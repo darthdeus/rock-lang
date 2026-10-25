@@ -255,14 +255,20 @@ impl Builder<'_> {
         {
             return Ok(None);
         }
-        // GC boxes share flat enum children whole in the copy policy. Keep that
-        // representation boundary rather than replacing it with a tag spread.
-        if boxed_shape.is_some()
-            && let FieldShape::Nested(shape) = &selected
-            && self.shape_has_flat_enum(shape)
+        // GC copies share enum children whole. Project through that same
+        // field-copy protocol instead of spreading the selected enum into lanes.
+        let enum_field = if boxed_shape.is_some()
+            && let FieldShape::Nested(selected_shape) = &selected
+            && self.shape_has_flat_enum(selected_shape)
         {
-            return Ok(None);
-        }
+            if path.len() != 1 || !self.boxed_copy_uses_gc_fields(shape)? {
+                return Ok(None);
+            }
+            Some(shape.fields.iter().position(|(field, _)| *field == path[0])
+                .expect("projection range selected a declared field"))
+        } else {
+            None
+        };
         let leaves = if let Some(shape) = boxed_shape {
             let value = if let Some(read) = boxed_read {
                 self.emit_cur(read)
@@ -271,6 +277,12 @@ impl Builder<'_> {
                 let base = self.lower_expr(base)?;
                 self.emit_cur(Inst::Field { base, field })
             };
+            if let Some(index) = enum_field {
+                let inline = self.gc_table_inline_layout(shape.name)?;
+                let owner = self.concrete_expr_ty(root);
+                return self.boxed_gc_field_copy_repr(value, &shape, owner.as_deref(), index,
+                    inline.as_ref().and_then(|layout| layout.get(index))).map(Some);
+            }
             self.cdata_leaf_range(value, &shape, range)?
         } else {
             let cells = self.group_binds[&raw(binding.expect("grouped projection"))].0[range].to_vec();

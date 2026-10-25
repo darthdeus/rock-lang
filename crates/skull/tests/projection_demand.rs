@@ -162,3 +162,64 @@ fn main() {{ print(probe(Owner {{ config: Config {{ chosen: 7, choice: Choice::E
     assert_eq!(run_luajit(&format!("{lua}\nmain(); local a = pcall(probe, nil); local b = pcall(probe, {{config=nil}}); print(a, b)\n"),
         "reference_owned_projection"), "7\nfalse\tfalse");
 }
+
+#[test]
+fn enum_projection_does_not_expand_sibling_fields() {
+    let _inline = crate::common::InlineOffGuard::on();
+    let lua = emit_module(r#"
+enum Choice { Empty, Number(int), Text(string) }
+value Config { choice: Choice, unused_sibling: int, items: [string] }
+struct Owner { config: Config }
+@nomangle fn selected(owner: Owner) -> Choice { owner.config.choice }
+fn main() {
+    let owner = Owner { config: Config { choice: Choice::Number(7), unused_sibling: 11, items: [] } }
+    let saved = selected(owner)
+    owner.config.choice = Choice::Text("new")
+    print(match saved { Choice::Number(n) => n, _ => -1 })
+    print(match selected(owner) { Choice::Text(s) => s, _ => "bad" })
+}
+"#);
+    let body = lua.split("\nfunction selected(").nth(1).unwrap().split("\nend").next().unwrap();
+    assert!(!body.contains(".unused_sibling"), "selected enum must not read siblings: {body}");
+    assert_eq!(run_luajit(&format!("{lua}\nmain(); local a = pcall(selected, nil); local b = pcall(selected, {{config=nil}}); print(a, b)\n"),
+        "selected_enum_projection"), "7\nnew\nfalse\tfalse");
+}
+
+#[test]
+fn enum_projections_preserve_nullable_children_and_argument_snapshots() {
+    let _inline = crate::common::InlineOffGuard::on();
+    let lua = emit_module(r#"
+enum Choice { Empty, Number(int), Text(string) }
+value Child { choice: Choice, marker: int }
+value Config { child: Child, optional: Choice?, spare: int }
+struct Owner { config: Config, calls: int }
+global CONFIG: Config = Config { child: Child { choice: Choice::Number(3), marker: 5 }, optional: null, spare: 11 }
+fn get(owner: Owner) -> Owner { owner.calls += 1; return owner }
+fn mutate(owner: Owner) -> int {
+    owner.config.child.choice = Choice::Text("changed")
+    owner.config.child.marker = 99
+    owner.config.optional = null
+    return 0
+}
+fn observe(choice: Choice, ignored: int) -> int { match choice { Choice::Number(n) => n, _ => -1 } }
+fn optional(owner: Owner) -> Choice? { owner.config.optional }
+fn main() {
+    let owner = Owner { config: Config { child: Child { choice: Choice::Number(7), marker: 13 },
+        optional: Choice::Number(17), spare: 19 }, calls: 0 }
+    let saved = get(owner).config.child
+    let present = optional(owner)
+    print(observe(owner.config.child.choice, mutate(owner)))
+    print(owner.calls)
+    print(saved.marker)
+    print(match saved.choice { Choice::Number(n) => n, _ => -1 })
+    if let choice = present { print(match choice { Choice::Number(n) => n, _ => -1 }) }
+    print(optional(owner) == null)
+    let global_child = CONFIG.child
+    CONFIG.child.marker = 101
+    print(global_child.marker)
+    print(CONFIG.optional == null)
+}
+"#);
+    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "enum_projection_snapshots"),
+        "7\n1\n13\n7\n17\ntrue\n5\ntrue");
+}

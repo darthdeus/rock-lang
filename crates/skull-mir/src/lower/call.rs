@@ -2896,6 +2896,20 @@ impl Builder<'_> {
         }
     }
 
+    /// Whether copies use declared GC fields, including shared enum boxes.
+    pub(crate) fn boxed_copy_uses_gc_fields(&self, shape: &ValueShape) -> Result<bool, CompilerError> {
+        Ok(!self.scx.values_first_class
+            && !shape.nullable
+            && EnumPlan::for_name(self.ws, shape.name).is_none()
+            && !self.shape_is_plain_keys(shape)
+            && self
+                .scx
+                .rep_arena()
+                .nominal_value_storage_required(self.ws, self.scx.target, shape.name)
+                .map_err(|e| self.gap_here(e.message))?
+                == ValueStorage::GcTable)
+    }
+
     /// The copy of a non-null box of `shape`. Enums are immutable, so a GC-table
     /// box's whole enum child is shared rather than split and rebuilt: only the
     /// value's own storage has to be fresh. Every other box splits to leaves.
@@ -2905,17 +2919,7 @@ impl Builder<'_> {
         shape: &ValueShape,
         owner_ty: Option<&MonoTy>,
     ) -> Result<ValueRepr, CompilerError> {
-        let gc_table = !self.scx.values_first_class
-            && !shape.nullable
-            && EnumPlan::for_name(self.ws, shape.name).is_none()
-            && !self.shape_is_plain_keys(shape)
-            && self
-                .scx
-                .rep_arena()
-                .nominal_value_storage_required(self.ws, self.scx.target, shape.name)
-                .map_err(|e| self.gap_here(e.message))?
-                == ValueStorage::GcTable;
-        if !gc_table {
+        if !self.boxed_copy_uses_gc_fields(shape)? {
             let leaves = self.cdata_leaves(v, shape)?;
             let copy = self.rebuild_from_leaves(shape, &leaves, &mut 0);
             self.mark_borrowed_value_children(shape, &copy, owner_ty)?;
@@ -2923,46 +2927,60 @@ impl Builder<'_> {
         }
         let inline = self.gc_table_inline_layout(shape.name)?;
         let mut parts = Vec::with_capacity(shape.fields.len());
-        for (i, (fname, fs)) in shape.fields.iter().enumerate() {
-            if let Some(field) = inline.as_ref().and_then(|layout| layout.get(i)).filter(|f| f.is_inline()) {
-                let leaves: Vec<Idx<Inst>> = field
-                    .keys()
-                    .into_iter()
-                    .map(|(key, _)| self.emit_cur(Inst::Field { base: v, field: key }))
-                    .collect();
-                parts.push(match fs {
-                    FieldShape::Prim => ValueRepr::Scalar(leaves[0]),
-                    FieldShape::Nested(sub) => self.rebuild_from_leaves(sub, &leaves, &mut 0),
-                });
-                continue;
-            }
-            let fv = self.emit_cur(Inst::Field { base: v, field: *fname });
-            parts.push(match fs {
-                FieldShape::Prim => {
-                    if let Some(ty) = self.opaque_value_child(shape.name, owner_ty, *fname)? {
-                        self.borrowed_value_children.insert(fv, ty);
-                    }
-                    ValueRepr::Scalar(fv)
-                }
-                FieldShape::Nested(sub)
-                    if EnumPlan::for_name(self.ws, sub.name).is_some_and(|plan| plan.flat().is_some()) =>
-                {
-                    ValueRepr::Scalar(fv)
-                }
-                FieldShape::Nested(sub) if sub.nullable => {
-                    let leaves = self.nullable_child_leaves(fv, sub)?;
-                    let copy = self.rebuild_from_leaves(sub, &leaves, &mut 0);
-                    let sub_ty = self.nested_owner_ty(shape.name, owner_ty, *fname, sub.name)?;
-                    self.mark_borrowed_value_children(sub, &copy, sub_ty.as_deref())?;
-                    copy
-                }
-                FieldShape::Nested(sub) => {
-                    let sub_ty = self.nested_owner_ty(shape.name, owner_ty, *fname, sub.name)?;
-                    self.boxed_copy_repr_of(fv, sub, sub_ty.as_deref())?
-                }
-            });
+        for i in 0..shape.fields.len() {
+            parts.push(self.boxed_gc_field_copy_repr(v, shape, owner_ty, i,
+                inline.as_ref().and_then(|layout| layout.get(i)))?);
         }
         Ok(ValueRepr::Group { name: shape.name, parts, present: None })
+    }
+
+    /// One field of the GC-table copy protocol. Immediate projections use the
+    /// same ownership and physical layout rules as whole-value snapshots.
+    pub(crate) fn boxed_gc_field_copy_repr(
+        &mut self,
+        v: Idx<Inst>,
+        shape: &ValueShape,
+        owner_ty: Option<&MonoTy>,
+        index: usize,
+        inline: Option<&GcTableField>,
+    ) -> Result<ValueRepr, CompilerError> {
+        let (fname, fs) = &shape.fields[index];
+        if let Some(field) = inline.filter(|f| f.is_inline()) {
+            let leaves: Vec<Idx<Inst>> = field
+                .keys()
+                .into_iter()
+                .map(|(key, _)| self.emit_cur(Inst::Field { base: v, field: key }))
+                .collect();
+            return Ok(match fs {
+                FieldShape::Prim => ValueRepr::Scalar(leaves[0]),
+                FieldShape::Nested(sub) => self.rebuild_from_leaves(sub, &leaves, &mut 0),
+            });
+        }
+        let fv = self.emit_cur(Inst::Field { base: v, field: *fname });
+        Ok(match fs {
+            FieldShape::Prim => {
+                if let Some(ty) = self.opaque_value_child(shape.name, owner_ty, *fname)? {
+                    self.borrowed_value_children.insert(fv, ty);
+                }
+                ValueRepr::Scalar(fv)
+            }
+            FieldShape::Nested(sub)
+                if EnumPlan::for_name(self.ws, sub.name).is_some_and(|plan| plan.flat().is_some()) =>
+            {
+                ValueRepr::Scalar(fv)
+            }
+            FieldShape::Nested(sub) if sub.nullable => {
+                let leaves = self.nullable_child_leaves(fv, sub)?;
+                let copy = self.rebuild_from_leaves(sub, &leaves, &mut 0);
+                let sub_ty = self.nested_owner_ty(shape.name, owner_ty, *fname, sub.name)?;
+                self.mark_borrowed_value_children(sub, &copy, sub_ty.as_deref())?;
+                copy
+            }
+            FieldShape::Nested(sub) => {
+                let sub_ty = self.nested_owner_ty(shape.name, owner_ty, *fname, sub.name)?;
+                self.boxed_copy_repr_of(fv, sub, sub_ty.as_deref())?
+            }
+        })
     }
 
     /// The `V?` twin of [`Self::boxed_value_copy_repr`]: an absent value has no
