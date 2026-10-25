@@ -103,3 +103,43 @@ fn main() { let owner = Owner { point: Point { x: 3, y: 5 } };
         .expect_err("an inline value has leaves but no holder to borrow");
     assert!(error.message.contains("cannot borrow an inline value field"), "{error:?}");
 }
+
+#[test]
+fn native_value_iteration_snapshots_without_nested_descriptors() {
+    let lua = emit_module(&format!(r#"{SOURCE}
+@nomangle fn rows() -> [Motion] {{ return [make().motion] }}
+@nomangle fn scan(rows: [Motion]) -> int {{
+    let total = 0
+    for row in rows {{ if row.active {{ total += row.at.region }} }}
+    return total
+}}
+@nomangle fn snapshot(rows: [Motion]) -> int {{
+    let before = rows[0]
+    rows[0].at.cell.y = 101
+    return before.at.cell.y
+}}
+@nomangle fn loop_snapshot(rows: [Motion]) -> int {{
+    let total = 0
+    for row in rows {{ rows[0].at.cell.y = 37; total += row.at.cell.y }}
+    return total
+}}
+"#));
+    let program = format!(r#"{lua}
+local values = rows()
+assert(scan(values) == 7)
+assert(snapshot(values) == 5)
+assert(loop_snapshot(values) == 101)
+assert(snapshot(values) == 37)
+assert(scan(values) == 7)
+jit.off(); jit.flush()
+for i = 1, 100 do assert(scan(values) == 7) end
+collectgarbage('collect'); collectgarbage('stop')
+local before = collectgarbage('count')
+for i = 1, 8192 do assert(scan(values) == 7) end
+local growth = collectgarbage('count') - before
+collectgarbage('restart')
+assert(growth < 4, 'value iteration allocates nested descriptors: ' .. growth .. ' KiB')
+print('ok')
+"#);
+    assert_eq!(run_luajit(&program, "cdata_iteration"), "ok");
+}

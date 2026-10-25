@@ -96,9 +96,9 @@ fn boxed_global_projects_before_copy_expansion() {
         fn subtree() -> Point { CONFIG.child }\n\
         fn whole() -> Config { CONFIG }";
     let leaf = lower(source, "leaf");
-    assert_eq!(fields(&leaf), 2, "only the child and selected leaf: {leaf}");
+    assert_eq!(fields(&leaf), 1, "only the selected native leaf alias: {leaf}");
     let subtree = lower(source, "subtree");
-    assert_eq!(fields(&subtree), 3, "selected child snapshots both leaves: {subtree}");
+    assert_eq!(fields(&subtree), 2, "selected child snapshots both native leaves: {subtree}");
     let whole = lower(source, "whole");
-    assert_eq!(fields(&whole), 4, "whole global still snapshots every leaf: {whole}");
+    assert_eq!(fields(&whole), 3, "whole global still snapshots every native leaf: {whole}");
 }

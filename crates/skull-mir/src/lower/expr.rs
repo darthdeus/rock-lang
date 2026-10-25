@@ -1348,7 +1348,7 @@ impl Builder<'_> {
                     if self.shape_is_plain_keys(&shape) {
                         let r = self.lower_expr_repr(value)?;
                         let leaves = self.repr_to_leaves_bundle_for_shape(&r, &shape)?;
-                        let paths = self.boxed_leaf_paths(&shape)?;
+                        let paths = self.boxed_leaf_paths(&shape, true)?;
                         if paths.len() != leaves.len() {
                             return Err(self.gap_here(format!(
                                 "`{cname}` has {} leaf paths but the value produced {} leaves",

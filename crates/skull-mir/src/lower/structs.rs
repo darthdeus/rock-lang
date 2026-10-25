@@ -1042,7 +1042,7 @@ impl Builder<'_> {
             return Ok(None);
         }
         // The key paths `cdata_leaves` reads a box with, one leaf at a time.
-        let paths = self.boxed_leaf_paths(&shape)?;
+        let paths = self.boxed_leaf_paths(&shape, true)?;
         let boxed = self.emit_cur(Inst::Global(name));
         Ok(Some(GlobalUniformSource::Boxed { boxed, paths }))
     }

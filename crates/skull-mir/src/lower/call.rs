@@ -2245,7 +2245,10 @@ impl Builder<'_> {
         // (a whole-value read wants every leaf anyway); the packer walks the
         // same paths but re-reads the parent per leaf, keeping one leaf live.
         if self.shape_is_plain_keys(shape) {
-            let paths = self.boxed_leaf_paths(shape)?;
+            // Storage loads have a native holder. Reconstructed values retain
+            // logical paths so constructor folding can see their child operands.
+            let native_aliases = matches!(self.f.insts[v], Inst::Global(_) | Inst::Index { .. });
+            let paths = self.boxed_leaf_paths(shape, native_aliases)?;
             let mut loaded: Vec<(Vec<Ustr>, Idx<Inst>)> = Vec::new();
             let mut out = Vec::with_capacity(range.len());
             for path in paths.into_iter().skip(range.start).take(range.len()) {
@@ -2417,21 +2420,23 @@ impl Builder<'_> {
 
     /// The key path from a box of `shape` (no nullable child anywhere) to each
     /// of its leaves, in `repr_to_leaves` order. A leaf-table box keys every
-    /// leaf by its dotted path at the top level; cdata and GC boxes nest, and
-    /// a nested child consults its own storage, so a leaf-table child inside a
-    /// GC parent keys by its dotted path under the parent's field.
+    /// leaf by its dotted path at the top level. Native boxes use their existing
+    /// primitive aliases, avoiding intermediate FFI descriptors while retaining
+    /// eager snapshot reads. A nested child consults its own storage.
     pub(crate) fn boxed_leaf_paths(
         &self,
         shape: &ValueShape,
+        native_aliases: bool,
     ) -> Result<Vec<Vec<Ustr>>, CompilerError> {
         let mut out = Vec::new();
-        self.boxed_leaf_paths_into(shape, &mut Vec::new(), &mut out)?;
+        self.boxed_leaf_paths_into(shape, native_aliases, &mut Vec::new(), &mut out)?;
         Ok(out)
     }
 
     fn boxed_leaf_paths_into(
         &self,
         shape: &ValueShape,
+        native_aliases: bool,
         prefix: &mut Vec<Ustr>,
         out: &mut Vec<Vec<Ustr>>,
     ) -> Result<(), CompilerError> {
@@ -2440,10 +2445,17 @@ impl Builder<'_> {
             .rep_arena()
             .nominal_value_storage_required(self.ws, self.scx.target, shape.name)
             .map_err(|e| self.gap_here(e.message))?;
-        if storage == ValueStorage::LeafTable {
+        let native_aliases = native_aliases && self.scx.target == bone_semantic::hir::FnBackend::Lua
+            && storage == ValueStorage::CData;
+        if storage == ValueStorage::LeafTable || native_aliases {
             for path in value_leaf_paths(shape) {
+                let key = if native_aliases && path.contains('.') {
+                    cdata_leaf_alias(self.ws, shape.name, path.as_str())
+                } else {
+                    path
+                };
                 let mut full = prefix.clone();
-                full.push(path);
+                full.push(key);
                 out.push(full);
             }
             return Ok(());
@@ -2461,7 +2473,7 @@ impl Builder<'_> {
             prefix.push(*fname);
             match fs {
                 FieldShape::Prim => out.push(prefix.clone()),
-                FieldShape::Nested(sub) => self.boxed_leaf_paths_into(sub, prefix, out)?,
+                FieldShape::Nested(sub) => self.boxed_leaf_paths_into(sub, native_aliases, prefix, out)?,
             }
             prefix.pop();
         }
@@ -2477,8 +2489,8 @@ impl Builder<'_> {
     /// Nested value fields recurse, so the snapshot survives a later place write
     /// through the owner -- a shallow expansion would snapshot the nested box's
     /// POINTER. A GC leaf is one slot, so its pointee stays shared by design. A
-    /// leaf projection off the `Group` still reads its own slot at its own read
-    /// point, and the unread leaves die in DCE.
+    /// leaf projection off the `Group` reads its snapshot slot. Physical reads
+    /// keep their error behavior even when the resulting leaf is unused.
     pub(crate) fn boxed_value_copy_repr(
         &mut self,
         boxed: Idx<Inst>,
