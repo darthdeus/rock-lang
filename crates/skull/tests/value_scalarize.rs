@@ -577,16 +577,12 @@ fn main() {{
     )
 }
 
-/// SENTINEL (inverted): the correct output is `1`, as the C backend prints. A
-/// Lua copy keeps its `V?` value child as the source's box until the copy
-/// escapes (a store, a return), so a write through the source's child before
-/// the copy's last read shows through. Copying the child at the snapshot fixes
-/// it but allocates on read-only draw paths. When this fails with `1`, flip it
-/// and move the case to tests/value_alias_escape_paths.rock.
+/// A retained nullable child is a snapshot even when its source is written
+/// before the retained value escapes.
 #[test]
-fn a_copy_reads_a_later_write_through_its_sources_nullable_child() {
+fn a_copy_keeps_its_sources_nullable_child_snapshot() {
     let lua = emit_module(&nullable_child_snapshot_source());
-    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "value_scalarize_nullable_child_snapshot"), "99");
+    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "value_scalarize_nullable_child_snapshot"), "1");
 }
 
 const RECURSIVE_VALUE_COPY: &str = r#"

@@ -786,6 +786,8 @@ impl Builder<'_> {
             let mut scrut_shape = binding_shape.clone();
             scrut_shape.nullable = true;
             let bundle = self.lower_expr_repr(value)?;
+            let owned = self.snapshot_opaque_value(bundle.value().clone())?;
+            let bundle = ValueBundle::new(bundle.representation(), owned);
             let leaves = self
                 .repr_to_slot_values_bundle(&bundle, &RetSlot::Leaves(scrut_shape))?;
             let (present, values) = leaves

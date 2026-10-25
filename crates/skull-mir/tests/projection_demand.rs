@@ -71,11 +71,20 @@ fn boxed_wide_parameter_projects_one_leaf_before_copy_expansion() {
 }
 
 #[test]
-fn boxed_wide_local_keeps_initial_snapshot_then_reads_only_demanded_fields() {
+fn boxed_wide_immutable_local_reads_only_demanded_fields() {
     let source = format!("value Wide {{ {} }}\n\
         fn pick(v: Wide) -> (int, int, int) {{ let w = v; (w.f0, w.f1, w.f2) }}", wide_fields());
     let body = lower(&source, "pick");
-    assert_eq!(fields(&body), 53, "one full snapshot and three primitive reads: {body}");
+    assert_eq!(fields(&body), 3, "immutable parameter box may be shared: {body}");
+}
+
+#[test]
+fn boxed_wide_mutable_place_keeps_initial_snapshot_then_projects() {
+    let source = format!("value Wide {{ {} }}\n\
+        struct Owner {{ row: Wide }}\n\
+        fn pick(owner: Owner) -> (int, int, int) {{ let w = owner.row; (w.f0, w.f1, w.f2) }}", wide_fields());
+    let body = lower(&source, "pick");
+    assert_eq!(fields(&body), 54, "owner field, full snapshot and three primitive reads: {body}");
 }
 
 #[test]

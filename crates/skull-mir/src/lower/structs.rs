@@ -22,6 +22,16 @@ impl Builder<'_> {
         fields: comfy_la_arena::IdxRange<bone_semantic::hir::StructLitField>,
         bases: comfy_la_arena::IdxRange<bone_semantic::hir::Expr>,
     ) -> Result<Idx<Inst>, CompilerError> {
+        self.with_value_lending(false, |s| s.lower_struct_literal_owned(e, name, fields, bases))
+    }
+
+    fn lower_struct_literal_owned(
+        &mut self,
+        e: Idx<Expr>,
+        name: Ustr,
+        fields: comfy_la_arena::IdxRange<bone_semantic::hir::StructLitField>,
+        bases: comfy_la_arena::IdxRange<bone_semantic::hir::Expr>,
+    ) -> Result<Idx<Inst>, CompilerError> {
         // Functional-update base (`Struct { ..base, .. }`): evaluate once, before
         // fields (source order), and read unwritten fields off it. Inference
         // guarantees at most one base and that it has this struct's type.
@@ -390,6 +400,11 @@ impl Builder<'_> {
                 args.chain(ref_lets).filter_map(root).collect()
             })
             .contains(&raw(b))
+    }
+
+    pub(crate) fn binding_value_is_shareable(&self, b: Idx<BindingInfo>) -> bool {
+        !self.binding_ref_borrowed(b)
+            && self.binds.get(&raw(b)).is_some_and(|cell| !self.unshareable_value_cells.contains(cell))
     }
 
     /// Whether binding `b`'s bone type is a NON-nullable value struct -- the one

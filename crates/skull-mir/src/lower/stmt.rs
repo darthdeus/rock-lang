@@ -241,6 +241,9 @@ impl Builder<'_> {
             ref_borrowed_binds: std::cell::OnceCell::new(),
             value_copy_stack: Vec::new(),
             borrowed_value_children: HashMap::new(),
+            shareable_value_boxes: HashSet::new(),
+            unshareable_value_cells: HashSet::new(),
+            shallow_pack: false,
             lending_pack: false,
             f32_round_exprs: HashSet::new(),
         tuple_binds: HashMap::new(),
@@ -337,7 +340,9 @@ impl Builder<'_> {
                     let mut threaded = false;
                     let mut opaque_repr = None;
                     if let Some(shape) = threaded_shape {
-                        let r = self.lower_expr_repr(value)?;
+                        let r = self.with_value_lending(false, |s| s.lower_expr_repr(value))?;
+                        let owned = self.snapshot_opaque_value(r.value().clone())?;
+                        let r = ValueBundle::new(r.representation(), owned);
                         if let Some(actual) = self.scx.rep_arena().value_shape(r.representation()) {
                             if actual.name != shape.name || actual.fields != shape.fields {
                                 return Err(self.gap_here(format!(
@@ -398,8 +403,9 @@ impl Builder<'_> {
                             self.bind_tuple_slots(name, &slots, shape);
                         } else {
                         let expected = self.binding_ty(name).and_then(|ty| self.concrete_ty_id(ty));
+                        let mut shareable = true;
                         let v = match opaque_repr {
-                            Some(r) => self.pack(r.into_value())?,
+                            Some(r) => self.pack_bundle(&r)?,
                             None if self.binding_is_ref(name) => self.lower_ref_borrow(value)?,
                             // The binding's own box is not an escape: every
                             // whole use of the binding copies again. A `ref`
@@ -409,10 +415,18 @@ impl Builder<'_> {
                                 .value_struct_of(value)
                                 .is_some_and(|n| !self.is_nobox_struct(n)) =>
                             {
-                                let r = self.lower_expr_repr(value)?.into_value();
-                                if self.binding_ref_borrowed(name) { self.pack(r)? } else { self.pack_lent(r)? }
+                                let lend = !self.binding_ref_borrowed(name);
+                                self.with_value_lending(lend, |s| {
+                                    let source_lend = lend && matches!(s.body.expr_arena[value], Expr::Var(_));
+                                    let r = s.with_value_lending(source_lend, |s| s.lower_expr_repr(value))?.into_value();
+                                    let r = s.snapshot_opaque_value(r)?;
+                                    shareable = s.value_repr_is_shareable(&r);
+                                    if lend { s.pack_lent(r) } else { s.pack(r) }
+                                })?
                             }
-                            None => self.lower_expr_with_expected(value, expected.as_deref())?,
+                            None => self.with_value_lending(false, |s| {
+                                s.lower_expr_with_expected(value, expected.as_deref())
+                            })?,
                         };
                         let v = self.coerced_to_binding(v, value, name);
                         let cty = self.binding_ty(name);
@@ -424,6 +438,9 @@ impl Builder<'_> {
                         );
                         if self.binding_is_nonnull_value_struct(name) {
                             self.f.mark_nonnull_value_struct(cell);
+                        }
+                        if !shareable {
+                            self.unshareable_value_cells.insert(cell);
                         }
                         if matches!(self.f.insts[v], Inst::MakeValueStruct { .. }) {
                             self.owned_value_binds.insert(raw(name));

@@ -14,6 +14,8 @@ mod compile_release;
 #[path = "allocation_report.rs"]
 mod allocation_report;
 
+mod nested_box_boundary;
+
 #[path = "ablation_totality.rs"]
 mod ablation_totality;
 #[path = "flat_element_ref_mutation.rs"]

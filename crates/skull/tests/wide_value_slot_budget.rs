@@ -23,6 +23,41 @@ use crate::common::{
     ws_with_stdlib,
 };
 
+#[test]
+fn retained_optional_loader_results_fit_the_local_budget() {
+    let fields = (0..8).map(|i| format!("item{i}: Item")).collect::<Vec<_>>().join(", ");
+    let scalars = (0..20).map(|i| format!("let s{i} = scalar(seed, {i})\n")).collect::<String>();
+    let loads = (0..8).map(|i| format!("let item{i} = load(seed + {i}) ?? return null\n")).collect::<String>();
+    let sum = (0..20).map(|i| format!("s{i}")).collect::<Vec<_>>().join(" + ");
+    let items = (0..8).map(|i| format!("item{i}")).collect::<Vec<_>>().join(", ");
+    let source = format!(r#"
+nobox value Pair {{ x: float, y: float }}
+value Triple {{ a: int, b: int, c: int }}
+value Item {{
+    a: int? = null, b: int? = null, c: int? = null, d: int? = null,
+    first: Entity<int>? = null, second: Entity<int>? = null,
+    triple: Triple, width: int, height: int, pivot: Pair,
+}}
+struct Bundle {{ checksum: int, {fields} }}
+inline(lua) fn scalar(x: int, k: int) -> int = "return x + k"
+fn make_item(seed: int) -> Item? {{
+    if seed < 0 {{ return null }}
+    return Item {{ triple: Triple {{ a: seed, b: seed + 1, c: seed + 2 }},
+        width: seed, height: seed + 1, pivot: Pair {{ x: 0.5, y: 0.5 }} }}
+}}
+@nomangle fn gather(seed: int) -> Bundle? {{
+    {scalars}
+    let load = x => make_item(x)
+    {loads}
+    return Bundle {{ checksum: {sum}, {items} }}
+}}
+fn main() {{ assert(gather(-20) == null); print(gather(1).unwrap().checksum) }}
+"#);
+    let lua = try_emit_module(&source).expect("retained loader results must fit LuaJIT's local limit");
+    luajit_loads(&lua, "retained_optional_loader_results").expect("emitted loader must load");
+    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "retained_optional_loader_results"), "210");
+}
+
 /// `held` values of a `leaves`-wide nobox struct, all live across the calls
 /// that read them back.
 fn fixture(leaves: usize, held: usize) -> String {

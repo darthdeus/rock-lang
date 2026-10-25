@@ -1641,6 +1641,9 @@ fn lower_body(
         ref_borrowed_binds: std::cell::OnceCell::new(),
         value_copy_stack: Vec::new(),
         borrowed_value_children: HashMap::new(),
+        shareable_value_boxes: HashSet::new(),
+        unshareable_value_cells: HashSet::new(),
+        shallow_pack: false,
         lending_pack: false,
         f32_round_exprs: HashSet::new(),
         tuple_binds: HashMap::new(),
@@ -2206,8 +2209,13 @@ struct Builder<'a> {
     /// Opaque value children a copy or a binding read left as its source's
     /// box, with their types ([`Self::owned_value_children`]).
     borrowed_value_children: HashMap<Idx<Inst>, Rc<MonoTy>>,
-    /// Set while a `let` packs a place read into its own cell
-    /// ([`Self::pack_lent`]).
+    /// Boxes held only by immutable values; owned storage still copies them.
+    shareable_value_boxes: HashSet<Idx<Inst>>,
+    /// Shallow local snapshots cannot be lent across a call or return.
+    unshareable_value_cells: HashSet<Idx<Cell>>,
+    /// A local snapshot may defer child copies until its whole-value escape.
+    shallow_pack: bool,
+    /// Immutable call, return and local uses may share proven immutable boxes.
     lending_pack: bool,
     /// Right-hand sides of assignments into an `f32` field. Every assignment
     /// path lowers its value through one of the expression entries, which
@@ -2311,6 +2319,9 @@ impl<'a> Builder<'a> {
             ref_borrowed_binds: std::cell::OnceCell::new(),
             value_copy_stack: Vec::new(),
             borrowed_value_children: HashMap::new(),
+            shareable_value_boxes: HashSet::new(),
+            unshareable_value_cells: HashSet::new(),
+            shallow_pack: false,
             lending_pack: false,
             f32_round_exprs: HashSet::new(),
             tuple_binds: HashMap::new(),
@@ -2617,7 +2628,6 @@ impl Builder<'_> {
         params: &[Idx<BindingInfo>],
     ) -> Result<(), CompilerError> {
         for &pb in params {
-            let Some(&cell) = self.binds.get(&raw(pb)) else { continue };
             if self.scx.values_first_class || self.binding_is_ref(pb) || !self.binding_ref_borrowed(pb) {
                 continue;
             }
@@ -2632,6 +2642,20 @@ impl Builder<'_> {
             {
                 continue;
             }
+            if let Some((cells, shape)) = self.group_binds.remove(&raw(pb)) {
+                let leaves = cells.iter().map(|cell| self.emit_cur(Inst::Load(*cell))).collect::<Vec<_>>();
+                let repr = self.rebuild_from_leaves(&shape, &leaves, &mut 0);
+                self.mark_borrowed_value_children(&shape, &repr, Some(&ty))?;
+                let value = self.with_value_lending(false, |s| s.pack(repr))?;
+                let cell = self.new_binding_cell(
+                    pb, self.body.binding_arena[pb].name, self.binding_ty(pb), Ustr::from(""),
+                );
+                self.emit_cur(Inst::Store { cell, value });
+                self.binds.insert(raw(pb), cell);
+                self.owned_value_binds.insert(raw(pb));
+                continue;
+            }
+            let Some(&cell) = self.binds.get(&raw(pb)) else { continue };
             let v = self.emit_cur(Inst::Load(cell));
             let copy = self.copied_value_box(&ty, v)?;
             self.emit_cur(Inst::Store { cell, value: copy });
@@ -3102,6 +3126,10 @@ impl Builder<'_> {
     /// flattens to its leaf scalars (`return v0, v1, ...`); otherwise it's the
     /// single (boxed) value, or empty for a bare return.
     fn return_leaves(&mut self, opt: Option<Idx<Expr>>) -> Result<Vec<Idx<Inst>>, CompilerError> {
+        self.with_value_lending(true, |s| s.return_leaves_lent(opt))
+    }
+
+    fn return_leaves_lent(&mut self, opt: Option<Idx<Expr>>) -> Result<Vec<Idx<Inst>>, CompilerError> {
         let Some(e) = opt else { return Ok(vec![]) };
         if self.ret_rep.is_none() {
             let gpu_context = self.site_owner.as_ref().is_some_and(|owner| {
@@ -3355,21 +3383,32 @@ impl Builder<'_> {
         slot: &RetSlot,
         a: Idx<Expr>,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
-        if !slot.splats()
+        self.arg_values_for_slot_lending(slot, a, true)
+    }
+
+    pub(crate) fn arg_values_for_slot_lending(
+        &mut self,
+        slot: &RetSlot,
+        a: Idx<Expr>,
+        lend: bool,
+    ) -> Result<Vec<Idx<Inst>>, CompilerError> {
+        if lend && !slot.splats()
             && let Expr::Var(b) = self.body.expr_arena[a]
             && self.boxed_value_local(b, a).is_some()
-            && !self.binding_ref_borrowed(b)
+            && self.binding_value_is_shareable(b)
         {
-            // An opaque slot lends the borrowed box: the callee copies its
-            // parameter wherever the parameter escapes whole. Nothing writes a
-            // box no `ref` reaches, so a callee may keep it past the call.
+            // The callee can retain an immutable box. A later mutable store
+            // copies it, and an internal ref borrow owns its parameter on entry.
             return Ok(vec![self.emit_cur(Inst::Load(self.binds[&raw(b)]))]);
         }
-        let r = self.lower_expr_repr(a)?;
-        if !slot.splats() {
-            return Ok(vec![self.pack_bundle(&r)?]);
-        }
-        self.repr_to_slot_values_bundle(&r, slot)
+        self.with_value_lending(lend, |s| {
+            let r = s.lower_expr_repr(a)?;
+            let r = ValueBundle::new(r.representation(), s.owned_value_children(r.into_value())?);
+            if !slot.splats() {
+                return Ok(vec![s.pack_bundle(&r)?]);
+            }
+            s.repr_to_slot_values_bundle(&r, slot)
+        })
     }
 
     fn is_ref_call_arg(&self, call: Idx<Expr>, arg: Idx<Expr>) -> bool {
@@ -3384,11 +3423,12 @@ impl Builder<'_> {
         call: Idx<Expr>,
         slot: &RetSlot,
         arg: Idx<Expr>,
+        lend: bool,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         if self.is_ref_call_arg(call, arg) {
             return Ok(vec![self.lower_ref_borrow(arg)?]);
         }
-        self.arg_values_for_slot(slot, arg)
+        self.arg_values_for_slot_lending(slot, arg, lend)
     }
 
 }

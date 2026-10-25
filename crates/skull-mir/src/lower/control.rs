@@ -563,7 +563,9 @@ impl Builder<'_> {
         if !self.is_open() {
             return Ok(());
         }
-        let slots = self.repr_to_slot_values_bundle(value, shape)?;
+        let owned = self.snapshot_opaque_value(value.value().clone())?;
+        let value = ValueBundle::new(value.representation(), owned);
+        let slots = self.repr_to_slot_values_bundle(&value, shape)?;
         self.store_slots_and_join(results, &slots, join)
     }
 

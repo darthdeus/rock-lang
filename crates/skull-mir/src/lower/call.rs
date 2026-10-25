@@ -302,6 +302,44 @@ impl Builder<'_> {
         callee: Callee,
         args: IdxRange<Expr>,
     ) -> Result<ValueRepr, CompilerError> {
+        let trusted = match callee {
+            Callee::Unresolved { name, .. } => self.resolve_funcref(e, name).ok()
+                .and_then(|f| self.select_backend_variant(e, name, f).ok())
+                .is_some_and(|f| self.ws.module(f.module).functions[f.func].inline_body.is_none()),
+            _ => false,
+        };
+        let r = self.with_value_lending(false, |s| s.lower_call_repr_inner(e, callee, args))?;
+        self.finish_call_repr(e, r, trusted)
+    }
+
+    fn finish_call_repr(
+        &mut self,
+        e: Idx<Expr>,
+        r: ValueRepr,
+        trusted: bool,
+    ) -> Result<ValueRepr, CompilerError> {
+        // Iterator protocols use phantom()'s nil even at a non-null value type.
+        if matches!(&r, ValueRepr::Scalar(v) if matches!(self.f.insts[*v], Inst::Const(Lit::Nil))) {
+            return Ok(r);
+        }
+        if !self.scx.values_first_class {
+            if let Some(ty) = self.concrete_expr_ty(e) {
+                // An opaque return can forward storage borrowed from a foreign
+                // body. Snapshot it at the consuming boundary, where projections
+                // can use leaves without first reconstructing its box.
+                let share = trusted && !matches!(r, ValueRepr::Scalar(_));
+                self.mark_boundary_value_repr(&r, &ty, share)?;
+            }
+        }
+        Ok(r)
+    }
+
+    fn lower_call_repr_inner(
+        &mut self,
+        e: Idx<Expr>,
+        callee: Callee,
+        args: IdxRange<Expr>,
+    ) -> Result<ValueRepr, CompilerError> {
         let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
         if matches!(
             self.scx.target(),
@@ -1102,7 +1140,8 @@ impl Builder<'_> {
                     if self.is_ref_call_arg(e, a) {
                         self.lower_ref_borrow(a)
                     } else {
-                        let v = self.lower_expr_with_expected(a, Some(t.as_ref()))?;
+                        let lend = callee.inline_body.is_none() && !callee.is_extern;
+                        let v = self.with_value_lending(lend, |s| s.lower_expr_with_expected(a, Some(t.as_ref())))?;
                         Ok(self.coerced_mono(v, a, t.as_ref()))
                     }
                 })
@@ -1269,6 +1308,18 @@ impl Builder<'_> {
         recv: Idx<Inst>,
         arg_idxs: &[Idx<Expr>],
     ) -> Result<ValueRepr, CompilerError> {
+        let trusted = self.ws.module(func.module).functions[func.func].inline_body.is_none();
+        let r = self.with_value_lending(false, |s| s.ufcs_call_repr_inner(e, func, recv, arg_idxs))?;
+        self.finish_call_repr(e, r, trusted)
+    }
+
+    fn ufcs_call_repr_inner(
+        &mut self,
+        e: Idx<Expr>,
+        func: FuncRef,
+        recv: Idx<Inst>,
+        arg_idxs: &[Idx<Expr>],
+    ) -> Result<ValueRepr, CompilerError> {
         let dc = self.plan_direct_call(e, func)?;
         self.reject_flat_return_outside_direct_call(e, &dc.callee_inst)?;
         if !dc.plan.uses_scalar_abi() {
@@ -1366,7 +1417,9 @@ impl Builder<'_> {
                     |slot| slot.clone(),
                     |message| self.gap_here(message),
                 )?;
-                out.extend(self.arg_values_for_call_slot(e, &slot, a)?);
+                let callee = &self.ws.module(func.module).functions[func.func];
+                let lend = callee.inline_body.is_none() && !callee.is_extern;
+                out.extend(self.arg_values_for_call_slot(e, &slot, a, lend)?);
             }
             out.extend(self.trailing_default_args(func, arg_idxs.len(), Some(param_shapes))?);
             return Ok(out);
@@ -1407,7 +1460,8 @@ impl Builder<'_> {
                     let pidx = param_names.iter().position(|p| *p == fname).ok_or_else(|| {
                         gap(format!("spread field `{fname}` matches no parameter"))
                     })?;
-                    slots[pidx] = Some(r);
+                    let owned = self.snapshot_opaque_value(r.value().clone())?;
+                    slots[pidx] = Some(ValueBundle::new(r.representation(), owned));
                 }
                 continue;
             }
@@ -1415,7 +1469,9 @@ impl Builder<'_> {
                 let place = self.lower_ref_borrow(a)?;
                 self.value_bundle_for_expr(a, ValueRepr::Scalar(place))?
             } else {
-                self.lower_expr_repr(a)?
+                let r = self.lower_expr_repr(a)?;
+                let owned = self.snapshot_opaque_value(r.value().clone())?;
+                ValueBundle::new(r.representation(), owned)
             };
             let pidx = match self.body.arg_names.get(&a) {
                 Some(nm) => param_names
@@ -1496,7 +1552,16 @@ impl Builder<'_> {
             r => r,
         };
         match r {
-            ValueRepr::Scalar(v) => Ok(v),
+            ValueRepr::Scalar(v) => {
+                if !self.shallow_pack && !self.lending_pack
+                    && (self.shareable_value_boxes.contains(&v)
+                        || matches!(self.f.insts[v], Inst::Call { .. } | Inst::CallValue { .. }))
+                    && let Some(ty) = self.borrowed_value_children.get(&v).cloned()
+                {
+                    return self.copied_value_box(&ty, v);
+                }
+                Ok(v)
+            }
             // A splatting tuple's box. Its `nobox` elements pack too, which is
             // exactly how a whole-tuple use reaches the guarantee's rejection.
             ValueRepr::Tuple { parts, .. } => {
@@ -2035,6 +2100,8 @@ impl Builder<'_> {
         expected: &ValueShape,
         reason: &str,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
+        let owned = self.owned_value_children(bundle.value().clone())?;
+        let bundle = &ValueBundle::new(bundle.representation(), owned);
         let plan = self
             .scx
             .rep_arena()
@@ -2332,9 +2399,30 @@ impl Builder<'_> {
         sub: &ValueShape,
         range: std::ops::Range<usize>,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
-        let include_presence = range.start == 0 && !range.is_empty();
         let payload = range.start.saturating_sub(1)..range.end.saturating_sub(1);
-        let field_count = payload.len();
+        self.nullable_value_leaf_range(fv, sub, range, |s, value, shape| {
+            s.cdata_leaf_range(value, shape, payload)
+        })
+    }
+
+    fn nullable_value_leaves(
+        &mut self,
+        fv: Idx<Inst>,
+        sub: &ValueShape,
+        read: impl FnOnce(&mut Self, Idx<Inst>, &ValueShape) -> Result<Vec<Idx<Inst>>, CompilerError>,
+    ) -> Result<Vec<Idx<Inst>>, CompilerError> {
+        self.nullable_value_leaf_range(fv, sub, 0..sub.leaf_count(), read)
+    }
+
+    fn nullable_value_leaf_range(
+        &mut self,
+        fv: Idx<Inst>,
+        sub: &ValueShape,
+        range: std::ops::Range<usize>,
+        read: impl FnOnce(&mut Self, Idx<Inst>, &ValueShape) -> Result<Vec<Idx<Inst>>, CompilerError>,
+    ) -> Result<Vec<Idx<Inst>>, CompilerError> {
+        let include_presence = range.start == 0 && !range.is_empty();
+        let field_count = range.end.saturating_sub(1) - range.start.saturating_sub(1);
         let nil = self.emit_cur(Inst::Const(Lit::Nil));
         let present = self.emit_cur(Inst::NotEq(fv, nil));
         let cells: Vec<Idx<Cell>> = (0..field_count).map(|_| self.f.new_cell(None)).collect();
@@ -2351,7 +2439,7 @@ impl Builder<'_> {
         self.cur = value_bb;
         let mut inner = sub.clone();
         inner.nullable = false;
-        let leaves = self.cdata_leaf_range(fv, &inner, payload)?;
+        let leaves = read(self, fv, &inner)?;
         for (c, lv) in cells.iter().zip(leaves) {
             self.emit_cur(Inst::Store { cell: *c, value: lv });
         }
@@ -2518,20 +2606,22 @@ impl Builder<'_> {
     }
 
     /// The concrete type of `owner.field`. `owner_ty` substitutes a generic
-    /// owner's arguments; a generic owner without one has no field types.
+    /// owner's arguments when the field depends on them.
     fn value_field_ty(
         &self,
         owner: Ustr,
         owner_ty: Option<&MonoTy>,
         field: Ustr,
     ) -> Result<Rc<MonoTy>, CompilerError> {
-        if !self.struct_is_generic(owner) {
-            let ty = self
-                .struct_field_ty(owner, field)
-                .ok_or_else(|| self.gap_here(format!("field `{owner}.{field}` is not declared")))?;
-            return crate::monoty::convert_decl(self.ws, ty, &crate::monoty::MonoSubst::default())
-                .map(Rc::new)
-                .map_err(|reason| self.gap_here(format!("field `{owner}.{field}` has no concrete type: {reason:?}")));
+        let ty = self
+            .struct_field_ty(owner, field)
+            .ok_or_else(|| self.gap_here(format!("field `{owner}.{field}` is not declared")))?;
+        match crate::monoty::convert_decl(self.ws, ty, &crate::monoty::MonoSubst::default()) {
+            Ok(ty) => return Ok(Rc::new(ty)),
+            Err(reason) if !self.struct_is_generic(owner) => {
+                return Err(self.gap_here(format!("field `{owner}.{field}` has no concrete type: {reason:?}")));
+            }
+            Err(_) => {}
         }
         let owner_ty = owner_ty.ok_or_else(|| {
             self.gap_here(format!("a copy of generic value `{owner}` has no concrete type for `{field}`"))
@@ -2618,20 +2708,29 @@ impl Builder<'_> {
         Ok(())
     }
 
-    /// `r` with each borrowed opaque value child copied, at an escape: a box
-    /// ([`Self::pack_boxed`]), a return, or an enum payload. A child is
-    /// borrowed when a copy, a scalarized parameter or a binding read it from
-    /// a source that still holds it.
+    /// Own borrowed boxes at mutable escapes. Immutable boundaries may share
+    /// boxes whose source cannot be written through; mutable-place reads still
+    /// snapshot their children before reaching such a boundary.
     pub(crate) fn owned_value_children(&mut self, r: ValueRepr) -> Result<ValueRepr, CompilerError> {
-        if self.scx.values_first_class || self.lending_pack {
+        if self.scx.values_first_class || self.shallow_pack {
             return Ok(r);
         }
         match r {
+            ValueRepr::Scalar(v)
+                if !(self.lending_pack && self.shareable_value_boxes.contains(&v)) =>
+            {
+                if let Some(ty) = self.borrowed_value_children.get(&v).cloned() {
+                    let copy = self.copied_value_repr(&ty, v)?;
+                    return self.owned_value_children(copy);
+                }
+                Ok(ValueRepr::Scalar(v))
+            }
             ValueRepr::Group { name, parts, present } => {
                 let parts = parts
                     .into_iter()
                     .map(|part| match part {
                         ValueRepr::Scalar(v) => match self.borrowed_value_children.get(&v).cloned() {
+                            Some(_) if self.lending_pack && self.shareable_value_boxes.contains(&v) => Ok(ValueRepr::Scalar(v)),
                             Some(ty) => self.copied_value_box(&ty, v).map(ValueRepr::Scalar),
                             None => Ok(ValueRepr::Scalar(v)),
                         },
@@ -2651,14 +2750,108 @@ impl Builder<'_> {
         }
     }
 
+    /// Retaining a scalar in cells loses its borrowed-box provenance. Snapshot
+    /// it before a later expression can mutate the source it came from.
+    pub(crate) fn snapshot_opaque_value(&mut self, r: ValueRepr) -> Result<ValueRepr, CompilerError> {
+        if matches!(&r, ValueRepr::Scalar(v) if !self.shareable_value_boxes.contains(v)) {
+            self.with_value_lending(false, |s| {
+                if let ValueRepr::Scalar(v) = &r
+                    && let Some(ty) = s.borrowed_value_children.get(v).cloned()
+                    && let (payload, true) = ty.peel_nullable()
+                {
+                    let representation = s.concrete_rep_id(&ty, RepUse::Return, false, false)?;
+                    if let Some(shape) = s.scx.rep_arena().value_shape(representation) {
+                        // Keep presence and leaves together instead of packing a
+                        // snapshot only to split it again. Wide values retain
+                        // the planner's boxed wire rather than widening a frame.
+                        let leaves = s.nullable_value_leaves(*v, &shape, |s, value, inner| {
+                            let copy = s.boxed_copy_repr_of(value, inner, Some(payload))?;
+                            let copy = s.owned_value_children(copy)?;
+                            s.repr_to_leaves_shape(&copy, inner)
+                        })?;
+                        return Ok(s.rebuild_from_leaves(&shape, &leaves, &mut 0));
+                    }
+                }
+                s.owned_value_children(r)
+            })
+        } else {
+            Ok(r)
+        }
+    }
+
     /// [`Self::pack`] for a `let` binding's own cell: its value children stay
     /// borrowed, since only the binding holds the box and each whole use of
     /// it copies ([`Self::boxed_value_local`]).
     pub(crate) fn pack_lent(&mut self, r: ValueRepr) -> Result<Idx<Inst>, CompilerError> {
-        let outer = std::mem::replace(&mut self.lending_pack, true);
+        let outer = std::mem::replace(&mut self.shallow_pack, true);
         let packed = self.pack(r);
-        self.lending_pack = outer;
+        self.shallow_pack = outer;
         packed
+    }
+
+    pub(crate) fn value_repr_is_shareable(&self, r: &ValueRepr) -> bool {
+        match r {
+            ValueRepr::Scalar(v) => !self.borrowed_value_children.contains_key(v)
+                || self.shareable_value_boxes.contains(v),
+            ValueRepr::Group { parts, .. } | ValueRepr::Tuple { parts, .. } => {
+                parts.iter().all(|p| self.value_repr_is_shareable(p))
+            }
+        }
+    }
+
+    pub(crate) fn with_value_lending<T>(
+        &mut self,
+        lend: bool,
+        f: impl FnOnce(&mut Self) -> Result<T, CompilerError>,
+    ) -> Result<T, CompilerError> {
+        let outer = std::mem::replace(&mut self.lending_pack, lend);
+        let result = f(self);
+        self.lending_pack = outer;
+        result
+    }
+
+    fn mark_boundary_value_repr(
+        &mut self,
+        r: &ValueRepr,
+        ty: &MonoTy,
+        share: bool,
+    ) -> Result<(), CompilerError> {
+        let mut payload = ty;
+        while let MonoTy::Nullable(inner) = payload { payload = inner; }
+        match r {
+            ValueRepr::Scalar(v) if payload.nominal().is_some_and(|name| {
+                self.is_value_struct(name) && !self.is_nobox_struct(name)
+            }) => {
+                self.borrowed_value_children.insert(*v, Rc::new(ty.clone()));
+                if share { self.shareable_value_boxes.insert(*v); }
+            }
+            ValueRepr::Group { name, .. } => {
+                let shape = self.nominal_rep_shape_required(*name, false)?;
+                self.mark_borrowed_value_children(&shape, r, Some(payload))?;
+                if share { self.share_borrowed_children(r); }
+            }
+            ValueRepr::Tuple { parts, .. } => {
+                if let MonoTy::Tuple(types) = payload {
+                    for (part, ty) in parts.iter().zip(types) {
+                        self.mark_boundary_value_repr(part, ty, share)?;
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    pub(crate) fn share_borrowed_children(&mut self, r: &ValueRepr) {
+        match r {
+            ValueRepr::Scalar(v) if self.borrowed_value_children.contains_key(v) => {
+                self.shareable_value_boxes.insert(*v);
+            }
+            ValueRepr::Group { parts, .. } | ValueRepr::Tuple { parts, .. } => {
+                for part in parts { self.share_borrowed_children(part); }
+            }
+            _ => {}
+        }
     }
 
     /// The copy of a non-null box of `shape`. Enums are immutable, so a GC-table
@@ -2773,10 +2966,17 @@ impl Builder<'_> {
         ty: &MonoTy,
         v: Idx<Inst>,
     ) -> Result<Idx<Inst>, CompilerError> {
-        match self.copied_value_repr(ty, v)? {
+        self.with_value_lending(false, |s| match s.copied_value_repr(ty, v)? {
+            ValueRepr::Scalar(copy) if copy != v && ty.peel_nullable().1 => {
+                // An opaque child occupies one slot. Keep the nullable payload
+                // boxed rather than promoting its fields across later copies.
+                let nil = s.emit_cur(Inst::Const(Lit::Nil));
+                let present = s.emit_cur(Inst::NotEq(copy, nil));
+                Ok(s.emit_cur(Inst::MakeNullableValue { present, value: copy }))
+            }
             ValueRepr::Scalar(v) => Ok(v),
-            copy => self.pack(copy),
-        }
+            copy => s.pack(copy),
+        })
     }
 
     /// [`Self::copied_value_box`] before packing: a non-null copy stays a
@@ -2786,7 +2986,12 @@ impl Builder<'_> {
         ty: &MonoTy,
         v: Idx<Inst>,
     ) -> Result<ValueRepr, CompilerError> {
-        let (payload, nullable) = ty.peel_nullable();
+        let mut payload = ty;
+        let mut nullable = false;
+        while let MonoTy::Nullable(inner) = payload {
+            payload = inner;
+            nullable = true;
+        }
         let Some(name) = payload
             .nominal()
             .filter(|name| self.is_value_struct(*name) && !self.is_nobox_struct(*name))
