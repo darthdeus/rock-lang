@@ -239,6 +239,39 @@ fn metric_recompute(m: Metric) {
     m.p99 = nb_get(m.sorted, metric_percentile_index(99, n))
 }
 
+// Lower bound of `v` in sorted[0..n). Both loops have a literal bound, so the
+// trip count is one constant per metric instead of one side exit per scanned
+// index; once lo == hi the remaining steps write nothing. 16 steps cover n up
+// to 65536, 64 cover any int-sized n.
+fn metric_lower_bound(m: Metric, n: int, v: float, cap: int) -> int {
+    let lo = 0
+    let hi = n
+    if cap <= 65536 {
+        for _step in 0..16 {
+            if lo < hi {
+                let mid = (lo + hi) ./ 2
+                if nb_get(m.sorted, mid) < v {
+                    lo = mid + 1
+                } else {
+                    hi = mid
+                }
+            }
+        }
+    } else {
+        for _step in 0..64 {
+            if lo < hi {
+                let mid = (lo + hi) ./ 2
+                if nb_get(m.sorted, mid) < v {
+                    lo = mid + 1
+                } else {
+                    hi = mid
+                }
+            }
+        }
+    }
+    return lo
+}
+
 // Add one sample: maintain the ascending `sorted` window (evict oldest if
 // full, insert the new value) and the insertion-order `ring`, then refresh the
 // summary fields. O(cap), zero allocation, uniform cost per call.
@@ -246,41 +279,39 @@ fn metric_add(m: Metric, v: float) {
     let evicting = m.count >= m.cap
     let old = 0.0
 
-    // `len` = valid length of `sorted` after any eviction, before inserting v.
-    let len = if evicting {
-        // Remove the oldest sample (ring[head]) from sorted: linear scan for
-        // its slot, then shift left. Equality is exact -- ring and sorted hold
-        // the same bit-for-bit float32 (both written via nb_set).
+    if evicting {
+        // Remove the oldest sample (ring[head]) from sorted. It is present
+        // bit-for-bit (both buffers are written through nb_set), so a lower
+        // bound lands on a copy of it.
         old = nb_get(m.ring, m.head)
-        let oi = 0
-        for i in 0..m.count {
-            if nb_get(m.sorted, i) == old {
-                oi = i
-                break
-            }
+        let oi = metric_lower_bound(m, m.count, old, m.cap)
+        // Lower bound in the array before the removal; every slot after oi
+        // moves down one.
+        let q = metric_lower_bound(m, m.count, v, m.cap)
+        let p = if oi < q { q - 1 } else { q }
+        // Rotate v into p from the evicted slot: one pass over the affected
+        // range, where separate eviction and insertion shifts would walk it
+        // twice. p == oi writes the one slot and drops the evicted value.
+        let step = if p < oi { 1 } else { -1 }
+        let stop = oi + step
+        let held = v
+        let j = p
+        while j != stop {
+            let prev = nb_get(m.sorted, j)
+            nb_set(m.sorted, j, held)
+            held = prev
+            j = j + step
         }
-        for i in oi..(m.count - 1) {
-            nb_set(m.sorted, i, nb_get(m.sorted, i + 1))
-        }
-        m.count - 1
     } else {
-        m.count
-    }
-
-    // Ascending insert position for v in sorted[0..len); shift the tail right.
-    let ins = len
-    for i in 0..len {
-        if v < nb_get(m.sorted, i) {
-            ins = i
-            break
+        // Filling: open the tail slot and shift the insertion point up.
+        let p = metric_lower_bound(m, m.count, v, m.cap)
+        let j = m.count
+        while j > p {
+            nb_set(m.sorted, j, nb_get(m.sorted, j - 1))
+            j = j - 1
         }
+        nb_set(m.sorted, p, v)
     }
-    let j = len
-    while j > ins {
-        nb_set(m.sorted, j, nb_get(m.sorted, j - 1))
-        j = j - 1
-    }
-    nb_set(m.sorted, ins, v)
 
     // Insertion-order ring + cursor.
     nb_set(m.ring, m.head, v)

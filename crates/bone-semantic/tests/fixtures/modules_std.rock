@@ -518,6 +518,7 @@
 // prelude: max
 // prelude: max_by
 // prelude: metric_add
+// prelude: metric_lower_bound
 // prelude: metric_new
 // prelude: metric_percentile_index
 // prelude: metric_recent
