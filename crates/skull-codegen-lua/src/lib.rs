@@ -780,33 +780,93 @@ fn reserved_namespace_collision(name: &str, span: Span, sink: &mut Vec<(String, 
 }
 
 fn scalar_constants(ws: &Workspace) -> HashMap<ustr::Ustr, Lit> {
-    use bone_semantic::hir::{Body, BodyOwner, Expr};
-    fn fold(body: &Body, id: Idx<Expr>, known: &HashMap<ustr::Ustr, Lit>) -> Option<Lit> {
-        match body.expr_arena[id] {
-            Expr::Int(v) => Some(Lit::Int(v)),
-            Expr::Float(v) => Some(Lit::Float(v.into_inner())),
-            Expr::Bool(v) => Some(Lit::Bool(v)),
-            Expr::String(v) => Some(Lit::Str(v)),
-            Expr::Global(name) => known.get(&name).cloned(),
-            Expr::UnaryMinus(inner, _) => match fold(body, inner, known)? {
-                Lit::Int(v) => v.checked_neg().map(Lit::Int),
-                Lit::Float(v) => Some(Lit::Float(-v)),
+    use bone_semantic::hir::{Body, BodyOwner, Callee, Expr};
+    use bone_semantic::inference::BodyInference;
+    use skull_mir::monoty::{convert, MonoSubst, MonoTy};
+
+    struct Folder<'a> {
+        ws: &'a Workspace,
+        body: &'a Body,
+        inf: Option<&'a BodyInference>,
+        known: &'a HashMap<ustr::Ustr, Lit>,
+        subst: &'a MonoSubst,
+    }
+    impl Folder<'_> {
+        fn numeric_type(&self, id: Idx<Expr>) -> Option<MonoTy> {
+            let inf = self.inf?;
+            let ty = convert(self.ws, inf, *inf.expr_types.get(id)?, self.subst).ok()?;
+            matches!(ty, MonoTy::Int | MonoTy::Float).then_some(ty)
+        }
+
+        fn fold(&self, id: Idx<Expr>, depth: usize) -> Option<Lit> {
+            // Initializers can be arbitrarily nested; leave large expressions at
+            // runtime instead of growing the compiler stack without a bound.
+            if depth >= 64 { return None; }
+            match self.body.expr_arena[id] {
+                Expr::Int(v) => Some(Lit::Int(v)),
+                Expr::Float(v) => Some(Lit::Float(v.into_inner())),
+                Expr::Bool(v) => Some(Lit::Bool(v)),
+                Expr::String(v) => Some(Lit::Str(v)),
+                Expr::Global(name) => self.known.get(&name).cloned(),
+                Expr::UnaryMinus(inner, _) => match self.fold(inner, depth + 1)? {
+                    Lit::Int(v) => v.checked_neg().map(Lit::Int),
+                    Lit::Float(v) => Some(Lit::Float(-v)),
+                    _ => None,
+                },
+                Expr::Call { callee: Callee::Unresolved { name, .. }, args, .. }
+                    if matches!(name.as_str(), "__op_add" | "__op_sub" | "__op_mul" | "__op_div") =>
+                {
+                    let mut args = args.into_iter();
+                    let left = args.next()?;
+                    let right = args.next()?;
+                    if args.next().is_some() { return None; }
+                    // Only the primitive numeric route is admitted. In particular,
+                    // uint, newtype operators and string coercions keep their
+                    // runtime checks and overload behavior.
+                    self.numeric_type(left)?;
+                    self.numeric_type(right)?;
+                    let result_ty = self.numeric_type(id)?;
+                    let number = |lit| match lit {
+                        Lit::Int(v) if v.unsigned_abs() <= 9_007_199_254_740_991 => Some(v as f64),
+                        Lit::Float(v) if v.is_finite() => Some(v),
+                        _ => None,
+                    };
+                    let left = number(self.fold(left, depth + 1)?)?;
+                    let right = number(self.fold(right, depth + 1)?)?;
+                    let result = match name.as_str() {
+                        "__op_add" => left + right,
+                        "__op_sub" => left - right,
+                        "__op_mul" => left * right,
+                        "__op_div" if right != 0.0 => left / right,
+                        _ => return None,
+                    };
+                    if !result.is_finite() { return None; }
+                    match result_ty {
+                        MonoTy::Float => Some(Lit::Float(result)),
+                        MonoTy::Int if result.abs() <= 9_007_199_254_740_991.0
+                            && !(result == 0.0 && result.is_sign_negative()) => Some(Lit::Int(result as i64)),
+                        _ => None,
+                    }
+                }
                 _ => None,
-            },
-            _ => None,
+            }
         }
     }
     let mut pending: Vec<_> = ws.modules.iter().flat_map(|module| {
         module.globals.iter().filter_map(|(id, global)| {
             if !global.is_const { return None; }
-            module.bodies.get(&BodyOwner::Global(id)).map(|body| (global.name, body))
+            let owner = BodyOwner::Global(id);
+            let inf = ws.inference(module.id).and_then(|inf| inf.per_fn.get(&owner));
+            module.bodies.get(&owner).map(|body| (global.name, body, inf))
         })
     }).collect();
     let mut known = HashMap::default();
+    let subst = MonoSubst::default();
     loop {
         let before = pending.len();
-        pending.retain(|(name, body)| {
-            if let Some(lit) = body.root.and_then(|root| fold(body, root, &known)) {
+        pending.retain(|(name, body, inf)| {
+            let folder = Folder { ws, body, inf: *inf, known: &known, subst: &subst };
+            if let Some(lit) = body.root.and_then(|root| folder.fold(root, 0)) {
                 known.insert(*name, lit);
                 false
             } else {

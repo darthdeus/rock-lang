@@ -265,6 +265,37 @@ fn scalar_constants_are_literals_at_use_sites() {
 }
 
 #[test]
+fn derived_scalar_constants_fold_arithmetic_without_runtime_reads() {
+    for (declarations, result, expected) in [
+        ("const NUMBER: float = 1.0 + 0.000001", "float", "1.000001"),
+        ("const BASE: int = 8; const NUMBER: int = BASE * 128", "int", "1024"),
+        ("const BASE: float = 4.5; const NUMBER: float = (BASE - 1.5) * 2.0", "float", "6.0"),
+        ("const NUMBER: float = 7 / 2", "float", "3.5"),
+    ] {
+        let lua = emit_clean(&format!("{declarations}\nfn choose() -> {result} {{ NUMBER }}"), "choose");
+        assert!(!lua.contains("NUMBER") && !lua.contains("BASE"), "{lua}");
+        assert!(lua.contains(expected), "{lua}");
+    }
+}
+
+#[test]
+fn scalar_arithmetic_keeps_effects_checks_and_unrepresentable_values_at_runtime() {
+    for (declarations, result) in [
+        ("global BASE: int = 8; const NUMBER: int = BASE * 128", "int"),
+        ("fn input() -> int { 8 }; const NUMBER: int = input() * 128", "int"),
+        ("const BASE: uint = 4294967295; const ONE: uint = 1; const NUMBER: uint = BASE + ONE", "uint"),
+        ("const NUMBER: float = 1.0 / 0.0", "float"),
+        ("const NUMBER: float = 1e308 * 1e308", "float"),
+        ("const BASE: int = 9007199254740991; const NUMBER: int = BASE + 2", "int"),
+    ] {
+        let lua = emit_clean(&format!("{declarations}\nfn choose() -> {result} {{ NUMBER }}"), "choose");
+        assert!(lua.contains("NUMBER"), "{lua}");
+    }
+    let lua = emit_clean("const NUMBER: float = -0.0 * 2.0; fn choose() -> float { NUMBER }", "choose");
+    assert!(lua.contains("-0.0") && !lua.contains("NUMBER"), "{lua}");
+}
+
+#[test]
 fn numeric_selection_uses_native_minmax() {
     let lua = emit_clean("fn choose(a: float, b: float) -> float { return if a < b { a } else { b } }", "choose");
     assert!(lua.contains("math.min("), "{lua}");

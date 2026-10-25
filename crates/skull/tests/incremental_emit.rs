@@ -73,6 +73,36 @@ fn scalar_constant_edits_refresh_full_incremental_and_overlay_emission() {
 }
 
 #[test]
+fn derived_scalar_constant_edits_refresh_transitive_readers_at_runtime() {
+    let template = "fn source() -> int { 32 }\nconst BASE: int = INIT\nconst SCALE: int = BASE * 128\nconst DERIVED: int = SCALE + 1\n@nomangle fn choose() -> int { DERIVED }";
+    for (from, to, expected_before, expected_after, folded_after) in [
+        ("8", "16", 1025, 2049, true),
+        ("16", "source()", 2049, 4097, false),
+        ("source()", "8", 4097, 1025, true),
+    ] {
+        let ws1 = ws_with_stdlib(&template.replace("INIT", from));
+        let mid = skull::user_module_id(&ws1).unwrap();
+        let (full, mut incremental_cache) = emit_full(&ws1, mid).unwrap();
+        let (_, mut overlay_cache) = emit_full(&ws1, mid).unwrap();
+        let ws2 = ws_with_stdlib(&template.replace("INIT", to));
+        let (mid2, gid) = ws2.modules.iter().find_map(|m| m.globals.iter()
+            .find(|(_, g)| g.name.as_str() == "BASE").map(|(id, _)| (m.id, id))).unwrap();
+        let edited = [(mid2, BodyOwner::Global(gid))];
+        let incremental = emit_incremental(&ws2, &mut incremental_cache, &edited).unwrap();
+        assert_eq!(incremental.lua, emit_full(&ws2, mid).unwrap().0.lua);
+        let overlay = emit_overlay(&ws2, &mut overlay_cache, &edited);
+        let after = crate::common::function_body(&overlay.lua, "choose");
+        if folded_after {
+            assert!(after.contains(&expected_after.to_string()) && !after.contains("DERIVED"), "{after}");
+        } else {
+            assert!(after.contains("DERIVED"), "{after}");
+        }
+        let run = format!("{}\nassert(choose() == {expected_before})\n{}\nassert(choose() == {expected_after})\nprint('ok')", full.lua, overlay.lua);
+        assert_eq!(crate::common::run_luajit(&run, "derived_scalar_reload"), "ok");
+    }
+}
+
+#[test]
 fn numeric_selection_updates_in_full_incremental_and_overlay_emission() {
     let v1 = "@nomangle fn choose(a: float, b: float) -> float { return if a < b { a } else { b } }";
     let v2 = v1.replace("a < b", "a > b");
