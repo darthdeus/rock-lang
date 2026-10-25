@@ -262,11 +262,14 @@ impl Builder<'_> {
     }
 
     /// Extracting an opaque value child from its parent group makes it an
-    /// independent value read. Snapshot it now: the parent's borrowed-child
-    /// pack policy no longer covers this standalone scalar (including a let).
-    fn snapshot_projected_value(&mut self, repr: ValueRepr) -> Result<ValueRepr, CompilerError> {
+    /// independent value read. Apply the ordinary value/place copy policy;
+    /// the parent's borrowed-child pack policy no longer covers a standalone
+    /// scalar. Nullable presence and borrowed reads must remain projection-only.
+    fn snapshot_projected_value(&mut self, e: Idx<Expr>, repr: ValueRepr) -> Result<ValueRepr, CompilerError> {
         if let ValueRepr::Scalar(value) = &repr
-            && let Some(ty) = self.borrowed_value_children.get(value).cloned()
+            && self.borrowed_value_children.contains_key(value)
+            && (self.value_struct_of(e).is_some() || self.nullable_place_value_of(e)?.is_some())
+            && let Some(ty) = self.concrete_expr_ty(e)
         {
             return self.copied_value_repr(&ty, *value);
         }
@@ -450,7 +453,7 @@ impl Builder<'_> {
                     let br = self.lower_expr_repr_inner(base)?;
                     if let ValueRepr::Group { name, parts, .. } = &br {
                         if let Some(i) = self.field_index(*name, field) {
-                            return self.snapshot_projected_value(parts[i].clone());
+                            return self.snapshot_projected_value(e, parts[i].clone());
                         }
                     }
                     let boxed = self.pack(br)?;
@@ -485,11 +488,11 @@ impl Builder<'_> {
                     while at < segs.len() {
                         let ValueRepr::Group { name, parts, .. } = &repr else { break };
                         let Some(i) = self.field_index(*name, segs[at]) else { break };
-                        repr = self.snapshot_projected_value(parts[i].clone())?;
+                        repr = parts[i].clone();
                         at += 1;
                     }
                     if at == segs.len() {
-                        return Ok(repr);
+                        return self.snapshot_projected_value(e, repr);
                     }
                     if at > 0 {
                         let rest: Vec<&str> = segs[at..].iter().map(|s| s.as_str()).collect();
@@ -529,7 +532,7 @@ impl Builder<'_> {
                 }
                 if let ValueRepr::Group { name, parts, .. } = &br {
                     if let Some(i) = self.field_index(*name, field) {
-                        return self.snapshot_projected_value(parts[i].clone());
+                        return self.snapshot_projected_value(e, parts[i].clone());
                     }
                 }
                 // A boxed base: read the field directly. A payload-free enum field
