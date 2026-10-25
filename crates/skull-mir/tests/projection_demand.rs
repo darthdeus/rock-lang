@@ -86,3 +86,19 @@ fn boxed_nullable_subtree_reads_its_presence_and_payload_only() {
     let body = lower(&source, "pick");
     assert_eq!(fields(&body), 3, "nullable subtree demand retains presence: {body}");
 }
+
+#[test]
+fn boxed_global_projects_before_copy_expansion() {
+    let source = "value Point { x: int = 1, y: int = 2 }\n\
+        value Config { spare: int = 3, child: Point = Point {} }\n\
+        global CONFIG: Config = Config {}\n\
+        fn leaf() -> int { CONFIG.child.y }\n\
+        fn subtree() -> Point { CONFIG.child }\n\
+        fn whole() -> Config { CONFIG }";
+    let leaf = lower(source, "leaf");
+    assert_eq!(fields(&leaf), 2, "only the child and selected leaf: {leaf}");
+    let subtree = lower(source, "subtree");
+    assert_eq!(fields(&subtree), 3, "selected child snapshots both leaves: {subtree}");
+    let whole = lower(source, "whole");
+    assert_eq!(fields(&whole), 4, "whole global still snapshots every leaf: {whole}");
+}

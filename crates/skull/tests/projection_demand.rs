@@ -97,3 +97,49 @@ fn main() {{
         "1\n5\n2\n5\n11\n11\n17\n17\n1\n-1\n1\n1\ntrue\n-1\n2"
     );
 }
+
+#[test]
+fn global_projections_preserve_snapshots_and_read_order() {
+    let source = r#"
+value Point { x: int = 3, y: int = 5 }
+nobox value Flat { x: int = 7, y: int = 11 }
+value Config { child: Point = Point {}, optional: Point? = Point {}, flat: Flat? = Flat {}, spare: int = 13 }
+global CONFIG: Config = Config {}
+global MAYBE: Config? = Config {}
+global FLAT: Flat? = Flat {}
+value Generic<T> { child: T, spare: int }
+global GENERIC: Generic<Point> = Generic { child: Point {}, spare: 17 }
+fn mutate() -> int { CONFIG.child.y = 99; CONFIG.optional = null; CONFIG.flat = null; return 1 }
+fn observe(p: Point, ignored: int) -> int { p.y }
+fn narrowed() -> int { if MAYBE != null { return MAYBE.child.y }; return -1 }
+fn flat() -> int { if FLAT != null { return FLAT.y }; return -1 }
+fn main() {
+    let generic_child = GENERIC.child
+    print(GENERIC.spare)
+    print(GENERIC.child.y)
+    GENERIC.child.y = 101
+    print(generic_child.y)
+    let whole = CONFIG
+    let child = CONFIG.child
+    let optional = CONFIG.optional
+    let selected_flat = CONFIG.flat
+    print(observe(CONFIG.child, mutate()))
+    print(CONFIG.child.y)
+    print(whole.child.y)
+    print(child.y)
+    print(optional?.y ?? -1)
+    print(selected_flat?.y ?? -1)
+    print(CONFIG.optional == null)
+    print(CONFIG.flat == null)
+    print(narrowed())
+    MAYBE = null
+    print(narrowed())
+    print(flat())
+    FLAT = null
+    print(flat())
+}
+"#;
+    let lua = emit_module(source);
+    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "global_projection_demand"),
+        "17\n5\n5\n5\n99\n5\n5\n5\n11\ntrue\ntrue\n5\n-1\n11\n-1");
+}

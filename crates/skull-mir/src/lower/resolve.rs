@@ -191,10 +191,23 @@ impl Builder<'_> {
         while let Expr::FieldAccess { base, .. } = self.body.expr_arena[root] {
             root = base;
         }
-        let Expr::Var(binding) = self.body.expr_arena[root] else { return Ok(None) };
-        let grouped = self.group_binds.contains_key(&raw(binding));
-        let boxed = if grouped { None } else { self.boxed_value_local(binding, root) };
-        if !grouped && boxed.is_none() { return Ok(None); }
+        let (binding, boxed_read, boxed) = match self.body.expr_arena[root] {
+            Expr::Var(binding) if self.group_binds.contains_key(&raw(binding)) => {
+                (Some(binding), None, None)
+            }
+            Expr::Var(binding) => {
+                let Some(name) = self.boxed_value_local(binding, root) else { return Ok(None) };
+                (None, Some(Inst::Load(self.binds[&raw(binding)])), Some(name))
+            }
+            Expr::Global(global) => {
+                let Some(name) = self.value_struct_of(root) else { return Ok(None) };
+                // Nobox globals use declared-type scalar storage, including a
+                // presence leaf when narrowed from nullable. Keep that reader.
+                if self.is_nobox_struct(name) { return Ok(None); }
+                (None, Some(Inst::Global(global)), Some(name))
+            }
+            _ => return Ok(None),
+        };
         let mut path = Vec::new();
         let mut at = e;
         while let Expr::FieldAccess { base, field } = self.body.expr_arena[at] {
@@ -208,7 +221,7 @@ impl Builder<'_> {
         let boxed_shape = boxed.map(|name| self.nominal_rep_shape_required(name, false)).transpose()?;
         let shape = match &boxed_shape {
             Some(shape) => shape,
-            None => &self.group_binds[&raw(binding)].1,
+            None => &self.group_binds[&raw(binding.expect("grouped projection"))].1,
         };
         let Some((range, selected)) = self.value_projection_range(shape, &path) else { return Ok(None) };
         // An opaque value slot needs the parent's borrowed-child copy policy.
@@ -230,10 +243,10 @@ impl Builder<'_> {
             return Ok(None);
         }
         let leaves = if let Some(shape) = boxed_shape {
-            let value = self.emit_cur(Inst::Load(self.binds[&raw(binding)]));
+            let value = self.emit_cur(boxed_read.expect("boxed projection"));
             self.cdata_leaf_range(value, &shape, range)?
         } else {
-            let cells = self.group_binds[&raw(binding)].0[range].to_vec();
+            let cells = self.group_binds[&raw(binding.expect("grouped projection"))].0[range].to_vec();
             cells.into_iter().map(|cell| self.emit_cur(Inst::Load(cell))).collect()
         };
         let repr = match selected {
@@ -246,6 +259,18 @@ impl Builder<'_> {
             }
         };
         Ok(Some(repr))
+    }
+
+    /// Extracting an opaque value child from its parent group makes it an
+    /// independent value read. Snapshot it now: the parent's borrowed-child
+    /// pack policy no longer covers this standalone scalar (including a let).
+    fn snapshot_projected_value(&mut self, repr: ValueRepr) -> Result<ValueRepr, CompilerError> {
+        if let ValueRepr::Scalar(value) = &repr
+            && let Some(ty) = self.borrowed_value_children.get(value).cloned()
+        {
+            return self.copied_value_repr(&ty, *value);
+        }
+        Ok(repr)
     }
 
     fn lower_expr_repr_unscoped(&mut self, e: Idx<Expr>) -> Result<ValueRepr, CompilerError> {
@@ -425,7 +450,7 @@ impl Builder<'_> {
                     let br = self.lower_expr_repr_inner(base)?;
                     if let ValueRepr::Group { name, parts, .. } = &br {
                         if let Some(i) = self.field_index(*name, field) {
-                            return Ok(parts[i].clone());
+                            return self.snapshot_projected_value(parts[i].clone());
                         }
                     }
                     let boxed = self.pack(br)?;
@@ -460,7 +485,7 @@ impl Builder<'_> {
                     while at < segs.len() {
                         let ValueRepr::Group { name, parts, .. } = &repr else { break };
                         let Some(i) = self.field_index(*name, segs[at]) else { break };
-                        repr = parts[i].clone();
+                        repr = self.snapshot_projected_value(parts[i].clone())?;
                         at += 1;
                     }
                     if at == segs.len() {
@@ -504,7 +529,7 @@ impl Builder<'_> {
                 }
                 if let ValueRepr::Group { name, parts, .. } = &br {
                     if let Some(i) = self.field_index(*name, field) {
-                        return Ok(parts[i].clone());
+                        return self.snapshot_projected_value(parts[i].clone());
                     }
                 }
                 // A boxed base: read the field directly. A payload-free enum field
