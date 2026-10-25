@@ -4,6 +4,51 @@ use std::time::Duration;
 use std::process::{Command, Stdio};
 
 #[test]
+fn source_fingerprint_support_files_follow_successful_live_compiles() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("stick.toml"),
+        "[package]\nname = \"fingerprint-watch\"\n[build.vars]\nREV = { source_fingerprint = { roots = [\"Root\"], files = [\"support.txt\"] } }\n").unwrap();
+    std::fs::write(dir.path().join("main.rock"),
+        "value Root { count: int }\nfn main() { print(build_var(\"REV\")) }\n").unwrap();
+    let support = dir.path().join("support.txt");
+    std::fs::write(&support, "first decoder").unwrap();
+    let support = support.canonicalize().unwrap();
+    let main = dir.path().join("main.lua");
+    let overlay = dir.path().join("incremental.lua");
+    let mut project = super::IncrementalProject::init(
+        dir.path().to_str().unwrap(), &main, &overlay).unwrap();
+    let recorded_hash = |project: &super::IncrementalProject| {
+        project.comptime_watch_files_with_hashes().into_iter()
+            .find(|(path, _)| path == &support)
+            .expect("declared support file must reach the watcher").1
+    };
+    let revision = |project: &super::IncrementalProject| {
+        project.comptime_inputs().vars[&ustr::Ustr::from("REV")].value.clone()
+    };
+    let first_hash = recorded_hash(&project);
+    let first_revision = revision(&project);
+    std::fs::write(&support, "second decoder").unwrap();
+    assert_eq!(recorded_hash(&project), first_hash,
+        "watch seeding must describe compiled bytes, not reread current disk");
+    assert!(matches!(project.recompile(std::slice::from_ref(&support), &main, &overlay).unwrap(),
+        super::SkullReload::Full { .. }));
+    let second_hash = recorded_hash(&project);
+    let second_revision = revision(&project);
+    assert_ne!(first_hash, second_hash);
+    assert_ne!(first_revision, second_revision);
+    std::fs::remove_file(&support).unwrap();
+    assert!(project.recompile(std::slice::from_ref(&support), &main, &overlay).is_err());
+    assert_eq!(recorded_hash(&project), second_hash);
+    assert_eq!(revision(&project), second_revision);
+    let manifest = dir.path().join("stick.toml");
+    std::fs::write(&manifest,
+        "[package]\nname = \"fingerprint-watch\"\n[build.vars]\nREV = \"fixed\"\n").unwrap();
+    project.recompile(&[manifest], &main, &overlay).unwrap();
+    assert!(project.comptime_watch_files_with_hashes().iter().all(|(path, _)| path != &support));
+    assert_eq!(revision(&project), "fixed");
+}
+
+#[test]
 fn iter_incremental_uses_the_same_production_sources_as_live_builds() {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::write(

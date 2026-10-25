@@ -4249,8 +4249,8 @@ impl IncrementalProject {
         &self.project.sources().package_roots
     }
 
-    /// Absolute path of every `embed_string` input baked into the current
-    /// program, with the hash of the bytes the lowering baked in. The engine
+    /// Absolute paths and compiled-byte hashes of embedded inputs and resolved
+    /// source-fingerprint dependencies in the current program. The engine
     /// watcher treats these files as sources: an edit to one routes as a
     /// changed non-source path, which forces the full rebuild that re-reads it
     /// (the compiler contract). The hash lets a watcher seeding the input
@@ -4258,8 +4258,11 @@ impl IncrementalProject {
     /// instant.
     pub fn comptime_watch_files_with_hashes(&self) -> Vec<(std::path::PathBuf, u64)> {
         // File ids are already the absolute canonical path the resolver read.
-        self.cache
-            .comptime_file_hashes()
+        let mut files = self.cache.comptime_file_hashes().into_iter()
+            .collect::<rustc_hash::FxHashMap<_, _>>();
+        files.extend(self.project.workspace().comptime_inputs.source_fingerprint_files.iter()
+            .map(|(path, hash)| (*path, *hash)));
+        files
             .into_iter()
             .map(|(abs, hash)| (std::path::PathBuf::from(abs.as_str()), hash))
             .collect()

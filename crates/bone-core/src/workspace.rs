@@ -124,6 +124,9 @@ pub struct ComptimeInputs {
     /// Explicit compiler-derived inputs, resolved after checking. Kept after
     /// resolution so retained builds can recompute them from updated sources.
     pub source_fingerprints: FxHashMap<Ustr, SourceFingerprint>,
+    /// Native files and compiled-byte hashes used by resolved fingerprints.
+    /// Retained with the values so watcher seeding and rollback use the same snapshot.
+    pub source_fingerprint_files: FxHashMap<Ustr, u64>,
     pub vars: FxHashMap<Ustr, ComptimeVarValue>,
     /// Declared metadata whose value is intentionally outside executable
     /// Artifact identity (for example a presentation build clock). The

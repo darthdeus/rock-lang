@@ -246,7 +246,7 @@ fn source_file_identity(file: &str, root: Option<&Path>) -> String {
 fn resolve_source_fingerprints(
     ws: &bone_semantic::inference::Workspace,
     inputs: &mut ComptimeInputs,
-    source_text: impl Fn(&str) -> Option<String>,
+    mut source_text: impl FnMut(&str) -> Option<String>,
     compiler_identity: &str,
 ) -> Result<()> {
     use sha2::{Digest, Sha256};
@@ -323,22 +323,30 @@ pub(crate) fn resolve_checked_inputs(
     mut inputs: ComptimeInputs,
     source_text: impl Fn(&str) -> Option<String>,
 ) -> Result<ComptimeInputs> {
+    inputs.source_fingerprint_files.clear();
     if inputs.source_fingerprints.is_empty() {
         return Ok(inputs);
     }
     let started = std::time::Instant::now();
     let root = inputs.embed_root.clone();
+    let mut watch_files = rustc_hash::FxHashMap::default();
     resolve_source_fingerprints(ws, &mut inputs, |file| {
         if let Some(name) = file.strip_prefix("<stdlib>/").or_else(|| file.strip_prefix("stdlib/")) {
             return rock_stdlib::stdlib_files().iter().find(|f| f.name == name).map(|f| f.contents.to_string());
         }
-        source_text(file).or_else(|| {
-            let path = Path::new(file);
-            let path = if path.is_absolute() { path.to_path_buf() } else { root.as_ref()?.join(path) };
-            let path = path.canonicalize().ok()?;
+        let path = Path::new(file);
+        let path = if path.is_absolute() { Some(path.to_path_buf()) } else { root.as_ref().map(|root| root.join(path)) };
+        let path = path.and_then(|path| path.canonicalize().ok());
+        let text = source_text(file).or_else(|| {
+            let path = path.as_ref()?;
             source_text(path.to_str()?).or_else(|| std::fs::read_to_string(path).ok())
-        })
+        })?;
+        if let Some(path) = path {
+            watch_files.insert(ustr::Ustr::from(path.to_str()?), skull_mir::mir::comptime_value_hash(&text));
+        }
+        Some(text)
     }, &compiler_identity()?)?;
+    inputs.source_fingerprint_files = watch_files;
     crate::compile_measurements::timings("comptime", &[("source-fingerprint", started.elapsed())]);
     Ok(inputs)
 }
