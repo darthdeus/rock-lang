@@ -1,0 +1,127 @@
+// Property test: metric_add keeps the sorted window, ring and summaries equal
+// to a model rebuilt from scratch after every sample.
+
+fn model_sort(model: NativeBuffer<float>, count: int) {
+    for a in 0..count {
+        let best = a
+        let from = a + 1
+        for b in from..count {
+            if nb_get(model, b) < nb_get(model, best) {
+                best = b
+            }
+        }
+        let t = nb_get(model, a)
+        nb_set(model, a, nb_get(model, best))
+        nb_set(model, best, t)
+    }
+}
+
+fn check_cap(cap: int, adds: int) {
+    let m = metric_new("prop", cap)
+    let ring = native_buffer_float(cap)
+    let model = native_buffer_float(cap)
+    let head = 0
+    let count = 0
+    let seed = 12345 + cap * 7
+    for step in 0..adds {
+        seed = (seed * 48271) % 2147483647
+        let pick = seed % 6
+        let v = if pick == 0 {
+            (step % 101) as float
+        } else if pick == 1 {
+            (100 - (step % 101)) as float
+        } else if pick == 2 {
+            (seed % 5) as float
+        } else if pick == 3 {
+            ((seed % 2001) - 1000) as float
+        } else if pick == 4 {
+            ((seed % 7) - 3) as float * 0.5
+        } else {
+            if seed % 2 == 0 { 0.0 } else { 1000.0 }
+        }
+
+        metric_add(m, v)
+
+        nb_set(ring, head, v)
+        if count < cap {
+            count = count + 1
+        }
+        let start = if count < cap { 0 } else { (head + 1) % cap }
+        let sum = 0.0
+        let sum_sq = 0.0
+        for k in 0..count {
+            let idx = (start + k) % cap
+            let rv = nb_get(ring, idx)
+            nb_set(model, k, rv)
+            sum += rv
+            sum_sq += rv * rv
+        }
+        model_sort(model, count)
+
+        assert(m.count == count, "count {m.count} != {count} (cap {cap} step {step})")
+        assert(m.head == (head + 1) % cap, "head {m.head} != {(head + 1) % cap} (cap {cap} step {step})")
+        for k in 0..count {
+            let got = nb_get(m.sorted, k)
+            let want = nb_get(model, k)
+            assert(got == want, "sorted[{k}] {got} != {want} (cap {cap} step {step})")
+        }
+        for k in 0..cap {
+            let got = nb_get(m.ring, k)
+            let want = nb_get(ring, k)
+            assert(got == want, "ring[{k}] {got} != {want} (cap {cap} step {step})")
+        }
+        let mean = sum / (count as float)
+        assert(abs(m.mean - mean) < 0.000000001, "mean {m.mean} != {mean} (cap {cap} step {step})")
+        assert(m.min == nb_get(model, 0), "min {m.min} != {nb_get(model, 0)} (cap {cap} step {step})")
+        assert(m.max == nb_get(model, count - 1), "max {m.max} != {nb_get(model, count - 1)} (cap {cap} step {step})")
+        let p50 = nb_get(model, metric_percentile_index(50, count))
+        let p90 = nb_get(model, metric_percentile_index(90, count))
+        let p99 = nb_get(model, metric_percentile_index(99, count))
+        assert(m.p50 == p50, "p50 {m.p50} != {p50} (cap {cap} step {step})")
+        assert(m.p90 == p90, "p90 {m.p90} != {p90} (cap {cap} step {step})")
+        assert(m.p99 == p99, "p99 {m.p99} != {p99} (cap {cap} step {step})")
+        let var = sum_sq / (count as float) - mean * mean
+        let stddev = sqrt(max(0.0, var))
+        assert(abs(m.stddev - stddev) < 0.000000001, "stddev {m.stddev} != {stddev} (cap {cap} step {step})")
+
+        head = (head + 1) % cap
+    }
+
+    metric_reset(m)
+    assert(m.count == 0 && m.head == 0, "reset left count {m.count} head {m.head} (cap {cap})")
+    assert(m.mean == 0.0 && m.stddev == 0.0 && m.min == 0.0 && m.max == 0.0, "reset left summaries (cap {cap})")
+    assert(m.p50 == 0.0 && m.p90 == 0.0 && m.p99 == 0.0, "reset left percentiles (cap {cap})")
+}
+
+@test
+fn metric_add_matches_a_rebuilt_window() {
+    for cap in [1, 2, 3, 4, 5, 8, 13, 32, 240] {
+        check_cap(cap, cap * 10 + 120)
+    }
+}
+
+// The 64-step fallback branch is chosen by cap, so a window that fills it is
+// far too large for the model above. Check its search directly against a
+// linear scan over a short window instead.
+@test
+fn lower_bound_uses_the_wide_cap_branch() {
+    let m = metric_new("wide", 65537)
+    let n = 40
+    for i in 0..n {
+        nb_set(m.sorted, i, ((i * 5) % 17) as float - 8.0)
+    }
+    model_sort(m.sorted, n)
+    for probe in 0..20 {
+        let v = (probe as float) - 9.5
+        let want = n
+        for i in 0..n {
+            if want == n && nb_get(m.sorted, i) >= v {
+                want = i
+            }
+        }
+        let got = metric_lower_bound(m, n, v, 65537)
+        assert(got == want, "wide lower_bound({v}) = {got}, want {want}")
+        let short = metric_lower_bound(m, n, v, 240)
+        assert(short == want, "narrow lower_bound({v}) = {short}, want {want}")
+    }
+}

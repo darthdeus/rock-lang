@@ -1,0 +1,153 @@
+// Microbenchmark for the stdlib window metric (`metric_add`).
+//
+//     rock run benchmarks/metric_add.rock
+//
+// Each workload flushes the JIT, attaches a trace listener and then feeds the
+// metric varied values past its window, so every trace and byte of mcode
+// counted here was recorded by that workload. `side_stops` counts compiled
+// side traces (a stop whose start named a parent trace), `mcode_bytes` sums
+// `jit.util.tracemc`. `ns_per_call` is measured after the counted run on a
+// warm trace cache.
+//
+// Two call topologies: `single` is one hot loop; `four` is a frame that calls
+// metric_add from four sites with different surrounding work, which is how a
+// frame builder reaches it.
+
+@nomangle inline(lua) fn bench_clock() -> float = "return os.clock()"
+
+@nomangle inline(lua) fn bench_reset() = """
+    local jit = require("jit")
+    jit.flush()
+    _G.__bench = { start = 0, stop = 0, abort = 0, side_stop = 0, side = {} }
+    _G.__bench_cb = function(what, tr, fn, pc, otr, oex)
+      local b = _G.__bench
+      if what == "start" then
+        b.start = b.start + 1
+        if oex ~= nil and oex >= 0 then b.side[tr] = true end
+      elseif what == "stop" then
+        b.stop = b.stop + 1
+        if b.side[tr] then b.side_stop = b.side_stop + 1 end
+      elseif what == "abort" then
+        b.abort = b.abort + 1
+      end
+    end
+    jit.attach(_G.__bench_cb, "trace")
+"""
+
+@nomangle inline(lua) fn bench_counts() -> string = """
+    local jit = require("jit")
+    jit.attach(_G.__bench_cb)
+    local util = require("jit.util")
+    local b = _G.__bench
+    local traces, mc = 0, 0
+    for tr = 1, 32000 do
+      local mcode = util.tracemc(tr)
+      if mcode then
+        traces = traces + 1
+        mc = mc + #mcode
+      end
+    end
+    -- The mcode strings above are garbage; collect before the timed run so a
+    -- GC step does not land inside it.
+    collectgarbage("collect")
+    return string.format("traces=%d side_stops=%d stops=%d aborts=%d mcode_bytes=%d",
+      traces, b.side_stop, b.stop, b.abort, mc)
+"""
+
+fn value_at(i: int, salt: int) -> float {
+    let pick = (i + salt) % 8
+    if pick == 0 { return (i % 101) as float }
+    if pick == 1 { return (100 - (i % 101)) as float }
+    if pick == 2 { return ((i + salt) % 5) as float }
+    if pick == 3 { return ((i * 53 + salt) % 2001) as float - 1000.0 }
+    return ((i * 37 + salt) % 2003) as float
+}
+
+fn site_a(m: Metric, i: int, salt: int) -> float {
+    let v = value_at(i, salt)
+    let pad = ((i * 13) % 101) as float
+    metric_add(m, v + pad * 0.0001)
+    return v
+}
+
+fn site_b(m: Metric, i: int, salt: int) -> float {
+    let v = value_at(i, salt + 1)
+    let pad = ((i * 17) % 89) as float
+    let tune = if pad > 40.0 { pad * 0.5 } else { pad }
+    metric_add(m, v + tune * 0.0001)
+    return v
+}
+
+fn site_c(m: Metric, i: int, salt: int) -> float {
+    let v = value_at(i, salt + 2)
+    let acc = 0.0
+    for k in 0..3 {
+        acc += (k as float) * 0.25
+    }
+    metric_add(m, v + acc * 0.0001)
+    return v
+}
+
+fn site_d(m: Metric, i: int, salt: int) -> float {
+    let v = value_at(i, salt + 3)
+    metric_add(m, v + ((i % 4) as float) * 0.0001)
+    return v
+}
+
+fn single_loop(m: Metric, n: int, salt: int) -> float {
+    let acc = 0.0
+    for i in 0..n {
+        acc += site_a(m, i, salt)
+    }
+    return acc
+}
+
+fn four_loop(m: Metric, n: int, salt: int) -> float {
+    let acc = 0.0
+    for i in 0..n {
+        acc += site_a(m, i, salt)
+        acc += site_b(m, i, salt)
+        acc += site_c(m, i, salt)
+        acc += site_d(m, i, salt)
+    }
+    return acc
+}
+
+fn fill(m: Metric, cap: int) {
+    for i in 0..cap {
+        metric_add(m, ((i * 13) % 997) as float)
+    }
+}
+
+fn run_single(cap: int, counted: int, timed: int) -> string {
+    let m = metric_new("single", cap)
+    fill(m, cap)
+    bench_reset()
+    let sink = single_loop(m, counted, 0)
+    let counts = bench_counts()
+    let warm = single_loop(m, timed ./ 4, 5)
+    let t0 = bench_clock()
+    let burn = single_loop(m, timed, 11)
+    let ns = (bench_clock() - t0) * 1000000000.0 / (timed as float)
+    print("workload=single cap={cap} calls={counted} {counts} ns_per_call={ns} sink={sink + warm + burn}")
+    return counts
+}
+
+fn run_four(cap: int, counted: int, timed: int) -> string {
+    let m = metric_new("four", cap)
+    fill(m, cap)
+    bench_reset()
+    let sink = four_loop(m, counted, 0)
+    let counts = bench_counts()
+    let warm = four_loop(m, timed ./ 8, 5)
+    let t0 = bench_clock()
+    let burn = four_loop(m, timed ./ 4, 11)
+    let ns = (bench_clock() - t0) * 1000000000.0 / (timed as float)
+    print("workload=four cap={cap} calls={counted * 4} {counts} ns_per_call={ns} sink={sink + warm + burn}")
+    return counts
+}
+
+fn main() {
+    run_single(240, 200000, 50000)
+    run_four(240, 50000, 200000)
+}
