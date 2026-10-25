@@ -319,3 +319,98 @@ inline(lua) fn foreign_receipt(owner: Owner) -> Receipt = """return owner.receip
     let lua = emit_module(&source);
     assert_eq!(run_luajit(&format!("{lua}\nprobe_semantics()\n"), "nested_box_semantics"), "ok");
 }
+
+fn assert_allocation_free_compare(source: &str, tag: &str, predicate: &str) {
+    let lua = emit_module(source);
+    let output = run_luajit(&format!(r#"{lua}
+jit.off(); jit.flush()
+local owner = make_owner()
+for i = 1, 10 do assert({predicate}) end
+collectgarbage('collect'); collectgarbage('stop')
+local before = collectgarbage('count')
+for i = 1, 1000 do assert({predicate}) end
+local bytes = (collectgarbage('count') - before) * 1024
+collectgarbage('restart')
+assert(bytes < 1024, 'nullable comparison allocated ' .. bytes .. ' bytes')
+print('ok')
+"#), tag);
+    assert_eq!(output, "ok");
+}
+
+#[test]
+fn unused_nullable_child_is_not_copied_for_membership_comparison() {
+    let source = r#"
+value Token { a: int, b: int, c: int, d: int }
+nobox value Membership { token: Token?, rows: [int], selected: [int] }
+struct Owner { membership: Membership? }
+fn shared(first: Membership, second: Membership) -> bool {
+    return same_ref(first.rows, second.rows) && same_ref(first.selected, second.selected)
+}
+@nomangle fn make_owner() -> Owner {
+    return Owner { membership: Membership { token: Token { a: 1, b: 2, c: 3, d: 4 }, rows: [3], selected: [4] } }
+}
+@nomangle fn compare(owner: Owner) -> bool {
+    let membership = owner.membership ?? return false
+    return shared(membership, owner.membership.unwrap())
+}
+fn main() { let _ = compare(make_owner()) }
+"#;
+    assert_allocation_free_compare(source, "unused_membership_child", "compare(owner)");
+}
+
+#[test]
+fn nullable_child_read_crosses_a_value_call_without_reboxing() {
+    let source = r#"
+value Token { a: int, b: int, c: int, d: int }
+nobox value Membership { token: Token?, rows: [int], selected: [int] }
+struct Owner { membership: Membership? }
+fn read(value: Membership) -> int {
+    let membership = value
+    return membership.token?.a ?? -1
+}
+
+@nomangle fn make_owner() -> Owner {
+    return Owner { membership: Membership { token: Token { a: 1, b: 2, c: 3, d: 4 }, rows: [3], selected: [4] } }
+}
+@nomangle fn compare(owner: Owner) -> int {
+    let membership = owner.membership ?? return -1
+    return read(membership)
+}
+fn main() { let _ = compare(make_owner()) }
+"#;
+    assert_allocation_free_compare(source, "nullable_child_call", "compare(owner) == 1");
+}
+
+#[test]
+fn nullable_parameter_lanes_snapshot_before_later_argument_effects() {
+    let source = r#"
+value Token { a: int, b: int, c: int, d: int }
+nobox value Row { token: Token?, items: [int] }
+struct Owner { row: Row }
+fn change(owner: Owner) -> int {
+    if owner.row.token != null { owner.row.token.a = 99 }
+    return 0
+}
+fn observe(row: Row, ignored: int) -> int { return row.token?.a ?? -1 }
+fn local_change(row: Row) -> int {
+    let copy = Owner { row }
+    if copy.row.token != null { copy.row.token.a = 7 }
+    return copy.row.token?.a ?? -1
+}
+fn main() {
+    let owner = Owner { row: Row { token: Token { a: 1, b: 2, c: 3, d: 4 }, items: [] } }
+    assert_eq(observe(owner.row, change(owner)), 1)
+    owner.row.token = Token { a: 1, b: 2, c: 3, d: 4 }
+    assert_eq(observe(row: owner.row, ignored: change(owner)), 1)
+    assert_eq(owner.row.token?.a, 99)
+    assert_eq(local_change(owner.row), 7)
+    assert_eq(owner.row.token?.a, 99)
+    owner.row.token = null
+    assert_eq(observe(owner.row, 0), -1)
+    assert_eq(local_change(owner.row), -1)
+    print("ok")
+}
+"#;
+    let lua = emit_module(source);
+    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "nullable_parameter_snapshots"), "ok");
+}

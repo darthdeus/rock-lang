@@ -60,6 +60,8 @@ fn main() {{ assert(gather(-20) == null); print(gather(1).unwrap().checksum) }}
 
 /// `held` values of a `leaves`-wide nobox struct, all live across the calls
 /// that read them back.
+/// The reader binds the complete value so field demand cannot move
+/// the fixture away from the frame boundary it tests.
 fn fixture(leaves: usize, held: usize) -> String {
     let fields: Vec<String> = (0..leaves).map(|k| format!("f{k}: float")).collect();
     let inits: Vec<String> = (0..leaves).map(|k| format!("f{k}: x + {k}.0")).collect();
@@ -68,7 +70,7 @@ fn fixture(leaves: usize, held: usize) -> String {
         "nobox value W {{ {} }}\n\
          fn mk(x: float) -> W {{ return W {{ {} }} }}\n\
          fn tweak(w: W) -> W {{ return W {{ f0: w.f0 + 1.0, {} }} }}\n\
-         fn check(w: W, k: int) -> float {{ return w.f0 + w.f{} + float(k) }}\n\
+         fn check(value: W, k: int) -> float {{ let w = value; return w.f0 + w.f{} + float(k) }}\n\
          fn run(x: float) -> float {{\n    let v0 = mk(x)\n",
         fields.join(", "),
         inits.join(", "),
@@ -202,13 +204,14 @@ fn walk(name: &str, lo: usize, hi: usize, mk: impl Fn(usize) -> String) {
 
 /// The declarations of a `leaves`-wide `nobox` value and the helpers that
 /// produce and read one.
+/// The reader binds the complete value to retain full transport for the boundary walkers.
 fn wide_decls(leaves: usize) -> String {
     let fields: Vec<String> = (0..leaves).map(|k| format!("f{k}: float")).collect();
     let inits: Vec<String> = (0..leaves).map(|k| format!("f{k}: x + {k}.0")).collect();
     format!(
         "nobox value W {{ {} }}\n\
          fn mk(x: float) -> W {{ return W {{ {} }} }}\n\
-         fn use_w(w: W, k: int) -> float {{ return w.f0 + w.f{} + float(k) }}\n\
+         fn use_w(value: W, k: int) -> float {{ let w = value; return w.f0 + w.f{} + float(k) }}\n\
          fn one(x: float, k: int) -> float {{ return x * float(k) + 1.0 }}\n",
         fields.join(", "),
         inits.join(", "),

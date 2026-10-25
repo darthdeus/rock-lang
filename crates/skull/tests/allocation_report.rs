@@ -505,6 +505,7 @@ fn make_worker() -> Coroutine<Event> {
 }
 
 fn wide_value_fixture(fields: usize, pads: usize) -> String {
+    // Bind the complete value in step to retain a wide call for the keeper.
     let pad_params = (0..pads).map(|i| format!(", p{i}: int")).collect::<String>();
     let pad_sum = (0..pads).map(|i| format!(" + p{i}")).collect::<String>();
     let decl = (0..fields).map(|i| format!("f{i}: int")).collect::<Vec<_>>().join(", ");
@@ -517,7 +518,8 @@ fn make_wide(seed: int) -> Wide {{
     return Wide {{ {init} }}
 }}
 
-fn step(w: Wide, tag: [int]) -> Wide {{
+fn step(value: Wide, tag: [int]) -> Wide {{
+    let w = value
     return make_wide(w.f0 + tag.len())
 }}
 

@@ -302,6 +302,7 @@ const BUDGET_NOBOX_WIDE: usize = 30;
 const BUDGET_NARROW: usize = 12;
 
 fn budget_src() -> String {
+    // Whole-value bindings retain the declared transport for the budget test.
     let value = |kw: &str, name: &str, n: usize| {
         let fields = (0..n).map(|k| format!("m{k}: float")).collect::<Vec<_>>().join(", ");
         let inits = (0..n).map(|k| format!("m{k}: x")).collect::<Vec<_>>().join(", ");
@@ -311,17 +312,20 @@ fn budget_src() -> String {
     };
     format!(
         "{}{}{}{}
-fn budget_five(a: M, b: M, c: M, d: M, e: M) -> float {{
+fn budget_five(a_value: M, b_value: M, c_value: M, d_value: M, e_value: M) -> float {{
+    let a = a_value; let b = b_value; let c = c_value; let d = d_value; let e = e_value;
     return a.m0 + b.m1 + c.m2 + d.m3 + e.m4
 }}
 
-fn budget_mixed(a: M, b: M, c: M, n: NB, d: N) -> float {{
+fn budget_mixed(a_value: M, b_value: M, c_value: M, n_value: NB, d_value: N) -> float {{
+    let a = a_value; let b = b_value; let c = c_value; let n = n_value; let d = d_value;
     return a.m0 + b.m1 + c.m2 + n.m0 + d.m3
 }}
 
 // The `nobox` member is the WIDEST thing in this signature, so a budget that
 // ranked candidates by lanes without excluding `nobox` would box it first.
-fn budget_nobox_widest(n: NW, a: M, b: M, c: M) -> float {{
+fn budget_nobox_widest(n_value: NW, a_value: M, b_value: M, c_value: M) -> float {{
+    let n = n_value; let a = a_value; let b = b_value; let c = c_value;
     return n.m0 + a.m0 + b.m1 + c.m2
 }}
 
@@ -590,7 +594,7 @@ fn a_frame_limit_rejection_still_names_the_nobox_value() {
         "nobox value W {{ {fields} }}\n\
          fn mk(x: float) -> W {{ return W {{ {inits} }} }}\n\
          fn tweak(w: W) -> W {{ return W {{ f0: w.f0 + 1.0, {} }} }}\n\
-         fn check(w: W, k: int) -> float {{ return w.f0 + w.f49 + float(k) }}\n\
+         fn check(value: W, k: int) -> float {{ let w = value; return w.f0 + w.f49 + float(k) }}\n\
          fn run(x: float) -> float {{\n    let v0 = mk(x)\n",
         copies.join(", "),
     );

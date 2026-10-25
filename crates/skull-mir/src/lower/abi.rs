@@ -2458,6 +2458,24 @@ impl PartialEq for BackendFnAbiPlan {
 
 impl Eq for BackendFnAbiPlan {}
 
+pub(super) fn expanded_nullable_parameter_shape(ws: &Workspace, shape: &ValueShape) -> ValueShape {
+    let mut expanded = shape.clone();
+    if shape.nullable { return expanded; }
+    if let Some(sid) = ws.struct_by_name.get(&shape.name) {
+        let sd = &ws.modules[sid.module.index()].structs[sid.def];
+        for (name, field) in &mut expanded.fields {
+            if !matches!(field, FieldShape::Prim) { continue; }
+            let Some(decl) = sd.fields.iter().find(|decl| decl.name == *name) else { continue };
+            let Some((child, true)) = super::shape::nominal_name_from_ty(ws, decl.ty) else { continue };
+            let Some(mut child) = super::shape::planned_value(ws, child).and_then(|p| p.shape) else { continue };
+            if child.leaf_count() > WIDE_VALUE_PAYLOAD_LEAF_CUT { continue; }
+            child.nullable = true;
+            *field = FieldShape::Nested(child);
+        }
+    }
+    expanded
+}
+
 impl BackendFnAbiPlan {
     /// ABI for an explicit opaque boundary instance.
     ///
@@ -2526,6 +2544,7 @@ impl BackendFnAbiPlan {
             body_dependent_parameters: false,
         };
         if !params.iter().any(|ty| matches!(ty, crate::monoty::MonoTy::App { ctor: crate::monoty::MonoCtor::Ref, .. })) {
+            abi.expand_nullable_parameter_children(ws, scx);
             abi.narrow_parameter_transport(ws, scx);
         }
         abi
@@ -2580,14 +2599,46 @@ impl BackendFnAbiPlan {
         }
     }
 
-    fn narrow_parameter_transport(&mut self, ws: &Workspace, scx: &ScalarCtx) {
-        use bone_semantic::hir::BodyOwner;
+    fn permits_parameter_transport(&self, ws: &Workspace, scx: &ScalarCtx) -> bool {
         let f = &ws.module(self.subject.func.module).functions[self.subject.func.func];
-        if scx.values_first_class || !matches!(self.target, FnBackend::Lua | FnBackend::Any)
+        !(scx.values_first_class || !matches!(self.target, FnBackend::Lua | FnBackend::Any)
             || scx.taken_by_ref.contains(&f.name) || f.is_extern || f.inline_body.is_some()
             || f.is_coroutine || f.is_variadic || !f.annotations.is_empty()
             || f.num_required != f.param_decls.len() || !self.uses_scalar_abi()
-        { return; }
+        )
+    }
+
+    // Parameter transport can snapshot compact nullable children as scalar
+    // lanes without changing their field storage or widening the ABI budget.
+    fn expand_nullable_parameter_children(&mut self, ws: &Workspace, scx: &ScalarCtx) {
+        if !self.permits_parameter_transport(ws, scx) { return; }
+        let mut shapes = Vec::new();
+        let mut lanes = 0;
+        for &id in &self.representation.params {
+            let rep = self.arena.get(id);
+            let RepLayout::Leaves(shape) = rep.layout() else {
+                lanes += rep.lanes(&self.arena);
+                shapes.push(None);
+                continue;
+            };
+            let expanded = expanded_nullable_parameter_shape(ws, shape);
+            lanes += expanded.leaf_count();
+            shapes.push((expanded != *shape).then_some(expanded));
+        }
+        if lanes + 1 > SIGNATURE_SCALAR_LANE_BUDGET { return; }
+        for (i, shape) in shapes.into_iter().enumerate() {
+            let Some(shape) = shape else { continue };
+            let rep = self.arena.get(self.representation.params[i]);
+            self.representation.params[i] = self.arena.intern_with_facts(
+                self.target, RepUse::Parameter, RepLayout::Leaves(shape),
+                rep.storage, false, rep.nobox, false,
+            );
+        }
+    }
+
+    fn narrow_parameter_transport(&mut self, ws: &Workspace, scx: &ScalarCtx) {
+        use bone_semantic::hir::BodyOwner;
+        if !self.permits_parameter_transport(ws, scx) { return; }
         self.body_dependent_parameters = self.representation.params.iter().any(|id| {
             matches!(self.arena.get(*id).layout(), RepLayout::Leaves(shape)
                 if !shape.nullable && ws.struct_by_name.contains_key(&shape.name))

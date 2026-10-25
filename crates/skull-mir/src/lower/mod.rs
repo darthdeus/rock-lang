@@ -3403,12 +3403,24 @@ impl Builder<'_> {
         }
         self.with_value_lending(lend, |s| {
             let r = s.lower_expr_repr(a)?;
-            let r = ValueBundle::new(r.representation(), s.owned_value_children(r.into_value())?);
-            if !slot.splats() {
-                return Ok(vec![s.pack_bundle(&r)?]);
-            }
-            s.repr_to_slot_values_bundle(&r, slot)
+            s.snapshot_argument_slot(&r, slot)
         })
+    }
+
+    pub(crate) fn snapshot_argument_slot(
+        &mut self,
+        r: &ValueBundle,
+        slot: &RetSlot,
+    ) -> Result<Vec<Idx<Inst>>, CompilerError> {
+        let owned = match slot {
+            RetSlot::Leaves(shape) => self.own_opaque_parameter_children(r.value().clone(), shape)?,
+            _ => self.owned_value_children(r.value().clone())?,
+        };
+        let r = ValueBundle::new(r.representation(), owned);
+        if !slot.splats() {
+            return Ok(vec![self.pack_bundle(&r)?]);
+        }
+        self.repr_to_slot_values_bundle(&r, slot)
     }
 
     fn is_ref_call_arg(&self, call: Idx<Expr>, arg: Idx<Expr>) -> bool {

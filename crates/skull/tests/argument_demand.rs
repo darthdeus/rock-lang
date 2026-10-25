@@ -7,7 +7,8 @@ fn compact_arguments_keep_discarded_errors_before_later_argument_effects() {
     let ws = ws_with_stdlib(r#"
 value Sample { kept: int, dropped: uint }
 global marks: int = 0
-fn demand_read(v: Sample, marker: int) -> int { return v.kept }
+fn forward(n: int) -> int { return n }
+fn demand_read(v: Sample, marker: int) -> int { return forward(v.kept) }
 fn mark() -> int { marks += 1; return 0 }
 @nomangle fn probe(n: int) -> int {
     let value = Sample { kept: 7, dropped: n as uint }
@@ -48,11 +49,12 @@ fn changed_parameter_demand_rebuilds_residual_callers_and_checks_overlay_compati
     let _inline = crate::common::InlineOffGuard::on();
     let before = r#"
 nobox value Sample { x: int, y: int, z: int }
-fn demand_read(v: Sample) -> int { return v.y }
+fn forward(n: int) -> int { return n }
+fn demand_read(v: Sample) -> int { return forward(v.y) }
 @nomangle fn caller() -> int { return demand_read(Sample { x: 11, y: 23, z: 47 }) }
 @nomangle fn save_caller() -> fn() -> int { return caller }
 "#;
-    let after = before.replace("return v.y", "return v.x + v.y");
+    let after = before.replace("forward(v.y)", "forward(v.x + v.y)");
     let ws1 = ws_with_stdlib(&before);
     let mid = skull::user_module_id(&ws1).unwrap();
     let (full1, mut cache) = emit_full(&ws1, mid).unwrap();

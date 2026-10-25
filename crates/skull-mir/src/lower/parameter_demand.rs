@@ -1,7 +1,7 @@
 //! Conservative field demand before parameter expansion. Unsupported operations
 //! retain the declared transport; this is not an effect or alias analysis.
 use std::collections::HashSet;
-use bone_semantic::hir::{Body, Expr, Pattern, Statement, VariantArgs};
+use bone_semantic::hir::{Body, Callee, Expr, Pattern, Statement, VariantArgs};
 use comfy_la_arena::Idx;
 use ustr::Ustr;
 
@@ -42,6 +42,19 @@ pub(super) fn fields(body: &Body) -> Option<Vec<Option<HashSet<Ustr>>>> {
             }
             Expr::Var(binding) => {
                 if let Some(i) = params.iter().position(|p| *p == binding) { demand[i] = None; }
+            }
+            Expr::Call { callee, args, .. } => {
+                match callee {
+                    Callee::Unresolved { .. } => {},
+                    Callee::Local(binding) => {
+                        if let Some(i) = params.iter().position(|p| *p == binding) { demand[i] = None; }
+                    }
+                    Callee::Value(value) => visit(body, value, params, demand)?,
+                }
+                // Passing a whole parameter retains its full transport. A
+                // field argument requires that field, regardless of effects
+                // in the callee; argument evaluation is still unchanged.
+                for arg in args { visit(body, arg, params, demand)?; }
             }
             Expr::Return(value) => { if let Some(v) = value { visit(body, v, params, demand)?; } }
             Expr::Block { statements, tail } => {

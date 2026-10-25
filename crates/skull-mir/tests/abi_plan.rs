@@ -1247,17 +1247,17 @@ fn demand_match_nested_pattern(event: DemandEvent) -> int {
 }
 global demand_match_calls: int = 0
 fn demand_match_effect(n: int) -> int { demand_match_calls += 1; return n }
-fn demand_match_unsupported(event: DemandEvent) -> int {
+fn demand_match_call(event: DemandEvent) -> int {
     return match event.subject {
         DemandSubject::Present(payload) => demand_match_effect(payload.c),
         _ => 0,
     }
 }
 "#);
-    let roots = ["demand_match_selected", "demand_match_guarded", "demand_match_unsupported", "demand_match_nested_pattern"]
+    let roots = ["demand_match_selected", "demand_match_guarded", "demand_match_call", "demand_match_nested_pattern"]
         .map(|name| func_ref(&ws, name));
     let (scx, bodies) = lower_test_roots(&ws, &roots);
-    for (root, expected) in roots.into_iter().zip([5, 6, 7, 5]) {
+    for (root, expected) in roots.into_iter().zip([5, 6, 5, 5]) {
         let mir = lower_test_root(&ws, &scx, &bodies, root);
         assert_eq!(mir.params.len(), expected, "{}", mir.name);
     }
@@ -1293,4 +1293,21 @@ fn demand_unit_match_caller(event: UnitMatchEvent) -> UnitMatchDirection? {{
     assert_eq!(entry.params.len(), 5, "subject keeps tag and all identity payload lanes");
     assert!(caller.insts.iter().any(|(_, inst)| matches!(inst,
         skull_mir::mir::Inst::Call { func, args } if *func == selected && args.len() == 5)));
+}
+
+#[test]
+fn nullable_child_expansion_respects_the_signature_lane_budget() {
+    let budget = skull_mir::lower::SIGNATURE_SCALAR_LANE_BUDGET;
+    let count = budget / 5 + 1;
+    let fields = (0..count).map(|i| format!("child{i}: Token?")).collect::<Vec<_>>().join(", ");
+    let ws = ws_of(&format!(r#"
+value Token {{ a: int, b: int, c: int, d: int }}
+nobox value Many {{ {fields} }}
+fn consume(value: Many) -> int {{ let whole = value; return whole.child0?.a ?? -1 }}
+"#));
+    let root = func_ref(&ws, "consume");
+    let (scx, bodies) = lower_test_roots(&ws, &[root]);
+    let mir = lower_test_root(&ws, &scx, &bodies, root);
+    assert_eq!(mir.params.len(), count, "expansion must retain opaque children when scalar lanes exceed the budget");
+    assert!(mir.params.len() + 1 <= budget);
 }

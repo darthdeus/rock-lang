@@ -6,7 +6,7 @@ fn final_report_is_opt_in_and_observes_mir_inlining() {
     if std::env::var_os(CHILD).is_some() {
         let lua = crate::common::emit_module(
             "nobox value Wide { a: float, b: float, c: float, d: float, e: float }\n\
-             fn leaf(w: Wide) -> float { w.a + w.e }\n\
+             fn leaf(w: Wide) -> float { w.a + w.b + w.c + w.d + w.e }\n\
              @inline fn bridge(w: Wide) -> float { leaf(w) + 2.0 }\n\
              fn run(x: float) -> float {\n\
                  let w = Wide { a: x, b: x + 1.0, c: x + 2.0, d: x + 3.0, e: x + 4.0 }\n\

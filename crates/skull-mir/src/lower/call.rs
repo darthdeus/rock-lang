@@ -1450,7 +1450,7 @@ impl Builder<'_> {
         arg_idxs: &[Idx<Expr>],
         defaults: &[Option<CallParamDefault>],
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
-        let mut slots: Vec<Option<ValueBundle>> = vec![None; param_names.len()];
+        let mut slots: Vec<Option<Vec<Idx<Inst>>>> = vec![None; param_names.len()];
         let mut next_pos = 0usize;
         for &a in arg_idxs {
             // Struct spread `..op`: decompose into per-field reprs (a struct-
@@ -1461,11 +1461,14 @@ impl Builder<'_> {
                         gap(format!("spread field `{fname}` matches no parameter"))
                     })?;
                     let owned = self.snapshot_opaque_value(r.value().clone())?;
-                    slots[pidx] = Some(ValueBundle::new(r.representation(), owned));
+                    let bundle = ValueBundle::new(r.representation(), owned);
+                    let slot = param_shapes.get(pidx).cloned().unwrap_or(RetSlot::Opaque);
+                    slots[pidx] = Some(self.snapshot_argument_slot(&bundle, &slot)?);
                 }
                 continue;
             }
-            let r = if self.is_ref_call_arg(e, a) {
+            let is_ref = self.is_ref_call_arg(e, a);
+            let r = if is_ref {
                 let place = self.lower_ref_borrow(a)?;
                 self.value_bundle_for_expr(a, ValueRepr::Scalar(place))?
             } else {
@@ -1490,7 +1493,14 @@ impl Builder<'_> {
                     slots.len()
                 )));
             }
-            slots[pidx] = Some(r);
+            let slot = param_shapes.get(pidx).cloned().unwrap_or(RetSlot::Opaque);
+            // Freeze this argument before evaluating the next one, including
+            // nullable child fields whose wire is wider than their storage.
+            slots[pidx] = Some(if is_ref {
+                self.repr_to_slot_values_bundle(&r, &slot)?
+            } else {
+                self.snapshot_argument_slot(&r, &slot)?
+            });
         }
         let hi = slots.iter().rposition(|s| s.is_some()).map_or(0, |i| i + 1);
         // A trailing param with a caller-supplied default is passed explicitly too.
@@ -1510,7 +1520,7 @@ impl Builder<'_> {
                 |message| self.gap_here(message),
             )?;
             match slots[i].clone() {
-                Some(r) => out.extend(self.repr_to_slot_values_bundle(&r, &slot)?),
+                Some(values) => out.extend(values),
                 None if defaults.get(i).is_some_and(Option::is_some) => {
                     let default = defaults[i].as_ref().expect("checked above");
                     out.extend(self.emit_param_default(default, &slot)?);
@@ -2204,6 +2214,11 @@ impl Builder<'_> {
                     })?;
                 match plan.layout() {
                     RepLayout::Leaves(actual) => {
+                        if actual != expected
+                            && super::abi::expanded_nullable_parameter_shape(self.ws, actual) == *expected
+                        {
+                            return self.repr_to_leaves_shape(bundle.value(), expected);
+                        }
                         if actual.name != expected.name || actual.fields != expected.fields {
                             return Err(self.gap_here(format!(
                                 "representation {:?} shape does not match its leaves slot shape",
@@ -2706,6 +2721,33 @@ impl Builder<'_> {
             }
         }
         Ok(())
+    }
+
+    /// Copy only children that stay opaque in the parameter wire. Expanded
+    /// children are snapshotted by the immediately following scalar reads.
+    pub(crate) fn own_opaque_parameter_children(
+        &mut self,
+        r: ValueRepr,
+        shape: &ValueShape,
+    ) -> Result<ValueRepr, CompilerError> {
+        match r {
+            ValueRepr::Group { name, parts, present } if parts.len() == shape.fields.len() => {
+                let parts = parts.into_iter().zip(&shape.fields).map(|(part, (_, field))| {
+                    match field {
+                        FieldShape::Prim => self.owned_value_children(part),
+                        FieldShape::Nested(child) => self.own_opaque_parameter_children(part, child),
+                    }
+                }).collect::<Result<Vec<_>, _>>()?;
+                Ok(ValueRepr::Group { name, parts, present })
+            }
+            // The boundary immediately reads this box into primitive lanes.
+            // Those lanes, rather than a reconstructed box, own the snapshot.
+            ValueRepr::Scalar(v) if super::shape::planned_value(self.ws, shape.name)
+                .and_then(|plan| plan.shape).is_some_and(|plain| plain.fields == shape.fields) => {
+                Ok(ValueRepr::Scalar(v))
+            }
+            r => self.owned_value_children(r),
+        }
     }
 
     /// Own borrowed boxes at mutable escapes. Immutable boundaries may share
