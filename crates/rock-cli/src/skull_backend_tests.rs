@@ -4254,7 +4254,7 @@ mod backend_stats_workspace_tests {
 
         let sources = discover_sources(&SourceSpec::Directory(PathBuf::from(dir.path())))
             .expect("discover timed project");
-        let (ok, times) = skull_workspace_timed(&sources);
+        let (ok, times) = skull_workspace_timed(&sources, dir.path());
 
         assert!(ok, "timed emission must succeed for a prepared project");
         assert!(
@@ -4265,6 +4265,34 @@ mod backend_stats_workspace_tests {
             !times.emit_phases.is_empty(),
             "successful timed emission must populate production phase attribution"
         );
+    }
+
+    #[test]
+    fn timed_emission_uses_invoked_project_build_vars_with_dependency_first() {
+        let dir = tempfile::tempdir().expect("temporary projects");
+        let project = dir.path().join("application");
+        let dependency = dir.path().join("dependency");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&dependency).unwrap();
+        std::fs::write(
+            project.join("stick.toml"),
+            "[package]\nname = \"application\"\n[dependencies]\ndependency = { path = \"../dependency\" }\n[build.vars]\nREQUIRED = \"application-value\"\n",
+        ).unwrap();
+        std::fs::write(
+            dependency.join("stick.toml"),
+            "[package]\nname = \"dependency\"\n",
+        ).unwrap();
+        std::fs::write(dependency.join("library.rock"), "fn library_value() -> int { return 7 }\n").unwrap();
+        std::fs::write(
+            project.join("application.rock"),
+            "fn main() { print(build_var(\"REQUIRED\")); print(library_value()) }\n",
+        ).unwrap();
+        let sources = discover_sources(&SourceSpec::Directory(project.clone())).unwrap();
+        let (_, entry, _) = crate::bone_backend::parse_user_modules(&sources).unwrap();
+        assert!(std::path::Path::new(entry.as_str()).starts_with(&dependency),
+            "fixture must exercise dependency-first entry selection without main.rock");
+        let result = crate::backend_stats::do_backend_stats(project.to_str().unwrap(), 1, 0);
+        assert!(result.is_ok(), "profiling must use the invoked project's build vars: {result:?}");
     }
 
     #[test]

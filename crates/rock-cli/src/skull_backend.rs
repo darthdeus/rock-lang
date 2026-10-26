@@ -269,7 +269,10 @@ pub struct SkullPhaseTimes {
 /// mirror `bone_workspace_timed`; `emit` is skull's codegen on top. Used by
 /// `backend-stats` — a per-file loop would never reach emit because bone rejects
 /// any file that references a sibling (so emit would always read ~0).
-pub fn skull_workspace_timed(sources: &SourceFiles) -> (bool, SkullPhaseTimes) {
+pub fn skull_workspace_timed(
+    sources: &SourceFiles,
+    project_path: &std::path::Path,
+) -> (bool, SkullPhaseTimes) {
     let stats = crate::compile_measurements::Scope::for_sources(sources);
     let mut times = SkullPhaseTimes::default();
     let (user_modules, entry_file, parse) = match crate::bone_backend::parse_user_modules(sources) {
@@ -316,10 +319,9 @@ pub fn skull_workspace_timed(sources: &SourceFiles) -> (bool, SkullPhaseTimes) {
     // workspace exists. Keep that preparation visible as its own timed lane;
     // the emit stopwatch remains codegen-only.
     let t = Instant::now();
-    if let Err(error) = crate::comptime::stamp_workspace(
-        &mut ws,
-        std::path::Path::new(entry_file.as_str()),
-    ) {
+    // Source discovery loads dependencies first; the parser's entry fallback
+    // must not choose the package that owns invocation build settings.
+    if let Err(error) = crate::comptime::stamp_workspace(&mut ws, project_path) {
         times.workspace_setup = t.elapsed();
         times.setup_failed = true;
         times.failure = Some(CompilerError::new_no_location(format!(

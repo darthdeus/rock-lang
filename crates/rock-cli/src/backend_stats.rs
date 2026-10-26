@@ -104,7 +104,7 @@ pub fn do_backend_stats(input: &str, iters: usize, warmup: usize) -> Result<()> 
     // JIT, LazyLock stdlib parse, OS caches) before the `iters` timed runs, so
     // the reported means aren't skewed by first-run cold-start cost.
     let bone = run_bone(&sources, iters, warmup);
-    let skull = run_skull(&sources, iters, warmup);
+    let skull = run_skull(&sources, std::path::Path::new(input), iters, warmup);
 
     print_report(input, iters, warmup, &bone, &skull);
     if skull.setup_failed || skull.emit_failed {
@@ -151,10 +151,10 @@ fn run_bone(sources: &SourceFiles, iters: usize, warmup: usize) -> BoneStats {
 /// untimed + `iters` timed runs, accumulating per-stage timing (parse + semantic
 /// shared with bone, plus skull's emit) only for the timed runs; `ok` is the
 /// final run's emit verdict.
-fn run_skull(sources: &SourceFiles, iters: usize, warmup: usize) -> SkullStats {
+fn run_skull(sources: &SourceFiles, project_path: &std::path::Path, iters: usize, warmup: usize) -> SkullStats {
     let mut stats = SkullStats::default();
     for i in 0..(warmup + iters) {
-        let (ok, times) = skull_backend::skull_workspace_timed(sources);
+        let (ok, times) = skull_backend::skull_workspace_timed(sources, project_path);
         stats.ok = ok;
         if i < warmup {
             continue; // untimed warmup
