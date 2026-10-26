@@ -381,7 +381,7 @@ mod incremental_watch_tests {
         }
     }
 
-    fn run_fuzz(seed: u64, n_fns: usize, steps: usize, binding: skull::CalleeBindingMode) -> usize {
+    fn run_fuzz(seed: u64, n_fns: usize, steps: usize, binding: skull::CalleeBindingMode) {
         let mut rng = Rng(seed.max(1));
         // Start: a mix of consts and call edges so inlining is exercised from step 0.
         let mut bodies: Vec<Body> = (0..n_fns)
@@ -399,15 +399,15 @@ mod incremental_watch_tests {
         let (_init, mut cache) = skull::mir_emit::emit_full_with_callee_binding(
             session.workspace(), mid, binding,
         ).expect("fuzz emit_full init");
-        let calls = (0..n_fns).map(|i| {
+        let names = (0..n_fns).map(|i| {
             let name = format!("f{i}");
             let (_, function) = session.workspace().modules.iter()
                 .flat_map(|module| module.functions.iter())
                 .find(|(_, function)| function.name.as_str() == name)
                 .expect("fuzz function");
-            format!("print({}())\n", skull_mir::mangle::mangle_fn(session.workspace(), function))
-        }).collect::<String>();
-        let mut shape_differences = 0;
+            skull_mir::mangle::mangle_fn(session.workspace(), function)
+        }).collect::<Vec<_>>();
+        let calls = names.iter().map(|name| format!("print({name}())\n")).collect::<String>();
 
         for step in 0..steps {
             let changed = mutate(&mut bodies, &mut rng);
@@ -439,10 +439,15 @@ mod incremental_watch_tests {
                     super::first_diff_line(&incremental.lua, &fresh.lua),
                 ),
                 skull::CalleeBindingMode::Upvalue => {
-                    // Reload keeps cached SCC ranks; fresh builds recompute them.
-                    // New edges can therefore differ in factory captures while
-                    // executing the same calls (the compiler contract, Callee binding).
-                    shape_differences += usize::from(incremental.lua != fresh.lua);
+                    // Every edge in this small DAG is inlined. Arena tombstones
+                    // must not create captures for calls absent from emitted code.
+                    for name in &names {
+                        let factory = format!("__rock_mk_{name} = function(");
+                        assert!(!incremental.lua.contains(&factory),
+                            "{context}: incremental retained an inlined callee binding for {name}");
+                        assert!(!fresh.lua.contains(&factory),
+                            "{context}: fresh retained an inlined callee binding for {name}");
+                    }
                     let mut values = Vec::<i64>::with_capacity(n_fns);
                     for body in &bodies {
                         values.push(match body {
@@ -456,7 +461,6 @@ mod incremental_watch_tests {
                 }
             }
         }
-        shape_differences
     }
 
     #[test]
@@ -475,13 +479,68 @@ mod incremental_watch_tests {
     fn fuzz_incremental_bound_calls_match_values() {
         // Keep the original failing seed and graph size; execution is bounded
         // because each edit launches LuaJIT for both incremental and fresh output.
-        let mut shape_differences = 0;
         for seed in 1_u64..=2 {
-            shape_differences += run_fuzz(
+            run_fuzz(
                 seed.wrapping_mul(2654435761), 16, 12, skull::CalleeBindingMode::Upvalue,
             );
         }
-        assert!(shape_differences > 0, "fixture must exercise changed binding ranks");
+    }
+
+    #[test]
+    fn incremental_live_call_preserves_values_across_changed_binding_ranks() {
+        // Add a live edge from the earlier-bound independent caller to the
+        // later-bound one. Fresh emission must reverse their dependency order;
+        // reload keeps its old ranks and must leave the new call global.
+        let initial = "fn a() -> int { x() }\nfn x() -> int { 1 }\nfn b() -> int { y() }\nfn y() -> int { 2 }";
+        let mut session = bone_session(files(initial)).expect("rank fixture session");
+        let mid = skull::user_module_id(session.workspace()).unwrap();
+        let symbol = |name: &str| {
+            let (_, function) = session.workspace().modules.iter()
+                .flat_map(|module| module.functions.iter())
+                .find(|(_, function)| function.name.as_str() == name).expect("rank fixture function");
+            skull_mir::mangle::mangle_fn(session.workspace(), function)
+        };
+        let (a, b, x, y) = (symbol("a"), symbol("b"), symbol("x"), symbol("y"));
+        let factory = |caller: &str, callee: &str| {
+            format!("__rock_mk_{caller} = function({callee}) return function(")
+        };
+        let (before, mut cache) = skull::mir_emit::emit_full_with_callee_binding(
+            session.workspace(), mid, skull::CalleeBindingMode::Upvalue,
+        ).expect("initial rank fixture emit");
+        assert!(before.lua.contains(&factory(&a, &x)), "initial a must capture x");
+        assert!(before.lua.contains(&factory(&b, &y)), "initial b must capture y");
+        let bind_position = |name: &str| before.lua.find(&format!("\n{name} = __rock_mk_{name}(")).expect("initial binding line");
+        let a_first = bind_position(&a) < bind_position(&b);
+        let (caller, callee, initial_value, next_value) = if a_first {
+            (&a, &b, 1, 2)
+        } else {
+            (&b, &a, 2, 1)
+        };
+        assert_fuzz_values(&before.lua, &format!("print({caller}())"), &initial_value.to_string(), "initial rank fixture");
+        for delta in [0, 10] {
+            let (a_body, b_body) = if a_first {
+                ("b()".to_string(), format!("y() + {delta}"))
+            } else {
+                (format!("x() + {delta}"), "a()".to_string())
+            };
+            let text = format!("fn a() -> int {{ {a_body} }}\nfn x() -> int {{ 1 }}\nfn b() -> int {{ {b_body} }}\nfn y() -> int {{ 2 }}");
+            let updated = session.update_file("main.rock", &text).expect("rank fixture edit");
+            assert!(session.diagnostics().is_empty(), "rank fixture must typecheck");
+            let incremental = skull::mir_emit::emit_incremental(
+                session.workspace(), &mut cache, &updated.reinferred,
+            ).expect("incremental rank fixture emit");
+            let fresh = skull::mir_emit::emit_full_with_callee_binding(
+                session.workspace(), mid, skull::CalleeBindingMode::Upvalue,
+            ).expect("fresh rank fixture emit").0;
+            assert!(!incremental.lua.contains(&format!("__rock_mk_{caller} = function(")),
+                "cached rank must leave the new caller -> callee edge global");
+            assert!(fresh.lua.contains(&factory(caller, callee)),
+                "fresh rank must capture the live callee");
+            let expected = (next_value + delta).to_string();
+            let calls = format!("print({caller}())");
+            assert_fuzz_values(&incremental.lua, &calls, &expected, "incremental live rank edit");
+            assert_fuzz_values(&fresh.lua, &calls, &expected, "fresh live rank edit");
+        }
     }
 }
 
