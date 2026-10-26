@@ -2368,10 +2368,6 @@ fn view_driven_specialized_chunks(
 ) -> (FxHashMap<Instance, Chunk>, Vec<(String, CompilerError)>) {
     let mut built: FxHashMap<Instance, Chunk> = FxHashMap::default();
     let mut errs: Vec<(String, CompilerError)> = Vec::new();
-    let mut inline_cache = match cache.inline_cache.candidate_table() {
-        Some(table) => skull_transform::InlineCache::with_candidate_table(table),
-        None => skull_transform::InlineCache::default(),
-    };
     let mut pending: Vec<Instance> = initial.iter().map(|d| d.inst.clone()).collect();
     for module in ws.modules.iter() {
         if module.id == ModuleId::builtin() {
@@ -2390,35 +2386,54 @@ fn view_driven_specialized_chunks(
         }
     }
     let mut done: FxHashSet<Instance> = FxHashSet::default();
-    while let Some(inst) = pending.pop() {
-        if !done.insert(inst.clone()) {
-            continue;
-        }
-        // Polymorphic recursion (plan S 0h: REJECT). The graph's own build
-        // silently CAPS a too-deep instance (`depth_capped`, no rejection --
-        // it is a target-neutral fact-recorder, not a diagnostic surface), so
-        // emission is where the spanned rejection has to live, same as before.
-        if let Some((name, err)) = too_deep_to_instantiate(ws, scx, &inst) {
-            errs.push((name, err));
-            continue;
-        }
-        if cache.graph.has_bound_tree_disagreement(&inst) {
-            errs.push(demand_clash(ws, scx, &inst));
-            continue;
-        }
-        if let Some(Ok(c)) = cache.chunks.get(&inst) {
-            pending.extend(c.specs.iter().map(|d| d.inst.clone()));
-            built.insert(inst, c.clone());
-            continue;
-        }
-        let name = inst.symbol(ws, scx.interner());
-        let mut specs = Vec::new();
-        match emit_spec_chunk(ws, cg, scx, &cache.concrete, &inst, &name, &mut inline_cache, &mut specs) {
-            Ok(chunk) => {
-                pending.extend(chunk.specs.iter().map(|d| d.inst.clone()));
-                built.insert(inst, chunk);
+    while !pending.is_empty() {
+        let mut jobs = Vec::new();
+        for inst in std::mem::take(&mut pending).into_iter().rev() {
+            if !done.insert(inst.clone()) {
+                continue;
             }
-            Err(e) => errs.push((name, e)),
+            // Polymorphic recursion (plan S 0h: REJECT). The graph's own build
+            // silently CAPS a too-deep instance (`depth_capped`, no rejection --
+            // it is a target-neutral fact-recorder, not a diagnostic surface), so
+            // emission is where the spanned rejection has to live, same as before.
+            if let Some((name, err)) = too_deep_to_instantiate(ws, scx, &inst) {
+                errs.push((name, err));
+                continue;
+            }
+            if cache.graph.has_bound_tree_disagreement(&inst) {
+                errs.push(demand_clash(ws, scx, &inst));
+                continue;
+            }
+            if let Some(Ok(c)) = cache.chunks.get(&inst) {
+                pending.extend(c.specs.iter().map(|d| d.inst.clone()));
+                built.insert(inst, c.clone());
+                continue;
+            }
+            jobs.push(inst);
+        }
+        let results = par_map_with(
+            jobs,
+            || match cache.inline_cache.candidate_table() {
+                Some(table) => skull_transform::InlineCache::with_candidate_table(table),
+                None => skull_transform::InlineCache::default(),
+            },
+            |inline_cache, inst| {
+                let name = inst.symbol(ws, scx.interner());
+                let mut specs = Vec::new();
+                let result = emit_spec_chunk(
+                    ws, cg, scx, &cache.concrete, &inst, &name, inline_cache, &mut specs,
+                );
+                (inst, name, result)
+            },
+        );
+        for (inst, name, result) in results {
+            match result {
+                Ok(chunk) => {
+                    pending.extend(chunk.specs.iter().map(|d| d.inst.clone()));
+                    built.insert(inst, chunk);
+                }
+                Err(e) => errs.push((name, e)),
+            }
         }
     }
     (built, errs)
