@@ -325,3 +325,5 @@ mod result_destinations;
 mod discarded_effects;
 mod overlay_function_values;
 mod argument_demand;
+
+mod optional_receiver_once;

@@ -817,33 +817,42 @@ impl Builder<'_> {
             // result cell (mirrors rock-codegen). A numeric field is a tuple read
             // (`x?.0`), a name is a struct/enum-record field.
             Expr::SafeNav { base, field } => {
-                // A chained `?.` whose BASE is a `nobox` value: this node's own
-                // result is an ordinary scalar, so it correctly declines the
-                // per-slot path -- but that decision is about the RESULT, and
-                // lowering the base with `lower_expr` packs it (`safe_nav_field_
-                // value` -> `materialize_embed`). Take the base as a repr instead
-                // and read the field off its leaves. The presence tag replaces
-                // the `== nil` test: there is no box to compare.
-                if let Some(r) = self.safe_nav_group_base(base, field)? {
-                    return Ok(r);
-                }
-                let bv = self.lower_expr(base)?;
-                let nil = self.emit_cur(Inst::Const(Lit::Nil));
-                let is_nil = self.emit_cur(Inst::Eq(bv, nil));
+                // Keep the evaluated receiver across representation selection.
+                // A boxed fallback must not lower the source expression again.
+                let recv = self.lower_safe_nav_receiver(base)?;
+                let cond = match &recv {
+                    SafeNavRecv::Unboxed { present, .. } => *present,
+                    _ => self.safe_nav_absent_cond(&recv),
+                };
                 let result = self
                     .f
                     .new_cell_typed(None, self.current_expr_storage_ty_id());
                 let nil_bb = self.f.new_block();
                 let val_bb = self.f.new_block();
                 let join = self.f.new_block();
-                self.f.set_term(self.cur, Term::Branch { cond: is_nil, then_bb: nil_bb, else_bb: val_bb });
+                let term = match &recv {
+                    SafeNavRecv::Unboxed { .. } => Term::Branch { cond, then_bb: val_bb, else_bb: nil_bb },
+                    _ => Term::Branch { cond, then_bb: nil_bb, else_bb: val_bb },
+                };
+                self.f.set_term(self.cur, term);
 
                 self.cur = nil_bb;
                 let n = self.emit_cur(Inst::Const(Lit::Nil));
                 self.store_and_join(result, n, join);
 
                 self.cur = val_bb;
-                let fv = self.safe_nav_field_value(e, base, bv, field)?;
+                let fv = match &recv {
+                    SafeNavRecv::Unboxed { repr: ValueRepr::Group { name, parts, .. }, .. }
+                        if self.field_index(*name, field).is_some() =>
+                    {
+                        let index = self.field_index(*name, field).expect("known value field");
+                        self.pack(parts[index].clone())?
+                    }
+                    _ => {
+                        let bv = self.safe_nav_present_value(recv)?;
+                        self.safe_nav_field_value(e, base, bv, field)?
+                    }
+                };
                 self.store_and_join(result, fv, join);
 
                 self.cur = join;
@@ -1884,67 +1893,8 @@ impl Builder<'_> {
         Ok(self.emit_cur(Inst::Load(result)))
     }
 
-    /// The non-nil arm of `base?.field`, with the receiver already lowered to
-    /// `bv`. Shared by the scalar lowering and the per-slot repr twin so the two
-    /// cannot drift about what a field read IS -- and so the receiver is lowered
-    /// exactly once either way.
-    /// `Some` when `base` denotes a NULLABLE `nobox` value, so `base?.field` can
-    /// read the field off the base's leaves instead of a box.
-    ///
-    /// This is the chained `?.`: `h?.v?.x` where `h?.v` is `NV?`. The outer node
-    /// asks `repr_join_slot` about ITS OWN type (`int?`, no leaves) and rightly
-    /// declines the per-slot join -- but the base still has to get there, and
-    /// `lower_expr` on it takes the scalar arm, whose embed read rebuilds the box
-    /// the mark forbids. Asking the BASE the same question is what routes it
-    /// through `safe_nav_field_repr`.
-    ///
-    /// The base's presence tag replaces the `== nil` test: once the value is
-    /// leaves there is no box to compare against nil, and its leaves are nil on
-    /// the absent row whether or not the tag is.
-    fn safe_nav_group_base(
-        &mut self,
-        base: Idx<Expr>,
-        field: Ustr,
-    ) -> Result<Option<Idx<Inst>>, CompilerError> {
-        // Only a NULLABLE base: a non-nullable one has no presence tag, and `?.`
-        // on it is already dead (bone rejects the redundant form).
-        if !self.repr_join_slot(base)?.is_some_and(
-            |s| matches!(s, RetSlot::Leaves(sh) if sh.nullable),
-        ) {
-            return Ok(None);
-        }
-        let ValueRepr::Group { name, parts, present: Some(present) } =
-            self.lower_expr_repr(base)?.into_value()
-        else {
-            return Ok(None);
-        };
-        let Some(i) = self.field_index(name, field) else {
-            return Ok(None);
-        };
-        let part = parts[i].clone();
-        let result = self
-            .f
-            .new_cell_typed(None, self.current_expr_storage_ty_id());
-        let absent_bb = self.f.new_block();
-        let val_bb = self.f.new_block();
-        let join = self.f.new_block();
-        self.f.set_term(
-            self.cur,
-            Term::Branch { cond: present, then_bb: val_bb, else_bb: absent_bb },
-        );
-
-        self.cur = absent_bb;
-        let n = self.emit_cur(Inst::Const(Lit::Nil));
-        self.store_and_join(result, n, join);
-
-        self.cur = val_bb;
-        let fv = self.pack(part)?;
-        self.store_and_join(result, fv, join);
-
-        self.cur = join;
-        Ok(Some(self.emit_cur(Inst::Load(result))))
-    }
-
+    /// Read a field from an already evaluated, present boxed receiver.
+    /// Shared by scalar and per-slot safe navigation.
     pub(crate) fn safe_nav_field_value(
         &mut self,
         e: Idx<Expr>,
