@@ -276,7 +276,10 @@ fn retained() {
     };
 
     assert_eq!(disposition("direct"), "direct-call");
-    assert_eq!(disposition("projected"), "field-only");
+    let projected = emit.allocation_report.bodies.values()
+        .find(|body| body.diagnostic_name == "projected").expect("projected body");
+    assert!(projected.direct_sites.is_empty(),
+        "the eliminated temporary must not appear in the final-emission allocation report");
     assert_eq!(disposition("returned"), "returned");
     assert_eq!(disposition("retained"), "global-store");
 

@@ -1895,13 +1895,17 @@ fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) -> Option<Cop
     //
     // Only cells holding a VALUE qualify. A direct `obj.f = v` on a cell holding
     // a `MakeStruct` table targets one runtime object shared by every use, so
-    // forwarding stays sound (and the fold below never forwards through a table
-    // anyway) -- excluding those keeps the hot `obj.field = v` shape
+    // forwarding stays sound (the fold below excludes tables with any other
+    // use) -- excluding those keeps the hot `obj.field = v` shape
     // copy-propagated. SROA peels one level per round, so the base is a `Field`
     // chain on the first round and a bare `Load` of the peeled value cell after.
     let mut holds_value = vec![false; func.cells.len()];
+    let mut has_fresh_projection = false;
     for (_, b) in func.blocks.iter() {
         for &i in &b.insts {
+            if let Inst::Field { base, .. } = &func.insts[i] {
+                has_fresh_projection |= matches!(func.insts[*base], Inst::MakeStruct { .. });
+            }
             if let Inst::Store { cell, value } = &func.insts[i] {
                 if matches!(&func.insts[*value], Inst::MakeValueStruct { .. }) {
                     holds_value[raw(*cell) as usize] = true;
@@ -1909,6 +1913,20 @@ fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) -> Option<Cop
             }
         }
     }
+    // Only direct temporary projections need use counts. An aliased mutable
+    // constructor cannot be forwarded using a pre-substitution count.
+    let struct_uses = if has_fresh_projection {
+        let mut uses = vec![0u32; func.insts.len()];
+        for (_, b) in func.blocks.iter() {
+            for &i in &b.insts {
+                value_operands(&func.insts[i], &mut |op| uses[raw(op) as usize] += 1);
+            }
+            term_uses_each(&b.term, &mut |op| uses[raw(op) as usize] += 1);
+        }
+        uses
+    } else {
+        Vec::new()
+    };
     for (_, b) in func.blocks.iter() {
         for &i in &b.insts {
             let Inst::StoreField { base, .. } = &func.insts[i] else { continue };
@@ -1988,8 +2006,8 @@ fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) -> Option<Cop
                 // construction operand -- sound to forward regardless of intervening
                 // code. Kills the repack-to-match cdata: a scalar-ABI enum param that
                 // `match` rebuilds (`X_ct(tag,_0).__tag`) folds to the tag leaf, and the
-                // now-dead ctor DCEs. (Plain `MakeStruct` is a MUTABLE table -- a
-                // `StoreField` could change it -- so it is NOT forwarded here.)
+                // now-dead ctor DCEs. A mutable `MakeStruct` needs the stricter
+                // single-use proof below, since a store could change its field.
                 Inst::Field { base, field } => {
                     let (base, field) = (*base, *field);
                     let rb = resolve_subst(&subst, base);
@@ -2005,6 +2023,17 @@ fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) -> Option<Cop
                             subst[raw(id) as usize] = Some(resolve_subst(&subst, *op));
                             any_subst = true;
                         }
+                    } else if base == rb && !struct_uses.is_empty()
+                        && struct_uses[raw(base) as usize] == 1
+                        && let Inst::MakeStruct { fields, .. } = &func.insts[base]
+                        && let Some((_, op)) = fields.iter().find(|(name, _)| *name == field)
+                    {
+                        // The fresh object is used only by this field read: no
+                        // alias can mutate it or observe its identity. Operands
+                        // have already run in source order, including unused ones.
+                        nonthrowing[raw(id) as usize] = true;
+                        subst[raw(id) as usize] = Some(resolve_subst(&subst, *op));
+                        any_subst = true;
                     } else if let Some((ctor, prefix)) = leaf_form_path(func, &subst, rb) {
                         // `Field(Field(ctor, c0), x)` is the ctor's `c0.x` leaf.
                         let Inst::MakeValueStruct { fields, .. } = &func.insts[ctor] else {

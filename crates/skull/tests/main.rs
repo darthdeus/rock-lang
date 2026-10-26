@@ -327,3 +327,5 @@ mod overlay_function_values;
 mod argument_demand;
 
 mod optional_receiver_once;
+
+mod fresh_struct_projection;
