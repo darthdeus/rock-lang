@@ -1779,13 +1779,13 @@ fn concrete_plan_attribution_uses_one_authoritative_type_table() {
         "the optimized route retained duplicate type-table ownership: {stats:?}"
     );
     assert!(
-        stats.callee_vec_materializations > 0 && stats.callee_vec_rows > 0,
-        "the fixture did not expose ConcreteBody::callees allocations: {stats:?}"
+        stats.callee_scans > 0 && stats.callee_rows_visited > 0,
+        "the fixture did not expose ConcreteBody::callees traversal: {stats:?}"
     );
     assert_eq!(
-        stats.callee_vec_materializations,
-        stats.plan_attempts * 2,
-        "the ordinary plan still materialized callee rows more than once: {stats:?}"
+        stats.callee_scans,
+        stats.plan_attempts * 3,
+        "the ordinary plan lost a callee traversal: {stats:?}"
     );
     assert!(
         stats.plan_callee_map_inserts > 0 && stats.plan_callee_signature_inserts > 0,
@@ -2463,7 +2463,7 @@ fn main() { let a = body([1, 2]) }
         .map(|(_, u)| u.expr)
         .expect("no untyped `Call`");
     assert!(
-        bodies.bodies[inst].callees().iter().all(|(s, _)| s.expr != header),
+        bodies.bodies[inst].callees().all(|(s, _)| s.expr != header),
         "the template-lowered `for` header has a callee entry after all"
     );
     assert_eq!(g.storage_failures().count(), 0, "a synthesized receiver had no concrete type");

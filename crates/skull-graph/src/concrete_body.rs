@@ -175,21 +175,12 @@ type TypeConversionMemo = FxHashMap<TyId, Result<(MonoTyId, usize), MonoTyReason
 
 impl ConcreteBody {
     /// Every callee this body names, with the site that named it.
-    pub fn callees(&self) -> Vec<(Site, &Callee)> {
-        let mut out: Vec<(Site, &Callee)> = Vec::new();
-        for (s, c) in &self.direct_calls {
-            out.push((s.clone(), c));
-        }
-        for (s, c) in &self.fn_values {
-            out.push((s.clone(), c));
-        }
-        for (s, op) in &self.iterator_ops {
-            out.push((s.clone(), &op.callee));
-        }
-        for (s, c) in &self.synthesized_calls {
-            out.push((s.clone(), c));
-        }
-        out
+    pub fn callees(&self) -> impl Iterator<Item = (&Site, &Callee)> {
+        self.direct_calls
+            .iter()
+            .chain(self.fn_values.iter())
+            .chain(self.iterator_ops.iter().map(|(site, op)| (site, &op.callee)))
+            .chain(self.synthesized_calls.iter())
     }
 }
 
@@ -377,8 +368,8 @@ pub struct ConcreteBuildStats {
     pub always_plan_failures: usize,
     pub source_expr_slots: usize,
     pub source_binding_slots: usize,
-    pub callee_vec_materializations: usize,
-    pub callee_vec_rows: usize,
+    pub callee_scans: usize,
+    pub callee_rows_visited: usize,
     pub plan_callee_map_inserts: usize,
     pub plan_callee_signature_inserts: usize,
     pub plan_type_expr_clones: usize,
@@ -420,8 +411,8 @@ impl ConcreteBuildStats {
         self.always_plan_failures += other.always_plan_failures;
         self.source_expr_slots += other.source_expr_slots;
         self.source_binding_slots += other.source_binding_slots;
-        self.callee_vec_materializations += other.callee_vec_materializations;
-        self.callee_vec_rows += other.callee_vec_rows;
+        self.callee_scans += other.callee_scans;
+        self.callee_rows_visited += other.callee_rows_visited;
         self.plan_callee_map_inserts += other.plan_callee_map_inserts;
         self.plan_callee_signature_inserts += other.plan_callee_signature_inserts;
         self.plan_type_expr_clones += other.plan_type_expr_clones;
@@ -1504,11 +1495,13 @@ fn collect_type_nodes(
 fn counted_callees<'a>(
     body: &'a ConcreteBody,
     stats: &mut ConcreteBuildStats,
-) -> Vec<(Site, &'a Callee)> {
-    let rows = body.callees();
-    stats.callee_vec_materializations += 1;
-    stats.callee_vec_rows += rows.len();
-    rows
+) -> impl Iterator<Item = (&'a Site, &'a Callee)> + use<'a> {
+    stats.callee_scans += 1;
+    stats.callee_rows_visited += body.direct_calls.len()
+        + body.fn_values.len()
+        + body.iterator_ops.len()
+        + body.synthesized_calls.len();
+    body.callees()
 }
 
 struct BuiltInstance {
@@ -2195,7 +2188,7 @@ fn concrete_plan_from_publication(
     let mut candidate_refs = FxHashSet::default();
     let signature_started = timing_enabled.then(bone_core::prelude::Instant::now);
     let callee_rows = counted_callees(body, stats);
-    for (site, callee) in &callee_rows {
+    for (site, callee) in callee_rows {
         let instance = callee.instance().clone();
         candidate_refs.insert(instance.clone());
         let signature = signatures
@@ -2229,7 +2222,7 @@ fn concrete_plan_from_publication(
         .get(&Owner::Instance(inst.clone()))
         .into_iter()
         .flat_map(|contribution| contribution.struct_default_domains.iter().cloned());
-    let site_domains = callee_rows.into_iter().map(|(site, _)| site.domain);
+    let site_domains = counted_callees(body, stats).map(|(site, _)| site.domain.clone());
     let foreign_domains = foreign_domains_from_publication(
         default_domains.chain(site_domains),
         domains,

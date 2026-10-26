@@ -1042,7 +1042,10 @@ fn classify(
     let Some(body) = bodies.bodies.get(owner_inst) else {
         return (Some(Unjoined::NoBody), op, none);
     };
-    let resolved: BTreeMap<Site, &Callee> = body.callees().into_iter().collect();
+    let resolved: BTreeMap<Site, &Callee> = body
+        .callees()
+        .map(|(site, callee)| (site.clone(), callee))
+        .collect();
 
     let Some(callee) = resolved.get(&cs.site) else {
         let note = if detail {
