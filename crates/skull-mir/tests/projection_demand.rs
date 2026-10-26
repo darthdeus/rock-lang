@@ -126,3 +126,26 @@ fn leaf_table_reference_projects_before_expanding_siblings() {
     let anchor = lower(source, "anchor");
     assert_eq!(fields(&anchor), 3, "nullable ref subtree keeps presence and payload: {anchor}");
 }
+
+#[test]
+fn nullable_reference_owned_value_projects_only_the_selected_scalar() {
+    let source = "value Point { x: int, y: int }\n\
+        value Label { text: string, point: Point, width: int }\n\
+        struct Holder { label: Label? }\n\
+        fn width(h: Holder) -> int? { h.label?.width }\n\
+        fn text(h: Holder) -> string? { h.label?.text }";
+    for name in ["width", "text"] {
+        let body = lower(source, name);
+        assert_eq!(fields(&body), 2, "only the owner slot and selected scalar are read: {body}");
+    }
+}
+
+#[test]
+fn nullable_scalar_projection_uses_the_embedded_owner_slot() {
+    let source = "value Label { text: string, width: int }\n\
+        struct Inner { label: Label?, tag: int }\n\
+        struct Root { embed inner: Inner }\n\
+        fn width(r: Root) -> int? { r.inner.label?.width }";
+    let body = lower(source, "width");
+    assert_eq!(fields(&body), 2, "embedded owner must not materialize unrelated fields: {body}");
+}

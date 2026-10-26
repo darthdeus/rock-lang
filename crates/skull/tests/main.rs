@@ -331,3 +331,5 @@ mod optional_receiver_once;
 mod fresh_struct_projection;
 
 mod leaf_table_projection;
+
+mod nullable_scalar_projection;

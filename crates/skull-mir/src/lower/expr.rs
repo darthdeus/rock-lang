@@ -819,7 +819,7 @@ impl Builder<'_> {
             Expr::SafeNav { base, field } => {
                 // Keep the evaluated receiver across representation selection.
                 // A boxed fallback must not lower the source expression again.
-                let recv = self.lower_safe_nav_receiver(base)?;
+                let recv = self.lower_scalar_safe_nav_receiver(e, base, field)?;
                 let cond = match &recv {
                     SafeNavRecv::Unboxed { present, .. } => *present,
                     _ => self.safe_nav_absent_cond(&recv),
@@ -1808,6 +1808,38 @@ impl Builder<'_> {
     ) -> Result<Idx<Inst>, CompilerError> {
         let r = self.safe_nav_call_value_repr(e, method, args, recv)?;
         self.pack_maybe_absent(r.into_value())
+    }
+
+    fn lower_scalar_safe_nav_receiver(
+        &mut self,
+        e: Idx<Expr>,
+        base: Idx<Expr>,
+        field: Ustr,
+    ) -> Result<SafeNavRecv, CompilerError> {
+        // A scalar projection cannot expose the nullable value box. Borrow its
+        // slot for this expression, then use the shared present-field reader.
+        // All eligibility checks precede lowering: a fallback evaluates once.
+        if !self.scx.values_first_class
+            && let Some(ty) = self.concrete_expr_ty(e)
+            && matches!(ty.peel_nullable().0,
+                MonoTy::Int | MonoTy::Uint | MonoTy::Float | MonoTy::Bool | MonoTy::String)
+            && let Expr::FieldAccess { base: owner, field: slot } = self.body.expr_arena[base]
+            && let Some(TypeExpr::App { ctor: TypeCtor::Nominal(owner_name), .. }) = self.field_base_ty(owner)
+            && self.ws.struct_by_name.contains_key(&owner_name)
+            && !self.is_value_struct(owner_name)
+            && let plan = self.struct_field_plan(owner_name, slot, false)?
+            && plan.is_direct() && plan.nullable()
+            && let Some(child) = plan.child()
+            && self.is_value_struct(child)
+            && self.swizzle_of(base, field).is_none()
+            && self.struct_field_plan(child, field, false)?.is_direct()
+        {
+            let (owner, slot) = self.physical_field(owner, slot)?;
+            let owner = self.lower_expr(owner)?;
+            let value = self.emit_cur(Inst::Field { base: owner, field: slot });
+            return Ok(SafeNavRecv::Boxed(value));
+        }
+        self.lower_safe_nav_receiver(base)
     }
 
     /// `recv?.method(args)` — `nil` if `recv` is nil, else the UFCS call
