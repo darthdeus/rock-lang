@@ -1971,3 +1971,24 @@ fn with_no_holder_construction_the_defaults_callee_is_absent() {
         "`make<int>` is reached with no `Holder {{}}` construction anywhere in the fixture"
     );
 }
+
+#[test]
+fn intermediate_body_edits_add_and_remove_recursion_findings() {
+    let flat = r#"
+fn descend<T>(x: T) -> int { return relay([x]) }
+fn relay<T>(x: [T]) -> int { return 0 }
+"#;
+    let recursive = flat.replace("return 0", "return descend(x)");
+    let mut case = Case::new("fn main() { print(\"{descend(1)}\") }\n", flat);
+    let count = |case: &Case| case.graph.rejections()
+        .filter(|r| r.kind == RejectionKind::ChangingInstanceRecursion).count();
+    assert_eq!(count(&case), 0);
+    case.edit(LIB, &recursive);
+    assert!(count(&case) > 0, "helper edit produced no changing recursion");
+    case.assert_matches_fresh("recursion added through a helper");
+
+    let stats = case.edit(LIB, flat);
+    assert!(stats.census.recursion_findings_retracted > 0);
+    assert_eq!(count(&case), 0);
+    case.assert_matches_fresh("recursion removed through a helper");
+}

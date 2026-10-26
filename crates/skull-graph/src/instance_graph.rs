@@ -4537,13 +4537,9 @@ fn record_call_impl(
 /// is what keeps two independent instantiations of one recursive function legal:
 /// `hold<int>` and `hold<string>` never reach each other.
 ///
-/// Reachability is searched over the WHOLE instance graph rather than over
-/// recursive SCCs first. Restricting to an SCC is sound -- every function on an
-/// `f`-to-`f` path lies on an `f`-to-`f` cycle, so no path crosses out of one --
-/// but it buys nothing: the graph is leaf-heavy, so the full search costs 110k
-/// traversal steps on the corpus's largest project (2,560 starts, 26,883
-/// edges), and the whole 26-project census runs in 1.5s. Measured, after
-/// writing the SCC pass and finding it inert.
+/// The fresh and incremental paths share the instance search below. The fresh
+/// path builds borrowed adjacency once; the incremental path looks up only the
+/// seed region affected by the edit.
 fn detect_changing_instance_recursion(g: &mut InstanceGraph, ws: &Workspace) {
     // Instance-level adjacency, carrying each edge's span so a rejection can
     // name the call that changed the arguments.
@@ -4582,60 +4578,14 @@ fn detect_changing_instance_recursion(g: &mut InstanceGraph, ws: &Workspace) {
     // different instantiation of itself -- while the per-declaration COUNT is
     // over every instance, because a declaration's second instance can be a
     // leaf and is exactly what makes the first one's search worth running.
-    let mut order: Vec<&Instance> = succ
-        .keys()
-        .copied()
-        .filter(|i| g.index.decls.get(&i.func).is_some_and(|n| *n > 1))
-        .collect();
-    order.sort();
-    let mut found: Vec<(Instance, Span, String, BTreeSet<Instance>)> = Vec::new();
-    let mut already: BTreeSet<(u32, u32)> = BTreeSet::new();
-    let mut starts = 0usize;
-    for start in order {
-        let key = (start.func.module.raw(), start.func.func.into_raw().into_u32());
-        if already.contains(&key) {
-            continue;
-        }
-        starts += 1;
-        let mut seen: BTreeSet<&Instance> = BTreeSet::new();
-        let mut subjects = BTreeSet::from([start.clone()]);
-        let mut queue: Vec<(&Instance, Span)> = vec![(start, Span::unknown())];
-        while let Some((node, via)) = queue.pop() {
-            subjects.insert(node.clone());
-            if node.func == start.func && node.args != start.args {
-                already.insert(key);
-                found.push((
-                    start.clone(),
-                    via,
-                    format!(
-                        "polymorphic recursion: `{}` recurs as `{}`; instantiation does not \
-                         terminate on a recursive call whose type arguments change",
-                        g.symbol(ws, start),
-                        g.symbol(ws, node)
-                    ),
-                    subjects,
-                ));
-                break;
-            }
-            for e in succ.get(node).copied().unwrap_or(&[]) {
-                if seen.insert(&e.to) {
-                    queue.push((&e.to, e.span));
-                }
-            }
-        }
-    }
+    let starts = succ.keys().copied().collect();
+    let (starts, findings) = search_changing_instance_recursion(g, ws, starts, |node| {
+        succ.get(node).copied().unwrap_or(&[])
+    });
     g.recursion_starts = starts;
-    g.run_stats.recursion_findings_derived += found.len();
-    for (at, span, message, subjects) in found {
-        g.install_recursion_finding(RecursionFinding {
-            rejection: Rejection {
-                kind: RejectionKind::ChangingInstanceRecursion,
-                at,
-                span,
-                message,
-            },
-            subjects,
-        });
+    g.run_stats.recursion_findings_derived += findings.len();
+    for finding in findings {
+        g.install_recursion_finding(finding);
     }
 }
 
@@ -4644,34 +4594,49 @@ fn detect_changing_instance_recursion_local(
     ws: &Workspace,
     seeds: &BTreeSet<Instance>,
 ) -> (usize, Vec<RecursionFinding>) {
-    let mut starts: Vec<Instance> = seeds
-        .iter()
-        .filter(|i| {
-            g.contributions.contains_key(&Owner::Instance((*i).clone()))
-                && g.index.decls.get(&i.func).is_some_and(|n| *n > 1)
-        })
-        .cloned()
-        .collect();
-    starts.sort();
+    // The local path probes only its reverse-reachable seed region; constructing
+    // a whole-graph adjacency table here would make a small edit global work.
+    let successors = |node: &Instance| {
+        g.contributions.get(&Owner::Instance(node.clone()))
+            .map_or(&[][..], |c| c.edges.as_slice())
+    };
+    let starts = seeds.iter().filter(|node| !successors(node).is_empty()).collect();
+    search_changing_instance_recursion(g, ws, starts, successors)
+}
+
+fn search_changing_instance_recursion<'a>(
+    g: &InstanceGraph,
+    ws: &Workspace,
+    mut order: Vec<&'a Instance>,
+    successors: impl Fn(&Instance) -> &'a [Edge],
+) -> (usize, Vec<RecursionFinding>) {
+    order.retain(|i| g.index.decls.get(&i.func).is_some_and(|n| *n > 1));
+    order.sort();
     let mut found = Vec::new();
     let mut already = BTreeSet::new();
-    for start in starts.iter() {
+    let mut starts = 0;
+    // Membership is unordered; traversal order comes only from the sorted
+    // starts and the edge stack. Reuse scratch across starts without copying
+    // instances that will be discarded when a search finds no error.
+    let mut seen: FxHashSet<&Instance> = FxHashSet::default();
+    let mut subjects = Vec::new();
+    let mut queue = Vec::new();
+    for start in order {
         let key = DeclKey(start.func);
-        if !already.insert(key) {
+        if already.contains(&key) {
             continue;
         }
-        let mut seen = BTreeSet::new();
-        let mut subjects = BTreeSet::from([start.clone()]);
-        let mut queue = Vec::new();
-        if let Some(c) = g.contributions.get(&Owner::Instance(start.clone())) {
-            queue.extend(c.edges.iter().map(|e| (e.to.clone(), e.span)));
-        }
+        starts += 1;
+        seen.clear();
+        subjects.clear();
+        queue.clear();
+        queue.push((start, Span::unknown()));
         while let Some((node, via)) = queue.pop() {
-            if !seen.insert(node.clone()) {
-                continue;
-            }
-            subjects.insert(node.clone());
+            subjects.push(node);
             if node.func == start.func && node.args != start.args {
+                // Only a witness discharges this declaration. Another instance
+                // can have changing recursion even when this one's path is finite.
+                already.insert(key);
                 found.push(RecursionFinding {
                     rejection: Rejection {
                         kind: RejectionKind::ChangingInstanceRecursion,
@@ -4681,19 +4646,21 @@ fn detect_changing_instance_recursion_local(
                             "polymorphic recursion: `{}` recurs as `{}`; instantiation does not \
                              terminate on a recursive call whose type arguments change",
                             g.symbol(ws, start),
-                            g.symbol(ws, &node)
+                            g.symbol(ws, node)
                         ),
                     },
-                    subjects,
+                    subjects: subjects.iter().copied().cloned().collect(),
                 });
                 break;
             }
-            if let Some(c) = g.contributions.get(&Owner::Instance(node)) {
-                queue.extend(c.edges.iter().map(|e| (e.to.clone(), e.span)));
+            for edge in successors(node) {
+                if seen.insert(&edge.to) {
+                    queue.push((&edge.to, edge.span));
+                }
             }
         }
     }
-    (starts.len(), found)
+    (starts, found)
 }
 
 /// A synthesized `iter` witness: the `for` head's or a coerced argument's.
@@ -6110,4 +6077,55 @@ pub fn reconcile_call_identities(ws: &Workspace, g: &InstanceGraph) -> CallIdent
         })
         .count();
     r
+}
+
+#[cfg(test)]
+mod recursion_search_tests {
+    use super::*;
+    use skull_mir::monoty::MonoTy;
+
+    #[test]
+    fn local_search_checks_later_instances_after_a_non_witness() {
+        let mut modules = vec![skull_parser::parse_module_clean(
+            "fn probe<T>(x: T) -> T { return x }",
+            ustr::Ustr::from("<recursion-test>"),
+        ).expect("parse")];
+        let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic");
+        let func = ws.modules.iter().find_map(|module| {
+            module.functions.iter().find_map(|(id, f)| {
+                (f.name.as_str() == "probe").then_some(FuncRef { module: module.id, func: id })
+            })
+        }).expect("probe declaration");
+        let interner = std::sync::Arc::new(MonoInterner::new());
+        let mut instances: Vec<_> = [MonoTy::Int, MonoTy::String, MonoTy::Bool]
+            .into_iter().map(|ty| Instance { func, args: vec![interner.intern(ty)] }).collect();
+        instances.sort();
+        let mut graph = InstanceGraph::empty_in(interner);
+        graph.index.decls.insert(func, instances.len());
+        // A finite self-loop sorts before the changing-instance path. Both
+        // starts belong to one declaration; failure from one proves nothing
+        // about reachability from the other.
+        for (from, to) in [(0, Some(0)), (1, Some(2)), (2, None)] {
+            let mut contribution = Contribution::default();
+            if let Some(to) = to {
+                contribution.edges.push(Edge {
+                    from: instances[from].clone(), to: instances[to].clone(),
+                    kind: EdgeKind::GenericCall, span: Span::unknown(),
+                });
+            }
+            graph.contributions.insert(Owner::Instance(instances[from].clone()), contribution);
+        }
+        let seeds = instances.iter().cloned().collect();
+        detect_changing_instance_recursion(&mut graph, &ws);
+        assert_eq!(graph.recursion_findings.len(), 1);
+        let (starts, local) = detect_changing_instance_recursion_local(&graph, &ws, &seeds);
+        assert_eq!(starts, graph.recursion_starts);
+        assert_eq!(starts, 2);
+        assert_eq!(local.len(), 1, "a non-witness must not suppress later starts");
+        let fresh = graph.recursion_findings.values().next().unwrap();
+        assert_eq!(local[0].rejection.at, fresh.rejection.at);
+        assert_eq!(local[0].rejection.message, fresh.rejection.message);
+        assert_eq!(local[0].subjects, fresh.subjects);
+        assert_eq!(fresh.subjects, BTreeSet::from([instances[1].clone(), instances[2].clone()]));
+    }
 }
