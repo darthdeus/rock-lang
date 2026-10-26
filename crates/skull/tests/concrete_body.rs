@@ -1501,10 +1501,11 @@ fn concrete_result_order_gate_exercises_the_reversed_merge_population() {
         &canonical_graph,
         concrete_body::BuildResultOrder::Canonical,
     );
-    let reverse_graph = instance_graph::build(&ws, roots, false);
+    // Both order arms must use one interner: raw type IDs are arena-local.
+    let reverse_graph = &canonical_graph;
     let (_, reverse_order) = concrete_body::build_with_result_order(
         &ws,
-        &reverse_graph,
+        reverse_graph,
         concrete_body::BuildResultOrder::Reverse,
     );
     assert!(canonical_order.len() > 1, "fixture exposed only one concrete result");
@@ -1608,10 +1609,11 @@ fn main() {
         &canonical_graph,
         concrete_body::BuildResultOrder::Canonical,
     );
-    let reverse_graph = instance_graph::build(&ws, roots, false);
+    // Both order arms must use one interner: raw type IDs are arena-local.
+    let reverse_graph = &canonical_graph;
     let (mut reverse, reverse_order) = concrete_body::build_with_result_order(
         &ws,
-        &reverse_graph,
+        reverse_graph,
         concrete_body::BuildResultOrder::Reverse,
     );
     canonical.refresh_flat_views();
@@ -1660,12 +1662,12 @@ fn main() {
     assert_eq!(canonical.plan_failures, reverse.plan_failures);
     assert_eq!(
         canonical.render_free_types(&ws, &canonical_graph),
-        reverse.render_free_types(&ws, &reverse_graph)
+        reverse.render_free_types(&ws, reverse_graph)
     );
-    assert_eq!(reverse.render_free_types(&ws, &reverse_graph), expected_free);
+    assert_eq!(reverse.render_free_types(&ws, reverse_graph), expected_free);
     assert_eq!(
         canonical.render_callee_holes(&ws, &canonical_graph),
-        reverse.render_callee_holes(&ws, &reverse_graph)
+        reverse.render_callee_holes(&ws, reverse_graph)
     );
     assert_eq!(
         canonical_order,
