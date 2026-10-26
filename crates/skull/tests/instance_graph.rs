@@ -691,6 +691,32 @@ fn main() { depth(1, 3) }
     assert!(!c.is_closed(), "a graph with a cut expansion reported itself closed");
 }
 
+#[test]
+fn recursive_diagnostics_do_not_depend_on_type_interning_order() {
+    let ws = check(r#"
+fn grow<T>(x: T, n: int) -> int {
+    if n <= 0 { return 0 }
+    return grow([x], n - 1)
+}
+fn first() -> int { return grow(1, 3) }
+fn second() -> int { return grow(true, 3) }
+fn main() { first(); second() }
+"#);
+    let roots = skull::mir_emit::emission_roots(&ws, Some("<test>"));
+    let build = |types| {
+        let interner = std::sync::Arc::new(skull_mir::monoty::MonoInterner::new());
+        interner.intern_all(types);
+        instance_graph::build_in(&ws, roots.clone(), false, interner)
+    };
+    use skull_mir::monoty::MonoTy;
+    let forward = build([MonoTy::Int, MonoTy::Bool]);
+    let reverse = build([MonoTy::Bool, MonoTy::Int]);
+    let kind = instance_graph::RejectionKind::ChangingInstanceRecursion;
+    let expected = rejections_of(&ws, &forward, kind);
+    assert_eq!(expected.len(), 1, "fixture produced no recursive diagnostic");
+    assert_eq!(expected, rejections_of(&ws, &reverse, kind));
+}
+
 /// Mutual polymorphic recursion. The type grows around a two-function cycle, so
 /// neither edge on its own changes a function's own arguments -- a self-edge
 /// check alone cannot see this.

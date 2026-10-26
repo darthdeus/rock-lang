@@ -227,6 +227,68 @@ fn deleting_the_only_edge_into_a_subtree_removes_the_whole_subtree() {
     assert_scoped(&stats, "subtree deletion");
 }
 
+#[test]
+fn explicit_root_delta_adds_and_removes_a_library_subtree() {
+    let mut case = Case::new("fn main() { print(\"{other()}\") }\n", CHAIN_LIB);
+    let ws = case.session.workspace();
+    let chain_a = crate::common::fn_ref(ws, "chain_a");
+    let base_roots = skull::mir_emit::emission_roots(ws, Some(PROJ));
+    assert!(!base_roots.contains(&chain_a));
+    for name in ["chain_a", "chain_b", "chain_c"] {
+        assert!(!case.has_instance_named(name), "v1 already reached `{name}`");
+    }
+
+    let added = case.graph.update_bodies_with_root_delta(ws, &[chain_a], &[], &[], &[]);
+    let subtree = BTreeSet::from([
+        "chain_a_0".to_string(),
+        "chain_b_0".to_string(),
+        "chain_c_0".to_string(),
+    ]);
+    let added_names: BTreeSet<String> =
+        added.added.iter().map(|i| short(&case.identity(i))).collect();
+    assert_eq!(added.newly_reached, 3);
+    assert_eq!(added_names, subtree);
+    let mut roots = base_roots.clone();
+    roots.push(chain_a);
+    let fresh = instance_graph::build(ws, roots, false);
+    let diff = canonical(ws, &case.graph).diff(&canonical(ws, &fresh));
+    assert!(diff.is_empty(), "root added: {}", diff.join("\n"));
+
+    let removed = case.graph.update_bodies_with_root_delta(ws, &[], &[chain_a], &[], &[]);
+    let removed_names: BTreeSet<String> =
+        removed.removed.iter().map(|i| short(&case.identity(i))).collect();
+    assert_eq!(removed.pruned, 3);
+    assert_eq!(removed_names, subtree);
+    case.assert_matches_fresh("root removed");
+}
+
+#[test]
+fn a_replaced_root_can_be_restored_by_an_earlier_install_in_its_wave() {
+    let ws = check_two_files(
+        "fn main() {}",
+        "fn old_root() -> int { return leaf() }\n\
+         fn leaf() -> int { return 1 }\n\
+         fn new_root() -> int { return old_root() }\n",
+    );
+    let old_root = crate::common::fn_ref(&ws, "old_root");
+    let new_root = crate::common::fn_ref(&ws, "new_root");
+    let mut graph = instance_graph::build(&ws, vec![old_root], false);
+    let old_instance = Instance { func: old_root, args: Vec::new() };
+    assert!(graph.substitution(&old_instance).is_some());
+    assert!(!graph.instances.iter().any(|i| i.func == new_root));
+
+    // Root removal makes old_root unwalkable at the wave snapshot. new_root
+    // installs first in reverse declaration order and restores its demand.
+    let stats = graph.update_bodies_with_root_delta(
+        &ws, &[new_root], &[old_root], &[body_of(&ws, "old_root")], &[],
+    );
+    assert!(stats.expanded >= 2);
+    assert!(graph.substitution(&old_instance).is_some());
+    let fresh = instance_graph::build(&ws, vec![new_root], false);
+    let diff = canonical(&ws, &graph).diff(&canonical(&ws, &fresh));
+    assert!(diff.is_empty(), "root replaced: {}", diff.join("\n"));
+}
+
 // ---------------------------------------------------------------------------
 // 2. Deletion prunes an unreachable CYCLE
 // ---------------------------------------------------------------------------

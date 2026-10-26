@@ -1911,159 +1911,186 @@ impl InstanceGraph {
         let mut rounds = 0usize;
         let mut expansion_times = Vec::new();
         loop {
-            while let Some(owner) = pending.pop() {
-                let current_frontier = timing_enabled
-                    .then(|| frontier_depths.get(&owner).copied().unwrap_or(0))
-                    .unwrap_or(0);
-                queued.remove(&owner);
-                stats.owner_visits += 1;
-                if timing_enabled {
-                    match owner {
-                        Owner::Instance(_) => stats.ordinary_owner_visits += 1,
-                        Owner::AlwaysEmitted(..) => stats.always_emitted_owner_visits += 1,
-                    }
-                }
-                // **An instance that lost its last namer DURING this run is not
-                // walkable, and is not an invariant break.**
-                //
-                // The prune runs in `derive`, AFTER this loop, so a stranded
-                // instance can still be sitting in `pending` -- an edit
-                // invalidates every owner that QUOTES the edited file, which in
-                // a single-file program is every owner, including ones the same
-                // edit is about to strand. Its substitution was retracted by its
-                // caller's re-walk a moment ago, so `expand` would find none and
-                // the invariant assertion would fire on a body that is simply
-                // gone.
-                //
-                // Skipping leaves it with its old contribution, which `derive`
-                // then prunes: membership is root reachability, and nothing
-                // points at it any more. Found by driving a real body edit
-                // through `update_chunk_cache` -- the graph fixtures live in a
-                // multi-file project, where the stranded owner does not quote
-                // the edited file and never reaches this loop.
-                if let Owner::Instance(i) = &owner {
-                    if self.substitution(i).is_none() {
-                        if timing_enabled {
-                            same_frontier_marks.remove(&owner);
-                        }
-                        stats.skipped_stranded_owners += 1;
-                        continue;
-                    }
-                    walked_with.insert(i.clone(), self.bound_tree(i).cloned().unwrap_or_default());
-                }
-                let visit_kind = if rounds > 0 {
-                    VisitKind::WitnessSettlement
-                } else if !first_pass_seen.insert(owner.clone()) {
-                    VisitKind::DuplicatePending
-                } else if initially_forced.contains(&owner) {
-                    VisitKind::IncrementalForced
-                } else {
-                    VisitKind::FirstOwner
+            while !pending.is_empty() {
+                let wave: Vec<_> = std::mem::take(&mut pending).into_iter().rev().collect();
+                let expand_owner = |owner: Owner| {
+                    let used_tree = owner.instance().map(|i| self.bound_tree(i).cloned().unwrap_or_default());
+                    let started = timing_enabled.then(Instant::now);
+                    let c = if owner.instance().is_some_and(|i| self.substitution(i).is_none()) {
+                        None
+                    } else {
+                        Some(self.expand(ws, &owner, timing_enabled))
+                    };
+                    (owner, used_tree, c, elapsed_ns(started))
                 };
-                if track_incremental_state {
-                    self.last_run_owners.insert(owner.clone());
-                }
-                let visit_start = timing_enabled.then(Instant::now);
-                let c = self.expand(ws, &owner, timing_enabled);
-                let visit_ns = elapsed_ns(visit_start);
-                if timing_enabled {
-                    expansion_times.push(visit_ns);
-                }
-                stats.expanded += 1;
-                if timing_enabled {
-                    if same_frontier_marks.remove(&owner) {
-                        stats.frontier_same_frontier_dependency_owners += 1;
-                    } else {
-                        stats.frontier_ready_owners += 1;
-                    }
-                }
-                match visit_kind {
-                    VisitKind::FirstOwner => {
-                        stats.first_owner_visits += 1;
-                        stats.first_owner_ns += visit_ns;
-                    }
-                    VisitKind::DuplicatePending => {
-                        stats.duplicate_pending_visits += 1;
-                        stats.duplicate_pending_ns += visit_ns;
-                    }
-                    VisitKind::WitnessSettlement => {
-                        stats.witness_settlement_rewalks += 1;
-                        stats.witness_settlement_ns += visit_ns;
-                    }
-                    VisitKind::IncrementalForced => {
-                        stats.incremental_forced_rewalks += 1;
-                        stats.incremental_forced_ns += visit_ns;
-                    }
-                }
-                stats.admissibility_ns += c.timing.admissibility_ns;
-                stats.body_prep_ns += c.timing.body_prep_ns;
-                stats.signature_type_conversion_ns += c.timing.signature_type_conversion_ns;
-                stats.mono_interner_self_ns += c.timing.mono_interner_self_ns;
-                stats.mono_timed_mutation_calls += c.timing.mono_timed_mutation_calls;
-                stats.call_site_resolution_ns += c.timing.call_site_resolution_ns;
-                stats.witness_bound_tree_ns += c.timing.witness_bound_tree_ns;
-                stats.walk_body_edges_ns += c.timing.walk_body_edges_ns;
-                stats.walk_struct_default_edges_ns += c.timing.walk_struct_default_edges_ns;
-                stats.body_exprs_scanned += c.body_exprs_scanned;
-                stats.resolved_overload_rows += c.resolved_overload_rows;
-                stats.fn_value_rows += c.fn_value_rows;
-                stats.generated_rows += c.generated_rows;
-                stats.dispatched_rows += c.dispatched_rows;
-                stats.implicit_iter_rows += c.implicit_iter_rows;
-                stats.bound_tree_rows += c.bound_tree_rows;
-                stats.bound_call_rows += c.bound_call_rows;
-                stats.iterator_rows += c.iterator_rows;
-                if timing_enabled {
-                    stats.contribution_reached += c.reached.len();
-                    stats.contribution_bound_trees += c.bound_trees.len();
-                    stats.contribution_edges += c.edges.len();
-                    stats.contribution_sites += c.call_sites.len() + c.always_call_sites.len();
-                    stats.contribution_struct_default_domains += c.struct_default_domains.len();
-                    stats.contribution_rejections += c.rejections.len();
-                    stats.contribution_synthesized_examined += c.synthesized_examined;
-                    stats.contribution_failures += c.rejections.len()
-                        + c.unresolved.len()
-                        + c.storage_failures.len()
-                        + c.always_emitted_holes.len();
-                    stats.contribution_always_emitted_targets += c.always_emitted_targets.len();
-                }
-                let (demanded, install_timing) =
-                    self.install(owner, c, timing_enabled, track_incremental_state);
-                stats.uninstall_ns += install_timing.uninstall_ns;
-                stats.root_hole_rows_examined += install_timing.root_hole_rows_retracted;
-                stats.index_maintenance_ns += install_timing.index.total_ns();
-                stats.index_subst_ns += install_timing.index.subst_ns;
-                stats.index_trees_ns += install_timing.index.trees_ns;
-                stats.index_erased_ns += install_timing.index.erased_ns;
-                stats.index_always_emitted_ns += install_timing.index.always_emitted_ns;
-                stats.index_preds_ns += install_timing.index.preds_ns;
-                stats.index_decls_ns += install_timing.index.decls_ns;
-                stats.index_commit_ns += install_timing.index.commit_ns;
-                stats.index_subst_updates += install_timing.index.subst_updates;
-                stats.index_trees_updates += install_timing.index.trees_updates;
-                stats.index_erased_updates += install_timing.index.erased_updates;
-                stats.index_always_emitted_updates += install_timing.index.always_emitted_updates;
-                stats.index_preds_updates += install_timing.index.preds_updates;
-                stats.index_decls_updates += install_timing.index.decls_updates;
-                for owner in demanded {
-                    if timing_enabled
-                        && queued.contains(&owner)
-                        && frontier_depths.get(&owner) == Some(&current_frontier)
-                    {
-                        same_frontier_marks.insert(owner.clone());
-                    }
-                    if queued.insert(owner.clone()) {
-                        if timing_enabled {
-                            let next_frontier = current_frontier.saturating_add(1);
-                            frontier_depths.insert(owner.clone(), next_frontier);
-                            if frontier_sizes.len() <= next_frontier {
-                                frontier_sizes.resize(next_frontier + 1, 0);
-                            }
-                            frontier_sizes[next_frontier] += 1;
+                #[cfg(feature = "sequential")]
+                let prepared: Vec<_> = wave.into_iter().map(expand_owner).collect();
+                #[cfg(not(feature = "sequential"))]
+                let prepared: Vec<_> = {
+                    use rayon::prelude::*;
+                    wave.into_par_iter().map(expand_owner).collect()
+                };
+                for (owner, mut used_tree, mut prepared_c, mut visit_ns) in prepared {
+                    let current_frontier = timing_enabled
+                        .then(|| frontier_depths.get(&owner).copied().unwrap_or(0))
+                        .unwrap_or(0);
+                    queued.remove(&owner);
+                    stats.owner_visits += 1;
+                    if timing_enabled {
+                        match owner {
+                            Owner::Instance(_) => stats.ordinary_owner_visits += 1,
+                            Owner::AlwaysEmitted(..) => stats.always_emitted_owner_visits += 1,
                         }
-                        pending.push(owner);
+                    }
+                    // **An instance that lost its last namer DURING this run is not
+                    // walkable, and is not an invariant break.**
+                    //
+                    // The prune runs in `derive`, AFTER this loop, so a stranded
+                    // instance can still be sitting in `pending` -- an edit
+                    // invalidates every owner that QUOTES the edited file, which in
+                    // a single-file program is every owner, including ones the same
+                    // edit is about to strand. Its substitution was retracted by its
+                    // caller's re-walk a moment ago, so `expand` would find none and
+                    // the invariant assertion would fire on a body that is simply
+                    // gone.
+                    //
+                    // Skipping leaves it with its old contribution, which `derive`
+                    // then prunes: membership is root reachability, and nothing
+                    // points at it any more. Found by driving a real body edit
+                    // through `update_chunk_cache` -- the graph fixtures live in a
+                    // multi-file project, where the stranded owner does not quote
+                    // the edited file and never reaches this loop.
+                    if let Owner::Instance(i) = &owner {
+                        if self.substitution(i).is_none() {
+                            if timing_enabled {
+                                same_frontier_marks.remove(&owner);
+                            }
+                            stats.skipped_stranded_owners += 1;
+                            continue;
+                        }
+                        // An earlier install in this wave can restore a substitution
+                        // that was absent at preparation. Its queued demand was
+                        // suppressed, so expand it now with the current witnesses.
+                        if prepared_c.is_none() {
+                            used_tree = Some(self.bound_tree(i).cloned().unwrap_or_default());
+                            let started = timing_enabled.then(Instant::now);
+                            prepared_c = Some(self.expand(ws, &owner, timing_enabled));
+                            visit_ns = elapsed_ns(started);
+                        }
+                        walked_with.insert(i.clone(), used_tree.expect("instance snapshot"));
+                    }
+                    let visit_kind = if rounds > 0 {
+                        VisitKind::WitnessSettlement
+                    } else if !first_pass_seen.insert(owner.clone()) {
+                        VisitKind::DuplicatePending
+                    } else if initially_forced.contains(&owner) {
+                        VisitKind::IncrementalForced
                     } else {
-                        stats.duplicate_pending_suppressed += 1;
+                        VisitKind::FirstOwner
+                    };
+                    if track_incremental_state {
+                        self.last_run_owners.insert(owner.clone());
+                    }
+                    let c = prepared_c.expect("walkable owner");
+                    if timing_enabled {
+                        expansion_times.push(visit_ns);
+                    }
+                    stats.expanded += 1;
+                    if timing_enabled {
+                        if same_frontier_marks.remove(&owner) {
+                            stats.frontier_same_frontier_dependency_owners += 1;
+                        } else {
+                            stats.frontier_ready_owners += 1;
+                        }
+                    }
+                    match visit_kind {
+                        VisitKind::FirstOwner => {
+                            stats.first_owner_visits += 1;
+                            stats.first_owner_ns += visit_ns;
+                        }
+                        VisitKind::DuplicatePending => {
+                            stats.duplicate_pending_visits += 1;
+                            stats.duplicate_pending_ns += visit_ns;
+                        }
+                        VisitKind::WitnessSettlement => {
+                            stats.witness_settlement_rewalks += 1;
+                            stats.witness_settlement_ns += visit_ns;
+                        }
+                        VisitKind::IncrementalForced => {
+                            stats.incremental_forced_rewalks += 1;
+                            stats.incremental_forced_ns += visit_ns;
+                        }
+                    }
+                    stats.admissibility_ns += c.timing.admissibility_ns;
+                    stats.body_prep_ns += c.timing.body_prep_ns;
+                    stats.signature_type_conversion_ns += c.timing.signature_type_conversion_ns;
+                    stats.mono_interner_self_ns += c.timing.mono_interner_self_ns;
+                    stats.mono_timed_mutation_calls += c.timing.mono_timed_mutation_calls;
+                    stats.call_site_resolution_ns += c.timing.call_site_resolution_ns;
+                    stats.witness_bound_tree_ns += c.timing.witness_bound_tree_ns;
+                    stats.walk_body_edges_ns += c.timing.walk_body_edges_ns;
+                    stats.walk_struct_default_edges_ns += c.timing.walk_struct_default_edges_ns;
+                    stats.body_exprs_scanned += c.body_exprs_scanned;
+                    stats.resolved_overload_rows += c.resolved_overload_rows;
+                    stats.fn_value_rows += c.fn_value_rows;
+                    stats.generated_rows += c.generated_rows;
+                    stats.dispatched_rows += c.dispatched_rows;
+                    stats.implicit_iter_rows += c.implicit_iter_rows;
+                    stats.bound_tree_rows += c.bound_tree_rows;
+                    stats.bound_call_rows += c.bound_call_rows;
+                    stats.iterator_rows += c.iterator_rows;
+                    if timing_enabled {
+                        stats.contribution_reached += c.reached.len();
+                        stats.contribution_bound_trees += c.bound_trees.len();
+                        stats.contribution_edges += c.edges.len();
+                        stats.contribution_sites += c.call_sites.len() + c.always_call_sites.len();
+                        stats.contribution_struct_default_domains += c.struct_default_domains.len();
+                        stats.contribution_rejections += c.rejections.len();
+                        stats.contribution_synthesized_examined += c.synthesized_examined;
+                        stats.contribution_failures += c.rejections.len()
+                            + c.unresolved.len()
+                            + c.storage_failures.len()
+                            + c.always_emitted_holes.len();
+                        stats.contribution_always_emitted_targets += c.always_emitted_targets.len();
+                    }
+                    let (demanded, install_timing) =
+                        self.install(owner, c, timing_enabled, track_incremental_state);
+                    stats.uninstall_ns += install_timing.uninstall_ns;
+                    stats.root_hole_rows_examined += install_timing.root_hole_rows_retracted;
+                    stats.index_maintenance_ns += install_timing.index.total_ns();
+                    stats.index_subst_ns += install_timing.index.subst_ns;
+                    stats.index_trees_ns += install_timing.index.trees_ns;
+                    stats.index_erased_ns += install_timing.index.erased_ns;
+                    stats.index_always_emitted_ns += install_timing.index.always_emitted_ns;
+                    stats.index_preds_ns += install_timing.index.preds_ns;
+                    stats.index_decls_ns += install_timing.index.decls_ns;
+                    stats.index_commit_ns += install_timing.index.commit_ns;
+                    stats.index_subst_updates += install_timing.index.subst_updates;
+                    stats.index_trees_updates += install_timing.index.trees_updates;
+                    stats.index_erased_updates += install_timing.index.erased_updates;
+                    stats.index_always_emitted_updates += install_timing.index.always_emitted_updates;
+                    stats.index_preds_updates += install_timing.index.preds_updates;
+                    stats.index_decls_updates += install_timing.index.decls_updates;
+                    for owner in demanded {
+                        if timing_enabled
+                            && queued.contains(&owner)
+                            && frontier_depths.get(&owner) == Some(&current_frontier)
+                        {
+                            same_frontier_marks.insert(owner.clone());
+                        }
+                        if queued.insert(owner.clone()) {
+                            if timing_enabled {
+                                let next_frontier = current_frontier.saturating_add(1);
+                                frontier_depths.insert(owner.clone(), next_frontier);
+                                if frontier_sizes.len() <= next_frontier {
+                                    frontier_sizes.resize(next_frontier + 1, 0);
+                                }
+                                frontier_sizes[next_frontier] += 1;
+                            }
+                            pending.push(owner);
+                        } else {
+                            stats.duplicate_pending_suppressed += 1;
+                        }
                     }
                 }
             }
@@ -2145,7 +2172,7 @@ impl InstanceGraph {
 
     /// Walk ONE owner's body. The only producer of a [`Contribution`], so a
     /// full build and an incremental re-walk cannot record different facts.
-    fn expand(&mut self, ws: &Workspace, owner: &Owner, timing_enabled: bool) -> Contribution {
+    fn expand(&self, ws: &Workspace, owner: &Owner, timing_enabled: bool) -> Contribution {
         let mut out = Contribution::default();
         match owner {
             Owner::AlwaysEmitted(module, body_owner) => {
@@ -3493,12 +3520,25 @@ impl InstanceGraph {
         self.index.trees.values().map(|a| a.total - 1).sum()
     }
 
+    fn diagnostic_key(&self, instance: &Instance) -> ((u32, u32), Vec<String>) {
+        (
+            DeclKey(instance.func).raw(),
+            instance.args.iter().map(|arg| self.interner.canonical(*arg)).collect(),
+        )
+    }
+
     /// Every rejection: the per-body ones and the whole-graph ones.
     pub fn rejections(&self) -> impl Iterator<Item = &Rejection> {
-        self.contributions
+        // Type IDs reflect parallel interning order. Preserve declaration and
+        // per-body rejection order, but order specializations by logical type.
+        let mut ordinary: Vec<_> = self.contributions
             .values()
             .flat_map(|c| c.rejections.iter())
-            .chain(self.graph_rejections.iter())
+            .collect();
+        ordinary.sort_by_cached_key(|rejection| self.diagnostic_key(&rejection.at));
+        let mut graph: Vec<_> = self.graph_rejections.iter().collect();
+        graph.sort_by_cached_key(|rejection| self.diagnostic_key(&rejection.at));
+        ordinary.into_iter().chain(graph)
     }
 
     /// The erased catalogue: the entries the WALK named plus the ones opaque
@@ -4611,7 +4651,7 @@ fn search_changing_instance_recursion<'a>(
     successors: impl Fn(&Instance) -> &'a [Edge],
 ) -> (usize, Vec<RecursionFinding>) {
     order.retain(|i| g.index.decls.get(&i.func).is_some_and(|n| *n > 1));
-    order.sort();
+    order.sort_by_cached_key(|instance| g.diagnostic_key(instance));
     let mut found = Vec::new();
     let mut already = BTreeSet::new();
     let mut starts = 0;
