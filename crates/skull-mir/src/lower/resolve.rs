@@ -209,6 +209,11 @@ impl Builder<'_> {
             }
             root = base;
         }
+        let indexed = if let Expr::Index { base, index } = self.body.expr_arena[root] {
+            self.vec_strided_elem_of(base)?.map(|elem| (base, index, elem))
+        } else {
+            None
+        };
         let (binding, boxed_read, boxed) = match self.body.expr_arena[root] {
             Expr::Var(binding) if self.group_binds.contains_key(&raw(binding)) => {
                 (Some(binding), None, None)
@@ -237,6 +242,7 @@ impl Builder<'_> {
             Expr::FieldAccess { .. } if reference_field.is_some() => {
                 (None, None, Some(reference_field.unwrap().2))
             }
+            Expr::Index { .. } if indexed.is_some() => (None, None, None),
             _ => return Ok(None),
         };
         let mut path = Vec::new();
@@ -250,7 +256,8 @@ impl Builder<'_> {
         }
         path.reverse();
         let boxed_shape = boxed.map(|name| self.nominal_rep_shape_required(name, false)).transpose()?;
-        let shape = match &boxed_shape {
+        let indexed_shape = indexed.map(|(_, _, elem)| self.column_shape(elem)).transpose()?;
+        let shape = match boxed_shape.as_ref().or(indexed_shape.as_ref()) {
             Some(shape) => shape,
             None => &self.group_binds[&raw(binding.expect("grouped projection"))].1,
         };
@@ -279,7 +286,21 @@ impl Builder<'_> {
         } else {
             None
         };
-        let leaves = if let Some(shape) = boxed_shape {
+        let leaves = if let Some((base, index, elem)) = indexed {
+            let shape = indexed_shape.as_ref().expect("indexed projection shape");
+            // Keep the index's source identity and evaluate both operands once,
+            // at the original read point, before any later argument can mutate it.
+            let outer = self.cur_span.replace(self.body.expr_spans[root]);
+            let outer_expr = self.cur_expr.replace(root);
+            let leaves = (|| {
+                let (vec, _) = self.lower_index_base(base)?;
+                let index = self.lower_expr(index)?;
+                Ok::<_, CompilerError>(self.strided_element_leaves(vec, index, elem, shape, range))
+            })();
+            self.cur_span = outer;
+            self.cur_expr = outer_expr;
+            leaves?
+        } else if let Some(shape) = boxed_shape {
             let value = if let Some(read) = boxed_read {
                 self.emit_cur(read)
             } else {

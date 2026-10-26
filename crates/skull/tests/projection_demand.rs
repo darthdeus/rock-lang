@@ -223,3 +223,83 @@ fn main() {
     assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "enum_projection_snapshots"),
         "7\n1\n13\n7\n17\ntrue\n5\ntrue");
 }
+
+#[test]
+fn indexed_strided_projection_lowers_only_selected_lanes() {
+    use skull_mir::mir::{ContainerKind, Inst};
+    let ws = crate::common::ws_with_stdlib(r#"
+nobox value Row { a: int, b: int, c: int, d: int, e: int, f: int }
+fn selected(rows: [Row], index: int) -> int { rows[index].b }
+fn main() { print(selected([Row { a: 1, b: 2, c: 3, d: 4, e: 5, f: 6 }], 0)) }
+"#);
+    let roots = skull::mir_emit::emission_roots(&ws, None);
+    let mut graph = skull::instance_graph::build(&ws, roots, false);
+    let bodies = skull::concrete_body::build(&ws, &mut graph);
+    let plan = bodies.plans.iter().find(|(inst, _)| {
+        ws.module(inst.func.module).functions[inst.func.func].name.as_str() == "selected"
+    }).expect("selected has no plan").1;
+    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(graph.interner().clone());
+    let mir = skull_mir::lower::lower_instance_with_plans(&ws, &scx, plan, &bodies.plans)
+        .expect("lower selected");
+    let reads = mir.insts.iter().filter(|(_, inst)| matches!(inst,
+        Inst::Index { kind: ContainerKind::VecStrideSlot, .. })).count();
+    assert_eq!(reads, 1, "scalar field projection expanded sibling lanes before cleanup");
+    assert_eq!(mir.insts.iter().filter(|(_, inst)| matches!(inst, Inst::VecCheckedIndex { .. })).count(),
+        1, "projection must retain exactly one element bounds check");
+}
+
+#[test]
+fn indexed_strided_projection_keeps_read_order_snapshots_and_bounds() {
+    let source = r#"
+nobox value Pair { x: int, y: int }
+value Boxed { n: int }
+enum Choice { Empty, Pair(Pair), Text(string) }
+nobox value Row {
+    spare: int = 99, point: Pair, optional: Pair?, boxed: Boxed?,
+    choice: Choice, flag: bool = false, text: string = "hello"
+}
+struct State { rows: [Row], calls: int = 0 }
+fn receiver(s: State) -> [Row] { s.calls = s.calls * 10 + 1; return s.rows }
+fn index(s: State) -> int { s.calls = s.calls * 10 + 2; return 0 }
+fn mutate(s: State) -> int {
+    s.rows[0].point.x = 90
+    s.rows[0].optional = null
+    s.rows[0].boxed = Boxed { n: 100 }
+    s.rows[0].choice = Choice::Empty
+    return 1
+}
+fn observe(p: Pair, ignored: int) -> int { p.x }
+@nomangle fn invalid(index: int) -> int {
+    let rows: [Row] = []
+    return rows[index].point.x
+}
+fn main() {
+    let s = State { rows: [Row { point: Pair { x: 3, y: 5 },
+        optional: Pair { x: 7, y: 11 }, boxed: Boxed { n: 13 },
+        choice: Choice::Pair(Pair { x: 17, y: 19 }) }] }
+    print(receiver(s)[index(s)].point.y)
+    print(s.calls)
+    let optional = s.rows[0].optional
+    let boxed = s.rows[0].boxed
+    let choice = s.rows[0].choice
+    print(observe(s.rows[0].point, mutate(s)))
+    print(s.rows[0].point.x)
+    print(optional?.y ?? -1)
+    print(boxed?.n ?? -1)
+    print(match choice { Choice::Pair(p) => p.y, _ => -1 })
+    print(s.rows[0].optional == null)
+    print(s.rows[0].flag)
+    print(s.rows[0].text)
+}
+"#;
+    let lua = emit_module(source);
+    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "indexed_projection_semantics"),
+        "5\n12\n3\n90\n11\n13\n19\ntrue\nfalse\nhello");
+    let checks = run_luajit(&format!(r#"{lua}
+for _, i in ipairs({{-1, 0}}) do
+    local ok, err = pcall(invalid, i)
+    print(ok, tostring(err):find("Vec index out of bounds", 1, true) ~= nil)
+end
+"#), "indexed_projection_bounds");
+    assert_eq!(checks, "false\ttrue\nfalse\ttrue");
+}

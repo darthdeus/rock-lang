@@ -46,6 +46,22 @@ impl Builder<'_> {
         elem: ColumnElem,
     ) -> Result<ValueBundle, CompilerError> {
         let shape = self.column_shape(elem)?;
+        let leaves = self.strided_element_leaves(vec, index, elem, &shape, 0..shape.leaf_count());
+        let mut idx = 0;
+        Ok(ValueBundle::new(
+            elem.representation(),
+            self.rebuild_from_leaves(&shape, &leaves, &mut idx),
+        ))
+    }
+
+    pub(crate) fn strided_element_leaves(
+        &mut self,
+        vec: Idx<Inst>,
+        index: Idx<Inst>,
+        elem: ColumnElem,
+        shape: &ValueShape,
+        range: std::ops::Range<usize>,
+    ) -> Vec<Idx<Inst>> {
         let stride = shape.leaf_count();
         let raw = self.strided_stores_raw(elem);
         let slot = self.checked_column_index(vec, index);
@@ -53,26 +69,19 @@ impl Builder<'_> {
             base: vec,
             field: Ustr::from("_data"),
         });
-        let leaves = (0..stride)
-            .map(|offset| {
-                let at = self.strided_slot_index(slot, stride, offset);
-                let stored = self.emit_cur(Inst::Index {
-                    base: data,
-                    index: at,
-                    kind: ContainerKind::VecStrideSlot,
-                });
-                if raw {
-                    stored
-                } else {
-                    self.emit_cur(Inst::VecStrideFalseToNil(stored))
-                }
-            })
-            .collect::<Vec<_>>();
-        let mut idx = 0;
-        Ok(ValueBundle::new(
-            elem.representation(),
-            self.rebuild_from_leaves(&shape, &leaves, &mut idx),
-        ))
+        range.map(|offset| {
+            let at = self.strided_slot_index(slot, stride, offset);
+            let stored = self.emit_cur(Inst::Index {
+                base: data,
+                index: at,
+                kind: ContainerKind::VecStrideSlot,
+            });
+            if raw {
+                stored
+            } else {
+                self.emit_cur(Inst::VecStrideFalseToNil(stored))
+            }
+        }).collect()
     }
 
     pub(crate) fn strided_element_store(
