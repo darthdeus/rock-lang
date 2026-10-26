@@ -1775,6 +1775,15 @@ fn a_multi_return_forward_delivers_the_same_values_under_every_shape() {
 /// components populated from this harness's own instance graph exactly as
 /// `skull::mir_emit` populates them from the whole-program one.
 fn emit_clean_bound(src: &str, fn_name: &str, mode: CalleeBindingMode) -> String {
+    emit_clean_bound_checked(src, fn_name, mode, |_, _| {})
+}
+
+fn emit_clean_bound_checked(
+    src: &str,
+    fn_name: &str,
+    mode: CalleeBindingMode,
+    check: impl FnOnce(&bone_semantic::inference::Workspace, &skull_mir::mir::MirFunc),
+) -> String {
     use std::sync::LazyLock;
     static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
         rock_stdlib::stdlib_files()
@@ -1799,6 +1808,7 @@ fn emit_clean_bound(src: &str, fn_name: &str, mode: CalleeBindingMode) -> String
     let (mut func, interner, graph) = common::lower_test_ref_with_graph(&ws, mid, fid)
         .unwrap_or_else(|e| panic!("lower failed: {}", e.message));
     skull_transform::cleanup(&mut func).unwrap();
+    check(&ws, &func);
     let mut ctx = CodegenCtx::new(&ws);
     ctx.set_callee_binding(mode);
     ctx.set_recursive_callees(common::cycle_callees(&graph));
@@ -1811,6 +1821,47 @@ fn emit_clean_bound(src: &str, fn_name: &str, mode: CalleeBindingMode) -> String
         Some(plan) => format!("{lua}{}", plan.bind_line()),
         None => lua,
     }
+}
+
+#[test]
+fn callee_binding_ignores_calls_removed_by_cleanup() {
+    let src = "fn discarded(a: int) -> int { a + 2 }\nfn live(a: int) -> int { a + 1 }\nfn caller(a: int) -> int { if false { discarded(a) } else { live(a) } }";
+    let lua = emit_clean_bound_checked(src, "caller", CalleeBindingMode::Upvalue, |ws, func| {
+        use skull_mir::mir::Inst;
+        let is_discarded = |inst: &Inst| matches!(inst,
+            Inst::Call { func: callee, .. }
+                if ws.module(callee.module).functions[callee.func].name.as_str() == "discarded"
+        );
+        assert!(func.insts.iter().any(|(_, inst)| is_discarded(inst)),
+            "fixture must retain the discarded call in its arena");
+        assert!(!skull_mir::cfg::reverse_postorder(func, func.entry()).iter()
+            .flat_map(|bid| func.blocks[*bid].insts.iter())
+            .any(|id| is_discarded(&func.insts[*id])),
+            "cleanup must remove the call from emitted instructions");
+    });
+    assert!(lua.starts_with("__rock_mk_caller_int = function(live_int) return function("),
+        "only the live callee should consume a binding slot:\n{lua}");
+    assert!(!lua.contains("discarded_int"), "discarded call must not be bound:\n{lua}");
+    assert_eq!(
+        run_shaped_bound(src, "caller(7)", TailCallShape::All, CalleeBindingMode::Upvalue),
+        "8"
+    );
+}
+
+#[test]
+fn callee_binding_ignores_discarded_uint_helpers() {
+    let src = "fn checked(value: float, count: uint) -> uint { if false { (value as uint) << count } else { count } }";
+    let lua = emit_clean_bound_checked(src, "checked", CalleeBindingMode::Upvalue, |_, func| {
+        assert!(func.insts.iter().any(|(_, inst)| matches!(inst,
+            skull_mir::mir::Inst::FloatToUint(_))),
+            "fixture must retain the discarded conversion in its arena");
+    });
+    assert!(!lua.contains(skull_codegen_lua::CALLEE_FACTORY_PREFIX),
+        "discarded validators must not create a factory:\n{lua}");
+    assert_eq!(
+        run_shaped_bound(src, "checked(-1, 3)", TailCallShape::All, CalleeBindingMode::Upvalue),
+        "3"
+    );
 }
 
 /// Under the global-lookup shape the emitted definition is a bare

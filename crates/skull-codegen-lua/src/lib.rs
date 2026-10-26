@@ -1787,7 +1787,13 @@ pub fn callee_binding_plan(
     }
     let rank = ctx.scc_of(self_ref);
     let mut captures: Vec<String> = Vec::new();
-    for (id, inst) in func.insts.iter() {
+    let mut touches_state = false;
+    // Cleanup unlinks instructions without freeing arena slots. Match the
+    // emitted body's CFG so discarded calls and separate scopes use no slots.
+    let blocks = reverse_postorder(func, func.entry());
+    for id in blocks.iter().flat_map(|bid| func.blocks[*bid].insts.iter().copied()) {
+        let inst = &func.insts[id];
+        touches_state |= matches!(inst, Inst::Global(_) | Inst::StoreGlobal { .. });
         match inst {
             Inst::IntToUint(x) | Inst::FloatToUint(x)
                 if checked_u32_constant(func, *x).is_none() =>
@@ -1834,9 +1840,7 @@ pub fn callee_binding_plan(
     }
     // A body that touches a mutable global captures the two Session cells as
     // upvalues too, against the same 60-upvalue limit the callees count toward.
-    let reserved = if ctx.state_cell()
-        && func.insts.iter().any(|(_, inst)| matches!(inst, Inst::Global(_) | Inst::StoreGlobal { .. }))
-    {
+    let reserved = if ctx.state_cell() && touches_state {
         2
     } else {
         0
