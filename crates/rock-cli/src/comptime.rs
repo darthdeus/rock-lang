@@ -354,8 +354,6 @@ pub(crate) fn resolve_checked_inputs(
 /// Content identity of the running compiler image, shared by source inputs
 /// and hosts' pre-compile cache keys. Never substitutes a checkout revision.
 pub fn compiler_identity() -> Result<String> {
-    use sha2::{Digest, Sha256};
-    use std::io::Read;
     static IDENTITY: OnceLock<Result<String, String>> = OnceLock::new();
     IDENTITY.get_or_init(|| {
         let image = rock_host::process_management::current_executable_image().map_err(|e| e.to_string())?;
@@ -365,19 +363,238 @@ pub fn compiler_identity() -> Result<String> {
         if before.modified().map_err(|e| e.to_string())? > compiler_process_started()? {
             return Err("compiler image changed after process start".into());
         }
-        let mut hash = Sha256::new();
-        let mut buffer = [0u8; 65536];
-        loop {
-            let count = file.read(&mut buffer).map_err(|e| e.to_string())?;
-            if count == 0 { break; }
-            hash.update(&buffer[..count]);
-        }
+        let identity = hash_compiler_image(&mut file).map_err(|e| e.to_string())?;
         let after = file.metadata().map_err(|e| e.to_string())?;
         if before.len() != after.len() || before.modified().ok() != after.modified().ok() {
             return Err("compiler image changed while hashing".into());
         }
-        Ok(format!("{:x}", hash.finalize()))
+        Ok(identity)
     }).clone().map_err(anyhow::Error::msg)
+}
+
+/// Content identity of a compiler image at `image`, using the same
+/// definition as [`compiler_identity`]. Hosts keying a compiler binary they
+/// spawn (rather than the running one) must use this, not a plain file hash,
+/// so both routes name the same compiler identically.
+pub fn compiler_image_identity(image: &Path) -> Result<String> {
+    let mut file = std::fs::File::open(image)?;
+    let before = file.metadata()?;
+    let identity = hash_compiler_image(&mut file)?;
+    let after = file.metadata()?;
+    if before.len() != after.len() || before.modified().ok() != after.modified().ok() {
+        anyhow::bail!("compiler image changed while hashing");
+    }
+    Ok(identity)
+}
+
+/// Hash the parts of a compiler image that can affect execution. An ELF
+/// image (Linux) hashes only its `PT_LOAD` segments: everything the loader
+/// maps, headers included in segment fields, with `p_memsz` covering BSS.
+/// Bytes outside load segments -- DWARF debug sections, `.symtab`, section
+/// headers -- cannot change what the compiler does, and on a Linux release
+/// binary they are ~94% of the file (hundreds of ms of hashing per compile).
+/// Debug info derives from the loaded code, so any compiler code change
+/// still changes this identity. Non-ELF images (e.g. Mach-O, where debug
+/// data already lives outside the executable) hash the whole file, as
+/// before. Any ELF inconsistency also falls back to the whole file rather
+/// than guessing.
+fn hash_compiler_image<R: std::io::Read + std::io::Seek>(image: &mut R) -> std::io::Result<String> {
+    use sha2::{Digest, Sha256};
+    use std::io::SeekFrom;
+    let mut hash = Sha256::new();
+    hash.update(b"rock-compiler-identity-v2\0");
+    let mut buffer = [0u8; 65536];
+    match elf_load_segments(image)? {
+        Some(segments) => {
+            for segment in segments {
+                hash.update(segment.flags.to_le_bytes());
+                hash.update(segment.vaddr.to_le_bytes());
+                hash.update(segment.filesz.to_le_bytes());
+                hash.update(segment.memsz.to_le_bytes());
+                image.seek(SeekFrom::Start(segment.offset))?;
+                let mut remaining = segment.filesz;
+                while remaining > 0 {
+                    let want = remaining.min(buffer.len() as u64) as usize;
+                    let count = image.read(&mut buffer[..want])?;
+                    if count == 0 {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::UnexpectedEof,
+                            "compiler image ends inside a load segment",
+                        ));
+                    }
+                    hash.update(&buffer[..count]);
+                    remaining -= count as u64;
+                }
+            }
+        }
+        None => {
+            image.seek(SeekFrom::Start(0))?;
+            loop {
+                let count = image.read(&mut buffer)?;
+                if count == 0 { break; }
+                hash.update(&buffer[..count]);
+            }
+        }
+    }
+    Ok(format!("{:x}", hash.finalize()))
+}
+
+struct ElfLoadSegment {
+    flags: u32,
+    vaddr: u64,
+    offset: u64,
+    filesz: u64,
+    memsz: u64,
+}
+
+/// `PT_LOAD` segments of an ELF image in file order, or `None` for a
+/// non-ELF or inconsistent image (the caller then hashes the whole file).
+fn elf_load_segments<R: std::io::Read + std::io::Seek>(image: &mut R) -> std::io::Result<Option<Vec<ElfLoadSegment>>> {
+    use std::io::SeekFrom;
+    let file_len = image.seek(SeekFrom::End(0))?;
+    image.seek(SeekFrom::Start(0))?;
+    let mut ident_buf = [0u8; 64];
+    let read = image.read(&mut ident_buf)?;
+    let ident = &ident_buf[..read];
+    if read < 16 || ident[..4] != *b"\x7fELF" {
+        return Ok(None);
+    }
+    let is64 = match ident[4] { 1 => false, 2 => true, _ => return Ok(None) };
+    let little = match ident[5] { 1 => true, 2 => false, _ => return Ok(None) };
+    let u16_at = |b: &[u8], at: usize| -> Option<u64> {
+        let v = b.get(at..at + 2)?;
+        Some(if little { u16::from_le_bytes([v[0], v[1]]) } else { u16::from_be_bytes([v[0], v[1]]) } as u64)
+    };
+    let u32_at = |b: &[u8], at: usize| -> Option<u64> {
+        let v = b.get(at..at + 4)?;
+        Some(if little { u32::from_le_bytes([v[0], v[1], v[2], v[3]]) } else { u32::from_be_bytes([v[0], v[1], v[2], v[3]]) } as u64)
+    };
+    let u64_at = |b: &[u8], at: usize| -> Option<u64> {
+        if is64 {
+            let v = b.get(at..at + 8)?;
+            Some(if little { u64::from_le_bytes(v.try_into().ok()?) } else { u64::from_be_bytes(v.try_into().ok()?) })
+        } else {
+            u32_at(b, at)
+        }
+    };
+    let (phoff, phentsize, phnum) = if is64 {
+        match (u64_at(&ident, 32), u16_at(&ident, 54), u16_at(&ident, 56)) {
+            (Some(a), Some(b), Some(c)) => (a, b, c),
+            _ => return Ok(None),
+        }
+    } else {
+        match (u32_at(&ident, 28), u16_at(&ident, 42), u16_at(&ident, 44)) {
+            (Some(a), Some(b), Some(c)) => (a, b, c),
+            _ => return Ok(None),
+        }
+    };
+    // PN_XNUM (0xffff) moves the count into section header 0; not expected
+    // for a compiler binary, and the whole-file fallback stays correct.
+    let min_phdr = if is64 { 56 } else { 32 };
+    if phnum == 0 || phnum == 0xffff || phentsize < min_phdr {
+        return Ok(None);
+    }
+    let Some(ph_end) = phnum.checked_mul(phentsize).and_then(|span| phoff.checked_add(span)) else {
+        return Ok(None);
+    };
+    if ph_end > file_len {
+        return Ok(None);
+    }
+    let mut phdr = vec![0u8; min_phdr as usize];
+    let mut segments = Vec::new();
+    for index in 0..phnum {
+        image.seek(SeekFrom::Start(phoff + index * phentsize))?;
+        image.read_exact(&mut phdr)?;
+        if u32_at(&phdr, 0) != Some(1) {
+            continue; // not PT_LOAD
+        }
+        let fields = if is64 {
+            (u32_at(&phdr, 4), u64_at(&phdr, 8), u64_at(&phdr, 16), u64_at(&phdr, 32), u64_at(&phdr, 40))
+        } else {
+            (u32_at(&phdr, 24), u64_at(&phdr, 4), u64_at(&phdr, 8), u64_at(&phdr, 16), u64_at(&phdr, 20))
+        };
+        let (Some(flags), Some(offset), Some(vaddr), Some(filesz), Some(memsz)) = fields else {
+            return Ok(None);
+        };
+        let segment = ElfLoadSegment { flags: flags as u32, vaddr, offset, filesz, memsz };
+        if segment.offset.checked_add(segment.filesz).is_none_or(|end| end > file_len) {
+            return Ok(None);
+        }
+        segments.push(segment);
+    }
+    if segments.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(segments))
+}
+
+#[cfg(test)]
+mod compiler_image_tests {
+    use super::hash_compiler_image;
+    use std::io::Cursor;
+
+    fn identity(bytes: &[u8]) -> String {
+        hash_compiler_image(&mut Cursor::new(bytes.to_vec())).unwrap()
+    }
+
+    /// Minimal ELF64-LE image: one PT_LOAD over "CODECODE" at offset 128,
+    /// then trailing bytes outside every load segment (the debug stand-in).
+    fn elf_image() -> Vec<u8> {
+        let mut bytes = vec![0u8; 128];
+        bytes[..4].copy_from_slice(b"\x7fELF");
+        bytes[4] = 2; // 64-bit
+        bytes[5] = 1; // little-endian
+        bytes[32..40].copy_from_slice(&64u64.to_le_bytes()); // e_phoff
+        bytes[54..56].copy_from_slice(&56u16.to_le_bytes()); // e_phentsize
+        bytes[56..58].copy_from_slice(&1u16.to_le_bytes()); // e_phnum
+        let ph = 64;
+        bytes[ph..ph + 4].copy_from_slice(&1u32.to_le_bytes()); // PT_LOAD
+        bytes[ph + 4..ph + 8].copy_from_slice(&5u32.to_le_bytes()); // flags R+X
+        bytes[ph + 8..ph + 16].copy_from_slice(&128u64.to_le_bytes()); // offset
+        bytes[ph + 16..ph + 24].copy_from_slice(&0x400000u64.to_le_bytes()); // vaddr
+        bytes[ph + 32..ph + 40].copy_from_slice(&8u64.to_le_bytes()); // filesz
+        bytes[ph + 40..ph + 48].copy_from_slice(&16u64.to_le_bytes()); // memsz
+        bytes.extend_from_slice(b"CODECODE");
+        bytes.extend_from_slice(b"DEBUGDEBUG");
+        bytes
+    }
+
+    #[test]
+    fn elf_identity_ignores_bytes_outside_load_segments() {
+        let base = elf_image();
+        let mut debug_changed = base.clone();
+        *debug_changed.last_mut().unwrap() = b'X';
+        assert_eq!(identity(&base), identity(&debug_changed));
+        let mut longer_debug = base.clone();
+        longer_debug.extend_from_slice(b"MOREDEBUG");
+        assert_eq!(identity(&base), identity(&longer_debug));
+    }
+
+    #[test]
+    fn elf_identity_tracks_loaded_bytes_and_segment_shape() {
+        let base = elf_image();
+        let mut code_changed = base.clone();
+        code_changed[128] = b'X';
+        assert_ne!(identity(&base), identity(&code_changed));
+        let mut memsz_changed = base.clone();
+        memsz_changed[64 + 40..64 + 48].copy_from_slice(&24u64.to_le_bytes());
+        assert_ne!(identity(&base), identity(&memsz_changed));
+    }
+
+    #[test]
+    fn non_elf_and_broken_elf_fall_back_to_whole_file() {
+        assert_ne!(identity(b"plain bytes A"), identity(b"plain bytes B"));
+        assert_eq!(identity(b"plain bytes"), identity(b"plain bytes"));
+        // Truncated ELF header, and a phdr table past EOF: no panic, and a
+        // trailing change still moves the whole-file fallback identity.
+        let truncated = &elf_image()[..20];
+        let _ = identity(truncated);
+        let mut past_eof = elf_image();
+        past_eof[32..40].copy_from_slice(&4096u64.to_le_bytes());
+        let mut past_eof_changed = past_eof.clone();
+        *past_eof_changed.last_mut().unwrap() = b'X';
+        assert_ne!(identity(&past_eof), identity(&past_eof_changed));
+    }
 }
 
 #[cfg(target_os = "macos")]
