@@ -556,7 +556,7 @@ fn term_cell_uses(
 /// in detached nested CFGs are forced to a unique color and are never emitted
 /// with their enclosing body.
 pub fn color_cells(func: &MirFunc) -> Vec<u32> {
-    color_cells_with_inlined_loads(func, None)
+    color_cells_with_analysis(&CellAnalysis::new(func), None, &[])
 }
 
 /// Cells held by reference for the whole body -- a closure's params, any cell
@@ -564,9 +564,8 @@ pub fn color_cells(func: &MirFunc) -> Vec<u32> {
 /// as a dense `raw(cell) -> bool`. They never share a color and are never
 /// nil-killed: the closure reads the local by identity, so a kill would be
 /// visible through it.
-pub(crate) fn pinned_cells(func: &MirFunc) -> Vec<bool> {
-    let top_set: HashSet<Idx<Block>> =
-        reachable_blocks_from(func, func.entry()).into_iter().collect();
+fn pinned_cells(func: &MirFunc, top: &[Idx<Block>]) -> Vec<bool> {
+    let top_set: HashSet<Idx<Block>> = top.iter().copied().collect();
     let mut pinned = vec![false; func.cells.len()];
     for c in collect_lambda_params(func) {
         pinned[raw(c)] = true;
@@ -591,18 +590,31 @@ pub(crate) fn pinned_cells(func: &MirFunc) -> Vec<bool> {
     pinned
 }
 
-pub(crate) fn color_cells_with_inlined_loads(func: &MirFunc, inline: Option<&[bool]>) -> Vec<u32> {
-    color_cells_with_inlined_loads_and_pinned_cells(func, inline, &[])
+/// Cell facts shared by all consumers of one immutable emitted body.
+/// Borrowing the body prevents mutation while these facts are in use.
+pub(crate) struct CellAnalysis<'a> {
+    func: &'a MirFunc,
+    top: Vec<Idx<Block>>,
+    pub(crate) pinned: Vec<bool>,
 }
 
-/// Like [`color_cells_with_inlined_loads`], with additional cells that the
-/// emitter uses implicitly and therefore cannot see in ordinary MIR liveness.
-pub(crate) fn color_cells_with_inlined_loads_and_pinned_cells(
-    func: &MirFunc,
+impl<'a> CellAnalysis<'a> {
+    pub(crate) fn new(func: &'a MirFunc) -> Self {
+        let top = reachable_blocks_from(func, func.entry());
+        let pinned = pinned_cells(func, &top);
+        Self { func, top, pinned }
+    }
+}
+
+/// Color cells using the body's shared facts, plus any cells the emitter
+/// references implicitly (such as a coroutine's frame parameter).
+pub(crate) fn color_cells_with_analysis(
+    analysis: &CellAnalysis<'_>,
     inline: Option<&[bool]>,
     extra_pinned: &[Idx<Cell>],
 ) -> Vec<u32> {
-    let top: Vec<Idx<Block>> = reachable_blocks_from(func, func.entry());
+    let func = analysis.func;
+    let top = &analysis.top;
     let n = top.len();
     // Dense block -> top-index (raw-id keyed; usize::MAX = not a top block).
     let mut pos = vec![usize::MAX; func.blocks.len()];
@@ -610,7 +622,7 @@ pub(crate) fn color_cells_with_inlined_loads_and_pinned_cells(
         pos[raw(b)] = i;
     }
 
-    let mut pinned = pinned_cells(func);
+    let mut pinned = analysis.pinned.clone();
     for &cell in extra_pinned {
         pinned[raw(cell)] = true;
     }
@@ -674,7 +686,7 @@ pub(crate) fn color_cells_with_inlined_loads_and_pinned_cells(
     // Predecessor CSR over scope blocks: `pred_list[pred_off[si]..pred_off[si+1]]`
     // are the scope-indices that have `top[si]` as a successor.
     let mut pred_off = vec![0u32; n + 1];
-    for &b in &top {
+    for &b in top {
         successors(&func.blocks[b].term, |s| {
             let si = pos[raw(s)];
             if si != usize::MAX {
@@ -1096,7 +1108,7 @@ pub(crate) fn nil_kills(
     };
 
     // Per-block upward-exposed uses and defs, then the same worklist liveness
-    // as `color_cells_with_inlined_loads`, over the slot space.
+    // as `color_cells_with_analysis`, over the slot space.
     let mut use_set: Vec<BitSet> = vec![BitSet::new(s_count); n];
     let mut def_set: Vec<BitSet> = vec![BitSet::new(s_count); n];
     for (bi, &b) in scope.iter().enumerate() {

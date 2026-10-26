@@ -540,21 +540,13 @@ thread_local! {
 /// `regalloc::color_cells`, charged to the `REGALLOC_TIME` accumulator (so the
 /// backend-stats regalloc/stringify split counts cell coloring as regalloc, not
 /// stringify — it is the second half of register allocation).
-fn color_cells_timed(func: &MirFunc, inlinable: &[bool]) -> Vec<u32> {
-    color_cells_timed_with_pins(func, inlinable, &[])
-}
-
-fn color_cells_timed_with_pins(
-    func: &MirFunc,
+fn color_cells_timed(
+    analysis: &regalloc::CellAnalysis<'_>,
     inlinable: &[bool],
     extra_pinned: &[Idx<Cell>],
 ) -> Vec<u32> {
     let t = bone_core::prelude::Instant::now();
-    let colors = regalloc::color_cells_with_inlined_loads_and_pinned_cells(
-        func,
-        Some(inlinable),
-        extra_pinned,
-    );
+    let colors = regalloc::color_cells_with_analysis(analysis, Some(inlinable), extra_pinned);
     REGALLOC_TIME.with(|c| c.set(c.get() + t.elapsed()));
     colors
 }
@@ -2308,7 +2300,10 @@ fn emit_named_framed_with_statics_impl(
     } else {
         call_arg_forwards(ws, func)
     };
-    let (mut inlinable, repeatable) = compute_inlinable(func, &rpo, params);
+    let t_cells = bone_core::prelude::Instant::now();
+    let cell_analysis = regalloc::CellAnalysis::new(func);
+    REGALLOC_TIME.with(|c| c.set(c.get() + t_cells.elapsed()));
+    let (mut inlinable, repeatable) = compute_inlinable(func, &rpo, params, &cell_analysis.pinned);
     for tail in tail_forwards.iter().flatten() {
         for &id in &tail.suppressed[1..] {
             inlinable[raw(id) as usize] = true;
@@ -2327,9 +2322,9 @@ fn emit_named_framed_with_statics_impl(
     // MIR cell use; reserve its parameter's color so a later local can never
     // overwrite the state table itself.
     let cell_colors = if let Some(frame) = frame {
-        color_cells_timed_with_pins(func, &inlinable, &[frame.s_cell])
+        color_cells_timed(&cell_analysis, &inlinable, &[frame.s_cell])
     } else {
-        color_cells_timed(func, &inlinable)
+        color_cells_timed(&cell_analysis, &inlinable, &[])
     };
     // Module-scope const hoisting: an all-constant `value` ctor is built ONCE as a
     // function-owned top-level global and referenced everywhere, instead of rebuilt
@@ -2396,6 +2391,7 @@ fn emit_named_framed_with_statics_impl(
         true,
         frame,
         &cell_colors,
+        &cell_analysis.pinned,
         &ctx.state_slots,
         &static_slots,
         &hoist,
@@ -3399,7 +3395,7 @@ fn always_inlinable(inst: &Inst) -> bool {
 /// which is what pushed functions holding a few wide values past LuaJIT's
 /// 250-slot frame limit. No later write can intervene, because the one write
 /// dominates every read. Narrow receives qualify too.
-fn single_receive_cells(func: &MirFunc, scope: &[Idx<Block>]) -> HashSet<Idx<Cell>> {
+fn single_receive_cells(func: &MirFunc, scope: &[Idx<Block>], pinned: &[bool]) -> HashSet<Idx<Cell>> {
     // cell -> (defs, the receive's block and position). Only a receive records
     // a position, so a cell qualifies iff its one def is one.
     let mut defs: rustc_hash::FxHashMap<Idx<Cell>, (u32, Option<(Idx<Block>, usize)>)> =
@@ -3426,7 +3422,6 @@ fn single_receive_cells(func: &MirFunc, scope: &[Idx<Block>]) -> HashSet<Idx<Cel
             }
         }
     }
-    let pinned = regalloc::pinned_cells(func);
     let captured = |cell: Idx<Cell>| {
         func.closure_env_plans
             .values()
@@ -3466,6 +3461,7 @@ fn compute_inlinable(
     func: &MirFunc,
     scope: &[Idx<Block>],
     params: &[Idx<Cell>],
+    pinned: &[bool],
 ) -> (Vec<bool>, Vec<bool>) {
     // Dense side-tables keyed by raw inst id (no hashing): use count, and the
     // block of the (single) use and of the def. `NONE` = unset. Insts outside
@@ -3519,7 +3515,7 @@ fn compute_inlinable(
             use_block[k] = br;
         });
     }
-    let received = single_receive_cells(func, scope);
+    let received = single_receive_cells(func, scope, pinned);
     // Dense `raw(inst) -> bool` (no hashing); probed per operand in `write_opnd`
     // and per use in `color_values`'s liveness/interference loops.
     let mut inl = vec![false; ni];
@@ -3601,6 +3597,7 @@ fn render_scope(
     is_top: bool,
     frame: Option<&FrameCtx>,
     cell_colors: &[u32],
+    pinned: &[bool],
     state_slots: &HashMap<ustr::Ustr, u32>,
     static_slots: &HashMap<ustr::Ustr, String>,
     hoist: &HashMap<Idx<Inst>, u32>,
@@ -3684,7 +3681,7 @@ fn render_scope(
             .collect();
         // A cell with no local of its own is excluded exactly like a pinned one:
         // both mean "this cell is not a killable `c<color>` in this body".
-        let mut excluded = regalloc::pinned_cells(func);
+        let mut excluded = pinned.to_vec();
         for (cid, _) in func.cells.iter() {
             if !cell_has_local(cid) {
                 excluded[raw(cid) as usize] = true;
