@@ -213,6 +213,16 @@ impl Builder<'_> {
             Expr::Var(binding) if self.group_binds.contains_key(&raw(binding)) => {
                 (Some(binding), None, None)
             }
+            Expr::Var(binding)
+                if self.binding_is_ref(binding)
+                    && self.binds.contains_key(&raw(binding))
+                    && !self.static_cells.contains_key(&raw(binding))
+                    && let Some(name) = self.leaf_table_base(root)? =>
+            {
+                // A borrowed leaf table uses the same selected-range reader as
+                // an owned box; expanding the whole ref retains unused reads.
+                (None, Some(Inst::Load(self.binds[&raw(binding)])), Some(name))
+            }
             Expr::Var(binding) => {
                 let Some(name) = self.boxed_value_local(binding, root) else { return Ok(None) };
                 (None, Some(Inst::Load(self.binds[&raw(binding)])), Some(name))

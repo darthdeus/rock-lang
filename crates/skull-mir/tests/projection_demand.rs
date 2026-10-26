@@ -111,3 +111,18 @@ fn boxed_global_projects_before_copy_expansion() {
     let whole = lower(source, "whole");
     assert_eq!(fields(&whole), 3, "whole global still snapshots every native leaf: {whole}");
 }
+
+#[test]
+fn leaf_table_reference_projects_before_expanding_siblings() {
+    let source = "nobox value Point { x: int, y: int }\n\
+        value State { armed: bool, point: Point, anchor: Point?, age: float }\n\
+        fn flag(p: ref State) -> bool { p.armed }\n\
+        fn point(p: ref State) -> Point { p.point }\n\
+        fn anchor(p: ref State) -> Point? { p.anchor }";
+    let flag = lower(source, "flag");
+    assert_eq!(fields(&flag), 1, "scalar ref projection must not expand siblings: {flag}");
+    let point = lower(source, "point");
+    assert_eq!(fields(&point), 2, "selected ref subtree snapshots both leaves: {point}");
+    let anchor = lower(source, "anchor");
+    assert_eq!(fields(&anchor), 3, "nullable ref subtree keeps presence and payload: {anchor}");
+}

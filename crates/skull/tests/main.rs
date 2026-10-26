@@ -329,3 +329,5 @@ mod argument_demand;
 mod optional_receiver_once;
 
 mod fresh_struct_projection;
+
+mod leaf_table_projection;
