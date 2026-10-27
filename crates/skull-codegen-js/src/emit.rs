@@ -67,8 +67,11 @@ fn collect_nested_code_identities(
 /// [`emit_with_closure`]; empty for the standalone [`emit_fn`] entry.
 #[derive(Clone, Default)]
 pub struct GlobalCtx {
-    /// Compiler-assigned Session slots, keyed by physical symbols rather than DefKeys.
+    /// Compiler-assigned storage keys, keyed by physical symbols rather than DefKeys.
     state: HashMap<ustr::Ustr, String>,
+    /// Set when an emitted body reads or writes a storage key: only then does
+    /// a closure need the globals runtime.
+    uses_storage: std::cell::Cell<bool>,
     /// Compile-time globals remain artifact constants in the backend runtime.
     const_globals: HashSet<ustr::Ustr>,
     /// A top-level fn used as a value -> its co-emitted JS name for direct calls.
@@ -1773,8 +1776,9 @@ impl Emitter<'_> {
                             "JS subset: write to unregistered global `{name}`"
                         )));
                     };
+                    self.globals.uses_storage.set(true);
                     let v = self.render_val(*value)?;
-                    self.push(&format!("__rock_state_set({}, {v});", js_string_lit(slot)?));
+                    self.push(&format!("__rock_globals[{}] = {v};", js_string_lit(slot)?));
                 }
                 // A checked Vec/NativeBuffer index whose value is UNUSED: its
                 // bounds check throws on OOB, so it must be emitted as a statement
@@ -2091,7 +2095,10 @@ impl Emitter<'_> {
             // Module-level `let`/`global` state: scoped so no body local can
             // collide with or shadow it.
             Inst::Global(name) => match self.globals.state.get(&symbol_of_key(*name)) {
-                Some(slot) => format!("__rock_state_get({})", js_string_lit(slot)?),
+                Some(slot) => {
+                    self.globals.uses_storage.set(true);
+                    format!("__rock_globals[{}]", js_string_lit(slot)?)
+                }
                 None if self.globals.enum_globals.contains(name) => name.to_string(),
                 None => return Err(err(format!("JS subset: global read `{name}` not supported"))),
             },
@@ -2954,10 +2961,6 @@ pub fn emit_with_closure(
         }
     }
     let init_lines = order_global_inits(&st.ginits, &st.lowered, &st.names, &st.gctx.state)?;
-    let has_state_transaction = !init_lines.is_empty();
-    if has_state_transaction {
-        out.push_str("if (typeof __rock_state_transaction_begin !== \"undefined\") __rock_state_transaction_begin();\n");
-    }
     // The init lines run LATE, after the code slots are staged (see below): a
     // global initialized from a lambda stores that lambda's CodeRef, so resolving
     // it needs the staged slot.
@@ -2999,10 +3002,13 @@ pub fn emit_with_closure(
         false,
         false,
     ));
-    if has_state_transaction && !code_artifact.entries.values().any(|entry| entry.escaping) {
-        out.push_str("if (typeof __rock_state_transaction_commit !== \"undefined\") __rock_state_transaction_commit();\n");
+    // A closure that reads and writes no mutable global or static runs without
+    // the globals runtime (the per-construct harnesses rely on it).
+    if !st.gctx.uses_storage.get() {
+        return Ok(out);
     }
-    Ok(out)
+    let global_layout = skull_mir::global_storage::global_layout_id(ws, &scx).map_err(err)?;
+    Ok(format!("{}{out}", globals_open_js(ws, &scx, &st.gctx.state, &global_layout)?))
 }
 
 /// One non-fn body (decorator definition, global initializer) plus its hoisted
@@ -3255,7 +3261,7 @@ pub fn emit_program(
         main_js_name,
         code_artifact: build.code_artifact,
         lifecycle_plan: build.lifecycle_plan,
-        state_schema: build.state_schema,
+        global_layout: build.global_layout,
     })
 }
 
@@ -3276,14 +3282,14 @@ pub fn emit_program_cached(
         .chunks
         .values()
         .flat_map(|chunk| chunk.statics.iter())
-        .map(|cell| (cell.cell, static_cell_key(cell)))
-        .collect();
+        .map(|cell| Ok((cell.cell, JsStaticBaseline::of(ws, scx.interner(), cell)?)))
+        .collect::<Result<_, CompilerError>>()?;
     let program = JsProgram {
         program: build.program.clone(),
         main_js_name,
         code_artifact: build.code_artifact.clone(),
         lifecycle_plan: build.lifecycle_plan.clone(),
-        state_schema: build.state_schema.clone(),
+        global_layout: build.global_layout.clone(),
     };
     let cache = JsEmitCache {
         build,
@@ -3666,26 +3672,8 @@ fn assemble_program_core(
         has_definition_plan,
         lifecycle_plan.census.declarations > 0,
     ));
-    let has_state_publication = code_artifact.entries.values().any(|entry| entry.escaping)
-        || has_definition_plan
-        || lifecycle_plan.census.declarations > 0;
-    if !has_state_publication {
-        out.push_str("if (typeof __rock_state_transaction_commit !== \"undefined\") __rock_state_transaction_commit();\n");
-    }
-
-    let state_schema = skull_mir::state_schema::StateSchema::collect(
-        ws,
-        scx,
-        &code_artifact,
-        &all_statics,
-    )
-    .map_err(|error| err(error.to_string()))?;
-    let program = format!(
-        "if (typeof __rock_state_transaction_begin !== \"undefined\") __rock_state_transaction_begin();\n__rock_state_publish_schema({:?});\n{}{}",
-        state_schema.schema_id,
-        state_schema_js(&state_schema)?,
-        out
-    );
+    let global_layout = skull_mir::global_storage::global_layout_id(ws, scx).map_err(err)?;
+    let program = format!("{}{out}", globals_open_js(ws, scx, &st.gctx.state, &global_layout)?);
 
     Ok(ProgramBuild {
         program,
@@ -3694,60 +3682,70 @@ fn assemble_program_core(
         spec_chunks,
         code_artifact,
         lifecycle_plan,
-        state_schema,
+        global_layout,
         const_chunks,
         const_order,
         const_init_lines,
     })
 }
 
-fn state_schema_js(
-    schema: &skull_mir::state_schema::StateSchema,
+/// Opens (or reattaches to) the global storage and publishes the directory.
+/// Every program runs this before any initializer.
+fn globals_open_js(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    state: &HashMap<ustr::Ustr, String>,
+    global_layout: &str,
 ) -> Result<String, CompilerError> {
-    let mut out = String::from("var __ROCK_STATE_SCHEMA = [");
-    for entry in &schema.entries {
-        let kind = match entry.kind {
-            skull_mir::state_schema::StateKind::Global => "global",
-            skull_mir::state_schema::StateKind::Static => "static",
-            skull_mir::state_schema::StateKind::CoroutineFrame => "coroutine_frame",
-            skull_mir::state_schema::StateKind::Storage => "storage",
-        };
-        let name = entry
-            .identity
-            .rsplit("::")
-            .next()
-            .unwrap_or(&entry.identity);
-        let physical = entry
-            .physical
-            .iter()
-            .map(|value| js_string_lit(value))
-            .collect::<Result<Vec<_>, _>>()?
-            .join(",");
-        let session_keys = skull_mir::state_schema::entry_state_keys(entry)
-            .iter()
-            .map(|value| js_string_lit(value))
-            .collect::<Result<Vec<_>, _>>()?
-            .join(",");
-        let owner = match entry.owner.as_deref() {
-            Some(owner) => js_string_lit(owner)?,
-            None => "null".to_string(),
-        };
-        let initializer_identity = entry
-            .initializer_identity
-            .map_or_else(|| "null".to_string(), |identity| identity.to_string());
+    Ok(format!(
+        "__rock_globals_open({});\n{}",
+        js_string_lit(global_layout)?,
+        globals_directory_js(ws, scx, state)?
+    ))
+}
+
+/// The global directory reflection and the `__G` bridge read.
+fn globals_directory_js(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    state_slots: &HashMap<ustr::Ustr, String>,
+) -> Result<String, CompilerError> {
+    let mut entries = Vec::new();
+    for module in ws.modules.iter().filter(|m| m.id != bone_semantic::prelude::ModuleId::builtin()) {
+        for (_, global) in module.globals.iter().filter(|(_, g)| !g.is_const) {
+            let identity = skull_mir::global_storage::global_identity(module.file, global.name);
+            let plan = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, global.ty)
+                .map_err(|_| err(format!("JS: global `{}` has no storage plan", global.name)))?;
+            let physical = skull_mir::global_storage::physical_leaf_names(&plan, global.name);
+            let slots = physical
+                .iter()
+                .map(|leaf| {
+                    state_slots.get(leaf).ok_or_else(|| {
+                        err(format!("JS: global `{}` has no storage slot for `{leaf}`", global.name))
+                    })
+                })
+                .map(|slot| js_string_lit(slot?))
+                .collect::<Result<Vec<_>, _>>()?
+                .join(",");
+            let physical = physical
+                .iter()
+                .map(|leaf| js_string_lit(leaf))
+                .collect::<Result<Vec<_>, _>>()?
+                .join(",");
+            let name = identity.rsplit("::").next().unwrap_or(&identity).to_string();
+            entries.push((identity, name, physical, slots));
+        }
+    }
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut out = String::from("__rock_globals_publish([");
+    for (identity, name, physical, slots) in entries {
         out.push_str(&format!(
-            "{{kind:{},name:{},identity:{},fingerprint:{},physical:[{}],session_keys:[{}],owner:{},initializer_identity:{}}},",
-            js_string_lit(kind)?,
-            js_string_lit(name)?,
-            js_string_lit(&entry.identity)?,
-            js_string_lit(&entry.fingerprint)?,
-            physical,
-            session_keys,
-            owner,
-            initializer_identity,
+            "{{name:{},identity:{},physical:[{physical}],slots:[{slots}]}},",
+            js_string_lit(&name)?,
+            js_string_lit(&identity)?,
         ));
     }
-    out.push_str("];\n__rock_state_install_global_bridge();\n");
+    out.push_str("]);\n");
     Ok(out)
 }
 
@@ -3801,8 +3799,8 @@ pub struct JsProgram {
     pub code_artifact: CodeArtifact,
     /// Compiler-owned lifecycle metadata shared with the Lua artifact.
     pub lifecycle_plan: skull_mir::lifecycle::LifecyclePlan,
-    /// Compiler-owned logical mutable-state inventory for the emitted artifact.
-    pub state_schema: skull_mir::state_schema::StateSchema,
+    /// The mutable-global layout fingerprint the program opens its storage with.
+    pub global_layout: String,
 }
 
 impl JsProgram {
@@ -3810,6 +3808,26 @@ impl JsProgram {
     /// full code-slot call helper (see [`crate::assemble_prelude`]).
     pub fn has_code_refs(&self) -> bool {
         self.code_artifact.entries.values().any(|entry| entry.escaping)
+    }
+}
+
+/// A `static` cell as the last build left it: its reload key and storage keys.
+#[derive(Clone)]
+struct JsStaticBaseline {
+    key: String,
+    value_slot: String,
+    done_slot: String,
+}
+
+impl JsStaticBaseline {
+    fn of(
+        ws: &Workspace,
+        interner: &skull_mir::monoty::MonoInterner,
+        cell: &skull_mir::mir::StaticCell,
+    ) -> Result<Self, CompilerError> {
+        let (value_slot, done_slot) =
+            skull_mir::global_storage::static_cell_storage_keys(ws, interner, cell).map_err(err)?;
+        Ok(Self { key: static_cell_key(cell), value_slot, done_slot })
     }
 }
 
@@ -3834,7 +3852,7 @@ struct ProgramBuild {
     spec_chunks: HashMap<Instance, JsSpecChunk>,
     code_artifact: CodeArtifact,
     lifecycle_plan: skull_mir::lifecycle::LifecyclePlan,
-    state_schema: skull_mir::state_schema::StateSchema,
+    global_layout: String,
     const_chunks: HashMap<ustr::Ustr, String>,
     const_order: Vec<ustr::Ustr>,
     const_init_lines: HashMap<ustr::Ustr, String>,
@@ -3844,7 +3862,7 @@ struct ProgramBuild {
 pub struct JsEmitCache {
     build: ProgramBuild,
     changed_since_full: HashSet<FuncRef>,
-    static_keys: HashMap<ustr::Ustr, String>,
+    static_keys: HashMap<ustr::Ustr, JsStaticBaseline>,
     shader_contributions:
         HashMap<(bone_semantic::prelude::ModuleId, bone_semantic::hir::BodyOwner), Vec<skull_mir::lower::ShaderPair>>,
     root_plan: JsRootPlan,
@@ -3881,8 +3899,8 @@ impl JsEmitCache {
         &self.build.code_artifact
     }
 
-    pub fn state_schema(&self) -> &skull_mir::state_schema::StateSchema {
-        &self.build.state_schema
+    pub fn global_layout(&self) -> &str {
+        &self.build.global_layout
     }
 
     pub fn lifecycle_plan(&self) -> &skull_mir::lifecycle::LifecyclePlan {
@@ -4014,7 +4032,7 @@ pub fn emit_overlay_with_span_edits(
     }
     update_js_session(ws, &mut cache.session, &root_plan.refs, reinferred, edits);
     let current = assemble_program_core(ws, &cache.scx, &root_plan.named, &cache.session)?;
-    if current.state_schema.schema_id != cache.build.state_schema.schema_id {
+    if current.global_layout != cache.build.global_layout {
         return Ok(JsReload::FullRequired);
     }
     if !cache.build.code_artifact.compatible_overlay(&current.code_artifact) {
@@ -4121,7 +4139,6 @@ pub fn emit_overlay_with_span_edits(
 
     let has_code_slots = current.code_artifact.entries.values().any(|entry| entry.escaping);
     let mut out = String::from("// skull JS incremental overlay\n");
-    out.push_str("if (typeof __rock_state_transaction_begin !== \"undefined\") __rock_state_transaction_begin();\n");
     out.push_str("try {\n");
     let affected_consts = affected_const_names(ws, &changed_consts, &current.const_order);
     for name in &current.const_order {
@@ -4138,25 +4155,44 @@ pub fn emit_overlay_with_span_edits(
     for fref in &changed_now {
         let Some(chunk) = current.chunks.get(fref) else { continue };
         for cell in &chunk.statics {
-            let key = static_cell_key(cell);
+            let base = JsStaticBaseline::of(ws, cache.scx.interner(), cell)?;
             if cache
                 .static_keys
                 .get(&cell.cell)
-                .is_none_or(|previous| *previous != key)
+                .is_none_or(|previous| previous.key != base.key)
                 && reset_cells.insert(cell.cell)
             {
-                let (value_slot, done_slot) = skull_mir::state_schema::static_cell_state_keys(
-                    ws,
-                    cache.scx.interner(),
-                    cell,
-                )
-                .map_err(|error| err(error.to_string()))?;
                 out.push_str(&format!(
-                    "__rock_state_set({value_slot:?}, undefined); __rock_state_set({done_slot:?}, false);\n"
+                    "delete __rock_globals[{}]; __rock_globals[{}] = false;\n",
+                    js_string_lit(&base.value_slot)?,
+                    js_string_lit(&base.done_slot)?,
                 ));
             }
-            cache.static_keys.insert(cell.cell, key);
+            cache.static_keys.insert(cell.cell, base);
         }
+    }
+    // A static an edit removed is held by no current chunk; its cells are
+    // dropped so they stop holding their last value.
+    let live: HashSet<ustr::Ustr> = current
+        .chunks
+        .values()
+        .flat_map(|chunk| chunk.statics.iter().map(|cell| cell.cell))
+        .collect();
+    let mut dropped: Vec<JsStaticBaseline> = Vec::new();
+    cache.static_keys.retain(|cell, base| {
+        let keep = live.contains(cell);
+        if !keep {
+            dropped.push(base.clone());
+        }
+        keep
+    });
+    dropped.sort_by(|a, b| a.value_slot.cmp(&b.value_slot));
+    for base in dropped {
+        out.push_str(&format!(
+            "delete __rock_globals[{}]; delete __rock_globals[{}];\n",
+            js_string_lit(&base.value_slot)?,
+            js_string_lit(&base.done_slot)?,
+        ));
     }
 
     let mut order: Vec<FuncRef> = cache.changed_since_full.iter().copied().collect();
@@ -4192,9 +4228,6 @@ pub fn emit_overlay_with_span_edits(
         false,
         current.lifecycle_plan.census.declarations > 0,
     ));
-    if !has_code_slots {
-        out.push_str("if (typeof __rock_state_transaction_commit !== \"undefined\") __rock_state_transaction_commit();\n");
-    }
     out.push_str("} catch (e) {\n");
     out.push_str("  __rock_code_slot_abort();\n");
     out.push_str("  throw e;\n");
@@ -4372,8 +4405,8 @@ impl<'a> WorklistState<'a> {
             .map(|(inst, realized)| (inst.clone(), realized.decl))
             .collect();
         let mut gctx = GlobalCtx::default();
-        gctx.state = skull_mir::state_schema::global_state_slots(ws, scx)
-            .map_err(|error| err(error.to_string()))?
+        gctx.state = skull_mir::global_storage::global_storage_keys(ws, scx)
+            .map_err(err)?
             .into_iter()
             .collect();
         gctx.const_globals = build_const_global_names(ws, scx);
@@ -4573,8 +4606,8 @@ fn register_statics(
     mf: &MirFunc,
     gctx: &mut GlobalCtx,
 ) -> Result<(), CompilerError> {
-    let slots = skull_mir::state_schema::static_state_slots(ws, interner, mf)
-        .map_err(|error| err(error.to_string()))?;
+    let slots = skull_mir::global_storage::static_storage_slots(ws, interner, &mf.statics)
+        .map_err(err)?;
     gctx.state.extend(slots);
     for nf in &mf.nested_fns {
         register_statics(ws, interner, nf, gctx)?;
@@ -6269,7 +6302,7 @@ fn schedule_global_reads(ws: &Workspace, mf: &MirFunc, st: &mut WorklistState) -
         } else if let Some(&base) = st.nobox_leaf_globals.get(&name) {
             if !st.gctx.state.contains_key(&symbol_of_key(name)) && !st.gctx.const_globals.contains(&name) {
                 return Err(err(format!(
-                    "JS: nobox leaf `{name}` has no compiler-owned Session slot"
+                    "JS: nobox leaf `{name}` has no compiler-owned storage slot"
                 )));
             }
             if let Some(&site) = st.state_index.get(&base) {
@@ -6286,7 +6319,7 @@ fn schedule_global_reads(ws: &Workspace, mf: &MirFunc, st: &mut WorklistState) -
             }
             if !st.gctx.state.contains_key(&symbol_of_key(name)) && !st.gctx.const_globals.contains(&name) {
                 return Err(err(format!(
-                    "JS: global `{name}` has no compiler-owned Session slot"
+                    "JS: global `{name}` has no compiler-owned storage slot"
                 )));
             }
             if st.ginit_seen.insert(name) {
@@ -6533,19 +6566,19 @@ fn order_global_inits(
                                 .map(|leaf| {
                                     state_slots.get(leaf).map(String::as_str).ok_or_else(|| {
                                         err(format!(
-                                            "JS: global `{}` has no compiler-owned Session slot for `{leaf}`",
+                                            "JS: global `{}` has no compiler-owned storage slot for `{leaf}`",
                                             g.name
                                         ))
                                     })
                                 })
                                 .collect::<Result<_, _>>()?;
                             let mut js = format!(
-                                "if (!__rock_state_has({:?})) {{ let __rock_init_values = {}(); __rock_state_set({:?}, __rock_init_values);",
-                                keys[0], g.init_name, keys[0]
+                                "if (__rock_globals_fresh) {{ __rock_globals[{:?}] = {}();",
+                                keys[0], g.init_name
                             );
                             for (i, _) in leaves.iter().enumerate().skip(1) {
                                 let key = keys[i];
-                                js.push_str(&format!(" __rock_state_set({key:?}, __rock_ret{i});"));
+                                js.push_str(&format!(" __rock_globals[{key:?}] = __rock_ret{i};"));
                             }
                             js.push_str(" }\n");
                             js
@@ -6553,12 +6586,12 @@ fn order_global_inits(
                         (false, None) => {
                             let key = state_slots.get(&symbol_of_key(g.name)).ok_or_else(|| {
                                 err(format!(
-                                    "JS: global `{}` has no compiler-owned Session slot",
+                                    "JS: global `{}` has no compiler-owned storage slot",
                                     g.name
                                 ))
                             })?;
                             format!(
-                                "if (!__rock_state_has({key:?})) __rock_state_set({key:?}, {}());\n",
+                                "if (__rock_globals_fresh) __rock_globals[{key:?}] = {}();\n",
                                 g.init_name
                             )
                         }

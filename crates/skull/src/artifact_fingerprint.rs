@@ -17,10 +17,9 @@ use skull_mir::definition::DefinitionPlan;
 use skull_mir::lifecycle::LifecyclePlan;
 use skull_mir::mir::{comptime_value_hash, ComptimeInputId, ComptimeRead};
 use skull_mir::monoty::MonoInterner;
-use skull_mir::state_schema::{StateKind, StateSchema};
 use ustr::Ustr;
 
-const FINGERPRINT_VERSION: &str = "semantic-artifact-v2";
+const FINGERPRINT_VERSION: &str = "semantic-artifact-v3";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FingerprintError(pub String);
@@ -42,12 +41,12 @@ pub fn compute(
     artifact: &CodeArtifact,
     lifecycle: &LifecyclePlan,
     definitions: &DefinitionPlan,
-    state: &StateSchema,
+    global_layout: &str,
     comptime_reads: &[ComptimeRead],
     volatile_vars: &FxHashSet<Ustr>,
     renderer: &str,
 ) -> Result<String, FingerprintError> {
-    compute_inner(ws, interner, artifact, lifecycle, definitions, state, comptime_reads,
+    compute_inner(ws, interner, artifact, lifecycle, definitions, global_layout, comptime_reads,
         volatile_vars, renderer, None)
 }
 
@@ -57,13 +56,13 @@ pub(crate) fn compute_cached(
     artifact: &CodeArtifact,
     lifecycle: &LifecyclePlan,
     definitions: &DefinitionPlan,
-    state: &StateSchema,
+    global_layout: &str,
     comptime_reads: &[ComptimeRead],
     volatile_vars: &FxHashSet<Ustr>,
     renderer: &str,
     code_rows: &CodeRows,
 ) -> Result<String, FingerprintError> {
-    compute_inner(ws, interner, artifact, lifecycle, definitions, state, comptime_reads,
+    compute_inner(ws, interner, artifact, lifecycle, definitions, global_layout, comptime_reads,
         volatile_vars, renderer, Some(code_rows))
 }
 
@@ -73,7 +72,7 @@ fn compute_inner(
     artifact: &CodeArtifact,
     lifecycle: &LifecyclePlan,
     definitions: &DefinitionPlan,
-    state: &StateSchema,
+    global_layout: &str,
     comptime_reads: &[ComptimeRead],
     volatile_vars: &FxHashSet<Ustr>,
     renderer: &str,
@@ -84,7 +83,6 @@ fn compute_inner(
         artifact,
         lifecycle,
         definitions,
-        state,
         comptime_reads,
         volatile_vars,
     )?;
@@ -136,23 +134,6 @@ fn compute_inner(
         for (key, entry) in code {
             write_code_row(&mut h, &key, entry)?;
         }
-    }
-
-    h.census(
-        "binding",
-        &[
-            artifact.binding_plan.census.examined as u64,
-            artifact.binding_plan.census.assigned as u64,
-            artifact.binding_plan.census.duplicate as u64,
-            artifact.binding_plan.census.incomplete as u64,
-        ],
-    );
-    h.len(artifact.binding_plan.entries.len());
-    for binding in &artifact.binding_plan.entries {
-        h.string(&binding.identity);
-        h.string(&binding.physical);
-        h.string(binding.kind.as_str());
-        h.string(binding.state_key.as_deref().unwrap_or(""));
     }
 
     h.census(
@@ -225,38 +206,7 @@ fn compute_inner(
         h.u64(entry.declaration_ordinal as u64);
     }
 
-    h.string(&state.schema_id);
-    h.census(
-        "state",
-        &[
-            state.census().examined as u64,
-            state.census().assigned as u64,
-            state.census().incomplete as u64,
-            state.census().duplicate as u64,
-            state.census().globals as u64,
-            state.census().statics as u64,
-            state.census().frames as u64,
-            state.census().storage as u64,
-        ],
-    );
-    h.len(state.entries.len());
-    for entry in &state.entries {
-        h.string(state_kind(entry.kind));
-        h.string(&entry.identity);
-        h.string(&entry.fingerprint);
-        h.len(entry.physical.len());
-        for physical in &entry.physical {
-            h.string(physical);
-        }
-        h.string(entry.owner.as_deref().unwrap_or(""));
-        match entry.initializer_identity {
-            Some(identity) => {
-                h.boolean(true);
-                h.u64(identity);
-            }
-            None => h.boolean(false),
-        }
-    }
+    h.string(global_layout);
 
     let reads = canonical_reads(ws, comptime_reads, volatile_vars)?;
     h.len(reads.len());
@@ -477,7 +427,6 @@ fn validate_inputs(
     artifact: &CodeArtifact,
     lifecycle: &LifecyclePlan,
     definitions: &DefinitionPlan,
-    state: &StateSchema,
     reads: &[ComptimeRead],
     volatile_vars: &FxHashSet<Ustr>,
 ) -> Result<(), FingerprintError> {
@@ -495,12 +444,6 @@ fn validate_inputs(
             )));
         }
     }
-    if !artifact.binding_plan.entries.is_empty() && !artifact.binding_plan.census.is_total() {
-        return Err(FingerprintError(format!(
-            "incomplete Artifact binding census: {:?}",
-            artifact.binding_plan.census
-        )));
-    }
     if lifecycle.census.applications != lifecycle.census.admitted
         || lifecycle.entries.len() != lifecycle.census.admitted
     {
@@ -515,12 +458,6 @@ fn validate_inputs(
         return Err(FingerprintError(format!(
             "incomplete DefinitionPlan census: {:?}",
             definitions.census
-        )));
-    }
-    if !state.census().is_total() {
-        return Err(FingerprintError(format!(
-            "incomplete StateSchema census: {:?}",
-            state.census()
         )));
     }
     for name in volatile_vars {
@@ -622,15 +559,6 @@ fn function_key(
             FingerprintError("definition accessor references missing function".to_string())
         })?;
     Ok(format!("{}::{}", module.file, function.name))
-}
-
-fn state_kind(kind: StateKind) -> &'static str {
-    match kind {
-        StateKind::Global => "global",
-        StateKind::Static => "static",
-        StateKind::CoroutineFrame => "coroutine-frame",
-        StateKind::Storage => "storage",
-    }
 }
 
 #[derive(Default)]

@@ -3,23 +3,8 @@ use crate::common::{
     try_emit_with_stdlib_module,
 };
 
-fn global_session_slots(lua: &str, name: &str) -> Vec<u32> {
-    let marker = format!("identity=\"global:<test>::{name}\"");
-    let entry = lua
-        .split(&marker)
-        .nth(1)
-        .unwrap_or_else(|| panic!("missing StateSchema entry for {name}"));
-    let slots = entry
-        .split("session_keys={")
-        .nth(1)
-        .expect("StateSchema entry has Session keys")
-        .split('}')
-        .next()
-        .expect("StateSchema Session keys close");
-    slots
-        .split(',')
-        .map(|slot| slot.parse::<u32>().expect("Lua global Session slot is numeric"))
-        .collect()
+fn global_slots(lua: &str, name: &str) -> Vec<u32> {
+    crate::common::global_slots(lua, &format!("global:<test>::{name}"))
 }
 
 const NOBOX_FIELD: &str = r#"
@@ -861,12 +846,12 @@ fn global_of_a_nobox_value_stores_leaves() {
         init.contains("do return (1.0), (2.0) end"),
         "the initializer did not return leaves:\n{init}"
     );
-    let slots = global_session_slots(&lua, "SPOT");
-    assert_eq!(slots.len(), 2, "the nobox global must own two Session leaves");
+    let slots = global_slots(&lua, "SPOT");
+    assert_eq!(slots.len(), 2, "the nobox global must own two storage leaves");
     assert!(
         slots.iter().all(|slot| lua.contains(&format!("__rock_state_cell[{slot}]")))
-            || slots.iter().all(|slot| lua.contains(&format!("__rock_active_session.__rock_state[{slot}]"))),
-        "the global leaves were not bound through the active Session:\n{lua}"
+            || slots.iter().all(|slot| lua.contains(&format!("__rock_globals[{slot}]"))),
+        "the global leaves were not bound through the global storage:\n{lua}"
     );
     for f in ["read", "main"] {
         let body = function_body(&lua, f);
@@ -927,14 +912,14 @@ fn main() {
 #[test]
 fn a_nobox_global_read_orders_its_dependent_initializer() {
     let lua = emit_module(NOBOX_GLOBAL_INIT_ORDER);
-    let base_slot = global_session_slots(&lua, "BASE")[0];
-    let derived_slot = global_session_slots(&lua, "DERIVED")[0];
+    let base_slot = global_slots(&lua, "BASE")[0];
+    let derived_slot = global_slots(&lua, "DERIVED")[0];
     let base = lua
-        .find(&format!("if not __rock_state_has({base_slot})"))
-        .expect("BASE Session init line");
+        .find(&format!("[{base_slot}] = __rock_init_values[1]"))
+        .expect("BASE init line");
     let derived = lua
-        .find(&format!("if not __rock_state_has({derived_slot})"))
-        .expect("DERIVED Session init line");
+        .find(&format!("[{derived_slot}] = __rock_init_values[1]"))
+        .expect("DERIVED init line");
     assert!(base < derived, "DERIVED initialized before the BASE it reads:\n{lua}");
     assert_eq!(
         run_luajit(&format!("{lua}\nmain()\n"), "nobox_global_order"),
@@ -969,9 +954,9 @@ fn a_refined_nullable_nobox_global_addresses_the_right_leaves() {
     // the presence leaf. Layout follows the DECLARED type, so it must not.
     let lua = emit_module(NOBOX_NULLABLE_GLOBAL);
     assert_eq!(
-        global_session_slots(&lua, "MAYBE").len(),
+        global_slots(&lua, "MAYBE").len(),
         3,
-        "a nullable nobox global must reserve Session presence/data leaves"
+        "a nullable nobox global must reserve storage presence/data leaves"
     );
     assert_eq!(
         run_luajit(&format!("{lua}\nmain()\n"), "nobox_global_nullable"),

@@ -282,6 +282,21 @@ pub fn luajit_loads(prog: &str, tag: &str) -> Result<(), String> {
     Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
 }
 
+/// The storage slots of the mutable global `identity` (`global:<file>::<name>`),
+/// read from the program's published global directory.
+pub fn global_slots(lua: &str, identity: &str) -> Vec<u32> {
+    lua.split(&format!("identity=\"{identity}\""))
+        .nth(1)
+        .unwrap_or_else(|| panic!("missing global directory entry for {identity}"))
+        .split("slots={")
+        .nth(1)
+        .and_then(|rest| rest.split('}').next())
+        .expect("global directory entry has slots")
+        .split(',')
+        .map(|slot| slot.parse::<u32>().expect("Lua global slot is numeric"))
+        .collect()
+}
+
 /// The body of the emitted definition named (or prefixed by) `name`. `name` is
 /// the rock identifier; the emitted definition is mangled
 /// (`hot_int_int_int`), so the prefix is resolved against the

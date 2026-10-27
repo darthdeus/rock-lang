@@ -88,7 +88,7 @@ fn nullable_entity_vec_round_trips_through_node() {
     let js = emit_js();
     let program = format!(
         "{}{}{}{}{}{}\n{js}\nconsole.log(main());",
-        skull_codegen_js::JS_SESSION_RUNTIME,
+        skull_codegen_js::JS_GLOBALS_RUNTIME,
         skull_codegen_js::JS_NB_CHECK_SHIMS,
         skull_codegen_js::JS_VEC_CHECK_SHIMS,
         skull_codegen_js::JS_TABLE_PRIM,

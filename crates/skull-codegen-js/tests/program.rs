@@ -39,7 +39,7 @@ fn main() -> int {
 "#);
     let js = emit_program(&ws);
     let source = format!("var __G = {{}};\n{}\n{}\n{js}\nconsole.log(main());",
-        skull_codegen_js::JS_SESSION_RUNTIME, skull_codegen_js::JS_CALL_HELPER);
+        skull_codegen_js::JS_GLOBALS_RUNTIME, skull_codegen_js::JS_CALL_HELPER);
     let output = node().arg("-e").arg(source)
         .output().expect("run nested value JavaScript");
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
@@ -81,13 +81,13 @@ fn assembly_order() {
     ordered(
         &js,
         "function __ginit_DERIVED(",
-        "__rock_state_set(\"global:<test>::DERIVED::value\"",
+        "__rock_globals[\"global:<test>::DERIVED::value\"] = ",
     );
     // `__deco_system({` is the APPLICATION (descriptor obj); the bare
     // `__deco_system(c0` definition sorts earlier and is matched above.
     ordered(
         &js,
-        "__rock_state_set(\"global:<test>::DERIVED::value\"",
+        "__rock_globals[\"global:<test>::DERIVED::value\"] = ",
         "__deco_system({",
     );
 }
@@ -99,8 +99,8 @@ fn init_dependency_order() {
     let js = emit_program(&ws);
     ordered(
         &js,
-        "__rock_state_set(\"global:<test>::BASE::value\"",
-        "__rock_state_set(\"global:<test>::DERIVED::value\"",
+        "__rock_globals[\"global:<test>::BASE::value\"] = ",
+        "__rock_globals[\"global:<test>::DERIVED::value\"] = ",
     );
 }
 
@@ -329,7 +329,7 @@ fn main() {}
     assert!(js.contains("factory: __rock_code_slot_pending_ref(\"named:<test>::make_beta<>\")"));
     let source = format!(
         "var __G = {{}};\n{}\n{}\nconsole.log(__G.__ROCK_DEFINITION_PLAN.widgets.len + ':' + __G.__ROCK_DEFINITION_PLAN.widgets._data[0].key + ':' + __rock_call(__G.__ROCK_DEFINITION_PLAN.widgets._data[0].factory));",
-        format!("{}\n{}", skull_codegen_js::JS_SESSION_RUNTIME, skull_codegen_js::JS_CALL_HELPER),
+        format!("{}\n{}", skull_codegen_js::JS_GLOBALS_RUNTIME, skull_codegen_js::JS_CALL_HELPER),
         js
     );
     let output = node()
@@ -360,7 +360,7 @@ fn main() {}
     assert!(!js.contains("__ROCK_DEFINITION_PLAN || {}"));
     let source = format!(
         "var __G = {{}};\n{}\n{}\n{}\nconst p = widget_definition_plan(); const e = empty_definition_plan(); let missing = false; try {{ __rock_definition_catalog('missing'); }} catch (_) {{ missing = true; }} console.log(p.len + ':' + p._data[0].key + ':' + p._data[0].definition.value + ':' + e.len + ':' + missing);",
-        skull_codegen_js::JS_SESSION_RUNTIME,
+        skull_codegen_js::JS_GLOBALS_RUNTIME,
         skull_codegen_js::JS_CALL_HELPER,
         js,
     );
@@ -415,7 +415,7 @@ fn main() {}
 fn typed_definition_catalog_lookup_is_fail_closed_and_counts_population_in_js() {
     let source = format!(
         "var __G = {{}};\n{}\n{}\n{}\nconsole.log(result);",
-        skull_codegen_js::JS_SESSION_RUNTIME,
+        skull_codegen_js::JS_GLOBALS_RUNTIME,
         skull_codegen_js::JS_CALL_HELPER,
         r#"
 let missingPlan = false;
@@ -505,7 +505,7 @@ fn main() -> int {
         "var __G = {{}};\n{}{}{}\n{}\n{}\nconsole.log(main());",
         skull_codegen_js::JS_NB_CHECK_SHIMS,
         skull_codegen_js::JS_VEC_CHECK_SHIMS,
-        skull_codegen_js::JS_SESSION_RUNTIME,
+        skull_codegen_js::JS_GLOBALS_RUNTIME,
         skull_codegen_js::JS_CALL_HELPER,
         js
     );

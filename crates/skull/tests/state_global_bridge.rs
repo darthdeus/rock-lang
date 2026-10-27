@@ -1,7 +1,7 @@
 //! The `_G` state bridge's MISS path.
 //!
-//! `__rock_state_install_global_bridge` puts a metatable on `_G` so a read or
-//! write of a Rock state global resolves through the Session. Every other global
+//! `__rock_globals_install_bridge` puts a metatable on `_G` so a read or
+//! write of a Rock state global resolves through the global storage. Every other global
 //! that is absent from the raw table reaches the same metamethod -- and a global
 //! whose value is genuinely `nil` is absent every time, because `rawset(_G, k,
 //! nil)` cannot make it present. So the miss path runs on every such read, and
@@ -78,7 +78,7 @@ local function check(label, got, want)
   end
 end
 
--- 1. A Rock state global resolves through the Session, on the shape installed
+-- 1. A Rock state global resolves through the storage, on the shape installed
 --    by the chunk itself.
 check("state read", _G.bar, 7)
 _G.bar = 11
@@ -92,7 +92,7 @@ setmetatable(_G, {
   __index = function(t, k) seen = k; return "fn:" .. tostring(k) end,
   __newindex = function(t, k, v) rawset(t, "captured_" .. tostring(k), v) end,
 })
-_G.__rock_state_install_global_bridge()
+_G.__rock_globals_install_bridge()
 check("function fallback read", _G.absent_one, "fn:absent_one")
 check("function fallback saw the key", seen, "absent_one")
 _G.absent_two = 3
@@ -103,7 +103,7 @@ check("state write past a function fallback", _G.bar, 13)
 
 -- 3. Reinstalling over a metatable whose `__index` is a TABLE.
 setmetatable(_G, { __index = { from_table = "tab" } })
-_G.__rock_state_install_global_bridge()
+_G.__rock_globals_install_bridge()
 check("table fallback read", _G.from_table, "tab")
 check("table fallback miss", _G.absent_three, nil)
 _G.absent_four = 5
@@ -112,7 +112,7 @@ check("state read past a table fallback", _G.bar, 13)
 
 -- 4. Reinstalling over a bare metatable: no fallback at all.
 setmetatable(_G, {})
-_G.__rock_state_install_global_bridge()
+_G.__rock_globals_install_bridge()
 check("bare reinstall miss", _G.absent_five, nil)
 _G.absent_six = 7
 check("bare reinstall write is raw", rawget(_G, "absent_six"), 7)

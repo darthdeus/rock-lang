@@ -96,12 +96,12 @@ pub fn discover_sources(source_spec: &SourceSpec) -> Result<SourceFiles> {
     }
 }
 
-/// Build the package graph and its legacy StateSchema labels. Module ownership
+/// Build the package graph and its legacy package labels. Module ownership
 /// is resolved by the graph; labels preserve the pre-graph metadata spelling.
 ///
 /// The names intentionally preserve the strings the pre-graph loader
 /// emitted: the root's manifest name lowercased and dependency keys as
-/// written, because these strings are embedded in emitted StateSchema
+/// written, because these strings are embedded in the emitted global directory
 /// metadata and legacy artifacts must stay byte-identical through M4 (the
 /// v1 package identity replaces them; see the compiler contract).
 /// Returns `None` when the source has no stick.toml package graph.
@@ -130,7 +130,7 @@ pub fn build_package_map(
         Err(e) => {
             log::warn!(target: "COMPILE",
                 "build_package_map: stick.toml lookup failed: {}. \
-                 StateSchema package metadata will be incomplete.",
+                 global package metadata will be incomplete.",
                 e
             );
             return None;
@@ -143,7 +143,7 @@ pub fn build_package_map(
         Err(e) => {
             log::warn!(target: "COMPILE",
                 "build_package_map: package graph resolution failed: {}. \
-                 StateSchema package metadata will be incomplete.",
+                 global package metadata will be incomplete.",
                 e
             );
             return None;

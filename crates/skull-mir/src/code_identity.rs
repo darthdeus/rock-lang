@@ -13,7 +13,6 @@ use comfy_la_arena::Idx;
 use rustc_hash::{FxHashMap, FxHashSet};
 use ustr::Ustr;
 
-use crate::artifact_plan::ArtifactBindingPlan;
 use crate::instance::Instance;
 use crate::mir::{
     ColumnElem, ContainerKind, CoroHookKind, FuncRef, Inst, Lit, MirFunc, Term, ValueCtorForm,
@@ -331,7 +330,6 @@ impl CodeIdentityCensus {
 pub struct CodeArtifact {
     pub entries: BTreeMap<CodeIdentity, CodeEntry>,
     pub census: CodeIdentityCensus,
-    pub binding_plan: ArtifactBindingPlan,
 }
 
 impl CodeArtifact {
@@ -654,6 +652,14 @@ impl CodeArtifact {
         }
     }
 
+    fn named_frames(&self) -> BTreeMap<&CodeIdentity, &FrameSchema> {
+        self.entries
+            .iter()
+            .filter(|(identity, _)| matches!(identity, CodeIdentity::Named(_)))
+            .filter_map(|(identity, entry)| Some((identity, entry.compatibility.frame.as_ref()?)))
+            .collect()
+    }
+
     /// Compare the entries belonging to one owner. A topology mismatch is an
     /// owner-level incompatibility, even if all surviving individual keys look
     /// compatible.
@@ -677,6 +683,12 @@ impl CodeArtifact {
             .values()
             .any(|entry| entry.escaping && !self.entries.contains_key(&entry.identity))
         {
+            return false;
+        }
+        // A live coroutine resumes into the replacement body, so every named
+        // frame-bound callable must keep its frame layout, and none may appear
+        // or disappear.
+        if self.named_frames() != next.named_frames() {
             return false;
         }
         let mut owners: BTreeMap<CodeOwner, LambdaTopologyFingerprint> = BTreeMap::new();

@@ -1,5 +1,5 @@
-//! `static` locals across a hot reload. The private value cell + done-flag are
-//! Session slots, so they survive a re-`dofile`; the done-flag guard then skips
+//! `static` locals across a hot reload. The private value cell + done-flag live
+//! in the global storage, so they survive a re-`dofile`; the done-flag guard then skips
 //! re-init and the value is PRESERVED. Editing the initializer changes the
 //! compiler's initializer identity, so the overlay clears both slots and the
 //! next reach RE-INITS with the new value.
@@ -86,13 +86,13 @@ fn static_survives_hot_reload_no_reinit() {
     let prog = emit_program(PROBE);
     let script = format!(
         "_G.HOT_RELOAD = false\n{prog}\n\
-         local result_key = __rock_state_entry_for_name(\"RESULT\").session_keys[1]\n\
-         local do_set_key = __rock_state_entry_for_name(\"DO_SET\").session_keys[1]\n\
-         __rock_state_set(do_set_key, true); main()   -- n inits 42, set -> 99, RESULT = 99\n\
+         local result_key = __rock_global_entry(\"RESULT\").slots[1]\n\
+         local do_set_key = __rock_global_entry(\"DO_SET\").slots[1]\n\
+         __rock_globals[do_set_key] = true; main()   -- n inits 42, set -> 99, RESULT = 99\n\
          _G.HOT_RELOAD = true\n{prog}\n\
-         __rock_state_set(do_set_key, false); main()  -- key unchanged: n preserved (99), RESULT = 99\n\
-         if __rock_state_get(result_key) == 99 then print(\"PASS\")\n\
-         else print(\"FAIL RESULT=\"..tostring(__rock_state_get(result_key))); os.exit(1) end\n"
+         __rock_globals[do_set_key] = false; main()  -- key unchanged: n preserved (99), RESULT = 99\n\
+         if __rock_globals[result_key] == 99 then print(\"PASS\")\n\
+         else print(\"FAIL RESULT=\"..tostring(__rock_globals[result_key])); os.exit(1) end\n"
     );
     assert!(run_luajit(&script).trim().starts_with("PASS"), "expected preserved static");
 }
@@ -105,13 +105,13 @@ fn static_reinits_when_initializer_edited() {
     let after = emit_program(&PROBE.replace("static n = 42", "static n = 7"));
     let script = format!(
         "_G.HOT_RELOAD = false\n{before}\n\
-         local result_key = __rock_state_entry_for_name(\"RESULT\").session_keys[1]\n\
-         local do_set_key = __rock_state_entry_for_name(\"DO_SET\").session_keys[1]\n\
-         __rock_state_set(do_set_key, false); main()  -- n inits 42, RESULT = 42\n\
+         local result_key = __rock_global_entry(\"RESULT\").slots[1]\n\
+         local do_set_key = __rock_global_entry(\"DO_SET\").slots[1]\n\
+         __rock_globals[do_set_key] = false; main()  -- n inits 42, RESULT = 42\n\
          _G.HOT_RELOAD = true\n{after}\n\
-         __rock_state_set(do_set_key, false); main()  -- init edited: n resets, re-inits 7, RESULT = 7\n\
-         if __rock_state_get(result_key) == 7 then print(\"PASS\")\n\
-         else print(\"FAIL RESULT=\"..tostring(__rock_state_get(result_key))); os.exit(1) end\n"
+         __rock_globals[do_set_key] = false; main()  -- init edited: n resets, re-inits 7, RESULT = 7\n\
+         if __rock_globals[result_key] == 7 then print(\"PASS\")\n\
+         else print(\"FAIL RESULT=\"..tostring(__rock_globals[result_key])); os.exit(1) end\n"
     );
     assert!(run_luajit(&script).trim().starts_with("PASS"), "expected re-init on edit");
 }
@@ -126,13 +126,90 @@ fn static_preserved_when_unrelated_body_edited() {
     let after = emit_program(&edited);
     let script = format!(
         "_G.HOT_RELOAD = false\n{before}\n\
-         local result_key = __rock_state_entry_for_name(\"RESULT\").session_keys[1]\n\
-         local do_set_key = __rock_state_entry_for_name(\"DO_SET\").session_keys[1]\n\
-         __rock_state_set(do_set_key, true); main()   -- RESULT = 99\n\
+         local result_key = __rock_global_entry(\"RESULT\").slots[1]\n\
+         local do_set_key = __rock_global_entry(\"DO_SET\").slots[1]\n\
+         __rock_globals[do_set_key] = true; main()   -- RESULT = 99\n\
          _G.HOT_RELOAD = true\n{after}\n\
-         __rock_state_set(do_set_key, false); main()  -- key unchanged despite edit: n preserved, RESULT = 99\n\
-         if __rock_state_get(result_key) == 99 then print(\"PASS\")\n\
-         else print(\"FAIL RESULT=\"..tostring(__rock_state_get(result_key))); os.exit(1) end\n"
+         __rock_globals[do_set_key] = false; main()  -- key unchanged despite edit: n preserved, RESULT = 99\n\
+         if __rock_globals[result_key] == 99 then print(\"PASS\")\n\
+         else print(\"FAIL RESULT=\"..tostring(__rock_globals[result_key])); os.exit(1) end\n"
     );
     assert!(run_luajit(&script).trim().starts_with("PASS"), "expected key stable under unrelated edit");
+}
+
+/// A body edit that adds or removes a `static` changes no global's storage, so
+/// it reloads as an overlay: the live globals survive, a new static initializes
+/// on its first reach, and a removed one's cell is dropped from the storage.
+const COUNTER: &str = "\
+global TOTAL: int = 0
+@nomangle fn bump() -> int {
+    TOTAL = TOTAL + 1
+    return TOTAL
+}
+fn main() {}
+";
+
+const COUNTER_WITH_STATIC: &str = "\
+global TOTAL: int = 0
+@nomangle fn bump() -> int {
+    static step = 10
+    TOTAL = TOTAL + step
+    step = step + 1
+    return TOTAL
+}
+fn main() {}
+";
+
+fn bump_body(ws: &Workspace) -> (bone_semantic::prelude::ModuleId, bone_semantic::hir::BodyOwner) {
+    ws.modules
+        .iter()
+        .find_map(|module| {
+            module.functions.iter().find(|(_, f)| f.name.as_str() == "bump").map(|(fid, _)| {
+                (module.id, bone_semantic::hir::BodyOwner::Function(fid))
+            })
+        })
+        .expect("fixture declares bump")
+}
+
+fn overlay_run(tag: &str, before: &str, after: &str, script: impl Fn(&str, &str) -> String) -> String {
+    let ws1 = crate::common::ws_with_stdlib(before);
+    let mid = skull::user_module_id(&ws1).unwrap();
+    let (full, mut cache) = skull::mir_emit::emit_full(&ws1, mid).expect("full emit");
+    let ws2 = crate::common::ws_with_stdlib(after);
+    let overlay = skull::mir_emit::emit_overlay(&ws2, &mut cache, &[bump_body(&ws2)])
+        .expect("a body edit that adds or removes a static must overlay");
+    crate::common::run_luajit(&script(&full.lua, &overlay.lua), tag)
+}
+
+#[test]
+fn a_body_edit_that_adds_a_static_overlays_over_live_globals() {
+    let out = overlay_run("static_added_overlay", COUNTER, COUNTER_WITH_STATIC, |full, overlay| {
+        format!(
+            "{full}\nassert(bump() == 1)\nassert(bump() == 2)\n{overlay}\n\
+             assert(bump() == 12)\nassert(bump() == 23)\nprint('ok')"
+        )
+    });
+    assert_eq!(out, "ok");
+}
+
+#[test]
+fn a_body_edit_that_removes_a_static_overlays_over_live_globals() {
+    let out = overlay_run("static_removed_overlay", COUNTER_WITH_STATIC, COUNTER, |full, overlay| {
+        format!(
+            "{full}\nassert(bump() == 10)\nassert(bump() == 21)\n\
+             local function static_cells()\n\
+               local n = 0\n\
+               for key in pairs(__rock_globals) do\n\
+                 if type(key) == 'string' and key:find('::step#', 1, true) then n = n + 1 end\n\
+               end\n\
+               return n\n\
+             end\n\
+             assert(static_cells() == 2, 'the static value and done cells are live')\n\
+             {overlay}\n\
+             assert(bump() == 22)\n\
+             assert(static_cells() == 0, 'the removed static still holds ' .. static_cells() .. ' cells')\n\
+             print('ok')"
+        )
+    });
+    assert_eq!(out, "ok");
 }

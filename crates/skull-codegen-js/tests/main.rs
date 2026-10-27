@@ -72,10 +72,10 @@ mod nomangle_roots;
 mod number_format;
 #[path = "session_arena.rs"]
 mod session_arena;
-#[path = "state_schema.rs"]
-mod state_schema;
-#[path = "session_state.rs"]
-mod session_state;
+#[path = "global_layout.rs"]
+mod global_layout;
+#[path = "global_storage.rs"]
+mod global_storage;
 
 #[path = "overlay.rs"]
 mod overlay;

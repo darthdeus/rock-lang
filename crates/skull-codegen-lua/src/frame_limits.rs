@@ -11,9 +11,9 @@
 //! | active locals | `LJ_MAX_LOCVAR` 200 | `var_new`: `nactvar + n >= 200` | `function at line N has more than 200 local variables` |
 //!
 //! The third parse cap, `LJ_MAX_UPVAL` (60), is NOT reachable from valid Rock:
-//! the only upvalues an emitted body has are its bound callees plus the two
-//! Session cells, and [`crate::MAX_BOUND_CALLEES`] already truncates that list
-//! to 60 (58 when the Session cells are captured) by construction, leaving the
+//! the only upvalues an emitted body has are its bound callees plus the global
+//! storage cell, and [`crate::MAX_BOUND_CALLEES`] already truncates that list
+//! to 60 (59 when the storage cell is captured) by construction, leaving the
 //! rest as global lookups.
 //!
 //! # What this models, and in which direction it errs

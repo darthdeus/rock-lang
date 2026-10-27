@@ -51,7 +51,7 @@ fn node(source: &str) -> String {
 }
 
 fn js_runtime() -> String {
-    format!("{}\n{}", skull_codegen_js::JS_SESSION_RUNTIME, skull_codegen_js::JS_CALL_HELPER)
+    format!("{}\n{}", skull_codegen_js::JS_GLOBALS_RUNTIME, skull_codegen_js::JS_CALL_HELPER)
 }
 
 #[test]
@@ -162,7 +162,7 @@ function run_wires() {
     if (__rock_lifecycle_take_wire(entry.key)) __rock_call(entry.func);
   }
 }
-function state(name) { return __rock_state_get("global:<test>::" + name + "::value"); }
+function state(name) { return __rock_globals["global:<test>::" + name + "::value"]; }
 run_wires();
 console.log("initial:" + state("PLAIN_RUNS") + ":" + state("DIRECT_RUNS") + ":" + state("TRANSITIVE_RUNS") + ":" + state("DIRECT_VALUE") + ":" + state("TRANSITIVE_VALUE"));
 var driver_before = state("DRIVER_RUNS");
@@ -326,7 +326,7 @@ fn const_value_overlay_redefines_users_without_reinitializing_state() {
     .expect_overlay();
 
     let output = node(&format!(
-        "{}\nvar __G = {{}};\n{}\n__rock_state_set(\"global:<test>::STATE::value\", 99);\n{}\nconsole.log(__rock_state_get(\"global:<test>::STATE::value\") + ':' + hot());",
+        "{}\nvar __G = {{}};\n{}\n__rock_globals[\"global:<test>::STATE::value\"] = 99;\n{}\nconsole.log(__rock_globals[\"global:<test>::STATE::value\"] + ':' + hot());",
         js_runtime(), program.program, overlay
     ));
     assert_eq!(output.trim(), "99:10");
@@ -391,9 +391,9 @@ fn overlay_redefines_a_function_without_reinitializing_global_state() {
     .unwrap()
     .expect_overlay();
 
-    assert!(!overlay.contains("__rock_state_set(\"global:<test>::STATE::value\""));
+    assert!(!overlay.contains("__rock_globals[\"global:<test>::STATE::value\"] = "));
     let output = node(&format!(
-        "{}\n{}\n__rock_state_set(\"global:<test>::STATE::value\", 99);\n{}\nconsole.log(__rock_state_get(\"global:<test>::STATE::value\") + ':' + hot());",
+        "{}\n{}\n__rock_globals[\"global:<test>::STATE::value\"] = 99;\n{}\nconsole.log(__rock_globals[\"global:<test>::STATE::value\"] + ':' + hot());",
         js_runtime(), program.program, overlay
     ));
     assert_eq!(output.trim(), "99:2");
@@ -520,7 +520,7 @@ fn wire_failure_after_publication_keeps_the_candidate_code_ref_live() {
     assert!(overlay.contains("run_wire_systems();"), "overlay must contain the later top-level hook:\n{overlay}");
 
     let output = node(&format!(
-        "{}\nvar __G = {{}};\n{}\nstart();\ntry {{ (0, eval)({:?}); }} catch (e) {{ console.log(false); }}\nconsole.log(__rock_code_slot_stage === null);\nconsole.log(__rock_call(__rock_state_get(\"global:<test>::CALLBACK::value\")));",
+        "{}\nvar __G = {{}};\n{}\nstart();\ntry {{ (0, eval)({:?}); }} catch (e) {{ console.log(false); }}\nconsole.log(__rock_code_slot_stage === null);\nconsole.log(__rock_call(__rock_globals[\"global:<test>::CALLBACK::value\"]));",
         js_runtime(),
         program.program,
         overlay
@@ -612,6 +612,39 @@ fn changed_static_initializer_resets_only_its_live_cell() {
 }
 
 #[test]
+fn a_body_edit_that_removes_a_static_drops_its_cells() {
+    let before = ws_with(
+        "@nomangle fn hot() -> int {\n\
+             static count = 1\n\
+             count += 1\n\
+             count\n\
+         }\n\
+         fn main() { print(hot()) }\n",
+    );
+    let after = ws_with("@nomangle fn hot() -> int { 7 }\nfn main() { print(hot()) }\n");
+    let mid = function(&before, "main").module;
+    let (program, mut cache) =
+        skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
+    let hot = function(&after, "hot");
+    let overlay = skull_codegen_js::emit::emit_overlay(
+        &after,
+        mid,
+        &mut cache,
+        &[(hot.module, BodyOwner::Function(hot.func))],
+    )
+    .unwrap()
+    .expect_overlay();
+
+    let output = node(&format!(
+        "{}\n{}\nhot();\n\
+         function cells() {{ return Object.keys(__rock_globals).filter(k => k.includes('::count#')).length; }}\n\
+         let live = cells();\n{}\nconsole.log(live + ':' + cells() + ':' + hot());",
+        js_runtime(), program.program, overlay
+    ));
+    assert_eq!(output.trim(), "2:0:7");
+}
+
+#[test]
 fn decorated_function_overlay_refreshes_the_registered_code_ref() {
     let source = |message: &str| {
         format!(
@@ -648,9 +681,9 @@ fn decorated_function_overlay_refreshes_the_registered_code_ref() {
          {}\n\
          var __G = {{}};\n\
          {}\n\
-         __rock_call(__rock_state_get(\"global:<test>::SYSTEMS::value\")._data[0].func);\n\
+         __rock_call(__rock_globals[\"global:<test>::SYSTEMS::value\"]._data[0].func);\n\
          (0, eval)({:?});\n\
-         __rock_call(__rock_state_get(\"global:<test>::SYSTEMS::value\")._data[0].func);\n\
+         __rock_call(__rock_globals[\"global:<test>::SYSTEMS::value\"]._data[0].func);\n\
          console.log(output.join(','));",
         skull_codegen_js::JS_TABLE_PRIM,
         js_runtime(),

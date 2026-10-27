@@ -112,7 +112,7 @@ fn main() {}
     assert_ne!(
         fingerprint(state_a, ComptimeInputs::default()),
         fingerprint(state_b, ComptimeInputs::default()),
-        "StateSchema membership is an Artifact input"
+        "the global layout is an Artifact input"
     );
 }
 

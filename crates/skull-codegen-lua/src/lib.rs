@@ -99,36 +99,6 @@ pub struct LuaEmission {
     pub allocation_sites: Vec<EmittedAllocationSite>,
 }
 
-pub const ARTIFACT_PLAN_PRELUDE: &str = r#"
-function __rock_artifact_binding_plan_stage(plan)
-  if not _G.__rock_state_transaction then error("Artifact binding plan stage not open", 0) end
-  if not plan or not plan.census or plan.census.examined <= 0
-      or plan.census.examined ~= plan.census.assigned then
-    error("incomplete Artifact binding plan", 0)
-  end
-  _G.__rock_artifact_binding_plan_pending = plan
-end
-function __rock_artifact_binding_plan_publish()
-  local plan = _G.__rock_artifact_binding_plan_pending
-  if plan ~= nil then
-    _G.__ROCK_ARTIFACT_BINDING_PLAN = plan
-    _G.__rock_artifact_binding_plan_pending = nil
-  end
-end
-function __rock_artifact_plan_begin()
-  if _G.__rock_state_transaction_begin then __rock_state_transaction_begin() end
-  _G.__rock_artifact_binding_plan_pending = nil
-end
-function __rock_artifact_plan_abort()
-  if _G.__rock_state_transaction_abort then __rock_state_transaction_abort() end
-  _G.__rock_artifact_binding_plan_pending = nil
-end
-function __rock_artifact_plan_publish()
-  __rock_artifact_binding_plan_publish()
-  if _G.__rock_state_transaction_commit then __rock_state_transaction_commit() end
-end
-"#;
-
 /// Shared validation for numeric uint conversions and shift counts.
 pub const UINT_CHECK_PRELUDE: &str = r#"
 function __rock_checked_u32(value)
@@ -218,24 +188,20 @@ function __rock_code_slot_pending_ref(key)
   return __rock_code_slot_ref(key)
 end
 function __rock_code_slot_begin()
-  if _G.__rock_state_transaction_begin then __rock_state_transaction_begin() end
   _G.__rock_code_slot_pending = {}
   _G.__rock_code_slot_pending_slots = {}
   _G.__rock_definition_plan_materializing = false
   _G.__rock_lifecycle_plan_pending = nil
   _G.__rock_definition_plan_pending = nil
   _G.__rock_definition_materializers_pending = nil
-  _G.__rock_artifact_binding_plan_pending = nil
 end
 function __rock_code_slot_abort()
-  if _G.__rock_state_transaction_abort then __rock_state_transaction_abort() end
   _G.__rock_code_slot_pending = nil
   _G.__rock_code_slot_pending_slots = nil
   _G.__rock_definition_plan_materializing = false
   _G.__rock_lifecycle_plan_pending = nil
   _G.__rock_definition_plan_pending = nil
   _G.__rock_definition_materializers_pending = nil
-  _G.__rock_artifact_binding_plan_pending = nil
   local discard_wgpu = rawget(_G, "__rock_wgpu_shader_discard_pending")
   if discard_wgpu then
     discard_wgpu()
@@ -381,13 +347,11 @@ function __rock_code_slot_publish()
   if definition_plan ~= nil then
     _G.__ROCK_DEFINITION_PLAN = definition_plan
   end
-  if __rock_artifact_binding_plan_publish then __rock_artifact_binding_plan_publish() end
   _G.__rock_code_slot_pending = nil
   _G.__rock_code_slot_pending_slots = nil
   _G.__rock_lifecycle_plan_pending = nil
   _G.__rock_definition_plan_pending = nil
   _G.__rock_definition_materializers_pending = nil
-  if _G.__rock_state_transaction_commit then __rock_state_transaction_commit() end
   if wire_due ~= nil then _G.__ROCK_WIRE_DUE = wire_due end
 end
 if not _G.__rock_fn_mt then
@@ -659,7 +623,7 @@ pub struct CodegenCtx {
     /// emit boundary. `Mutex` because `&CodegenCtx` is shared across rayon
     /// workers; contention is nil (a few per fn).
     rejections: Mutex<Vec<(String, CompilerError)>>,
-    /// Compiler-assigned Session slots for mutable globals.
+    /// Compiler-assigned storage slots for mutable globals.
     state_slots: HashMap<ustr::Ustr, u32>,
     scalar_constants: HashMap<ustr::Ustr, Lit>,
     /// Every function that lies on a call cycle, from the whole-program instance
@@ -675,9 +639,9 @@ pub struct CodegenCtx {
     /// The emitted shape for a call to another emitted function. Read from
     /// `ROCK_SKULL_CALLEE_BINDING` once per context, same as `tail_calls`.
     callee_binding: CalleeBindingMode,
-    /// Whether a mutable-global access under the bound shape reads the Session
-    /// tables through chunk-level upvalue cells instead of walking
-    /// `_G.__rock_active_session.__rock_state`. Read from
+    /// Whether a mutable-global access under the bound shape reads the global
+    /// storage through a chunk-level upvalue cell instead of reading
+    /// `_G.__rock_globals`. Read from
     /// `ROCK_SKULL_STATE_CELL` once per context; only effective under
     /// [`CalleeBindingMode::Upvalue`], see [`CodegenCtx::state_cell`].
     state_cell: bool,
@@ -948,18 +912,28 @@ impl CodegenCtx {
         self.callee_binding
     }
 
-    /// Override the Session-cell switch this context was built with. The
+    /// Override the storage-cell switch this context was built with. The
     /// production path takes it from `ROCK_SKULL_STATE_CELL`; a test uses this
     /// so one process can emit both shapes.
     pub fn set_state_cell(&mut self, on: bool) {
         self.state_cell = on;
     }
 
-    /// Whether mutable-global accesses are emitted through the Session cells
-    /// (`__rock_state_cell[k]`) rather than the `_G` walk. This optimization is
+    /// Whether mutable-global accesses are emitted through the storage cell
+    /// (`__rock_state_cell[k]`) rather than a `_G.__rock_globals` read. This optimization is
     /// enabled together with bound callees; overlays retain both optimizations.
     pub fn state_cell(&self) -> bool {
         self.state_cell && self.callee_binding == CalleeBindingMode::Upvalue
+    }
+
+    /// The table a mutable-global access indexes: the chunk-level cell under the
+    /// bound shape, else the `_G` lookup an overlay chunk can also perform.
+    pub fn state_table(&self) -> &'static str {
+        if self.state_cell() {
+            STATE_CELL
+        } else {
+            "__rock_globals"
+        }
     }
 
     /// Override the emitted loop shape this context was built with. The
@@ -1105,7 +1079,7 @@ impl CodegenCtx {
         sink.drain(..).next().map(|(_, e)| e)
     }
 
-    /// The Session slot of `name`. The map is keyed on the emitted SYMBOL, so a
+    /// The storage slot of `name`. The map is keyed on the emitted SYMBOL, so a
     /// caller may hand over either spelling of a v1 global: its DefKey (what MIR
     /// carries) or the symbol (what the schema publishes).
     pub fn state_slot(&self, name: ustr::Ustr) -> Option<u32> {
@@ -1114,8 +1088,8 @@ impl CodegenCtx {
             .copied()
     }
 
-    /// The highest compiler-assigned Session slot, 0 when there is none. The
-    /// emitter sizes every Session's array part to this slot's rehash fixpoint.
+    /// The highest compiler-assigned storage slot, 0 when there is none. The
+    /// emitter sizes the storage table's array part to this slot's rehash fixpoint.
     pub fn state_slot_max(&self) -> u32 {
         self.state_slots.values().copied().max().unwrap_or(0)
     }
@@ -1453,22 +1427,21 @@ pub fn line_directives_mode() -> bool {
 pub const OMITTED_ARG: &str = "__rock_omitted";
 
 /// Chunk-level local that every emitted function reads a mutable global through
-/// under the bound shape: the active Session's `__rock_state` table. Declared
-/// at the top of the runtime prelude, assigned by `__rock_session_publish`.
+/// under the bound shape: the process's one global storage table,
+/// `_G.__rock_globals`. Each chunk (a full program or an overlay) declares its
+/// own and assigns the same table, so no upvalue ever needs rejoining.
 pub const STATE_CELL: &str = "__rock_state_cell";
-/// The sibling cell for the active Session's `__rock_initialized` table.
-pub const INITIALIZED_CELL: &str = "__rock_initialized_cell";
 
-/// `ROCK_SKULL_STATE_RESERVE=0` leaves every Session's tables to grow lazily
-/// from `{}` instead of sizing them to the schema's rehash fixpoint at load, for A/B measurement.
+/// `ROCK_SKULL_STATE_RESERVE=0` leaves the global storage table to grow lazily
+/// from `{}` instead of sizing it to its rehash fixpoint at creation, for A/B measurement.
 /// Default: on.
 pub fn state_reserve_mode() -> bool {
     static MODE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *MODE.get_or_init(|| !matches!(std::env::var("ROCK_SKULL_STATE_RESERVE").as_deref(), Ok("0")))
 }
 
-/// `ROCK_SKULL_STATE_CELL=0` keeps the `_G.__rock_active_session.__rock_state`
-/// walk under the bound shape, for A/B measurement. Anything else is the
+/// `ROCK_SKULL_STATE_CELL=0` keeps the `_G.__rock_globals` read under the
+/// bound shape, for A/B measurement. Anything else is the
 /// shipped default: on.
 pub fn state_cell_mode() -> bool {
     static MODE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -1838,10 +1811,10 @@ pub fn callee_binding_plan(
     if captures.is_empty() {
         return None;
     }
-    // A body that touches a mutable global captures the two Session cells as
-    // upvalues too, against the same 60-upvalue limit the callees count toward.
+    // A body that touches a mutable global captures the storage cell as an
+    // upvalue too, against the same 60-upvalue limit the callees count toward.
     let reserved = if ctx.state_cell() && touches_state {
-        2
+        1
     } else {
         0
     };
@@ -2545,24 +2518,17 @@ fn static_slots_for(
     name: &str,
     ctx: &CodegenCtx,
 ) -> HashMap<ustr::Ustr, String> {
-    let mut slots = HashMap::default();
-    for cell in inherited_statics.iter().chain(&func.statics) {
-        let (value, done) = match skull_mir::state_schema::static_cell_state_keys(ws, interner, cell) {
-            Ok(keys) => keys,
-            Err(error) => {
-                ctx.reject(name.to_string(), CompilerError::new_no_location(error.to_string()));
-                return HashMap::default();
-            }
-        };
-        if slots.insert(cell.cell, value).is_some() || slots.insert(cell.done_flag, done).is_some() {
-            ctx.reject(
-                name.to_string(),
-                CompilerError::new_no_location(format!("duplicate static state slot for `{}`", cell.cell)),
-            );
-            return HashMap::default();
+    match skull_mir::global_storage::static_storage_slots(
+        ws,
+        interner,
+        inherited_statics.iter().chain(&func.statics),
+    ) {
+        Ok(slots) => slots.into_iter().collect(),
+        Err(error) => {
+            ctx.reject(name.to_string(), CompilerError::new_no_location(error));
+            HashMap::default()
         }
     }
-    slots
 }
 
 /// Whether every use of `cand` is a provably READ-ONLY consumer, so sharing one
@@ -4284,23 +4250,6 @@ impl Emitter<'_> {
         self.state_slots.contains_key(&symbol) || self.static_slots.contains_key(&symbol)
     }
 
-    /// The table a mutable-global access indexes: the chunk-level cell under the
-    /// bound shape, else the `_G` walk an overlay chunk can also perform.
-    fn state_table_expr(&self) -> &'static str {
-        if self.ctx.state_cell() {
-            STATE_CELL
-        } else {
-            "__rock_active_session.__rock_state"
-        }
-    }
-
-    fn initialized_table_expr(&self) -> &'static str {
-        if self.ctx.state_cell() {
-            INITIALIZED_CELL
-        } else {
-            "__rock_active_session.__rock_initialized"
-        }
-    }
 
     fn write_state_slot(&self, out: &mut String, name: ustr::Ustr) {
         let name = skull_mir::mangle::symbol_of_key(name);
@@ -4883,7 +4832,7 @@ impl Emitter<'_> {
                     out.push_str(&lua_string(&identity.logical_key(self.ws, self.interner)));
                     out.push(')');
                 } else if self.has_state_slot(*g) {
-                    out.push_str(self.state_table_expr());
+                    out.push_str(self.ctx.state_table());
                     out.push('[');
                     self.write_state_slot(out, *g);
                     out.push(']');
@@ -5608,16 +5557,12 @@ impl Emitter<'_> {
             Inst::StoreGlobal { name, value } => {
                 if self.has_state_slot(*name) {
                     out.push_str("  ");
-                    out.push_str(self.state_table_expr());
+                    out.push_str(self.ctx.state_table());
                     out.push('[');
                     self.write_state_slot(out, *name);
                     out.push_str("] = ");
                     self.write_opnd(out, *value);
-                    out.push_str("\n  ");
-                    out.push_str(self.initialized_table_expr());
-                    out.push('[');
-                    self.write_state_slot(out, *name);
-                    out.push_str("] = true\n");
+                    out.push('\n');
                 } else {
                     let _ = write!(out, "  {} = ", skull_mir::mangle::symbol_of_key(*name));
                     self.write_opnd(out, *value);

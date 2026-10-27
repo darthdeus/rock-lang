@@ -19,7 +19,7 @@ fn streamed_test_program_matches_concatenation_and_excerpt() {
 
 #[test]
 fn streamed_game_main_matches_metadata_splice_and_entry() {
-    let marker = "__rock_state_install_global_bridge()\n";
+    let marker = "__rock_globals_install_bridge()\n";
     for emits_main in [false, true] {
         let lua = format!("head\n{marker}tail\n{marker}last\n");
         let metadata = "-- metadata\n";

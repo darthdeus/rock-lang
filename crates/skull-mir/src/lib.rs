@@ -8,7 +8,6 @@
 //! `skull-codegen-*`.
 
 pub mod ablation;
-pub mod artifact_plan;
 pub mod bound;
 pub mod cfg;
 pub mod concrete;
@@ -30,7 +29,7 @@ pub mod instance;
 pub mod site;
 pub mod sinking;
 pub mod spec_census;
-pub mod state_schema;
+pub mod global_storage;
 pub mod struct_defaults;
 pub mod verdict;
 pub mod vertex_plan;

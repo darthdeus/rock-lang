@@ -647,7 +647,7 @@ impl Builder<'_> {
                     return Ok(None);
                 };
                 // Minted from the global's emitted SYMBOL, matching
-                // `state_schema::physical_leaf_names`: a v1 DefKey is not an
+                // `global_storage::physical_leaf_names`: a v1 DefKey is not an
                 // identifier, and these leaves ARE emitted Lua globals.
                 let symbol = crate::mangle::symbol_of_key(name);
                 let leaves =

@@ -477,7 +477,6 @@ fn runtime_prelude() -> &'static str {
         let out = PRELUDE_TEMPLATE
             .replace("{FN_MT}", "")
             .replace("{UINT_CHECK}", skull_codegen_lua::UINT_CHECK_PRELUDE)
-            .replace("{SESSION_CELL_BINDING}\n", SESSION_CELL_BINDING)
             .replace("{LEAF_VIEWS}", &skull_mir::lower::leaf_views_lua_table())
             .replace("{NB_PRIM_STORAGE}", &skull_mir::lower::nb_prim_storage_lua());
         // `str::replace` on a placeholder that drifted out of the template is a
@@ -499,33 +498,19 @@ fn runtime_prelude() -> &'static str {
     &PRELUDE
 }
 
-/// Session activation must reseat cells in full chunks and incremental overlays.
-pub(crate) const SESSION_CELL_BINDING: &str = r#"if not _G.__rock_state_cell_sink then
-  _G.__rock_state_cell_sink = function(session)
-    __rock_state_cell = session and session.__rock_state or nil
-    __rock_initialized_cell = session and session.__rock_initialized or nil
-  end
-end
-if not _G.__rock_active_session then
-  _G.__rock_session_activate(_G.__rock_session_new(nil))
-end
-__rock_state_cell = _G.__rock_active_session.__rock_state
-__rock_initialized_cell = _G.__rock_active_session.__rock_initialized
-"#;
-
 const PRELUDE_TEMPLATE: &str =
     r#"if jit and jit.opt then local __mc = tonumber(os.getenv("ROCK_JIT_MCODE_KB") or "") or 65536 local __he = tonumber(os.getenv("ROCK_JIT_HOTEXIT") or "") or 100 local __hl = tonumber(os.getenv("ROCK_JIT_HOTLOOP") or "") or 56 local __lu = tonumber(os.getenv("ROCK_JIT_LOOPUNROLL") or "") or 15 local __mt = tonumber(os.getenv("ROCK_JIT_MAXTRACE") or "") or 32000 local __mk = tonumber(os.getenv("ROCK_JIT_MAXIRCONST") or "") or 500 jit.opt.start("maxmcode=" .. __mc, "sizemcode=" .. __mc, "maxtrace=" .. __mt, "maxrecord=32000", "maxsnap=4000", "maxirconst=" .. __mk, "hotexit=" .. __he, "hotloop=" .. __hl, "loopunroll=" .. __lu) end
 -- Everything up to the entry call runs inside one block, so the block's locals
--- -- the Session cells first of all -- are CLOSED upvalues (UREFC: one guard,
+-- -- the storage cell first of all -- are CLOSED upvalues (UREFC: one guard,
 -- no constant) by the time an emitted function runs under the JIT. Left open,
 -- every inlined frame reading a cell would intern its own 2-slot i64 guard
 -- constant. The matching
 -- `end` is the last line the full emitter writes; the entry call the CLI
 -- appends runs after it.
 do
--- Chunk-level cells every bound function reads a mutable global through
---. Seated by __rock_session_publish below.
-local __rock_state_cell, __rock_initialized_cell
+-- The chunk-level cell every bound function reads a mutable global through;
+-- the program assigns it from __rock_globals_open before running any code.
+local __rock_state_cell
 {UINT_CHECK}
 local __rock_table_new = require("table.new")
 if not _G.ffi then _G.ffi = require("ffi") end
@@ -670,299 +655,145 @@ end
 _G.__rock_nb_storage = __rock_nb_storage
 {NB_PRIM_STORAGE}
 if not _G.__rock_on_hot_reload then _G.__rock_on_hot_reload = {} end
--- A Session's state tables are sized to the schema's rehash fixpoint
--- (`_G.__ROCK_STATE_CAPACITY`, emitted by the compiler; `__rock_state_reserve`
--- below) so their array part never moves after load. LuaJIT specialises a
--- constant-key read to the table's CURRENT array/hash split, and a table that
--- grows lazily from `{}` rehashes once per hash-part overflow -- each time
--- recomputing the array part from the keys populated so far -- which left
--- every trace recorded before a move with a permanently failing guard
---. Defined outside the define-once block
--- so a reload with a newer artifact never keeps an older constructor.
-_G.__rock_session_new = function(schema_id)
-  local capacity = rawget(_G, "__ROCK_STATE_CAPACITY")
-  local narr, nhash = 0, 0
-  if capacity then narr, nhash = capacity[1], capacity[2] end
-  return {
-    __rock_schema_id = schema_id,
-    __rock_state = __rock_table_new(narr, nhash),
-    __rock_initialized = __rock_table_new(narr, nhash),
-    __rock_initializer_keys = {},
-    __rock_rng_state = nil,
-    __rock_presentation_rng_state = nil,
-    __rock_state_capacity = { narr, nhash }
-  }
-end
--- Grow a Session's tables to at least (narr, nhash) by rebuilding them at that
--- size; values and keys are preserved. The first Session is created above
--- before the compiler's capacity line runs, and a full reload may raise the
--- capacity, so this is what seats the fixpoint on a live Session.
-_G.__rock_state_reserve = function(session, narr, nhash)
-  local have = session.__rock_state_capacity
-  if have and have[1] >= narr and have[2] >= nhash then return end
-  local state = __rock_table_new(narr, nhash)
-  for key, value in pairs(session.__rock_state) do state[key] = value end
-  local initialized = __rock_table_new(narr, nhash)
-  for key, value in pairs(session.__rock_initialized) do initialized[key] = value end
-  session.__rock_state = state
-  session.__rock_initialized = initialized
-  session.__rock_state_capacity = { narr, nhash }
-  if rawget(_G, "__rock_active_session") == session then _G.__rock_session_publish(session) end
-end
-_G.__rock_state_reserve_active = function()
-  local capacity = rawget(_G, "__ROCK_STATE_CAPACITY")
-  if not capacity then return end
-  _G.__rock_state_reserve(_G.__rock_active_session, capacity[1], capacity[2])
-end
-if not _G.__rock_session_new_defined_once then
-  _G.__rock_session_new_defined_once = true
-  _G.__rock_session_current = function()
-    local session = _G.__rock_active_session
-    if not session then error("no active Rock Session", 0) end
-    return session
+-- Mutable globals and statics live in one table per process, created by the
+-- first full program and never replaced, so an incremental overlay runs
+-- against the values the program wrote. Globals take compiler-assigned
+-- integer slots; statics take string keys from their logical identity. The
+-- table is sized at creation to the compiler's rehash fixpoint (narr, nhash):
+-- LuaJIT specialises a constant-key read to the table's CURRENT array/hash
+-- split, and a table grown lazily from `{}` rehashes on every hash-part
+-- overflow, which left each trace recorded before a move with a permanently
+-- failing guard. A program whose global layout differs from the one that
+-- created the table cannot reuse it: its slots would name other globals.
+_G.__rock_globals_open = function(layout, narr, nhash)
+  local globals = rawget(_G, "__rock_globals")
+  if globals == nil then
+    globals = __rock_table_new(narr, nhash)
+    rawset(_G, "__rock_globals", globals)
+    rawset(_G, "__rock_globals_layout", layout)
+    rawset(_G, "__rock_globals_fresh", true)
+  elseif rawget(_G, "__rock_globals_layout") ~= layout then
+    error("Rock global layout changed; restart required", 0)
+  else
+    rawset(_G, "__rock_globals_fresh", false)
   end
-  _G.__rock_state_has = function(key)
-    local initialized = _G.__rock_active_initialized
-    if not initialized then error("no active Rock Session", 0) end
-    return initialized[key] == true
-  end
-  _G.__rock_state_get = function(key)
-    local state = _G.__rock_active_state
-    if not state then error("no active Rock Session", 0) end
-    return state[key]
-  end
-  _G.__rock_state_set = function(key, value)
-    local state, initialized = _G.__rock_active_state, _G.__rock_active_initialized
-    if not state or not initialized then error("no active Rock Session", 0) end
-    state[key] = value
-    initialized[key] = true
-    return value
-  end
-  _G.__rock_state_prepare_static = function(value_key, done_key, initializer_key)
-    local session = _G.__rock_session_current()
-    local old = session.__rock_initializer_keys[value_key]
-    if old ~= nil and old ~= initializer_key then
-      session.__rock_state[value_key] = nil
-      session.__rock_initialized[value_key] = nil
-      session.__rock_state[done_key] = false
-      session.__rock_initialized[done_key] = true
-    end
-    session.__rock_initializer_keys[value_key] = initializer_key
-  end
-  _G.__rock_state_publish_schema = function(schema_id)
-    local session = _G.__rock_session_current()
-    if session.__rock_schema_id ~= nil and session.__rock_schema_id ~= schema_id then
-      error("Rock StateSchema changed; restart is required", 0)
-    end
-    session.__rock_schema_id = schema_id
-    rawset(_G, "__rock_state_schema_id", schema_id)
-    rawset(_G, "__rock_state_name_index", nil)
-  end
+  return globals
 end
--- Every Session swap publishes through the canonical pair of state cells,
--- including state-image candidates and transaction aborts.
-_G.__rock_session_publish = function(session)
-  rawset(_G, "__rock_active_session", session)
-  rawset(_G, "__rock_active_state", session and session.__rock_state or nil)
-  rawset(_G, "__rock_active_initialized", session and session.__rock_initialized or nil)
-  local sink = rawget(_G, "__rock_state_cell_sink")
-  if sink then sink(session) end
-  return session
-end
-_G.__rock_session_activate = function(session)
-  if type(session) ~= "table" or type(session.__rock_state) ~= "table"
-      or type(session.__rock_initialized) ~= "table" then
-    error("invalid Rock Session", 0)
+-- A static whose initializer changed since the last load is reset, so its
+-- next reach re-runs the edited initializer; an unchanged one keeps its value.
+if not _G.__rock_static_init_keys then _G.__rock_static_init_keys = {} end
+_G.__rock_static_prepare = function(value_key, done_key, initializer_key)
+  local keys = _G.__rock_static_init_keys
+  local old = keys[value_key]
+  if old ~= nil and old ~= initializer_key then
+    local globals = _G.__rock_globals
+    globals[value_key] = nil
+    globals[done_key] = false
   end
-  local published = _G.__rock_state_schema_id
-  if published ~= nil and session.__rock_schema_id ~= published then
-    error("Rock StateSchema does not match the active Session", 0)
-  end
-  return _G.__rock_session_publish(session)
+  keys[value_key] = initializer_key
 end
-{SESSION_CELL_BINDING}
--- Join before a factory creates its body, so all later closures inherit these
--- same two cells. Match table identity: stripped bytecode has no upvalue names.
-_G.__rock_bind_state_cells = function(body)
-  local session = _G.__rock_active_session
-  local sink = _G.__rock_state_cell_sink
-  -- Initial full-chunk factories already share these cells. Avoid a redundant
-  -- join there; overlays and later full chunks still join their distinct cells.
-  local state_id = debug.upvalueid(sink, 1)
-  local initialized_id = debug.upvalueid(sink, 2)
-  local i = 1
-  while true do
-    local name, value = debug.getupvalue(body, i)
-    if name == nil then break end
-    if value == session.__rock_state then
-      if debug.upvalueid(body, i) ~= state_id then
-        debug.upvaluejoin(body, i, sink, 1)
-      end
-    elseif value == session.__rock_initialized then
-      if debug.upvalueid(body, i) ~= initialized_id then
-        debug.upvaluejoin(body, i, sink, 2)
-      end
-    end
-    i = i + 1
-  end
+-- A static an edit removed: its cells stop holding the last value.
+_G.__rock_static_drop = function(value_key, done_key)
+  local globals = _G.__rock_globals
+  globals[value_key] = nil
+  globals[done_key] = nil
+  _G.__rock_static_init_keys[value_key] = nil
 end
-_G.__rock_state_clear = function(key)
-  local session = _G.__rock_session_current()
-  session.__rock_state[key] = nil
-  session.__rock_initialized[key] = nil
+-- The global directory, published by every full program: one entry per
+-- mutable global, { name, identity, physical = {leaf names}, slots = {...} }.
+-- A host may add fields by identity (__rock_global_decorate): `package`,
+-- `description` and, for a global stored as several leaves, `get`/`set`.
+-- Reflection and the `_G` bridge read globals only through it.
+_G.__rock_globals_publish = function(directory)
+  rawset(_G, "__ROCK_GLOBALS", directory)
+  rawset(_G, "__rock_global_index", nil)
 end
-_G.__rock_state_transaction_begin = function()
-  if rawget(_G, "__rock_state_transaction") ~= nil then return end
-  local session = _G.__rock_session_current()
-  local state, initialized, initializer_keys = {}, {}, {}
-  for key, value in pairs(session.__rock_state) do state[key] = value end
-  for key, value in pairs(session.__rock_initialized) do initialized[key] = value end
-  for key, value in pairs(session.__rock_initializer_keys) do initializer_keys[key] = value end
-  rawset(_G, "__rock_state_transaction", {
-    session = session,
-    schema_id = session.__rock_schema_id,
-    schema = rawget(_G, "__ROCK_STATE_SCHEMA"),
-    metadata = rawget(_G, "__ROCK_STATE_METADATA"),
-    nobox = rawget(_G, "__ROCK_STATE_NOBOX"),
-    artifact_binding_plan = rawget(_G, "__ROCK_ARTIFACT_BINDING_PLAN"),
-    name_index = rawget(_G, "__rock_state_name_index"),
-    bridge_physical = rawget(_G, "__rock_state_bridge_physical"),
-    state = state,
-    initialized = initialized,
-    initializer_keys = initializer_keys,
-    published_schema_id = rawget(_G, "__rock_state_schema_id")
-  })
-end
-_G.__rock_state_transaction_abort = function()
-  local transaction = rawget(_G, "__rock_state_transaction")
-  if not transaction then return end
-  local session = transaction.session
-  _G.__rock_session_publish(session)
-  session.__rock_schema_id = transaction.schema_id
-  for key in pairs(session.__rock_state) do session.__rock_state[key] = nil end
-  for key, value in pairs(transaction.state) do session.__rock_state[key] = value end
-  for key in pairs(session.__rock_initialized) do session.__rock_initialized[key] = nil end
-  for key, value in pairs(transaction.initialized) do session.__rock_initialized[key] = value end
-  for key in pairs(session.__rock_initializer_keys) do session.__rock_initializer_keys[key] = nil end
-  for key, value in pairs(transaction.initializer_keys) do session.__rock_initializer_keys[key] = value end
-  rawset(_G, "__ROCK_STATE_SCHEMA", transaction.schema)
-  rawset(_G, "__ROCK_STATE_METADATA", transaction.metadata)
-  rawset(_G, "__ROCK_STATE_NOBOX", transaction.nobox)
-  rawset(_G, "__ROCK_ARTIFACT_BINDING_PLAN", transaction.artifact_binding_plan)
-  rawset(_G, "__rock_artifact_binding_plan_pending", nil)
-  rawset(_G, "__rock_state_name_index", transaction.name_index)
-  rawset(_G, "__rock_state_bridge_physical", transaction.bridge_physical)
-  rawset(_G, "__rock_state_schema_id", transaction.published_schema_id)
-  rawset(_G, "__rock_state_transaction", nil)
-end
-_G.__rock_state_transaction_commit = function()
-  local publish_binding = rawget(_G, "__rock_artifact_binding_plan_publish")
-  if publish_binding then publish_binding() end
-  rawset(_G, "__rock_state_transaction", nil)
-end
-_G.__rock_state_name_index_build = function()
+_G.__rock_global_index_build = function()
   local index = {}
   local function add(key, entry)
     if not key then return end
     local old = index[key]
     if old == nil or old == entry then index[key] = entry else index[key] = false end
   end
-  for _, entry in ipairs(rawget(_G, "__ROCK_STATE_SCHEMA") or {}) do
+  for _, entry in ipairs(rawget(_G, "__ROCK_GLOBALS") or {}) do
     add(entry.name, entry)
     add(entry.identity, entry)
-    if entry.kind == "global" then
-      for _, physical in ipairs(entry.physical or {}) do add(physical, entry) end
-    end
+    for _, physical in ipairs(entry.physical) do add(physical, entry) end
   end
-  rawset(_G, "__rock_state_name_index", index)
+  rawset(_G, "__rock_global_index", index)
   return index
 end
-_G.__rock_state_entry_for_name = function(name)
-  local index = rawget(_G, "__rock_state_name_index")
-  if not index then index = _G.__rock_state_name_index_build() end
+-- By name, identity or physical leaf name; nil when absent or ambiguous.
+_G.__rock_global_entry = function(name)
+  local index = rawget(_G, "__rock_global_index")
+  if not index then index = _G.__rock_global_index_build() end
   local entry = index[name]
   return entry ~= false and entry or nil
 end
-_G.__rock_state_entry_for_identity = function(identity)
-  for _, entry in ipairs(rawget(_G, "__ROCK_STATE_SCHEMA") or {}) do
-    if entry.identity == identity then return entry end
+_G.__rock_global_decorate = function(rows)
+  for identity, fields in pairs(rows) do
+    local entry = _G.__rock_global_entry(identity)
+    if not entry then error("no Rock global " .. identity .. " to decorate", 0) end
+    for key, value in pairs(fields) do entry[key] = value end
   end
-  return nil
 end
-_G.__rock_state_entry_get = function(entry)
-  local adapters = rawget(_G, "__ROCK_STATE_NOBOX")
-  local adapter = adapters and adapters[entry.identity]
-  if adapter then return adapter.get() end
-  local keys = entry.session_keys or {}
-  if #keys == 1 then return _G.__rock_state_get(keys[1]) end
-  error("StateSchema entry has no logical realization " .. tostring(entry.identity), 0)
+_G.__rock_global_get = function(entry)
+  if entry.get then return entry.get() end
+  if #entry.slots == 1 then return _G.__rock_globals[entry.slots[1]] end
+  error("Rock global " .. entry.identity .. " has no single-value accessor", 0)
 end
-_G.__rock_state_entry_try_get = function(entry)
-  for _, key in ipairs(entry.session_keys or {}) do
-    if _G.__rock_state_has(key) then
-      return true, _G.__rock_state_entry_get(entry)
-    end
-  end
-  return false, nil
+_G.__rock_global_set = function(entry, value)
+  if entry.set then return entry.set(value) end
+  if #entry.slots == 1 then _G.__rock_globals[entry.slots[1]] = value; return end
+  error("Rock global " .. entry.identity .. " has no single-value accessor", 0)
 end
-_G.__rock_state_entry_set = function(entry, value)
-  local adapters = rawget(_G, "__ROCK_STATE_NOBOX")
-  local adapter = adapters and adapters[entry.identity]
-  if adapter then return adapter.set(value) end
-  local keys = entry.session_keys or {}
-  if #keys == 1 then return _G.__rock_state_set(keys[1], value) end
-  error("StateSchema entry has no logical realization " .. tostring(entry.identity), 0)
-end
-_G.__rock_state_entry_clear = function(entry)
-  for _, key in ipairs(entry.session_keys or {}) do _G.__rock_state_clear(key) end
-end
-_G.__rock_state_install_global_bridge = function()
-  local schema = rawget(_G, "__ROCK_STATE_SCHEMA") or {}
+-- Inline Lua names a Rock global by its emitted symbol, which lives in the
+-- storage table rather than in `_G`; the bridge routes those reads and writes.
+_G.__rock_globals_install_bridge = function()
+  local directory = rawget(_G, "__ROCK_GLOBALS") or {}
   local mt = getmetatable(_G) or {}
-  local old_index, old_newindex = mt.__rock_state_original_index, mt.__rock_state_original_newindex
-  if not mt.__rock_state_bridge then
+  local old_index, old_newindex = mt.__rock_globals_original_index, mt.__rock_globals_original_newindex
+  if not mt.__rock_globals_bridge then
     old_index, old_newindex = mt.__index, mt.__newindex
-    mt.__rock_state_original_index = old_index
-    mt.__rock_state_original_newindex = old_newindex
+    mt.__rock_globals_original_index = old_index
+    mt.__rock_globals_original_newindex = old_newindex
   end
   -- Which of the three pre-bridge fallback shapes applies is decided HERE, once,
   -- rather than re-decided inside the metamethod on every miss. `_G` normally
   -- carries no metatable at all, so both resolve to nil and the miss path is a
   -- plain `return nil` / `rawset` with no Lua-level TAIL CALL -- and a miss is
-  -- the common case: a read of any global that is not a Rock state global and
+  -- the common case: a read of any global that is not a Rock global and
   -- holds nil (an unset feature flag, say) reaches `__index` every time, and
   -- cannot be cached raw, because rawsetting nil leaves the key absent.
   local index_fn = type(old_index) == "function" and old_index or nil
   local index_tab = type(old_index) == "table" and old_index or nil
   local newindex_fn = type(old_newindex) == "function" and old_newindex or nil
   local newindex_tab = type(old_newindex) == "table" and old_newindex or nil
-  local previous_physical = rawget(_G, "__rock_state_bridge_physical") or {}
+  local previous_physical = rawget(_G, "__rock_globals_bridge_physical") or {}
   for _, physical in ipairs(previous_physical) do rawset(_G, physical, nil) end
   local current_physical = {}
-  for _, entry in ipairs(schema) do
-    if entry.kind == "global" then
-      for _, physical in ipairs(entry.physical or {}) do
-        rawset(_G, physical, nil)
-        current_physical[#current_physical + 1] = physical
-      end
+  for _, entry in ipairs(directory) do
+    for _, physical in ipairs(entry.physical) do
+      rawset(_G, physical, nil)
+      current_physical[#current_physical + 1] = physical
     end
   end
-  rawset(_G, "__rock_state_bridge_physical", current_physical)
+  rawset(_G, "__rock_globals_bridge_physical", current_physical)
   mt.__index = function(t, key)
-    local entry = _G.__rock_state_entry_for_name(key)
-    if entry and entry.kind == "global" then return _G.__rock_state_entry_get(entry) end
+    local entry = _G.__rock_global_entry(key)
+    if entry then return _G.__rock_global_get(entry) end
     if index_fn then return index_fn(t, key) end
     if index_tab then return index_tab[key] end
     return nil
   end
   mt.__newindex = function(t, key, value)
-    local entry = _G.__rock_state_entry_for_name(key)
-    if entry and entry.kind == "global" then return _G.__rock_state_entry_set(entry, value) end
+    local entry = _G.__rock_global_entry(key)
+    if entry then return _G.__rock_global_set(entry, value) end
     if newindex_fn then return newindex_fn(t, key, value) end
     if newindex_tab then newindex_tab[key] = value; return end
     rawset(t, key, value)
   end
-  mt.__rock_state_bridge = true
+  mt.__rock_globals_bridge = true
   setmetatable(_G, mt)
 end
 -- Shared metatable of capturing-lambda env records:
@@ -972,21 +803,13 @@ end
 if not _G.__rock_rng_next then
   local __rock_bit = require("bit")
   local __rock_rng_state = 0
-  local function active_rng_state()
-    local session = _G.__rock_active_session
-    if session and session.__rock_rng_state ~= nil then return session.__rock_rng_state end
-    return __rock_rng_state
-  end
-  local function store_rng_state(state)
-    local session = _G.__rock_active_session
-    if session then session.__rock_rng_state = state else __rock_rng_state = state end
-  end
+  local function active_rng_state() return __rock_rng_state end
+  local function store_rng_state(state) __rock_rng_state = state end
   _G.__rock_rng_seed = function(s)
     local state = __rock_bit.tobit(tonumber(s))
     store_rng_state(state)
   end
-  -- Whole RNG state is this one counter; get/set serialize it for state-image
-  -- restore. It is a plain 32-bit number.
+  -- Whole RNG state is this one counter, a plain 32-bit number.
   _G.__rock_rng_state_get = function() return active_rng_state() end
   _G.__rock_rng_state_set = function(s)
     local state = __rock_bit.tobit(tonumber(s))
@@ -1004,15 +827,8 @@ if not _G.__rock_rng_next then
   end
 
   local __rock_presentation_rng_state = 0
-  local function active_presentation_rng_state()
-    local session = _G.__rock_active_session
-    if session and session.__rock_presentation_rng_state ~= nil then return session.__rock_presentation_rng_state end
-    return __rock_presentation_rng_state
-  end
-  local function store_presentation_rng_state(state)
-    local session = _G.__rock_active_session
-    if session then session.__rock_presentation_rng_state = state else __rock_presentation_rng_state = state end
-  end
+  local function active_presentation_rng_state() return __rock_presentation_rng_state end
+  local function store_presentation_rng_state(state) __rock_presentation_rng_state = state end
   _G.__rock_presentation_rng_seed = function(s)
     local state = __rock_bit.tobit(tonumber(s))
     store_presentation_rng_state(state)

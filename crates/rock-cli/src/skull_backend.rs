@@ -2364,51 +2364,32 @@ fn allocation_report_path_from_env() -> Option<std::ffi::OsString> {
     })
 }
 
-/// Attach host-only package grouping and reflection descriptions to the
-/// compiler-emitted StateSchema. This is metadata, not a second state-membership
-/// oracle: consumers enumerate `_G.__ROCK_STATE_SCHEMA` and read the active
-/// Session through its session keys.
-fn build_rock_state_metadata(
+/// The host-only fields of each mutable global's directory entry: its package
+/// and reflection description. Consumers enumerate `_G.__ROCK_GLOBALS`.
+fn build_rock_global_metadata(
     ws: &bone_semantic::inference::Workspace,
     spec: &crate::unified_compile::SourceSpec,
-) -> std::result::Result<String, CompilerError> {
+    rows: &mut std::collections::BTreeMap<String, Vec<String>>,
+) {
     use bone_semantic::prelude::ModuleId;
-    use std::collections::BTreeMap;
 
     let package_map = crate::unified_compile::build_package_map(spec);
-    let mut metadata: BTreeMap<String, String> = BTreeMap::new();
     for m in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
         let package = package_map.as_ref().and_then(|(graph, names)| {
             let owner = graph.package_of_file(std::path::Path::new(m.file.as_str()))?;
             names.get(&owner).cloned()
         });
-        for (_gid, g) in m.globals.iter() {
-            let identity = skull_mir::state_schema::global_identity(m.file, g.name);
-            let description = skull::type_desc_lua(ws, g.ty);
-            let fields = [
-                package.clone().map(|p| format!("package={p:?}")),
-                description.map(|d| format!("description={d}")),
-            ]
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>();
-            if !fields.is_empty() {
-                metadata.insert(identity, format!("{{{}}}", fields.join(",")));
+        for (_gid, g) in m.globals.iter().filter(|(_, global)| !global.is_const) {
+            let identity = skull_mir::global_storage::global_identity(m.file, g.name);
+            let fields = rows.entry(identity).or_default();
+            if let Some(package) = &package {
+                fields.push(format!("package={package:?}"));
+            }
+            if let Some(description) = skull::type_desc_lua(ws, g.ty) {
+                fields.push(format!("description={description}"));
             }
         }
     }
-    let mut out = String::from("\n_G.__ROCK_STATE_METADATA = {");
-    for (identity, fields) in metadata {
-        out.push_str(&format!("[{identity:?}]={fields},"));
-    }
-    out.push_str("}\n");
-    out.push_str("for _, entry in ipairs(_G.__ROCK_STATE_SCHEMA or {}) do\n");
-    out.push_str("  local metadata = _G.__ROCK_STATE_METADATA[entry.identity]\n");
-    out.push_str("  if metadata then\n");
-    out.push_str("    entry.package = metadata.package\n");
-    out.push_str("    entry.description = metadata.description\n");
-    out.push_str("  end\nend\n");
-    Ok(out)
 }
 
 /// Emitted Lua with compiler-owned metadata, passed unchanged to the runtime host.
@@ -2421,9 +2402,9 @@ pub struct GameProgram {
 
 impl GameProgram {
     fn with_metadata(lua: String, metadata: String) -> std::result::Result<Self, CompilerError> {
-        let marker = "__rock_state_install_global_bridge()\n";
+        let marker = "__rock_globals_install_bridge()\n";
         let at = lua.find(marker).ok_or_else(|| CompilerError::new_no_location(
-            "compiler-owned StateSchema is missing its global bridge".to_string(),
+            "compiled program is missing its global directory".to_string(),
         ))?;
         Ok(Self { lua, metadata, metadata_at: at + marker.len(), comptime_inputs: Default::default() })
     }
@@ -2439,18 +2420,23 @@ fn install_rock_state_metadata(
     ws: &bone_semantic::inference::Workspace,
     spec: &crate::unified_compile::SourceSpec,
 ) -> std::result::Result<GameProgram, CompilerError> {
-    let mut metadata = build_rock_state_metadata(ws, spec)?;
+    let mut rows = std::collections::BTreeMap::new();
+    build_rock_global_metadata(ws, spec, &mut rows);
     let scx = skull_mir::lower::ScalarCtx::new(ws);
-    metadata.push_str(&build_state_nobox_accessors(ws, &scx)?);
+    build_global_nobox_accessors(ws, &scx, &mut rows)?;
+    let mut metadata = String::from("\n_G.__rock_global_decorate({");
+    for (identity, fields) in rows.into_iter().filter(|(_, fields)| !fields.is_empty()) {
+        metadata.push_str(&format!("[{identity:?}]={{{}}},\n", fields.join(",")));
+    }
+    metadata.push_str("})\n");
     let mut program = GameProgram::with_metadata(lua, metadata)?;
     program.comptime_inputs = ws.comptime_inputs.clone();
     Ok(program)
 }
 
-/// Build `_G.__ROCK_STATE_NOBOX`, the rebuild/take-apart pair per `nobox`
-/// global. A `nobox` global's storage is its leaf globals, so reflection cannot
-/// reach it as one Session value; these closures are the physical adapter for
-/// the logical StateSchema entry.
+/// The `get`/`set` directory fields of each `nobox` global: the rebuild and
+/// take-apart pair. A `nobox` global's storage is its leaf slots, so reflection
+/// cannot reach it as one stored value; these closures are its accessors.
 ///
 /// Both directions consume one canonical accessor plan
 /// (`nobox_global_accessor_shape`), so they cannot drift from each other or from the
@@ -2458,13 +2444,13 @@ fn install_rock_state_metadata(
 /// `set` reads the same paths in order. Nested cdata uses the flattened `_lct`
 /// representation; ordinary cdata and GC-table values retain `_ct` and `_vt`.
 ///
-fn build_state_nobox_accessors(
+fn build_global_nobox_accessors(
     ws: &bone_semantic::inference::Workspace,
     scx: &skull_mir::lower::ScalarCtx,
-) -> std::result::Result<String, CompilerError> {
+    rows: &mut std::collections::BTreeMap<String, Vec<String>>,
+) -> std::result::Result<(), CompilerError> {
     use bone_semantic::prelude::ModuleId;
 
-    let mut rows: Vec<String> = Vec::new();
     let state_slots = skull::mir_emit::lua_global_state_slots(ws, scx)?;
     for m in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
         for (_gid, g) in m.globals.iter().filter(|(_, global)| !global.is_const) {
@@ -2478,7 +2464,7 @@ fn build_state_nobox_accessors(
             let ty_symbol = skull_mir::mangle::type_symbol(ws, ty_name);
             let plan = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, g.ty)
                 .map_err(|e| CompilerError::new_no_location(e.message))?;
-            // The leaves are emitted symbols, matching the Session slot map.
+            // The leaves are emitted symbols, matching the storage slot map.
             let all_leaves = plan
                 .leaf_names(skull_mir::mangle::symbol_of_key(g.name))
                 .ok_or_else(|| {
@@ -2529,7 +2515,7 @@ fn build_state_nobox_accessors(
                 .map(|leaf| {
                     state_slots.get(leaf).copied().ok_or_else(|| {
                         CompilerError::new_no_location(format!(
-                            "nobox global `{}` leaf `{leaf}` has no Lua Session slot",
+                            "nobox global `{}` leaf `{leaf}` has no Lua storage slot",
                             g.name
                         ))
                     })
@@ -2538,14 +2524,14 @@ fn build_state_nobox_accessors(
             let (present_key, value_keys) = if nullable {
                 let (present, values) = state_keys
                     .split_first()
-                    .expect("a nullable shape has a presence Session slot");
+                    .expect("a nullable shape has a presence storage slot");
                 (Some(*present), values.to_vec())
             } else {
                 (None, state_keys)
             };
             let args = value_keys
                 .iter()
-                .map(|key| format!("__rock_state_get({key})"))
+                .map(|key| format!("__rock_globals[{key}]"))
                 .collect::<Vec<_>>()
                 .join(", ");
             let writes = leaves
@@ -2561,7 +2547,7 @@ fn build_state_nobox_accessors(
                     } else {
                         format!("v.{}", p.as_str())
                     };
-                    format!("__rock_state_set({key}, {value})")
+                    format!("__rock_globals[{key}] = {value}")
                 })
                 .collect::<Vec<_>>()
                 .join("; ");
@@ -2571,34 +2557,28 @@ fn build_state_nobox_accessors(
                 // behind would let a later read resurrect the old value.
                 Some(_) => (
                     format!(
-                        "if not __rock_state_get({}) then return nil end return {ty_symbol}{suffix}({args})",
+                        "if not __rock_globals[{}] then return nil end return {ty_symbol}{suffix}({args})",
                         present_key.as_ref().expect("nullable accessor has a presence key")
                     ),
                     format!(
-                        "__rock_state_set({}, v ~= nil); if v ~= nil then {writes} else {} end",
+                        "__rock_globals[{}] = v ~= nil; if v ~= nil then {writes} else {} end",
                         present_key.as_ref().expect("nullable accessor has a presence key"),
                         leaves
                             .iter()
                             .zip(&value_keys)
-                            .map(|(_, key)| format!("__rock_state_clear({key})"))
+                            .map(|(_, key)| format!("__rock_globals[{key}] = nil"))
                             .collect::<Vec<_>>()
                             .join("; ")
                     ),
                 ),
                 None => (format!("return {ty_symbol}{suffix}({args})"), writes),
             };
-            rows.push(format!(
-                "[{:?}]={{get=function() {get} end,set=function(v) {set} end}},",
-                skull_mir::state_schema::global_identity(m.file, g.name)
-            ));
+            rows.entry(skull_mir::global_storage::global_identity(m.file, g.name))
+                .or_default()
+                .push(format!("get=function() {get} end,set=function(v) {set} end"));
         }
     }
-    // Assigned even when EMPTY. A full reload re-executes the chunk in the live
-    // process, so what the new chunk omits it inherits: emitting nothing here
-    // would leave the previous build's accessors installed, and changing the last
-    // `nobox` global to an ordinary one would keep reflection reading leaf globals
-    // that no longer back it.
-    Ok(format!("\n_G.__ROCK_STATE_NOBOX = {{{}}}\n", rows.concat()))
+    Ok(())
 }
 
 /// A checked sim declaration, in workspace/source order. Wire identities use
@@ -4020,7 +4000,7 @@ impl IncrementalProject {
                     .or(allocation_report_path.as_deref()),
                 &emit.allocation_report,
             )?;
-            // Host package/description metadata is appended to StateSchema.
+            // Host package/description metadata decorates the global directory.
             let spec = crate::unified_compile::SourceSpec::Directory(
                 std::path::PathBuf::from(dir),
             );
@@ -4348,14 +4328,11 @@ impl IncrementalProject {
                 }
                 if self
                     .cache
-                    .state_schema()
-                    .is_some_and(|old| {
-                        c.state_schema()
-                            .is_some_and(|new| old.schema_id != new.schema_id)
-                    })
+                    .global_layout()
+                    .is_some_and(|old| c.global_layout().is_some_and(|new| old != new))
                 {
                     return Ok(SkullReload::FullRequired {
-                        reasons: vec!["StateSchema changed; fresh Session is required".to_string()],
+                        reasons: vec!["global layout changed; restart required".to_string()],
                     });
                 }
                 if self.cache.lifecycle_plan().is_some_and(|old| {
@@ -4367,7 +4344,7 @@ impl IncrementalProject {
                         ],
                     });
                 }
-                // StateSchema metadata is regenerated on a structural edit.
+                // Global directory metadata is regenerated on a structural edit.
                 let spec =
                     crate::unified_compile::SourceSpec::Directory(PathBuf::from(self.project.dir()));
                 let emits_main = emit.emits_main;
@@ -4509,7 +4486,7 @@ impl IncrementalProject {
             crate::compile_measurements::emission(&emit);
             let artifact_fingerprint = emit.artifact_fingerprint.clone();
             let emits_main = emit.emits_main;
-            // Host package/description metadata is rebuilt with the StateSchema.
+            // Host package/description metadata is rebuilt with the global directory.
             let spec = crate::unified_compile::SourceSpec::Directory(
                 std::path::PathBuf::from(self.project.dir()),
             );

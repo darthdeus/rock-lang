@@ -243,7 +243,7 @@ fn bound_overlay_rebinds_a_residual_inline_caller_without_rebuilding_its_chunk()
 }
 
 #[test]
-fn bound_overlay_cells_follow_session_activation() {
+fn bound_overlay_cells_read_the_live_global_storage() {
     let v1 = "global COUNT: int = 0\nfn delta(n: int) -> int { n + 1 }\n@nomangle fn bump() { COUNT = delta(COUNT) }\n";
     let ws1 = ws_with_stdlib(v1);
     let mid = skull::user_module_id(&ws1).unwrap();
@@ -252,7 +252,7 @@ fn bound_overlay_cells_follow_session_activation() {
     let ws2 = ws_with_stdlib(&v1.replace("delta(COUNT)", "delta(COUNT) + 1"));
     let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "bump")]).expect("overlay");
     let script = format!(
-        "{}\nbump()\n{}\nbump()\nassert(COUNT == 3)\nlocal old = __rock_session_current()\nlocal fresh = __rock_session_new(old.__rock_schema_id)\n__rock_session_activate(fresh)\nCOUNT = 20\nbump()\nassert(COUNT == 22)\n__rock_session_activate(old)\nbump()\nassert(COUNT == 5)\nprint('PASS')\n",
+        "{}\nbump()\n{}\nbump()\nassert(COUNT == 3)\nCOUNT = 20\nbump()\nassert(COUNT == 22)\nprint('PASS')\n",
         full.lua, overlay.lua,
     );
     let out = rock_host::lua_runner::run_lua_code_with_timeout(&script, Some(test_utils::HANG_BACKSTOP)).expect("loaded overlay");
@@ -277,7 +277,7 @@ fn bound_overlay_new_backedge_keeps_capture_binding_acyclic() {
 
 
 #[test]
-fn repeated_stripped_overlays_keep_one_session_sink_and_old_closures_live() {
+fn repeated_stripped_overlays_share_one_storage_table_and_old_closures_live() {
     let v1 = "global COUNT: int = 0\n@nomangle fn bump() { COUNT = COUNT + 1 }\n";
     let ws1 = ws_with_stdlib(v1);
     let mid = skull::user_module_id(&ws1).unwrap();
@@ -294,30 +294,18 @@ local real_join = debug.upvaluejoin
 local joins = 0
 debug.upvaluejoin = function(...) joins = joins + 1; return real_join(...) end
 stripped({full})()
-assert(joins == 0, 'initial full chunk redundantly joined its own state cells')
 local old_bump = bump
-local sinks_before = __rock_state_cell_sinks and #__rock_state_cell_sinks or 1
+local storage = __rock_globals
 local patch = stripped({overlay})
-local first_sink = __rock_state_cell_sink
 for i = 1, 25 do patch() end
-assert(joins > 0, 'overlay did not join its independent state cells')
-local sinks_after = __rock_state_cell_sinks and #__rock_state_cell_sinks or 1
-assert(sinks_after == sinks_before, 'Session sinks grew across body edits')
-assert(__rock_state_cell_sink == first_sink)
 stripped({full})()
 patch()
-assert(__rock_state_cell_sink == first_sink)
-local old_session = __rock_session_current()
-local fresh = __rock_session_new(old_session.__rock_schema_id)
-__rock_session_activate(fresh)
+assert(joins == 0, 'a chunk joined upvalues; every chunk reads the one storage table')
+assert(__rock_globals == storage, 'a reload replaced the global storage')
 COUNT = 10
 old_bump()
 bump()
 assert(COUNT == 13)
-__rock_session_activate(old_session)
-old_bump()
-bump()
-assert(COUNT == 3)
 print('PASS')
 "#,
         full = skull_codegen_lua::lua_string(&full.lua),

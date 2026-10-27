@@ -85,7 +85,7 @@ fn v1_global_state_identity_is_its_def_key() {
     let emitted = package();
     assert!(
         emitted.lua.contains("identity=\"global:v1state::a::COUNT\""),
-        "a v1 global's StateSchema identity is its DefKey"
+        "a v1 global's storage identity is its DefKey"
     );
     assert!(
         emitted.lua.contains("identity=\"global:v1state::b::COUNT\""),
@@ -168,14 +168,32 @@ fn main() {
 /// a function that moves between fragments of one module must not change.
 #[test]
 fn v1_code_identity_is_its_def_key() {
-    let emitted = package();
-    assert!(
-        emitted.lua.contains("\"named:v1state::a::bump<>\""),
-        "a v1 function's logical code identity is its DefKey"
-    );
-    assert!(
-        !emitted.lua.contains("named:a.rock::"),
-        "the owning FRAGMENT must not be part of a v1 function's code identity"
+    let fragments = [
+        V1Fragment { file: "main.rock", src: MAIN },
+        V1Fragment { file: "a.rock", src: MOD_A },
+        V1Fragment { file: "b.rock", src: MOD_B },
+    ];
+    let ws = crate::common::ws_v1_package("v1state", &fragments);
+    let mid = *ws.module_ids.get(&ustr::Ustr::from("main.rock")).expect("module id");
+    let emitted = skull::mir_emit::emit_workspace_mir(&ws, mid).expect("emit");
+    let interner = skull_mir::monoty::MonoInterner::default();
+    let bump = ws
+        .modules
+        .iter()
+        .filter(|module| module.file.as_str() == "a.rock")
+        .find_map(|module| {
+            module.functions.iter().find(|(_, f)| f.name.as_str().ends_with("bump")).map(|(fid, _)| {
+                skull_mir::code_identity::CodeIdentity::Named(skull_mir::instance::Instance::base(
+                    skull_mir::mir::FuncRef { module: module.id, func: fid },
+                ))
+            })
+        })
+        .expect("a::bump");
+    assert!(emitted.code_artifact.entries.contains_key(&bump), "a::bump has no code identity");
+    assert_eq!(
+        bump.logical_key(&ws, &interner),
+        "named:v1state::a::bump<>",
+        "a v1 function's logical code identity is its DefKey, not its fragment"
     );
 }
 

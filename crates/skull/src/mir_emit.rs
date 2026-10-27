@@ -505,8 +505,8 @@ pub struct MirEmit {
     pub code_artifact: std::sync::Arc<skull_mir::code_identity::CodeArtifact>,
     /// The compiler-owned lifecycle inventory staged by this artifact.
     pub lifecycle_plan: skull_mir::lifecycle::LifecyclePlan,
-    /// The one compiler-owned logical inventory consumed by every backend.
-    pub state_schema: skull_mir::state_schema::StateSchema,
+    /// The mutable-global layout fingerprint the program opens its storage with.
+    pub global_layout: String,
     /// The compiler-owned definition inventory included in the exact Artifact
     /// identity and published to the runtime.
     pub definition_plan: skull_mir::definition::DefinitionPlan,
@@ -1663,7 +1663,10 @@ fn global_init_target(
         .join(", "))
 }
 
-fn global_init_session_line(
+/// The load-time initialization of one mutable global. It runs only when this
+/// load created the global storage: a program loaded over live storage keeps
+/// every value the running program wrote.
+fn global_init_line(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
     cg: &CodegenCtx,
@@ -1671,46 +1674,34 @@ fn global_init_session_line(
     init_name: &str,
 ) -> Result<String, CompilerError> {
     let plan = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, g.ty)
-        .map_err(|_| CompilerError::new_no_location(format!("no state plan for global `{}`", g.name)))?;
+        .map_err(|_| CompilerError::new_no_location(format!("no storage plan for global `{}`", g.name)))?;
+    let slot = |leaf: Ustr| {
+        cg.state_slot(leaf).ok_or_else(|| {
+            CompilerError::new_no_location(format!(
+                "global `{}` has no compiler-owned storage slot for `{leaf}`",
+                g.name
+            ))
+        })
+    };
+    let cell = cg.state_table();
     match plan.leaf_names(skull_mir::mangle::symbol_of_key(g.name)) {
         Some(leaves) => {
-            let keys: Vec<u32> = leaves
-                .iter()
-                .map(|leaf| {
-                    cg.state_slot(*leaf)
-                        .ok_or_else(|| {
-                            CompilerError::new_no_location(format!(
-                                "global `{}` has no compiler-owned Session slot for `{leaf}`",
-                                g.name
-                            ))
-                        })
-                })
-                .collect::<Result<_, _>>()?;
-            let first = keys.first().expect("a leaf plan has a first Session slot");
-            let mut line = format!("if not __rock_state_has({first}) then\n");
+            let mut line = String::from("if __rock_globals_fresh then\n");
             line.push_str(&format!("  local __rock_init_values = {{ {init_name}() }}\n"));
-            for (index, key) in keys.iter().enumerate() {
+            for (index, leaf) in leaves.iter().enumerate() {
                 line.push_str(&format!(
-                    "  __rock_state_set({key}, __rock_init_values[{}])\n",
+                    "  {cell}[{}] = __rock_init_values[{}]\n",
+                    slot(*leaf)?,
                     index + 1
                 ));
             }
             line.push_str("end\n");
             Ok(line)
         }
-        None => {
-            let key = cg
-                .state_slot(g.name)
-                .ok_or_else(|| {
-                    CompilerError::new_no_location(format!(
-                        "global `{}` has no compiler-owned Session slot",
-                        g.name
-                    ))
-                })?;
-            Ok(format!(
-                "if not __rock_state_has({key}) then __rock_state_set({key}, {init_name}()) end\n"
-            ))
-        }
+        None => Ok(format!(
+            "if __rock_globals_fresh then {cell}[{}] = {init_name}() end\n",
+            slot(g.name)?
+        )),
     }
 }
 
@@ -1718,8 +1709,8 @@ pub fn lua_global_state_slots(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
 ) -> Result<std::collections::BTreeMap<ustr::Ustr, u32>, CompilerError> {
-    let mut slots = skull_mir::state_schema::global_state_slots(ws, scx)
-        .map_err(|error| CompilerError::new_no_location(error.to_string()))?
+    let mut slots = skull_mir::global_storage::global_storage_keys(ws, scx)
+        .map_err(CompilerError::new_no_location)?
         .into_iter()
         .collect::<Vec<_>>();
     slots.sort_by(|a, b| a.1.cmp(&b.1));
@@ -1727,95 +1718,77 @@ pub fn lua_global_state_slots(
         .into_iter()
         .enumerate()
         .map(|(index, (physical, _))| {
-            let slot = u32::try_from(index + 1).expect("Lua Session slot population exceeds u32");
+            let slot = u32::try_from(index + 1).expect("Lua global slot population exceeds u32");
             (physical, slot)
         })
         .collect())
 }
 
-/// The Session table sizes the prelude reserves: the array part at the rehash fixpoint of the highest compiler slot
-/// -- the next power of two, plus one for index 0, which is what LuaJIT's
-/// `rehashtab` settles on once more than half of that range is populated, so a
-/// later rehash cannot move it -- and a hash part with twice the schema's string
-/// keys, so no static's first store overflows it. Returns the capacity line and
-/// the reserve call, or `None` under `ROCK_SKULL_STATE_RESERVE=0`.
-fn state_capacity_lua(
-    schema: &skull_mir::state_schema::StateSchema,
-    cg: &CodegenCtx,
-) -> Option<(String, &'static str)> {
-    if !skull_codegen_lua::state_reserve_mode() {
-        return None;
-    }
-    let narr = cg.state_slot_max().next_power_of_two() + 1;
-    let string_keys: usize = schema
-        .entries
-        .iter()
-        .filter(|entry| entry.kind != skull_mir::state_schema::StateKind::Global)
-        .map(|entry| skull_mir::state_schema::entry_state_keys(entry).len())
-        .sum();
-    let nhash = (string_keys * 2).next_power_of_two().max(16);
-    Some((
-        format!("_G.__ROCK_STATE_CAPACITY = {{{narr}, {nhash}}}\n"),
-        "__rock_state_reserve_active()\n",
-    ))
+/// The line that opens (or, on a later load, validates) the global storage and
+/// seats this chunk's storage cell. The table is sized to its rehash fixpoint:
+/// the array part at the highest slot's next power of two, plus one for index
+/// 0, which is what LuaJIT's `rehashtab` settles on once more than half of that
+/// range is populated, so a later rehash cannot move it -- and a hash part with
+/// twice the statics' string keys, so no static's first store overflows it.
+/// `ROCK_SKULL_STATE_RESERVE=0` leaves it to grow from `{}`.
+fn globals_open_lua(layout: &str, cg: &CodegenCtx, static_count: usize) -> String {
+    let (narr, nhash) = if skull_codegen_lua::state_reserve_mode() {
+        (
+            cg.state_slot_max().next_power_of_two() + 1,
+            (static_count * 4).next_power_of_two().max(16),
+        )
+    } else {
+        (0, 0)
+    };
+    format!(
+        "{} = __rock_globals_open({layout:?}, {narr}, {nhash})\n",
+        skull_codegen_lua::STATE_CELL
+    )
 }
 
-fn state_schema_lua(
-    schema: &skull_mir::state_schema::StateSchema,
+/// The global directory every reflection reader and the `_G` bridge use.
+fn globals_directory_lua(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
     cg: &CodegenCtx,
-) -> String {
-    let mut out = String::from("_G.__ROCK_STATE_SCHEMA = {");
-    for entry in &schema.entries {
-        let kind = match entry.kind {
-            skull_mir::state_schema::StateKind::Global => "global",
-            skull_mir::state_schema::StateKind::Static => "static",
-            skull_mir::state_schema::StateKind::CoroutineFrame => "coroutine_frame",
-            skull_mir::state_schema::StateKind::Storage => "storage",
-        };
-        let physical = entry
-            .physical
-            .iter()
-            .map(|name| format!("{name:?}"))
-            .collect::<Vec<_>>()
-            .join(",");
-        let keys = if entry.kind == skull_mir::state_schema::StateKind::Global {
-            entry
-                .physical
+) -> Result<String, CompilerError> {
+    use skull_codegen_lua::lua_string;
+    let mut entries = Vec::new();
+    for module in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
+        for (_, global) in module.globals.iter().filter(|(_, g)| !g.is_const) {
+            let identity = skull_mir::global_storage::global_identity(module.file, global.name);
+            let plan = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, global.ty)
+                .map_err(|_| CompilerError::new_no_location(format!("no storage plan for global `{}`", global.name)))?;
+            let physical = skull_mir::global_storage::physical_leaf_names(&plan, global.name);
+            let slots = physical
                 .iter()
-                .map(|name| {
-                    cg.state_slot(ustr::Ustr::from(name.as_str()))
-                        .expect("every Lua global StateSchema leaf has a physical Session slot")
-                        .to_string()
+                .map(|leaf| {
+                    cg.state_slot(*leaf).map(|slot| slot.to_string()).ok_or_else(|| {
+                        CompilerError::new_no_location(format!(
+                            "global `{}` has no compiler-owned storage slot for `{leaf}`",
+                            global.name
+                        ))
+                    })
                 })
-                .collect::<Vec<_>>()
-                .join(",")
-        } else {
-            skull_mir::state_schema::entry_state_keys(entry)
-                .iter()
-                .map(|key| format!("{key:?}"))
-                .collect::<Vec<_>>()
-                .join(",")
-        };
-        let owner = entry
-            .owner
-            .as_deref()
-            .map_or_else(|| "nil".to_string(), |owner| format!("{owner:?}"));
-        let initializer_identity = entry
-            .initializer_identity
-            .map_or_else(|| "nil".to_string(), |identity| identity.to_string());
-        let name = entry
-            .identity
-            .rsplit("::")
-            .next()
-            .unwrap_or(&entry.identity);
-        out.push_str(&format!(
-            "{{kind={kind:?},name={name:?},identity={:?},fingerprint={:?},physical={{{physical}}},session_keys={{{keys}}},owner={owner},initializer_identity={initializer_identity}}},",
-            entry.identity, entry.fingerprint
-        ));
+                .collect::<Result<Vec<_>, _>>()?;
+            let name = identity.rsplit("::").next().unwrap_or(&identity).to_string();
+            entries.push((identity, name, physical, slots));
+        }
     }
-    out.push_str("}\n");
-    out.push_str("__rock_state_install_global_bridge()\n");
-    out
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut out = String::from("_G.__rock_globals_publish({");
+    for (identity, name, physical, slots) in entries {
+        let physical = physical.iter().map(|leaf| lua_string(leaf)).collect::<Vec<_>>().join(",");
+        let _ = writeln!(
+            out,
+            "{{name={},identity={},physical={{{physical}}},slots={{{}}}}},",
+            lua_string(&name),
+            lua_string(&identity),
+            slots.join(",")
+        );
+    }
+    out.push_str("})\n");
+    Ok(out)
 }
 
 /// Lower + emit one global's initializer fn, recording its `pending_init` line.
@@ -1978,7 +1951,7 @@ fn emit_global_unit(
             let line = if g.is_const {
                 format!("{target} = {init_name}()\n")
             } else {
-                match global_init_session_line(ws, scx, cg, g, &init_name) {
+                match global_init_line(ws, scx, cg, g, &init_name) {
                     Ok(line) => line,
                     Err(error) => {
                         out.hard_error = Some(error);
@@ -2499,29 +2472,6 @@ struct Chunk {
     binds: Vec<skull_codegen_lua::CalleeBindingPlan>,
 }
 
-fn chunk_dynamic_state_matches(left: &Chunk, right: &Chunk) -> bool {
-    fn frames(
-        chunk: &Chunk,
-    ) -> impl Iterator<
-        Item = (
-            &skull_mir::code_identity::CodeIdentity,
-            &skull_mir::code_identity::FrameSchema,
-        ),
-    > {
-        chunk
-            .code_artifact
-            .entries
-            .values()
-            .filter_map(|entry| match (&entry.identity, &entry.compatibility.frame) {
-                (skull_mir::code_identity::CodeIdentity::Named(_), Some(frame)) => {
-                    Some((&entry.identity, frame))
-                }
-                _ => None,
-            })
-    }
-    left.statics == right.statics && frames(left).eq(frames(right))
-}
-
 // Each global definition costs the enclosing LuaJIT proto a child proto and name.
 const LUA_DEFINITIONS_PER_SCOPE: usize = 4_096;
 
@@ -2579,11 +2529,10 @@ struct LuaDefinitionBuffer {
     lua: String,
     units: Vec<(usize, usize, usize)>,
     definition_count: usize,
-    bind_state_cells: bool,
 }
 
 /// The global a top-level definition assigns, in either emitted shape.
-/// Definition splitting and Session-cell binding consume the same inventory.
+/// Definition splitting consumes this inventory.
 fn definition_global(line: &str) -> Option<&str> {
     let body = skull_codegen_lua::emitted_body_name(line)?;
     if line.starts_with("function ") {
@@ -2593,27 +2542,14 @@ fn definition_global(line: &str) -> Option<&str> {
 }
 
 impl LuaDefinitionBuffer {
-    fn new(bind_state_cells: bool) -> Self {
-        Self { lua: String::new(), units: Vec::new(), definition_count: 0, bind_state_cells }
-    }
-
-    /// The buffer for a full assembly: a package-test program is never
-    /// reloaded, so its definitions have no distinct cells to join.
-    fn for_assembly(build_kind: BuildKind) -> Self {
-        Self::new(build_kind == BuildKind::Program)
+    fn new() -> Self {
+        Self { lua: String::new(), units: Vec::new(), definition_count: 0 }
     }
 
     fn push_str(&mut self, lua: &str) {
         let start = self.lua.len();
-        let names: Vec<_> = lua.lines().filter_map(definition_global).collect();
-        let count = names.len();
+        let count = lua.lines().filter_map(definition_global).count();
         self.lua.push_str(lua);
-        if self.bind_state_cells && lua.contains(skull_codegen_lua::STATE_CELL) {
-            for name in names {
-                writeln!(self.lua, "__rock_bind_state_cells({name})")
-                    .expect("writing a String cannot fail");
-            }
-        }
         self.units.push((start, self.lua.len(), count));
         self.definition_count += count;
     }
@@ -2864,6 +2800,14 @@ fn rebuild_chunk(
     }
 }
 
+/// A `static` cell as the last full build left it: its reload key and storage keys.
+#[derive(Clone)]
+struct StaticBaseline {
+    key: String,
+    value_slot: String,
+    done_slot: String,
+}
+
 /// Per-body emit cache for incremental codegen: the expensive function chunks
 /// (ordinary + coroutine bodies), keyed by [`Instance`]. `Err` records a body the
 /// new path could not lower (the parity gap). Everything else is regenerated by
@@ -2930,14 +2874,14 @@ pub struct SkullEmitCache {
     /// guard preserves the live value, and their value edits stay interface-tier).
     /// Reset to empty by `emit_full`.
     changed_consts_since_full: FxHashSet<(ModuleId, Idx<bone_semantic::hir::GlobalDef>)>,
-    /// Baseline `static` cell keys (`type@init_hash`) from the last full build,
-    /// keyed by cell name. `assemble_overlay` compares each changed fn's current
-    /// cell key against this and emits an UNGUARDED reset (nil cell + clear
-    /// done-flag) for any cell whose key changed, so an initializer edit re-inits
-    /// on the next reach; an unchanged key is left alone (an unrelated body edit
-    /// preserves the live value). Rebuilt by `emit_full`.
-    ///
-    static_key_baseline: FxHashMap<Ustr, String>,
+    /// Baseline `static` cells from the last full build, keyed by cell name.
+    /// `assemble_overlay` compares each changed fn's current cell key
+    /// (`type@init_hash`) against this and emits `__rock_static_prepare` for any
+    /// cell whose key changed, so an initializer edit re-inits on the next
+    /// reach; an unchanged key is left alone (an unrelated body edit preserves
+    /// the live value). A baseline cell no current chunk holds was removed and
+    /// is dropped. Rebuilt by `emit_full`.
+    static_key_baseline: FxHashMap<Ustr, StaticBaseline>,
     roots: RootCache,
     shader_registrations: ShaderRegistrations,
     shader_view: crate::shader_artifact::ShaderArtifactView,
@@ -2955,9 +2899,9 @@ pub struct SkullEmitCache {
     /// Lifecycle metadata for the published artifact. Body overlays replace
     /// fingerprints while structural changes take the full transition path.
     lifecycle_plan: Option<std::sync::Arc<skull_mir::lifecycle::LifecyclePlan>>,
-    /// Logical state table from the last complete assembly. Body overlays keep
-    /// it unchanged; a full/incremental assembly replaces it atomically.
-    state_schema: Option<std::sync::Arc<skull_mir::state_schema::StateSchema>>,
+    /// Global layout from the last complete assembly. A body overlay cannot
+    /// change it; a full/incremental assembly replaces it.
+    global_layout: Option<String>,
     /// Definition inventory from the last complete assembly. Body overlays
     /// retain it because definition structure is a full-reload boundary.
     definition_plan: Option<std::sync::Arc<skull_mir::definition::DefinitionPlan>>,
@@ -3034,10 +2978,6 @@ pub struct IncrementalRepairStats {
     pub candidate_update_ns: u64,
     pub affected_selection_ns: u64,
     pub relowering_ns: u64,
-    pub dynamic_state_chunks_compared: usize,
-    pub dynamic_state_facts_changed: bool,
-    pub dynamic_state_full_scans: usize,
-    pub dynamic_state_static_rows_scanned: usize,
     pub code_artifact_assembly_reused: bool,
     pub fingerprint_code_rows_derived: usize,
 }
@@ -3054,9 +2994,7 @@ pub enum BuildKind {
     /// A game, tool or single-file program; it may be reloaded in place.
     Program,
     /// A package's `rock test` program. Each test child loads it once and never
-    /// reloads it, so it omits what only a reload reads: the Artifact binding
-    /// plan and the Session-cell joins of full-assembly definitions. It runs no
-    /// sims, so it registers none.
+    /// reloads it. It runs no sims, so it registers none.
     PackageTest,
 }
 
@@ -3175,11 +3113,11 @@ struct BodyEditRollback {
     edits: Vec<crate::instance_graph::SpanEdit>,
     changed_since_full: FxHashSet<Instance>,
     changed_consts_since_full: FxHashSet<(ModuleId, Idx<bone_semantic::hir::GlobalDef>)>,
-    static_key_baseline: FxHashMap<Ustr, String>,
+    static_key_baseline: FxHashMap<Ustr, StaticBaseline>,
     emitted: FxHashSet<Instance>,
     code_artifact: std::sync::Arc<skull_mir::code_identity::CodeArtifact>,
     lifecycle_plan: Option<std::sync::Arc<skull_mir::lifecycle::LifecyclePlan>>,
-    state_schema: Option<std::sync::Arc<skull_mir::state_schema::StateSchema>>,
+    global_layout: Option<String>,
     definition_plan: Option<std::sync::Arc<skull_mir::definition::DefinitionPlan>>,
     artifact_fingerprint: Option<String>,
     fingerprint_code_rows: Option<crate::artifact_fingerprint::CodeRows>,
@@ -3923,8 +3861,8 @@ fn fn_has_bounds(f: &bone_semantic::hir::Function) -> bool {
 /// - `direct_globals` / `direct_calls`: global-init ordering is stated over
 ///   declarations, and a specialization's ordering facts are its declaration's.
 /// `statics` is NOT one of them. A specialized body's `static` cells are cells
-/// the emitted program uses, so leaving them out would leave them absent from
-/// StateSchema and from Session initialization. With emission owned by the
+/// the emitted program uses, so leaving them out would leave them without a
+/// reload reset. With emission owned by the
 /// instance, every generic body with a `static` is one.
 fn emit_spec_chunk(
     ws: &Workspace,
@@ -5591,7 +5529,7 @@ fn artifact_fingerprint(
     artifact: &skull_mir::code_identity::CodeArtifact,
     lifecycle: &skull_mir::lifecycle::LifecyclePlan,
     definitions: &skull_mir::definition::DefinitionPlan,
-    state: &skull_mir::state_schema::StateSchema,
+    global_layout: &str,
     reads: &[skull_mir::mir::ComptimeRead],
     renderer_target: RendererTarget,
 ) -> Result<String, CompilerError> {
@@ -5601,7 +5539,7 @@ fn artifact_fingerprint(
         artifact,
         lifecycle,
         definitions,
-        state,
+        global_layout,
         reads,
         &ws.comptime_inputs.volatile_vars,
         renderer_fingerprint_tag(renderer_target),
@@ -5746,7 +5684,7 @@ fn assemble(
         &mut attribution,
         &mut times,
     );
-    let mut decorator_definitions = LuaDefinitionBuffer::for_assembly(cache.build_kind);
+    let mut decorator_definitions = LuaDefinitionBuffer::new();
     decorator_definitions.push_str(&decorator_lua);
     decorator_definitions.append_to(&mut out);
 
@@ -5863,25 +5801,13 @@ fn assemble(
     } else {
         None
     };
-    let mut definitions = LuaDefinitionBuffer::for_assembly(cache.build_kind);
+    let mut definitions = LuaDefinitionBuffer::new();
     // Second pass of the callee binding: every factory's
     // `<name> = __rock_mk_<name>(<callees>)` line, emitted after EVERY
     // definition and in ascending call-graph component rank, so each captured
     // callee is already its final closure. Empty under the global-lookup shape.
     let mut callee_binds: Vec<skull_codegen_lua::CalleeBindingPlan> = Vec::new();
     let mut emits_main = false;
-    let foreign_bindings: Vec<(FuncRef, String)> = ws
-        .modules
-        .iter()
-        .filter(|module| module.id != ModuleId::builtin())
-        .flat_map(|module| {
-            module.functions.iter().filter_map(|(fid, _)| {
-                let self_ref = FuncRef { module: module.id, func: fid };
-                foreign_artifact_binding(ws, &cache.lua_view, &needed_foreign, self_ref)
-                    .map(|physical| (self_ref, physical))
-            })
-        })
-        .collect();
 
     // Function definitions, every module (cached chunk for ordinary/coroutine,
     // regenerated for extern / inline(lua)). The cached chunks were built in
@@ -6120,53 +6046,28 @@ fn assemble(
     } else {
         crate::allocation_report::AllocationReport::default()
     };
-    let state_schema = skull_mir::state_schema::StateSchema::collect(ws, scx, &code_artifact, &all_statics)
-        .map_err(|error| CompilerError::new_no_location(error.to_string()))?;
-    let binding_plan = build_artifact_plans(
-        ws,
-        scx,
-        &code_artifact,
-        &state_schema,
-        &foreign_bindings,
-    )?;
-    code_artifact.binding_plan = binding_plan;
-    // A package-test program is never reloaded, and only a reload reads the
-    // published plan; it is still built above so both kinds reject alike.
-    let has_artifact_plans = cache.build_kind == BuildKind::Program
-        && !code_artifact.binding_plan.entries.is_empty();
     let has_code_slot_publication = code_artifact.entries.values().any(|entry| entry.escaping)
         || !definition_plan.catalogs.is_empty()
         || lifecycle_plan.census.declarations > 0;
-    let has_state_publication = has_code_slot_publication || has_artifact_plans;
-    out.push_str("__rock_state_transaction_begin()\n");
-    let state_capacity = state_capacity_lua(&state_schema, cg);
-    if let Some((line, _)) = &state_capacity {
-        out.push_str(line);
-    }
-    out.push_str(&format!(
-        "__rock_state_publish_schema({:?})\n",
-        state_schema.schema_id
-    ));
-    let state_schema_stage = state_schema_lua(&state_schema, cg);
+    let global_layout = skull_mir::global_storage::global_layout_id(ws, scx)
+        .map_err(CompilerError::new_no_location)?;
+    let static_count = all_statics.iter().map(|cell| cell.cell).collect::<FxHashSet<_>>().len();
+    out.push_str(&globals_open_lua(&global_layout, cg, static_count));
     out.push_str(&wrap_large_lua_section(
-        "__rock_state_schema_stage_part",
-        &state_schema_stage,
+        "__rock_globals_directory_part",
+        &globals_directory_lua(ws, scx, cg)?,
     ));
-    if let Some((_, call)) = &state_capacity {
-        out.push_str(call);
-    }
+    // A host attaches its own directory fields right after this line.
+    out.push_str("__rock_globals_install_bridge()\n");
 
     // Globals: an init fn + a dependency-ordered `<NAME> = __skull_ginit_<NAME>()`.
     // (Lowered above, so the walk could see their call edges; appended here, in
     // the original slot, so the emitted text is unchanged.)
-    let mut global_definitions = LuaDefinitionBuffer::for_assembly(cache.build_kind);
+    let mut global_definitions = LuaDefinitionBuffer::new();
     global_definitions.push_str(&globals_lua);
     global_definitions.append_to(&mut out);
     skipped.extend(global_skipped);
     let has_definition_plan = !definition_plan.catalogs.is_empty();
-    if has_artifact_plans {
-        out.push_str(skull_codegen_lua::ARTIFACT_PLAN_PRELUDE);
-    }
     if has_code_slot_publication {
         out.push_str(skull_codegen_lua::FN_MT_PRELUDE);
     }
@@ -6179,8 +6080,6 @@ fn assemble(
     ));
     if has_code_slot_publication && !code_artifact.entries.values().any(|entry| entry.escaping) {
         out.push_str("__rock_code_slot_begin()\n");
-    } else if has_artifact_plans && !has_code_slot_publication {
-        out.push_str("__rock_artifact_plan_begin()\n");
     }
     let definition_plan_stage = match early_stage {
         Some(stage) => stage,
@@ -6195,13 +6094,6 @@ fn assemble(
         "__rock_lifecycle_plan_stage_part",
         &lifecycle_plan_stage,
     ));
-    if has_artifact_plans {
-        let binding_plan_stage = artifact_binding_plan_stage_lua(&code_artifact.binding_plan, cg);
-        out.push_str(&wrap_large_lua_section(
-            "__rock_artifact_binding_plan_stage_part",
-            &binding_plan_stage,
-        ));
-    }
 
     // Order the init lines by their transitive global-read closure over the full
     // call graph (now that every fn's direct facts are recorded).
@@ -6240,8 +6132,8 @@ fn assemble(
         .collect();
     // `static` cells: on reload, RESET (nil the cell + clear the done-flag) when
     // the init/type key changed since last run, so the next reach re-inits with
-    // the edited initializer; an unchanged key preserves the live cell. Register
-    // both names in the snapshot so the next reload can compare. Dedup by cell.
+    // the edited initializer; an unchanged key preserves the live cell. Dedup by
+    // cell.
     let mut seen_static: FxHashSet<Ustr> = FxHashSet::default();
     let mut static_resets = String::new();
     for sc in &all_statics {
@@ -6249,15 +6141,15 @@ fn assemble(
             continue;
         }
         let key = static_cell_key(sc);
-        let (value_slot, done_slot) = skull_mir::state_schema::static_cell_state_keys(
+        let (value_slot, done_slot) = skull_mir::global_storage::static_cell_storage_keys(
             ws,
             scx.interner(),
             sc,
         )
-        .map_err(|error| CompilerError::new_no_location(error.to_string()))?;
+        .map_err(CompilerError::new_no_location)?;
         let _ = write!(
             static_resets,
-            "__rock_state_prepare_static({value_slot:?}, {done_slot:?}, {key:?})\n"
+            "__rock_static_prepare({value_slot:?}, {done_slot:?}, {key:?})\n"
         );
     }
 
@@ -6281,14 +6173,9 @@ fn assemble(
             has_definition_plan,
             lifecycle_plan.census.declarations > 0,
         ));
-    } else if has_artifact_plans {
-        out.push_str("__rock_artifact_plan_publish()\n");
     }
-    if !has_state_publication {
-        out.push_str("__rock_state_transaction_commit()\n");
-    }
-    // Closes the block the runtime prelude opens (Session cells become closed
-    // upvalues here); anything appended after this line runs outside it.
+    // Closes the block the runtime prelude opens (the storage cell becomes a
+    // closed upvalue here); anything appended after this line runs outside it.
     out.push_str("end\n");
     t_scaffold += ts.elapsed();
 
@@ -6346,7 +6233,7 @@ fn assemble(
         &code_artifact,
         &lifecycle_plan,
         &definition_plan,
-        &state_schema,
+        &global_layout,
         &artifact_reads,
         cache.renderer_target,
     )?;
@@ -6364,7 +6251,7 @@ fn assemble(
             allocation_report,
             code_artifact: std::sync::Arc::new(code_artifact),
             lifecycle_plan,
-            state_schema,
+            global_layout,
             definition_plan,
             artifact_fingerprint,
             skipped,
@@ -6617,146 +6504,6 @@ fn mark_generated_code_values(
             }
         }
     }
-}
-
-fn foreign_artifact_binding(
-    ws: &Workspace,
-    view: &crate::artifact::ArtifactView,
-    needed_foreign: &FxHashSet<Instance>,
-    self_ref: FuncRef,
-) -> Option<String> {
-    let function = &ws.module(self_ref.module).functions[self_ref.func];
-    if function.backend == bone_semantic::hir::FnBackend::Js {
-        return None;
-    }
-    if function.is_extern {
-        return function
-            .ffi_lib
-            .filter(|_| should_emit_via_view(ws, view, self_ref))
-            .map(|_| function.name.to_string());
-    }
-    function
-        .inline_body
-        .as_ref()
-        .filter(|(backend, _)| *backend == bone_semantic::hir::FnBackend::Lua)
-        .filter(|_| emits_foreign_definition(ws, view, needed_foreign, self_ref))
-        .map(|_| mangle_fn(ws, function))
-}
-
-fn build_artifact_plans(
-    ws: &Workspace,
-    scx: &skull_mir::lower::ScalarCtx,
-    artifact: &skull_mir::code_identity::CodeArtifact,
-    state_schema: &skull_mir::state_schema::StateSchema,
-    foreign_bindings: &[(FuncRef, String)],
-) -> Result<skull_mir::artifact_plan::ArtifactBindingPlan, CompilerError> {
-    use skull_mir::artifact_plan::{ArtifactBinding, ArtifactBindingKind};
-    use skull_mir::code_identity::CodeIdentity;
-    use skull_mir::state_schema::{entry_state_keys, global_identity, StateKind};
-
-    let mut bindings = Vec::new();
-    for module in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
-        for (_, global) in module.globals.iter() {
-            let identity = global_identity(module.file, global.name);
-            if global.is_const {
-                let plan = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, global.ty)
-                    .map_err(|error| CompilerError::new_no_location(error.message))?;
-                let physical =
-                    skull_mir::state_schema::physical_leaf_names(&plan, global.name);
-                for leaf in physical {
-                    bindings.push(ArtifactBinding {
-                        identity: identity.clone(),
-                        physical: leaf.to_string(),
-                        diagnostic: global.name.to_string(),
-                        kind: ArtifactBindingKind::Global,
-                        state_key: None,
-                    });
-                }
-            } else {
-                let entry = state_schema.entry(StateKind::Global, &identity).ok_or_else(|| {
-                    CompilerError::new_no_location(format!(
-                        "mutable global `{}` has no compiler-owned StateSchema entry",
-                        global.name
-                    ))
-                })?;
-                for (physical, state_key) in entry
-                    .physical
-                    .iter()
-                    .zip(entry_state_keys(entry).into_iter())
-                {
-                    bindings.push(ArtifactBinding {
-                        identity: identity.clone(),
-                        physical: physical.clone(),
-                        diagnostic: global.name.to_string(),
-                        kind: ArtifactBindingKind::Global,
-                        state_key: Some(state_key),
-                    });
-                }
-            }
-        }
-    }
-
-    for entry in artifact.entries.values() {
-        let Some(body_name) = entry.body_name else { continue };
-        bindings.push(ArtifactBinding {
-            identity: entry.identity.logical_key(ws, scx.interner()),
-            physical: body_name.to_string(),
-            diagnostic: entry.identity.logical_key(ws, scx.interner()),
-            kind: ArtifactBindingKind::Callable,
-            state_key: None,
-        });
-    }
-    for (fref, physical) in foreign_bindings {
-        let function = &ws.module(fref.module).functions[fref.func];
-        bindings.push(ArtifactBinding {
-            identity: CodeIdentity::Named(Instance::base(*fref)).logical_key(ws, scx.interner()),
-            physical: physical.clone(),
-            diagnostic: function.name.to_string(),
-            kind: ArtifactBindingKind::Callable,
-            state_key: None,
-        });
-    }
-
-    let binding_plan = skull_mir::artifact_plan::ArtifactBindingPlan::from_entries(bindings)
-        .map_err(CompilerError::new_no_location)?;
-    Ok(binding_plan)
-}
-
-fn artifact_binding_plan_stage_lua(
-    plan: &skull_mir::artifact_plan::ArtifactBindingPlan,
-    cg: &CodegenCtx,
-) -> String {
-    let mut out = String::from("__rock_artifact_binding_plan_stage({ entries = { len = ");
-    let _ = write!(out, "{}, _data = {{\n", plan.entries.len());
-    for (index, entry) in plan.entries.iter().enumerate() {
-        let state_key = entry.state_key.as_ref().map_or_else(
-            || "nil".to_string(),
-            |_| {
-                cg.state_slot(ustr::Ustr::from(entry.physical.as_str()))
-                    .expect("every Lua artifact global binding has a physical Session slot")
-                    .to_string()
-            },
-        );
-        let _ = writeln!(
-            out,
-            "[{}] = {{ identity = {}, physical = {}, diagnostic = {}, kind = {}, state_key = {} }},",
-            index + 1,
-            skull_codegen_lua::lua_string(&entry.identity),
-            skull_codegen_lua::lua_string(&entry.physical),
-            skull_codegen_lua::lua_string(&entry.diagnostic),
-            skull_codegen_lua::lua_string(entry.kind.as_str()),
-            state_key,
-        );
-    }
-    let _ = writeln!(
-        out,
-        "}} }}, census = {{ examined = {}, assigned = {}, duplicate = {}, incomplete = {} }} }})",
-        plan.census.examined,
-        plan.census.assigned,
-        plan.census.duplicate,
-        plan.census.incomplete,
-    );
-    out
 }
 
 fn lifecycle_plan_stage_lua(
@@ -7537,12 +7284,17 @@ fn emit_full_in_with_mutation(
         }
     }
     // Baseline every `static` cell's reload key so the overlay can detect an
-    // initializer edit (changed key) vs an unrelated body edit (unchanged key).
-    let mut static_key_baseline: FxHashMap<Ustr, String> = FxHashMap::default();
+    // initializer edit (changed key) vs an unrelated body edit (unchanged key),
+    // and its storage keys so the overlay can drop a static an edit removed.
+    let mut static_key_baseline: FxHashMap<Ustr, StaticBaseline> = FxHashMap::default();
     if build.lifetime() == CacheLifetime::Retained {
         for chunk in chunks.values().flatten() {
             for sc in &chunk.statics {
-                static_key_baseline.insert(sc.cell, static_cell_key(sc));
+                let (value_slot, done_slot) =
+                    skull_mir::global_storage::static_cell_storage_keys(ws, scx.interner(), sc)
+                        .map_err(CompilerError::new_no_location)?;
+                static_key_baseline
+                    .insert(sc.cell, StaticBaseline { key: static_cell_key(sc), value_slot, done_slot });
             }
         }
     }
@@ -7575,7 +7327,7 @@ fn emit_full_in_with_mutation(
         emitted: FxHashSet::default(),
         code_artifact: std::sync::Arc::new(skull_mir::code_identity::CodeArtifact::default()),
         lifecycle_plan: None,
-        state_schema: None,
+        global_layout: None,
         definition_plan: None,
         artifact_fingerprint: None,
         fingerprint_code_rows: None,
@@ -7607,7 +7359,7 @@ fn emit_full_in_with_mutation(
     cache.emitted = emitted;
     cache.code_artifact = emit.code_artifact.clone();
     cache.lifecycle_plan = Some(std::sync::Arc::new(emit.lifecycle_plan.clone()));
-    cache.state_schema = Some(std::sync::Arc::new(emit.state_schema.clone()));
+    cache.global_layout = Some(emit.global_layout.clone());
     cache.definition_plan = Some(std::sync::Arc::new(emit.definition_plan.clone()));
     cache.artifact_fingerprint = Some(emit.artifact_fingerprint.clone());
     cache.fingerprint_code_rows = Some(crate::artifact_fingerprint::CodeRows::collect(
@@ -7704,7 +7456,7 @@ impl SkullEmitCache {
             emitted: self.emitted.clone(),
             code_artifact: self.code_artifact.clone(),
             lifecycle_plan: self.lifecycle_plan.clone(),
-            state_schema: self.state_schema.clone(),
+            global_layout: self.global_layout.clone(),
             definition_plan: self.definition_plan.clone(),
             artifact_fingerprint: self.artifact_fingerprint.clone(),
             fingerprint_code_rows: self.fingerprint_code_rows.clone(),
@@ -7730,7 +7482,7 @@ impl SkullEmitCache {
             emitted,
             code_artifact,
             lifecycle_plan,
-            state_schema,
+            global_layout,
             definition_plan,
             artifact_fingerprint,
             fingerprint_code_rows,
@@ -7764,7 +7516,7 @@ impl SkullEmitCache {
         self.emitted = emitted;
         self.code_artifact = code_artifact;
         self.lifecycle_plan = lifecycle_plan;
-        self.state_schema = state_schema;
+        self.global_layout = global_layout;
         self.definition_plan = definition_plan;
         self.artifact_fingerprint = artifact_fingerprint;
         self.fingerprint_code_rows = fingerprint_code_rows;
@@ -7822,8 +7574,8 @@ impl SkullEmitCache {
         &self.lua_view
     }
 
-    pub fn state_schema(&self) -> Option<&skull_mir::state_schema::StateSchema> {
-        self.state_schema.as_deref()
+    pub fn global_layout(&self) -> Option<&str> {
+        self.global_layout.as_deref()
     }
 
     pub fn lifecycle_plan(&self) -> Option<&skull_mir::lifecycle::LifecyclePlan> {
@@ -8624,7 +8376,6 @@ fn update_chunk_cache(
     cache.repair_stats.affected_selection_ns = _t_aff.elapsed().as_nanos() as u64;
     cache.repair_stats.chunk_rebuild_requests = affected.len();
     let _aff_ms = Duration::from_nanos(cache.repair_stats.affected_selection_ns);
-    let mut dynamic_state_facts_changed = !update.added.is_empty() || !update.removed.is_empty();
 
     // The persistent InlineCache keeps unchanged callee bodies across edits; the
     // affected entries are exactly those whose lowered body could have changed
@@ -8655,13 +8406,6 @@ fn update_chunk_cache(
         if is_cached_emitted_body(f, body) {
             chunks_rebuilt += 1;
             let chunk = rebuild_chunk(ws, cg, scx, &cache.concrete, body, f, &mut cache.inline_cache);
-            match (cache.chunks.get(body), &chunk) {
-                (Some(Ok(old)), Ok(new)) => {
-                    cache.repair_stats.dynamic_state_chunks_compared += 1;
-                    dynamic_state_facts_changed |= !chunk_dynamic_state_matches(old, new);
-                }
-                _ => dynamic_state_facts_changed = true,
-            }
             if let Ok(c) = &chunk {
                 fingerprint_identities.extend(c.code_artifact.entries.keys().cloned());
                 let new_deps: Vec<FuncRef> = c.deps.iter().copied().collect();
@@ -8671,11 +8415,9 @@ fn update_chunk_cache(
             }
             cache.chunks.insert(body.clone(), chunk);
         } else {
-            dynamic_state_facts_changed |= cache.chunks.contains_key(body);
             cache.chunks.remove(body);
         }
     }
-    cache.repair_stats.dynamic_state_facts_changed = dynamic_state_facts_changed;
     cache.repair_stats.chunks_rebuilt = chunks_rebuilt;
     let (added_errors, added_fingerprint_identities) =
         Self::build_graph_added_chunks(cache, ws, &update.added);
@@ -8728,7 +8470,7 @@ pub fn emit_incremental(
     cache.emitted = emitted;
     cache.code_artifact = emit.code_artifact.clone();
     cache.lifecycle_plan = Some(std::sync::Arc::new(emit.lifecycle_plan.clone()));
-    cache.state_schema = Some(std::sync::Arc::new(emit.state_schema.clone()));
+    cache.global_layout = Some(emit.global_layout.clone());
     cache.definition_plan = Some(std::sync::Arc::new(emit.definition_plan.clone()));
     cache.artifact_fingerprint = Some(emit.artifact_fingerprint.clone());
     cache.fingerprint_code_rows = Some(crate::artifact_fingerprint::CodeRows::collect(
@@ -8807,9 +8549,7 @@ fn assemble_overlay(
     let mut skipped: Vec<(String, String)> = Vec::new();
     let mut candidate_code_artifact = cache.code_artifact.clone();
     let d_clone_artifact = t_clone_artifact.elapsed();
-    out.push_str("do\nlocal __rock_state_cell, __rock_initialized_cell\n");
-    out.push_str(crate::SESSION_CELL_BINDING);
-    out.push_str("__rock_state_transaction_begin()\n");
+    out.push_str("do\nlocal __rock_state_cell = __rock_globals\n");
     let mut unit_reads = UnitComptimeReads::default();
 
     // Redefine the changed functions, deterministic order for a stable diff.
@@ -8817,7 +8557,7 @@ fn assemble_overlay(
     let mut order: Vec<Instance> = cache.changed_since_full.iter().cloned().collect();
     order.sort_by_key(|b| overlay_order_key(&cache.scx, b));
     order.dedup();
-    let mut definitions = LuaDefinitionBuffer::new(true);
+    let mut definitions = LuaDefinitionBuffer::new();
     for body in &order {
         match cache.chunks.get(body) {
             Some(Ok(chunk)) => {
@@ -8854,12 +8594,14 @@ fn assemble_overlay(
     // build (`type@init_hash` key differs from the baseline). A static is
     // name-keyed and lazy, so redefining its fn above leaves the warmed cell +
     // set done-flag intact -- the redefined fn would re-read the stale value.
-    // Re-run the Session-owned initializer transition so the next reach re-inits
-    // with the edited initializer; an unchanged key is skipped (an unrelated
-    // body edit preserves the live cell). Only the changed fns' statics are
-    // considered -- a static's key can't change without its enclosing fn being
-    // re-lowered into `changed_since_full`.
+    // Re-run the initializer transition so the next reach re-inits with the
+    // edited initializer; an unchanged key is skipped (an unrelated body edit
+    // preserves the live cell). Only the changed fns' statics are considered --
+    // a static's key can't change without its enclosing fn being re-lowered into
+    // `changed_since_full`. The resets run in the publication step, so an
+    // overlay that fails to load leaves every static as it was.
     let t_static_resets = Instant::now();
+    let mut static_resets = String::new();
     let mut seen_static: FxHashSet<Ustr> = FxHashSet::default();
     for body in &order {
         let Some(Ok(chunk)) = cache.chunks.get(body) else { continue };
@@ -8870,20 +8612,42 @@ fn assemble_overlay(
             let changed = cache
                 .static_key_baseline
                 .get(&sc.cell)
-                .is_none_or(|base| *base != static_cell_key(sc));
+                .is_none_or(|base| base.key != static_cell_key(sc));
             if changed {
-                let (value_slot, done_slot) = skull_mir::state_schema::static_cell_state_keys(
+                let (value_slot, done_slot) = skull_mir::global_storage::static_cell_storage_keys(
                     ws,
                     cache.scx.interner(),
                     sc,
                 )
-                .map_err(|error| CompilerError::new_no_location(error.to_string()))?;
+                .map_err(CompilerError::new_no_location)?;
                 let _ = write!(
-                    out,
-                    "__rock_state_prepare_static({value_slot:?}, {done_slot:?}, {:?})\n",
+                    static_resets,
+                    "__rock_static_prepare({value_slot:?}, {done_slot:?}, {:?})\n",
                     static_cell_key(sc),
                 );
             }
+        }
+    }
+    // A static an edit removed is in the baseline but in no current chunk (a
+    // generic's static can sit in several callers' chunks, so absence from the
+    // edited body alone does not remove it). Its cells are dropped so they stop
+    // holding their last value.
+    if !cache.static_key_baseline.is_empty() {
+        let current: FxHashSet<Ustr> = cache
+            .chunks
+            .values()
+            .flatten()
+            .flat_map(|chunk| chunk.statics.iter().map(|sc| sc.cell))
+            .collect();
+        let mut dropped: Vec<&StaticBaseline> = cache
+            .static_key_baseline
+            .iter()
+            .filter(|(cell, _)| !current.contains(*cell))
+            .map(|(_, base)| base)
+            .collect();
+        dropped.sort_by(|a, b| a.value_slot.cmp(&b.value_slot));
+        for base in dropped {
+            let _ = writeln!(static_resets, "__rock_static_drop({:?}, {:?})", base.value_slot, base.done_slot);
         }
     }
     let d_static_resets = t_static_resets.elapsed();
@@ -8961,7 +8725,7 @@ fn assemble_overlay(
         // Emit each affected const's ginit fn now; build its init
         // line + dependency edges (restricted to affected consts) for the sort.
         let mut inits: Vec<GlobalInit> = Vec::new();
-        let mut definitions = LuaDefinitionBuffer::new(true);
+        let mut definitions = LuaDefinitionBuffer::new();
         for a in &affected {
             let line = {
                 let unit = emit_global_unit(
@@ -9024,16 +8788,12 @@ fn assemble_overlay(
     }
     let t_publication = Instant::now();
     out.push_str(&lifecycle_plan_stage_lua(ws, &cache.scx, &lifecycle_plan));
+    out.push_str(&static_resets);
     out.push_str(code_slot_publish_lua(
         &candidate_code_artifact,
         false,
         lifecycle_plan.census.declarations > 0,
     ));
-    if !candidate_code_artifact.entries.values().any(|entry| entry.escaping)
-        && lifecycle_plan.census.declarations == 0
-    {
-        out.push_str("__rock_state_transaction_commit()\n");
-    }
     let d_publication = t_publication.elapsed();
     let t_metadata = Instant::now();
     let definition_plan = cache.definition_plan.as_deref().cloned().ok_or_else(|| {
@@ -9041,9 +8801,9 @@ fn assemble_overlay(
             "Artifact fingerprint generation requires a complete DefinitionPlan".to_string(),
         )
     })?;
-    let state_schema = cache.state_schema.clone().ok_or_else(|| {
+    let global_layout = cache.global_layout.clone().ok_or_else(|| {
         CompilerError::new_no_location(
-            "Artifact fingerprint generation requires a complete StateSchema".to_string(),
+            "Artifact fingerprint generation requires a global layout".to_string(),
         )
     })?;
     let artifact_reads = artifact_comptime_reads(cache, &[], &unit_reads, false);
@@ -9059,12 +8819,12 @@ fn assemble_overlay(
     let d_fingerprint_rows = t_fingerprint_rows.elapsed();
     let artifact_fingerprint = crate::artifact_fingerprint::compute_cached(
         ws, cache.scx.interner(), &candidate_code_artifact, &lifecycle_plan,
-        &definition_plan, &state_schema, &artifact_reads, &ws.comptime_inputs.volatile_vars,
+        &definition_plan, &global_layout, &artifact_reads, &ws.comptime_inputs.volatile_vars,
         renderer_fingerprint_tag(cache.renderer_target), &fingerprint_code_rows,
     ).map_err(|error| CompilerError::new_no_location(format!("Artifact fingerprint generation failed: {error}")))?;
     if std::env::var_os("SKULL_FORCE_FINGERPRINT_SCAN").is_some() {
         let fresh = self::artifact_fingerprint(ws, &cache.scx, &candidate_code_artifact, &lifecycle_plan,
-            &definition_plan, &state_schema, &artifact_reads, cache.renderer_target)?;
+            &definition_plan, &global_layout, &artifact_reads, cache.renderer_target)?;
         if artifact_fingerprint != fresh {
             return Err(CompilerError::new_no_location("cached code fingerprint differs from fresh inventory".to_string()));
         }
@@ -9087,11 +8847,7 @@ fn assemble_overlay(
             allocation_report: crate::allocation_report::AllocationReport::default(),
             code_artifact: candidate_code_artifact,
             lifecycle_plan,
-            state_schema: cache
-                .state_schema
-                .as_deref()
-                .cloned()
-                .expect("overlay requires a completed StateSchema"),
+            global_layout,
             definition_plan,
             artifact_fingerprint,
             skipped,
@@ -9195,94 +8951,23 @@ pub fn emit_overlay_with_span_edits(
             "Rock CodeRef compatibility requires a safe restart".to_string(),
         ));
     }
-    let body_only_state_change = reinferred
+    // A body edit cannot change the mutable-global layout; any other reinferred
+    // owner is checked, since the overlay runs over the live storage.
+    let t_layout = Instant::now();
+    let body_only = reinferred
         .iter()
         .all(|(_, owner)| matches!(owner, BodyOwner::Function(_)));
-    let needs_dynamic_state_scan = !body_only_state_change
-        || cache.repair_stats.dynamic_state_facts_changed
-        || cache.state_schema.is_none();
-    let t_statics = Instant::now();
-    let statics: Vec<skull_mir::mir::StaticCell> = if needs_dynamic_state_scan {
-        cache.repair_stats.dynamic_state_full_scans = 1;
-        let statics = cache
-            .chunks
-            .iter()
-            .filter(|(body, _)| cache.lua_view.instances.contains(*body))
-            .filter_map(|(_, chunk)| chunk.as_ref().ok())
-            .flat_map(|chunk| chunk.statics.iter().cloned())
-            .collect::<Vec<_>>();
-        cache.repair_stats.dynamic_state_static_rows_scanned = statics.len();
-        statics
-    } else {
-        Vec::new()
-    };
-    let d_statics = t_statics.elapsed();
-    let t_schema = Instant::now();
-    let mut full_schema_collection = false;
-    let next_state_schema = if body_only_state_change
-        && !cache.repair_stats.dynamic_state_facts_changed
-    {
-        if let Some(old) = cache.state_schema.as_ref() {
-            (**old).clone()
-        } else {
-            full_schema_collection = true;
-            skull_mir::state_schema::StateSchema::collect(
-                ws,
-                &cache.scx,
-                &next_code_artifact,
-                &statics,
-            )
-            .map_err(|error| CompilerError::new_no_location(error.to_string()))?
+    if !body_only {
+        let layout = skull_mir::global_storage::global_layout_id(ws, &cache.scx)
+            .map_err(CompilerError::new_no_location)?;
+        if cache.global_layout.as_deref() != Some(layout.as_str()) {
+            return Err(CompilerError::new_no_location(
+                "Rock global layout changed; restart required".to_string(),
+            ));
         }
-    } else if body_only_state_change {
-        if let Some(old) = cache.state_schema.as_ref() {
-            let unchanged = old
-                .dynamic_entries_match(ws, &cache.scx, &next_code_artifact, &statics)
-                .map_err(|error| CompilerError::new_no_location(error.to_string()))?;
-            if unchanged {
-                (**old).clone()
-            } else {
-                full_schema_collection = true;
-                skull_mir::state_schema::StateSchema::collect(
-                    ws,
-                    &cache.scx,
-                    &next_code_artifact,
-                    &statics,
-                )
-                .map_err(|error| CompilerError::new_no_location(error.to_string()))?
-            }
-        } else {
-            full_schema_collection = true;
-            skull_mir::state_schema::StateSchema::collect(
-                ws,
-                &cache.scx,
-                &next_code_artifact,
-                &statics,
-            )
-            .map_err(|error| CompilerError::new_no_location(error.to_string()))?
-        }
-    } else {
-        full_schema_collection = true;
-        skull_mir::state_schema::StateSchema::collect(
-            ws,
-            &cache.scx,
-            &next_code_artifact,
-            &statics,
-        )
-        .map_err(|error| CompilerError::new_no_location(error.to_string()))?
-    };
-    let d_schema = t_schema.elapsed();
-    if cache
-        .state_schema
-        .as_ref()
-        .is_some_and(|old| old.schema_id != next_state_schema.schema_id)
-    {
-        return Err(CompilerError::new_no_location(
-            "Rock StateSchema changed; safe restart is required".to_string(),
-        ));
     }
+    let d_layout = t_layout.elapsed();
     cache.code_artifact = std::sync::Arc::new(next_code_artifact);
-    cache.state_schema = Some(std::sync::Arc::new(next_state_schema));
     // A comptime input read by a GLOBAL initializer can go stale with no
     // reinferred body at all (bone hashes only source text). Route a stale
     // const through the same changed-consts machinery -- its ginit re-lowers
@@ -9333,16 +9018,31 @@ pub fn emit_overlay_with_span_edits(
     // cell (or leaves it unchanged), a LATER overlay must not reset it again -- else
     // an unrelated follow-up edit would re-run the initializer and wipe accumulated
     // state. Bring each changed fn's cells up to their current key so the next
-    // overlay only resets cells whose key changes AGAIN.
-    let advanced: Vec<(Ustr, String)> = cache
+    // overlay only resets cells whose key changes AGAIN. A cell this overlay
+    // dropped leaves the baseline, so a later overlay does not drop it again.
+    let mut advanced: Vec<(Ustr, StaticBaseline)> = Vec::new();
+    for chunk in cache
         .changed_since_full
         .iter()
         .filter_map(|fref| cache.chunks.get(fref).and_then(|c| c.as_ref().ok()))
-        .flat_map(|chunk| chunk.statics.iter().map(|sc| (sc.cell, static_cell_key(sc))))
-        .collect();
-    for (cell, key) in advanced {
-        cache.static_key_baseline.insert(cell, key);
+    {
+        for sc in &chunk.statics {
+            let (value_slot, done_slot) =
+                skull_mir::global_storage::static_cell_storage_keys(ws, cache.scx.interner(), sc)
+                    .map_err(CompilerError::new_no_location)?;
+            advanced.push((sc.cell, StaticBaseline { key: static_cell_key(sc), value_slot, done_slot }));
+        }
     }
+    for (cell, base) in advanced {
+        cache.static_key_baseline.insert(cell, base);
+    }
+    let current: FxHashSet<Ustr> = cache
+        .chunks
+        .values()
+        .flatten()
+        .flat_map(|chunk| chunk.statics.iter().map(|sc| sc.cell))
+        .collect();
+    cache.static_key_baseline.retain(|cell, _| current.contains(cell));
     let t_asm = t3.elapsed();
     // A body edit that mints a newly-colliding synthetic name is not safe to
     // deliver as an overlay.
@@ -9356,12 +9056,7 @@ pub fn emit_overlay_with_span_edits(
         ("  shader registrations", d_shader),
         ("  owner-local chunk cache", d_chunk),
         ("  CodeArtifact replacement", d_replacements),
-        ("  static collection", d_statics),
-        ("  StateSchema dynamic validation", d_schema),
-        (
-            "  StateSchema full collection",
-            full_schema_collection.then_some(d_schema).unwrap_or_default(),
-        ),
+        ("  global layout check", d_layout),
         ("  stale comptime scan", d_stale),
         ("  graph update", Duration::from_nanos(cache.repair_stats.graph_update_ns)),
         ("  concrete update", Duration::from_nanos(cache.repair_stats.concrete_update_ns)),
@@ -9398,7 +9093,7 @@ mod lua_definition_scope_tests {
     #[test]
     fn definition_scopes_cross_the_luajit_main_constant_limit() {
         let mut raw = String::new();
-        let mut definitions = LuaDefinitionBuffer::new(true);
+        let mut definitions = LuaDefinitionBuffer::new();
         for i in 0..32_769 {
             let function = format!("function generated_{i}() return {i} end\n");
             raw.push_str(&function);
@@ -9423,7 +9118,7 @@ mod lua_definition_scope_tests {
     #[test]
     fn small_definition_population_keeps_its_exact_text() {
         let source = "function one() return 1 end\nfunction two() return one() + 1 end\n";
-        let mut definitions = LuaDefinitionBuffer::new(true);
+        let mut definitions = LuaDefinitionBuffer::new();
         definitions.push_str(source);
         let mut out = String::new();
         definitions.append_to(&mut out);

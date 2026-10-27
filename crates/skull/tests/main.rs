@@ -36,8 +36,6 @@ mod clone_into_immutable;
 mod closure_snapshot;
 #[path = "code_identity_artifact.rs"]
 mod code_identity_artifact;
-#[path = "artifact_binding_plan.rs"]
-mod artifact_binding_plan;
 #[path = "artifact_fingerprint.rs"]
 mod artifact_fingerprint;
 #[path = "coalesce_value_struct_literal_field.rs"]
@@ -272,10 +270,10 @@ mod state_global_bridge;
 mod static_hot_reload;
 #[path = "static_registration_coverage.rs"]
 mod static_registration_coverage;
-#[path = "state_schema.rs"]
-mod state_schema;
-#[path = "session_state.rs"]
-mod session_state;
+#[path = "global_layout.rs"]
+mod global_layout;
+#[path = "global_storage.rs"]
+mod global_storage;
 #[path = "struct_expand.rs"]
 mod struct_expand;
 #[path = "synthetic_name_collision.rs"]

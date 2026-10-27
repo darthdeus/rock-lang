@@ -71,6 +71,17 @@ fn iter_incremental_uses_the_same_production_sources_as_live_builds() {
         .all(|source| !source.borrow().file.to_id_path().contains("/tests/")));
 }
 
+/// Every directory field the nobox accessor builder emits, as one text.
+fn nobox_accessors(
+    workspace: &bone_semantic::inference::Workspace,
+    scalar: &skull_mir::lower::ScalarCtx,
+) -> String {
+    let mut rows = std::collections::BTreeMap::new();
+    super::build_global_nobox_accessors(workspace, scalar, &mut rows)
+        .expect("build nobox reflection accessors");
+    rows.values().flatten().cloned().collect::<Vec<_>>().join("\n")
+}
+
 #[test]
 fn nobox_reflection_uses_the_compiler_owned_lua_slots() {
     let source = r#"
@@ -83,10 +94,9 @@ fn main() {}
     let workspace = bone_semantic::semantic_passes::semantic_pass(&mut [module])
         .expect("typecheck nobox reflection fixture");
     let scalar = skull_mir::lower::ScalarCtx::new(&workspace);
-    let bridge = super::build_state_nobox_accessors(&workspace, &scalar)
-        .expect("build nobox reflection bridge");
-    assert!(bridge.contains("__rock_state_get(1)"), "first leaf did not use its numeric slot:\n{bridge}");
-    assert!(bridge.contains("__rock_state_get(2)"), "second leaf did not use its numeric slot:\n{bridge}");
+    let bridge = nobox_accessors(&workspace, &scalar);
+    assert!(bridge.contains("__rock_globals[1]"), "first leaf did not use its numeric slot:\n{bridge}");
+    assert!(bridge.contains("__rock_globals[2]"), "second leaf did not use its numeric slot:\n{bridge}");
     assert!(!bridge.contains("global:main.rock::SPOT::"), "logical identity leaked into physical access:\n{bridge}");
 }
 
@@ -103,8 +113,7 @@ fn main() {}
     let workspace = bone_semantic::semantic_passes::semantic_pass(&mut [module])
         .expect("typecheck nested nobox reflection fixture");
     let scalar = skull_mir::lower::ScalarCtx::new(&workspace);
-    let bridge = super::build_state_nobox_accessors(&workspace, &scalar)
-        .expect("build nested nobox reflection bridge");
+    let bridge = nobox_accessors(&workspace, &scalar);
     assert!(bridge.contains("Place_lct("), "nested CData did not use its leaf ctor:\n{bridge}");
     assert!(bridge.contains("v.space.value"), "nested CData write did not read declared fields:\n{bridge}");
     assert!(!bridge.contains("v[\"space.value\"]"), "nested CData used a leaf-table key:\n{bridge}");
@@ -138,8 +147,7 @@ fn main() {}
     )
     .expect("typecheck scoped nobox fixture");
     let scalar = skull_mir::lower::ScalarCtx::new(&workspace);
-    let bridge = super::build_state_nobox_accessors(&workspace, &scalar)
-        .expect("build scoped nobox reflection bridge");
+    let bridge = nobox_accessors(&workspace, &scalar);
     let symbol = skull_mir::mangle::symbol_of_key(ustr::Ustr::from("example_space::Place"));
     assert!(bridge.contains(&format!("return {symbol}_ct(")), "scoped ctor did not use its emitted symbol:\n{bridge}");
     assert!(!bridge.contains("example_space::Place_ct("), "logical type key leaked into Lua:\n{bridge}");
@@ -1453,9 +1461,9 @@ local function run_wire()
     if __rock_lifecycle_take_wire(entry.key) then entry.func() end
   end
 end
-local runs_key = __rock_state_entry_for_name("RUNS").session_keys[1]
+local runs_key = __rock_global_entry("RUNS").slots[1]
 run_wire()
-assert(__rock_state_get(runs_key) == 1, "initial wire did not run exactly once: " .. tostring(__rock_state_get(runs_key)))
+assert(__rock_globals[runs_key] == 1, "initial wire did not run exactly once: " .. tostring(__rock_globals[runs_key]))
 local old_plan = _G.__ROCK_LIFECYCLE_PLAN
 REPLACE_OVERLAY
 local candidate_plan = _G.__ROCK_LIFECYCLE_PLAN
@@ -1464,7 +1472,7 @@ local ok, err = pcall(run_wire)
 assert(not ok and tostring(err):find("wire hook failed after publication", 1, true), "wire failure was not observed: " .. tostring(err))
 assert(_G.__rock_code_slot_pending == nil, "the hook failure must not leave a staging transaction")
 assert(_G.__ROCK_LIFECYCLE_PLAN == candidate_plan, "hook failure must not claim publication rollback")
-assert(__rock_state_get(runs_key) == 1, "wire failure changed the retained effect")
+assert(__rock_globals[runs_key] == 1, "wire failure changed the retained effect")
 print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
 "#
         .replace("REPLACE_OVERLAY", &overlay.lua);
@@ -1643,7 +1651,7 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
     }
 
     /// Layout drift, cell shift: inserting a frame-resident local changes the
-    /// StateSchema frame layout, so an overlay must request a safe restart
+    /// coroutine frame layout the CodeArtifact records, so an overlay must request a safe restart
     /// before any new CodeRef can reach a live process. The inserted `z` is a GENUINE frame cell
     /// (read after the first yield, so it must survive suspension); a dead local
     /// -- `let z = 999` never read -- is now a ghost dropped from the frame and
@@ -2794,17 +2802,12 @@ mod shape_drift_tests {
     }
 
     #[test]
-    fn mutable_global_membership_edit_requests_restart_and_keeps_old_session_schema() {
+    fn mutable_global_membership_edit_requests_restart_and_keeps_old_global_layout() {
         let v0 = "global A: int = 1\nfn main() { }\n";
         let v1 = "global A: int = 1\nglobal B: int = 2\nfn main() { }\n";
         let (_dir, mut project, main_lua, inc_lua, rock) = boot(v0);
         let baseline = std::fs::read_to_string(&main_lua).expect("baseline");
-        let old_schema = project
-            .cache
-            .state_schema()
-            .expect("baseline StateSchema")
-            .schema_id
-            .clone();
+        let old_layout = project.cache.global_layout().expect("baseline global layout").to_string();
 
         std::fs::write(&rock, v1).expect("edited source");
         let reload = project
@@ -2812,45 +2815,35 @@ mod shape_drift_tests {
             .expect("membership edit");
         match reload {
             SkullReload::FullRequired { reasons } => assert!(
-                reasons.iter().any(|reason| reason.contains("StateSchema")),
-                "membership drift must identify StateSchema restart: {reasons:?}"
+                reasons.iter().any(|reason| reason.contains("global layout changed")),
+                "membership drift must name the global layout: {reasons:?}"
             ),
             other => panic!("adding a mutable global must require restart, got {other:?}"),
         }
         assert_eq!(
             std::fs::read_to_string(&main_lua).expect("main after refusal"),
             baseline,
-            "an incompatible schema must not replace the old process artifact"
+            "an incompatible layout must not replace the old process artifact"
         );
         assert_eq!(
-            project
-                .cache
-                .state_schema()
-                .expect("retained StateSchema")
-                .schema_id
-                .as_str(),
-            old_schema.as_str(),
-            "a refused publication must retain the old compiler schema"
+            project.cache.global_layout().expect("retained global layout"),
+            old_layout,
+            "a refused publication must retain the old global layout"
         );
 
         project
             .force_full(&main_lua, &inc_lua)
             .expect("restart canonicalization");
         let current = std::fs::read_to_string(&main_lua).expect("new main");
-        assert_ne!(current, baseline, "force_full must materialize the new schema");
+        assert_ne!(current, baseline, "force_full must materialize the new layout");
         assert!(
             current.contains("identity=\"global:") && current.contains("::B\""),
-            "the new logical global identity must be present in the published schema: {current}"
+            "the new logical global identity must be present in the published directory: {current}"
         );
         assert_ne!(
-            project
-                .cache
-                .state_schema()
-                .expect("new StateSchema")
-                .schema_id
-                .as_str(),
-            old_schema.as_str(),
-            "restart canonicalization must publish the changed schema"
+            project.cache.global_layout().expect("new global layout"),
+            old_layout,
+            "restart canonicalization must publish the changed layout"
         );
     }
 

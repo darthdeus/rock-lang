@@ -6,7 +6,7 @@
 //! path, and validates the v1/legacy edges (`allow_legacy`), alias
 //! normalization (`-` to `_`), and file-ownership overlaps. Every consumer
 //! that used to resolve dependencies on its own (CLI source discovery, the
-//! compilation-unit loader, watch, StateSchema metadata) reads facts from
+//! compilation-unit loader, watch, global directory metadata) reads facts from
 //! here instead of re-walking manifests.
 
 use anyhow::{anyhow, Context, Result};
@@ -26,7 +26,7 @@ pub struct PackageId(pub u32);
 /// One dependency edge in the graph: the declaring package's view of a
 /// provider. `alias` is the normalized source name (`-` to `_`, case
 /// preserved); `declared_key` is the key as written in the consumer's
-/// manifest, kept for legacy metadata parity (StateSchema package strings).
+/// manifest, kept for legacy metadata parity (global directory package strings).
 #[derive(Debug, Clone)]
 pub struct PackageEdge {
     pub alias: String,

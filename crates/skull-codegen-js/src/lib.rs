@@ -371,7 +371,6 @@ var __rock_definition_plan_pending = null;
 var __rock_definition_materializers_pending = null;
 var __rock_definition_plan_materializing = false;
 function __rock_code_slot_begin() {
-  if (typeof __rock_state_transaction_begin !== "undefined") __rock_state_transaction_begin();
   __rock_code_slot_stage = Object.create(null);
   __rock_code_slot_pending_slots = Object.create(null);
   __rock_definition_plan_materializing = false;
@@ -380,14 +379,12 @@ function __rock_code_slot_begin() {
   __rock_definition_materializers_pending = null;
 }
 function __rock_code_slot_abort() {
-  if (typeof __rock_state_transaction_abort !== "undefined") __rock_state_transaction_abort();
   __rock_code_slot_stage = null;
   __rock_code_slot_pending_slots = Object.create(null);
   __rock_definition_plan_materializing = false;
   __rock_lifecycle_plan_pending = null;
   __rock_definition_plan_pending = null;
   __rock_definition_materializers_pending = null;
-  if (typeof __rock_state_transaction_commit !== "undefined") __rock_state_transaction_commit();
 }
 function __rock_lifecycle_plan_stage(plan) {
   if (__rock_code_slot_stage === null) throw new Error("Rock code slot stage not open");
@@ -517,7 +514,6 @@ function __rock_code_slot_publish() {
   __rock_lifecycle_plan_pending = null;
   __rock_definition_plan_pending = null;
   __rock_definition_materializers_pending = null;
-  if (typeof __rock_state_transaction_commit !== "undefined") __rock_state_transaction_commit();
   if (wireDue !== null) __G.__ROCK_WIRE_DUE = wireDue;
 }
 function __rock_code_ref_kind(v) {
@@ -1111,15 +1107,8 @@ function log_dedup_count() { return Object.keys(__rock_log_dedup).length; }
 /// a semantic, not a nicety).
 pub const JS_RNG_RUNTIME: &str = r#"
 var __rock_rng_state = 0;
-function __rock_rng_current() {
-  if (typeof __rock_active_session !== "undefined" && __rock_active_session
-      && __rock_active_session.__rock_rng_state !== null) return __rock_active_session.__rock_rng_state;
-  return __rock_rng_state;
-}
-function __rock_rng_store(s) {
-  if (typeof __rock_active_session !== "undefined" && __rock_active_session) __rock_active_session.__rock_rng_state = s | 0;
-  else __rock_rng_state = s | 0;
-}
+function __rock_rng_current() { return __rock_rng_state; }
+function __rock_rng_store(s) { __rock_rng_state = s | 0; }
 function __rock_rng_seed(s) { __rock_rng_store(s); }
 function __rock_rng_state_get() { return __rock_rng_current(); }
 function __rock_rng_state_set(s) { __rock_rng_store(s); }
@@ -1140,15 +1129,8 @@ function __rock_random_int(min, max) {
   return min + ((hi * 2097152 + (lo >>> 11)) % r);
 }
 var __rock_presentation_rng_state = 0;
-function __rock_presentation_rng_current() {
-  if (typeof __rock_active_session !== "undefined" && __rock_active_session
-      && __rock_active_session.__rock_presentation_rng_state !== null) return __rock_active_session.__rock_presentation_rng_state;
-  return __rock_presentation_rng_state;
-}
-function __rock_presentation_rng_store(s) {
-  if (typeof __rock_active_session !== "undefined" && __rock_active_session) __rock_active_session.__rock_presentation_rng_state = s | 0;
-  else __rock_presentation_rng_state = s | 0;
-}
+function __rock_presentation_rng_current() { return __rock_presentation_rng_state; }
+function __rock_presentation_rng_store(s) { __rock_presentation_rng_state = s | 0; }
 function __rock_presentation_rng_seed(s) { __rock_presentation_rng_store(s); }
 function __rock_presentation_rng_state_get() { return __rock_presentation_rng_current(); }
 function __rock_presentation_rng_state_set(s) { __rock_presentation_rng_store(s); }
@@ -1170,6 +1152,100 @@ function __rock_presentation_random_int(min, max) {
 }
 "#;
 
+pub const JS_GLOBALS_RUNTIME: &str = r#"
+// Mutable globals and statics live in one object per runtime, created by the
+// first full program and never replaced, so an incremental overlay runs against
+// the values the program wrote. A program whose global layout differs from the
+// one that created it cannot reuse it: its keys would name other globals.
+var __rock_globals = null;
+var __rock_globals_layout = null;
+var __rock_globals_fresh = false;
+function __rock_globals_open(layout) {
+  if (__rock_globals === null) {
+    __rock_globals = Object.create(null);
+    __rock_globals_layout = layout;
+    __rock_globals_fresh = true;
+  } else if (__rock_globals_layout !== layout) {
+    throw new Error("Rock global layout changed; restart required");
+  } else {
+    __rock_globals_fresh = false;
+  }
+  return __rock_globals;
+}
+// The global directory: one entry per mutable global,
+// { name, identity, physical: [leaf names], slots: [storage keys] }.
+var __ROCK_GLOBALS = [];
+function __rock_globals_publish(directory) {
+  __ROCK_GLOBALS = directory;
+  __rock_globals_install_bridge();
+}
+// By name, identity or physical leaf name.
+function __rock_global_entry(name) {
+  for (var i = 0; i < __ROCK_GLOBALS.length; i++) {
+    var entry = __ROCK_GLOBALS[i];
+    if (entry.name === name || entry.identity === name) return entry;
+    for (var j = 0; j < entry.physical.length; j++) {
+      if (entry.physical[j] === name) return entry;
+    }
+  }
+  return null;
+}
+function __rock_global_get(entry) {
+  if (entry.slots.length === 1) return __rock_globals[entry.slots[0]];
+  throw new Error("Rock global " + entry.identity + " has no single-value accessor");
+}
+function __rock_global_set(entry, value) {
+  if (entry.slots.length === 1) { __rock_globals[entry.slots[0]] = value; return value; }
+  throw new Error("Rock global " + entry.identity + " has no single-value accessor");
+}
+// The storage key a bridged name reads: the global's only slot, or the slot
+// of the leaf it names.
+function __rock_global_bridge_key(entry, name) {
+  if (entry.slots.length === 1) return entry.slots[0];
+  for (var i = 0; i < entry.physical.length; i++) {
+    if (entry.physical[i] === name) return entry.slots[i];
+  }
+  throw new Error("Rock global " + entry.identity + " has no leaf " + name);
+}
+// Inline JS names a Rock global through `__G`; the bridge routes those reads
+// and writes to the storage object.
+function __rock_globals_install_bridge() {
+  if (typeof __G === "undefined" || __G === null) return;
+  if (__G.__rock_globals_bridge_target === true) return;
+  var target = __G;
+  Object.defineProperty(target, "__rock_globals_bridge_target", {
+    value: true, writable: false, configurable: false, enumerable: false
+  });
+  __G = new Proxy(target, {
+    get: function (object, key, receiver) {
+      var entry = (typeof key === "string") ? __rock_global_entry(key) : null;
+      if (entry !== null) return __rock_globals[__rock_global_bridge_key(entry, key)];
+      return Reflect.get(object, key, receiver);
+    },
+    set: function (object, key, value, receiver) {
+      var entry = (typeof key === "string") ? __rock_global_entry(key) : null;
+      if (entry !== null) {
+        __rock_globals[__rock_global_bridge_key(entry, key)] = value;
+        return true;
+      }
+      return Reflect.set(object, key, value, receiver);
+    },
+    deleteProperty: function (object, key) {
+      var entry = (typeof key === "string") ? __rock_global_entry(key) : null;
+      if (entry !== null) {
+        delete __rock_globals[__rock_global_bridge_key(entry, key)];
+        return true;
+      }
+      return Reflect.deleteProperty(object, key);
+    },
+    has: function (object, key) {
+      var entry = (typeof key === "string") ? __rock_global_entry(key) : null;
+      return entry !== null || Reflect.has(object, key);
+    }
+  });
+}
+"#;
+
 /// The coroutine runtime: JS ports of the stdlib `__rock_coroutine_kill` /
 /// `__rock_coroutine_run_defers` inline(lua) bodies (`stdlib/unified.rock`),
 /// plus the `error` global backing the transform's `Inst::Global("error")` +
@@ -1177,180 +1253,6 @@ function __rock_presentation_random_int(min, max) {
 /// failures go to STDERR, never stdout -- the harness output-compare must not
 /// see them. Nil checks are truthiness (`!c.__defers`, `if (c.__inner)`) so
 /// `undefined` and `null` both count as nil, matching the subset's loose rule.
-pub const JS_SESSION_RUNTIME: &str = r#"
-function __rock_session_new(schema_id) {
-  return { __rock_schema_id: schema_id, __rock_state: Object.create(null), __rock_initialized: Object.create(null), __rock_initializer_keys: Object.create(null), __rock_rng_state: null, __rock_presentation_rng_state: null };
-}
-function __rock_session_activate(session) {
-  if (!session || !session.__rock_state || !session.__rock_initialized) throw new Error("invalid Rock Session");
-  if (__rock_state_schema_id !== null && session.__rock_schema_id !== __rock_state_schema_id) {
-    throw new Error("Rock StateSchema does not match the active Session");
-  }
-  __rock_active_session = session;
-  return session;
-}
-function __rock_session_current() {
-  if (__rock_active_session === null) throw new Error("no active Rock Session");
-  return __rock_active_session;
-}
-function __rock_state_has(key) { return __rock_session_current().__rock_initialized[key] === true; }
-function __rock_state_get(key) { return __rock_session_current().__rock_state[key]; }
-function __rock_state_set(key, value) {
-  var session = __rock_session_current();
-  session.__rock_state[key] = value;
-  session.__rock_initialized[key] = true;
-  return value;
-}
-function __rock_state_transaction_begin() {
-  if (__rock_state_transaction !== null) return;
-  var session = __rock_session_current();
-  var state = Object.create(null);
-  var initialized = Object.create(null);
-  var initializer_keys = Object.create(null);
-  Object.keys(session.__rock_state).forEach(function (key) { state[key] = session.__rock_state[key]; });
-  Object.keys(session.__rock_initialized).forEach(function (key) { initialized[key] = session.__rock_initialized[key]; });
-  Object.keys(session.__rock_initializer_keys).forEach(function (key) { initializer_keys[key] = session.__rock_initializer_keys[key]; });
-  __rock_state_transaction = {
-    session: session,
-    schema_id: session.__rock_schema_id,
-    has_schema: typeof __ROCK_STATE_SCHEMA !== "undefined",
-    schema: (typeof __ROCK_STATE_SCHEMA === "undefined") ? null : __ROCK_STATE_SCHEMA,
-    state: state,
-    initialized: initialized,
-    initializer_keys: initializer_keys,
-    published_schema_id: __rock_state_schema_id
-  };
-}
-function __rock_state_transaction_abort() {
-  var transaction = __rock_state_transaction;
-  if (transaction === null) return;
-  var session = transaction.session;
-  __rock_active_session = session;
-  session.__rock_schema_id = transaction.schema_id;
-  Object.keys(session.__rock_state).forEach(function (key) { delete session.__rock_state[key]; });
-  Object.keys(transaction.state).forEach(function (key) { session.__rock_state[key] = transaction.state[key]; });
-  Object.keys(session.__rock_initialized).forEach(function (key) { delete session.__rock_initialized[key]; });
-  Object.keys(transaction.initialized).forEach(function (key) { session.__rock_initialized[key] = transaction.initialized[key]; });
-  Object.keys(session.__rock_initializer_keys).forEach(function (key) { delete session.__rock_initializer_keys[key]; });
-  Object.keys(transaction.initializer_keys).forEach(function (key) { session.__rock_initializer_keys[key] = transaction.initializer_keys[key]; });
-  if (transaction.has_schema) __ROCK_STATE_SCHEMA = transaction.schema;
-  else if (typeof __ROCK_STATE_SCHEMA !== "undefined") __ROCK_STATE_SCHEMA = undefined;
-  __rock_state_schema_id = transaction.published_schema_id;
-  __rock_state_transaction = null;
-}
-function __rock_state_transaction_commit() { __rock_state_transaction = null; }
-function __rock_state_prepare_static(value_key, done_key, initializer_key) {
-  var session = __rock_session_current();
-  var old = session.__rock_initializer_keys[value_key];
-  if (old !== undefined && old !== initializer_key) {
-    delete session.__rock_state[value_key];
-    delete session.__rock_initialized[value_key];
-    __rock_state_set(done_key, false);
-  }
-  session.__rock_initializer_keys[value_key] = initializer_key;
-}
-function __rock_state_publish_schema(schema_id) {
-  var session = __rock_session_current();
-  if (session.__rock_schema_id !== null && session.__rock_schema_id !== schema_id) {
-    throw new Error("Rock StateSchema changed; restart is required");
-  }
-  session.__rock_schema_id = schema_id;
-  __rock_state_schema_id = schema_id;
-}
-function __rock_state_entry_for_name(name) {
-  if (typeof __ROCK_STATE_SCHEMA === "undefined") return null;
-  for (var i = 0; i < __ROCK_STATE_SCHEMA.length; i++) {
-    var entry = __ROCK_STATE_SCHEMA[i];
-    if (entry.kind !== "global") continue;
-    if (entry.name === name || entry.identity === name) return entry;
-    for (var j = 0; j < (entry.physical || []).length; j++) {
-      if (entry.physical[j] === name) return entry;
-    }
-  }
-  return null;
-}
-function __rock_state_entry_get(entry) {
-  var keys = entry.session_keys || [];
-  if (keys.length === 1) return __rock_state_get(keys[0]);
-  throw new Error("StateSchema entry has no single JS logical realization " + entry.identity);
-}
-function __rock_state_entry_set(entry, value) {
-  var keys = entry.session_keys || [];
-  if (keys.length === 1) return __rock_state_set(keys[0], value);
-  throw new Error("StateSchema entry has no single JS logical realization " + entry.identity);
-}
-function __rock_state_entry_clear(entry) {
-  var keys = entry.session_keys || [];
-  for (var i = 0; i < keys.length; i++) {
-    delete __rock_session_current().__rock_state[keys[i]];
-    delete __rock_session_current().__rock_initialized[keys[i]];
-  }
-}
-function __rock_state_bridge_key(entry, name) {
-  var keys = entry.session_keys || [];
-  if (keys.length === 1) return keys[0];
-  for (var i = 0; i < (entry.physical || []).length; i++) {
-    if (entry.physical[i] === name) return keys[i];
-  }
-  return null;
-}
-function __rock_state_bridge_get(entry, name) {
-  var key = __rock_state_bridge_key(entry, name);
-  if (key === null) throw new Error("StateSchema entry has no JS logical leaf for " + name);
-  return __rock_state_get(key);
-}
-function __rock_state_bridge_set(entry, name, value) {
-  var key = __rock_state_bridge_key(entry, name);
-  if (key === null) throw new Error("StateSchema entry has no JS logical leaf for " + name);
-  return __rock_state_set(key, value);
-}
-function __rock_state_bridge_clear(entry, name) {
-  var key = __rock_state_bridge_key(entry, name);
-  if (key === null) throw new Error("StateSchema entry has no JS logical leaf for " + name);
-  delete __rock_session_current().__rock_state[key];
-  delete __rock_session_current().__rock_initialized[key];
-}
-function __rock_state_install_global_bridge() {
-  if (typeof __G === "undefined" || __G === null) return;
-  if (__G.__rock_state_bridge_target === true) return;
-  var target = __G;
-  Object.defineProperty(target, "__rock_state_bridge_target", {
-    value: true, writable: false, configurable: false, enumerable: false
-  });
-  __G = new Proxy(target, {
-    get: function (object, key, receiver) {
-      var entry = (typeof key === "string") ? __rock_state_entry_for_name(key) : null;
-      if (entry !== null) return __rock_state_bridge_get(entry, key);
-      return Reflect.get(object, key, receiver);
-    },
-    set: function (object, key, value, receiver) {
-      var entry = (typeof key === "string") ? __rock_state_entry_for_name(key) : null;
-      if (entry !== null) {
-        __rock_state_bridge_set(entry, key, value);
-        return true;
-      }
-      return Reflect.set(object, key, value, receiver);
-    },
-    deleteProperty: function (object, key) {
-      var entry = (typeof key === "string") ? __rock_state_entry_for_name(key) : null;
-      if (entry !== null) {
-        __rock_state_bridge_clear(entry, key);
-        return true;
-      }
-      return Reflect.deleteProperty(object, key);
-    },
-    has: function (object, key) {
-      var entry = (typeof key === "string") ? __rock_state_entry_for_name(key) : null;
-      return entry !== null || Reflect.has(object, key);
-    }
-  });
-}
-var __rock_active_session = null;
-var __rock_state_schema_id = null;
-var __rock_state_transaction = null;
-__rock_session_activate(__rock_session_new(null));
-"#;
-
 pub const JS_CORO_RUNTIME: &str = r#"
 function error(m) { throw new Error(m); }
 function __rock_coroutine_run_defers(c) {
@@ -1695,7 +1597,7 @@ pub fn assemble_prelude(
     } else if emitted.contains("__rock_call(") || emitted.contains("__try_call(") {
         p.push_str(JS_FOREIGN_CALL_HELPER);
     }
-    p.push_str(JS_SESSION_RUNTIME);
+    p.push_str(JS_GLOBALS_RUNTIME);
     p.push_str(JS_CORO_RUNTIME);
     p.push_str(JS_STRING_RUNTIME);
     p.push_str(JS_INSPECT_RUNTIME);

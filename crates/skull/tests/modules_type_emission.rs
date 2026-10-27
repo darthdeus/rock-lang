@@ -75,10 +75,10 @@ fn v1_value_struct_and_enum_emit_runnable_lua() {
 }
 
 /// The cdef, the `ffi.typeof` argument and the layout assertions name ONE C
-/// type, and a DefKey cannot be that name. The DefKey still appears in identity
-/// strings and in display text, which is what the digested names are NOT for.
+/// type, and a DefKey cannot be that name. The DefKey still appears in display
+/// text, which is what the digested names are NOT for.
 #[test]
-fn v1_nominal_types_mint_identifiers_and_keep_the_key_for_identity() {
+fn v1_nominal_types_mint_identifiers() {
     let emitted = package();
     for spelled in [
         "} v1ty::a::V2;",
@@ -94,10 +94,6 @@ fn v1_nominal_types_mint_identifiers_and_keep_the_key_for_identity() {
             "a v1 DefKey must not reach an identifier or C-type position: `{spelled}`"
         );
     }
-    assert!(
-        emitted.lua.contains("identity=\"value:v1ty::a::V2\""),
-        "the type's own identity stays its DefKey"
-    );
     assert!(
         emitted.lua.contains("\"v1ty::a::Color::Blue\""),
         "display text is the package-qualified path"
@@ -234,10 +230,6 @@ fn a_generic_specialized_at_a_v1_nominal_emits_runnable_lua() {
     assert!(
         emitted.lua.contains(&format!("function vec_len_arr_T_{encoded}(")),
         "the specialized definition takes the nominal's identifier form"
-    );
-    assert!(
-        emitted.lua.contains("identity = \"named:<stdlib:unified.rock>::vec_len<a_n15_v1spec::a::Step_0_z>\""),
-        "the instance's IDENTITY keeps the DefKey -- that is the half that must not move"
     );
     let out = run_luajit(&format!("{}\nmain()\n", emitted.lua), "modules_v1_spec");
     assert_eq!(out, "total=9");

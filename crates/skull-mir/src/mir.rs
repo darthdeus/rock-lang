@@ -1000,8 +1000,8 @@ impl Default for Block {
 }
 
 /// A `static` local's synthesized storage: a private global cell + a done-flag,
-/// discovered during lowering and surfaced to `skull::mir_emit` for the
-/// compiler-owned StateSchema and per-Session initializer reset. The
+/// discovered during lowering and surfaced to `skull::mir_emit` for its
+/// storage key and the initializer reset on reload. The
 /// in-body first-reach guard is emitted inline (see `Builder::lower_static`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct StaticCell {
@@ -1022,7 +1022,7 @@ pub struct StaticCell {
     /// arena indices).
     pub init_hash: u64,
     /// The compiler-owned callable identity that owns this static. This is
-    /// metadata for StateSchema; the emitted cell name is only a realization.
+    /// part of the storage key; the emitted cell name is only a realization.
     pub owner: Option<crate::code_identity::CodeIdentity>,
     /// Source site of the static declaration. It is stable under body edits and
     /// independent of lowering traversal order.

@@ -157,7 +157,7 @@ fn main() {
     );
     let source = format!(
         "var __G = {{}};\nfunction print(value) {{ console.log(value); }}\n{}\n{}\nmain();",
-        skull_codegen_js::JS_SESSION_RUNTIME,
+        skull_codegen_js::JS_GLOBALS_RUNTIME,
         prog,
     );
     let output = node().args(["-e", &source]).output().expect("node");
