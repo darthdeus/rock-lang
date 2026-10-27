@@ -148,8 +148,15 @@ impl Builder<'_> {
                             Inst::NotEq(value, nil)
                         }));
                     }
+                    // A group-bound nullable value carries its presence as
+                    // a leaf even when its read's rep layout is boxed (a
+                    // container-read copy binds as lanes, #827), so
+                    // `nullable_value_shape_of` alone misses it.
+                    let group_bound_nullable = matches!(self.body.expr_arena[v], Expr::Var(b)
+                        if self.group_binds.get(&raw(b)).is_some_and(|(_, shape)| shape.nullable));
                     if self.nobox_value_name(v).is_some()
                         || self.nullable_value_shape_of(v)?.is_some()
+                        || group_bound_nullable
                     {
                         let repr = self.lower_expr_repr(v)?.into_value();
                         let present = match repr {

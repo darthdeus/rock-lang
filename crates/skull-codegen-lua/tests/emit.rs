@@ -1864,6 +1864,50 @@ fn callee_binding_ignores_discarded_uint_helpers() {
     );
 }
 
+#[test]
+fn read_only_nullable_value_lookup_does_not_rebuild_the_wrapper() {
+    // #827: a let-bound nullable GC value struct copied out of a
+    // container binds as presence/field lanes; read-only whole uses
+    // (presence test, unwrap field reads) must not pack the lanes
+    // straight back into a fresh `_vt` wrapper.
+    let prelude = r#"
+value SlotMetadata { names: [string], by_name: Map<string, int> }
+global METADATA: Map<string, SlotMetadata> = map_new()
+"#;
+    for (name, body) in [
+        (
+            "lookup",
+            r#"fn lookup(shader: string, name: string) -> int {
+    let slots = METADATA.get(shader)
+    if slots == null || slots.unwrap().names.len() == 0 { return -1 }
+    return slots.unwrap().by_name.get(name) ?? -1
+}"#,
+        ),
+        (
+            "presence",
+            r#"fn presence(shader: string) -> int {
+    let slots = METADATA.get(shader)
+    if slots == null { return -1 }
+    return 0
+}"#,
+        ),
+        (
+            "unwrap_field",
+            r#"fn unwrap_field(shader: string) -> int {
+    let slots = METADATA.get(shader)
+    return slots.unwrap().names.len()
+}"#,
+        ),
+    ] {
+        let src = format!("{prelude}{body}");
+        let lua = emit_clean_bound(&src, name, CalleeBindingMode::Upvalue);
+        assert!(
+            !lua.contains("SlotMetadata_vt("),
+            "{name} must not materialize a fresh wrapper:\n{lua}"
+        );
+    }
+}
+
 /// Under the global-lookup shape the emitted definition is a bare
 /// `function <name>(..)` and no factory exists. This is the shape every other
 /// test in this file pins, so binding must not reach it.

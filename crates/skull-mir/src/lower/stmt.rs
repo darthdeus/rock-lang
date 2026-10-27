@@ -343,18 +343,31 @@ impl Builder<'_> {
                         let r = self.with_value_lending(false, |s| s.lower_expr_repr(value))?;
                         let owned = self.snapshot_opaque_value(r.value().clone())?;
                         let r = ValueBundle::new(r.representation(), owned);
-                        if let Some(actual) = self.scx.rep_arena().value_shape(r.representation()) {
-                            if actual.name != shape.name || actual.fields != shape.fields {
-                                return Err(self.gap_here(format!(
-                                    "representation {:?} shape {:?} does not match binding shape {:?}",
-                                    r.representation(), actual, shape
-                                )));
+                        let threaded_leaves = match self.scx.rep_arena().value_shape(r.representation()) {
+                            Some(actual) => {
+                                if actual.name != shape.name || actual.fields != shape.fields {
+                                    return Err(self.gap_here(format!(
+                                        "representation {:?} shape {:?} does not match binding shape {:?}",
+                                        r.representation(), actual, shape
+                                    )));
+                                }
+                                // A nullable binding keeps its presence lane even when
+                                // the source plan is non-null with presence on the
+                                // Group (a map column `get`).
+                                let shape = if shape.nullable && !actual.nullable { shape } else { actual };
+                                Some((shape.clone(), self.repr_to_leaves_bundle_for_shape(&r, &shape)?))
                             }
-                            // A nullable binding keeps its presence lane even when
-                            // the source plan is non-null with presence on the
-                            // Group (a map column `get`).
-                            let shape = if shape.nullable && !actual.nullable { shape } else { actual };
-                            let leaves = self.repr_to_leaves_bundle_for_shape(&r, &shape)?;
+                            // A container-read copy's producer plan is boxed, so
+                            // it has no leaf shape - but the snapshot just split
+                            // the value into the binding shape's lanes. Thread
+                            // those instead of packing them straight back into
+                            // a fresh wrapper (#827).
+                            None if matches!(r.value(), ValueRepr::Group { parts, .. } if parts.len() == shape.fields.len()) => {
+                                Some((shape.clone(), self.repr_to_leaves_shape(&r.value().clone(), &shape)?))
+                            }
+                            None => None,
+                        };
+                        if let Some((shape, leaves)) = threaded_leaves {
                             let bname = self.body.binding_arena[name].name;
                             let owner = self
                                 .binding_ty(name)
