@@ -1764,8 +1764,6 @@ fn state_schema_lua(
     schema: &skull_mir::state_schema::StateSchema,
     cg: &CodegenCtx,
 ) -> String {
-    let image_plan = skull_mir::state_image::StateImagePlan::from_schema(schema)
-        .expect("compiler-owned StateSchema must produce one StateImagePlan");
     let mut out = String::from("_G.__ROCK_STATE_SCHEMA = {");
     for entry in &schema.entries {
         let kind = match entry.kind {
@@ -1811,71 +1809,11 @@ fn state_schema_lua(
             .next()
             .unwrap_or(&entry.identity);
         out.push_str(&format!(
-            "{{kind={kind:?},name={name:?},identity={:?},fingerprint={:?},physical={{{physical}}},session_keys={{{keys}}},owner={owner},initializer_identity={initializer_identity},storage_free={}}},",
-            entry.identity, entry.fingerprint, entry.storage_free
+            "{{kind={kind:?},name={name:?},identity={:?},fingerprint={:?},physical={{{physical}}},session_keys={{{keys}}},owner={owner},initializer_identity={initializer_identity}}},",
+            entry.identity, entry.fingerprint
         ));
     }
     out.push_str("}\n");
-    out.push_str(&format!(
-        "_G.__ROCK_STATE_IMAGE_PLAN = {{schema_id={:?},entries={{",
-        image_plan.schema_id()
-    ));
-    for entry in image_plan.entries() {
-        out.push_str(&format!(
-            "{{identity={:?},kind={:?},layout={:?},capture_policy={:?},realization_policy={:?},world_policy={:?}}},",
-            entry.identity,
-            entry.kind.as_str(),
-            entry.layout,
-            entry.capture_policy,
-            entry.realization_policy,
-            entry.world_policy,
-        ));
-    }
-    let census = image_plan.census();
-    let scene = image_plan.scene();
-    let scene_registry_identity = scene
-        .scene_registry_identity
-        .as_deref()
-        .map_or_else(|| "nil".to_string(), |value| format!("{value:?}"));
-    let arena_registry_identity = scene
-        .arena_registry_identity
-        .as_deref()
-        .map_or_else(|| "nil".to_string(), |value| format!("{value:?}"));
-    let scene_root_types = scene
-        .scene_root_types
-        .iter()
-        .map(|value| format!("{value:?}"))
-        .collect::<Vec<_>>()
-        .join(",");
-    let arena_identity_fields = scene
-        .arena_identity_fields
-        .iter()
-        .map(|value| format!("{value:?}"))
-        .collect::<Vec<_>>()
-        .join(",");
-    out.push_str(&format!(
-        "}},scene={{scene_registry_identity={},arena_registry_identity={},scene_root_types={{{}}},arena_identity_fields={{{}}},census={{examined={},assigned={},scene_registry={},arena_registry={},scene_root_types={},arena_identity_fields={},scene_lifecycle_entries={}}}}},census={{examined={},assigned={},duplicates={},unknown={},semantic_session={},program_artifact={},host_projection={},runner_diagnostic={},unsupported={}}}}}\n",
-        scene_registry_identity,
-        arena_registry_identity,
-        scene_root_types,
-        arena_identity_fields,
-        scene.census.examined,
-        scene.census.assigned,
-        scene.census.scene_registry,
-        scene.census.arena_registry,
-        scene.census.scene_root_types,
-        scene.census.arena_identity_fields,
-        schema.scene.scene_lifecycle_entries,
-        census.examined,
-        census.assigned,
-        census.duplicates,
-        census.unknown,
-        census.semantic_session,
-        census.program_artifact,
-        census.host_projection,
-        census.runner_diagnostic,
-        census.unsupported,
-    ));
     out.push_str("__rock_state_install_global_bridge()\n");
     out
 }
@@ -6183,8 +6121,6 @@ fn assemble(
         crate::allocation_report::AllocationReport::default()
     };
     let state_schema = skull_mir::state_schema::StateSchema::collect(ws, scx, &code_artifact, &all_statics)
-        .map_err(|error| CompilerError::new_no_location(error.to_string()))?
-        .with_lifecycle_plan(&lifecycle_plan)
         .map_err(|error| CompilerError::new_no_location(error.to_string()))?;
     let binding_plan = build_artifact_plans(
         ws,

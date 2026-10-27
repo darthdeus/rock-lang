@@ -31,7 +31,6 @@ pub mod site;
 pub mod sinking;
 pub mod spec_census;
 pub mod state_schema;
-pub mod state_image;
 pub mod struct_defaults;
 pub mod verdict;
 pub mod vertex_plan;

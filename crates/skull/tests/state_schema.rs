@@ -1,7 +1,6 @@
 //! RED checkpoint for the compiler-owned logical state inventory.
 
 use crate::common::emit_mir;
-use skull_mir::state_image::StateImagePlan;
 
 const FIXTURE: &str = r#"
 value Boxed { x: int, y: int }
@@ -107,40 +106,6 @@ fn compiler_owned_state_schema_is_total_for_a_nondegenerate_fixture() {
 }
 
 #[test]
-fn host_projection_storage_scan_policy_follows_declared_nested_types() {
-    let emit = emit_mir(
-        r#"
-struct SafeLeaf { count: int, label: string }
-struct SafeBranch { leaves: [SafeLeaf] }
-struct UnsafeBranch { pointer: Ptr<int>, storage: NativeBuffer<int> }
-
-@state(ownership=host_projection, world=exclude, realization=rebuild_host_projection)
-global SAFE: Map<string, SafeBranch> = map_new()
-@state(ownership=host_projection, world=exclude, realization=rebuild_host_projection)
-global UNSAFE: UnsafeBranch
-@state(ownership=host_projection, world=exclude, realization=rebuild_host_projection)
-global OPAQUE: [any] = []
-
-fn main() {}
-"#,
-    );
-    for (name, expected) in [("SAFE", true), ("UNSAFE", false), ("OPAQUE", false)] {
-        let entry = emit
-            .state_schema
-            .entries
-            .iter()
-            .find(|entry| entry.identity.ends_with(&format!("::{name}")))
-            .expect("fixture global in StateSchema");
-        assert_eq!(entry.storage_free, expected, "{name} declared storage policy");
-        let marker = format!("identity={:?},fingerprint={:?}", entry.identity, entry.fingerprint);
-        let start = emit.lua.find(&marker).expect("fixture entry in emitted StateSchema");
-        let emitted = emit.lua[start..].split("}},").next().expect("complete emitted entry");
-        assert!(emitted.contains(&format!("storage_free={expected}")),
-            "{name} emitted storage policy absent or wrong: {emitted}");
-    }
-}
-
-#[test]
 fn state_schema_identity_ignores_body_and_source_order_but_tracks_membership_and_layout() {
     let baseline = emit_mir(FIXTURE).state_schema;
     let body_edit = FIXTURE.replace("live + 1", "live + 2");
@@ -196,8 +161,6 @@ fn state_schema_rejects_omissions_duplicates_and_incomplete_entries() {
         physical: physical.iter().map(|name| (*name).to_string()).collect(),
         owner: None,
         initializer_identity: None,
-        metadata: Some(bone_semantic::hir::StateMetadata::default()),
-        storage_free: false,
     };
     assert!(matches!(
         StateSchema::from_entries(vec![entry("", "shape", &["g"])]),
@@ -221,136 +184,4 @@ fn state_schema_rejects_omissions_duplicates_and_incomplete_entries() {
         ]),
         Err(StateSchemaError::UnownedPhysical { .. })
     ));
-}
-
-#[test]
-fn lua_emits_the_complete_state_image_plan_next_to_the_schema() {
-    let emitted = emit_mir(FIXTURE);
-    let plan = StateImagePlan::from_schema(&emitted.state_schema).expect("image plan");
-    let census = plan.census();
-    assert!(census.is_total() && census.examined > 0);
-    assert!(emitted.lua.contains("__ROCK_STATE_IMAGE_PLAN = {"));
-    for entry in plan.entries() {
-        assert!(
-            emitted.lua.contains(&format!("identity={:?}", entry.identity)),
-            "Lua image plan omitted {}",
-            entry.identity
-        );
-        assert!(
-            emitted.lua.contains(&format!("kind={:?}", entry.kind.as_str())),
-            "Lua image plan omitted kind for {}",
-            entry.identity
-        );
-    }
-    assert!(emitted.lua.contains(&format!("examined={}", census.examined)));
-    assert!(emitted.lua.contains(&format!("assigned={}", census.assigned)));
-}
-
-#[test]
-fn module_memory_header_platform_reaches_state_schema_metadata() {
-    use bone_semantic::hir::StateMetadata;
-    use skull_mir::state_schema::StateKind;
-
-    let header = emit_mir(
-        "@memory(platform)\nglobal TICKS: int = 0\nfn main() { TICKS = TICKS + 1 }\n",
-    );
-    let entry = header
-        .state_schema
-        .entries
-        .iter()
-        .find(|entry| entry.kind == StateKind::Global && entry.identity.ends_with("::TICKS"))
-        .expect("header fixture global in StateSchema");
-
-    // Oracle 1: the class table lowering builds the unit default from.
-    let platform = StateMetadata::for_memory_class(skull_parser::MemoryClass::Platform);
-    assert_eq!(
-        entry.metadata,
-        Some(platform),
-        "a header-only platform global must carry the platform triple: {entry:?}"
-    );
-    assert_ne!(
-        entry.metadata,
-        Some(StateMetadata::default()),
-        "the header must move the global off the game default: {entry:?}"
-    );
-
-    // Oracle 2: the same triple spelled as an explicit per-declaration
-    // annotation takes the annotation-lowering path, not the header default.
-    let explicit = emit_mir(
-        "@state(ownership=host_projection, world=exclude, realization=rebuild_host_projection)\nglobal TICKS: int = 0\nfn main() { TICKS = TICKS + 1 }\n",
-    );
-    let explicit_entry = explicit
-        .state_schema
-        .entries
-        .iter()
-        .find(|entry| entry.kind == StateKind::Global && entry.identity.ends_with("::TICKS"))
-        .expect("explicit fixture global in StateSchema");
-    assert_eq!(
-        entry.metadata, explicit_entry.metadata,
-        "header and explicit annotation must resolve to the same metadata"
-    );
-
-    // HostProjection over a storage-free declared type skips the storage scan.
-    assert!(
-        entry.storage_free,
-        "a platform int global must be storage-free: {entry:?}"
-    );
-
-    // Publication fidelity: the Lua image plan must carry the policies the
-    // schema computes, read back from the plan rather than restated here.
-    let plan = StateImagePlan::from_schema(&header.state_schema).expect("image plan");
-    let plan_entry = plan
-        .entries()
-        .iter()
-        .find(|entry| entry.identity.ends_with("::TICKS"))
-        .expect("header fixture global in StateImagePlan");
-    assert_eq!(
-        plan_entry.kind,
-        skull_mir::state_image::ImageEntryKind::HostProjection,
-        "a platform global must image as a host projection"
-    );
-    let marker = format!("identity={:?}", plan_entry.identity);
-    let start = header
-        .lua
-        .find(&marker)
-        .expect("fixture entry in emitted image plan");
-    let emitted = header.lua[start..]
-        .split("}},")
-        .next()
-        .expect("complete emitted entry");
-    for (key, value) in [
-        ("kind", plan_entry.kind.as_str()),
-        ("capture_policy", plan_entry.capture_policy.as_str()),
-        (
-            "realization_policy",
-            plan_entry.realization_policy.as_str(),
-        ),
-        ("world_policy", plan_entry.world_policy.as_str()),
-    ] {
-        assert!(
-            emitted.contains(&format!("{key}={value:?}")),
-            "emitted image plan omitted {key} for {}: {emitted}",
-            plan_entry.identity
-        );
-    }
-}
-
-#[test]
-fn explicit_global_state_ownership_reaches_both_image_backends() {
-    let source = r#"
-@state(ownership=host_projection, world=exclude, realization=font)
-global FONT_REGISTRY: int = 0
-global VALUE: int = 1
-"#;
-    let emitted = emit_mir(source);
-    let plan = StateImagePlan::from_schema(&emitted.state_schema).expect("image plan");
-    let font = plan
-        .entries()
-        .iter()
-        .find(|entry| entry.identity.ends_with("::FONT_REGISTRY"))
-        .expect("font entry");
-    assert_eq!(font.kind, skull_mir::state_image::ImageEntryKind::HostProjection);
-    assert_eq!(font.world_policy, "exclude");
-    assert_eq!(font.realization_policy, "font");
-    assert!(emitted.lua.contains("realization_policy=\"font\""));
 }

@@ -114,14 +114,6 @@ fn main() {}
         fingerprint(state_b, ComptimeInputs::default()),
         "StateSchema membership is an Artifact input"
     );
-
-    let state_metadata_a = "@state(ownership=session, world=include)\nglobal STATE: int = 0\nfn main() {}";
-    let state_metadata_b = "@state(ownership=session, world=boot_only)\nglobal STATE: int = 0\nfn main() {}";
-    assert_ne!(
-        fingerprint(state_metadata_a, ComptimeInputs::default()),
-        fingerprint(state_metadata_b, ComptimeInputs::default()),
-        "StateSchema metadata is an Artifact input even when code is unchanged"
-    );
 }
 
 #[test]

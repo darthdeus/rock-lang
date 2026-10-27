@@ -90,10 +90,6 @@ pub struct CallEffect {
 pub trait PlacementOracle {
     fn global_place(&self, name: Ustr) -> Place;
 
-    fn global_store_requires_clone(&self, _name: Ustr) -> bool {
-        false
-    }
-
     fn parameter_derived_place(&self, _mir: &MirFunc, _inst: Idx<Inst>) -> Option<Place> {
         None
     }
@@ -945,9 +941,7 @@ fn infer_requirements(
         };
         worklist.queued_values.remove(id);
         match &mir.insts[id] {
-            Inst::StoreGlobal { name, value }
-                if oracle.carries_placement(mir, *value)
-                    && !oracle.global_store_requires_clone(*name) =>
+            Inst::StoreGlobal { value, .. } if oracle.carries_placement(mir, *value) =>
             {
                 worklist.merge_value(&mut requirements, *value, Place::Session);
             }
@@ -2114,11 +2108,9 @@ pub fn analyze(
                             changed |= merge_cell(&mut analysis.cells, *cell, value);
                             changed |= merge_cell_origins(&mut analysis.cell_origins, *cell, origins);
                         }
-                        Inst::StoreGlobal { name, value } => {
-                            if !oracle.global_store_requires_clone(*name) {
-                                for value in provenance_places(mir, &analysis, *value) {
-                                    add_constraint(&mut analysis, value, Place::Session, span);
-                                }
+                        Inst::StoreGlobal { value, .. } => {
+                            for value in provenance_places(mir, &analysis, *value) {
+                                add_constraint(&mut analysis, value, Place::Session, span);
                             }
                         }
                         Inst::StoreField { base, value, .. }

@@ -256,26 +256,7 @@ fn compute_inner(
             }
             None => h.boolean(false),
         }
-        if let Some(metadata) = entry.metadata {
-            h.boolean(true);
-            h.string(metadata.ownership.as_str());
-            h.string(metadata.world.as_str());
-            h.string(metadata.realization.as_str());
-        } else {
-            h.boolean(false);
-        }
     }
-    h.string(state.scene.scene_registry_identity.as_deref().unwrap_or(""));
-    h.string(state.scene.arena_registry_identity.as_deref().unwrap_or(""));
-    h.len(state.scene.scene_root_types.len());
-    for root in &state.scene.scene_root_types {
-        h.string(root);
-    }
-    h.len(state.scene.arena_identity_fields.len());
-    for field in &state.scene.arena_identity_fields {
-        h.string(field);
-    }
-    h.u64(state.scene.scene_lifecycle_entries as u64);
 
     let reads = canonical_reads(ws, comptime_reads, volatile_vars)?;
     h.len(reads.len());

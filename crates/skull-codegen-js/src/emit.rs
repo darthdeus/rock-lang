@@ -3679,8 +3679,6 @@ fn assemble_program_core(
         &code_artifact,
         &all_statics,
     )
-    .map_err(|error| err(error.to_string()))?
-    .with_lifecycle_plan(&lifecycle_plan)
     .map_err(|error| err(error.to_string()))?;
     let program = format!(
         "if (typeof __rock_state_transaction_begin !== \"undefined\") __rock_state_transaction_begin();\n__rock_state_publish_schema({:?});\n{}{}",
@@ -3706,8 +3704,6 @@ fn assemble_program_core(
 fn state_schema_js(
     schema: &skull_mir::state_schema::StateSchema,
 ) -> Result<String, CompilerError> {
-    let image_plan = skull_mir::state_image::StateImagePlan::from_schema(schema)
-        .map_err(|error| err(error.to_string()))?;
     let mut out = String::from("var __ROCK_STATE_SCHEMA = [");
     for entry in &schema.entries {
         let kind = match entry.kind {
@@ -3740,7 +3736,7 @@ fn state_schema_js(
             .initializer_identity
             .map_or_else(|| "null".to_string(), |identity| identity.to_string());
         out.push_str(&format!(
-            "{{kind:{},name:{},identity:{},fingerprint:{},physical:[{}],session_keys:[{}],owner:{},initializer_identity:{},storage_free:{}}},",
+            "{{kind:{},name:{},identity:{},fingerprint:{},physical:[{}],session_keys:[{}],owner:{},initializer_identity:{}}},",
             js_string_lit(kind)?,
             js_string_lit(name)?,
             js_string_lit(&entry.identity)?,
@@ -3749,68 +3745,9 @@ fn state_schema_js(
             session_keys,
             owner,
             initializer_identity,
-            entry.storage_free,
         ));
     }
-    out.push_str("];\nvar __ROCK_STATE_IMAGE_PLAN = {schema_id:");
-    out.push_str(&js_string_lit(image_plan.schema_id())?);
-    out.push_str(",entries:[");
-    for entry in image_plan.entries() {
-        out.push_str("{identity:");
-        out.push_str(&js_string_lit(&entry.identity)?);
-        out.push_str(",kind:");
-        out.push_str(&js_string_lit(entry.kind.as_str())?);
-        out.push_str(",layout:");
-        out.push_str(&js_string_lit(&entry.layout)?);
-        out.push_str(",capture_policy:");
-        out.push_str(&js_string_lit(&entry.capture_policy)?);
-        out.push_str(",realization_policy:");
-        out.push_str(&js_string_lit(&entry.realization_policy)?);
-        out.push_str(",world_policy:");
-        out.push_str(&js_string_lit(&entry.world_policy)?);
-        out.push_str("},");
-    }
-    let census = image_plan.census();
-    let scene = image_plan.scene();
-    out.push_str(&format!(
-        "],scene:{{scene_registry_identity:{},arena_registry_identity:{},scene_root_types:[{}],arena_identity_fields:[{}],census:{{examined:{},assigned:{},scene_registry:{},arena_registry:{},scene_root_types:{},arena_identity_fields:{},scene_lifecycle_entries:{}}}}},census:{{examined:{},assigned:{},duplicates:{},unknown:{},semantic_session:{},program_artifact:{},host_projection:{},runner_diagnostic:{},unsupported:{}}}}};\n__rock_state_install_global_bridge();\n",
-        scene
-            .scene_registry_identity
-            .as_deref()
-            .map_or_else(|| Ok("null".to_string()), js_string_lit)?,
-        scene
-            .arena_registry_identity
-            .as_deref()
-            .map_or_else(|| Ok("null".to_string()), js_string_lit)?,
-        scene
-            .scene_root_types
-            .iter()
-            .map(|value| js_string_lit(value))
-            .collect::<Result<Vec<_>, _>>()?
-            .join(","),
-        scene
-            .arena_identity_fields
-            .iter()
-            .map(|value| js_string_lit(value))
-            .collect::<Result<Vec<_>, _>>()?
-            .join(","),
-        scene.census.examined,
-        scene.census.assigned,
-        scene.census.scene_registry,
-        scene.census.arena_registry,
-        scene.census.scene_root_types,
-        scene.census.arena_identity_fields,
-        scene.scene_lifecycle_entries,
-        census.examined,
-        census.assigned,
-        census.duplicates,
-        census.unknown,
-        census.semantic_session,
-        census.program_artifact,
-        census.host_projection,
-        census.runner_diagnostic,
-        census.unsupported,
-    ));
+    out.push_str("];\n__rock_state_install_global_bridge();\n");
     Ok(out)
 }
 
