@@ -160,23 +160,33 @@ global TOTAL: int = 0
 fn main() {}
 ";
 
-fn bump_body(ws: &Workspace) -> (bone_semantic::prelude::ModuleId, bone_semantic::hir::BodyOwner) {
+fn fn_body(ws: &Workspace, name: &str) -> (bone_semantic::prelude::ModuleId, bone_semantic::hir::BodyOwner) {
     ws.modules
         .iter()
         .find_map(|module| {
-            module.functions.iter().find(|(_, f)| f.name.as_str() == "bump").map(|(fid, _)| {
+            module.functions.iter().find(|(_, f)| f.name.as_str() == name).map(|(fid, _)| {
                 (module.id, bone_semantic::hir::BodyOwner::Function(fid))
             })
         })
-        .expect("fixture declares bump")
+        .unwrap_or_else(|| panic!("fixture declares {name}"))
 }
 
 fn overlay_run(tag: &str, before: &str, after: &str, script: impl Fn(&str, &str) -> String) -> String {
+    overlay_run_editing(tag, "bump", before, after, script)
+}
+
+fn overlay_run_editing(
+    tag: &str,
+    edited: &str,
+    before: &str,
+    after: &str,
+    script: impl Fn(&str, &str) -> String,
+) -> String {
     let ws1 = crate::common::ws_with_stdlib(before);
     let mid = skull::user_module_id(&ws1).unwrap();
     let (full, mut cache) = skull::mir_emit::emit_full(&ws1, mid).expect("full emit");
     let ws2 = crate::common::ws_with_stdlib(after);
-    let overlay = skull::mir_emit::emit_overlay(&ws2, &mut cache, &[bump_body(&ws2)])
+    let overlay = skull::mir_emit::emit_overlay(&ws2, &mut cache, &[fn_body(&ws2, edited)])
         .expect("a body edit that adds or removes a static must overlay");
     crate::common::run_luajit(&script(&full.lua, &overlay.lua), tag)
 }
@@ -207,6 +217,46 @@ fn a_body_edit_that_removes_a_static_overlays_over_live_globals() {
              assert(static_cells() == 2, 'the static value and done cells are live')\n\
              {overlay}\n\
              assert(bump() == 22)\n\
+             assert(static_cells() == 0, 'the removed static still holds ' .. static_cells() .. ' cells')\n\
+             print('ok')"
+        )
+    });
+    assert_eq!(out, "ok");
+}
+
+const SPECIALIZED: &str = "\
+value V2 { x: float, y: float }
+global TOTAL: float = 0.0
+fn tagged<T>(v: T) -> T {
+    static seen = 0
+    seen = seen + 1
+    return v
+}
+@nomangle fn bump() -> float {
+    TOTAL = TOTAL + tagged(V2 { x: 1.0, y: 2.0 }).x
+    return TOTAL
+}
+fn main() {}
+";
+
+/// A generic's static lives in its specialization's chunk, which the cache
+/// builds apart from the ordinary bodies; removing it drops its cells all the same.
+#[test]
+fn a_body_edit_that_removes_a_specialized_generics_static_drops_its_cells() {
+    let after = SPECIALIZED.replace("    static seen = 0\n    seen = seen + 1\n", "");
+    let out = overlay_run_editing("spec_static_removed_overlay", "tagged", SPECIALIZED, &after, |full, overlay| {
+        format!(
+            "{full}\nassert(bump() == 1)\n\
+             local function static_cells()\n\
+               local n = 0\n\
+               for key in pairs(__rock_globals) do\n\
+                 if type(key) == 'string' and key:find('::seen#', 1, true) then n = n + 1 end\n\
+               end\n\
+               return n\n\
+             end\n\
+             assert(static_cells() == 2, 'the specialized static holds ' .. static_cells() .. ' cells')\n\
+             {overlay}\n\
+             assert(bump() == 2)\n\
              assert(static_cells() == 0, 'the removed static still holds ' .. static_cells() .. ' cells')\n\
              print('ok')"
         )

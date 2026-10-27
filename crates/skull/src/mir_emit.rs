@@ -7283,21 +7283,6 @@ fn emit_full_in_with_mutation(
             }
         }
     }
-    // Baseline every `static` cell's reload key so the overlay can detect an
-    // initializer edit (changed key) vs an unrelated body edit (unchanged key),
-    // and its storage keys so the overlay can drop a static an edit removed.
-    let mut static_key_baseline: FxHashMap<Ustr, StaticBaseline> = FxHashMap::default();
-    if build.lifetime() == CacheLifetime::Retained {
-        for chunk in chunks.values().flatten() {
-            for sc in &chunk.statics {
-                let (value_slot, done_slot) =
-                    skull_mir::global_storage::static_cell_storage_keys(ws, scx.interner(), sc)
-                        .map_err(CompilerError::new_no_location)?;
-                static_key_baseline
-                    .insert(sc.cell, StaticBaseline { key: static_cell_key(sc), value_slot, done_slot });
-            }
-        }
-    }
     let concrete_stats = if concrete_stats_requested() {
         concrete.snapshot_build_stats()
     } else {
@@ -7314,7 +7299,7 @@ fn emit_full_in_with_mutation(
         inline_cache: skull_transform::InlineCache::with_candidate_table(inline_candidate_table),
         dependents,
         changed_consts_since_full: FxHashSet::default(),
-        static_key_baseline,
+        static_key_baseline: FxHashMap::default(),
         roots: RootCache {
             project_root: project_root.map(str::to_string),
             interface_roots,
@@ -7367,6 +7352,12 @@ fn emit_full_in_with_mutation(
     ).map_err(|error| CompilerError::new_no_location(error.to_string()))?);
     cache.unit_comptime_reads = unit_reads;
     dependency_edges += cache.absorb_spec_chunks(built_specs);
+    // Baseline every `static` cell's reload key so the overlay can detect an
+    // initializer edit (changed key) vs an unrelated body edit (unchanged key),
+    // and its storage keys so the overlay can drop a static an edit removed.
+    // After the specializations are absorbed: a generic's static lives in its
+    // specialization's chunk.
+    cache.advance_static_baseline(ws)?;
     emit.compile_counts.chunks = cache.chunks.len();
     emit.compile_counts.dependency_edges = Some(dependency_edges);
     emit.graph_census = graph_census;
@@ -7881,6 +7872,31 @@ fn update_shader_registrations(
 /// Take the specialized chunks an assembly BUILT into the cache, with their
 /// reverse-dependency edges, so the next build reuses them and an edit to any
 /// declaration they depend on -- their own included -- invalidates them.
+/// Bring the static baseline up to the current chunks: a changed body's cells
+/// take their current key, a cell not yet baselined joins, and a cell no chunk
+/// holds any more leaves.
+fn advance_static_baseline(&mut self, ws: &Workspace) -> Result<(), CompilerError> {
+    let mut advanced: Vec<(Ustr, StaticBaseline)> = Vec::new();
+    let mut current: FxHashSet<Ustr> = FxHashSet::default();
+    for (body, chunk) in &self.chunks {
+        let Ok(chunk) = chunk else { continue };
+        let changed = self.changed_since_full.contains(body);
+        for sc in &chunk.statics {
+            current.insert(sc.cell);
+            if !changed && self.static_key_baseline.contains_key(&sc.cell) {
+                continue;
+            }
+            let (value_slot, done_slot) =
+                skull_mir::global_storage::static_cell_storage_keys(ws, self.scx.interner(), sc)
+                    .map_err(CompilerError::new_no_location)?;
+            advanced.push((sc.cell, StaticBaseline { key: static_cell_key(sc), value_slot, done_slot }));
+        }
+    }
+    self.static_key_baseline.extend(advanced);
+    self.static_key_baseline.retain(|cell, _| current.contains(cell));
+    Ok(())
+}
+
 fn absorb_spec_chunks(&mut self, built: Vec<(Instance, Chunk)>) -> usize {
     let mut dependency_edges = 0;
     for (body, chunk) in built {
@@ -9020,29 +9036,8 @@ pub fn emit_overlay_with_span_edits(
     // state. Bring each changed fn's cells up to their current key so the next
     // overlay only resets cells whose key changes AGAIN. A cell this overlay
     // dropped leaves the baseline, so a later overlay does not drop it again.
-    let mut advanced: Vec<(Ustr, StaticBaseline)> = Vec::new();
-    for chunk in cache
-        .changed_since_full
-        .iter()
-        .filter_map(|fref| cache.chunks.get(fref).and_then(|c| c.as_ref().ok()))
-    {
-        for sc in &chunk.statics {
-            let (value_slot, done_slot) =
-                skull_mir::global_storage::static_cell_storage_keys(ws, cache.scx.interner(), sc)
-                    .map_err(CompilerError::new_no_location)?;
-            advanced.push((sc.cell, StaticBaseline { key: static_cell_key(sc), value_slot, done_slot }));
-        }
-    }
-    for (cell, base) in advanced {
-        cache.static_key_baseline.insert(cell, base);
-    }
-    let current: FxHashSet<Ustr> = cache
-        .chunks
-        .values()
-        .flatten()
-        .flat_map(|chunk| chunk.statics.iter().map(|sc| sc.cell))
-        .collect();
-    cache.static_key_baseline.retain(|cell, _| current.contains(cell));
+    // A specialization first built by this overlay joins the baseline here.
+    cache.advance_static_baseline(ws)?;
     let t_asm = t3.elapsed();
     // A body edit that mints a newly-colliding synthetic name is not safe to
     // deliver as an overlay.
