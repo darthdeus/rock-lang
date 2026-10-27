@@ -25,7 +25,7 @@ use bone_core::modules::NsAliases;
 use bone_incremental::session::{BodyId, Session, SessionFile, UpdateResult, UpdateTier};
 use bone_semantic::hir::{BodyOwner, CallFamily, Expr, Module, TypeCtor, TypeExpr};
 use bone_semantic::prelude::*;
-use skull_parser::{Ast, Dialect, GlobalPolicy, MemoryClass, PackageTag};
+use skull_parser::{Ast, Dialect, GlobalPolicy, PackageTag};
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -39,7 +39,6 @@ fn v1(path: &str, text: &str) -> SessionFile {
         text: text.into(),
         dialect: Dialect::V1,
         package: Some(PackageTag { id: 1, self_name: PACKAGE.into() }),
-        memory_class: MemoryClass::Game,
         global_policy: GlobalPolicy::Any,
     }
 }
@@ -1267,7 +1266,7 @@ fn a_module_reexport_added_and_repointed_moves_a_path_through_it() {
 // ---------------------------------------------------------------------------
 
 fn in_package(dialect: Dialect, id: u32, name: &str, path: &str, text: &str) -> SessionFile {
-    SessionFile { path: path.into(), text: text.into(), dialect, package: Some(PackageTag { id, self_name: name.into() }), memory_class: MemoryClass::Game, global_policy: GlobalPolicy::Any }
+    SessionFile { path: path.into(), text: text.into(), dialect, package: Some(PackageTag { id, self_name: name.into() }), global_policy: GlobalPolicy::Any }
 }
 
 /// `app` (2) depends on the legacy `x_lib` (1).

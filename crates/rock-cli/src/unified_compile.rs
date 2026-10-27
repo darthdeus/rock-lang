@@ -17,7 +17,6 @@ fn stamp_package(file: &Arc<AtomicRefCell<SourceFile>>, node: &PackageNode) {
         self_name: node.self_name.clone(),
     });
     f.dialect = node.dialect;
-    f.memory_class = node.memory_class;
     f.global_policy = node.global_policy;
 }
 

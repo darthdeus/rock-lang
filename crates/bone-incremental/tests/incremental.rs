@@ -51,7 +51,6 @@ fn parse_files(files: &Files) -> Result<Vec<skull_parser::Ast>, CompilerError> {
         // these same facts on every parse. A no-op for legacy fixtures
         // (Legacy/None/Game/Any are the parser defaults).
         module.package = f.package.clone();
-        module.memory_class = f.memory_class;
         module.global_policy = f.global_policy;
         assert!(
             !module.items.is_empty(),
@@ -2555,7 +2554,6 @@ fn fuzz_session_fixture_package_graph() {
                     id: node.id.0,
                     self_name: node.self_name.clone(),
                 }),
-                memory_class: node.memory_class,
                 global_policy: node.global_policy,
             };
             if *id == root {

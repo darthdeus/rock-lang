@@ -787,15 +787,6 @@ pub struct ModuleHeader {
     pub span: Span,
 }
 
-/// The file's `@memory(<class>)` header -- first non-comment item only, like
-/// `mod a::b;`. It sets the memory class of the whole file's globals; a
-/// per-declaration `@state` still wins.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct MemoryHeader {
-    pub class: rock_core::source_code::MemoryClass,
-    pub span: Span,
-}
-
 /// `use` declarations (spec 8.1).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UseDecl {
@@ -894,17 +885,10 @@ pub struct Ast {
     /// The file's `mod a::b;` header (v1), if the first non-comment item was
     /// one. Selects the logical module this file's items contribute to.
     pub module_header: Option<ModuleHeader>,
-    /// The owning package's memory class, stamped by the loader from the
-    /// package graph exactly as `package`/`dialect` are. The default for an
-    /// unannotated `global` in this file, unless `memory_header` overrides it.
-    pub memory_class: rock_core::source_code::MemoryClass,
     /// The owning package's mutable-global policy, stamped by the loader with
     /// the other package facts. `Any` keeps standalone sources and packages
     /// without the key on today's behavior.
     pub global_policy: rock_core::source_code::GlobalPolicy,
-    /// The file's `@memory(<class>)` header, if the first non-comment item was
-    /// one: this module's class, overriding the package's.
-    pub memory_header: Option<MemoryHeader>,
     pub exprs: Arena<ExprData>,
     pub stmts: Arena<StatementData>,
     pub blocks: Arena<BlockData>,

@@ -45,9 +45,6 @@ pub struct PackageNode {
     /// `name = "Demo"` yields `Demo`, never an invented `demo`.
     pub self_name: String,
     pub dialect: Dialect,
-    /// The package's declared memory class (`[language] memory`), which every
-    /// file it owns inherits as the default for an unannotated `global`.
-    pub memory_class: rock_core::source_code::MemoryClass,
     /// The package's mutable-global policy (`[language] globals`).
     pub global_policy: rock_core::source_code::GlobalPolicy,
     /// Channel-filtered edges, sorted by declared key.
@@ -217,7 +214,6 @@ impl Builder {
             manifest_name: config.package.name.clone(),
             self_name: config.package.name.replace('-', "_"),
             dialect,
-            memory_class: config.memory_class(),
             global_policy: config.global_policy(),
             dependencies,
             source_groups,

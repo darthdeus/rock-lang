@@ -11,7 +11,6 @@
 // Control via ROCK_LOG env var: error|warn|info|debug|trace (or 0-4)
 // Default is info level
 
-@state(ownership=runner_diagnostic, world=exclude, realization=runner_rebind)
 global __rock_log_level: int = -1
 
 // Level source is a platform SEAM: the host installs `_G.__rock_log_level_source`

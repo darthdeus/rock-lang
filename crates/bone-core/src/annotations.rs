@@ -107,32 +107,10 @@ fn validate_one(
             }
             Ok(())
         }
-        "state" => {
-            at(anno, pos, AnnoPos::GlobalItem)?;
-            const KEYS: &[&str] = &["ownership", "world", "realization"];
-            let mut seen = FxHashSet::default();
-            for arg in &anno.args {
-                let Some(key) = arg.name.as_ref() else {
-                    comp_error!(
-                        anno.span,
-                        "`@state` arguments must be named: ownership=, world=, realization="
-                    );
-                };
-                if !KEYS.contains(&key.name.as_str())
-                    || !matches!(arg.value, AnnoValue::Ident(_))
-                    || !seen.insert(key.name)
-                {
-                    comp_error!(
-                        anno.span,
-                        "`@state` accepts one each of ownership=, world=, and realization= with identifier values"
-                    );
-                }
-            }
-            if !seen.contains(&Ustr::from("ownership")) {
-                comp_error!(anno.span, "`@state` requires ownership=");
-            }
-            Ok(())
-        }
+        "state" => comp_error!(
+            anno.span,
+            "`@state` was removed; delete it: globals have no ownership/world/realization metadata"
+        ),
         "shader" => {
             at(anno, pos, AnnoPos::FnItem)?;
             let ok = anno.args.len() == 1
@@ -193,17 +171,14 @@ fn validate_one(
         }
         // `@host_resource` marks a TYPE as a name for something the host owns:
         // a GL object, a canvas, a shader, a mesh upload, a playing voice, an
-        // FFI pointer. One declaration, on the type, is what makes both
-        // consumers agree -- the compile-time rejection of such a type in game
-        // memory and the runtime
-        // host-projection classification, which reads the flag out of
-        // `__ROCK_TYPE_TABLE` instead of keeping its own list of names.
+        // FFI pointer. The runtime host-projection classification reads it
+        // out of `__ROCK_TYPE_TABLE` instead of keeping its own list of names.
         //
         // The optional bare identifier is the NATIVE LEDGER class
         // (the host's native ledger), for the types the ledger tracks. A
         // host resource the ledger does not track -- an FFI pointer, a
-        // `NativeBuffer` -- carries the annotation with no class: the compile
-        // check still applies, and the runtime has nothing to ask about it.
+        // `NativeBuffer` -- carries the annotation with no class, and the
+        // runtime has nothing to ask about it.
         "host_resource" => {
             at_type_item(anno, pos)?;
             match &anno.args[..] {

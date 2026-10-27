@@ -181,7 +181,6 @@ fn create_source_file(
         used_packages,
         package: None,
         dialect,
-        memory_class: rock_core::source_code::MemoryClass::Game,
         global_policy: rock_core::source_code::GlobalPolicy::Any,
     })
 }
@@ -219,7 +218,6 @@ pub fn source_file_new_with_context(path: impl AsRef<Path>) -> Result<SourceFile
             self_name: node.self_name.clone(),
         });
         source.dialect = node.dialect;
-        source.memory_class = node.memory_class;
         source.global_policy = node.global_policy;
     }
     Ok(source)

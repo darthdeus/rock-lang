@@ -2513,7 +2513,7 @@ pub fn pass_lower_functions(a: &Ast, ctx: &mut LowerCtx) -> Result<(), CompilerE
             ItemKind::Use(_) | ItemKind::Module(_) => {}
 
             ItemKind::Global(g) => {
-                lower_global(ctx, a, g, &item.annotations, reg_key(&g.name.name, path))?;
+                lower_global(ctx, a, g, reg_key(&g.name.name, path))?;
             }
 
             ItemKind::CompilerDirective(_) => {

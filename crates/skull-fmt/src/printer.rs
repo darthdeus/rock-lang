@@ -85,9 +85,6 @@ impl<'a> Printer<'a> {
         // The `mod a::b;` file header (v1) prints first, verbatim: it has no
         // internal layout decisions.
         let header = self.ast.module_header.as_ref().map(|h| self.raw(h.span));
-        // The `@memory(<class>)` file header prints the same way, and before
-        // `mod` when both are present (the parser accepts either order).
-        let memory_header = self.ast.memory_header.as_ref().map(|h| self.raw(h.span));
         // Render every item, then preserve hand-aligned runs of adjacent items
         // verbatim (sfx.rock's aligned `global` declarations) before assembling.
         let item_spans: Vec<Span> = self.ast.items.iter().map(|it| it.span).collect();
@@ -125,11 +122,6 @@ impl<'a> Printer<'a> {
         }
 
         let mut parts = Vec::new();
-        if let Some(h) = memory_header {
-            parts.push(h);
-            parts.push(hardline());
-            parts.push(hardline());
-        }
         if let Some(h) = header {
             // The file header leads the output with one blank line after it.
             parts.push(h);

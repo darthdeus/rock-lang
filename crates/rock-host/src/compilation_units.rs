@@ -215,7 +215,6 @@ pub fn source_facts(
 ) -> Option<(
     rock_core::source_code::PackageTag,
     rock_core::source_code::Dialect,
-    rock_core::source_code::MemoryClass,
     rock_core::source_code::GlobalPolicy,
 )> {
     let owner = graph.package_of_file(path)?;
@@ -226,7 +225,6 @@ pub fn source_facts(
     Some((
         rock_core::source_code::PackageTag { id: node.id.0, self_name: node.self_name.clone() },
         node.dialect,
-        node.memory_class,
         node.global_policy,
     ))
 }
@@ -292,11 +290,10 @@ pub fn load_sources_for_compilation_unit(unit: &CompilationUnit) -> Result<Sourc
                 );
                 for file in &sources.files {
                     let path = file.borrow().file.to_id_path();
-                    if let Some((package, dialect, memory_class, global_policy)) = source_facts(graph, Path::new(&path)) {
+                    if let Some((package, dialect, global_policy)) = source_facts(graph, Path::new(&path)) {
                         let mut f = file.borrow_mut();
                         f.package = Some(package);
                         f.dialect = dialect;
-                        f.memory_class = memory_class;
                         f.global_policy = global_policy;
                     }
                 }

@@ -13,8 +13,7 @@ use bone_core::{
     hir::{
         AsKind, BindingInfo, BindingKind, BindingPattern, Callee, DecoratorDef, EnumVariantDef,
         Expr, Function, GlobalDef, InterpPart, InterpSpec, MatchArm, ParamDecl, Pattern,
-        RecordPatField, Scope, StateMetadata, StateOwnership, StateRealization,
-        StateWorldPolicy, Statement, StructLitField, TyId, TypeCtor, TypeExpr, VarId,
+        RecordPatField, Scope, Statement, StructLitField, TyId, TypeCtor, TypeExpr, VarId,
         VariantArgs, VariantPayload,
     },
     prelude::*,
@@ -3221,7 +3220,6 @@ pub fn lower_global(
     ctx: &mut LowerCtx,
     a: &Ast,
     g: &skull_parser::GlobalDef,
-    annotations: &[skull_parser::Annotation],
     reg_key: Ustr,
 ) -> Result<(), CompilerError> {
     if !g.is_const {
@@ -3229,7 +3227,6 @@ pub fn lower_global(
     }
     let name = reg_key;
     let mut body = Body::default();
-    let (state_metadata, redundant_state) = lower_state_metadata(ctx, a, annotations)?;
 
     let ty = match &g.ty {
         Some(te) => lower_type_expr(ctx, a, &mut body, a.te(te))?,
@@ -3257,8 +3254,6 @@ pub fn lower_global(
         ty,
         span: g.span,
         is_const: g.is_const,
-        state_metadata,
-        redundant_state,
     });
 
     if ctx.module.global_by_name.insert(name, idx).is_some() {
@@ -3278,8 +3273,7 @@ pub fn lower_global(
 
 /// A `globals = "none"` package may still use immutable `const` declarations,
 /// but mutable package-level storage would make its explicit simulation root
-/// incomplete. The owning file supplies this fact, so declaration annotations
-/// such as `@state` or `@memory` cannot override it.
+/// incomplete. The owning file supplies this fact; no declaration overrides it.
 fn reject_mutable_global_if_forbidden(
     a: &Ast,
     span: Span,
@@ -3323,131 +3317,6 @@ fn reject_inline_lua_if_forbidden(a: &Ast, f: &FunctionDef) -> Result<(), Compil
         f.name.name,
         package
     );
-}
-
-/// The default ownership of a `global` that says nothing itself: the file's
-/// `@memory(<class>)` header, else the owning package's `[language] memory`.
-/// `game` is today's behavior, so a
-/// package that declares nothing is unchanged.
-fn metadata_for_memory_class(class: skull_parser::MemoryClass) -> StateMetadata {
-    StateMetadata::for_memory_class(class)
-}
-
-/// The class this file's globals default to, and where it was declared. The
-/// header wins over the package exactly as `lower_state_metadata` resolves it.
-fn memory_class_of(a: &Ast) -> (skull_parser::MemoryClass, bone_core::hir::MemoryClassSite) {
-    use bone_core::hir::MemoryClassSite;
-    match a.memory_header {
-        Some(header) => (header.class, MemoryClassSite::Header(header.span)),
-        None => {
-            let site = match &a.package {
-                Some(tag) => MemoryClassSite::Package(Ustr::from(&tag.self_name)),
-                None => MemoryClassSite::LanguageDefault,
-            };
-            (a.memory_class, site)
-        }
-    }
-}
-
-fn lower_state_metadata(
-    ctx: &LowerCtx,
-    ast: &Ast,
-    annotations: &[skull_parser::Annotation],
-) -> Result<(StateMetadata, Option<bone_core::hir::RedundantStateAnnotation>), CompilerError> {
-    let (class, site) = memory_class_of(ast);
-    let unit_default = metadata_for_memory_class(class);
-    let annotations = lower_annotations_with_ctx(ctx, ast, annotations)?;
-    let Some(annotation) = annotations.iter().find(|annotation| annotation.is_builtin("state")) else {
-        return Ok((unit_default, None));
-    };
-    if annotations
-        .iter()
-        .filter(|candidate| candidate.is_builtin("state"))
-        .count()
-        != 1
-    {
-        comp_error!(annotation.span, "a global may have only one `@state` annotation");
-    }
-
-    let mut metadata = StateMetadata::default();
-    let mut world_explicit = false;
-    let mut realization_explicit = false;
-    for arg in &annotation.args {
-        let key = arg.name.as_ref().expect("state annotation arguments were validated");
-        let value = match &arg.value {
-            bone_core::hir::AnnoValue::Ident(value) => value.name.as_str(),
-            _ => unreachable!("state annotation values were validated"),
-        };
-        match key.name.as_str() {
-            "ownership" => {
-                metadata.ownership = match value {
-                    "session" => StateOwnership::Session,
-                    "host_projection" => StateOwnership::HostProjection,
-                    "runner_diagnostic" => StateOwnership::RunnerDiagnostic,
-                    "unsupported" => StateOwnership::Unsupported,
-                    _ => comp_error!(
-                        annotation.span,
-                        "unknown StateImage ownership `{value}`"
-                    ),
-                };
-            }
-            "world" => {
-                world_explicit = true;
-                metadata.world = match value {
-                    "include" => StateWorldPolicy::Include,
-                    "boot_only" => StateWorldPolicy::BootOnly,
-                    "exclude" => StateWorldPolicy::Exclude,
-                    _ => comp_error!(annotation.span, "unknown StateImage world policy `{value}`"),
-                };
-            }
-            "realization" => {
-                realization_explicit = true;
-                metadata.realization = match value {
-                    "fresh_session" => StateRealization::FreshSession,
-                    "rebuild_host_projection" => StateRealization::RebuildHostProjection,
-                    "native_frame_delta" => StateRealization::NativeFrameDelta,
-                    "font" => StateRealization::Font,
-                    "asset_cache" => StateRealization::AssetCache,
-                    "asset_paths" => StateRealization::AssetPaths,
-                    "process_window" => StateRealization::ProcessWindow,
-                    "runner_reset_nil" => StateRealization::RunnerResetNil,
-                    "runner_reset_int" => StateRealization::RunnerResetInt,
-                    "runner_reset_bool" => StateRealization::RunnerResetBool,
-                    "runner_reset_true" => StateRealization::RunnerResetTrue,
-                    "runner_reset_string" => StateRealization::RunnerResetString,
-                    "runner_rebind" => StateRealization::RunnerRebind,
-                    "reject" => StateRealization::Reject,
-                    _ => comp_error!(annotation.span, "unknown StateImage realization `{value}`"),
-                };
-            }
-            _ => unreachable!("state annotation keys were validated"),
-        }
-    }
-    if !world_explicit {
-        metadata.world = match metadata.ownership {
-            StateOwnership::Session => StateWorldPolicy::Include,
-            StateOwnership::HostProjection
-            | StateOwnership::RunnerDiagnostic
-            | StateOwnership::Unsupported => StateWorldPolicy::Exclude,
-        };
-    }
-    if !realization_explicit {
-        metadata.realization = match metadata.ownership {
-            StateOwnership::Session => StateRealization::FreshSession,
-            StateOwnership::HostProjection => StateRealization::RebuildHostProjection,
-            StateOwnership::RunnerDiagnostic => StateRealization::RunnerRebind,
-            StateOwnership::Unsupported => StateRealization::Reject,
-        };
-    }
-    // The comparison is made HERE because this is the only place that holds
-    // both the annotation's resolved triple and the unit default it was
-    // measured against; the lint reports what lowering decided.
-    let redundant = (metadata == unit_default).then(|| bone_core::hir::RedundantStateAnnotation {
-        span: annotation.span,
-        class,
-        site,
-    });
-    Ok((metadata, redundant))
 }
 
 fn lower_pattern_value(

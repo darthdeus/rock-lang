@@ -1743,7 +1743,6 @@ pub fn skull_shader(files: &[String], output: Option<String>, profile: Option<St
         }
     };
     user.package = source.package;
-    user.memory_class = source.memory_class;
     user.global_policy = source.global_policy;
     let user_file = user.file;
     let ws = match crate::bone_backend::check_with_stdlib([user]) {

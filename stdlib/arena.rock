@@ -55,7 +55,6 @@ struct ArenaRegistry {
 //
 // Everything created by `arena_new()` belongs to owner (scene) 0, the Session
 // root, until P2 introduces typed Scenes.
-@state(ownership=session, world=boot_only, realization=fresh_session)
 global __ARENA_REGISTRY: ArenaRegistry = ArenaRegistry {
     stores: map_new(), next_id: 0, session_root: 0,
     live_count: 0, retired_since_compact: 0,
@@ -77,9 +76,8 @@ fn __arena_store_erased<T>(store: ArenaStore<T>) -> any { return store }
 @inline @nomangle fn __arena_store_any(scene_id: int, arena_id: int) -> any? {
     let store = __ARENA_REGISTRY.stores.get(arena_id) ?? return null
     let owner: ArenaStore<int> = cast(store)
-    // The ID alone does not name one incarnation: IDs restart in every session
-    // materialized from a boot image, and a world-image restore merges its
-    // stores into the current registry by ID.
+    // The ID alone does not name one incarnation: IDs restart in every
+    // Session, so a handle minted by another Session can name a live store.
     if owner._owner_scene_id != scene_id { return null }
     return store
 }
@@ -113,7 +111,6 @@ fn __arena_store_mut<T>(arena: Arena<T>) -> ArenaStore<T> {
 //
 // `__arena_store_or_empty` is the same store for the `enumerate(arena)`
 // lowering, which needs a non-generic callee for its synthesized `Inst::Call`.
-@state(ownership=session, world=boot_only, realization=fresh_session)
 global __ARENA_DEAD_STORE: ArenaStore<int> = ArenaStore {
     _owner_scene_id: -1,
     generations: [], occupied: [], data: [], free_indices: [],

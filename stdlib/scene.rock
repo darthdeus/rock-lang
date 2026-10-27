@@ -30,9 +30,7 @@ const __SCENE_DEAD: int = 4
 // incarnation's teardown actions.
 const __SCENE_DISCARDING: int = 5
 
-// The Session Scene registry: authoritative columns indexed by Scene ID. The
-// compiler records this nominal root in StateSchema so WorldImage can copy it
-// with the ordinary Session graph.
+// The Session Scene registry: authoritative columns indexed by Scene ID.
 struct SceneRegistry {
     roots: [any?],
     states: [int],
@@ -49,7 +47,6 @@ struct SceneRegistry {
     phase_bucket_lengths: [int],
 }
 
-@state(ownership=session, world=include, realization=fresh_session)
 global __SCENE_REGISTRY: SceneRegistry = SceneRegistry {
     roots: [], states: [], arena_ids: [], next_id: 0, closers: [],
     pending_close: [], root_type_key: [], root_type_bucket: [],

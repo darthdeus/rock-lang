@@ -1,0 +1,36 @@
+//! `@state(...)` on a global and the `@memory(<class>)` file header were
+//! removed with the global ownership metadata they fed. Both are hard errors
+//! that name the removal; neither is ignored.
+
+//- state_on_global @fail=`@state` was removed; delete it
+@state(ownership=session, world=include, realization=fresh_session)
+global COUNT: int = 0
+fn marker() -> int {
+    5
+  //^ int
+}
+
+//- state_ownership_only @fail=`@state` was removed; delete it
+@state(ownership=host_projection)
+global COUNT: int = 0
+fn marker() -> int {
+    5
+  //^ int
+}
+
+//- memory_header @fail=`@memory` was removed; delete it
+@memory(platform)
+
+global COUNT: int = 0
+fn marker() -> int {
+    5
+  //^ int
+}
+
+//- memory_after_item @fail=`@memory` was removed; delete it
+global COUNT: int = 0
+@memory(debug)
+fn marker() -> int {
+    5
+  //^ int
+}
