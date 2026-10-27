@@ -2599,24 +2599,28 @@ impl BackendFnAbiPlan {
         }
     }
 
-    fn permits_parameter_transport(&self, ws: &Workspace, scx: &ScalarCtx) -> bool {
+    fn permits_parameter_transport(&self, ws: &Workspace, scx: &ScalarCtx, with_defaults: bool) -> bool {
         let f = &ws.module(self.subject.func.module).functions[self.subject.func.func];
         !(scx.values_first_class || !matches!(self.target, FnBackend::Lua | FnBackend::Any)
             || scx.taken_by_ref.contains(&f.name) || f.is_extern || f.inline_body.is_some()
             || f.is_coroutine || f.is_variadic || !f.annotations.is_empty()
-            || f.num_required != f.param_decls.len() || !self.uses_scalar_abi()
+            || (!with_defaults && f.num_required != f.param_decls.len()) || !self.uses_scalar_abi()
         )
     }
 
     // Parameter transport can snapshot compact nullable children as scalar
     // lanes without changing their field storage or widening the ABI budget.
+    // A defaulted parameter keeps its declared wire, which its default fill and
+    // omitted-argument nils are built against; the others still expand.
     fn expand_nullable_parameter_children(&mut self, ws: &Workspace, scx: &ScalarCtx) {
-        if !self.permits_parameter_transport(ws, scx) { return; }
+        if !self.permits_parameter_transport(ws, scx, true) { return; }
+        let f = &ws.module(self.subject.func.module).functions[self.subject.func.func];
         let mut shapes = Vec::new();
         let mut lanes = 0;
-        for &id in &self.representation.params {
+        for (i, &id) in self.representation.params.iter().enumerate() {
             let rep = self.arena.get(id);
-            let RepLayout::Leaves(shape) = rep.layout() else {
+            let defaulted = f.param_decls.get(i).is_none_or(|param| param.has_default);
+            let (RepLayout::Leaves(shape), false) = (rep.layout(), defaulted) else {
                 lanes += rep.lanes(&self.arena);
                 shapes.push(None);
                 continue;
@@ -2638,7 +2642,9 @@ impl BackendFnAbiPlan {
 
     fn narrow_parameter_transport(&mut self, ws: &Workspace, scx: &ScalarCtx) {
         use bone_semantic::hir::BodyOwner;
-        if !self.permits_parameter_transport(ws, scx) { return; }
+        // Field demand does not read default expressions, so defaults keep the
+        // full transport here.
+        if !self.permits_parameter_transport(ws, scx, false) { return; }
         self.body_dependent_parameters = self.representation.params.iter().any(|id| {
             matches!(self.arena.get(*id).layout(), RepLayout::Leaves(shape)
                 if !shape.nullable && ws.struct_by_name.contains_key(&shape.name))

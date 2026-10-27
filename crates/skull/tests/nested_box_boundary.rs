@@ -414,3 +414,33 @@ fn main() {
     let lua = emit_module(source);
     assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "nullable_parameter_snapshots"), "ok");
 }
+
+#[test]
+fn nullable_child_crosses_a_call_with_an_omitted_default_without_reboxing() {
+    let source = r#"
+value Token { a: int, b: int, c: int, d: int }
+nobox value Membership { token: Token?, rows: [int], selected: [int] }
+struct Owner { membership: Membership? }
+fn first(value: Membership) -> int { return value.token?.a ?? -1 }
+fn read(value: Membership, offset: int = 0) -> int { return first(value) + offset }
+
+@nomangle fn make_owner() -> Owner {
+    return Owner { membership: Membership { token: Token { a: 1, b: 2, c: 3, d: 4 }, rows: [3], selected: [4] } }
+}
+@nomangle fn compare(owner: Owner) -> int {
+    let membership = owner.membership ?? return -1
+    return read(membership) + read(membership, 1) - 2
+}
+fn main() {
+    let owner = make_owner()
+    assert_eq(compare(owner), 1)
+    let empty = Membership { token: null, rows: [], selected: [] }
+    assert_eq(read(empty), -1)
+    assert_eq(read(offset: 2, value: empty), 1)
+    print("ok")
+}
+"#;
+    assert_allocation_free_compare(source, "nullable_child_default_call", "compare(owner) == 1");
+    let lua = emit_module(source);
+    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "nullable_child_default_semantics"), "ok");
+}
