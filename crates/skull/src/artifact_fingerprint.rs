@@ -142,7 +142,7 @@ fn compute_inner(
             lifecycle.census.declarations as u64,
             lifecycle.census.applications as u64,
             lifecycle.census.admitted as u64,
-            lifecycle.census.session_owned as u64,
+            lifecycle.census.process_owned as u64,
             lifecycle.census.scene_owned as u64,
             lifecycle.census.plain as u64,
             lifecycle.census.gated as u64,

@@ -6531,8 +6531,8 @@ fn lifecycle_plan_stage_lua(
             None => "nil".to_string(),
         };
         // A compiler-synthesized thunk of one uniform signature
-        // (`scene_id: int -> ()`) per entry, session- and scene-owned alike
-        // -- never the raw slot. A session thunk ignores its argument; a
+        // (`scene_id: int -> ()`) per entry, process- and scene-owned alike
+        // -- never the raw slot. A process thunk ignores its argument; a
         // scene thunk resolves the live root for `scene_id` and calls
         // through, skipping a Scene that closed since the population
         // snapshot was taken (`__scene_root_any` returns nil there). Neither

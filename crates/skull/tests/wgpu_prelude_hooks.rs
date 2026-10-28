@@ -18,7 +18,7 @@ const HOOKS: &str = r#"
     print("discard")
 }
 
-@lifecycle(phase="update", owner="session")
+@lifecycle(phase="update", owner="process")
 deco init tick {}
 
 @tick
@@ -30,7 +30,7 @@ fn main() {}
 const REGISTRAR_ONLY: &str = r#"
 @nomangle fn __rock_wgpu_shader_register(key: string, source: string, abi_wire: string, semantic_wire: string) {}
 
-@lifecycle(phase="update", owner="session")
+@lifecycle(phase="update", owner="process")
 deco init tick {}
 
 @tick
@@ -40,7 +40,7 @@ fn main() {}
 "#;
 
 const NO_WGPU: &str = r#"
-@lifecycle(phase="update", owner="session")
+@lifecycle(phase="update", owner="process")
 deco init tick {}
 
 @tick

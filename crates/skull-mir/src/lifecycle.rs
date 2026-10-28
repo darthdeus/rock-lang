@@ -53,7 +53,7 @@ pub struct LifecycleCensus {
     pub declarations: usize,
     pub applications: usize,
     pub admitted: usize,
-    pub session_owned: usize,
+    pub process_owned: usize,
     pub scene_owned: usize,
     pub plain: usize,
     pub gated: usize,
@@ -532,10 +532,10 @@ pub fn collect(ws: &Workspace) -> Result<LifecyclePlan, CompilerError> {
                 ));
             }
             let owner = string_arg(meta, "owner").expect("validated lifecycle owner");
-            if owner.as_str() != "session" && owner.as_str() != "scene" {
+            if owner.as_str() != "process" && owner.as_str() != "scene" {
                 return Err(CompilerError::new_with_label(
                     meta.span,
-                    format!("unsupported lifecycle owner `{owner}`; expected `session` or `scene`"),
+                    format!("unsupported lifecycle owner `{owner}`; expected `process` or `scene`"),
                 ));
             }
             let stage_param = string_arg(meta, "stage_param");
@@ -592,17 +592,17 @@ pub fn collect(ws: &Workspace) -> Result<LifecyclePlan, CompilerError> {
                 }
                 census.applications += 1;
                 let root_type = match owner.as_str() {
-                    "session" => {
+                    "process" => {
                         if !f.generics.is_empty() || !f.param_decls.is_empty() || f.return_ty.is_some() {
                             return Err(CompilerError::new_with_label(
                                 f.span,
                                 format!(
-                                    "session lifecycle target `{}` must be concrete, non-generic, zero-argument, and unit-returning",
+                                    "process lifecycle target `{}` must be concrete, non-generic, zero-argument, and unit-returning",
                                     f.name
                                 ),
                             ));
                         }
-                        census.session_owned += 1;
+                        census.process_owned += 1;
                         None
                     }
                     "scene" => {
@@ -778,11 +778,22 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_owner_rejects_retired_session_spelling() {
+        let ws = workspace(&[("old_owner.rock", r#"
+            @lifecycle(phase="update", owner="session")
+            deco init tick {}
+            @tick fn run() {}
+        "#)]);
+        let error = collect(&ws).expect_err("retired lifecycle owner must be rejected");
+        assert!(error.message.contains("unsupported lifecycle owner"));
+    }
+
+    #[test]
     fn plan_reads_stage_defaults_and_orders_equal_stage_by_declaration() {
         let ws = workspace(&[(
             "plan.rock",
             r#"
-            @lifecycle(phase="update", owner="session", stage_param="stage")
+            @lifecycle(phase="update", owner="process", stage_param="stage")
             deco init tick(stage: int = 100) {}
             @tick(stage=20) fn later() {}
             @tick(stage=10) fn first() {}
@@ -814,7 +825,7 @@ mod tests {
         let ws = workspace(&[(
             "wire.rock",
             r#"
-            @lifecycle(phase="wire", owner="session")
+            @lifecycle(phase="wire", owner="process")
             deco init wire {}
             const GAME_VOLUME: int = 1
             const ART_FILTER: int = 2
@@ -851,7 +862,7 @@ mod tests {
         let ws = workspace(&[(
             "wire.rock",
             r#"
-            @lifecycle(phase="wire", owner="session")
+            @lifecycle(phase="wire", owner="process")
             deco init wire {}
             const BASE: int = 1
             const DERIVED: int = BASE
@@ -877,7 +888,7 @@ mod tests {
             "wire.rock",
             &format!(
                 r#"
-                @lifecycle(phase="wire", owner="session")
+                @lifecycle(phase="wire", owner="process")
                 deco init wire {{}}
                 const IMMUTABLE: int = 1
                 global MUTABLE: int = 2
@@ -912,14 +923,14 @@ mod tests {
         let plain = workspace(&[(
             "wire.rock",
             r#"
-            @lifecycle(phase="wire", owner="session") deco init wire {}
+            @lifecycle(phase="wire", owner="process") deco init wire {}
             @wire fn apply_game_config() {}
             "#,
         )]);
         let gated = workspace(&[(
             "wire.rock",
             r#"
-            @lifecycle(phase="wire", owner="session") deco init wire {}
+            @lifecycle(phase="wire", owner="process") deco init wire {}
             const A: int = 1
             @wire(onchange=[A]) fn apply_game_config() {}
             "#,
@@ -941,7 +952,7 @@ mod tests {
         let ws = workspace(&[
             (
                 "role.rock",
-                "@lifecycle(phase=\"draw\", owner=\"session\") deco init paint {}",
+                "@lifecycle(phase=\"draw\", owner=\"process\") deco init paint {}",
             ),
             ("a.rock", "@paint fn render() {}"),
             ("b.rock", "@paint fn render() {}"),
@@ -956,7 +967,7 @@ mod tests {
         let ws = workspace(&[
             (
                 "roles.rock",
-                "@lifecycle(phase=\"update\", owner=\"session\") deco init tick {}",
+                "@lifecycle(phase=\"update\", owner=\"process\") deco init tick {}",
             ),
             (
                 "/repo/game/tests/sims/owned.rock",
@@ -1007,7 +1018,7 @@ mod tests {
         let ws = workspace(&[(
             "bad.rock",
             r#"
-            @lifecycle(phase="update", owner="session") deco init tick {}
+            @lifecycle(phase="update", owner="process") deco init tick {}
             @tick fn bad(x: int) {}
         "#,
         )]);
@@ -1030,7 +1041,7 @@ mod tests {
         assert_eq!(plan.entries.len(), 1);
         assert_eq!(plan.entries[0].owner.as_str(), "scene");
         assert_eq!(plan.entries[0].diagnostic_name.as_str(), "tick_dungeon");
-        assert_eq!(plan.census.session_owned, 0);
+        assert_eq!(plan.census.process_owned, 0);
         assert_eq!(plan.census.scene_owned, 1);
         assert_eq!(
             plan.entries[0].root_type,
@@ -1089,22 +1100,22 @@ mod tests {
     }
 
     #[test]
-    fn scene_and_session_updates_share_one_stage_order() {
+    fn scene_and_process_updates_share_one_stage_order() {
         let ws = workspace(&[(
             "mixed.rock",
             r#"
             struct Root { value: int }
-            @lifecycle(phase="update", owner="session", stage_param="stage")
+            @lifecycle(phase="update", owner="process", stage_param="stage")
             deco init update(stage: int = 100) {}
             @lifecycle(phase="update", owner="scene", stage_param="stage")
             deco init scene_update(stage: int = 100) {}
             @scene_update(stage=40) fn scene_first(root: Root) { root.value += 1 }
-            @update(stage=41) fn session_middle() {}
+            @update(stage=41) fn process_middle() {}
             @scene_update(stage=42) fn scene_last(root: Root) { root.value += 1 }
             "#,
         )]);
         let plan = collect(&ws).expect("mixed lifecycle plan");
-        assert_eq!(plan.census.session_owned, 1);
+        assert_eq!(plan.census.process_owned, 1);
         assert_eq!(plan.census.scene_owned, 2);
         assert_eq!(
             plan.entries
@@ -1113,7 +1124,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 ("scene_first", "scene"),
-                ("session_middle", "session"),
+                ("process_middle", "process"),
                 ("scene_last", "scene"),
             ],
         );
@@ -1124,7 +1135,7 @@ mod tests {
         let ws = workspace(&[(
             "post-imgui.rock",
             r#"
-            @lifecycle(phase="post_imgui_draw", owner="session", stage_param="stage")
+            @lifecycle(phase="post_imgui_draw", owner="process", stage_param="stage")
             deco init post_imgui_draw(stage: int = 100) {}
             @post_imgui_draw(stage=20) fn later() {}
             @post_imgui_draw(stage=10) fn first() {}
@@ -1151,11 +1162,11 @@ mod tests {
         let ws = workspace(&[(
             "prepare.rock",
             r#"
-            @lifecycle(phase="draw", owner="session", stage_param="stage")
+            @lifecycle(phase="draw", owner="process", stage_param="stage")
             deco init draw(stage: int = 100) {}
-            @lifecycle(phase="prepare", owner="session", stage_param="stage")
+            @lifecycle(phase="prepare", owner="process", stage_param="stage")
             deco init prepare(stage: int = 100) {}
-            @lifecycle(phase="late_update", owner="session", stage_param="stage")
+            @lifecycle(phase="late_update", owner="process", stage_param="stage")
             deco init late_update(stage: int = 100) {}
             @draw(stage=-1000) fn paint() {}
             @prepare(stage=20) fn later() {}

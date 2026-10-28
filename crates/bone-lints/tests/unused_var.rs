@@ -109,7 +109,7 @@ deco init widget(key: string) {}
 #[test]
 fn lifecycle_stage_param_is_metadata_used() {
     let src = r#"
-@lifecycle(phase="update", owner="session", stage_param="stage")
+@lifecycle(phase="update", owner="process", stage_param="stage")
 deco init update(stage: int = 100) {}
 "#;
     assert!(names(src).is_empty(), "lifecycle metadata consumes `stage`");

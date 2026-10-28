@@ -60,7 +60,7 @@ fn a_one_sided_body_change_changes_the_artifact_fingerprint() {
 #[test]
 fn lifecycle_definition_and_state_structure_change_the_fingerprint() {
     let lifecycle_a = r#"
-@lifecycle(phase="update", owner="session") deco init tick() {}
+@lifecycle(phase="update", owner="process") deco init tick() {}
 @tick fn first() {}
 fn main() {}
 "#;
@@ -72,7 +72,7 @@ fn main() {}
     );
 
     let lifecycle_phase_a = r#"
-@lifecycle(phase="update", owner="session") deco init tick() {}
+@lifecycle(phase="update", owner="process") deco init tick() {}
 @tick fn first() {}
 fn main() {}
 "#;

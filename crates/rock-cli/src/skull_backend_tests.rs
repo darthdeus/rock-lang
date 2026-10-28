@@ -1436,7 +1436,7 @@ mod overlay_runtime_tests {
     #[test]
     fn wire_hook_failure_is_post_publication_and_not_reported_as_rollback() {
         let v0 = r#"
-@lifecycle(phase="wire", owner="session")
+@lifecycle(phase="wire", owner="process")
 deco init wire {}
 const DEP: int = 1
 global RUNS: int = 0
@@ -3303,7 +3303,7 @@ struct WidgetState {
 }
 @artifact_definition(catalog="widgets", key_param="key")
 deco init widget(key: string) {}
-@lifecycle(phase="wire", owner="session")
+@lifecycle(phase="wire", owner="process")
 deco init wire {}
 @artifact_catalog(catalog="widgets")
 @intrinsic extern fn widget_definition_plan() -> [ArtifactDefinition<WidgetDef>]
@@ -3330,7 +3330,7 @@ struct WidgetDef { callback: fn() -> int }
 struct WidgetState { seq: int = 0, presence: int = 0 }
 @artifact_definition(catalog="widgets", key_param="key")
 deco init widget(key: string) {}
-@lifecycle(phase="wire", owner="session")
+@lifecycle(phase="wire", owner="process")
 deco init wire {}
 @artifact_catalog(catalog="widgets")
 @intrinsic extern fn widget_definition_plan() -> [ArtifactDefinition<WidgetDef>]
@@ -3357,7 +3357,7 @@ struct WidgetDef { callback: fn() -> int }
 struct WidgetState { seq: int = 0, presence: int = 0 }
 @artifact_definition(catalog="widgets", key_param="key")
 deco init widget(key: string) {}
-@lifecycle(phase="wire", owner="session")
+@lifecycle(phase="wire", owner="process")
 deco init wire {}
 @artifact_catalog(catalog="widgets")
 @intrinsic extern fn widget_definition_plan() -> [ArtifactDefinition<WidgetDef>]
@@ -3609,7 +3609,7 @@ mod wire_transition_tests {
     use std::path::PathBuf;
 
     const V0: &str = r#"
-@lifecycle(phase="wire", owner="session")
+@lifecycle(phase="wire", owner="process")
 deco init wire {}
 
 const DIRECT: int = 1

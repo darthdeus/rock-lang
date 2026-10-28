@@ -1,4 +1,4 @@
-// Scene<T>: one independently disposable state root inside the Session -- a
+// Scene<T>: one independently disposable state root inside the process -- a
 // dungeon room, loaded level, editor document, preview viewport. `Scene` and
 // `SceneBuilder` are declared in unified.rock with the other early type decls.
 //
@@ -9,7 +9,7 @@
 // Ownership is a Scene concern but LOOKUP is flat, exactly as it is for Arenas:
 // `_scene_id` indexes the parallel registry columns directly. A Scene owns the
 // LIST of Arena IDs it created, which is what teardown needs; nothing walks
-// Session -> Scene -> Arena to resolve a row.
+// process -> Scene -> Arena to resolve a row.
 //
 // Destruction is two steps. `scene_close` is a REQUEST: it hides the Scene from
 // lookup at once and refuses a second request, but the rows stay live so nothing
@@ -17,7 +17,7 @@
 // `__scene_drain_closed` is the physical teardown, and the runner calls it at one
 // end-of-frame safe point (`frame_core_end`) after every consumer has returned.
 
-// The Session root, the owner ID every `arena_new()` Arena already carries. It
+// The Process root, the owner ID every `arena_new()` Arena already carries. It
 // is not a Scene and is never published; it exists here so the registry stays
 // dense from index 0.
 const __SCENE_RESERVED: int = 0
@@ -30,7 +30,7 @@ const __SCENE_DEAD: int = 4
 // incarnation's teardown actions.
 const __SCENE_DISCARDING: int = 5
 
-// The Session Scene registry: authoritative columns indexed by Scene ID.
+// The Process Scene registry: authoritative columns indexed by Scene ID.
 struct SceneRegistry {
     roots: [any?],
     states: [int],

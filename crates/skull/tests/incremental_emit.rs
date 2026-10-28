@@ -336,7 +336,7 @@ fn exact_body_edit_has_no_full_concrete_or_artifact_rebuild() {
 #[test]
 fn an_unrelated_body_overlay_does_not_restage_the_complete_code_artifact() {
     let v1 = r#"
-@lifecycle(phase="update", owner="session")
+@lifecycle(phase="update", owner="process")
 deco init tick {}
 @tick fn first() {}
 @tick fn second() {}
@@ -370,7 +370,7 @@ fn main() { let _ = helper() }
 #[test]
 fn a_changed_decorated_body_stages_its_logical_code_ref() {
     let v1 = r#"
-@lifecycle(phase="update", owner="session")
+@lifecycle(phase="update", owner="process")
 deco init tick {}
 @tick fn first() {}
 @tick fn second() {}
@@ -1360,7 +1360,7 @@ fn main() {
 }
 
 const SHARED_ABI_SLOTS: &str = r#"
-@lifecycle(phase="update", owner="session")
+@lifecycle(phase="update", owner="process")
 deco init tick {}
 @tick fn first() {}
 @tick fn second() {}

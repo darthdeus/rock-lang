@@ -130,7 +130,7 @@ fn application_line_content() {
 #[test]
 fn lifecycle_metadata_uses_the_shared_sorted_plan_in_js() {
     let ws = ws_with(r#"
-@lifecycle(phase="update", owner="session", stage_param="stage")
+@lifecycle(phase="update", owner="process", stage_param="stage")
 deco init tick(stage: int = 100) {}
 @tick(stage=7) fn first() {}
 @tick(stage=7) fn second() {}
@@ -160,7 +160,7 @@ fn lua_and_js_guard_frame_hooks_owned_by_a_sim_fixture_module() {
     let ws = ws_with_named(
         file,
         r#"
-        @lifecycle(phase="update", owner="session") deco init update {}
+        @lifecycle(phase="update", owner="process") deco init update {}
         fn register_sim(name: string, body: () -> ()) {}
         @update fn observed_tick() {}
         @sim("wire-name") fn selected_sim() {}
@@ -235,7 +235,7 @@ fn main() { ROOT = load() }
 #[test]
 fn lua_and_js_publish_identical_dependency_gated_lifecycle_plans() {
     let ws = ws_with(r#"
-        @lifecycle(phase="wire", owner="session") deco init wire {}
+        @lifecycle(phase="wire", owner="process") deco init wire {}
         const BASE: int = 1
         const DERIVED: int = BASE + 1
         const OTHER: int = 9
@@ -286,7 +286,7 @@ fn lua_and_js_reject_the_same_unsupported_wire_dependencies() {
     for (annotation, expected) in cases {
         let source = format!(
             r#"
-            @lifecycle(phase="wire", owner="session") deco init wire {{}}
+            @lifecycle(phase="wire", owner="process") deco init wire {{}}
             const GOOD: int = 1
             global MUTABLE: int = 2
             fn callable() {{}}

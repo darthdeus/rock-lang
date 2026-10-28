@@ -1,6 +1,6 @@
 // Arena<T> + Entity<T>: generational-index entity storage (dynamic mobs,
 // projectiles). Both are WEAK handles -- scalar logical identities resolved
-// through the Session Arena registry below -- so neither keeps backing data
+// through the process Arena registry below -- so neither keeps backing data
 // alive and neither survives the incarnation it names. The `Arena`/`Entity`
 // decls live in unified.rock with the other early type decls.
 //
@@ -39,24 +39,24 @@ value ArenaGenerationSnapshot {
 struct ArenaRegistry {
     stores: Map<int, any>,
     next_id: int,
-    session_root: int,
+    process_root: int,
     live_count: int,
     retired_since_compact: int,
 }
 
-// --- the Session Arena registry ----------------------------------------------
+// --- the process Arena registry ----------------------------------------------
 //
-// One Session-wide lookup from monotonic logical IDs to live stores. Retired
+// One process-wide lookup from monotonic logical IDs to live stores. Retired
 // entries leave the map; periodic rebuilding bounds Lua table tombstones without
 // reusing IDs or weakening stale-handle rejection.
 //
 // The owner ID lives beside the Arena columns, so the hot lookup needs one map
 // access and does not depend on the element type.
 //
-// Everything created by `arena_new()` belongs to owner (scene) 0, the Session
-// root, until P2 introduces typed Scenes.
+// Everything created by `arena_new()` belongs to owner (scene) 0, the process
+// root. Typed Scenes own their arenas through the same registry.
 global __ARENA_REGISTRY: ArenaRegistry = ArenaRegistry {
-    stores: map_new(), next_id: 0, session_root: 0,
+    stores: map_new(), next_id: 0, process_root: 0,
     live_count: 0, retired_since_compact: 0,
 }
 
@@ -76,8 +76,7 @@ fn __arena_store_erased<T>(store: ArenaStore<T>) -> any { return store }
 @inline @nomangle fn __arena_store_any(scene_id: int, arena_id: int) -> any? {
     let store = __ARENA_REGISTRY.stores.get(arena_id) ?? return null
     let owner: ArenaStore<int> = cast(store)
-    // The ID alone does not name one incarnation: IDs restart in every
-    // Session, so a handle minted by another Session can name a live store.
+    // The arena ID is not enough: require its owning scene identity too.
     if owner._owner_scene_id != scene_id { return null }
     return store
 }
@@ -132,12 +131,12 @@ fn __arena_store_or_dead<T>(arena: Arena<T>) -> ArenaStore<T> {
     return boxed.unwrap()
 }
 
-// An Arena owned by the Session root. Scene-owned Arenas come from
+// An Arena owned by the process root. Scene-owned Arenas come from
 // `SceneBuilder.arena()` (`stdlib/scene.rock`), which is the same registry and
 // the same creation path with a different owner ID -- not a second Arena
 // implementation.
 fn arena_new<T>() -> Arena<T> {
-    return __arena_new_owned(__ARENA_REGISTRY.session_root)
+    return __arena_new_owned(__ARENA_REGISTRY.process_root)
 }
 
 fn __arena_new_owned<T>(scene_id: int) -> Arena<T> {
@@ -373,7 +372,7 @@ fn Arena<T>.len(arena) -> int {
     return found.unwrap().occupied_count
 }
 
-// How many Arena incarnations the Session registry is still holding backing for.
+// How many Arena incarnations the process registry is still holding backing for.
 //
 // The registry is a STRONG root: a store lives until something retires it, which
 // is a change from the pre-P1 representation where an unreferenced `Arena` table

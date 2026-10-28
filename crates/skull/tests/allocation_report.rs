@@ -360,8 +360,8 @@ fn allocation_report_builds_update_and_draw_routes_from_lifecycle_metadata() {
     let _report = AllocationReportGuard::on();
     let emit = emit_mir(
         r#"
-@lifecycle(phase="update", owner="session") deco init tick {}
-@lifecycle(phase="draw", owner="session") deco init paint {}
+@lifecycle(phase="update", owner="process") deco init tick {}
+@lifecycle(phase="draw", owner="process") deco init paint {}
 
 global FRAME_VALUE: int = 0
 

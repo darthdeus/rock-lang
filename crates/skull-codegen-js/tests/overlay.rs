@@ -93,7 +93,7 @@ fn dependency_gated_wire_overlay_selects_const_closure_and_calls_runtime_once() 
     let source = |base: i32, direct: i32, unrelated: i32| {
         format!(
             r#"
-@lifecycle(phase="wire", owner="session") deco init wire {{}}
+@lifecycle(phase="wire", owner="process") deco init wire {{}}
 const BASE: int = {base}
 const DERIVED: int = BASE + 1
 const DIRECT: int = {direct}

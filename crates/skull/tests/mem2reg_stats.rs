@@ -4,7 +4,7 @@ use crate::common::{self, function_body, run_luajit};
 fn mem2reg_stats_replays_cleaned_concrete_bodies() {
     let ws = common::ws_with_stdlib(
         r#"
-@lifecycle(phase="update", owner="session") deco init tick {}
+@lifecycle(phase="update", owner="process") deco init tick {}
 
 fn choose(flag: bool) -> int {
     let retained = 7

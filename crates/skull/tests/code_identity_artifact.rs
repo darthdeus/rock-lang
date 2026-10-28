@@ -74,7 +74,7 @@ fn main() { }
 #[test]
 fn lifecycle_metadata_emits_a_sorted_plan_without_executing_the_decorator() {
     let emit = emit_mir(r#"
-@lifecycle(phase="update", owner="session", stage_param="stage")
+@lifecycle(phase="update", owner="process", stage_param="stage")
 deco init tick(stage: int = 100) {}
 @tick(stage=7) fn first() {}
 @tick(stage=7) fn second() {}
@@ -217,13 +217,13 @@ fn main() {}
 #[test]
 fn full_publication_replaces_lifecycle_membership_by_logical_key() {
     let v0 = emit_mir(r#"
-@lifecycle(phase="update", owner="session") deco init tick {}
+@lifecycle(phase="update", owner="process") deco init tick {}
 @tick fn removed() {}
 @tick fn retained() {}
 fn main() {}
 "#);
     let v1 = emit_mir(r#"
-@lifecycle(phase="update", owner="session") deco init tick {}
+@lifecycle(phase="update", owner="process") deco init tick {}
 @tick fn retained() {}
 @tick fn added() {}
 fn main() {}

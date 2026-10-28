@@ -8,7 +8,7 @@ const MAIN: &str = r#"
 use facade::tick as first;
 use facade::tick as second;
 
-@lifecycle(phase="update", owner="session")
+@lifecycle(phase="update", owner="process")
 deco init tick {}
 
 @first
@@ -88,7 +88,7 @@ use facade::wire as hook;
 
 const DEP: int = 1
 
-@lifecycle(phase="wire", owner="session")
+@lifecycle(phase="wire", owner="process")
 deco init wire {}
 
 @hook(onchange=[DEP])
@@ -119,7 +119,7 @@ fn v1_wire_const_arithmetic_admits_a_namespaced_operator_family() {
 use geometry::*;
 const BASE: int = 2
 const DEP: int = BASE + 1
-@lifecycle(phase="wire", owner="session")
+@lifecycle(phase="wire", owner="process")
 deco init wire {}
 @wire(onchange=[DEP])
 fn apply() {}
@@ -142,7 +142,7 @@ fn v1_wire_still_rejects_a_namespaced_ordinary_function_dependency() {
     let fragments = [V1Fragment { file: "main.rock", src: r#"
 fn helper() -> int { 3 }
 const DEP: int = helper()
-@lifecycle(phase="wire", owner="session")
+@lifecycle(phase="wire", owner="process")
 deco init wire {}
 @wire(onchange=[DEP])
 fn apply() {}

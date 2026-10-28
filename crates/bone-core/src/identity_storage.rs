@@ -1,5 +1,5 @@
 //! Identity storage: a nominal `struct` has
-//! identity and exists only as an Arena row or a Scene/Session root. Any other
+//! identity and exists only as an Arena row or a Scene/process root. Any other
 //! storage position must hold values or handles.
 //!
 //! A type argument is a storage position iff its constructor stores that
@@ -66,7 +66,7 @@ pub fn identity_body_storage_violation(
 
 /// [`identity_storage_violation`] for a root position (a global's type): the
 /// top itself may be an identity, or a nullable identity (an optional one-row
-/// Session root), but what it stores through its type arguments may not.
+/// process root), but what it stores through its type arguments may not.
 pub fn identity_root_storage_violation(ws: &Workspace, ty: TyId) -> Option<IdentityStorageViolation> {
     visit(ws, Types { ws, bi: None }, ty, Top::Root, IdentityStorageVia::Direct, &mut ParamClasses::default())
 }
@@ -109,7 +109,7 @@ enum Top {
     Stored,
     /// An Arena row: the identity itself.
     Admitted,
-    /// A Session root: the identity, or a nullable one.
+    /// A process root: the identity, or a nullable one.
     Root,
     /// A body's borrow: the identity, under nullables and tuples.
     Borrow,

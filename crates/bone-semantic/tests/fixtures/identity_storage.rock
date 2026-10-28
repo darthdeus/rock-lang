@@ -1,6 +1,6 @@
 //! @no_check
 //! Identity storage. A `struct` has
-//! identity and lives only as an Arena row or a Scene/Session root; every
+//! identity and lives only as an Arena row or a Scene/process root; every
 //! ordinary declaration position holds values or handles. Fields of structs
 //! and values, enum payloads, nullable wrappers, newtypes, non-root globals,
 //! and the type arguments a constructor stores (transitively) reject an
@@ -79,7 +79,7 @@ fn f() -> int {
   //^ int
 }
 
-// A direct `T?` at the top of a global is an optional one-row Session root:
+// A direct `T?` at the top of a global is an optional one-row process root:
 // the nullable is occupancy, not nested storage.
 //- identity_nullable_root_global
 struct Mob { hp: int }
@@ -185,7 +185,7 @@ fn f() -> int {
   //^ int
 }
 
-// A global of exactly an identity type is its Session root.
+// A global of exactly an identity type is its process root.
 //- identity_root_global
 struct World { tick: int }
 global WORLD: World = World { tick: 0 }
