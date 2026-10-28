@@ -9,6 +9,7 @@ description = "Incremental sessions, dependency invalidation and differential fi
 
 [dependencies]
 bone-core = { workspace = true }
+rock-core = { workspace = true }
 bone-semantic = { workspace = true }
 skull-parser = { workspace = true }
 

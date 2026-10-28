@@ -798,17 +798,9 @@ impl BoneWorkspace {
         let mut out = Vec::new();
         for f in &sources.files {
             let f = f.borrow();
-            let raw = f.file.to_id_path();
-            // The loader already stamped each file's dialect and owning package
-            // from the package graph; carry both into the session so the LSP
-            // reads a v1 package the way a real compile does.
-            out.push(SessionFile {
-                path: canonicalize_lenient(&raw),
-                text: f.contents.clone(),
-                dialect: f.dialect,
-                package: f.package.clone(),
-                global_policy: f.global_policy,
-            });
+            let mut file = SessionFile::from_source(&f);
+            file.path = canonicalize_lenient(&file.path);
+            out.push(file);
         }
         Ok(out)
     }

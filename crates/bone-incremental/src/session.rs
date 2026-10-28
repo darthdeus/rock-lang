@@ -333,6 +333,17 @@ pub struct SessionFile {
 }
 
 impl SessionFile {
+    /// Retain the source loader's parse and package facts across reparses.
+    pub fn from_source(source: &rock_core::SourceFile) -> Self {
+        Self {
+            path: source.file.to_id_path(),
+            text: source.contents.clone(),
+            dialect: source.dialect,
+            package: source.package.clone(),
+            global_policy: source.global_policy,
+        }
+    }
+
     /// A source with no owning manifest: legacy dialect, no package.
     pub fn legacy(path: impl Into<String>, text: impl Into<String>) -> Self {
         Self {

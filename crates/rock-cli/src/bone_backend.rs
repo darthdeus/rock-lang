@@ -250,15 +250,9 @@ pub(crate) fn session_files(sources: &SourceFiles) -> Vec<bone_incremental::sess
         .iter()
         .map(|source| {
             let source = source.borrow();
-            let path = source.file.to_id_path();
-            crate::compile_measurements::source(&path, source.contents.len());
-            bone_incremental::session::SessionFile {
-                path,
-                text: source.contents.clone(),
-                dialect: source.dialect,
-                package: source.package.clone(),
-                global_policy: source.global_policy,
-            }
+            let file = bone_incremental::session::SessionFile::from_source(&source);
+            crate::compile_measurements::source(&file.path, file.text.len());
+            file
         })
         .collect()
 }

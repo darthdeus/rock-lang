@@ -192,6 +192,7 @@ dependencies = [
  "bone-semantic",
  "comfy-la-arena",
  "itertools 0.13.0",
+ "rock-core",
  "rock-host",
  "rock-stdlib",
  "rust-lapper",
