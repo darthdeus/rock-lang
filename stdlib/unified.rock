@@ -2262,6 +2262,14 @@ inline(lua) fn on_killed(f: fn() -> ()) = """
 """
 
 @nomangle inline(lua) fn __rock_vec_strided_elements(vec: any) -> any = """
+    local h = rawget(vec, "@vec")
+    local types = _G.__ROCK_TYPE_TABLE
+    local decl = types and types[h.elem]
+    if not decl then error("missing strided element type: " .. tostring(h.elem), 0) end
+    if decl.kind ~= "enum" and decl.kind ~= "c_enum" then
+        error("cannot materialize strided nobox struct `" .. h.elem ..
+            "`: inspection requires implicit element materialization", 0)
+    end
     local out = {}
     for i = 1, vec.len or 0 do out[i] = __rock_materialize_strided_element(vec, i) end
     return out
