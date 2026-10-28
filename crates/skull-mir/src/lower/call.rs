@@ -453,6 +453,17 @@ impl Builder<'_> {
                         !self.body.arg_names.contains_key(a) && !self.body.spread_args.contains(a)
                     });
                     if positional && self.resolves_to_inline_builtin(e, name) {
+                        if let Some(elem) = self.vec_strided_elem_of(value)? {
+                            let ty = MonoTy::App {
+                                ctor: MonoCtor::Nominal(elem.name),
+                                params: Vec::new(),
+                            };
+                            if super::shape::lua_value_is_immutable(self.ws, &ty) {
+                                let vec = self.lower_expr(value)?;
+                                self.lower_expr(storage)?;
+                                return self.clone_strided_data(vec, elem);
+                            }
+                        }
                         if let Some(elem) = self.vec_column_elem_of(value)? {
                             let ty = MonoTy::App {
                                 ctor: MonoCtor::Nominal(elem.name),

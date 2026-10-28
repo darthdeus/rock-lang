@@ -903,6 +903,7 @@ pub const COMPILER_GENERATED_TRIGGERS: &[(&str, StorageCond, &[&str])] = &[
     ("__vec_data_capacity", StorageCond::VecStrided, &["table_len", "__rock_stride_capacity"]),
     ("__vec_data_insert", StorageCond::VecStrided, &["__rock_stride_insert"]),
     ("__vec_data_clone", StorageCond::VecStrided, &["__rock_stride_copy"]),
+    ("clone_into", StorageCond::VecStrided, &["__rock_stride_copy"]),
     ("__vec_data_sort", StorageCond::VecStrided, &["__rock_stride_sort", "__rock_stride_sort_leaves"]),
     ("__rock_vec_to_lua_array", StorageCond::VecStrided, &["__rock_vec_strided_elements"]),
     ("map_new", StorageCond::MapColumn, &["__map_col_new_spine"]),

@@ -39,6 +39,36 @@ impl Builder<'_> {
         })))
     }
 
+    pub(crate) fn clone_strided_data(
+        &mut self, vec: Idx<Inst>, elem: ColumnElem,
+    ) -> Result<ValueRepr, CompilerError> {
+        let stride = self.column_shape(elem)?.leaf_count();
+        let data = self.emit_cur(Inst::Field {
+            base: vec,
+            field: Ustr::from("_data"),
+        });
+        let len = self.emit_cur(Inst::Field {
+            base: vec,
+            field: Ustr::from("len"),
+        });
+        let width = self.emit_cur(Inst::Const(Lit::Int(stride as i64)));
+        let copied = self.call_spine("__rock_stride_copy", vec![data, len, width])?;
+        let old_header = self.column_header(vec);
+        let capacity = self.emit_cur(Inst::Field {
+            base: old_header,
+            field: Ustr::from("cap"),
+        });
+        let header = self.make_strided_header(elem, stride, capacity);
+        Ok(ValueRepr::Scalar(self.emit_cur(Inst::MakeStruct {
+            ty: Some(Ustr::from("Vec")),
+            fields: vec![
+                (Ustr::from("_data"), copied),
+                (Ustr::from("len"), len),
+                (Ustr::from(VEC_COLUMN_HEADER_FIELD), header),
+            ],
+        })))
+    }
+
     pub(crate) fn strided_element_repr(
         &mut self,
         vec: Idx<Inst>,
@@ -381,32 +411,8 @@ impl Builder<'_> {
                 let Some(elem) = self.vec_strided_elem_of(*recv)? else {
                     return Ok(None);
                 };
-                let stride = self.column_shape(elem)?.leaf_count();
                 let vec = self.lower_expr(*recv)?;
-                let data = self.emit_cur(Inst::Field {
-                    base: vec,
-                    field: Ustr::from("_data"),
-                });
-                let len = self.emit_cur(Inst::Field {
-                    base: vec,
-                    field: Ustr::from("len"),
-                });
-                let width = self.emit_cur(Inst::Const(Lit::Int(stride as i64)));
-                let copied = self.call_spine("__rock_stride_copy", vec![data, len, width])?;
-                let old_header = self.column_header(vec);
-                let capacity = self.emit_cur(Inst::Field {
-                    base: old_header,
-                    field: Ustr::from("cap"),
-                });
-                let header = self.make_strided_header(elem, stride, capacity);
-                Ok(Some(ValueRepr::Scalar(self.emit_cur(Inst::MakeStruct {
-                    ty: Some(Ustr::from("Vec")),
-                    fields: vec![
-                        (Ustr::from("_data"), copied),
-                        (Ustr::from("len"), len),
-                        (Ustr::from(VEC_COLUMN_HEADER_FIELD), header),
-                    ],
-                }))))
+                self.clone_strided_data(vec, elem).map(Some)
             }
             ("__vec_data_sort", [recv, key_fn]) => {
                 let Some(elem) = self.vec_strided_elem_of(*recv)? else {
