@@ -2045,7 +2045,8 @@ inline(lua) fn on_killed(f: fn() -> ()) = """
 
 // Typed for the same reason the `__vec_data_*` receivers are: `any` claimed no
 // representation, so a missing column route fell through to the boxed body.
-// Both callers are Map methods (`remove`, `clear`).
+// Both callers are Map methods (`remove`, `clear`), and both unset only present
+// keys.
 @intrinsic @relocates @inline inline(lua) fn table_unset<K, V>(tbl: Map<K, V>, index: K) = """
     tbl[index] = nil
 """
@@ -3061,9 +3062,11 @@ fn Map<K, V>.insert(map, key: K, value: V) {
     return m.spine
 """
 
+// An absent key is not unset: LuaJIT turns a nil store to an absent key into a
+// new hash node, and a table with no free node left rehashes on every one.
 fn Map<K, V>.remove(map, key: K) -> V? {
     let old = get(map, key)
-    table_unset(map, key)
+    if old != null { table_unset(map, key) }
     old
 }
 

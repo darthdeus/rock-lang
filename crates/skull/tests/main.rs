@@ -5,6 +5,7 @@
 mod common;
 
 mod map_empty_snapshots;
+mod map_remove_absent;
 
 #[path = "cdata_leaf_projection.rs"]
 mod cdata_leaf_projection;
