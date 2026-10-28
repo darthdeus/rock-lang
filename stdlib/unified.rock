@@ -1791,6 +1791,10 @@ inline(js) fn float_to_int(value: float) -> int = "return Math.floor(value);"
     if type(obj) ~= "table" then
         return obj
     end
+    -- Slots are published in place; environments still own copied captures.
+    if _G.__rock_code_ref_kind and _G.__rock_code_ref_kind(obj) == "slot" then
+        return obj
+    end
     local unit = __rock_enum_unit(rawget(obj, "__ty"), rawget(obj, "__variant"))
     if unit then return unit end
     if seen[obj] then

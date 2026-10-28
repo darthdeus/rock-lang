@@ -4,6 +4,8 @@
 
 mod common;
 
+mod copy_code_refs;
+
 mod map_empty_snapshots;
 mod map_remove_absent;
 
