@@ -701,8 +701,8 @@ _G.__rock_static_drop = function(value_key, done_key)
 end
 -- The global directory, published by every full program: one entry per
 -- mutable global, { name, identity, physical = {leaf names}, slots = {...} }.
--- A host may add fields by identity (__rock_global_decorate): `package`,
--- `description` and, for a global stored as several leaves, `get`/`set`.
+-- A host adds `get`/`set` by identity (__rock_global_decorate) for a
+-- global stored as several leaves.
 -- Reflection and the `_G` bridge read globals only through it.
 _G.__rock_globals_publish = function(directory)
   rawset(_G, "__ROCK_GLOBALS", directory)

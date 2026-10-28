@@ -1529,7 +1529,7 @@ fn skull_build_package_with_limit(
     }).collect::<Vec<_>>();
     let tests = test_fns.into_iter().map(|(_, test)| test).collect::<Vec<_>>();
     let facts = test_program_facts(&ws);
-    let lua = install_rock_state_metadata(lua, &ws, &spec).map_err(|e| SkullFailure {
+    let lua = install_global_accessors(lua, &ws).map_err(|e| SkullFailure {
         reason: categorize(&e.message),
         rendered: render_project_err(&sources, &e),
     })?.parts().concat();
@@ -2318,11 +2318,11 @@ fn skull_emit_project_with_inputs(
         }
     }
 
-    let lua = match install_rock_state_metadata(lua, &ws, &spec) {
+    let lua = match install_global_accessors(lua, &ws) {
         Ok(lua) => lua,
         Err(error) => {
             eprintln!("{}", render_project_err(&sources, &error));
-            log::error!(target: "SKULL", "state metadata planning failed for {}", dir);
+            log::error!(target: "SKULL", "global accessor planning failed for {}", dir);
             crate::ablation_report::exit_with_census(1);
         }
     };
@@ -2364,34 +2364,6 @@ fn allocation_report_path_from_env() -> Option<std::ffi::OsString> {
     })
 }
 
-/// The host-only fields of each mutable global's directory entry: its package
-/// and reflection description. Consumers enumerate `_G.__ROCK_GLOBALS`.
-fn build_rock_global_metadata(
-    ws: &bone_semantic::inference::Workspace,
-    spec: &crate::unified_compile::SourceSpec,
-    rows: &mut std::collections::BTreeMap<String, Vec<String>>,
-) {
-    use bone_semantic::prelude::ModuleId;
-
-    let package_map = crate::unified_compile::build_package_map(spec);
-    for m in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
-        let package = package_map.as_ref().and_then(|(graph, names)| {
-            let owner = graph.package_of_file(std::path::Path::new(m.file.as_str()))?;
-            names.get(&owner).cloned()
-        });
-        for (_gid, g) in m.globals.iter().filter(|(_, global)| !global.is_const) {
-            let identity = skull_mir::global_storage::global_identity(m.file, g.name);
-            let fields = rows.entry(identity).or_default();
-            if let Some(package) = &package {
-                fields.push(format!("package={package:?}"));
-            }
-            if let Some(description) = skull::type_desc_lua(ws, g.ty) {
-                fields.push(format!("description={description}"));
-            }
-        }
-    }
-}
-
 /// Emitted Lua with compiler-owned metadata, passed unchanged to the runtime host.
 pub struct GameProgram {
     comptime_inputs: bone_semantic::inference::ComptimeInputs,
@@ -2415,13 +2387,11 @@ impl GameProgram {
     }
 }
 
-fn install_rock_state_metadata(
+fn install_global_accessors(
     lua: String,
     ws: &bone_semantic::inference::Workspace,
-    spec: &crate::unified_compile::SourceSpec,
 ) -> std::result::Result<GameProgram, CompilerError> {
     let mut rows = std::collections::BTreeMap::new();
-    build_rock_global_metadata(ws, spec, &mut rows);
     let scx = skull_mir::lower::ScalarCtx::new(ws);
     build_global_nobox_accessors(ws, &scx, &mut rows)?;
     let mut metadata = String::from("\n_G.__rock_global_decorate({");
@@ -4000,13 +3970,9 @@ impl IncrementalProject {
                     .or(allocation_report_path.as_deref()),
                 &emit.allocation_report,
             )?;
-            // Host package/description metadata decorates the global directory.
-            let spec = crate::unified_compile::SourceSpec::Directory(
-                std::path::PathBuf::from(dir),
-            );
             let artifact_fingerprint = emit.artifact_fingerprint.clone();
             let emits_main = emit.emits_main;
-            let lua = install_rock_state_metadata(emit.lua, ws, &spec)
+            let lua = install_global_accessors(emit.lua, ws)
                 .map_err(|e| anyhow::anyhow!(render_project_err(project.sources(), &e)))?;
             (lua, c, artifact_fingerprint, emits_main)
         };
@@ -4261,7 +4227,6 @@ impl IncrementalProject {
         incremental_path: &std::path::Path,
         mut profile: Option<&mut SkullRouteProfile>,
     ) -> Result<SkullReload> {
-        use std::path::PathBuf;
         let (full, reinferred, span_edits, cook_ms) = match update {
             crate::live_project::LiveUpdate::NoChange => return Ok(SkullReload::NoChange),
             crate::live_project::LiveUpdate::BodyOnly { reinferred, span_edits, cook_ms } => {
@@ -4344,11 +4309,8 @@ impl IncrementalProject {
                         ],
                     });
                 }
-                // Global directory metadata is regenerated on a structural edit.
-                let spec =
-                    crate::unified_compile::SourceSpec::Directory(PathBuf::from(self.project.dir()));
                 let emits_main = emit.emits_main;
-                let lua = install_rock_state_metadata(emit.lua, ws, &spec)
+                let lua = install_global_accessors(emit.lua, ws)
                     .map_err(|e| anyhow::anyhow!(render_project_err(self.project.sources(), &e)))?;
                 ((lua, emits_main), c)
             };
@@ -4486,11 +4448,7 @@ impl IncrementalProject {
             crate::compile_measurements::emission(&emit);
             let artifact_fingerprint = emit.artifact_fingerprint.clone();
             let emits_main = emit.emits_main;
-            // Host package/description metadata is rebuilt with the global directory.
-            let spec = crate::unified_compile::SourceSpec::Directory(
-                std::path::PathBuf::from(self.project.dir()),
-            );
-            let lua = install_rock_state_metadata(emit.lua, ws, &spec)
+            let lua = install_global_accessors(emit.lua, ws)
                 .map_err(|e| anyhow::anyhow!(e.message))?;
             (lua, c, artifact_fingerprint, emits_main)
         };
