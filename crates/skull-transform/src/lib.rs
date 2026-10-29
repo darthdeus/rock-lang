@@ -852,7 +852,8 @@ pub fn cleanup_with_nobox(ws: &Workspace, func: &mut MirFunc) -> Result<(), Comp
     while flatten_nobox_nested_ctors(ws, func)? {
         cleanup_in(Some(ws), func)?;
     }
-    dce(func);
+    // Each successful flatten is followed by cleanup's fixed-point DCE;
+    // the final unsuccessful flatten leaves the live program unchanged.
     promote_direct_cells(func);
     // After promotion, so a rounding that reached the store through a cell
     // (an inlined constructor with a defaulted argument) is seen directly.
