@@ -58,6 +58,7 @@ fn lower_annotation(left: &str, right: &str, source: &str) -> Result<Vec<Annotat
         workspace: &ws, module: &mut module, generics_in_scope: Default::default(),
         _next_var_id: 0, placeholder_param: None, placeholder_forbidden: false,
         scope_probes: Default::default(),
+        resolutions: Default::default(),
     };
     let item = ast.items.last().unwrap();
     let annotations = match &item.kind {

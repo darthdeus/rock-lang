@@ -17,6 +17,7 @@ fn repeated_probes_do_not_inflate_the_module_probe_set() {
         placeholder_param: None,
         placeholder_forbidden: false,
         scope_probes: Default::default(),
+        resolutions: Default::default(),
     };
     for _ in 0..10_000 {
         ctx.probe_legacy(ustr("a"));

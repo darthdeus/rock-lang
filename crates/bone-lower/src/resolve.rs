@@ -201,6 +201,7 @@ pub fn resolve_legacy_bare(ws: &Workspace, file: Ustr, name: Ustr) -> Result<Res
 /// spanning several definitions, among which overload resolution picks by
 /// argument types. Legacy merges legacy callables with projected or imported
 /// v1 ones (spec 3.2); v1 spans the lookup tiers (spec 8.3, 8.5).
+#[derive(Debug, Clone)]
 pub enum CalleeFamily {
     Single(Resolved),
     /// Every member, deduplicated, with the tier that contributed it.

@@ -107,6 +107,16 @@ pub fn alloc_tys_contiguous(
     }
 }
 
+/// Lookup results for one module lowering. The context keeps the workspace
+/// immutable, and its first lookup records dependencies in `scope_probes`.
+/// Re-lowering constructs a fresh context instead of retaining these answers.
+#[derive(Debug, Default)]
+pub struct ResolutionCache {
+    bare: std::cell::RefCell<FxHashMap<Ustr, Result<resolve::Resolved, String>>>,
+    callee: std::cell::RefCell<FxHashMap<Ustr, Result<resolve::CalleeFamily, String>>>,
+    optional: std::cell::RefCell<FxHashMap<Ustr, Result<Option<resolve::CalleeFamily>, String>>>,
+}
+
 #[derive(Debug)]
 pub struct LowerCtx<'a> {
     pub workspace: &'a Workspace,
@@ -123,6 +133,7 @@ pub struct LowerCtx<'a> {
     /// ([`LowerCtx::flush_scope_probes`]). A cell because lookups run from
     /// `&self` helpers.
     pub scope_probes: std::cell::RefCell<Vec<bone_core::modules::ScopeProbe>>,
+    pub resolutions: ResolutionCache,
 }
 
 impl<'a> LowerCtx<'a> {
@@ -130,6 +141,21 @@ impl<'a> LowerCtx<'a> {
     fn probed<R>(&self, lookup: impl FnOnce() -> R) -> R {
         let (result, probes) = resolve::with_probes(lookup);
         self.scope_probes.borrow_mut().extend(probes);
+        result
+    }
+
+    fn probed_cached<R: Clone>(
+        &self,
+        cache: &std::cell::RefCell<FxHashMap<Ustr, Result<R, String>>>,
+        name: Ustr,
+        lookup: impl FnOnce() -> Result<R, String>,
+    ) -> Result<R, String> {
+        if let Some(result) = cache.borrow().get(&name) {
+            // The miss already recorded these dependencies for this module.
+            return result.clone();
+        }
+        let result = self.probed(lookup);
+        cache.borrow_mut().insert(name, result.clone());
         result
     }
 
@@ -338,7 +364,9 @@ impl<'a> LowerCtx<'a> {
         span: Span,
     ) -> Result<resolve::Resolved, CompilerError> {
         match self.v1_scope() {
-            Some(frag) => self.probed(|| resolve::resolve_bare(self.workspace, Some(frag), name)),
+            Some(frag) => self.probed_cached(&self.resolutions.bare, name, || {
+                resolve::resolve_bare(self.workspace, Some(frag), name)
+            }),
             None => {
                 self.probe_legacy(name);
                 resolve::resolve_legacy_bare(self.workspace, self.module.file, name)
@@ -360,7 +388,9 @@ impl<'a> LowerCtx<'a> {
     ) -> Result<(Ustr, hir::CallFamily), CompilerError> {
         let file = self.module.file;
         let resolved = match self.v1_scope() {
-            Some(frag) => self.probed(|| resolve::resolve_v1_callee(self.workspace, frag, name)),
+            Some(frag) => self.probed_cached(&self.resolutions.callee, name, || {
+                resolve::resolve_v1_callee(self.workspace, frag, name)
+            }),
             None => {
                 self.probe_legacy(name);
                 resolve::resolve_legacy_callee(self.workspace, file, name)
@@ -389,7 +419,9 @@ impl<'a> LowerCtx<'a> {
     fn resolve_optional_family(&mut self, name: Ustr, span: Span) -> Result<(Ustr, hir::CallFamily), CompilerError> {
         let file = self.module.file;
         let resolved = match self.v1_scope() {
-            Some(frag) => self.probed(|| resolve::resolve_v1_unary(self.workspace, frag, name)),
+            Some(frag) => self.probed_cached(&self.resolutions.optional, name, || {
+                resolve::resolve_v1_unary(self.workspace, frag, name)
+            }),
             None => {
                 self.probe_legacy(name);
                 resolve::resolve_legacy_callee(self.workspace, file, name).map(Some)
@@ -2746,6 +2778,7 @@ pub fn relower_function_in_place(
             placeholder_param: None,
             placeholder_forbidden: false,
             scope_probes: Default::default(),
+            resolutions: Default::default(),
         };
 
         let (func, body, errors) = build_function(&mut ctx, a, f, annotations)?;
@@ -2796,6 +2829,7 @@ pub fn relower_function_in_place(
         placeholder_param: None,
         placeholder_forbidden: false,
         scope_probes: Default::default(),
+        resolutions: Default::default(),
     };
 
     let mut body = Body::default();
