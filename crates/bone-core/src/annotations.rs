@@ -111,6 +111,10 @@ fn validate_one(
             anno.span,
             "`@state` was removed; delete it: globals have no ownership/world/realization metadata"
         ),
+        "host_resource" => comp_error!(
+            anno.span,
+            "`@host_resource` was removed; delete it: type declarations no longer carry host-projection metadata"
+        ),
         "shader" => {
             at(anno, pos, AnnoPos::FnItem)?;
             let ok = anno.args.len() == 1
@@ -168,28 +172,6 @@ fn validate_one(
         "consume" => {
             at(anno, pos, AnnoPos::StructItem)?;
             no_args(anno)
-        }
-        // `@host_resource` marks a TYPE as a name for something the host owns:
-        // a GL object, a canvas, a shader, a mesh upload, a playing voice, an
-        // FFI pointer. The runtime host-projection classification reads it
-        // out of `__ROCK_TYPE_TABLE` instead of keeping its own list of names.
-        //
-        // The optional bare identifier is the NATIVE LEDGER class
-        // (the host's native ledger), for the types the ledger tracks. A
-        // host resource the ledger does not track -- an FFI pointer, a
-        // `NativeBuffer` -- carries the annotation with no class, and the
-        // runtime has nothing to ask about it.
-        "host_resource" => {
-            at_type_item(anno, pos)?;
-            match &anno.args[..] {
-                [] => Ok(()),
-                [a] if a.name.is_none() && matches!(a.value, AnnoValue::Ident(_)) => Ok(()),
-                _ => comp_error!(
-                    anno.span,
-                    "`@host_resource` takes nothing, or one bare native ledger class: \
-                     @host_resource(voice)"
-                ),
-            }
         }
         "size" => {
             at(anno, pos, AnnoPos::Param)?;
@@ -361,21 +343,6 @@ pub fn validate_param_repr_against_body(
         }
     }
     Ok(())
-}
-
-/// An annotation that decorates any NOMINAL TYPE declaration. Separate from
-/// [`at`] because that one names a single position in its message, and
-/// "applies to a struct" would be wrong for three.
-fn at_type_item(anno: &Annotation, pos: AnnoPos) -> Result<(), CompilerError> {
-    match pos {
-        AnnoPos::StructItem | AnnoPos::EnumItem | AnnoPos::NewtypeItem => Ok(()),
-        _ => comp_error!(
-            anno.span,
-            "annotation `@{}` is not allowed on {} -- it applies to a struct, an enum or a newtype",
-            anno.name.name,
-            pos.describe()
-        ),
-    }
 }
 
 fn at(anno: &Annotation, pos: AnnoPos, allowed: AnnoPos) -> Result<(), CompilerError> {

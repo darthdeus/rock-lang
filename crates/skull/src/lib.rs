@@ -1848,24 +1848,6 @@ fn reflect_field_type(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> (Stri
 /// value's metadata from its `__ty` tag. The prelude already seeds the table
 /// empty, so this only adds entries. No metatables: type tagging is the direct
 /// `__ty`.
-///
-/// The `host_resource` key of a type-table entry, or nothing.
-///
-/// `@host_resource(<class>)` on the declaration is the ONE place a type is
-/// named a host resource; `__stone_host_projection_class`
-/// (the host projection) reads this key instead of keeping its
-/// own list of type names, which is what stops the two drifting and reporting
-/// every handle of a forgotten type as a missing one. A host resource the
-/// native ledger does not track publishes the empty class, which reads as
-/// "ordinary state" to the projection walk while still being a compile error
-/// in game memory.
-fn host_resource_key(hr: Option<bone_semantic::hir::HostResource>) -> String {
-    match hr {
-        Some(hr) => format!(", host_resource = \"{}\"", hr.ledger_class),
-        None => String::new(),
-    }
-}
-
 fn type_table_defs(
     ws: &Workspace,
     gc: &rustc_hash::FxHashSet<ustr::Ustr>,
@@ -1925,18 +1907,16 @@ fn type_table_defs(
                 ));
             }
             out.push_str(&format!(
-                "_G.__ROCK_TYPE_TABLE[\"{n}\"] = {{ name = \"{n}\", kind = \"{k}\"{hr}, fields = {{ {f} }} }}\n",
+                "_G.__ROCK_TYPE_TABLE[\"{n}\"] = {{ name = \"{n}\", kind = \"{k}\", fields = {{ {f} }} }}\n",
                 n = skull_mir::mangle::type_symbol(ws, s.name),
                 k = kind,
-                hr = host_resource_key(s.host_resource),
                 f = fields.join(", ")
             ));
         }
         for (_, nt) in module.newtypes.iter() {
             out.push_str(&format!(
-                "_G.__ROCK_TYPE_TABLE[\"{n}\"] = {{ name = \"{n}\", kind = \"newtype\"{hr}, fields = {{ }} }}\n",
+                "_G.__ROCK_TYPE_TABLE[\"{n}\"] = {{ name = \"{n}\", kind = \"newtype\", fields = {{ }} }}\n",
                 n = skull_mir::mangle::type_symbol(ws, nt.name),
-                hr = host_resource_key(nt.host_resource)
             ));
         }
     }

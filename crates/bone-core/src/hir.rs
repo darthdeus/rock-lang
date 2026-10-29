@@ -1119,20 +1119,6 @@ pub struct StructDef {
     pub span: Span,
     pub generics: Vec<TyId>,
     pub fields: Vec<StructFieldDef>,
-    /// `@host_resource` -- see [`HostResource`].
-    pub host_resource: Option<HostResource>,
-}
-
-/// A type declared `@host_resource`: it NAMES something the host owns rather
-/// than holding the thing itself, so its value is meaningless to a process
-/// that did not mint it. Emitted into `__ROCK_TYPE_TABLE`, where the runtime
-/// host-projection classification reads `ledger_class` back out.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct HostResource {
-    /// The host's native ledger class whose registry
-    /// can be asked whether one of these handles is still live, or empty for
-    /// a host resource the ledger does not track.
-    pub ledger_class: Ustr,
 }
 
 #[derive(Clone, Debug)]
@@ -1170,8 +1156,6 @@ pub struct EnumDef {
     pub span: Span,
     pub generics: Vec<TyId>,
     pub variants: Vec<EnumVariantDef>,
-    /// `@host_resource` -- see [`HostResource`].
-    pub host_resource: Option<HostResource>,
 }
 
 #[derive(Clone, Debug)]

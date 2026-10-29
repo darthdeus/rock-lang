@@ -207,8 +207,6 @@ pub struct NewtypeDef {
     pub span: Span,
     pub generics: Vec<TyId>,
     pub wrapped: TyId,
-    /// `@host_resource` -- see [`crate::hir::HostResource`].
-    pub host_resource: Option<crate::hir::HostResource>,
 }
 
 // ---------------------------------------------------------------------------

@@ -1,0 +1,26 @@
+//! `@host_resource` no longer attaches host-projection metadata to nominal types.
+//! Every former type position rejects it with the removal diagnostic.
+
+//- host_resource_on_struct @fail=`@host_resource` was removed; delete it
+@host_resource
+struct Resource { id: int }
+fn marker() -> int {
+    5
+  //^ int
+}
+
+//- host_resource_on_enum @fail=`@host_resource` was removed; delete it
+@host_resource(voice)
+enum ResourceState { Ready }
+fn marker() -> int {
+    5
+  //^ int
+}
+
+//- host_resource_on_newtype @fail=`@host_resource` was removed; delete it
+@host_resource
+newtype ResourceId(int)
+fn marker() -> int {
+    5
+  //^ int
+}
