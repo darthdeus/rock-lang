@@ -1876,7 +1876,6 @@ fn type_table_defs(
             // Row offsets of a `[S]` stored as strided rows, so reflection
             // reads a row by leaf path (`serialization.rock`).
             if s.is_nobox
-                && s.generics.is_empty()
                 && let Some(offsets) = skull_mir::lower::ContainerPlan::strided_struct_row_offsets(
                     ws,
                     bone_semantic::hir::FnBackend::Lua,

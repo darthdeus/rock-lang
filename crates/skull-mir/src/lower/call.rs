@@ -323,7 +323,8 @@ impl Builder<'_> {
             return Ok(r);
         }
         if !self.scx.values_first_class {
-            if let Some(ty) = self.concrete_expr_ty(e) {
+            let ty = self.call_result_owner_ty(e, &r)?;
+            if let Some(ty) = ty {
                 // An opaque return can forward storage borrowed from a foreign
                 // body. Snapshot it at the consuming boundary, where projections
                 // can use leaves without first reconstructing its box.
@@ -332,6 +333,36 @@ impl Builder<'_> {
             }
         }
         Ok(r)
+    }
+
+    /// Storage reads carry the receiver's element type even though the inline
+    /// primitive is declared `any`. Its generic value children must retain
+    /// that owner type when the physical result is a group of borrowed leaves.
+    fn call_result_owner_ty(
+        &self,
+        e: Idx<Expr>,
+        value: &ValueRepr,
+    ) -> Result<Option<Rc<MonoTy>>, CompilerError> {
+        if matches!(value, ValueRepr::Group { .. }) {
+            if let Expr::Call { callee: Callee::Unresolved { name, .. }, args, .. } =
+                &self.body.expr_arena[e]
+                && name.as_str() == "__vec_data_get"
+                && let Some(recv) = args.into_iter().next()
+                && let Some(plan) = self.container_plan_for(recv, ContainerFamily::Vec)?
+                && matches!(plan.storage(), ContainerStorage::Columns { .. } | ContainerStorage::Strided { .. })
+            {
+                let owner = self.concrete_ty(recv)?.ok_or_else(|| {
+                    self.gap_here("intercepted Vec read has no concrete receiver type")
+                })?;
+                let MonoTy::App { ctor: MonoCtor::Array, params } = owner.peel_nullable().0 else {
+                    return Err(self.gap_here("intercepted Vec read has a non-Vec receiver type"));
+                };
+                return params.first().cloned().map(Rc::new).map(Some).ok_or_else(|| {
+                    self.gap_here("intercepted Vec read has no concrete element type")
+                });
+            }
+        }
+        Ok(self.concrete_expr_ty(e))
     }
 
     fn lower_call_repr_inner(

@@ -352,6 +352,85 @@ fn main() {
 }
 "#;
 
+const GENERIC_WIDE: &str = r#"
+nobox value Wide<T> { a: int, item: T, c: int, d: int, flag: bool }
+value Pair { x: int, y: int }
+global STORAGE: [int] = []
+fn append<T>(xs: [Wide<T>], item: T) {
+    xs.push(Wide { a: 1, item, c: 3, d: 4, flag: false })
+}
+inline(lua) fn row_width(xs: any) -> int = "return xs['@vec'].repr == 'strided' and xs['@vec'].stride or -1"
+fn main() {
+    let ints: [Wide<int>] = []
+    let pairs: [Wide<Pair>] = []
+    let arrays: [Wide<[int]>] = []
+    let absent: [Wide<int?>] = []
+    append(ints, 7)
+    append(pairs, Pair { x: 11, y: 12 })
+    append(arrays, [21])
+    append(absent, null)
+    print("{row_width(ints)} {row_width(pairs)} {row_width(arrays)} {row_width(absent)}")
+    arrays[0].item.push(22)
+    print("{ints[0].item} {pairs[0].item.x} {pairs[0].item.y} {arrays[0].item.len()} {absent[0].item ?? -1} {ints[0].flag}")
+}
+"#;
+
+#[test]
+fn wide_generic_rows_keep_one_slot_per_type_argument() {
+    let lua = try_emit_module(GENERIC_WIDE).expect("generic rows emit");
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\nlocal row = __ROCK_STRIDED_ROWS.Wide\nassert(row.a == 1 and row.item == 2 and row.flag == 5)\n"), "wide_generic_rows"),
+        "5 5 5 5\n7 11 12 2 -1 false",
+    );
+}
+
+#[test]
+fn wide_generic_rows_clone_owned_leaves_and_release_removed_references() {
+    let extra = r#"
+@nomangle fn copy_rows() -> string {
+    let xs: [Wide<[int]>] = []
+    append(xs, [21])
+    let shallow = xs.clone()
+    let owned = xs.clone_into(STORAGE.storage)
+    xs[0].item.push(22)
+    let before = "{xs[0].item.len()} {shallow[0].item.len()} {owned[0].item.len()}"
+    xs[0] = Wide { a: 9, item: [99], c: 8, d: 7, flag: true }
+    return "{before} {shallow[0].a} {owned[0].item[0]} {xs[0].item[0]}"
+}
+"#;
+    let lua = try_emit_module(&format!("{GENERIC_WIDE}\n{extra}")).expect("generic copies emit");
+    assert_eq!(
+        run_luajit(&format!("{lua}\nprint(copy_rows())\n"), "wide_generic_copy"),
+        "2 2 1 1 21 99",
+    );
+
+    let popped = r#"
+@nomangle fn pop_value() -> string {
+    let xs: [Wide<Pair>] = []
+    append(xs, Pair { x: 11, y: 12 })
+    let shared = xs.clone()
+    let row = xs.pop().unwrap()
+    shared[0].item.x = 99
+    return "{xs.len()} {row.item.x} {shared[0].item.x}"
+}
+"#;
+    let lua = try_emit_module(&format!("{GENERIC_WIDE}\n{popped}")).expect("generic value pop emits");
+    assert_eq!(
+        run_luajit(&format!("{lua}\nprint(pop_value())\n"), "wide_generic_value_pop"),
+        "0 11 99",
+    );
+
+    let release = RELEASE_MAIN
+        .replace("value Holder { items: [int]?", "value Holder<T> { items: T")
+        .replace("[Holder]", "[Holder<[int]?>]");
+    let lua = try_emit_module(&release).expect("generic reference cleanup emits");
+    assert!(lua.contains(r#"repr = "strided""#), "fixture must exercise strided storage");
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "wide_generic_release"),
+        "true,true,true",
+    );
+}
+
 #[test]
 fn a_nobox_element_at_the_threshold_keeps_columns() {
     let lua = try_emit_module(NARROW).expect("emits");

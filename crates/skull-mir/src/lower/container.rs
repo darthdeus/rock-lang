@@ -185,9 +185,8 @@ impl ContainerPlan {
         // A wide `nobox` value struct stores row-major in one table: a column
         // per leaf costs a table lookup, bounds check and barrier per leaf on
         // every push and read, which is what made a 50-leaf push end hot traces
-        // at LuaJIT's constant limit. Only a
-        // non-generic struct: reflection finds a row's layout by struct name
-        // (`__ROCK_STRIDED_ROWS`), which names one layout only without params.
+        // at LuaJIT's constant limit. A generic field remains one opaque leaf,
+        // so type arguments do not change the declared row offsets.
         let wide_nobox_struct = matches!(family, ContainerFamily::Vec)
             && !nullable
             && column_eligible
@@ -196,8 +195,8 @@ impl ContainerPlan {
                 &element,
                 crate::monoty::MonoTy::App {
                     ctor: crate::monoty::MonoCtor::Nominal(name),
-                    params,
-                } if params.is_empty() && ws.struct_by_name.contains_key(name)
+                    ..
+                } if ws.struct_by_name.contains_key(name)
             )
             && shape
                 .as_ref()
@@ -241,7 +240,7 @@ impl ContainerPlan {
     }
 
     /// Leaf path -> 1-based row offset for a `[name]` whose element is a
-    /// non-generic struct stored as strided rows, or `None` for any other
+    /// struct stored as strided rows, or `None` for any other
     /// storage. Reflection reads rows through this; it is the plan lowering
     /// stores by, not a restatement of it.
     pub fn strided_struct_row_offsets(
