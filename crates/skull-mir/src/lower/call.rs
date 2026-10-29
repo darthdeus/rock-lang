@@ -2369,9 +2369,17 @@ impl Builder<'_> {
         // (a whole-value read wants every leaf anyway); the packer walks the
         // same paths but re-reads the parent per leaf, keeping one leaf live.
         if self.shape_is_plain_keys(shape) {
-            // Storage loads have a native holder. Reconstructed values retain
-            // logical paths so constructor folding can see their child operands.
-            let native_aliases = matches!(self.f.insts[v], Inst::Global(_) | Inst::Index { .. });
+            // Include field-held boxes, including nullable payloads after their
+            // presence guard. boxed_leaf_paths checks the native storage plan;
+            // constructor-derived projections must keep logical paths so copy
+            // propagation can eliminate their intermediate value constructors.
+            let mut root = v;
+            while let Inst::Field { base, .. } = self.f.insts[root] {
+                root = base;
+            }
+            let native_aliases = matches!(self.f.insts[v],
+                Inst::Global(_) | Inst::Index { .. } | Inst::Field { .. })
+                && !matches!(self.f.insts[root], Inst::MakeValueStruct { .. } | Inst::MakeStruct { .. });
             let paths = self.boxed_leaf_paths(shape, native_aliases)?;
             let mut loaded: Vec<(Vec<Ustr>, Idx<Inst>)> = Vec::new();
             let mut out = Vec::with_capacity(range.len());

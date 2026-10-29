@@ -143,3 +143,68 @@ print('ok')
 "#);
     assert_eq!(run_luajit(&program, "cdata_iteration"), "ok");
 }
+
+#[test]
+fn nullable_native_field_snapshots_avoid_intermediate_descriptors() {
+    let lua = emit_module(r#"
+value Point { x: int, y: int }
+value Span { a: Point, b: Point }
+value State { active: bool, span: Span? }
+struct Owner { state: State }
+fn ready(state: State) -> bool { state.active }
+@nomangle fn snapshot(owner: Owner) -> bool {
+    let state = owner.state
+    return ready(state)
+}
+@nomangle fn make(present: bool) -> Owner {
+    let span = if present {
+        Span { a: Point { x: 2, y: 3 }, b: Point { x: 5, y: 7 } }
+    } else { null }
+    return Owner { state: State { active: true, span: span } }
+}
+@nomangle fn retained(owner: Owner) -> int {
+    let state = owner.state
+    owner.state.span = null
+    if let span = state.span { return span.a.x + span.a.y + span.b.x + span.b.y }
+    return -1
+}
+"#);
+    let program = format!(r#"{lua}
+local present, absent = make(true), make(false)
+assert(snapshot(present) and snapshot(absent))
+assert(retained(present) == 17 and retained(present) == -1)
+assert(retained(absent) == -1)
+assert(not pcall(snapshot, nil), 'invalid owner read must still fail')
+present = make(true)
+jit.off(); jit.flush()
+for i = 1, 100 do assert(snapshot(present) and snapshot(absent)) end
+collectgarbage('collect'); collectgarbage('stop')
+local before = collectgarbage('count')
+for i = 1, 8192 do assert(snapshot(present) and snapshot(absent)) end
+local growth = collectgarbage('count') - before
+collectgarbage('restart')
+assert(growth < 4, 'nullable native snapshot allocates child descriptors: ' .. growth .. ' KiB')
+print('ok')
+"#);
+    assert_eq!(run_luajit(&program, "nullable_native_snapshot"), "ok");
+}
+
+#[test]
+fn optional_inline_child_projection_keeps_constructor_folding() {
+    let lua = emit_module(r#"
+nobox value Point { x: int, y: int }
+nobox value Inner { point: Point, tag: int }
+nobox value SnapshotEnvelope { inner: Inner, flag: int }
+struct Owner { envelope: SnapshotEnvelope? }
+fn child(owner: Owner) -> Inner? { return owner.envelope?.inner }
+fn main() {
+    let owner = Owner { envelope: SnapshotEnvelope {
+        inner: Inner { point: Point { x: 2, y: 3 }, tag: 7 }, flag: 11 } }
+    let before = child(owner)
+    owner.envelope = null
+    let value = before.unwrap()
+    print("{value.point.x} {value.point.y} {value.tag} {child(owner) == null}")
+}
+"#);
+    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "optional_inline_child"), "2 3 7 true");
+}

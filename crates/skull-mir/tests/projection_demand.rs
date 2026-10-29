@@ -149,3 +149,22 @@ fn nullable_scalar_projection_uses_the_embedded_owner_slot() {
     let body = lower(source, "width");
     assert_eq!(fields(&body), 2, "embedded owner must not materialize unrelated fields: {body}");
 }
+
+#[test]
+fn nullable_native_field_snapshot_reads_scalar_aliases() {
+    let source = "value Point { x: int, y: int }\n\
+        value Span { a: Point, b: Point }\n\
+        value State { active: bool, span: Span? }\n\
+        struct Owner { state: State }\n\
+        fn ready(state: State) -> bool { state.active }\n\
+        fn snapshot(owner: Owner) -> bool { let state = owner.state; ready(state) }";
+    let body = lower(source, "snapshot");
+    let intermediate: Vec<_> = body.insts.iter().filter(|(_, inst)| {
+        matches!(inst, Inst::Field { field, .. } if matches!(field.as_str(), "a" | "b"))
+    }).collect();
+    assert!(intermediate.is_empty(), "native snapshot must not create child cdata views: {body}");
+    let aliases = body.insts.iter().filter(|(_, inst)| {
+        matches!(inst, Inst::Field { field, .. } if field.as_str().starts_with("__rock_leaf_"))
+    }).count();
+    assert_eq!(aliases, 4, "the present payload still reads every scalar leaf: {body}");
+}
