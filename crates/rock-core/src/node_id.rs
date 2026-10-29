@@ -13,10 +13,6 @@ impl AstNodeId {
         Self(ModuleId::BUILTIN, local)
     }
 
-    pub fn to_u32(&self) -> u32 {
-        self.local_id()
-    }
-
     pub fn module_id(&self) -> ModuleId {
         self.0
     }
