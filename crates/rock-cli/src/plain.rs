@@ -89,10 +89,6 @@ pub static COMMANDS: &[&CliCommand] = &[
         let root = cx.get_path_or_current()?;
         rock_cli::do_monoty_census(Some(&root))
     }) },
-    &CliCommand { name: "identity-storage-census", route: Route::Direct(|cx| {
-        let root = cx.get_path_or_current()?;
-        rock_cli::do_identity_storage_census(&root)
-    }) },
     &CliCommand { name: "allocation-join", route: Route::Direct(|cx| {
         rock_cli::allocation_join_run(&cx.args.files)
     }) },
@@ -429,10 +425,6 @@ pub static REGISTRATIONS: registry::Registrations = registry::Registrations {
     invocation_context_keys: &[],
     compile_slot_policy: || Ok(None),
     scan_excluded: |_| false,
-    identity_census_population: |root| crate::identity_storage_census::CensusPopulation {
-        packages: crate::identity_storage_census::packages_under(root, |_| false),
-        programs: Vec::new(),
-    },
     early_entries: EARLY_ENTRIES,
     fixes: &[],
     sim_environment: None,

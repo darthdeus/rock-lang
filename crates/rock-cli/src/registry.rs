@@ -23,8 +23,6 @@ pub struct Registrations {
     pub arguments: fn(clap::Command) -> clap::Command,
     /// Decode only the options installed by this host's argument definitions.
     pub decode_arguments: fn(&clap::ArgMatches, &mut Args),
-    /// Select packages and standalone programs for identity analysis.
-    pub identity_census_population: fn(&std::path::Path) -> crate::identity_storage_census::CensusPopulation,
     /// Host exclusions for automatic bin discovery; never applied to the root.
     pub scan_excluded: fn(&std::path::Path) -> bool,
     pub command_metadata: fn(&CliCommand) -> CommandMetadata,
