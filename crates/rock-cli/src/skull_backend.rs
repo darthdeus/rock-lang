@@ -783,7 +783,7 @@ struct SkullFailure {
 
 impl From<crate::registry::RuntimeFailure> for SkullFailure {
     fn from(error: crate::registry::RuntimeFailure) -> Self {
-        Self { reason: error.reason.to_owned(), rendered: error.rendered }
+        Self { reason: format!("{}: {}", error.reason, error.rendered), rendered: error.rendered }
     }
 }
 
