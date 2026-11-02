@@ -7,10 +7,6 @@ appeal to mass market adoption ... yet :)
 Made by [darth.games](https://darth.games), [Discord](https://discord.gg/xYaedzBCkJ)
 
 ```rock
-// Your first Rock program. Save it as hello.rock and run it:
-//
-//     rock run hello.rock
-//
 fn main() {
     print("hello from Rock")
     let answer = 6 * 7
