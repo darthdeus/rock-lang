@@ -10,11 +10,11 @@ use wait_timeout::ChildExt;
 
 /// One node run's outcome. Unlike `lua_runner`, stderr stays separate: the JS
 /// executor's protocol lives on stdout and its error reports quote stderr
-/// verbatim.
+/// verbatim. There is no exit status: the harness catches every test, so the
+/// stdout markers alone decide the outcome.
 pub struct NodeRun {
     pub stdout: String,
     pub stderr: String,
-    pub success: bool,
 }
 
 pub fn run_node_code_with_timeout(
@@ -77,7 +77,6 @@ pub fn run_node_code_with_timeout(
     Ok(NodeRun {
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        success: output.status.success(),
     })
 }
 
