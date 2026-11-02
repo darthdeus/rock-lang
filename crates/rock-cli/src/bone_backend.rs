@@ -699,6 +699,8 @@ fn bone_loc_stats(sources: &SourceFiles) -> rock_core::CompileStats {
 /// adds any output write (== `compile` when the caller writes nothing here);
 /// `output`, when set, is appended as `-> <path>`. `symbols` is bone's count of
 /// top-level definitions (fns/structs/enums/newtypes/globals) across all modules.
+/// Debug level: `rock run` on a project would otherwise print it before the
+/// program's own output; `--verbose` or `ROCK_LOG=debug` shows it.
 pub(crate) fn log_compile_stats(
     sources: &SourceFiles,
     ws: &bone_semantic::inference::Workspace,
@@ -717,10 +719,10 @@ pub(crate) fn log_compile_stats(
     let compile_ms = compile.as_secs_f64() * 1000.0;
     let total_ms = total.as_secs_f64() * 1000.0;
     match output {
-        Some(out) => log::info!(target: "COMPILE",
+        Some(out) => log::debug!(target: "COMPILE",
             "done in {:.2}ms (compile {:.2}ms, {} symbols, {} lines, {}) -> {}",
             total_ms, compile_ms, symbols, stats.total_lines, stats.format_throughput(compile), out),
-        None => log::info!(target: "COMPILE",
+        None => log::debug!(target: "COMPILE",
             "done in {:.2}ms (compile {:.2}ms, {} symbols, {} lines, {})",
             total_ms, compile_ms, symbols, stats.total_lines, stats.format_throughput(compile)),
     }
