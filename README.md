@@ -1,22 +1,59 @@
 # Rock
 
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
+[![Discord](https://img.shields.io/discord/1560692612040761554?label=discord&logo=discord&logoColor=white)](https://discord.gg/xYaedzBCkJ)
+[![Written in Rust](https://img.shields.io/badge/written%20in-Rust-orange?logo=rust)](https://www.rust-lang.org)
+[![Runs on LuaJIT](https://img.shields.io/badge/runs%20on-LuaJIT-000080)](https://luajit.org)
+
 Rock is a statically typed programming language that compiles to LuaJIT and GLSL.
 The compiler is mostly a personal project that I decided to opensource. It does not
 appeal to mass market adoption ... yet :)
 
-Made by [darth.games](https://darth.games), [Discord](https://discord.gg/xYaedzBCkJ)
+Made by [darth.games](https://darth.games)
 
 ```rock
+enum Shape {
+    Circle(float),
+    Rect { w: float, h: float },
+}
+
+struct Named {
+    name: string?,
+}
+
+fn Shape.area(s) -> float {
+    return match s {
+        Shape::Circle(r) => 3.14159 * r * r,
+        Shape::Rect { w, h } => w * h,
+    }
+}
+
+fn greet(n: Named?) -> string {
+    return "hi {n?.name ?? "stranger"}"
+}
+
+// The same language, compiled to a GLSL fragment shader.
+@shader(fragment)
+fn tint(tc: Vec2) -> Vec4 {
+    return v(tc.x, tc.y, 0.5, 1.0)
+}
+
+@test(output = "6")
+fn rect_area() {
+    print(Shape::Rect { w: 2.0, h: 3.0 }.area())
+}
+
 fn main() {
-    print("hello from Rock")
-    let answer = 6 * 7
-    print(answer)
-    print("6 times 7 is {answer}")
+    print(greet(Named { name: "ada" })) // hi ada
+    print(greet(null))                  // hi stranger
+    print(Shape::Circle(1.0).area())    // 3.14159
 }
 ```
 
 ```sh
-rock run hello.rock
+rock run shapes.rock          # compile to Lua and run it on LuaJIT
+rock test shapes.rock         # run the @test functions
+rock shader shapes.rock tint  # print the GLSL for `tint`
 ```
 
 ## Install
@@ -41,65 +78,24 @@ New to Rock? Start with [docs/guide.md](docs/guide.md): a tour of the
 language in runnable examples, from a first program through structs,
 enums, optionals, generics, modules, tests and shaders.
 
-## Repository layout
+## What else is in here
 
-| Crate | Origin |
-|---|---|
-| `crates/rock-cli` | CLI library and standalone `rock` compiler |
-| `crates/skull` | Compiler driver, artifact assembly and incremental Lua emission |
-| `crates/rock-lsp` | Language server, diagnostics and editor queries |
-| `crates/skull-transform` | Control-flow transforms, inlining and coroutine lowering |
-| `crates/skull-codegen-shader` | Shared shader lowering, layouts and validation |
-| `crates/skull-codegen-glsl` | GLSL shader emission |
-| `crates/skull-codegen-wgsl` | WGSL shader emission and ABI integration |
-| `crates/skull-codegen-lua` | Lua emission, local allocation and frame limits |
-| `crates/skull-codegen-js` | JavaScript emission and runtime prelude (tests need `node`, and `luajit` for the differentials) |
-| `crates/bone-incremental` | Incremental sessions, dependency invalidation and differential fixtures |
-| `crates/bone-query` | IDE queries, completion ranking and the LSP workspace facade |
-| `crates/skull-mir` | Cell-based control-flow IR, lowering and backend layout contracts |
-| `crates/skull-graph` | Backend-neutral instance graph and concrete artifact plans |
-| `crates/bone-core` | HIR, annotation registry, module workspace and shared types of the `bone` typechecker |
-| `crates/bone-lints` | Lint catalog, HIR analysis and incremental lint cache |
-| `crates/bone-inference` | Type inference: unification, calls, fields, purity |
-| `crates/bone-semantic` | Semantic passes, identity-storage validation and typechecker fixtures |
-| `crates/bone-lower` | Lowering from the parser AST to the typechecker's HIR |
-| `crates/la-arena` (`comfy-la-arena`) | Fork of `la-arena` from [rust-analyzer](https://github.com/rust-lang/rust-analyzer), MIT OR Apache-2.0 |
-| `crates/lsp-server-manual` | Fork of `lsp-server` 0.7.9 from rust-analyzer with hand-written serde, MIT OR Apache-2.0 |
-| `crates/lsp-types-manual` | Fork of [`lsp-types`](https://github.com/gluon-lang/lsp-types) 0.97.0, MIT (see its `LICENSE`) |
-| `crates/lsp-serde-test` | Checks that the LSP forks serialize like the upstream crates |
-| `crates/rock-host` | Project discovery, source loading, manifest configuration and compiler process support |
-| `crates/rock-core` | Spans, diagnostics, the type representation, symbols, scopes and node ids |
-| `crates/rock-stdlib` | Runtime source discovery and the Rock standard library in `stdlib/` |
-| `crates/rock-log` | Logger shared by the compiler and its runtime hosts |
-| `crates/rock-tokenizer` | Lexer and string interpolation |
-| `crates/skull-fmt` | Formatter (`rock fmt`) and its `tests/fmt` corpus |
-| `crates/skull-parser` | Parser, AST, macro expansion and desugaring |
-| `crates/skull-wgsl-abi` | Versioned binding-registration contract between the WGSL backend and a WGPU renderer |
-| `crates/test-utils` | Test helpers; `extract_annotations` is ported from rust-analyzer (MIT OR Apache-2.0) |
-
-### Why the forks exist
-
-- `comfy-la-arena`: upstream `la-arena`'s `IdxRange<T>` is not `Copy`
-  (it wraps a `Range<u32>`). The fork stores the range as two `u32`s so index
-  ranges are `Copy` and can sit in plain-data IR nodes; `IdxRange::new` is
-  `new_exclusive` and `make_range()` returns the `Range<u32>`.
-- `lsp-server-manual` and `lsp-types-manual`: both replace `serde` derives
-  with hand-written `Serialize`/`Deserialize` impls (`lsp-types` alone has
-  about 430 derive sites), and `lsp-types-manual` drops `serde_repr`. The goal
-  was to remove `serde_derive` and `syn` from the compiler's build and cut
-  cold build time. `lsp-server-manual` also rejects request ids outside the
-  `i32` range. Other dependencies now bring `serde_derive` back, so the
-  remaining gain is only these crates' own derive cost; replacing the forks
-  with the upstream crates is under consideration.
-- `lsp-serde-test`: the hand-written impls are checked against upstream by
-  feeding both the same generated JSON (21 message types, about 13k inputs)
-  and comparing the results. Run it after changing either fork.
+- `rock fmt`, `rock lint` and `rock watch`.
+- A language server (`crates/rock-lsp`) and a Neovim plugin (`editors/nvim`).
+- A JavaScript backend (`--backend js`) and a browser playground (`playground/`).
+- `@shader` functions also compile to WGSL, for wgpu renderers.
 
 ## License
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
-[MIT license](LICENSE-MIT) at your option. Forked crates keep the licenses of
-their upstream projects as listed above.
+[MIT license](LICENSE-MIT) at your option.
+
+A few crates are forks and keep their upstream licenses: `crates/la-arena` and
+`crates/lsp-server-manual` come from
+[rust-analyzer](https://github.com/rust-lang/rust-analyzer) (MIT OR
+Apache-2.0), `crates/lsp-types-manual` from
+[lsp-types](https://github.com/gluon-lang/lsp-types) (MIT, see its `LICENSE`),
+and `crates/test-utils` ports `extract_annotations` from rust-analyzer.
 
 ## Acknowledgements
 
