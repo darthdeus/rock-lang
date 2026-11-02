@@ -50,6 +50,8 @@ fn main() {
 }
 ```
 
+Save it as `shapes.rock`:
+
 ```sh
 rock run shapes.rock          # compile to Lua and run it on LuaJIT
 rock test shapes.rock         # run the @test functions
@@ -58,15 +60,10 @@ rock shader shapes.rock tint  # print the GLSL for `tint`
 
 ## Install
 
-Install the `rock` compiler from git, or unpack a release archive:
+Install the `rock` compiler with Cargo; it lands in `~/.cargo/bin`:
 
 ```sh
 cargo install --git https://github.com/darthdeus/rock-lang.git rock-cli
-```
-
-```sh
-tar -xzf rock-<target-triple>.tar.gz
-export PATH="$PWD/rock-<target-triple>/bin:$PATH"
 ```
 
 `rock run` and `rock test` execute programs with LuaJIT, so `luajit` must be
@@ -76,7 +73,8 @@ on `PATH`; `--backend js` additionally needs `node`.
 
 New to Rock? Start with [docs/guide.md](docs/guide.md): a tour of the
 language in runnable examples, from a first program through structs,
-enums, optionals, generics, modules, tests and shaders.
+enums, optionals, generics, modules, tests and shaders. The examples are
+in [`examples/guide/`](examples/guide/), so clone the repository to run them.
 
 ## What else is in here
 

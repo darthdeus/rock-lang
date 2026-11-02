@@ -6,14 +6,17 @@ also lowers `@shader` functions to GLSL and WGSL. This guide describes
 what the compiler accepts today, feature by feature, with runnable
 examples.
 
-Every example in this guide is a file under `../examples/guide/`, kept
-in sync by an automated test: each fenced program below is one of those
-files byte for byte, each `NN_topic.rock` prints its `NN_topic.out`
-twin when run, and the shader examples compile to GLSL and WGSL. Run
-any of them with `rock run`:
+Every example in this guide is a file under
+[`examples/guide/`](../examples/guide/), kept in sync by an automated
+test: each fenced program below is one of those files byte for byte,
+each `NN_topic.rock` prints its `NN_topic.out` twin when run, and the
+shader examples compile to GLSL and WGSL. The commands in this guide
+run from that directory of a clone:
 
 ```sh
-rock run ../examples/guide/01_hello.rock
+git clone https://github.com/darthdeus/rock-lang.git
+cd rock-lang/examples/guide
+rock run 01_hello.rock
 ```
 
 `rock run` and `rock test` execute programs with LuaJIT, so `luajit`
@@ -591,7 +594,8 @@ fn whisper(s: string) -> string {
 }
 ```
 
-Run the directory: `rock run .` prints `HELLO!`.
+The files live in `16_modules/`; `rock run 16_modules` (or `rock run .`
+inside it) prints `HELLO!`.
 
 ## Tests
 
@@ -629,8 +633,8 @@ fn main() {
 rock test 17_tests.rock
 ```
 
-reports `2/2 @tests passed`. Plain `rock run` still runs `main`, so one
-file can carry both the program and its tests.
+reports `rock test: 2/2 @tests passed`. Plain `rock run` still runs
+`main`, so one file can carry both the program and its tests.
 
 ## Shaders
 
