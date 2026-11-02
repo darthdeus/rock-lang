@@ -1,7 +1,10 @@
 # Rock
 
-Rock is a statically typed programming language. Programs compile to
-Lua and run on LuaJIT; `@shader` functions compile to GLSL and WGSL.
+Rock is a statically typed programming language that compiles to LuaJIT and GLSL.
+The compiler is mostly a personal project that I decided to opensource. It does not
+appeal to mass market adoption ... yet :)
+
+Made by [darth.games](https://darth.games), [Discord](https://discord.gg/xYaedzBCkJ)
 
 ```rock
 // Your first Rock program. Save it as hello.rock and run it:
@@ -101,3 +104,10 @@ enums, optionals, generics, modules, tests and shaders.
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
 [MIT license](LICENSE-MIT) at your option. Forked crates keep the licenses of
 their upstream projects as listed above.
+
+## Acknowledgements
+
+Special thanks to [Celes](https://mastodon.gamedev.place/@setzer22) for all the
+advice throughout the years. [Their initial attempt at building a
+compiler](https://blog.celes42.com/the_language_that_never_was.html) was the
+main reason why I even started with this project.
