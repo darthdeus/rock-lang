@@ -2888,7 +2888,7 @@ pub fn skull_test(paths: &[String], filter: Option<&crate::test::TestFilter>) ->
         ("tests_failed", tests_failed),
     ]);
     println!(
-        "\nskull backend: {}/{} @tests passed ({} failed) across {} files ({:.2}s){}",
+        "\nrock test: {}/{} @tests passed ({} failed) across {} files ({:.2}s){}",
         tests_passed.to_string().green(),
         tests_total,
         if tests_failed == 0 {
