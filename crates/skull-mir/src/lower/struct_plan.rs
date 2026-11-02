@@ -10,6 +10,7 @@ use ustr::Ustr;
 
 use super::shape::{declared_value_storage, static_ty, GcFieldEq};
 use super::{EnumFlatShape, EnumPlan, RepArena, RepError, RepId, ValueShape, ValueStorage};
+use crate::lua_nesting::{display_record, LuaDisplayPart};
 use crate::mir::{Inst, MirFunc};
 
 /// One physical answer for one logical field. Inline/nobox fields and flat
@@ -321,12 +322,12 @@ impl GcTableField {
         out
     }
 
-    /// The Lua expression rendering this field's value off box `v` for the
-    /// box's `__tostring`: an inline child renders as its own box would.
-    pub fn lua_tostring(&self) -> String {
+    /// This field's value off box `v`, rendered for the box's `__tostring`:
+    /// an inline child renders as its own box would.
+    pub fn lua_display_parts(&self) -> Vec<LuaDisplayPart> {
         match &self.inline {
-            None => format!("tostring(v.{})", self.name),
-            Some(sub) => lua_tostring_inline(sub, self.name.as_str()),
+            None => vec![LuaDisplayPart::Expr(format!("tostring(v.{})", self.name))],
+            Some(sub) => lua_display_inline(sub, self.name.as_str()),
         }
     }
 }
@@ -362,28 +363,28 @@ fn leaf_eq(ws: &Workspace, shape: &ValueShape, nested: bool, out: &mut Vec<GcFie
     }
 }
 
-fn lua_tostring_inline(shape: &ValueShape, prefix: &str) -> String {
-    let parts: Vec<String> = shape
+fn lua_display_inline(shape: &ValueShape, prefix: &str) -> Vec<LuaDisplayPart> {
+    let fields: Vec<(String, Vec<LuaDisplayPart>)> = shape
         .fields
         .iter()
         .map(|(fname, fs)| {
             let key = format!("{prefix}.{fname}");
             let value = match fs {
-                super::FieldShape::Prim => format!("tostring(v[\"{key}\"])"),
-                super::FieldShape::Nested(sub) => lua_tostring_inline(sub, &key),
+                super::FieldShape::Prim => vec![LuaDisplayPart::Expr(format!("tostring(v[\"{key}\"])"))],
+                super::FieldShape::Nested(sub) => lua_display_inline(sub, &key),
             };
-            format!("\"{fname}: \" .. {value}")
+            (format!("{fname}: "), value)
         })
         .collect();
-    let body = if parts.is_empty() {
-        format!("\"{} {{ }}\"", shape.name)
+    let body = if fields.is_empty() {
+        vec![LuaDisplayPart::literal(&format!("{} {{ }}", shape.name))]
     } else {
-        format!("\"{} {{ \" .. {} .. \" }}\"", shape.name, parts.join(" .. \", \" .. "))
+        display_record(&format!("{} {{ ", shape.name), fields, " }")
     };
     if shape.nullable {
-        format!("(v[\"{prefix}\"] == nil and \"nil\" or ({body}))")
+        vec![LuaDisplayPart::UnlessNil { value: format!("v[\"{prefix}\"]"), parts: body }]
     } else {
-        format!("({body})")
+        body
     }
 }
 

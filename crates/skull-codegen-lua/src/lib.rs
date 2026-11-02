@@ -2294,6 +2294,7 @@ fn emit_named_framed_with_statics_impl(
     }
     alias_int_to_float(func, &rpo, &mut inlinable, &repeatable);
     skull_mir::sinking::preserve_effect_order(func, &rpo, &mut inlinable);
+    bound_fold_levels(func, &rpo, &mut inlinable);
     // Frame fields map to their dense slots before this table is consulted.
     // Frame accesses name `s` implicitly in the printer rather than through a
     // MIR cell use; reserve its parameter's color so a later local can never
@@ -3550,6 +3551,119 @@ fn alias_int_to_float(
     }
 }
 
+/// Append the operands of the flat `..` run `id` renders as: a folded child
+/// `StringConcat` contributes its own operands, anything else is one operand.
+fn concat_run(func: &MirFunc, inlinable: &[bool], parts: &mut Vec<Idx<Inst>>, id: Idx<Inst>) {
+    if inlinable[raw(id) as usize] {
+        if let Inst::StringConcat(a, b) = func.insts[id] {
+            concat_run(func, inlinable, parts, a);
+            concat_run(func, inlinable, parts, b);
+            return;
+        }
+    }
+    parts.push(id);
+}
+
+/// Each operand of the folded value `id`, with the LuaJIT syntax levels its
+/// rendering nests that operand under, not counting the parenthesis
+/// `write_opnd` wraps `id` in. A binary operator's left operand is parsed in
+/// its own loop and costs nothing; the right operand, a call argument list, a
+/// table constructor and a parenthesis cost one each, so the default allows
+/// two; a `..` run's operand costs its position. Allocation instrumentation
+/// wraps an allocating value in `(<site> and ..)`, counted always so the
+/// instrumented and plain builds fold alike.
+fn fold_operand_levels(func: &MirFunc, inlinable: &[bool], id: Idx<Inst>) -> Vec<(Idx<Inst>, u32)> {
+    let inst = &func.insts[id];
+    let instrument = if emitted_value_allocation_kind(inst).is_some() { 2 } else { 0 };
+    let uniform = |levels: u32| {
+        let mut out = Vec::new();
+        regalloc::inst_uses(inst, &mut |u| out.push((u, levels)));
+        out
+    };
+    match *inst {
+        Inst::StringConcat(a, b) => {
+            let mut run = Vec::new();
+            concat_run(func, inlinable, &mut run, a);
+            concat_run(func, inlinable, &mut run, b);
+            run.into_iter().zip(instrument..).collect()
+        }
+        Inst::IntAdd(a, b) | Inst::FloatAdd(a, b) | Inst::IntSub(a, b) | Inst::FloatSub(a, b)
+        | Inst::IntMul(a, b) | Inst::FloatMul(a, b) | Inst::FloatDiv(a, b)
+        | Inst::IntMod(a, b) | Inst::FloatMod(a, b)
+        | Inst::IntLt(a, b) | Inst::UintLt(a, b) | Inst::FloatLt(a, b)
+        | Inst::IntLeq(a, b) | Inst::UintLeq(a, b) | Inst::FloatLeq(a, b)
+        | Inst::IntGt(a, b) | Inst::UintGt(a, b) | Inst::FloatGt(a, b)
+        | Inst::IntGeq(a, b) | Inst::UintGeq(a, b) | Inst::FloatGeq(a, b)
+        | Inst::Eq(a, b) | Inst::NotEq(a, b) => vec![(a, 0), (b, 1)],
+        Inst::Neg(x) | Inst::Not(x) => vec![(x, 1)],
+        Inst::UintMul(..) => uniform(8),
+        Inst::UintShr(..) => uniform(5),
+        Inst::UintBitcastInt(_) => uniform(3),
+        _ => uniform(2 + instrument),
+    }
+}
+
+/// Give a register to every folded operand that would nest its user's
+/// expression past [`skull_mir::lua_nesting::EXPRESSION_LEVEL_BUDGET`] LuaJIT
+/// syntax levels. Folding is otherwise unbounded: a wide value interpolation
+/// folds into one `..` run (a level per operand) and a run of `total += x`
+/// statements into one expression with a parenthesis per statement, and the
+/// chunk then fails to load. Values are visited in definition order, so every
+/// folded operand is already within the budget; a value over it unfolds the
+/// operands that put it there, which restores the bound without touching any
+/// expression that already fits. An unfolded value is evaluated at its own
+/// definition, which is the order the MIR states.
+fn bound_fold_levels(func: &MirFunc, scope: &[Idx<Block>], inlinable: &mut [bool]) {
+    let budget = skull_mir::lua_nesting::EXPRESSION_LEVEL_BUDGET;
+    // Levels a value costs where it is rendered as an operand; 0 for a register.
+    let mut levels = vec![0u32; func.insts.len()];
+    let measure = |inlinable: &[bool], levels: &[u32], id: Idx<Inst>| -> u32 {
+        match func.insts[id] {
+            Inst::Load(_) => 0,
+            // Rendered as its operand alone.
+            Inst::IntToFloat(x) => levels[raw(x) as usize],
+            _ => {
+                let deepest = fold_operand_levels(func, inlinable, id)
+                    .iter()
+                    .map(|&(u, at)| at + levels[raw(u) as usize])
+                    .max()
+                    .unwrap_or(0);
+                1 + deepest
+            }
+        }
+    };
+    for &b in scope {
+        for &id in &func.blocks[b].insts {
+            let k = raw(id) as usize;
+            if !inlinable[k] {
+                continue;
+            }
+            levels[k] = measure(inlinable, &levels, id);
+            if levels[k] <= budget {
+                continue;
+            }
+            // A run too long by itself: its folded halves become registers.
+            if let Inst::StringConcat(a, b) = func.insts[id] {
+                for half in [a, b] {
+                    let h = raw(half) as usize;
+                    if inlinable[h] && matches!(func.insts[half], Inst::StringConcat(..)) {
+                        inlinable[h] = false;
+                        levels[h] = 0;
+                    }
+                }
+            }
+            for (u, at) in fold_operand_levels(func, inlinable, id) {
+                let x = raw(u) as usize;
+                if inlinable[x] && 1 + at + levels[x] > budget && always_inlinable(&func.insts[u]) {
+                    inlinable[x] = false;
+                    levels[x] = 0;
+                }
+            }
+            levels[k] = measure(inlinable, &levels, id);
+        }
+    }
+}
+
 /// Render `function(<params>) <locals> <blocks> end` for the ordinary MIR
 /// function rooted at `entry`, appending to `out` after its name.
 #[allow(clippy::too_many_arguments)]
@@ -4791,14 +4905,7 @@ impl Emitter<'_> {
     /// expression). A non-inlinable child stays a leaf -- it is a separate `..`
     /// already materialized in its own cell, so flattening past it would be wrong.
     fn collect_concat(&self, parts: &mut Vec<Idx<Inst>>, id: Idx<Inst>) {
-        if self.inlinable[raw(id) as usize] {
-            if let Inst::StringConcat(a, b) = &self.func.insts[id] {
-                self.collect_concat(parts, *a);
-                self.collect_concat(parts, *b);
-                return;
-            }
-        }
-        parts.push(id);
+        concat_run(self.func, &self.inlinable, parts, id);
     }
 
     /// `write_opnd` into a fresh `String` — for the few cold sites that need an

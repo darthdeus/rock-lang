@@ -335,3 +335,5 @@ mod fresh_struct_projection;
 mod leaf_table_projection;
 
 mod nullable_scalar_projection;
+#[path = "lua_syntax_level_budget.rs"]
+mod lua_syntax_level_budget;

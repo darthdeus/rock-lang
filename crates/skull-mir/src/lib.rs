@@ -19,6 +19,7 @@ pub mod gpu_layout;
 pub mod display;
 pub mod intrinsics;
 pub mod lower;
+pub mod lua_nesting;
 pub mod mangle;
 pub mod mir;
 pub mod monoty;

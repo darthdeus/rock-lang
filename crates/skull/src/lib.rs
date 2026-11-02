@@ -39,6 +39,7 @@ pub mod pipeline;
 
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;
+use skull_mir::lua_nesting::{display_expr, display_record, display_return, LuaDisplayPart};
 use skull_parser::CompilerError;
 
 /// Per-nominal-type layout hash, keyed by type name (unique workspace-wide).
@@ -1193,12 +1194,23 @@ fn value_struct_gc_defs(
             ));
             out.push_str("end\n");
             out.push_str(&format!("{mt}.__tostring = function(v)\n"));
-            let ts: Vec<String> =
-                paths.iter().map(|p| format!("\"{p}: \" .. tostring(v[\"{p}\"])")).collect();
-            out.push_str(&format!(
-                "  return \"{n} {{ \" .. {} .. \" }}\"\nend\n",
-                if ts.is_empty() { "\"\"".to_string() } else { ts.join(" .. \", \" .. ") }
-            ));
+            let parts = if paths.is_empty() {
+                vec![
+                    LuaDisplayPart::literal(&format!("{n} {{ ")),
+                    LuaDisplayPart::literal(""),
+                    LuaDisplayPart::literal(" }"),
+                ]
+            } else {
+                display_record(
+                    &format!("{n} {{ "),
+                    paths.iter().map(|p| {
+                        (format!("{p}: "), vec![LuaDisplayPart::Expr(format!("tostring(v[\"{p}\"])"))])
+                    }),
+                    " }",
+                )
+            };
+            out.push_str(&display_return(&parts, "  "));
+            out.push_str("end\n");
             let params: Vec<String> = (0..paths.len()).map(|i| format!("l{i}")).collect();
             // An absent tag canonicalizes to `nil` -- the form a `= null` write
             // and an absent literal both store. The scalar ABI spells absence
@@ -1257,12 +1269,12 @@ fn value_struct_gc_defs(
         if fields.is_empty() {
             out.push_str(&format!("  return \"{n} {{ }}\"\n"));
         } else {
-            let ts: Vec<String> =
-                fields.iter().map(|f| format!("\"{}: \" .. {}", f.name, f.lua_tostring())).collect();
-            out.push_str(&format!(
-                "  return \"{n} {{ \" .. {} .. \" }}\"\n",
-                ts.join(" .. \", \" .. ")
-            ));
+            let parts = display_record(
+                &format!("{n} {{ "),
+                fields.iter().map(|f| (format!("{}: ", f.name), f.lua_display_parts())),
+                " }",
+            );
+            out.push_str(&display_return(&parts, "  "));
         }
         out.push_str("end\n");
         // `<Name>_vt(...)` positional ctor over the box keys. A declared field's
@@ -1376,23 +1388,36 @@ fn enum_cdata_metatypes(ws: &Workspace) -> String {
             let ed = &ws.modules[eid.module.index()].enums[eid.def];
             for (i, var) in ed.variants.iter().enumerate() {
                 let vn = var.name;
-                let render = match &var.payload {
-                    VariantPayload::Tuple(tys) if !tys.is_empty() => {
-                        let parts: Vec<String> = (0..tys.len())
-                            .map(|j| format!("\"[{k}] = \" .. tostring(v._{j})", k = j + 1))
-                            .collect();
-                        format!("\"{name}::{vn} {{ \" .. {} .. \" }}\"", parts.join(" .. \", \" .. "))
-                    }
+                let open = format!("{name}::{vn} {{ ");
+                let parts = match &var.payload {
+                    VariantPayload::Tuple(tys) if !tys.is_empty() => display_record(
+                        &open,
+                        (0..tys.len()).map(|j| {
+                            (format!("[{}] = ", j + 1), vec![LuaDisplayPart::Expr(format!("tostring(v._{j})"))])
+                        }),
+                        " }",
+                    ),
                     VariantPayload::Record(fields) if !fields.is_empty() => {
                         let mut fns: Vec<ustr::Ustr> = fields.iter().map(|f| f.name).collect();
                         fns.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-                        let parts: Vec<String> =
-                            fns.iter().map(|f| format!("\"{f} = \" .. tostring(v._{f})")).collect();
-                        format!("\"{name}::{vn} {{ \" .. {} .. \" }}\"", parts.join(" .. \", \" .. "))
+                        display_record(
+                            &open,
+                            fns.iter().map(|f| {
+                                (format!("{f} = "), vec![LuaDisplayPart::Expr(format!("tostring(v._{f})"))])
+                            }),
+                            " }",
+                        )
                     }
-                    _ => format!("\"{name}::{vn}\""), // unit (or empty tuple/record)
+                    _ => vec![LuaDisplayPart::literal(&format!("{name}::{vn}"))], // unit (or empty tuple/record)
                 };
-                ts.push_str(&format!("    if t == {i} then return {render} end\n"));
+                match display_expr(&parts) {
+                    Some(render) => ts.push_str(&format!("    if t == {i} then return {render} end\n")),
+                    None => {
+                        ts.push_str(&format!("    if t == {i} then\n"));
+                        ts.push_str(&display_return(&parts, "      "));
+                        ts.push_str("    end\n");
+                    }
+                }
             }
         }
         ts.push_str("    return \"?\"\n  end,\n}\n");
@@ -1447,15 +1472,14 @@ fn value_struct_metatypes(ws: &Workspace, emitted: &rustc_hash::FxHashSet<ustr::
             if s.fields.is_empty() {
                 out.push_str(&format!("    return \"{n} {{ }}\"\n"));
             } else {
-                let ts: Vec<String> = s
-                    .fields
-                    .iter()
-                    .map(|f| format!("\"{}: \" .. tostring(v.{})", f.name, f.name))
-                    .collect();
-                out.push_str(&format!(
-                    "    return \"{n} {{ \" .. {} .. \" }}\"\n",
-                    ts.join(" .. \", \" .. ")
-                ));
+                let parts = display_record(
+                    &format!("{n} {{ "),
+                    s.fields.iter().map(|f| {
+                        (format!("{}: ", f.name), vec![LuaDisplayPart::Expr(format!("tostring(v.{})", f.name))])
+                    }),
+                    " }",
+                );
+                out.push_str(&display_return(&parts, "    "));
             }
             out.push_str("  end,\n}\n");
             out.push_str(&format!(
@@ -1603,15 +1627,14 @@ fn c_struct_inspect_defs(ws: &Workspace, emitted: &rustc_hash::FxHashSet<ustr::U
             if s.fields.is_empty() {
                 out.push_str(&format!("  return \"{n} {{ }}\"\n"));
             } else {
-                let parts: Vec<String> = s
-                    .fields
-                    .iter()
-                    .map(|f| format!("\"{}: \" .. inspect(v.{})", f.name, f.name))
-                    .collect();
-                out.push_str(&format!(
-                    "  return \"{n} {{ \" .. {} .. \" }}\"\n",
-                    parts.join(" .. \", \" .. ")
-                ));
+                let parts = display_record(
+                    &format!("{n} {{ "),
+                    s.fields.iter().map(|f| {
+                        (format!("{}: ", f.name), vec![LuaDisplayPart::Expr(format!("inspect(v.{})", f.name))])
+                    }),
+                    " }",
+                );
+                out.push_str(&display_return(&parts, "  "));
             }
             let copy_args: Vec<String> =
                 s.fields.iter().map(|f| format!("v.{}", f.name)).collect();
