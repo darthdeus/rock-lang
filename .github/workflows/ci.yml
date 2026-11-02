@@ -1,7 +1,7 @@
 name: CI
 
-# Manual until the repository is public: private-repo Actions minutes are
-# billed, and every change is gated on the build host before it lands.
+# Manual: run it from the Actions tab (workflow_dispatch). Changes are gated
+# on the author's build hosts before they land.
 on:
   workflow_dispatch:
 

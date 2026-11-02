@@ -2,8 +2,8 @@
 
 `AGENTS.md` and `CLAUDE.md` are the same file.
 
-This repository will be public. Treat every commit, file and commit message
-as published the moment it is written.
+This repository is public. Every commit, file and commit message is
+published the moment it is pushed.
 
 - Never write private information: home-directory or machine-specific paths,
   host names, email addresses, credentials, or details of games and other
