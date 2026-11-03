@@ -745,17 +745,7 @@ impl Session {
         files: Vec<SessionFile>,
         aliases: &bone_core::modules::NsAliases,
     ) -> Result<Self, CompilerError> {
-        Self::new_with_identity_storage_exemptions(warm, files, aliases, Default::default())
-    }
-
-    /// Migration exemptions belong to the host and persist across rebuilds.
-    pub fn new_with_identity_storage_exemptions(
-        warm: Vec<Ast>,
-        files: Vec<SessionFile>,
-        aliases: &bone_core::modules::NsAliases,
-        exemptions: bone_semantic::identity_storage::IdentityStorageExemptions,
-    ) -> Result<Self, CompilerError> {
-        let mut ws = Workspace { identity_storage_exemptions: exemptions, ..Default::default() };
+        let mut ws = Workspace::default();
 
         let warm_mids: FxHashSet<ModuleId> = warm
             .iter()
@@ -1254,7 +1244,7 @@ impl Session {
         let base = if independent { self.warm_alone(registry).cloned() } else { None };
         let (mut ws, mut lowered, first_user) = match base {
             Some(base) => (base, unexpanded.split_off(warm_len), 0),
-            None => (Workspace { identity_storage_exemptions: self.ws.identity_storage_exemptions, ..Default::default() }, unexpanded, warm_len),
+            None => (Workspace::default(), unexpanded, warm_len),
         };
         let contributions: Vec<&FragmentContribution> =
             self.warm_contributions.iter().chain(&user_contributions).collect();
@@ -1274,7 +1264,7 @@ impl Session {
     /// modules alone are refused or report a diagnostic (see [`WarmBase`]).
     fn warm_alone(&mut self, registry: &MacroRegistry) -> Option<&Workspace> {
         if matches!(self.warm_base, WarmBase::Unbuilt) {
-            let mut ws = Workspace { identity_storage_exemptions: self.ws.identity_storage_exemptions, ..Default::default() };
+            let mut ws = Workspace::default();
             let mut cooked = self.warm.clone();
             cooked.par_iter_mut().for_each(|ast| cook_one(ast, registry));
             // A refusal here is not the build's verdict: the warm modules may

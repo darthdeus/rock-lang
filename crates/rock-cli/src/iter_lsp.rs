@@ -205,7 +205,7 @@ pub fn iter_lsp(path: &str, iters: usize, warmup: usize) -> Result<()> {
     // Warm: build the workspace and batch-index the whole compilation unit
     // (project + stick.toml deps), exactly as the server does on first open.
     // This is the cold load -- excluded from the per-edit timing below.
-    let mut bone = BoneWorkspace::with_identity_storage_exemptions(crate::registry::registered().identity_storage_exemptions);
+    let mut bone = BoneWorkspace::new();
     bone.load_project(&target);
     // Seed the edited file's buffer so the first timed pass is a steady-state edit.
     let _ = bone.update(&target, state_a.clone());

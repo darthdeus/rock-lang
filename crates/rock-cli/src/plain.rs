@@ -390,7 +390,7 @@ pub static EARLY_ENTRIES: &[registry::EarlyEntry] = &[
     // file) and a global logger can only be set once. The synthetic argv[0]
     // makes its clap usage/errors read as `rock lsp ...`. The compiler policy
     // comes from the installed registrations, so private hosts keep their own
-    // action-layer and identity-storage policy through this same entry.
+    // action-layer policy through this same entry.
     registry::EarlyEntry {
         name: "lsp",
         run: |rest| {
@@ -398,7 +398,6 @@ pub static EARLY_ENTRIES: &[registry::EarlyEntry] = &[
             forwarded.extend(rest);
             match rock_lsp::server_cli::run_cli_with_policy(forwarded, rock_lsp::CompilerPolicy {
                 action_layer: registry::registered().action_layer_policy,
-                identity_storage: registry::registered().identity_storage_exemptions,
             }) {
                 Ok(()) => 0,
                 Err(e) => {
@@ -411,10 +410,6 @@ pub static EARLY_ENTRIES: &[registry::EarlyEntry] = &[
 ];
 
 pub static REGISTRATIONS: registry::Registrations = registry::Registrations {
-    identity_storage_exemptions: bone_query::IdentityStorageExemptions {
-        packages: &[bone_query::STDLIB_PACKAGE, bone_query::UNPACKAGED_PROGRAMS],
-        modules: &[],
-    },
     action_layer_policy: None,
     commands: COMMANDS,
     backends: BACKENDS,

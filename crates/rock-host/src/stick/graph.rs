@@ -47,10 +47,31 @@ pub struct PackageNode {
     pub dialect: Dialect,
     /// The package's mutable-global policy (`[language] globals`).
     pub global_policy: rock_core::source_code::GlobalPolicy,
+    /// The package's identity-storage migration state
+    /// (`[language] identity_storage`).
+    pub identity_storage: rock_core::source_code::IdentityStorage,
     /// Channel-filtered edges, sorted by declared key.
     pub dependencies: Vec<PackageEdge>,
     /// Source directories selected before parsing, under this same owner.
     pub source_groups: Vec<SourceGroup>,
+}
+
+impl PackageNode {
+    /// The tag every source file of this package is stamped with.
+    pub fn tag(&self) -> rock_core::source_code::PackageTag {
+        rock_core::source_code::PackageTag {
+            id: self.id.0,
+            self_name: self.self_name.clone(),
+            identity_storage: self.identity_storage.clone(),
+        }
+    }
+
+    /// Stamp this package's facts onto one of its source files.
+    pub fn stamp(&self, source: &mut rock_core::source_code::SourceFile) {
+        source.package = Some(self.tag());
+        source.dialect = self.dialect;
+        source.global_policy = self.global_policy;
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -215,6 +236,7 @@ impl Builder {
             self_name: config.package.name.replace('-', "_"),
             dialect,
             global_policy: config.global_policy(),
+            identity_storage: config.identity_storage(),
             dependencies,
             source_groups,
         });

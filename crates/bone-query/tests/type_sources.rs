@@ -44,7 +44,7 @@ fn namespace_identity_excludes_an_unrelated_same_named_type() {
         let mut ast = skull_parser::parse_module_with_dialect(
             source, Ustr::from(file), Dialect::V1,
         ).unwrap();
-        ast.package = Some(PackageTag { id: 1, self_name: "app".into() });
+        ast.package = Some(PackageTag { id: 1, self_name: "app".into(), identity_storage: Default::default() });
         ast
     }).collect::<Vec<_>>();
     let aliases = NsAliases { packages: vec![PackageAliases {

@@ -160,6 +160,7 @@ pub fn ws_v1_package(package: &str, fragments: &[V1Fragment]) -> Workspace {
         module.package = Some(skull_parser::PackageTag {
             id: 0,
             self_name: package.to_string(),
+            identity_storage: Default::default(),
         });
         modules.push(module);
     }

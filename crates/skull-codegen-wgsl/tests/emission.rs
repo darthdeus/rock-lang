@@ -51,6 +51,7 @@ fn workspace(
     module.package = Some(skull_parser::PackageTag {
         id: 0,
         self_name: "shader_fixture".to_string(),
+        identity_storage: Default::default(),
     });
     modules.push(module);
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic");
@@ -110,6 +111,7 @@ fn v1_workspace(
         module.package = Some(skull_parser::PackageTag {
             id: 1,
             self_name: package.to_string(),
+            identity_storage: Default::default(),
         });
         modules.push(module);
     }

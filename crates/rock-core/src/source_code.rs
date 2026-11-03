@@ -53,13 +53,44 @@ impl GlobalPolicy {
     pub const NAMES: [&'static str; 2] = ["any", "none"];
 }
 
+/// A package's identity-storage migration state, declared by its manifest
+/// (`[language] identity_storage`). Unmigrated code is exempt: its sites are
+/// counted instead of reported. Absent means enforced.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub enum IdentityStorage {
+    #[default]
+    Enforced,
+    /// The whole package is unmigrated.
+    Exempt,
+    /// Modules under these `::`-joined module path prefixes are unmigrated.
+    /// A prefix covers the module it names and every module below it.
+    ExemptModules(Vec<String>),
+}
+
+impl IdentityStorage {
+    pub const NAMES: [&'static str; 2] = ["enforced", "exempt"];
+
+    /// Parse a declared whole-package state. Unknown values are rejected by
+    /// the manifest loader.
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "enforced" => Some(Self::Enforced),
+            "exempt" => Some(Self::Exempt),
+            _ => None,
+        }
+    }
+}
+
 /// The package a file belongs to, minted by the host's PackageGraph.
 /// `id` is dense and stable within one graph build; `self_name` is the
 /// manifest name with `-` normalized to `_`, case preserved.
+/// `identity_storage` is the manifest's declaration, carried with the tag so
+/// every file of the package reaches the checker with it.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct PackageTag {
     pub id: u32,
     pub self_name: String,
+    pub identity_storage: IdentityStorage,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

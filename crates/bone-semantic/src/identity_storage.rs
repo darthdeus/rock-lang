@@ -1,5 +1,5 @@
 //! Identity-storage checks for declarations and function bodies.
-//! Hosts supply migration exemptions through the workspace; the compiler
+//! A package's manifest declares its migration exemption; the compiler
 //! otherwise enforces the same rules for every package.
 
 use bone_core::escape::lambda_is_nonescaping;
@@ -21,7 +21,7 @@ use crate::hir::{BindingInfo, BindingKind, Callee, Expr, Function, Module, TypeC
 use crate::prelude::*;
 
 pub use bone_core::identity_storage::{
-    identity_storage_package, IdentityStorageExemption, IdentityStorageExemptions,
+    identity_storage_exemption, identity_storage_package, IdentityStorageExemption,
     RUST_EMBEDDED_PACKAGES, STDLIB_PACKAGE, UNPACKAGED_PROGRAMS,
 };
 
@@ -87,7 +87,7 @@ pub struct IdentityStorageSite {
 
 /// Whether `module`'s sites are counted by the census instead of reported.
 pub fn identity_storage_exempt(ws: &Workspace, module: &Module) -> bool {
-    ws.identity_storage_exemptions.exemption(ws, module).is_some()
+    identity_storage_exemption(ws, module).is_some()
 }
 
 /// Every declaration position in `module` that stores an identity struct.

@@ -213,12 +213,7 @@ pub fn source_file_new_with_context(path: impl AsRef<Path>) -> Result<SourceFile
             )
         })?;
         let node = graph.package(owner);
-        source.package = Some(rock_core::source_code::PackageTag {
-            id: node.id.0,
-            self_name: node.self_name.clone(),
-        });
-        source.dialect = node.dialect;
-        source.global_policy = node.global_policy;
+        node.stamp(&mut source);
     }
     Ok(source)
 }

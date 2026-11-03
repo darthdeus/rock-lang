@@ -10,16 +10,6 @@ pub enum SourceSpec {
     Files(Vec<PathBuf>),
 }
 
-fn stamp_package(file: &Arc<AtomicRefCell<SourceFile>>, node: &PackageNode) {
-    let mut f = file.borrow_mut();
-    f.package = Some(rock_core::source_code::PackageTag {
-        id: node.id.0,
-        self_name: node.self_name.clone(),
-    });
-    f.dialect = node.dialect;
-    f.global_policy = node.global_policy;
-}
-
 /// Discover sources based on source specification
 pub fn discover_sources(source_spec: &SourceSpec) -> Result<SourceFiles> {
     match source_spec {
@@ -54,7 +44,7 @@ pub fn discover_sources(source_spec: &SourceSpec) -> Result<SourceFiles> {
                     for file in package_sources.files {
                         // Skip files with #script directive (test/example files in library dependencies)
                         if !file.borrow().is_script || *id == graph.root() {
-                            stamp_package(&file, node);
+                            node.stamp(&mut file.borrow_mut());
                             dependency_files.push(file);
                         }
                     }

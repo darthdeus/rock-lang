@@ -12,6 +12,7 @@
 use crate::hir::{Module, StructFieldDef, TyId, TypeCtor, TypeExpr, VariantPayload};
 use crate::prelude::*;
 use crate::workspace::{BodyInference, Workspace};
+use skull_parser::IdentityStorage;
 
 pub const IDENTITY_STORAGE_ANNOTATION: &str = "identity_storage";
 /// The Arena and Scene registries' erasure capability: a stdlib function whose
@@ -483,42 +484,37 @@ pub const RUST_EMBEDDED_PACKAGES: &[&str] = &[
 /// Why a module's sites are counted by the census instead of reported.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum IdentityStorageExemption {
-    /// Its package is listed whole.
+    /// The compiler-owned stdlib, or a program outside any package.
+    Builtin,
+    /// Its package's manifest declares the whole package exempt.
     Package,
-    /// It is under this listed module path prefix.
-    Module(&'static str),
+    /// Its package's manifest declares this module path prefix exempt.
+    Module(Ustr),
 }
 
-/// Caller-supplied migration exemptions, retained by the workspace.
-#[derive(Clone, Copy, Debug)]
-pub struct IdentityStorageExemptions {
-    pub packages: &'static [&'static str],
-    pub modules: &'static [(&'static str, &'static str)],
-}
-
-impl Default for IdentityStorageExemptions {
-    fn default() -> Self {
-        Self { packages: &[STDLIB_PACKAGE, UNPACKAGED_PROGRAMS], modules: &[] }
+/// The one exemption predicate. Stdlib and unpackaged programs are exempt
+/// by the compiler (unpackaged ones unless the workspace enforces them);
+/// every package answers with its own manifest's declaration, stamped on
+/// the module. A module's path is the `mod` header of its file
+/// (`Workspace.fragment_scopes`); a file without one matches no prefix.
+pub fn identity_storage_exemption(ws: &Workspace, module: &Module) -> Option<IdentityStorageExemption> {
+    match identity_storage_package(module) {
+        STDLIB_PACKAGE => return Some(IdentityStorageExemption::Builtin),
+        UNPACKAGED_PROGRAMS => {
+            return (!ws.identity_storage_enforce_unpackaged).then_some(IdentityStorageExemption::Builtin);
+        }
+        _ => {}
     }
-}
-
-impl IdentityStorageExemptions {
-    /// The one exemption predicate. A module's path is the `mod` header of
-    /// its file (`Workspace.fragment_scopes`); a file without one matches no
-    /// module prefix.
-    pub fn exemption(&self, ws: &Workspace, module: &Module) -> Option<IdentityStorageExemption> {
-        let package = identity_storage_package(module);
-        if package == UNPACKAGED_PROGRAMS && ws.identity_storage_enforce_unpackaged {
-            return None;
+    match &module.identity_storage {
+        IdentityStorage::Enforced => None,
+        IdentityStorage::Exempt => Some(IdentityStorageExemption::Package),
+        IdentityStorage::ExemptModules(prefixes) => {
+            let path = &ws.fragment_scopes.get(&module.file)?.module_path;
+            prefixes
+                .iter()
+                .find(|prefix| module_path_under(path, prefix))
+                .map(|prefix| IdentityStorageExemption::Module(Ustr::from(prefix)))
         }
-        if self.packages.contains(&package) {
-            return Some(IdentityStorageExemption::Package);
-        }
-        let path = &ws.fragment_scopes.get(&module.file)?.module_path;
-        self.modules
-            .iter()
-            .find(|(p, prefix)| *p == package && module_path_under(path, prefix))
-            .map(|(_, prefix)| IdentityStorageExemption::Module(prefix))
     }
 }
 

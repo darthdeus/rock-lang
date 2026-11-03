@@ -13,7 +13,7 @@ fn ws_v1(src: &str) -> Workspace {
         skull_parser::Dialect::V1,
     )
     .expect("parse");
-    module.package = Some(skull_parser::PackageTag { id: 0, self_name: "lintv1".to_string() });
+    module.package = Some(skull_parser::PackageTag { id: 0, self_name: "lintv1".to_string(), identity_storage: Default::default() });
     semantic_pass(&mut [module]).expect("clean program typechecks")
 }
 
@@ -42,7 +42,7 @@ fn action_gaps(src: &str, dialect: skull_parser::Dialect) -> Vec<String> {
     let file = Ustr::from("app/actions.rock");
     let mut module = skull_parser::parse_module_clean_with_dialect(src, file, dialect).expect("parse");
     if dialect == skull_parser::Dialect::V1 {
-        module.package = Some(skull_parser::PackageTag { id: 0, self_name: "lintv1".to_string() });
+        module.package = Some(skull_parser::PackageTag { id: 0, self_name: "lintv1".to_string(), identity_storage: Default::default() });
     }
     let ws = semantic_pass(&mut [module]).expect("clean program typechecks");
     let mut sources = FxHashMap::default();

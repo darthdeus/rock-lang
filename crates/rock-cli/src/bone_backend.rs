@@ -154,7 +154,7 @@ pub(crate) fn aliases_for_modules(
 }
 
 /// The host's binding of [`skull::pipeline::check_modules`]: its alias
-/// tables and migration exemptions. Returns the verified workspace; `Err`
+/// tables. Returns the verified workspace; `Err`
 /// carries EVERY diagnostic of the first failing gate (all syntax errors,
 /// else all type errors) so the CLI reports the same set the LSP shows.
 pub fn check_modules(
@@ -182,12 +182,7 @@ fn check_modules_gated(
     modules: &mut [skull_parser::Ast],
     gate: ClosureGate,
 ) -> std::result::Result<(bone_semantic::inference::Workspace, Vec<CompilerError>), Vec<CompilerError>> {
-    skull::pipeline::check_modules(
-        modules,
-        crate::registry::registered().identity_storage_exemptions,
-        gate,
-        aliases_for_modules,
-    )
+    skull::pipeline::check_modules(modules, gate, aliases_for_modules)
 }
 
 /// [`check_modules`] over the stdlib + `user`: the common "I just parsed user
@@ -213,7 +208,7 @@ pub(crate) fn bone_session(
     // from the same facts `aliases_for_modules` reads off a parsed set: the
     // root package's manifest, reached through the file that carries graph id 0.
     let aliases = aliases_for_session(&files)?;
-    bone_incremental::session::Session::new_with_identity_storage_exemptions(skull::pipeline::stdlib_modules(), files, &aliases, crate::registry::registered().identity_storage_exemptions)
+    bone_incremental::session::Session::new(skull::pipeline::stdlib_modules(), files, &aliases)
 }
 
 /// [`aliases_for_modules`] for a session's file list, which is not parsed yet.
@@ -1261,7 +1256,7 @@ mod tests {
             ("fixture/two.rock", "mod two;\nfn hub(p: cascade::a::Hub) -> int { p.x }\nfn twin(p: cascade::b::Twin) -> int { p.x }\nfn inner(p: cascade::b::inner::Twin) -> int { p.x }\n"),
         ].into_iter().map(|(path, text)| SessionFile {
             dialect: Dialect::V1,
-            package: Some(PackageTag { id: 1, self_name: "cascade".into() }),
+            package: Some(PackageTag { id: 1, self_name: "cascade".into(), identity_storage: Default::default() }),
             ..SessionFile::legacy(path, text)
         }).collect();
         let new_session = || Session::new(vec![], files.clone(), &Default::default()).unwrap();
@@ -1411,16 +1406,11 @@ mod tests {
     }
 }
 
-/// Batch and incremental compiles share the host's migration policy.
+/// The batch semantic pass with the API-closure gate the build enforces.
 pub fn semantic_pass_with_aliases(
     modules: &mut [skull_parser::Ast],
     aliases: &bone_core::modules::NsAliases,
 ) -> std::result::Result<bone_semantic::inference::Workspace, CompilerError> {
-    skull::pipeline::semantic_pass(
-        modules,
-        aliases,
-        crate::registry::registered().identity_storage_exemptions,
-        ClosureGate::Enforce,
-    )
+    skull::pipeline::semantic_pass(modules, aliases, ClosureGate::Enforce)
 }
 

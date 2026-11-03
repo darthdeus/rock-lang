@@ -135,6 +135,7 @@ fn main() {}
     module.package = Some(rock_core::source_code::PackageTag {
         id: 1,
         self_name: "example_space".to_string(),
+        identity_storage: Default::default(),
     });
     let mut aliases = bone_core::modules::NsAliases::default();
     aliases.packages.push(bone_core::modules::PackageAliases {

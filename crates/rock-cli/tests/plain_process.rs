@@ -208,18 +208,56 @@ fn plain_parser_rejects_options_whose_private_rules_are_absent() {
     }
 }
 
+// A package's identity-storage migration state is its own manifest's
+// declaration: the package name exempts nothing, and the declaration reaches
+// both checking backends and the LSP of the plain compiler.
 #[test]
-fn plain_reports_identity_storage_in_private_package_names() {
+fn plain_identity_storage_follows_the_manifest_declaration() {
     let root = tempfile::tempdir().unwrap();
-    std::fs::write(root.path().join("stick.toml"), "[package]\nname = \"stone\"\n").unwrap();
-    std::fs::write(root.path().join("main.rock"),
-        "struct Actor { hp: int }\nstruct Holder { actor: Actor }\nfn main() {}\n").unwrap();
-    for backend in ["bone", "skull"] {
-        let out = invoke(root.path(), &["check", ".", "--backend", backend]);
-        assert!(!out.status.success(), "plain compiler exempted a private package: {}", text(&out));
-        assert!(text(&out).contains("cannot store identity struct `Actor`"), "{backend}: {}", text(&out));
-    }
+    let manifest = |language: &str| {
+        std::fs::write(root.path().join("stick.toml"), format!("[package]\nname = \"stone\"\n{language}")).unwrap();
+    };
+    let write_source = |header: &str| {
+        std::fs::write(root.path().join("main.rock"),
+            format!("{header}struct Actor {{ hp: int }}\nstruct Holder {{ actor: Actor }}\nfn main() {{}}\n")).unwrap();
+    };
+    let commands: [&[&str]; 3] = [
+        &["check", ".", "--backend", "bone"],
+        &["check", ".", "--backend", "skull"],
+        &["lsp", "diagnostics", "."],
+    ];
+    let reports = |what: &str| {
+        for args in commands {
+            let out = invoke(root.path(), args);
+            let output = text(&out);
+            assert!(output.contains("cannot store identity struct"), "{what} {args:?}: {output}");
+        }
+    };
+    let accepts = |what: &str| {
+        for args in commands {
+            let out = invoke(root.path(), args);
+            let output = text(&out);
+            assert!(out.status.success(), "{what} {args:?}: {output}");
+            assert!(!output.contains("cannot store identity struct"), "{what} {args:?}: {output}");
+        }
+    };
+
+    write_source("");
+    manifest("");
+    reports("a package name alone exempts nothing");
+    manifest("[language]\nidentity_storage = \"exempt\"\n");
+    accepts("a package declared exempt");
+    manifest("[language]\nidentity_storage = \"enforced\"\n");
+    reports("a package declared enforced");
+
+    write_source("mod nav::graph;\n");
+    manifest("[language]\nmodules = \"v1\"\nidentity_storage = { exempt_modules = [\"nav\"] }\n");
+    accepts("a module under a declared exempt prefix");
+    write_source("mod navigation;\n");
+    reports("a module that only shares the prefix's spelling");
+
     std::fs::remove_file(root.path().join("stick.toml")).unwrap();
+    write_source("");
     let unpackaged = invoke(root.path(), &["check", "main.rock"]);
     assert!(unpackaged.status.success(), "unpackaged program lost its exemption: {}", text(&unpackaged));
 }

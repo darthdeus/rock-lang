@@ -39,6 +39,7 @@ fn legacy_only_workspace_keeps_modules_v1_namespace_empty() {
     module.package = Some(rock_core::source_code::PackageTag {
         id: 1,
         self_name: "game".to_string(),
+        identity_storage: Default::default(),
     });
     let aliases = NsAliases {
         packages: vec![PackageAliases {
@@ -67,6 +68,7 @@ fn mixed_workspace_rejects_package_less_legacy_use_at_the_use_span() {
     provider.package = Some(rock_core::source_code::PackageTag {
         id: 1,
         self_name: "provider".to_string(),
+        identity_storage: Default::default(),
     });
 
     let legacy_src = "use provider::Provider;\nfn main() {}";
@@ -107,6 +109,7 @@ fn an_unresolved_v1_variant_pattern_is_labeled_at_its_path() {
     module.package = Some(rock_core::source_code::PackageTag {
         id: 1,
         self_name: "app".to_string(),
+        identity_storage: Default::default(),
     });
     let aliases = NsAliases {
         packages: vec![PackageAliases {
@@ -148,6 +151,7 @@ fn legacy_only_workspace_keeps_the_std_namespace() {
     user_module.package = Some(rock_core::source_code::PackageTag {
         id: 1,
         self_name: "game".to_string(),
+        identity_storage: Default::default(),
     });
 
     let ws = semantic_pass(&mut [std_module, user_module]).expect("semantic pass");
@@ -2387,6 +2391,7 @@ pub struct Actor {
     v1_mod.package = Some(rock_core::source_code::PackageTag {
         id: 1,
         self_name: "game".to_string(),
+        identity_storage: Default::default(),
     });
 
     let legacy_src = r#"
@@ -2476,6 +2481,7 @@ pub struct Actor {
     lib_mod.package = Some(rock_core::source_code::PackageTag {
         id: 1,
         self_name: "game".to_string(),
+        identity_storage: Default::default(),
     });
 
     let consumer_src = r#"
@@ -2497,6 +2503,7 @@ pub struct ReadableSecret {
     consumer_mod.package = Some(rock_core::source_code::PackageTag {
         id: 2,
         self_name: "consumer".to_string(),
+        identity_storage: Default::default(),
     });
 
     let mut aliases = bone_core::modules::NsAliases::default();
@@ -2612,6 +2619,7 @@ fn identity_storage_errors(std_file: &str, std_src: &str, package: Option<&str>,
     user_module.package = package.map(|name| rock_core::source_code::PackageTag {
         id: 1,
         self_name: name.to_string(),
+        identity_storage: Default::default(),
     });
     let ws = semantic_pass(&mut [std_module, user_module]).expect("semantic pass");
     module_error_messages(&ws)
@@ -2688,42 +2696,50 @@ fn identity_storage_capability_is_the_arena_files_alone() {
     );
 }
 
+// A package's own declaration decides whether its sites are reported: the
+// package name exempts nothing, and stdlib and unpackaged programs keep the
+// compiler's built-in exemption.
 #[test]
-fn identity_storage_exemptions_follow_the_package() {
-    use bone_semantic::identity_storage::IdentityStorageExemptions;
+fn identity_storage_exemption_follows_the_package_declaration() {
+    use rock_core::source_code::IdentityStorage;
     let user = "struct Mob { hp: int }\nstruct Room { mobs: [Mob] }\nfn count(held: [Mob]) -> int { return 0 }";
     let enforced = identity_storage_errors("<stdlib>/fixture.rock", "fn print() {}", Some("game"), user);
     assert!(
         enforced.iter().any(|e| e.contains("field `mobs` cannot store identity struct `Mob`")),
-        "a package off the exemption list is enforced: {enforced:?}"
+        "a package that declares nothing is enforced: {enforced:?}"
     );
     assert!(
         enforced.iter().any(|e| e.contains("parameter `held` cannot store identity struct `Mob`")),
-        "the body check follows the same exemption list: {enforced:?}"
+        "the body check follows the same declaration: {enforced:?}"
     );
     let unpackaged = identity_storage_errors("<stdlib>/fixture.rock", "fn print() {}", None, user);
     assert!(unpackaged.is_empty(), "unpackaged programs are exempt outside bone fixtures: {unpackaged:?}");
-    let mut module = parse_rock_with_file(user, "main.rock").expect("parse user module");
-    module.package = Some(rock_core::source_code::PackageTag { id: 1, self_name: "migrating".into() });
-    let ws = bone_semantic::inference::Workspace {
-        identity_storage_exemptions: IdentityStorageExemptions { packages: &["migrating"], modules: &[] },
-        ..Default::default()
+    let check = |identity_storage: IdentityStorage| {
+        let mut module = parse_rock_with_file(user, "main.rock").expect("parse user module");
+        module.package = Some(rock_core::source_code::PackageTag { id: 1, self_name: "migrating".into(), identity_storage });
+        let ws = bone_semantic::semantic_passes::semantic_pass_into(Default::default(), &mut [module], &Default::default())
+            .expect("semantic pass");
+        module_error_messages(&ws)
     };
-    let ws = bone_semantic::semantic_passes::semantic_pass_into(ws, &mut [module], &Default::default()).expect("semantic pass");
-    let exempt = module_error_messages(&ws);
-    assert!(exempt.is_empty(), "an exempt package gets no diagnostics: {exempt:?}");
+    let exempt = check(IdentityStorage::Exempt);
+    assert!(exempt.is_empty(), "a package declared exempt gets no diagnostics: {exempt:?}");
+    let declared = check(IdentityStorage::Enforced);
+    assert!(
+        declared.iter().any(|e| e.contains("field `mobs` cannot store identity struct `Mob`")),
+        "a package declared enforced is enforced: {declared:?}"
+    );
 }
 
-// A module exemption covers a qualified module path prefix of one package,
-// read from each file's `mod` header: the module it names and every module
-// below it, never a sibling that shares its spelling or a file with no path.
+// A declared module exemption covers a qualified module path prefix of its own
+// package, read from each file's `mod` header: the module it names and every
+// module below it, never a sibling that shares its spelling or a file with no
+// path.
 #[test]
 fn identity_storage_module_exemption_follows_the_module_path() {
     use bone_core::modules::{NsAliases, PackageAliases};
-    use bone_semantic::identity_storage::{
-        identity_storage_exempt, IdentityStorageExemption, IdentityStorageExemptions,
-    };
+    use bone_semantic::identity_storage::{identity_storage_exemption, IdentityStorageExemption};
     use bone_semantic::semantic_passes::semantic_pass_with_aliases;
+    use rock_core::source_code::{IdentityStorage, PackageTag};
     use skull_parser::{parse_module_with_dialect, Dialect};
 
     let files = [
@@ -2733,37 +2749,47 @@ fn identity_storage_module_exemption_follows_the_module_path() {
         ("world.rock", "pub mod world;", "WorldMob"),
         ("lib.rock", "", "RootMob"),
     ];
-    let mut modules: Vec<_> = files
-        .iter()
-        .map(|(file, header, mob)| {
-            let src = format!("{header}\npub struct {mob} {{ hp: int }}\npub struct {mob}Room {{ mobs: [{mob}] }}\n");
-            let mut module = parse_module_with_dialect(&src, ustr(file), Dialect::V1).expect("parse v1");
-            module.package = Some(rock_core::source_code::PackageTag {
-                id: 1,
-                self_name: "game".to_string(),
-            });
-            module
-        })
-        .collect();
-    let mut legacy = parse_module_with_dialect(
-        "struct LegacyMob { hp: int }\nstruct LegacyMobRoom { mobs: [LegacyMob] }\n",
-        ustr("legacy.rock"),
-        Dialect::Legacy,
-    )
-    .expect("parse legacy");
-    legacy.package = Some(rock_core::source_code::PackageTag {
-        id: 1,
-        self_name: "game".to_string(),
-    });
-    modules.push(legacy);
-    let aliases = NsAliases {
-        packages: vec![PackageAliases {
-            id: 1,
-            self_name: ustr("game"),
-            aliases: vec![],
-        }],
+    let build = |game: IdentityStorage| {
+        let tag = |id: u32, self_name: &str, identity_storage: IdentityStorage| PackageTag {
+            id,
+            self_name: self_name.to_string(),
+            identity_storage,
+        };
+        let mut modules: Vec<_> = files
+            .iter()
+            .map(|(file, header, mob)| {
+                let src = format!("{header}\npub struct {mob} {{ hp: int }}\npub struct {mob}Room {{ mobs: [{mob}] }}\n");
+                let mut module = parse_module_with_dialect(&src, ustr(file), Dialect::V1).expect("parse v1");
+                module.package = Some(tag(1, "game", game.clone()));
+                module
+            })
+            .collect();
+        let mut legacy = parse_module_with_dialect(
+            "struct LegacyMob { hp: int }\nstruct LegacyMobRoom { mobs: [LegacyMob] }\n",
+            ustr("legacy.rock"),
+            Dialect::Legacy,
+        )
+        .expect("parse legacy");
+        legacy.package = Some(tag(1, "game", game.clone()));
+        modules.push(legacy);
+        let mut other = parse_module_with_dialect(
+            "pub mod world;\npub struct OtherMob { hp: int }\npub struct OtherMobRoom { mobs: [OtherMob] }\n",
+            ustr("other/world.rock"),
+            Dialect::V1,
+        )
+        .expect("parse other v1");
+        other.package = Some(tag(2, "other", IdentityStorage::Enforced));
+        modules.push(other);
+        let aliases = NsAliases {
+            packages: vec![
+                PackageAliases { id: 1, self_name: ustr("game"), aliases: vec![] },
+                PackageAliases { id: 2, self_name: ustr("other"), aliases: vec![] },
+            ],
+        };
+        semantic_pass_with_aliases(&mut modules, &aliases).expect("semantic pass")
     };
-    let ws = semantic_pass_with_aliases(&mut modules, &aliases).expect("semantic pass");
+
+    let ws = build(IdentityStorage::Enforced);
     let errors = module_error_messages(&ws);
     for (_, _, mob) in files {
         assert!(
@@ -2772,22 +2798,26 @@ fn identity_storage_module_exemption_follows_the_module_path() {
         );
     }
 
-    let exemptions = IdentityStorageExemptions {
-        packages: &[],
-        modules: &[("game", "nav"), ("other", "world")],
-    };
+    let ws = build(IdentityStorage::ExemptModules(vec!["nav".to_string(), "world".to_string()]));
     let exemption_of = |file: &str| {
         let module = ws.modules.iter().find(|m| m.file == ustr(file)).expect("fixture module");
-        assert!(!identity_storage_exempt(&ws, module), "`game` has no listed exemption");
-        exemptions.exemption(&ws, module)
+        identity_storage_exemption(&ws, module)
     };
-    assert_eq!(exemption_of("nav.rock"), Some(IdentityStorageExemption::Module("nav")));
-    assert_eq!(exemption_of("nav/graph.rock"), Some(IdentityStorageExemption::Module("nav")));
+    let nav = Some(IdentityStorageExemption::Module(ustr("nav")));
+    assert_eq!(exemption_of("nav.rock"), nav);
+    assert_eq!(exemption_of("nav/graph.rock"), nav);
     assert_eq!(exemption_of("navigation.rock"), None, "a prefix matches whole segments");
-    assert_eq!(exemption_of("world.rock"), None, "an entry covers its own package only");
+    assert_eq!(exemption_of("world.rock"), Some(IdentityStorageExemption::Module(ustr("world"))));
+    assert_eq!(exemption_of("other/world.rock"), None, "a declaration covers its own package only");
     assert_eq!(exemption_of("lib.rock"), None, "the package root is not under `nav`");
     assert!(ws.fragment_scopes.get(&ustr("legacy.rock")).is_none());
     assert_eq!(exemption_of("legacy.rock"), None, "a module with no v1 path matches no prefix");
+    let errors = module_error_messages(&ws);
+    assert!(
+        !errors.iter().any(|e| e.contains("NavMob`;") || e.contains("GraphMob`;")),
+        "exempt modules get no diagnostics: {errors:?}"
+    );
+    assert!(errors.iter().any(|e| e.contains("NavigationMob`;")), "{errors:?}");
 }
 
 #[test]
@@ -2855,7 +2885,7 @@ fn annotation_resolution_errors(sources: &[(&str, &str)]) -> Vec<String> {
     use bone_core::modules::{NsAliases, PackageAliases};
     let mut modules: Vec<_> = sources.iter().map(|(file, source)| {
         let mut ast = skull_parser::parse_module_clean_with_dialect(source, (*file).into(), skull_parser::Dialect::V1).unwrap();
-        ast.package = Some(rock_core::source_code::PackageTag { id: 1, self_name: "sample".into() });
+        ast.package = Some(rock_core::source_code::PackageTag { id: 1, self_name: "sample".into(), identity_storage: Default::default() });
         ast
     }).collect();
     let aliases = NsAliases { packages: vec![PackageAliases { id: 1, self_name: "sample".into(), aliases: vec![] }] };

@@ -312,6 +312,7 @@ fn wgsl_workspace(
     module.package = Some(skull_parser::PackageTag {
         id: 0,
         self_name: "guide_fixture".to_string(),
+        identity_storage: Default::default(),
     });
     modules.push(module);
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic pass");

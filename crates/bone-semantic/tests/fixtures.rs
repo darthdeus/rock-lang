@@ -130,6 +130,7 @@ fn check_std_fixture(contents: &str) -> datatest_stable::Result<()> {
         module.package = file.package.map(|(name, id)| rock_core::source_code::PackageTag {
             id,
             self_name: name.to_owned(),
+            identity_storage: Default::default(),
         });
         modules.push(module);
     }

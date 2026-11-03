@@ -81,19 +81,30 @@ fn dir_stays_silent_for_lib() {
     );
 }
 
+// The LSP reads a package's identity-storage state from its own manifest, in
+// the one-shot report and in the server workspace alike.
 #[test]
-fn default_policy_reports_identity_storage_for_named_packages() {
+fn identity_storage_diagnostics_follow_the_package_declaration() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("stick.toml"), "[package]\nname = \"example-lib\"\n").unwrap();
     let file = dir.path().join("main.rock");
     let source = "struct Actor { hp: int }\nstruct Holder { actor: Actor }\nfn main() {}\n";
     std::fs::write(&file, source).unwrap();
-    let report = diagnostics_report(dir.path().to_str().unwrap()).unwrap();
-    assert!(messages(&report).iter().any(|m| m.contains("cannot store identity struct `Actor`")), "{report}");
-    let mut server = rock_lsp::workspace::LspWorkspace::new();
     let path = file.to_str().unwrap();
-    server.bone.update(path, source.to_owned());
-    assert!(server.bone.diagnostics_for(path).iter().any(|d| d.message.contains("cannot store identity struct `Actor`")));
+    let reported = |manifest: &str| {
+        std::fs::write(dir.path().join("stick.toml"), manifest).unwrap();
+        let report = diagnostics_report(dir.path().to_str().unwrap()).unwrap();
+        let in_report = messages(&report).iter().any(|m| m.contains("cannot store identity struct `Actor`"));
+        let mut server = rock_lsp::workspace::LspWorkspace::new();
+        server.bone.update(path, source.to_owned());
+        let in_server = server.bone.diagnostics_for(path).iter().any(|d| d.message.contains("cannot store identity struct `Actor`"));
+        assert_eq!(in_report, in_server, "{manifest}: {report}");
+        in_report
+    };
+    assert!(reported("[package]\nname = \"example-lib\"\n"), "a package that declares nothing is enforced");
+    assert!(
+        !reported("[package]\nname = \"example-lib\"\n[language]\nidentity_storage = \"exempt\"\n"),
+        "a package declared exempt gets no identity-storage diagnostics"
+    );
 }
 
 #[test]

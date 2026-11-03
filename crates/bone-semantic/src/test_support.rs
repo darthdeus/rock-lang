@@ -289,6 +289,7 @@ fn check_types_packages_inner(
             rock_core::source_code::PackageTag {
                 id,
                 self_name: name.to_string(),
+                identity_storage: Default::default(),
             }
         });
         modules.push(module);

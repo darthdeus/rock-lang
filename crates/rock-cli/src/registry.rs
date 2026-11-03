@@ -13,8 +13,6 @@ use anyhow::Result;
 
 /// Static host tables; uninstalled library callers use `plain::REGISTRATIONS`.
 pub struct Registrations {
-    /// Migration exemptions supplied by this build.
-    pub identity_storage_exemptions: bone_query::IdentityStorageExemptions,
     /// Project conventions supplied by the host; absent in the plain compiler.
     pub action_layer_policy: Option<&'static ActionLayerPolicy>,
     pub commands: &'static [&'static CliCommand],

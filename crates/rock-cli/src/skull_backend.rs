@@ -58,8 +58,7 @@ impl EmitFullErr {
 }
 
 /// The command line's [`skull::pipeline::CompileHost`]: alias tables from
-/// manifests on disk, the registry's migration exemptions, the invocation's
-/// lint policy and compile measurements.
+/// manifests on disk, the invocation's lint policy and compile measurements.
 struct CliCompileHost<'a> {
     sources: &'a SourceFiles,
     lint_root: &'a std::path::Path,
@@ -77,10 +76,6 @@ enum CliComptime<'a> {
 }
 
 impl skull::pipeline::CompileHost for CliCompileHost<'_> {
-    fn identity_storage_exemptions(&self) -> bone_query::IdentityStorageExemptions {
-        crate::registry::registered().identity_storage_exemptions
-    }
-
     fn aliases(
         &mut self,
         modules: &[skull_parser::Ast],
@@ -144,10 +139,6 @@ struct PackageTestHost<'a> {
 }
 
 impl skull::pipeline::CompileHost for PackageTestHost<'_> {
-    fn identity_storage_exemptions(&self) -> bone_query::IdentityStorageExemptions {
-        self.inner.identity_storage_exemptions()
-    }
-
     fn aliases(
         &mut self,
         modules: &[skull_parser::Ast],

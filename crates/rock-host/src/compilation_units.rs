@@ -204,29 +204,17 @@ pub fn determine_compilation_unit_for_file(file_path: impl AsRef<Path>) -> Resul
     }
 }
 
-/// The owning package and source facts `graph` gives the file at the canonical
-/// `path`: what the loader stamps on every file it loads, and what a host
-/// declares for a file that enters an incremental session after its load
-/// (the editor opening a new file). `None` when no package owns the path: a
-/// standalone source, legacy and unowned.
-pub fn source_facts(
-    graph: &crate::stick::graph::PackageGraph,
+/// The package that owns the file at the canonical `path` in `graph`: its
+/// node stamps the file's facts, at load or when the file enters an
+/// incremental session after its load (the editor opening a new file).
+/// `None` when no package owns the path: a standalone source, legacy and
+/// unowned.
+pub fn source_package<'g>(
+    graph: &'g crate::stick::graph::PackageGraph,
     path: &Path,
-) -> Option<(
-    rock_core::source_code::PackageTag,
-    rock_core::source_code::Dialect,
-    rock_core::source_code::GlobalPolicy,
-)> {
+) -> Option<&'g crate::stick::graph::PackageNode> {
     let owner = graph.package_of_file(path)?;
-    if !graph.includes_file(owner, path) {
-        return None;
-    }
-    let node = graph.package(owner);
-    Some((
-        rock_core::source_code::PackageTag { id: node.id.0, self_name: node.self_name.clone() },
-        node.dialect,
-        node.global_policy,
-    ))
+    graph.includes_file(owner, path).then(|| graph.package(owner))
 }
 
 /// Load SourceFiles based on a compilation unit
@@ -290,11 +278,8 @@ pub fn load_sources_for_compilation_unit(unit: &CompilationUnit) -> Result<Sourc
                 );
                 for file in &sources.files {
                     let path = file.borrow().file.to_id_path();
-                    if let Some((package, dialect, global_policy)) = source_facts(graph, Path::new(&path)) {
-                        let mut f = file.borrow_mut();
-                        f.package = Some(package);
-                        f.dialect = dialect;
-                        f.global_policy = global_policy;
+                    if let Some(node) = source_package(graph, Path::new(&path)) {
+                        node.stamp(&mut file.borrow_mut());
                     }
                 }
             }

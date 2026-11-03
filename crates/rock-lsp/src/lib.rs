@@ -4,12 +4,11 @@
 #[derive(Clone, Copy, Default)]
 pub struct CompilerPolicy {
     pub action_layer: Option<&'static bone_lints::ActionLayerPolicy>,
-    pub identity_storage: bone_query::IdentityStorageExemptions,
 }
 
 impl CompilerPolicy {
     pub fn workspace(self) -> bone_query::BoneWorkspace {
-        bone_query::BoneWorkspace::with_identity_storage_exemptions(self.identity_storage)
+        bone_query::BoneWorkspace::new()
             .with_lint_options(bone_lints::LintOptions::default().with_action_policy(self.action_layer))
     }
 }

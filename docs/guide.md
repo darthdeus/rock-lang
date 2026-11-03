@@ -174,6 +174,23 @@ fn main() {
 }
 ```
 
+A struct has identity, so it lives in one place: an `Arena<T>` row or
+a global. Fields, `Vec` and `Map` elements, enum payloads, escaping
+closure captures and coroutine state hold a value or an `Entity<T>`
+handle instead; a struct local or parameter is a borrow. The compiler
+reports `cannot store identity struct` for anything else. A package
+that has not migrated to this rule yet declares it in its
+`stick.toml`, and its violations are not reported:
+
+```toml
+[language]
+identity_storage = "exempt"                    # the whole package
+# identity_storage = { exempt_modules = ["nav"] } # `nav` and modules below it
+```
+
+Absent, or `"enforced"`, the rule applies. The standard library and
+files outside any package are exempt.
+
 ## Newtypes
 
 A `newtype` wraps one value in a distinct type, so the compiler stops

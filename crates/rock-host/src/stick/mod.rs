@@ -13,10 +13,16 @@ pub mod graph;
 ///
 /// `globals` declares whether the package may own mutable global storage.
 /// Absent = `"any"`; `"none"` is the simulation-package boundary from R5.
+///
+/// `identity_storage` declares the package's identity-storage migration
+/// state: absent or `"enforced"`, `"exempt"` for an unmigrated package, or
+/// `{ exempt_modules = ["nav"] }` for unmigrated module path prefixes inside
+/// an enforced package.
 #[derive(Debug, Clone)]
 pub struct LanguageConfig {
     pub modules: rock_core::source_code::Dialect,
     pub globals: rock_core::source_code::GlobalPolicy,
+    pub identity_storage: rock_core::source_code::IdentityStorage,
 }
 
 impl Default for LanguageConfig {
@@ -24,7 +30,55 @@ impl Default for LanguageConfig {
         Self {
             modules: rock_core::source_code::Dialect::Legacy,
             globals: rock_core::source_code::GlobalPolicy::Any,
+            identity_storage: rock_core::source_code::IdentityStorage::Enforced,
         }
+    }
+}
+
+/// `[language] identity_storage`: a state name or an `exempt_modules` table.
+struct IdentityStorageDeclaration(rock_core::source_code::IdentityStorage);
+
+impl<'de> serde::Deserialize<'de> for IdentityStorageDeclaration {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use rock_core::source_code::IdentityStorage;
+        struct Vis;
+        impl<'de> serde::de::Visitor<'de> for Vis {
+            type Value = IdentityStorageDeclaration;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                write!(f, "\"enforced\", \"exempt\" or a table with an exempt_modules list")
+            }
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                IdentityStorage::parse(value).map(IdentityStorageDeclaration).ok_or_else(|| {
+                    E::custom(format!(
+                        "unknown `[language] identity_storage` value `{value}`; known values: {}, or {{ exempt_modules = [..] }}",
+                        IdentityStorage::NAMES.join(", ")
+                    ))
+                })
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut modules = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "exempt_modules" => modules = Some(map.next_value::<Vec<String>>()?),
+                        other => {
+                            return Err(serde::de::Error::custom(format!(
+                                "unknown key `{other}` in `[language] identity_storage`; known keys: exempt_modules"
+                            )));
+                        }
+                    }
+                }
+                let modules = modules.ok_or_else(|| {
+                    serde::de::Error::custom("`[language] identity_storage` table needs `exempt_modules`")
+                })?;
+                if let Some(bad) = modules.iter().find(|m| m.is_empty() || m.split("::").any(str::is_empty)) {
+                    return Err(serde::de::Error::custom(format!(
+                        "`[language] identity_storage` exempt module `{bad}` is not a `::`-joined module path"
+                    )));
+                }
+                Ok(IdentityStorageDeclaration(IdentityStorage::ExemptModules(modules)))
+            }
+        }
+        d.deserialize_any(Vis)
     }
 }
 
@@ -34,11 +88,12 @@ impl<'de> serde::Deserialize<'de> for LanguageConfig {
         impl<'de> serde::de::Visitor<'de> for Vis {
             type Value = LanguageConfig;
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                write!(f, "a table with modules and/or globals keys")
+                write!(f, "a table with modules, globals and/or identity_storage keys")
             }
             fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<LanguageConfig, A::Error> {
                 let mut modules = rock_core::source_code::Dialect::Legacy;
                 let mut globals = rock_core::source_code::GlobalPolicy::Any;
+                let mut identity_storage = rock_core::source_code::IdentityStorage::Enforced;
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
                         "modules" => {
@@ -67,14 +122,17 @@ impl<'de> serde::Deserialize<'de> for LanguageConfig {
                                 ))
                             })?;
                         }
+                        "identity_storage" => {
+                            identity_storage = map.next_value::<IdentityStorageDeclaration>()?.0;
+                        }
                         other => {
                             return Err(serde::de::Error::custom(format!(
-                                "unknown key `{other}` in [language]; known keys: modules, globals"
+                                "unknown key `{other}` in [language]; known keys: modules, globals, identity_storage"
                             )));
                         }
                     }
                 }
-                Ok(LanguageConfig { modules, globals })
+                Ok(LanguageConfig { modules, globals, identity_storage })
             }
         }
         d.deserialize_map(Vis)
@@ -126,6 +184,12 @@ impl StickConfig {
             .as_ref()
             .map(|l| l.globals)
             .unwrap_or(rock_core::source_code::GlobalPolicy::Any)
+    }
+
+    /// This package's identity-storage migration state. Missing `[language]`
+    /// or missing `identity_storage` is enforced.
+    pub fn identity_storage(&self) -> rock_core::source_code::IdentityStorage {
+        self.language.as_ref().map(|l| l.identity_storage.clone()).unwrap_or_default()
     }
 
     /// This package's source dialect. Missing `[language]` is legacy.
@@ -1263,6 +1327,31 @@ mod tests {
             .expect_err("`[language] memory` must not load");
         let text = format!("{err:#}");
         assert!(text.contains("`[language] memory` was removed; delete it"), "{text}");
+    }
+
+    #[test]
+    fn the_language_identity_storage_key_declares_the_migration_state() {
+        use rock_core::source_code::IdentityStorage;
+        let state = |language: &str| {
+            StickConfig::new_from_str(&format!("[package]\nname = \"x\"\n{language}")).map(|c| c.identity_storage())
+        };
+        assert_eq!(state("").unwrap(), IdentityStorage::Enforced);
+        assert_eq!(state("[language]\nidentity_storage = \"enforced\"\n").unwrap(), IdentityStorage::Enforced);
+        assert_eq!(state("[language]\nidentity_storage = \"exempt\"\n").unwrap(), IdentityStorage::Exempt);
+        assert_eq!(
+            state("[language]\nidentity_storage = { exempt_modules = [\"nav\", \"ui::old\"] }\n").unwrap(),
+            IdentityStorage::ExemptModules(vec!["nav".into(), "ui::old".into()])
+        );
+        for (bad, want) in [
+            ("\"unchecked\"", "unknown `[language] identity_storage` value `unchecked`"),
+            ("{ modules = [\"nav\"] }", "unknown key `modules` in `[language] identity_storage`"),
+            ("{}", "table needs `exempt_modules`"),
+            ("{ exempt_modules = [\"nav::\"] }", "exempt module `nav::` is not a `::`-joined module path"),
+        ] {
+            let err = state(&format!("[language]\nidentity_storage = {bad}\n")).expect_err(bad);
+            let text = format!("{err:#}");
+            assert!(text.contains(want), "{bad}: {text}");
+        }
     }
 
     #[test]

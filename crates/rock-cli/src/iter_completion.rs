@@ -117,7 +117,7 @@ pub fn iter_completion(path: &str, iters: usize, warmup: usize, budget_ms: Optio
 
     // Warm: cold load (project + stick.toml deps) + seed the buffer. Excluded
     // from the timing -- this is what the server does on first open.
-    let mut bone = BoneWorkspace::with_identity_storage_exemptions(crate::registry::registered().identity_storage_exemptions);
+    let mut bone = BoneWorkspace::new();
     bone.load_project(&target);
     bone.update(&target, text.clone());
 

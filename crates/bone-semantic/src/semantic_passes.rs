@@ -144,6 +144,7 @@ pub fn lower_modules(
         .map(|rock_mod| Module {
             file: rock_mod.file,
             package: rock_mod.package.as_ref().map(|tag| ustr(&tag.self_name)),
+            identity_storage: rock_mod.package.as_ref().map(|tag| tag.identity_storage.clone()).unwrap_or_default(),
             ..Default::default()
         })
         .collect_vec();

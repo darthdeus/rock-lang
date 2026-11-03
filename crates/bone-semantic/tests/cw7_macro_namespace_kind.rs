@@ -12,6 +12,7 @@ fn provider(dialect: Dialect, file: &str) -> Ast {
     ast.package = Some(rock_core::source_code::PackageTag {
         id: 1,
         self_name: "provider".to_string(),
+        identity_storage: Default::default(),
     });
     ast
 }
@@ -65,6 +66,7 @@ fn check_namespace(dialect: Dialect) {
         consumer.package = Some(rock_core::source_code::PackageTag {
             id: 2,
             self_name: "consumer".to_string(),
+            identity_storage: Default::default(),
         });
         modules.push(consumer);
     }

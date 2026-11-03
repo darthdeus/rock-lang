@@ -391,6 +391,10 @@ pub struct Module {
     /// The owning package's manifest name, stamped by the host graph. `None`
     /// for stdlib files and for programs outside any package.
     pub package: Option<Ustr>,
+    /// The owning package's declared identity-storage migration state,
+    /// stamped with `package`. Enforced for files outside any package; the
+    /// exemption predicate decides those by their census label.
+    pub identity_storage: skull_parser::IdentityStorage,
 
     pub functions: Arena<Function>,
     pub functions_by_name: FxHashMap<Ustr, FnList>,
@@ -452,6 +456,7 @@ impl Default for Module {
 
             file: Ustr::from(""),
             package: None,
+            identity_storage: Default::default(),
 
             functions: Default::default(),
             functions_by_name: Default::default(),

@@ -111,7 +111,7 @@ fn qualified_register_workspace(registrations: &[&str]) -> bone_semantic::infere
             ustr::Ustr::from(&format!("<registry{index}>")),
             skull_parser::Dialect::V1,
         ).expect("v1 registration source");
-        module.package = Some(skull_parser::PackageTag { id: 0, self_name: "shaders".into() });
+        module.package = Some(skull_parser::PackageTag { id: 0, self_name: "shaders".into(), identity_storage: Default::default() });
         modules.push(module);
     }
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("workspace");

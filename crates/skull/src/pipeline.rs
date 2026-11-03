@@ -6,7 +6,6 @@
 
 use std::sync::LazyLock;
 
-use bone_core::identity_storage::IdentityStorageExemptions;
 use bone_core::modules::NsAliases;
 use bone_semantic::inference::{ComptimeInputs, Workspace};
 use bone_semantic::prelude::{FxHashMap, FxHashSet, ModuleId};
@@ -55,15 +54,13 @@ pub enum ClosureGate {
     LeaveToCaller,
 }
 
-/// Lower and type-check `modules` under the host's migration exemptions.
+/// Lower and type-check `modules`.
 pub fn semantic_pass(
     modules: &mut [Ast],
     aliases: &NsAliases,
-    exemptions: IdentityStorageExemptions,
     gate: ClosureGate,
 ) -> Result<Workspace, CompilerError> {
-    let ws = Workspace { identity_storage_exemptions: exemptions, ..Default::default() };
-    let ws = bone_semantic::semantic_passes::semantic_pass_into(ws, modules, aliases)?;
+    let ws = bone_semantic::semantic_passes::semantic_pass_into(Workspace::default(), modules, aliases)?;
     if gate == ClosureGate::Enforce {
         bone_semantic::semantic_passes::pass_validate_api_closure(&ws)?;
     }
@@ -77,7 +74,6 @@ pub fn semantic_pass(
 /// "lowered and checked", not "no type errors".
 pub fn check_modules(
     modules: &mut [Ast],
-    exemptions: IdentityStorageExemptions,
     gate: ClosureGate,
     aliases: impl FnOnce(&[Ast]) -> Result<NsAliases, CompilerError>,
 ) -> Result<(Workspace, Vec<CompilerError>), Vec<CompilerError>> {
@@ -97,7 +93,7 @@ pub fn check_modules(
         return Err(macro_labels);
     }
     let aliases = aliases(modules).map_err(|error| vec![error])?;
-    let ws = semantic_pass(modules, &aliases, exemptions, gate);
+    let ws = semantic_pass(modules, &aliases, gate);
     // Expansion recovers: a macro that must not expand records the reason on
     // `recovery_errors` and leaves the call in place. That reason explains
     // any type error the unexpanded call caused, so it reports first.
@@ -142,10 +138,6 @@ pub enum Phase<'a> {
 
 /// What a compile needs from its host.
 pub trait CompileHost {
-    /// Migration exemptions the semantic pass applies.
-    fn identity_storage_exemptions(&self) -> IdentityStorageExemptions {
-        IdentityStorageExemptions::default()
-    }
     /// Dependency alias tables for the module set.
     fn aliases(&mut self, modules: &[Ast]) -> Result<NsAliases, CompilerError>;
     /// The build inputs (`build_var` values, `embed_string` files), resolved
@@ -243,9 +235,8 @@ pub fn compile_modules(
     target: EmitTarget<'_>,
     host: &mut dyn CompileHost,
 ) -> Result<Compiled, CompileFailure> {
-    let exemptions = host.identity_storage_exemptions();
     let (mut ws, body_errors) =
-        check_modules(&mut modules, exemptions, ClosureGate::Enforce, |m| host.aliases(m))
+        check_modules(&mut modules, ClosureGate::Enforce, |m| host.aliases(m))
             .map_err(|errors| CompileFailure::at(Stage::Check, errors))?;
     if !body_errors.is_empty() {
         return Err(CompileFailure::at(Stage::Check, body_errors));

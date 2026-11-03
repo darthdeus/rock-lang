@@ -2553,6 +2553,7 @@ fn fuzz_session_fixture_package_graph() {
                 package: Some(skull_parser::PackageTag {
                     id: node.id.0,
                     self_name: node.self_name.clone(),
+                    identity_storage: Default::default(),
                 }),
                 global_policy: node.global_policy,
             };

@@ -84,7 +84,7 @@ pub fn completion_sweep(path: &str, stride: usize, check: bool) -> Result<()> {
     }
     let root = fs_err::canonicalize(dir)?;
 
-    let mut bone = BoneWorkspace::with_identity_storage_exemptions(crate::registry::registered().identity_storage_exemptions);
+    let mut bone = BoneWorkspace::new();
     let first = fs_err::canonicalize(&files[0])?.to_string_lossy().to_string();
     bone.load_project(&first);
 

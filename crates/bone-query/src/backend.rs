@@ -425,7 +425,6 @@ fn stick_is_bin(root: &Path) -> bool {
 #[derive(Default)]
 pub struct BoneWorkspace {
     lint_options: bone_lints::LintOptions,
-    identity_storage_exemptions: bone_semantic::identity_storage::IdentityStorageExemptions,
     projects: HashMap<PathBuf, BoneProject>,
     /// Project roots already batch-indexed from disk. The first `update` for a
     /// file in a `stick.toml` project bulk-loads its siblings so cross-file
@@ -553,10 +552,6 @@ impl BoneWorkspace {
         Self::default()
     }
 
-    pub fn with_identity_storage_exemptions(exemptions: bone_semantic::identity_storage::IdentityStorageExemptions) -> Self {
-        Self { identity_storage_exemptions: exemptions, ..Self::default() }
-    }
-
     /// Canonicalize `path` (collapse `/./`, resolve to the OS canonical form),
     /// falling back to the input verbatim if it doesn't exist on disk (a
     /// not-yet-saved buffer). Idempotent: discovery and `root_for`/`stick_root`
@@ -631,7 +626,7 @@ impl BoneWorkspace {
                 lint_options: self.lint_options.clone(),
                 // Warm-only session is always valid even if the first file
                 // doesn't parse; the file is added by the update_file below.
-                session: Session::new_with_identity_storage_exemptions(warm_stdlib(), Vec::new(), &aliases, self.identity_storage_exemptions)
+                session: Session::new(warm_stdlib(), Vec::new(), &aliases)
                     .expect("bone session warm-init (stdlib) must succeed"),
                 texts: stdlib_texts().into_iter().collect(),
                 freq: None, hole_cache: HashMap::new(), lint_cache: Default::default(),
@@ -731,7 +726,7 @@ impl BoneWorkspace {
             .map(crate::package_aliases::from_graph)
             // Scratch roots need no aliases; graph failures were logged by project_graph.
             .unwrap_or_default();
-        match Session::new_with_identity_storage_exemptions(warm_stdlib(), files, &aliases, self.identity_storage_exemptions) {
+        match Session::new(warm_stdlib(), files, &aliases) {
             Ok(session) => {
                 let texts: HashMap<String, String> =
                     stdlib_texts().into_iter().chain(file_texts).collect();
@@ -884,12 +879,12 @@ impl BoneWorkspace {
         // or entering one by one after a failed batch) takes its dialect and
         // package from the manifest, exactly as the batch load's files did.
         if !proj.session.is_tracked(path) {
-            let facts = proj
+            let node = proj
                 .graph
                 .as_ref()
-                .and_then(|g| rock_host::compilation_units::source_facts(g, Path::new(path)));
-            let (package, dialect, global_policy) = match facts {
-                Some((package, dialect, global_policy)) => (Some(package), dialect, global_policy),
+                .and_then(|g| rock_host::compilation_units::source_package(g, Path::new(path)));
+            let (package, dialect, global_policy) = match node {
+                Some(node) => (Some(node.tag()), node.dialect, node.global_policy),
                 None => (None, skull_parser::Dialect::Legacy, skull_parser::GlobalPolicy::Any),
             };
             if let Err(e) = proj
