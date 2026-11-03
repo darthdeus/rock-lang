@@ -5,6 +5,11 @@
 [![Written in Rust](https://img.shields.io/badge/written%20in-Rust-orange?logo=rust)](https://www.rust-lang.org)
 [![Runs on LuaJIT](https://img.shields.io/badge/runs%20on-LuaJIT-000080)](https://luajit.org)
 
+** Even though the Rock compiler is public now, it should still be considered
+experimental, as there are parts of it I still haven't fully released, and
+parts may be a bit tied to how I use it on my own projects. This will be
+improved over time.**
+
 Rock is a statically typed programming language that compiles to LuaJIT and GLSL.
 The compiler is mostly a personal project that I decided to opensource. It does not
 appeal to mass market adoption ... yet :)
