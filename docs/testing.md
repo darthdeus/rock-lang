@@ -102,6 +102,18 @@ after the runtime-test summary, which can show `0/0` for an error-only file.
 
 ## Compiler tests and checking the checks
 
+For the full Rust workspace, install SDL2 development libraries and `pkg-config`
+(the shader runner uses them to discover SDL2), plus LuaJIT and Node on `PATH`:
+
+```sh
+# macOS (Homebrew)
+brew install sdl2 pkg-config
+# Debian/Ubuntu
+sudo apt-get install libsdl2-dev pkg-config
+
+cargo test --locked --workspace --no-fail-fast
+```
+
 Run the Rust suites for every crate changed, for example:
 
 ```sh

@@ -21,7 +21,7 @@ jobs:
       - name: Install SDL2 development libraries
         run: |
           sudo apt-get update
-          sudo apt-get install -y libsdl2-dev
+          sudo apt-get install -y libsdl2-dev pkg-config
       # Distro LuaJIT builds older than 2.1.1785763465 round some exact
       # ties in number formatting differently from the correctly rounded
       # result that the Lua and JS backends must agree on.

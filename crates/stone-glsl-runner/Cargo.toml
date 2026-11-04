@@ -10,7 +10,7 @@ name = "stone-glsl-runner"
 path = "src/main.rs"
 
 [dependencies]
-sdl2 = { version = "0.38" }
+sdl2 = { version = "0.38", features = ["use-pkgconfig"] }
 glow = "0.17"
 serde_json = { workspace = true }
 
