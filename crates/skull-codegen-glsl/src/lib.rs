@@ -21,9 +21,7 @@ mod structure;
 
 pub use skull_mir::shader_ir::GlslProfile;
 
-use bone_semantic::hir::{
-    AnnoValue, BuiltinTy, Expr, Function, StructDef, TyId, TypeCtor, TypeExpr,
-};
+use bone_semantic::hir::{AnnoValue, BuiltinTy, Function, StructDef, TyId, TypeCtor, TypeExpr};
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::{FnList, ModuleId, Span};
 use comfy_la_arena::Idx;
