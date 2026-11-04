@@ -11,8 +11,7 @@
 //! `instance_owned_emission` discipline) rather than a bare name, because a
 //! callee's own definition line contains its symbol.
 
-mod common;
-use common::{emit_module, function_body};
+use crate::common::{emit_module, function_body};
 
 /// Every emitted top-level definition symbol, from its `function <sym>(` header.
 fn definition_symbols(lua: &str) -> Vec<String> {

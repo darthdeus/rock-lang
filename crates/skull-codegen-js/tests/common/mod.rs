@@ -1,7 +1,7 @@
 //! Shared test helpers: build the stdlib workspace and emit an intrinsic's
 //! scalar Rock-fallback body to JS.
 
-#![allow(dead_code)] // every test file includes this module; none uses all of it.
+#![allow(dead_code)]
 
 use std::sync::Arc;
 

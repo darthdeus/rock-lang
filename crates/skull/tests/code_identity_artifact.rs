@@ -1,6 +1,4 @@
-mod common;
-
-use common::{emit_mir, run_luajit};
+use crate::common::{emit_mir, run_luajit};
 
 #[test]
 fn emitted_lua_artifact_has_a_total_escaping_function_census() {

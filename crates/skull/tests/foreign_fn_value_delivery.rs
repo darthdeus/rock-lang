@@ -11,8 +11,7 @@
 //! `@test`s die on `attempt to call local 'r0' (a nil value)` when the
 //! definition is missing.
 
-mod common;
-use common::emit_module;
+use crate::common::emit_module;
 
 fn definition_symbols(lua: &str) -> Vec<String> {
     lua.match_indices("\nfunction ")

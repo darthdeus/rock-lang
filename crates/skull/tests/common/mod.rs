@@ -1,9 +1,9 @@
 //! Shared skull codegen-test harness: parse + semantic_pass, then either a full
 //! MIR emit against the real stdlib (`emit_mir` / `emit_module`) or a bare
-//! single-module workspace (`ws_of`). Pulled into each `tests/*.rs` via
-//! `mod common;`.
+//! single-module workspace (`ws_of`). Each integration harness declares this
+//! module once; its test modules import helpers through `crate::common`.
 
-#![allow(dead_code)] // every test file includes this module; none uses all of it.
+#![allow(dead_code)] // The main and GPU harnesses use different helper subsets.
 
 use bone_semantic::inference::Workspace;
 use std::sync::LazyLock;

@@ -9,8 +9,7 @@
 //! `function <sym>(` and the callee-bound `__rock_mk_<sym> = function(`); call
 //! spellings are read out of the caller's body via `function_body`.
 
-mod common;
-use common::{definition_names, emit_module, function_body, ws_with_stdlib};
+use crate::common::{self, definition_names, emit_module, function_body, ws_with_stdlib};
 
 /// Every emitted top-level definition symbol, from its definition header in
 /// whichever callee shape the build emits (`function <sym>(` or the bound

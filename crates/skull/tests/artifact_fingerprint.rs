@@ -1,9 +1,7 @@
 //! RED contract fixtures for the compiler-owned exact Artifact fingerprint.
 
-mod common;
-
+use crate::common::{emit_mir_with_inputs, try_emit_mir_with_inputs};
 use bone_semantic::inference::{ComptimeInputs, ComptimeVarValue};
-use common::{emit_mir_with_inputs, try_emit_mir_with_inputs};
 use ustr::Ustr;
 
 fn inputs(values: &[(&str, &str)], volatile: &[&str]) -> ComptimeInputs {

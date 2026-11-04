@@ -12,9 +12,8 @@
 //! end-to-end control: a retained instance that reaches no definition would still
 //! be a nil call at load.
 
-mod common;
-use common::{
-    V1Fragment, emit_v1_package, fn_ref, ws_v1_package, ws_with_dependency_module,
+use crate::common::{
+    self, V1Fragment, emit_v1_package, fn_ref, ws_v1_package, ws_with_dependency_module,
     ws_with_stdlib_module,
 };
 use skull::mir_emit::emit_full;

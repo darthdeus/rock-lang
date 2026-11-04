@@ -3,9 +3,8 @@
 //! below prove addition, removal, and reintroduction against a nonzero
 //! population.
 
-mod common;
+use crate::common::ws_with;
 use bone_semantic::hir::BodyOwner;
-use common::ws_with;
 use skull_mir::mir::FuncRef;
 
 fn function(ws: &bone_semantic::inference::Workspace, name: &str) -> FuncRef {
