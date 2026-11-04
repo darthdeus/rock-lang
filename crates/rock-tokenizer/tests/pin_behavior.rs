@@ -232,7 +232,7 @@ fn pin_lex_roundtrip_where_it_applies() {
         ("foo_bar", TokenKind::Ident("foo_bar".into())),
     ];
     for (src, expected) in &roundtrip {
-        assert_eq!(&kinds(src), &vec![expected.clone()], "roundtrip {:?}", src);
+        assert_eq!(&kinds(src), &vec![*expected], "roundtrip {:?}", src);
         assert_eq!(expected.to_code(), src.to_string(), "to_code {:?}", src);
     }
     assert_eq!(kinds("&&"), vec![TokenKind::And]);

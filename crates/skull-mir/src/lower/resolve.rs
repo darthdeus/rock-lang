@@ -437,7 +437,7 @@ impl Builder<'_> {
         let tuple_box_shape = expr_tuple_shape.clone().filter(TupleRetShape::splats);
         let nobox_global_place = self.nobox_global_place(e)?;
         let nullable_place_value = self.nullable_place_value_of(e)?;
-        match self.body.expr_arena[e].clone() {
+        match self.body.expr_arena[e] {
             Expr::Block { statements, tail } => self.lower_block_repr(statements, tail),
             Expr::If {
                 cond,

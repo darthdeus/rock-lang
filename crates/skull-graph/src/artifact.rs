@@ -991,7 +991,7 @@ impl ArtifactView {
         }
         for decl in root_added {
             local_index_rows_examined += 1;
-            root_entries_examined += usize::from(self.index.root_decls.insert(decl.clone()));
+            root_entries_examined += usize::from(self.index.root_decls.insert(*decl));
         }
         for i in &subjects {
             local_index_rows_examined += 1;
@@ -1337,7 +1337,7 @@ impl ArtifactView {
             }
             if g.inline_body_deps.contains_key(decl) {
                 rows_examined += 1;
-                owners.insert(decl.clone());
+                owners.insert(*decl);
             }
         }
         if owners.is_empty() {
@@ -1373,12 +1373,12 @@ impl ArtifactView {
                     let dependency = DeclKey(rep);
                     self.index
                         .inline_consumers
-                        .entry(dependency.clone())
+                        .entry(dependency)
                         .or_default()
-                        .insert(owner.clone());
+                        .insert(*owner);
                     self.index
                         .inline_dependencies_by_owner
-                        .entry(owner.clone())
+                        .entry(*owner)
                         .or_default()
                         .insert(dependency);
                 }
@@ -1433,7 +1433,7 @@ impl ArtifactView {
             }
             self.index
                 .inline_by_owner
-                .insert(owner.clone(), (inline, unresolved));
+                .insert(*owner, (inline, unresolved));
             if let Some((deps, unresolved)) = self.index.inline_by_owner.get(owner) {
                 rows_examined += deps.len() + unresolved.len();
                 for dep in deps {
@@ -1481,8 +1481,7 @@ impl ArtifactView {
                 || self.index.instances_by_decl.contains_key(&owner.0)
             {
                 if let Some(targets) = g.inline_body_nomangle_roots.get(owner) {
-                    self.opaque_boundary_roots
-                        .insert(owner.clone(), targets.clone());
+                    self.opaque_boundary_roots.insert(*owner, targets.clone());
                 }
             }
         }
@@ -1550,7 +1549,7 @@ impl ArtifactView {
             }
             self.index
                 .publication_decls
-                .entry(decl.clone())
+                .entry(*decl)
                 .or_default()
                 .insert(instance.clone());
             self.index
@@ -2298,12 +2297,12 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
             let dependency = DeclKey(rep);
             index
                 .inline_consumers
-                .entry(dependency.clone())
+                .entry(dependency)
                 .or_default()
-                .insert(owner.clone());
+                .insert(*owner);
             index
                 .inline_dependencies_by_owner
-                .entry(owner.clone())
+                .entry(*owner)
                 .or_default()
                 .insert(dependency);
         }
@@ -2482,7 +2481,7 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
     let mut by_pub_symbol: BTreeMap<String, Vec<Instance>> = BTreeMap::new();
     let mut unrepresented_publications: Vec<FuncRef> = Vec::new();
     for (inst, symbol) in &publication_candidates {
-        if !g.instances.contains(&inst) {
+        if !g.instances.contains(inst) {
             unrepresented_publications.push(inst.func);
             continue;
         }
@@ -2511,7 +2510,7 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
         .inline_body_nomangle_roots
         .iter()
         .filter(|(owner, _)| retained_decls.contains(owner))
-        .map(|(owner, targets)| (owner.clone(), targets.clone()))
+        .map(|(owner, targets)| (*owner, targets.clone()))
         .collect();
 
     ArtifactView {

@@ -285,8 +285,8 @@ fn main() { print(selected([Row { a: 1, b: 2, c: 3, d: 4, e: 5, f: 6 }], 0)) }
 "#,
     );
     let roots = skull::mir_emit::emission_roots(&ws, None);
-    let mut graph = skull::instance_graph::build(&ws, roots, false);
-    let bodies = skull::concrete_body::build(&ws, &mut graph);
+    let graph = skull::instance_graph::build(&ws, roots, false);
+    let bodies = skull::concrete_body::build(&ws, &graph);
     let plan = bodies
         .plans
         .iter()

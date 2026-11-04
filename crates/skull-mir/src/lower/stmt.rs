@@ -830,7 +830,7 @@ impl Builder<'_> {
     /// Lower an expression in statement position (value discarded). A tail-less
     /// block lowers to nothing (no dead unit); side-effecting tails still run.
     pub(crate) fn lower_stmt_expr(&mut self, e: Idx<Expr>) -> Result<(), CompilerError> {
-        match self.body.expr_arena[e].clone() {
+        match self.body.expr_arena[e] {
             Expr::Block { statements, tail } => {
                 self.defers.push(Vec::new());
                 let terminated = self.lower_stmts(statements)?;

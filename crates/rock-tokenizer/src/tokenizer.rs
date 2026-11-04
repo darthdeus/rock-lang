@@ -1099,7 +1099,7 @@ impl<'a> Tokenizer<'a> {
     ) -> Result<Option<Token>, CompilerError> {
         let meaningful = !matches!(kind, TokenKind::Newline | TokenKind::Comment(_));
         if meaningful {
-            self.last_token_kind = Some(kind.clone());
+            self.last_token_kind = Some(kind);
         }
         self.just_skipped_whitespace = false;
         Ok(Some(Token {
@@ -1625,7 +1625,7 @@ fn main() {       // trailing comment
             .tokenize()
             .unwrap();
 
-        let kinds = tokens.iter().map(|t| t.kind.clone()).collect_vec();
+        let kinds = tokens.iter().map(|t| t.kind).collect_vec();
 
         assert_eq!(
             kinds,

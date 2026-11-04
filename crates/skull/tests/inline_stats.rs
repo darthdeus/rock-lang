@@ -15,8 +15,8 @@ fn main() {
 "#,
     );
     let roots = skull::mir_emit::emission_roots(&ws, None);
-    let mut graph = instance_graph::build(&ws, roots, false);
-    let bodies = skull::concrete_body::build(&ws, &mut graph);
+    let graph = instance_graph::build(&ws, roots, false);
+    let bodies = skull::concrete_body::build(&ws, &graph);
     let expected = bodies.plans.len();
     assert!(
         expected > 3,

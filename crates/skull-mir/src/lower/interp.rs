@@ -18,7 +18,7 @@ impl Builder<'_> {
         use bone_semantic::hir::InterpPart;
         let mut acc: Option<Idx<Inst>> = None;
         for p in parts {
-            let s = match self.body.interp_part_arena[p].clone() {
+            let s = match self.body.interp_part_arena[p] {
                 InterpPart::Literal(lit) => self.emit_cur(Inst::Const(Lit::Str(lit))),
                 InterpPart::Value { expr, spec } => {
                     // Every call a hole synthesizes belongs to the HOLE, not to
@@ -309,7 +309,7 @@ impl Builder<'_> {
         // `string.format("%.2f", nil)`. A null has nothing to pad or round, so it
         // renders bare "nil" whatever the spec asks for.
         if self.expr_is_nullable(expr) {
-            let spec = spec.clone();
+            let spec = *spec;
             return self.nil_guarded_render(v, move |s| s.lower_format_non_null(expr, v, &spec));
         }
         self.lower_format_non_null(expr, v, spec)

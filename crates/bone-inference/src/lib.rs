@@ -498,7 +498,7 @@ pub fn check_function(
         match (&binding.kind, binding.declared_ty) {
             (BindingKind::Param, Some(ty)) => {
                 gamma.assign_named_type(param_binding, ty)?;
-                if contains_frame_ref(&mut gamma, ty) {
+                if contains_frame_ref(&gamma, ty) {
                     gamma
                         .ref_binding_provenance
                         .insert(param_binding, RefProvenance::Stable);

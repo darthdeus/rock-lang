@@ -199,7 +199,7 @@ fn main() {{ print(\"{{roundtrip(0.0)}}\") }}
 #[test]
 fn the_retained_old_abi_witness_still_fails_to_load() {
     let witness = include_str!("fixtures/generated-function.lua");
-    let err = luajit_loads(&witness, "wide_value_abi_old_witness")
+    let err = luajit_loads(witness, "wide_value_abi_old_witness")
         .expect_err("the retained witness is a diagnostic of the old ABI, not a repaired oracle");
     assert!(err.contains("too complex"), "unexpected parse error: {err}");
 }

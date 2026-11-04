@@ -262,9 +262,9 @@ impl<'a> BodyCtx<'a> {
 
     fn call_args(&self, call: Idx<Expr>) -> Option<Vec<Idx<Expr>>> {
         match &self.body.expr_arena[call] {
-            Expr::Call { args, .. } => Some(args.clone().into_iter().collect()),
+            Expr::Call { args, .. } => Some((*args).into_iter().collect()),
             Expr::SafeNavCall { receiver, args, .. } => {
-                Some(std::iter::once(*receiver).chain(args.clone()).collect())
+                Some(std::iter::once(*receiver).chain(*args).collect())
             }
             _ => None,
         }
@@ -400,7 +400,7 @@ impl<'a> BodyCtx<'a> {
                 }
             }
             Expr::Match { arms, .. } => {
-                for arm in arms.clone() {
+                for arm in *arms {
                     self.element_roots(self.body.match_arm_arena[arm].body, out);
                 }
             }

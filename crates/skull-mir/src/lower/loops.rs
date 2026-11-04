@@ -65,13 +65,13 @@ impl Builder<'_> {
         iter: Idx<Expr>,
         body: Idx<Expr>,
     ) -> Result<(), CompilerError> {
-        if let Expr::Range { low, high } = self.body.expr_arena[iter].clone() {
+        if let Expr::Range { low, high } = self.body.expr_arena[iter] {
             return match vars {
                 BindingPattern::Leaf(var_b) => self.lower_for_range(var_b, low, high, body),
                 BindingPattern::Tuple(_) => Err(gap("for-range with a tuple pattern")),
             };
         }
-        let enumerated_collection = match self.body.expr_arena[iter].clone() {
+        let enumerated_collection = match self.body.expr_arena[iter] {
             Expr::Call {
                 callee: Callee::Unresolved { name, .. },
                 args,

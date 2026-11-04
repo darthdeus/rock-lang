@@ -90,7 +90,7 @@ fn emit_compute_wgsl(src: &str) -> String {
         &skull_codegen_wgsl::WgslShaderPolicy,
     )
     .expect("compute neutral plan");
-    let entry = neutral.entry.inst.symbol(&ws, &scx.interner());
+    let entry = neutral.entry.inst.symbol(&ws, scx.interner());
     let abi = skull_codegen_wgsl::WgslAbiPlan::compute(
         &neutral.interface,
         &format!("{entry}_compute"),
@@ -503,7 +503,7 @@ fn compiler_authored_rect_loss_fixture_is_naga_validated() {
     );
     assert_eq!(compute_iface.workgroup[0].size, 64);
 
-    let entry = neutral.entry.inst.symbol(&ws, &scx.interner());
+    let entry = neutral.entry.inst.symbol(&ws, scx.interner());
     let abi = skull_codegen_wgsl::WgslAbiPlan::compute(
         &neutral.interface,
         &format!("{entry}_compute"),
@@ -837,7 +837,7 @@ fn rect_loss_shaped_compute_keeps_root_helper_plan_and_naga_population() {
         compute_iface.dispatch,
         skull_mir::shader_ir::ComputeDispatchContract::Runtime { dimensions: 1 }
     );
-    let entry = neutral.entry.inst.symbol(&ws, &scx.interner());
+    let entry = neutral.entry.inst.symbol(&ws, scx.interner());
     let abi = skull_codegen_wgsl::WgslAbiPlan::compute(
         &neutral.interface,
         &format!("{entry}_compute"),
@@ -1010,7 +1010,7 @@ fn saxpy_compute_emits_deterministic_wgsl_and_v4_abi() {
         &skull_codegen_wgsl::WgslShaderPolicy,
     )
     .expect("compute neutral plan");
-    let logical_entry = neutral.entry.inst.symbol(&ws, &scx.interner());
+    let logical_entry = neutral.entry.inst.symbol(&ws, scx.interner());
     let abi = skull_codegen_wgsl::WgslAbiPlan::compute(
         &neutral.interface,
         &format!("{logical_entry}_compute"),

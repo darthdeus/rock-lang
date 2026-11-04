@@ -3408,7 +3408,7 @@ fn emit_coroutine_chunk(
     // `instances_of`. `deps` carries only what codegen alone knows -- which
     // bodies this chunk's TEXT contains.
     let mut abi_deps = FxHashSet::default();
-    collect_abi_dependencies(&mf, &mut abi_deps);
+    collect_abi_dependencies(mf, &mut abi_deps);
     deps.extend(abi_deps.iter().copied());
     Ok(Chunk {
         abi_deps,
@@ -4882,7 +4882,7 @@ fn named_sim_dependencies(
                     Expr::Call { args, family, .. }
                         if skull_mir::mangle::declared_name(family.key().as_str()) == "get" =>
                     {
-                        let mut args = args.clone();
+                        let mut args = *args;
                         if args.next() == Some(id) {
                             args.next()
                         } else {
@@ -7328,11 +7328,11 @@ fn emit_full_in_with_mutation(
         if let BodyMutation::ConcreteResultOrder(order) = mutation {
             crate::concrete_body::build_with_result_order(ws, &graph, order).0
         } else {
-            crate::concrete_body::build(ws, &mut graph)
+            crate::concrete_body::build(ws, &graph)
         }
         #[cfg(not(test))]
         {
-            crate::concrete_body::build(ws, &mut graph)
+            crate::concrete_body::build(ws, &graph)
         }
     };
     #[cfg(test)]

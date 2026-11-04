@@ -671,7 +671,7 @@ impl Builder<'_> {
         if self.scx.values_first_class {
             return Ok(None);
         }
-        match self.body.expr_arena[e].clone() {
+        match self.body.expr_arena[e] {
             // The DECLARED type, never `e`'s: a refined read of a `global X: NV2?`
             // has expr type `NV2`, whose 2-leaf shape would address the presence
             // leaf as `x`. Storage layout is a property of the global, not of the

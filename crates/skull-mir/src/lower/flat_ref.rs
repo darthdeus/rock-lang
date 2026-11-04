@@ -123,7 +123,7 @@ fn is_phantom_call(body: &Body, e: Idx<Expr>) -> bool {
     matches!(
         &body.expr_arena[e],
         Expr::Call { callee: Callee::Unresolved { name, .. }, args, .. }
-            if name.as_str() == "phantom" && args.clone().into_iter().next().is_none()
+            if name.as_str() == "phantom" && (*args).into_iter().next().is_none()
     )
 }
 
@@ -138,7 +138,7 @@ fn scan_returns(
     let go = |x: Idx<Expr>, returns: &mut Vec<Idx<Expr>>, lets: &mut Vec<_>| {
         scan_returns(body, x, returns, lets)
     };
-    match body.expr_arena[e].clone() {
+    match body.expr_arena[e] {
         Expr::Unit
         | Expr::Null
         | Expr::Hole(_)

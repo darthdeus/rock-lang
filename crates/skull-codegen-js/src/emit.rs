@@ -3144,7 +3144,7 @@ pub fn emit_with_closure(
         &st.lowered,
         &st.spec_lowered,
         &bodies,
-        &st.concrete,
+        st.concrete,
         &st.artifact_decls,
     ));
     let hoisted = collect_hoisted(&bodies);
@@ -3227,7 +3227,7 @@ pub fn emit_with_closure(
         out.push_str(&emit_inline_js_fn(
             ws,
             &scx,
-            &st.concrete,
+            st.concrete,
             &body.instance,
             body.decl,
             st.names
@@ -3421,7 +3421,7 @@ fn new_js_session(
     scx: &skull_mir::lower::ScalarCtx,
     roots: &[FuncRef],
 ) -> JsSession {
-    let mut graph =
+    let graph =
         skull_graph::instance_graph::build_in(ws, roots.to_vec(), false, scx.interner_handle());
     let mappings = artifact::ArtifactMappings::for_backend(bone_semantic::hir::FnBackend::Js)
         .with_supply(&crate::JsBackendRealization);
@@ -3432,7 +3432,7 @@ fn new_js_session(
             .with_mappings(mappings)
             .with_symbols(&artifact::REALIZED_SYMBOLS),
     );
-    let concrete = skull_graph::concrete_body::build(ws, &mut graph);
+    let concrete = skull_graph::concrete_body::build(ws, &graph);
     JsSession {
         roots: roots.to_vec(),
         graph,
@@ -3682,7 +3682,7 @@ fn assemble_program_core(
                         ws,
                         scx,
                         plan,
-                        &st.concrete,
+                        st.concrete,
                         ustr::Ustr::from(deco_name.as_str()),
                     )
                 });
@@ -3700,7 +3700,7 @@ fn assemble_program_core(
                 self_ref,
                 &mut mf,
                 &mut st.cache,
-                &st.concrete,
+                st.concrete,
             ) {
                 st.reject(&deco_name, e);
                 continue;
@@ -3760,7 +3760,7 @@ fn assemble_program_core(
         &st.lowered,
         &st.spec_lowered,
         &bodies,
-        &st.concrete,
+        st.concrete,
         &st.artifact_decls,
     ));
     let hoisted = collect_hoisted(&bodies);
@@ -3865,7 +3865,7 @@ fn assemble_program_core(
             .names
             .get(&body.instance)
             .expect("emitted body has a name");
-        match emit_inline_js_fn(ws, scx, &st.concrete, &body.instance, body.decl, name) {
+        match emit_inline_js_fn(ws, scx, st.concrete, &body.instance, body.decl, name) {
             Ok(definition) => {
                 out.push_str(&definition);
                 stable.push_str(&definition);
@@ -3943,7 +3943,7 @@ fn assemble_program_core(
     // Global initializers run once the slots they may reference are staged, and
     // before the definition plan materializes (a materializer may read them).
     out.push_str("__rock_state_initialize();\n");
-    let definition_stage = definition_plan_stage_js(ws, scx, &st.concrete, &definition_plan)?;
+    let definition_stage = definition_plan_stage_js(ws, scx, st.concrete, &definition_plan)?;
     out.push_str(&definition_stage);
     stable.push_str(&definition_stage);
     out.push_str(&lifecycle_plan_stage_js(
@@ -5043,7 +5043,7 @@ impl<'a, 'b> JsDelivery<'a, 'b> {
                 fr,
                 &mut mf,
                 &mut self.st.cache,
-                &self.st.concrete,
+                self.st.concrete,
             ) {
                 self.st.reject(&name, e);
                 return Ok(());
@@ -5155,7 +5155,7 @@ impl<'a, 'b> JsDelivery<'a, 'b> {
             self.ws,
             self.scx,
             plan,
-            &self.st.concrete,
+            self.st.concrete,
         ) {
             Ok(mf) => mf,
             Err(e) => {
@@ -5185,7 +5185,7 @@ impl<'a, 'b> JsDelivery<'a, 'b> {
             self.scx.interner(),
             &mut mf,
             &tree,
-            &self.st.concrete,
+            self.st.concrete,
         ) {
             self.st.reject(&name, e);
             return Ok(());
@@ -5203,7 +5203,7 @@ impl<'a, 'b> JsDelivery<'a, 'b> {
             fr,
             &mut mf,
             &mut self.st.cache,
-            &self.st.concrete,
+            self.st.concrete,
         ) {
             self.st.reject(&name, e);
             return Ok(());
@@ -5247,7 +5247,7 @@ impl<'a, 'b> JsDelivery<'a, 'b> {
                 self.ws,
                 self.scx,
                 plan,
-                &self.st.concrete,
+                self.st.concrete,
                 ustr::Ustr::from(init_name.as_str()),
             ),
             None if self

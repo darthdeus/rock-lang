@@ -160,7 +160,7 @@ impl Builder<'_> {
     }
 
     fn operation_representation(&self, e: Idx<Expr>) -> Result<Option<RepId>, CompilerError> {
-        match self.body.expr_arena[e].clone() {
+        match self.body.expr_arena[e] {
             Expr::Index { base, .. } => {
                 if let Some(elem) = self.vec_column_elem_of(base)? {
                     return Ok(Some(elem.representation()));
@@ -367,7 +367,7 @@ impl Builder<'_> {
             name,
             fields,
             bases,
-        } = self.body.expr_arena[op].clone()
+        } = self.body.expr_arena[op]
         {
             let decl = self
                 .struct_field_names(name)

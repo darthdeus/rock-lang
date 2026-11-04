@@ -1835,7 +1835,7 @@ pub(crate) fn commit_selected_call(
         let slots = reorder_call_args(
             c,
             gamma,
-            &arg_list,
+            arg_list,
             &param_names[offset..],
             function.num_required.saturating_sub(offset),
             true,

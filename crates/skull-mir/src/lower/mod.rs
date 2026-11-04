@@ -2112,7 +2112,7 @@ fn validate_concrete_type_tables(
         })?;
         let sid = ws
             .struct_by_name
-            .get(&name)
+            .get(name)
             .ok_or_else(|| gap(format!("{label} names unknown struct `{name}`")))?;
         let def = &ws.modules[sid.module.index()].structs[sid.def];
         for field in &def.fields {
@@ -3381,7 +3381,7 @@ impl Builder<'_> {
                     callee: Callee::Unresolved { name, .. },
                     args,
                     ..
-                } => name.as_str() == "phantom" && args.clone().into_iter().next().is_none(),
+                } => name.as_str() == "phantom" && (*args).into_iter().next().is_none(),
                 _ => false,
             };
             if is_phantom {
@@ -4919,7 +4919,7 @@ pub fn gpu_only_call_rejection(ws: &Workspace, mid: ModuleId) -> Option<Compiler
                 crate::intrinsics::expand_kind(f),
                 Some(ExpandKind::ShaderPipeline | ExpandKind::ComputeArtifact)
             ) {
-                shader_expansion_args.extend(args.clone().into_iter());
+                shader_expansion_args.extend((*args).into_iter());
             }
         }
         for (e, expr) in body.expr_arena.iter() {

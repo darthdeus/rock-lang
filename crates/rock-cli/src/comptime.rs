@@ -586,12 +586,12 @@ fn elf_load_segments<R: std::io::Read + std::io::Seek>(
         }
     };
     let (phoff, phentsize, phnum) = if is64 {
-        match (u64_at(&ident, 32), u16_at(&ident, 54), u16_at(&ident, 56)) {
+        match (u64_at(ident, 32), u16_at(ident, 54), u16_at(ident, 56)) {
             (Some(a), Some(b), Some(c)) => (a, b, c),
             _ => return Ok(None),
         }
     } else {
-        match (u32_at(&ident, 28), u16_at(&ident, 42), u16_at(&ident, 44)) {
+        match (u32_at(ident, 28), u16_at(ident, 42), u16_at(ident, 44)) {
             (Some(a), Some(b), Some(c)) => (a, b, c),
             _ => return Ok(None),
         }

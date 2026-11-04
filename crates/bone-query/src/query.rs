@@ -63,7 +63,7 @@ pub fn definition_at(
 
             hir::Expr::StructLiteral { name, fields, .. } => {
                 let enum_name = record_literal_enum(ws, def_bi, e, *name);
-                for fidx in fields.clone() {
+                for fidx in *fields {
                     let f = &body.struct_lit_field_arena[fidx];
                     if span_contains(&f.name_span, offset) {
                         return match enum_name {
@@ -252,7 +252,7 @@ fn pattern_field_def(ws: &Workspace, body: &Body, offset: usize) -> Option<Span>
         else {
             continue;
         };
-        for fidx in fields.clone() {
+        for fidx in *fields {
             let f = &body.record_pat_field_arena[fidx];
             let (s, e) = f.name_span.offset_range;
             if s <= offset && offset < e {
@@ -359,7 +359,7 @@ pub fn hover_at(
                                 // A field name under the cursor -> `field: T
                                 // (field of Struct)`; otherwise the head -> the
                                 // full struct definition.
-                                for fld_idx in fields.clone() {
+                                for fld_idx in *fields {
                                     let fld = &body.struct_lit_field_arena[fld_idx];
                                     let fs = fld.name_span.offset_range.0;
                                     // Cover the name through (but not including) the
@@ -851,7 +851,7 @@ fn hover_record_pat(ws: &Workspace, body: &Body, offset: usize) -> Option<(Strin
         // is excluded: the name token *is* the binding, so it hovers as a value
         // (`Type: T`) via the node dispatch -- only an explicit `field: bind`
         // (name distinct from its binding) is a field-name reference.
-        for fidx in fields.clone() {
+        for fidx in *fields {
             let f = &body.record_pat_field_arena[fidx];
             let (s, e) = f.name_span.offset_range;
             if s <= offset && offset < e {
@@ -1659,7 +1659,7 @@ fn struct_field_at(
     match &body.expr_arena[e] {
         // A field name inside a struct literal.
         hir::Expr::StructLiteral { name, fields, .. } => {
-            for fidx in fields.clone() {
+            for fidx in *fields {
                 let f = &body.struct_lit_field_arena[fidx];
                 let (fs, fe) = f.name_span.offset_range;
                 if fs <= offset && offset < fe {
@@ -1718,7 +1718,7 @@ fn field_references(ws: &Workspace, sname: Ustr, field: Ustr) -> Vec<RefSite> {
                     // where the value token IS the name token) expands on
                     // rename, keeping the binding: `{ <new>: x }`.
                     hir::Expr::StructLiteral { name, fields, .. } if *name == sname => {
-                        for fidx in fields.clone() {
+                        for fidx in *fields {
                             let f = &body.struct_lit_field_arena[fidx];
                             if f.name == field {
                                 let is_shorthand = body
@@ -1804,7 +1804,7 @@ fn field_references(ws: &Workspace, sname: Ustr, field: Ustr) -> Vec<RefSite> {
                 } = pat
                 {
                     if *n == sname {
-                        for fidx in fields.clone() {
+                        for fidx in *fields {
                             let f = &body.record_pat_field_arena[fidx];
                             if f.name == field {
                                 let is_shorthand = match body.pattern_arena[f.pat] {
@@ -2764,7 +2764,7 @@ pub fn call_param_hints(
                 continue;
             }
 
-            for (i, arg) in args.clone().enumerate() {
+            for (i, arg) in (*args).enumerate() {
                 // A NAMED arg (`b: 2`) already shows its name -- no hint, and its
                 // positional `param_decls.get(i)` mapping would be wrong anyway
                 // (a preceding named arg reorders/skips params). Positional args
@@ -4347,7 +4347,7 @@ fn match_missing_variants<'a>(
     // parity: `E::A if c =>` still reports A missing). An unguarded wildcard/
     // binding arm makes the whole match exhaustive.
     let mut covered: std::collections::HashSet<Ustr> = std::collections::HashSet::new();
-    for arm_idx in arms.clone() {
+    for arm_idx in *arms {
         let arm = &body.match_arm_arena[arm_idx];
         if arm.guard.is_some() {
             continue;
@@ -4426,7 +4426,7 @@ pub fn struct_fields_fill(
 
     // Field names already provided in the literal.
     let mut present: std::collections::HashSet<Ustr> = std::collections::HashSet::new();
-    for fidx in fields.clone() {
+    for fidx in *fields {
         present.insert(body.struct_lit_field_arena[fidx].name);
     }
 
@@ -4606,8 +4606,7 @@ pub fn generate_function(
         return None;
     }
 
-    let params: Vec<(String, String)> = args
-        .clone()
+    let params: Vec<(String, String)> = (*args)
         .enumerate()
         .map(|(i, arg)| {
             (
@@ -4753,7 +4752,7 @@ fn collect_covered_variants(
             out.insert(*n);
         }
         hir::Pattern::Or { alternatives } => {
-            for alt in alternatives.clone() {
+            for alt in *alternatives {
                 collect_covered_variants(body, alt, out);
             }
         }

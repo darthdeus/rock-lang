@@ -518,7 +518,7 @@ fn main() { let c = ticker(3) }
 
 #[test]
 fn coroutine_graph_helpers_match_the_concrete_signature_plan() {
-    let (ws, mut g) = graph_of(
+    let (ws, g) = graph_of(
         r#"
 nobox value Payload { x: float, y: float }
 enum Event { Tick(Payload) }
@@ -528,7 +528,7 @@ co fn ticker() -> Coroutine<Event> {
 fn main() { let c = ticker(); let _ = c.resume() }
 "#,
     );
-    let bodies = skull::concrete_body::build(&ws, &mut g);
+    let bodies = skull::concrete_body::build(&ws, &g);
     let mut compared = 0;
     for (inst, concrete) in bodies.plans.iter() {
         let f = &ws.module(inst.func.module).functions[inst.func.func];

@@ -420,7 +420,7 @@ impl Builder<'_> {
             name,
             fields,
             bases,
-        } = self.body.expr_arena[value].clone()
+        } = self.body.expr_arena[value]
         {
             // A functional-update base reads unwritten fields off another
             // instance; leave that to the general path rather than duplicating

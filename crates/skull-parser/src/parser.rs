@@ -638,7 +638,7 @@ impl<'a> Parser<'a> {
         let peek2 = |p: &Self| {
             p.tokens
                 .get(p.pos + 2)
-                .map(|t| t.kind.clone())
+                .map(|t| t.kind)
                 .unwrap_or(TokenKind::EOF)
         };
         // The token kinds that can follow a committed visibility modifier: the

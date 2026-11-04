@@ -61,7 +61,7 @@ fn nonloop_capture_hoists_to_by_value_record() {
     );
     // The single-assignment captures are by-value fields -- no box declared.
     assert!(
-        !declares_box(&body),
+        !declares_box(body),
         "single-assignment captures are by value, not boxed:\n{body}"
     );
 }
@@ -132,7 +132,7 @@ fn mutated_capture_lowers_to_box_threaded_into_record() {
     let lua = emit_module(MUTATED_CAPTURE);
     let body = function_body(&lua, "capture_box");
     assert!(
-        declares_box(&body),
+        declares_box(body),
         "a mutable capture must declare a shared box:\n{body}"
     );
     assert!(
@@ -175,7 +175,7 @@ fn per_iteration_value_capture_snapshots_flat_leaves() {
     let lua = emit_module(PER_ITER_VALUE_CAPTURE);
     let body = function_body(&lua, "main");
     assert!(
-        !declares_box(&body),
+        !declares_box(body),
         "a per-iteration value capture must not box its leaves:\n{body}"
     );
     assert!(
@@ -227,7 +227,7 @@ fn per_iteration_enum_capture_snapshots_flat_leaves() {
     let lua = emit_module(PER_ITER_ENUM_CAPTURE);
     let body = function_body(&lua, "capture_choices");
     assert!(
-        !declares_box(&body),
+        !declares_box(body),
         "a per-iteration enum capture must not box its leaves:\n{body}"
     );
     assert!(

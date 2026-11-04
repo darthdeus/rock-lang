@@ -230,7 +230,7 @@ fn row_edge_literals(ws: &Workspace, body: &Body, bi: &BodyInference) -> FxHashS
     for (id, expr) in body.expr_arena.iter() {
         match expr {
             Expr::StructLiteral { fields, .. } => {
-                for field in fields.clone() {
+                for field in *fields {
                     let field = &body.struct_lit_field_arena[field];
                     edge(id, field.name, field.value);
                 }

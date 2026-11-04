@@ -231,8 +231,8 @@ fn main() {
 "#,
     );
     let roots = skull::mir_emit::emission_roots(&ws, None);
-    let mut graph = skull::instance_graph::build(&ws, roots, false);
-    let bodies = skull::concrete_body::build(&ws, &mut graph);
+    let graph = skull::instance_graph::build(&ws, roots, false);
+    let bodies = skull::concrete_body::build(&ws, &graph);
     let (_inst, plan) = bodies
         .plans
         .iter()

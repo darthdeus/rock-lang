@@ -83,7 +83,7 @@ fn param_lambda_hoists_as_record_under_frame() {
     // `s` is the step's first param cell. Its environment field keeps the
     // stable emit-cell key, while the field value is the colored param name.
     let s = fn_params(&lua, &step_name).swap_remove(0);
-    let state_field = state_capture_field(&step, &s);
+    let state_field = state_capture_field(step, &s);
     // the co-fn lambda hoists to a sibling top-level fn taking (env, <param>).
     let lp = fn_params(&lua, &format!("{w}__step__lambda0"));
     assert_eq!(lp.len(), 2, "the hoisted lambda must take (env, n):\n{lua}");
@@ -107,11 +107,11 @@ fn frame_capture_composes_env_then_frame() {
     let w = mangled_name(&lua, "worker");
     let step = function_body(&lua, &format!("{w}__step"));
     let s = fn_params(&lua, &format!("{w}__step")).swap_remove(0);
-    let state_field = state_capture_field(&step, &s)
+    let state_field = state_capture_field(step, &s)
         .unwrap_or_else(|| panic!("the step must capture its state param `{s}`:\n{step}"));
     let body = function_body(&lua, &format!("{w}__step__lambda0"));
     assert!(
-        body.contains(&format!(".{state_field}")) && contains_digit_bridge(&body, ".c", ""),
+        body.contains(&format!(".{state_field}")) && contains_digit_bridge(body, ".c", ""),
         "the hoisted body must read the captured state table field `.{state_field}` and then a frame slot:\n{body}"
     );
 }

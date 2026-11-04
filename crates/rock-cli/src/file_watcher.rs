@@ -918,7 +918,7 @@ mod macos {
             };
             let mut updates = Vec::new();
             for path in &candidates {
-                let stamp = match Stamp::read(&path) {
+                let stamp = match Stamp::read(path) {
                     Ok(stamp) => stamp,
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                         if self.files.contains_key(path) {
@@ -939,7 +939,7 @@ mod macos {
                 {
                     continue;
                 }
-                let hash = match content_hash(&path) {
+                let hash = match content_hash(path) {
                     Ok(hash) => hash,
                     // Atomic saves can replace the path between stat and open;
                     // leave the prior state intact for the next scan.
@@ -984,7 +984,7 @@ mod macos {
                         && (old
                             .is_none_or(|old| old.hash != hash || old.stamp.inode != stamp.inode)
                             || !self.config.filter_metadata
-                            || self.restart(&path))
+                            || self.restart(path))
                 };
                 updates.push((
                     path.clone(),
@@ -995,7 +995,7 @@ mod macos {
                     }),
                 ));
                 if relevant && !initial {
-                    event.is_restart_trigger |= self.restart(&path);
+                    event.is_restart_trigger |= self.restart(path);
                     event.paths.insert(path.clone());
                 }
             }

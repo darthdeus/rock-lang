@@ -742,14 +742,14 @@ fn verify_candidate(
         .collect();
     let mut converged = false;
     for _round in 0..MAX_ROUNDS {
-        let edits = match candidate_edits(&plan) {
+        let edits = match candidate_edits(plan) {
             Ok(e) => e,
             Err(e) => {
                 plan.blockers.push(e);
                 break;
             }
         };
-        let imports_text = imports_text(&plan);
+        let imports_text = imports_text(plan);
         let mut texts: HashMap<usize, String> = HashMap::new();
         for (fi, f) in plan.files.iter().enumerate() {
             match apply_edits(&f.text, edits.get(&fi).map(Vec::as_slice).unwrap_or(&[])) {
@@ -764,7 +764,7 @@ fn verify_candidate(
         if !plan.blockers.is_empty() {
             break;
         }
-        if let Err(e) = verify_ascriptions(&plan, &texts) {
+        if let Err(e) = verify_ascriptions(plan, &texts) {
             plan.blockers.push(e);
             break;
         }
@@ -777,7 +777,7 @@ fn verify_candidate(
         let mut verification = Vec::new();
         let mut unrepairable = Vec::new();
         for (ci, c) in ctxs.iter().enumerate() {
-            let sources = candidate_sources(c, &plan, &file_index, &texts, imports_text.as_deref());
+            let sources = candidate_sources(c, plan, file_index, &texts, imports_text.as_deref());
             let checked = match check_sources(&sources) {
                 Ok(v) => v,
                 Err((stage, errs)) => {
@@ -796,7 +796,7 @@ fn verify_candidate(
                     if req.satisfied {
                         continue;
                     }
-                    let Some(di) = closure_def(&checked.ws, &plan, req.required) else {
+                    let Some(di) = closure_def(&checked.ws, plan, req.required) else {
                         unrepairable.push(format!(
                             "the API closure requires `{}` ({}), which the package does not own",
                             req.required, req.reason
@@ -815,7 +815,7 @@ fn verify_candidate(
             let cand = sites(
                 &checked.ws,
                 &checked.refs,
-                &candidate_file_pkg(c, &plan),
+                &candidate_file_pkg(c, plan),
                 &HashMap::new(),
             );
             let mapped = map_sites(&base_sites[ci], &edits_by_id);
@@ -825,7 +825,7 @@ fn verify_candidate(
                 if &after == before {
                     continue;
                 }
-                match repair_for(&plan, &file_index, &baselines[ci], c, key, &edits_by_id) {
+                match repair_for(plan, file_index, &baselines[ci], c, key, &edits_by_id) {
                     Some(r)
                         if !plan
                             .repairs

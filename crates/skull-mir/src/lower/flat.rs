@@ -93,7 +93,7 @@ impl Builder<'_> {
             variant,
             args,
             ..
-        } = self.body.expr_arena[value].clone()
+        } = self.body.expr_arena[value]
         {
             if enum_name == shape.name {
                 let (positional, rec_args) = match args {

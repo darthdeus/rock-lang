@@ -64,7 +64,7 @@ fn abs(toks: &[SemanticToken]) -> Vec<(u32, u32, SemanticToken)> {
             } else {
                 col += t.delta_start;
             }
-            (line, col, t.clone())
+            (line, col, *t)
         })
         .collect()
 }

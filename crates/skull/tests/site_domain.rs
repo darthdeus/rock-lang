@@ -51,8 +51,8 @@ fn graph_of(ws: &Workspace) -> InstanceGraph {
 
 fn census_of(src: &str) -> SiteJoinCensus {
     let ws = check(src);
-    let mut g = graph_of(&ws);
-    let bodies = skull::concrete_body::build(&ws, &mut g);
+    let g = graph_of(&ws);
+    let bodies = skull::concrete_body::build(&ws, &g);
     let scx = ScalarCtx::new(&ws).sharing(g.interner().clone());
     site_join::census(&ws, &scx, &g, &bodies)
 }
@@ -189,8 +189,8 @@ fn main() {
         "the fixture does not put two arenas at one index, so it proves nothing: {stamped:?}"
     );
     // The two are DIFFERENT keys, so the body's table holds both.
-    let mut g = graph_of(&ws);
-    let bodies = skull::concrete_body::build(&ws, &mut g);
+    let g = graph_of(&ws);
+    let bodies = skull::concrete_body::build(&ws, &g);
     let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
     let main = bodies
         .bodies

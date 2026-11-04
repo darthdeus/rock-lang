@@ -4096,7 +4096,7 @@ fn semantic_classifications(
                 }
                 // Struct-literal field names -> property.
                 Expr::StructLiteral { fields, .. } => {
-                    for fi in fields.clone() {
+                    for fi in *fields {
                         let f = &body.struct_lit_field_arena[fi];
                         map.insert(f.name_span.offset_range.0, (TT_PROPERTY, 0));
                     }
@@ -4105,7 +4105,7 @@ fn semantic_classifications(
                 // offsets from the parser) lets the emitter split the string
                 // token and color the hole as the expression it is.
                 Expr::InterpolatedString(parts) => {
-                    for pi in parts.clone() {
+                    for pi in *parts {
                         if let bone_semantic::hir::InterpPart::Value { expr, .. } =
                             &body.interp_part_arena[pi]
                         {

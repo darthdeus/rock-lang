@@ -37,8 +37,8 @@ fn check(src: &str) -> Workspace {
 fn bodies_of_raw(src: &str) -> (Workspace, InstanceGraph, ConcreteBodies) {
     let ws = check(src);
     let roots = skull::mir_emit::emission_roots(&ws, None);
-    let mut g = instance_graph::build(&ws, roots, false);
-    let bodies = concrete_body::build(&ws, &mut g);
+    let g = instance_graph::build(&ws, roots, false);
+    let bodies = concrete_body::build(&ws, &g);
     (ws, g, bodies)
 }
 
@@ -1280,8 +1280,8 @@ fn main() { let x = G }
         .get(&Ustr::from("<test>"))
         .expect("test module");
     let roots = skull::mir_emit::emission_roots(&ws, Some("<project>"));
-    let mut g = instance_graph::build(&ws, roots, false);
-    let mut bodies = concrete_body::build(&ws, &mut g);
+    let g = instance_graph::build(&ws, roots, false);
+    let mut bodies = concrete_body::build(&ws, &g);
     bodies.refresh_flat_views();
     let (owner, plan) = bodies
         .always_plans
@@ -1473,7 +1473,7 @@ fn main() { let a = plain(1) }
 "#,
     );
     let roots = skull::mir_emit::emission_roots(&ws, None);
-    let mut g = instance_graph::build(&ws, roots, false);
+    let g = instance_graph::build(&ws, roots, false);
     let inst = g
         .expanded()
         .find(|i| g.identity(&ws, i).starts_with("plain"))
@@ -1493,7 +1493,7 @@ fn main() { let a = plain(1) }
         "the instance graph expanded a body from stale inference"
     );
 
-    let mut bodies = concrete_body::build(&ws, &mut g);
+    let mut bodies = concrete_body::build(&ws, &g);
     bodies.refresh_flat_views();
 
     assert!(
@@ -2219,7 +2219,7 @@ fn vanishing() -> int {
     let ws1 = check(source_v1);
     let roots = skull::mir_emit::emission_roots(&ws1, Some("/project"));
     let mut graph = instance_graph::build(&ws1, roots.clone(), false);
-    let mut local = concrete_body::build(&ws1, &mut graph);
+    let mut local = concrete_body::build(&ws1, &graph);
     let before = local.diagnostic_snapshot(&ws1, &graph);
     assert!(!before.is_empty(), "fixture exposed no diagnostic rows");
     assert!(
@@ -2286,8 +2286,8 @@ fn vanishing() -> int {
         &[span_edit],
     );
     let fresh_roots = skull::mir_emit::emission_roots(&ws2, Some("/project"));
-    let mut fresh_graph = instance_graph::build(&ws2, fresh_roots, false);
-    let mut fresh = concrete_body::build(&ws2, &mut fresh_graph);
+    let fresh_graph = instance_graph::build(&ws2, fresh_roots, false);
+    let mut fresh = concrete_body::build(&ws2, &fresh_graph);
     assert_eq!(
         local.diagnostic_snapshot(&ws2, &graph),
         fresh.diagnostic_snapshot(&ws2, &fresh_graph),
@@ -2373,7 +2373,7 @@ fn main() {
         graph.index.subst.remove(&bad).is_some(),
         "fixture did not expose bad's substitution"
     );
-    let mut bodies = concrete_body::build(&ws, &mut graph);
+    let mut bodies = concrete_body::build(&ws, &graph);
     bodies.refresh_flat_views();
     let snapshot = bodies.diagnostic_snapshot(&ws, &graph);
     assert!(!snapshot.is_empty(), "fixture exposed no owner findings");
@@ -2453,7 +2453,7 @@ fn main() {
         graph.index.subst.remove(&bad).is_some(),
         "fixture did not expose bad's substitution"
     );
-    let mut local = concrete_body::build(&ws1, &mut graph);
+    let mut local = concrete_body::build(&ws1, &graph);
     let before = local.diagnostic_snapshot(&ws1, &graph);
     assert!(before.iter().any(|row| row.starts_with("plan-failure:")));
     assert!(
@@ -2492,8 +2492,8 @@ fn main() {
         &update.revisited_owners,
     );
     let fresh_roots = skull::mir_emit::emission_roots(&ws2, Some("<project>"));
-    let mut fresh_graph = instance_graph::build(&ws2, fresh_roots, false);
-    let fresh = concrete_body::build(&ws2, &mut fresh_graph);
+    let fresh_graph = instance_graph::build(&ws2, fresh_roots, false);
+    let fresh = concrete_body::build(&ws2, &fresh_graph);
     assert_eq!(
         local.diagnostic_snapshot(&ws2, &graph),
         fresh.diagnostic_snapshot(&ws2, &fresh_graph),
@@ -2668,7 +2668,7 @@ fn main() { let n = sum_it([1, 2].iter()) }
             instance_graph::InstanceBoundTree::default(),
         );
 
-    let mut bodies = concrete_body::build(&ws, &mut g);
+    let mut bodies = concrete_body::build(&ws, &g);
     bodies.refresh_flat_views();
     assert!(
         !bodies.bodies.contains_key(&inst),
@@ -2989,8 +2989,8 @@ fn the_tyid_memo_deduplicates_conversions_and_replays_the_census() {
     ];
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
     let roots = skull::mir_emit::emission_roots(&ws, None);
-    let mut g = instance_graph::build(&ws, roots, false);
-    let mut bodies = concrete_body::build(&ws, &mut g);
+    let g = instance_graph::build(&ws, roots, false);
+    let mut bodies = concrete_body::build(&ws, &g);
     bodies.refresh_flat_views();
     let slots = bodies.expr_examined + bodies.binding_examined;
     assert!(slots > 0, "the fixture lost its slots");

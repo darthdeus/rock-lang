@@ -2256,7 +2256,7 @@ impl RepArena {
                             span: None,
                         },
                         RepGuarantees {
-                            nobox: mode.nobox_only_for(&ty),
+                            nobox: mode.nobox_only_for(ty),
                             allow_opaque: true,
                         },
                     )

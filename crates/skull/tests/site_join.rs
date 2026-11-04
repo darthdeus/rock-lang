@@ -50,8 +50,8 @@ fn graph_of_ws(ws: &Workspace) -> InstanceGraph {
 }
 
 fn census_of(src: &str) -> SiteJoinCensus {
-    let (ws, mut g) = graph_of(src);
-    let bodies = skull::concrete_body::build(&ws, &mut g);
+    let (ws, g) = graph_of(src);
+    let bodies = skull::concrete_body::build(&ws, &g);
     let scx = ScalarCtx::new(&ws).sharing(g.interner().clone());
     site_join::census(&ws, &scx, &g, &bodies)
 }
@@ -482,7 +482,7 @@ fn main() {
 
 #[test]
 fn concrete_lowering_carries_the_callee_bound_plan_to_the_call() {
-    let (ws, mut g) = graph_of(
+    let (ws, g) = graph_of(
         r#"
 fn sum_all<I: Iterator<int>>(it: I) -> int {
     let total = 0
@@ -493,7 +493,7 @@ fn sum_all<I: Iterator<int>>(it: I) -> int {
 fn main() { print("{sum_all([1, 2, 3].iter())}") }
 "#,
     );
-    let bodies = skull::concrete_body::build(&ws, &mut g);
+    let bodies = skull::concrete_body::build(&ws, &g);
     let main = bodies
         .plans
         .iter()
@@ -1041,8 +1041,7 @@ fn main() {
 }
 "#,
     );
-    let mut g = g;
-    let bodies = skull::concrete_body::build(&ws, &mut g);
+    let bodies = skull::concrete_body::build(&ws, &g);
     // Taken from the CALLEE TABLES rather than from a name: what makes this a
     // boundary is how the walk resolved it, and a generic declaration is what
     // makes the fixture non-vacuous.
@@ -1159,8 +1158,8 @@ fn main() { print("{top()}") }
         "a generic declaration must not use an empty specialization identity: {wraps:?}"
     );
     let c = {
-        let mut graph = g;
-        let bodies = skull::concrete_body::build(&ws, &mut graph);
+        let graph = g;
+        let bodies = skull::concrete_body::build(&ws, &graph);
         let scx = ScalarCtx::new(&ws).sharing(graph.interner().clone());
         site_join::census(&ws, &scx, &graph, &bodies)
     };
@@ -1462,7 +1461,7 @@ fn top() -> float {
 fn main() { print("{top()}") }
 "#;
     let (ws, mut g) = graph_of(src);
-    let bodies = skull::concrete_body::build(&ws, &mut g);
+    let bodies = skull::concrete_body::build(&ws, &g);
     let scx = ScalarCtx::new(&ws).sharing(g.interner().clone());
     // CONTROL: with every substitution present, nothing is refused for want of
     // an owner. Without this the refusal below could be any other failure.
@@ -1582,8 +1581,8 @@ fn main() { print("{use_both()}") }
     );
 
     let c = {
-        let mut graph = g;
-        let bodies = skull::concrete_body::build(&ws, &mut graph);
+        let graph = g;
+        let bodies = skull::concrete_body::build(&ws, &graph);
         let scx = ScalarCtx::new(&ws).sharing(graph.interner().clone());
         site_join::census(&ws, &scx, &graph, &bodies)
     };
@@ -1796,8 +1795,8 @@ fn add_two(x: int) -> int { return x + 2 }
 fn apply(f: fn(int) -> int, x: int) -> int { return f(x) }
 fn main() { print("{apply(add_one, 1)}") }
 "#;
-    let (ws, mut g) = graph_of(src);
-    let bodies = skull::concrete_body::build(&ws, &mut g);
+    let (ws, g) = graph_of(src);
+    let bodies = skull::concrete_body::build(&ws, &g);
     let main_inst = g
         .expanded()
         .find(|i| {

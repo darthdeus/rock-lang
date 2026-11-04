@@ -12,7 +12,7 @@ impl Builder<'_> {
         if self.f32_round_exprs.contains(&e) {
             return None;
         }
-        match self.body.expr_arena[e].clone() {
+        match self.body.expr_arena[e] {
             Expr::Block {
                 statements,
                 tail: Some(tail),
@@ -64,7 +64,7 @@ impl Builder<'_> {
         // structurizer cannot yet recover every direct short-circuit CFG.
         let direct = self.scx.target == bone_semantic::hir::FnBackend::Lua;
         let result = (|| {
-            match self.body.expr_arena[e].clone() {
+            match self.body.expr_arena[e] {
                 // Logical left operands always use condition coercion; their
                 // right operands inherit the enclosing use, as in value lowering.
                 Expr::BinOp {
@@ -144,7 +144,7 @@ impl Builder<'_> {
         // expression back, so a call always carries the innermost expression
         // that produced it -- which is the key `ConcreteBody` is built on.
         let outer_expr = self.cur_expr.replace(e);
-        let v = match self.body.expr_arena[e].clone() {
+        let v = match self.body.expr_arena[e] {
             Expr::Array(elems)
                 if expected
                     .is_some_and(|ty| ContainerPlan::matches_type(ContainerFamily::Vec, ty)) =>
@@ -274,7 +274,7 @@ impl Builder<'_> {
         if let Some(read) = self.flat_ref_read(e)? {
             return self.pack(read.into_value());
         }
-        match self.body.expr_arena[e].clone() {
+        match self.body.expr_arena[e] {
             Expr::Unit | Expr::Null => Ok(self.emit_cur(Inst::Const(Lit::Nil))),
             Expr::Int(i) => {
                 if self.arith_ty(e) == Some(ArithTy::Uint) {
@@ -670,7 +670,6 @@ impl Builder<'_> {
                 // bindings carry what inference unified them WITH, i.e. the same
                 // types the call site reads off the fn type.
                 let param_slots: Vec<RetSlot> = params
-                    .clone()
                     .into_iter()
                     .enumerate()
                     .map(|(i, _)| {
@@ -696,7 +695,7 @@ impl Builder<'_> {
                 let entry = self.f.new_block();
                 let saved = self.cur;
                 self.cur = entry;
-                let lambda_params: Vec<Idx<BindingInfo>> = params.clone().into_iter().collect();
+                let lambda_params: Vec<Idx<BindingInfo>> = params.into_iter().collect();
                 self.copy_ref_borrowed_params(&lambda_params)?;
                 // The lambda body returns via the LAMBDA's ABI, not the enclosing
                 // fn's: a bone-desugared `() => e` body is a block with a `return e`
@@ -1098,7 +1097,7 @@ impl Builder<'_> {
     /// pack at any level.
     pub(crate) fn lower_place_base(&mut self, e: Idx<Expr>) -> Result<Idx<Inst>, CompilerError> {
         let nobox_global_place = self.nobox_global_place(e)?;
-        let flat_field = match self.body.expr_arena[e].clone() {
+        let flat_field = match self.body.expr_arena[e] {
             Expr::FieldAccess { base, field } if self.swizzle_of(base, field).is_none() => {
                 match self.field_base_ty(base) {
                     Some(TypeExpr::App {
@@ -1110,7 +1109,7 @@ impl Builder<'_> {
             }
             _ => None,
         };
-        match self.body.expr_arena[e].clone() {
+        match self.body.expr_arena[e] {
             // Element stores, leaf places and `ref` borrows of flat storage are
             // decomposed before this ([`flat_ref`]); a flat element has no
             // table to name as a place.
@@ -1204,7 +1203,7 @@ impl Builder<'_> {
         e: Idx<Expr>,
         absent_join: Idx<Block>,
     ) -> Result<Idx<Inst>, CompilerError> {
-        let flat_field = match self.body.expr_arena[e].clone() {
+        let flat_field = match self.body.expr_arena[e] {
             Expr::FieldAccess { base, field } if self.swizzle_of(base, field).is_none() => {
                 match self.field_base_ty(base) {
                     Some(TypeExpr::App {
@@ -1216,7 +1215,7 @@ impl Builder<'_> {
             }
             _ => None,
         };
-        match self.body.expr_arena[e].clone() {
+        match self.body.expr_arena[e] {
             Expr::SafeNav { base, field } => {
                 let recv = self.lower_guarded_place_base(base, absent_join)?;
                 let nil = self.emit_cur(Inst::Const(Lit::Nil));
@@ -1259,7 +1258,7 @@ impl Builder<'_> {
             Field(Idx<Inst>, Ustr),
             Global(Ustr),
         }
-        let owner = match self.body.expr_arena[place].clone() {
+        let owner = match self.body.expr_arena[place] {
             Expr::FieldAccess { base, field: slot } => {
                 let (pbase, key) = self.physical_field(base, slot)?;
                 Owner::Field(self.lower_place_base(pbase)?, key)
@@ -1313,7 +1312,7 @@ impl Builder<'_> {
             self.f32_round_exprs.insert(value);
         }
         let nobox_global_place = self.nobox_global_place(target)?;
-        match self.body.expr_arena[target].clone() {
+        match self.body.expr_arena[target] {
             // A threaded (group_binds) var -- a scalarized flat-enum local or value
             // param -- updates its leaf cells, not one boxed cell.
             Expr::Var(b) if self.group_binds.contains_key(&raw(b)) => {
@@ -1694,7 +1693,7 @@ impl Builder<'_> {
         } else {
             None
         };
-        match self.body.expr_arena[target].clone() {
+        match self.body.expr_arena[target] {
             Expr::Var(b) if self.static_cells.contains_key(&raw(b)) => {
                 let name = self.static_cells[&raw(b)];
                 let cur = self.emit_cur(Inst::Global(name));
@@ -1885,7 +1884,7 @@ impl Builder<'_> {
             };
             s.emit_cur(inst)
         };
-        match self.body.expr_arena[target].clone() {
+        match self.body.expr_arena[target] {
             Expr::Var(b) if self.static_cells.contains_key(&raw(b)) => {
                 let name = self.static_cells[&raw(b)];
                 let old = self.emit_cur(Inst::Global(name));

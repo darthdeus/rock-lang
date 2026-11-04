@@ -543,7 +543,6 @@ fn lambda_param_default_does_not_leak_into_fn_params() {
         let fbody = &hir.bodies[&BodyOwner::Function(f_idx)];
         let got: Vec<_> = fbody
             .param_bindings
-            .clone()
             .map(|b| fbody.binding_arena[b].name.to_string())
             .collect();
         assert_eq!(got, names, "{src}");
@@ -588,7 +587,7 @@ fn nested_interpolation_does_not_leak_into_outer_parts() {
         );
     };
 
-    let parts: Vec<_> = parts.map(|p| fbody.interp_part_arena[p].clone()).collect();
+    let parts: Vec<_> = parts.map(|p| fbody.interp_part_arena[p]).collect();
     assert_eq!(
         parts.len(),
         2,

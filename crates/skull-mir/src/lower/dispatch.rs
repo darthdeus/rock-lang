@@ -771,7 +771,7 @@ impl<'a> DispatchCtx<'a> {
         if !matches!(name.as_str(), "tostring" | "to_string") {
             return None;
         }
-        let mut args = args.clone();
+        let mut args = *args;
         let (Some(arg), None) = (args.next(), args.next()) else {
             return None;
         };

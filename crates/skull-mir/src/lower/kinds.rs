@@ -116,7 +116,7 @@ impl Builder<'_> {
         else {
             return Ok(None);
         };
-        let Some(&sid) = self.ws.struct_by_name.get(&name) else {
+        let Some(&sid) = self.ws.struct_by_name.get(name) else {
             return Ok(None);
         };
         if !has_value_plan(&self.ws.modules[sid.module.index()].structs[sid.def]) {
@@ -124,7 +124,7 @@ impl Builder<'_> {
         }
         let arena = self.scx.rep_arena();
         let rep = arena
-            .plan_container_element(self.ws, self.scx.target, &payload)
+            .plan_container_element(self.ws, self.scx.target, payload)
             .map_err(|error| match error.span.or(self.cur_span) {
                 Some(span) => CompilerError::new_with_label(span, error.message),
                 None => CompilerError::new_no_location(error.message),

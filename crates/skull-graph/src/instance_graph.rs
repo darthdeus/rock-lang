@@ -5322,8 +5322,7 @@ fn walk_struct_default_edges(
                 continue;
             };
             let args = args.to_vec();
-            let written: BTreeSet<ustr::Ustr> = fields
-                .clone()
+            let written: BTreeSet<ustr::Ustr> = (*fields)
                 .map(|f| scan.struct_lit_field_arena[f].name)
                 .collect();
             let decl = &ws.modules[sid.module.index()].structs[sid.def];
@@ -6364,16 +6363,12 @@ fn record_inline_body_deps(g: &mut InstanceGraph, ws: &Workspace, decls: &[DeclK
             let text = body.1.as_str();
             for name in ERASED_RUNTIME_ENTRIES {
                 if text.contains(name) {
-                    let inserted = g
-                        .inline_body_deps
-                        .entry(member.clone())
-                        .or_default()
-                        .insert(name);
+                    let inserted = g.inline_body_deps.entry(member).or_default().insert(name);
                     if inserted {
                         g.inline_erased_users
                             .entry(name.to_string())
                             .or_default()
-                            .insert(member.clone());
+                            .insert(member);
                     }
                 }
             }

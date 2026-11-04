@@ -76,7 +76,7 @@ fn demand_read(v: Sample) -> int { return forward(v.y) }
 @nomangle fn save_caller() -> fn() -> int { return caller }
 "#;
     let after = before.replace("forward(v.y)", "forward(v.x + v.y)");
-    let ws1 = ws_with_stdlib(&before);
+    let ws1 = ws_with_stdlib(before);
     let mid = skull::user_module_id(&ws1).unwrap();
     let (full1, mut cache) = emit_full(&ws1, mid).unwrap();
     let (_, mut overlay_cache) = emit_full(&ws1, mid).unwrap();

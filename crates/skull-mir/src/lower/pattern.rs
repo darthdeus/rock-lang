@@ -110,7 +110,7 @@ impl Builder<'_> {
         top: bool,
         scrut_enum: Option<Ustr>,
     ) -> Result<(), CompilerError> {
-        match self.body.pattern_arena[pat].clone() {
+        match self.body.pattern_arena[pat] {
             Pattern::Wildcard => Ok(()),
             Pattern::Bind(b) => {
                 let name = self.body.binding_arena[b].name;
@@ -396,7 +396,7 @@ impl Builder<'_> {
         variants: &HashSet<Ustr>,
         top: bool,
     ) -> bool {
-        match self.body.pattern_arena[pat].clone() {
+        match self.body.pattern_arena[pat] {
             Pattern::Wildcard | Pattern::Literal(_) | Pattern::Range { .. } => false,
             Pattern::Bind(b) => {
                 let name = self.body.binding_arena[b].name;
@@ -447,7 +447,7 @@ impl Builder<'_> {
     /// `Scrut::Flat` (tag/payload read from the parent's slots, no box); anything
     /// else lowers to an ordinary value.
     pub(crate) fn lower_scrut(&mut self, e: Idx<Expr>) -> Result<Scrut, CompilerError> {
-        if let Expr::FieldAccess { base, field } = self.body.expr_arena[e].clone() {
+        if let Expr::FieldAccess { base, field } = self.body.expr_arena[e] {
             if let Some(TypeExpr::App {
                 ctor: TypeCtor::Nominal(sname),
                 ..
@@ -463,7 +463,7 @@ impl Builder<'_> {
                 }
             }
         }
-        if let Expr::Tuple(elements) = self.body.expr_arena[e].clone() {
+        if let Expr::Tuple(elements) = self.body.expr_arena[e] {
             let mut parts = Vec::with_capacity(elements.len());
             for element in elements {
                 let repr = self.lower_expr_repr(element)?.into_value();
@@ -1159,7 +1159,7 @@ impl Builder<'_> {
     /// literal, a variant, a record) is excluded and still matches against the
     /// packed scrutinee.
     fn pattern_is_names_only(&self, pat: Idx<Pattern>) -> bool {
-        match self.body.pattern_arena[pat].clone() {
+        match self.body.pattern_arena[pat] {
             Pattern::Bind(_) | Pattern::Wildcard => true,
             Pattern::Tuple { elements } => {
                 elements.into_iter().all(|p| self.pattern_is_names_only(p))
@@ -1183,7 +1183,7 @@ impl Builder<'_> {
         values: &[Idx<Inst>],
         idx: &mut usize,
     ) -> Result<(), CompilerError> {
-        match self.body.pattern_arena[pat].clone() {
+        match self.body.pattern_arena[pat] {
             Pattern::Wildcard => *idx += slot.slot_count(),
             Pattern::Bind(b) => {
                 self.bind_pattern_slot(&BindingPattern::Leaf(b), slot, values, idx)?;

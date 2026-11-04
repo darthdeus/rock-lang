@@ -1091,7 +1091,7 @@ impl Builder<'_> {
         u_e: Idx<Expr>,
         struct_name: Ustr,
     ) -> Result<Option<GlobalUniformSource>, CompilerError> {
-        let Expr::Global(name) = self.body.expr_arena[u_e].clone() else {
+        let Expr::Global(name) = self.body.expr_arena[u_e] else {
             return Ok(None);
         };
         if let Some((leaves, Some(_))) = self.nobox_global_place(u_e)? {
