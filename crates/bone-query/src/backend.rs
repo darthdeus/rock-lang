@@ -5194,7 +5194,10 @@ mod tests {
         bone.update(&path, source.into());
         let proj = bone.projects.get(&BoneWorkspace::root_for(&path)).unwrap();
         let mut span = Span::unknown();
-        span.file = Ustr::from(path.as_str());
+        // Real spans use the session file id, not the editor path (which may
+        // traverse a symlink, including the temporary directory on macOS).
+        let file_id = bone.canon(&path);
+        span.file = Ustr::from(file_id.as_str());
         span.offset_range = (4, 8);
         capture.take();
         for deleted in [false, true] {
@@ -5205,7 +5208,7 @@ mod tests {
             assert!(matches!(text, Cow::Borrowed(_)));
             assert_eq!(text, source);
             let location = bone.location_from_span(proj, &span).unwrap();
-            assert_eq!(location.uri, Uri::from_file_path(&path).unwrap());
+            assert_eq!(location.uri, Uri::from_file_path(&editor_path(&file_id)).unwrap());
             assert_eq!(location.range, Range::new(Position::new(1, 3), Position::new(1, 7)));
             assert_eq!(bone.location_from_span_indexed(proj, &span, &mut HashMap::new()), Some(location));
         }
