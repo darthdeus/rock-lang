@@ -56,7 +56,7 @@ jobs:
           mkdir -p "$HOME/.config/rock-lang"
           printf '%s\n' "$ROCK_LANG_DENYLIST" > "$HOME/.config/rock-lang/denylist"
           test -n "$ROCK_LANG_DENYLIST" || { echo "ROCK_LANG_DENYLIST secret is not set" >&2; exit 1; }
-          git grep -I -h . -- . ':!crates/lsp-types-manual/Cargo.toml' ':!crates/lsp-types-manual/Cargo.toml.orig' > "$RUNNER_TEMP/public-content.txt"
+          git grep -I -h . -- . > "$RUNNER_TEMP/public-content.txt"
           .githooks/check-public "$RUNNER_TEMP/public-content.txt"
       - uses: actions/setup-node@v4
         with:

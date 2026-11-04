@@ -3,9 +3,8 @@ set -euo pipefail
 hooks="$(dirname "$0")"
 tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT
-# Added lines only. The upstream authors listed in lsp-types-manual's
-# manifests are public attribution, not private data.
-git diff --cached --no-color -U0 -- . ':!crates/lsp-types-manual/Cargo.toml' ':!crates/lsp-types-manual/Cargo.toml.orig' \
+# Scan added lines in every tracked file.
+git diff --cached --no-color -U0 -- . \
   | { grep -E '^\+' || true; } | { grep -vE '^\+\+\+ ' || true; } > "$tmp"
 "$hooks/check-public" "$tmp"
 if command -v gitleaks >/dev/null 2>&1; then
