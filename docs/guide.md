@@ -653,6 +653,9 @@ rock test 17_tests.rock
 reports `rock test: 2/2 @tests passed`. Plain `rock run` still runs
 `main`, so one file can carry both the program and its tests.
 
+For testing compiler changes from a checkout, filtering individual cases, and
+asserting expected compiler errors, see [Testing compiler changes](testing.md).
+
 ## Shaders
 
 A `@shader(vertex)` entry runs per vertex, a `@shader(fragment)` entry

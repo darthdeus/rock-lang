@@ -81,6 +81,12 @@ language in runnable examples, from a first program through structs,
 enums, optionals, generics, modules, tests and shaders. The examples are
 in [`examples/guide/`](examples/guide/), so clone the repository to run them.
 
+## Testing compiler changes
+
+Use `cargo run --quiet --bin rock -- test file.rock` to rebuild and test with
+this checkout. See [Testing compiler changes](docs/testing.md) for runtime cases,
+expected compiler errors, backend comparison, filtering, and Rust test commands.
+
 ## What else is in here
 
 - `rock fmt`, `rock lint` and `rock watch`.
