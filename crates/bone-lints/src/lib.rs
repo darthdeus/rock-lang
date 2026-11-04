@@ -1948,10 +1948,10 @@ impl IncrementalLintCache {
         }
         for file in files {
             if let Some(findings) = self.global.get_mut(&file) {
-                findings.sort_by_key(|a| finding_offset(a));
+                findings.sort_by_key(finding_offset);
             }
             if let Some(findings) = self.global_raw.get_mut(&file) {
-                findings.sort_by_key(|a| finding_offset(a));
+                findings.sort_by_key(finding_offset);
             }
         }
     }
