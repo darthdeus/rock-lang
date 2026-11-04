@@ -23,4 +23,18 @@ fn test_json_float_roundtrip() {
     print(json_encode(json_float(-0.0)) == "-0")
     print(json_encode(json_float(1e15)) == "1e+15")
     print(json_encode(json_float(0.1)))
+    print(json_signed_zero_after_warmup())
+}
+
+fn json_signed_zero_after_warmup() -> bool {
+    let values = [42.0, -0.0, 0.0]
+    let expected = ["42", "-0", "0"]
+    // Warm the integer shortcut before zero reaches a compiled trace.
+    for i in 0..12000 {
+        let index = if i < 9000 { 0 } else { 1 + i % 2 }
+        let scalar = json_float(values[index])
+        if json_encode(scalar) != expected[index] { return false }
+        if json_encode_pretty(scalar) != expected[index] { return false }
+    }
+    return true
 }

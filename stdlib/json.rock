@@ -312,6 +312,8 @@ fn hex4(n: int) -> string {
 fn format_float(f: float) -> string {
     if f != f { return "null" }
     if f == 1.0 / 0.0 || f == -1.0 / 0.0 { return "null" }
+    // Integer conversion can erase the sign of zero on a compiled trace.
+    if f == 0.0 && 1.0 / f < 0.0 { return "-0" }
     let i = f as int
     if (i as float) == f {
         let text = "{i}"

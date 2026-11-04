@@ -132,6 +132,7 @@ fn json_float_roundtrip(backend: &str) {
     };
     let mut expected = vec!["true".to_string(); 14 * 4 + 6 + 4];
     expected.push(if backend == "lua" { "0.10000000000000001" } else { "0.1" }.to_string());
+    expected.push("true".to_string());
     assert_eq!(lines, expected, "{backend} JSON must recover the exact input float");
 }
 
