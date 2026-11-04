@@ -22,7 +22,7 @@
 //! paths rendered relative to the root.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;
@@ -154,7 +154,7 @@ type ProjectResult = (
 );
 
 fn census_project(
-    dir: &PathBuf,
+    dir: &Path,
     union: &mut MonoArena,
     union_ids: &mut std::collections::HashSet<String>,
 ) -> Result<ProjectResult> {

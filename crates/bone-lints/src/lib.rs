@@ -2859,7 +2859,7 @@ fn finding_offset(finding: &Finding) -> usize {
         .unwrap_or(finding.error.location.offset)
 }
 
-fn sort_global_findings(findings: &mut Vec<Finding>) {
+fn sort_global_findings(findings: &mut [Finding]) {
     findings.sort_by(|a, b| {
         global_family_rank(a.lint)
             .cmp(&global_family_rank(b.lint))

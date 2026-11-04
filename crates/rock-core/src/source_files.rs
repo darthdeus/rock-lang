@@ -327,7 +327,7 @@ mod tests {
             .map(|file| file.borrow().file.to_id_path())
             .collect();
 
-        assert_eq!(paths, [main_path.clone()]);
+        assert_eq!(paths.as_slice(), std::slice::from_ref(&main_path));
         assert!(!SourceFiles::is_test_only_path(&main_path, &project_root).unwrap());
         assert!(SourceFiles::is_test_only_path(&broken_path, &project_root).unwrap());
         std::fs::remove_dir_all(temp_root).unwrap();

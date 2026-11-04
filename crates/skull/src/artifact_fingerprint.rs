@@ -658,6 +658,111 @@ struct CanonicalHasher {
     bytes: Vec<u8>,
 }
 
+impl CanonicalHasher {
+    fn string(&mut self, value: &str) {
+        self.len(value.len());
+        self.bytes.extend_from_slice(value.as_bytes());
+    }
+
+    fn len(&mut self, value: usize) {
+        self.u64(value as u64);
+    }
+
+    fn u64(&mut self, value: u64) {
+        self.bytes.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn i64(&mut self, value: i64) {
+        self.u64(value as u64);
+    }
+
+    fn boolean(&mut self, value: bool) {
+        self.byte(value as u8);
+    }
+
+    fn census(&mut self, name: &str, values: &[u64]) {
+        self.string(name);
+        self.len(values.len());
+        for value in values {
+            self.u64(*value);
+        }
+    }
+
+    fn byte(&mut self, value: u8) {
+        self.bytes.push(value);
+    }
+
+    fn finish(self) -> u64 {
+        xxhash64(&self.bytes)
+    }
+}
+
+fn xxhash64(bytes: &[u8]) -> u64 {
+    const P1: u64 = 0x9e37_79b1_85eb_ca87;
+    const P2: u64 = 0xc2b2_ae3d_27d4_eb4f;
+    const P3: u64 = 0x1656_67b1_9e37_79f9;
+    const P4: u64 = 0x85eb_ca77_c2b2_ae63;
+    const P5: u64 = 0x27d4_eb2f_1656_67c5;
+
+    let read_u64 = |chunk: &[u8]| u64::from_le_bytes(chunk.try_into().expect("eight bytes"));
+    let round = |acc: u64, input: u64| {
+        acc.wrapping_add(input.wrapping_mul(P2))
+            .rotate_left(31)
+            .wrapping_mul(P1)
+    };
+    let merge_round =
+        |acc: u64, value: u64| (acc ^ round(0, value)).wrapping_mul(P1).wrapping_add(P4);
+
+    let mut offset = 0;
+    let mut hash = if bytes.len() >= 32 {
+        let mut v1 = P1.wrapping_add(P2);
+        let mut v2 = P2;
+        let mut v3 = 0;
+        let mut v4 = 0_u64.wrapping_sub(P1);
+        while offset + 32 <= bytes.len() {
+            v1 = round(v1, read_u64(&bytes[offset..offset + 8]));
+            v2 = round(v2, read_u64(&bytes[offset + 8..offset + 16]));
+            v3 = round(v3, read_u64(&bytes[offset + 16..offset + 24]));
+            v4 = round(v4, read_u64(&bytes[offset + 24..offset + 32]));
+            offset += 32;
+        }
+        let merged = v1
+            .rotate_left(1)
+            .wrapping_add(v2.rotate_left(7))
+            .wrapping_add(v3.rotate_left(12))
+            .wrapping_add(v4.rotate_left(18));
+        merge_round(
+            merge_round(merge_round(merge_round(merged, v1), v2), v3),
+            v4,
+        )
+    } else {
+        P5
+    };
+
+    hash = hash.wrapping_add(bytes.len() as u64);
+    while offset + 8 <= bytes.len() {
+        hash ^= round(0, read_u64(&bytes[offset..offset + 8]));
+        hash = hash.rotate_left(27).wrapping_mul(P1).wrapping_add(P4);
+        offset += 8;
+    }
+    if offset + 4 <= bytes.len() {
+        let value = u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("four bytes"));
+        hash ^= u64::from(value).wrapping_mul(P1);
+        hash = hash.rotate_left(23).wrapping_mul(P2).wrapping_add(P3);
+        offset += 4;
+    }
+    while offset < bytes.len() {
+        hash ^= u64::from(bytes[offset]).wrapping_mul(P5);
+        hash = hash.rotate_left(11).wrapping_mul(P1);
+        offset += 1;
+    }
+    hash ^= hash >> 33;
+    hash = hash.wrapping_mul(P2);
+    hash ^= hash >> 29;
+    hash = hash.wrapping_mul(P3);
+    hash ^ (hash >> 32)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -776,109 +881,4 @@ mod tests {
             0x7639_d419_de61_4eed
         );
     }
-}
-
-impl CanonicalHasher {
-    fn string(&mut self, value: &str) {
-        self.len(value.len());
-        self.bytes.extend_from_slice(value.as_bytes());
-    }
-
-    fn len(&mut self, value: usize) {
-        self.u64(value as u64);
-    }
-
-    fn u64(&mut self, value: u64) {
-        self.bytes.extend_from_slice(&value.to_le_bytes());
-    }
-
-    fn i64(&mut self, value: i64) {
-        self.u64(value as u64);
-    }
-
-    fn boolean(&mut self, value: bool) {
-        self.byte(value as u8);
-    }
-
-    fn census(&mut self, name: &str, values: &[u64]) {
-        self.string(name);
-        self.len(values.len());
-        for value in values {
-            self.u64(*value);
-        }
-    }
-
-    fn byte(&mut self, value: u8) {
-        self.bytes.push(value);
-    }
-
-    fn finish(self) -> u64 {
-        xxhash64(&self.bytes)
-    }
-}
-
-fn xxhash64(bytes: &[u8]) -> u64 {
-    const P1: u64 = 0x9e37_79b1_85eb_ca87;
-    const P2: u64 = 0xc2b2_ae3d_27d4_eb4f;
-    const P3: u64 = 0x1656_67b1_9e37_79f9;
-    const P4: u64 = 0x85eb_ca77_c2b2_ae63;
-    const P5: u64 = 0x27d4_eb2f_1656_67c5;
-
-    let read_u64 = |chunk: &[u8]| u64::from_le_bytes(chunk.try_into().expect("eight bytes"));
-    let round = |acc: u64, input: u64| {
-        acc.wrapping_add(input.wrapping_mul(P2))
-            .rotate_left(31)
-            .wrapping_mul(P1)
-    };
-    let merge_round =
-        |acc: u64, value: u64| (acc ^ round(0, value)).wrapping_mul(P1).wrapping_add(P4);
-
-    let mut offset = 0;
-    let mut hash = if bytes.len() >= 32 {
-        let mut v1 = P1.wrapping_add(P2);
-        let mut v2 = P2;
-        let mut v3 = 0;
-        let mut v4 = 0_u64.wrapping_sub(P1);
-        while offset + 32 <= bytes.len() {
-            v1 = round(v1, read_u64(&bytes[offset..offset + 8]));
-            v2 = round(v2, read_u64(&bytes[offset + 8..offset + 16]));
-            v3 = round(v3, read_u64(&bytes[offset + 16..offset + 24]));
-            v4 = round(v4, read_u64(&bytes[offset + 24..offset + 32]));
-            offset += 32;
-        }
-        let merged = v1
-            .rotate_left(1)
-            .wrapping_add(v2.rotate_left(7))
-            .wrapping_add(v3.rotate_left(12))
-            .wrapping_add(v4.rotate_left(18));
-        merge_round(
-            merge_round(merge_round(merge_round(merged, v1), v2), v3),
-            v4,
-        )
-    } else {
-        P5
-    };
-
-    hash = hash.wrapping_add(bytes.len() as u64);
-    while offset + 8 <= bytes.len() {
-        hash ^= round(0, read_u64(&bytes[offset..offset + 8]));
-        hash = hash.rotate_left(27).wrapping_mul(P1).wrapping_add(P4);
-        offset += 8;
-    }
-    if offset + 4 <= bytes.len() {
-        let value = u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("four bytes"));
-        hash ^= u64::from(value).wrapping_mul(P1);
-        hash = hash.rotate_left(23).wrapping_mul(P2).wrapping_add(P3);
-        offset += 4;
-    }
-    while offset < bytes.len() {
-        hash ^= u64::from(bytes[offset]).wrapping_mul(P5);
-        hash = hash.rotate_left(11).wrapping_mul(P1);
-        offset += 1;
-    }
-    hash ^= hash >> 33;
-    hash = hash.wrapping_mul(P2);
-    hash ^= hash >> 29;
-    hash = hash.wrapping_mul(P3);
-    hash ^ (hash >> 32)
 }

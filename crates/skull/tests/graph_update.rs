@@ -45,7 +45,7 @@ const LIB: &str = "lib/helpers.rock";
 
 /// An instance key without its declaration indices, so an expected set can be
 /// written down and still name the declaration exactly.
-fn short(key: &String) -> String {
+fn short(key: &str) -> String {
     key.split('#').next().unwrap_or(key).to_string()
 }
 
@@ -241,7 +241,7 @@ fn deleting_the_only_edge_into_a_subtree_removes_the_whole_subtree() {
     );
     let removed: Vec<String> = before
         .difference(&case.instance_names())
-        .map(short)
+        .map(|key| short(key))
         .collect();
     assert_eq!(
         removed,
@@ -381,7 +381,7 @@ fn deleting_the_only_external_edge_prunes_a_mutually_reachable_cycle() {
     // only caller was the cycle, and a count would hide a swap.
     let removed: Vec<String> = before
         .difference(&case.instance_names())
-        .map(short)
+        .map(|key| short(key))
         .collect();
     assert_eq!(removed, vec!["__op_sub_int_int", "cyc_a_int", "cyc_b_int"]);
     assert_eq!(stats.pruned, removed.len());

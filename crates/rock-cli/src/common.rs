@@ -679,6 +679,43 @@ pub struct ProcessResult<P = ()> {
     pub progress_stopped: bool,
 }
 
+/// Thread count requested by `ROCK_NUM_THREADS`, else `RAYON_NUM_THREADS`.
+/// It sizes both the compiler's global rayon pool and the C test pool.
+/// `0` asks for the default, as in rayon. A value that is not a count is an
+/// error: ignoring it would silently run with a different pool size.
+pub fn thread_count_request() -> std::result::Result<Option<usize>, String> {
+    parse_thread_count_request(
+        std::env::var("ROCK_NUM_THREADS").ok().as_deref(),
+        std::env::var("RAYON_NUM_THREADS").ok().as_deref(),
+    )
+}
+
+fn parse_thread_count_request(
+    rock: Option<&str>,
+    rayon: Option<&str>,
+) -> std::result::Result<Option<usize>, String> {
+    let Some((var, value)) = rock
+        .map(|v| ("ROCK_NUM_THREADS", v))
+        .or(rayon.map(|v| ("RAYON_NUM_THREADS", v)))
+    else {
+        return Ok(None);
+    };
+    match value.parse::<usize>() {
+        Ok(0) => Ok(None),
+        Ok(n) => Ok(Some(n)),
+        Err(_) => Err(format!(
+            "invalid value '{value}' for '{var}': expected a thread count"
+        )),
+    }
+}
+
+/// [`thread_count_request`] for pool construction. `main_with` rejects an
+/// invalid value at startup, so reaching the panic means a pool was built
+/// outside the CLI process lifecycle with a bad environment.
+pub fn requested_thread_count() -> Option<usize> {
+    thread_count_request().unwrap_or_else(|error| panic!("{error}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{TestSequence, parse_test_start, parse_test_time_progress};
@@ -792,41 +829,4 @@ mod tests {
         assert_eq!(tests.running, Some(2));
         assert_eq!(tests.last_completed, Some(1));
     }
-}
-
-/// Thread count requested by `ROCK_NUM_THREADS`, else `RAYON_NUM_THREADS`.
-/// It sizes both the compiler's global rayon pool and the C test pool.
-/// `0` asks for the default, as in rayon. A value that is not a count is an
-/// error: ignoring it would silently run with a different pool size.
-pub fn thread_count_request() -> std::result::Result<Option<usize>, String> {
-    parse_thread_count_request(
-        std::env::var("ROCK_NUM_THREADS").ok().as_deref(),
-        std::env::var("RAYON_NUM_THREADS").ok().as_deref(),
-    )
-}
-
-fn parse_thread_count_request(
-    rock: Option<&str>,
-    rayon: Option<&str>,
-) -> std::result::Result<Option<usize>, String> {
-    let Some((var, value)) = rock
-        .map(|v| ("ROCK_NUM_THREADS", v))
-        .or(rayon.map(|v| ("RAYON_NUM_THREADS", v)))
-    else {
-        return Ok(None);
-    };
-    match value.parse::<usize>() {
-        Ok(0) => Ok(None),
-        Ok(n) => Ok(Some(n)),
-        Err(_) => Err(format!(
-            "invalid value '{value}' for '{var}': expected a thread count"
-        )),
-    }
-}
-
-/// [`thread_count_request`] for pool construction. `main_with` rejects an
-/// invalid value at startup, so reaching the panic means a pool was built
-/// outside the CLI process lifecycle with a bad environment.
-pub fn requested_thread_count() -> Option<usize> {
-    thread_count_request().unwrap_or_else(|error| panic!("{error}"))
 }

@@ -1041,7 +1041,7 @@ fn record_phase(
     }
 }
 
-fn finish_distribution(phase: &mut AttributionPhase, samples: &mut Vec<u64>) {
+fn finish_distribution(phase: &mut AttributionPhase, samples: &mut [u64]) {
     samples.sort_unstable();
     if samples.is_empty() {
         return;

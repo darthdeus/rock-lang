@@ -4235,7 +4235,7 @@ io.write("__STATE__old:" .. plan.len .. ":" .. plan._data[1].key .. ":" .. plan.
 #[cfg(test)]
 mod wire_transition_tests {
     use super::super::{IncrementalProject, SkullReload};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     const V0: &str = r#"
 @lifecycle(phase="wire", owner="process")
@@ -4281,8 +4281,8 @@ fn main() {}
         project: &mut IncrementalProject,
         source_path: &PathBuf,
         source: &str,
-        main: &PathBuf,
-        incremental: &PathBuf,
+        main: &Path,
+        incremental: &Path,
     ) -> anyhow::Result<SkullReload> {
         std::fs::write(source_path, source).expect("wire replacement source");
         project.recompile(std::slice::from_ref(source_path), main, incremental)
