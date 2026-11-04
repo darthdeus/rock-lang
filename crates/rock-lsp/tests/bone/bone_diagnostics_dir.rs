@@ -33,7 +33,7 @@ fn dir_reports_diagnostics_across_files() {
 
     let report = diagnostics_report(dir.path().to_str().unwrap()).unwrap();
 
-    assert_eq!(report["dir"].is_string(), true, "dir report shape");
+    assert!(report["dir"].is_string(), "dir report shape");
     assert_eq!(
         report["file_count"].as_u64(),
         Some(2),

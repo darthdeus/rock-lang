@@ -3210,7 +3210,7 @@ fn identity_storage_module_exemption_follows_the_module_path() {
         None,
         "the package root is not under `nav`"
     );
-    assert!(ws.fragment_scopes.get(&ustr("legacy.rock")).is_none());
+    assert!(!ws.fragment_scopes.contains_key(&ustr("legacy.rock")));
     assert_eq!(
         exemption_of("legacy.rock"),
         None,

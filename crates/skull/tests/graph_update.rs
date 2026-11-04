@@ -544,10 +544,9 @@ fn generated_support_sources(depth: usize) -> (String, String, String, Vec<Strin
             ));
         }
     }
-    let v1 = format!(
-        "fn main() {{ print(\"{{shared(1)}}\") }}\n\
-         fn independent_root() -> int {{ return support_0() }}\n"
-    );
+    let v1 = "fn main() { print(\"{shared(1)}\") }\n\
+         fn independent_root() -> int { return support_0() }\n"
+        .to_string();
     let v2 = "fn main() { print(\"0\") }\nfn independent_root() -> int { return support_0() }\n"
         .to_string();
     let subtree = [

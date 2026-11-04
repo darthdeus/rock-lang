@@ -1897,8 +1897,8 @@ fn sample() -> int {
     let flat_abis: Vec<_> = full
         .code_artifact
         .entries
-        .iter()
-        .map(|(_, entry)| entry.compatibility.call_abi.as_str())
+        .values()
+        .map(|entry| entry.compatibility.call_abi.as_str())
         .filter(|abi| abi.contains("|flat "))
         .collect();
     assert!(

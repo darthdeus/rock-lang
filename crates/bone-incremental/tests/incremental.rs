@@ -1867,10 +1867,9 @@ fn relower_function_in_place_matches_fresh_lower() {
         .bodies
         .remove(&bone_semantic::hir::BodyOwner::Function(fid));
     assert!(
-        ws.module(mid)
+        !ws.module(mid)
             .bodies
-            .get(&bone_semantic::hir::BodyOwner::Function(fid))
-            .is_none(),
+            .contains_key(&bone_semantic::hir::BodyOwner::Function(fid)),
         "precondition: target body removed"
     );
 

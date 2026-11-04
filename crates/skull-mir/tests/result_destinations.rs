@@ -9,7 +9,7 @@ use skull_mir::monoty::MonoInterner;
 
 fn lower(src: &str) -> MirFunc {
     let ast = skull_parser::parse_module_clean(src, ustr::Ustr::from("<test>")).expect("parse");
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut vec![ast]).expect("semantic pass");
+    let ws = bone_semantic::semantic_passes::semantic_pass(&mut [ast]).expect("semantic pass");
     let mid = ws.module_ids[&ustr::Ustr::from("<test>")];
     let (fid, _) = ws
         .module(mid)

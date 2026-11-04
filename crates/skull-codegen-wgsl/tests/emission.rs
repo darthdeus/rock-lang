@@ -1615,7 +1615,7 @@ fn orientation_frag(vary: OrientationVary, @textures t: OrientationTex) -> Vec4 
             ),
         );
         let artifact = explicit_artifact_source(&source, "orientation_vert", "orientation_frag");
-        assert_eq!(artifact.abi.textures.len(), count as usize);
+        assert_eq!(artifact.abi.textures.len(), count);
         for texture in &artifact.abi.textures {
             let suffix = artifact
                 .source

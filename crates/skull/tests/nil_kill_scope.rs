@@ -146,7 +146,7 @@ fn undeclared_kills(lua: &str) -> Vec<(String, usize, String)> {
             return;
         };
         for (line_no, killed) in pending.drain(..) {
-            if !declared.iter().any(|d| *d == killed) {
+            if !declared.contains(&killed) {
                 out.push((name.clone(), line_no, killed));
             }
         }

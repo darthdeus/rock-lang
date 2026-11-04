@@ -304,7 +304,7 @@ fn numeric_selection_clamp_keeps_mutable_frame_bounds() {
         "fn choose(a: float) -> float { let lo = -1.0; return if a < lo { lo } else if a > 1.0 { 1.0 } else { a } }",
         ustr::Ustr::from("<test>"),
     ).expect("parse");
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut vec![ast]).expect("semantic_pass");
+    let ws = bone_semantic::semantic_passes::semantic_pass(&mut [ast]).expect("semantic_pass");
     let mid = ws.module_ids[&ustr::Ustr::from("<test>")];
     let fid = ws
         .module(mid)

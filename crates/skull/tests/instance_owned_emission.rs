@@ -249,7 +249,7 @@ fn main() {
     for (form, lua) in [("implicit coercion", &coerced), ("`for` head", &looped)] {
         let called = iter_called_in(lua, "main");
         assert!(
-            definition_symbols(lua).iter().any(|d| *d == called),
+            definition_symbols(lua).contains(&called),
             "the {form} witness calls `{called}`, which no definition defines"
         );
     }
@@ -400,7 +400,7 @@ fn main() {
     );
     let boundary_sym = graph.logical_symbol(&ws, boundary);
     assert!(
-        !defs.iter().any(|d| *d == boundary_sym),
+        !defs.contains(&boundary_sym),
         "a boundary (`{boundary_sym}`) must not be emitted as a Rock definition"
     );
 }

@@ -364,7 +364,7 @@ fn main() { print("{top(3)}") }
         })
         .collect();
     assert!(
-        owners.iter().any(|n| *n == "leaf"),
+        owners.contains(&"leaf"),
         "no spliced call attributed to `leaf`; owners = {owners:?}"
     );
     // Every entry indexes a real owner slot -- a stale `OwnerRef` would be a

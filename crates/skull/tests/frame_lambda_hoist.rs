@@ -88,7 +88,7 @@ fn param_lambda_hoists_as_record_under_frame() {
     let lp = fn_params(&lua, &format!("{w}__step__lambda0"));
     assert_eq!(lp.len(), 2, "the hoisted lambda must take (env, n):\n{lua}");
     assert!(
-        step.contains(&format!("__slot = __rock_code_slot_ref(")) && state_field.is_some(),
+        step.contains("__slot = __rock_code_slot_ref(") && state_field.is_some(),
         "the step must build a CodeRef env record carrying the frame state param `{s}`: {step}"
     );
     assert!(

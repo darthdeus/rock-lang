@@ -6,7 +6,7 @@ use ustr::Ustr;
 fn converted(src: &str, edit: impl FnOnce(&mut MirFunc)) -> (MirFunc, String) {
     let ast =
         skull_parser::parse_module_clean(src, Ustr::from("<captured-cell-seed>")).expect("parse");
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut vec![ast]).expect("semantic");
+    let ws = bone_semantic::semantic_passes::semantic_pass(&mut [ast]).expect("semantic");
     let mid = ws.module_ids[&Ustr::from("<captured-cell-seed>")];
     let (fid, _) = ws
         .module(mid)
