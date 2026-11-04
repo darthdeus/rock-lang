@@ -152,6 +152,9 @@ unused_enumerate_index = "allow"
 inherent_to_string = "allow"
 result_large_err = "allow"
 too_many_arguments = "allow"
+# Introduce named types when they clarify domain contracts, not just to shorten
+# local collection types or satisfy a complexity threshold.
+type_complexity = "allow"
 uninlined_format_args = "allow"
 manual_strip = "allow"
 unnecessary_map_or = "allow"
