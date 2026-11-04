@@ -89,7 +89,7 @@ pub fn line_col_to_offset(s: &str, line: usize, col: usize) -> Result<usize, Lin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::strip_ansi_sgr;
+    use test_utils::strip_ansi_sgr;
 
     const OPEN: &str = "\u{256d}\u{2500}";
     const CLOSE: &str = "\u{2500}\u{2500}\u{2500}\u{256f}";

@@ -27,7 +27,11 @@ fn invoke(root: &Path, runner: &Path, shader: bool, skip: bool) -> Output {
 }
 
 fn text(output: &Output) -> String {
-    format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr))
+    test_utils::strip_ansi_sgr(&format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    ))
 }
 
 #[test]

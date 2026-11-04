@@ -22,4 +22,4 @@ tracing = { workspace = true }
 colored = { workspace = true }
 
 [dev-dependencies]
-regex-lite = { workspace = true }
+test-utils = { workspace = true }

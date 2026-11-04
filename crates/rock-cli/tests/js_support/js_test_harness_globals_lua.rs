@@ -32,11 +32,11 @@ fn luajit_executor_keeps_shared_global_state() {
         .current_dir(workspace_root())
         .output()
         .expect("spawn rock");
-    let text = format!(
+    let text = test_utils::strip_ansi_sgr(&format!(
         "{}{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
-    );
+    ));
     assert!(output.status.success(), "luajit must evaluate the shared counter once:\n{text}");
     assert!(text.contains("2/2"), "both Lua tests must run:\n{text}");
 }

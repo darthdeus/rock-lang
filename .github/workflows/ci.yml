@@ -67,6 +67,13 @@ jobs:
         run: cargo build --locked --workspace
       - name: Test workspace
         run: cargo test --locked --workspace
+      - name: Test diagnostic and CLI output with forced colors
+        env:
+          ROCK_FORCE_COLOR: "1"
+          ROCK_LOG_COLOR: always
+          CLICOLOR_FORCE: "1"
+          FORCE_COLOR: "1"
+        run: cargo test --locked -p rock-core -p rock-cli -p rock-log
       - name: Install wasm target
         run: rustup target add wasm32-unknown-unknown
       - name: Check wasm libraries

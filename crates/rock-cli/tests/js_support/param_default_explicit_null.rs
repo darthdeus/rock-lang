@@ -188,11 +188,11 @@ fn rock_test_lua(src: &str, expected: &str) {
         .current_dir(workspace_root())
         .output()
         .expect("spawn rock");
-    let text = format!(
+    let text = test_utils::strip_ansi_sgr(&format!(
         "{}{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
-    );
+    ));
     assert!(output.status.success(), "{text}");
     assert!(text.contains(expected), "expected {expected} Lua tests to pass:\n{text}");
 }

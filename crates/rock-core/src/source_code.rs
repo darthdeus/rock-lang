@@ -354,7 +354,7 @@ impl LineCol {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::strip_ansi_sgr;
+    use test_utils::strip_ansi_sgr;
     use crate::utils::{LineColError, line_col_to_offset};
 
     const FILE: &str = "main.rock";

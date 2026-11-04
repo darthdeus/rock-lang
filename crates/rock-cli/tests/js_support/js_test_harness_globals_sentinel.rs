@@ -69,11 +69,11 @@ fn rock(cmd: &str, src: &str, args: &[&str]) -> (bool, String) {
         .current_dir(workspace_root())
         .output()
         .expect("spawn rock");
-    let text = format!(
+    let text = test_utils::strip_ansi_sgr(&format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
-    );
+    ));
     (out.status.success(), text)
 }
 

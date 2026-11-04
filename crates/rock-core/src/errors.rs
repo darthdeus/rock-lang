@@ -371,7 +371,7 @@ where
 mod tests {
     use super::*;
     use crate::source_code::source_file_from_path_and_contents;
-    use crate::test_support::strip_ansi_sgr;
+    use test_utils::strip_ansi_sgr;
 
 
     // Frame glyphs ariadne draws, escaped to keep this file ASCII.

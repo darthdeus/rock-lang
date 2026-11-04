@@ -4820,7 +4820,11 @@ fn plain_luajit_without_runtime_layout() {
             .env_remove("ROCK_TEST_FILTER");
         if use_override { command.env("ROCK_LUAJIT", &luajit); }
         let output = command.output().unwrap();
-        let text = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        let text = test_utils::strip_ansi_sgr(&format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ));
         if !output.status.success() || !text.contains("1/1 @tests passed") {
             failures.push(format!("plain runtime (override={use_override}) failed:\n{text}"));
         }

@@ -152,3 +152,18 @@ should fail; restore the original cases afterward.
 When comparing two implementations, use small inputs with independently known
 answers. Agreement between backends alone is not enough: both may share the
 same lowering bug.
+
+## Terminal-dependent output
+
+Text assertions must work both in a terminal and with output redirected. CI also
+runs the diagnostic, CLI and logging tests with colors forced on:
+
+```sh
+ROCK_FORCE_COLOR=1 ROCK_LOG_COLOR=always CLICOLOR_FORCE=1 FORCE_COLOR=1 \
+  cargo test --locked -p rock-core -p rock-cli -p rock-log
+```
+
+Use `test_utils::strip_ansi_sgr` when an assertion checks diagnostic text or
+layout rather than styling. For Node subprocesses whose numeric stdout is test
+data, remove `FORCE_COLOR` from the child environment; `NO_COLOR` alone does not
+override it. Do not change process-wide environment variables in parallel tests.

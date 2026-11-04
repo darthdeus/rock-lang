@@ -13,7 +13,11 @@ fn invoke(root: &std::path::Path, args: &[&str]) -> Output {
 }
 
 fn text(out: &Output) -> String {
-    format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))
+    test_utils::strip_ansi_sgr(&format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    ))
 }
 
 #[test]

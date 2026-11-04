@@ -57,8 +57,11 @@ fn package_test_program_reflects_nobox_globals_by_logical_value() {
         .env("ROCK_TEST_VERBOSE", "1")
         .env_remove("ROCK_TEST_FILTER")
         .output().expect("run fixture package tests");
-    let text = format!("{}{}", String::from_utf8_lossy(&test.stdout),
-        String::from_utf8_lossy(&test.stderr));
+    let text = test_utils::strip_ansi_sgr(&format!(
+        "{}{}",
+        String::from_utf8_lossy(&test.stdout),
+        String::from_utf8_lossy(&test.stderr)
+    ));
     assert!(test.status.success(), "package test failed:\n{text}");
     assert!(text.contains("1/1 @tests passed"), "expected one passing test:\n{text}");
 }
