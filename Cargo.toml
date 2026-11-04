@@ -37,6 +37,43 @@ members = [
     "crates/test-utils",
 ]
 
+# Keep plain cargo build/test usable without the optional SDL2 runner.
+# --workspace still includes every member, including the runner.
+default-members = [
+    "crates/rock-cli",
+    "crates/skull",
+    "crates/skull-codegen-shader",
+    "crates/skull-codegen-glsl",
+    "crates/skull-codegen-wgsl",
+    "crates/skull-codegen-lua",
+    "crates/skull-codegen-js",
+    "crates/skull-transform",
+    "crates/rock-lsp",
+    "crates/skull-mir",
+    "crates/skull-graph",
+    "crates/bone-core",
+    "crates/bone-incremental",
+    "crates/bone-query",
+    "crates/bone-inference",
+    "crates/bone-lints",
+    "crates/bone-lower",
+    "crates/bone-semantic",
+    "crates/la-arena",
+    "crates/lsp-serde-test",
+    "crates/lsp-server-manual",
+    "crates/lsp-types-manual",
+    "crates/rock-core",
+    "crates/rock-host",
+    "crates/rock-log",
+    "crates/rock-stdlib",
+    "crates/rock-wasm",
+    "crates/rock-tokenizer",
+    "crates/skull-fmt",
+    "crates/skull-parser",
+    "crates/skull-wgsl-abi",
+    "crates/test-utils",
+]
+
 [workspace.package]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/darthdeus/rock-lang"
