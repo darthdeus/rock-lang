@@ -95,8 +95,10 @@ fn greeting() -> string {
     return embed_string("greeting.txt")
 }
 "#;
-    let mut inputs = ComptimeInputs::default();
-    inputs.embed_root = Some(dir.path().to_path_buf());
+    let inputs = ComptimeInputs {
+        embed_root: Some(dir.path().to_path_buf()),
+        ..ComptimeInputs::default()
+    };
     let lua = try_emit_module_with(src, inputs).expect("embed expands");
     let body = function_body(&lua, "greeting");
     assert!(
@@ -113,8 +115,10 @@ fn broken() -> string {
     return embed_string("absent.txt")
 }
 "#;
-    let mut inputs = ComptimeInputs::default();
-    inputs.embed_root = Some(dir.path().to_path_buf());
+    let inputs = ComptimeInputs {
+        embed_root: Some(dir.path().to_path_buf()),
+        ..ComptimeInputs::default()
+    };
     let err = try_emit_module_with(src, inputs).expect_err("missing embed file must reject");
     assert!(
         err.message.contains("absent.txt"),
@@ -133,8 +137,10 @@ fn broken() -> string {
     return embed_string("../secret.txt")
 }
 "#;
-    let mut inputs = ComptimeInputs::default();
-    inputs.embed_root = Some(dir.path().join("proj"));
+    let inputs = ComptimeInputs {
+        embed_root: Some(dir.path().join("proj")),
+        ..ComptimeInputs::default()
+    };
     let err = try_emit_module_with(src, inputs).expect_err("path escaping the root must reject");
     assert!(
         err.message.contains("project root") || err.message.contains("escapes"),
@@ -165,8 +171,10 @@ fn payload() -> string {
     return embed_string("payload.txt")
 }
 "#;
-    let mut inputs = ComptimeInputs::default();
-    inputs.embed_root = Some(elsewhere.path().to_path_buf());
+    let inputs = ComptimeInputs {
+        embed_root: Some(elsewhere.path().to_path_buf()),
+        ..ComptimeInputs::default()
+    };
     let lua = crate::common::try_emit_module_with_file(src, lib_file.to_str().unwrap(), inputs)
         .expect("package-relative embed resolves");
     assert!(
@@ -378,8 +386,10 @@ fn other() -> int {
     return 1
 }
 "#;
-    let mut inputs = ComptimeInputs::default();
-    inputs.embed_root = Some(dir.path().to_path_buf());
+    let inputs = ComptimeInputs {
+        embed_root: Some(dir.path().to_path_buf()),
+        ..ComptimeInputs::default()
+    };
 
     let ws1 = ws_with_inputs(src, inputs.clone());
     let mid = skull::user_module_id(&ws1).unwrap();
@@ -420,8 +430,10 @@ fn other() -> int {
     return 1
 }
 "#;
-    let mut inputs = ComptimeInputs::default();
-    inputs.embed_root = Some(dir.path().to_path_buf());
+    let inputs = ComptimeInputs {
+        embed_root: Some(dir.path().to_path_buf()),
+        ..ComptimeInputs::default()
+    };
     let ws1 = ws_with_inputs(src, inputs.clone());
     let mid = skull::user_module_id(&ws1).unwrap();
     let (_, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
@@ -457,8 +469,10 @@ fn main() {
     print(BANNER)
 }
 "#;
-    let mut inputs = ComptimeInputs::default();
-    inputs.embed_root = Some(dir.path().to_path_buf());
+    let inputs = ComptimeInputs {
+        embed_root: Some(dir.path().to_path_buf()),
+        ..ComptimeInputs::default()
+    };
     let ws = ws_with_inputs(src, inputs);
     let mid = skull::user_module_id(&ws).unwrap();
     let (full, cache) = emit_full(&ws, mid).expect("emit_full");
@@ -556,8 +570,10 @@ fn main() {
 }
 "#;
     let v2 = v1.replace("first.txt", "second.txt");
-    let mut inputs = bone_semantic::inference::ComptimeInputs::default();
-    inputs.embed_root = Some(dir.path().to_path_buf());
+    let inputs = bone_semantic::inference::ComptimeInputs {
+        embed_root: Some(dir.path().to_path_buf()),
+        ..bone_semantic::inference::ComptimeInputs::default()
+    };
     let ws1 = ws_with_inputs(v1, inputs.clone());
     let mid = skull::user_module_id(&ws1).unwrap();
     let (_, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
@@ -613,8 +629,10 @@ fn main() {
     print(DATA)
 }
 "#;
-    let mut inputs = ComptimeInputs::default();
-    inputs.embed_root = Some(dir.path().to_path_buf());
+    let inputs = ComptimeInputs {
+        embed_root: Some(dir.path().to_path_buf()),
+        ..ComptimeInputs::default()
+    };
     let ws1 = ws_with_inputs(src, inputs.clone());
     let mid = skull::user_module_id(&ws1).unwrap();
     let (_, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");

@@ -303,18 +303,18 @@ fn assert_incremental_nav_matches_scratch(before: &str, after: &str) {
     };
 
     assert_eq!(
-        nav_profile(&inc, after, &refs),
-        nav_profile(&scratch, after, &refs),
+        nav_profile(&inc, after, refs),
+        nav_profile(&scratch, after, refs),
         "incremental references must equal from-scratch after the edit"
     );
     assert_eq!(
-        nav_profile(&inc, after, &hover),
-        nav_profile(&scratch, after, &hover),
+        nav_profile(&inc, after, hover),
+        nav_profile(&scratch, after, hover),
         "incremental hover must equal from-scratch after the edit"
     );
     assert_eq!(
-        nav_profile(&inc, after, &def),
-        nav_profile(&scratch, after, &def),
+        nav_profile(&inc, after, def),
+        nav_profile(&scratch, after, def),
         "incremental definition must equal from-scratch after the edit"
     );
 }

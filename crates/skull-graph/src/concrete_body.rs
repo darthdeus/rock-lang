@@ -1507,11 +1507,10 @@ fn concrete_ty_types(
                 })
                 .collect::<Result<rustc_hash::FxHashMap<_, _>, _>>()
         })
-        .map(|types| {
+        .inspect(|_| {
             if let Some(started) = started {
                 stats.type_nodes_ns += started.elapsed().as_nanos() as u64;
             }
-            types
         })
 }
 
@@ -2362,7 +2361,6 @@ fn produce_instance(
     callee_tables(ws, g, &inst, &mut concrete, &mut facts);
     let callee_time = started.elapsed();
     let keys: BTreeSet<Idx<Expr>> = counted_callees(&concrete, &mut facts.build_stats)
-        .into_iter()
         .map(|(site, _)| site.expr)
         .collect();
     for untyped_expr in &untyped {
@@ -2907,7 +2905,7 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
 pub fn concrete_default_invocations() -> u64 {
     #[cfg(feature = "test-hooks")]
     {
-        return CONCRETE_DEFAULT_INVOCATIONS.with(std::cell::Cell::get);
+        CONCRETE_DEFAULT_INVOCATIONS.with(std::cell::Cell::get)
     }
     #[cfg(not(feature = "test-hooks"))]
     {
@@ -3119,8 +3117,10 @@ fn build_published_impl(
     results.sort_by(|left, right| left.instance().cmp(right.instance()));
 
     let t_ordinary_merge = bone_core::prelude::Instant::now();
-    let mut out = ConcreteBodies::default();
-    out.global_build_stats = publication_stats;
+    let mut out = ConcreteBodies {
+        global_build_stats: publication_stats,
+        ..ConcreteBodies::default()
+    };
     let mut plans = skull_mir::concrete::ConcretePlans::new();
     let mut per_inst = Vec::new();
     let mut t_convert = std::time::Duration::ZERO;

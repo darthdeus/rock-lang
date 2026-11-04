@@ -14,7 +14,7 @@ use skull_transform::scope::{ROOT, ScopeTree};
 /// operations, so `() => x` / `n = 5` suffice.
 fn lower(src: &str, fn_name: &str) -> MirFunc {
     let ast = skull_parser::parse_module_clean(src, ustr::Ustr::from("<test>")).expect("parse");
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut vec![ast]).expect("semantic_pass");
+    let ws = bone_semantic::semantic_passes::semantic_pass(&mut [ast]).expect("semantic_pass");
     let mid = *ws
         .module_ids
         .get(&ustr::Ustr::from("<test>"))
@@ -227,7 +227,7 @@ fn rewrite_last_store_to_dest_write(
         .iter()
         .filter(|(_, i)| matches!(i, Inst::Store { cell: c, .. } if *c == cell))
         .map(|(id, _)| id)
-        .last()
+        .next_back()
         .expect("a Store of the cell");
     for (_, b) in func.blocks.iter_mut() {
         b.insts.retain(|&i| i != last_store);
@@ -237,7 +237,7 @@ fn rewrite_last_store_to_dest_write(
         .iter()
         .filter(|(_, i)| matches!(i, Inst::CallMulti { .. }))
         .map(|(id, _)| id)
-        .last()
+        .next_back()
         .expect("a CallMulti");
     let Inst::CallMulti { dests, .. } = &mut func.insts[call] else {
         unreachable!()

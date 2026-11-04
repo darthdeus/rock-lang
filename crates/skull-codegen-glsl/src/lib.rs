@@ -637,7 +637,7 @@ const GLSL_INTRINSICS: &[(&str, usize, &str)] = &[
 /// a GLSL fn definition. Backs [`GlslIntrinsics::lookup`].
 fn intrinsic_template(f: &Function) -> Option<&'static str> {
     let n = declared_name(f.name.as_str());
-    let arity = f.param_decls.iter().count();
+    let arity = f.param_decls.len();
     GLSL_INTRINSICS
         .iter()
         .find(|(name, ar, _)| *name == n && *ar == arity)
@@ -673,8 +673,7 @@ impl IntrinsicTable for GlslIntrinsics {
 /// this predicate: lowering turns them into native MIR instructions.
 pub fn renders_inline(f: &Function) -> bool {
     GlslIntrinsics.lookup(f).is_some()
-        || (vec_op_symbol(declared_name(f.name.as_str())).is_some()
-            && f.param_decls.iter().count() == 2)
+        || (vec_op_symbol(declared_name(f.name.as_str())).is_some() && f.param_decls.len() == 2)
 }
 
 // Union of lexical and future-use keywords in GLSL ES 3.00 section 3.8 and
@@ -758,8 +757,7 @@ pub fn renders_inline_instance(
     if GlslIntrinsics.lookup(f).is_some() {
         return true;
     }
-    if vec_op_symbol(declared_name(f.name.as_str())).is_none() || f.param_decls.iter().count() != 2
-    {
+    if vec_op_symbol(declared_name(f.name.as_str())).is_none() || f.param_decls.len() != 2 {
         return false;
     }
     let subst = inst.subst(ws, interner);
@@ -785,7 +783,7 @@ pub fn is_lowered_native_operator(
     if !matches!(
         declared_name(f.name.as_str()),
         "__op_add" | "__op_sub" | "__op_mul" | "__op_div" | "__op_idiv" | "__op_mod"
-    ) || f.param_decls.iter().count() != 2
+    ) || f.param_decls.len() != 2
         || renders_inline_instance(ws, f, inst, interner)
     {
         return false;
@@ -6925,8 +6923,7 @@ mod assertion_flip_tests {
         let mut overlap = abi.clone();
         overlap.attribute_locations = vec![(Ustr::from("a"), 0), (Ustr::from("b"), 0)];
         let msg = validate_abi(&iface, &overlap, Span::default())
-            .err()
-            .expect("overlapping locations must reject")
+            .expect_err("overlapping locations must reject")
             .message;
         assert!(msg.contains("both occupy location"), "{msg}");
 
@@ -6936,8 +6933,7 @@ mod assertion_flip_tests {
         let mut top = abi.clone();
         top.attribute_locations = vec![(Ustr::from("a"), u32::MAX), (Ustr::from("b"), 1)];
         let msg = validate_abi(&iface, &top, Span::default())
-            .err()
-            .expect("a location at u32::MAX must reject")
+            .expect_err("a location at u32::MAX must reject")
             .message;
         assert!(msg.contains("spans past the end"), "{msg}");
     }
@@ -7001,8 +6997,7 @@ mod assertion_flip_tests {
             members: vec![(Ustr::from("x"), WireKind::F32)],
         });
         let msg = validate_abi(&two_roles, &abi, Span::default())
-            .err()
-            .expect("two groups at one role must reject")
+            .expect_err("two groups at one role must reject")
             .message;
         assert!(msg.contains("two uniform groups at binding"), "{msg}");
 
@@ -7018,8 +7013,7 @@ mod assertion_flip_tests {
             }],
         });
         let msg = validate_abi(&two_arrays, &abi, Span::default())
-            .err()
-            .expect("two array groups for one stage must reject")
+            .expect_err("two array groups for one stage must reject")
             .message;
         assert!(msg.contains("two array groups"), "{msg}");
     }

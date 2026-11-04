@@ -2341,7 +2341,7 @@ impl Emitter<'_> {
                     }
                     return self.render_leaf_form_value_struct(*name, *representation, fields);
                 }
-                let mut parts = vec![format!("__ty: {}", js_string_lit(&name.to_string())?)];
+                let mut parts = vec![format!("__ty: {}", js_string_lit(name.as_ref())?)];
                 for (f, v) in fields {
                     parts.push(format!("{}: {}", js_key(f)?, self.render_val(*v)?));
                 }
@@ -2757,7 +2757,7 @@ impl Emitter<'_> {
             .and_then(|plan| plan.value_storage())
             == Some(skull_mir::lower::ValueStorage::CData);
         if !cdata {
-            let mut parts = vec![format!("__ty: {}", js_string_lit(&name.to_string())?)];
+            let mut parts = vec![format!("__ty: {}", js_string_lit(name.as_ref())?)];
             for (key, value) in fields {
                 parts.push(format!("{}: {}", js_key(key)?, self.render_val(*value)?));
             }
@@ -2780,7 +2780,7 @@ impl Emitter<'_> {
                 }
             }
         }
-        let mut parts = vec![format!("__ty: {}", js_string_lit(&name.to_string())?)];
+        let mut parts = vec![format!("__ty: {}", js_string_lit(name.as_ref())?)];
         for (key, rendered) in &top {
             parts.push(format!("{}: {rendered}", js_key(key)?));
         }
@@ -4742,12 +4742,14 @@ impl<'a> WorklistState<'a> {
             .iter()
             .map(|(inst, realized)| (inst.clone(), realized.decl))
             .collect();
-        let mut gctx = GlobalCtx::default();
-        gctx.state = skull_mir::global_storage::global_storage_keys(ws, scx)
-            .map_err(err)?
-            .into_iter()
-            .collect();
-        gctx.const_globals = build_const_global_names(ws, scx);
+        let gctx = GlobalCtx {
+            state: skull_mir::global_storage::global_storage_keys(ws, scx)
+                .map_err(err)?
+                .into_iter()
+                .collect(),
+            const_globals: build_const_global_names(ws, scx),
+            ..GlobalCtx::default()
+        };
         Ok(WorklistState {
             concrete,
             always,
@@ -5107,7 +5109,7 @@ impl<'a, 'b> JsDelivery<'a, 'b> {
             let f = &self.ws.module(inst.func.module).functions[inst.func.func];
             let at = at.render();
             self.st.reject(
-                &f.name.to_string(),
+                f.name.as_ref(),
                 CompilerError::new_with_label(
                     f.name_span,
                     format!(

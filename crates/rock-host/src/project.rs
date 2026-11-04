@@ -35,10 +35,7 @@ pub fn find_workspace_root(path: &Path) -> Option<PathBuf> {
         if is_rock_root(&current) {
             return Some(current);
         }
-        match current.parent() {
-            Some(parent) => current = parent.to_path_buf(),
-            None => return None,
-        }
+        current = current.parent()?.to_path_buf();
     }
 }
 
@@ -60,10 +57,7 @@ pub fn find_source_root(path: &Path) -> Option<PathBuf> {
         if current.join("Cargo.toml").exists() && current.join("crates").is_dir() {
             return Some(current);
         }
-        match current.parent() {
-            Some(parent) => current = parent.to_path_buf(),
-            None => return None,
-        }
+        current = current.parent()?.to_path_buf();
     }
 }
 
@@ -145,11 +139,7 @@ pub fn find_project_root(path: &Path) -> Option<PathBuf> {
             }
         }
 
-        // Move to parent directory
-        match current_path.parent() {
-            Some(parent) => current_path = parent.to_path_buf(),
-            None => return None, // Reached filesystem root
-        }
+        current_path = current_path.parent()?.to_path_buf();
     }
 }
 

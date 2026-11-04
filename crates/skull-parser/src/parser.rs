@@ -805,7 +805,7 @@ impl<'a> Parser<'a> {
             self.expect(TokenKind::CloseParen)?;
             let op_fn = glyph
                 .overloadable_binop_fn()
-                .or_else(|| match glyph {
+                .or(match glyph {
                     TokenKind::Bang => Some("__not"),
                     _ => None,
                 })
@@ -3661,13 +3661,13 @@ impl<'a> Parser<'a> {
                     // the postfix machinery; a bare path (or `p::Type<T>` as a
                     // value) lands here.
                     let span = self.span_from(start);
-                    return Ok(self.ast.expr(
+                    Ok(self.ast.expr(
                         span,
                         ExprKind::Path {
                             path,
                             generic_args: Vec::new(),
                         },
-                    ));
+                    ))
                 }
                 // `Base::Member` is a qualified ident ONLY when the member
                 // starts uppercase (enum-variant convention). A lowercase

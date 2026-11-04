@@ -958,9 +958,11 @@ impl Default for InlineCache {
     fn default() -> Self {
         let census_enabled =
             std::env::var_os("ROCK_INLINE_CENSUS").is_some_and(|v| v.to_str() == Some("1"));
-        let worker = census_enabled
-            .then(|| format!("{:?}", std::thread::current().id()))
-            .unwrap_or_default();
+        let worker = if census_enabled {
+            format!("{:?}", std::thread::current().id())
+        } else {
+            Default::default()
+        };
         Self {
             cands: HashMap::default(),
             shared: None,
@@ -1214,8 +1216,8 @@ fn live_closure(func: &MirFunc) -> LiveClosure {
             live.cells.insert(*flag);
         }
     }
-    for iid in live.insts.iter().copied() {
-        if let Some(plan) = func.closure_env_plans.get(&iid) {
+    for iid in &live.insts {
+        if let Some(plan) = func.closure_env_plans.get(iid) {
             live.cells.extend(plan.captures().iter().copied());
             if let Some(cell) = plan.env_cell() {
                 live.cells.insert(cell);
@@ -1239,64 +1241,66 @@ fn template_counts(func: &MirFunc, live: &LiveClosure) -> InlineCloneStats {
     let live_blocks = live.blocks.len();
     let live_inst = |id: &Idx<Inst>| live.insts.contains(id);
     let live_block = |id: &Idx<Block>| live.blocks.contains(id);
-    let mut side = InlineSideTableStats::default();
-    side.spec_bindings = side_family(
-        func.spec_bindings.len(),
-        func.spec_bindings.keys().filter(|id| live_inst(id)).count(),
-    );
-    side.callee_instances = side_family(
-        func.callee_instances.len(),
-        func.callee_instances
-            .keys()
-            .filter(|id| live_inst(id))
-            .count(),
-    );
-    side.abi_plans = side_family(
-        func.call_abi_plans.len(),
-        func.call_abi_plans
-            .keys()
-            .filter(|id| live_inst(id))
-            .count(),
-    );
-    side.representation_plans = side_family(
-        func.call_rep_plans.len(),
-        func.call_rep_plans
-            .keys()
-            .filter(|id| live_inst(id))
-            .count(),
-    );
-    side.closure_environment_plans = side_family(
-        func.closure_env_plans.len(),
-        func.closure_env_plans
-            .keys()
-            .filter(|id| live_inst(id))
-            .count(),
-    );
-    side.raw_bound_trees = side_family(
-        func.bound_trees.len(),
-        func.bound_trees.keys().filter(|id| live_inst(id)).count(),
-    );
-    side.resolved_bound_trees = side_family(
-        func.resolved_bound_trees.len(),
-        func.resolved_bound_trees
-            .keys()
-            .filter(|id| live_inst(id))
-            .count(),
-    );
-    side.function_value_symbols = side_family(
-        func.fn_value_symbols.len(),
-        func.fn_value_symbols
-            .keys()
-            .filter(|id| live_inst(id))
-            .count(),
-    );
-    side.instruction_spans = side_family(
-        func.inst_spans.iter().count(),
-        func.inst_spans
-            .iter()
-            .filter(|(id, _)| live_inst(id))
-            .count(),
-    );
+    let mut side = InlineSideTableStats {
+        spec_bindings: side_family(
+            func.spec_bindings.len(),
+            func.spec_bindings.keys().filter(|id| live_inst(id)).count(),
+        ),
+        callee_instances: side_family(
+            func.callee_instances.len(),
+            func.callee_instances
+                .keys()
+                .filter(|id| live_inst(id))
+                .count(),
+        ),
+        abi_plans: side_family(
+            func.call_abi_plans.len(),
+            func.call_abi_plans
+                .keys()
+                .filter(|id| live_inst(id))
+                .count(),
+        ),
+        representation_plans: side_family(
+            func.call_rep_plans.len(),
+            func.call_rep_plans
+                .keys()
+                .filter(|id| live_inst(id))
+                .count(),
+        ),
+        closure_environment_plans: side_family(
+            func.closure_env_plans.len(),
+            func.closure_env_plans
+                .keys()
+                .filter(|id| live_inst(id))
+                .count(),
+        ),
+        raw_bound_trees: side_family(
+            func.bound_trees.len(),
+            func.bound_trees.keys().filter(|id| live_inst(id)).count(),
+        ),
+        resolved_bound_trees: side_family(
+            func.resolved_bound_trees.len(),
+            func.resolved_bound_trees
+                .keys()
+                .filter(|id| live_inst(id))
+                .count(),
+        ),
+        function_value_symbols: side_family(
+            func.fn_value_symbols.len(),
+            func.fn_value_symbols
+                .keys()
+                .filter(|id| live_inst(id))
+                .count(),
+        ),
+        instruction_spans: side_family(
+            func.inst_spans.iter().count(),
+            func.inst_spans
+                .iter()
+                .filter(|(id, _)| live_inst(id))
+                .count(),
+        ),
+        ..InlineSideTableStats::default()
+    };
     let retained_call_sites = func.call_sites.keys().filter(|id| live_inst(id)).count();
     side.call_sites = side_family(func.call_sites.len(), retained_call_sites);
     let retained_owners: HashSet<u32> = func
@@ -1373,8 +1377,8 @@ fn compact_live_template(
             inst_map.insert(id, insts.alloc(inst.clone()));
         }
     }
-    for id in live.insts.iter().copied() {
-        let new_id = inst_map[&id];
+    for id in &live.insts {
+        let new_id = inst_map[id];
         remap_clone(&mut insts[new_id], &inst_map, &cell_map, &block_map);
     }
     for id in live.blocks.iter().copied() {
@@ -1460,11 +1464,8 @@ fn compact_live_template(
     template.coro_defers = source
         .coro_defers
         .iter()
-        .filter_map(|(flag, block)| {
-            live.blocks
-                .contains(block)
-                .then(|| (cell_map[flag], block_map[block]))
-        })
+        .filter(|&(_, block)| live.blocks.contains(block))
+        .map(|(flag, block)| (cell_map[flag], block_map[block]))
         .collect();
     template.for_iter_headers = source
         .for_iter_headers
@@ -1937,7 +1938,7 @@ fn get<'a>(
                     cache.census.candidate_cache_hits += 1;
                 }
                 cache.cands.insert(inst.clone(), candidate);
-                return Ok(cache.cands[inst].as_ref().map(|candidate| &**candidate));
+                return Ok(cache.cands[inst].as_deref());
             }
         }
         if cache.census_enabled {
@@ -1981,7 +1982,7 @@ fn get<'a>(
     } else if cache.census_enabled {
         cache.census.candidate_cache_hits += 1;
     }
-    Ok(cache.cands[inst].as_ref().map(|candidate| &**candidate))
+    Ok(cache.cands[inst].as_deref())
 }
 
 /// One resolved, eligible call site in the caller, extracted before the splice.
@@ -2280,7 +2281,8 @@ fn clone_cells_insts(
             block_base,
         ));
     }
-    let maps = CloneMapStats {
+
+    CloneMapStats {
         inst_entries: scratch.inst_map.len(),
         cell_entries: scratch.cell_map.len(),
         inst_capacity: scratch.inst_map.capacity(),
@@ -2288,8 +2290,7 @@ fn clone_cells_insts(
         inst_growth: usize::from(scratch.inst_map.capacity() != inst_capacity),
         cell_growth: usize::from(scratch.cell_map.capacity() != cell_capacity),
         ..CloneMapStats::default()
-    };
-    maps
+    }
 }
 
 /// Clone the callee's cells, blocks, AND insts into `caller`. Returns
@@ -2386,7 +2387,8 @@ fn clone_all(caller: &mut MirFunc, callee: &MirFunc, scratch: &mut InlineScratch
             block_base + callee.emit_block_span(),
         ));
     }
-    let maps = CloneMapStats {
+
+    CloneMapStats {
         inst_entries: scratch.inst_map.len(),
         cell_entries: scratch.cell_map.len(),
         block_entries: scratch.block_map.len(),
@@ -2396,8 +2398,7 @@ fn clone_all(caller: &mut MirFunc, callee: &MirFunc, scratch: &mut InlineScratch
         inst_growth: usize::from(scratch.inst_map.capacity() != inst_capacity),
         cell_growth: usize::from(scratch.cell_map.capacity() != cell_capacity),
         block_growth: usize::from(scratch.block_map.capacity() != block_capacity),
-    };
-    maps
+    }
 }
 
 fn import_cleanup_load_cells(

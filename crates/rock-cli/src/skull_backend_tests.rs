@@ -3254,7 +3254,7 @@ mod shape_drift_tests {
 
         std::fs::write(&rock, v1).unwrap();
         let reload = project
-            .recompile(&[rock.clone()], &main_lua, &inc_lua)
+            .recompile(std::slice::from_ref(&rock), &main_lua, &inc_lua)
             .expect("recompile v1");
         match &reload {
             SkullReload::ShapeChanged { types } => assert!(
@@ -3401,7 +3401,7 @@ mod shape_drift_tests {
 
         std::fs::write(&rock, body).unwrap();
         let reload = project
-            .recompile(&[rock.clone()], &main_lua, &inc_lua)
+            .recompile(std::slice::from_ref(&rock), &main_lua, &inc_lua)
             .expect("body edit");
         assert!(
             matches!(reload, SkullReload::Incremental { .. }),
@@ -4470,7 +4470,7 @@ mod force_full_tests {
         // check against a fresh v2 build below would catch it.
         std::fs::write(&rock, v2).unwrap();
         let reload = skull
-            .recompile(&[rock.clone()], &main_lua, &inc_lua)
+            .recompile(std::slice::from_ref(&rock), &main_lua, &inc_lua)
             .expect("recompile v2");
         assert!(
             matches!(reload, SkullReload::Incremental { .. }),
@@ -4548,7 +4548,7 @@ mod force_full_tests {
         // Body edit: main now calls `split`, which routes to the overlay.
         std::fs::write(&rock, v2).unwrap();
         let reload = skull
-            .recompile(&[rock.clone()], &main_lua, &inc_lua)
+            .recompile(std::slice::from_ref(&rock), &main_lua, &inc_lua)
             .expect("recompile v2");
         assert!(
             matches!(reload, SkullReload::Incremental { .. }),
@@ -4623,7 +4623,7 @@ mod force_full_tests {
         // and must restore the v1 compiler Session before returning.
         let v2 = "fn helper() -> int { 3 }\nfn use_it() -> int { nope() }\n";
         std::fs::write(&rock, v2).unwrap();
-        let reload = skull.recompile(&[rock.clone()], &main_lua, &inc_lua);
+        let reload = skull.recompile(std::slice::from_ref(&rock), &main_lua, &inc_lua);
         assert!(reload.is_err(), "recompile must bail on the broken edit");
 
         // A fold after the failed update now sees the retained v1 Session and

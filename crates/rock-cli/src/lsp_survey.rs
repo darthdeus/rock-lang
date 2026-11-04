@@ -348,8 +348,8 @@ pub fn lsp_survey(path: &str, iters: usize, warmup: usize, json_out: bool) -> Re
     }
 
     // Warm the LSP facade off the largest project file's unit.
-    mods.sort_by(|a, b| b.body_bytes.cmp(&a.body_bytes));
-    fns.sort_by(|a, b| b.body_bytes.cmp(&a.body_bytes));
+    mods.sort_by_key(|a| std::cmp::Reverse(a.body_bytes));
+    fns.sort_by_key(|a| std::cmp::Reverse(a.body_bytes));
     let warm_file = fns[0].file.clone();
     let warm_canon = fs_err::canonicalize(&warm_file)
         .map(|p| p.to_string_lossy().to_string())
@@ -371,11 +371,11 @@ pub fn lsp_survey(path: &str, iters: usize, warmup: usize, json_out: bool) -> Re
     };
 
     let mut by_body = fns.clone();
-    by_body.sort_by(|a, b| b.body_bytes.cmp(&a.body_bytes));
+    by_body.sort_by_key(|a| std::cmp::Reverse(a.body_bytes));
     let mut by_calls = fns.clone();
-    by_calls.sort_by(|a, b| b.call_fan_in.cmp(&a.call_fan_in));
+    by_calls.sort_by_key(|a| std::cmp::Reverse(a.call_fan_in));
     let mut by_modfan = fns.clone();
-    by_modfan.sort_by(|a, b| b.mod_fan_in.cmp(&a.mod_fan_in));
+    by_modfan.sort_by_key(|a| std::cmp::Reverse(a.mod_fan_in));
 
     for f in by_body.iter().take(5) {
         add(f, EditKind::Body, &mut candidates, &mut seen);
@@ -571,8 +571,8 @@ pub fn lsp_survey(path: &str, iters: usize, warmup: usize, json_out: bool) -> Re
 
     eprintln!("\n  WORST EDITS (ranked by max per-edit auto-refresh latency):");
     eprintln!(
-        "    {:<26} {:<22} {:<10} {:<9} {:>7} {:>7}  {}",
-        "where", "fn", "kind", "tier", "mean", "max", "[upd/sem/inl/hov/cmp ms, reinf, diags]"
+        "    {:<26} {:<22} {:<10} {:<9} {:>7} {:>7}  [upd/sem/inl/hov/cmp ms, reinf, diags]",
+        "where", "fn", "kind", "tier", "mean", "max"
     );
     for r in results.iter().take(20) {
         let tier_tag = if r.tier.contains(r.kind.expected_tier()) || r.tier == "ParseErr" {

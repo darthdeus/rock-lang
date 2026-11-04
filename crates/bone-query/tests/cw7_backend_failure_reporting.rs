@@ -120,8 +120,7 @@ fn parse_fallback_reports_cause_once_and_recovers_after_repair() {
     let good = "fn main() {\n let count = 1\n}\n";
     let broken = "fn main() {\n let count = 1\n let text = \"unterminated\n}\n";
     let cause = skull_parser::parse_module(broken, ustr::Ustr::from(path.as_str()))
-        .err()
-        .expect("fixture must force a hard parse failure")
+        .expect_err("fixture must force a hard parse failure")
         .message;
     let mut bone = BoneWorkspace::new();
     bone.update(&path, good.into());
@@ -180,8 +179,7 @@ fn semantic_recovery_reports_real_cause_and_repaired_request_succeeds() {
     let ast = skull_parser::parse_module_clean(broken, ustr::Ustr::from(path.as_str()))
         .expect("semantic fixture must parse cleanly");
     let cause = bone_semantic::semantic_passes::semantic_pass(&mut [ast])
-        .err()
-        .expect("fixture must refuse the semantic pass")
+        .expect_err("fixture must refuse the semantic pass")
         .message;
     let mut bone = BoneWorkspace::new();
     bone.update(&path, broken.into());
@@ -245,8 +243,7 @@ fn batch_fallback_reports_failed_per_file_update() {
     std::fs::write(&path, broken).unwrap();
     let ast = skull_parser::parse_module_clean(broken, ustr::Ustr::from(path.as_str())).unwrap();
     let cause = bone_semantic::semantic_passes::semantic_pass(&mut [ast])
-        .err()
-        .expect("semantic failure fixture")
+        .expect_err("semantic failure fixture")
         .message;
     let mut bone = BoneWorkspace::new();
     bone.load_project(&path);

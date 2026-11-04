@@ -675,8 +675,7 @@ impl<'a> Tokenizer<'a> {
 
         match radix {
             Radix::Binary => {
-                loop {
-                    let Some(cur) = self.current else { break };
+                while let Some(cur) = self.current {
                     match cur {
                         '0' | '1' => {
                             digits.push(cur);
@@ -709,8 +708,7 @@ impl<'a> Tokenizer<'a> {
                 Ok(TokenKind::Int(value, kept.into()))
             }
             Radix::Hex => {
-                loop {
-                    let Some(cur) = self.current else { break };
+                while let Some(cur) = self.current {
                     if cur.is_ascii_hexdigit() {
                         digits.push(cur);
                         kept.push(cur);
@@ -741,8 +739,7 @@ impl<'a> Tokenizer<'a> {
                 Ok(TokenKind::Int(value, kept.into()))
             }
             Radix::Decimal => {
-                loop {
-                    let Some(cur) = self.current else { break };
+                while let Some(cur) = self.current {
                     match cur {
                         '0'..='9' => {
                             digits.push(cur);
@@ -780,8 +777,7 @@ impl<'a> Tokenizer<'a> {
                                 }
                             }
                             let mut exp_digits = false;
-                            loop {
-                                let Some(ec) = self.current else { break };
+                            while let Some(ec) = self.current {
                                 if !ec.is_ascii_digit() {
                                     break;
                                 }
@@ -908,8 +904,7 @@ impl<'a> Tokenizer<'a> {
                     TokenKind::Comment(self.read_line_rest().into())
                 } else if self.eat('*') {
                     let mut body = String::with_capacity(16);
-                    loop {
-                        let Some(cur) = self.current else { break };
+                    while let Some(cur) = self.current {
                         if cur == '*' {
                             self.advance();
                             if self.eat('/') {

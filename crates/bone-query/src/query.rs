@@ -1741,8 +1741,7 @@ fn field_references(ws: &Workspace, sname: Ustr, field: Ustr) -> Vec<RefSite> {
                         if *fname == field =>
                     {
                         let resolves = bi
-                            .and_then(|bi| bi.expr_types.get(*base).copied())
-                            .and_then(|t| bi.map(|bi| (bi, t)))
+                            .zip(bi.and_then(|bi| bi.expr_types.get(*base).copied()))
                             .and_then(|(bi, t)| struct_app_args(ws, bi, t))
                             .is_some_and(|(n, _)| n == sname);
                         if resolves {
@@ -5107,11 +5106,7 @@ fn emit_visible_binding_entries(
         rec: 0,
     };
     match &binding.kind {
-        VisibleBindingKind::Function {
-            takes_params,
-            multiple_overloads: _,
-            ..
-        } => {
+        VisibleBindingKind::Function { takes_params, .. } => {
             if expr_position && matches(binding.name.as_str()) {
                 out.push(CompletionEntry {
                     signature_key: Some(binding.key),

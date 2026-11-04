@@ -453,7 +453,7 @@ fn collection_element(ws: &Workspace, bi: Option<&BodyInference>, ty: TyId) -> O
                 ctor: TypeCtor::Array | TypeCtor::Map,
                 params,
             },
-        ) => Some(base.with_idx(params.into_iter().last()?)),
+        ) => Some(base.with_idx(params.into_iter().next_back()?)),
         _ => None,
     }
 }
@@ -642,10 +642,7 @@ struct Program<'a> {
     summaries: FxHashMap<FnKey, Effect>,
 }
 
-fn inferred_body<'a>(
-    ws: &'a Workspace,
-    key: FnKey,
-) -> Option<(&'a Function, &'a Body, &'a BodyInference)> {
+fn inferred_body(ws: &Workspace, key: FnKey) -> Option<(&Function, &Body, &BodyInference)> {
     let module = ws.module(key.0);
     let function = &module.functions[key.1];
     if function.inline_body.is_some() || function.is_extern {

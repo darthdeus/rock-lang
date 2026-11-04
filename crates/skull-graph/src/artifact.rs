@@ -56,7 +56,7 @@ thread_local! {
 pub fn realize_invocations() -> u64 {
     #[cfg(feature = "test-hooks")]
     {
-        return REALIZE_INVOCATIONS.with(std::cell::Cell::get);
+        REALIZE_INVOCATIONS.with(std::cell::Cell::get)
     }
     #[cfg(not(feature = "test-hooks"))]
     {
@@ -67,7 +67,7 @@ pub fn realize_invocations() -> u64 {
 pub fn fresh_index_site_rows() -> u64 {
     #[cfg(feature = "test-hooks")]
     {
-        return FRESH_INDEX_SITE_ROWS.with(std::cell::Cell::get);
+        FRESH_INDEX_SITE_ROWS.with(std::cell::Cell::get)
     }
     #[cfg(not(feature = "test-hooks"))]
     {
@@ -779,7 +779,8 @@ impl ArtifactView {
             .collect();
         let root_added: BTreeSet<DeclKey> = new_roots.difference(&old_roots).cloned().collect();
         let root_removed: BTreeSet<DeclKey> = old_roots.difference(&new_roots).cloned().collect();
-        let stats = self.update_local_with_decl_delta(
+
+        self.update_local_with_decl_delta(
             ws,
             g,
             req,
@@ -788,8 +789,7 @@ impl ArtifactView {
             removed,
             &root_added,
             &root_removed,
-        );
-        stats
+        )
     }
 
     /// Apply a graph delta and an explicit root delta. Production callers keep

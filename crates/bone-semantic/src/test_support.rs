@@ -363,9 +363,7 @@ fn check_types_packages_inner(
             .ok_or_else(|| format!("no inference for {}", f.file))?;
         for ((start, _end), expected) in &annotations {
             if expected == "?" {
-                return Err(format!(
-                    "`?` dump markers are not supported in package fixtures"
-                ));
+                return Err("`?` dump markers are not supported in package fixtures".to_string());
             }
             let actual = crate::query::type_at(&ws, mid, inf, *start).ok_or_else(|| {
                 format!("no type at marker (expected `{expected}`) in {}", f.file)
@@ -412,7 +410,7 @@ pub fn parse_embedded_files(body: &str) -> Vec<EmbeddedFile<'_>> {
                     src: Box::leak(src.into_boxed_str()),
                 });
             }
-            let mut it = rest.trim().split_whitespace();
+            let mut it = rest.split_whitespace();
             let file = it.next().unwrap_or("file.rock");
             let mut package = None;
             let mut dialect = skull_parser::Dialect::Legacy;

@@ -63,7 +63,7 @@ fn trailing_generic_defaults(
 /// different logical modules stay distinct; in a legacy file the bare name.
 fn map_key(scope: Option<&FragmentScope>, path: &[ustr::Ustr], name: ustr::Ustr) -> ustr::Ustr {
     match scope {
-        Some(sc) => bone_core::modules::def_key(&sc.package_name.to_string(), path, name.as_str()),
+        Some(sc) => bone_core::modules::def_key(sc.package_name.as_ref(), path, name.as_str()),
         None => name,
     }
 }
@@ -976,10 +976,8 @@ pub fn api_closure_requirements(ws: &Workspace) -> Vec<ClosureRequirement> {
                         if let Some(ret) = f.return_ty {
                             need(ret, f.span, "public function");
                         }
-                        for b in &f.generic_bounds {
-                            if let Some(bound_ty) = b {
-                                need(*bound_ty, f.span, "generic bound");
-                            }
+                        for bound_ty in f.generic_bounds.iter().flatten() {
+                            need(*bound_ty, f.span, "generic bound");
                         }
                     }
                 }
@@ -2102,11 +2100,8 @@ fn register_items(
                     segments: path.to_vec(),
                     ..Default::default()
                 });
-                let def_key = bone_core::modules::def_key(
-                    &scope.package_name.to_string(),
-                    path,
-                    bare.as_str(),
-                );
+                let def_key =
+                    bone_core::modules::def_key(scope.package_name.as_ref(), path, bare.as_str());
                 let callable_overload =
                     kind == "callable" && node.owned_callables.contains_key(&bare);
                 let taken = node.owned_types.contains_key(&bare)
@@ -2421,7 +2416,7 @@ pub fn pass_register_forward_decls(
         let def_key = |name: &ustr::Ustr| -> ustr::Ustr {
             match v1_scope {
                 Some(sc) => {
-                    bone_core::modules::def_key(&sc.package_name.to_string(), path, name.as_str())
+                    bone_core::modules::def_key(sc.package_name.as_ref(), path, name.as_str())
                 }
                 None => *name,
             }
@@ -2496,9 +2491,7 @@ pub fn pass_lower_fields(a: &Ast, ctx: &mut LowerCtx) -> Result<(), CompilerErro
     let scope = ctx.v1_scope().cloned();
     let reg_key = |name: &ustr::Ustr, path: &[ustr::Ustr]| -> ustr::Ustr {
         match &scope {
-            Some(sc) => {
-                bone_core::modules::def_key(&sc.package_name.to_string(), path, name.as_str())
-            }
+            Some(sc) => bone_core::modules::def_key(sc.package_name.as_ref(), path, name.as_str()),
             None => *name,
         }
     };
@@ -2524,9 +2517,7 @@ pub fn pass_lower_functions(a: &Ast, ctx: &mut LowerCtx) -> Result<(), CompilerE
     let scope = ctx.v1_scope().cloned();
     let reg_key = |name: &ustr::Ustr, path: &[ustr::Ustr]| -> ustr::Ustr {
         match &scope {
-            Some(sc) => {
-                bone_core::modules::def_key(&sc.package_name.to_string(), path, name.as_str())
-            }
+            Some(sc) => bone_core::modules::def_key(sc.package_name.as_ref(), path, name.as_str()),
             None => *name,
         }
     };

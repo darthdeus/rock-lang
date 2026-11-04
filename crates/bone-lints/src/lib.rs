@@ -1948,10 +1948,10 @@ impl IncrementalLintCache {
         }
         for file in files {
             if let Some(findings) = self.global.get_mut(&file) {
-                findings.sort_by(|a, b| finding_offset(a).cmp(&finding_offset(b)));
+                findings.sort_by_key(|a| finding_offset(a));
             }
             if let Some(findings) = self.global_raw.get_mut(&file) {
-                findings.sort_by(|a, b| finding_offset(a).cmp(&finding_offset(b)));
+                findings.sort_by_key(|a| finding_offset(a));
             }
         }
     }
@@ -2033,8 +2033,10 @@ impl IncrementalLintCache {
         sel: &LintOptions,
         change: &LintCacheUpdate,
     ) -> (Vec<Finding>, LintCacheStats) {
-        let mut stats = LintCacheStats::default();
-        stats.timed = self.timing_enabled;
+        let mut stats = LintCacheStats {
+            timed: self.timing_enabled,
+            ..LintCacheStats::default()
+        };
         let workspace_files: FxHashSet<Ustr> = ws
             .modules
             .iter()
@@ -3095,18 +3097,22 @@ fn flat_findings_with(
                 .map(Finding::of),
         );
     }
-    if sel.enabled(RAW_INPUT_MIGRATION) && sel.action_policy.is_some() {
-        let found = raw_input_sites_in_module(module, sel.action_policy.unwrap());
+    if sel.enabled(RAW_INPUT_MIGRATION)
+        && let Some(policy) = sel.action_policy
+    {
+        let found = raw_input_sites_in_module(module, policy);
         out.extend(
             filter_suppressed_census(found, src, census.as_deref_mut())
                 .iter()
                 .map(Finding::of),
         );
     }
-    if sel.enabled(RAW_INPUT_CLASSIFICATION) && sel.action_policy.is_some() {
-        let found = unclassified_raw_input_sites_in_module(module, src, sel.action_policy.unwrap());
+    if sel.enabled(RAW_INPUT_CLASSIFICATION)
+        && let Some(policy) = sel.action_policy
+    {
+        let found = unclassified_raw_input_sites_in_module(module, src, policy);
         out.extend(
-            filter_suppressed_census(found, src, census.as_deref_mut())
+            filter_suppressed_census(found, src, census)
                 .iter()
                 .map(Finding::of),
         );
@@ -3174,7 +3180,7 @@ fn inference_findings_with(
             })
             .collect();
         out.extend(
-            filter_suppressed_census(found, src, census.as_deref_mut())
+            filter_suppressed_census(found, src, census)
                 .iter()
                 .map(Finding::of),
         );
@@ -3240,13 +3246,11 @@ fn workspace_findings_by_file_census(
         }
     }
     if !sel.enabled(BACKEND_SIBLING_MISMATCH) {
-        if sel.enabled(ACTION_CALLERS) && sel.action_policy.is_some() {
+        if sel.enabled(ACTION_CALLERS)
+            && let Some(policy) = sel.action_policy
+        {
             let t = bone_core::prelude::Instant::now();
-            let findings = action_caller_gaps(
-                ws,
-                warm,
-                sel.action_policy.expect("configured action policy"),
-            );
+            let findings = action_caller_gaps(ws, warm, policy);
             record_family(
                 census.as_deref_mut(),
                 CensusFamily::ActionCaller,
@@ -3291,15 +3295,13 @@ fn workspace_findings_by_file_census(
             .or_default()
             .extend(findings.iter().map(Finding::of));
     }
-    if sel.enabled(ACTION_CALLERS) && sel.action_policy.is_some() {
+    if sel.enabled(ACTION_CALLERS)
+        && let Some(policy) = sel.action_policy
+    {
         let t = bone_core::prelude::Instant::now();
-        let findings = action_caller_gaps(
-            ws,
-            warm,
-            sel.action_policy.expect("configured action policy"),
-        );
+        let findings = action_caller_gaps(ws, warm, policy);
         record_family(
-            census.as_deref_mut(),
+            census,
             CensusFamily::ActionCaller,
             t.elapsed(),
             0,

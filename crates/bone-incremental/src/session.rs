@@ -1241,9 +1241,11 @@ impl Session {
                 edit: previous_text
                     .as_deref()
                     .map(|old| text_edit_delta(path, old, text)),
-                semantic_bodies: (!span_only)
-                    .then(|| result.reinferred.clone())
-                    .unwrap_or_default(),
+                semantic_bodies: if !span_only {
+                    result.reinferred.clone()
+                } else {
+                    Default::default()
+                },
                 span_only,
             };
         }
@@ -2889,9 +2891,9 @@ fn interface_snapshot(ws: &Workspace, mid: ModuleId) -> String {
             .as_ref()
             .map(|t| render_ty(ws, t))
             .unwrap_or_default();
-        let _ = write!(
+        let _ = writeln!(
             out,
-            "fn {} co={} var={} gen=[{generics}] params=[{params}] req={} ret={ret} inline={:?} backend={:?} extern={} anns={:?} ffi={:?}\n",
+            "fn {} co={} var={} gen=[{generics}] params=[{params}] req={} ret={ret} inline={:?} backend={:?} extern={} anns={:?} ffi={:?}",
             f.name,
             f.is_coroutine,
             f.is_variadic,
@@ -2905,7 +2907,7 @@ fn interface_snapshot(ws: &Workspace, mid: ModuleId) -> String {
     }
 
     for (_, g) in m.globals.iter() {
-        let _ = write!(out, "global {}:{}\n", g.name, render_ty(ws, &g.ty));
+        let _ = writeln!(out, "global {}:{}", g.name, render_ty(ws, &g.ty));
     }
 
     let _ = write!(

@@ -1168,7 +1168,7 @@ impl Builder<'_> {
         let leaves = self.uniform_block_leaves(*u_e, struct_name)?;
         let expected: Vec<crate::gpu_layout::WireKind> = members
             .iter()
-            .flat_map(|(_, kind)| std::iter::repeat(*kind).take(kind.leaf_suffixes().len()))
+            .flat_map(|(_, kind)| std::iter::repeat_n(*kind, kind.leaf_suffixes().len()))
             .collect();
         if leaves.len() != expected.len() {
             return Err(reject(
@@ -1318,11 +1318,11 @@ impl Builder<'_> {
                 };
                 parts.push(ValueRepr::Scalar(v));
             }
-            return Ok(self.pack(ValueRepr::Group {
+            return self.pack(ValueRepr::Group {
                 name: enum_name,
                 parts,
                 present: None,
-            })?);
+            });
         }
         Ok(self.emit_cur(Inst::MakeEnum {
             tag: variant,
@@ -1342,7 +1342,7 @@ impl Builder<'_> {
             EnumPlan::for_name(self.ws, enum_name).and_then(|plan| plan.cdata().cloned())
         {
             let r = self.enum_cdata_repr(&shape, variant, args)?;
-            return Ok(self.pack(r)?);
+            return self.pack(r);
         }
         if let VariantArgs::Unit = args {
             // A payload-free enum is an `int` value GLOBALLY (the variant's
@@ -1399,9 +1399,7 @@ impl Builder<'_> {
             return None;
         }
         if let Some(ty) = self.concrete_expr_ty(base) {
-            let Some(name) = ty.peel_nullable().0.nominal() else {
-                return None;
-            };
+            let name = ty.peel_nullable().0.nominal()?;
             return bone_semantic::inference::vec_swizzle_components(name.as_str(), field.as_str());
         }
         None

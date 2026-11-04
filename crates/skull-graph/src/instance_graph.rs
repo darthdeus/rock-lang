@@ -991,7 +991,7 @@ thread_local! {
 pub fn build_invocations() -> u64 {
     #[cfg(feature = "test-hooks")]
     {
-        return BUILD_INVOCATIONS.with(std::cell::Cell::get);
+        BUILD_INVOCATIONS.with(std::cell::Cell::get)
     }
     #[cfg(not(feature = "test-hooks"))]
     {
@@ -1355,7 +1355,7 @@ impl InstanceGraph {
 
         // Direct: an instance that calls itself.
         for (from, tos) in &succ {
-            if tos.iter().any(|t| *t == *from) {
+            if tos.contains(from) {
                 direct.insert(self.identity(ws, from));
             }
         }
@@ -2013,9 +2013,11 @@ impl InstanceGraph {
                     wave.into_par_iter().map(expand_owner).collect()
                 };
                 for (owner, mut used_tree, mut prepared_c, mut visit_ns) in prepared {
-                    let current_frontier = timing_enabled
-                        .then(|| frontier_depths.get(&owner).copied().unwrap_or(0))
-                        .unwrap_or(0);
+                    let current_frontier = if timing_enabled {
+                        frontier_depths.get(&owner).copied().unwrap_or(0)
+                    } else {
+                        0
+                    };
                     queued.remove(&owner);
                     stats.owner_visits += 1;
                     if timing_enabled {
