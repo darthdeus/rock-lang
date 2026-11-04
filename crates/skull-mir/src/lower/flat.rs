@@ -51,8 +51,12 @@ impl Builder<'_> {
         let mut offset = 0;
         for slot in &flat.slots {
             if self.scx.native_flat_enums || matches!(slot, FlatSlot::Leaves(_)) {
-                for index in offset..offset + slot.width() {
-                    native_slot_fields[index] = Some(Ustr::from(index.to_string().as_str()));
+                for (relative, field) in native_slot_fields[offset..offset + slot.width()]
+                    .iter_mut()
+                    .enumerate()
+                {
+                    let index = offset + relative;
+                    *field = Some(Ustr::from(index.to_string().as_str()));
                 }
             }
             offset += slot.width();

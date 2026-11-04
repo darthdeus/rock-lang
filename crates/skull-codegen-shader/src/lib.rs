@@ -256,9 +256,28 @@ fn shader_ty(
     }
 }
 
+/// Depth cap on `const A = B` alias chains. A cycle is impossible in a
+/// well-formed program (bone rejects one), so this only bounds a pathological
+/// chain rather than implementing cycle detection.
 const CONST_CHAIN_DEPTH: usize = 16;
 
-fn const_lit(ws: &Workspace, name: Ustr) -> Option<Lit> {
+/// Fold a `const` global to its literal value, or `None` if it is not a `const`
+/// or its initializer is not a constant expression.
+///
+/// GLSL has no module-level mutable state, so a `global` read can never lower.
+/// A `const` is different in kind: bone enforces it read-only
+/// (`ws.const_globals`, rejected at any rebind), so baking its value into the
+/// shader cannot drift from the CPU-side value. It folds at the use site rather
+/// than emitting a GLSL `const` declaration -- a declaration would have to join
+/// the one cross-stage namespace shared by uniforms, varyings, attributes and
+/// samplers, and collide-check against it, for no gain the folded literal
+/// doesn't already give.
+///
+/// Only literals and alias chains fold today. Arithmetic (`const TAU = PI * 2`)
+/// lowers to an operator CALL in HIR, not a `BinOp`, so folding it means
+/// evaluating calls -- deliberately out of scope; such a const rejects with a
+/// message naming the real cause.
+pub fn const_lit(ws: &Workspace, name: Ustr) -> Option<Lit> {
     const_lit_depth(ws, name, 0)
 }
 

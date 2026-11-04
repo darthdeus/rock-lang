@@ -22,14 +22,14 @@ mod structure;
 pub use skull_mir::shader_ir::GlslProfile;
 
 use bone_semantic::hir::{
-    AnnoValue, BodyOwner, BuiltinTy, Expr, Function, StructDef, TyId, TypeCtor, TypeExpr,
+    AnnoValue, BuiltinTy, Expr, Function, StructDef, TyId, TypeCtor, TypeExpr,
 };
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::{FnList, ModuleId, Span};
 use comfy_la_arena::Idx;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use skull_codegen_lua::mangle_fn;
-use skull_codegen_shader::structure::LoopRegion;
+use skull_codegen_shader::{const_lit, structure::LoopRegion};
 use skull_graph::instance_graph::{InstanceGraph, SiteOutcome};
 pub use skull_graph::shader::ShaderLibraryView;
 use skull_graph::shader::{ShaderProgram, ShaderProgramView, ShaderStageView};
@@ -231,66 +231,6 @@ fn fmt_float(f: f64) -> String {
 }
 
 // --- const globals ----------------------------------------------------------
-
-/// Depth cap on `const A = B` alias chains. A cycle is impossible in a
-/// well-formed program (bone rejects one), so this only bounds a pathological
-/// chain rather than implementing cycle detection.
-const CONST_CHAIN_DEPTH: usize = 16;
-
-/// Fold a `const` global to its literal value, or `None` if it is not a `const`
-/// or its initializer is not a constant expression.
-///
-/// GLSL has no module-level mutable state, so a `global` read can never lower.
-/// A `const` is different in kind: bone enforces it read-only
-/// (`ws.const_globals`, rejected at any rebind), so baking its value into the
-/// shader cannot drift from the CPU-side value. It folds at the use site rather
-/// than emitting a GLSL `const` declaration -- a declaration would have to join
-/// the one cross-stage namespace shared by uniforms, varyings, attributes and
-/// samplers, and collide-check against it, for no gain the folded literal
-/// doesn't already give.
-///
-/// Only literals and alias chains fold today. Arithmetic (`const TAU = PI * 2`)
-/// lowers to an operator CALL in HIR, not a `BinOp`, so folding it means
-/// evaluating calls -- deliberately out of scope; such a const rejects with a
-/// message naming the real cause.
-fn const_lit(ws: &Workspace, name: Ustr) -> Option<Lit> {
-    const_lit_depth(ws, name, 0)
-}
-
-fn const_lit_depth(ws: &Workspace, name: Ustr, depth: usize) -> Option<Lit> {
-    if depth > CONST_CHAIN_DEPTH || !ws.const_globals.contains(&name) {
-        return None;
-    }
-    let (module, gid) = ws.modules.iter().find_map(|m| {
-        m.globals
-            .iter()
-            .find(|(_, g)| g.name == name && g.is_const)
-            .map(|(gid, _)| (m, gid))
-    })?;
-    let body = module.bodies.get(&BodyOwner::Global(gid))?;
-    fold_const_expr(ws, module, body, body.root?, depth)
-}
-
-fn fold_const_expr(
-    ws: &Workspace,
-    module: &bone_semantic::hir::Module,
-    body: &bone_semantic::hir::Body,
-    e: Idx<Expr>,
-    depth: usize,
-) -> Option<Lit> {
-    match body.expr_arena[e] {
-        Expr::Int(i) => Some(Lit::Int(i)),
-        Expr::Float(f) => Some(Lit::Float(f.into_inner())),
-        Expr::Bool(b) => Some(Lit::Bool(b)),
-        Expr::UnaryMinus(inner, _) => match fold_const_expr(ws, module, body, inner, depth)? {
-            Lit::Int(i) => Some(Lit::Int(-i)),
-            Lit::Float(f) => Some(Lit::Float(-f)),
-            _ => None,
-        },
-        Expr::Global(g) => const_lit_depth(ws, g, depth + 1),
-        _ => None,
-    }
-}
 
 /// The GLSL type a folded const literal renders at.
 fn const_lit_ty(lit: &Lit) -> GlslTy {

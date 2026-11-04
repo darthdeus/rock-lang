@@ -3098,8 +3098,8 @@ impl Builder<'_> {
             return Ok(Vec::new());
         };
         let mut out = Vec::new();
-        for i in provided..=last {
-            match &defaults[i] {
+        for (i, default) in defaults.iter().enumerate().take(last + 1).skip(provided) {
+            match default {
                 Some(default) => {
                     let slot = param_shapes
                         .and_then(|shapes| shapes.get(i))

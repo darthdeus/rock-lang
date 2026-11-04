@@ -6440,8 +6440,12 @@ impl Emitter<'_> {
         let lo = self.selection_float_literal(bb, lower)?;
         let hi = self.selection_float_literal(no, upper)?;
         // The source tests the lower bound first; an inverted range would lose
-        // that priority in a nested min/max expression.
-        if !(lo <= hi) || !self.selection_matches(bb, cond, inner_value, value) {
+        // that priority in a nested min/max expression. NaN bounds are unordered.
+        if !matches!(
+            lo.partial_cmp(&hi),
+            Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+        ) || !self.selection_matches(bb, cond, inner_value, value)
+        {
             return None;
         }
         if inner_target != target {
