@@ -9,8 +9,8 @@
 //! (`macro_refs::macro_invocation_def`), arity-selected exactly like expansion.
 //! Semantic-tokens twin of the same erasure root: `macro_call_site_sentinel.rs`.
 
-use bone_query::BoneWorkspace;
-use lsp_types::Position;
+use bone_query::{canonicalize_lenient, BoneWorkspace};
+use lsp_types::{Position, Uri};
 
 /// (line, char) of `src[find(marker) + into]`, 0-based.
 fn pos(src: &str, marker: &str, into: usize) -> Position {
@@ -69,8 +69,8 @@ fn public_macro_navigation_survives_namespace_construction() {
             use_path.to_str().unwrap(), pos(invocation, "twice(21)", 2),
         ).expect("public macro invocation definition");
         assert_eq!(
-            location.uri.as_str().strip_prefix("file://").unwrap(),
-            def_path.to_str().unwrap(),
+            location.uri,
+            Uri::from_file_path(&canonicalize_lenient(def_path.to_str().unwrap())).unwrap(),
         );
         assert_eq!(location.range.start, pos(declaration, "twice(x:", 0));
     }

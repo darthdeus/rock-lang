@@ -99,7 +99,7 @@ mod tests {
         assert_eq!(resolve_rock_dir_with(Some("chosen-root".into()), None, Some(cwd.path()), Some(source.path())), "chosen-root");
         fs_err::write(cwd.path().join("Cargo.toml"), "[workspace]\n").unwrap();
         fs_err::create_dir(cwd.path().join("crates")).unwrap();
-        assert_eq!(resolve_rock_dir_with(None, None, Some(cwd.path()), Some(source.path())), cwd.path().to_string_lossy());
+        assert_eq!(resolve_rock_dir_with(None, None, Some(cwd.path()), Some(source.path())), cwd.path().canonicalize().unwrap().to_string_lossy());
     }
 
     #[test]

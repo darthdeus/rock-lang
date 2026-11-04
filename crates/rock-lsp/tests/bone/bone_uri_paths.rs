@@ -54,7 +54,7 @@ fn encoded_document_uri_resolves_to_the_file() {
 
 #[test]
 fn returned_locations_encode_the_path() {
-    let (_dir, path, uri, mut ws) = spaced_project();
+    let (dir, path, _uri, mut ws) = spaced_project();
     let params = WorkspaceSymbolParams {
         query: "heal_all".to_string(),
         work_done_progress_params: Default::default(),
@@ -65,8 +65,12 @@ fn returned_locations_encode_the_path() {
         other => panic!("expected flat workspace symbols, got {other:?}"),
     };
     assert_eq!(hits.len(), 1, "{hits:?}");
+    // Returned locations use canonical paths; keep the expected escaping
+    // handwritten so this still checks the URI encoder independently.
+    let root = dir.path().canonicalize().unwrap();
+    let uri = Uri::from_str(&format!("file://{}/my%20dir/caf%C3%A9.rock", root.to_str().unwrap())).unwrap();
     assert_eq!(hits[0].location.uri, uri);
-    assert_eq!(hits[0].location.uri.to_file_path().unwrap(), path.to_str().unwrap());
+    assert_eq!(hits[0].location.uri.to_file_path().unwrap(), path.canonicalize().unwrap().to_str().unwrap());
 }
 
 #[test]

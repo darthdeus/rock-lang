@@ -4342,7 +4342,8 @@ mod backend_stats_workspace_tests {
         ).unwrap();
         let sources = discover_sources(&SourceSpec::Directory(project.clone())).unwrap();
         let (_, entry, _) = crate::bone_backend::parse_user_modules(&sources).unwrap();
-        assert!(std::path::Path::new(entry.as_str()).starts_with(&dependency),
+        assert!(std::path::Path::new(entry.as_str()).starts_with(
+            std::fs::canonicalize(&dependency).expect("canonical dependency path")),
             "fixture must exercise dependency-first entry selection without main.rock");
         let result = crate::backend_stats::do_backend_stats(project.to_str().unwrap(), 1, 0);
         assert!(result.is_ok(), "profiling must use the invoked project's build vars: {result:?}");
