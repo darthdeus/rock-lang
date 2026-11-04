@@ -371,6 +371,7 @@ where
 mod tests {
     use super::*;
     use crate::source_code::source_file_from_path_and_contents;
+    use crate::test_support::strip_ansi_sgr;
 
 
     // Frame glyphs ariadne draws, escaped to keep this file ASCII.
@@ -420,8 +421,9 @@ mod tests {
 
     #[test]
     fn render_draws_the_labelled_frame() {
+        let rendered = strip_ansi_sgr(&labelled().render(&files()));
         assert_eq!(
-            labelled().render(&files()),
+            rendered,
             joined(&[
                 "[E00] Error: bad thing".to_string(),
                 format!("   {OPEN}[main.rock:2:6]"),
@@ -438,8 +440,9 @@ mod tests {
     #[test]
     fn render_points_at_the_location_without_any_label() {
         let error = CompilerError::at(at("main.rock", 1, 8, 17).start(), "no label".to_string());
+        let rendered = strip_ansi_sgr(&error.render(&files()));
         assert_eq!(
-            error.render(&files()),
+            rendered,
             joined(&[
                 "[E00] Error: no label".to_string(),
                 format!("   {OPEN}[main.rock:2:6]"),
@@ -454,7 +457,7 @@ mod tests {
     #[test]
     fn render_keeps_every_label_in_the_order_it_was_added() {
         let error = labelled().with_label(at("main.rock", 1, 8, 17), "second".to_string());
-        let rendered = error.render(&files());
+        let rendered = strip_ansi_sgr(&error.render(&files()));
         let second = rendered.find("second").expect("second label");
         let first = rendered.find("bad thing").expect("first label");
         assert!(first < second, "{rendered}");
@@ -478,20 +481,36 @@ mod tests {
     #[test]
     fn render_prefixes_the_level_and_a_two_digit_code() {
         let error = labelled();
+        let rendered = strip_ansi_sgr(&error.render(&files()));
         assert_eq!(
-            error.render(&files()).lines().next(),
+            rendered.lines().next(),
             Some("[E00] Error: bad thing")
         );
+        let rendered = strip_ansi_sgr(
+            &error
+                .clone()
+                .with_code(CompilerErrorCode::SyntaxError)
+                .render(&files()),
+        );
         assert_eq!(
-            error.clone().with_code(CompilerErrorCode::SyntaxError).render(&files()).lines().next(),
+            rendered.lines().next(),
             Some("[E02] Error: bad thing")
         );
-        assert_eq!(
-            error.clone().with_level(CompilerErrorLevel::Warning).render(&files()).lines().next(),
-            Some("[W00] Warning: bad thing")
+        let rendered = strip_ansi_sgr(
+            &error
+                .clone()
+                .with_level(CompilerErrorLevel::Warning)
+                .render(&files()),
         );
         assert_eq!(
-            error.with_level(CompilerErrorLevel::Advice).render(&files()).lines().next(),
+            rendered.lines().next(),
+            Some("[W00] Warning: bad thing")
+        );
+        let rendered = strip_ansi_sgr(
+            &error.with_level(CompilerErrorLevel::Advice).render(&files()),
+        );
+        assert_eq!(
+            rendered.lines().next(),
             Some("[A00] Advice: bad thing")
         );
     }
@@ -499,21 +518,39 @@ mod tests {
     #[test]
     fn render_compact_uses_the_level_only_and_always_the_00_code() {
         let error = labelled();
-        assert_eq!(error.render_compact(), "[E00] Error: bad thing at main.rock:1:8");
         assert_eq!(
-            error.clone().with_level(CompilerErrorLevel::Warning).render_compact(),
-            "[W00] Warning: bad thing at main.rock:1:8"
-        );
-        assert_eq!(
-            error.clone().with_level(CompilerErrorLevel::Advice).render_compact(),
-            "[A00] Advice: bad thing at main.rock:1:8"
-        );
-        assert_eq!(
-            error.clone().with_code(CompilerErrorCode::TokenizerError).render_compact(),
+            strip_ansi_sgr(&error.render_compact()),
             "[E00] Error: bad thing at main.rock:1:8"
         );
         assert_eq!(
-            CompilerError::new_no_location("nowhere".to_string()).render_compact(),
+            strip_ansi_sgr(
+                &error
+                    .clone()
+                    .with_level(CompilerErrorLevel::Warning)
+                    .render_compact()
+            ),
+            "[W00] Warning: bad thing at main.rock:1:8"
+        );
+        assert_eq!(
+            strip_ansi_sgr(
+                &error
+                    .clone()
+                    .with_level(CompilerErrorLevel::Advice)
+                    .render_compact()
+            ),
+            "[A00] Advice: bad thing at main.rock:1:8"
+        );
+        assert_eq!(
+            strip_ansi_sgr(
+                &error
+                    .clone()
+                    .with_code(CompilerErrorCode::TokenizerError)
+                    .render_compact()
+            ),
+            "[E00] Error: bad thing at main.rock:1:8"
+        );
+        assert_eq!(
+            strip_ansi_sgr(&CompilerError::new_no_location("nowhere".to_string()).render_compact()),
             "[E00] Error: nowhere"
         );
     }
@@ -521,12 +558,14 @@ mod tests {
     #[test]
     fn render_changes_only_the_header_with_the_level() {
         let error = labelled();
-        let base = error.render(&files());
+        let base = strip_ansi_sgr(&error.render(&files()));
         for level in [CompilerErrorLevel::Warning, CompilerErrorLevel::Advice] {
-            let rendered = error.clone().with_level(level).render(&files());
+            let rendered = strip_ansi_sgr(&error.clone().with_level(level).render(&files()));
             assert_eq!(body(&rendered), body(&base));
         }
-        let rendered = error.with_level(CompilerErrorLevel::Warning).render(&files());
+        let rendered = strip_ansi_sgr(
+            &error.with_level(CompilerErrorLevel::Warning).render(&files()),
+        );
         assert_eq!(rendered.lines().next(), Some("[W00] Warning: bad thing"));
     }
 
@@ -539,25 +578,41 @@ mod tests {
     fn render_all_separates_frames_by_one_blank_line() {
         let first = labelled();
         let second = CompilerError::new_with_label(at("main.rock", 2, 0, 29), "second".to_string());
-        let rendered = render_all(&[first.clone(), second.clone()], &files());
+        let rendered = strip_ansi_sgr(&render_all(&[first.clone(), second.clone()], &files()));
         assert_eq!(
             rendered,
-            format!("{}\n{}", first.render(&files()), second.render(&files()))
+            format!(
+                "{}\n{}",
+                strip_ansi_sgr(&first.render(&files())),
+                strip_ansi_sgr(&second.render(&files()))
+            )
         );
-        assert_eq!(body(&rendered).matches(&format!("{CLOSE}\n\n[E00]")).count(), 1);
+        assert_eq!(
+            body(&rendered).matches(&format!("{CLOSE}\n\n[E00]")).count(),
+            1
+        );
     }
 
     #[test]
     fn render_all_reports_unregistered_stdlib_errors_first_and_without_a_frame() {
-        let stdlib = CompilerError::new_with_label(at("<stdlib>/absent.rock", 3, 4, 9), "gone".to_string());
-        let rendered = render_all(&[labelled(), stdlib.clone()], &files());
-        assert_eq!(rendered, format!("{}\n{}", stdlib.render_compact(), labelled().render(&files())));
+        let stdlib =
+            CompilerError::new_with_label(at("<stdlib>/absent.rock", 3, 4, 9), "gone".to_string());
+        let rendered = strip_ansi_sgr(&render_all(&[labelled(), stdlib.clone()], &files()));
+        assert_eq!(
+            rendered,
+            format!(
+                "{}\n{}",
+                strip_ansi_sgr(&stdlib.render_compact()),
+                strip_ansi_sgr(&labelled().render(&files()))
+            )
+        );
     }
 
     #[test]
     fn render_all_draws_a_frame_for_a_registered_stdlib_file() {
-        let stdlib = CompilerError::new_with_label(at("<stdlib>/core.rock", 0, 3, 3), "stdlib".to_string());
-        let rendered = render_all(&[stdlib], &files());
+        let stdlib =
+            CompilerError::new_with_label(at("<stdlib>/core.rock", 0, 3, 3), "stdlib".to_string());
+        let rendered = strip_ansi_sgr(&render_all(&[stdlib], &files()));
         assert_eq!(
             rendered,
             joined(&[
@@ -591,7 +646,7 @@ mod tests {
         assert_eq!(&source[25..29], "\u{e9}\u{e9}");
         let error = CompilerError::new_with_label(span, "accented".to_string());
         assert_eq!(
-            error.render(&files),
+            strip_ansi_sgr(&error.render(&files)),
             joined(&[
                 "[E00] Error: accented".to_string(),
                 format!("   {OPEN}[mb.rock:2:14]"),
@@ -617,8 +672,14 @@ mod tests {
             ["sibling", "nested", "sibling"]
         );
         assert!(error.siblings.iter().all(|s| s.siblings.is_empty()));
-        assert_eq!(error.render(&files()), primary.render(&files()));
-        assert_eq!(error.render_compact(), primary.render_compact());
+        assert_eq!(
+            strip_ansi_sgr(&error.render(&files())),
+            strip_ansi_sgr(&primary.render(&files()))
+        );
+        assert_eq!(
+            strip_ansi_sgr(&error.render_compact()),
+            strip_ansi_sgr(&primary.render_compact())
+        );
     }
 
     #[test]

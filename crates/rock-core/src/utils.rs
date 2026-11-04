@@ -89,6 +89,7 @@ pub fn line_col_to_offset(s: &str, line: usize, col: usize) -> Result<usize, Lin
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::strip_ansi_sgr;
 
     const OPEN: &str = "\u{256d}\u{2500}";
     const CLOSE: &str = "\u{2500}\u{2500}\u{2500}\u{256f}";
@@ -125,7 +126,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            String::from_utf8(written).unwrap(),
+            strip_ansi_sgr(&String::from_utf8(written).unwrap()),
             joined(&[
                 "[W07] Warning: header text".to_string(),
                 format!("   {OPEN}[u.rock:1:1]"),
@@ -156,7 +157,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            String::from_utf8(written).unwrap(),
+            strip_ansi_sgr(&String::from_utf8(written).unwrap()),
             "[E03] Error: no labels\n"
         );
     }

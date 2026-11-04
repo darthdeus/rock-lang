@@ -354,6 +354,7 @@ impl LineCol {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::strip_ansi_sgr;
     use crate::utils::{LineColError, line_col_to_offset};
 
     const FILE: &str = "main.rock";
@@ -483,7 +484,10 @@ mod tests {
     fn write_renders_a_header_only_for_a_missing_source() {
         let mut written = Vec::new();
         span((1, 1), (5, 8), (17, 20)).write("span message", &mut written);
-        assert_eq!(String::from_utf8(written).unwrap(), "[  ] Advice: span message\n");
+        assert_eq!(
+            strip_ansi_sgr(&String::from_utf8(written).unwrap()),
+            "[  ] Advice: span message\n"
+        );
     }
 
     fn offset_of(source: &str, line: usize, col: usize) -> usize {

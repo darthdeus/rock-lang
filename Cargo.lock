@@ -1428,6 +1428,7 @@ dependencies = [
  "colored",
  "fs-err",
  "itertools 0.13.0",
+ "regex-lite",
  "rustc-hash 2.1.3",
  "tracing",
  "ustr",

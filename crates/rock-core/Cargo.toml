@@ -20,3 +20,6 @@ itertools = { workspace = true }
 rustc-hash = { workspace = true }
 tracing = { workspace = true }
 colored = { workspace = true }
+
+[dev-dependencies]
+regex-lite = { workspace = true }
