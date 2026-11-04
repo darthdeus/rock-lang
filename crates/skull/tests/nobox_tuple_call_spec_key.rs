@@ -5,21 +5,26 @@
 //! path is a miscompile, not a missed optimization. These are the three paths
 //! that emit a tuple call.
 
-
 use std::process::Command;
 
 fn run_ok(src: &str, tag: &str) -> String {
     let lua = crate::common::try_emit_module(src).expect("must emit");
     let path = std::env::temp_dir().join(format!("skull_speckey_{}_{tag}.lua", std::process::id()));
     std::fs::write(&path, format!("{lua}\nmain()\n")).expect("write program");
-    let out = Command::new("luajit").arg(&path).output().expect("spawn luajit");
+    let out = Command::new("luajit")
+        .arg(&path)
+        .output()
+        .expect("spawn luajit");
     let _ = std::fs::remove_file(&path);
     let combined = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(out.status.success(), "must not die reading `_data`:\n{combined}");
+    assert!(
+        out.status.success(),
+        "must not die reading `_data`:\n{combined}"
+    );
     combined.trim().to_string()
 }
 

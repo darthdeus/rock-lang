@@ -6,7 +6,10 @@ use skull::ValueExpect;
 
 fn tests_of(src: &str) -> Result<Vec<skull::SkullTest>, skull_parser::CompilerError> {
     let ws = crate::common::ws_with_stdlib(src);
-    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("module id");
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("module id");
     skull::module_tests(&ws, mid)
 }
 
@@ -45,10 +48,8 @@ fn returns_plus_output_is_legal_and_both_extract() {
 
 #[test]
 fn returns_plus_expect_failure_rejects() {
-    let err = tests_of(
-        "@test(expect_failure = true, returns = 42)\nfn a() -> int { return 42 }\n",
-    )
-    .expect_err("contradictory annotation must reject");
+    let err = tests_of("@test(expect_failure = true, returns = 42)\nfn a() -> int { return 42 }\n")
+        .expect_err("contradictory annotation must reject");
     assert!(
         err.message.contains("returns") && err.message.contains("expect_failure"),
         "unexpected message: {}",
@@ -59,10 +60,13 @@ fn returns_plus_expect_failure_rejects() {
 #[test]
 fn returns_non_literal_rejects() {
     for bad in ["\"str\"", "foo"] {
-        let err = tests_of(&format!("@test(returns = {bad})\nfn a() -> int {{ return 1 }}\n"))
-            .expect_err("non int/float/bool literal must reject");
+        let err = tests_of(&format!(
+            "@test(returns = {bad})\nfn a() -> int {{ return 1 }}\n"
+        ))
+        .expect_err("non int/float/bool literal must reject");
         assert!(
-            err.message.contains("returns expects an int/float/bool literal"),
+            err.message
+                .contains("returns expects an int/float/bool literal"),
             "unexpected message for {bad}: {}",
             err.message
         );
@@ -74,7 +78,8 @@ fn output_interpolated_string_rejects() {
     let err = tests_of("@test(output = \"Vec { 1, 2 }\")\nfn a() { print(\"x\") }\n")
         .expect_err("a lone-brace output= is an interpolation expr, not a constant -- must reject");
     assert!(
-        err.message.contains("output expects a plain string literal"),
+        err.message
+            .contains("output expects a plain string literal"),
         "unexpected message: {}",
         err.message
     );
@@ -85,7 +90,8 @@ fn output_non_string_rejects() {
     let err = tests_of("@test(output = 42)\nfn a() { print(\"x\") }\n")
         .expect_err("non-string output= must reject");
     assert!(
-        err.message.contains("output expects a plain string literal"),
+        err.message
+            .contains("output expects a plain string literal"),
         "unexpected message: {}",
         err.message
     );
@@ -93,8 +99,9 @@ fn output_non_string_rejects() {
 
 #[test]
 fn output_doubled_brace_is_a_constant_and_unescapes() {
-    let tests = tests_of("@test(output = \"Vec {{ 1, 2 }}\")\nfn a() { print(\"Vec { 1, 2 }\") }\n")
-        .expect("doubled braces stay a string constant");
+    let tests =
+        tests_of("@test(output = \"Vec {{ 1, 2 }}\")\nfn a() { print(\"Vec { 1, 2 }\") }\n")
+            .expect("doubled braces stay a string constant");
     assert_eq!(tests[0].output.as_deref(), Some("Vec { 1, 2 }"));
 }
 

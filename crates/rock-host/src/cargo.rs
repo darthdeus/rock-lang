@@ -41,7 +41,10 @@ pub fn run_cargo(args: &[&str], fail_msg: &str) -> Result<()> {
     let mut cmd = Command::new("cargo");
     cmd.args(args).current_dir(crate::rock_dir());
     strip_cargo_harness_env(&mut cmd);
-    let status = cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit()).status()?;
+    let status = cmd
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()?;
     if !status.success() {
         anyhow::bail!("{}", fail_msg);
     }

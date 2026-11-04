@@ -141,7 +141,11 @@ fn fits(mut width: isize, mut stack: Vec<(usize, Mode, &Doc)>) -> bool {
             // line>]` keep the head flat (the array breaks) while still breaking
             // `(params) => long_body` (the breakless body overflows the line).
             Doc::Group(d) => {
-                let m = if d.has_hard_line() { Mode::Break } else { Mode::Flat };
+                let m = if d.has_hard_line() {
+                    Mode::Break
+                } else {
+                    Mode::Flat
+                };
                 stack.push((indent, m, d));
             }
             Doc::IfBreak(broken, flat) => {
@@ -214,8 +218,7 @@ pub fn render(doc: &Doc, width: usize, indent_unit: usize) -> String {
                 // params: the params alone fit, but params-plus-body do not.
                 let mut probe = stack.clone();
                 probe.push((indent, Mode::Flat, sub));
-                let flat_fits =
-                    !sub.has_hard_line() && fits(width as isize - col as isize, probe);
+                let flat_fits = !sub.has_hard_line() && fits(width as isize - col as isize, probe);
                 let m = if flat_fits { Mode::Flat } else { Mode::Break };
                 stack.push((indent, m, sub));
             }
@@ -248,10 +251,13 @@ mod tests {
         // [ a, b, c ] on one line
         let d = Doc::group(Doc::concat([
             Doc::text("["),
-            Doc::indent(Doc::concat([softline(), Doc::join(
-                Doc::concat([Doc::text(","), line()]),
-                [Doc::text("a"), Doc::text("b"), Doc::text("c")],
-            )])),
+            Doc::indent(Doc::concat([
+                softline(),
+                Doc::join(
+                    Doc::concat([Doc::text(","), line()]),
+                    [Doc::text("a"), Doc::text("b"), Doc::text("c")],
+                ),
+            ])),
             softline(),
             Doc::text("]"),
         ]));

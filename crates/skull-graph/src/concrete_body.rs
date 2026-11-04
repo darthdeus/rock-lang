@@ -34,18 +34,18 @@ use bone_semantic::hir::{BindingInfo, Body, BodyOwner, Expr, TypeExpr};
 use bone_semantic::inference::{BodyInference, Workspace};
 use bone_semantic::prelude::{Span, TyId};
 use comfy_la_arena::{ArenaMap, Idx};
+use rustc_hash::{FxHashMap, FxHashSet};
 use skull_mir::concrete::{
     ConcreteAlwaysPlans, ConcreteBodyPlan, ConcreteOwner, ConcretePlans, ConcreteSignature,
     ConcreteSignatureHandle, ConcreteTypeTables,
 };
-use skull_mir::monoty::{MonoArena, MonoCtor, MonoSubst, MonoTy, MonoTyId, MonoTyReason, TyEnv};
 use skull_mir::mir::FuncRef;
-use rustc_hash::{FxHashMap, FxHashSet};
+use skull_mir::monoty::{MonoArena, MonoCtor, MonoSubst, MonoTy, MonoTyId, MonoTyReason, TyEnv};
 use ustr::Ustr;
 
 use crate::instance_graph::{
-    boundary_class_for, function_body, is_spanless, BoundaryClass, FunctionBody, Instance,
-    shift_span, InstanceGraph, Owner, Site, SiteDomain, SiteOp, SiteOutcome, SpanEdit,
+    boundary_class_for, function_body, is_spanless, shift_span, BoundaryClass, FunctionBody,
+    Instance, InstanceGraph, Owner, Site, SiteDomain, SiteOp, SiteOutcome, SpanEdit,
 };
 use crate::target_projection::CpuTargetSpec;
 
@@ -179,7 +179,11 @@ impl ConcreteBody {
         self.direct_calls
             .iter()
             .chain(self.fn_values.iter())
-            .chain(self.iterator_ops.iter().map(|(site, op)| (site, &op.callee)))
+            .chain(
+                self.iterator_ops
+                    .iter()
+                    .map(|(site, op)| (site, &op.callee)),
+            )
             .chain(self.synthesized_calls.iter())
     }
 }
@@ -432,7 +436,6 @@ impl ConcreteBuildStats {
         self.struct_fields_ns += other.struct_fields_ns;
         self.foreign_domains_ns += other.foreign_domains_ns;
     }
-
 }
 
 impl ConcreteBodies {
@@ -604,8 +607,12 @@ impl ConcreteBodies {
         }
         let mut always_subjects = Vec::new();
         for owner in revisited_owners {
-            let Owner::AlwaysEmitted(module, body_owner) = owner else { continue };
-            let Some(owner) = concrete_owner_for(*module, *body_owner) else { continue };
+            let Owner::AlwaysEmitted(module, body_owner) = owner else {
+                continue;
+            };
+            let Some(owner) = concrete_owner_for(*module, *body_owner) else {
+                continue;
+            };
             always_subjects.push((*module, *body_owner, owner));
         }
         for (_, _, owner) in &always_subjects {
@@ -619,7 +626,14 @@ impl ConcreteBodies {
             .iter()
             .enumerate()
             .map(|(order, (module, body_owner, _))| {
-                prepare_always(ws, g, order, *module, *body_owner, log::log_enabled!(log::Level::Debug))
+                prepare_always(
+                    ws,
+                    g,
+                    order,
+                    *module,
+                    *body_owner,
+                    log::log_enabled!(log::Level::Debug),
+                )
             })
             .collect();
         if !always_inputs.is_empty() {
@@ -656,7 +670,9 @@ impl ConcreteBodies {
                 let owner = result.owner.clone();
                 let mut raw_facts = result.facts;
                 if let (Some(owner), Err(reason)) = (&owner, &result.plan) {
-                    raw_facts.always_plan_failures.push((owner.clone(), reason.clone()));
+                    raw_facts
+                        .always_plan_failures
+                        .push((owner.clone(), reason.clone()));
                 }
                 let facts = raw_facts;
                 match result.plan {
@@ -699,7 +715,9 @@ impl ConcreteBodies {
         let mut removed = BTreeSet::new();
         if let Some(candidates) = self.owner_candidates.remove(instance) {
             for candidate in candidates {
-                let Some(users) = self.candidate_users.get_mut(&candidate) else { continue };
+                let Some(users) = self.candidate_users.get_mut(&candidate) else {
+                    continue;
+                };
                 users.remove(instance);
                 if users.is_empty() {
                     self.candidate_users.remove(&candidate);
@@ -732,10 +750,12 @@ impl ConcreteBodies {
 
     fn install_failure_index(&mut self, facts: &OwnerFacts) {
         for (instance, reason) in &facts.plan_failures {
-            self.plan_failure_index.insert(instance.clone(), reason.clone());
+            self.plan_failure_index
+                .insert(instance.clone(), reason.clone());
         }
         for (owner, reason) in &facts.always_plan_failures {
-            self.always_plan_failure_index.insert(owner.clone(), reason.clone());
+            self.always_plan_failure_index
+                .insert(owner.clone(), reason.clone());
         }
     }
 
@@ -891,17 +911,18 @@ impl ConcreteBodies {
     pub fn diagnostic_snapshot(&self, ws: &Workspace, g: &InstanceGraph) -> Vec<String> {
         let facts = self.aggregate_facts();
         let mut rows = Vec::new();
-        rows.extend(
-            facts
-                .plan_failures
-                .iter()
-                .map(|(instance, reason)| {
-                    format!("plan-failure:{}:{}", g.identity(ws, instance), reason.bucket())
-                }),
-        );
-        rows.extend(facts.always_plan_failures.iter().map(|(owner, reason)| {
-            format!("always-plan-failure:{owner:?}:{}", reason.bucket())
+        rows.extend(facts.plan_failures.iter().map(|(instance, reason)| {
+            format!(
+                "plan-failure:{}:{}",
+                g.identity(ws, instance),
+                reason.bucket()
+            )
         }));
+        rows.extend(
+            facts.always_plan_failures.iter().map(|(owner, reason)| {
+                format!("always-plan-failure:{owner:?}:{}", reason.bucket())
+            }),
+        );
         rows.extend(
             self.render_free_types(ws, g)
                 .into_iter()
@@ -917,13 +938,12 @@ impl ConcreteBodies {
                 .into_iter()
                 .map(|row| format!("callee-hole:{row}")),
         );
-        rows.extend(facts.gaps.iter().map(|gap| {
-            format!(
-                "gap:{}:{}",
-                g.identity(ws, &gap.instance),
-                gap.gap.label()
-            )
-        }));
+        rows.extend(
+            facts
+                .gaps
+                .iter()
+                .map(|gap| format!("gap:{}:{}", g.identity(ws, &gap.instance), gap.gap.label())),
+        );
         rows.extend(facts.unknown_rock_callees.iter().map(|(instance, site)| {
             format!(
                 "unknown-callee:{}:{}",
@@ -1008,7 +1028,10 @@ pub struct UntypedExpr {
 /// enum silently.
 fn expr_kind(e: &Expr) -> &'static str {
     let d = format!("{e:?}");
-    let head = d.split(|c: char| !c.is_alphanumeric() && c != '_').next().unwrap_or("?");
+    let head = d
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .next()
+        .unwrap_or("?");
     // Leaked once per DISTINCT kind, not per slot: the set is the enum's
     // variants, so this is bounded by the enum and not by the corpus.
     static KINDS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<&'static str>>> =
@@ -1077,8 +1100,8 @@ pub fn convert_body(
     let mut memo: TypeConversionMemo = FxHashMap::default();
     let mut conversions = 0usize;
     let conversions_ref = &mut conversions;
-    let mut convert_memo = |arena: &mut MonoArena, ty: TyId, generics_bound: &mut usize| {
-        match memo.entry(ty) {
+    let mut convert_memo =
+        |arena: &mut MonoArena, ty: TyId, generics_bound: &mut usize| match memo.entry(ty) {
             std::collections::hash_map::Entry::Occupied(hit) => match hit.get() {
                 Ok((id, delta)) => {
                     *generics_bound += delta;
@@ -1094,8 +1117,7 @@ pub fn convert_body(
                 slot.insert(converted.clone().map(|id| (id, delta)));
                 converted
             }
-        }
-    };
+        };
     for (e, ty) in inf.expr_types.iter() {
         c.expr_examined += 1;
         match convert_memo(arena, *ty, &mut c.generics_bound) {
@@ -1105,7 +1127,11 @@ pub fn convert_body(
             Err(reason) => c.failures.push(FreeType {
                 slot: Slot::Expr(e),
                 reason,
-                span: body.expr_spans.get(e).copied().unwrap_or_else(Span::unknown),
+                span: body
+                    .expr_spans
+                    .get(e)
+                    .copied()
+                    .unwrap_or_else(Span::unknown),
             }),
         }
     }
@@ -1115,7 +1141,11 @@ pub fn convert_body(
             c.untyped_exprs.push(UntypedExpr {
                 expr: e,
                 kind: expr_kind(expr),
-                span: body.expr_spans.get(e).copied().unwrap_or_else(Span::unknown),
+                span: body
+                    .expr_spans
+                    .get(e)
+                    .copied()
+                    .unwrap_or_else(Span::unknown),
             });
         }
     }
@@ -1134,7 +1164,11 @@ pub fn convert_body(
             Err(reason) => c.failures.push(FreeType {
                 slot: Slot::Binding(b),
                 reason,
-                span: body.binding_spans.get(b).copied().unwrap_or_else(Span::unknown),
+                span: body
+                    .binding_spans
+                    .get(b)
+                    .copied()
+                    .unwrap_or_else(Span::unknown),
             }),
         }
     }
@@ -1158,7 +1192,9 @@ fn callee_tables(
     body: &mut ConcreteBody,
     out: &mut OwnerFacts,
 ) {
-    let Some(sites) = g.sites_of(inst) else { return };
+    let Some(sites) = g.sites_of(inst) else {
+        return;
+    };
     for (site, rec) in sites {
         out.sites_examined += 1;
         let target = match &rec.outcome {
@@ -1203,25 +1239,37 @@ fn callee_tables(
             SiteOp::ForIter => {
                 body.iterator_ops.insert(
                     site.clone(),
-                    ConcreteIteratorOp { kind: IteratorOpKind::Iter, callee },
+                    ConcreteIteratorOp {
+                        kind: IteratorOpKind::Iter,
+                        callee,
+                    },
                 );
             }
             SiteOp::ForNext(_) => {
                 body.iterator_ops.insert(
                     site.clone(),
-                    ConcreteIteratorOp { kind: IteratorOpKind::Next, callee },
+                    ConcreteIteratorOp {
+                        kind: IteratorOpKind::Next,
+                        callee,
+                    },
                 );
             }
             SiteOp::ImplicitIter => {
                 body.iterator_ops.insert(
                     site.clone(),
-                    ConcreteIteratorOp { kind: IteratorOpKind::ImplicitIter, callee },
+                    ConcreteIteratorOp {
+                        kind: IteratorOpKind::ImplicitIter,
+                        callee,
+                    },
                 );
             }
             SiteOp::BoundNext(_) => {
                 body.iterator_ops.insert(
                     site.clone(),
-                    ConcreteIteratorOp { kind: IteratorOpKind::BoundNext, callee },
+                    ConcreteIteratorOp {
+                        kind: IteratorOpKind::BoundNext,
+                        callee,
+                    },
                 );
             }
         }
@@ -1250,16 +1298,21 @@ fn concrete_signature(
             .return_ty
             .map(|ty| arena.convert_decl(ws, ty, subst))
             .transpose()?;
-        Ok(ConcreteSignature { params, param_tuple_spelled, result })
+        Ok(ConcreteSignature {
+            params,
+            param_tuple_spelled,
+            result,
+        })
     })
 }
 
 fn declared_tuple_param(ws: &Workspace, ty: TyId) -> Result<bool, MonoTyReason> {
     match TyEnv::Decl.decl_node(ws, ty)? {
         TypeExpr::Tuple { .. } => Ok(true),
-        TypeExpr::Nullable(inner) => {
-            Ok(matches!(TyEnv::Decl.decl_node(ws, ty.with_idx(inner))?, TypeExpr::Tuple { .. }))
-        }
+        TypeExpr::Nullable(inner) => Ok(matches!(
+            TyEnv::Decl.decl_node(ws, ty.with_idx(inner))?,
+            TypeExpr::Tuple { .. }
+        )),
         TypeExpr::Builtin(_)
         | TypeExpr::App { .. }
         | TypeExpr::Generic(..)
@@ -1290,7 +1343,9 @@ fn concrete_tables(
     stats: &mut ConcreteBuildStats,
     timing_enabled: bool,
 ) -> Result<ConcreteTypeTables, MonoTyReason> {
-    let mut converted = g.interner().with_mut(|arena| convert_body(arena, ws, inf, body, subst));
+    let mut converted = g
+        .interner()
+        .with_mut(|arena| convert_body(arena, ws, inf, body, subst));
     for failure in &converted.failures {
         if !matches!(failure.reason, MonoTyReason::UnresolvedInfer(_)) {
             return Err(failure.reason.clone());
@@ -1343,7 +1398,9 @@ fn concrete_struct_field_types(
     let mut out = ArenaMap::default();
     let started = timing_enabled.then(bone_core::prelude::Instant::now);
     for (expr, node) in body.expr_arena.iter() {
-        let Expr::StructLiteral { name, .. } = node else { continue };
+        let Expr::StructLiteral { name, .. } = node else {
+            continue;
+        };
         stats.struct_literals_examined += 1;
         let sid = *ws.struct_by_name.get(&name).ok_or(MonoTyReason::NoNode)?;
         let def = &ws.modules[sid.module.index()].structs[sid.def];
@@ -1351,7 +1408,11 @@ fn concrete_struct_field_types(
             Some(ty_id) => {
                 let concrete = g.interner().get(ty_id);
                 let (payload, _) = concrete.peel_nullable();
-                let MonoTy::App { ctor: MonoCtor::Nominal(actual), params } = payload else {
+                let MonoTy::App {
+                    ctor: MonoCtor::Nominal(actual),
+                    params,
+                } = payload
+                else {
                     return Err(MonoTyReason::NoNode);
                 };
                 if *actual != *name || def.generics.len() != params.len() {
@@ -1421,43 +1482,40 @@ fn concrete_ty_types(
     }
     stats.type_nodes_examined += nodes.len();
     let started = timing_enabled.then(bone_core::prelude::Instant::now);
-    g.interner().with_mut(|arena| {
-        nodes
-            .into_iter()
-            .filter_map(|ty| {
-                let converted = if let Some(cached) = memo.get(&ty) {
-                    stats.type_node_memo_hits += 1;
-                    cached.clone()
-                } else {
-                    stats.type_node_conversion_attempts += 1;
-                    let converted = arena.convert(ws, inf, ty, subst);
-                    memo.insert(ty, converted.clone().map(|id| (id, 0)));
-                    converted.map(|id| (id, 0))
-                };
-                match converted {
-                    Ok((id, _)) => Some(Ok((ty, id))),
-                    Err(MonoTyReason::UnresolvedInfer(_)) => {
-                        stats.type_node_unresolved += 1;
-                        None
+    g.interner()
+        .with_mut(|arena| {
+            nodes
+                .into_iter()
+                .filter_map(|ty| {
+                    let converted = if let Some(cached) = memo.get(&ty) {
+                        stats.type_node_memo_hits += 1;
+                        cached.clone()
+                    } else {
+                        stats.type_node_conversion_attempts += 1;
+                        let converted = arena.convert(ws, inf, ty, subst);
+                        memo.insert(ty, converted.clone().map(|id| (id, 0)));
+                        converted.map(|id| (id, 0))
+                    };
+                    match converted {
+                        Ok((id, _)) => Some(Ok((ty, id))),
+                        Err(MonoTyReason::UnresolvedInfer(_)) => {
+                            stats.type_node_unresolved += 1;
+                            None
+                        }
+                        Err(reason) => Some(Err(reason)),
                     }
-                    Err(reason) => Some(Err(reason)),
-                }
-            })
-            .collect::<Result<rustc_hash::FxHashMap<_, _>, _>>()
-    }).map(|types| {
-        if let Some(started) = started {
-            stats.type_nodes_ns += started.elapsed().as_nanos() as u64;
-        }
-        types
-    })
+                })
+                .collect::<Result<rustc_hash::FxHashMap<_, _>, _>>()
+        })
+        .map(|types| {
+            if let Some(started) = started {
+                stats.type_nodes_ns += started.elapsed().as_nanos() as u64;
+            }
+            types
+        })
 }
 
-fn collect_type_nodes(
-    ws: &Workspace,
-    inf: &BodyInference,
-    ty: TyId,
-    out: &mut FxHashSet<TyId>,
-) {
+fn collect_type_nodes(ws: &Workspace, inf: &BodyInference, ty: TyId, out: &mut FxHashSet<TyId>) {
     if !out.insert(ty) {
         return;
     }
@@ -1557,31 +1615,42 @@ struct OwnerFacts {
     build_stats: ConcreteBuildStats,
 }
 
-fn concrete_owner_order(
-    left: &ConcreteOwner,
-    right: &ConcreteOwner,
-) -> std::cmp::Ordering {
+fn concrete_owner_order(left: &ConcreteOwner, right: &ConcreteOwner) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     let tag = |owner: &ConcreteOwner| match owner {
         ConcreteOwner::Function(_) => 0,
         ConcreteOwner::Global { .. } => 1,
         ConcreteOwner::Decorator { .. } => 2,
     };
-    tag(left).cmp(&tag(right)).then_with(|| match (left, right) {
-        (ConcreteOwner::Function(left), ConcreteOwner::Function(right)) => left.cmp(right),
-        (
-            ConcreteOwner::Global { module: left_module, index: left_index },
-            ConcreteOwner::Global { module: right_module, index: right_index },
-        )
-        | (
-            ConcreteOwner::Decorator { module: left_module, index: left_index },
-            ConcreteOwner::Decorator { module: right_module, index: right_index },
-        ) => left_module
-            .index()
-            .cmp(&right_module.index())
-            .then(left_index.cmp(right_index)),
-        _ => Ordering::Equal,
-    })
+    tag(left)
+        .cmp(&tag(right))
+        .then_with(|| match (left, right) {
+            (ConcreteOwner::Function(left), ConcreteOwner::Function(right)) => left.cmp(right),
+            (
+                ConcreteOwner::Global {
+                    module: left_module,
+                    index: left_index,
+                },
+                ConcreteOwner::Global {
+                    module: right_module,
+                    index: right_index,
+                },
+            )
+            | (
+                ConcreteOwner::Decorator {
+                    module: left_module,
+                    index: left_index,
+                },
+                ConcreteOwner::Decorator {
+                    module: right_module,
+                    index: right_index,
+                },
+            ) => left_module
+                .index()
+                .cmp(&right_module.index())
+                .then(left_index.cmp(right_index)),
+            _ => Ordering::Equal,
+        })
 }
 
 impl OwnerFacts {
@@ -1627,8 +1696,10 @@ impl OwnerFacts {
 
     fn sort_for_output(&mut self) {
         self.free_types.sort_by(|left, right| left.0.cmp(&right.0));
-        self.gaps.sort_by(|left, right| left.instance.cmp(&right.instance));
-        self.plan_failures.sort_by(|left, right| left.0.cmp(&right.0));
+        self.gaps
+            .sort_by(|left, right| left.instance.cmp(&right.instance));
+        self.plan_failures
+            .sort_by(|left, right| left.0.cmp(&right.0));
         self.always_plan_failures
             .sort_by(|left, right| concrete_owner_order(&left.0, &right.0));
         self.untyped.sort_by(|left, right| left.0.cmp(&right.0));
@@ -1638,11 +1709,9 @@ impl OwnerFacts {
                 .then_with(|| left.site.cmp(&right.site))
                 .then_with(|| left.reason.cmp(right.reason))
         });
-        self.unknown_rock_callees.sort_by(|left, right| {
-            left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1))
-        });
+        self.unknown_rock_callees
+            .sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
     }
-
 }
 
 type PublishedSignatures = FxHashMap<Instance, Result<ConcreteSignatureHandle, MonoTyReason>>;
@@ -1704,7 +1773,9 @@ fn publish_signatures_local(
         }
     }
     for owner in always_owners {
-        let Some(contribution) = g.contributions.get(owner) else { continue };
+        let Some(contribution) = g.contributions.get(owner) else {
+            continue;
+        };
         for record in contribution.always_call_sites.values() {
             if let SiteOutcome::Resolved(target) = &record.outcome {
                 instances.insert(target.clone());
@@ -1744,7 +1815,12 @@ fn collect_foreign_domains(g: &InstanceGraph, expanded: &[Instance]) -> BTreeSet
             continue;
         }
         domains.extend(contribution.struct_default_domains.iter().cloned());
-        domains.extend(contribution.always_call_sites.keys().map(|site| site.domain.clone()));
+        domains.extend(
+            contribution
+                .always_call_sites
+                .keys()
+                .map(|site| site.domain.clone()),
+        );
     }
     domains
 }
@@ -1764,9 +1840,16 @@ fn collect_foreign_domains_local(
         }
     }
     for owner in always_owners {
-        let Some(contribution) = g.contributions.get(owner) else { continue };
+        let Some(contribution) = g.contributions.get(owner) else {
+            continue;
+        };
         domains.extend(contribution.struct_default_domains.iter().cloned());
-        domains.extend(contribution.always_call_sites.keys().map(|site| site.domain.clone()));
+        domains.extend(
+            contribution
+                .always_call_sites
+                .keys()
+                .map(|site| site.domain.clone()),
+        );
     }
     domains
 }
@@ -1783,27 +1866,24 @@ fn build_instance_delta(
     let signatures = publish_signatures_local(ws, g, targets, &BTreeSet::new());
     let mut publication_stats = ConcreteBuildStats::default();
     let domains = collect_foreign_domains_local(g, targets, &BTreeSet::new());
-    let published_domains = publish_foreign_domains(
-        ws,
-        g,
-        domains,
-        &mut publication_stats,
-        timing_enabled,
-    );
+    let published_domains =
+        publish_foreign_domains(ws, g, domains, &mut publication_stats, timing_enabled);
     let results = targets
         .iter()
         .cloned()
-        .map(|instance| match prepare_instance(ws, g, instance, timing_enabled) {
-            PreparedInstanceResult::Gap(gap) => InstanceResult::Gap(gap),
-            PreparedInstanceResult::Ready(prepared) => InstanceResult::Built(produce_instance(
-                ws,
-                g,
-                prepared,
-                &signatures,
-                &published_domains,
-                timing_enabled,
-            )),
-        })
+        .map(
+            |instance| match prepare_instance(ws, g, instance, timing_enabled) {
+                PreparedInstanceResult::Gap(gap) => InstanceResult::Gap(gap),
+                PreparedInstanceResult::Ready(prepared) => InstanceResult::Built(produce_instance(
+                    ws,
+                    g,
+                    prepared,
+                    &signatures,
+                    &published_domains,
+                    timing_enabled,
+                )),
+            },
+        )
         .collect();
     (results, publication_stats)
 }
@@ -1942,7 +2022,9 @@ fn prepare_instance(
         (0, 0)
     };
     let started = bone_core::prelude::Instant::now();
-    let converted = g.interner().with_mut(|arena| convert_body(arena, ws, inf, body, &subst));
+    let converted = g
+        .interner()
+        .with_mut(|arena| convert_body(arena, ws, inf, body, &subst));
     let convert_time = started.elapsed();
     facts.expr_examined = converted.expr_examined;
     facts.binding_examined = converted.binding_examined;
@@ -2038,7 +2120,10 @@ struct PreparedAlways {
     facts: OwnerFacts,
 }
 
-fn concrete_owner_for(module: bone_semantic::prelude::ModuleId, body_owner: BodyOwner) -> Option<ConcreteOwner> {
+fn concrete_owner_for(
+    module: bone_semantic::prelude::ModuleId,
+    body_owner: BodyOwner,
+) -> Option<ConcreteOwner> {
     match body_owner {
         BodyOwner::Global(index) => Some(ConcreteOwner::Global {
             module,
@@ -2112,9 +2197,7 @@ fn prepare_always(
         | BodyOwner::Function(_)
         | BodyOwner::StructDefaults(_)
         | BodyOwner::Enum(_)
-        | BodyOwner::Newtype(_) => {
-            Vec::new().into_iter()
-        }
+        | BodyOwner::Newtype(_) => Vec::new().into_iter(),
     };
     let result = concrete_tables(
         ws,
@@ -2159,7 +2242,9 @@ where
             continue;
         }
         stats.foreign_domain_unique += 1;
-        let SiteDomain::StructDefaults(..) = domain else { continue };
+        let SiteDomain::StructDefaults(..) = domain else {
+            continue;
+        };
         let tables = published
             .get(&domain)
             .ok_or(MonoTyReason::NoNode)?
@@ -2198,10 +2283,7 @@ fn concrete_plan_from_publication(
         callee_signatures.insert(site.clone(), signature);
         callees.insert(site.clone(), instance);
     }
-    let signature = signatures
-        .get(inst)
-        .ok_or(MonoTyReason::NoNode)?
-        .clone()?;
+    let signature = signatures.get(inst).ok_or(MonoTyReason::NoNode)?.clone()?;
     if let Some(started) = signature_started {
         stats.signature_ns += started.elapsed().as_nanos() as u64;
     }
@@ -2291,9 +2373,11 @@ fn produce_instance(
                 .or_insert(0) += 1;
         }
     }
-    facts
-        .untyped
-        .extend(untyped.into_iter().map(|untyped_expr| (inst.clone(), untyped_expr)));
+    facts.untyped.extend(
+        untyped
+            .into_iter()
+            .map(|untyped_expr| (inst.clone(), untyped_expr)),
+    );
     facts.signature_requests += concrete.direct_calls.len()
         + concrete.fn_values.len()
         + concrete.iterator_ops.len()
@@ -2387,7 +2471,10 @@ fn produce_always(
             facts,
         };
     }
-    let contribution = match g.contributions.get(&Owner::AlwaysEmitted(module, body_owner)) {
+    let contribution = match g
+        .contributions
+        .get(&Owner::AlwaysEmitted(module, body_owner))
+    {
         Some(contribution) => contribution,
         None => {
             return BuiltAlways {
@@ -2434,7 +2521,10 @@ fn produce_always(
         }
     }
     let default_domains = contribution.struct_default_domains.iter().cloned();
-    let site_domains = contribution.always_call_sites.keys().map(|site| site.domain.clone());
+    let site_domains = contribution
+        .always_call_sites
+        .keys()
+        .map(|site| site.domain.clone());
     let foreign_domains = match foreign_domains_from_publication(
         default_domains.chain(site_domains),
         domains,
@@ -2515,18 +2605,22 @@ fn produce_always(
         BodyOwner::Function(_)
         | BodyOwner::StructDefaults(_)
         | BodyOwner::Enum(_)
-        | BodyOwner::Newtype(_) => return BuiltAlways {
-            order,
-            owner,
-            plan: Ok(None),
-            facts,
-        },
+        | BodyOwner::Newtype(_) => {
+            return BuiltAlways {
+                order,
+                owner,
+                plan: Ok(None),
+                facts,
+            }
+        }
     };
     if let Some(started) = signature_started {
         facts.build_stats.signature_ns += started.elapsed().as_nanos() as u64;
     }
     let plan = ConcreteBodyPlan {
-        owner: owner.clone().expect("always-emitted owner was not global or decorator"),
+        owner: owner
+            .clone()
+            .expect("always-emitted owner was not global or decorator"),
         code_identity: None,
         types,
         foreign_domains,
@@ -2651,24 +2745,38 @@ impl CompletionScheduler {
         }
         loop {
             if state.selected.len() < 2 {
-                state = self.ready.wait(state).expect("completion scheduler poisoned");
+                state = self
+                    .ready
+                    .wait(state)
+                    .expect("completion scheduler poisoned");
                 continue;
             }
-            if let Some(position) = state.selected.iter().position(|selected| selected == instance) {
+            if let Some(position) = state
+                .selected
+                .iter()
+                .position(|selected| selected == instance)
+            {
                 if state.next == position {
                     return;
                 }
             } else if state.next == state.selected.len() {
                 return;
             }
-            state = self.ready.wait(state).expect("completion scheduler poisoned");
+            state = self
+                .ready
+                .wait(state)
+                .expect("completion scheduler poisoned");
         }
     }
 
     fn finish(&self, instance: Instance) {
         let mut state = self.state.lock().expect("completion scheduler poisoned");
         state.completion_order.push(instance.clone());
-        if let Some(position) = state.selected.iter().position(|selected| selected == &instance) {
+        if let Some(position) = state
+            .selected
+            .iter()
+            .position(|selected| selected == &instance)
+        {
             assert_eq!(
                 state.next, position,
                 "completion scheduler observed a selected result out of order"
@@ -2739,14 +2847,8 @@ fn produce_instances(
                         let key = instance.instance.clone();
                         census.record();
                         scheduler.enter(&key);
-                        let result = produce_instance(
-                            ws,
-                            g,
-                            instance,
-                            signatures,
-                            domains,
-                            timing_enabled,
-                        );
+                        let result =
+                            produce_instance(ws, g, instance, signatures, domains, timing_enabled);
                         scheduler.finish(key);
                         InstanceResult::Built(result)
                     })
@@ -2868,14 +2970,12 @@ pub fn build_with_result_order(
 }
 
 #[cfg(feature = "test-hooks")]
-pub fn build_with_default_trace(
-    ws: &Workspace,
-    g: &InstanceGraph,
-) -> (ConcreteBodies, BuildTrace) {
+pub fn build_with_default_trace(ws: &Workspace, g: &InstanceGraph) -> (ConcreteBodies, BuildTrace) {
     let run = build_impl(ws, g, BuildResultOrder::Canonical, BuildSchedule::Default);
     (
         run.bodies,
-        run.trace.expect("default concrete run did not produce a trace"),
+        run.trace
+            .expect("default concrete run did not produce a trace"),
     )
 }
 
@@ -2893,7 +2993,8 @@ pub fn build_with_reverse_completion(
     (
         run.bodies,
         run.merge_order,
-        run.trace.expect("reverse-completion test run did not produce a trace"),
+        run.trace
+            .expect("reverse-completion test run did not produce a trace"),
     )
 }
 
@@ -2963,13 +3064,8 @@ fn build_published_impl(
     let mut publication_stats = ConcreteBuildStats::default();
     let t_foreign_publication = bone_core::prelude::Instant::now();
     let domains = collect_foreign_domains(g, &publication_instances);
-    let published_domains = publish_foreign_domains(
-        ws,
-        g,
-        domains,
-        &mut publication_stats,
-        timing_enabled,
-    );
+    let published_domains =
+        publish_foreign_domains(ws, g, domains, &mut publication_stats, timing_enabled);
     publication_stats.signature_ns += signature_time.as_nanos() as u64;
     let foreign_publication_time = t_foreign_publication.elapsed();
 
@@ -3107,7 +3203,9 @@ fn build_published_impl(
         let owner = result.owner.clone();
         let mut raw_facts = result.facts;
         if let (Some(owner), Err(reason)) = (&owner, &result.plan) {
-            raw_facts.always_plan_failures.push((owner.clone(), reason.clone()));
+            raw_facts
+                .always_plan_failures
+                .push((owner.clone(), reason.clone()));
         }
         let facts = raw_facts;
         match result.plan {

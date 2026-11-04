@@ -10,9 +10,14 @@ unsafe extern "C" {
     fn mi_collect(force: bool);
     fn mi_option_set_default(option: std::ffi::c_int, value: std::ffi::c_long);
     fn mi_process_info(
-        elapsed_msecs: *mut usize, user_msecs: *mut usize, system_msecs: *mut usize,
-        current_rss: *mut usize, peak_rss: *mut usize,
-        current_commit: *mut usize, peak_commit: *mut usize, page_faults: *mut usize,
+        elapsed_msecs: *mut usize,
+        user_msecs: *mut usize,
+        system_msecs: *mut usize,
+        current_rss: *mut usize,
+        peak_rss: *mut usize,
+        current_commit: *mut usize,
+        peak_commit: *mut usize,
+        page_faults: *mut usize,
     );
 }
 
@@ -50,16 +55,27 @@ fn memory_sample(values: &[usize; 8], rss: Option<u64>) -> serde_json::Value {
 #[cfg(target_os = "linux")]
 fn linux_current_rss() -> std::io::Result<u64> {
     let statm = std::fs::read_to_string("/proc/self/statm")?;
-    let pages = statm.split_whitespace().nth(1)
+    let pages = statm
+        .split_whitespace()
+        .nth(1)
         .and_then(|value| value.parse::<u64>().ok())
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid resident page count"))?;
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid resident page count",
+            )
+        })?;
     // SAFETY: sysconf takes no pointers; a non-positive result is rejected.
     let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
     if page_size <= 0 {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid OS page size"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid OS page size",
+        ));
     }
-    pages.checked_mul(page_size as u64)
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "RSS byte count overflow"))
+    pages.checked_mul(page_size as u64).ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "RSS byte count overflow")
+    })
 }
 
 // `mi_option_purge_delay` in the vendored mimalloc.h `mi_option_e`; the sys
@@ -148,8 +164,10 @@ mod tests {
         let data = vec![1u8; 16 << 20];
         std::hint::black_box(&data);
         let memory = super::process_memory();
-        assert!(memory["rss_bytes"].as_u64().unwrap() >= data.len() as u64,
-            "RSS omitted a resident system allocation: {memory}");
+        assert!(
+            memory["rss_bytes"].as_u64().unwrap() >= data.len() as u64,
+            "RSS omitted a resident system allocation: {memory}"
+        );
         assert!(memory["peak_rss_bytes"].as_u64().unwrap() > 0);
     }
 
@@ -160,7 +178,10 @@ mod tests {
         values[5] = -549_257_216i64 as usize;
         values[6] = 3_875_405_824;
         let memory = super::memory_sample(&values, Some(1_383_763_968));
-        assert!(memory["commit_bytes"].is_null(), "wrapped commit counter: {memory}");
+        assert!(
+            memory["commit_bytes"].is_null(),
+            "wrapped commit counter: {memory}"
+        );
         assert_eq!(memory["peak_commit_bytes"], 3_875_405_824u64);
     }
 
@@ -176,7 +197,10 @@ mod tests {
         const PER_THREAD: usize = 64 << 20;
         const BLOCK: usize = 1024;
         let threads = rayon::current_num_threads();
-        assert!(threads > 1, "needs a multi-thread rayon pool, got {threads}");
+        assert!(
+            threads > 1,
+            "needs a multi-thread rayon pool, got {threads}"
+        );
         let blocks: Vec<Vec<usize>> = rayon::broadcast(|_| {
             (0..PER_THREAD / BLOCK)
                 .map(|_| {
@@ -301,6 +325,10 @@ mod tests {
         super::purge_freed_pages_immediately();
         // SAFETY: as above.
         let after = unsafe { mi_option_get(super::MI_OPTION_PURGE_DELAY) };
-        assert_eq!(format!("{before} {after}"), expect, "purge delay before and after");
+        assert_eq!(
+            format!("{before} {after}"),
+            expect,
+            "purge delay before and after"
+        );
     }
 }

@@ -1,6 +1,6 @@
-use rand::Rng;
 use rand::rngs::StdRng;
-use serde_json::{Value, json};
+use rand::Rng;
+use serde_json::{json, Value};
 
 // ── notebook ─────────────────────────────────────────────────────────────────
 
@@ -26,7 +26,9 @@ pub fn gen_range(rng: &mut StdRng) -> Value {
 #[allow(dead_code)]
 pub fn gen_string(rng: &mut StdRng) -> Value {
     let len = rng.random_range(0..20usize);
-    let s: String = (0..len).map(|_| (b'a' + rng.random_range(0..26u8)) as char).collect();
+    let s: String = (0..len)
+        .map(|_| (b'a' + rng.random_range(0..26u8)) as char)
+        .collect();
     json!(s)
 }
 
@@ -407,9 +409,15 @@ pub fn gen_prepare_rename_response(rng: &mut StdRng) -> Vec<Value> {
 
 pub fn gen_watch_kind(_rng: &mut StdRng) -> Vec<Value> {
     vec![
-        json!(0),  // empty flags
-        json!(1), json!(2), json!(3), json!(4), json!(5), json!(6), json!(7),
-        json!(8),  // invalid bit — both reject
+        json!(0), // empty flags
+        json!(1),
+        json!(2),
+        json!(3),
+        json!(4),
+        json!(5),
+        json!(6),
+        json!(7),
+        json!(8), // invalid bit — both reject
         json!(255),
         json!(-1), // negative — u8 rejects
         json!("create"),
@@ -426,7 +434,7 @@ pub fn gen_position_encoding_kind(_rng: &mut StdRng) -> Vec<Value> {
         json!("utf-32"),
         json!("custom"),
         json!(""),
-        json!(123),  // non-string — both reject
+        json!(123), // non-string — both reject
         json!(null),
     ]
 }
@@ -721,12 +729,12 @@ pub fn gen_lsp_message(rng: &mut StdRng) -> Vec<Value> {
         // Both inputs are out-of-spec; the manual fork's stricter dispatch
         // is acceptable and arguably safer (no silent variant fallback).
         // Both-side-error happy paths instead:
-        json!({ "id": null }),                          // both error
-        json!({ "method": null }),                      // both error
-        json!({ "id": null, "method": null }),          // both error
-        // {"id": [], "method": "x"} also diverges: upstream's untagged
-        // fallback yields Notification {method:"x"}; manual routes to Request
-        // and rejects on id type. Same fallback pattern as the null cases.
+        json!({ "id": null }),     // both error
+        json!({ "method": null }), // both error
+        json!({ "id": null, "method": null }), // both error
+                                   // {"id": [], "method": "x"} also diverges: upstream's untagged
+                                   // fallback yields Notification {method:"x"}; manual routes to Request
+                                   // and rejects on id type. Same fallback pattern as the null cases.
     ]);
     out
 }

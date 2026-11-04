@@ -9,7 +9,6 @@
 //! number. So this is a JS-ONLY rejection -- the same asymmetry
 //! `spec_key_has_target_storage` already makes.
 
-
 const FLATVEC_PARAM: &str = r#"
 value G { x: float, y: float }
 
@@ -75,13 +74,19 @@ fn main() {
 /// Emit the `main` closure for the JS target.
 fn js(src: &str) -> Result<(), String> {
     let ws = crate::common::ws_with(src);
-    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("test module");
     let root = ws
         .module(mid)
         .functions
         .iter()
         .find(|(_, f)| f.name.as_str() == "main")
-        .map(|(fid, _)| skull_mir::mir::FuncRef { module: mid, func: fid })
+        .map(|(fid, _)| skull_mir::mir::FuncRef {
+            module: mid,
+            func: fid,
+        })
         .expect("main");
     skull_codegen_js::emit::emit_with_closure(&ws, &[(root, "main".to_string())])
         .map(|_| ())
@@ -91,21 +96,32 @@ fn js(src: &str) -> Result<(), String> {
 /// The luajit control, through the ordinary module emit.
 fn lua(src: &str) -> Result<(), String> {
     let ws = crate::common::ws_with(src);
-    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
-    skull::mir_emit::emit_workspace_mir(&ws, mid).map(|_| ()).map_err(|e| e.message)
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("test module");
+    skull::mir_emit::emit_workspace_mir(&ws, mid)
+        .map(|_| ())
+        .map_err(|e| e.message)
 }
 
 #[test]
 fn a_flatvec_at_a_leaf_addressed_element_rejects_on_js() {
     let msg = js(FLATVEC_PARAM).expect_err("must reject on JS");
-    assert!(msg.contains("FlatVec<G>") && msg.contains("probe"), "got: {msg}");
+    assert!(
+        msg.contains("FlatVec<G>") && msg.contains("probe"),
+        "got: {msg}"
+    );
 }
 
 /// The TARGET bound. luajit's `ptr` is an `E*`, so the identical body is right
 /// there -- without this the rejection above would read as "FlatVec is banned".
 #[test]
 fn the_same_flatvec_body_is_admitted_on_lua() {
-    assert!(lua(FLATVEC_PARAM).is_ok(), "luajit `ptr[i]` is an element reference");
+    assert!(
+        lua(FLATVEC_PARAM).is_ok(),
+        "luajit `ptr[i]` is an element reference"
+    );
 }
 
 #[test]
@@ -122,11 +138,18 @@ fn the_same_native_buffer_body_is_admitted_on_lua() {
 #[test]
 fn a_primitive_element_buffer_is_admitted_on_js() {
     let result = js(NATIVEBUFFER_PRIMITIVE);
-    assert!(result.is_ok(), "no leaf plan means no representation the boxed form does not have: {result:?}");
+    assert!(
+        result.is_ok(),
+        "no leaf plan means no representation the boxed form does not have: {result:?}"
+    );
 }
 
 #[test]
 fn an_expansion_intrinsic_over_a_native_buffer_is_admitted() {
-    assert!(js(EXPANSION_INTRINSIC).is_ok(), "js: {:?}", js(EXPANSION_INTRINSIC));
+    assert!(
+        js(EXPANSION_INTRINSIC).is_ok(),
+        "js: {:?}",
+        js(EXPANSION_INTRINSIC)
+    );
     assert!(lua(EXPANSION_INTRINSIC).is_ok());
 }

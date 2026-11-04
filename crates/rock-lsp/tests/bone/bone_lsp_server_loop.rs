@@ -8,7 +8,7 @@
 
 use lsp_server::{Message, Notification, Request, RequestId};
 use rock_lsp::{CompilerPolicy, LspServer};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::str::FromStr;
 
 fn init_params() -> Value {
@@ -72,7 +72,9 @@ fn did_change(uri: &str, text: &str) -> Message {
 fn diagnostics_for(out: &[Message], uri: &str) -> Vec<Value> {
     out.iter()
         .filter_map(|m| match m {
-            Message::Notification(n) if n.method == "textDocument/publishDiagnostics" => Some(&n.params),
+            Message::Notification(n) if n.method == "textDocument/publishDiagnostics" => {
+                Some(&n.params)
+            }
             _ => None,
         })
         .filter(|p| p["uri"].as_str() == Some(uri))
@@ -88,8 +90,8 @@ fn initialize_replies_with_the_advertised_capabilities() {
         method: "initialize".to_string(),
         params: init_params(),
     };
-    let (_server, reply) = LspServer::initialize(CompilerPolicy::default(), request)
-        .expect("initialize must succeed");
+    let (_server, reply) =
+        LspServer::initialize(CompilerPolicy::default(), request).expect("initialize must succeed");
     let Message::Response(resp) = reply else {
         panic!("initialize must answer with a response");
     };
@@ -163,7 +165,10 @@ fn capability_set_stays_identical() {
         caps["executeCommandProvider"]["commands"],
         json!(["rock.completionAccepted"])
     );
-    assert!(caps["semanticTokensProvider"].is_object(), "semantic tokens stay advertised");
+    assert!(
+        caps["semanticTokensProvider"].is_object(),
+        "semantic tokens stay advertised"
+    );
     assert_eq!(
         caps["workspace"]["workspaceFolders"],
         json!({ "supported": true, "changeNotifications": true })
@@ -179,10 +184,7 @@ fn did_open_publishes_the_type_error_and_change_clears_it() {
 
     let out = roundtrip(&mut server, did_open(&uri, BROKEN));
     let diags = diagnostics_for(&out, &uri);
-    let errors: Vec<&Value> = diags
-        .iter()
-        .filter(|d| d["severity"] == 1)
-        .collect();
+    let errors: Vec<&Value> = diags.iter().filter(|d| d["severity"] == 1).collect();
     assert!(
         !errors.is_empty(),
         "didOpen with a type error must publish it, got {diags:?}"
@@ -221,7 +223,10 @@ fn hover_and_definition_answer_through_handle() {
     assert_eq!(resp.id, RequestId::from(10));
     assert!(resp.error.is_none(), "hover error: {:?}", resp.error);
     let text = serde_json::to_string(&resp.result).unwrap();
-    assert!(text.contains("is_nan"), "hover names the stdlib call: {text}");
+    assert!(
+        text.contains("is_nan"),
+        "hover names the stdlib call: {text}"
+    );
 
     let out = roundtrip(&mut server, req(11, "textDocument/definition", at));
     let resp = response(&out);
@@ -250,15 +255,22 @@ fn shutdown_answers_then_exit_ends_the_loop() {
 
     let out = roundtrip(&mut server, req(1, "shutdown", Value::Null));
     let resp = response(&out);
-    assert!(resp.result == Some(Value::Null), "shutdown answers null: {resp:?}");
+    assert!(
+        resp.result == Some(Value::Null),
+        "shutdown answers null: {resp:?}"
+    );
     assert!(resp.error.is_none());
     assert!(!server.exited(), "shutdown alone does not exit");
 
     // After shutdown every request is rejected, but the loop keeps running.
     let out = roundtrip(
         &mut server,
-        req(2, "textDocument/hover", json!({ "textDocument": { "uri": "file:///x.rock" },
-            "position": { "line": 0, "character": 0 } })),
+        req(
+            2,
+            "textDocument/hover",
+            json!({ "textDocument": { "uri": "file:///x.rock" },
+            "position": { "line": 0, "character": 0 } }),
+        ),
     );
     let resp = response(&out);
     assert!(resp.result.is_none(), "{resp:?}");
@@ -268,7 +280,10 @@ fn shutdown_answers_then_exit_ends_the_loop() {
 
     // Notifications after shutdown are swallowed silently.
     let out = roundtrip(&mut server, did_open("file:///x.rock", FIXED));
-    assert!(out.is_empty(), "post-shutdown notification emits nothing: {out:?}");
+    assert!(
+        out.is_empty(),
+        "post-shutdown notification emits nothing: {out:?}"
+    );
 
     roundtrip(&mut server, not("exit", Value::Null));
     assert!(server.exited(), "exit ends the loop");
@@ -287,7 +302,10 @@ fn unknown_request_is_not_found_and_unknown_notification_is_silent() {
     assert_eq!(err.message, "Method 'frobnicate/do' not found");
 
     let out = roundtrip(&mut server, not("frobnicate/event", json!({})));
-    assert!(out.is_empty(), "unknown notification emits nothing: {out:?}");
+    assert!(
+        out.is_empty(),
+        "unknown notification emits nothing: {out:?}"
+    );
     assert!(!server.exited());
 }
 
@@ -300,5 +318,8 @@ fn malformed_request_params_do_not_answer() {
         &mut server,
         req(3, "textDocument/hover", json!({ "textDocument": 42 })),
     );
-    assert!(out.is_empty(), "JSON-mismatched request emits nothing: {out:?}");
+    assert!(
+        out.is_empty(),
+        "JSON-mismatched request emits nothing: {out:?}"
+    );
 }

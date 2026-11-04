@@ -12,7 +12,9 @@ const PATH: &str = "/tmp/rock_lsp_compl_invariants.rock";
 
 /// Split a `$0`-marked source into (source, cursor Position).
 fn marked(src: &str) -> (String, Position) {
-    let off = src.find("$0").expect("fixture must contain the `$0` cursor marker");
+    let off = src
+        .find("$0")
+        .expect("fixture must contain the `$0` cursor marker");
     let before = &src[..off];
     let line = before.matches('\n').count() as u32;
     let col = (before.len() - before.rfind('\n').map(|i| i + 1).unwrap_or(0)) as u32;
@@ -51,7 +53,10 @@ fn right_type_local_in_top_three_of_typed_slot() {
          fn r() {\n  let col = Color { r: 1.0 }\n  paint(col$0)\n}\n",
     );
     let c = rank_of(&labels, "col").expect("local `col` must be offered");
-    assert!(c < 3, "right-type local `col` must rank in the top 3 of a Color slot: {labels:?}");
+    assert!(
+        c < 3,
+        "right-type local `col` must rank in the top 3 of a Color slot: {labels:?}"
+    );
 }
 
 #[test]
@@ -84,7 +89,10 @@ fn param_type_slot_offers_types_only() {
          fn wield(x: float) {}\n\
          fn use_weapon(w: W$0) {}\n",
     );
-    assert!(labels.iter().any(|l| l == "Weapon"), "the struct must be offered: {labels:?}");
+    assert!(
+        labels.iter().any(|l| l == "Weapon"),
+        "the struct must be offered: {labels:?}"
+    );
     assert!(
         !labels.iter().any(|l| l == "wcount" || l == "w"),
         "value-universe candidates must not appear in a param TYPE slot: {labels:?}"
@@ -104,7 +112,10 @@ fn let_annotation_type_slot_offers_types_only() {
          fn wield(x: float) {}\n\
          fn r() {\n  let x: w$0 = 0\n}\n",
     );
-    assert!(labels.iter().any(|l| l == "Weapon"), "the struct must be offered: {labels:?}");
+    assert!(
+        labels.iter().any(|l| l == "Weapon"),
+        "the struct must be offered: {labels:?}"
+    );
     assert!(
         !labels.iter().any(|l| l == "wcount" || l == "wield"),
         "values/functions must not appear in a let-annotation TYPE slot: {labels:?}"

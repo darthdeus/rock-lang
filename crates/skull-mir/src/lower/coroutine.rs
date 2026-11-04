@@ -12,7 +12,7 @@
 
 use bone_semantic::inference::Workspace;
 
-use super::{coroutine_yield_channel_mono, YieldChannel};
+use super::{YieldChannel, coroutine_yield_channel_mono};
 use crate::concrete::{ConcreteBodyPlan, ConcreteSignature};
 use crate::monoty::{MonoCtor, MonoInterner, MonoTy, MonoTyReason};
 
@@ -48,8 +48,14 @@ impl CoroutinePlan {
         base: String,
     ) -> Result<Self, MonoTyReason> {
         let result = signature.result.map(|id| interner.get(id));
-        let channel = result.as_ref().and_then(|ty| Self::channel_for_concrete_type(ws, ty));
-        Ok(Self { base, result, channel })
+        let channel = result
+            .as_ref()
+            .and_then(|ty| Self::channel_for_concrete_type(ws, ty));
+        Ok(Self {
+            base,
+            result,
+            channel,
+        })
     }
 
     pub fn channel_for_concrete_type(ws: &Workspace, ty: &MonoTy) -> Option<YieldChannel> {
@@ -87,7 +93,9 @@ impl CoroutinePlan {
     /// side and the emitting side from disagreeing about whether the symbol
     /// exists.
     pub fn advance(&self) -> Option<String> {
-        self.channel.as_ref().map(|_| format!("{}__advance", self.base))
+        self.channel
+            .as_ref()
+            .map(|_| format!("{}__advance", self.base))
     }
 
     pub fn defer(&self, k: usize) -> String {
@@ -139,13 +147,12 @@ mod tests {
             param_tuple_spelled: Vec::new(),
             result: Some(result),
         };
-        let plan = CoroutinePlan::from_concrete_signature(
-            &ws,
-            &interner,
-            &signature,
-            "event".to_string(),
-        )
-        .expect("concrete coroutine signature");
-        assert!(plan.channel.is_some(), "the concrete yield type must select a channel");
+        let plan =
+            CoroutinePlan::from_concrete_signature(&ws, &interner, &signature, "event".to_string())
+                .expect("concrete coroutine signature");
+        assert!(
+            plan.channel.is_some(),
+            "the concrete yield type must select a channel"
+        );
     }
 }

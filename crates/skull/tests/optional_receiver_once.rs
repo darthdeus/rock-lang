@@ -18,7 +18,10 @@ fn main() {
 #[test]
 fn optional_receiver_call_is_evaluated_once() {
     let lua = emit_module(SOURCE);
-    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "optional_receiver_once"), "7 1");
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "optional_receiver_once"),
+        "7 1"
+    );
 }
 
 #[test]
@@ -62,6 +65,8 @@ fn main() {
 }
 "#;
     let lua = emit_module(src);
-    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "optional_receiver_shapes"),
-        "-1 -1 -1\n-1 -1 -1\n13 19 29\n31 41 43");
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "optional_receiver_shapes"),
+        "-1 -1 -1\n-1 -1 -1\n13 19 29\n31 41 43"
+    );
 }

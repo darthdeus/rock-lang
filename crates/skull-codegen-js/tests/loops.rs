@@ -265,12 +265,12 @@ fn range_match_folds_to_and_diamond() {
         }",
     );
     let js = emit_user(&ws, "f");
-    assert!(js.contains("&&"), "range match folds to an && diamond:\n{js}");
+    assert!(
+        js.contains("&&"),
+        "range match folds to an && diamond:\n{js}"
+    );
     assert!(
         !js.contains("shared branch tail"),
         "no longer rejects:\n{js}"
     );
 }
-
-
-

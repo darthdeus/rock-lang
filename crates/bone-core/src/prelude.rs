@@ -1,8 +1,8 @@
+#[cfg(not(target_family = "wasm"))]
+pub use native_instant::Instant;
 pub use rustc_hash::{FxHashMap, FxHashSet};
 pub use smallvec::SmallVec;
 pub use std::time::Duration;
-#[cfg(not(target_family = "wasm"))]
-pub use native_instant::Instant;
 
 // Clippy follows re-exports, so wrap the native clock to keep the ban local.
 #[cfg(not(target_family = "wasm"))]
@@ -83,18 +83,18 @@ mod wasm_instant {
     }
 }
 pub use std::{cell::RefCell, sync::LazyLock};
-pub use ustr::{ustr, Ustr};
+pub use ustr::{Ustr, ustr};
 
 pub use comfy_la_arena::{Arena, ArenaMap, Idx, IdxRange, RawIdx};
 pub use rust_lapper::Lapper;
 pub use skull_parser::{
-    source_file_from_path_and_contents, CompilerError, OrderedFloat, SourceFiles, Span,
+    CompilerError, OrderedFloat, SourceFiles, Span, source_file_from_path_and_contents,
 };
 
 pub use crate::hir;
-pub use crate::workspace::*;
 use crate::hir::Function;
 pub use crate::hir::{Body, BodyOwner, EnumDef, StructDef, TyId};
+pub use crate::workspace::*;
 pub use itertools::Itertools;
 
 use nonmax::NonMaxU32;
@@ -223,7 +223,7 @@ pub use sequential_par::*;
 
 #[cfg(feature = "sequential")]
 mod sequential_par {
-    use std::collections::{hash_map, HashMap, LinkedList};
+    use std::collections::{HashMap, LinkedList, hash_map};
 
     pub trait SeqParSlice<T> {
         fn par_iter(&self) -> std::slice::Iter<'_, T>;

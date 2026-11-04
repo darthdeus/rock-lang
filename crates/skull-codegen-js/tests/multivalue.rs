@@ -8,16 +8,22 @@
 //! correctly REJECT (skip): a closure capturing a loop counter/cursor, a value
 //! struct (deferred to a future arc), a scalar-ABI arg/param count mismatch.
 
-use skull_mir::mir::FuncRef;
 use crate::common::{emit_user, ws_with};
+use skull_mir::mir::FuncRef;
 
 /// Co-emit `root` + its plain-Rock callees (needed for `push`), returning the JS.
 fn emit_closure(ws: &bone_semantic::inference::Workspace, root: &str) -> Result<String, String> {
-    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("test module");
     let mut r = None;
     for (fid, f) in ws.module(mid).functions.iter() {
         if f.name.as_str() == root {
-            r = Some(FuncRef { module: mid, func: fid });
+            r = Some(FuncRef {
+                module: mid,
+                func: fid,
+            });
         }
     }
     skull_codegen_js::emit::emit_with_closure(ws, &[(r.unwrap(), root.to_string())])
@@ -30,8 +36,14 @@ fn emit_closure(ws: &bone_semantic::inference::Workspace, root: &str) -> Result<
 fn tuple_return_uses_scratch_slots() {
     let ws = ws_with("fn mk(a: int, b: int) -> (int, int) { (a, b) }");
     let js = emit_user(&ws, "mk");
-    assert!(js.contains("__rock_ret1 = "), "leaf 1 publishes to the bank:\n{js}");
-    assert!(!js.contains("return ["), "multi-return must not allocate an array:\n{js}");
+    assert!(
+        js.contains("__rock_ret1 = "),
+        "leaf 1 publishes to the bank:\n{js}"
+    );
+    assert!(
+        !js.contains("return ["),
+        "multi-return must not allocate an array:\n{js}"
+    );
 }
 
 // A closure capturing an iteration-local `let` copy snapshots THAT iteration's
@@ -47,7 +59,10 @@ fn loop_capture_snapshots_per_iteration() {
          }",
     );
     let js = emit_closure(&ws, "f").expect("emits");
-    assert!(js.contains("__slot: __rock_code_slot_ref("), "per-iteration capture record:\n{js}");
+    assert!(
+        js.contains("__slot: __rock_code_slot_ref("),
+        "per-iteration capture record:\n{js}"
+    );
     assert!(js.contains("function f__lambda0("), "hoisted body:\n{js}");
 }
 
@@ -65,7 +80,10 @@ fn loop_counter_capture_now_emits() {
          }",
     );
     let js = emit_closure(&ws, "f").expect("counter capture now emits");
-    assert!(js.contains("__slot: __rock_code_slot_ref("), "counter snapshotted into a record:\n{js}");
+    assert!(
+        js.contains("__slot: __rock_code_slot_ref("),
+        "counter snapshotted into a record:\n{js}"
+    );
 }
 
 // A reassigned param captured in a loop stays function-scoped (shared box), NOT
@@ -97,7 +115,10 @@ fn nobox_tuple_element_splats_into_the_return_array() {
          fn mk(v: NV2) -> (bool, NV2) { (true, v) }",
     );
     let js = emit_user(&ws, "mk");
-    assert!(!js.contains("\"NV2\""), "nobox element materialized an object:\n{js}");
+    assert!(
+        !js.contains("\"NV2\""),
+        "nobox element materialized an object:\n{js}"
+    );
     assert_eq!(
         return_wire_arity(&js),
         3,

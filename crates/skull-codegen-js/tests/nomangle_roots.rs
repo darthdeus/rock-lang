@@ -6,8 +6,8 @@
 //! opaque bodies, and the JS view publishes those roots under their bare names
 //! (plain Rock lowered normally, inline(js) verbatim).
 use crate::common::ws_with;
-use std::sync::Arc;
 use rustc_hash::FxHashSet;
+use std::sync::Arc;
 
 fn function(ws: &bone_semantic::inference::Workspace, name: &str) -> skull_mir::mir::FuncRef {
     let module = *ws
@@ -102,12 +102,8 @@ fn main() {
     let target = function(&ws, "web_view_probe");
     let interner = Arc::new(skull_mir::monoty::MonoInterner::new());
     let roots = [main];
-    let graph = skull_graph::instance_graph::build_in(
-        &ws,
-        roots.to_vec(),
-        false,
-        Arc::clone(&interner),
-    );
+    let graph =
+        skull_graph::instance_graph::build_in(&ws, roots.to_vec(), false, Arc::clone(&interner));
     let view = skull_graph::artifact::realize(
         &ws,
         &graph,
@@ -116,10 +112,8 @@ fn main() {
             &roots,
         )
         .with_mappings(
-            skull_graph::artifact::ArtifactMappings::for_backend(
-                bone_semantic::hir::FnBackend::Js,
-            )
-            .with_supply(&skull_codegen_js::JsBackendRealization),
+            skull_graph::artifact::ArtifactMappings::for_backend(bone_semantic::hir::FnBackend::Js)
+                .with_supply(&skull_codegen_js::JsBackendRealization),
         )
         .with_symbols(&skull_graph::artifact::REALIZED_SYMBOLS),
     );

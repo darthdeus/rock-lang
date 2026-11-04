@@ -11,7 +11,7 @@
 //! non-overloadable symbol REJECTS, and `tests/overloadable_operators.rock`
 //! asserts each overloadable one actually DISPATCHES to the user fn.
 
-use bone_core::hir::{operator_entry, unary_operator_entry, OPERATOR_FNS, UNARY_OPERATOR_FNS};
+use bone_core::hir::{OPERATOR_FNS, UNARY_OPERATOR_FNS, operator_entry, unary_operator_entry};
 use skull_parser::ItemKind;
 use ustr::Ustr;
 
@@ -23,9 +23,7 @@ fn parser_fn_name_for(symbol: &str) -> Option<String> {
     let src = match symbol {
         "~" => format!("value V {{ a: int }}\noperator {symbol}(x: V) -> V {{ return x }}\n"),
         "[]" => "value V { a: int }\noperator [](x: V, i: int) -> int { return 1 }\n".to_string(),
-        _ => format!(
-            "value V {{ a: int }}\noperator {symbol}(x: V, y: V) -> V {{ return x }}\n"
-        ),
+        _ => format!("value V {{ a: int }}\noperator {symbol}(x: V, y: V) -> V {{ return x }}\n"),
     };
     let ast = skull_parser::parse_module_clean(&src, Ustr::from("<operator_table>")).ok()?;
     ast.items.iter().find_map(|item| match &item.kind {

@@ -38,13 +38,13 @@ mod forl;
 mod inline;
 mod mem2reg;
 pub mod scope;
-pub use closure::{convert_closures, convert_closures_framed, FrameInfo};
+pub use closure::{FrameInfo, convert_closures, convert_closures_framed};
 pub use forl::recover_counted_loops;
 pub use inline::{
-    fn_has_bounds, inline_functions_with_plans, inline_off_active, inline_off_guard, InlineOffGuard,
-    validate_no_residual_bound_calls, InlineCache, InlineCandidateTable,
-    InlineCandidateProfile, InlineCandidateTableStats, InlineCandidateWarm, InlineScanStats,
-    SpliceRecord,
+    InlineCache, InlineCandidateProfile, InlineCandidateTable, InlineCandidateTableStats,
+    InlineCandidateWarm, InlineOffGuard, InlineScanStats, SpliceRecord, fn_has_bounds,
+    inline_functions_with_plans, inline_off_active, inline_off_guard,
+    validate_no_residual_bound_calls,
 };
 pub use mem2reg::{Mem2RegCensus, Mem2RegPromotion, mem2reg_census, promote_direct_cells};
 
@@ -191,8 +191,10 @@ fn dce_core(func: &mut MirFunc, cp: Option<&CopyProp>) {
     for (_, b) in func.blocks.iter() {
         for &i in &b.insts {
             if is_dead_rc(&func.insts[i], i, &use_count, &load_count)
-                || cp.is_some_and(|cp| cp.self_stores[raw(i) as usize]
-                    || (cp.nonthrowing[raw(i) as usize] && use_count[raw(i) as usize] == 0))
+                || cp.is_some_and(|cp| {
+                    cp.self_stores[raw(i) as usize]
+                        || (cp.nonthrowing[raw(i) as usize] && use_count[raw(i) as usize] == 0)
+                })
             {
                 dead[raw(i) as usize] = true;
                 work.push(i);
@@ -205,7 +207,8 @@ fn dce_core(func: &mut MirFunc, cp: Option<&CopyProp>) {
         value_operands(&func.insts[i], &mut |op| {
             let k = raw(op) as usize;
             use_count[k] = use_count[k].saturating_sub(1);
-            if !dead[k] && use_count[k] == 0
+            if !dead[k]
+                && use_count[k] == 0
                 && (is_dead_value(&func.insts[op]) || cp.is_some_and(|cp| cp.nonthrowing[k]))
             {
                 dead[k] = true;
@@ -241,7 +244,6 @@ fn drop_flagged(func: &mut MirFunc, dead: &[bool]) {
         func.blocks[bid].insts = insts;
     }
 }
-
 
 /// Value operands a terminator reads (the live-use contribution of a `Term`).
 fn term_uses_each(term: &Term, push: &mut impl FnMut(Idx<Inst>)) {
@@ -342,9 +344,19 @@ fn cleanup_in(ws: Option<&Workspace>, func: &mut MirFunc) -> Result<(), Compiler
 fn drop_f32_rounding_into_float_views(func: &mut MirFunc) -> bool {
     let float_view = skull_mir::lower::leaf_view_field("float");
     let mut changed = false;
-    let insts: Vec<Idx<Inst>> = func.blocks.iter().flat_map(|(_, b)| b.insts.iter().copied()).collect();
+    let insts: Vec<Idx<Inst>> = func
+        .blocks
+        .iter()
+        .flat_map(|(_, b)| b.insts.iter().copied())
+        .collect();
     for i in insts {
-        let Inst::StoreIndex { base, value, kind: ContainerKind::NativeBufferLeaf, .. } = func.insts[i] else {
+        let Inst::StoreIndex {
+            base,
+            value,
+            kind: ContainerKind::NativeBufferLeaf,
+            ..
+        } = func.insts[i]
+        else {
             continue;
         };
         if !matches!(func.insts[base], Inst::Field { field, .. } if field == float_view) {
@@ -409,8 +421,8 @@ fn fold_never_nil_compares(func: &mut MirFunc) -> bool {
             Inst::NotEq(a, b) => (*a, *b, false),
             _ => continue,
         };
-        let known = (never_nil(func, a) && is_nil(func, b))
-            || (never_nil(func, b) && is_nil(func, a));
+        let known =
+            (never_nil(func, a) && is_nil(func, b)) || (never_nil(func, b) && is_nil(func, a));
         if known {
             rewrites.push((iid, !eq));
         }
@@ -435,7 +447,12 @@ pub fn fold_const_branches(func: &mut MirFunc) -> bool {
     let bids: Vec<Idx<Block>> = func.blocks.iter().map(|(b, _)| b).collect();
     let mut changed = false;
     for b in &bids {
-        if let Term::Branch { cond, then_bb, else_bb } = func.blocks[*b].term {
+        if let Term::Branch {
+            cond,
+            then_bb,
+            else_bb,
+        } = func.blocks[*b].term
+        {
             if let Inst::Const(Lit::Bool(v)) = func.insts[cond] {
                 func.blocks[*b].term = Term::Goto(if v { then_bb } else { else_bb });
                 changed = true;
@@ -491,7 +508,9 @@ pub fn fold_const_branches(func: &mut MirFunc) -> bool {
 fn term_targets_each(term: &Term, f: &mut impl FnMut(Idx<Block>)) {
     match term {
         Term::Goto(t) => f(*t),
-        Term::Branch { then_bb, else_bb, .. } => {
+        Term::Branch {
+            then_bb, else_bb, ..
+        } => {
             f(*then_bb);
             f(*else_bb);
         }
@@ -531,9 +550,13 @@ pub fn scalarize_native_buffer_stores(func: &mut MirFunc) {
         .iter()
         .flat_map(|(_, b)| b.insts.iter().copied())
         .filter_map(|i| match &func.insts[i] {
-            Inst::StoreIndex { base, index, value, kind }
-                if kind.is_native_buffer()
-                    && matches!(&func.insts[*value], Inst::MakeValueStruct { .. }) =>
+            Inst::StoreIndex {
+                base,
+                index,
+                value,
+                kind,
+            } if kind.is_native_buffer()
+                && matches!(&func.insts[*value], Inst::MakeValueStruct { .. }) =>
             {
                 Some((i, *base, *index, *value, *kind))
             }
@@ -552,7 +575,11 @@ pub fn scalarize_native_buffer_stores(func: &mut MirFunc) {
     }
     let block_ids: Vec<Idx<Block>> = func.blocks.iter().map(|(id, _)| id).collect();
     for bid in block_ids {
-        if !func.blocks[bid].insts.iter().any(|i| replacement.contains_key(i)) {
+        if !func.blocks[bid]
+            .insts
+            .iter()
+            .any(|i| replacement.contains_key(i))
+        {
             continue;
         }
         let old = std::mem::take(&mut func.blocks[bid].insts);
@@ -622,7 +649,10 @@ fn leaf_operand(
             }
             // Opaque: read the field off the existing value.
             _ => {
-                let f = func.alloc_inst(Inst::Field { base: cur, field: comp });
+                let f = func.alloc_inst(Inst::Field {
+                    base: cur,
+                    field: comp,
+                });
                 out.push(f);
                 Some(f)
             }
@@ -659,15 +689,26 @@ pub fn flatten_nobox_nested_ctors(
     ws: &Workspace,
     func: &mut MirFunc,
 ) -> Result<bool, CompilerError> {
-    let all: Vec<Idx<Inst>> =
-        func.blocks.iter().flat_map(|(_, b)| b.insts.iter().copied()).collect();
+    let all: Vec<Idx<Inst>> = func
+        .blocks
+        .iter()
+        .flat_map(|(_, b)| b.insts.iter().copied())
+        .collect();
     // A ctor used as a field operand of another CDATA ctor is not the
     // outermost one. A table parent absorbs nothing, so a cdata child of a
     // GC-table or leaf-table ctor is itself the outermost cdata materialization.
     let mut inner: HashSet<Idx<Inst>> = HashSet::default();
     for &i in &all {
-        if let Inst::MakeValueStruct { fields, representation, .. }
-        | Inst::MaterializeValueStruct { fields, representation, .. } = &func.insts[i]
+        if let Inst::MakeValueStruct {
+            fields,
+            representation,
+            ..
+        }
+        | Inst::MaterializeValueStruct {
+            fields,
+            representation,
+            ..
+        } = &func.insts[i]
         {
             let table_parent = matches!(
                 func.rep_arena
@@ -706,12 +747,18 @@ pub fn flatten_nobox_nested_ctors(
             None => CompilerError::new_no_location(msg),
         };
         let (name, representation, form, explicit) = match &func.insts[t] {
-            Inst::MakeValueStruct { name, representation, form, .. } => {
-                (*name, *representation, *form, false)
-            }
-            Inst::MaterializeValueStruct { name, representation, form, .. } => {
-                (*name, *representation, *form, true)
-            }
+            Inst::MakeValueStruct {
+                name,
+                representation,
+                form,
+                ..
+            } => (*name, *representation, *form, false),
+            Inst::MaterializeValueStruct {
+                name,
+                representation,
+                form,
+                ..
+            } => (*name, *representation, *form, true),
             _ => continue,
         };
         // A ctor ALREADY in leaf form carries the canonical leaves as its
@@ -798,8 +845,10 @@ pub fn flatten_nobox_nested_ctors(
     }
     // The flattened ctor takes the original's slot, so every existing user of
     // `t` now reads the flat form.
-    let remap: HashMap<Idx<Inst>, Idx<Inst>> =
-        replacement.iter().map(|(k, v)| (*k, *v.last().unwrap())).collect();
+    let remap: HashMap<Idx<Inst>, Idx<Inst>> = replacement
+        .iter()
+        .map(|(k, v)| (*k, *v.last().unwrap()))
+        .collect();
     let m = |o: Idx<Inst>| remap.get(&o).copied().unwrap_or(o);
     for i in func.insts.iter_mut().map(|(id, _)| id).collect::<Vec<_>>() {
         remap_inst(&mut func.insts[i], &m);
@@ -812,7 +861,11 @@ pub fn flatten_nobox_nested_ctors(
         remap_term(&mut func.blocks[*bid].term, &m);
     }
     for bid in block_ids {
-        if !func.blocks[bid].insts.iter().any(|i| replacement.contains_key(i)) {
+        if !func.blocks[bid]
+            .insts
+            .iter()
+            .any(|i| replacement.contains_key(i))
+        {
             continue;
         }
         let old = std::mem::take(&mut func.blocks[bid].insts);
@@ -876,7 +929,11 @@ fn gen_leaf_stores(func: &mut MirFunc, slot: Idx<Inst>, mvs: Idx<Inst>, out: &mu
     };
     let fields = fields.clone();
     for (fname, op) in fields {
-        out.push(func.alloc_inst(Inst::StoreField { base: slot, field: fname, value: op }));
+        out.push(func.alloc_inst(Inst::StoreField {
+            base: slot,
+            field: fname,
+            value: op,
+        }));
     }
 }
 
@@ -932,7 +989,9 @@ fn ctor_fields(
     enum_hint: Option<ustr::Ustr>,
 ) -> Option<(StructId, Vec<(ustr::Ustr, FieldSrc)>)> {
     let op = |fs: &[(ustr::Ustr, Idx<Inst>)]| {
-        fs.iter().map(|(n, v)| (*n, FieldSrc::Operand(*v))).collect::<Vec<_>>()
+        fs.iter()
+            .map(|(n, v)| (*n, FieldSrc::Operand(*v)))
+            .collect::<Vec<_>>()
     };
     match inst {
         Inst::MakeValueStruct { name, fields, .. } => Some((StructId::Value(*name), op(fields))),
@@ -944,10 +1003,18 @@ fn ctor_fields(
                 .map(|(i, v)| (ustr::Ustr::from(&format!("_{i}")), FieldSrc::Operand(*v)))
                 .collect(),
         )),
-        Inst::MakeEnum { tag, ty, positional, named } => {
+        Inst::MakeEnum {
+            tag,
+            ty,
+            positional,
+            named,
+        } => {
             let mut f = vec![
                 (ustr::Ustr::from("__variant"), FieldSrc::ConstStr(*tag)),
-                (ustr::Ustr::from("__ty"), FieldSrc::ConstStr(skull_mir::mangle::symbol_of_key(*ty))),
+                (
+                    ustr::Ustr::from("__ty"),
+                    FieldSrc::ConstStr(skull_mir::mangle::symbol_of_key(*ty)),
+                ),
             ];
             for (i, p) in positional.iter().enumerate() {
                 f.push((ustr::Ustr::from(&format!("_{i}")), FieldSrc::Operand(*p)));
@@ -957,10 +1024,18 @@ fn ctor_fields(
             }
             Some((StructId::Enum(*ty), f))
         }
-        Inst::MakeEnumDyn { tag, ty, positional, named } => {
+        Inst::MakeEnumDyn {
+            tag,
+            ty,
+            positional,
+            named,
+        } => {
             let mut f = vec![
                 (ustr::Ustr::from("__variant"), FieldSrc::Operand(*tag)),
-                (ustr::Ustr::from("__ty"), FieldSrc::ConstStr(skull_mir::mangle::symbol_of_key(*ty))),
+                (
+                    ustr::Ustr::from("__ty"),
+                    FieldSrc::ConstStr(skull_mir::mangle::symbol_of_key(*ty)),
+                ),
             ];
             for (i, p) in positional.iter().enumerate() {
                 f.push((ustr::Ustr::from(&format!("_{i}")), FieldSrc::Operand(*p)));
@@ -981,7 +1056,10 @@ fn ctor_fields(
             Some((
                 StructId::Enum(e),
                 vec![
-                    (ustr::Ustr::from("__variant"), FieldSrc::ConstStr(ustr::Ustr::from(variant))),
+                    (
+                        ustr::Ustr::from("__variant"),
+                        FieldSrc::ConstStr(ustr::Ustr::from(variant)),
+                    ),
                     (ustr::Ustr::from("__ty"), FieldSrc::ConstStr(symbol)),
                 ],
             ))
@@ -992,10 +1070,16 @@ fn ctor_fields(
 
 fn value_ctor_plan(inst: &Inst) -> Option<(skull_mir::lower::RepId, ValueCtorForm)> {
     match inst {
-        Inst::MakeValueStruct { representation, form, .. }
-        | Inst::MaterializeValueStruct { representation, form, .. } => {
-            Some((*representation, *form))
+        Inst::MakeValueStruct {
+            representation,
+            form,
+            ..
         }
+        | Inst::MaterializeValueStruct {
+            representation,
+            form,
+            ..
+        } => Some((*representation, *form)),
         _ => None,
     }
 }
@@ -1070,7 +1154,8 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> Result<bool, CompilerError
     // rebuilt `MakeValueStruct` is positional); `escape_loads` are the loads to
     // rewrite. The flag -- set at lowering only for non-null value bindings --
     // is the ONLY license: no store/CFG heuristic (both proven unsound/too weak).
-    let mut value_order: HashMap<usize, (Vec<ustr::Ustr>, skull_mir::lower::RepId, ValueCtorForm)> = HashMap::default();
+    let mut value_order: HashMap<usize, (Vec<ustr::Ustr>, skull_mir::lower::RepId, ValueCtorForm)> =
+        HashMap::default();
     let mut escape_loads: Vec<(Idx<Inst>, Idx<Cell>)> = Vec::new();
     // A cell is a candidate iff every store to it is a struct ctor of one
     // consistent type. `cand[c]`: None = not yet seen / disqualified, Some(id) =
@@ -1107,7 +1192,9 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> Result<bool, CompilerError
                 Inst::Lambda { params, .. } => {
                     params.iter().for_each(|c| disq[raw(*c) as usize] = true)
                 }
-                Inst::MapNext { key_cell, val_cell, .. } => {
+                Inst::MapNext {
+                    key_cell, val_cell, ..
+                } => {
                     disq[raw(*key_cell) as usize] = true;
                     disq[raw(*val_cell) as usize] = true;
                 }
@@ -1192,12 +1279,18 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> Result<bool, CompilerError
                         } else {
                             cand[ck] = Some(id);
                             if matches!(id, StructId::Value(_)) {
-                                let Some((representation, form)) = value_ctor_plan(&func.insts[*value]) else {
+                                let Some((representation, form)) =
+                                    value_ctor_plan(&func.insts[*value])
+                                else {
                                     disq[ck] = true;
                                     continue;
                                 };
                                 value_order.entry(ck).or_insert_with(|| {
-                                    (fields.iter().map(|(n, _)| *n).collect(), representation, form)
+                                    (
+                                        fields.iter().map(|(n, _)| *n).collect(),
+                                        representation,
+                                        form,
+                                    )
                                 });
                             }
                             cand_fields[ck]
@@ -1267,8 +1360,7 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> Result<bool, CompilerError
     for k in 0..nc {
         let cell = Idx::from_raw(RawIdx::from_u32(k as u32));
         let copies_binding = matches!(cand[rep[k]], Some(StructId::Value(_)))
-            || (matches!(cand[rep[k]], Some(StructId::Enum(_)))
-                && captured_cells.contains(&cell));
+            || (matches!(cand[rep[k]], Some(StructId::Enum(_))) && captured_cells.contains(&cell));
         if rep[k] == k || disq[k] || !copies_binding {
             continue;
         }
@@ -1475,20 +1567,19 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> Result<bool, CompilerError
         }
     };
     let mut field_cell: HashMap<(Idx<Cell>, ustr::Ustr), Idx<Cell>> = HashMap::default();
-    let mut get_field_cell =
-        |func: &mut MirFunc, c: Idx<Cell>, f: ustr::Ustr| -> Idx<Cell> {
-            *field_cell.entry((c, f)).or_insert_with(|| {
-                let base = func.cells[c].name.map(|n| n.as_str().to_string());
-                let name = base.map(|b| ustr::Ustr::from(&format!("{b}__{f}")));
-                let capture_identity = func.cells[c]
-                    .capture_identity
-                    .as_ref()
-                    .map(|identity| identity.projected(f));
-                let cell = func.new_cell(name);
-                func.cells[cell].capture_identity = capture_identity;
-                cell
-            })
-        };
+    let mut get_field_cell = |func: &mut MirFunc, c: Idx<Cell>, f: ustr::Ustr| -> Idx<Cell> {
+        *field_cell.entry((c, f)).or_insert_with(|| {
+            let base = func.cells[c].name.map(|n| n.as_str().to_string());
+            let name = base.map(|b| ustr::Ustr::from(&format!("{b}__{f}")));
+            let capture_identity = func.cells[c]
+                .capture_identity
+                .as_ref()
+                .map(|identity| identity.projected(f));
+            let cell = func.new_cell(name);
+            func.cells[cell].capture_identity = capture_identity;
+            cell
+        })
+    };
 
     let mut nil_test_loads: HashMap<Idx<Inst>, Idx<Inst>> = HashMap::default();
     for (test, old, c) in enum_nil_tests {
@@ -1559,7 +1650,9 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> Result<bool, CompilerError
     // `Field` on the aggregate, which the `escape_loads` rebuild below
     // reconstitutes at exactly this load.
     let provides = |c: Idx<Cell>, f: &ustr::Ustr| {
-        cand_fields[rep[raw(c) as usize]].as_ref().is_some_and(|s| s.contains(f))
+        cand_fields[rep[raw(c) as usize]]
+            .as_ref()
+            .is_some_and(|s| s.contains(f))
     };
     let field_rewrites: Vec<(Idx<Inst>, Idx<Cell>, ustr::Ustr)> = func
         .blocks
@@ -1620,12 +1713,15 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> Result<bool, CompilerError
         let root = *rep.get(k).ok_or_else(|| {
             CompilerError::new_no_location("SROA candidate cell is outside its analysis tables")
         })?;
-        let fields = cand_fields.get(root).and_then(Option::as_ref).ok_or_else(|| {
-            CompilerError::new_no_location(format!(
-                "SROA candidate cell {} has no planned physical field set",
-                k
-            ))
-        })?;
+        let fields = cand_fields
+            .get(root)
+            .and_then(Option::as_ref)
+            .ok_or_else(|| {
+                CompilerError::new_no_location(format!(
+                    "SROA candidate cell {} has no planned physical field set",
+                    k
+                ))
+            })?;
         Ok(fields.iter().copied().collect())
     };
 
@@ -1635,52 +1731,61 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> Result<bool, CompilerError
         .blocks
         .iter()
         .flat_map(|(_, b)| b.insts.iter().copied())
-        .map(|i| -> Result<Option<(Idx<Inst>, Idx<Cell>, Vec<(ustr::Ustr, FieldSrc)>)>, CompilerError> {
-            match &func.insts[i] {
-            Inst::Store { cell, value } if is_cand(*cell) => {
-                // A nil store writes nil to EVERY field cell (sorted for
-                // deterministic emission), reusing the nil value inst.
-                if matches!(&func.insts[*value], Inst::Const(Lit::Nil)) {
-                    let mut fs = candidate_fields(*cell)?;
-                    fs.sort_unstable();
-                    return Ok(Some((
-                        i,
-                        *cell,
-                        fs.into_iter().map(|f| (f, FieldSrc::Operand(*value))).collect(),
-                    )));
+        .map(
+            |i| -> Result<
+                Option<(Idx<Inst>, Idx<Cell>, Vec<(ustr::Ustr, FieldSrc)>)>,
+                CompilerError,
+            > {
+                match &func.insts[i] {
+                    Inst::Store { cell, value } if is_cand(*cell) => {
+                        // A nil store writes nil to EVERY field cell (sorted for
+                        // deterministic emission), reusing the nil value inst.
+                        if matches!(&func.insts[*value], Inst::Const(Lit::Nil)) {
+                            let mut fs = candidate_fields(*cell)?;
+                            fs.sort_unstable();
+                            return Ok(Some((
+                                i,
+                                *cell,
+                                fs.into_iter()
+                                    .map(|f| (f, FieldSrc::Operand(*value)))
+                                    .collect(),
+                            )));
+                        }
+                        // A value-struct alias member copies its source's leaves.
+                        if let (Inst::Load(src), Some(_)) =
+                            (&func.insts[*value], copy_alias[raw(*cell) as usize])
+                        {
+                            let src = to_rep(*src);
+                            let mut fs = candidate_fields(*cell)?;
+                            fs.sort_unstable();
+                            return Ok(Some((
+                                i,
+                                *cell,
+                                fs.into_iter()
+                                    .map(|f| (f, FieldSrc::CellLoad(src)))
+                                    .collect(),
+                            )));
+                        }
+                        let Some((_, mut fields)) =
+                            ctor_fields(&func.insts[*value], cell_enum[raw(*cell) as usize])
+                        else {
+                            return Ok(None);
+                        };
+                        if needs_presence(*cell) {
+                            fields.push((present_field, FieldSrc::ConstTrue));
+                        }
+                        // An omitted box key reads nil, even after a previous variant
+                        // populated the scalar cell in a loop or coroutine frame.
+                        let mut missing = candidate_fields(*cell)?;
+                        missing.retain(|f| !fields.iter().any(|(name, _)| name == f));
+                        missing.sort_unstable();
+                        fields.extend(missing.into_iter().map(|f| (f, FieldSrc::ConstNil)));
+                        Ok(Some((i, *cell, fields)))
+                    }
+                    _ => Ok(None),
                 }
-                // A value-struct alias member copies its source's leaves.
-                if let (Inst::Load(src), Some(_)) =
-                    (&func.insts[*value], copy_alias[raw(*cell) as usize])
-                {
-                    let src = to_rep(*src);
-                    let mut fs = candidate_fields(*cell)?;
-                    fs.sort_unstable();
-                    return Ok(Some((
-                        i,
-                        *cell,
-                        fs.into_iter().map(|f| (f, FieldSrc::CellLoad(src))).collect(),
-                    )));
-                }
-                let Some((_, mut fields)) =
-                    ctor_fields(&func.insts[*value], cell_enum[raw(*cell) as usize])
-                else {
-                    return Ok(None);
-                };
-                if needs_presence(*cell) {
-                    fields.push((present_field, FieldSrc::ConstTrue));
-                }
-                // An omitted box key reads nil, even after a previous variant
-                // populated the scalar cell in a loop or coroutine frame.
-                let mut missing = candidate_fields(*cell)?;
-                missing.retain(|f| !fields.iter().any(|(name, _)| name == f));
-                missing.sort_unstable();
-                fields.extend(missing.into_iter().map(|f| (f, FieldSrc::ConstNil)));
-                Ok(Some((i, *cell, fields)))
-            }
-            _ => Ok(None),
-            }
-        })
+            },
+        )
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .flatten()
@@ -1765,7 +1870,10 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> Result<bool, CompilerError
             if nn_field.get(&(c, fname)).copied().unwrap_or(false) {
                 func.mark_nonnull_value_struct(fc);
             }
-            news.push(func.alloc_inst(Inst::Store { cell: fc, value: fval }));
+            news.push(func.alloc_inst(Inst::Store {
+                cell: fc,
+                value: fval,
+            }));
         }
         replacement.insert(store_i, news);
     }
@@ -1783,8 +1891,13 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> Result<bool, CompilerError
             continue;
         }
         let root = to_rep(c);
-        let Some(StructId::Value(name)) = cand[raw(root) as usize] else { continue };
-        let Some((order, representation, form)) = value_order.get(&(raw(root) as usize)).cloned() else { continue };
+        let Some(StructId::Value(name)) = cand[raw(root) as usize] else {
+            continue;
+        };
+        let Some((order, representation, form)) = value_order.get(&(raw(root) as usize)).cloned()
+        else {
+            continue;
+        };
         let mut news = Vec::with_capacity(order.len() + 1);
         let mut mvs_fields = Vec::with_capacity(order.len());
         for fname in order {
@@ -1805,7 +1918,11 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> Result<bool, CompilerError
     if !replacement.is_empty() {
         let block_ids: Vec<Idx<Block>> = func.blocks.iter().map(|(id, _)| id).collect();
         for bid in block_ids {
-            if !func.blocks[bid].insts.iter().any(|i| replacement.contains_key(i)) {
+            if !func.blocks[bid]
+                .insts
+                .iter()
+                .any(|i| replacement.contains_key(i))
+            {
                 continue;
             }
             let old = std::mem::take(&mut func.blocks[bid].insts);
@@ -1930,7 +2047,9 @@ fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) -> Option<Cop
     };
     for (_, b) in func.blocks.iter() {
         for &i in &b.insts {
-            let Inst::StoreField { base, .. } = &func.insts[i] else { continue };
+            let Inst::StoreField { base, .. } = &func.insts[i] else {
+                continue;
+            };
             // `d.o.i.a = 9` nests the reads; the write lands in the root cell.
             let mut cur = *base;
             loop {
@@ -1961,13 +2080,17 @@ fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) -> Option<Cop
         let mut checked_native_buffers = HashSet::default();
         for &id in &b.insts {
             match &func.insts[id] {
-                Inst::Call { func: target, args } if args.len() == 2 && ws.is_some_and(|ws| {
-                    let module = ws.module(target.module);
-                    let f = &module.functions[target.func];
-                    bone_semantic::prelude::is_stdlib_module_file(module.file.as_str())
-                        && f.name.as_str() == "__nb_checked_index" && f.inline_body.is_some()
-                        && f.annotations.iter().any(|a| a.is_builtin("nomangle"))
-                }) => {
+                Inst::Call { func: target, args }
+                    if args.len() == 2
+                        && ws.is_some_and(|ws| {
+                            let module = ws.module(target.module);
+                            let f = &module.functions[target.func];
+                            bone_semantic::prelude::is_stdlib_module_file(module.file.as_str())
+                                && f.name.as_str() == "__nb_checked_index"
+                                && f.inline_body.is_some()
+                                && f.annotations.iter().any(|a| a.is_builtin("nomangle"))
+                        }) =>
+                {
                     checked_native_buffers.insert(resolve_subst(&subst, args[0]));
                 }
                 Inst::Store { cell, value } if !escaping[raw(*cell) as usize] => {
@@ -2012,19 +2135,28 @@ fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) -> Option<Cop
                 Inst::Field { base, field } => {
                     let (base, field) = (*base, *field);
                     let rb = resolve_subst(&subst, base);
-                    if checked_native_buffers.contains(&rb) && skull_mir::lower::is_leaf_view_field(field.as_str()) {
+                    if checked_native_buffers.contains(&rb)
+                        && skull_mir::lower::is_leaf_view_field(field.as_str())
+                    {
                         // The retained bounds check already accessed this exact
                         // buffer. Its generated view keys are plain table fields.
                         nonthrowing[raw(id) as usize] = true;
                     }
                     if let Inst::MakeValueStruct { fields, form, .. } = &func.insts[rb] {
-                        nonthrowing[raw(id) as usize] = fields.iter().any(|(name, _)| *name == field)
-                            || (*form == ValueCtorForm::Leaves && fields.iter().any(|(name, _)| name.as_str().strip_prefix(field.as_str()).is_some_and(|tail| tail.starts_with('.'))));
+                        nonthrowing[raw(id) as usize] =
+                            fields.iter().any(|(name, _)| *name == field)
+                                || (*form == ValueCtorForm::Leaves
+                                    && fields.iter().any(|(name, _)| {
+                                        name.as_str()
+                                            .strip_prefix(field.as_str())
+                                            .is_some_and(|tail| tail.starts_with('.'))
+                                    }));
                         if let Some((_, op)) = fields.iter().find(|(n, _)| *n == field) {
                             subst[raw(id) as usize] = Some(resolve_subst(&subst, *op));
                             any_subst = true;
                         }
-                    } else if base == rb && !struct_uses.is_empty()
+                    } else if base == rb
+                        && !struct_uses.is_empty()
                         && struct_uses[raw(base) as usize] == 1
                         && let Inst::MakeStruct { fields, .. } = &func.insts[base]
                         && let Some((_, op)) = fields.iter().find(|(name, _)| *name == field)
@@ -2041,8 +2173,13 @@ fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) -> Option<Cop
                             unreachable!("leaf_form_path roots at a value ctor")
                         };
                         let key = format!("{prefix}.{field}");
-                        nonthrowing[raw(id) as usize] = fields.iter().any(|(name, _)| name.as_str() == key
-                            || name.as_str().strip_prefix(&key).is_some_and(|tail| tail.starts_with('.')));
+                        nonthrowing[raw(id) as usize] = fields.iter().any(|(name, _)| {
+                            name.as_str() == key
+                                || name
+                                    .as_str()
+                                    .strip_prefix(&key)
+                                    .is_some_and(|tail| tail.starts_with('.'))
+                        });
                         if let Some((_, op)) = fields.iter().find(|(n, _)| n.as_str() == key) {
                             subst[raw(id) as usize] = Some(resolve_subst(&subst, *op));
                             any_subst = true;
@@ -2072,7 +2209,11 @@ fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) -> Option<Cop
         }
     }
     (any_subst || self_stores.iter().any(|&noop| noop) || nonthrowing.iter().any(|&safe| safe))
-        .then_some(CopyProp { subst, self_stores, nonthrowing })
+        .then_some(CopyProp {
+            subst,
+            self_stores,
+            nonthrowing,
+        })
 }
 
 /// The value ctor and dotted child path `x` reads when it is an unfolded
@@ -2083,10 +2224,15 @@ fn leaf_form_path(
     subst: &[Option<Idx<Inst>>],
     x: Idx<Inst>,
 ) -> Option<(Idx<Inst>, String)> {
-    let Inst::Field { base, field } = &func.insts[x] else { return None };
+    let Inst::Field { base, field } = &func.insts[x] else {
+        return None;
+    };
     let rb = resolve_subst(subst, *base);
     match &func.insts[rb] {
-        Inst::MakeValueStruct { form: ValueCtorForm::Leaves, .. } => Some((rb, field.to_string())),
+        Inst::MakeValueStruct {
+            form: ValueCtorForm::Leaves,
+            ..
+        } => Some((rb, field.to_string())),
         Inst::MakeValueStruct { .. } => None,
         _ => leaf_form_path(func, subst, rb).map(|(ctor, p)| (ctor, format!("{p}.{field}"))),
     }
@@ -2136,7 +2282,12 @@ impl CoroutineFramePlan {
         spill_values: Vec<Idx<Inst>>,
         layout_hash: i64,
     ) -> Self {
-        Self { frame_cells, frame_slots, spill_values, layout_hash }
+        Self {
+            frame_cells,
+            frame_slots,
+            spill_values,
+            layout_hash,
+        }
     }
 
     pub fn fields(&self) -> &HashSet<Idx<Cell>> {
@@ -2184,7 +2335,8 @@ mod tests {
 
     fn lower(src: &str, fn_name: &str) -> MirFunc {
         let ast = skull_parser::parse_module(src, ustr::Ustr::from("<test>")).expect("parse");
-        let ws = bone_semantic::semantic_passes::semantic_pass(&mut vec![ast]).expect("semantic_pass");
+        let ws =
+            bone_semantic::semantic_passes::semantic_pass(&mut vec![ast]).expect("semantic_pass");
         let mid = ws.module_ids[&ustr::Ustr::from("<test>")];
         let (fid, _) = ws
             .module(mid)
@@ -2192,7 +2344,10 @@ mod tests {
             .iter()
             .find(|(_, f)| f.name.as_str() == fn_name)
             .expect("function");
-        let root = skull_mir::mir::FuncRef { module: mid, func: fid };
+        let root = skull_mir::mir::FuncRef {
+            module: mid,
+            func: fid,
+        };
         let interner = std::sync::Arc::new(skull_mir::monoty::MonoInterner::new());
         let graph = skull_graph::instance_graph::build_in(
             &ws,
@@ -2303,7 +2458,11 @@ mod tests {
             .filter(|&cell| lowered.step.cells[cell].ty.is_none())
             .map(|cell| (cell, lowered.step.cells[cell].name))
             .collect();
-        assert!(untyped.is_empty(), "untyped frame cells: {untyped:?}\n{}", lowered.step);
+        assert!(
+            untyped.is_empty(),
+            "untyped frame cells: {untyped:?}\n{}",
+            lowered.step
+        );
     }
 
     #[test]
@@ -2324,7 +2483,11 @@ mod tests {
             .filter(|&cell| lowered.step.cells[cell].ty.is_none())
             .map(|cell| (cell, lowered.step.cells[cell].name))
             .collect();
-        assert!(untyped.is_empty(), "untyped frame cells: {untyped:?}\n{}", lowered.step);
+        assert!(
+            untyped.is_empty(),
+            "untyped frame cells: {untyped:?}\n{}",
+            lowered.step
+        );
     }
 
     #[test]
@@ -2347,7 +2510,11 @@ mod tests {
             .filter(|&cell| lowered.step.cells[cell].ty.is_none())
             .map(|cell| (cell, lowered.step.cells[cell].name))
             .collect();
-        assert!(untyped.is_empty(), "untyped frame cells: {untyped:?}\n{}", lowered.step);
+        assert!(
+            untyped.is_empty(),
+            "untyped frame cells: {untyped:?}\n{}",
+            lowered.step
+        );
     }
 
     #[test]
@@ -2360,7 +2527,13 @@ mod tests {
         let else_bb = func.new_block();
         let global = func.emit(func.entry, Inst::Global(ustr::Ustr::from("SELF")));
         let constant = func.emit(func.entry, Inst::Const(Lit::Int(7)));
-        func.set_term(func.entry, Term::Yield { values: vec![constant], resume });
+        func.set_term(
+            func.entry,
+            Term::Yield {
+                values: vec![constant],
+                resume,
+            },
+        );
         func.emit(
             resume,
             Inst::StoreGlobal {
@@ -2369,7 +2542,14 @@ mod tests {
             },
         );
         let condition = func.emit(resume, Inst::IntLt(constant, constant));
-        func.set_term(resume, Term::Branch { cond: condition, then_bb, else_bb });
+        func.set_term(
+            resume,
+            Term::Branch {
+                cond: condition,
+                then_bb,
+                else_bb,
+            },
+        );
         func.set_term(then_bb, Term::Return(Vec::new()));
         func.set_term(else_bb, Term::Return(Vec::new()));
         let lowered = transform_coroutine(&func, None, false);
@@ -2397,14 +2577,30 @@ mod tests {
             "f",
         );
         assert!(
-            func.insts.iter().any(|(_, inst)| matches!(inst, Inst::Lambda { .. })),
+            func.insts
+                .iter()
+                .any(|(_, inst)| matches!(inst, Inst::Lambda { .. })),
             "the closure fixture must have a nonzero lambda population"
         );
         convert_closures(&mut func, "f");
-        assert_eq!(func.closure_env_plans.len(), 1, "one lambda must have one env plan");
-        let plan = func.closure_env_plans.values().next().expect("closure env plan");
-        assert!(!plan.captures().is_empty(), "the closure environment must carry a capture");
-        assert!(plan.env_cell().is_some(), "a capturing closure must own an env cell");
+        assert_eq!(
+            func.closure_env_plans.len(),
+            1,
+            "one lambda must have one env plan"
+        );
+        let plan = func
+            .closure_env_plans
+            .values()
+            .next()
+            .expect("closure env plan");
+        assert!(
+            !plan.captures().is_empty(),
+            "the closure environment must carry a capture"
+        );
+        assert!(
+            plan.env_cell().is_some(),
+            "a capturing closure must own an env cell"
+        );
     }
 
     #[test]
@@ -2432,20 +2628,35 @@ mod tests {
             .keys()
             .filter_map(|identity| match identity {
                 skull_mir::code_identity::CodeIdentity::Lambda { enclosing, site }
-                    if *enclosing == skull_mir::code_identity::CodeOwner::Instance(owner.clone()) => Some(*site),
+                    if *enclosing
+                        == skull_mir::code_identity::CodeOwner::Instance(owner.clone()) =>
+                {
+                    Some(*site)
+                }
                 _ => None,
             })
             .collect();
-        assert_eq!(lambdas.len(), 3, "all escaping lambda bodies need identities");
         assert_eq!(
-            lambdas.iter().collect::<std::collections::BTreeSet<_>>().len(),
+            lambdas.len(),
+            3,
+            "all escaping lambda bodies need identities"
+        );
+        assert_eq!(
+            lambdas
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
             3,
             "source sites, not ordinals, distinguish identical-looking lambdas"
         );
         assert_eq!(artifact.census.lambda_values, 3);
         assert_eq!(artifact.census.capturing_lambdas, 2);
         assert_eq!(artifact.census.capture_free_lambdas, 1);
-        assert!(artifact.census.is_total(), "identity census: {:?}", artifact.census);
+        assert!(
+            artifact.census.is_total(),
+            "identity census: {:?}",
+            artifact.census
+        );
     }
 
     #[test]
@@ -2460,10 +2671,26 @@ mod tests {
             module: bone_semantic::prelude::ModuleId::builtin(),
             func: comfy_la_arena::Idx::from_raw(comfy_la_arena::RawIdx::from_u32(0)),
         });
-        let site_a = LambdaSiteId { file: Ustr::from("f.rock"), offset: 10 };
-        let site_b = LambdaSiteId { file: Ustr::from("f.rock"), offset: 20 };
+        let site_a = LambdaSiteId {
+            file: Ustr::from("f.rock"),
+            offset: 10,
+        };
+        let site_b = LambdaSiteId {
+            file: Ustr::from("f.rock"),
+            offset: 20,
+        };
         let topology = LambdaTopologyFingerprint::from_sites(&[(site_a, 0), (site_b, 0)]);
-        let inserted = LambdaTopologyFingerprint::from_sites(&[(site_a, 0), (LambdaSiteId { file: Ustr::from("f.rock"), offset: 15 }, 0), (site_b, 0)]);
+        let inserted = LambdaTopologyFingerprint::from_sites(&[
+            (site_a, 0),
+            (
+                LambdaSiteId {
+                    file: Ustr::from("f.rock"),
+                    offset: 15,
+                },
+                0,
+            ),
+            (site_b, 0),
+        ]);
         let removed = LambdaTopologyFingerprint::from_sites(&[(site_b, 0)]);
         let compat = |topology| CodeCompatibility {
             call_abi: "params=[];result=none;lanes=0;scalar=false".to_string(),
@@ -2493,7 +2720,10 @@ mod tests {
             escaping: true,
             capture_free: true,
         });
-        assert!(old.compatible_overlay(&body_edit), "body-only edit must retain the slot");
+        assert!(
+            old.compatible_overlay(&body_edit),
+            "body-only edit must retain the slot"
+        );
         let mut topology_edit = CodeArtifact::default();
         topology_edit.insert(CodeEntry {
             identity: id,
@@ -2503,7 +2733,10 @@ mod tests {
             escaping: true,
             capture_free: true,
         });
-        assert!(!old.compatible_overlay(&topology_edit), "insertion before a lambda must fail closed");
+        assert!(
+            !old.compatible_overlay(&topology_edit),
+            "insertion before a lambda must fail closed"
+        );
         let mut removal_edit = CodeArtifact::default();
         removal_edit.insert(CodeEntry {
             identity: CodeIdentity::Lambda {
@@ -2516,7 +2749,10 @@ mod tests {
             escaping: true,
             capture_free: true,
         });
-        assert!(!old.compatible_overlay(&removal_edit), "removing a lambda must fail closed");
+        assert!(
+            !old.compatible_overlay(&removal_edit),
+            "removing a lambda must fail closed"
+        );
 
         let mut capture_edit = CodeArtifact::default();
         let mut incompatible_capture = CaptureSchema::empty();
@@ -2535,7 +2771,10 @@ mod tests {
             escaping: true,
             capture_free: false,
         });
-        assert!(!old.compatible_overlay(&capture_edit), "incomplete capture schema must fail closed");
+        assert!(
+            !old.compatible_overlay(&capture_edit),
+            "incomplete capture schema must fail closed"
+        );
     }
 
     #[test]
@@ -2647,8 +2886,14 @@ mod tests {
         convert_closures(&mut value, "f");
         let value_artifact = skull_mir::code_identity::CodeArtifact::from_mir_tree(&value);
         assert_eq!(value_artifact.census.named_values, 1);
-        assert_eq!(value_artifact.census.unresolved_body, 1, "the per-body artifact must expose an unjoined target");
-        assert!(!value_artifact.census.is_total(), "a partial artifact must not report a total census");
+        assert_eq!(
+            value_artifact.census.unresolved_body, 1,
+            "the per-body artifact must expose an unjoined target"
+        );
+        assert!(
+            !value_artifact.census.is_total(),
+            "a partial artifact must not report a total census"
+        );
     }
 
     #[test]
@@ -2659,15 +2904,16 @@ mod tests {
             "f",
         );
         assert!(func.code_value_identities.is_empty());
-        assert_eq!(func.fn_value_symbols.len(), 1, "the foreign value still has a boundary symbol");
+        assert_eq!(
+            func.fn_value_symbols.len(),
+            1,
+            "the foreign value still has a boundary symbol"
+        );
     }
 
     #[test]
     fn detached_coroutine_regions_are_ordinary_converted_functions() {
-        let mut source = lower(
-            "fn f() -> int { let add = (n: int) => n; add(1) }",
-            "f",
-        );
+        let mut source = lower("fn f() -> int { let add = (n: int) => n; add(1) }", "f");
         let entry = source.entry();
         let s_cell = source.new_cell(Some(Ustr::from("s")));
         let frame = FrameInfo {
@@ -2676,19 +2922,32 @@ mod tests {
             slots: HashMap::default(),
         };
         let aux = lower_detached_region(&source, entry, "f__detached", &frame);
-        assert!(!aux.is_coroutine, "detached body must be an ordinary MirFunc");
-        assert!(!aux.nested_fns.is_empty(), "detached lambda must own a nested MirFunc");
         assert!(
-            aux.insts.iter().any(|(_, inst)| matches!(inst, Inst::Global(_))),
+            !aux.is_coroutine,
+            "detached body must be an ordinary MirFunc"
+        );
+        assert!(
+            !aux.nested_fns.is_empty(),
+            "detached lambda must own a nested MirFunc"
+        );
+        assert!(
+            aux.insts
+                .iter()
+                .any(|(_, inst)| matches!(inst, Inst::Global(_))),
             "capture-free detached lambda must become a Global value"
         );
         assert!(
-            aux.insts.iter().all(|(_, inst)| !matches!(inst, Inst::Lambda { .. })),
+            aux.insts
+                .iter()
+                .all(|(_, inst)| !matches!(inst, Inst::Lambda { .. })),
             "detached conversion must leave no residual lambda"
         );
         erase_detached_lambdas(&mut source, [entry]);
         assert!(
-            source.insts.iter().all(|(_, inst)| !matches!(inst, Inst::Lambda { .. })),
+            source
+                .insts
+                .iter()
+                .all(|(_, inst)| !matches!(inst, Inst::Lambda { .. })),
             "the emitted artifact must have no detached residual lambda"
         );
     }
@@ -2741,7 +3000,9 @@ fn emit(f: &mut MirFunc, bid: Idx<Block>, inst: Inst) -> Idx<Inst> {
 pub(crate) fn term_succs(term: &Term, mut f: impl FnMut(Idx<Block>)) {
     match term {
         Term::Goto(b) => f(*b),
-        Term::Branch { then_bb, else_bb, .. } => {
+        Term::Branch {
+            then_bb, else_bb, ..
+        } => {
             f(*then_bb);
             f(*else_bb);
         }
@@ -2780,32 +3041,88 @@ pub(crate) fn top_level_blocks(f: &MirFunc) -> Vec<Idx<Block>> {
 pub fn value_operands(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
     let mut p = |x: &Idx<Inst>| push(*x);
     match inst {
-        Inst::Const(_) | Inst::Global(_) | Inst::Load(_) | Inst::Lambda { .. }
+        Inst::Const(_)
+        | Inst::Global(_)
+        | Inst::Load(_)
+        | Inst::Lambda { .. }
         | Inst::CoroHook { .. } => {}
         Inst::FfiViewCast { ptr, .. } => p(ptr),
-        Inst::IntAdd(a, b) | Inst::IntSub(a, b) | Inst::IntMul(a, b) | Inst::IntDiv(a, b)
-        | Inst::IntMod(a, b) | Inst::FloatAdd(a, b) | Inst::FloatSub(a, b) | Inst::FloatMul(a, b)
-        | Inst::FloatDiv(a, b) | Inst::FloatMod(a, b) | Inst::StringConcat(a, b)
-        | Inst::IntLt(a, b) | Inst::IntLeq(a, b) | Inst::IntGt(a, b) | Inst::IntGeq(a, b)
-        | Inst::UintAdd(a, b) | Inst::UintSub(a, b) | Inst::UintMul(a, b) | Inst::UintDiv(a, b)
-        | Inst::UintMod(a, b) | Inst::UintLt(a, b) | Inst::UintLeq(a, b) | Inst::UintGt(a, b)
+        Inst::IntAdd(a, b)
+        | Inst::IntSub(a, b)
+        | Inst::IntMul(a, b)
+        | Inst::IntDiv(a, b)
+        | Inst::IntMod(a, b)
+        | Inst::FloatAdd(a, b)
+        | Inst::FloatSub(a, b)
+        | Inst::FloatMul(a, b)
+        | Inst::FloatDiv(a, b)
+        | Inst::FloatMod(a, b)
+        | Inst::StringConcat(a, b)
+        | Inst::IntLt(a, b)
+        | Inst::IntLeq(a, b)
+        | Inst::IntGt(a, b)
+        | Inst::IntGeq(a, b)
+        | Inst::UintAdd(a, b)
+        | Inst::UintSub(a, b)
+        | Inst::UintMul(a, b)
+        | Inst::UintDiv(a, b)
+        | Inst::UintMod(a, b)
+        | Inst::UintLt(a, b)
+        | Inst::UintLeq(a, b)
+        | Inst::UintGt(a, b)
         | Inst::UintGeq(a, b)
-        | Inst::FloatLt(a, b) | Inst::FloatLeq(a, b) | Inst::FloatGt(a, b) | Inst::FloatGeq(a, b)
-        | Inst::Eq(a, b) | Inst::NotEq(a, b) | Inst::BitAnd(a, b) | Inst::BitOr(a, b)
-        | Inst::BitXor(a, b) | Inst::Shl(a, b) | Inst::Shr(a, b)
-        | Inst::UintBitAnd(a, b) | Inst::UintBitOr(a, b) | Inst::UintBitXor(a, b)
-        | Inst::UintShl(a, b) | Inst::UintShr(a, b) => { p(a); p(b); }
-        Inst::Neg(x) | Inst::Not(x) | Inst::BitNot(x) | Inst::UintBitNot(x) | Inst::ToString(x)
-        | Inst::FloatToInt(x) | Inst::IntToFloat(x) | Inst::UintToFloat(x) | Inst::FloatToF32(x) | Inst::IntToUint(x)
-        | Inst::UintToInt(x) | Inst::FloatToUint(x) | Inst::UintBitcastInt(x) | Inst::IntBitcastUint(x)
+        | Inst::FloatLt(a, b)
+        | Inst::FloatLeq(a, b)
+        | Inst::FloatGt(a, b)
+        | Inst::FloatGeq(a, b)
+        | Inst::Eq(a, b)
+        | Inst::NotEq(a, b)
+        | Inst::BitAnd(a, b)
+        | Inst::BitOr(a, b)
+        | Inst::BitXor(a, b)
+        | Inst::Shl(a, b)
+        | Inst::Shr(a, b)
+        | Inst::UintBitAnd(a, b)
+        | Inst::UintBitOr(a, b)
+        | Inst::UintBitXor(a, b)
+        | Inst::UintShl(a, b)
+        | Inst::UintShr(a, b) => {
+            p(a);
+            p(b);
+        }
+        Inst::Neg(x)
+        | Inst::Not(x)
+        | Inst::BitNot(x)
+        | Inst::UintBitNot(x)
+        | Inst::ToString(x)
+        | Inst::FloatToInt(x)
+        | Inst::IntToFloat(x)
+        | Inst::UintToFloat(x)
+        | Inst::FloatToF32(x)
+        | Inst::IntToUint(x)
+        | Inst::UintToInt(x)
+        | Inst::FloatToUint(x)
+        | Inst::UintBitcastInt(x)
+        | Inst::IntBitcastUint(x)
         | Inst::CoroSetInner(x)
         | Inst::VecStrideNilToFalse(x)
         | Inst::VecStrideFalseToNil(x) => p(x),
         Inst::Format { value, .. } => p(value),
-        Inst::FormatDyn { value, fmt } => { p(value); p(fmt); }
-        Inst::Call { args, .. } | Inst::CallMulti { args, .. } | Inst::CallBoundMulti { args, .. } => args.iter().for_each(&mut p),
-        Inst::CallValue { callee, args } => { p(callee); args.iter().for_each(&mut p); }
-        Inst::CallValueMulti { callee, args, .. } => { p(callee); args.iter().for_each(&mut p); }
+        Inst::FormatDyn { value, fmt } => {
+            p(value);
+            p(fmt);
+        }
+        Inst::Call { args, .. }
+        | Inst::CallMulti { args, .. }
+        | Inst::CallBoundMulti { args, .. } => args.iter().for_each(&mut p),
+        Inst::CallValue { callee, args } => {
+            p(callee);
+            args.iter().for_each(&mut p);
+        }
+        Inst::CallValueMulti { callee, args, .. } => {
+            p(callee);
+            args.iter().for_each(&mut p);
+        }
         Inst::MakeTuple(vs) | Inst::MakeVec(vs) => vs.iter().for_each(&mut p),
         Inst::MakeVecColumns {
             columns, capacity, ..
@@ -2814,7 +3131,9 @@ pub fn value_operands(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
             columns.iter().flat_map(|(_, vs)| vs).for_each(&mut p)
         }
         Inst::MakeVecColumnHeader { capacity, .. } => p(capacity),
-        Inst::MakeVecStrided { values, capacity, .. } => {
+        Inst::MakeVecStrided {
+            values, capacity, ..
+        } => {
             p(capacity);
             values.iter().for_each(&mut p);
         }
@@ -2827,25 +3146,50 @@ pub fn value_operands(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
             p(present);
             p(value);
         }
-        Inst::MakeEnum { positional, named, .. } => {
+        Inst::MakeEnum {
+            positional, named, ..
+        } => {
             positional.iter().for_each(&mut p);
             named.iter().for_each(|(_, a)| p(a));
         }
-        Inst::MakeEnumDyn { tag, positional, named, .. } => {
+        Inst::MakeEnumDyn {
+            tag,
+            positional,
+            named,
+            ..
+        } => {
             p(tag);
             positional.iter().for_each(&mut p);
             named.iter().for_each(|(_, a)| p(a));
         }
         Inst::FfiNewArray { count, .. } => p(count),
         Inst::Field { base, .. } | Inst::TupleIndex { base, .. } => p(base),
-        Inst::Index { base, index, .. } => { p(base); p(index); }
-        Inst::VecCheckedIndex { vec, index } => { p(vec); p(index); }
+        Inst::Index { base, index, .. } => {
+            p(base);
+            p(index);
+        }
+        Inst::VecCheckedIndex { vec, index } => {
+            p(vec);
+            p(index);
+        }
         Inst::Len { base, .. } => p(base),
         Inst::Store { value, .. } => p(value),
-        Inst::StoreField { base, value, .. } => { p(base); p(value); }
-        Inst::StoreIndex { base, index, value, .. } => { p(base); p(index); p(value); }
+        Inst::StoreField { base, value, .. } => {
+            p(base);
+            p(value);
+        }
+        Inst::StoreIndex {
+            base, index, value, ..
+        } => {
+            p(base);
+            p(index);
+            p(value);
+        }
         Inst::StoreGlobal { value, .. } => p(value),
-        Inst::ArrayPush { arr, value, .. } => { p(arr); p(value); }
+        Inst::ArrayPush { arr, value, .. } => {
+            p(arr);
+            p(value);
+        }
         Inst::MapNext { table, .. } => p(table),
     }
 }
@@ -2854,32 +3198,88 @@ pub fn value_operands(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
 pub(crate) fn remap_inst(inst: &mut Inst, m: &impl Fn(Idx<Inst>) -> Idx<Inst>) {
     let mut f = |x: &mut Idx<Inst>| *x = m(*x);
     match inst {
-        Inst::Const(_) | Inst::Global(_) | Inst::Load(_) | Inst::Lambda { .. }
+        Inst::Const(_)
+        | Inst::Global(_)
+        | Inst::Load(_)
+        | Inst::Lambda { .. }
         | Inst::CoroHook { .. } => {}
         Inst::FfiViewCast { ptr, .. } => f(ptr),
-        Inst::IntAdd(a, b) | Inst::IntSub(a, b) | Inst::IntMul(a, b) | Inst::IntDiv(a, b)
-        | Inst::IntMod(a, b) | Inst::FloatAdd(a, b) | Inst::FloatSub(a, b) | Inst::FloatMul(a, b)
-        | Inst::FloatDiv(a, b) | Inst::FloatMod(a, b) | Inst::StringConcat(a, b)
-        | Inst::IntLt(a, b) | Inst::IntLeq(a, b) | Inst::IntGt(a, b) | Inst::IntGeq(a, b)
-        | Inst::UintAdd(a, b) | Inst::UintSub(a, b) | Inst::UintMul(a, b) | Inst::UintDiv(a, b)
-        | Inst::UintMod(a, b) | Inst::UintLt(a, b) | Inst::UintLeq(a, b) | Inst::UintGt(a, b)
+        Inst::IntAdd(a, b)
+        | Inst::IntSub(a, b)
+        | Inst::IntMul(a, b)
+        | Inst::IntDiv(a, b)
+        | Inst::IntMod(a, b)
+        | Inst::FloatAdd(a, b)
+        | Inst::FloatSub(a, b)
+        | Inst::FloatMul(a, b)
+        | Inst::FloatDiv(a, b)
+        | Inst::FloatMod(a, b)
+        | Inst::StringConcat(a, b)
+        | Inst::IntLt(a, b)
+        | Inst::IntLeq(a, b)
+        | Inst::IntGt(a, b)
+        | Inst::IntGeq(a, b)
+        | Inst::UintAdd(a, b)
+        | Inst::UintSub(a, b)
+        | Inst::UintMul(a, b)
+        | Inst::UintDiv(a, b)
+        | Inst::UintMod(a, b)
+        | Inst::UintLt(a, b)
+        | Inst::UintLeq(a, b)
+        | Inst::UintGt(a, b)
         | Inst::UintGeq(a, b)
-        | Inst::FloatLt(a, b) | Inst::FloatLeq(a, b) | Inst::FloatGt(a, b) | Inst::FloatGeq(a, b)
-        | Inst::Eq(a, b) | Inst::NotEq(a, b) | Inst::BitAnd(a, b) | Inst::BitOr(a, b)
-        | Inst::BitXor(a, b) | Inst::Shl(a, b) | Inst::Shr(a, b)
-        | Inst::UintBitAnd(a, b) | Inst::UintBitOr(a, b) | Inst::UintBitXor(a, b)
-        | Inst::UintShl(a, b) | Inst::UintShr(a, b) => { f(a); f(b); }
-        Inst::Neg(x) | Inst::Not(x) | Inst::BitNot(x) | Inst::UintBitNot(x) | Inst::ToString(x)
-        | Inst::FloatToInt(x) | Inst::IntToFloat(x) | Inst::UintToFloat(x) | Inst::FloatToF32(x) | Inst::IntToUint(x)
-        | Inst::UintToInt(x) | Inst::FloatToUint(x) | Inst::UintBitcastInt(x) | Inst::IntBitcastUint(x)
+        | Inst::FloatLt(a, b)
+        | Inst::FloatLeq(a, b)
+        | Inst::FloatGt(a, b)
+        | Inst::FloatGeq(a, b)
+        | Inst::Eq(a, b)
+        | Inst::NotEq(a, b)
+        | Inst::BitAnd(a, b)
+        | Inst::BitOr(a, b)
+        | Inst::BitXor(a, b)
+        | Inst::Shl(a, b)
+        | Inst::Shr(a, b)
+        | Inst::UintBitAnd(a, b)
+        | Inst::UintBitOr(a, b)
+        | Inst::UintBitXor(a, b)
+        | Inst::UintShl(a, b)
+        | Inst::UintShr(a, b) => {
+            f(a);
+            f(b);
+        }
+        Inst::Neg(x)
+        | Inst::Not(x)
+        | Inst::BitNot(x)
+        | Inst::UintBitNot(x)
+        | Inst::ToString(x)
+        | Inst::FloatToInt(x)
+        | Inst::IntToFloat(x)
+        | Inst::UintToFloat(x)
+        | Inst::FloatToF32(x)
+        | Inst::IntToUint(x)
+        | Inst::UintToInt(x)
+        | Inst::FloatToUint(x)
+        | Inst::UintBitcastInt(x)
+        | Inst::IntBitcastUint(x)
         | Inst::CoroSetInner(x)
         | Inst::VecStrideNilToFalse(x)
         | Inst::VecStrideFalseToNil(x) => f(x),
         Inst::Format { value, .. } => f(value),
-        Inst::FormatDyn { value, fmt } => { f(value); f(fmt); }
-        Inst::Call { args, .. } | Inst::CallMulti { args, .. } | Inst::CallBoundMulti { args, .. } => args.iter_mut().for_each(&mut f),
-        Inst::CallValue { callee, args } => { f(callee); args.iter_mut().for_each(&mut f); }
-        Inst::CallValueMulti { callee, args, .. } => { f(callee); args.iter_mut().for_each(&mut f); }
+        Inst::FormatDyn { value, fmt } => {
+            f(value);
+            f(fmt);
+        }
+        Inst::Call { args, .. }
+        | Inst::CallMulti { args, .. }
+        | Inst::CallBoundMulti { args, .. } => args.iter_mut().for_each(&mut f),
+        Inst::CallValue { callee, args } => {
+            f(callee);
+            args.iter_mut().for_each(&mut f);
+        }
+        Inst::CallValueMulti { callee, args, .. } => {
+            f(callee);
+            args.iter_mut().for_each(&mut f);
+        }
         Inst::MakeTuple(vs) | Inst::MakeVec(vs) => vs.iter_mut().for_each(&mut f),
         Inst::MakeVecColumns {
             columns, capacity, ..
@@ -2888,7 +3288,9 @@ pub(crate) fn remap_inst(inst: &mut Inst, m: &impl Fn(Idx<Inst>) -> Idx<Inst>) {
             columns.iter_mut().flat_map(|(_, vs)| vs).for_each(&mut f)
         }
         Inst::MakeVecColumnHeader { capacity, .. } => f(capacity),
-        Inst::MakeVecStrided { values, capacity, .. } => {
+        Inst::MakeVecStrided {
+            values, capacity, ..
+        } => {
             f(capacity);
             values.iter_mut().for_each(&mut f);
         }
@@ -2901,25 +3303,50 @@ pub(crate) fn remap_inst(inst: &mut Inst, m: &impl Fn(Idx<Inst>) -> Idx<Inst>) {
             f(present);
             f(value);
         }
-        Inst::MakeEnum { positional, named, .. } => {
+        Inst::MakeEnum {
+            positional, named, ..
+        } => {
             positional.iter_mut().for_each(&mut f);
             named.iter_mut().for_each(|(_, a)| f(a));
         }
-        Inst::MakeEnumDyn { tag, positional, named, .. } => {
+        Inst::MakeEnumDyn {
+            tag,
+            positional,
+            named,
+            ..
+        } => {
             f(tag);
             positional.iter_mut().for_each(&mut f);
             named.iter_mut().for_each(|(_, a)| f(a));
         }
         Inst::FfiNewArray { count, .. } => f(count),
         Inst::Field { base, .. } | Inst::TupleIndex { base, .. } => f(base),
-        Inst::Index { base, index, .. } => { f(base); f(index); }
-        Inst::VecCheckedIndex { vec, index } => { f(vec); f(index); }
+        Inst::Index { base, index, .. } => {
+            f(base);
+            f(index);
+        }
+        Inst::VecCheckedIndex { vec, index } => {
+            f(vec);
+            f(index);
+        }
         Inst::Len { base, .. } => f(base),
         Inst::Store { value, .. } => f(value),
-        Inst::StoreField { base, value, .. } => { f(base); f(value); }
-        Inst::StoreIndex { base, index, value, .. } => { f(base); f(index); f(value); }
+        Inst::StoreField { base, value, .. } => {
+            f(base);
+            f(value);
+        }
+        Inst::StoreIndex {
+            base, index, value, ..
+        } => {
+            f(base);
+            f(index);
+            f(value);
+        }
         Inst::StoreGlobal { value, .. } => f(value),
-        Inst::ArrayPush { arr, value, .. } => { f(arr); f(value); }
+        Inst::ArrayPush { arr, value, .. } => {
+            f(arr);
+            f(value);
+        }
         Inst::MapNext { table, .. } => f(table),
     }
 }
@@ -3040,7 +3467,10 @@ fn spill_cross_block_values(
             } else {
                 let sv = step.alloc_inst(Inst::Load(s_cell));
                 new_list.push(sv);
-                step.alloc_inst(Inst::Field { base: sv, field: vfield(v) })
+                step.alloc_inst(Inst::Field {
+                    base: sv,
+                    field: vfield(v),
+                })
             };
             new_list.push(rv);
             reload.insert(v, rv);
@@ -3052,7 +3482,11 @@ fn spill_cross_block_values(
             // Spill right after a frame value's def.
             if frame_values.contains(&id) && def_block.get(&id) == Some(&bid) {
                 let sv = step.alloc_inst(Inst::Load(s_cell));
-                let st = step.alloc_inst(Inst::StoreField { base: sv, field: vfield(id), value: id });
+                let st = step.alloc_inst(Inst::StoreField {
+                    base: sv,
+                    field: vfield(id),
+                    value: id,
+                });
                 new_list.push(sv);
                 new_list.push(st);
             }
@@ -3092,7 +3526,9 @@ fn cells_live_at_yield_resumes(func: &MirFunc, blocks: &[Idx<Block>]) -> HashSet
                 | Inst::CallBoundMulti { dests, .. } => {
                     defs.extend(dests.iter().copied());
                 }
-                Inst::MapNext { key_cell, val_cell, .. } => {
+                Inst::MapNext {
+                    key_cell, val_cell, ..
+                } => {
                     if !defs.contains(key_cell) {
                         uses.insert(*key_cell);
                     }
@@ -3127,10 +3563,16 @@ fn cells_live_at_yield_resumes(func: &MirFunc, blocks: &[Idx<Block>]) -> HashSet
             });
             let mut input = block_use[&block].clone();
             input.extend(out.difference(&block_def[&block]).copied());
-            if live_out.insert(block, out.clone()).is_some_and(|old| old != out) {
+            if live_out
+                .insert(block, out.clone())
+                .is_some_and(|old| old != out)
+            {
                 changed = true;
             }
-            if live_in.insert(block, input.clone()).is_some_and(|old| old != input) {
+            if live_in
+                .insert(block, input.clone())
+                .is_some_and(|old| old != input)
+            {
                 changed = true;
             }
         }
@@ -3219,10 +3661,16 @@ fn values_live_at_resume_blocks(
             });
             let mut input = block_use[&block].clone();
             input.extend(out.difference(&block_def[&block]).copied());
-            if live_out.insert(block, out.clone()).is_some_and(|old| old != out) {
+            if live_out
+                .insert(block, out.clone())
+                .is_some_and(|old| old != out)
+            {
                 changed = true;
             }
-            if live_in.insert(block, input.clone()).is_some_and(|old| old != input) {
+            if live_in
+                .insert(block, input.clone())
+                .is_some_and(|old| old != input)
+            {
                 changed = true;
             }
         }
@@ -3267,11 +3715,10 @@ pub fn transform_coroutine_with_nonescaping_lambdas(
     let resume_arg = func.resume_arg.expect("co fn must carry a resume-arg cell");
     let params = func.params.clone();
     let s_cell = step.new_cell(Some(ustr::Ustr::from("s")));
-    step.cells[s_cell].capture_identity = Some(
-        skull_mir::code_identity::CaptureIdentity::Generated {
+    step.cells[s_cell].capture_identity =
+        Some(skull_mir::code_identity::CaptureIdentity::Generated {
             role: ustr::Ustr::from("coroutine-frame"),
-        },
-    );
+        });
 
     // Only the co-fn's TOP-LEVEL blocks are transformed — NOT closure sub-blocks
     // (which share the arena but are their own CFGs, reached via `Inst::Lambda`,
@@ -3300,9 +3747,9 @@ pub fn transform_coroutine_with_nonescaping_lambdas(
     }
     if !hooks.is_empty() {
         for &bid in &orig_blocks {
-            step.blocks[bid]
-                .insts
-                .retain(|&id| !matches!(step.insts[id], Inst::CoroHook { .. }) && !hook_lambdas.contains(&id));
+            step.blocks[bid].insts.retain(|&id| {
+                !matches!(step.insts[id], Inst::CoroHook { .. }) && !hook_lambdas.contains(&id)
+            });
         }
     }
 
@@ -3423,7 +3870,15 @@ pub fn transform_coroutine_with_nonescaping_lambdas(
             if frame_slot_channel {
                 for (i, &v) in values.iter().enumerate() {
                     let sv = emit(&mut step, bid, Inst::Load(s_cell));
-                    emit(&mut step, bid, Inst::StoreField { base: sv, field: skull_mir::lower::yield_slot(i), value: v });
+                    emit(
+                        &mut step,
+                        bid,
+                        Inst::StoreField {
+                            base: sv,
+                            field: skull_mir::lower::yield_slot(i),
+                            value: v,
+                        },
+                    );
                 }
             }
             // The stamp is guarded on `state >= 0` (mirror the completion
@@ -3431,17 +3886,40 @@ pub fn transform_coroutine_with_nonescaping_lambdas(
             // killed, not resurrect via a positive resume state. The killed
             // arm returns nothing -- a dead coroutine's resume yields nil.
             let sv = emit(&mut step, bid, Inst::Load(s_cell));
-            let st = emit(&mut step, bid, Inst::Field { base: sv, field: ustr::Ustr::from(STATE) });
+            let st = emit(
+                &mut step,
+                bid,
+                Inst::Field {
+                    base: sv,
+                    field: ustr::Ustr::from(STATE),
+                },
+            );
             let zero = emit(&mut step, bid, Inst::Const(Lit::Int(0)));
             let already_terminal = emit(&mut step, bid, Inst::IntLt(st, zero));
             let killed_bb = step.new_block();
             let stamp_bb = step.new_block();
-            step.blocks[bid].term = Term::Branch { cond: already_terminal, then_bb: killed_bb, else_bb: stamp_bb };
+            step.blocks[bid].term = Term::Branch {
+                cond: already_terminal,
+                then_bb: killed_bb,
+                else_bb: stamp_bb,
+            };
 
             let kc = emit(&mut step, stamp_bb, Inst::Const(Lit::Int(k)));
             let sv2 = emit(&mut step, stamp_bb, Inst::Load(s_cell));
-            emit(&mut step, stamp_bb, Inst::StoreField { base: sv2, field: ustr::Ustr::from(STATE), value: kc });
-            step.blocks[stamp_bb].term = if frame_slot_channel { Term::Return(Vec::new()) } else { Term::Return(values) };
+            emit(
+                &mut step,
+                stamp_bb,
+                Inst::StoreField {
+                    base: sv2,
+                    field: ustr::Ustr::from(STATE),
+                    value: kc,
+                },
+            );
+            step.blocks[stamp_bb].term = if frame_slot_channel {
+                Term::Return(Vec::new())
+            } else {
+                Term::Return(values)
+            };
             step.blocks[killed_bb].term = Term::Return(Vec::new());
         }
     }
@@ -3465,25 +3943,60 @@ pub fn transform_coroutine_with_nonescaping_lambdas(
         if let Some(v0) = ret_val {
             if let Some(v) = v0 {
                 let sv = emit(&mut step, bid, Inst::Load(s_cell));
-                emit(&mut step, bid, Inst::StoreField { base: sv, field: ustr::Ustr::from("__return"), value: v });
+                emit(
+                    &mut step,
+                    bid,
+                    Inst::StoreField {
+                        base: sv,
+                        field: ustr::Ustr::from("__return"),
+                        value: v,
+                    },
+                );
             }
             let sv = emit(&mut step, bid, Inst::Load(s_cell));
-            let st = emit(&mut step, bid, Inst::Field { base: sv, field: ustr::Ustr::from(STATE) });
+            let st = emit(
+                &mut step,
+                bid,
+                Inst::Field {
+                    base: sv,
+                    field: ustr::Ustr::from(STATE),
+                },
+            );
             let zero = emit(&mut step, bid, Inst::Const(Lit::Int(0)));
             let already_terminal = emit(&mut step, bid, Inst::IntLt(st, zero));
             let killed_bb = step.new_block();
             let stamp_bb = step.new_block();
-            step.blocks[bid].term = Term::Branch { cond: already_terminal, then_bb: killed_bb, else_bb: stamp_bb };
+            step.blocks[bid].term = Term::Branch {
+                cond: already_terminal,
+                then_bb: killed_bb,
+                else_bb: stamp_bb,
+            };
 
             let dc = emit(&mut step, stamp_bb, Inst::Const(Lit::Int(-3)));
             let sv2 = emit(&mut step, stamp_bb, Inst::Load(s_cell));
-            emit(&mut step, stamp_bb, Inst::StoreField { base: sv2, field: ustr::Ustr::from(STATE), value: dc });
+            emit(
+                &mut step,
+                stamp_bb,
+                Inst::StoreField {
+                    base: sv2,
+                    field: ustr::Ustr::from(STATE),
+                    value: dc,
+                },
+            );
             step.blocks[stamp_bb].term = Term::Return(Vec::new());
 
             if v0.is_some() {
                 let nil = emit(&mut step, killed_bb, Inst::Const(Lit::Nil));
                 let sv3 = emit(&mut step, killed_bb, Inst::Load(s_cell));
-                emit(&mut step, killed_bb, Inst::StoreField { base: sv3, field: ustr::Ustr::from("__return"), value: nil });
+                emit(
+                    &mut step,
+                    killed_bb,
+                    Inst::StoreField {
+                        base: sv3,
+                        field: ustr::Ustr::from("__return"),
+                        value: nil,
+                    },
+                );
             }
             step.blocks[killed_bb].term = Term::Return(Vec::new());
         }
@@ -3510,7 +4023,14 @@ pub fn transform_coroutine_with_nonescaping_lambdas(
         // emitted field names and the slot ordinals.
         for (id, cell) in step.cells.iter() {
             if let Some(&slot) = frame_slots.get(&id) {
-                let _ = write!(canon, "c{}:{};", slot, cell.name.map(|n| n.as_str().to_string()).unwrap_or_default());
+                let _ = write!(
+                    canon,
+                    "c{}:{};",
+                    slot,
+                    cell.name
+                        .map(|n| n.as_str().to_string())
+                        .unwrap_or_default()
+                );
             }
         }
         for &value in &spill_values {
@@ -3544,11 +4064,26 @@ pub fn transform_coroutine_with_nonescaping_lambdas(
         for k in 0..num_states {
             let bid = check_blocks[k];
             let sv = emit(&mut step, bid, Inst::Load(s_cell));
-            let st = emit(&mut step, bid, Inst::Field { base: sv, field: ustr::Ustr::from(STATE) });
+            let st = emit(
+                &mut step,
+                bid,
+                Inst::Field {
+                    base: sv,
+                    field: ustr::Ustr::from(STATE),
+                },
+            );
             let kc = emit(&mut step, bid, Inst::Const(Lit::Int(k as i64 + 1)));
             let eq = emit(&mut step, bid, Inst::Eq(st, kc));
-            let else_bb = if k + 1 < num_states { check_blocks[k + 1] } else { orig_entry };
-            step.blocks[bid].term = Term::Branch { cond: eq, then_bb: resume_of_state[k], else_bb };
+            let else_bb = if k + 1 < num_states {
+                check_blocks[k + 1]
+            } else {
+                orig_entry
+            };
+            step.blocks[bid].term = Term::Branch {
+                cond: eq,
+                then_bb: resume_of_state[k],
+                else_bb,
+            };
         }
         step.entry = check_blocks[0];
     }
@@ -3562,7 +4097,14 @@ pub fn transform_coroutine_with_nonescaping_lambdas(
         let dispatch = step.entry;
         let chk = step.new_block();
         let sv = emit(&mut step, chk, Inst::Load(s_cell));
-        let lay = emit(&mut step, chk, Inst::Field { base: sv, field: ustr::Ustr::from("__layout") });
+        let lay = emit(
+            &mut step,
+            chk,
+            Inst::Field {
+                base: sv,
+                field: ustr::Ustr::from("__layout"),
+            },
+        );
         let kc = emit(&mut step, chk, Inst::Const(Lit::Int(layout_hash)));
         let ne = emit(&mut step, chk, Inst::NotEq(lay, kc));
         let raise = step.new_block();
@@ -3571,13 +4113,28 @@ pub fn transform_coroutine_with_nonescaping_lambdas(
             &mut step,
             raise,
             Inst::Const(Lit::Str(ustr::Ustr::from(
-                format!("coroutine killed: frame layout changed by hot reload ({})", func.name).as_str(),
+                format!(
+                    "coroutine killed: frame layout changed by hot reload ({})",
+                    func.name
+                )
+                .as_str(),
             ))),
         );
-        emit(&mut step, raise, Inst::CallValue { callee: err_fn, args: vec![msg] });
+        emit(
+            &mut step,
+            raise,
+            Inst::CallValue {
+                callee: err_fn,
+                args: vec![msg],
+            },
+        );
         // Unreachable (error() raised); a terminator is still required.
         step.blocks[raise].term = Term::Goto(dispatch);
-        step.blocks[chk].term = Term::Branch { cond: ne, then_bb: raise, else_bb: dispatch };
+        step.blocks[chk].term = Term::Branch {
+            cond: ne,
+            then_bb: raise,
+            else_bb: dispatch,
+        };
         step.entry = chk;
     }
 
@@ -3603,7 +4160,10 @@ pub fn transform_coroutine_with_nonescaping_lambdas(
 fn dense_slots(cells: impl Iterator<Item = Idx<Cell>>) -> HashMap<Idx<Cell>, u32> {
     let mut v: Vec<Idx<Cell>> = cells.collect();
     v.sort_by_key(|c| raw(*c));
-    v.into_iter().enumerate().map(|(i, c)| (c, i as u32)).collect()
+    v.into_iter()
+        .enumerate()
+        .map(|(i, c)| (c, i as u32))
+        .collect()
 }
 
 impl CoroLowered {
@@ -3632,7 +4192,11 @@ impl CoroLowered {
             .filter(|(cell, _)| fields.contains(cell))
             .map(|(&cell, &slot)| (cell, slot))
             .collect();
-        FrameInfo { s_cell: self.s_cell, fields, slots }
+        FrameInfo {
+            s_cell: self.s_cell,
+            fields,
+            slots,
+        }
     }
 }
 
@@ -3680,25 +4244,28 @@ pub fn lower_detached_region_with_source(
         .as_ref()
         .and_then(skull_mir::code_identity::CodeIdentity::owner)
         .zip(detached_region_site(source, &region))
-        .map(|(enclosing, site)| skull_mir::code_identity::CodeIdentity::Nested {
-            enclosing,
-            site,
-            name: aux.name,
-        });
+        .map(
+            |(enclosing, site)| skull_mir::code_identity::CodeIdentity::Nested {
+                enclosing,
+                site,
+                name: aux.name,
+            },
+        );
     aux.code_abi_fingerprint = Some(format!("detached:{name}"));
     let slots = {
         let mut slots: Vec<u32> = frame.slots.values().copied().collect();
         slots.sort_unstable();
         slots
     };
-    aux.code_compatibility = aux.code_identity.as_ref().map(|_| {
-        skull_mir::code_identity::CodeCompatibility {
-            call_abi: format!("detached:{name}"),
-            capture: skull_mir::code_identity::CaptureSchema::empty(),
-            frame: Some(skull_mir::code_identity::FrameSchema { slots }),
-            lambda_topology: Default::default(),
-        }
-    });
+    aux.code_compatibility =
+        aux.code_identity
+            .as_ref()
+            .map(|_| skull_mir::code_identity::CodeCompatibility {
+                call_abi: format!("detached:{name}"),
+                capture: skull_mir::code_identity::CaptureSchema::empty(),
+                frame: Some(skull_mir::code_identity::FrameSchema { slots }),
+                lambda_topology: Default::default(),
+            });
     aux.params = vec![frame.s_cell];
     aux.is_coroutine = false;
     aux.resume_arg = None;
@@ -3714,7 +4281,10 @@ pub fn lower_detached_region_with_source(
     // the detached body. Remove it from the clone before ScopeTree sees it;
     // nested lambdas whose entries are inside the region remain for conversion.
     for (_, inst) in aux.insts.iter_mut() {
-        if let Inst::Lambda { entry: lambda_entry, .. } = inst
+        if let Inst::Lambda {
+            entry: lambda_entry,
+            ..
+        } = inst
             && (*lambda_entry == entry || !region.contains(lambda_entry))
         {
             *inst = Inst::Const(Lit::Nil);
@@ -3726,7 +4296,9 @@ pub fn lower_detached_region_with_source(
     let aux_entry = aux.entry;
     materialize_frame_cells(&mut aux, aux_entry, frame.s_cell, &frame.slots);
     assert!(
-        !aux.insts.iter().any(|(_, inst)| matches!(inst, Inst::Lambda { .. })),
+        !aux.insts
+            .iter()
+            .any(|(_, inst)| matches!(inst, Inst::Lambda { .. })),
         "detached region `{name}` retained an Inst::Lambda after conversion"
     );
     LoweredDetachedRegion {
@@ -3845,13 +4417,20 @@ fn materialize_frame_inner(
                 Inst::Load(c) if slots.contains_key(&c) => {
                     let sv = mf.alloc_inst(Inst::Load(s_cell));
                     new.push(sv);
-                    mf.insts[id] = Inst::Field { base: sv, field: field_of(slots[&c]) };
+                    mf.insts[id] = Inst::Field {
+                        base: sv,
+                        field: field_of(slots[&c]),
+                    };
                     new.push(id);
                 }
                 Inst::Store { cell, value } if slots.contains_key(&cell) => {
                     let sv = mf.alloc_inst(Inst::Load(s_cell));
                     new.push(sv);
-                    mf.insts[id] = Inst::StoreField { base: sv, field: field_of(slots[&cell]), value };
+                    mf.insts[id] = Inst::StoreField {
+                        base: sv,
+                        field: field_of(slots[&cell]),
+                        value,
+                    };
                     new.push(id);
                 }
                 Inst::CallMulti { dests, .. }
@@ -3895,15 +4474,23 @@ fn materialize_frame_inner(
                 // iterations), then store both temps back to their fields. Without
                 // this a framed cursor would read from `s.c<slot>` (materialized
                 // `Load`) but be written to a bare local, so the loop never advances.
-                Inst::MapNext { key_cell, val_cell, table }
-                    if slots.contains_key(&key_cell) || slots.contains_key(&val_cell) =>
-                {
+                Inst::MapNext {
+                    key_cell,
+                    val_cell,
+                    table,
+                } if slots.contains_key(&key_cell) || slots.contains_key(&val_cell) => {
                     let k_use = if slots.contains_key(&key_cell) {
                         let t = mf.new_cell(None);
                         minted.insert(t);
                         let sv = mf.alloc_inst(Inst::Load(s_cell));
-                        let fld = mf.alloc_inst(Inst::Field { base: sv, field: field_of(slots[&key_cell]) });
-                        let st = mf.alloc_inst(Inst::Store { cell: t, value: fld });
+                        let fld = mf.alloc_inst(Inst::Field {
+                            base: sv,
+                            field: field_of(slots[&key_cell]),
+                        });
+                        let st = mf.alloc_inst(Inst::Store {
+                            cell: t,
+                            value: fld,
+                        });
                         new.extend([sv, fld, st]);
                         t
                     } else {
@@ -3916,10 +4503,15 @@ fn materialize_frame_inner(
                     } else {
                         val_cell
                     };
-                    mf.insts[id] = Inst::MapNext { key_cell: k_use, val_cell: v_use, table };
+                    mf.insts[id] = Inst::MapNext {
+                        key_cell: k_use,
+                        val_cell: v_use,
+                        table,
+                    };
                     new.push(id);
-                    for (frame_cell, temp) in
-                        [(key_cell, k_use), (val_cell, v_use)].into_iter().filter(|(c, _)| slots.contains_key(c))
+                    for (frame_cell, temp) in [(key_cell, k_use), (val_cell, v_use)]
+                        .into_iter()
+                        .filter(|(c, _)| slots.contains_key(c))
                     {
                         let lt = mf.alloc_inst(Inst::Load(temp));
                         let sv = mf.alloc_inst(Inst::Load(s_cell));

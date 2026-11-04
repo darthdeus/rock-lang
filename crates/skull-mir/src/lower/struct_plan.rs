@@ -8,9 +8,9 @@ use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::TyId;
 use ustr::Ustr;
 
-use super::shape::{declared_value_storage, static_ty, GcFieldEq};
+use super::shape::{GcFieldEq, declared_value_storage, static_ty};
 use super::{EnumFlatShape, EnumPlan, RepArena, RepError, RepId, ValueShape, ValueStorage};
-use crate::lua_nesting::{display_record, LuaDisplayPart};
+use crate::lua_nesting::{LuaDisplayPart, display_record};
 use crate::mir::{Inst, MirFunc};
 
 /// One physical answer for one logical field. Inline/nobox fields and flat
@@ -18,7 +18,10 @@ use crate::mir::{Inst, MirFunc};
 /// they need from the selected plan.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StructFieldPlan {
-    Direct { child: Option<Ustr>, nullable: bool },
+    Direct {
+        child: Option<Ustr>,
+        nullable: bool,
+    },
     Inline {
         child: Ustr,
         nullable: bool,
@@ -44,7 +47,11 @@ impl StructFieldPlan {
 
     pub fn embed(&self) -> Option<(Ustr, bool)> {
         match self {
-            Self::Inline { child, nullable, flat: None } => Some((*child, *nullable)),
+            Self::Inline {
+                child,
+                nullable,
+                flat: None,
+            } => Some((*child, *nullable)),
             _ => None,
         }
     }
@@ -55,7 +62,9 @@ impl StructFieldPlan {
 
     pub fn flat_shape(&self) -> Option<EnumFlatShape> {
         match self {
-            Self::Inline { flat: Some(shape), .. } => Some(shape.clone()),
+            Self::Inline {
+                flat: Some(shape), ..
+            } => Some(shape.clone()),
             _ => None,
         }
     }
@@ -73,7 +82,10 @@ pub fn cdata_leaf_alias(ws: &Workspace, owner: Ustr, path: &str) -> Ustr {
     let sid = ws.struct_by_name[&owner];
     let fields = &ws.modules[sid.module.index()].structs[sid.def].fields;
     let mut prefix = "__rock_leaf_".to_string();
-    while fields.iter().any(|field| field.name.as_str().starts_with(&prefix)) {
+    while fields
+        .iter()
+        .any(|field| field.name.as_str().starts_with(&prefix))
+    {
         prefix.push('_');
     }
     use std::fmt::Write as _;
@@ -115,20 +127,23 @@ impl StructRegistryPlan {
         }
         names.extend(column_plans.keys().copied());
 
-        let mut value_plans: BTreeMap<Ustr, RepId> = arena.value_plan_catalog().into_iter().collect();
+        let mut value_plans: BTreeMap<Ustr, RepId> =
+            arena.value_plan_catalog().into_iter().collect();
         let mut queue: Vec<Ustr> = names.iter().copied().collect();
         while let Some(name) = queue.pop() {
-            let sid = ws
-                .struct_by_name
-                .get(&name)
-                .ok_or_else(|| plan_error(format!("struct registry type `{name}` is not declared")))?;
+            let sid = ws.struct_by_name.get(&name).ok_or_else(|| {
+                plan_error(format!("struct registry type `{name}` is not declared"))
+            })?;
             let s = &ws.modules[sid.module.index()].structs[sid.def];
             if crate::lower::has_value_plan(s) && !value_plans.contains_key(&name) {
                 value_plans.insert(name, arena.plan_nominal_value(ws, target, name)?);
             }
             for field in &s.fields {
                 let plan = struct_field_plan(ws, target, name, field.name, false)?;
-                if let Some(child) = plan.child().filter(|child| ws.struct_by_name.contains_key(child)) {
+                if let Some(child) = plan
+                    .child()
+                    .filter(|child| ws.struct_by_name.contains_key(child))
+                {
                     if names.insert(child) {
                         queue.push(child);
                     }
@@ -136,7 +151,12 @@ impl StructRegistryPlan {
             }
         }
         value_plans.retain(|name, _| names.contains(name));
-        Ok(Some(Self { arena, names, value_plans, column_plans }))
+        Ok(Some(Self {
+            arena,
+            names,
+            value_plans,
+            column_plans,
+        }))
     }
 
     pub fn arena(&self) -> &RepArena {
@@ -191,7 +211,10 @@ fn collect_struct_roots(
 }
 
 fn plan_error(message: impl Into<String>) -> RepError {
-    RepError { span: None, message: message.into() }
+    RepError {
+        span: None,
+        message: message.into(),
+    }
 }
 
 fn resolved_field_type(ws: &Workspace, ty: TyId) -> Result<(TypeExpr, bool), RepError> {
@@ -229,11 +252,20 @@ pub fn struct_field_plan(
     };
     let sd = &ws.modules[sid.module.index()].structs[sid.def];
     let Some(fdef) = sd.fields.iter().find(|f| f.name == field) else {
-        return Err(plan_error(format!("struct `{sname}` has no field `{field}`")));
+        return Err(plan_error(format!(
+            "struct `{sname}` has no field `{field}`"
+        )));
     };
     let (resolved, nullable) = resolved_field_type(ws, fdef.ty)?;
-    let TypeExpr::App { ctor: TypeCtor::Nominal(child_name), .. } = resolved else {
-        return Ok(StructFieldPlan::Direct { child: None, nullable });
+    let TypeExpr::App {
+        ctor: TypeCtor::Nominal(child_name),
+        ..
+    } = resolved
+    else {
+        return Ok(StructFieldPlan::Direct {
+            child: None,
+            nullable,
+        });
     };
     let child = ws
         .struct_by_name
@@ -257,7 +289,9 @@ pub fn struct_field_plan(
     let parent_is_value = crate::lower::has_value_plan(sd);
     let parent_storage = if parent_is_value && !spliced {
         Some(declared_value_storage(ws, target, sname).ok_or_else(|| {
-            plan_error(format!("struct `{sname}` has no resolved value storage plan"))
+            plan_error(format!(
+                "struct `{sname}` has no resolved value storage plan"
+            ))
         })?)
     } else {
         None
@@ -267,10 +301,16 @@ pub fn struct_field_plan(
     if (fdef.is_embed || child.is_some_and(|s| s.is_nobox))
         && (spliced || !parent_is_value || parent_storage != Some(ValueStorage::CData))
     {
-        return Ok(StructFieldPlan::Inline { child: child_name, nullable, flat: None });
+        return Ok(StructFieldPlan::Inline {
+            child: child_name,
+            nullable,
+            flat: None,
+        });
     }
     if !parent_is_value {
-        if let Some(shape) = EnumPlan::for_name(ws, child_name).and_then(|plan| plan.flat().cloned()) {
+        if let Some(shape) =
+            EnumPlan::for_name(ws, child_name).and_then(|plan| plan.flat().cloned())
+        {
             return Ok(StructFieldPlan::Inline {
                 child: child_name,
                 nullable: false,
@@ -278,7 +318,10 @@ pub fn struct_field_plan(
             });
         }
     }
-    Ok(StructFieldPlan::Direct { child: Some(child_name), nullable })
+    Ok(StructFieldPlan::Direct {
+        child: Some(child_name),
+        nullable,
+    })
 }
 
 /// One declared field of a GC-table (`<Name>_vt`) value box: a single key, or
@@ -370,7 +413,9 @@ fn lua_display_inline(shape: &ValueShape, prefix: &str) -> Vec<LuaDisplayPart> {
         .map(|(fname, fs)| {
             let key = format!("{prefix}.{fname}");
             let value = match fs {
-                super::FieldShape::Prim => vec![LuaDisplayPart::Expr(format!("tostring(v[\"{key}\"])"))],
+                super::FieldShape::Prim => {
+                    vec![LuaDisplayPart::Expr(format!("tostring(v[\"{key}\"])"))]
+                }
                 super::FieldShape::Nested(sub) => lua_display_inline(sub, &key),
             };
             (format!("{fname}: "), value)
@@ -382,7 +427,10 @@ fn lua_display_inline(shape: &ValueShape, prefix: &str) -> Vec<LuaDisplayPart> {
         display_record(&format!("{} {{ ", shape.name), fields, " }")
     };
     if shape.nullable {
-        vec![LuaDisplayPart::UnlessNil { value: format!("v[\"{prefix}\"]"), parts: body }]
+        vec![LuaDisplayPart::UnlessNil {
+            value: format!("v[\"{prefix}\"]"),
+            parts: body,
+        }]
     } else {
         body
     }
@@ -405,13 +453,18 @@ pub fn gc_table_fields(
     let shape = super::shape::value_shape_gc(ws, name)
         .ok_or_else(|| plan_error(format!("GC-table value `{name}` has no GC shape")))?;
     if shape.fields.len() != sd.fields.len() {
-        return Err(plan_error(format!("GC-table value `{name}` shape does not match its fields")));
+        return Err(plan_error(format!(
+            "GC-table value `{name}` shape does not match its fields"
+        )));
     }
     sd.fields
         .iter()
         .zip(shape.fields)
         .map(|(f, (_, fs))| {
-            let inline = if struct_field_plan(ws, target, name, f.name, false)?.embed().is_some() {
+            let inline = if struct_field_plan(ws, target, name, f.name, false)?
+                .embed()
+                .is_some()
+            {
                 match fs {
                     super::FieldShape::Nested(sub) => Some(sub),
                     super::FieldShape::Prim => {
@@ -424,7 +477,11 @@ pub fn gc_table_fields(
             } else {
                 None
             };
-            Ok(GcTableField { name: f.name, ty: f.ty, inline })
+            Ok(GcTableField {
+                name: f.name,
+                ty: f.ty,
+                inline,
+            })
         })
         .collect()
 }

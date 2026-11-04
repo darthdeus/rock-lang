@@ -31,9 +31,8 @@
 //! is what kept this lead untested (the registry block is appended only by the
 //! game emit paths).
 
-
-use skull_mir::lower::{nobox_global_accessor_shape, NoboxGlobalAccessorShape, ScalarCtx};
 use bone_semantic::inference::Workspace;
+use skull_mir::lower::{NoboxGlobalAccessorShape, ScalarCtx, nobox_global_accessor_shape};
 
 /// The parent must carry more than four leaves so it exceeds the column budget,
 /// exactly as `tests/nobox_zero_leaf_child.rock` explains: at four or fewer,
@@ -89,9 +88,10 @@ fn a_zero_data_leaf_child_defeats_both_punctuation_proxies() {
 
     // Proxy 1, the old presence guard: no path is a proper prefix of another.
     assert!(
-        !acc.paths
+        !acc.paths.iter().any(|p| acc
+            .paths
             .iter()
-            .any(|p| acc.paths.iter().any(|q| q.as_str().starts_with(&format!("{p}.")))),
+            .any(|q| q.as_str().starts_with(&format!("{p}.")))),
         "the prefix proxy finds no presence leaf here"
     );
     // The oracle: there IS one, and it is the child's own name.
@@ -123,15 +123,25 @@ fn a_zero_data_leaf_child_defeats_both_punctuation_proxies() {
 fn a_child_with_data_leaves_agrees_under_both_rules() {
     let (_ws, acc) = accessor_of(DATA_LEAF_CHILD, "H");
     assert!(
-        acc.paths
+        acc.paths.iter().any(|p| acc
+            .paths
             .iter()
-            .any(|p| acc.paths.iter().any(|q| q.as_str().starts_with(&format!("{p}.")))),
+            .any(|q| q.as_str().starts_with(&format!("{p}.")))),
         "a data-carrying nullable child makes one path a proper prefix of another"
     );
-    assert!(acc.paths.iter().any(|p| p.contains('.')), "and makes a path dotted");
-    assert_eq!(acc.presence_path.map(|p| p.to_string()).as_deref(), Some("m"));
+    assert!(
+        acc.paths.iter().any(|p| p.contains('.')),
+        "and makes a path dotted"
+    );
+    assert_eq!(
+        acc.presence_path.map(|p| p.to_string()).as_deref(),
+        Some("m")
+    );
     assert_eq!(acc.ctor_suffix, "_lct");
-    assert!(acc.unbuildable.is_none(), "a leaf-table ctor IS its leaf sequence");
+    assert!(
+        acc.unbuildable.is_none(),
+        "a leaf-table ctor IS its leaf sequence"
+    );
 }
 
 /// An FFI-clean parent with a NON-nullable nested value field. Its ordinary
@@ -168,7 +178,10 @@ fn main() { print("{MAYBE}") }
 fn an_ffi_clean_nested_field_uses_the_flattened_leaf_ctor() {
     let (_ws, acc) = accessor_of(FFI_CLEAN_NESTED, "H");
     assert_eq!(acc.ctor_suffix, "_lct");
-    assert_eq!(acc.presence_path, None, "no nullable child, so no presence tag");
+    assert_eq!(
+        acc.presence_path, None,
+        "no nullable child, so no presence tag"
+    );
     assert!(acc.paths.iter().any(|path| path == "m.x"));
     assert!(acc.unbuildable.is_none());
 }
@@ -180,14 +193,23 @@ fn a_flat_ffi_clean_global_stays_buildable() {
     let (_ws, acc) = accessor_of(FLAT, "F");
     assert_eq!(acc.ctor_suffix, "_ct");
     assert_eq!(acc.presence_path, None);
-    assert!(acc.unbuildable.is_none(), "a flat cdata ctor IS its leaf sequence");
+    assert!(
+        acc.unbuildable.is_none(),
+        "a flat cdata ctor IS its leaf sequence"
+    );
 }
 
 #[test]
 fn a_top_level_nullable_global_keeps_data_flags_aligned() {
     let (_ws, acc) = accessor_of(NULLABLE_TOP_LEVEL, "MAYBE");
-    assert_eq!(acc.paths.iter().map(|p| p.to_string()).collect::<Vec<_>>(), ["x", "y"]);
-    assert_eq!(acc.presence_path, None, "the top-level presence has no field path");
+    assert_eq!(
+        acc.paths.iter().map(|p| p.to_string()).collect::<Vec<_>>(),
+        ["x", "y"]
+    );
+    assert_eq!(
+        acc.presence_path, None,
+        "the top-level presence has no field path"
+    );
     assert_eq!(acc.ctor_suffix, "_ct");
     assert!(acc.unbuildable.is_none());
 }
@@ -231,5 +253,8 @@ fn a_gc_tier_global_with_a_nested_nobox_field_is_buildable() {
 fn a_gc_tier_global_with_a_nested_boxed_field_stays_unbuildable() {
     let (_ws, acc) = accessor_of(GC_TIER_NESTED_BOXED, "HB");
     assert_eq!(acc.ctor_suffix, "_vt");
-    assert!(acc.unbuildable.is_some(), "`Held_vt` takes `inner` whole, not `inner.v`");
+    assert!(
+        acc.unbuildable.is_some(),
+        "`Held_vt` takes `inner` whole, not `inner.v`"
+    );
 }

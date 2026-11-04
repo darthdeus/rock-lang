@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use skull_graph::instance_graph;
 use skull_mir::instance::Instance;
-use skull_mir::lower::{lower_instance_with_plans, ScalarCtx};
+use skull_mir::lower::{ScalarCtx, lower_instance_with_plans};
 use skull_mir::mir::{FuncRef, MirFunc};
 use skull_mir::monoty::MonoInterner;
 
@@ -73,14 +73,20 @@ pub fn lower_test_ref(
     mid: bone_semantic::prelude::ModuleId,
     fid: comfy_la_arena::Idx<bone_semantic::hir::Function>,
 ) -> MirFunc {
-    let root = FuncRef { module: mid, func: fid };
+    let root = FuncRef {
+        module: mid,
+        func: fid,
+    };
     let interner = Arc::new(MonoInterner::new());
     let graph = instance_graph::build_in(ws, vec![root], false, Arc::clone(&interner));
     let scx = ScalarCtx::new(ws).sharing(interner);
     let concrete = skull_graph::concrete_body::build(ws, &graph);
     let plan = concrete
         .plans
-        .get(&Instance::base(FuncRef { module: mid, func: fid }))
+        .get(&Instance::base(FuncRef {
+            module: mid,
+            func: fid,
+        }))
         .unwrap_or_else(|| panic!("no concrete plan for <test> function {fid:?}"));
     lower_instance_with_plans(ws, &scx, plan, &concrete.plans)
         .unwrap_or_else(|e| panic!("lower concrete test root: {}", e.message))
@@ -91,7 +97,10 @@ pub fn lower_test_fn(
     ws: &bone_semantic::inference::Workspace,
     name: &str,
 ) -> skull_mir::mir::MirFunc {
-    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("test module");
     for (fid, f) in ws.module(mid).functions.iter() {
         if f.name.as_str() == name {
             return lower_test_ref(ws, mid, fid);
@@ -130,7 +139,10 @@ pub fn emit_scalar(ws: &bone_semantic::inference::Workspace, name: &str, arity: 
             if f.name.as_str() != name
                 || f.param_decls.len() != arity
                 || f.inline_body.is_some()
-                || !f.annotations.iter().any(|a| a.name.name.as_str() == "intrinsic")
+                || !f
+                    .annotations
+                    .iter()
+                    .any(|a| a.name.name.as_str() == "intrinsic")
             {
                 continue;
             }

@@ -30,7 +30,10 @@ fn check(src: &str) -> (Workspace, ModuleId) {
     let mut modules = STDLIB.clone();
     modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("user module id");
+    let mid = *ws
+        .module_ids
+        .get(&Ustr::from("<test>"))
+        .expect("user module id");
     (ws, mid)
 }
 
@@ -43,7 +46,9 @@ fn convert_module(
 ) -> (Vec<String>, Vec<MonoTyReason>) {
     let mut ok = Vec::new();
     let mut bad = Vec::new();
-    let Some(ir) = ws.inference(mid) else { return (ok, bad) };
+    let Some(ir) = ws.inference(mid) else {
+        return (ok, bad);
+    };
     let subst = MonoSubst::default();
     for (_, inf) in ir.per_fn.iter() {
         let tys = inf
@@ -92,8 +97,14 @@ fn main() {
     );
     let mut arena = MonoArena::new();
     let (ok, bad) = convert_module(&ws, mid, &mut arena);
-    assert!(bad.is_empty(), "expected total conversion, got failures: {bad:?}");
-    assert!(!ok.is_empty(), "nothing was converted -- the walk found no types");
+    assert!(
+        bad.is_empty(),
+        "expected total conversion, got failures: {bad:?}"
+    );
+    assert!(
+        !ok.is_empty(),
+        "nothing was converted -- the walk found no types"
+    );
     let unique: BTreeSet<&str> = ok.iter().map(String::as_str).collect();
     let expected: BTreeSet<&str> = [
         "(int, string)",
@@ -114,9 +125,17 @@ fn main() {
     ]
     .into_iter()
     .collect();
-    assert_eq!(unique, expected, "valid-type denominator or membership changed");
-    for want in ["int", "float", "bool", "string", "any", "int?", "Vec<int>", "Holder"] {
-        assert!(ok.iter().any(|r| r == want), "missing `{want}` among {ok:?}");
+    assert_eq!(
+        unique, expected,
+        "valid-type denominator or membership changed"
+    );
+    for want in [
+        "int", "float", "bool", "string", "any", "int?", "Vec<int>", "Holder",
+    ] {
+        assert!(
+            ok.iter().any(|r| r == want),
+            "missing `{want}` among {ok:?}"
+        );
     }
     assert!(
         ok.iter().any(|r| r.starts_with("fn(")),
@@ -166,7 +185,10 @@ fn unbound_generic_is_a_distinct_reason() {
         .iter()
         .find(|(_, f)| f.name.as_str() == "id")
         .expect("id");
-    let inf = ir.per_fn.get(&BodyOwner::Function(fid)).expect("id body inference");
+    let inf = ir
+        .per_fn
+        .get(&BodyOwner::Function(fid))
+        .expect("id body inference");
     let generic = ws.module(mid).functions[fid].generics[0];
     let mut a = MonoArena::new();
     let err = a
@@ -188,7 +210,10 @@ fn a_bound_generic_converts_to_its_binding() {
         .iter()
         .find(|(_, f)| f.name.as_str() == "id")
         .expect("id");
-    let inf = ir.per_fn.get(&BodyOwner::Function(fid)).expect("id body inference");
+    let inf = ir
+        .per_fn
+        .get(&BodyOwner::Function(fid))
+        .expect("id body inference");
     let generic = ws.module(mid).functions[fid].generics[0];
     let mut a = MonoArena::new();
     let int = a.intern(MonoTy::Int);
@@ -196,7 +221,9 @@ fn a_bound_generic_converts_to_its_binding() {
         .expect("the declared generic is a Generic node");
     let mut subst = MonoSubst::default();
     subst.insert(var, MonoTy::Int);
-    let got = a.convert(&ws, inf, generic, &subst).expect("bound generic converts");
+    let got = a
+        .convert(&ws, inf, generic, &subst)
+        .expect("bound generic converts");
     assert_eq!(got, int);
 }
 
@@ -217,7 +244,10 @@ fn same_shape_nominals_stay_distinct() {
         ctor: MonoCtor::Nominal(Ustr::from("Point")),
         params: vec![],
     });
-    assert_ne!(vec2, point, "two same-layout nominals must not share a MonoTyId");
+    assert_ne!(
+        vec2, point,
+        "two same-layout nominals must not share a MonoTyId"
+    );
     assert_ne!(a.render(vec2), a.render(point));
     assert_ne!(a.structural_hash(vec2), a.structural_hash(point));
 
@@ -245,7 +275,17 @@ fn structural_equality_is_the_identity() {
     let fn_i_f = a.function(&[i1], f);
     let fn_f_i = a.function(&[f], i1);
 
-    let all = [i1, f, nullable_int, tup_if, tup_fi, vec_int, map_int, fn_i_f, fn_f_i];
+    let all = [
+        i1,
+        f,
+        nullable_int,
+        tup_if,
+        tup_fi,
+        vec_int,
+        map_int,
+        fn_i_f,
+        fn_f_i,
+    ];
     for (x, a_id) in all.iter().enumerate() {
         for (y, b_id) in all.iter().enumerate() {
             if x != y {
@@ -289,8 +329,16 @@ fn distinct_types_cannot_share_a_cross_process_identity() {
     let nominal_map_int = a.app(MonoCtor::Nominal(Ustr::from("Map")), &[int]);
 
     let pairs = [
-        ("nullable fn vs fn returning nullable", nullable_fn, fn_i_nullable),
-        ("nullable tuple-of-fn vs nullable fn", nullable_tuple_1_fn, nullable_fn),
+        (
+            "nullable fn vs fn returning nullable",
+            nullable_fn,
+            fn_i_nullable,
+        ),
+        (
+            "nullable tuple-of-fn vs nullable fn",
+            nullable_tuple_1_fn,
+            nullable_fn,
+        ),
         ("one-tuple vs its element", tuple_1, int),
         ("Vec ctor vs a nominal named Vec", vec_int, nominal_vec_int),
         ("Map ctor vs a nominal named Map", map_int, nominal_map_int),
@@ -402,10 +450,16 @@ fn generated_composition_to_depth_three_is_total() {
     let mut seen: std::collections::HashMap<String, skull_mir::monoty::MonoTyId> =
         std::collections::HashMap::new();
     for id in &every {
-        assert!(!a.render(*id).is_empty(), "a generated type displayed empty");
+        assert!(
+            !a.render(*id).is_empty(),
+            "a generated type displayed empty"
+        );
         let c = a.canonical(*id);
         if let Some(prev) = seen.insert(c.clone(), *id) {
-            assert_eq!(prev, *id, "two distinct ids share one canonical encoding: `{c}`");
+            assert_eq!(
+                prev, *id,
+                "two distinct ids share one canonical encoding: `{c}`"
+            );
         }
     }
     // Every constructor must actually appear -- a count alone would pass while
@@ -417,7 +471,10 @@ fn generated_composition_to_depth_three_is_total() {
         ("tuple", rendered.iter().any(|r| r.starts_with('('))),
         ("array", rendered.iter().any(|r| r.starts_with("Vec<"))),
         ("map", rendered.iter().any(|r| r.starts_with("Map<"))),
-        ("nominal+params", rendered.iter().any(|r| r.starts_with("Pair<"))),
+        (
+            "nominal+params",
+            rendered.iter().any(|r| r.starts_with("Pair<")),
+        ),
         ("function", rendered.iter().any(|r| r.starts_with("fn("))),
         ("never", rendered.iter().any(|r| r == "never")),
         ("unit", rendered.iter().any(|r| r == "unit")),
@@ -433,7 +490,11 @@ fn generated_composition_to_depth_three_is_total() {
     // Distinct renderings must mean distinct ids, which is interning's contract.
     assert_eq!(
         seen.len(),
-        every.iter().copied().collect::<std::collections::HashSet<_>>().len(),
+        every
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
         "the canonical encoding is not injective over the generated set"
     );
 }
@@ -447,12 +508,13 @@ fn generated_composition_to_depth_three_is_total() {
 /// therefore rejects no valid program on this construct.
 #[test]
 fn null_in_a_cast_binds_to_the_ascribed_type() {
-    let (ws, mid) = check(
-        "struct Prefab { n: int }\nfn main() { let e = (null :: Prefab?) }",
-    );
+    let (ws, mid) = check("struct Prefab { n: int }\nfn main() { let e = (null :: Prefab?) }");
     let mut arena = MonoArena::new();
     let (ok, bad) = convert_module(&ws, mid, &mut arena);
-    assert!(bad.is_empty(), "expected total conversion, got failures: {bad:?}");
+    assert!(
+        bad.is_empty(),
+        "expected total conversion, got failures: {bad:?}"
+    );
     assert!(
         ok.iter().any(|r| r == "Prefab?"),
         "expected the null literal to convert as `Prefab?`, got {ok:?}"

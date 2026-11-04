@@ -1,10 +1,12 @@
 //! WGPU shader registration and projection tests.
 
+use crate::common::ws_with_stdlib;
 use bone_incremental::session::{NsAliases, Session, SessionFile};
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;
-use crate::common::ws_with_stdlib;
-use skull::mir_emit::{emit_full_in_for_renderer, emit_overlay as emit_overlay_result, RendererTarget};
+use skull::mir_emit::{
+    RendererTarget, emit_full_in_for_renderer, emit_overlay as emit_overlay_result,
+};
 use skull_codegen_shader::ConcreteStageInput;
 use skull_mir::shader_ir::ShaderStage;
 use std::sync::Arc;
@@ -69,7 +71,9 @@ fn use_all() -> string { return rock_shader(nonfinite_frag) }
 "#;
 
 fn test_mid(ws: &Workspace) -> ModuleId {
-    *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("<test> module id")
+    *ws.module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("<test> module id")
 }
 
 const WGPU_FULLSCREEN_SRC: &str = r#"
@@ -158,14 +162,26 @@ fn wgpu_registration_follows_graph_owned_shader_pairs() {
         6,
         "the selected renderer admits six of the seven graph pairs"
     );
-    assert!(emit.lua.contains("__rock_shader_register(\"sampler_value_frag\""),
-        "GL keeps the raw compatibility registration for the omitted WGSL projection");
-    let census = cache.wgpu_projection_census().expect("WGPU projection census");
+    assert!(
+        emit.lua
+            .contains("__rock_shader_register(\"sampler_value_frag\""),
+        "GL keeps the raw compatibility registration for the omitted WGSL projection"
+    );
+    let census = cache
+        .wgpu_projection_census()
+        .expect("WGPU projection census");
     assert_eq!(census.examined, 7);
     assert_eq!(census.admitted, 6);
     assert_eq!(census.omitted, 1);
     assert_eq!(census.admitted + census.omitted, census.examined);
-    assert_eq!(census.omissions.keys().map(String::as_str).collect::<Vec<_>>(), ["sampler_value_frag"]);
+    assert_eq!(
+        census
+            .omissions
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["sampler_value_frag"]
+    );
     for root in [
         "blit_frag",
         "present_frag",
@@ -175,7 +191,8 @@ fn wgpu_registration_follows_graph_owned_shader_pairs() {
         "custom_vert+custom_frag",
     ] {
         assert!(
-            emit.lua.contains(&format!("__rock_wgpu_shader_register(\"{root}\"")),
+            emit.lua
+                .contains(&format!("__rock_wgpu_shader_register(\"{root}\"")),
             "selected root {root} is missing from WGSL registration"
         );
     }
@@ -221,25 +238,38 @@ fn wgpu_overlay_session(source: &str) -> Session {
             skull_parser::parse_module_clean(file.contents, id).expect("stdlib parse")
         })
         .collect();
-    Session::new(stdlib, vec![SessionFile::legacy("main.rock", source)], &NsAliases::default())
-        .expect("session")
+    Session::new(
+        stdlib,
+        vec![SessionFile::legacy("main.rock", source)],
+        &NsAliases::default(),
+    )
+    .expect("session")
 }
 
 #[test]
 fn a_failed_wgpu_overlay_cannot_publish_a_staged_coderef() {
     let mut session = wgpu_overlay_session(CODEREF_WGPU_OVERLAY_SRC);
     let mid = skull::user_module_id(session.workspace()).expect("user module");
-    let (full, mut cache) = emit_full_in_for_renderer(
-        session.workspace(),
-        mid,
-        None,
-        RendererTarget::Wgpu,
-    )
-    .expect("combined CodeRef/WGPU full emit");
-    let escaping = full.code_artifact.entries.values().filter(|entry| entry.escaping).count();
-    assert!(escaping > 0, "CodeArtifact escaping population must be nonzero");
-    let census = cache.wgpu_projection_census().expect("WGPU projection census");
-    assert!(census.examined > 0 && census.admitted > 0, "WGPU projection population must be nonzero: {census:?}");
+    let (full, mut cache) =
+        emit_full_in_for_renderer(session.workspace(), mid, None, RendererTarget::Wgpu)
+            .expect("combined CodeRef/WGPU full emit");
+    let escaping = full
+        .code_artifact
+        .entries
+        .values()
+        .filter(|entry| entry.escaping)
+        .count();
+    assert!(
+        escaping > 0,
+        "CodeArtifact escaping population must be nonzero"
+    );
+    let census = cache
+        .wgpu_projection_census()
+        .expect("WGPU projection census");
+    assert!(
+        census.examined > 0 && census.admitted > 0,
+        "WGPU projection population must be nonzero: {census:?}"
+    );
 
     let update = session
         .update_file("main.rock", CODEREF_WGPU_OVERLAY_EDIT)
@@ -282,7 +312,10 @@ fn a_failed_wgpu_overlay_cannot_publish_a_staged_coderef() {
         full.lua, overlay.lua, overlay.lua
     );
     let output = crate::common::run_luajit(&script, "coderef_wgpu_overlay");
-    assert_eq!(output, "1\nfalse\ntrue\n1\ntrue\n2", "failed WGPU load must retain the old CodeRef, then the control publishes the edit");
+    assert_eq!(
+        output, "1\nfalse\ntrue\n1\ntrue\n2",
+        "failed WGPU load must retain the old CodeRef, then the control publishes the edit"
+    );
 }
 
 const BLOOM_PROJECTION_SRC: &str = r#"
@@ -318,12 +351,24 @@ fn bloom_sampler_helper_projection_is_admitted_from_the_graph() {
     let mid = test_mid(&ws);
     let (emit, cache) = emit_full_in_for_renderer(&ws, mid, None, RendererTarget::Wgpu)
         .expect("selected artifacts emit");
-    let census = cache.wgpu_projection_census().expect("WGPU projection census");
-    assert_eq!(census.examined, 2, "the fixture must exercise both graph roots: {census:?}");
-    assert_eq!(census.admitted, 2, "bloom sampler/helper projection was omitted: {census:?}");
-    assert_eq!(census.omitted, 0, "a valid graph pair entered the omitted population: {census:?}");
+    let census = cache
+        .wgpu_projection_census()
+        .expect("WGPU projection census");
+    assert_eq!(
+        census.examined, 2,
+        "the fixture must exercise both graph roots: {census:?}"
+    );
+    assert_eq!(
+        census.admitted, 2,
+        "bloom sampler/helper projection was omitted: {census:?}"
+    );
+    assert_eq!(
+        census.omitted, 0,
+        "a valid graph pair entered the omitted population: {census:?}"
+    );
     assert!(
-        emit.lua.contains("__rock_wgpu_shader_register(\"bloom_down_frag\""),
+        emit.lua
+            .contains("__rock_wgpu_shader_register(\"bloom_down_frag\""),
         "the admitted bloom artifact never reached the registration output"
     );
 }
@@ -341,7 +386,9 @@ fn selected_wgpu_planning_reads_the_exact_graph_instance_and_concrete_plan() {
         .roots
         .iter()
         .find(|instance| {
-            ws.module(instance.func.module).functions[instance.func.func].name.as_str()
+            ws.module(instance.func.module).functions[instance.func.func]
+                .name
+                .as_str()
                 == "blit_frag"
         })
         .expect("blit root");
@@ -369,8 +416,8 @@ fn selected_wgpu_planning_reads_the_exact_graph_instance_and_concrete_plan() {
     assert!(!entry_plan.callees.is_empty());
 
     let interner = Arc::clone(cache.graph().interner());
-    let scx = skull_mir::lower::ScalarCtx::new_values_first_class(&ws)
-        .sharing(Arc::clone(&interner));
+    let scx =
+        skull_mir::lower::ScalarCtx::new_values_first_class(&ws).sharing(Arc::clone(&interner));
     assert!(Arc::ptr_eq(&interner, &scx.interner_handle()));
     let input = ConcreteStageInput {
         stage: stage.stage,
@@ -423,16 +470,36 @@ fn typed_projection_census_admits_the_current_entity_and_outline_projections() {
     let mid = test_mid(&ws);
     let (emit, cache) = emit_full_in_for_renderer(&ws, mid, None, RendererTarget::Wgpu)
         .expect("the typed refusal census must compile its GL controls");
-    let census = cache.wgpu_projection_census().expect("WGPU projection census");
+    let census = cache
+        .wgpu_projection_census()
+        .expect("WGPU projection census");
     println!("typed projection census: {census:?}");
     assert_eq!(census.examined, 2);
-    assert_eq!(census.admitted, 2, "entity-id and outline projections must be admitted: {census:?}");
-    assert_eq!(census.omitted, 0, "typed projection omissions remain: {census:?}");
+    assert_eq!(
+        census.admitted, 2,
+        "entity-id and outline projections must be admitted: {census:?}"
+    );
+    assert_eq!(
+        census.omitted, 0,
+        "typed projection omissions remain: {census:?}"
+    );
     assert!(census.omissions.is_empty());
-    assert!(emit.lua.contains("__rock_shader_register(\"entity_id_debug_frag\""));
-    assert!(emit.lua.contains("__rock_shader_register(\"outline_detect_vert+outline_detect_frag\""));
-    assert!(emit.lua.contains("__rock_wgpu_shader_register(\"entity_id_debug_frag\""));
-    assert!(emit.lua.contains("__rock_wgpu_shader_register(\"outline_detect_vert+outline_detect_frag\""));
+    assert!(
+        emit.lua
+            .contains("__rock_shader_register(\"entity_id_debug_frag\"")
+    );
+    assert!(
+        emit.lua
+            .contains("__rock_shader_register(\"outline_detect_vert+outline_detect_frag\"")
+    );
+    assert!(
+        emit.lua
+            .contains("__rock_wgpu_shader_register(\"entity_id_debug_frag\"")
+    );
+    assert!(
+        emit.lua
+            .contains("__rock_wgpu_shader_register(\"outline_detect_vert+outline_detect_frag\"")
+    );
 }
 
 #[test]
@@ -441,11 +508,22 @@ fn selected_wgpu_entity_id_projection_is_admitted() {
     let mid = test_mid(&ws);
     let (emit, cache) = emit_full_in_for_renderer(&ws, mid, None, RendererTarget::Wgpu)
         .expect("the entity-id fixture must reach projection census");
-    let census = cache.wgpu_projection_census().expect("WGPU projection census");
+    let census = cache
+        .wgpu_projection_census()
+        .expect("WGPU projection census");
     assert_eq!(census.examined, 2);
-    assert_eq!(census.admitted, 2, "entity-id and its real outline consumer must be admitted: {census:?}");
-    assert_eq!(census.omitted, 0, "typed projection omissions remain: {census:?}");
-    assert!(emit.lua.contains("__rock_wgpu_shader_register(\"entity_id_debug_frag\""));
+    assert_eq!(
+        census.admitted, 2,
+        "entity-id and its real outline consumer must be admitted: {census:?}"
+    );
+    assert_eq!(
+        census.omitted, 0,
+        "typed projection omissions remain: {census:?}"
+    );
+    assert!(
+        emit.lua
+            .contains("__rock_wgpu_shader_register(\"entity_id_debug_frag\"")
+    );
 }
 
 #[test]
@@ -454,9 +532,20 @@ fn nonfinite_projection_reaches_selected_wgpu() {
     let mid = test_mid(&ws);
     let (emit, cache) = emit_full_in_for_renderer(&ws, mid, None, RendererTarget::Wgpu)
         .expect("the nonfinite shader must have a GL control");
-    let census = cache.wgpu_projection_census().expect("WGPU projection census");
+    let census = cache
+        .wgpu_projection_census()
+        .expect("WGPU projection census");
     assert_eq!(census.examined, 1);
-    assert_eq!(census.admitted, 1, "nonfinite shader remains omitted: {census:?}");
-    assert_eq!(census.omitted, 0, "nonfinite shader projection failed: {census:?}");
-    assert!(emit.lua.contains("__rock_wgpu_shader_register(\"nonfinite_frag\""));
+    assert_eq!(
+        census.admitted, 1,
+        "nonfinite shader remains omitted: {census:?}"
+    );
+    assert_eq!(
+        census.omitted, 0,
+        "nonfinite shader projection failed: {census:?}"
+    );
+    assert!(
+        emit.lua
+            .contains("__rock_wgpu_shader_register(\"nonfinite_frag\"")
+    );
 }

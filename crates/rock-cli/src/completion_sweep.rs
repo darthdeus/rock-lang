@@ -20,7 +20,7 @@
 //! Paths are project-relative so dumps diff across checkouts.
 
 use anyhow::Result;
-use bone_query::{offset_to_position, BoneWorkspace};
+use bone_query::{BoneWorkspace, offset_to_position};
 use std::io::Write;
 use std::path::Path;
 
@@ -66,7 +66,9 @@ fn prefix_at(text: &str, offset: usize) -> &str {
 }
 
 fn esc(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('\t', "\\t").replace('\n', "\\n")
+    s.replace('\\', "\\\\")
+        .replace('\t', "\\t")
+        .replace('\n', "\\n")
 }
 
 fn field(s: Option<&str>) -> String {
@@ -85,7 +87,9 @@ pub fn completion_sweep(path: &str, stride: usize, check: bool) -> Result<()> {
     let root = fs_err::canonicalize(dir)?;
 
     let mut bone = BoneWorkspace::new();
-    let first = fs_err::canonicalize(&files[0])?.to_string_lossy().to_string();
+    let first = fs_err::canonicalize(&files[0])?
+        .to_string_lossy()
+        .to_string();
     bone.load_project(&first);
 
     // Buffer stdout: the dump is tens of MB of small writes at stride 1.
@@ -97,7 +101,11 @@ pub fn completion_sweep(path: &str, stride: usize, check: bool) -> Result<()> {
 
     for f in &files {
         let abs = fs_err::canonicalize(f)?;
-        let rel = abs.strip_prefix(&root).unwrap_or(&abs).to_string_lossy().to_string();
+        let rel = abs
+            .strip_prefix(&root)
+            .unwrap_or(&abs)
+            .to_string_lossy()
+            .to_string();
         let abs_str = abs.to_string_lossy().to_string();
         let text = fs_err::read_to_string(&abs)?;
         bone.update(&abs_str, text.clone());
@@ -140,7 +148,9 @@ pub fn completion_sweep(path: &str, stride: usize, check: bool) -> Result<()> {
                     out,
                     "{}\t{}\t{}\t{}\t{}\t{}",
                     esc(&it.label),
-                    it.kind.map(|k| format!("{k:?}")).unwrap_or_else(|| "-".to_string()),
+                    it.kind
+                        .map(|k| format!("{k:?}"))
+                        .unwrap_or_else(|| "-".to_string()),
                     field(it.sort_text.as_deref()),
                     field(it.insert_text.as_deref()),
                     fmt,

@@ -5,37 +5,55 @@
 //! callee. Structural pins fix the emitted shape; node checks are the behavior
 //! oracle.
 
-use skull_mir::mir::FuncRef;
 use crate::common::{emit_user, ws_with};
+use skull_mir::mir::FuncRef;
 
 fn test_fn_ref(ws: &bone_semantic::inference::Workspace, name: &str) -> FuncRef {
-    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("test module");
     for (fid, f) in ws.module(mid).functions.iter() {
         if f.name.as_str() == name {
-            return FuncRef { module: mid, func: fid };
+            return FuncRef {
+                module: mid,
+                func: fid,
+            };
         }
     }
     panic!("no fn `{name}` in <test> module");
 }
 
 fn node_available() -> bool {
-    crate::common::node().arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+    crate::common::node()
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 /// Run `<defs>; console.log(<call>)` under node and parse the printed int. The
 /// `__rock_call` dispatch helper is prepended (every indirect call routes
 /// through it after `convert_closures`).
 fn node_eval_int(defs: &str, call: &str) -> i64 {
-    let program =
-        format!("{}{defs}\nconsole.log({call});", skull_codegen_js::JS_CALL_HELPER);
-    let out = crate::common::node().arg("-e").arg(&program).output().expect("spawn node");
+    let program = format!(
+        "{}{defs}\nconsole.log({call});",
+        skull_codegen_js::JS_CALL_HELPER
+    );
+    let out = crate::common::node()
+        .arg("-e")
+        .arg(&program)
+        .output()
+        .expect("spawn node");
     assert!(
         out.status.success(),
         "node failed:\n--- program ---\n{program}\n--- stderr ---\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
     let s = String::from_utf8_lossy(&out.stdout);
-    s.trim().parse::<i64>().unwrap_or_else(|_| panic!("node did not print an int: {s:?}\n{program}"))
+    s.trim()
+        .parse::<i64>()
+        .unwrap_or_else(|_| panic!("node did not print an int: {s:?}\n{program}"))
 }
 
 /// Co-emit `root` and its plain-Rock callees into one JS program.
@@ -53,7 +71,10 @@ fn emit_closure(ws: &bone_semantic::inference::Workspace, root: &str) -> String 
 fn callvalue_through_fn_param() {
     let ws = ws_with("fn apply(f: (int) -> int, x: int) -> int { f(x) }");
     let js = emit_user(&ws, "apply");
-    assert!(js.contains("__rock_call(v0, v1)"), "indirect call via __rock_call:\n{js}");
+    assert!(
+        js.contains("__rock_call(v0, v1)"),
+        "indirect call via __rock_call:\n{js}"
+    );
 }
 
 #[test]
@@ -66,8 +87,14 @@ fn direct_calls_remain_direct_while_values_use_slots() {
     let js = emit_closure(&ws, "main");
     let start = js.find("function direct").expect("direct body");
     let body = js[start..].split("\n}\n").next().expect("direct body");
-    assert!(body.contains("target_"), "direct call keeps its physical call: {body}");
-    assert!(!body.contains("__rock_code_slot_ref"), "direct call must not route through a CodeRef: {body}");
+    assert!(
+        body.contains("target_"),
+        "direct call keeps its physical call: {body}"
+    );
+    assert!(
+        !body.contains("__rock_code_slot_ref"),
+        "direct call must not route through a CodeRef: {body}"
+    );
 }
 
 // A capturing lambda becomes an env record `{ __slot, c<A>: .. }` at its
@@ -81,9 +108,18 @@ fn capturing_lambda_builds_env_record() {
          }",
     );
     let js = emit_closure(&ws, "capture");
-    assert!(js.contains("__slot: __rock_code_slot_ref("), "creation site builds a CodeRef record:\n{js}");
-    assert!(!js.contains("__fn: capture__lambda0"), "Rock closures must not freeze a backend body:\n{js}");
-    assert!(js.contains("function capture__lambda0("), "hoisted sibling body:\n{js}");
+    assert!(
+        js.contains("__slot: __rock_code_slot_ref("),
+        "creation site builds a CodeRef record:\n{js}"
+    );
+    assert!(
+        !js.contains("__fn: capture__lambda0"),
+        "Rock closures must not freeze a backend body:\n{js}"
+    );
+    assert!(
+        js.contains("function capture__lambda0("),
+        "hoisted sibling body:\n{js}"
+    );
 }
 
 // A capture-free lambda resolves one reusable slot (no env allocation):
@@ -92,10 +128,19 @@ fn capturing_lambda_builds_env_record() {
 fn capture_free_lambda_is_hoisted() {
     let ws = ws_with("fn mk() -> fn() -> int { () => 42 }");
     let js = emit_closure(&ws, "mk");
-    assert!(js.contains("function mk__lambda0("), "hoisted top-level fn:\n{js}");
+    assert!(
+        js.contains("function mk__lambda0("),
+        "hoisted top-level fn:\n{js}"
+    );
     assert!(js.contains("return 42;"), "hoisted body:\n{js}");
-    assert!(js.contains("__rock_code_slot_ref("), "capture-free values use the reusable slot:\n{js}");
-    assert!(!js.contains("__fn: mk__lambda0"), "no frozen backend body for a capture-free lambda:\n{js}");
+    assert!(
+        js.contains("__rock_code_slot_ref("),
+        "capture-free values use the reusable slot:\n{js}"
+    );
+    assert!(
+        !js.contains("__fn: mk__lambda0"),
+        "no frozen backend body for a capture-free lambda:\n{js}"
+    );
 }
 
 // --- behavioral (node) oracle: emit through the full pipeline (the pass runs
@@ -113,7 +158,10 @@ fn capturing_arrow_executes() {
              g(10)\n\
          }",
     );
-    assert_eq!(node_eval_int(&emit_closure(&ws, "capture"), "capture(7)"), 17);
+    assert_eq!(
+        node_eval_int(&emit_closure(&ws, "capture"), "capture(7)"),
+        17
+    );
 }
 
 #[test]

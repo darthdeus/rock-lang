@@ -10,75 +10,77 @@ pub use std::os::windows::io::AsRawHandle;
 // rock-cli's prelude: symbols the kept code reaches through `crate::*`. Core
 // types come straight from rock_core + rock_tokenizer, host helpers from
 // rock_host, and the rest from std / common deps.
-pub use anyhow::{bail, Result};
+pub use anyhow::{Result, bail};
 pub use atomic_refcell::AtomicRefCell;
-pub use ustr::Ustr;
-pub use std::path::Path;
-pub use std::sync::Arc;
-pub use rock_core::*;
-pub use rock_tokenizer::*;
-pub use rock_host::process_management::*;
-pub use rock_host::source_files::{
-    source_file_from_code, source_file_new_preprocessed, SourceFilesExt,
-};
-pub use rock_host::stick::{graph::{PackageGraph, PackageId, PackageNode}, RendererBackend, StickConfig};
-pub use std::collections::{HashMap, HashSet};
-pub use std::sync::mpsc::channel;
-pub use std::time::Duration;
 #[allow(unused_imports)]
 pub use log::{debug, error, info, trace, warn};
+pub use rock_core::*;
+pub use rock_host::process_management::*;
+pub use rock_host::source_files::{
+    SourceFilesExt, source_file_from_code, source_file_new_preprocessed,
+};
+pub use rock_host::stick::{
+    RendererBackend, StickConfig,
+    graph::{PackageGraph, PackageId, PackageNode},
+};
+pub use rock_tokenizer::*;
+pub use std::collections::{HashMap, HashSet};
+pub use std::path::Path;
+pub use std::sync::Arc;
+pub use std::sync::mpsc::channel;
+pub use std::time::Duration;
+pub use ustr::Ustr;
 
+pub mod ablation_report;
+pub mod allocation_join;
 pub mod allocator;
-mod compile_measurements;
 pub mod backend_stats;
 pub mod bone_backend;
-pub mod skull_backend;
-pub mod docs_index;
+pub mod child_lifetime;
 pub mod common;
 pub mod compile_cmd;
+mod compile_measurements;
 pub mod compile_slots;
-mod package_test_sources;
+mod completion_episodes;
+mod completion_sweep;
 pub mod comptime;
 mod dispatcher;
+pub mod docs_index;
 mod error_test;
 pub mod file_watcher;
 mod formatting;
-mod completion_episodes;
-mod completion_sweep;
+pub mod glsl_test;
+pub mod invocation_log;
 mod iter_completion;
 mod iter_lsp;
 mod iter_parse;
-pub mod glsl_test;
-#[cfg(feature = "backend-js")]
-pub mod js_test;
 #[cfg(feature = "backend-js")]
 mod js_runner;
-pub mod live_project;
-pub mod test_protocol;
+#[cfg(feature = "backend-js")]
+pub mod js_test;
 mod lint_cmd;
-pub mod lint_union;
 pub mod lint_pass;
-pub mod ablation_report;
-pub mod invocation_log;
-pub mod child_lifetime;
-pub mod allocation_join;
-mod monoty_census;
+pub mod lint_union;
+pub mod live_project;
 mod lsp_survey;
 mod lsp_test;
+mod monoty_census;
+mod package_test_sources;
 mod parallel_runner;
+pub mod skull_backend;
 mod test;
+pub mod test_protocol;
 pub use test::{TestFilter, TestMetadata, find_test_functions_from_sources};
-mod text_utils;
-pub mod unified_compile;
 pub mod modules_analysis;
 mod modules_audit;
 mod modules_fix;
 mod modules_migrate;
-pub mod watch;
-pub mod registry;
 pub mod plain;
 mod process;
-pub use process::{main_with, compiler_process};
+pub mod registry;
+mod text_utils;
+pub mod unified_compile;
+pub mod watch;
 pub use allocation_join::run as allocation_join_run;
 pub use completion_episodes::completion_episodes;
 pub use completion_sweep::completion_sweep;
@@ -88,21 +90,22 @@ pub use iter_parse::iter_parse_skull;
 pub use iter_parse::iter_tokenize;
 pub use lint_cmd::do_lint;
 pub use lsp_survey::lsp_survey;
-pub use modules_audit::run as modules_audit_run;
 pub use modules_audit::Format as ModulesFormat;
+pub use modules_audit::run as modules_audit_run;
 pub use modules_fix::run as modules_fix_run;
-pub use modules_migrate::run as modules_migrate_run;
 pub use modules_migrate::Mode as ModulesMode;
+pub use modules_migrate::run as modules_migrate_run;
 pub use monoty_census::do_monoty_census;
+pub use process::{compiler_process, main_with};
 
 pub use common::*;
 pub use dispatcher::*;
 pub use file_watcher::*;
 pub use formatting::*;
+pub use registry::{BackendSpec, CliCommand, Operation};
 pub use text_utils::*;
 pub use unified_compile::*;
 pub use watch::*;
-pub use registry::{BackendSpec, CliCommand, Operation};
 
 /// Compiler backend selected via `--backend` / `ROCK_BACKEND`. Each variant's
 /// name, served operations and policy are registered in
@@ -189,7 +192,6 @@ pub struct Args {
     pub workers: bool,
     pub multi_order: bool,
 
-
     /// For `rock completion-sweep`: keep every Nth derived probe position
     /// (1 = exhaustive). Controls corpus size vs coverage.
     pub stride: usize,
@@ -274,7 +276,6 @@ pub struct Args {
     /// surrounding package; set `ROCK_TEST_NO_PACKAGE=1` to fall back to
     /// the legacy single-file path.
     pub package: bool,
-
 }
 
 impl Args {
@@ -393,15 +394,21 @@ impl Args {
     /// Convert matches from this registry-backed CLI command definition.
     pub fn from_matches(m: clap::ArgMatches) -> Self {
         let many_str = |name: &str| -> Vec<String> {
-            m.get_many::<String>(name).map(|vs| vs.cloned().collect()).unwrap_or_default()
+            m.get_many::<String>(name)
+                .map(|vs| vs.cloned().collect())
+                .unwrap_or_default()
         };
-        let command = *m.get_one::<&'static CliCommand>("command").expect("command required");
+        let command = *m
+            .get_one::<&'static CliCommand>("command")
+            .expect("command required");
         let test_filter = m.get_one::<String>("filter").cloned();
         let mut args = Args {
             command,
             files: many_str("files"),
             required_tests: Default::default(),
-            test_filter: test_filter.clone().or_else(|| std::env::var("ROCK_TEST_FILTER").ok()),
+            test_filter: test_filter
+                .clone()
+                .or_else(|| std::env::var("ROCK_TEST_FILTER").ok()),
             test_filter_explicit: test_filter.is_some(),
             show_passing: Default::default(),
             skip_gpu: m.get_flag("skip-gpu"),
@@ -424,17 +431,22 @@ impl Args {
             gc_window: Default::default(),
             gc_window_start: Default::default(),
             gc_window_mode: Default::default(),
-            perf_format: m.get_one::<String>("perf-format").cloned().unwrap_or_else(|| "pretty".to_string()),
+            perf_format: m
+                .get_one::<String>("perf-format")
+                .cloned()
+                .unwrap_or_else(|| "pretty".to_string()),
             top: Default::default(),
             sim_log_dir: Default::default(),
             sim_entry: Default::default(),
             type_validation: m.get_flag("type-validation"),
             headless: Default::default(),
-            renderer: m.get_one::<String>("renderer").map(|value| match value.as_str() {
-                "gl" => RendererBackend::Gl,
-                "wgpu" => RendererBackend::Wgpu,
-                _ => unreachable!("renderer value parser admitted an unknown value"),
-            }),
+            renderer: m
+                .get_one::<String>("renderer")
+                .map(|value| match value.as_str() {
+                    "gl" => RendererBackend::Gl,
+                    "wgpu" => RendererBackend::Wgpu,
+                    _ => unreachable!("renderer value parser admitted an unknown value"),
+                }),
             test_threads: m.get_one::<usize>("test-threads").copied(),
             lib: m.get_one::<String>("lib").cloned(),
             clean: m.get_flag("clean"),
@@ -478,9 +490,15 @@ impl Args {
             union: m.get_flag("union"),
             closed: m.get_flag("closed"),
             apply: m.get_flag("apply"),
-            consumer: m.get_many::<String>("consumer").map(|v| v.cloned().collect()).unwrap_or_default(),
+            consumer: m
+                .get_many::<String>("consumer")
+                .map(|v| v.cloned().collect())
+                .unwrap_or_default(),
             imports: m.get_flag("imports"),
-            fix: registry::registered().fixes.iter().find(|fix| m.get_flag(fix.flag)),
+            fix: registry::registered()
+                .fixes
+                .iter()
+                .find(|fix| m.get_flag(fix.flag)),
             consumers: m.get_one::<String>("consumers").cloned(),
             // Backend selection. An explicit `--backend` flag wins; otherwise an
             // explicit `ROCK_BACKEND` env var; otherwise the implicit default is

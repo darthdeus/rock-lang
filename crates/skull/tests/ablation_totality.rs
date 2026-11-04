@@ -71,16 +71,23 @@ fn main() {
 "#,
     );
     assert!(
-        fatals.iter().any(|f| f.category == FatalCategory::PolymorphicGrowth),
+        fatals
+            .iter()
+            .any(|f| f.category == FatalCategory::PolymorphicGrowth),
         "the control did not fire, so this fixture proves nothing about `total`; got {:?}",
-        fatals.iter().map(|f| (f.category, &f.callee)).collect::<Vec<_>>()
+        fatals
+            .iter()
+            .map(|f| (f.category, &f.callee))
+            .collect::<Vec<_>>()
     );
     let hit: Vec<&ablation::Fatal> = fatals.iter().filter(|f| f.callee == "total").collect();
     assert!(
         hit.is_empty(),
         "an `Iterator`-bounded body is emitted standalone now, so a call to one \
          must record no fatal; got {:?}",
-        hit.iter().map(|f| (f.category, f.detail.as_str())).collect::<Vec<_>>()
+        hit.iter()
+            .map(|f| (f.category, f.detail.as_str()))
+            .collect::<Vec<_>>()
     );
 }
 
@@ -114,16 +121,23 @@ fn main() {
 "#,
     );
     assert!(
-        fatals.iter().any(|f| f.category == FatalCategory::PolymorphicGrowth),
+        fatals
+            .iter()
+            .any(|f| f.category == FatalCategory::PolymorphicGrowth),
         "the control did not fire, so this fixture proves nothing about `stream`; got {:?}",
-        fatals.iter().map(|f| (f.category, &f.callee)).collect::<Vec<_>>()
+        fatals
+            .iter()
+            .map(|f| (f.category, &f.callee))
+            .collect::<Vec<_>>()
     );
     let hit: Vec<&ablation::Fatal> = fatals.iter().filter(|f| f.callee == "stream").collect();
     assert!(
         hit.is_empty(),
         "a generic `co fn` specializes now, so a call to one must record no \
          fatal; got {:?}",
-        hit.iter().map(|f| (f.category, f.detail.as_str())).collect::<Vec<_>>()
+        hit.iter()
+            .map(|f| (f.category, f.detail.as_str()))
+            .collect::<Vec<_>>()
     );
 }
 
@@ -145,12 +159,14 @@ fn main() {
 }
 "#,
     );
-    let hit: Vec<&ablation::Fatal> =
-        fatals.iter().filter(|f| f.callee == "probe_len").collect();
+    let hit: Vec<&ablation::Fatal> = fatals.iter().filter(|f| f.callee == "probe_len").collect();
     assert!(
         !hit.is_empty(),
         "a generic inline(lua) callee produced no fatal; got {:?}",
-        fatals.iter().map(|f| (f.category, &f.callee)).collect::<Vec<_>>()
+        fatals
+            .iter()
+            .map(|f| (f.category, &f.callee))
+            .collect::<Vec<_>>()
     );
     assert_eq!(
         hit[0].category,
@@ -186,7 +202,10 @@ fn main() {
         fatals.is_empty(),
         "the mode is OFF and {} fatal(s) were still recorded: {:?}",
         fatals.len(),
-        fatals.iter().map(|f| (f.category, &f.callee)).collect::<Vec<_>>()
+        fatals
+            .iter()
+            .map(|f| (f.category, &f.callee))
+            .collect::<Vec<_>>()
     );
 }
 
@@ -214,7 +233,10 @@ fn main() {
 }
 "#,
     );
-    assert!(!fatals.is_empty(), "the fixture produced no fatals to classify");
+    assert!(
+        !fatals.is_empty(),
+        "the fixture produced no fatals to classify"
+    );
     for f in &fatals {
         assert!(!f.callee.is_empty(), "a fatal with no callee");
         assert!(!f.caller.is_empty(), "a fatal with no caller: {f:?}");
@@ -254,9 +276,15 @@ fn main() { depth(1, 12) }
     assert!(
         !growth.is_empty(),
         "polymorphic recursion produced no growth fatal; categories seen: {:?}",
-        fatals.iter().map(|f| f.category).collect::<std::collections::BTreeSet<_>>()
+        fatals
+            .iter()
+            .map(|f| f.category)
+            .collect::<std::collections::BTreeSet<_>>()
     );
-    assert_eq!(growth[0].callee, "depth", "the growth fatal must name the growing callee");
+    assert_eq!(
+        growth[0].callee, "depth",
+        "the growth fatal must name the growing callee"
+    );
 }
 
 /// The bounding CONTROL for the detector: an ordinary nested container must NOT
@@ -335,13 +363,18 @@ fn main() {
         !control.is_empty(),
         "the control did not fire, so this fixture proves nothing about `ident`: \
          polymorphic growth must still be a fatal; got {:?}",
-        fatals.iter().map(|f| (f.category, &f.callee)).collect::<Vec<_>>()
+        fatals
+            .iter()
+            .map(|f| (f.category, &f.callee))
+            .collect::<Vec<_>>()
     );
     let hit: Vec<&ablation::Fatal> = fatals.iter().filter(|f| f.callee == "ident").collect();
     assert!(
         hit.is_empty(),
         "`unit`, `any` and `fn(int) -> int` are valid types the key now names, so a call \
          bound to one must record no fatal; got {:?}",
-        hit.iter().map(|f| (f.category, f.detail.as_str())).collect::<Vec<_>>()
+        hit.iter()
+            .map(|f| (f.category, f.detail.as_str()))
+            .collect::<Vec<_>>()
     );
 }

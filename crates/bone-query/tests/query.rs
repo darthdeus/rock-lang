@@ -7,14 +7,15 @@
 //! bare name or the whole item. `query` lives in this crate over bone's public
 //! HIR; queries that need new bone internals get proposed as a bone hint.
 
+use bone_query::query::{FnRefScope, definition_at, references};
 use bone_semantic::prelude::*;
-use bone_query::query::{definition_at, references, FnRefScope};
 use bone_semantic::semantic_passes::semantic_pass;
 
 /// Build a checked workspace from a single source string and return it plus the
 /// (sole) user module id.
 fn ws_of(src: &str) -> (Workspace, ModuleId) {
-    let module = skull_parser::parse_module_clean(src, Ustr::from("<query-test>")).expect("parse_rock");
+    let module =
+        skull_parser::parse_module_clean(src, Ustr::from("<query-test>")).expect("parse_rock");
     let ws = semantic_pass(&mut [module]).expect("semantic_pass");
     let mid = ws
         .modules
@@ -132,12 +133,22 @@ fn definition_of_field_ref_resolves_to_the_struct_field() {
 fn assert_refs(src: &str, cursor_off: usize, expected: &[usize]) {
     let (ws, mid) = ws_of(src);
     let inf = ws.inference(mid).expect("user module inferred");
-    let spans = references(&ws, mid, inf, cursor_off, &|_| Some(src), FnRefScope::AllOverloads);
+    let spans = references(
+        &ws,
+        mid,
+        inf,
+        cursor_off,
+        &|_| Some(src),
+        FnRefScope::AllOverloads,
+    );
     assert_eq!(
         spans.len(),
         expected.len(),
         "reference count: got {:?}, expected offsets {:?}",
-        spans.iter().map(|s| s.span.offset_range).collect::<Vec<_>>(),
+        spans
+            .iter()
+            .map(|s| s.span.offset_range)
+            .collect::<Vec<_>>(),
         expected
     );
     for &off in expected {
@@ -146,7 +157,10 @@ fn assert_refs(src: &str, cursor_off: usize, expected: &[usize]) {
                 .iter()
                 .any(|s| s.span.offset_range.0 <= off && off < s.span.offset_range.1),
             "no reference span covers offset {off}; got {:?}",
-            spans.iter().map(|s| s.span.offset_range).collect::<Vec<_>>()
+            spans
+                .iter()
+                .map(|s| s.span.offset_range)
+                .collect::<Vec<_>>()
         );
     }
 }
@@ -173,10 +187,17 @@ fn references_of_parameter() {
 fn refs_at(src: &str, cursor_off: usize) -> Vec<(usize, usize)> {
     let (ws, mid) = ws_of(src);
     let inf = ws.inference(mid).expect("user module inferred");
-    references(&ws, mid, inf, cursor_off, &|_| Some(src), FnRefScope::AllOverloads)
-        .iter()
-        .map(|s| s.span.offset_range)
-        .collect()
+    references(
+        &ws,
+        mid,
+        inf,
+        cursor_off,
+        &|_| Some(src),
+        FnRefScope::AllOverloads,
+    )
+    .iter()
+    .map(|s| s.span.offset_range)
+    .collect()
 }
 
 /// Assert the reference set covers exactly `expected` offsets AND every span is
@@ -245,7 +266,8 @@ fn references_of_function_from_declaration() {
 fn references_of_function_includes_ufcs_call() {
     // The UFCS call `5.inc()` lowers to Callee::Unresolved with the method name
     // NOT at the call-span start -- only a recorded name_span gets this right.
-    let src = "fn inc(x: int) -> int { x + 1 }\nfn main() {\n    let a = inc(5)\n    let b = 5.inc()\n}";
+    let src =
+        "fn inc(x: int) -> int { x + 1 }\nfn main() {\n    let a = inc(5)\n    let b = 5.inc()\n}";
     let decl = nth_offset(src, "inc", 1); // fn inc
     let plain = nth_offset(src, "inc", 2); // inc(5)
     let ufcs = nth_offset(src, "inc", 3); // 5.inc()

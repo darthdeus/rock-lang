@@ -1,5 +1,5 @@
 use crate::common::{emit_mir, mangled_name, run_luajit, ws_with_stdlib};
-use skull::mir_emit::{emit_full_with_shapes, ShapeOverrides};
+use skull::mir_emit::{ShapeOverrides, emit_full_with_shapes};
 use skull_codegen_lua::CalleeBindingMode;
 use ustr::Ustr;
 
@@ -8,7 +8,11 @@ use ustr::Ustr;
 fn emit_shaped(src: &str, binding: CalleeBindingMode, state_cell: Option<bool>) -> String {
     let ws = ws_with_stdlib(src);
     let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
-    let shapes = ShapeOverrides { callee_binding: Some(binding), state_cell, ..ShapeOverrides::default() };
+    let shapes = ShapeOverrides {
+        callee_binding: Some(binding),
+        state_cell,
+        ..ShapeOverrides::default()
+    };
     emit_full_with_shapes(&ws, mid, shapes).expect("emit").0.lua
 }
 
@@ -122,7 +126,10 @@ fn bound_emission_reads_globals_through_the_storage_cell() {
         "the prelude must declare the cell as a chunk-level local:\n{}",
         &lua[..lua.len().min(4000)]
     );
-    assert!(lua.contains("__rock_state_cell[5]"), "reads and writes go through the storage cell");
+    assert!(
+        lua.contains("__rock_state_cell[5]"),
+        "reads and writes go through the storage cell"
+    );
     assert!(
         !lua.contains("__rock_globals[5]"),
         "no access may keep the `_G` lookup under the bound shape"
@@ -176,10 +183,20 @@ fn the_program_opens_sized_storage_before_initializing() {
     assert_eq!(nums[1], 9, "array fixpoint of slot 5 is 8 + 1: {open}");
     // The hash size counts the stdlib's own statics too, so pin its shape, not
     // its value: a power of two no smaller than the 16-node floor.
-    assert!(nums[0] >= 16 && nums[0].is_power_of_two(), "hash capacity shape: {open}");
-    let open_at = lua.find("\n__rock_state_cell = __rock_globals_open(").expect("open line");
-    let init = lua.find("\n__rock_state_initialize()\n").expect("initialize call");
-    assert!(open_at < init, "the storage opens before any initializer runs");
+    assert!(
+        nums[0] >= 16 && nums[0].is_power_of_two(),
+        "hash capacity shape: {open}"
+    );
+    let open_at = lua
+        .find("\n__rock_state_cell = __rock_globals_open(")
+        .expect("open line");
+    let init = lua
+        .find("\n__rock_state_initialize()\n")
+        .expect("initialize call");
+    assert!(
+        open_at < init,
+        "the storage opens before any initializer runs"
+    );
     assert!(
         lua.contains("__rock_table_new(narr, nhash)"),
         "the storage must be built with table.new, not `{{}}`"
@@ -203,7 +220,10 @@ print({bump}())
 print(storage == __rock_globals, __rock_globals_fresh)
 "
     );
-    assert_eq!(run_luajit(&program, "global_reload"), "1\n2\n3\ntrue\tfalse");
+    assert_eq!(
+        run_luajit(&program, "global_reload"),
+        "1\n2\n3\ntrue\tfalse"
+    );
 }
 
 /// A program whose mutable-global layout differs from the live storage's
@@ -211,8 +231,15 @@ print(storage == __rock_globals, __rock_globals_fresh)
 #[test]
 fn a_program_with_a_different_global_layout_refuses_live_storage() {
     let before = emit_mir(FIXTURE).lua;
-    let after = emit_mir(&FIXTURE.replace("global COUNTER: int = 0", "global COUNTER: int = 0\nglobal EXTRA: int = 0")).lua;
-    assert!(!after.contains("]======]"), "the program must fit in the long string");
+    let after = emit_mir(&FIXTURE.replace(
+        "global COUNTER: int = 0",
+        "global COUNTER: int = 0\nglobal EXTRA: int = 0",
+    ))
+    .lua;
+    assert!(
+        !after.contains("]======]"),
+        "the program must fit in the long string"
+    );
     let program = format!(
         "{before}
 local chunk = assert(loadstring([======[{after}]======]))

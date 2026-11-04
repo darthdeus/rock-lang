@@ -82,13 +82,10 @@ fn validate_one(
             no_args(anno)
         }
         "pure" | "ignore" | "debug_impure" | "intrinsic" | "native_required"
-        | "frame_ref_source" | "identity_erasure" | "relocates"
-        | "struct_expand" | "shader_expand" | "vertex_expand" | "uniform_expand"
-        | "build_var_expand" | "embed_expand"
-        | "uniform_values" | "scene_type_key"
-        | "materialize" | "gpu_only"
-        | "scalar_abi" | "inline" | "sim" | "sim_entry"
-        | "sim_render" | "shadow_root" => {
+        | "frame_ref_source" | "identity_erasure" | "relocates" | "struct_expand"
+        | "shader_expand" | "vertex_expand" | "uniform_expand" | "build_var_expand"
+        | "embed_expand" | "uniform_values" | "scene_type_key" | "materialize" | "gpu_only"
+        | "scalar_abi" | "inline" | "sim" | "sim_entry" | "sim_render" | "shadow_root" => {
             at(anno, pos, AnnoPos::FnItem)?;
             no_args(anno)
         }
@@ -121,7 +118,10 @@ fn validate_one(
                 && anno.args[0].name.is_none()
                 && matches!(anno.args[0].value, AnnoValue::Ident(_));
             if !ok {
-                comp_error!(anno.span, "`@shader` takes exactly one stage argument: @shader(compute)");
+                comp_error!(
+                    anno.span,
+                    "`@shader` takes exactly one stage argument: @shader(compute)"
+                );
             }
             Ok(())
         }
@@ -135,7 +135,10 @@ fn validate_one(
                 && anno.args[2].name.is_none()
                 && matches!(anno.args[2].value, AnnoValue::Int(_));
             if !ok {
-                comp_error!(anno.span, "`@workgroup` takes exactly three integer sizes: @workgroup(64, 1, 1)");
+                comp_error!(
+                    anno.span,
+                    "`@workgroup` takes exactly three integer sizes: @workgroup(64, 1, 1)"
+                );
             }
             Ok(())
         }
@@ -145,7 +148,10 @@ fn validate_one(
                 && anno.args[0].name.is_none()
                 && matches!(anno.args[0].value, AnnoValue::Int(_));
             if !ok {
-                comp_error!(anno.span, "`@dispatch` takes exactly one integer dimension: @dispatch(1)");
+                comp_error!(
+                    anno.span,
+                    "`@dispatch` takes exactly one integer dimension: @dispatch(1)"
+                );
             }
             Ok(())
         }
@@ -179,7 +185,10 @@ fn validate_one(
                 && anno.args[0].name.is_none()
                 && matches!(anno.args[0].value, AnnoValue::Int(_));
             if !ok {
-                comp_error!(anno.span, "`@size` takes exactly one int argument: @size(32)");
+                comp_error!(
+                    anno.span,
+                    "`@size` takes exactly one int argument: @size(32)"
+                );
             }
             Ok(())
         }
@@ -237,7 +246,10 @@ fn validate_one(
                 && anno.args[0].name.is_none()
                 && matches!(anno.args[0].value, AnnoValue::Ident(_));
             if !ok {
-                comp_error!(anno.span, "`@storage` takes one access argument: @storage(read_write)");
+                comp_error!(
+                    anno.span,
+                    "`@storage` takes one access argument: @storage(read_write)"
+                );
             }
             Ok(())
         }
@@ -250,13 +262,24 @@ fn validate_one(
             const KEYS: &[&str] = &["phase", "owner", "stage_param"];
             for arg in &anno.args {
                 let Some(key) = arg.name.as_ref() else {
-                    comp_error!(anno.span, "`@lifecycle` arguments must be named: phase=, owner=, stage_param=");
+                    comp_error!(
+                        anno.span,
+                        "`@lifecycle` arguments must be named: phase=, owner=, stage_param="
+                    );
                 };
-                if !KEYS.contains(&key.name.as_str()) || !matches!(arg.value, AnnoValue::String(_)) {
-                    comp_error!(anno.span, "`@lifecycle` accepts string arguments phase=, owner=, optional stage_param=");
+                if !KEYS.contains(&key.name.as_str()) || !matches!(arg.value, AnnoValue::String(_))
+                {
+                    comp_error!(
+                        anno.span,
+                        "`@lifecycle` accepts string arguments phase=, owner=, optional stage_param="
+                    );
                 }
             }
-            let has = |name: &str| anno.args.iter().any(|a| a.name.as_ref().is_some_and(|n| n.name.as_str() == name));
+            let has = |name: &str| {
+                anno.args
+                    .iter()
+                    .any(|a| a.name.as_ref().is_some_and(|n| n.name.as_str() == name))
+            };
             if !has("phase") || !has("owner") {
                 comp_error!(anno.span, "`@lifecycle` requires phase= and owner=");
             }
@@ -272,8 +295,7 @@ fn validate_one(
                         "`@artifact_definition` arguments must be named: catalog=, key_param="
                     );
                 };
-                if !KEYS.contains(&key.name.as_str())
-                    || !matches!(arg.value, AnnoValue::String(_))
+                if !KEYS.contains(&key.name.as_str()) || !matches!(arg.value, AnnoValue::String(_))
                 {
                     comp_error!(
                         anno.span,
@@ -297,7 +319,10 @@ fn validate_one(
         "artifact_catalog" => {
             at(anno, pos, AnnoPos::FnItem)?;
             if anno.args.len() != 1
-                || anno.args[0].name.as_ref().is_none_or(|name| name.name.as_str() != "catalog")
+                || anno.args[0]
+                    .name
+                    .as_ref()
+                    .is_none_or(|name| name.name.as_str() != "catalog")
                 || !matches!(anno.args[0].value, AnnoValue::String(_))
             {
                 comp_error!(
@@ -360,13 +385,23 @@ fn at(anno: &Annotation, pos: AnnoPos, allowed: AnnoPos) -> Result<(), CompilerE
 
 fn no_args(anno: &Annotation) -> Result<(), CompilerError> {
     if !anno.args.is_empty() {
-        comp_error!(anno.span, "annotation `@{}` takes no arguments", anno.name.name);
+        comp_error!(
+            anno.span,
+            "annotation `@{}` takes no arguments",
+            anno.name.name
+        );
     }
     Ok(())
 }
 
 fn test_args(anno: &Annotation) -> Result<(), CompilerError> {
-    const TEST_KEYS: &[&str] = &["output", "returns", "expect_failure", "compile_error", "type_holes"];
+    const TEST_KEYS: &[&str] = &[
+        "output",
+        "returns",
+        "expect_failure",
+        "compile_error",
+        "type_holes",
+    ];
     for arg in &anno.args {
         match &arg.name {
             Some(key) if TEST_KEYS.contains(&key.name.as_str()) => {}

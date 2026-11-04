@@ -3,19 +3,29 @@
 //! object graph (shared refs copy once, cycles terminate). Node execution is the
 //! correctness oracle; `tests/js_deepcopy.rock` cross-checks against luajit.
 
-use skull_mir::mir::FuncRef;
 use crate::common::ws_with;
+use skull_mir::mir::FuncRef;
 
 fn node_available() -> bool {
-    crate::common::node().arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+    crate::common::node()
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 fn emit_closure(ws: &bone_semantic::inference::Workspace, root: &str) -> Result<String, String> {
-    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("test module");
     let mut r = None;
     for (fid, f) in ws.module(mid).functions.iter() {
         if f.name.as_str() == root {
-            r = Some(FuncRef { module: mid, func: fid });
+            r = Some(FuncRef {
+                module: mid,
+                func: fid,
+            });
         }
     }
     skull_codegen_js::emit::emit_with_closure(ws, &[(r.unwrap(), root.to_string())])
@@ -35,14 +45,21 @@ fn eval_int(defs: &str, root: &str, expect: i64) {
         skull_codegen_js::JS_STRING_RUNTIME,
         skull_codegen_js::JS_DEEPCOPY_RUNTIME,
     );
-    let out = crate::common::node().arg("-e").arg(&program).output().expect("spawn node");
+    let out = crate::common::node()
+        .arg("-e")
+        .arg(&program)
+        .output()
+        .expect("spawn node");
     assert!(
         out.status.success(),
         "node failed:\n{program}\n--- stderr ---\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
     let s = String::from_utf8_lossy(&out.stdout);
-    let got: i64 = s.trim().parse().unwrap_or_else(|_| panic!("not an int: {s:?}\n{program}"));
+    let got: i64 = s
+        .trim()
+        .parse()
+        .unwrap_or_else(|_| panic!("not an int: {s:?}\n{program}"));
     assert_eq!(got, expect, "wrong result\n{program}");
 }
 
@@ -119,11 +136,19 @@ fn copied_code_ref_env_shares_logical_slot() {
         skull_codegen_js::JS_CALL_HELPER,
         skull_codegen_js::JS_DEEPCOPY_RUNTIME,
     );
-    let out = crate::common::node().arg("-e").arg(&program).output().expect("spawn node");
+    let out = crate::common::node()
+        .arg("-e")
+        .arg(&program)
+        .output()
+        .expect("spawn node");
     assert!(
         out.status.success(),
         "node failed:\n{program}\n--- stderr ---\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "107", "{program}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "107",
+        "{program}"
+    );
 }

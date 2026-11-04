@@ -21,7 +21,10 @@ use std::collections::BTreeMap;
 use bone_core::modules::is_stdlib_module_file;
 use bone_core::workspace::BodyInference;
 
-use crate::hir::{BinOp, BindingInfo, BindingKind, Body, Expr, Function, Module, Statement, TypeCtor, TypeExpr, VarId};
+use crate::hir::{
+    BinOp, BindingInfo, BindingKind, Body, Expr, Function, Module, Statement, TypeCtor, TypeExpr,
+    VarId,
+};
 use crate::prelude::*;
 
 /// The compiler-reserved stdlib marker of a primitive that changes the
@@ -137,7 +140,6 @@ struct BodyCtx<'a> {
     fresh_locals: FxHashSet<Idx<BindingInfo>>,
 }
 
-
 impl<'a> BodyCtx<'a> {
     fn new(ws: &'a Workspace, function: &Function, body: &'a Body, bi: &'a BodyInference) -> Self {
         let generics = function
@@ -172,7 +174,9 @@ impl<'a> BodyCtx<'a> {
         let mut stale = FxHashSet::default();
         for (_, statement) in self.body.statement_arena.iter() {
             if let Statement::Let { name, value } = *statement {
-                if self.body.binding_arena[name].kind == BindingKind::Let && self.is_new_collection(value) {
+                if self.body.binding_arena[name].kind == BindingKind::Let
+                    && self.is_new_collection(value)
+                {
                     fresh.insert(name);
                 } else {
                     stale.insert(name);
@@ -304,7 +308,9 @@ impl<'a> BodyCtx<'a> {
 
     /// Map index assignment inserts; a Vec `len` write resizes.
     fn assign_write(&self, e: Idx<Expr>, effect: &mut Effect) {
-        let Expr::Assign { target, .. } = self.body.expr_arena[e] else { return };
+        let Expr::Assign { target, .. } = self.body.expr_arena[e] else {
+            return;
+        };
         let at = self.body.expr_spans[e];
         match self.body.expr_arena[target] {
             Expr::Index { base, .. } if self.is_map(base) => self.write(effect, base, at),
@@ -343,7 +349,11 @@ impl<'a> BodyCtx<'a> {
             None => Vec::new(),
         };
         let args = self.bind_args(function, &self.call_args(call).unwrap_or_default());
-        CallSite::Known(Edge { callee, generics, args })
+        CallSite::Known(Edge {
+            callee,
+            generics,
+            args,
+        })
     }
 
     /// The collections an argument points into an element of, with their
@@ -351,7 +361,9 @@ impl<'a> BodyCtx<'a> {
     /// so only a place expression or a ref-returning call can carry one.
     fn element_roots(&self, e: Idx<Expr>, out: &mut Vec<Root>) {
         match &self.body.expr_arena[e] {
-            Expr::FieldAccess { base, .. } | Expr::SafeNav { base, .. } => self.element_roots(*base, out),
+            Expr::FieldAccess { base, .. } | Expr::SafeNav { base, .. } => {
+                self.element_roots(*base, out)
+            }
             Expr::TupleIndex { tuple, .. } => self.element_roots(*tuple, out),
             Expr::As { value, .. } => self.element_roots(*value, out),
             Expr::Index { base, .. } => match self.element_key(*base) {
@@ -369,7 +381,9 @@ impl<'a> BodyCtx<'a> {
                 self.element_roots(*lhs, out);
                 self.element_roots(*rhs, out);
             }
-            Expr::Block { tail: Some(tail), .. } => self.element_roots(*tail, out),
+            Expr::Block {
+                tail: Some(tail), ..
+            } => self.element_roots(*tail, out),
             Expr::If {
                 then_branch,
                 else_branch,
@@ -433,15 +447,24 @@ fn strip_ref(ws: &Workspace, bi: Option<&BodyInference>, ty: TyId) -> Option<(Ty
 /// The element type of a Vec, or the value type of a Map.
 fn collection_element(ws: &Workspace, bi: Option<&BodyInference>, ty: TyId) -> Option<TyId> {
     match strip_ref(ws, bi, ty)? {
-        (base, TypeExpr::App {
-            ctor: TypeCtor::Array | TypeCtor::Map,
-            params,
-        }) => Some(base.with_idx(params.into_iter().last()?)),
+        (
+            base,
+            TypeExpr::App {
+                ctor: TypeCtor::Array | TypeCtor::Map,
+                params,
+            },
+        ) => Some(base.with_idx(params.into_iter().last()?)),
         _ => None,
     }
 }
 
-fn render_key(ws: &Workspace, bi: Option<&BodyInference>, generics: &[VarId], ty: TyId, out: &mut String) {
+fn render_key(
+    ws: &Workspace,
+    bi: Option<&BodyInference>,
+    generics: &[VarId],
+    ty: TyId,
+    out: &mut String,
+) {
     if out.len() > MAX_KEY_LEN {
         return;
     }
@@ -497,7 +520,10 @@ fn substitute(key: &str, generics: &[String]) -> String {
         let Some(end) = tail.find('$') else {
             return ANY_KEY.to_string();
         };
-        let binding = tail[..end].parse::<usize>().ok().and_then(|i| generics.get(i));
+        let binding = tail[..end]
+            .parse::<usize>()
+            .ok()
+            .and_then(|i| generics.get(i));
         out.push_str(binding.map_or(ANY_KEY, String::as_str));
         rest = &tail[end + 1..];
     }
@@ -523,7 +549,9 @@ fn map_edge(edge: &Edge, callee: &Effect, at: Span) -> Effect {
     }
     for (&p, &witness) in &callee.params {
         match edge.args.get(p as usize) {
-            Some(Some(Arg { fresh: Some(local), .. })) => {
+            Some(Some(Arg {
+                fresh: Some(local), ..
+            })) => {
                 mapped.locals.entry(*local).or_insert(witness);
             }
             Some(Some(arg)) => {
@@ -551,13 +579,19 @@ fn bodiless_summary(ws: &Workspace, key: FnKey) -> Effect {
     let module = ws.module(key.0);
     let function = &module.functions[key.1];
     let mut effect = Effect::default();
-    if function.annotations.iter().any(|a| a.is_builtin(RELOCATES_ANNOTATION)) {
+    if function
+        .annotations
+        .iter()
+        .any(|a| a.is_builtin(RELOCATES_ANNOTATION))
+    {
         effect.params.insert(0, function.span);
     } else if !is_stdlib_module_file(module.file.as_str())
-        || function
-            .param_decls
-            .iter()
-            .any(|p| matches!(resolve(ws, None, p.ty), Some((_, TypeExpr::Function { .. }))))
+        || function.param_decls.iter().any(|p| {
+            matches!(
+                resolve(ws, None, p.ty),
+                Some((_, TypeExpr::Function { .. }))
+            )
+        })
     {
         // Foreign code, or a stdlib primitive that calls back into a closure.
         effect.add_unknown(function.span);
@@ -608,7 +642,10 @@ struct Program<'a> {
     summaries: FxHashMap<FnKey, Effect>,
 }
 
-fn inferred_body<'a>(ws: &'a Workspace, key: FnKey) -> Option<(&'a Function, &'a Body, &'a BodyInference)> {
+fn inferred_body<'a>(
+    ws: &'a Workspace,
+    key: FnKey,
+) -> Option<(&'a Function, &'a Body, &'a BodyInference)> {
     let module = ws.module(key.0);
     let function = &module.functions[key.1];
     if function.inline_body.is_some() || function.is_extern {
@@ -632,7 +669,9 @@ impl<'a> Program<'a> {
         for module in ws.modules.iter() {
             for (fid, _) in module.functions.iter() {
                 let key = (module.id, fid);
-                let Some((function, body, bi)) = inferred_body(ws, key) else { continue };
+                let Some((function, body, bi)) = inferred_body(ws, key) else {
+                    continue;
+                };
                 if bi.ref_call_args.is_empty() {
                     continue;
                 }
@@ -655,7 +694,9 @@ impl<'a> Program<'a> {
             if program.facts.contains_key(&key) {
                 continue;
             }
-            let Some((function, body, bi)) = inferred_body(ws, key) else { continue };
+            let Some((function, body, bi)) = inferred_body(ws, key) else {
+                continue;
+            };
             let facts = BodyCtx::new(ws, function, body, bi).facts();
             pending.extend(facts.calls.iter().filter_map(|(_, site)| match site {
                 CallSite::Known(edge) => Some(edge.callee),
@@ -714,7 +755,11 @@ impl<'a> Program<'a> {
             }
             effect.locals.clear();
             self.relevance.trim(&mut effect);
-            if self.summaries.get(&key).is_some_and(|old| old.same_shape(&effect)) {
+            if self
+                .summaries
+                .get(&key)
+                .is_some_and(|old| old.same_shape(&effect))
+            {
                 continue;
             }
             self.summaries.insert(key, effect);
@@ -727,7 +772,9 @@ impl<'a> Program<'a> {
     }
 
     fn rejections(&self, key: FnKey) -> Vec<CompilerError> {
-        let (Some(facts), Some((function, body, bi))) = (self.facts.get(&key), inferred_body(self.ws, key)) else {
+        let (Some(facts), Some((function, body, bi))) =
+            (self.facts.get(&key), inferred_body(self.ws, key))
+        else {
             return Vec::new();
         };
         let ctx = BodyCtx::new(self.ws, function, body, bi);
@@ -738,7 +785,9 @@ impl<'a> Program<'a> {
             .collect();
         let mut errors = Vec::new();
         for (call, _) in &facts.calls {
-            let Some(ref_args) = bi.ref_call_args.get(call) else { continue };
+            let Some(ref_args) = bi.ref_call_args.get(call) else {
+                continue;
+            };
             for &ref_arg in ref_args {
                 let mut roots = Vec::new();
                 ctx.element_roots(ref_arg, &mut roots);
@@ -825,7 +874,10 @@ fn rejection(
     }
     for root in roots {
         let local = root.local.and_then(|local| effect.locals.get(&local));
-        let element = effect.elements.iter().find(|(key, _)| keys_may_alias(&root.key, key));
+        let element = effect
+            .elements
+            .iter()
+            .find(|(key, _)| keys_may_alias(&root.key, key));
         let (key, witness) = match (local, element) {
             (Some(&witness), _) => (root.key.as_str(), witness),
             (None, Some((key, &witness))) => (key.as_str(), witness),
@@ -850,7 +902,11 @@ fn annotation_errors(module: &Module) -> Vec<(BodyOwner, CompilerError)> {
     }
     let mut errors = Vec::new();
     for (fid, function) in module.functions.iter() {
-        for annotation in function.annotations.iter().filter(|a| a.is_builtin(RELOCATES_ANNOTATION)) {
+        for annotation in function
+            .annotations
+            .iter()
+            .filter(|a| a.is_builtin(RELOCATES_ANNOTATION))
+        {
             errors.push((
                 BodyOwner::Function(fid),
                 CompilerError::new_with_label(annotation.span, ANNOTATION_MESSAGE.to_string()),
@@ -865,7 +921,9 @@ fn annotation_errors(module: &Module) -> Vec<(BodyOwner, CompilerError)> {
 pub fn check_relocation(ws: &mut Workspace) {
     for inference in ws.inferences.iter_mut().flatten() {
         inference.errors.retain(|_, errors| {
-            errors.retain(|e| !e.message.starts_with(REJECTION_PREFIX) && e.message != ANNOTATION_MESSAGE);
+            errors.retain(|e| {
+                !e.message.starts_with(REJECTION_PREFIX) && e.message != ANNOTATION_MESSAGE
+            });
             !errors.is_empty()
         });
     }

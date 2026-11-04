@@ -16,25 +16,25 @@
 //! `gap` (return a clear error) and land in later phases. The gate is the real
 //! corpus, not this comment.
 
+use bone_core::prelude::Instant;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::OnceLock;
-use bone_core::prelude::Instant;
 
 use bone_semantic::hir::{
     BinOp, BindingInfo, BindingPattern, Body, BodyOwner, BuiltinTy, Callee, Expr, Function,
     MatchArm, Pattern, Statement, TyId, TypeCtor, TypeExpr, VariantArgs, VariantPayload,
 };
-use ustr::Ustr;
 use bone_semantic::inference::{BodyInference, Workspace};
 use bone_semantic::prelude::{BoundNext, ForIterInfo, ModuleId, Span};
 use comfy_la_arena::{Idx, IdxRange, RawIdx};
 use skull_parser::CompilerError;
+use ustr::Ustr;
 
+use crate::concrete::{ConcreteBodyPlan, ConcreteOwner, ConcretePlans, ConcreteTypeTables};
 use crate::intrinsics::ExpandKind;
 use crate::mir::*;
-use crate::concrete::{ConcreteBodyPlan, ConcreteOwner, ConcretePlans, ConcreteTypeTables};
 use crate::monoty::{MonoCtor, MonoTy, MonoTyId};
 
 type ConcreteTypeCache = RefCell<rustc_hash::FxHashMap<MonoTyId, Rc<MonoTy>>>;
@@ -42,7 +42,10 @@ type ConcreteTypeCache = RefCell<rustc_hash::FxHashMap<MonoTyId, Rc<MonoTy>>>;
 #[derive(Clone)]
 pub(crate) enum CallParamDefault {
     Scalar(Lit),
-    Vector { shape: ValueShape, literals: Vec<Lit> },
+    Vector {
+        shape: ValueShape,
+        literals: Vec<Lit>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -334,18 +337,19 @@ pub use shape::*;
 /// it from two places.
 mod abi;
 pub use abi::{
-    boundary_requires_boxed_representation, declared_boundary_class, owner_abi_plan,
-    owner_abi_plan_for_body, requires_concrete_body_plan, selected_sibling_abi_plan,
     AbiPlanKey, AbiPlanMemoStats, BackendFnAbiPlan, BackendFnAbiPlanHandle, BoundaryClass,
-    FunctionRepPlan, GlobalPlan,
-    RepArena, RepArenaStats, RepError,
-    RepId, RepLayout,
-    RepGuarantees, RepPlan, RepUse, RepUseFacts,
-    SIGNATURE_SCALAR_LANE_BUDGET, WIDE_VALUE_PAYLOAD_LEAF_CUT,
+    FunctionRepPlan, GlobalPlan, RepArena, RepArenaStats, RepError, RepGuarantees, RepId,
+    RepLayout, RepPlan, RepUse, RepUseFacts, SIGNATURE_SCALAR_LANE_BUDGET,
+    WIDE_VALUE_PAYLOAD_LEAF_CUT, boundary_requires_boxed_representation, declared_boundary_class,
+    owner_abi_plan, owner_abi_plan_for_body, requires_concrete_body_plan,
+    selected_sibling_abi_plan,
 };
 
 mod struct_plan;
-pub use struct_plan::{cdata_leaf_alias, gc_table_fields, struct_field_plan, GcTableField, StructFieldPlan, StructRegistryPlan};
+pub use struct_plan::{
+    GcTableField, StructFieldPlan, StructRegistryPlan, cdata_leaf_alias, gc_table_fields,
+    struct_field_plan,
+};
 
 mod coroutine;
 pub use coroutine::CoroutinePlan;
@@ -360,16 +364,18 @@ pub use container::{ContainerFamily, ContainerPlan, ContainerStorage, PlaceBundl
 mod control;
 mod dispatch;
 pub use dispatch::{
-    dispatched_callee_decl, dispatched_callee_decls,
     DispatchCtx, EqRoute, FormatPlan, HolePlan, StringifyRoute, StructuralRender,
+    dispatched_callee_decl, dispatched_callee_decls,
 };
 mod embed;
 mod expr;
 mod flat;
 mod flat_ref;
-use flat_ref::{FlatArgCapture, FlatCallOut, FlatRefKey, FlatStorage, FlatVariants, FlatVariantsHandle};
+use flat_ref::{
+    FlatArgCapture, FlatCallOut, FlatRefKey, FlatStorage, FlatVariants, FlatVariantsHandle,
+};
 mod format;
-pub use format::{format_tree, FmtNode, FmtPayload, FmtVariant};
+pub use format::{FmtNode, FmtPayload, FmtVariant, format_tree};
 mod interp;
 mod kinds;
 mod loops;
@@ -377,8 +383,8 @@ mod nobox;
 mod pattern;
 mod resolve;
 pub use resolve::{
-    backend_variant, backend_variant_group, backend_variant_instance, canonical_variant,
-    sibling_variant, NoServingBinding,
+    NoServingBinding, backend_variant, backend_variant_group, backend_variant_instance,
+    canonical_variant, sibling_variant,
 };
 mod stmt;
 mod storage;
@@ -836,11 +842,17 @@ impl NestedFn {
     }
 
     pub(crate) fn param_slots(&self, arena: &RepArena) -> Vec<RetSlot> {
-        self.representation.params().iter().map(|id| arena.ret_slot(*id)).collect()
+        self.representation
+            .params()
+            .iter()
+            .map(|id| arena.ret_slot(*id))
+            .collect()
     }
 
     pub(crate) fn result_shape(&self, arena: &RepArena) -> Option<ValueShape> {
-        self.representation.result().and_then(|id| arena.value_shape(id))
+        self.representation
+            .result()
+            .and_then(|id| arena.value_shape(id))
     }
 }
 
@@ -1020,9 +1032,9 @@ fn fmt_pieces(
     let mut buf = String::from("%");
     if !skip_pad_attrs {
         match spec.alignment {
-            None | Some('>') => {}       // right-align is printf's default
-            Some('<') => buf.push('-'),  // left-align
-            _ => return None,            // center etc. — no printf equivalent
+            None | Some('>') => {}      // right-align is printf's default
+            Some('<') => buf.push('-'), // left-align
+            _ => return None,           // center etc. — no printf equivalent
         }
     }
     match spec.sign {
@@ -1111,7 +1123,13 @@ enum ArithTy {
 
 /// The typed native arithmetic instruction for an `__op_*` over two scalar
 /// values of the given classes (the build-time int/float/string split, D8).
-fn arith_inst(op: &str, lt: ArithTy, rt: ArithTy, lv: Idx<Inst>, rv: Idx<Inst>) -> Result<Inst, CompilerError> {
+fn arith_inst(
+    op: &str,
+    lt: ArithTy,
+    rt: ArithTy,
+    lv: Idx<Inst>,
+    rv: Idx<Inst>,
+) -> Result<Inst, CompilerError> {
     let float = lt == ArithTy::Float || rt == ArithTy::Float;
     Ok(match op {
         "__op_add" if lt == ArithTy::Str || rt == ArithTy::Str => Inst::StringConcat(lv, rv),
@@ -1257,7 +1275,11 @@ fn hash_init_expr(body: &Body, e: Idx<Expr>, h: &mut std::collections::hash_map:
         }
         Expr::Break => tag!(21),
         Expr::Continue => tag!(22),
-        Expr::As { value, target, kind } => {
+        Expr::As {
+            value,
+            target,
+            kind,
+        } => {
             tag!(23);
             target.hash(h);
             kind.hash(h);
@@ -1273,7 +1295,11 @@ fn hash_init_expr(body: &Body, e: Idx<Expr>, h: &mut std::collections::hash_map:
             field.hash(h);
             go!(base);
         }
-        Expr::IncDec { target, decrement, postfix } => {
+        Expr::IncDec {
+            target,
+            decrement,
+            postfix,
+        } => {
             tag!(27);
             decrement.hash(h);
             postfix.hash(h);
@@ -1300,13 +1326,22 @@ fn hash_init_expr(body: &Body, e: Idx<Expr>, h: &mut std::collections::hash_map:
             go!(target);
             go!(value);
         }
-        Expr::CompoundAssign { target, op_fn, value, .. } => {
+        Expr::CompoundAssign {
+            target,
+            op_fn,
+            value,
+            ..
+        } => {
             tag!(32);
             op_fn.hash(h);
             go!(target);
             go!(value);
         }
-        Expr::If { cond, then_branch, else_branch } => {
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
             tag!(33);
             go!(cond);
             go!(then_branch);
@@ -1314,7 +1349,12 @@ fn hash_init_expr(body: &Body, e: Idx<Expr>, h: &mut std::collections::hash_map:
                 go!(x);
             }
         }
-        Expr::IfLet { value, then_branch, else_branch, .. } => {
+        Expr::IfLet {
+            value,
+            then_branch,
+            else_branch,
+            ..
+        } => {
             tag!(34);
             go!(value);
             go!(then_branch);
@@ -1366,7 +1406,12 @@ fn hash_init_expr(body: &Body, e: Idx<Expr>, h: &mut std::collections::hash_map:
                 go!(x);
             }
         }
-        Expr::SafeNavCall { receiver, method, args, .. } => {
+        Expr::SafeNavCall {
+            receiver,
+            method,
+            args,
+            ..
+        } => {
             tag!(39);
             method.hash(h);
             go!(receiver);
@@ -1374,12 +1419,18 @@ fn hash_init_expr(body: &Body, e: Idx<Expr>, h: &mut std::collections::hash_map:
                 go!(x);
             }
         }
-        Expr::SafeNavLet { receiver, body: b, .. } => {
+        Expr::SafeNavLet {
+            receiver, body: b, ..
+        } => {
             tag!(40);
             go!(receiver);
             go!(b);
         }
-        Expr::StructLiteral { name, fields, bases } => {
+        Expr::StructLiteral {
+            name,
+            fields,
+            bases,
+        } => {
             tag!(41);
             name.hash(h);
             for b in bases {
@@ -1391,7 +1442,12 @@ fn hash_init_expr(body: &Body, e: Idx<Expr>, h: &mut std::collections::hash_map:
                 go!(f.value);
             }
         }
-        Expr::EnumVariant { enum_name, variant, args, .. } => {
+        Expr::EnumVariant {
+            enum_name,
+            variant,
+            args,
+            ..
+        } => {
             tag!(42);
             enum_name.hash(h);
             variant.hash(h);
@@ -1416,7 +1472,11 @@ fn hash_init_expr(body: &Body, e: Idx<Expr>, h: &mut std::collections::hash_map:
     }
 }
 
-fn hash_init_stmt(body: &Body, s: Idx<Statement>, h: &mut std::collections::hash_map::DefaultHasher) {
+fn hash_init_stmt(
+    body: &Body,
+    s: Idx<Statement>,
+    h: &mut std::collections::hash_map::DefaultHasher,
+) {
     use bone_semantic::hir::Statement;
     use std::hash::Hash;
     macro_rules! go {
@@ -1445,9 +1505,10 @@ fn hash_init_stmt(body: &Body, s: Idx<Statement>, h: &mut std::collections::hash
             go!(value);
             go!(b);
         }
-        Statement::Return(None) | Statement::Break | Statement::Continue | Statement::Comment(_) => {
-            (b'x').hash(h)
-        }
+        Statement::Return(None)
+        | Statement::Break
+        | Statement::Continue
+        | Statement::Comment(_) => (b'x').hash(h),
     }
 }
 
@@ -1521,14 +1582,17 @@ fn lower_instance_with_plan_inner(
         )?;
         for (expr, _) in inf.expr_types.iter() {
             if plan.types.expr_type(expr).is_none() && !plan.types.is_untyped_expr(expr) {
-                return Err(gap(format!("concrete plan is missing expression type {expr:?}")));
+                return Err(gap(format!(
+                    "concrete plan is missing expression type {expr:?}"
+                )));
             }
         }
         for (binding, _) in inf.binding_types.iter() {
-            if plan.types.binding_type(binding).is_none()
-                && !plan.types.is_untyped_binding(binding)
+            if plan.types.binding_type(binding).is_none() && !plan.types.is_untyped_binding(binding)
             {
-                return Err(gap(format!("concrete plan is missing binding type {binding:?}")));
+                return Err(gap(format!(
+                    "concrete plan is missing binding type {binding:?}"
+                )));
             }
         }
     }
@@ -1690,10 +1754,13 @@ pub fn lower_definition_factory(
     concrete_plans: &ConcretePlans,
     factory: &crate::instance::Instance,
 ) -> Result<MirFunc, CompilerError> {
-    let concrete_plan = concrete_plans.get(factory)
+    let concrete_plan = concrete_plans
+        .get(factory)
         .ok_or_else(|| gap("definition factory has no concrete body plan"))?;
     let module = ws.module(factory.func.module);
-    let body = module.bodies.get(&BodyOwner::Function(factory.func.func))
+    let body = module
+        .bodies
+        .get(&BodyOwner::Function(factory.func.func))
         .ok_or_else(|| gap("definition factory has no body"))?;
     let abi = owner_abi_plan(ws, scx, concrete_plans, factory)?;
     let mut f = MirFunc::new(Ustr::from("__rock_definition_materialize"));
@@ -1738,7 +1805,14 @@ pub fn lower_global_with_call_context(
         return Err(gap("concrete global plan has an invalid global index"));
     }
     let gid = Idx::from_raw(RawIdx::from_u32(*index));
-    validate_always_plan(ws, scx, *module, BodyOwner::Global(gid), plan, concrete_plans)?;
+    validate_always_plan(
+        ws,
+        scx,
+        *module,
+        BodyOwner::Global(gid),
+        plan,
+        concrete_plans,
+    )?;
     lower_global_inner(ws, scx, call_scx, *module, gid, name, plan, concrete_plans)
 }
 
@@ -1772,7 +1846,16 @@ fn lower_global_inner(
         },
     ));
     f.rep_arena = Some(scx.rep_arena());
-    let mut b = Builder::generated(ws, scx, call_scx, concrete_plan, concrete_plans, body, inf, f);
+    let mut b = Builder::generated(
+        ws,
+        scx,
+        call_scx,
+        concrete_plan,
+        concrete_plans,
+        body,
+        inf,
+        f,
+    );
     let global_plan = GlobalPlan::for_concrete_result(
         ws,
         scx,
@@ -1789,8 +1872,12 @@ fn lower_global_inner(
     // A `nobox` global is category-2 storage: its concrete plan owns the layout,
     // so the initializer RETURNS leaves and `mir_emit` binds one Lua global per
     // leaf. Without this the body packs a box the verifier then rejects.
-    b.ret_rep = (!scx.values_first_class)
-        .then(|| b.f.global_plan.as_ref().expect("global plan").representation());
+    b.ret_rep = (!scx.values_first_class).then(|| {
+        b.f.global_plan
+            .as_ref()
+            .expect("global plan")
+            .representation()
+    });
     b.lower_root()?;
     let stats = b.lower_attribution.into_inner();
     Ok(Some(finish_lower_attribution(b.f, stats)))
@@ -1809,10 +1896,19 @@ pub fn lower_decorator_with_plans(
     };
     let module_ref = ws.module(*module);
     if *index as usize >= module_ref.decorators.len() {
-        return Err(gap("concrete decorator plan has an invalid decorator index"));
+        return Err(gap(
+            "concrete decorator plan has an invalid decorator index",
+        ));
     }
     let did = Idx::from_raw(RawIdx::from_u32(*index));
-    validate_always_plan(ws, scx, *module, BodyOwner::Decorator(did), plan, concrete_plans)?;
+    validate_always_plan(
+        ws,
+        scx,
+        *module,
+        BodyOwner::Decorator(did),
+        plan,
+        concrete_plans,
+    )?;
     lower_decorator_inner(ws, scx, *module, did, name, plan, concrete_plans)
 }
 
@@ -1861,9 +1957,7 @@ fn validate_always_plan(
         }
     }
     for (binding, _) in inf.binding_types.iter() {
-        if plan.types.binding_type(binding).is_none()
-            && !plan.types.is_untyped_binding(binding)
-        {
+        if plan.types.binding_type(binding).is_none() && !plan.types.is_untyped_binding(binding) {
             return Err(gap(format!(
                 "concrete always-emitted plan is missing binding type {binding:?}"
             )));
@@ -1897,7 +1991,8 @@ fn validate_concrete_callee_plans(
 ) -> Result<(), CompilerError> {
     for (site, owner) in &plan.callees {
         let needs_plan = requires_concrete_body_plan(ws, owner)
-            && crate::monoty::too_deep_to_instantiate(owner.arg_types(scx.interner()).iter()).is_none();
+            && crate::monoty::too_deep_to_instantiate(owner.arg_types(scx.interner()).iter())
+                .is_none();
         if !needs_plan {
             continue;
         }
@@ -2007,7 +2102,9 @@ fn validate_concrete_type_tables(
         }
     }
     for (expr, node) in body.expr_arena.iter() {
-        let Expr::StructLiteral { name, .. } = node else { continue };
+        let Expr::StructLiteral { name, .. } = node else {
+            continue;
+        };
         let fields = tables.struct_field_types.get(expr).ok_or_else(|| {
             gap(format!(
                 "{label} is missing concrete fields for struct literal `{name}` ({expr:?})"
@@ -2064,10 +2161,11 @@ fn lower_decorator_inner(
         .boxed_function(scx.target(), concrete_plan.signature.params.len());
     f.abi_representation = Some(representation.clone());
     let param_reps = representation.params().to_vec();
-    let ret_rep = concrete_plan
-        .signature
-        .result
-        .map(|_| representation.result().expect("boxed decorator result plan"));
+    let ret_rep = concrete_plan.signature.result.map(|_| {
+        representation
+            .result()
+            .expect("boxed decorator result plan")
+    });
     let mut b = Builder::generated(ws, scx, scx, concrete_plan, concrete_plans, body, inf, f);
     b.param_reps = param_reps;
     b.ret_rep = ret_rep;
@@ -2383,11 +2481,13 @@ impl Builder<'_> {
     }
 
     fn result_shape(&self) -> Option<ValueShape> {
-        self.ret_rep.and_then(|id| self.scx.rep_arena().value_shape(id))
+        self.ret_rep
+            .and_then(|id| self.scx.rep_arena().value_shape(id))
     }
 
     fn result_tuple(&self) -> Option<TupleRetShape> {
-        self.ret_rep.and_then(|id| self.scx.rep_arena().tuple_shape(id))
+        self.ret_rep
+            .and_then(|id| self.scx.rep_arena().tuple_shape(id))
     }
 
     /// [`gap`] anchored at the construct currently being lowered. Use wherever a
@@ -2395,10 +2495,9 @@ impl Builder<'_> {
     /// reader with a whole project to search.
     fn gap_here(&self, msg: impl std::fmt::Display) -> CompilerError {
         match self.cur_span {
-            Some(span) => CompilerError::new_with_label(
-                span,
-                format!("skull-mir: lowering gap: {msg}"),
-            ),
+            Some(span) => {
+                CompilerError::new_with_label(span, format!("skull-mir: lowering gap: {msg}"))
+            }
             None => gap(msg),
         }
     }
@@ -2514,7 +2613,9 @@ impl Builder<'_> {
             .unwrap_or_default();
         let mut stats = self.lower_attribution.borrow_mut();
         stats.concrete_mono_shared_handle_requests += 1;
-        let nodes = interner_cold.then(|| mono_ty_node_count(&ty)).unwrap_or_default();
+        let nodes = interner_cold
+            .then(|| mono_ty_node_count(&ty))
+            .unwrap_or_default();
         cache.borrow_mut().insert(id, Rc::clone(&ty));
         stats.record_concrete_mono_derivation(consumer, nodes, 0, lookup_ns, cache_lookup_ns, 0);
         ty
@@ -2528,11 +2629,7 @@ impl Builder<'_> {
         let ty = self.concrete_mono_view(id, consumer);
         let (owned, clone_self_ns) = clone_mono_ty_timed(&ty, self.lower_timing_enabled);
         let mut stats = self.lower_attribution.borrow_mut();
-        stats.record_concrete_mono_owned_escape(
-            consumer,
-            mono_ty_node_count(&ty),
-            clone_self_ns,
-        );
+        stats.record_concrete_mono_owned_escape(consumer, mono_ty_node_count(&ty), clone_self_ns);
         owned
     }
 
@@ -2591,11 +2688,7 @@ impl Builder<'_> {
     /// witness and synthesized routes emit calls that belong to the enclosing
     /// expression but are NOT its own call, and a `for` head carries several at
     /// one expression -- so the operation has to be scoped, not global.
-    fn with_site_op<T>(
-        &mut self,
-        op: crate::site::SiteOp,
-        f: impl FnOnce(&mut Self) -> T,
-    ) -> T {
+    fn with_site_op<T>(&mut self, op: crate::site::SiteOp, f: impl FnOnce(&mut Self) -> T) -> T {
         let outer = std::mem::replace(&mut self.cur_op, op);
         let out = f(self);
         self.cur_op = outer;
@@ -2628,7 +2721,10 @@ impl Builder<'_> {
         params: &[Idx<BindingInfo>],
     ) -> Result<(), CompilerError> {
         for &pb in params {
-            if self.scx.values_first_class || self.binding_is_ref(pb) || !self.binding_ref_borrowed(pb) {
+            if self.scx.values_first_class
+                || self.binding_is_ref(pb)
+                || !self.binding_ref_borrowed(pb)
+            {
                 continue;
             }
             let Some(ty) = self.binding_ty(pb).and_then(|ty| self.concrete_ty_id(ty)) else {
@@ -2643,19 +2739,27 @@ impl Builder<'_> {
                 continue;
             }
             if let Some((cells, shape)) = self.group_binds.remove(&raw(pb)) {
-                let leaves = cells.iter().map(|cell| self.emit_cur(Inst::Load(*cell))).collect::<Vec<_>>();
+                let leaves = cells
+                    .iter()
+                    .map(|cell| self.emit_cur(Inst::Load(*cell)))
+                    .collect::<Vec<_>>();
                 let repr = self.rebuild_from_leaves(&shape, &leaves, &mut 0);
                 self.mark_borrowed_value_children(&shape, &repr, Some(&ty))?;
                 let value = self.with_value_lending(false, |s| s.pack(repr))?;
                 let cell = self.new_binding_cell(
-                    pb, self.body.binding_arena[pb].name, self.binding_ty(pb), Ustr::from(""),
+                    pb,
+                    self.body.binding_arena[pb].name,
+                    self.binding_ty(pb),
+                    Ustr::from(""),
                 );
                 self.emit_cur(Inst::Store { cell, value });
                 self.binds.insert(raw(pb), cell);
                 self.owned_value_binds.insert(raw(pb));
                 continue;
             }
-            let Some(&cell) = self.binds.get(&raw(pb)) else { continue };
+            let Some(&cell) = self.binds.get(&raw(pb)) else {
+                continue;
+            };
             let v = self.emit_cur(Inst::Load(cell));
             let copy = self.copied_value_box(&ty, v)?;
             self.emit_cur(Inst::Store { cell, value: copy });
@@ -2688,27 +2792,30 @@ impl Builder<'_> {
         }
         let cells = match slot {
             RetSlot::Leaves(shape) => {
-                let owner = self
-                    .binding_ty(pb)
-                    .and_then(|ty| self.concrete_ty_id(ty));
-                self.new_flat_enum_cells(pb, name, shape, owner.as_deref())?.unwrap_or_else(|| {
-                    (0..slot.slot_count())
-                        .map(|li| self.new_binding_cell(
-                            pb,
-                            Ustr::from(format!("{name}__{li}").as_str()),
-                            None,
-                            Ustr::from(li.to_string().as_str()),
-                        ))
-                        .collect()
-                })
+                let owner = self.binding_ty(pb).and_then(|ty| self.concrete_ty_id(ty));
+                self.new_flat_enum_cells(pb, name, shape, owner.as_deref())?
+                    .unwrap_or_else(|| {
+                        (0..slot.slot_count())
+                            .map(|li| {
+                                self.new_binding_cell(
+                                    pb,
+                                    Ustr::from(format!("{name}__{li}").as_str()),
+                                    None,
+                                    Ustr::from(li.to_string().as_str()),
+                                )
+                            })
+                            .collect()
+                    })
             }
             RetSlot::Nested(_) | RetSlot::Opaque => (0..slot.slot_count())
-                .map(|li| self.new_binding_cell(
-                    pb,
-                    Ustr::from(format!("{name}__{li}").as_str()),
-                    None,
-                    Ustr::from(li.to_string().as_str()),
-                ))
+                .map(|li| {
+                    self.new_binding_cell(
+                        pb,
+                        Ustr::from(format!("{name}__{li}").as_str()),
+                        None,
+                        Ustr::from(li.to_string().as_str()),
+                    )
+                })
                 .collect(),
         };
         if cells.len() != slot.slot_count() {
@@ -2747,10 +2854,16 @@ impl Builder<'_> {
             Expr::Bool(v) => Lit::Bool(v),
             Expr::String(v) => Lit::Str(v),
             _ => {
-                let TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } = static_ty(self.ws, ty?)? else {
+                let TypeExpr::App {
+                    ctor: TypeCtor::Nominal(name),
+                    ..
+                } = static_ty(self.ws, ty?)?
+                else {
                     return None;
                 };
-                if name.as_str() != "Vec3" { return None; }
+                if name.as_str() != "Vec3" {
+                    return None;
+                }
                 return self.constant_vector_default(body, inf, expr);
             }
         };
@@ -2774,13 +2887,26 @@ impl Builder<'_> {
         };
         let mut bindings = HashMap::new();
         let (body, expr) = match body.expr_arena[expr] {
-            Expr::Call { callee: Callee::Unresolved { name, .. }, args, .. } => {
+            Expr::Call {
+                callee: Callee::Unresolved { name, .. },
+                args,
+                ..
+            } => {
                 let (module, func) = resolve_call_fn(self.ws, inf?, expr, name)?;
-                let target = backend_variant(self.ws, name, FuncRef { module, func }, self.call_scx.target).ok()?;
+                let target = backend_variant(
+                    self.ws,
+                    name,
+                    FuncRef { module, func },
+                    self.call_scx.target,
+                )
+                .ok()?;
                 let module = self.ws.module(target.module);
                 let decl = &module.functions[target.func];
                 let ctor = module.bodies.get(&BodyOwner::Function(target.func))?;
-                if decl.is_variadic || decl.is_coroutine || decl.is_extern || decl.inline_body.is_some()
+                if decl.is_variadic
+                    || decl.is_coroutine
+                    || decl.is_extern
+                    || decl.inline_body.is_some()
                     || !decl.generics.is_empty()
                     || args.len() != decl.param_decls.len()
                     || ctor.param_bindings.len() != decl.param_decls.len()
@@ -2790,19 +2916,30 @@ impl Builder<'_> {
                 let params: Vec<_> = ctor.param_bindings.into_iter().collect();
                 let mut next_pos = 0;
                 for arg in args {
-                    if body.spread_args.contains(&arg) { return None; }
+                    if body.spread_args.contains(&arg) {
+                        return None;
+                    }
                     let index = match body.arg_names.get(&arg) {
                         Some(name) => decl.param_decls.iter().position(|pd| pd.name == *name)?,
-                        None => { let i = next_pos; next_pos += 1; i }
+                        None => {
+                            let i = next_pos;
+                            next_pos += 1;
+                            i
+                        }
                     };
                     let binding = *params.get(index)?;
-                    if bindings.insert(binding, number(body, arg)?).is_some() { return None; }
+                    if bindings.insert(binding, number(body, arg)?).is_some() {
+                        return None;
+                    }
                 }
-                if bindings.len() != params.len() { return None; }
+                if bindings.len() != params.len() {
+                    return None;
+                }
                 let root = ctor.root?;
                 let returned = match ctor.expr_arena[root] {
                     Expr::Block { statements, tail } => {
-                        let statements: Vec<_> = statements.into_iter()
+                        let statements: Vec<_> = statements
+                            .into_iter()
                             .filter(|&s| !matches!(ctor.statement_arena[s], Statement::Comment(_)))
                             .take(2)
                             .collect();
@@ -2822,13 +2959,25 @@ impl Builder<'_> {
             }
             _ => (body, expr),
         };
-        let Expr::StructLiteral { name, fields, bases } = body.expr_arena[expr] else {
+        let Expr::StructLiteral {
+            name,
+            fields,
+            bases,
+        } = body.expr_arena[expr]
+        else {
             return None;
         };
-        if name.as_str() != "Vec3" || !bases.is_empty() { return None; }
+        if name.as_str() != "Vec3" || !bases.is_empty() {
+            return None;
+        }
         let shape = value_shape(self.ws, name)?;
-        if shape.nullable || shape.fields.len() != 3 || fields.len() != shape.fields.len()
-            || shape.fields.iter().any(|(_, field)| !matches!(field, FieldShape::Prim))
+        if shape.nullable
+            || shape.fields.len() != 3
+            || fields.len() != shape.fields.len()
+            || shape
+                .fields
+                .iter()
+                .any(|(_, field)| !matches!(field, FieldShape::Prim))
         {
             return None;
         }
@@ -2839,9 +2988,15 @@ impl Builder<'_> {
                 Expr::Var(binding) => bindings.get(&binding)?.clone(),
                 _ => number(body, field.value)?,
             };
-            if values.insert(field.name, value).is_some() { return None; }
+            if values.insert(field.name, value).is_some() {
+                return None;
+            }
         }
-        let literals = shape.fields.iter().map(|(name, _)| values.remove(name)).collect::<Option<_>>()?;
+        let literals = shape
+            .fields
+            .iter()
+            .map(|(name, _)| values.remove(name))
+            .collect::<Option<_>>()?;
         Some(CallParamDefault::Vector { shape, literals })
     }
 
@@ -2854,20 +3009,31 @@ impl Builder<'_> {
     pub(crate) fn call_param_defaults(&self, func: FuncRef) -> Vec<Option<CallParamDefault>> {
         let module = self.ws.module(func.module);
         let decl = &module.functions[func.func];
-        let Some(body) = module.bodies.get(&BodyOwner::Function(func.func)) else { return Vec::new() };
-        if decl.is_variadic { return Vec::new(); }
-        let inf = self.ws.inference(func.module)
+        let Some(body) = module.bodies.get(&BodyOwner::Function(func.func)) else {
+            return Vec::new();
+        };
+        if decl.is_variadic {
+            return Vec::new();
+        }
+        let inf = self
+            .ws
+            .inference(func.module)
             .and_then(|ir| ir.per_fn.get(&BodyOwner::Function(func.func)));
         // A foreign wrapper fills only literal defaults and has no Rock
         // prologue to test the marker (`default_fill_prologue`).
         let rock_body = decl.inline_body.is_none() && !decl.is_extern;
-        body.param_defaults.iter().enumerate().map(|(i, expr)| {
-            let ty = decl.param_decls.get(i)?.ty;
-            self.constant_param_default(body, inf, (*expr)?, Some(ty)).or_else(|| {
-                (rock_body && param_null_overrides_default(self.ws, body, i, ty))
-                    .then_some(CallParamDefault::Scalar(Lit::Omitted))
+        body.param_defaults
+            .iter()
+            .enumerate()
+            .map(|(i, expr)| {
+                let ty = decl.param_decls.get(i)?.ty;
+                self.constant_param_default(body, inf, (*expr)?, Some(ty))
+                    .or_else(|| {
+                        (rock_body && param_null_overrides_default(self.ws, body, i, ty))
+                            .then_some(CallParamDefault::Scalar(Lit::Omitted))
+                    })
             })
-        }).collect()
+            .collect()
     }
 
     pub(crate) fn emit_param_default(
@@ -2881,20 +3047,29 @@ impl Builder<'_> {
             }
             // A scalarized nullable value tells omitted from null by its
             // presence leaf, so an omitted one is nil in every leaf.
-            CallParamDefault::Scalar(Lit::Omitted) => {
-                Ok((0..slot.slot_count()).map(|_| self.emit_cur(Inst::Const(Lit::Nil))).collect())
-            }
+            CallParamDefault::Scalar(Lit::Omitted) => Ok((0..slot.slot_count())
+                .map(|_| self.emit_cur(Inst::Const(Lit::Nil)))
+                .collect()),
             CallParamDefault::Vector { shape, literals } => {
-                let leaves: Vec<_> = literals.iter()
-                    .map(|lit| self.emit_cur(Inst::Const(lit.clone()))).collect();
+                let leaves: Vec<_> = literals
+                    .iter()
+                    .map(|lit| self.emit_cur(Inst::Const(lit.clone())))
+                    .collect();
                 match slot {
                     RetSlot::Leaves(expected) if expected == shape => Ok(leaves),
                     RetSlot::Opaque => {
                         let parts = leaves.into_iter().map(ValueRepr::Scalar).collect();
-                        let value = self.pack(ValueRepr::Group { name: shape.name, parts, present: None })?;
+                        let value = self.pack(ValueRepr::Group {
+                            name: shape.name,
+                            parts,
+                            present: None,
+                        })?;
                         Ok(vec![value])
                     }
-                    _ => Err(self.gap_here("constant vector default does not match its parameter ABI")),
+                    _ => {
+                        Err(self
+                            .gap_here("constant vector default does not match its parameter ABI"))
+                    }
                 }
             }
             _ => Err(self.gap_here("constant scalar default does not match its parameter ABI")),
@@ -2913,14 +3088,24 @@ impl Builder<'_> {
         param_shapes: Option<&[RetSlot]>,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         let defaults = self.call_param_defaults(func);
-        let slots_of = |i: usize| param_shapes.and_then(|s| s.get(i)).map_or(1, |s| s.slot_count());
-        let last = (provided..defaults.len()).rev().find(|&i| defaults[i].is_some());
-        let Some(last) = last else { return Ok(Vec::new()) };
+        let slots_of = |i: usize| {
+            param_shapes
+                .and_then(|s| s.get(i))
+                .map_or(1, |s| s.slot_count())
+        };
+        let last = (provided..defaults.len())
+            .rev()
+            .find(|&i| defaults[i].is_some());
+        let Some(last) = last else {
+            return Ok(Vec::new());
+        };
         let mut out = Vec::new();
         for i in provided..=last {
             match &defaults[i] {
                 Some(default) => {
-                    let slot = param_shapes.and_then(|shapes| shapes.get(i)).unwrap_or(&RetSlot::Opaque);
+                    let slot = param_shapes
+                        .and_then(|shapes| shapes.get(i))
+                        .unwrap_or(&RetSlot::Opaque);
                     out.extend(self.emit_param_default(default, slot)?);
                 }
                 _ => {
@@ -2949,8 +3134,13 @@ impl Builder<'_> {
         for (i, def) in defaults.iter().enumerate() {
             let Some(def) = def else { continue };
             let Some(&pb) = pbs.get(i) else { continue };
-            let ty = self.body.binding_arena[pb].declared_ty.or_else(|| self.binding_ty(pb));
-            if self.constant_param_default(self.body, self.inf, *def, ty).is_some() {
+            let ty = self.body.binding_arena[pb]
+                .declared_ty
+                .or_else(|| self.binding_ty(pb));
+            if self
+                .constant_param_default(self.body, self.inf, *def, ty)
+                .is_some()
+            {
                 self.f.param_default_materialized.insert(i);
             }
             // A scalarized value param's omitted arg arrives as N nils — guard on
@@ -2965,7 +3155,14 @@ impl Builder<'_> {
                 self.f.param_default_guards.insert(is_nil, i);
                 let then_bb = self.f.new_block();
                 let join = self.f.new_block();
-                self.f.set_term(self.cur, Term::Branch { cond: is_nil, then_bb, else_bb: join });
+                self.f.set_term(
+                    self.cur,
+                    Term::Branch {
+                        cond: is_nil,
+                        then_bb,
+                        else_bb: join,
+                    },
+                );
                 self.cur = then_bb;
                 let r = self.lower_expr_repr(*def)?;
                 let leaves = self.repr_to_storage_leaves(&r, &shape, "struct default")?;
@@ -2979,7 +3176,9 @@ impl Builder<'_> {
                 self.cur = join;
                 continue;
             }
-            let Some(&cell) = self.binds.get(&raw(pb)) else { continue };
+            let Some(&cell) = self.binds.get(&raw(pb)) else {
+                continue;
+            };
             if matches!(self.body.expr_arena[*def], Expr::Null) {
                 continue;
             }
@@ -2994,7 +3193,14 @@ impl Builder<'_> {
             self.f.param_default_guards.insert(is_omitted, i);
             let then_bb = self.f.new_block();
             let join = self.f.new_block();
-            self.f.set_term(self.cur, Term::Branch { cond: is_omitted, then_bb, else_bb: join });
+            self.f.set_term(
+                self.cur,
+                Term::Branch {
+                    cond: is_omitted,
+                    then_bb,
+                    else_bb: join,
+                },
+            );
             self.cur = then_bb;
             let expected = self.binding_ty(pb).and_then(|ty| self.concrete_ty_id(ty));
             let dv = self.lower_expr_with_expected(*def, expected.as_deref())?;
@@ -3059,19 +3265,23 @@ impl Builder<'_> {
     /// when the body's end is reachable, so `while true` bodies never trip it.
     fn reject_nonunit_coroutine_falloff(&self) -> Result<(), CompilerError> {
         let plan = self.concrete_plan;
-        let Some(result_id) = plan.signature.result else { return Ok(()) };
+        let Some(result_id) = plan.signature.result else {
+            return Ok(());
+        };
         let result = self.concrete_mono_view(result_id, ConcreteMonoConsumer::ReturnValidation);
         let crate::monoty::MonoTy::App {
             ctor: crate::monoty::MonoCtor::Nominal(name),
             params,
         } = &*result
         else {
-            return Ok(())
+            return Ok(());
         };
         if !bone_semantic::prelude::is_intrinsic_key(*name, "Coroutine") {
-            return Ok(())
+            return Ok(());
         }
-        let Some(result) = params.get(1) else { return Ok(()) };
+        let Some(result) = params.get(1) else {
+            return Ok(());
+        };
         let nonunit_concrete = match result {
             crate::monoty::MonoTy::Unit | crate::monoty::MonoTy::Nullable(_) => false,
             crate::monoty::MonoTy::Tuple(parts) => !parts.is_empty(),
@@ -3129,7 +3339,10 @@ impl Builder<'_> {
         self.with_value_lending(true, |s| s.return_leaves_lent(opt))
     }
 
-    fn return_leaves_lent(&mut self, opt: Option<Idx<Expr>>) -> Result<Vec<Idx<Inst>>, CompilerError> {
+    fn return_leaves_lent(
+        &mut self,
+        opt: Option<Idx<Expr>>,
+    ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         let Some(e) = opt else { return Ok(vec![]) };
         if self.ret_rep.is_none() {
             let gpu_context = self.site_owner.as_ref().is_some_and(|owner| {
@@ -3146,19 +3359,17 @@ impl Builder<'_> {
             }
             return Ok(vec![]);
         }
-        if self
-            .concrete_plan
-            .signature
-            .result
-            .is_some_and(|result| {
-                matches!(
-                    self.concrete_mono_view(result, ConcreteMonoConsumer::ReturnLowering)
-                        .peel_nullable()
-                        .0,
-                    MonoTy::App { ctor: MonoCtor::Ref, .. }
-                )
-            })
-        {
+        if self.concrete_plan.signature.result.is_some_and(|result| {
+            matches!(
+                self.concrete_mono_view(result, ConcreteMonoConsumer::ReturnLowering)
+                    .peel_nullable()
+                    .0,
+                MonoTy::App {
+                    ctor: MonoCtor::Ref,
+                    ..
+                }
+            )
+        }) {
             if self.flat_ret.is_some() {
                 return self.flat_return_leaves(e);
             }
@@ -3166,9 +3377,11 @@ impl Builder<'_> {
         }
         if let Some(shape) = self.result_shape() {
             let is_phantom = match &self.body.expr_arena[e] {
-                Expr::Call { callee: Callee::Unresolved { name, .. }, args, .. } => {
-                    name.as_str() == "phantom" && args.clone().into_iter().next().is_none()
-                }
+                Expr::Call {
+                    callee: Callee::Unresolved { name, .. },
+                    args,
+                    ..
+                } => name.as_str() == "phantom" && args.clone().into_iter().next().is_none(),
                 _ => false,
             };
             if is_phantom {
@@ -3179,11 +3392,21 @@ impl Builder<'_> {
             }
             let r = self.lower_expr_repr(e)?;
             // A terminating block returns a placeholder, not an aggregate to project.
-            if !self.is_open() { return Ok(Vec::new()); }
-            if self.scx.rep_arena().value_shape(r.representation()).is_none() {
+            if !self.is_open() {
+                return Ok(Vec::new());
+            }
+            if self
+                .scx
+                .rep_arena()
+                .value_shape(r.representation())
+                .is_none()
+            {
                 return self.opaque_boundary_leaves(&r, &shape, "return boundary");
             }
-            let r = ValueBundle::new(r.representation(), self.owned_value_children(r.into_value())?);
+            let r = ValueBundle::new(
+                r.representation(),
+                self.owned_value_children(r.into_value())?,
+            );
             return self.repr_to_leaves_bundle_after_presence(&r, &shape);
         }
         if let Some(shape) = self.result_tuple() {
@@ -3192,7 +3415,9 @@ impl Builder<'_> {
             }
             if shape.splats() {
                 let r = self.lower_expr_repr(e)?.into_value();
-                if !self.is_open() { return Ok(Vec::new()); }
+                if !self.is_open() {
+                    return Ok(Vec::new());
+                }
                 let r = self.owned_value_children(r)?;
                 return self.tuple_repr_to_slots(r, &shape);
             }
@@ -3200,16 +3425,19 @@ impl Builder<'_> {
                 return self.lower_tuple_operands(e, elems);
             }
             let v = self.lower_expr(e)?;
-            if !self.is_open() { return Ok(Vec::new()); }
+            if !self.is_open() {
+                return Ok(Vec::new());
+            }
             return Ok(self.tuple_return_operands(v, shape.slots.len()));
         }
-        let expected = self
-            .concrete_plan
-            .signature
-            .result
-            .map(|result| self.concrete_mono_view(result, ConcreteMonoConsumer::ReturnLowering));
+        let expected =
+            self.concrete_plan.signature.result.map(|result| {
+                self.concrete_mono_view(result, ConcreteMonoConsumer::ReturnLowering)
+            });
         let v = self.lower_expr_with_expected(e, expected.as_deref())?;
-        if !self.is_open() { return Ok(Vec::new()); }
+        if !self.is_open() {
+            return Ok(Vec::new());
+        }
         let v = match self.concrete_plan.signature.result {
             Some(result) => {
                 let result = self.concrete_mono_view(result, ConcreteMonoConsumer::ReturnLowering);
@@ -3245,7 +3473,9 @@ impl Builder<'_> {
         shape: &TupleRetShape,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         let r = self.lower_expr_repr(e)?.into_value();
-        if !self.is_open() { return Ok(Vec::new()); }
+        if !self.is_open() {
+            return Ok(Vec::new());
+        }
         if let ValueRepr::Scalar(v) = &r {
             if !matches!(self.f.insts[*v], Inst::Const(Lit::Nil)) {
                 return Err(gap(
@@ -3298,7 +3528,12 @@ impl Builder<'_> {
         }
         let present = match (shape.nullable, &r) {
             (false, _) => None,
-            (true, ValueRepr::Tuple { present: Some(p), .. }) => Some(*p),
+            (
+                true,
+                ValueRepr::Tuple {
+                    present: Some(p), ..
+                },
+            ) => Some(*p),
             (true, _) => Some(self.emit_cur(Inst::Const(Lit::Bool(true)))),
         };
         let parts: Vec<ValueRepr> = match r {
@@ -3321,9 +3556,7 @@ impl Builder<'_> {
                 // the slot is dead anyway because the tuple's own flag guards it.
                 // The nullable spread already branches on nil, so borrow it and
                 // drop the presence leaf.
-                RetSlot::Leaves(vs)
-                    if !vs.nullable && !matches!(part, ValueRepr::Group { .. }) =>
-                {
+                RetSlot::Leaves(vs) if !vs.nullable && !matches!(part, ValueRepr::Group { .. }) => {
                     let mut nullable = vs.clone();
                     nullable.nullable = true;
                     let leaves = self.repr_to_leaves_shape(&part, &nullable)?;
@@ -3392,7 +3625,8 @@ impl Builder<'_> {
         a: Idx<Expr>,
         lend: bool,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
-        if lend && !slot.splats()
+        if lend
+            && !slot.splats()
             && let Expr::Var(b) = self.body.expr_arena[a]
             && self.boxed_value_local(b, a).is_some()
             && self.binding_value_is_shareable(b)
@@ -3444,7 +3678,6 @@ impl Builder<'_> {
         }
         self.arg_values_for_slot_lending(slot, arg, lend)
     }
-
 }
 
 /// EXPLICIT_NULL_DEFAULT: whether parameter `index` of `body`, declared `ty`,
@@ -3454,7 +3687,9 @@ impl Builder<'_> {
 /// default fill tests for that marker instead of nil. Any other omitted
 /// argument is nil, because nil and the default agree there.
 pub fn param_null_overrides_default(ws: &Workspace, body: &Body, index: usize, ty: TyId) -> bool {
-    let Some(Some(default)) = body.param_defaults.get(index) else { return false };
+    let Some(Some(default)) = body.param_defaults.get(index) else {
+        return false;
+    };
     if matches!(body.expr_arena[*default], Expr::Null) {
         return false;
     }
@@ -3468,7 +3703,9 @@ pub fn param_null_overrides_default(ws: &Workspace, body: &Body, index: usize, t
 /// [`param_null_overrides_default`] for a declared function's parameter.
 pub fn function_param_null_overrides_default(ws: &Workspace, func: FuncRef, index: usize) -> bool {
     let module = ws.module(func.module);
-    let Some(body) = module.bodies.get(&BodyOwner::Function(func.func)) else { return false };
+    let Some(body) = module.bodies.get(&BodyOwner::Function(func.func)) else {
+        return false;
+    };
     module.functions[func.func]
         .param_decls
         .get(index)
@@ -3595,7 +3832,11 @@ fn map_is_value_struct(ws: &Workspace, name: Ustr) -> bool {
 /// When `ty` resolves to `Map<K, V>` with an inadmissible `K`, returns why.
 fn map_key_rejected(ws: &Workspace, inf: &BodyInference, ty: TyId) -> Option<String> {
     let ty = resolve_tyid(ws, inf, ty)?;
-    let TypeExpr::App { ctor: TypeCtor::Map, params } = ty_node(ws, inf, ty)? else {
+    let TypeExpr::App {
+        ctor: TypeCtor::Map,
+        params,
+    } = ty_node(ws, inf, ty)?
+    else {
         return None;
     };
     let k = resolve_tyid(ws, inf, ty.with_idx(params.into_iter().next()?))?;
@@ -3643,7 +3884,11 @@ fn gc_value_under_newtypes(
     ty: MonoTy,
 ) -> Result<Option<Ustr>, crate::monoty::NewtypeResolutionError> {
     let ty = crate::monoty::resolve_newtype_chain(ws, ty)?;
-    let MonoTy::App { ctor: MonoCtor::Nominal(name), .. } = ty else {
+    let MonoTy::App {
+        ctor: MonoCtor::Nominal(name),
+        ..
+    } = ty
+    else {
         return Ok(None);
     };
     Ok(nominal_is_gc_value(ws, name).then_some(name))
@@ -3668,22 +3913,28 @@ pub fn gc_value_c_boundary(ws: &Workspace, mid: ModuleId) -> Option<(String, Spa
             .map(|p| (p.ty, false))
             .chain(f.return_ty.map(|ty| (ty, true)));
         for (ty, is_return) in tys {
-            if matches!(static_ty(ws, ty), Some(TypeExpr::App { ctor: TypeCtor::Nominal(_), .. })) {
-                let normalized = crate::monoty::convert_decl(
-                    ws,
-                    ty,
-                    &rustc_hash::FxHashMap::default(),
-                )
-                .map_err(|reason| crate::monoty::NewtypeResolutionError::Conversion(reason))
-                .and_then(|ty| gc_value_under_newtypes(ws, ty));
+            if matches!(
+                static_ty(ws, ty),
+                Some(TypeExpr::App {
+                    ctor: TypeCtor::Nominal(_),
+                    ..
+                })
+            ) {
+                let normalized =
+                    crate::monoty::convert_decl(ws, ty, &rustc_hash::FxHashMap::default())
+                        .map_err(|reason| crate::monoty::NewtypeResolutionError::Conversion(reason))
+                        .and_then(|ty| gc_value_under_newtypes(ws, ty));
                 match normalized {
                     Ok(Some(n)) => {
-                        return Some((format!(
-                            "`{n}` is a GC-carrying `value` struct (immutable Lua table) and cannot \
+                        return Some((
+                            format!(
+                                "`{n}` is a GC-carrying `value` struct (immutable Lua table) and cannot \
                              cross an `extern` C boundary -- it has no C layout. Use an FFI-clean \
                              value struct (fields int/float/bool or nested FFI-clean value structs), \
                              or pass the fields individually."
-                        ), f.name_span));
+                            ),
+                            f.name_span,
+                        ));
                     }
                     Ok(None) => {}
                     Err(reason) => {
@@ -3692,9 +3943,12 @@ pub fn gc_value_c_boundary(ws: &Workspace, mid: ModuleId) -> Option<(String, Spa
                         } else {
                             format!("extern `{}` has a parameter type {reason}", f.name)
                         };
-                        return Some((format!(
-                            "{context}, which has no C representation. Declare a concrete type."
-                        ), f.name_span));
+                        return Some((
+                            format!(
+                                "{context}, which has no C representation. Declare a concrete type."
+                            ),
+                            f.name_span,
+                        ));
                     }
                 }
             }
@@ -3738,15 +3992,23 @@ fn struct_expand_rejection_for_call(
     let reject = |span: Span, msg: String| Some(CompilerError::new_with_label(span, msg));
 
     let [_arg] = args else {
-        return reject(call_span, format!("`@struct_expand` fn `{fname}` takes exactly one argument"));
+        return reject(
+            call_span,
+            format!("`@struct_expand` fn `{fname}` takes exactly one argument"),
+        );
     };
 
-    if f.return_ty.and_then(|ret| pairs_return_enum(ws, ret)).is_none() {
+    if f.return_ty
+        .and_then(|ret| pairs_return_enum(ws, ret))
+        .is_none()
+    {
         return reject(
             call_span,
             format!(
                 "`@struct_expand` fn `{fname}` must return `[(string, <enum>)]`, got `{}`",
-                f.return_ty.map(|r| ws.render(None, r)).unwrap_or_else(|| "()".to_string())
+                f.return_ty
+                    .map(|r| ws.render(None, r))
+                    .unwrap_or_else(|| "()".to_string())
             ),
         );
     }
@@ -3793,7 +4055,9 @@ pub struct ComputeCollection {
 fn shader_stage_of(f: &Function) -> Option<&'static str> {
     let ann = f.annotations.iter().find(|a| a.is_builtin("shader"))?;
     match ann.args.first().map(|a| &a.value) {
-        Some(bone_semantic::hir::AnnoValue::Ident(id)) if id.name.as_str() == "vertex" => Some("vertex"),
+        Some(bone_semantic::hir::AnnoValue::Ident(id)) if id.name.as_str() == "vertex" => {
+            Some("vertex")
+        }
         Some(bone_semantic::hir::AnnoValue::Ident(id)) if id.name.as_str() == "fragment" => {
             Some("fragment")
         }
@@ -3824,11 +4088,14 @@ pub fn resolve_compute_entry(
         ));
     };
     let fref = match ws.functions_by_name.get(&name).map(|list| list.as_slice()) {
-        Some([(module, func)]) => FuncRef { module: *module, func: *func },
+        Some([(module, func)]) => FuncRef {
+            module: *module,
+            func: *func,
+        },
         _ => {
             return Err(reject(format!(
                 "`rock_compute` argument `{name}` must be a direct reference to a unique top-level fn"
-            )))
+            )));
         }
     };
     let function = &ws.module(fref.module).functions[fref.func];
@@ -3862,11 +4129,14 @@ fn resolve_shader_arg(
         )));
     };
     let fref = match ws.functions_by_name.get(&name).map(|l| l.as_slice()) {
-        Some([(module, func)]) => FuncRef { module: *module, func: *func },
+        Some([(module, func)]) => FuncRef {
+            module: *module,
+            func: *func,
+        },
         _ => {
             return Err(reject(format!(
                 "`rock_shader` argument `{name}` is not a unique top-level fn"
-            )))
+            )));
         }
     };
     let f = &ws.module(fref.module).functions[fref.func];
@@ -3915,14 +4185,22 @@ pub fn resolve_shader_pair(
             let frag = resolve_shader_arg(ws, body, *frag_arg, "fragment")?;
             let fname = ws.module(frag.module).functions[frag.func].name;
             // Bare frag name -- no '+', so it can never collide with a pair key.
-            Ok(ShaderPair { key: fname.to_string(), vert: None, frag })
+            Ok(ShaderPair {
+                key: fname.to_string(),
+                vert: None,
+                frag,
+            })
         }
         [vert_arg, frag_arg] => {
             let vert = resolve_shader_arg(ws, body, *vert_arg, "vertex")?;
             let frag = resolve_shader_arg(ws, body, *frag_arg, "fragment")?;
             let vname = ws.module(vert.module).functions[vert.func].name;
             let fname = ws.module(frag.module).functions[frag.func].name;
-            Ok(ShaderPair { key: format!("{vname}+{fname}"), vert: Some(vert), frag })
+            Ok(ShaderPair {
+                key: format!("{vname}+{fname}"),
+                vert: Some(vert),
+                frag,
+            })
         }
         _ => Err(CompilerError::new_with_label(
             body.expr_spans[call_expr],
@@ -3997,7 +4275,11 @@ fn uniform_values_rejection_for_call(
             format!("`@uniform_values` fn `{fname}` has no concrete packet result"),
         ));
     };
-    let Some(TypeExpr::App { ctor: TypeCtor::Nominal(block_name), .. }) = static_ty(ws, ret_ty) else {
+    let Some(TypeExpr::App {
+        ctor: TypeCtor::Nominal(block_name),
+        ..
+    }) = static_ty(ws, ret_ty)
+    else {
         return Some(CompilerError::new_with_label(
             body.expr_spans[call],
             format!("`@uniform_values` fn `{fname}` must return the canonical packet struct"),
@@ -4030,11 +4312,13 @@ pub fn resolve_comptime_value(
         ExpandKind::EmbedString => "embed_string",
         _ => unreachable!("resolve_comptime_value only serves the comptime-input kinds"),
     };
-    let reject = |span: Idx<Expr>, msg: String| {
-        CompilerError::new_with_label(body.expr_spans[span], msg)
-    };
+    let reject =
+        |span: Idx<Expr>, msg: String| CompilerError::new_with_label(body.expr_spans[span], msg);
     let [arg] = args else {
-        return Err(reject(call_expr, format!("`{fname}` takes exactly one argument")));
+        return Err(reject(
+            call_expr,
+            format!("`{fname}` takes exactly one argument"),
+        ));
     };
     let Expr::String(key) = body.expr_arena[*arg] else {
         return Err(reject(
@@ -4044,7 +4328,10 @@ pub fn resolve_comptime_value(
     };
     match kind {
         ExpandKind::BuildVar => match ws.comptime_inputs.vars.get(&key) {
-            Some(var) => Ok(ResolvedComptime { value: var.value.clone(), file_abs: None }),
+            Some(var) => Ok(ResolvedComptime {
+                value: var.value.clone(),
+                file_abs: None,
+            }),
             // A fully-default inputs struct means resolution never RAN for
             // this compile (no stick.toml found, or an entry point that did
             // not stamp declared inputs) -- blaming the project's [build.vars]
@@ -4065,7 +4352,9 @@ pub fn resolve_comptime_value(
             }
             None => Err(reject(
                 call_expr,
-                format!("`build_var(\"{key}\")`: {key} is not declared in this project's [build.vars]"),
+                format!(
+                    "`build_var(\"{key}\")`: {key} is not declared in this project's [build.vars]"
+                ),
             )),
         },
         ExpandKind::EmbedString => {
@@ -4087,23 +4376,30 @@ pub fn resolve_comptime_value(
             if rel.is_absolute() {
                 return Err(reject(
                     *arg,
-                    format!("`embed_string` path must be relative to the package root, got {key:?}"),
+                    format!(
+                        "`embed_string` path must be relative to the package root, got {key:?}"
+                    ),
                 ));
             }
             use bone_core::comptime_files::EmbedReadError;
             let (file, value) = files.read(&root, rel).map_err(|e| match e {
-                EmbedReadError::Unreadable(e) => {
-                    reject(*arg, format!("`embed_string(\"{key}\")`: cannot read {key:?}: {e}"))
-                }
-                EmbedReadError::RootUnreadable(e) => {
-                    reject(call_expr, format!("`embed_string`: package root is unreadable: {e}"))
-                }
+                EmbedReadError::Unreadable(e) => reject(
+                    *arg,
+                    format!("`embed_string(\"{key}\")`: cannot read {key:?}: {e}"),
+                ),
+                EmbedReadError::RootUnreadable(e) => reject(
+                    call_expr,
+                    format!("`embed_string`: package root is unreadable: {e}"),
+                ),
                 EmbedReadError::EscapesRoot => reject(
                     *arg,
                     format!("`embed_string(\"{key}\")`: path escapes the package root"),
                 ),
             })?;
-            Ok(ResolvedComptime { value, file_abs: Some(Ustr::from(&file)) })
+            Ok(ResolvedComptime {
+                value,
+                file_abs: Some(Ustr::from(&file)),
+            })
         }
         _ => unreachable!(),
     }
@@ -4124,12 +4420,21 @@ pub fn comptime_input_rejection(ws: &Workspace, mid: ModuleId) -> Option<Compile
     let module = ws.module(mid);
     let ir = ws.inference(mid)?;
     for (owner, body) in module.bodies.iter() {
-        let Some(inf) = ir.per_fn.get(owner) else { continue };
+        let Some(inf) = ir.per_fn.get(owner) else {
+            continue;
+        };
         for (e, expr) in body.expr_arena.iter() {
-            let Expr::Call { callee: Callee::Unresolved { name, .. }, args, .. } = expr else {
+            let Expr::Call {
+                callee: Callee::Unresolved { name, .. },
+                args,
+                ..
+            } = expr
+            else {
                 continue;
             };
-            let Some((fmod, fid)) = resolve_call_fn(ws, inf, e, *name) else { continue };
+            let Some((fmod, fid)) = resolve_call_fn(ws, inf, e, *name) else {
+                continue;
+            };
             let kind = crate::intrinsics::expand_kind(&ws.module(fmod).functions[fid]);
             let Some(kind @ (ExpandKind::BuildVar | ExpandKind::EmbedString)) = kind else {
                 continue;
@@ -4154,14 +4459,25 @@ pub fn comptime_embed_files(ws: &Workspace) -> Vec<Ustr> {
         if module.id == ModuleId::builtin() {
             continue;
         }
-        let Some(ir) = ws.inference(module.id) else { continue };
+        let Some(ir) = ws.inference(module.id) else {
+            continue;
+        };
         for (owner, body) in module.bodies.iter() {
-            let Some(inf) = ir.per_fn.get(owner) else { continue };
+            let Some(inf) = ir.per_fn.get(owner) else {
+                continue;
+            };
             for (e, expr) in body.expr_arena.iter() {
-                let Expr::Call { callee: Callee::Unresolved { name, .. }, args, .. } = expr else {
+                let Expr::Call {
+                    callee: Callee::Unresolved { name, .. },
+                    args,
+                    ..
+                } = expr
+                else {
                     continue;
                 };
-                let Some((fmod, fid)) = resolve_call_fn(ws, inf, e, *name) else { continue };
+                let Some((fmod, fid)) = resolve_call_fn(ws, inf, e, *name) else {
+                    continue;
+                };
                 let kind = crate::intrinsics::expand_kind(&ws.module(fmod).functions[fid]);
                 if !matches!(kind, Some(ExpandKind::EmbedString)) {
                     continue;
@@ -4201,7 +4517,10 @@ fn vertex_expand_rejection_for_call(
             format!("`@vertex_expand` fn `{fname}` takes exactly one argument"),
         );
     };
-    if f.return_ty.and_then(|r| vertex_expand_return(ws, r)).is_none() {
+    if f.return_ty
+        .and_then(|r| vertex_expand_return(ws, r))
+        .is_none()
+    {
         return reject(call_span, vertex_expand_ret_msg(ws, fname, f.return_ty));
     }
     // The element type and vertex plan belong to the concrete expander.
@@ -4261,14 +4580,25 @@ pub fn expansion_rejection(ws: &Workspace, mid: ModuleId) -> Option<CompilerErro
         uniform_values: None,
     };
     for (owner, body) in module.bodies.iter() {
-        let Some(inf) = ir.per_fn.get(owner) else { continue };
+        let Some(inf) = ir.per_fn.get(owner) else {
+            continue;
+        };
         for (e, expr) in body.expr_arena.iter() {
-            let Expr::Call { callee: Callee::Unresolved { name, .. }, args, .. } = expr else {
+            let Expr::Call {
+                callee: Callee::Unresolved { name, .. },
+                args,
+                ..
+            } = expr
+            else {
                 continue;
             };
-            let Some((fmod, fid)) = resolve_call_fn(ws, inf, e, *name) else { continue };
+            let Some((fmod, fid)) = resolve_call_fn(ws, inf, e, *name) else {
+                continue;
+            };
             let f = &ws.module(fmod).functions[fid];
-            let Some(kind) = crate::intrinsics::expand_kind(f) else { continue };
+            let Some(kind) = crate::intrinsics::expand_kind(f) else {
+                continue;
+            };
             let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
             let rejection = match kind {
                 ExpandKind::StructPairs => {
@@ -4277,9 +4607,7 @@ pub fn expansion_rejection(ws: &Workspace, mid: ModuleId) -> Option<CompilerErro
                 ExpandKind::ShaderPipeline => {
                     shader_expand_rejection_for_call(ws, body, e, &arg_idxs)
                 }
-                ExpandKind::ComputeArtifact => {
-                    resolve_compute_entry(ws, body, e, &arg_idxs).err()
-                }
+                ExpandKind::ComputeArtifact => resolve_compute_entry(ws, body, e, &arg_idxs).err(),
                 ExpandKind::VertexLayout => {
                     vertex_expand_rejection_for_call(ws, body, e, f, &arg_idxs)
                 }
@@ -4308,16 +4636,18 @@ pub fn collect_shader_pairs(ws: &Workspace) -> Result<Vec<ShaderPair>, CompilerE
     Ok(collect_shader_collection(ws)?.pairs)
 }
 
-pub fn body_has_shader_pipeline_call(
-    ws: &Workspace,
-    mid: ModuleId,
-    owner: BodyOwner,
-) -> bool {
+pub fn body_has_shader_pipeline_call(ws: &Workspace, mid: ModuleId, owner: BodyOwner) -> bool {
     let module = ws.module(mid);
-    let Some(body) = module.bodies.get(&owner) else { return false };
+    let Some(body) = module.bodies.get(&owner) else {
+        return false;
+    };
     let inf = ws.inference(mid).and_then(|ir| ir.per_fn.get(&owner));
     body.expr_arena.iter().any(|(e, expr)| {
-        let Expr::Call { callee: Callee::Unresolved { name, .. }, .. } = expr else {
+        let Expr::Call {
+            callee: Callee::Unresolved { name, .. },
+            ..
+        } = expr
+        else {
             return false;
         };
         let resolved = match inf {
@@ -4336,16 +4666,18 @@ pub fn body_has_shader_pipeline_call(
     })
 }
 
-pub fn body_has_compute_artifact_call(
-    ws: &Workspace,
-    mid: ModuleId,
-    owner: BodyOwner,
-) -> bool {
+pub fn body_has_compute_artifact_call(ws: &Workspace, mid: ModuleId, owner: BodyOwner) -> bool {
     let module = ws.module(mid);
-    let Some(body) = module.bodies.get(&owner) else { return false };
+    let Some(body) = module.bodies.get(&owner) else {
+        return false;
+    };
     let inf = ws.inference(mid).and_then(|ir| ir.per_fn.get(&owner));
     body.expr_arena.iter().any(|(e, expr)| {
-        let Expr::Call { callee: Callee::Unresolved { name, .. }, .. } = expr else {
+        let Expr::Call {
+            callee: Callee::Unresolved { name, .. },
+            ..
+        } = expr
+        else {
             return false;
         };
         let resolved = match inf {
@@ -4373,12 +4705,19 @@ pub fn collect_shader_body(
     owner: BodyOwner,
 ) -> Result<(Vec<ShaderPair>, bool), CompilerError> {
     let module = ws.module(mid);
-    let Some(body) = module.bodies.get(&owner) else { return Ok((Vec::new(), false)) };
+    let Some(body) = module.bodies.get(&owner) else {
+        return Ok((Vec::new(), false));
+    };
     let inf = ws.inference(mid).and_then(|ir| ir.per_fn.get(&owner));
     let mut by_key = BTreeMap::new();
     let mut callsite = false;
     for (e, expr) in body.expr_arena.iter() {
-        let Expr::Call { callee: Callee::Unresolved { name, .. }, args, .. } = expr else {
+        let Expr::Call {
+            callee: Callee::Unresolved { name, .. },
+            args,
+            ..
+        } = expr
+        else {
             continue;
         };
         let resolved = match inf {
@@ -4388,7 +4727,9 @@ pub fn collect_shader_body(
                 _ => None,
             },
         };
-        let Some((fmod, fid)) = resolved else { continue };
+        let Some((fmod, fid)) = resolved else {
+            continue;
+        };
         if !matches!(
             crate::intrinsics::expand_kind(&ws.module(fmod).functions[fid]),
             Some(ExpandKind::ShaderPipeline)
@@ -4411,12 +4752,19 @@ pub fn collect_compute_body(
     owner: BodyOwner,
 ) -> Result<(Vec<ComputeEntry>, bool), CompilerError> {
     let module = ws.module(mid);
-    let Some(body) = module.bodies.get(&owner) else { return Ok((Vec::new(), false)) };
+    let Some(body) = module.bodies.get(&owner) else {
+        return Ok((Vec::new(), false));
+    };
     let inf = ws.inference(mid).and_then(|ir| ir.per_fn.get(&owner));
     let mut by_key = BTreeMap::new();
     let mut callsite = false;
     for (e, expr) in body.expr_arena.iter() {
-        let Expr::Call { callee: Callee::Unresolved { name, .. }, args, .. } = expr else {
+        let Expr::Call {
+            callee: Callee::Unresolved { name, .. },
+            args,
+            ..
+        } = expr
+        else {
             continue;
         };
         let resolved = match inf {
@@ -4426,7 +4774,9 @@ pub fn collect_compute_body(
                 _ => None,
             },
         };
-        let Some((fmod, fid)) = resolved else { continue };
+        let Some((fmod, fid)) = resolved else {
+            continue;
+        };
         if !matches!(
             crate::intrinsics::expand_kind(&ws.module(fmod).functions[fid]),
             Some(ExpandKind::ComputeArtifact)
@@ -4436,8 +4786,12 @@ pub fn collect_compute_body(
         callsite = true;
         let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
         let entry = resolve_compute_entry(ws, body, e, &arg_idxs)?;
-        let key = ws.module(entry.module).functions[entry.func].name.to_string();
-        by_key.entry(key.clone()).or_insert(ComputeEntry { key, entry });
+        let key = ws.module(entry.module).functions[entry.func]
+            .name
+            .to_string();
+        by_key
+            .entry(key.clone())
+            .or_insert(ComputeEntry { key, entry });
     }
     Ok((by_key.into_values().collect(), callsite))
 }
@@ -4455,7 +4809,9 @@ pub fn collect_shader_collection(ws: &Workspace) -> Result<ShaderCollection, Com
                 callsites.insert(key);
             }
             for pair in &pairs {
-                by_key.entry(pair.key.clone()).or_insert_with(|| pair.clone());
+                by_key
+                    .entry(pair.key.clone())
+                    .or_insert_with(|| pair.clone());
             }
             contributions.insert(key, pairs);
         }
@@ -4480,7 +4836,9 @@ pub fn collect_compute_collection(ws: &Workspace) -> Result<ComputeCollection, C
                 callsites.insert(key);
             }
             for entry in &entries {
-                by_key.entry(entry.key.clone()).or_insert_with(|| entry.clone());
+                by_key
+                    .entry(entry.key.clone())
+                    .or_insert_with(|| entry.clone());
             }
             contributions.insert(key, entries);
         }
@@ -4506,10 +4864,14 @@ pub fn gpu_only_call_rejection(ws: &Workspace, mid: ModuleId) -> Option<Compiler
         {
             return Some(CompilerError::new_with_label(
                 function.name_span,
-                "WorkgroupArray is workgroup memory and cannot cross a function boundary".to_string(),
+                "WorkgroupArray is workgroup memory and cannot cross a function boundary"
+                    .to_string(),
             ));
         }
-        if function.return_ty.is_some_and(|ty| is_workgroup_array_type(ws, ty)) {
+        if function
+            .return_ty
+            .is_some_and(|ty| is_workgroup_array_type(ws, ty))
+        {
             return Some(CompilerError::new_with_label(
                 function.name_span,
                 "WorkgroupArray is workgroup memory and cannot be returned".to_string(),
@@ -4525,11 +4887,14 @@ pub fn gpu_only_call_rejection(ws: &Workspace, mid: ModuleId) -> Option<Compiler
         }
     }
     for (owner, body) in module.bodies.iter() {
-        let Some(inf) = ir.per_fn.get(owner) else { continue };
+        let Some(inf) = ir.per_fn.get(owner) else {
+            continue;
+        };
         let caller_is_gpu = match owner {
             BodyOwner::Function(fid) => {
                 let function = &module.functions[*fid];
-                crate::intrinsics::is_gpu_context(function) || function_has_gpu_resource_param(ws, function)
+                crate::intrinsics::is_gpu_context(function)
+                    || function_has_gpu_resource_param(ws, function)
             }
             _ => false,
         };
@@ -4567,7 +4932,8 @@ pub fn gpu_only_call_rejection(ws: &Workspace, mid: ModuleId) -> Option<Compiler
                         continue;
                     };
                     let f = &ws.module(fmod).functions[fid];
-                    if !crate::intrinsics::is_gpu_only(f) && !function_has_gpu_resource_param(ws, f) {
+                    if !crate::intrinsics::is_gpu_only(f) && !function_has_gpu_resource_param(ws, f)
+                    {
                         continue;
                     }
                     let fname = f.name;
@@ -4585,12 +4951,17 @@ pub fn gpu_only_call_rejection(ws: &Workspace, mid: ModuleId) -> Option<Compiler
                         continue;
                     };
                     let f = &ws.module(fmod).functions[fid];
-                    if !crate::intrinsics::is_gpu_context(f) && !function_has_gpu_resource_param(ws, f) {
+                    if !crate::intrinsics::is_gpu_context(f)
+                        && !function_has_gpu_resource_param(ws, f)
+                    {
                         continue;
                     }
                     let fname = f.name;
-                    let kind =
-                        if crate::intrinsics::is_gpu_only(f) { "GPU-only" } else { "a shader entry" };
+                    let kind = if crate::intrinsics::is_gpu_only(f) {
+                        "GPU-only"
+                    } else {
+                        "a shader entry"
+                    };
                     return Some(CompilerError::new_with_label(
                         body.expr_spans[e],
                         format!(
@@ -4608,8 +4979,14 @@ pub fn gpu_only_call_rejection(ws: &Workspace, mid: ModuleId) -> Option<Compiler
 
 fn function_has_gpu_resource_param(ws: &Workspace, function: &Function) -> bool {
     function.param_decls.iter().any(|param| {
-        let TyId::Static(module, index) = param.ty else { return false };
-        let TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } = ws.module(module).ty_arena[index] else {
+        let TyId::Static(module, index) = param.ty else {
+            return false;
+        };
+        let TypeExpr::App {
+            ctor: TypeCtor::Nominal(name),
+            ..
+        } = ws.module(module).ty_arena[index]
+        else {
             return false;
         };
         bone_semantic::prelude::is_intrinsic_key_in(
@@ -4620,8 +4997,14 @@ fn function_has_gpu_resource_param(ws: &Workspace, function: &Function) -> bool 
 }
 
 fn is_workgroup_array_type(ws: &Workspace, ty: TyId) -> bool {
-    let TyId::Static(module, index) = ty else { return false };
-    let TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } = ws.module(module).ty_arena[index] else {
+    let TyId::Static(module, index) = ty else {
+        return false;
+    };
+    let TypeExpr::App {
+        ctor: TypeCtor::Nominal(name),
+        ..
+    } = ws.module(module).ty_arena[index]
+    else {
         return false;
     };
     bone_semantic::prelude::is_intrinsic_key(name, "WorkgroupArray")
@@ -4648,14 +5031,23 @@ pub fn string_char_literal_out_of_range(ws: &Workspace, mid: ModuleId) -> Option
     let module = ws.module(mid);
     for (_owner, body) in module.bodies.iter() {
         for (_e, expr) in body.expr_arena.iter() {
-            let Expr::Call { callee: Callee::Unresolved { name, .. }, args, .. } = *expr else {
+            let Expr::Call {
+                callee: Callee::Unresolved { name, .. },
+                args,
+                ..
+            } = *expr
+            else {
                 continue;
             };
             if name.as_str() != "string_char" {
                 continue;
             }
-            let Some(arg) = args.into_iter().next() else { continue };
-            let Some(code) = const_int(body, arg) else { continue };
+            let Some(arg) = args.into_iter().next() else {
+                continue;
+            };
+            let Some(code) = const_int(body, arg) else {
+                continue;
+            };
             if !(0..=127).contains(&code) {
                 return Some(body.expr_spans[arg]);
             }
@@ -4670,9 +5062,9 @@ mod tests;
 /// Support for `crate::spec_census`: expose concrete generic call identities
 /// without giving the diagnostic census its own type conversion.
 pub(crate) mod shape_census_support {
-    use super::shape::{callee_instance_subst, spec_key_from_subst, SpecSubst};
-    use crate::monoty::MonoTy;
+    use super::shape::{SpecSubst, callee_instance_subst, spec_key_from_subst};
     use crate::mir::FuncRef;
+    use crate::monoty::MonoTy;
     use bone_semantic::inference::{BodyInference, Workspace};
 
     /// Every complete generic call identity in this body, plus the count of
@@ -4688,7 +5080,10 @@ pub(crate) mod shape_census_support {
         let mut calls: Vec<_> = inf.resolved_overload_calls.iter().collect();
         calls.sort_by_key(|(e, _)| **e);
         for (e, (m, f)) in calls {
-            let func = FuncRef { module: *m, func: *f };
+            let func = FuncRef {
+                module: *m,
+                func: *f,
+            };
             match callee_instance_subst(ws, inf, *e, func, &empty) {
                 Ok(Some(subst)) => match spec_key_from_subst(ws, func, &subst) {
                     Some(key) => out.push((func, key)),

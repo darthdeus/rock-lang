@@ -12,11 +12,11 @@ use bone_core::hir::{Callee, Expr, Function, Pattern, TyId, TypeCtor, TypeExpr};
 use bone_core::prelude::{Idx, ModuleId};
 use bone_core::workspace::{BodyInference, BoundNext, BoundTree};
 use bone_semantic::inference::Workspace;
+use rock_core::SourceFiles;
 use rock_core::errors::CompilerError;
 use rock_core::source_code::Span;
-use rock_core::SourceFiles;
-use rock_host::stick::graph::PackageGraph;
 use rock_host::stick::StickConfig;
+use rock_host::stick::graph::PackageGraph;
 use ustr::Ustr;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -41,7 +41,8 @@ pub(crate) fn population(
     mode: Option<PopMode>,
 ) -> Result<Population, String> {
     let spec = crate::unified_compile::SourceSpec::Directory(project.to_path_buf());
-    let discovered = crate::unified_compile::discover_sources(&spec).map_err(|e| format!("{e:#}"))?;
+    let discovered =
+        crate::unified_compile::discover_sources(&spec).map_err(|e| format!("{e:#}"))?;
     let root_path = &graph.package(graph.root()).root;
     let mode = mode.unwrap_or(PopMode::Production);
     let analyzed = match mode {
@@ -50,7 +51,11 @@ pub(crate) fn population(
             .map_err(|error| error.to_string())?,
         PopMode::Test => discovered.clone(),
     };
-    Ok(Population { mode, discovered, analyzed })
+    Ok(Population {
+        mode,
+        discovered,
+        analyzed,
+    })
 }
 
 /// Package id of every package-tagged file, keyed by its module file id, and
@@ -92,8 +97,12 @@ impl Ctx {
 }
 
 pub(crate) fn load_ctx(root: &Path, p_root: &Path, mode: PopMode) -> Result<Ctx, String> {
-    let root = root.canonicalize().map_err(|e| format!("`{}`: {e}", root.display()))?;
-    let Some((config_path, config)) = StickConfig::find_from_dir(&root).map_err(|e| format!("{e:#}"))? else {
+    let root = root
+        .canonicalize()
+        .map_err(|e| format!("`{}`: {e}", root.display()))?;
+    let Some((config_path, config)) =
+        StickConfig::find_from_dir(&root).map_err(|e| format!("{e:#}"))?
+    else {
         return Err(format!("no stick.toml at or above `{}`", root.display()));
     };
     let manifest_dir = config_path.parent().unwrap_or(&config_path).to_path_buf();
@@ -105,7 +114,8 @@ pub(crate) fn load_ctx(root: &Path, p_root: &Path, mode: PopMode) -> Result<Ctx,
         ));
     }
     let channel = rock_host::stick::resolved_channel_for(&config);
-    let graph = PackageGraph::build_with_channel(&manifest_dir, &config, &channel).map_err(|e| format!("{e:#}"))?;
+    let graph = PackageGraph::build_with_channel(&manifest_dir, &config, &channel)
+        .map_err(|e| format!("{e:#}"))?;
     let Some(p) = graph.packages().iter().find(|n| n.root == p_root) else {
         return Err(format!(
             "`{}` does not depend on the package being migrated (`{}`)",
@@ -117,9 +127,20 @@ pub(crate) fn load_ctx(root: &Path, p_root: &Path, mode: PopMode) -> Result<Ctx,
     let pop = population(&root, &graph, Some(mode))?;
     let (file_pkg, untagged) = file_packages(&pop.analyzed);
     if !untagged.is_empty() {
-        return Err(format!("{} analyzed file(s) carry no package tag: {}", untagged.len(), untagged.join(", ")));
+        return Err(format!(
+            "{} analyzed file(s) carry no package tag: {}",
+            untagged.len(),
+            untagged.join(", ")
+        ));
     }
-    Ok(Ctx { root, graph, sources: pop.analyzed, p_id, file_pkg, mode })
+    Ok(Ctx {
+        root,
+        graph,
+        sources: pop.analyzed,
+        p_id,
+        file_pkg,
+        mode,
+    })
 }
 
 pub(crate) struct CheckFailure {
@@ -157,11 +178,19 @@ pub(crate) struct Checked {
 /// workspace when bodies have errors (they come back beside it) and leave the
 /// spec 11 closure to the caller (`api_closure_requirements`).
 pub(crate) fn check(sources: &SourceFiles) -> Result<Checked, CheckFailure> {
-    let (mut modules, _entry) = crate::skull_backend::skull_assemble_project(sources)
-        .map_err(|errors| CheckFailure { stage: "parse", errors })?;
+    let (mut modules, _entry) =
+        crate::skull_backend::skull_assemble_project(sources).map_err(|errors| CheckFailure {
+            stage: "parse",
+            errors,
+        })?;
     let census = modules.iter().map(|m| (m.file, census(m))).collect();
-    let (ws, errors) = crate::bone_backend::check_modules_for_tools(&mut modules)
-        .map_err(|errors| CheckFailure { stage: "semantic pass", errors })?;
+    let (ws, errors) =
+        crate::bone_backend::check_modules_for_tools(&mut modules).map_err(|errors| {
+            CheckFailure {
+                stage: "semantic pass",
+                errors,
+            }
+        })?;
     Ok(Checked { ws, errors, census })
 }
 
@@ -176,7 +205,11 @@ fn census(ast: &skull_parser::Ast) -> FileCensus {
     }
     let mut items: Vec<&skull_parser::Item> = ast.items.iter().collect();
     while let Some(item) = items.pop() {
-        if item.annotations.iter().any(|a| a.name.name.as_str() == "nomangle") {
+        if item
+            .annotations
+            .iter()
+            .any(|a| a.name.name.as_str() == "nomangle")
+        {
             c.nomangle_items += 1;
         }
         match &item.kind {
@@ -247,7 +280,11 @@ pub(crate) enum Target {
     Unrecorded(Ustr),
     /// A method-syntax call through a fn-typed field of struct `strukt`
     /// (defined in `module`), which wins over every function of the name.
-    Field { module: ModuleId, strukt: Ustr, field: Ustr },
+    Field {
+        module: ModuleId,
+        strukt: Ustr,
+        field: Ustr,
+    },
 }
 
 /// The callee of a call written by name, for a repair that qualifies it.
@@ -297,7 +334,10 @@ pub(crate) fn references(ws: &Workspace) -> Vec<Ref> {
         out
     };
     let nominal = |te: &TypeExpr| match te {
-        TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } => Some(*name),
+        TypeExpr::App {
+            ctor: TypeCtor::Nominal(name),
+            ..
+        } => Some(*name),
         _ => None,
     };
 
@@ -312,7 +352,10 @@ pub(crate) fn references(ws: &Workspace) -> Vec<Ref> {
                     from: m.id,
                     span: m.ty_spans.get(idx).copied(),
                     kind: RefKind::Type,
-                    target: Target::Key { key: name, modules: type_modules(name) },
+                    target: Target::Key {
+                        key: name,
+                        modules: type_modules(name),
+                    },
                     callee: None,
                 });
             }
@@ -322,12 +365,17 @@ pub(crate) fn references(ws: &Workspace) -> Vec<Ref> {
         for (_, f) in m.functions.iter() {
             for a in &f.annotations {
                 let key = a.resolved_name.unwrap_or(a.name.name);
-                let Some(modules) = decorator_modules.get(&key) else { continue };
+                let Some(modules) = decorator_modules.get(&key) else {
+                    continue;
+                };
                 out.push(Ref {
                     from: m.id,
                     span: Some(a.span),
                     kind: RefKind::Annotation,
-                    target: Target::Key { key, modules: modules.clone() },
+                    target: Target::Key {
+                        key,
+                        modules: modules.clone(),
+                    },
                     callee: None,
                 });
             }
@@ -341,30 +389,53 @@ pub(crate) fn references(ws: &Workspace) -> Vec<Ref> {
                         from: m.id,
                         span: body.lowered_ty_spans.get(idx).copied(),
                         kind: RefKind::Type,
-                        target: Target::Key { key: name, modules: type_modules(name) },
+                        target: Target::Key {
+                            key: name,
+                            modules: type_modules(name),
+                        },
                         callee: None,
                     });
                 }
             }
             for (_, pat) in body.pattern_arena.iter() {
                 let (name, span) = match pat {
-                    Pattern::EnumVariant { enum_name: Some(name), enum_name_span, .. } => (*name, *enum_name_span),
-                    Pattern::Record { enum_name: Some(name), enum_name_span, .. } => (*name, *enum_name_span),
-                    Pattern::Record { enum_name: None, name: Some(name), name_span, .. } => (*name, *name_span),
+                    Pattern::EnumVariant {
+                        enum_name: Some(name),
+                        enum_name_span,
+                        ..
+                    } => (*name, *enum_name_span),
+                    Pattern::Record {
+                        enum_name: Some(name),
+                        enum_name_span,
+                        ..
+                    } => (*name, *enum_name_span),
+                    Pattern::Record {
+                        enum_name: None,
+                        name: Some(name),
+                        name_span,
+                        ..
+                    } => (*name, *name_span),
                     _ => continue,
                 };
                 out.push(Ref {
                     from: m.id,
                     span,
                     kind: RefKind::Pattern,
-                    target: Target::Key { key: name, modules: type_modules(name) },
+                    target: Target::Key {
+                        key: name,
+                        modules: type_modules(name),
+                    },
                     callee: None,
                 });
             }
             for (idx, expr) in body.expr_arena.iter() {
                 let span = body.expr_spans.get(idx).copied();
                 let site = match expr {
-                    Expr::Call { callee: Callee::Unresolved { name, name_span }, args, .. } => Some(CalleeSite {
+                    Expr::Call {
+                        callee: Callee::Unresolved { name, name_span },
+                        args,
+                        ..
+                    } => Some(CalleeSite {
                         name: *name,
                         name_span: *name_span,
                         method: !args.is_empty() && body.method_call_recvs.contains(&args.start()),
@@ -373,19 +444,36 @@ pub(crate) fn references(ws: &Workspace) -> Vec<Ref> {
                 };
                 // Every call inference bound, whatever its syntax (named, UFCS,
                 // operator, compound assignment, a callee that is a value).
-                let bound = bi.and_then(|bi| bi.resolved_overload_calls.get(&idx)).copied();
+                let bound = bi
+                    .and_then(|bi| bi.resolved_overload_calls.get(&idx))
+                    .copied();
                 if let Some(bi) = bi {
                     if let Some(&field) = bi.fn_field_calls.get(&idx) {
                         let target = fn_field_target(ws, bi, expr, field);
-                        out.push(Ref { from: m.id, span, kind: RefKind::Call, target, callee: site });
+                        out.push(Ref {
+                            from: m.id,
+                            span,
+                            kind: RefKind::Call,
+                            target,
+                            callee: site,
+                        });
                         continue;
                     }
                 }
                 if let Some((mid, fid)) = bound {
-                    out.push(Ref { from: m.id, span, kind: RefKind::Call, target: Target::Fn(mid, fid), callee: site });
+                    out.push(Ref {
+                        from: m.id,
+                        span,
+                        kind: RefKind::Call,
+                        target: Target::Fn(mid, fid),
+                        callee: site,
+                    });
                 }
                 let (key, modules, kind) = match expr {
-                    Expr::Call { callee: Callee::Unresolved { name, .. }, .. } => {
+                    Expr::Call {
+                        callee: Callee::Unresolved { name, .. },
+                        ..
+                    } => {
                         if bound.is_some() {
                             continue;
                         }
@@ -393,11 +481,21 @@ pub(crate) fn references(ws: &Workspace) -> Vec<Ref> {
                         // a call through a fn-valued global, attributed like the
                         // definition it names.
                         let types = type_modules(*name);
-                        let kind = if types.is_empty() { RefKind::Value } else { RefKind::Construction };
+                        let kind = if types.is_empty() {
+                            RefKind::Value
+                        } else {
+                            RefKind::Construction
+                        };
                         let mut mids = global_modules.get(name).cloned().unwrap_or_default();
                         mids.extend(types);
                         if mids.is_empty() {
-                            out.push(Ref { from: m.id, span, kind: RefKind::Call, target: Target::Unrecorded(*name), callee: site });
+                            out.push(Ref {
+                                from: m.id,
+                                span,
+                                kind: RefKind::Call,
+                                target: Target::Unrecorded(*name),
+                                callee: site,
+                            });
                             continue;
                         }
                         (*name, mids, kind)
@@ -410,11 +508,21 @@ pub(crate) fn references(ws: &Workspace) -> Vec<Ref> {
                         mids.extend(type_modules(*key));
                         (*key, mids, RefKind::Value)
                     }
-                    Expr::StructLiteral { name, .. } => (*name, type_modules(*name), RefKind::Construction),
-                    Expr::EnumVariant { enum_name, .. } => (*enum_name, type_modules(*enum_name), RefKind::EnumVariant),
+                    Expr::StructLiteral { name, .. } => {
+                        (*name, type_modules(*name), RefKind::Construction)
+                    }
+                    Expr::EnumVariant { enum_name, .. } => {
+                        (*enum_name, type_modules(*enum_name), RefKind::EnumVariant)
+                    }
                     _ => continue,
                 };
-                out.push(Ref { from: m.id, span, kind, target: Target::Key { key, modules }, callee: site });
+                out.push(Ref {
+                    from: m.id,
+                    span,
+                    kind,
+                    target: Target::Key { key, modules },
+                    callee: site,
+                });
             }
             let Some(bi) = bi else { continue };
             let mut protocol = |idx: Idx<Expr>, func: (ModuleId, Idx<Function>)| {
@@ -457,11 +565,18 @@ fn fn_field_target(ws: &Workspace, bi: &BodyInference, expr: &Expr, field: Ustr)
     let owner = recv
         .and_then(|recv| resolved_ty(ws, bi, *bi.expr_types.get(recv)?))
         .and_then(|ty| match ty {
-            TypeExpr::App { ctor: TypeCtor::Nominal(strukt), .. } => Some((ws.struct_by_name.get(&strukt)?.module, strukt)),
+            TypeExpr::App {
+                ctor: TypeCtor::Nominal(strukt),
+                ..
+            } => Some((ws.struct_by_name.get(&strukt)?.module, strukt)),
             _ => None,
         });
     match owner {
-        Some((module, strukt)) => Target::Field { module, strukt, field },
+        Some((module, strukt)) => Target::Field {
+            module,
+            strukt,
+            field,
+        },
         None => Target::Unrecorded(field),
     }
 }
@@ -562,20 +677,35 @@ pub(crate) fn lua_references(bodies: &[LuaBody]) -> Result<Vec<LuaRefs>, String>
         } else {
             b.src.to_string()
         };
-        let params = b.params.iter().map(|p| p.as_str()).collect::<Vec<_>>().join(", ");
-        script.push_str(&format!("  {},\n", lua_quote(&format!("return function({params})\n{src}\nend"))));
+        let params = b
+            .params
+            .iter()
+            .map(|p| p.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        script.push_str(&format!(
+            "  {},\n",
+            lua_quote(&format!("return function({params})\n{src}\nend"))
+        ));
     }
     script.push_str("}\n");
     script.push_str(include_str!("modules_lua_references.lua"));
-    let run = crate::compile_cmd::run_lua_code_with_timeout(&script, Some(std::time::Duration::from_secs(60)))
-        .map_err(|e| format!("the raw-ABI census could not run LuaJIT: {}", e.message))?;
+    let run = crate::compile_cmd::run_lua_code_with_timeout(
+        &script,
+        Some(std::time::Duration::from_secs(60)),
+    )
+    .map_err(|e| format!("the raw-ABI census could not run LuaJIT: {}", e.message))?;
     if !run.success {
-        return Err(format!("the raw-ABI census failed in LuaJIT: {}", run.stderr.trim()));
+        return Err(format!(
+            "the raw-ABI census failed in LuaJIT: {}",
+            run.stderr.trim()
+        ));
     }
     let mut refs: Vec<LuaRefs> = bodies.iter().map(|_| LuaRefs::default()).collect();
     for line in run.stdout.lines() {
         let mut parts = line.splitn(3, '\t');
-        let (Some(tag), Some(index), Some(rest)) = (parts.next(), parts.next(), parts.next()) else {
+        let (Some(tag), Some(index), Some(rest)) = (parts.next(), parts.next(), parts.next())
+        else {
             return Err(format!("unexpected raw-ABI census output: {line}"));
         };
         let i = index
@@ -587,7 +717,9 @@ pub(crate) fn lua_references(bodies: &[LuaBody]) -> Result<Vec<LuaRefs>, String>
         match tag {
             "E" => {
                 let message = refs[i].error.get_or_insert_with(String::new);
-                if !message.is_empty() { message.push_str("; "); }
+                if !message.is_empty() {
+                    message.push_str("; ");
+                }
                 message.push_str(rest);
             }
             "G" => refs[i].globals.push(rest.to_string()),
@@ -642,7 +774,11 @@ pub struct Edit {
 
 impl Edit {
     pub fn new(range: (usize, usize), text: impl Into<String>) -> Edit {
-        Edit { range, text: text.into(), closes: false }
+        Edit {
+            range,
+            text: text.into(),
+            closes: false,
+        }
     }
 }
 
@@ -656,7 +792,10 @@ pub fn apply_edits(text: &str, edits: &[Edit]) -> std::result::Result<String, St
         if e.range.0 < at {
             return Err(format!("overlapping edits at byte {}", e.range.0));
         }
-        if e.range.1 > text.len() || !text.is_char_boundary(e.range.0) || !text.is_char_boundary(e.range.1) {
+        if e.range.1 > text.len()
+            || !text.is_char_boundary(e.range.0)
+            || !text.is_char_boundary(e.range.1)
+        {
             return Err(format!("edit range {:?} is outside the file", e.range));
         }
         out.push_str(&text[at..e.range.0]);
@@ -693,11 +832,25 @@ pub(crate) fn map_offset(edits: &[Edit], off: usize) -> usize {
 /// A resolved target, spelled so a legacy key and its v1 DefKey agree.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum TargetId {
-    Fn { file: Ustr, name: String, ordinal: usize },
-    Def { file: Ustr, name: String },
-    Family { files: Vec<Ustr>, name: String },
+    Fn {
+        file: Ustr,
+        name: String,
+        ordinal: usize,
+    },
+    Def {
+        file: Ustr,
+        name: String,
+    },
+    Family {
+        files: Vec<Ustr>,
+        name: String,
+    },
     Unrecorded(String),
-    Field { file: Ustr, strukt: String, field: String },
+    Field {
+        file: Ustr,
+        strukt: String,
+        field: String,
+    },
 }
 
 pub(crate) fn target_id(ws: &Workspace, t: &Target) -> TargetId {
@@ -708,9 +861,16 @@ pub(crate) fn target_id(ws: &Workspace, t: &Target) -> TargetId {
             let ordinal = m
                 .functions
                 .iter()
-                .filter(|(i, f)| u32::from(i.into_raw()) < u32::from(fid.into_raw()) && declared_name(f.name.as_str()) == name)
+                .filter(|(i, f)| {
+                    u32::from(i.into_raw()) < u32::from(fid.into_raw())
+                        && declared_name(f.name.as_str()) == name
+                })
                 .count();
-            TargetId::Fn { file: m.file, name, ordinal }
+            TargetId::Fn {
+                file: m.file,
+                name,
+                ordinal,
+            }
         }
         Target::Key { key, modules } => {
             let name = declared_name(key.as_str()).to_string();
@@ -723,7 +883,11 @@ pub(crate) fn target_id(ws: &Workspace, t: &Target) -> TargetId {
             }
         }
         Target::Unrecorded(name) => TargetId::Unrecorded(name.to_string()),
-        Target::Field { module, strukt, field } => TargetId::Field {
+        Target::Field {
+            module,
+            strukt,
+            field,
+        } => TargetId::Field {
             file: ws.module(*module).file,
             strukt: declared_name(strukt.as_str()).to_string(),
             field: field.to_string(),
@@ -749,7 +913,12 @@ pub(crate) type Sites = BTreeMap<SiteKey, Vec<TargetId>>;
 /// spelled name against maps keyed by DefKey), an application leads an item
 /// that `pub ` is inserted before, and neither name can be overloaded, so a
 /// per-file count is as strict.
-pub(crate) fn sites(ws: &Workspace, refs: &[Ref], file_pkg: &HashMap<Ustr, u32>, edits: &HashMap<Ustr, Vec<Edit>>) -> Sites {
+pub(crate) fn sites(
+    ws: &Workspace,
+    refs: &[Ref],
+    file_pkg: &HashMap<Ustr, u32>,
+    edits: &HashMap<Ustr, Vec<Edit>>,
+) -> Sites {
     let mut out: Sites = BTreeMap::new();
     for r in refs {
         let file = ws.module(r.from).file;
@@ -757,9 +926,14 @@ pub(crate) fn sites(ws: &Workspace, refs: &[Ref], file_pkg: &HashMap<Ustr, u32>,
             continue;
         }
         if r.kind.per_file() {
-            out.entry(SiteKey { file, start: 0, end: 0, kind: r.kind })
-                .or_default()
-                .push(target_id(ws, &r.target));
+            out.entry(SiteKey {
+                file,
+                start: 0,
+                end: 0,
+                kind: r.kind,
+            })
+            .or_default()
+            .push(target_id(ws, &r.target));
             continue;
         }
         let Some(span) = r.span else { continue };
@@ -767,12 +941,20 @@ pub(crate) fn sites(ws: &Workspace, refs: &[Ref], file_pkg: &HashMap<Ustr, u32>,
             continue;
         }
         let (start, end) = match edits.get(&file) {
-            Some(e) => (map_offset(e, span.offset_range.0), map_offset(e, span.offset_range.1)),
+            Some(e) => (
+                map_offset(e, span.offset_range.0),
+                map_offset(e, span.offset_range.1),
+            ),
             None => span.offset_range,
         };
-        out.entry(SiteKey { file, start, end, kind: r.kind })
-            .or_default()
-            .push(target_id(ws, &r.target));
+        out.entry(SiteKey {
+            file,
+            start,
+            end,
+            kind: r.kind,
+        })
+        .or_default()
+        .push(target_id(ws, &r.target));
     }
     for v in out.values_mut() {
         v.sort();
@@ -785,7 +967,12 @@ pub(crate) fn map_sites(base: &Sites, edits: &HashMap<Ustr, Vec<Edit>>) -> Sites
         .map(|(k, v)| {
             let key = match edits.get(&k.file) {
                 Some(_) if k.kind.per_file() => k.clone(),
-                Some(e) => SiteKey { file: k.file, start: map_offset(e, k.start), end: map_offset(e, k.end), kind: k.kind },
+                Some(e) => SiteKey {
+                    file: k.file,
+                    start: map_offset(e, k.start),
+                    end: map_offset(e, k.end),
+                    kind: k.kind,
+                },
                 None => k.clone(),
             };
             (key, v.clone())
@@ -800,11 +987,21 @@ pub(crate) fn describe_change(key: &SiteKey, before: &[TargetId], after: &[Targe
         }
         v.iter()
             .map(|t| match t {
-                TargetId::Fn { file, name, ordinal } => format!("fn {name}#{ordinal} in {}", short_path(file)),
+                TargetId::Fn {
+                    file,
+                    name,
+                    ordinal,
+                } => format!("fn {name}#{ordinal} in {}", short_path(file)),
                 TargetId::Def { file, name } => format!("{name} in {}", short_path(file)),
-                TargetId::Family { files, name } => format!("{name} across {} file(s)", files.len()),
+                TargetId::Family { files, name } => {
+                    format!("{name} across {} file(s)", files.len())
+                }
                 TargetId::Unrecorded(n) => format!("unrecorded {n}"),
-                TargetId::Field { file, strukt, field } => format!("field {strukt}.{field} in {}", short_path(file)),
+                TargetId::Field {
+                    file,
+                    strukt,
+                    field,
+                } => format!("field {strukt}.{field} in {}", short_path(file)),
             })
             .collect::<Vec<_>>()
             .join(" + ")
@@ -839,7 +1036,11 @@ mod tests {
             Edit::new((0, 0), "pub "),
             Edit::new((10, 10), "std::"),
             Edit::new((20, 24), " : "),
-            Edit { range: (27, 27), text: ")".into(), closes: true },
+            Edit {
+                range: (27, 27),
+                text: ")".into(),
+                closes: true,
+            },
         ];
         assert_eq!(map_offset(&edits, 0), 0);
         assert_eq!(map_offset(&edits, 5), 9);
@@ -847,6 +1048,9 @@ mod tests {
         assert_eq!(map_offset(&edits, 11), 20);
         assert_eq!(map_offset(&edits, 24), 32);
         assert_eq!(map_offset(&edits, 27), 36);
-        assert_eq!(apply_edits("0123456789abcdefghij::  xyz", &edits).unwrap(), "pub 0123456789std::abcdefghij : xyz)");
+        assert_eq!(
+            apply_edits("0123456789abcdefghij::  xyz", &edits).unwrap(),
+            "pub 0123456789std::abcdefghij : xyz)"
+        );
     }
 }

@@ -12,7 +12,13 @@ fn findings(src: &str, options: &LintOptions) -> Vec<Finding> {
     let ws = semantic_pass(&mut [ast]).expect("clean program typechecks");
     let mut sources = FxHashMap::default();
     sources.insert(Ustr::from(FILE), src);
-    lint_workspace(&ws, &FxHashSet::default(), true, &sources, &options.clone().with_action_policy(Some(&support::POLICY)))
+    lint_workspace(
+        &ws,
+        &FxHashSet::default(),
+        true,
+        &sources,
+        &options.clone().with_action_policy(Some(&support::POLICY)),
+    )
 }
 
 fn census(src: &str) -> Vec<Finding> {
@@ -33,8 +39,16 @@ fn main() { gameplay() }
 "#;
     let found = census(src);
     assert_eq!(found.len(), 2, "raw census findings: {found:?}");
-    assert!(found.iter().any(|f| f.error.message.contains("is_key_pressed")));
-    assert!(found.iter().any(|f| f.error.message.contains("is_mouse_down")));
+    assert!(
+        found
+            .iter()
+            .any(|f| f.error.message.contains("is_key_pressed"))
+    );
+    assert!(
+        found
+            .iter()
+            .any(|f| f.error.message.contains("is_mouse_down"))
+    );
 }
 
 #[test]
@@ -47,9 +61,16 @@ fn gameplay(a: Action) {
 }
 fn main() { gameplay(Action {}) }
 "#;
-    assert!(census(src).is_empty(), "action query must not be a raw site");
+    assert!(
+        census(src).is_empty(),
+        "action query must not be a raw site"
+    );
     let default_findings = findings(src, &LintOptions::default());
-    assert!(default_findings.iter().all(|f| f.lint != RAW_INPUT_MIGRATION));
+    assert!(
+        default_findings
+            .iter()
+            .all(|f| f.lint != RAW_INPUT_MIGRATION)
+    );
 }
 
 #[test]

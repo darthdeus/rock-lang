@@ -88,7 +88,9 @@ pub fn find_test_functions_from_sources(sources: &SourceFiles) -> Vec<TestMetada
                 continue;
             };
             let expect_failure = test_ann.args.iter().any(|arg| {
-                arg.name.as_ref().map_or(false, |n| n.name.as_str() == "expect_failure")
+                arg.name
+                    .as_ref()
+                    .map_or(false, |n| n.name.as_str() == "expect_failure")
                     && matches!(ast.expr_kind(arg.value), skull_parser::ExprKind::Bool(true))
             });
             let ignored = item
@@ -157,8 +159,13 @@ fn not_a_test() {}
 ";
         let tests = discover(src);
         assert_eq!(tests.len(), 3, "three @test fns discovered");
-        assert_eq!(tests.iter().map(|test| test.name.as_str()).collect::<Vec<_>>(),
-            ["plain", "fails", "skipped"]);
+        assert_eq!(
+            tests
+                .iter()
+                .map(|test| test.name.as_str())
+                .collect::<Vec<_>>(),
+            ["plain", "fails", "skipped"]
+        );
         assert_eq!(
             tests.iter().filter(|t| t.expect_failure).count(),
             1,
@@ -170,7 +177,10 @@ fn not_a_test() {}
             "one @test + @ignore"
         );
         assert_eq!(
-            tests.iter().filter(|t| !t.expect_failure && !t.ignored).count(),
+            tests
+                .iter()
+                .filter(|t| !t.expect_failure && !t.ignored)
+                .count(),
             1,
             "one plain @test"
         );

@@ -21,7 +21,10 @@ use crate::common::ws_with;
 
 fn emit_res(src: &str, root: &str) -> Result<String, String> {
     let ws = ws_with(src);
-    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("test module");
     let fid = ws
         .module(mid)
         .functions
@@ -31,7 +34,13 @@ fn emit_res(src: &str, root: &str) -> Result<String, String> {
         .expect("root fn");
     skull_codegen_js::emit::emit_with_closure(
         &ws,
-        &[(FuncRef { module: mid, func: fid }, root.to_string())],
+        &[(
+            FuncRef {
+                module: mid,
+                func: fid,
+            },
+            root.to_string(),
+        )],
     )
     .map_err(|e| e.message)
 }
@@ -110,7 +119,10 @@ fn main() {
 "#,
     );
     let interner = Arc::new(skull_mir::monoty::MonoInterner::new());
-    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("test module");
     let fid = ws
         .module(mid)
         .functions
@@ -123,20 +135,22 @@ fn main() {
     // error bone refuses long before emission, so a fixture "proving" the
     // rejection would be measuring bone. What IS checkable here is that the
     // admission window did not widen for a callee with nothing to omit.
-    let fr = FuncRef { module: mid, func: fid };
+    let fr = FuncRef {
+        module: mid,
+        func: fid,
+    };
     let main = ws
         .module(mid)
         .functions
         .iter()
         .find(|(_, f)| f.name.as_str() == "main")
-        .map(|(fid, _)| FuncRef { module: mid, func: fid })
+        .map(|(fid, _)| FuncRef {
+            module: mid,
+            func: fid,
+        })
         .expect("main");
-    let graph = skull_graph::instance_graph::build_in(
-        &ws,
-        vec![main],
-        false,
-        Arc::clone(&interner),
-    );
+    let graph =
+        skull_graph::instance_graph::build_in(&ws, vec![main], false, Arc::clone(&interner));
     let concrete = skull_graph::concrete_body::build(&ws, &graph);
     let scx = ScalarCtx::new(&ws)
         .with_target(bone_semantic::hir::FnBackend::Js)
@@ -159,7 +173,10 @@ fn main() {
         );
     }
     let with_default = ws_with(OMITTED_DEFAULT_AT_SPEC);
-    let dmid = *with_default.module_ids.get(&ustr::Ustr::from("<test>")).expect("module");
+    let dmid = *with_default
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("module");
     let dfid = with_default
         .module(dmid)
         .functions
@@ -167,13 +184,19 @@ fn main() {
         .find(|(_, f)| f.name.as_str() == "take")
         .map(|(fid, _)| fid)
         .expect("take");
-    let dfr = FuncRef { module: dmid, func: dfid };
+    let dfr = FuncRef {
+        module: dmid,
+        func: dfid,
+    };
     let dmain = with_default
         .module(dmid)
         .functions
         .iter()
         .find(|(_, f)| f.name.as_str() == "main")
-        .map(|(fid, _)| FuncRef { module: dmid, func: fid })
+        .map(|(fid, _)| FuncRef {
+            module: dmid,
+            func: fid,
+        })
         .expect("main");
     let dinterner = Arc::new(skull_mir::monoty::MonoInterner::new());
     let dgraph = skull_graph::instance_graph::build_in(

@@ -17,8 +17,8 @@
 //! RED until `Statement::Let` in `inference.rs` binds `name` to an error type
 //! when its RHS inference fails, instead of leaving `name` unbound.
 
-use bone_semantic::prelude::*;
 use bone_incremental::session::Session;
+use bone_semantic::prelude::*;
 
 // `x`'s RHS is undefined; `x` is then used once. The root error is real; the
 // use of `x` must NOT produce a second diagnostic.
@@ -34,7 +34,8 @@ fn main() {
 ";
 
 fn diags(src: &str) -> Vec<String> {
-    let mut s = Session::new(vec![], vec![], &bone_core::modules::NsAliases::default()).expect("session");
+    let mut s =
+        Session::new(vec![], vec![], &bone_core::modules::NsAliases::default()).expect("session");
     let _ = s.update_file("c.rock", src);
     s.diagnostics().iter().map(|e| e.message.clone()).collect()
 }
@@ -67,13 +68,19 @@ fn type_at_needle(src: &str, needle: &str) -> Option<String> {
 // Rendered type of the binding named by `marker` (e.g. "let x"); points just
 // past the `let `.
 fn type_of_binding(src: &str, marker: &str) -> Option<String> {
-    type_at_offset(src, src.find(marker).expect("marker present") + "let ".len())
+    type_at_offset(
+        src,
+        src.find(marker).expect("marker present") + "let ".len(),
+    )
 }
 
 // Any diagnostic blaming the poisoned binding `name` (e.g. "`a`") -- a cascade.
 fn cascade_of(src: &str, name: &str) -> Vec<String> {
     let tick = format!("`{name}`");
-    diags(src).into_iter().filter(|m| m.contains(&tick)).collect()
+    diags(src)
+        .into_iter()
+        .filter(|m| m.contains(&tick))
+        .collect()
 }
 
 // The root error must always surface -- recovery suppresses the CASCADE, never
@@ -93,10 +100,7 @@ fn root_error_still_surfaces() {
 #[test]
 fn poisoned_binding_use_emits_no_cascade() {
     let msgs = diags(SRC);
-    let cascade: Vec<_> = msgs
-        .iter()
-        .filter(|m| m.contains("`x`"))
-        .collect();
+    let cascade: Vec<_> = msgs.iter().filter(|m| m.contains("`x`")).collect();
     assert!(
         cascade.is_empty(),
         "a failed `let` RHS must not cascade onto uses of the binding; got {cascade:?}"
@@ -195,7 +199,10 @@ fn let_tuple_root_error_surfaces() {
 #[test]
 fn let_tuple_no_cascade() {
     let c = cascade_of(TUPLE, "a");
-    assert!(c.is_empty(), "tuple-let must not cascade onto `a`; got {c:?}");
+    assert!(
+        c.is_empty(),
+        "tuple-let must not cascade onto `a`; got {c:?}"
+    );
 }
 
 // RED: each destructured slot is poisoned to `<error>`.
@@ -252,7 +259,11 @@ fn main() {
 
 #[test]
 fn while_let_root_error_surfaces() {
-    assert!(diags(WHILE_LET).iter().any(|m| m.contains("undefined_thing")));
+    assert!(
+        diags(WHILE_LET)
+            .iter()
+            .any(|m| m.contains("undefined_thing"))
+    );
 }
 
 // RED: body analyzed past a failed `while let` scrutinee.
@@ -305,12 +316,19 @@ fn main() {
 
 #[test]
 fn safe_nav_let_root_error_surfaces() {
-    assert!(diags(SAFE_NAV_LET).iter().any(|m| m.contains("undefined_thing")));
+    assert!(
+        diags(SAFE_NAV_LET)
+            .iter()
+            .any(|m| m.contains("undefined_thing"))
+    );
 }
 
 // RED: the `?.let` body is analyzed past a failed receiver -- a body-local
 // binding resolves (poisoned receiver flows through `use_it`).
 #[test]
 fn safe_nav_let_body_analyzed() {
-    assert_eq!(type_of_binding(SAFE_NAV_LET, "let z").as_deref(), Some("int"));
+    assert_eq!(
+        type_of_binding(SAFE_NAV_LET, "let z").as_deref(),
+        Some("int")
+    );
 }

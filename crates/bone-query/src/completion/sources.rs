@@ -10,19 +10,19 @@ use lsp_types::{CompletionItem, CompletionItemKind, InsertTextFormat};
 
 use bone_incremental::session::Session;
 use bone_semantic::prelude::{
-    is_intrinsic_key, is_intrinsic_key_in, Idx, InferenceResult, ModuleId, TyId, Workspace,
+    Idx, InferenceResult, ModuleId, TyId, Workspace, is_intrinsic_key, is_intrinsic_key_in,
 };
 use ustr::Ustr;
 
 use crate::backend::{
-    analyze_variant, bind_generic, expected_for_anchor, nominal_base,
-    preceding_arg_starts, ty_of, user_module_for_path, ExpectedArg,
+    ExpectedArg, analyze_variant, bind_generic, expected_for_anchor, nominal_base,
+    preceding_arg_starts, ty_of, user_module_for_path,
 };
 use crate::completion::match_policy::admit;
-use crate::query::{clean_match, SymCat};
+use crate::query::{SymCat, clean_match};
 use crate::rank_key::RankKey;
 
-use super::classify::{balance_delimiters, completion_munges, in_pattern_position, SlotAnchor};
+use super::classify::{SlotAnchor, balance_delimiters, completion_munges, in_pattern_position};
 use super::rank::*;
 use super::select::*;
 
@@ -37,7 +37,9 @@ pub(crate) fn callee_param_names_in_scope(
     let name = Ustr::from(callee);
     let mut out: Vec<(Ustr, String)> = Vec::new();
     for m in ws.modules.iter() {
-        let Some(fns) = m.functions_by_name.get(&name) else { continue };
+        let Some(fns) = m.functions_by_name.get(&name) else {
+            continue;
+        };
         for (fmid, fid) in fns {
             if frag.is_some_and(|frag| {
                 !crate::modules_scope::callable_member_admitted(ws, frag, name, *fmid, *fid)
@@ -99,9 +101,10 @@ fn receiver_owner_binding(
     };
     match ty_of(ws, None, p0.ty) {
         TypeExpr::Generic(v, _) => (Some(v), recv_struct),
-        TypeExpr::App { ctor: TypeCtor::Nominal(n), params }
-            if Some(n) == recv_struct && params.len() == 1 =>
-        {
+        TypeExpr::App {
+            ctor: TypeCtor::Nominal(n),
+            params,
+        } if Some(n) == recv_struct && params.len() == 1 => {
             let arg_idx = params.into_iter().next().unwrap();
             match (ty_of(ws, None, p0.ty.with_idx(arg_idx)), recv_elem) {
                 (TypeExpr::Generic(v, _), Some(e)) => (Some(v), Some(e)),
@@ -131,9 +134,11 @@ fn fieldref_slot_owner(
     use bone_semantic::hir::{TypeCtor, TypeExpr};
     let p = f.param_decls.get(pi)?;
     let (t_idx, v_idx) = match ty_of(ws, None, p.ty) {
-        TypeExpr::App { ctor: TypeCtor::Nominal(n), params }
-            if is_intrinsic_key_in(n, &["FieldRef", "ReadFieldRef", "WriteFieldRef"])
-                && params.len() == 2 =>
+        TypeExpr::App {
+            ctor: TypeCtor::Nominal(n),
+            params,
+        } if is_intrinsic_key_in(n, &["FieldRef", "ReadFieldRef", "WriteFieldRef"])
+            && params.len() == 2 =>
         {
             let mut it = params.into_iter();
             (it.next().unwrap(), it.next().unwrap())
@@ -142,7 +147,10 @@ fn fieldref_slot_owner(
     };
     let v_str = ws.render(None, p.ty.with_idx(v_idx));
     let owner = match ty_of(ws, None, p.ty.with_idx(t_idx)) {
-        TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => n,
+        TypeExpr::App {
+            ctor: TypeCtor::Nominal(n),
+            ..
+        } => n,
         TypeExpr::Generic(tv, gname) => {
             if recv_var == Some(tv) {
                 recv_owner?
@@ -172,7 +180,11 @@ fn sibling_owner_bind(
     let mid = user_module_for_path(ws, path)?;
     let inf = ws.inference(mid)?;
     let starts = preceding_arg_starts(src, offset);
-    for (j, &aoff) in starts.iter().enumerate().take(arg_idx.saturating_sub(recv_offset)) {
+    for (j, &aoff) in starts
+        .iter()
+        .enumerate()
+        .take(arg_idx.saturating_sub(recv_offset))
+    {
         let Some(pty) = f.param_decls.get(j + recv_offset).map(|p| p.ty) else {
             continue;
         };
@@ -221,19 +233,23 @@ pub(crate) fn field_ref_arg_completions(
 
     // First overload whose `arg_idx` slot resolves to a FieldRef with >=1 field.
     let (t_name, v_str) = ws.modules.iter().find_map(|m| {
-        m.functions_by_name.get(&name)?.iter().find_map(|(fmid, fid)| {
-            if frag.is_some_and(|frag| {
-                !crate::modules_scope::callable_member_admitted(ws, frag, name, *fmid, *fid)
-            }) {
-                return None;
-            }
-            let f = &ws.modules[fmid.index()].functions[*fid];
-            let (recv_var, recv_owner) = receiver_owner_binding(ws, f, recv_struct, recv_elem);
-            let (owner, v_str) = fieldref_slot_owner(ws, f, arg_idx, recv_var, recv_owner, |gname| {
-                sibling_owner_bind(ws, path, src, offset, arg_idx, recv_offset, f, gname)
-            })?;
-            (!fields_of_type(ws, owner, &v_str).is_empty()).then_some((owner, v_str))
-        })
+        m.functions_by_name
+            .get(&name)?
+            .iter()
+            .find_map(|(fmid, fid)| {
+                if frag.is_some_and(|frag| {
+                    !crate::modules_scope::callable_member_admitted(ws, frag, name, *fmid, *fid)
+                }) {
+                    return None;
+                }
+                let f = &ws.modules[fmid.index()].functions[*fid];
+                let (recv_var, recv_owner) = receiver_owner_binding(ws, f, recv_struct, recv_elem);
+                let (owner, v_str) =
+                    fieldref_slot_owner(ws, f, arg_idx, recv_var, recv_owner, |gname| {
+                        sibling_owner_bind(ws, path, src, offset, arg_idx, recv_offset, f, gname)
+                    })?;
+                (!fields_of_type(ws, owner, &v_str).is_empty()).then_some((owner, v_str))
+            })
     })?;
 
     let pfx = prefix.as_bytes();
@@ -450,7 +466,9 @@ pub(crate) fn build_call_through(
             if f.name.as_str().starts_with("__") {
                 continue;
             }
-            let Some(p0) = f.param_decls.first() else { continue };
+            let Some(p0) = f.param_decls.first() else {
+                continue;
+            };
             fns.push(CtFn {
                 key: f.name,
                 name: f.name,
@@ -465,7 +483,11 @@ pub(crate) fn build_call_through(
     let mut groots: Vec<(ustr::Ustr, String, String)> = Vec::new();
     for m in ws.modules.iter() {
         for (gname, gidx) in m.global_by_name.iter() {
-            groots.push((*gname, gname.to_string(), ws.render(None, m.globals[*gidx].ty)));
+            groots.push((
+                *gname,
+                gname.to_string(),
+                ws.render(None, m.globals[*gidx].ty),
+            ));
         }
     }
     // Static args per distinct first-param type. Seed each needed type with its
@@ -487,7 +509,11 @@ pub(crate) fn build_call_through(
                 crate::query::VariantShape::Tuple => ArgPayload::Tuple,
                 crate::query::VariantShape::Record => ArgPayload::Record,
             };
-            vals.push(CtArg::keyed(Ustr::from(t), format!("{t}::{vname}"), payload));
+            vals.push(CtArg::keyed(
+                Ustr::from(t),
+                format!("{t}::{vname}"),
+                payload,
+            ));
         }
         global_type_args.insert(t.to_string(), vals);
     }
@@ -505,10 +531,17 @@ pub(crate) fn build_call_through(
     let mut fns_by_first_char: HashMap<u8, Vec<usize>> = HashMap::new();
     for (index, cf) in fns.iter().enumerate() {
         if let Some(&first) = cf.name.as_bytes().first() {
-            fns_by_first_char.entry(first.to_ascii_lowercase()).or_default().push(index);
+            fns_by_first_char
+                .entry(first.to_ascii_lowercase())
+                .or_default()
+                .push(index);
         }
     }
-    CallThroughIndex { fns, fns_by_first_char, global_type_args }
+    CallThroughIndex {
+        fns,
+        fns_by_first_char,
+        global_type_args,
+    }
 }
 
 /// The fragment view of the workspace call-through index. Namespace spellings
@@ -525,31 +558,49 @@ pub(crate) fn build_scoped_call_through(
     frag: &bone_core::modules::FragmentScope,
     index: &CallThroughIndex,
 ) -> ScopedCallThroughIndex {
-    let globals = crate::modules_scope::spellings_by_key(ws, frag, bone_core::modules::DefKind::Global);
+    let globals =
+        crate::modules_scope::spellings_by_key(ws, frag, bone_core::modules::DefKind::Global);
     let types = crate::modules_scope::spellings_by_key(ws, frag, bone_core::modules::DefKind::Type);
     let callable_spellings =
         crate::modules_scope::spellings_by_key(ws, frag, bone_core::modules::DefKind::Callable);
     let global_type_args = index
         .global_type_args
         .iter()
-        .map(|(ty, args)| (ty.clone(), global_args_in_scope(args, &globals, &types, &callable_spellings)))
+        .map(|(ty, args)| {
+            (
+                ty.clone(),
+                global_args_in_scope(args, &globals, &types, &callable_spellings),
+            )
+        })
         .collect();
     let mut fns_by_first_char: HashMap<u8, Vec<ScopedCtFn>> = HashMap::new();
     for (index, cf) in index.fns.iter().enumerate() {
         if !crate::modules_scope::callable_member_admitted(ws, frag, cf.key, cf.mid, cf.fid) {
             continue;
         }
-        let Some(names) = callable_spellings.get(&cf.key) else { continue };
+        let Some(names) = callable_spellings.get(&cf.key) else {
+            continue;
+        };
         for &name in names {
             let name_lc = name.as_str().to_lowercase();
-            let Some(&first) = name_lc.as_bytes().first() else { continue };
+            let Some(&first) = name_lc.as_bytes().first() else {
+                continue;
+            };
             fns_by_first_char
                 .entry(first)
                 .or_default()
-                .push(ScopedCtFn { index, name, name_lc });
+                .push(ScopedCtFn {
+                    index,
+                    name,
+                    name_lc,
+                });
         }
     }
-    ScopedCallThroughIndex { fns_by_first_char, global_type_args, callable_spellings }
+    ScopedCallThroughIndex {
+        fns_by_first_char,
+        global_type_args,
+        callable_spellings,
+    }
 }
 
 fn global_args_in_scope(
@@ -568,7 +619,9 @@ fn global_args_in_scope(
             continue;
         };
         for name in names {
-            let Some(suffix) = arg.text.strip_prefix(key.as_str()) else { continue };
+            let Some(suffix) = arg.text.strip_prefix(key.as_str()) else {
+                continue;
+            };
             let mut rendered = arg.clone();
             rendered.text = format!("{name}{suffix}");
             if let Some(reach_suffix) = &arg.reach_suffix {
@@ -592,10 +645,7 @@ fn global_args_in_scope(
     out
 }
 
-fn local_args_in_scope(
-    callable_names: &HashMap<Ustr, Vec<Ustr>>,
-    args: Vec<CtArg>,
-) -> Vec<CtArg> {
+fn local_args_in_scope(callable_names: &HashMap<Ustr, Vec<Ustr>>, args: Vec<CtArg>) -> Vec<CtArg> {
     args.into_iter()
         .filter_map(|mut arg| {
             let Some(reach_suffix) = &arg.reach_suffix else {
@@ -646,7 +696,11 @@ pub(crate) fn call_through_param_completions(
     let callable_spellings: Option<&HashMap<Ustr, Vec<Ustr>>>;
     if let Some(scoped) = scoped_index {
         // No indexed name begins with this letter, so this source contributes no candidates.
-        scoped_fns = scoped.fns_by_first_char.get(&q[0]).cloned().unwrap_or_default();
+        scoped_fns = scoped
+            .fns_by_first_char
+            .get(&q[0])
+            .cloned()
+            .unwrap_or_default();
         global_type_args = &scoped.global_type_args;
         callable_spellings = Some(&scoped.callable_spellings);
     } else {
@@ -657,7 +711,11 @@ pub(crate) fn call_through_param_completions(
             .flatten()
             .map(|&fn_index| {
                 let name = index.fns[fn_index].name;
-                ScopedCtFn { index: fn_index, name, name_lc: name.as_str().to_lowercase() }
+                ScopedCtFn {
+                    index: fn_index,
+                    name,
+                    name_lc: name.as_str().to_lowercase(),
+                }
             })
             .collect();
         global_type_args = &index.global_type_args;
@@ -711,7 +769,10 @@ pub(crate) fn call_through_param_completions(
             if p.is_method && p.takes_args {
                 continue;
             }
-            local_args.entry(p.final_ty.clone()).or_default().push(CtArg::reach_local(ln, p));
+            local_args
+                .entry(p.final_ty.clone())
+                .or_default()
+                .push(CtArg::reach_local(ln, p));
         }
     }
     if let Some(callable_names) = callable_spellings {
@@ -765,8 +826,7 @@ pub(crate) fn call_through_param_completions(
     let empty: Vec<CtArg> = Vec::new();
     // Per group: (arg, suffix_scores, path_penalty, local). suffix + penalty
     // both depend only on the arg (not the fn), so computed once and shared.
-    let mut match_memo: HashMap<(&str, usize), Vec<(&CtArg, Vec<i32>, i32, bool)>> =
-        HashMap::new();
+    let mut match_memo: HashMap<(&str, usize), Vec<(&CtArg, Vec<i32>, i32, bool)>> = HashMap::new();
     let mut prefix_scores: Vec<i32> = Vec::new(); // reused across fns
 
     // Collect lightweight candidates (score, fn index, arg, payload) across all
@@ -830,7 +890,8 @@ pub(crate) fn call_through_param_completions(
             // Best by score DESC, then arg lexical CASE-INSENSITIVE (so an
             // UPPER_CASE global doesn't beat a lowercase field path on a tie).
             methods.select_nth_unstable_by(PER_FN_METHOD_CAP, |x, y| {
-                y.0.cmp(&x.0).then_with(|| ci_cmp(x.1.text.as_bytes(), y.1.text.as_bytes()))
+                y.0.cmp(&x.0)
+                    .then_with(|| ci_cmp(x.1.text.as_bytes(), y.1.text.as_bytes()))
             });
             methods.truncate(PER_FN_METHOD_CAP);
         }
@@ -866,7 +927,8 @@ pub(crate) fn call_through_param_completions(
     // Global top `CALL_THROUGH_CAP` by score (then ci-arg tiebreak); materialize only those.
     if cands.len() > CALL_THROUGH_CAP {
         cands.select_nth_unstable_by(CALL_THROUGH_CAP, |x, y| {
-            y.0.cmp(&x.0).then_with(|| ci_cmp(x.2.text.as_bytes(), y.2.text.as_bytes()))
+            y.0.cmp(&x.0)
+                .then_with(|| ci_cmp(x.2.text.as_bytes(), y.2.text.as_bytes()))
         });
         cands.truncate(CALL_THROUGH_CAP);
     }
@@ -913,7 +975,13 @@ pub(crate) fn call_through_param_completions(
         } else {
             // Typed slot: kind 2 (a call synth is fn-shaped), so a real
             // local of the slot type still beats a same-rank synth.
-            RankKey { exact: ex, type_rank, band: bd, kind: 2, ..Default::default() }
+            RankKey {
+                exact: ex,
+                type_rank,
+                band: bd,
+                kind: 2,
+                ..Default::default()
+            }
         };
         let key = RankKey {
             method: 1,
@@ -971,19 +1039,30 @@ pub(crate) fn build_freq_index(ws: &Workspace) -> HashMap<Ustr, u32> {
     let mut counts: HashMap<Ustr, u32> = HashMap::new();
     for m in ws.modules.iter() {
         for te in m.ty_arena.values() {
-            if let TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } = te {
+            if let TypeExpr::App {
+                ctor: TypeCtor::Nominal(n),
+                ..
+            } = te
+            {
                 *counts.entry(*n).or_insert(0) += 1;
             }
         }
         for body in m.bodies.values() {
             for te in body.lowered_tys.values() {
-                if let TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } = te {
+                if let TypeExpr::App {
+                    ctor: TypeCtor::Nominal(n),
+                    ..
+                } = te
+                {
                     *counts.entry(*n).or_insert(0) += 1;
                 }
             }
             for (_, expr) in body.expr_arena.iter() {
                 let n = match expr {
-                    hir::Expr::Call { callee: hir::Callee::Unresolved { name, .. }, .. } => *name,
+                    hir::Expr::Call {
+                        callee: hir::Callee::Unresolved { name, .. },
+                        ..
+                    } => *name,
                     hir::Expr::SafeNavCall { method, .. } => *method,
                     hir::Expr::Global(n) => *n,
                     hir::Expr::StructLiteral { name, .. } => *name,
@@ -1009,15 +1088,13 @@ pub(crate) fn fn_is_coroutine_in_scope(
 ) -> bool {
     let n = Ustr::from(name);
     ws.modules.iter().any(|m| {
-        m.functions_by_name
-            .get(&n)
-            .is_some_and(|fns| {
-                fns.iter().any(|(fmid, fid)| {
-                    !frag.is_some_and(|frag| {
-                        !crate::modules_scope::callable_member_admitted(ws, frag, n, *fmid, *fid)
-                    }) && ws.modules[fmid.index()].functions[*fid].is_coroutine
-                })
+        m.functions_by_name.get(&n).is_some_and(|fns| {
+            fns.iter().any(|(fmid, fid)| {
+                !frag.is_some_and(|frag| {
+                    !crate::modules_scope::callable_member_admitted(ws, frag, n, *fmid, *fid)
+                }) && ws.modules[fmid.index()].functions[*fid].is_coroutine
             })
+        })
     })
 }
 
@@ -1038,7 +1115,9 @@ fn arg_admitted(
 /// ergonomics probe both.
 pub(crate) fn nominal_exists(ws: &Workspace, name: &str) -> bool {
     let u = Ustr::from(name);
-    ws.modules.iter().any(|m| m.struct_by_name.contains_key(&u) || m.enums_by_name.contains_key(&u))
+    ws.modules
+        .iter()
+        .any(|m| m.struct_by_name.contains_key(&u) || m.enums_by_name.contains_key(&u))
 }
 
 /// The struct named by a fn-name's first `_`-segment, capitalized (`mob_attack_co`
@@ -1048,12 +1127,18 @@ pub(crate) fn fn_prefix_struct(ws: &Workspace, fn_name: &str) -> Option<Ustr> {
     // Try each `_`-segment leading-first: `<type>_<verb>` (`mob_attack_co`) and
     // `<verb>_<type>` (`spawn_mob`) both name `Mob`. Leading match wins when
     // more than one segment is a struct (the UFCS convention).
-    fn_name.split('_').filter(|s| !s.is_empty()).find_map(|seg| {
-        let mut chars = seg.chars();
-        let cap: String = chars.next()?.to_ascii_uppercase().to_string() + chars.as_str();
-        let u = Ustr::from(&cap);
-        ws.modules.iter().any(|m| m.struct_by_name.contains_key(&u)).then_some(u)
-    })
+    fn_name
+        .split('_')
+        .filter(|s| !s.is_empty())
+        .find_map(|seg| {
+            let mut chars = seg.chars();
+            let cap: String = chars.next()?.to_ascii_uppercase().to_string() + chars.as_str();
+            let u = Ustr::from(&cap);
+            ws.modules
+                .iter()
+                .any(|m| m.struct_by_name.contains_key(&u))
+                .then_some(u)
+        })
 }
 
 /// Completion candidates in decorator position: every `deco` declaration in the
@@ -1123,9 +1208,7 @@ pub(crate) fn enum_record_field_completions(
         let mut items: Vec<CompletionItem> = fields
             .into_iter()
             .enumerate()
-            .filter(|(_, (name, _))| {
-                prefix.is_empty() || admit(name.as_bytes(), prefix.as_bytes())
-            })
+            .filter(|(_, (name, _))| prefix.is_empty() || admit(name.as_bytes(), prefix.as_bytes()))
             .map(|(i, (name, ty))| CompletionItem {
                 label: format!("{name}: {ty}"),
                 kind: Some(CompletionItemKind::FIELD),
@@ -1157,12 +1240,14 @@ pub(crate) fn struct_literal_field_completions(
     // Analyze a balanced/synthetic munge as a Session variant so the struct def
     // survives the broken literal -- and so a struct defined in another file /
     // dependency resolves.
-    let fields = completion_munges(src, offset).into_iter().find_map(|munged| {
-        let f = analyze_variant(session, path, &munged, |ws| {
-            crate::query::struct_fields_by_name(ws, name)
+    let fields = completion_munges(src, offset)
+        .into_iter()
+        .find_map(|munged| {
+            let f = analyze_variant(session, path, &munged, |ws| {
+                crate::query::struct_fields_by_name(ws, name)
+            })?;
+            (!f.is_empty()).then_some(f)
         })?;
-        (!f.is_empty()).then_some(f)
-    })?;
 
     // Fields already written between the `{` and the cursor (`name :`), to skip.
     let written = src.get(brace_open + 1..offset.min(src.len())).unwrap_or("");
@@ -1234,8 +1319,7 @@ pub(crate) fn enum_qualified_completions(
     }
 
     let pattern = in_pattern_position(src, offset);
-    let matches_prefix =
-        |v: &str| prefix.is_empty() || admit(v.as_bytes(), prefix.as_bytes());
+    let matches_prefix = |v: &str| prefix.is_empty() || admit(v.as_bytes(), prefix.as_bytes());
     // When the in-progress prefix matches NO variant (a typo like `TextAlign::top`),
     // returning empty hands the popup to the client's buffer-word fallback -- the
     // worst outcome, since an enum is a closed set. Show every variant instead, and
@@ -1256,9 +1340,10 @@ pub(crate) fn enum_qualified_completions(
                 (false, VariantShape::Tuple) => {
                     (Some(format!("{v}($0)")), Some(InsertTextFormat::SNIPPET))
                 }
-                (false, VariantShape::Record) => {
-                    (Some(format!("{v} {{ $0 }}")), Some(InsertTextFormat::SNIPPET))
-                }
+                (false, VariantShape::Record) => (
+                    Some(format!("{v} {{ $0 }}")),
+                    Some(InsertTextFormat::SNIPPET),
+                ),
                 _ => (None, None),
             };
             CompletionItem {
@@ -1343,7 +1428,15 @@ pub(crate) fn member_completions(
     for munged in completion_munges(src, offset) {
         let attempt = analyze_variant(session, path, &munged, |ws| {
             member_completion_items(
-                ws, path, offset, segments, prefix, arg_slot.clone(), anchor, reach, bool_ctx,
+                ws,
+                path,
+                offset,
+                segments,
+                prefix,
+                arg_slot.clone(),
+                anchor,
+                reach,
+                bool_ctx,
                 paren_follows,
             )
         });
@@ -1362,8 +1455,14 @@ pub(crate) fn member_completions(
 /// field boosts in an `int?`/`float`/`any` slot); rendered-string equality when
 /// the member has no stored TyId (a generic-substituted field) or there's no
 /// session. False with no session at all.
-pub(crate) fn member_ty_match(mut expected: Option<&mut ExpectedArg>, ty_id: Option<TyId>, ty_render: &str) -> bool {
-    let Some(exp) = expected.as_mut() else { return false };
+pub(crate) fn member_ty_match(
+    mut expected: Option<&mut ExpectedArg>,
+    ty_id: Option<TyId>,
+    ty_render: &str,
+) -> bool {
+    let Some(exp) = expected.as_mut() else {
+        return false;
+    };
     match ty_id {
         Some(t) => exp.accepts(t),
         None => exp.rendered.iter().any(|e| e == ty_render),
@@ -1402,8 +1501,19 @@ pub(crate) fn member_completions_by_receiver(
             let (fields, recv_struct, vec_elem, recv_elem) =
                 crate::query::struct_members_of_receiver_expr(ws, mid, recv_end)?;
             Some(build_member_items(
-                ws, mid, offset, fields, Some(recv_struct), vec_elem, recv_elem, prefix,
-                arg_slot.clone(), anchor, reach, bool_ctx, paren_follows,
+                ws,
+                mid,
+                offset,
+                fields,
+                Some(recv_struct),
+                vec_elem,
+                recv_elem,
+                prefix,
+                arg_slot.clone(),
+                anchor,
+                reach,
+                bool_ctx,
+                paren_follows,
             ))
         });
         // `Some(Some(items))`: this variant resolved the receiver. Prefer the
@@ -1445,8 +1555,19 @@ pub(crate) fn member_completion_items(
     let vec_elem = crate::query::receiver_vec_elem(ws, mid, offset, segments);
     let recv_elem = crate::query::receiver_sole_arg_struct(ws, mid, offset, segments);
     build_member_items(
-        ws, mid, offset, fields, recv_struct, vec_elem, recv_elem, prefix, arg_slot, anchor, reach,
-        bool_ctx, paren_follows,
+        ws,
+        mid,
+        offset,
+        fields,
+        recv_struct,
+        vec_elem,
+        recv_elem,
+        prefix,
+        arg_slot,
+        anchor,
+        reach,
+        bool_ctx,
+        paren_follows,
     )
 }
 
@@ -1493,7 +1614,12 @@ fn field_ref_slot(
 /// the field (a `${1|.a,.b|}` choice when >1 field), every other arg a numbered
 /// placeholder named after its param. `mob.kill_co` -> `kill_co(.attack_co)`;
 /// `mob.set_co` -> `set_co(.attack_co, ${1:next})`.
-fn field_ref_insert(name: &str, f: &bone_semantic::hir::Function, field_arg_idx: usize, fields: &[Ustr]) -> String {
+fn field_ref_insert(
+    name: &str,
+    f: &bone_semantic::hir::Function,
+    field_arg_idx: usize,
+    fields: &[Ustr],
+) -> String {
     let mut stop = if fields.len() > 1 { 2 } else { 1 };
     let mut parts = Vec::new();
     for (j, p) in f.param_decls.iter().skip(1).enumerate() {
@@ -1501,7 +1627,11 @@ fn field_ref_insert(name: &str, f: &bone_semantic::hir::Function, field_arg_idx:
             if fields.len() == 1 {
                 parts.push(format!(".{}", fields[0]));
             } else {
-                let joined = fields.iter().map(|x| format!(".{x}")).collect::<Vec<_>>().join(",");
+                let joined = fields
+                    .iter()
+                    .map(|x| format!(".{x}"))
+                    .collect::<Vec<_>>()
+                    .join(",");
                 parts.push(format!("${{1|{joined}|}}"));
             }
         } else {
@@ -1542,15 +1672,18 @@ fn field_ref_methods<'a>(
             }) {
                 continue;
             }
-            let Some(p0) = f.param_decls.first() else { continue };
+            let Some(p0) = f.param_decls.first() else {
+                continue;
+            };
             // A bare-generic receiver (`o: T`), or a wrapper `Ctor<T>` whose ctor
             // is the receiver struct (`e: Entity<T>` on an `Entity<Glyph>`
             // receiver) -- the two shapes `field_ref_slot` resolves an owner for.
             let p0_ok = match ty_of(ws, None, p0.ty) {
                 TypeExpr::Generic(..) => true,
-                TypeExpr::App { ctor: TypeCtor::Nominal(n), params } => {
-                    n == recv_struct && params.len() == 1 && recv_elem.is_some()
-                }
+                TypeExpr::App {
+                    ctor: TypeCtor::Nominal(n),
+                    params,
+                } => n == recv_struct && params.len() == 1 && recv_elem.is_some(),
                 _ => false,
             };
             if !p0_ok {
@@ -1634,7 +1767,13 @@ fn build_member_items(
             .collect();
         let method_match: Vec<bool> = methods
             .iter()
-            .map(|m| member_ty_match(expected.as_mut(), m.return_ty, m.returns.as_deref().unwrap_or("")))
+            .map(|m| {
+                member_ty_match(
+                    expected.as_mut(),
+                    m.return_ty,
+                    m.returns.as_deref().unwrap_or(""),
+                )
+            })
             .collect();
         // Direct members are 1-hop (dist 1): they carry a sort_text too, so they
         // order consistently with -- and ahead of, by distance -- the transitive
@@ -1658,25 +1797,31 @@ fn build_member_items(
         // spuriously trip the length tiebreak (empty-prefix browse stays
         // alphabetical). Tunable; eyeball with `rock lsp completion <pos> --repl`.
         let field_boost = if prefix.is_empty() { 0 } else { 25 };
-        let field_items = fields.into_iter().zip(field_match).filter_map(|((name, ty, _), tmatch)| {
-            if name.starts_with('_') && !show_private {
-                return None;
-            }
-            (prefix.is_empty() || admit(name.as_bytes(), prefix.as_bytes())).then(|| CompletionItem {
-                sort_text: Some(if bool_ctx {
-                    member_bool_sort_text(&name, pfx, ty == "bool", 0, field_boost)
-                } else if arg_ctx {
-                    member_arg_sort_text(&name, pfx, tmatch, 0, 1, field_boost)
-                } else {
-                    arg_sort_text(0, 0, &name, pfx, 1, 0, field_boost)
-                }),
-                label: format!("{name}: {ty}"),
-                kind: Some(CompletionItemKind::FIELD),
-                detail: Some(ty),
-                insert_text: Some(name),
-                ..Default::default()
-            })
-        });
+        let field_items =
+            fields
+                .into_iter()
+                .zip(field_match)
+                .filter_map(|((name, ty, _), tmatch)| {
+                    if name.starts_with('_') && !show_private {
+                        return None;
+                    }
+                    (prefix.is_empty() || admit(name.as_bytes(), prefix.as_bytes())).then(|| {
+                        CompletionItem {
+                            sort_text: Some(if bool_ctx {
+                                member_bool_sort_text(&name, pfx, ty == "bool", 0, field_boost)
+                            } else if arg_ctx {
+                                member_arg_sort_text(&name, pfx, tmatch, 0, 1, field_boost)
+                            } else {
+                                arg_sort_text(0, 0, &name, pfx, 1, 0, field_boost)
+                            }),
+                            label: format!("{name}: {ty}"),
+                            kind: Some(CompletionItemKind::FIELD),
+                            detail: Some(ty),
+                            insert_text: Some(name),
+                            ..Default::default()
+                        }
+                    })
+                });
         // FieldRef field-ref methods for this receiver, resolved once. Two shapes:
         // a bare-generic receiver (`mob.stop`, never surfaced by `ufcs_methods`)
         // and a wrapper `Entity<T>` overload (`e.run_into`, which the NOMINAL
@@ -1688,47 +1833,56 @@ fn build_member_items(
             .unwrap_or_default();
         let field_ref_names: std::collections::HashSet<Ustr> =
             field_ref_matches.iter().map(|(f, _, _)| f.name).collect();
-        let method_items = methods.into_iter().zip(method_match).filter_map(|(m, rmatch)| {
-            if field_ref_names.contains(&Ustr::from(m.name.as_str())) {
-                return None;
-            }
-            (prefix.is_empty() || admit(m.name.as_bytes(), prefix.as_bytes())).then(|| {
-                // Inline `(params) -> ret`. A method with args left after the
-                // receiver accepts as a snippet `name($0)` (`recv.name()`, cursor
-                // inside); one with no remaining args inserts `name()` as plain
-                // text so the cursor lands after the `)`. When a `(` already
-                // follows, insert the bare name -- the parens are already there.
-                let (insert_text, insert_text_format) = if paren_follows {
-                    (Some(m.name.clone()), None)
-                } else if m.takes_args {
-                    (Some(format!("{}($0)", m.name)), Some(InsertTextFormat::SNIPPET))
-                } else {
-                    (Some(format!("{}()", m.name)), None)
-                };
-                CompletionItem {
-                    // `method` rung = 0 (same as fields): in member position the
-                    // `.` already means "give me a member", so a method is not
-                    // demoted below a field by a hard rung. Fields get only a soft
-                    // SCORE lean (MEMBER_FIELD_BOOST); methods take no bonus, so a
-                    // better-matching method still outranks a field. (In non-member
-                    // position fns are still down-ranked, by `kind`.)
-                    sort_text: Some(if bool_ctx {
-                        member_bool_sort_text(&m.name, pfx, false, 0, 0)
-                    } else if arg_ctx {
-                        member_arg_sort_text(&m.name, pfx, rmatch, 0, 1, 0)
-                    } else {
-                        arg_sort_text(0, 0, &m.name, pfx, 1, 0, 0)
-                    }),
-                    label: m.name.clone(),
-                    label_details: fn_or_type_label_details(SymCat::Function, Some(&m.signature)),
-                    kind: Some(CompletionItemKind::METHOD),
-                    detail: Some(m.signature),
-                    insert_text,
-                    insert_text_format,
-                    ..Default::default()
+        let method_items = methods
+            .into_iter()
+            .zip(method_match)
+            .filter_map(|(m, rmatch)| {
+                if field_ref_names.contains(&Ustr::from(m.name.as_str())) {
+                    return None;
                 }
-            })
-        });
+                (prefix.is_empty() || admit(m.name.as_bytes(), prefix.as_bytes())).then(|| {
+                    // Inline `(params) -> ret`. A method with args left after the
+                    // receiver accepts as a snippet `name($0)` (`recv.name()`, cursor
+                    // inside); one with no remaining args inserts `name()` as plain
+                    // text so the cursor lands after the `)`. When a `(` already
+                    // follows, insert the bare name -- the parens are already there.
+                    let (insert_text, insert_text_format) = if paren_follows {
+                        (Some(m.name.clone()), None)
+                    } else if m.takes_args {
+                        (
+                            Some(format!("{}($0)", m.name)),
+                            Some(InsertTextFormat::SNIPPET),
+                        )
+                    } else {
+                        (Some(format!("{}()", m.name)), None)
+                    };
+                    CompletionItem {
+                        // `method` rung = 0 (same as fields): in member position the
+                        // `.` already means "give me a member", so a method is not
+                        // demoted below a field by a hard rung. Fields get only a soft
+                        // SCORE lean (MEMBER_FIELD_BOOST); methods take no bonus, so a
+                        // better-matching method still outranks a field. (In non-member
+                        // position fns are still down-ranked, by `kind`.)
+                        sort_text: Some(if bool_ctx {
+                            member_bool_sort_text(&m.name, pfx, false, 0, 0)
+                        } else if arg_ctx {
+                            member_arg_sort_text(&m.name, pfx, rmatch, 0, 1, 0)
+                        } else {
+                            arg_sort_text(0, 0, &m.name, pfx, 1, 0, 0)
+                        }),
+                        label: m.name.clone(),
+                        label_details: fn_or_type_label_details(
+                            SymCat::Function,
+                            Some(&m.signature),
+                        ),
+                        kind: Some(CompletionItemKind::METHOD),
+                        detail: Some(m.signature),
+                        insert_text,
+                        insert_text_format,
+                        ..Default::default()
+                    }
+                })
+            });
         let mut items: Vec<CompletionItem> = field_items.chain(method_items).collect();
         // Field-ref methods (`mob.kill_co(.attack_co)`, `e.run_into(.co, ..)`):
         // surface each with the field arg pre-filled. A bare-generic receiver is
@@ -1776,7 +1930,13 @@ fn build_member_items(
         if recv_struct.is_some_and(|s| is_intrinsic_key(s, "Entity")) {
             for it in items.iter_mut() {
                 if it.label == "get" {
-                    it.sort_text = Some(RankKey { len: RankKey::len_key(9999, "get".len()), ..Default::default() }.encode("get"));
+                    it.sort_text = Some(
+                        RankKey {
+                            len: RankKey::len_key(9999, "get".len()),
+                            ..Default::default()
+                        }
+                        .encode("get"),
+                    );
                 }
             }
             if clean_match(b"get().unwrap()", prefix.as_bytes()) {
@@ -1785,7 +1945,14 @@ fn build_member_items(
                     kind: Some(CompletionItemKind::METHOD),
                     detail: Some("unwrap the Entity's value (T)".to_string()),
                     insert_text: Some("get().unwrap()".to_string()),
-                    sort_text: Some(RankKey { fine: RankKey::fine(9998), len: RankKey::len_key(9998, "get().unwrap()".len()), ..Default::default() }.encode("get().unwrap()")),
+                    sort_text: Some(
+                        RankKey {
+                            fine: RankKey::fine(9998),
+                            len: RankKey::len_key(9998, "get().unwrap()".len()),
+                            ..Default::default()
+                        }
+                        .encode("get().unwrap()"),
+                    ),
                     ..Default::default()
                 });
             }
@@ -1830,13 +1997,30 @@ fn build_member_items(
                         } else {
                             (call.clone(), None)
                         };
-                        (format!("{call} -> {}", p.final_ty), CompletionItemKind::METHOD, insert, fmt)
+                        (
+                            format!("{call} -> {}", p.final_ty),
+                            CompletionItemKind::METHOD,
+                            insert,
+                            fmt,
+                        )
                     } else {
-                        (format!("{}: {}", p.suffix, p.final_ty), CompletionItemKind::FIELD, p.suffix.clone(), None)
+                        (
+                            format!("{}: {}", p.suffix, p.final_ty),
+                            CompletionItemKind::FIELD,
+                            p.suffix.clone(),
+                            None,
+                        )
                     };
                     // Reach paths are type-matches by construction (paths TO the
                     // expected type) -- prio 0, same format as the direct items.
-                    let sort_text = member_arg_sort_text(&p.suffix, pfx, true, u8::from(p.is_method), p.dist, 0);
+                    let sort_text = member_arg_sort_text(
+                        &p.suffix,
+                        pfx,
+                        true,
+                        u8::from(p.is_method),
+                        p.dist,
+                        0,
+                    );
                     items.push(CompletionItem {
                         label,
                         kind: Some(kind),

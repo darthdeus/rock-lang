@@ -150,7 +150,11 @@ pub struct Site {
 
 impl Site {
     pub fn direct_call(expr: Idx<Expr>) -> Self {
-        Self { domain: SiteDomain::Own, expr, op: SiteOp::DirectCall }
+        Self {
+            domain: SiteDomain::Own,
+            expr,
+            op: SiteOp::DirectCall,
+        }
     }
 }
 

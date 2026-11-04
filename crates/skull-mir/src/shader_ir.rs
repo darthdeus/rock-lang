@@ -21,8 +21,8 @@
 //! interface plan. If that cannot produce a different physical answer, the
 //! interface plan was a GLSL plan wearing another name.
 
-use ustr::Ustr;
 use std::fmt::Write as _;
+use ustr::Ustr;
 
 /// Which GLSL dialect an artifact packages: the `#version`
 /// line plus the builtin/precision differences that follow from it. `Core330`
@@ -250,9 +250,11 @@ impl ComputeInterfacePlan {
         }) {
             return Err("atomic compute resources must be read_write storage arrays");
         }
-        if self.workgroup.iter().any(|memory| {
-            memory.size == 0 || matches!(memory.kind, ComputeValueKind::AtomicU32)
-        }) {
+        if self
+            .workgroup
+            .iter()
+            .any(|memory| memory.size == 0 || matches!(memory.kind, ComputeValueKind::AtomicU32))
+        {
             return Err("compute workgroup arrays must have a positive non-atomic element kind");
         }
         Ok(())
@@ -283,7 +285,9 @@ impl ShaderInstance {
     /// The declaration's own shape -- an entry, or a helper reached with no
     /// instantiation.
     pub fn plain(fref: FuncRef) -> Self {
-        ShaderInstance { inst: Instance::base(fref) }
+        ShaderInstance {
+            inst: Instance::base(fref),
+        }
     }
 
     pub fn fref(&self) -> FuncRef {
@@ -335,7 +339,12 @@ impl ShaderStageIr {
     pub fn declarations(&self) -> Vec<FuncRef> {
         let mut seen: rustc_hash::FxHashSet<(u32, u32)> = rustc_hash::FxHashSet::default();
         let mut out = Vec::new();
-        for f in self.order.iter().map(|i| i.fref()).chain(std::iter::once(self.entry.fref())) {
+        for f in self
+            .order
+            .iter()
+            .map(|i| i.fref())
+            .chain(std::iter::once(self.entry.fref()))
+        {
             if seen.insert((f.module.raw(), f.func.into_raw().into_u32())) {
                 out.push(f);
             }
@@ -398,7 +407,10 @@ pub struct NominalType {
 
 impl NominalType {
     pub fn of(ws: &Workspace, key: Ustr) -> Self {
-        Self { key, symbol: type_symbol(ws, key) }
+        Self {
+            key,
+            symbol: type_symbol(ws, key),
+        }
     }
 }
 
@@ -414,10 +426,7 @@ pub struct LogicalUniformGroup {
 
 /// The identity of a logical uniform value group. Physical offsets, padding,
 /// bindings and block size are deliberately absent.
-pub fn semantic_uniform_group_fingerprint(
-    struct_name: Ustr,
-    members: &[(Ustr, WireKind)],
-) -> u64 {
+pub fn semantic_uniform_group_fingerprint(struct_name: Ustr, members: &[(Ustr, WireKind)]) -> u64 {
     let mut hash = 0xa5a5_5a5a_c3c3_3c3cu64;
     for byte in struct_name.as_bytes() {
         hash ^= u64::from(*byte);
@@ -576,7 +585,10 @@ impl ShaderInterfacePlan {
     /// The sampler names in declaration order, which is the order a target
     /// assigns units in. Empty when the program declares no group.
     pub fn sampler_names(&self) -> Vec<Ustr> {
-        self.textures.as_ref().map(|t| t.samplers.iter().map(|(n, _)| *n).collect()).unwrap_or_default()
+        self.textures
+            .as_ref()
+            .map(|t| t.samplers.iter().map(|(n, _)| *n).collect())
+            .unwrap_or_default()
     }
 
     /// Every sampler `stage` reads, grouped ones first (in group order), then
@@ -590,7 +602,10 @@ impl ShaderInterfacePlan {
             .flat_map(|t| t.samplers.iter().copied())
             .collect();
         out.extend(
-            self.bare_samplers.iter().filter(|s| s.stage == stage).map(|s| (s.name, s.kind)),
+            self.bare_samplers
+                .iter()
+                .filter(|s| s.stage == stage)
+                .map(|s| (s.name, s.kind)),
         );
         out
     }
@@ -639,7 +654,14 @@ impl ShaderInterfacePlan {
                 VertexRate::PerVertex => "vertex",
                 VertexRate::PerInstance => "instance",
             };
-            writeln!(out, "vertex_input {} {} {}", input.struct_name.symbol, rate, input.attrs.len()).unwrap();
+            writeln!(
+                out,
+                "vertex_input {} {} {}",
+                input.struct_name.symbol,
+                rate,
+                input.attrs.len()
+            )
+            .unwrap();
             for (name, kind) in &input.attrs {
                 writeln!(out, "attr {} {}", name, attr_kind_code(*kind)).unwrap();
             }
@@ -647,12 +669,27 @@ impl ShaderInterfacePlan {
 
         writeln!(out, "varyings {}", self.varyings.len()).unwrap();
         for varying in &self.varyings {
-            writeln!(out, "varying {} {} {}", varying.name, varying.kind.code(), if varying.flat { 1 } else { 0 }).unwrap();
+            writeln!(
+                out,
+                "varying {} {} {}",
+                varying.name,
+                varying.kind.code(),
+                if varying.flat { 1 } else { 0 }
+            )
+            .unwrap();
         }
 
         writeln!(out, "groups {}", self.uniform_groups.len()).unwrap();
         for group in &self.uniform_groups {
-            writeln!(out, "group {} {} {} {}", uniform_role_name(group.role), group.struct_name.symbol, group.semantic_fingerprint(), group.members.len()).unwrap();
+            writeln!(
+                out,
+                "group {} {} {} {}",
+                uniform_role_name(group.role),
+                group.struct_name.symbol,
+                group.semantic_fingerprint(),
+                group.members.len()
+            )
+            .unwrap();
             for (name, kind) in &group.members {
                 writeln!(out, "member {} {}", name, kind.code()).unwrap();
             }
@@ -660,16 +697,35 @@ impl ShaderInterfacePlan {
 
         writeln!(out, "arrays {}", self.array_groups.len()).unwrap();
         for group in &self.array_groups {
-            writeln!(out, "array {} {} {}", group.stage.name(), group.symbol(), group.members.len()).unwrap();
+            writeln!(
+                out,
+                "array {} {} {}",
+                group.stage.name(),
+                group.symbol(),
+                group.members.len()
+            )
+            .unwrap();
             for member in &group.members {
-                writeln!(out, "array_member {} {} {}", member.name, member.elem.code(), member.capacity).unwrap();
+                writeln!(
+                    out,
+                    "array_member {} {} {}",
+                    member.name,
+                    member.elem.code(),
+                    member.capacity
+                )
+                .unwrap();
             }
         }
 
         match &self.compute {
             Some(compute) => {
                 writeln!(out, "compute some").unwrap();
-                writeln!(out, "compute_workgroup {} {} {}", compute.workgroup_size.x, compute.workgroup_size.y, compute.workgroup_size.z).unwrap();
+                writeln!(
+                    out,
+                    "compute_workgroup {} {} {}",
+                    compute.workgroup_size.x, compute.workgroup_size.y, compute.workgroup_size.z
+                )
+                .unwrap();
                 match compute.dispatch {
                     ComputeDispatchContract::Runtime { dimensions } => {
                         writeln!(out, "compute_dispatch runtime {dimensions}").unwrap();
@@ -685,11 +741,27 @@ impl ShaderInterfacePlan {
                 writeln!(out, "compute_resources {}", compute.resources.len()).unwrap();
                 for resource in &compute.resources {
                     let (shape, kind) = resource.shape.code();
-                    writeln!(out, "compute_resource {} {} {} {} {}", resource.name, resource.address_space.name(), resource.access.name(), shape, kind.code()).unwrap();
+                    writeln!(
+                        out,
+                        "compute_resource {} {} {} {} {}",
+                        resource.name,
+                        resource.address_space.name(),
+                        resource.access.name(),
+                        shape,
+                        kind.code()
+                    )
+                    .unwrap();
                 }
                 writeln!(out, "compute_workgroup_arrays {}", compute.workgroup.len()).unwrap();
                 for memory in &compute.workgroup {
-                    writeln!(out, "compute_workgroup_array {} {} {}", memory.name, memory.kind.code(), memory.size).unwrap();
+                    writeln!(
+                        out,
+                        "compute_workgroup_array {} {} {}",
+                        memory.name,
+                        memory.kind.code(),
+                        memory.size
+                    )
+                    .unwrap();
                 }
             }
             None => {}
@@ -697,7 +769,10 @@ impl ShaderInterfacePlan {
 
         match &self.textures {
             Some(group) => {
-                let struct_name = group.struct_name.map(|name| name.symbol.as_str()).unwrap_or("none");
+                let struct_name = group
+                    .struct_name
+                    .map(|name| name.symbol.as_str())
+                    .unwrap_or("none");
                 writeln!(out, "textures {} {}", struct_name, group.samplers.len()).unwrap();
                 for (name, kind) in &group.samplers {
                     writeln!(out, "texture {} {}", name, sampler_kind_code(*kind)).unwrap();
@@ -715,7 +790,14 @@ impl ShaderInterfacePlan {
 
         writeln!(out, "bare_samplers {}", self.bare_samplers.len()).unwrap();
         for sampler in &self.bare_samplers {
-            writeln!(out, "bare_sampler {} {} {}", sampler.stage.name(), sampler.name, sampler_kind_code(sampler.kind)).unwrap();
+            writeln!(
+                out,
+                "bare_sampler {} {} {}",
+                sampler.stage.name(),
+                sampler.name,
+                sampler_kind_code(sampler.kind)
+            )
+            .unwrap();
         }
 
         match &self.fragment_output {

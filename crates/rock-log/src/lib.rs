@@ -6,13 +6,13 @@
 //! `log_once!` / `log_throttled!` filters; this is the only thing that
 //! actually writes. `eprintln!` here is the *one* sanctioned raw write.
 
+use bone_core::prelude::Instant;
 use once_cell::sync::Lazy;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::io::Write;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use bone_core::prelude::Instant;
 
 // 0=error 1=warn 2=info 3=debug 4=trace. Default info (2). Single
 // source of truth for the whole process; external level bridges delegate here.
@@ -84,9 +84,7 @@ fn log_to_level(l: log::Level) -> u8 {
 const NOISY_TARGET_PREFIXES: &[&str] = &["symphonia"];
 
 fn is_noisy(target: &str) -> bool {
-    NOISY_TARGET_PREFIXES
-        .iter()
-        .any(|p| target.starts_with(p))
+    NOISY_TARGET_PREFIXES.iter().any(|p| target.starts_with(p))
 }
 
 /// Effective max level for a target: noisy third-party targets are
@@ -121,7 +119,8 @@ impl Filter {
     }
 
     pub fn enabled(&self, target: &str, level: log::Level) -> bool {
-        self.0.enabled(&log::Metadata::builder().target(target).level(level).build())
+        self.0
+            .enabled(&log::Metadata::builder().target(target).level(level).build())
     }
 }
 
@@ -275,7 +274,10 @@ impl log::Log for Logger {
 
 fn emit(level: log::Level, target: &str, args: &std::fmt::Arguments, wall_clock: bool) {
     if let Some(table) = record_table(level) {
-        table.lock().unwrap().record(target, &args.to_string(), elapsed_secs());
+        table
+            .lock()
+            .unwrap()
+            .record(target, &args.to_string(), elapsed_secs());
     }
     let line = format_line(elapsed_secs(), level, target, args, wall_clock);
     if let Some(file) = FILE_SINK.get() {
@@ -448,8 +450,7 @@ pub fn records(level: log::Level) -> Vec<LogRecord> {
 
 // ---- log_once / log_throttled filter state (the one dedup/throttle) ----
 
-static DEDUP: Lazy<Mutex<HashSet<&'static str>>> =
-    Lazy::new(|| Mutex::new(HashSet::new()));
+static DEDUP: Lazy<Mutex<HashSet<&'static str>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 static THROTTLE: Lazy<Mutex<HashMap<&'static str, Instant>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
@@ -624,7 +625,10 @@ mod tests {
             &format_args!("frame 60 took 69.7ms"),
             true,
         );
-        assert_eq!(declared, "[   1.296s ERROR]~[SLOWFRAME] frame 60 took 69.7ms");
+        assert_eq!(
+            declared,
+            "[   1.296s ERROR]~[SLOWFRAME] frame 60 took 69.7ms"
+        );
         assert_eq!(
             plain.len(),
             declared.len(),
@@ -640,7 +644,11 @@ mod tests {
         table.record("SAVE", "rejected: floor", 3.0);
         assert_eq!(table.total(), 3);
         let rows = table.rows();
-        assert_eq!(rows.len(), 2, "one fault with different tails is one row: {rows:?}");
+        assert_eq!(
+            rows.len(),
+            2,
+            "one fault with different tails is one row: {rows:?}"
+        );
         assert_eq!(rows[0].target, "SAVE", "most recently seen first");
         assert_eq!(rows[1].message, "rejected: floor");
         assert_eq!(rows[1].count, 2);
@@ -659,8 +667,14 @@ mod tests {
         assert_eq!(rows.len(), RECORD_CAP);
         assert_eq!(table.evicted(), 1);
         assert_eq!(table.total(), RECORD_CAP as u64 + 2);
-        assert!(rows.iter().any(|r| r.message == "fault 0"), "a repeat refreshes its row");
-        assert!(!rows.iter().any(|r| r.message == "fault 1"), "the stalest row is evicted");
+        assert!(
+            rows.iter().any(|r| r.message == "fault 0"),
+            "a repeat refreshes its row"
+        );
+        assert!(
+            !rows.iter().any(|r| r.message == "fault 1"),
+            "the stalest row is evicted"
+        );
         assert!(rows.iter().any(|r| r.message == "fresh"));
     }
 
@@ -671,7 +685,10 @@ mod tests {
         log::error!(target: "RLTEST_ERRORS", "error table witness {}", 7);
         log::warn!(target: "RLTEST_ERRORS", "warning table witness {}", 8);
         let witness = |level| -> Vec<LogRecord> {
-            records(level).into_iter().filter(|r| r.target == "RLTEST_ERRORS").collect()
+            records(level)
+                .into_iter()
+                .filter(|r| r.target == "RLTEST_ERRORS")
+                .collect()
         };
         let errors = witness(log::Level::Error);
         assert_eq!(errors.len(), 1, "{errors:?}");
@@ -680,7 +697,10 @@ mod tests {
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert_eq!(warnings[0].message, "warning table witness 8");
         assert!(records_total(log::Level::Warn) > warnings_before);
-        assert!(records(log::Level::Info).is_empty(), "only errors and warnings are kept");
+        assert!(
+            records(log::Level::Info).is_empty(),
+            "only errors and warnings are kept"
+        );
     }
 
     #[test]
@@ -696,7 +716,9 @@ mod tests {
 }
 
 fn unix_millis(time: SystemTime) -> u128 {
-    time.duration_since(UNIX_EPOCH).expect("system clock is before UNIX epoch").as_millis()
+    time.duration_since(UNIX_EPOCH)
+        .expect("system clock is before UNIX epoch")
+        .as_millis()
 }
 
 #[cfg(test)]
@@ -712,7 +734,11 @@ mod release_tests {
     fn filtered_logger_writes_enabled_targets_to_its_file() {
         if let Some(path) = std::env::var_os("FILTERED_TEST_CHILD") {
             let file = std::fs::File::create(path).unwrap();
-            let filter = Filter::parse(log::LevelFilter::Warn, Some("chosen=debug"), &[("timing", log::LevelFilter::Info)]);
+            let filter = Filter::parse(
+                log::LevelFilter::Warn,
+                Some("chosen=debug"),
+                &[("timing", log::LevelFilter::Info)],
+            );
             init_filtered(filter.unwrap(), Sink::File(file));
             log::debug!(target: "chosen", "kept debug");
             log::info!(target: "timing", "kept info");
@@ -726,13 +752,33 @@ mod release_tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("out.log");
         let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["release_tests::filtered_logger_writes_enabled_targets_to_its_file", "--exact", "--nocapture"])
-            .env("FILTERED_TEST_CHILD", &path).output().unwrap();
+            .args([
+                "release_tests::filtered_logger_writes_enabled_targets_to_its_file",
+                "--exact",
+                "--nocapture",
+            ])
+            .env("FILTERED_TEST_CHILD", &path)
+            .output()
+            .unwrap();
         let written = std::fs::read_to_string(&path).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-        let lines: Vec<&str> = written.lines().map(|l| l.split_once("] ").unwrap().1).collect();
-        assert_eq!(lines, ["[chosen] kept debug", "[timing] kept info", "[other] kept warn"]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let lines: Vec<&str> = written
+            .lines()
+            .map(|l| l.split_once("] ").unwrap().1)
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                "[chosen] kept debug",
+                "[timing] kept info",
+                "[other] kept warn"
+            ]
+        );
         assert!(!String::from_utf8_lossy(&output.stderr).contains("kept"));
     }
 
@@ -744,8 +790,14 @@ mod release_tests {
             return;
         }
         let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["release_tests::logger_conflict_is_reported", "--exact", "--nocapture"])
-            .env("LOGGER_TEST_CHILD", "1").output().unwrap();
+            .args([
+                "release_tests::logger_conflict_is_reported",
+                "--exact",
+                "--nocapture",
+            ])
+            .env("LOGGER_TEST_CHILD", "1")
+            .output()
+            .unwrap();
         assert!(!output.status.success());
         assert!(String::from_utf8_lossy(&output.stderr).contains("install logger"));
     }

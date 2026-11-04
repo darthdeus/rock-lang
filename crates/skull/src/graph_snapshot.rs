@@ -35,9 +35,7 @@ use bone_semantic::prelude::Span;
 use skull_mir::mangle::mangle_fn;
 use skull_mir::monoty::MonoSubst;
 
-use crate::instance_graph::{
-    Instance, InstanceBoundTree, InstanceGraph, Site, SiteDomain, SiteOp,
-};
+use crate::instance_graph::{Instance, InstanceBoundTree, InstanceGraph, Site, SiteDomain, SiteOp};
 
 /// One graph's semantic state: section name -> sorted canonical lines.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
@@ -65,8 +63,18 @@ impl CanonicalGraph {
                 b.len(),
                 only_a.len(),
                 only_b.len(),
-                only_a.iter().take(3).map(|s| s.as_str()).collect::<Vec<_>>().join("\n  - "),
-                only_b.iter().take(3).map(|s| s.as_str()).collect::<Vec<_>>().join("\n  + "),
+                only_a
+                    .iter()
+                    .take(3)
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n  - "),
+                only_b
+                    .iter()
+                    .take(3)
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n  + "),
             ));
         }
         out
@@ -82,7 +90,11 @@ pub fn instance_key(ws: &Workspace, g: &InstanceGraph, i: &Instance) -> String {
     // The raw indices disambiguate two declarations that mangle alike; they are
     // deterministic for one source, which is all a build-to-build comparison
     // needs.
-    out.push_str(&format!("#{}.{}", i.func.module.raw(), i.func.func.into_raw().into_u32()));
+    out.push_str(&format!(
+        "#{}.{}",
+        i.func.module.raw(),
+        i.func.func.into_raw().into_u32()
+    ));
     if !i.args.is_empty() {
         let args: Vec<String> = i.args.iter().map(|a| g.interner().canonical(*a)).collect();
         out.push('<');
@@ -94,7 +106,12 @@ pub fn instance_key(ws: &Workspace, g: &InstanceGraph, i: &Instance) -> String {
 
 fn decl_key(ws: &Workspace, d: skull_mir::mir::FuncRef) -> String {
     let f = &ws.module(d.module).functions[d.func];
-    format!("{}#{}.{}", mangle_fn(ws, f), d.module.raw(), d.func.into_raw().into_u32())
+    format!(
+        "{}#{}.{}",
+        mangle_fn(ws, f),
+        d.module.raw(),
+        d.func.into_raw().into_u32()
+    )
 }
 
 /// A span's COMPLETE position, not its `Debug` -- which prints the file alone
@@ -126,7 +143,10 @@ fn site_key(s: &Site) -> String {
             "defaults({}.{}<{}>)",
             m.index(),
             d.into_raw().into_u32(),
-            args.iter().map(|a| a.canonical()).collect::<Vec<_>>().join(","),
+            args.iter()
+                .map(|a| a.canonical())
+                .collect::<Vec<_>>()
+                .join(","),
         ),
     };
     let op = match &s.op {
@@ -143,7 +163,13 @@ fn site_key(s: &Site) -> String {
 }
 
 fn path_key<T: std::fmt::Display>(path: &[T]) -> String {
-    format!("[{}]", path.iter().map(|p| p.to_string()).collect::<Vec<_>>().join("."))
+    format!(
+        "[{}]",
+        path.iter()
+            .map(|p| p.to_string())
+            .collect::<Vec<_>>()
+            .join(".")
+    )
 }
 
 /// A conformance tree RECURSIVELY. Rendering only the outermost witnesses
@@ -154,7 +180,11 @@ fn bound_tree_key(ws: &Workspace, g: &InstanceGraph, t: &InstanceBoundTree) -> S
         .next
         .iter()
         .map(|(idx, n)| {
-            format!("{idx}->{}{}", instance_key(ws, g, &n.callee), bound_tree_key(ws, g, &n.sub))
+            format!(
+                "{idx}->{}{}",
+                instance_key(ws, g, &n.callee),
+                bound_tree_key(ws, g, &n.sub)
+            )
         })
         .collect();
     format!("{{{}}}", parts.join(","))
@@ -163,7 +193,10 @@ fn bound_tree_key(ws: &Workspace, g: &InstanceGraph, t: &InstanceBoundTree) -> S
 /// A substitution's bindings, sorted so the map's iteration order cannot leak
 /// into the comparison.
 fn subst_key(s: &MonoSubst) -> String {
-    let mut binds: Vec<String> = s.iter().map(|(v, t)| format!("{v:?}={}", t.canonical())).collect();
+    let mut binds: Vec<String> = s
+        .iter()
+        .map(|(v, t)| format!("{v:?}={}", t.canonical()))
+        .collect();
     binds.sort();
     binds.join(",")
 }
@@ -211,15 +244,27 @@ pub fn canonical(ws: &Workspace, g: &InstanceGraph) -> CanonicalGraph {
         "rejections",
         g.rejections()
             .map(|r| {
-                format!("{:?} at {} @{}: {}", r.kind, key(&r.at), span_key(&r.span), r.message)
+                format!(
+                    "{:?} at {} @{}: {}",
+                    r.kind,
+                    key(&r.at),
+                    span_key(&r.span),
+                    r.message
+                )
             })
             .collect(),
     );
     put("depth_capped", g.depth_capped().map(&key).collect());
-    put("storage_failures", g.storage_failures().map(|r| format!("{r:?}")).collect());
+    put(
+        "storage_failures",
+        g.storage_failures().map(|r| format!("{r:?}")).collect(),
+    );
     put(
         "boundaries",
-        g.boundaries.iter().map(|(k, b)| format!("{k} {:?} {}", b.class, b.symbol)).collect(),
+        g.boundaries
+            .iter()
+            .map(|(k, b)| format!("{k} {:?} {}", b.class, b.symbol))
+            .collect(),
     );
     put(
         "coroutine_helpers",
@@ -234,13 +279,19 @@ pub fn canonical(ws: &Workspace, g: &InstanceGraph) -> CanonicalGraph {
         g.inline_body_deps
             .iter()
             .map(|(d, set)| {
-                format!("{} -> {:?}", decl_key(ws, d.0), set.iter().collect::<Vec<_>>())
+                format!(
+                    "{} -> {:?}",
+                    decl_key(ws, d.0),
+                    set.iter().collect::<Vec<_>>()
+                )
             })
             .collect(),
     );
     put(
         "substitutions",
-        g.substitutions().map(|(i, s)| format!("{} :: {}", key(i), subst_key(s))).collect(),
+        g.substitutions()
+            .map(|(i, s)| format!("{} :: {}", key(i), subst_key(s)))
+            .collect(),
     );
     put(
         "bound_trees",
@@ -267,7 +318,12 @@ pub fn canonical(ws: &Workspace, g: &InstanceGraph) -> CanonicalGraph {
                                 format!("failed({why})")
                             }
                         };
-                        format!("{} @{} {outcome} @{}", key(i), site_key(s), span_key(&r.span))
+                        format!(
+                            "{} @{} {outcome} @{}",
+                            key(i),
+                            site_key(s),
+                            span_key(&r.span)
+                        )
                     })
                     .collect::<Vec<_>>()
             })
@@ -275,7 +331,9 @@ pub fn canonical(ws: &Workspace, g: &InstanceGraph) -> CanonicalGraph {
     );
     put(
         "duplicate_sites",
-        g.duplicate_sites().map(|(i, s)| format!("{} @{}", key(i), site_key(s))).collect(),
+        g.duplicate_sites()
+            .map(|(i, s)| format!("{} @{}", key(i), site_key(s)))
+            .collect(),
     );
     // Each always-emitted failure by OUTCOME and SPAN, not as a count: two
     // failures of one callee are two diagnostics at two places, and a count
@@ -316,11 +374,17 @@ pub fn canonical(ws: &Workspace, g: &InstanceGraph) -> CanonicalGraph {
         g.excused_generic_roots
             .iter()
             .flat_map(|(reason, names)| {
-                names.iter().map(move |n| format!("{reason}: {n}")).collect::<Vec<_>>()
+                names
+                    .iter()
+                    .map(move |n| format!("{reason}: {n}"))
+                    .collect::<Vec<_>>()
             })
             .collect(),
     );
-    put("always_emitted_targets", g.always_emitted_targets().map(&key).collect());
+    put(
+        "always_emitted_targets",
+        g.always_emitted_targets().map(&key).collect(),
+    );
     // Both sides of each disagreement. The instance alone says only THAT one
     // exists; what makes the record actionable -- and what an updater can get
     // wrong on its own -- is which two answers disagreed.

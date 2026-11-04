@@ -35,10 +35,12 @@ impl Builder<'_> {
                     } if *name == flat.name
                 )
             })
-            .ok_or_else(|| self.gap_here(format!(
-                "flat enum {} has no concrete owner type for native slots",
-                flat.name
-            )))?;
+            .ok_or_else(|| {
+                self.gap_here(format!(
+                    "flat enum {} has no concrete owner type for native slots",
+                    flat.name
+                ))
+            })?;
         let owner = self.scx.interner().intern(owner.clone());
         let tag_ty = self
             .scx
@@ -86,13 +88,20 @@ impl Builder<'_> {
         shape: &EnumFlatShape,
         value: Idx<Expr>,
     ) -> Result<FlatCells, CompilerError> {
-        if let Expr::EnumVariant { enum_name, variant, args, .. } = self.body.expr_arena[value].clone() {
+        if let Expr::EnumVariant {
+            enum_name,
+            variant,
+            args,
+            ..
+        } = self.body.expr_arena[value].clone()
+        {
             if enum_name == shape.name {
                 let (positional, rec_args) = match args {
                     VariantArgs::Unit => (Vec::new(), Vec::new()),
-                    VariantArgs::Tuple(range) => {
-                        (range.into_iter().map(FlatPayload::Expr).collect(), Vec::new())
-                    }
+                    VariantArgs::Tuple(range) => (
+                        range.into_iter().map(FlatPayload::Expr).collect(),
+                        Vec::new(),
+                    ),
                     VariantArgs::Record(fields) => {
                         let rec = fields
                             .into_iter()
@@ -152,7 +161,10 @@ impl Builder<'_> {
                     let leaves = match arg {
                         FlatPayload::Expr(a) => {
                             let r = self.lower_expr_repr(a)?;
-                            let r = ValueBundle::new(r.representation(), self.owned_value_children(r.into_value())?);
+                            let r = ValueBundle::new(
+                                r.representation(),
+                                self.owned_value_children(r.into_value())?,
+                            );
                             self.repr_to_storage_leaves(&r, &vs, "flat enum payload")?
                         }
                         FlatPayload::Repr(r) => {
@@ -203,7 +215,11 @@ impl Builder<'_> {
                 (*rf, v)
             })
             .collect();
-        Ok(FlatCells { tag, positional, named })
+        Ok(FlatCells {
+            tag,
+            positional,
+            named,
+        })
     }
 
     pub(crate) fn spread_maybe_null_box_to_cells(
@@ -212,10 +228,7 @@ impl Builder<'_> {
         shape: &EnumFlatShape,
     ) -> Result<FlatCells, CompilerError> {
         let leaves = self.cdata_leaves(boxed, &shape.value_shape())?;
-        self.repr_group_to_cells(
-            shape,
-            leaves.into_iter().map(ValueRepr::Scalar).collect(),
-        )
+        self.repr_group_to_cells(shape, leaves.into_iter().map(ValueRepr::Scalar).collect())
     }
 
     /// Whether `variant` of `enum_name` is a Unit (payload-free) variant -- its
@@ -241,8 +254,12 @@ impl Builder<'_> {
         &self,
         e: Idx<Expr>,
     ) -> Result<Option<ValueShape>, CompilerError> {
-        let Some(id) = self.expr_rep_id(e, RepUse::Value, false)? else { return Ok(None) };
-        let Some(mut shape) = self.scx.rep_arena().value_shape(id) else { return Ok(None) };
+        let Some(id) = self.expr_rep_id(e, RepUse::Value, false)? else {
+            return Ok(None);
+        };
+        let Some(mut shape) = self.scx.rep_arena().value_shape(id) else {
+            return Ok(None);
+        };
         if !EnumPlan::for_name(self.ws, shape.name).is_some_and(|plan| plan.flat().is_some()) {
             return Ok(None);
         }
@@ -266,14 +283,24 @@ impl Builder<'_> {
         value_shape: &ValueShape,
     ) -> ValueRepr {
         let frame = cobj;
-        let state = self.emit_cur(Inst::Field { base: frame, field: Ustr::from("__state") });
+        let state = self.emit_cur(Inst::Field {
+            base: frame,
+            field: Ustr::from("__state"),
+        });
         let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
         let done = self.emit_cur(Inst::IntLt(state, zero));
         let cells: Vec<Idx<Cell>> = (0..n).map(|_| self.f.new_cell(None)).collect();
         let done_bb = self.f.new_block();
         let live_bb = self.f.new_block();
         let join = self.f.new_block();
-        self.f.set_term(self.cur, Term::Branch { cond: done, then_bb: done_bb, else_bb: live_bb });
+        self.f.set_term(
+            self.cur,
+            Term::Branch {
+                cond: done,
+                then_bb: done_bb,
+                else_bb: live_bb,
+            },
+        );
         // Terminal: all-nil leaves (tag = nil => `== null`).
         self.cur = done_bb;
         for c in &cells {
@@ -284,12 +311,18 @@ impl Builder<'_> {
         // Live: spread the reused frame slots into the leaf cells.
         self.cur = live_bb;
         for (i, c) in cells.iter().enumerate() {
-            let v = self.emit_cur(Inst::Field { base: frame, field: yield_slot(i) });
+            let v = self.emit_cur(Inst::Field {
+                base: frame,
+                field: yield_slot(i),
+            });
             self.emit_cur(Inst::Store { cell: *c, value: v });
         }
         self.f.set_term(self.cur, Term::Goto(join));
         self.cur = join;
-        let leaves: Vec<Idx<Inst>> = cells.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
+        let leaves: Vec<Idx<Inst>> = cells
+            .iter()
+            .map(|c| self.emit_cur(Inst::Load(*c)))
+            .collect();
         let mut idx = 0;
         self.rebuild_from_leaves(value_shape, &leaves, &mut idx)
     }
@@ -314,7 +347,11 @@ impl Builder<'_> {
             .enumerate()
             .map(|(i, rf)| (*rf, packed[1 + shape.tuple_width() + i]))
             .collect();
-        Ok(FlatCells { tag, positional, named })
+        Ok(FlatCells {
+            tag,
+            positional,
+            named,
+        })
     }
 
     /// A flat enum's runtime cells as a `ValueRepr::Group` in `value_shape` leaf
@@ -333,8 +370,15 @@ impl Builder<'_> {
 
     /// Read a boxed enum's keys back out into flattened cells (`__variant` -> tag,
     /// `[i+1]` -> positional, `.field` -> named) -- the box-to-slots spread.
-    pub(crate) fn spread_box_to_cells(&mut self, bv: Idx<Inst>, shape: &EnumFlatShape) -> FlatCells {
-        let tag = self.emit_cur(Inst::Field { base: bv, field: Ustr::from("__variant") });
+    pub(crate) fn spread_box_to_cells(
+        &mut self,
+        bv: Idx<Inst>,
+        shape: &EnumFlatShape,
+    ) -> FlatCells {
+        let tag = self.emit_cur(Inst::Field {
+            base: bv,
+            field: Ustr::from("__variant"),
+        });
         let positional = (0..shape.tuple_width())
             .map(|i| self.emit_cur(Inst::TupleIndex { base: bv, index: i }))
             .collect();
@@ -342,24 +386,61 @@ impl Builder<'_> {
             .record_fields
             .clone()
             .into_iter()
-            .map(|rf| (rf, self.emit_cur(Inst::Field { base: bv, field: rf })))
+            .map(|rf| {
+                (
+                    rf,
+                    self.emit_cur(Inst::Field {
+                        base: bv,
+                        field: rf,
+                    }),
+                )
+            })
             .collect();
-        FlatCells { tag, positional, named }
+        FlatCells {
+            tag,
+            positional,
+            named,
+        }
     }
 
     /// Read a flat enum field from the physical slots of its parent struct.
-    pub(crate) fn load_flat_cells(&mut self, parent: Idx<Inst>, prefix: Ustr, shape: &EnumFlatShape) -> FlatCells {
-        let tag = self.emit_cur(Inst::Field { base: parent, field: flat_tag_slot(prefix) });
+    pub(crate) fn load_flat_cells(
+        &mut self,
+        parent: Idx<Inst>,
+        prefix: Ustr,
+        shape: &EnumFlatShape,
+    ) -> FlatCells {
+        let tag = self.emit_cur(Inst::Field {
+            base: parent,
+            field: flat_tag_slot(prefix),
+        });
         let positional = (0..shape.tuple_width())
-            .map(|i| self.emit_cur(Inst::Field { base: parent, field: flat_payload_slot(prefix, i) }))
+            .map(|i| {
+                self.emit_cur(Inst::Field {
+                    base: parent,
+                    field: flat_payload_slot(prefix, i),
+                })
+            })
             .collect();
         let named = shape
             .record_fields
             .clone()
             .into_iter()
-            .map(|rf| (rf, self.emit_cur(Inst::Field { base: parent, field: flat_named_slot(prefix, rf) })))
+            .map(|rf| {
+                (
+                    rf,
+                    self.emit_cur(Inst::Field {
+                        base: parent,
+                        field: flat_named_slot(prefix, rf),
+                    }),
+                )
+            })
             .collect();
-        FlatCells { tag, positional, named }
+        FlatCells {
+            tag,
+            positional,
+            named,
+        }
     }
 
     pub(crate) fn materialize_flat_cells(
@@ -388,16 +469,24 @@ impl Builder<'_> {
         let join = self.f.new_block();
         self.f.set_term(
             self.cur,
-            Term::Branch { cond: is_nil, then_bb: nil_bb, else_bb: box_bb },
+            Term::Branch {
+                cond: is_nil,
+                then_bb: nil_bb,
+                else_bb: box_bb,
+            },
         );
         self.cur = nil_bb;
         let absent = self.emit_cur(Inst::Const(Lit::Nil));
-        self.emit_cur(Inst::Store { cell: result, value: absent });
+        self.emit_cur(Inst::Store {
+            cell: result,
+            value: absent,
+        });
         self.f.set_term(self.cur, Term::Goto(join));
         self.cur = box_bb;
         let eid = self.ws.enums_by_name[&shape.name];
         let units: Vec<_> = self.ws.modules[eid.module.index()].enums[eid.def]
-            .variants.iter()
+            .variants
+            .iter()
             .filter(|v| matches!(v.payload, VariantPayload::Unit))
             .map(|v| v.name)
             .collect();
@@ -406,15 +495,28 @@ impl Builder<'_> {
             let is_unit = self.emit_cur(Inst::Eq(tag, known_tag));
             let unit_bb = self.f.new_block();
             let next_bb = self.f.new_block();
-            self.f.set_term(self.cur, Term::Branch {
-                cond: is_unit, then_bb: unit_bb, else_bb: next_bb,
-            });
+            self.f.set_term(
+                self.cur,
+                Term::Branch {
+                    cond: is_unit,
+                    then_bb: unit_bb,
+                    else_bb: next_bb,
+                },
+            );
             self.cur = unit_bb;
-            let global = Ustr::from(format!(
-                "__rock_enum_{}_{}", crate::mangle::type_symbol(self.ws, shape.name), variant,
-            ).as_str());
+            let global = Ustr::from(
+                format!(
+                    "__rock_enum_{}_{}",
+                    crate::mangle::type_symbol(self.ws, shape.name),
+                    variant,
+                )
+                .as_str(),
+            );
             let singleton = self.emit_cur(Inst::Global(global));
-            self.emit_cur(Inst::Store { cell: result, value: singleton });
+            self.emit_cur(Inst::Store {
+                cell: result,
+                value: singleton,
+            });
             self.f.set_term(self.cur, Term::Goto(join));
             self.cur = next_bb;
         }
@@ -424,7 +526,10 @@ impl Builder<'_> {
             positional: cells.positional,
             named: cells.named,
         });
-        self.emit_cur(Inst::Store { cell: result, value: boxed });
+        self.emit_cur(Inst::Store {
+            cell: result,
+            value: boxed,
+        });
         self.f.set_term(self.cur, Term::Goto(join));
         self.cur = join;
         self.emit_cur(Inst::Load(result))
@@ -437,14 +542,23 @@ impl Builder<'_> {
         variant: Ustr,
     ) -> Idx<Inst> {
         if self.variant_is_unit(shape.name, variant) {
-            let global = Ustr::from(format!(
-                "__rock_enum_{}_{}", crate::mangle::type_symbol(self.ws, shape.name), variant,
-            ).as_str());
+            let global = Ustr::from(
+                format!(
+                    "__rock_enum_{}_{}",
+                    crate::mangle::type_symbol(self.ws, shape.name),
+                    variant,
+                )
+                .as_str(),
+            );
             return self.emit_cur(Inst::Global(global));
         }
         let (width, fields) = shape.box_layout(self.ws, variant);
-        let named = cells.named.iter().copied()
-            .filter(|(name, _)| fields.contains(name)).collect();
+        let named = cells
+            .named
+            .iter()
+            .copied()
+            .filter(|(name, _)| fields.contains(name))
+            .collect();
         self.emit_cur(Inst::MakeEnumDyn {
             tag: cells.tag,
             ty: shape.name,
@@ -453,10 +567,14 @@ impl Builder<'_> {
         })
     }
 
-
     /// Re-materialize a flattened enum field `parent.{prefix}` at a whole-value
     /// read boundary. A nil tag materializes to nil, never `{__variant = nil}`.
-    pub(crate) fn materialize_flat(&mut self, parent: Idx<Inst>, prefix: Ustr, shape: &EnumFlatShape) -> Idx<Inst> {
+    pub(crate) fn materialize_flat(
+        &mut self,
+        parent: Idx<Inst>,
+        prefix: Ustr,
+        shape: &EnumFlatShape,
+    ) -> Idx<Inst> {
         let cells = self.load_flat_cells(parent, prefix, shape);
         self.materialize_flat_cells(shape, cells)
     }
@@ -464,18 +582,34 @@ impl Builder<'_> {
     /// Emit the per-slot stores for a flattened enum field assignment
     /// `parent.{prefix} = <cells>` (tag + every positional + every named slot).
     pub(crate) fn store_flat_cells(&mut self, parent: Idx<Inst>, prefix: Ustr, cells: FlatCells) {
-        self.emit_cur(Inst::StoreField { base: parent, field: flat_tag_slot(prefix), value: cells.tag });
+        self.emit_cur(Inst::StoreField {
+            base: parent,
+            field: flat_tag_slot(prefix),
+            value: cells.tag,
+        });
         for (i, p) in cells.positional.into_iter().enumerate() {
-            self.emit_cur(Inst::StoreField { base: parent, field: flat_payload_slot(prefix, i), value: p });
+            self.emit_cur(Inst::StoreField {
+                base: parent,
+                field: flat_payload_slot(prefix, i),
+                value: p,
+            });
         }
         for (rf, v) in cells.named {
-            self.emit_cur(Inst::StoreField { base: parent, field: flat_named_slot(prefix, rf), value: v });
+            self.emit_cur(Inst::StoreField {
+                base: parent,
+                field: flat_named_slot(prefix, rf),
+                value: v,
+            });
         }
     }
 
     /// The `(slot_name, value)` pairs for a flattened enum field in a struct literal
     /// (tag + every positional + every named slot), keyed by the parent field name.
-    pub(crate) fn flat_literal_slots(&self, field: Ustr, cells: FlatCells) -> Vec<(Ustr, Idx<Inst>)> {
+    pub(crate) fn flat_literal_slots(
+        &self,
+        field: Ustr,
+        cells: FlatCells,
+    ) -> Vec<(Ustr, Idx<Inst>)> {
         let mut out = Vec::with_capacity(1 + cells.positional.len() + cells.named.len());
         out.push((flat_tag_slot(field), cells.tag));
         for (i, p) in cells.positional.into_iter().enumerate() {
@@ -492,24 +626,36 @@ impl EnumFlatShape {
     pub fn box_layout(&self, ws: &Workspace, variant: Ustr) -> (usize, Vec<Ustr>) {
         let eid = ws.enums_by_name[&self.name];
         let payload = &ws.modules[eid.module.index()].enums[eid.def]
-            .variants.iter().find(|v| v.name == variant)
-            .expect("flat enum tag belongs to its declaration").payload;
+            .variants
+            .iter()
+            .find(|v| v.name == variant)
+            .expect("flat enum tag belongs to its declaration")
+            .payload;
         match payload {
             VariantPayload::Tuple(types) => {
-                let width = types.len().checked_sub(1).map(|last| {
-                    let child = match static_ty(ws, types[last]) {
-                        Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }) => {
-                            self.position_shape(last, Some(name))
-                        }
-                        _ => None,
-                    };
-                    self.slot_offset(last) + child.map_or(1, |vs| vs.leaf_count())
-                }).unwrap_or(0);
+                let width = types
+                    .len()
+                    .checked_sub(1)
+                    .map(|last| {
+                        let child = match static_ty(ws, types[last]) {
+                            Some(TypeExpr::App {
+                                ctor: TypeCtor::Nominal(name),
+                                ..
+                            }) => self.position_shape(last, Some(name)),
+                            _ => None,
+                        };
+                        self.slot_offset(last) + child.map_or(1, |vs| vs.leaf_count())
+                    })
+                    .unwrap_or(0);
                 (width, Vec::new())
             }
             VariantPayload::Record(fields) => {
-                let names = self.record_fields.iter().copied()
-                    .filter(|name| fields.iter().any(|field| field.name == *name)).collect();
+                let names = self
+                    .record_fields
+                    .iter()
+                    .copied()
+                    .filter(|name| fields.iter().any(|field| field.name == *name))
+                    .collect();
                 (0, names)
             }
             VariantPayload::Unit => (0, Vec::new()),

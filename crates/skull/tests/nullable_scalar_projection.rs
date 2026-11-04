@@ -40,8 +40,10 @@ fn main() {
 #[test]
 fn nullable_scalar_projection_preserves_effects_absence_and_snapshots() {
     let lua = emit_module(SOURCE);
-    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "nullable_scalar_projection"),
-        "-1 -1 1\n11 13 2\nold false -1\n11 99 11 7\n7");
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "nullable_scalar_projection"),
+        "-1 -1 1\n11 13 2\nold false -1\n11 99 11 7\n7"
+    );
 }
 
 #[test]
@@ -73,6 +75,8 @@ fn main() {
     let lua = emit_module(source);
     let body = function_body(&lua, "embedded_width");
     assert!(!body.contains("inner.tag"), "{body}");
-    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "nullable_embedded_projection"),
-        "-1\n23 5");
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "nullable_embedded_projection"),
+        "-1\n23 5"
+    );
 }

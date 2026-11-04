@@ -6,7 +6,7 @@
 use crate::common::bone_ws;
 use lsp_types::*;
 use rock_lsp::semantic_tokens::compute_semantic_tokens_workspace;
-use rock_lsp::{do_document_symbols_workspace, do_workspace_symbols_workspace, LspWorkspace};
+use rock_lsp::{LspWorkspace, do_document_symbols_workspace, do_workspace_symbols_workspace};
 use std::str::FromStr;
 
 const SRC: &str = "fn heal_all(x: int) -> int {\n    return x + 1\n}\n\nfn main() {\n    let y = heal_all(2)\n}\n";
@@ -19,7 +19,10 @@ fn spaced_project() -> (tempfile::TempDir, std::path::PathBuf, Uri, LspWorkspace
     let path = dir.path().join("my dir").join("caf\u{e9}.rock");
     let ws = bone_ws(&path, SRC);
     let root = dir.path().to_str().unwrap();
-    assert!(root.bytes().all(|b| b.is_ascii_alphanumeric() || b"/._-".contains(&b)));
+    assert!(
+        root.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"/._-".contains(&b))
+    );
     let uri = Uri::from_str(&format!("file://{root}/my%20dir/caf%C3%A9.rock")).unwrap();
     (dir, path, uri, ws)
 }
@@ -35,11 +38,17 @@ fn symbol_params(uri: Uri) -> DocumentSymbolParams {
 #[test]
 fn encoded_document_uri_resolves_to_the_file() {
     let (_dir, _path, uri, mut ws) = spaced_project();
-    let names: Vec<String> = match do_document_symbols_workspace(&mut ws, &symbol_params(uri.clone())).unwrap() {
-        Some(DocumentSymbolResponse::Nested(syms)) => syms.into_iter().map(|s| s.name).collect(),
-        other => panic!("expected nested document symbols, got {other:?}"),
-    };
-    assert!(names.iter().any(|n| n == "heal_all"), "symbols of the decoded file: {names:?}");
+    let names: Vec<String> =
+        match do_document_symbols_workspace(&mut ws, &symbol_params(uri.clone())).unwrap() {
+            Some(DocumentSymbolResponse::Nested(syms)) => {
+                syms.into_iter().map(|s| s.name).collect()
+            }
+            other => panic!("expected nested document symbols, got {other:?}"),
+        };
+    assert!(
+        names.iter().any(|n| n == "heal_all"),
+        "symbols of the decoded file: {names:?}"
+    );
 
     let params = SemanticTokensParams {
         text_document: TextDocumentIdentifier { uri },
@@ -47,7 +56,9 @@ fn encoded_document_uri_resolves_to_the_file() {
         partial_result_params: Default::default(),
     };
     match compute_semantic_tokens_workspace(&mut ws, params).unwrap() {
-        Some(SemanticTokensResult::Tokens(t)) => assert!(!t.data.is_empty(), "no tokens for decoded file"),
+        Some(SemanticTokensResult::Tokens(t)) => {
+            assert!(!t.data.is_empty(), "no tokens for decoded file")
+        }
         other => panic!("expected token data, got {other:?}"),
     }
 }
@@ -68,9 +79,16 @@ fn returned_locations_encode_the_path() {
     // Returned locations use canonical paths; keep the expected escaping
     // handwritten so this still checks the URI encoder independently.
     let root = dir.path().canonicalize().unwrap();
-    let uri = Uri::from_str(&format!("file://{}/my%20dir/caf%C3%A9.rock", root.to_str().unwrap())).unwrap();
+    let uri = Uri::from_str(&format!(
+        "file://{}/my%20dir/caf%C3%A9.rock",
+        root.to_str().unwrap()
+    ))
+    .unwrap();
     assert_eq!(hits[0].location.uri, uri);
-    assert_eq!(hits[0].location.uri.to_file_path().unwrap(), path.canonicalize().unwrap().to_str().unwrap());
+    assert_eq!(
+        hits[0].location.uri.to_file_path().unwrap(),
+        path.canonicalize().unwrap().to_str().unwrap()
+    );
 }
 
 #[test]

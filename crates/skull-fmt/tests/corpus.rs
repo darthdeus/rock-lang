@@ -19,7 +19,9 @@ fn corpus_dir() -> PathBuf {
 }
 
 fn collect_fmt_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else { return };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
     for e in entries.flatten() {
         let p = e.path();
         if p.is_dir() {
@@ -116,30 +118,49 @@ fn corpus_report() {
 
     for f in &files {
         let text = fs::read_to_string(f).unwrap();
-        let short = f.strip_prefix(corpus_dir()).unwrap().to_string_lossy().to_string();
+        let short = f
+            .strip_prefix(corpus_dir())
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
         let cases = parse_cases(&short, &text);
         for c in cases {
             total += 1;
-            let got = std::panic::catch_unwind(|| skull_fmt::format_code(&c.input))
-                .unwrap_or_else(|_| panic!("formatter panicked for {} :: {}\n{}", c.file, c.name, c.input));
+            let got = std::panic::catch_unwind(|| skull_fmt::format_code(&c.input)).unwrap_or_else(
+                |_| {
+                    panic!(
+                        "formatter panicked for {} :: {}\n{}",
+                        c.file, c.name, c.input
+                    )
+                },
+            );
             let got_trim = got.trim_end();
             let exp_trim = c.expected.trim_end();
             if got_trim == exp_trim {
                 pass += 1;
             } else {
-                if got_trim == c.input.trim_end() && skull_parser::parse_module_clean(&c.input, "x".into()).is_err() {
+                if got_trim == c.input.trim_end()
+                    && skull_parser::parse_module_clean(&c.input, "x".into()).is_err()
+                {
                     parse_err += 1;
                 }
-                failures.push((c.file, c.name, c.input, exp_trim.to_string(), got_trim.to_string()));
+                failures.push((
+                    c.file,
+                    c.name,
+                    c.input,
+                    exp_trim.to_string(),
+                    got_trim.to_string(),
+                ));
             }
         }
     }
 
-    eprintln!("\n=== skull-fmt corpus: {pass}/{total} cases pass ({parse_err} parse-fail passthrough) ===\n");
+    eprintln!(
+        "\n=== skull-fmt corpus: {pass}/{total} cases pass ({parse_err} parse-fail passthrough) ===\n"
+    );
 
-    let is_known = |file: &str, name: &str| {
-        KNOWN_FAILING.iter().any(|(f, n)| *f == file && *n == name)
-    };
+    let is_known =
+        |file: &str, name: &str| KNOWN_FAILING.iter().any(|(f, n)| *f == file && *n == name);
 
     // Partition failures into unexpected (must go red) and known bring-up gaps.
     let mut unexpected = Vec::new();
@@ -147,12 +168,20 @@ fn corpus_report() {
         if is_known(file, name) {
             continue;
         }
-        unexpected.push((file.clone(), name.clone(), input.clone(), exp.clone(), got.clone()));
+        unexpected.push((
+            file.clone(),
+            name.clone(),
+            input.clone(),
+            exp.clone(),
+            got.clone(),
+        ));
     }
 
     // Ratchet: an allowlisted case that now passes must be removed same-commit.
-    let failed: std::collections::HashSet<(String, String)> =
-        failures.iter().map(|(f, n, ..)| (f.clone(), n.clone())).collect();
+    let failed: std::collections::HashSet<(String, String)> = failures
+        .iter()
+        .map(|(f, n, ..)| (f.clone(), n.clone()))
+        .collect();
     let stale: Vec<_> = KNOWN_FAILING
         .iter()
         .filter(|(f, n)| !failed.contains(&(f.to_string(), n.to_string())))

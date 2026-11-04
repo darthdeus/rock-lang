@@ -176,7 +176,9 @@ fn decorator_default() {
 "#;
 
 fn workspace_root() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("workspace root")
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace root")
 }
 
 fn rock_test_lua(src: &str, expected: &str) {
@@ -194,7 +196,10 @@ fn rock_test_lua(src: &str, expected: &str) {
         String::from_utf8_lossy(&output.stderr)
     ));
     assert!(output.status.success(), "{text}");
-    assert!(text.contains(expected), "expected {expected} Lua tests to pass:\n{text}");
+    assert!(
+        text.contains(expected),
+        "expected {expected} Lua tests to pass:\n{text}"
+    );
 }
 
 #[test]
@@ -209,7 +214,11 @@ fn explicit_null_overrides_default_at_lua_boundaries() {
 
 #[test]
 fn explicit_null_overrides_default_on_js() {
-    if std::process::Command::new("node").arg("--version").output().is_err() {
+    if std::process::Command::new("node")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
         eprintln!("SKIP explicit_null_overrides_default_on_js: `node` not on PATH");
         return;
     }

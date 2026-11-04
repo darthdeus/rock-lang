@@ -8,19 +8,29 @@
 //! execution is the correctness oracle; `tests/js_inspect.rock` cross-checks
 //! against luajit.
 
-use skull_mir::mir::FuncRef;
 use crate::common::ws_with;
+use skull_mir::mir::FuncRef;
 
 fn node_available() -> bool {
-    crate::common::node().arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+    crate::common::node()
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 fn emit_closure(ws: &bone_semantic::inference::Workspace, root: &str) -> Result<String, String> {
-    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("test module");
     let mut r = None;
     for (fid, f) in ws.module(mid).functions.iter() {
         if f.name.as_str() == root {
-            r = Some(FuncRef { module: mid, func: fid });
+            r = Some(FuncRef {
+                module: mid,
+                func: fid,
+            });
         }
     }
     skull_codegen_js::emit::emit_with_closure(ws, &[(r.unwrap(), root.to_string())])
@@ -43,14 +53,21 @@ fn eval_str(src: &str, root: &str) -> String {
         skull_codegen_js::JS_STRUCTURAL_EQ,
         skull_codegen_js::JS_INSPECT_RUNTIME,
     );
-    let out = crate::common::node().arg("-e").arg(&program).output().expect("spawn node");
+    let out = crate::common::node()
+        .arg("-e")
+        .arg(&program)
+        .output()
+        .expect("spawn node");
     assert!(
         out.status.success(),
         "node failed:\n{program}\n--- stderr ---\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
     let s = String::from_utf8_lossy(&out.stdout);
-    s.trim().trim_start_matches("<<<").trim_end_matches(">>>").to_string()
+    s.trim()
+        .trim_start_matches("<<<")
+        .trim_end_matches(">>>")
+        .to_string()
 }
 
 // A 2-field struct is compact, sorted, ` = `-separated.
@@ -58,7 +75,10 @@ fn eval_str(src: &str, root: &str) -> String {
 fn compact_struct_sorted() {
     let src = "struct Person { name: string, age: int }\n\
                fn root() -> string { inspect(Person { name: \"Alice\", age: 30 }) }";
-    assert_eq!(eval_str(src, "root"), "Person { age = 30, name = \"Alice\" }");
+    assert_eq!(
+        eval_str(src, "root"),
+        "Person { age = 30, name = \"Alice\" }"
+    );
 }
 
 // A 3-field struct is multi-line.
@@ -66,7 +86,10 @@ fn compact_struct_sorted() {
 fn multiline_struct() {
     let src = "struct Triple { a: int, b: int, c: int }\n\
                fn root() -> string { inspect(Triple { a: 1, b: 2, c: 3 }) }";
-    assert_eq!(eval_str(src, "root"), "Triple {\n  a = 1,\n  b = 2,\n  c = 3\n}");
+    assert_eq!(
+        eval_str(src, "root"),
+        "Triple {\n  a = 1,\n  b = 2,\n  c = 3\n}"
+    );
 }
 
 // A Vec renders in index order.
@@ -99,7 +122,10 @@ fn value_struct_nested_colon_render() {
     let src = "value IV { x: int, y: int }\n\
                value Nested { a: IV, b: int }\n\
                fn root() -> string { inspect(Nested { a: IV { x: 1, y: 2 }, b: 9 }) }";
-    assert_eq!(eval_str(src, "root"), "Nested { a: IV { x: 1, y: 2 }, b: 9 }");
+    assert_eq!(
+        eval_str(src, "root"),
+        "Nested { a: IV { x: 1, y: 2 }, b: 9 }"
+    );
 }
 
 // An embedded child is physically inline. Inspect must use the shared field
@@ -109,7 +135,10 @@ fn inspect_rebuilds_an_embed_field_from_inline_leaves() {
     let src = "struct Pt { x: int, y: int }\n\
                struct Holder { embed p: Pt, tag: int }\n\
                fn root() -> string { inspect(Holder { p: Pt { x: 1, y: 2 }, tag: 3 }) }";
-    assert_eq!(eval_str(src, "root"), "Holder { p = Pt { x = 1, y = 2 }, tag = 3 }");
+    assert_eq!(
+        eval_str(src, "root"),
+        "Holder { p = Pt { x = 1, y = 2 }, tag = 3 }"
+    );
 }
 
 #[test]
@@ -123,9 +152,8 @@ inline(js) fn foreign_draw() -> Draw = """
 return { __ty: "Draw", mask: { __ty: "Mask", r: true } };
 """
 "#;
-    let without_constructor = format!(
-        "{PREFIX}\nfn root() -> string {{ inspect(Traced {{ draw: foreign_draw() }}) }}"
-    );
+    let without_constructor =
+        format!("{PREFIX}\nfn root() -> string {{ inspect(Traced {{ draw: foreign_draw() }}) }}");
     let with_constructor = format!(
         "{PREFIX}\n\
          fn local_draw() -> Draw {{ Draw {{ mask: Mask {{ r: false, g: null }} }} }}\n\

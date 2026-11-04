@@ -18,8 +18,8 @@ use comfy_la_arena::{Idx, RawIdx};
 use skull_mir::code_identity::{
     CaptureSchema, CodeArtifact, CodeCompatibility, CodeIdentity, FrameSchema,
 };
-use skull_mir::intrinsics::{Emission, IntrinsicTable};
 use skull_mir::instance::Instance;
+use skull_mir::intrinsics::{Emission, IntrinsicTable};
 use skull_mir::mangle::{ident_of_key, symbol_of_key};
 use skull_mir::mir::{Block, Cell, ContainerKind, FuncRef, Inst, Lit, MirFunc, Term};
 
@@ -32,7 +32,7 @@ use skull_parser::{CompilerError, Span};
 use ustr::Ustr;
 
 use crate::structure::{self, LoopRegion, Structure};
-use crate::{fill_template, JsIntrinsics};
+use crate::{JsIntrinsics, fill_template};
 
 fn raw<T>(idx: Idx<T>) -> u32 {
     idx.into_raw().into()
@@ -108,7 +108,9 @@ fn nobox_errs(
         sited_err((format!("{msg}, while emitting `{}`", mf.name), site))
     };
     let mut vs = skull_transform::nobox_materialization_violations(ws, mf).into_iter();
-    let Some(first) = vs.next() else { return Ok(()) };
+    let Some(first) = vs.next() else {
+        return Ok(());
+    };
     let mut e = named(first);
     e.siblings = vs.map(named).collect();
     Err(e)
@@ -231,9 +233,11 @@ fn max_multi_wire(bodies: &[&MirFunc]) -> Result<usize, CompilerError> {
         }
         Ok(n)
     }
-    bodies.iter().map(|mf| of(mf)).collect::<Result<Vec<_>, _>>().map(|widths| {
-        widths.into_iter().max().unwrap_or(0)
-    })
+    bodies
+        .iter()
+        .map(|mf| of(mf))
+        .collect::<Result<Vec<_>, _>>()
+        .map(|widths| widths.into_iter().max().unwrap_or(0))
 }
 
 /// The widest wire any reachable `inline(js)` body PUBLISHES, from the concrete
@@ -261,7 +265,9 @@ fn max_published_lanes(
             };
             if !matches!(
                 realized.kind,
-                artifact::Realization::ForeignBody(skull_graph::instance_graph::BoundaryClass::InlineBody)
+                artifact::Realization::ForeignBody(
+                    skull_graph::instance_graph::BoundaryClass::InlineBody
+                )
             ) {
                 return Ok(0);
             }
@@ -393,15 +399,24 @@ fn lower_publisher(body: &str, lanes: usize, name: &str) -> Result<String, Compi
     };
     // `return` immediately followed by the publisher, and nothing but the call
     // between them. A single-exit body by construction.
-    if return_at > publish_at || !code[return_at + "return".len()..publish_at].trim().is_empty() {
+    if return_at > publish_at
+        || !code[return_at + "return".len()..publish_at]
+            .trim()
+            .is_empty()
+    {
         return Err(err(format!(
             "`inline(js)` body of `{name}` must end with one final \
              `return __rock_publish(..)`; its `return` does not name the publisher"
         )));
     }
-    let open = code[publish_at..].find('(').map(|r| publish_at + r).ok_or_else(|| {
-        err(format!("`inline(js)` body of `{name}`: `__rock_publish` is not a call"))
-    })?;
+    let open = code[publish_at..]
+        .find('(')
+        .map(|r| publish_at + r)
+        .ok_or_else(|| {
+            err(format!(
+                "`inline(js)` body of `{name}`: `__rock_publish` is not a call"
+            ))
+        })?;
     // Argument boundaries come from the BLANKED text (a comma inside a string is
     // not a separator); the argument TEXT comes from the original body.
     let mut depth = 0usize;
@@ -423,9 +438,16 @@ fn lower_publisher(body: &str, lanes: usize, name: &str) -> Result<String, Compi
         }
     }
     let close = close.ok_or_else(|| {
-        err(format!("`inline(js)` body of `{name}`: unbalanced `__rock_publish(..)`"))
+        err(format!(
+            "`inline(js)` body of `{name}`: unbalanced `__rock_publish(..)`"
+        ))
     })?;
-    if !code[close + 1..].trim().trim_end_matches(';').trim().is_empty() {
+    if !code[close + 1..]
+        .trim()
+        .trim_end_matches(';')
+        .trim()
+        .is_empty()
+    {
         return Err(err(format!(
             "`inline(js)` body of `{name}`: the publisher must be the body's final statement"
         )));
@@ -522,7 +544,11 @@ fn is_js_ident(s: &str) -> bool {
 
 /// `f` as an object-literal key: bare when it is an identifier, quoted otherwise.
 fn js_key(f: &str) -> Result<String, CompilerError> {
-    if is_js_ident(f) { Ok(f.to_string()) } else { js_string_lit(f) }
+    if is_js_ident(f) {
+        Ok(f.to_string())
+    } else {
+        js_string_lit(f)
+    }
 }
 
 /// `base.f` / `base["f"]` -- property access that survives a non-identifier key.
@@ -538,7 +564,14 @@ fn js_member(base: &str, f: &str) -> Result<String, CompilerError> {
 /// chosen JS identity (the differential harness names each fallback fn).
 pub fn emit_fn(ws: &Workspace, mf: &MirFunc, js_name: &str) -> Result<String, CompilerError> {
     let names = CalleeNames::default();
-    emit_fn_with_callees(ws, mf, js_name, &names, &HashSet::new(), &GlobalCtx::default())
+    emit_fn_with_callees(
+        ws,
+        mf,
+        js_name,
+        &names,
+        &HashSet::new(),
+        &GlobalCtx::default(),
+    )
 }
 
 /// [`emit_fn`] with a set of known co-emitted plain-Rock callees: a call whose
@@ -604,7 +637,11 @@ pub fn emit_fn_with_callees(
     let mut header = format!("function {js_name}({}) {{\n", params.join(", "));
     for &c in &mf.params {
         if cell_is_uint(ws, mf.cells[c].ty) {
-            header.push_str(&format!("  {} = {} >>> 0;\n", cell_name(mf, c), cell_name(mf, c)));
+            header.push_str(&format!(
+                "  {} = {} >>> 0;\n",
+                cell_name(mf, c),
+                cell_name(mf, c)
+            ));
         }
     }
 
@@ -644,9 +681,9 @@ pub fn emit_fn_with_callees(
         // discarded structured attempt leaves no residue. Every OTHER reject
         // rides `?` out untouched (`shared_tail_reject` is set only at the one
         // reject site), and a trampoline reject surfaces its own reason.
-        Err(_) if em.shared_tail_reject => {
-            emit_fn_trampoline(ws, mf, js_name, callees, hoisted, globals, mf.entry, &mf.params, true)
-        }
+        Err(_) if em.shared_tail_reject => emit_fn_trampoline(
+            ws, mf, js_name, callees, hoisted, globals, mf.entry, &mf.params, true,
+        ),
         Err(e) => Err(e),
     }
 }
@@ -796,7 +833,9 @@ impl CalleeNames {
             .call_sites()
             .flat_map(|(caller, sites)| {
                 sites.iter().filter_map(|(site, record)| {
-                    let SiteOutcome::Resolved(callee) = &record.outcome else { return None };
+                    let SiteOutcome::Resolved(callee) = &record.outcome else {
+                        return None;
+                    };
                     Some(((caller.clone(), site.clone()), callee.clone()))
                 })
             })
@@ -830,11 +869,7 @@ impl CalleeNames {
         self.get(&instance)
     }
 
-    fn instance_for_owner(
-        &self,
-        ws: &Workspace,
-        owner: &Instance,
-    ) -> Option<Instance> {
+    fn instance_for_owner(&self, ws: &Workspace, owner: &Instance) -> Option<Instance> {
         let func = skull_mir::lower::canonical_variant(ws, owner.func);
         self.owner_instances
             .iter()
@@ -866,9 +901,10 @@ impl CalleeNames {
         let call_site = mf.call_sites.get(&iid)?;
         let owner = mf.site_owners.get(call_site.owner.0 as usize)?;
         let owner = self.instance_for_owner(ws, owner)?;
-        self.site_targets.get(&(owner, call_site.site.clone())).cloned()
+        self.site_targets
+            .get(&(owner, call_site.site.clone()))
+            .cloned()
     }
-
 }
 
 struct Emitter<'a> {
@@ -1070,7 +1106,9 @@ impl Emitter<'_> {
                     }
                 }
                 self.shared_tail_reject = true;
-                return Err(err("JS subset: unstructured control flow (shared branch tail)"));
+                return Err(err(
+                    "JS subset: unstructured control flow (shared branch tail)",
+                ));
             }
             self.emit_block_effects(cur)?;
             match self.mf.blocks[cur].term.clone() {
@@ -1103,12 +1141,14 @@ impl Emitter<'_> {
                     }
                     cur = t;
                 }
-                Term::Branch { cond, then_bb, else_bb } => {
-                    match self.emit_branch(cur, cond, then_bb, else_bb, stop, ctx)? {
-                        Some(m) => cur = m,
-                        None => return Ok(()),
-                    }
-                }
+                Term::Branch {
+                    cond,
+                    then_bb,
+                    else_bb,
+                } => match self.emit_branch(cur, cond, then_bb, else_bb, stop, ctx)? {
+                    Some(m) => cur = m,
+                    None => return Ok(()),
+                },
                 Term::Switch { .. } => return Err(err("JS subset: `match`/switch not supported")),
                 Term::Yield { .. } => return Err(err("JS subset: `yield` not supported")),
             }
@@ -1250,12 +1290,15 @@ impl Emitter<'_> {
                     }
                     cur = t;
                 }
-                Term::Branch { cond, then_bb, else_bb } => {
+                Term::Branch {
+                    cond,
+                    then_bb,
+                    else_bb,
+                } => {
                     let cond_s = self.render_val(cond)?;
-                    let merge = self
-                        .structure
-                        .ipdom(cur)
-                        .filter(|&m| Some(m) != ctx.cont && Some(m) != ctx.brk && region.contains(&m));
+                    let merge = self.structure.ipdom(cur).filter(|&m| {
+                        Some(m) != ctx.cont && Some(m) != ctx.brk && region.contains(&m)
+                    });
                     let arm_stop = merge.map(Some).unwrap_or(stop);
                     self.push(&format!("if ({cond_s}) {{"));
                     self.indent += 1;
@@ -1286,7 +1329,12 @@ impl Emitter<'_> {
     /// that guards it miscompiles safe-nav chains. Returns the branch's
     /// `(cond, then, else)`.
     fn foldable_branch(&self, b: Idx<Block>) -> Option<(Idx<Inst>, Idx<Block>, Idx<Block>)> {
-        let Term::Branch { cond, then_bb, else_bb } = self.mf.blocks[b].term else {
+        let Term::Branch {
+            cond,
+            then_bb,
+            else_bb,
+        } = self.mf.blocks[b].term
+        else {
             return None;
         };
         let pure = self.mf.blocks[b].insts.iter().all(|&i| {
@@ -1370,9 +1418,8 @@ impl Emitter<'_> {
             .structure
             .ipdom(blk)
             .filter(|&m| Some(m) != ctx.cont && Some(m) != ctx.brk);
-        let forward_ok = |j: Idx<Block>| {
-            (merge == Some(j) || merge.is_none()) && !self.active.contains(&j)
-        };
+        let forward_ok =
+            |j: Idx<Block>| (merge == Some(j) || merge.is_none()) && !self.active.contains(&j);
         if let Some(j) = self.empty_forward(else_bb).filter(|&j| forward_ok(j)) {
             self.push(&format!("if ({cond_s}) {{"));
             self.indent += 1;
@@ -1406,7 +1453,6 @@ impl Emitter<'_> {
         Ok(merge)
     }
 
-
     /// A range-`for`: `for (; slot < bound; slot = slot + 1) { body }`. The slot
     /// and bound were initialized in the preheader (hoisted cells), so the `for`
     /// init clause is empty. `continue` targets the latch (the `for` increment
@@ -1419,10 +1465,19 @@ impl Emitter<'_> {
         let cmp = if li.inclusive { "<=" } else { "<" };
         self.loop_markers.push(header);
         let mark = loop_marker(self.mf, header);
-        self.push(&format!("{mark}for (; {slot} {cmp} {bound}; {slot} = {slot} + 1) {{"));
+        self.push(&format!(
+            "{mark}for (; {slot} {cmp} {bound}; {slot} = {slot} + 1) {{"
+        ));
         self.indent += 1;
-        let ctx = LoopCtx { cont: Some(li.latch), brk: Some(li.exit) };
-        self.loop_stack.push(LoopFrame { cont: li.latch, brk: li.exit, header });
+        let ctx = LoopCtx {
+            cont: Some(li.latch),
+            brk: Some(li.exit),
+        };
+        self.loop_stack.push(LoopFrame {
+            cont: li.latch,
+            brk: li.exit,
+            header,
+        });
         let body_len = self.out.len();
         self.emit_seq(li.body_entry, None, ctx)?;
         self.trim_trailing_continue(body_len);
@@ -1438,15 +1493,19 @@ impl Emitter<'_> {
     /// materializes its `L<h>:`. `None` if `t` is no enclosing loop target.
     fn labeled_jump(&mut self, t: Idx<Block>) -> Option<String> {
         let innermost = self.loop_stack.last().map(|f| f.header);
-        let hit = self
-            .loop_stack
-            .iter()
-            .rev()
-            .find_map(|f| (t == f.cont).then_some((f.header, true)).or((t == f.brk).then_some((f.header, false))))?;
+        let hit = self.loop_stack.iter().rev().find_map(|f| {
+            (t == f.cont)
+                .then_some((f.header, true))
+                .or((t == f.brk).then_some((f.header, false)))
+        })?;
         let (header, is_cont) = hit;
         let bare = Some(header) == innermost;
         if bare {
-            return Some(if is_cont { "continue;".to_string() } else { "break;".to_string() });
+            return Some(if is_cont {
+                "continue;".to_string()
+            } else {
+                "break;".to_string()
+            });
         }
         self.labels_used.insert(header);
         Some(if is_cont {
@@ -1469,14 +1528,21 @@ impl Emitter<'_> {
     fn emit_general(&mut self, region: &LoopRegion, outer: LoopCtx) -> Result<(), CompilerError> {
         let h = region.header;
         let exit = region.exit;
-        let ctx = LoopCtx { cont: Some(h), brk: Some(exit) };
+        let ctx = LoopCtx {
+            cont: Some(h),
+            brk: Some(exit),
+        };
 
         self.active.insert(h);
         self.loop_markers.push(h);
         let mark = loop_marker(self.mf, h);
         self.push(&format!("{mark}while (true) {{"));
         self.indent += 1;
-        self.loop_stack.push(LoopFrame { cont: h, brk: exit, header: h });
+        self.loop_stack.push(LoopFrame {
+            cont: h,
+            brk: exit,
+            header: h,
+        });
 
         if let Some(test) = region.test {
             let (cond, body_start, break_when_true) = self.test_arms(test, exit)?;
@@ -1512,7 +1578,12 @@ impl Emitter<'_> {
         test: Idx<Block>,
         exit: Idx<Block>,
     ) -> Result<(Idx<Inst>, Idx<Block>, bool), CompilerError> {
-        if let Term::Branch { cond, then_bb, else_bb } = self.mf.blocks[test].term {
+        if let Term::Branch {
+            cond,
+            then_bb,
+            else_bb,
+        } = self.mf.blocks[test].term
+        {
             if then_bb == exit {
                 return Ok((cond, else_bb, true));
             }
@@ -1520,7 +1591,9 @@ impl Emitter<'_> {
                 return Ok((cond, then_bb, false));
             }
         }
-        Err(err("JS subset: unstructured loop (condition test has no direct exit arm)"))
+        Err(err(
+            "JS subset: unstructured loop (condition test has no direct exit arm)",
+        ))
     }
 
     /// Drop a redundant trailing `continue;` that is the loop body's natural
@@ -1652,7 +1725,12 @@ impl Emitter<'_> {
                     let line = format!("{} = {};", cell_name(self.mf, *cell), rhs);
                     self.push(&line);
                 }
-                Inst::StoreIndex { base, index, value, kind } => {
+                Inst::StoreIndex {
+                    base,
+                    index,
+                    value,
+                    kind,
+                } => {
                     let (b, i, v) = (
                         self.render_val(*base)?,
                         self.render_val(*index)?,
@@ -1704,7 +1782,11 @@ impl Emitter<'_> {
                 // side reads `t.get(k)` -- no per-step pair allocation. The `table`
                 // operand renders to a Load/Global/Field (idempotent) or a
                 // materialized `v<N>` temp, so re-rendering it is safe.
-                Inst::MapNext { key_cell, val_cell, table } => {
+                Inst::MapNext {
+                    key_cell,
+                    val_cell,
+                    table,
+                } => {
                     let t = self.render_val(*table)?;
                     let k = cell_name(self.mf, *key_cell);
                     let v = cell_name(self.mf, *val_cell);
@@ -1757,7 +1839,11 @@ impl Emitter<'_> {
                     };
                     self.push(&line);
                 }
-                Inst::CallValueMulti { dests, callee, args } => {
+                Inst::CallValueMulti {
+                    dests,
+                    callee,
+                    args,
+                } => {
                     let mut rendered = vec![self.render_val(*callee)?];
                     for a in args {
                         rendered.push(self.render_val(*a)?);
@@ -1770,7 +1856,7 @@ impl Emitter<'_> {
                 // (scoped so no body local can collide). The name must be in the
                 // program's state set (`emit_with_closure` registers it before
                 // emit); an unregistered write is a backend bug, not a skip.
-            Inst::StoreGlobal { name, value } => {
+                Inst::StoreGlobal { name, value } => {
                     let Some(slot) = self.globals.state.get(&symbol_of_key(*name)) else {
                         return Err(err(format!(
                             "JS subset: write to unregistered global `{name}`"
@@ -1797,9 +1883,10 @@ impl Emitter<'_> {
                 // program position as `let v<raw> = <expr>` so cell reads capture
                 // their value here and effectful calls keep their order. Its use
                 // sites read the temp via `render_val`.
-                other if other.produces_value()
-                    && !self.inlinable[raw(iid) as usize]
-                    && self.use_count[raw(iid) as usize] > 0 =>
+                other
+                    if other.produces_value()
+                        && !self.inlinable[raw(iid) as usize]
+                        && self.use_count[raw(iid) as usize] > 0 =>
                 {
                     let expr = self.render_inst_expr(iid)?;
                     // A cross-case temp is hoist-declared at the fn top (see
@@ -1816,11 +1903,7 @@ impl Emitter<'_> {
                 // EFFECT insts (StoreField, StoreGlobal, ArrayPush, MapNext,
                 // CallMulti, coroutine ops, ...) are outside the subset.
                 other if other.produces_value() => {}
-                other => {
-                    return Err(err(format!(
-                        "JS subset: unsupported effect {other:?}"
-                    )))
-                }
+                other => return Err(err(format!("JS subset: unsupported effect {other:?}"))),
             }
         }
         Ok(())
@@ -1863,7 +1946,11 @@ impl Emitter<'_> {
     fn emit_trampoline_term(&mut self, b: Idx<Block>) -> Result<(), CompilerError> {
         match self.mf.blocks[b].term.clone() {
             Term::Goto(t) => self.push(&format!("__bb = {}; continue;", self.mf.emit_block_id(t))),
-            Term::Branch { cond, then_bb, else_bb } => {
+            Term::Branch {
+                cond,
+                then_bb,
+                else_bb,
+            } => {
                 let c = self.render_val(cond)?;
                 self.push(&format!(
                     "if ({c}) {{ __bb = {}; }} else {{ __bb = {}; }} continue;",
@@ -1871,7 +1958,11 @@ impl Emitter<'_> {
                     self.mf.emit_block_id(else_bb)
                 ));
             }
-            Term::Switch { discr, cases, default } => {
+            Term::Switch {
+                discr,
+                cases,
+                default,
+            } => {
                 let d = self.render_val(discr)?;
                 let mut s = String::new();
                 for (lit, bb) in &cases {
@@ -1889,7 +1980,10 @@ impl Emitter<'_> {
                         self.mf.emit_block_id(*bb)
                     ));
                 }
-                s.push_str(&format!("{{ __bb = {}; }} continue;", self.mf.emit_block_id(default)));
+                s.push_str(&format!(
+                    "{{ __bb = {}; }} continue;",
+                    self.mf.emit_block_id(default)
+                ));
                 self.push(&s);
             }
             Term::Return(vs) => match vs.as_slice() {
@@ -1920,7 +2014,7 @@ impl Emitter<'_> {
             Term::Yield { .. } => {
                 return Err(err(
                     "trampoline: Term::Yield must not survive transform_coroutine (pass bug)",
-                ))
+                ));
             }
         }
         Ok(())
@@ -1955,9 +2049,15 @@ impl Emitter<'_> {
     /// untyped, so the int/float split collapses to one operator and
     /// `IntToFloat` is identity.
     fn render_inst_expr(&self, iid: Idx<Inst>) -> Result<String, CompilerError> {
-        let bin = |a: &Idx<Inst>, op: &str, b: &Idx<Inst>, s: &Self| -> Result<String, CompilerError> {
-            Ok(format!("({} {} {})", s.render_val(*a)?, op, s.render_val(*b)?))
-        };
+        let bin =
+            |a: &Idx<Inst>, op: &str, b: &Idx<Inst>, s: &Self| -> Result<String, CompilerError> {
+                Ok(format!(
+                    "({} {} {})",
+                    s.render_val(*a)?,
+                    op,
+                    s.render_val(*b)?
+                ))
+            };
         Ok(match &self.mf.insts[iid] {
             Inst::Const(Lit::Int(i)) => i.to_string(),
             Inst::Const(Lit::Uint(i)) => i.to_string(),
@@ -1970,14 +2070,38 @@ impl Emitter<'_> {
             Inst::IntAdd(a, b) | Inst::FloatAdd(a, b) => bin(a, "+", b, self)?,
             Inst::IntSub(a, b) | Inst::FloatSub(a, b) => bin(a, "-", b, self)?,
             Inst::IntMul(a, b) | Inst::FloatMul(a, b) => bin(a, "*", b, self)?,
-            Inst::UintAdd(a, b) => format!("(({} + {}) >>> 0)", self.render_val(*a)?, self.render_val(*b)?),
-            Inst::UintSub(a, b) => format!("(({} - {}) >>> 0)", self.render_val(*a)?, self.render_val(*b)?),
-            Inst::UintMul(a, b) => format!("(Math.imul({}, {}) >>> 0)", self.render_val(*a)?, self.render_val(*b)?),
-            Inst::UintDiv(a, b) => format!("(Math.floor({} / {}) >>> 0)", self.render_val(*a)?, self.render_val(*b)?),
-            Inst::UintMod(a, b) => format!("(({} % {}) >>> 0)", self.render_val(*a)?, self.render_val(*b)?),
+            Inst::UintAdd(a, b) => format!(
+                "(({} + {}) >>> 0)",
+                self.render_val(*a)?,
+                self.render_val(*b)?
+            ),
+            Inst::UintSub(a, b) => format!(
+                "(({} - {}) >>> 0)",
+                self.render_val(*a)?,
+                self.render_val(*b)?
+            ),
+            Inst::UintMul(a, b) => format!(
+                "(Math.imul({}, {}) >>> 0)",
+                self.render_val(*a)?,
+                self.render_val(*b)?
+            ),
+            Inst::UintDiv(a, b) => format!(
+                "(Math.floor({} / {}) >>> 0)",
+                self.render_val(*a)?,
+                self.render_val(*b)?
+            ),
+            Inst::UintMod(a, b) => format!(
+                "(({} % {}) >>> 0)",
+                self.render_val(*a)?,
+                self.render_val(*b)?
+            ),
             Inst::FloatDiv(a, b) => bin(a, "/", b, self)?,
             // Rock int `/` floors toward -inf (Lua); JS `/` is real division.
-            Inst::IntDiv(a, b) => format!("Math.floor({} / {})", self.render_val(*a)?, self.render_val(*b)?),
+            Inst::IntDiv(a, b) => format!(
+                "Math.floor({} / {})",
+                self.render_val(*a)?,
+                self.render_val(*b)?
+            ),
             Inst::IntLt(a, b) | Inst::FloatLt(a, b) => bin(a, "<", b, self)?,
             Inst::IntLeq(a, b) | Inst::FloatLeq(a, b) => bin(a, "<=", b, self)?,
             Inst::IntGt(a, b) | Inst::FloatGt(a, b) => bin(a, ">", b, self)?,
@@ -2010,13 +2134,29 @@ impl Emitter<'_> {
             Inst::BitXor(a, b) => bin(a, "^", b, self)?,
             Inst::Shl(a, b) => bin(a, "<<", b, self)?,
             Inst::Shr(a, b) => {
-                format!("(({} >>> {}) | 0)", self.render_val(*a)?, self.render_val(*b)?)
+                format!(
+                    "(({} >>> {}) | 0)",
+                    self.render_val(*a)?,
+                    self.render_val(*b)?
+                )
             }
             Inst::BitNot(x) => format!("(~{})", self.render_val(*x)?),
             Inst::UintBitNot(x) => format!("((~{}) >>> 0)", self.render_val(*x)?),
-            Inst::UintBitAnd(a, b) => format!("(({} & {}) >>> 0)", self.render_val(*a)?, self.render_val(*b)?),
-            Inst::UintBitOr(a, b) => format!("(({} | {}) >>> 0)", self.render_val(*a)?, self.render_val(*b)?),
-            Inst::UintBitXor(a, b) => format!("(({} ^ {}) >>> 0)", self.render_val(*a)?, self.render_val(*b)?),
+            Inst::UintBitAnd(a, b) => format!(
+                "(({} & {}) >>> 0)",
+                self.render_val(*a)?,
+                self.render_val(*b)?
+            ),
+            Inst::UintBitOr(a, b) => format!(
+                "(({} | {}) >>> 0)",
+                self.render_val(*a)?,
+                self.render_val(*b)?
+            ),
+            Inst::UintBitXor(a, b) => format!(
+                "(({} ^ {}) >>> 0)",
+                self.render_val(*a)?,
+                self.render_val(*b)?
+            ),
             Inst::UintShl(a, b) => self.checked_uint_shift(*a, *b, "<<")?,
             Inst::UintShr(a, b) => self.checked_uint_shift(*a, *b, ">>>")?,
             // Identity on JS (all doubles), like codegen-lua on luajit.
@@ -2071,9 +2211,7 @@ impl Emitter<'_> {
             // value) is not emitted, so it stays out of subset. `error` is the
             // one runtime global: the coroutine transform's layout raise and
             // `await`'s re-raise read it as a value (`JS_CORO_RUNTIME` defines it).
-            Inst::Global(name)
-                if self.mf.code_value_identities.contains_key(&iid) =>
-            {
+            Inst::Global(name) if self.mf.code_value_identities.contains_key(&iid) => {
                 let identity = &self.mf.code_value_identities[&iid];
                 let key = self
                     .globals
@@ -2100,7 +2238,11 @@ impl Emitter<'_> {
                     format!("__rock_globals[{}]", js_string_lit(slot)?)
                 }
                 None if self.globals.enum_globals.contains(name) => name.to_string(),
-                None => return Err(err(format!("JS subset: global read `{name}` not supported"))),
+                None => {
+                    return Err(err(format!(
+                        "JS subset: global read `{name}` not supported"
+                    )));
+                }
             },
             // A CodeRef env record `{ __slot, c<A>.. }` (capturing lambda) or a
             // box `{ v }` (a shared mutable capture) -- built by `convert_closures`.
@@ -2113,9 +2255,14 @@ impl Emitter<'_> {
                             .code_slots
                             .get(identity)
                             .ok_or_else(|| err("JS: Rock closure has no CodeRef slot"))?;
-                        parts.push(format!("__slot: __rock_code_slot_ref({})", js_string_lit(key)?));
+                        parts.push(format!(
+                            "__slot: __rock_code_slot_ref({})",
+                            js_string_lit(key)?
+                        ));
                     } else {
-                        return Err(err("JS: Rock closure missing compiler-owned CodeRef identity"));
+                        return Err(err(
+                            "JS: Rock closure missing compiler-owned CodeRef identity",
+                        ));
                     }
                 }
                 for (f, v) in fields {
@@ -2137,7 +2284,11 @@ impl Emitter<'_> {
                 let name = ty.map(|t| t.to_string()).unwrap_or_default();
                 let mut parts: Vec<String> = Vec::new();
                 if !name.is_empty() {
-                    let tag = if is_native_buffer(&name) { "NativeBuffer" } else { &name };
+                    let tag = if is_native_buffer(&name) {
+                        "NativeBuffer"
+                    } else {
+                        &name
+                    };
                     parts.push(format!("__ty: {}", js_string_lit(tag)?));
                 }
                 for (f, v) in fields {
@@ -2154,8 +2305,18 @@ impl Emitter<'_> {
             // registry (`build_vt_eq_defs`) supplies that split and `__op_eq`
             // consults it before the generic walk -- mirroring luajit's `_vt.__eq`
             // metatable-authority rule. Construction is identical for both tiers.
-            Inst::MakeValueStruct { name, representation, form, fields }
-            | Inst::MaterializeValueStruct { name, representation, form, fields } => {
+            Inst::MakeValueStruct {
+                name,
+                representation,
+                form,
+                fields,
+            }
+            | Inst::MaterializeValueStruct {
+                name,
+                representation,
+                form,
+                fields,
+            } => {
                 let arena = self.mf.rep_arena.as_ref().ok_or_else(|| {
                     err(format!(
                         "JS subset: `{name}` value constructor has no representation arena"
@@ -2192,12 +2353,18 @@ impl Emitter<'_> {
             // semantics; `TupleIndex` reads `base[index]` uniformly here). A unit
             // variant of a mixed enum is its interned singleton (an `Inst::Global`),
             // so a bare `MakeEnum` here always carries payload.
-            Inst::MakeEnum { tag, ty, positional, named } => {
-                self.render_make_enum(&js_string_lit(tag.as_str())?, ty, positional, named)?
-            }
-            Inst::MakeEnumDyn { tag, ty, positional, named } => {
-                self.render_make_enum(&self.render_val(*tag)?, ty, positional, named)?
-            }
+            Inst::MakeEnum {
+                tag,
+                ty,
+                positional,
+                named,
+            } => self.render_make_enum(&js_string_lit(tag.as_str())?, ty, positional, named)?,
+            Inst::MakeEnumDyn {
+                tag,
+                ty,
+                positional,
+                named,
+            } => self.render_make_enum(&self.render_val(*tag)?, ty, positional, named)?,
             // A tuple is a plain JS array; `.N` reads index N. (Most tuples are
             // scalarized by SROA before emission; these cover the residue.)
             Inst::MakeTuple(elems) => {
@@ -2291,7 +2458,11 @@ impl Emitter<'_> {
             // (skull-mir intercepts the call and resolves the element ctype).
             // `Ptr<T>` IS a TypedArray on JS, matching the luajit `ffi.new` cdata;
             // value-struct elements use the shared flat C layout below.
-            Inst::FfiNewArray { ctype, count, representation } => match ctype.as_str() {
+            Inst::FfiNewArray {
+                ctype,
+                count,
+                representation,
+            } => match ctype.as_str() {
                 "float" => format!("new Float32Array({})", self.render_val(*count)?),
                 "int" => format!("new Int32Array({})", self.render_val(*count)?),
                 "uint32_t" => format!("new Uint32Array({})", self.render_val(*count)?),
@@ -2343,7 +2514,8 @@ impl Emitter<'_> {
                     // element's C width. Preserve that width for byte equality.
                     format!(
                         "Object.assign(new Float32Array(({}) * {}), {{__rock_elem_size: {size}}})",
-                        self.render_val(*count)?, size / 4
+                        self.render_val(*count)?,
+                        size / 4
                     )
                 }
             },
@@ -2364,7 +2536,7 @@ impl Emitter<'_> {
                     other => {
                         return Err(err(format!(
                             "JS subset: no TypedArray for leaf view C type `{other}`"
-                        )))
+                        )));
                     }
                 };
                 format!("new {array}({p}.buffer, {p}.byteOffset)")
@@ -2385,17 +2557,31 @@ impl Emitter<'_> {
             // (d/i/u/x/X/o/f/F/e/E/g/G/s/c, flags, width, precision; half-even
             // rounding). Format's fmt is a static string, FormatDyn's is computed.
             Inst::Format { value, fmt } => {
-                format!("__rock_sprintf({}, {})", js_string_lit(fmt.as_str())?, self.render_val(*value)?)
+                format!(
+                    "__rock_sprintf({}, {})",
+                    js_string_lit(fmt.as_str())?,
+                    self.render_val(*value)?
+                )
             }
             Inst::FormatDyn { value, fmt } => {
-                format!("__rock_sprintf({}, {})", self.render_val(*fmt)?, self.render_val(*value)?)
+                format!(
+                    "__rock_sprintf({}, {})",
+                    self.render_val(*fmt)?,
+                    self.render_val(*value)?
+                )
             }
             // Column storage: one plain array per leaf, sharing the single
             // `len`. Plain arrays rather than TypedArrays on purpose -- V8's
             // packed-double arrays beat `Float64Array` for the strided reads
             // this layout exists to make fast.
             // A nested leaf path is dotted (`min.x`), so keys are quoted.
-            Inst::MakeVecColumns { elem, columns, len, capacity, .. } => {
+            Inst::MakeVecColumns {
+                elem,
+                columns,
+                len,
+                capacity,
+                ..
+            } => {
                 let mut s = format!(
                     "{{{}: {{repr: {}, elem: {}, cap: {}}}",
                     js_string_lit(skull_mir::mir::VEC_COLUMN_HEADER_FIELD)?,
@@ -2465,7 +2651,7 @@ impl Emitter<'_> {
             other => {
                 return Err(err(format!(
                     "JS subset: cannot render {other:?} as a JS expression"
-                )))
+                )));
             }
         })
     }
@@ -2498,9 +2684,11 @@ impl Emitter<'_> {
         name: ustr::Ustr,
         head: &str,
     ) -> Result<Option<ustr::Ustr>, CompilerError> {
-        let sid = self.ws.struct_by_name.get(&name).ok_or_else(|| {
-            err(format!("leaf-form value `{name}` has no declared struct"))
-        })?;
+        let sid = self
+            .ws
+            .struct_by_name
+            .get(&name)
+            .ok_or_else(|| err(format!("leaf-form value `{name}` has no declared struct")))?;
         let sd = &self.ws.modules[sid.module.index()].structs[sid.def];
         let Some(f) = sd.fields.iter().find(|f| f.name.as_str() == head) else {
             return Err(err(format!("struct `{name}` has no field `{head}`")));
@@ -2513,7 +2701,9 @@ impl Emitter<'_> {
             false,
         )
         .map_err(|e| err(e.message))?;
-        Ok(plan.child().filter(|child| self.ws.struct_by_name.contains_key(child)))
+        Ok(plan
+            .child()
+            .filter(|child| self.ws.struct_by_name.contains_key(child)))
     }
 
     /// Split a possibly-FLATTENED field list into exact fields and per-head
@@ -2595,11 +2785,13 @@ impl Emitter<'_> {
             parts.push(format!("{}: {rendered}", js_key(key)?));
         }
         for (head, sub) in &groups {
-            let child = self.nested_field_struct_name(name, head.as_str())?.ok_or_else(|| {
-                CompilerError::new_no_location(format!(
-                    "leaf-form ctor for `{name}`: field `{head}` is not a value struct"
-                ))
-            })?;
+            let child = self
+                .nested_field_struct_name(name, head.as_str())?
+                .ok_or_else(|| {
+                    CompilerError::new_no_location(format!(
+                        "leaf-form ctor for `{name}`: field `{head}` is not a value struct"
+                    ))
+                })?;
             let child_rep = arena
                 .plan_nominal_value(self.ws, bone_semantic::hir::FnBackend::Js, child)
                 .map_err(|e| err(e.message))?;
@@ -2718,7 +2910,9 @@ impl Emitter<'_> {
         // The call-site join is the identity oracle. The instruction's FuncRef
         // is only the backend declaration selected for the call; the graph owns
         // the target-neutral instance and the artifact view owns its symbol.
-        let body = self.callees.instance_for_call(self.ws, self.mf, iid, func)?;
+        let body = self
+            .callees
+            .instance_for_call(self.ws, self.mf, iid, func)?;
         self.callees.get(&body)
     }
 
@@ -2748,14 +2942,26 @@ impl Emitter<'_> {
         // `inspect` (lua_tostring / precision parity), nested value structs recurse.
         if supply.is_some() && matches!(cf.name.as_str(), "inspect" | "inspect_formatted") {
             if let Some(&arg0) = args.first() {
-                if let Inst::MakeValueStruct { name, representation, .. } = &self.mf.insts[arg0] {
-                    if skull_mir::lower::gc_free_value_struct_field_order(self.ws, *name).is_some() {
+                if let Inst::MakeValueStruct {
+                    name,
+                    representation,
+                    ..
+                } = &self.mf.insts[arg0]
+                {
+                    if skull_mir::lower::gc_free_value_struct_field_order(self.ws, *name).is_some()
+                    {
                         let (cyc, prec) = if cf.name.as_str() == "inspect_formatted" {
                             ("true".to_string(), self.render_val(args[1])?)
                         } else {
                             (
-                                args.get(1).map(|a| self.render_val(*a)).transpose()?.unwrap_or_else(|| "true".to_string()),
-                                args.get(2).map(|a| self.render_val(*a)).transpose()?.unwrap_or_else(|| "(-1)".to_string()),
+                                args.get(1)
+                                    .map(|a| self.render_val(*a))
+                                    .transpose()?
+                                    .unwrap_or_else(|| "true".to_string()),
+                                args.get(2)
+                                    .map(|a| self.render_val(*a))
+                                    .transpose()?
+                                    .unwrap_or_else(|| "(-1)".to_string()),
                             )
                         };
                         return self.render_value_struct_inspect(arg0, &cyc, &prec);
@@ -2808,7 +3014,12 @@ impl Emitter<'_> {
 /// pure-increment latch. The bound must render inline (a `Load` of a hoisted
 /// preheader cell, or a const) since the counted path skips the header block.
 fn match_counted_loop(f: &MirFunc, h: Idx<Block>) -> Option<LoopInfo> {
-    let Term::Branch { cond, then_bb, else_bb } = f.blocks[h].term else {
+    let Term::Branch {
+        cond,
+        then_bb,
+        else_bb,
+    } = f.blocks[h].term
+    else {
         return None;
     };
     let (slot, bound, inclusive) = match &f.insts[cond] {
@@ -2829,7 +3040,14 @@ fn match_counted_loop(f: &MirFunc, h: Idx<Block>) -> Option<LoopInfo> {
         }
     }
     let latch = latch?;
-    Some(LoopInfo { slot, bound, inclusive, body_entry: then_bb, latch, exit: else_bb })
+    Some(LoopInfo {
+        slot,
+        bound,
+        inclusive,
+        body_entry: then_bb,
+        latch,
+        exit: else_bb,
+    })
 }
 
 fn load_cell(f: &MirFunc, iid: Idx<Inst>) -> Option<Idx<Cell>> {
@@ -2846,7 +3064,8 @@ fn is_incr_latch(f: &MirFunc, p: Idx<Block>, slot: Idx<Cell>) -> bool {
             if cell == slot {
                 if let Inst::IntAdd(a, b) = f.insts[value] {
                     let is_one = |x: Idx<Inst>| matches!(f.insts[x], Inst::Const(Lit::Int(1)));
-                    let loads_slot = |x: Idx<Inst>| matches!(f.insts[x], Inst::Load(c) if c == slot);
+                    let loads_slot =
+                        |x: Idx<Inst>| matches!(f.insts[x], Inst::Load(c) if c == slot);
                     return (loads_slot(a) && is_one(b)) || (loads_slot(b) && is_one(a));
                 }
                 return false;
@@ -2969,12 +3188,24 @@ pub fn emit_with_closure(
         init_js.push_str(&init.js);
     }
     for (fr, mf) in &st.lowered {
-        let name = st.names.name_for_decl(ws, *fr).expect("emitted body has a name");
+        let name = st
+            .names
+            .name_for_decl(ws, *fr)
+            .expect("emitted body has a name");
         let plan = st
             .concrete
             .get(&Instance::base(*fr))
             .ok_or_else(|| err(format!("JS: no concrete plan for `{name}`")))?;
-        match emit_lowered_fn(ws, scx.interner(), mf, name, plan, &st.names, &hoisted, &st.gctx) {
+        match emit_lowered_fn(
+            ws,
+            scx.interner(),
+            mf,
+            name,
+            plan,
+            &st.names,
+            &hoisted,
+            &st.gctx,
+        ) {
             Ok((js, artifact)) => {
                 out.push_str(&js);
                 code_artifact.merge(artifact);
@@ -2982,7 +3213,13 @@ pub fn emit_with_closure(
             Err(e) => rejections.push((name.clone(), e)),
         }
     }
-    out.push_str(&emit_spec_bodies(ws, scx.interner(), &st, &hoisted, &mut rejections));
+    out.push_str(&emit_spec_bodies(
+        ws,
+        scx.interner(),
+        &st,
+        &hoisted,
+        &mut rejections,
+    ));
     combine_rejections(rejections)?;
     let code_slot_stage = code_slot_registration_js(ws, scx.interner(), &code_artifact)?;
     out.push_str(&code_slot_stage);
@@ -2993,22 +3230,23 @@ pub fn emit_with_closure(
             &st.concrete,
             &body.instance,
             body.decl,
-            st.names.get(&body.instance).expect("emitted body has a name"),
+            st.names
+                .get(&body.instance)
+                .expect("emitted body has a name"),
         )?);
     }
     out.push_str(&init_js);
-    out.push_str(code_slot_publish_js(
-        &code_artifact,
-        false,
-        false,
-    ));
+    out.push_str(code_slot_publish_js(&code_artifact, false, false));
     // A closure that reads and writes no mutable global or static runs without
     // the globals runtime (the per-construct harnesses rely on it).
     if !st.gctx.uses_storage.get() {
         return Ok(out);
     }
     let global_layout = skull_mir::global_storage::global_layout_id(ws, &scx).map_err(err)?;
-    Ok(format!("{}{out}", globals_open_js(ws, &scx, &st.gctx.state, &global_layout)?))
+    Ok(format!(
+        "{}{out}",
+        globals_open_js(ws, &scx, &st.gctx.state, &global_layout)?
+    ))
 }
 
 /// One non-fn body (decorator definition, global initializer) plus its hoisted
@@ -3024,7 +3262,14 @@ fn emit_body_with_nested(
 ) -> Result<String, CompilerError> {
     let mut out = emit_fn_with_callees(ws, mf, js_name, names, hoisted, gctx)?;
     for nf in &mf.nested_fns {
-        out.push_str(&emit_body_with_nested(ws, nf, nf.name.as_str(), names, hoisted, gctx)?);
+        out.push_str(&emit_body_with_nested(
+            ws,
+            nf,
+            nf.name.as_str(),
+            names,
+            hoisted,
+            gctx,
+        )?);
     }
     Ok(out)
 }
@@ -3102,8 +3347,14 @@ fn js_root_plan(
             continue;
         }
         for (fid, f) in module.functions.iter() {
-            if f.annotations.iter().any(|a| deco_names.contains(&a.name.name)) {
-                let fr = FuncRef { module: module.id, func: fid };
+            if f.annotations
+                .iter()
+                .any(|a| deco_names.contains(&a.name.name))
+            {
+                let fr = FuncRef {
+                    module: module.id,
+                    func: fid,
+                };
                 if seen.insert(fr) {
                     named.push((fr, callee_js_name(ws, fr)));
                 }
@@ -3133,8 +3384,16 @@ fn shader_root_refs(ws: &Workspace) -> Result<Vec<FuncRef>, CompilerError> {
         .collect())
 }
 
-fn extend_root_plan_from_inline_view(ws: &Workspace, plan: &mut JsRootPlan, view: &ArtifactView) -> bool {
-    extend_root_plan_from_opaque_targets(ws, plan, view.opaque_boundary_roots.values().flatten().copied())
+fn extend_root_plan_from_inline_view(
+    ws: &Workspace,
+    plan: &mut JsRootPlan,
+    view: &ArtifactView,
+) -> bool {
+    extend_root_plan_from_opaque_targets(
+        ws,
+        plan,
+        view.opaque_boundary_roots.values().flatten().copied(),
+    )
 }
 
 fn extend_root_plan_from_opaque_targets(
@@ -3146,7 +3405,9 @@ fn extend_root_plan_from_opaque_targets(
     let mut added = false;
     for target in targets {
         if seen.insert(target) {
-            let name = ws.module(target.module).functions[target.func].name.to_string();
+            let name = ws.module(target.module).functions[target.func]
+                .name
+                .to_string();
             plan.named.push((target, name));
             plan.refs.push(target);
             added = true;
@@ -3160,12 +3421,8 @@ fn new_js_session(
     scx: &skull_mir::lower::ScalarCtx,
     roots: &[FuncRef],
 ) -> JsSession {
-    let mut graph = skull_graph::instance_graph::build_in(
-        ws,
-        roots.to_vec(),
-        false,
-        scx.interner_handle(),
-    );
+    let mut graph =
+        skull_graph::instance_graph::build_in(ws, roots.to_vec(), false, scx.interner_handle());
     let mappings = artifact::ArtifactMappings::for_backend(bone_semantic::hir::FnBackend::Js)
         .with_supply(&crate::JsBackendRealization);
     let view = artifact::realize(
@@ -3189,7 +3446,10 @@ fn update_js_session(
     ws: &Workspace,
     session: &mut JsSession,
     roots: &[FuncRef],
-    changed: &[(bone_semantic::prelude::ModuleId, bone_semantic::hir::BodyOwner)],
+    changed: &[(
+        bone_semantic::prelude::ModuleId,
+        bone_semantic::hir::BodyOwner,
+    )],
     edits: &[skull_graph::instance_graph::SpanEdit],
 ) {
     let before = session.graph.instances.len();
@@ -3204,9 +3464,10 @@ fn update_js_session(
         .filter(|root| !roots.contains(root))
         .copied()
         .collect();
-    let update = session
-        .graph
-        .update_bodies_with_root_delta(ws, &root_added, &root_removed, changed, edits);
+    let update =
+        session
+            .graph
+            .update_bodies_with_root_delta(ws, &root_added, &root_removed, changed, edits);
     session.concrete.update_local_with_span_edits(
         ws,
         &session.graph,
@@ -3297,10 +3558,7 @@ pub fn emit_program_cached(
         static_keys,
         shader_contributions: shader_collection.contributions,
         root_plan,
-        opaque_root_contributions: session
-            .view
-            .opaque_boundary_roots
-            .clone(),
+        opaque_root_contributions: session.view.opaque_boundary_roots.clone(),
         scx,
         session,
     };
@@ -3443,8 +3701,7 @@ fn assemble_program_core(
                 &mut mf,
                 &mut st.cache,
                 &st.concrete,
-            )
-            {
+            ) {
                 st.reject(&deco_name, e);
                 continue;
             }
@@ -3464,7 +3721,14 @@ fn assemble_program_core(
             // body was the only caller of was never queued, and the call site
             // spelled a name nothing emitted.
             let mut findings: Vec<CompilerError> = Vec::new();
-            findings.extend(JsDelivery { ws, scx, st: &mut st }.schedule_body(&mf)?);
+            findings.extend(
+                JsDelivery {
+                    ws,
+                    scx,
+                    st: &mut st,
+                }
+                .schedule_body(&mf)?,
+            );
             match merge_findings(findings) {
                 Some(e) => st.reject(&deco_name, e),
                 None => deco_bodies.push((deco_name, mf)),
@@ -3550,20 +3814,35 @@ fn assemble_program_core(
     // 2. fn defs (main, decorated fns, transitive callees).
     let mut chunks = HashMap::new();
     for (fr, mf) in &st.lowered {
-        let name = st.names.name_for_decl(ws, *fr).expect("emitted body has a name");
+        let name = st
+            .names
+            .name_for_decl(ws, *fr)
+            .expect("emitted body has a name");
         let plan = session
             .concrete
             .plans
             .get(&Instance::base(*fr))
             .ok_or_else(|| err(format!("JS: no concrete plan for `{name}`")))?;
-        match emit_lowered_fn(ws, scx.interner(), mf, name, plan, &st.names, &hoisted, &st.gctx) {
+        match emit_lowered_fn(
+            ws,
+            scx.interner(),
+            mf,
+            name,
+            plan,
+            &st.names,
+            &hoisted,
+            &st.gctx,
+        ) {
             Ok((js, artifact)) => {
                 out.push_str(&js);
                 code_artifact.merge(artifact.clone());
                 all_statics.extend(collect_statics(mf));
                 chunks.insert(
                     *fr,
-                    JsChunk { js, statics: collect_statics(mf) },
+                    JsChunk {
+                        js,
+                        statics: collect_statics(mf),
+                    },
                 );
             }
             Err(e) => rejections.push((name.clone(), e)),
@@ -3582,7 +3861,10 @@ fn assemble_program_core(
     }
     // 2b. inline(js) fns, emitted verbatim.
     for body in &st.inline_js {
-        let name = st.names.get(&body.instance).expect("emitted body has a name");
+        let name = st
+            .names
+            .get(&body.instance)
+            .expect("emitted body has a name");
         match emit_inline_js_fn(ws, scx, &st.concrete, &body.instance, body.decl, name) {
             Ok(definition) => {
                 out.push_str(&definition);
@@ -3607,7 +3889,10 @@ fn assemble_program_core(
         code_artifact.merge(artifact);
         all_statics.extend(collect_statics(&g.mf));
         if g.is_const {
-            const_chunks.entry(g.name).or_insert_with(String::new).push_str(&definition);
+            const_chunks
+                .entry(g.name)
+                .or_insert_with(String::new)
+                .push_str(&definition);
         } else {
             stable.push_str(&definition);
         }
@@ -3661,7 +3946,11 @@ fn assemble_program_core(
     let definition_stage = definition_plan_stage_js(ws, scx, &st.concrete, &definition_plan)?;
     out.push_str(&definition_stage);
     stable.push_str(&definition_stage);
-    out.push_str(&lifecycle_plan_stage_js(ws, scx.interner(), &lifecycle_plan)?);
+    out.push_str(&lifecycle_plan_stage_js(
+        ws,
+        scx.interner(),
+        &lifecycle_plan,
+    )?);
     // 5. decorator applications (AFTER inits: a deco body pushes into a ginit-
     //    initialized registry).
     let applications = decorator_application_lines_js(ws, &deco_names, scx.interner(), &st.names)?;
@@ -3673,7 +3962,10 @@ fn assemble_program_core(
         lifecycle_plan.census.declarations > 0,
     ));
     let global_layout = skull_mir::global_storage::global_layout_id(ws, scx).map_err(err)?;
-    let program = format!("{}{out}", globals_open_js(ws, scx, &st.gctx.state, &global_layout)?);
+    let program = format!(
+        "{}{out}",
+        globals_open_js(ws, scx, &st.gctx.state, &global_layout)?
+    );
 
     Ok(ProgramBuild {
         program,
@@ -3711,7 +4003,11 @@ fn globals_directory_js(
     state_slots: &HashMap<ustr::Ustr, String>,
 ) -> Result<String, CompilerError> {
     let mut entries = Vec::new();
-    for module in ws.modules.iter().filter(|m| m.id != bone_semantic::prelude::ModuleId::builtin()) {
+    for module in ws
+        .modules
+        .iter()
+        .filter(|m| m.id != bone_semantic::prelude::ModuleId::builtin())
+    {
         for (_, global) in module.globals.iter().filter(|(_, g)| !g.is_const) {
             let identity = skull_mir::global_storage::global_identity(module.file, global.name);
             let plan = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, global.ty)
@@ -3721,7 +4017,10 @@ fn globals_directory_js(
                 .iter()
                 .map(|leaf| {
                     state_slots.get(leaf).ok_or_else(|| {
-                        err(format!("JS: global `{}` has no storage slot for `{leaf}`", global.name))
+                        err(format!(
+                            "JS: global `{}` has no storage slot for `{leaf}`",
+                            global.name
+                        ))
                     })
                 })
                 .map(|slot| js_string_lit(slot?))
@@ -3732,7 +4031,11 @@ fn globals_directory_js(
                 .map(|leaf| js_string_lit(leaf))
                 .collect::<Result<Vec<_>, _>>()?
                 .join(",");
-            let name = identity.rsplit("::").next().unwrap_or(&identity).to_string();
+            let name = identity
+                .rsplit("::")
+                .next()
+                .unwrap_or(&identity)
+                .to_string();
             entries.push((identity, name, physical, slots));
         }
     }
@@ -3756,7 +4059,9 @@ fn shader_register_sibling(ws: &Workspace) -> Result<Option<FuncRef>, CompilerEr
     }
     // The registry uses DefKeys for v1 modules. @nomangle changes the emitted
     // symbol, not that key, so match the declared segment on both dialects.
-    let cands: Vec<_> = ws.functions_by_name.iter()
+    let cands: Vec<_> = ws
+        .functions_by_name
+        .iter()
         .filter(|(key, _)| skull_mir::mangle::declared_name(key) == "__rock_shader_register")
         .flat_map(|(_, functions)| functions.iter().copied())
         .collect();
@@ -3807,7 +4112,10 @@ impl JsProgram {
     /// True when a callable escapes as a code ref, so the prelude needs the
     /// full code-slot call helper (see [`crate::assemble_prelude`]).
     pub fn has_code_refs(&self) -> bool {
-        self.code_artifact.entries.values().any(|entry| entry.escaping)
+        self.code_artifact
+            .entries
+            .values()
+            .any(|entry| entry.escaping)
     }
 }
 
@@ -3827,7 +4135,11 @@ impl JsStaticBaseline {
     ) -> Result<Self, CompilerError> {
         let (value_slot, done_slot) =
             skull_mir::global_storage::static_cell_storage_keys(ws, interner, cell).map_err(err)?;
-        Ok(Self { key: static_cell_key(cell), value_slot, done_slot })
+        Ok(Self {
+            key: static_cell_key(cell),
+            value_slot,
+            done_slot,
+        })
     }
 }
 
@@ -3863,8 +4175,13 @@ pub struct JsEmitCache {
     build: ProgramBuild,
     changed_since_full: HashSet<FuncRef>,
     static_keys: HashMap<ustr::Ustr, JsStaticBaseline>,
-    shader_contributions:
-        HashMap<(bone_semantic::prelude::ModuleId, bone_semantic::hir::BodyOwner), Vec<skull_mir::lower::ShaderPair>>,
+    shader_contributions: HashMap<
+        (
+            bone_semantic::prelude::ModuleId,
+            bone_semantic::hir::BodyOwner,
+        ),
+        Vec<skull_mir::lower::ShaderPair>,
+    >,
     root_plan: JsRootPlan,
     opaque_root_contributions:
         BTreeMap<skull_graph::instance_graph::DeclKey, rustc_hash::FxHashSet<FuncRef>>,
@@ -3934,7 +4251,10 @@ pub fn emit_overlay(
     ws: &Workspace,
     user_mid: bone_semantic::prelude::ModuleId,
     cache: &mut JsEmitCache,
-    reinferred: &[(bone_semantic::prelude::ModuleId, bone_semantic::hir::BodyOwner)],
+    reinferred: &[(
+        bone_semantic::prelude::ModuleId,
+        bone_semantic::hir::BodyOwner,
+    )],
 ) -> Result<JsReload, CompilerError> {
     emit_overlay_with_span_edits(ws, user_mid, cache, reinferred, &[])
 }
@@ -3945,7 +4265,10 @@ pub fn emit_overlay_with_span_edits_staged(
     ws: &Workspace,
     user_mid: bone_semantic::prelude::ModuleId,
     cache: &JsEmitCache,
-    reinferred: &[(bone_semantic::prelude::ModuleId, bone_semantic::hir::BodyOwner)],
+    reinferred: &[(
+        bone_semantic::prelude::ModuleId,
+        bone_semantic::hir::BodyOwner,
+    )],
     edits: &[skull_graph::instance_graph::SpanEdit],
 ) -> Result<(JsReload, JsEmitCache), CompilerError> {
     let mut staged = cache.clone();
@@ -3957,19 +4280,18 @@ pub fn emit_overlay_with_span_edits(
     ws: &Workspace,
     user_mid: bone_semantic::prelude::ModuleId,
     cache: &mut JsEmitCache,
-    reinferred: &[(bone_semantic::prelude::ModuleId, bone_semantic::hir::BodyOwner)],
+    reinferred: &[(
+        bone_semantic::prelude::ModuleId,
+        bone_semantic::hir::BodyOwner,
+    )],
     edits: &[skull_graph::instance_graph::SpanEdit],
 ) -> Result<JsReload, CompilerError> {
-    if reinferred
-        .iter()
-        .any(|(_, owner)| {
-            !matches!(
-                owner,
-                bone_semantic::hir::BodyOwner::Function(_)
-                    | bone_semantic::hir::BodyOwner::Global(_)
-            )
-        })
-    {
+    if reinferred.iter().any(|(_, owner)| {
+        !matches!(
+            owner,
+            bone_semantic::hir::BodyOwner::Function(_) | bone_semantic::hir::BodyOwner::Global(_)
+        )
+    }) {
         return Ok(JsReload::FullRequired);
     }
 
@@ -3984,7 +4306,11 @@ pub fn emit_overlay_with_span_edits(
 
     for &(mid, owner) in reinferred {
         let key = (mid, owner);
-        let previous = cache.shader_contributions.get(&key).cloned().unwrap_or_default();
+        let previous = cache
+            .shader_contributions
+            .get(&key)
+            .cloned()
+            .unwrap_or_default();
         let (current, _) = skull_mir::lower::collect_shader_body(ws, mid, owner)?;
         if current != previous {
             return Ok(JsReload::FullRequired);
@@ -3994,7 +4320,10 @@ pub fn emit_overlay_with_span_edits(
     let changed_funcs: Vec<FuncRef> = reinferred
         .iter()
         .filter_map(|(mid, owner)| match owner {
-            bone_semantic::hir::BodyOwner::Function(func) => Some(FuncRef { module: *mid, func: *func }),
+            bone_semantic::hir::BodyOwner::Function(func) => Some(FuncRef {
+                module: *mid,
+                func: *func,
+            }),
             bone_semantic::hir::BodyOwner::Global(_) => None,
             _ => None,
         })
@@ -4035,7 +4364,11 @@ pub fn emit_overlay_with_span_edits(
     if current.global_layout != cache.build.global_layout {
         return Ok(JsReload::FullRequired);
     }
-    if !cache.build.code_artifact.compatible_overlay(&current.code_artifact) {
+    if !cache
+        .build
+        .code_artifact
+        .compatible_overlay(&current.code_artifact)
+    {
         return Ok(JsReload::FullRequired);
     }
     let update = cache
@@ -4083,21 +4416,18 @@ pub fn emit_overlay_with_span_edits(
             if update.added_instances.contains(inst) {
                 return Some(chunk);
             }
-            cache.build.spec_chunks.get(inst).and_then(|previous| {
-                (previous.js != chunk.js).then_some(chunk)
-            })
+            cache
+                .build
+                .spec_chunks
+                .get(inst)
+                .and_then(|previous| (previous.js != chunk.js).then_some(chunk))
         })
         .collect();
     let mut removed_specs: Vec<&JsSpecChunk> = cache
         .build
         .spec_chunks
         .iter()
-        .filter_map(|(inst, chunk)| {
-            update
-                .removed_instances
-                .contains(inst)
-                .then_some(chunk)
-        })
+        .filter_map(|(inst, chunk)| update.removed_instances.contains(inst).then_some(chunk))
         .collect();
     changed_specs.sort_by(|left, right| left.name.cmp(&right.name));
     removed_specs.sort_by(|left, right| left.name.cmp(&right.name));
@@ -4137,7 +4467,11 @@ pub fn emit_overlay_with_span_edits(
     }
     cache.changed_since_full.extend(changed_now.iter().copied());
 
-    let has_code_slots = current.code_artifact.entries.values().any(|entry| entry.escaping);
+    let has_code_slots = current
+        .code_artifact
+        .entries
+        .values()
+        .any(|entry| entry.escaping);
     let mut out = String::from("// skull JS incremental overlay\n");
     out.push_str("try {\n");
     let affected_consts = affected_const_names(ws, &changed_consts, &current.const_order);
@@ -4153,7 +4487,9 @@ pub fn emit_overlay_with_span_edits(
     }
     let mut reset_cells = HashSet::new();
     for fref in &changed_now {
-        let Some(chunk) = current.chunks.get(fref) else { continue };
+        let Some(chunk) = current.chunks.get(fref) else {
+            continue;
+        };
         for cell in &chunk.statics {
             let base = JsStaticBaseline::of(ws, cache.scx.interner(), cell)?;
             if cache
@@ -4209,11 +4545,8 @@ pub fn emit_overlay_with_span_edits(
     for chunk in changed_specs {
         out.push_str(&chunk.js);
     }
-    let code_slot_stage = code_slot_registration_js(
-        ws,
-        cache.scx.interner(),
-        &current.code_artifact,
-    )?;
+    let code_slot_stage =
+        code_slot_registration_js(ws, cache.scx.interner(), &current.code_artifact)?;
     out.push_str(&code_slot_stage);
     if !has_code_slots && current.lifecycle_plan.census.declarations > 0 {
         out.push_str("__rock_code_slot_begin();\n");
@@ -4261,8 +4594,10 @@ fn find_plain_function(ws: &Workspace, name: &str) -> Option<FuncRef> {
         .iter()
         .find_map(|(module, function)| {
             let function_ref = &ws.module(*module).functions[*function];
-            (function_ref.inline_body.is_none() && !function_ref.is_extern)
-                .then_some(FuncRef { module: *module, func: *function })
+            (function_ref.inline_body.is_none() && !function_ref.is_extern).then_some(FuncRef {
+                module: *module,
+                func: *function,
+            })
         })
 }
 
@@ -4385,7 +4720,10 @@ impl<'a> WorklistState<'a> {
                     ws.module(requested.module).functions[requested.func].name
                 ))
             })?;
-            let fr = view.realization.get(&key).map_or(requested, |realized| realized.decl);
+            let fr = view
+                .realization
+                .get(&key)
+                .map_or(requested, |realized| realized.decl);
             let f = &ws.module(fr.module).functions[fr.func];
             if matches!(f.inline_body, Some((bone_semantic::hir::FnBackend::Js, _))) {
                 if seen.insert(fr) {
@@ -4426,7 +4764,11 @@ impl<'a> WorklistState<'a> {
             inline_js,
             state_index: build_state_index(ws),
             nobox_leaf_globals: build_nobox_leaf_globals(ws, scx)?,
-            deco_globals: if program_mode { HashSet::new() } else { decorator_populated_globals(ws) },
+            deco_globals: if program_mode {
+                HashSet::new()
+            } else {
+                decorator_populated_globals(ws)
+            },
             enum_defs: build_enum_global_defs(ws),
             gctx,
             ginit_queue: Vec::new(),
@@ -4456,11 +4798,7 @@ impl<'a> WorklistState<'a> {
             .flat_map(|body| opaque_js_global_names(ws, body))
             .collect();
         for name in names {
-            let base = self
-                .nobox_leaf_globals
-                .get(&name)
-                .copied()
-                .unwrap_or(name);
+            let base = self.nobox_leaf_globals.get(&name).copied().unwrap_or(name);
             let Some(&site) = self.state_index.get(&base) else {
                 continue;
             };
@@ -4488,8 +4826,16 @@ impl<'a> WorklistState<'a> {
         // Specialized copies share a `FuncRef`, so the emitted NAME is what
         // orders them (one per instantiation, all distinct).
         self.spec_lowered.sort_by(|a, b| {
-            (a.0.func.module.index(), u32::from(a.0.func.func.into_raw()), &a.1.name)
-                .cmp(&(b.0.func.module.index(), u32::from(b.0.func.func.into_raw()), &b.1.name))
+            (
+                a.0.func.module.index(),
+                u32::from(a.0.func.func.into_raw()),
+                &a.1.name,
+            )
+                .cmp(&(
+                    b.0.func.module.index(),
+                    u32::from(b.0.func.func.into_raw()),
+                    &b.1.name,
+                ))
         });
         self.inline_js.sort_by(|left, right| {
             (
@@ -4522,7 +4868,10 @@ fn queue_lifecycle_dependency_initializers(
             else {
                 return Err(err("JS: lifecycle dependency is not a top-level global"));
             };
-            let Some(source_module) = ws.modules.iter().find(|candidate| candidate.file == *module)
+            let Some(source_module) = ws
+                .modules
+                .iter()
+                .find(|candidate| candidate.file == *module)
             else {
                 return Err(err(format!(
                     "JS: lifecycle dependency `{name}` has no source module"
@@ -4567,7 +4916,10 @@ fn emit_inline_js_fn(
     // A @scalar_abi fn's value-struct params explode into their
     // `<name>__<leaf>` scalars, same as the lua path, so the exploded call
     // sites and the raw body's leaf names agree.
-    let selected = Instance { func: fr, args: instance.args.clone() };
+    let selected = Instance {
+        func: fr,
+        args: instance.args.clone(),
+    };
     let abi = skull_mir::lower::owner_abi_plan(ws, scx, plans, &selected)?;
     let lua_param_names = abi.lua_param_names(ws);
     let params = match &lua_param_names {
@@ -4606,8 +4958,8 @@ fn register_statics(
     mf: &MirFunc,
     gctx: &mut GlobalCtx,
 ) -> Result<(), CompilerError> {
-    let slots = skull_mir::global_storage::static_storage_slots(ws, interner, &mf.statics)
-        .map_err(err)?;
+    let slots =
+        skull_mir::global_storage::static_storage_slots(ws, interner, &mf.statics).map_err(err)?;
     gctx.state.extend(slots);
     for nf in &mf.nested_fns {
         register_statics(ws, interner, nf, gctx)?;
@@ -4657,7 +5009,13 @@ impl<'a, 'b> JsDelivery<'a, 'b> {
         let plan = match self.st.concrete.get(&Instance::base(fr)) {
             Some(plan) => plan,
             None => {
-                self.st.reject(&name, err(format!("JS: no concrete plan for retained function `{}`", f.name)));
+                self.st.reject(
+                    &name,
+                    err(format!(
+                        "JS: no concrete plan for retained function `{}`",
+                        f.name
+                    )),
+                );
                 return Ok(());
             }
         };
@@ -4701,7 +5059,10 @@ impl<'a, 'b> JsDelivery<'a, 'b> {
             }
         }
         let mut findings: Vec<CompilerError> = Vec::new();
-        collect(&mut findings, skull_transform::validate_no_residual_bound_calls(self.ws, f, &mf));
+        collect(
+            &mut findings,
+            skull_transform::validate_no_residual_bound_calls(self.ws, f, &mf),
+        );
         collect(&mut findings, nobox_errs(self.ws, &mf));
         for nf in &mf.nested_fns {
             collect(&mut findings, nobox_errs(self.ws, nf));
@@ -4740,9 +5101,9 @@ impl<'a, 'b> JsDelivery<'a, 'b> {
             );
             return Ok(());
         }
-        if let Some(at) = skull_mir::monoty::too_deep_to_instantiate(
-            inst.arg_types(self.scx.interner()).iter(),
-        ) {
+        if let Some(at) =
+            skull_mir::monoty::too_deep_to_instantiate(inst.arg_types(self.scx.interner()).iter())
+        {
             let f = &self.ws.module(inst.func.module).functions[inst.func.func];
             let at = at.render();
             self.st.reject(
@@ -4776,11 +5137,17 @@ impl<'a, 'b> JsDelivery<'a, 'b> {
             );
             return Ok(());
         };
-        let lowered_inst = Instance { func: fr, args: inst.args.clone() };
+        let lowered_inst = Instance {
+            func: fr,
+            args: inst.args.clone(),
+        };
         let plan = match self.st.concrete.get(&lowered_inst) {
             Some(plan) => plan,
             None => {
-                self.st.reject(&name, err("JS: no concrete plan for the selected retained body"));
+                self.st.reject(
+                    &name,
+                    err("JS: no concrete plan for the selected retained body"),
+                );
                 return Ok(());
             }
         };
@@ -4883,14 +5250,16 @@ impl<'a, 'b> JsDelivery<'a, 'b> {
                 &self.st.concrete,
                 ustr::Ustr::from(init_name.as_str()),
             ),
-            None
-                if self
-                    .ws
-                    .module(site.module)
-                    .bodies
-                    .get(&bone_semantic::hir::BodyOwner::Global(site.gid))
-                    .and_then(|body| body.root)
-                    .is_none() => Ok(None),
+            None if self
+                .ws
+                .module(site.module)
+                .bodies
+                .get(&bone_semantic::hir::BodyOwner::Global(site.gid))
+                .and_then(|body| body.root)
+                .is_none() =>
+            {
+                Ok(None)
+            }
             None => Err(err(format!("JS: no concrete plan for global `{gname}`"))),
         };
         let lowered = match lowered {
@@ -4922,19 +5291,20 @@ impl<'a, 'b> JsDelivery<'a, 'b> {
         }
         let gdecl = &self.ws.module(site.module).globals[site.gid];
         let is_const = gdecl.is_const;
-        let leaves = match skull_mir::lower::GlobalPlan::for_declared_type(self.ws, self.scx, gdecl.ty) {
-            Ok(plan) => plan.leaf_names(symbol_of_key(gdecl.name)),
-            Err(error) => {
-                self.st.reject(
-                    &init_name,
-                    CompilerError::new_no_location(format!(
-                        "JS: global `{}` representation planning failed: {}",
-                        gdecl.name, error.message
-                    )),
-                );
-                return Ok(());
-            }
-        };
+        let leaves =
+            match skull_mir::lower::GlobalPlan::for_declared_type(self.ws, self.scx, gdecl.ty) {
+                Ok(plan) => plan.leaf_names(symbol_of_key(gdecl.name)),
+                Err(error) => {
+                    self.st.reject(
+                        &init_name,
+                        CompilerError::new_no_location(format!(
+                            "JS: global `{}` representation planning failed: {}",
+                            gdecl.name, error.message
+                        )),
+                    );
+                    return Ok(());
+                }
+            };
         self.st.ginits.push(GlobalInit {
             name: gname,
             init_name,
@@ -4955,16 +5325,16 @@ impl<'a, 'b> JsDelivery<'a, 'b> {
     /// to RETRY the file in program mode (where the applications are emitted).
     /// Demoting it to a sibling would turn a test that lifts into a test that
     /// skips, so it aborts the emission immediately as before.
-    fn schedule_body(
-        &mut self,
-        mf: &MirFunc,
-    ) -> Result<Vec<CompilerError>, CompilerError> {
+    fn schedule_body(&mut self, mf: &MirFunc) -> Result<Vec<CompilerError>, CompilerError> {
         let ws = self.ws;
         let st = &mut *self.st;
         register_statics(ws, self.scx.interner(), mf, &mut st.gctx)?;
         let mut findings = Vec::new();
         let mut demands = Vec::new();
-        collect(&mut findings, collect_spec_bound_calls(ws, mf, &mut demands));
+        collect(
+            &mut findings,
+            collect_spec_bound_calls(ws, mf, &mut demands),
+        );
         for demand in demands {
             if st.bound_tree_disagreements.contains(&demand.inst) {
                 let f = &ws.module(demand.inst.func.module).functions[demand.inst.func.func];
@@ -5040,7 +5410,12 @@ fn emit_lowered_fn(
             concrete,
             js_name.to_string(),
         )
-        .map_err(|reason| err(format!("JS: cannot build concrete coroutine plan: {}", reason.bucket())))?;
+        .map_err(|reason| {
+            err(format!(
+                "JS: cannot build concrete coroutine plan: {}",
+                reason.bucket()
+            ))
+        })?;
         return emit_coroutine_js(ws, interner, &plan, mf, names, hoisted, gctx);
     }
     let out = emit_body_with_nested(ws, mf, js_name, names, hoisted, gctx)?;
@@ -5059,19 +5434,31 @@ fn emit_spec_chunks(
 ) -> HashMap<Instance, JsSpecChunk> {
     let mut chunks = HashMap::new();
     for (inst, mf) in &st.spec_lowered {
-        let name = st.names.get(inst).expect("a lowered specialization has a name");
+        let name = st
+            .names
+            .get(inst)
+            .expect("a lowered specialization has a name");
         let selected_decl = match st.artifact_decls.get(inst).copied() {
             Some(decl) => decl,
             None => {
-                rejections.push((name.clone(), err("JS: no selected declaration for specialization")));
+                rejections.push((
+                    name.clone(),
+                    err("JS: no selected declaration for specialization"),
+                ));
                 continue;
             }
         };
-        let selected = Instance { func: selected_decl, args: inst.args.clone() };
+        let selected = Instance {
+            func: selected_decl,
+            args: inst.args.clone(),
+        };
         let plan = match st.concrete.get(&selected) {
             Some(plan) => plan,
             None => {
-                rejections.push((name.clone(), err("JS: no concrete plan for selected specialization")));
+                rejections.push((
+                    name.clone(),
+                    err("JS: no concrete plan for selected specialization"),
+                ));
                 continue;
             }
         };
@@ -5079,7 +5466,11 @@ fn emit_spec_chunks(
             Ok((js, code_artifact)) => {
                 chunks.insert(
                     inst.clone(),
-                    JsSpecChunk { name: name.clone(), js, code_artifact },
+                    JsSpecChunk {
+                        name: name.clone(),
+                        js,
+                        code_artifact,
+                    },
                 );
             }
             Err(e) => rejections.push((name.clone(), e)),
@@ -5092,7 +5483,10 @@ fn ordered_spec_chunks<'a>(
     chunks: &'a HashMap<Instance, JsSpecChunk>,
     order: &[(Instance, MirFunc)],
 ) -> Vec<&'a JsSpecChunk> {
-    let ordered: Vec<_> = order.iter().filter_map(|(inst, _)| chunks.get(inst)).collect();
+    let ordered: Vec<_> = order
+        .iter()
+        .filter_map(|(inst, _)| chunks.get(inst))
+        .collect();
     assert_eq!(
         ordered.len(),
         chunks.len(),
@@ -5133,22 +5527,28 @@ fn check_scalar_abi(
     concrete: &skull_mir::concrete::ConcretePlans,
     artifact_decls: &HashMap<Instance, FuncRef>,
 ) -> Vec<(String, CompilerError)> {
-    let arities: HashMap<FuncRef, usize> =
-        lowered.iter().map(|(fr, mf)| (*fr, mf.params.len())).collect();
+    let arities: HashMap<FuncRef, usize> = lowered
+        .iter()
+        .map(|(fr, mf)| (*fr, mf.params.len()))
+        .collect();
     // A SPECIALIZED callee takes the scalar ABI its instantiation implies, which
     // is exactly where a value-struct arg legitimately becomes several leaves --
     // so a spec-bound call must be measured against its own copy, not the shared
     // body it shares a `FuncRef` with. Checking the shared arity reads every
     // correct specialized call as a dropped-leaf bug.
-    let spec_arities: HashMap<Instance, usize> =
-        spec_lowered.iter().map(|(inst, mf)| (inst.clone(), mf.params.len())).collect();
+    let spec_arities: HashMap<Instance, usize> = spec_lowered
+        .iter()
+        .map(|(inst, mf)| (inst.clone(), mf.params.len()))
+        .collect();
     let mut out: Vec<(String, CompilerError)> = Vec::new();
     for mf in bodies {
         let mut findings: Vec<CompilerError> = Vec::new();
         for (_, block) in mf.blocks.iter() {
             for &iid in &block.insts {
                 let (callee, argc) = match &mf.insts[iid] {
-                    Inst::Call { func, args } | Inst::CallMulti { func, args, .. } => (func, args.len()),
+                    Inst::Call { func, args } | Inst::CallMulti { func, args, .. } => {
+                        (func, args.len())
+                    }
                     _ => continue,
                 };
                 // ONE admission rule, over the EMITTED BODY the call targets.
@@ -5172,9 +5572,10 @@ fn check_scalar_abi(
                         Some(&arity) => (Instance::base(*callee), arity, ""),
                     },
                 };
-                let selected = artifact_decls
-                    .get(&body)
-                    .map(|decl| Instance { func: *decl, args: body.args.clone() });
+                let selected = artifact_decls.get(&body).map(|decl| Instance {
+                    func: *decl,
+                    args: body.args.clone(),
+                });
                 // The ABI is the shared oracle's answer about that emitted
                 // body; the arms only decide which entry point matches the
                 // selection: `owner_abi_plan` for a body serving its own
@@ -5273,7 +5674,11 @@ fn code_slot_registration_js(
             artifact.census
         )));
     }
-    let mut entries: Vec<_> = artifact.entries.values().filter(|entry| entry.escaping).collect();
+    let mut entries: Vec<_> = artifact
+        .entries
+        .values()
+        .filter(|entry| entry.escaping)
+        .collect();
     entries.sort_by_key(|entry| entry.identity.logical_key(ws, interner));
     if entries.is_empty() {
         return Ok(String::new());
@@ -5333,7 +5738,10 @@ fn definition_plan_stage_js(
         let mut mf = skull_mir::lower::lower_definition_factory(ws, scx, concrete, factory)?;
         skull_transform::cleanup_with_nobox(ws, &mut mf)?;
         materializers.insert(entry.identity.clone(), emit_fn(ws, &mf, "")?);
-        entries_by_catalog.entry(entry.catalog).or_default().push(entry);
+        entries_by_catalog
+            .entry(entry.catalog)
+            .or_default()
+            .push(entry);
     }
     for catalog_plan in &plan.catalogs {
         if let Some(accessor) = catalog_plan.accessor {
@@ -5381,7 +5789,13 @@ fn definition_plan_stage_js(
     }
     out.push_str("}, {\n");
     for (identity, body) in materializers {
-        writeln!(out, "{}: {},", js_string_lit(&identity.logical_key(ws, scx.interner()))?, body).unwrap();
+        writeln!(
+            out,
+            "{}: {},",
+            js_string_lit(&identity.logical_key(ws, scx.interner()))?,
+            body
+        )
+        .unwrap();
     }
     out.push_str("});\n");
     Ok(out)
@@ -5392,20 +5806,35 @@ fn lifecycle_plan_stage_js(
     interner: &skull_mir::monoty::MonoInterner,
     plan: &skull_mir::lifecycle::LifecyclePlan,
 ) -> Result<String, CompilerError> {
-    if plan.census.declarations == 0 { return Ok(String::new()); }
+    if plan.census.declarations == 0 {
+        return Ok(String::new());
+    }
     let mut out = String::from("__rock_lifecycle_plan_stage({\n");
     let mut phases: BTreeMap<ustr::Ustr, Vec<_>> = BTreeMap::new();
-    for entry in &plan.entries { phases.entry(entry.phase).or_default().push(entry); }
+    for entry in &plan.entries {
+        phases.entry(entry.phase).or_default().push(entry);
+    }
     for (phase, entries) in phases {
-        let scene_owned = entries.iter().filter(|entry| entry.owner.as_str() == "scene").count();
-        writeln!(out, "[{}]: {{len: {}, scene_owned: {}, _data: [", js_string_lit(phase.as_str())?, entries.len(), scene_owned).unwrap();
+        let scene_owned = entries
+            .iter()
+            .filter(|entry| entry.owner.as_str() == "scene")
+            .count();
+        writeln!(
+            out,
+            "[{}]: {{len: {}, scene_owned: {}, _data: [",
+            js_string_lit(phase.as_str())?,
+            entries.len(),
+            scene_owned
+        )
+        .unwrap();
         for entry in entries {
             let key = entry.identity.logical_key(ws, interner);
             let dependencies = entry.qualification.dependencies();
             let root_type = match &entry.root_type {
                 Some(root) => js_string_lit(
-                    &skull_mir::lifecycle::scene_root_type_key(root)
-                        .unwrap_or_else(|| panic!("validated scene lifecycle root reached emission as {root:?}")),
+                    &skull_mir::lifecycle::scene_root_type_key(root).unwrap_or_else(|| {
+                        panic!("validated scene lifecycle root reached emission as {root:?}")
+                    }),
                 )?,
                 None => "null".to_string(),
             };
@@ -5419,9 +5848,13 @@ fn lifecycle_plan_stage_js(
                 dependencies.len()).unwrap();
             for dependency in dependencies {
                 let dependency_key = dependency.identity.logical_key(ws, interner);
-                write!(out, "{{key: {}, fingerprint: {}}},",
+                write!(
+                    out,
+                    "{{key: {}, fingerprint: {}}},",
                     js_string_lit(&dependency_key)?,
-                    js_string_lit(&format!("{:016x}", dependency.fingerprint))?).unwrap();
+                    js_string_lit(&format!("{:016x}", dependency.fingerprint))?
+                )
+                .unwrap();
             }
             // A compiler-synthesized thunk of one uniform signature
             // (`scene_id -> ()`) per entry -- see the Lua sibling in
@@ -5453,7 +5886,9 @@ fn lifecycle_plan_stage_js(
                     write!(out, "if ({guard}) {{").unwrap();
                 }
                 out.push_str("var __root = __scene_root_any(scene_id); if (__root !== null) { __rock_call(__s, __root); }");
-                if sim_guard.is_some() { out.push('}'); }
+                if sim_guard.is_some() {
+                    out.push('}');
+                }
                 out.push_str("};})()},\n");
             } else {
                 out.push_str("]}, func: (function(){var __s = __rock_code_slot_ref(");
@@ -5463,7 +5898,9 @@ fn lifecycle_plan_stage_js(
                     write!(out, "if ({guard}) {{").unwrap();
                 }
                 out.push_str("__rock_call(__s);");
-                if sim_guard.is_some() { out.push('}'); }
+                if sim_guard.is_some() {
+                    out.push('}');
+                }
                 out.push_str("};})()},\n");
             }
         }
@@ -5476,10 +5913,7 @@ fn lifecycle_plan_stage_js(
 /// Mark function values introduced by generated registration glue. Decorator
 /// applications and `@sim` registration are outside MIR, but their targets are
 /// still escaping Rock values and must use the same mono-owned CodeRefs.
-fn mark_generated_code_values(
-    ws: &Workspace,
-    artifact: &mut CodeArtifact,
-) {
+fn mark_generated_code_values(ws: &Workspace, artifact: &mut CodeArtifact) {
     let decorator_names: HashSet<ustr::Ustr> = ws
         .modules
         .iter()
@@ -5494,12 +5928,14 @@ fn mark_generated_code_values(
                 continue;
             }
             let generated_value = f.annotations.iter().any(|ann| {
-                ann.name.name.as_str() == "sim"
-                    || decorator_names.contains(&ann.name.name)
+                ann.name.name.as_str() == "sim" || decorator_names.contains(&ann.name.name)
             });
             if generated_value {
                 artifact.mark_value(skull_mir::code_identity::CodeIdentity::Named(
-                    Instance::base(FuncRef { module: module.id, func: fid }),
+                    Instance::base(FuncRef {
+                        module: module.id,
+                        func: fid,
+                    }),
                 ));
             }
         }
@@ -5554,7 +5990,12 @@ fn emit_inspect_ty(
     let Some(registry) = registry else {
         return Ok(String::new());
     };
-    build_inspect_ty_defs(ws, registry.arena(), registry.value_plans(), registry.names())
+    build_inspect_ty_defs(
+        ws,
+        registry.arena(),
+        registry.value_plans(),
+        registry.names(),
+    )
 }
 
 /// Per-type, per-variant descriptors for flat enum tuple payloads whose
@@ -5569,8 +6010,8 @@ fn emit_inspect_enum_payloads(ws: &Workspace) -> Result<String, CompilerError> {
     names.sort_by(|a, b| a.as_str().cmp(b.as_str()));
     let mut out = String::new();
     for name in names {
-        let Some(flat) = skull_mir::lower::EnumPlan::for_name(ws, name)
-            .and_then(|plan| plan.flat().cloned())
+        let Some(flat) =
+            skull_mir::lower::EnumPlan::for_name(ws, name).and_then(|plan| plan.flat().cloned())
         else {
             continue;
         };
@@ -5612,17 +6053,15 @@ fn emit_inspect_enum_payloads(ws: &Workspace) -> Result<String, CompilerError> {
                         ),
                         TyId::Local(_) => false,
                     });
-                    if !structure.is_value
-                        || structure.fields.is_empty()
-                        || has_nominal_field
-                    {
+                    if !structure.is_value || structure.fields.is_empty() || has_nominal_field {
                         return None;
                     }
                     let leaves = flat.position_leaf_paths(position, child)?;
                     if leaves.len() != structure.fields.len()
-                        || leaves.iter().zip(&structure.fields).any(|(leaf, field)| {
-                            leaf.as_str().contains('.') || *leaf != field.name
-                        })
+                        || leaves
+                            .iter()
+                            .zip(&structure.fields)
+                            .any(|(leaf, field)| leaf.as_str().contains('.') || *leaf != field.name)
                     {
                         return None;
                     }
@@ -5785,9 +6224,10 @@ fn nested_value_field_struct_name(
     parent: ustr::Ustr,
     field: &str,
 ) -> Result<Option<ustr::Ustr>, CompilerError> {
-    let sid = ws.struct_by_name.get(&parent).ok_or_else(|| {
-        err(format!("column element `{parent}` has no declared struct"))
-    })?;
+    let sid = ws
+        .struct_by_name
+        .get(&parent)
+        .ok_or_else(|| err(format!("column element `{parent}` has no declared struct")))?;
     let s = &ws.module(sid.module).structs[sid.def];
     let Some(f) = s.fields.iter().find(|f| f.name.as_str() == field) else {
         return Err(err(format!("struct `{parent}` has no field `{field}")));
@@ -5828,7 +6268,10 @@ fn decorator_names(ws: &Workspace) -> HashSet<ustr::Ustr> {
 /// The decorator names actually APPLIED (some fn carries an `@<deco>`
 /// annotation) -- the reachable subset of [`decorator_names`]. An unapplied
 /// `deco` def is never emitted (D1).
-fn applied_decorator_names(ws: &Workspace, deco_names: &HashSet<ustr::Ustr>) -> HashSet<ustr::Ustr> {
+fn applied_decorator_names(
+    ws: &Workspace,
+    deco_names: &HashSet<ustr::Ustr>,
+) -> HashSet<ustr::Ustr> {
     let mut set = HashSet::new();
     for module in ws.modules.iter() {
         if module.id == bone_semantic::prelude::ModuleId::builtin() {
@@ -5851,7 +6294,10 @@ fn nullary_main(ws: &Workspace, user_mid: bone_semantic::prelude::ModuleId) -> O
         .functions
         .iter()
         .find(|(_, f)| f.name.as_str() == "main" && f.param_decls.is_empty())
-        .map(|(fid, _)| FuncRef { module: user_mid, func: fid })
+        .map(|(fid, _)| FuncRef {
+            module: user_mid,
+            func: fid,
+        })
 }
 
 /// A `self_ref` for inlining a body that is NOT a function (a `deco` def): any
@@ -5864,7 +6310,12 @@ fn safe_self_ref(ws: &Workspace, mf: &MirFunc) -> FuncRef {
     ws.modules
         .iter()
         .filter(|m| m.id != bone_semantic::prelude::ModuleId::builtin())
-        .flat_map(|m| m.functions.iter().map(move |(fid, _)| FuncRef { module: m.id, func: fid }))
+        .flat_map(|m| {
+            m.functions.iter().map(move |(fid, _)| FuncRef {
+                module: m.id,
+                func: fid,
+            })
+        })
         .find(|fr| !targets.contains(fr))
         .expect("workspace has a function the deco body does not call")
 }
@@ -5927,10 +6378,20 @@ fn decorator_application_lines_js(
     interner: &skull_mir::monoty::MonoInterner,
     names: &CalleeNames,
 ) -> Result<String, CompilerError> {
-    let deco_map: HashMap<ustr::Ustr, (bone_semantic::prelude::ModuleId, Idx<bone_semantic::hir::DecoratorDef>)> = ws
+    let deco_map: HashMap<
+        ustr::Ustr,
+        (
+            bone_semantic::prelude::ModuleId,
+            Idx<bone_semantic::hir::DecoratorDef>,
+        ),
+    > = ws
         .modules
         .iter()
-        .flat_map(|m| m.decorators.iter().map(move |(did, d)| (d.name, (m.id, did))))
+        .flat_map(|m| {
+            m.decorators
+                .iter()
+                .map(move |(did, d)| (d.name, (m.id, did)))
+        })
         .collect();
     let mut out = String::new();
     for module in ws.modules.iter() {
@@ -5945,12 +6406,17 @@ fn decorator_application_lines_js(
                 if f.backend == bone_semantic::hir::FnBackend::Lua {
                     continue;
                 }
-                let &(dmid, did) = deco_map.get(&ann.name.name).expect("decorator name resolves");
+                let &(dmid, did) = deco_map
+                    .get(&ann.name.name)
+                    .expect("decorator name resolves");
                 let d = &ws.module(dmid).decorators[did];
                 if skull_mir::definition::is_compiler_owned_decorator(d) {
                     continue;
                 }
-                let fr = FuncRef { module: module.id, func: fid };
+                let fr = FuncRef {
+                    module: module.id,
+                    func: fid,
+                };
                 let instance = Instance::base(fr);
                 let _js_fn = names.get(&instance).ok_or_else(|| {
                     err(format!(
@@ -5967,7 +6433,11 @@ fn decorator_application_lines_js(
                 );
                 let mut call_args = vec![descriptor];
                 call_args.extend(decorator_call_args_js(ws, dmid, did, ann)?);
-                out.push_str(&format!("{}({});\n", decorator_js_name(ann.name.name.as_str()), call_args.join(", ")));
+                out.push_str(&format!(
+                    "{}({});\n",
+                    decorator_js_name(ann.name.name.as_str()),
+                    call_args.join(", ")
+                ));
             }
         }
     }
@@ -6033,7 +6503,13 @@ fn build_state_index(ws: &Workspace) -> HashMap<ustr::Ustr, GlobalSite> {
     let mut m = HashMap::new();
     for module in &ws.modules {
         for (&name, &gid) in &module.global_by_name {
-            m.insert(name, GlobalSite { module: module.id, gid });
+            m.insert(
+                name,
+                GlobalSite {
+                    module: module.id,
+                    gid,
+                },
+            );
         }
     }
     m
@@ -6044,7 +6520,11 @@ fn build_const_global_names(
     scx: &skull_mir::lower::ScalarCtx,
 ) -> HashSet<ustr::Ustr> {
     let mut names = HashSet::new();
-    for module in ws.modules.iter().filter(|m| m.id != bone_semantic::prelude::ModuleId::builtin()) {
+    for module in ws
+        .modules
+        .iter()
+        .filter(|m| m.id != bone_semantic::prelude::ModuleId::builtin())
+    {
         for (_, global) in module.globals.iter().filter(|(_, g)| g.is_const) {
             names.insert(global.name);
             if let Ok(plan) = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, global.ty) {
@@ -6092,7 +6572,9 @@ fn queue_standalone(
     findings: &mut Vec<CompilerError>,
 ) {
     let Some(&selected) = st.artifact_decls.get(&inst) else {
-        findings.push(err("JS: a retained specialization has no artifact declaration"));
+        findings.push(err(
+            "JS: a retained specialization has no artifact declaration",
+        ));
         return;
     };
     if js_supply(ws, &ws.module(selected.module).functions[selected.func]).is_some() {
@@ -6129,7 +6611,9 @@ fn schedule_residual_calls(
                     continue;
                 }
                 match &mf.insts[iid] {
-                    Inst::Call { func, .. } | Inst::CallMulti { func, .. } => out.push((iid, *func)),
+                    Inst::Call { func, .. } | Inst::CallMulti { func, .. } => {
+                        out.push((iid, *func))
+                    }
                     _ => {}
                 }
             }
@@ -6230,7 +6714,11 @@ fn register_fn_values_from_view(
     for iid in fn_value_ids {
         let surface = match &mf.insts[iid] {
             Inst::Global(surface) => *surface,
-            _ => return Err(err("JS: a function-value record does not name a Global instruction")),
+            _ => {
+                return Err(err(
+                    "JS: a function-value record does not name a Global instruction",
+                ));
+            }
         };
         surfaces.insert(surface);
         let Some(instance) = st.names.instance_for_site(ws, mf, iid) else {
@@ -6249,7 +6737,9 @@ fn register_fn_values_from_view(
             )));
         };
         let Some(js_name) = st.names.get(&instance).cloned() else {
-            return Err(err(format!("JS: function value `{surface}` has no artifact symbol")));
+            return Err(err(format!(
+                "JS: function value `{surface}` has no artifact symbol"
+            )));
         };
         let f = &ws.module(selected.module).functions[selected.func];
         match js_supply(ws, f) {
@@ -6288,7 +6778,11 @@ fn register_fn_values_from_view(
     Ok(())
 }
 
-fn schedule_global_reads(ws: &Workspace, mf: &MirFunc, st: &mut WorklistState) -> Result<(), CompilerError> {
+fn schedule_global_reads(
+    ws: &Workspace,
+    mf: &MirFunc,
+    st: &mut WorklistState,
+) -> Result<(), CompilerError> {
     let mut fn_value_names = HashSet::new();
     register_fn_values_from_view(ws, mf, st, &mut fn_value_names)?;
     for name in global_refs(mf) {
@@ -6300,7 +6794,9 @@ fn schedule_global_reads(ws: &Workspace, mf: &MirFunc, st: &mut WorklistState) -
         } else if st.enum_defs.contains_key(&name) {
             st.gctx.enum_globals.insert(name);
         } else if let Some(&base) = st.nobox_leaf_globals.get(&name) {
-            if !st.gctx.state.contains_key(&symbol_of_key(name)) && !st.gctx.const_globals.contains(&name) {
+            if !st.gctx.state.contains_key(&symbol_of_key(name))
+                && !st.gctx.const_globals.contains(&name)
+            {
                 return Err(err(format!(
                     "JS: nobox leaf `{name}` has no compiler-owned storage slot"
                 )));
@@ -6317,7 +6813,9 @@ fn schedule_global_reads(ws: &Workspace, mf: &MirFunc, st: &mut WorklistState) -
                      (module-load side effect not emitted)"
                 )));
             }
-            if !st.gctx.state.contains_key(&symbol_of_key(name)) && !st.gctx.const_globals.contains(&name) {
+            if !st.gctx.state.contains_key(&symbol_of_key(name))
+                && !st.gctx.const_globals.contains(&name)
+            {
                 return Err(err(format!(
                     "JS: global `{name}` has no compiler-owned storage slot"
                 )));
@@ -6360,7 +6858,10 @@ fn direct_callees(mf: &MirFunc, names: &CalleeNames) -> Vec<ustr::Ustr> {
     out
 }
 
-fn forward_reach(deps: &HashMap<ustr::Ustr, HashSet<ustr::Ustr>>, start: ustr::Ustr) -> HashSet<ustr::Ustr> {
+fn forward_reach(
+    deps: &HashMap<ustr::Ustr, HashSet<ustr::Ustr>>,
+    start: ustr::Ustr,
+) -> HashSet<ustr::Ustr> {
     let mut seen = HashSet::default();
     let mut stack = vec![start];
     while let Some(name) = stack.pop() {
@@ -6389,15 +6890,21 @@ fn affected_const_names(
         .iter()
         .filter(|module| module.id != bone_semantic::prelude::ModuleId::builtin())
     {
-        let Some(inference) = ws.inference(module.id) else { continue };
+        let Some(inference) = ws.inference(module.id) else {
+            continue;
+        };
         for (fid, function) in module.functions.iter() {
             if let Some(body) = inference.per_fn.get(&BodyOwner::Function(fid)) {
-                deps.entry(function.name).or_default().extend(body.deps.iter().copied());
+                deps.entry(function.name)
+                    .or_default()
+                    .extend(body.deps.iter().copied());
             }
         }
         for (gid, global) in module.globals.iter() {
             if let Some(body) = inference.per_fn.get(&BodyOwner::Global(gid)) {
-                deps.entry(global.name).or_default().extend(body.deps.iter().copied());
+                deps.entry(global.name)
+                    .or_default()
+                    .extend(body.deps.iter().copied());
             }
         }
     }
@@ -6406,7 +6913,9 @@ fn affected_const_names(
         .copied()
         .filter(|name| {
             changed.contains(name)
-                || forward_reach(&deps, *name).iter().any(|dependency| changed.contains(dependency))
+                || forward_reach(&deps, *name)
+                    .iter()
+                    .any(|dependency| changed.contains(dependency))
         })
         .collect()
 }
@@ -6632,7 +7141,9 @@ fn build_enum_global_defs(ws: &Workspace) -> HashMap<ustr::Ustr, String> {
                 continue;
             }
             let all_unit = !e.variants.is_empty()
-                && e.variants.iter().all(|v| matches!(v.payload, VariantPayload::Unit));
+                && e.variants
+                    .iter()
+                    .all(|v| matches!(v.payload, VariantPayload::Unit));
             let symbol = skull_mir::mangle::type_symbol(ws, e.name);
             if all_unit {
                 let name = ustr::Ustr::from(format!("__rock_enum_{symbol}_names").as_str());
@@ -6642,7 +7153,10 @@ fn build_enum_global_defs(ws: &Workspace) -> HashMap<ustr::Ustr, String> {
                     .enumerate()
                     .map(|(ord, v)| format!("[{ord}, \"{e}::{v}\"]", e = e.name, v = v.name))
                     .collect();
-                out.insert(name, format!("var {name} = new Map([{}]);\n", items.join(", ")));
+                out.insert(
+                    name,
+                    format!("var {name} = new Map([{}]);\n", items.join(", ")),
+                );
             } else {
                 for v in e.variants.iter() {
                     if matches!(v.payload, VariantPayload::Unit) {
@@ -6674,9 +7188,10 @@ fn embed_view_expr(
     ty_name: ustr::Ustr,
     nullable: bool,
 ) -> Result<String, CompilerError> {
-    let sid = ws.struct_by_name.get(&ty_name).ok_or_else(|| {
-        err(format!("embed view `{ty_name}` has no declared struct"))
-    })?;
+    let sid = ws
+        .struct_by_name
+        .get(&ty_name)
+        .ok_or_else(|| err(format!("embed view `{ty_name}` has no declared struct")))?;
     let s = &ws.module(sid.module).structs[sid.def];
     let mut parts = vec![format!("__ty: {}", js_string_lit(ty_name.as_str())?)];
     for f in &s.fields {
@@ -6700,7 +7215,9 @@ fn embed_view_expr(
         return Ok(built);
     }
     let p = js_string_lit(prefix)?;
-    Ok(format!("((t[{p}] === null || t[{p}] === undefined) ? null : {built})"))
+    Ok(format!(
+        "((t[{p}] === null || t[{p}] === undefined) ? null : {built})"
+    ))
 }
 
 /// Emit the `__rock_inspect_ty["<N>"] = function(t, ..) {...}` entries: the
@@ -6725,7 +7242,9 @@ fn build_inspect_ty_defs(
     let mut out = String::new();
     for name in names {
         let sid = ws.struct_by_name.get(name).ok_or_else(|| {
-            err(format!("JS subset: inspected registry type `{name}` is not declared"))
+            err(format!(
+                "JS subset: inspected registry type `{name}` is not declared"
+            ))
         })?;
         let s = &ws.module(sid.module).structs[sid.def];
         if out.is_empty() {
@@ -6825,21 +7344,27 @@ fn build_vt_eq_defs(
     let mut out = String::new();
     for (name, storage) in names {
         let sid = ws.struct_by_name.get(name).ok_or_else(|| {
-            err(format!("JS subset: value equality registry type `{name}` is not declared"))
+            err(format!(
+                "JS subset: value equality registry type `{name}` is not declared"
+            ))
         })?;
         let s = &ws.module(sid.module).structs[sid.def];
-        let compare = |key: &str, equality: skull_mir::lower::GcFieldEq| -> Result<String, CompilerError> {
-            let (a, b) = if key.contains('.') {
-                (format!("a[{}]", js_string_lit(key)?), format!("b[{}]", js_string_lit(key)?))
-            } else {
-                (format!("a.{key}"), format!("b.{key}"))
+        let compare =
+            |key: &str, equality: skull_mir::lower::GcFieldEq| -> Result<String, CompilerError> {
+                let (a, b) = if key.contains('.') {
+                    (
+                        format!("a[{}]", js_string_lit(key)?),
+                        format!("b[{}]", js_string_lit(key)?),
+                    )
+                } else {
+                    (format!("a.{key}"), format!("b.{key}"))
+                };
+                Ok(if equality == skull_mir::lower::GcFieldEq::Reference {
+                    format!("{a} === {b}")
+                } else {
+                    format!("__op_eq({a}, {b})")
+                })
             };
-            Ok(if equality == skull_mir::lower::GcFieldEq::Reference {
-                format!("{a} === {b}")
-            } else {
-                format!("__op_eq({a}, {b})")
-            })
-        };
         // A GC-table box keys an inline child's leaves by dotted path.
         let cmps: Vec<String> = if *storage == skull_mir::lower::ValueStorage::GcTable {
             let fields =
@@ -6858,7 +7383,11 @@ fn build_vt_eq_defs(
                 .map(|f| compare(f.name.as_str(), skull_mir::lower::gc_field_eq(ws, f.ty)))
                 .collect::<Result<_, _>>()?
         };
-        let body = if cmps.is_empty() { "true".to_string() } else { cmps.join(" && ") };
+        let body = if cmps.is_empty() {
+            "true".to_string()
+        } else {
+            cmps.join(" && ")
+        };
         out.push_str(&format!(
             "__rock_vt_eq[{}] = function(a, b) {{ return {body}; }};\n",
             js_string_lit(name.as_str())?
@@ -6937,14 +7466,20 @@ fn emit_coroutine_js(
 ) -> Result<(String, CodeArtifact), CompilerError> {
     let channel = plan.channel.as_ref();
     let mut lowered = skull_transform::transform_coroutine(mf, channel, plan.has_return_value());
-    let resume_arg = mf.resume_arg.ok_or_else(|| err("co fn must carry a resume-arg cell"))?;
+    let resume_arg = mf
+        .resume_arg
+        .ok_or_else(|| err("co fn must carry a resume-arg cell"))?;
     let step_name = plan.step();
     // Convert detached hook/defer regions as ordinary functions. Their own
     // lambda parameters and locals stay ordinary cells; only root-owned cells
     // are materialized through the coroutine state table.
     let frame_info = lowered.root_frame_info();
-    let defer_entries: Vec<Idx<Block>> =
-        lowered.step.coro_defers.iter().map(|(_, entry)| *entry).collect();
+    let defer_entries: Vec<Idx<Block>> = lowered
+        .step
+        .coro_defers
+        .iter()
+        .map(|(_, entry)| *entry)
+        .collect();
     let hook_entries: Vec<(&'static str, Idx<Block>)> = lowered
         .hooks
         .iter()
@@ -6988,15 +7523,20 @@ fn emit_coroutine_js(
     for (_, aux) in &hook_funcs {
         collect_nested_code_identities(aux, &mut detached_identities);
     }
-    lowered
-        .step
-        .nested_fns
-        .retain(|nested| nested.code_identity.as_ref().is_none_or(|id| !detached_identities.contains(id)));
+    lowered.step.nested_fns.retain(|nested| {
+        nested
+            .code_identity
+            .as_ref()
+            .is_none_or(|id| !detached_identities.contains(id))
+    });
     // This coroutine's hoisted lambda names are referenced only from its own
     // bodies, so extend the program set locally.
     let mut hoisted = hoisted.clone();
     hoisted.extend(lowered.step.nested_fns.iter().map(|nf| nf.name));
-    for aux in defer_funcs.iter().chain(hook_funcs.iter().map(|(_, aux)| aux)) {
+    for aux in defer_funcs
+        .iter()
+        .chain(hook_funcs.iter().map(|(_, aux)| aux))
+    {
         hoisted.extend(aux.nested_fns.iter().map(|nf| nf.name));
     }
     // Materialize only the root region; detached regions were materialized when
@@ -7068,7 +7608,14 @@ fn emit_coroutine_js(
     for nf in nested.iter_mut() {
         skull_transform::cleanup_with_nobox(ws, nf)?;
         skull_transform::recover_counted_loops(ws, nf);
-        out.push_str(&emit_fn_with_callees(ws, nf, nf.name.as_str(), callees, &hoisted, &globals)?);
+        out.push_str(&emit_fn_with_callees(
+            ws,
+            nf,
+            nf.name.as_str(),
+            callees,
+            &hoisted,
+            &globals,
+        )?);
     }
     lowered.step.nested_fns = nested;
     for mut aux in defer_funcs {
@@ -7196,7 +7743,12 @@ fn emit_js_constructor(
         // array keys), so a boxed-enum consumer of a yielded channel value projects
         // the payload correctly. Matches `MakeEnum`'s native 0-based keys.
         for i in 0..ch.tuple_width {
-            let _ = write!(box_fields, ", \"{}\": s.{}", i, skull_mir::lower::yield_slot(1 + i));
+            let _ = write!(
+                box_fields,
+                ", \"{}\": s.{}",
+                i,
+                skull_mir::lower::yield_slot(1 + i)
+            );
         }
         for (j, rf) in ch.record_fields.iter().enumerate() {
             let _ = write!(
@@ -7206,7 +7758,9 @@ fn emit_js_constructor(
             );
         }
         box_fields.push_str(" }");
-        let advance = plan.advance().expect("a channel is what makes `__advance` exist");
+        let advance = plan
+            .advance()
+            .expect("a channel is what makes `__advance` exist");
         let resume = plan.resume();
         let advance_ref = format!(
             "__rock_code_slot_ref({})",
@@ -7373,7 +7927,9 @@ fn inst_writes(inst: &Inst) -> Vec<Idx<Cell>> {
         | Inst::CallValueMulti { dests, .. }
         | Inst::CallBoundMulti { dests, .. } => dests.clone(),
         // MapNext writes both the cursor key cell (in place) and the value cell.
-        Inst::MapNext { key_cell, val_cell, .. } => vec![*key_cell, *val_cell],
+        Inst::MapNext {
+            key_cell, val_cell, ..
+        } => vec![*key_cell, *val_cell],
         _ => Vec::new(),
     }
 }
@@ -7392,7 +7948,6 @@ fn is_native_buffer(name: &str) -> bool {
             | "NativeBufferI32"
     )
 }
-
 
 /// Invoke `f` for each inst used as an operand by `inst`. The match is
 /// EXHAUSTIVE on purpose: a new Inst variant must decide its operands here or
@@ -7491,13 +8046,20 @@ fn for_each_operand(inst: &Inst, f: &mut impl FnMut(Idx<Inst>)) {
             }
         }
         Inst::MakeNullableValue { present, value } => mark(&[*present, *value]),
-        Inst::MakeEnum { positional, named, .. } => {
+        Inst::MakeEnum {
+            positional, named, ..
+        } => {
             mark(positional);
             for (_, v) in named {
                 f(*v);
             }
         }
-        Inst::MakeEnumDyn { tag, positional, named, .. } => {
+        Inst::MakeEnumDyn {
+            tag,
+            positional,
+            named,
+            ..
+        } => {
             mark(&[*tag]);
             mark(positional);
             for (_, v) in named {
@@ -7511,7 +8073,9 @@ fn for_each_operand(inst: &Inst, f: &mut impl FnMut(Idx<Inst>)) {
         Inst::FfiNewArray { count, .. } => mark(&[*count]),
         Inst::Store { value, .. } => mark(&[*value]),
         Inst::StoreField { base, value, .. } => mark(&[*base, *value]),
-        Inst::StoreIndex { base, index, value, .. } => mark(&[*base, *index, *value]),
+        Inst::StoreIndex {
+            base, index, value, ..
+        } => mark(&[*base, *index, *value]),
         Inst::StoreGlobal { value, .. } => mark(&[*value]),
         Inst::ArrayPush { arr, value, .. } => mark(&[*arr, *value]),
         Inst::CoroHook { lambda, .. } => mark(&[*lambda]),
@@ -7529,7 +8093,6 @@ fn for_each_term_operand(term: &Term, f: &mut impl FnMut(Idx<Inst>)) {
     }
 }
 
-
 /// An expression candidate for folding into its single use site. The shared
 /// sinking check separately constrains potentially throwing evaluations.
 /// EXCLUDES `Load`/`Call`/`Index`/`Field`/`Len` (impure or cell-order-sensitive)
@@ -7539,24 +8102,69 @@ fn always_inlinable(inst: &Inst) -> bool {
     matches!(
         inst,
         Inst::Const(_)
-            | Inst::IntAdd(..) | Inst::IntSub(..) | Inst::IntMul(..) | Inst::IntDiv(..) | Inst::IntMod(..)
-            | Inst::UintAdd(..) | Inst::UintSub(..) | Inst::UintMul(..) | Inst::UintDiv(..) | Inst::UintMod(..)
-            | Inst::FloatAdd(..) | Inst::FloatSub(..) | Inst::FloatMul(..) | Inst::FloatDiv(..) | Inst::FloatMod(..)
+            | Inst::IntAdd(..)
+            | Inst::IntSub(..)
+            | Inst::IntMul(..)
+            | Inst::IntDiv(..)
+            | Inst::IntMod(..)
+            | Inst::UintAdd(..)
+            | Inst::UintSub(..)
+            | Inst::UintMul(..)
+            | Inst::UintDiv(..)
+            | Inst::UintMod(..)
+            | Inst::FloatAdd(..)
+            | Inst::FloatSub(..)
+            | Inst::FloatMul(..)
+            | Inst::FloatDiv(..)
+            | Inst::FloatMod(..)
             | Inst::StringConcat(..)
-            | Inst::IntLt(..) | Inst::IntLeq(..) | Inst::IntGt(..) | Inst::IntGeq(..)
-            | Inst::UintLt(..) | Inst::UintLeq(..) | Inst::UintGt(..) | Inst::UintGeq(..)
-            | Inst::FloatLt(..) | Inst::FloatLeq(..) | Inst::FloatGt(..) | Inst::FloatGeq(..)
-            | Inst::Eq(..) | Inst::NotEq(..)
-            | Inst::BitAnd(..) | Inst::BitOr(..) | Inst::BitXor(..) | Inst::Shl(..) | Inst::Shr(..)
-            | Inst::UintBitAnd(..) | Inst::UintBitOr(..) | Inst::UintBitXor(..) | Inst::UintShl(..) | Inst::UintShr(..)
-            | Inst::Neg(_) | Inst::Not(_) | Inst::BitNot(_) | Inst::UintBitNot(_) | Inst::ToString(_)
-            | Inst::FloatToInt(_) | Inst::IntToFloat(_) | Inst::UintToFloat(_) | Inst::FloatToF32(_) | Inst::IntToUint(_)
-            | Inst::UintToInt(_) | Inst::FloatToUint(_) | Inst::UintBitcastInt(_) | Inst::IntBitcastUint(_)
-            | Inst::Format { .. } | Inst::FormatDyn { .. }
-            | Inst::MakeTuple(_) | Inst::MakeVec(_)
-            | Inst::MakeStruct { .. } | Inst::MakeValueStruct { .. }
+            | Inst::IntLt(..)
+            | Inst::IntLeq(..)
+            | Inst::IntGt(..)
+            | Inst::IntGeq(..)
+            | Inst::UintLt(..)
+            | Inst::UintLeq(..)
+            | Inst::UintGt(..)
+            | Inst::UintGeq(..)
+            | Inst::FloatLt(..)
+            | Inst::FloatLeq(..)
+            | Inst::FloatGt(..)
+            | Inst::FloatGeq(..)
+            | Inst::Eq(..)
+            | Inst::NotEq(..)
+            | Inst::BitAnd(..)
+            | Inst::BitOr(..)
+            | Inst::BitXor(..)
+            | Inst::Shl(..)
+            | Inst::Shr(..)
+            | Inst::UintBitAnd(..)
+            | Inst::UintBitOr(..)
+            | Inst::UintBitXor(..)
+            | Inst::UintShl(..)
+            | Inst::UintShr(..)
+            | Inst::Neg(_)
+            | Inst::Not(_)
+            | Inst::BitNot(_)
+            | Inst::UintBitNot(_)
+            | Inst::ToString(_)
+            | Inst::FloatToInt(_)
+            | Inst::IntToFloat(_)
+            | Inst::UintToFloat(_)
+            | Inst::FloatToF32(_)
+            | Inst::IntToUint(_)
+            | Inst::UintToInt(_)
+            | Inst::FloatToUint(_)
+            | Inst::UintBitcastInt(_)
+            | Inst::IntBitcastUint(_)
+            | Inst::Format { .. }
+            | Inst::FormatDyn { .. }
+            | Inst::MakeTuple(_)
+            | Inst::MakeVec(_)
+            | Inst::MakeStruct { .. }
+            | Inst::MakeValueStruct { .. }
             | Inst::MakeNullableValue { .. }
-            | Inst::MakeEnum { .. } | Inst::MakeEnumDyn { .. }
+            | Inst::MakeEnum { .. }
+            | Inst::MakeEnumDyn { .. }
             | Inst::MakeEnv { .. }
     )
 }
@@ -7628,9 +8236,7 @@ fn cross_block_temps(
     for &b in region {
         for &iid in &mf.blocks[b].insts {
             let k = raw(iid);
-            if mf.insts[iid].produces_value()
-                && !inlinable[k as usize]
-                && use_count[k as usize] > 0
+            if mf.insts[iid].produces_value() && !inlinable[k as usize] && use_count[k as usize] > 0
             {
                 def_block.insert(k, b);
             }
@@ -7659,7 +8265,9 @@ fn succ(mf: &MirFunc, b: Idx<Block>) -> Vec<Option<Idx<Block>>> {
     match &mf.blocks[b].term {
         Term::Return(_) | Term::Unreachable => vec![None],
         Term::Goto(t) => vec![Some(*t)],
-        Term::Branch { then_bb, else_bb, .. } => vec![Some(*then_bb), Some(*else_bb)],
+        Term::Branch {
+            then_bb, else_bb, ..
+        } => vec![Some(*then_bb), Some(*else_bb)],
         Term::Switch { cases, default, .. } => {
             let mut v: Vec<_> = cases.iter().map(|(_, b)| Some(*b)).collect();
             v.push(Some(*default));
@@ -7703,17 +8311,18 @@ mod tests {
                 skull_parser::parse_module_clean(file.contents, id).expect("stdlib parse")
             })
             .collect();
-        modules.push(
-            skull_parser::parse_module_clean(src, Ustr::from("<test>"))
-                .expect("test parse"),
-        );
+        modules
+            .push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("test parse"));
         bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic pass")
     }
 
     #[test]
     fn a_missing_graph_root_does_not_mint_a_base_instance() {
         let ws = workspace("fn root() {}\n");
-        let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("test module");
+        let mid = *ws
+            .module_ids
+            .get(&Ustr::from("<test>"))
+            .expect("test module");
         let fid = ws
             .module(mid)
             .functions
@@ -7721,7 +8330,10 @@ mod tests {
             .find(|(_, f)| f.name.as_str() == "root")
             .map(|(fid, _)| fid)
             .expect("root");
-        let root = FuncRef { module: mid, func: fid };
+        let root = FuncRef {
+            module: mid,
+            func: fid,
+        };
         let interner = std::sync::Arc::new(skull_mir::monoty::MonoInterner::new());
         let scx = js_scx(&ws);
         let graph = skull_graph::instance_graph::build_in(&ws, Vec::new(), false, interner.clone());
@@ -7754,7 +8366,9 @@ mod tests {
             Err(error) => error,
         };
         assert!(
-            error.message.contains("root `root` has no base InstanceGraph instance"),
+            error
+                .message
+                .contains("root `root` has no base InstanceGraph instance"),
             "missing-root rejection should name the graph invariant: {}",
             error.message
         );
@@ -7770,7 +8384,10 @@ fn main() {
 }
 "#,
         );
-        let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("test module");
+        let mid = *ws
+            .module_ids
+            .get(&Ustr::from("<test>"))
+            .expect("test module");
         let main = ws
             .module(mid)
             .functions
@@ -7793,14 +8410,19 @@ fn main() {
             .publisher_lanes
             .keys()
             .find(|instance| {
-                ws.module(instance.func.module).functions[instance.func.func].name.as_str()
+                ws.module(instance.func.module).functions[instance.func.func]
+                    .name
+                    .as_str()
                     == "wired_pair"
             })
             .expect("publisher instance")
             .clone();
-        let removed = graph.index.subst.remove(&instance).is_some()
-            | graph.root_instances.remove(&instance);
-        assert!(removed, "publisher instance had no graph substitution record");
+        let removed =
+            graph.index.subst.remove(&instance).is_some() | graph.root_instances.remove(&instance);
+        assert!(
+            removed,
+            "publisher instance had no graph substitution record"
+        );
         let after = artifact::realize(
             &ws,
             &graph,
@@ -7813,7 +8435,10 @@ fn main() {
         assert!(after.missing_substitutions.contains(&instance));
         let error = max_published_lanes(
             &after,
-            &[JsInlineBody { decl: instance.func, instance }],
+            &[JsInlineBody {
+                decl: instance.func,
+                instance,
+            }],
         )
         .expect_err("a missing publisher plan must not become a zero-width answer");
         assert!(

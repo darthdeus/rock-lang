@@ -1,6 +1,8 @@
 use bone_core::modules::{DefKind, NsAliases, PackageAliases};
 use bone_core::prelude::*;
-use bone_semantic::semantic_passes::{build_namespaces, legacy_owned_names, semantic_pass_with_aliases};
+use bone_semantic::semantic_passes::{
+    build_namespaces, legacy_owned_names, semantic_pass_with_aliases,
+};
 use skull_parser::{Ast, Dialect};
 
 const SOURCE: &str = include_str!("fixtures/cw7_macro_namespace_kind.rock");
@@ -45,16 +47,24 @@ fn legacy_provider_macros_are_not_callable_families() {
 }
 
 fn ordinary_declarations(ast: &Ast) -> usize {
-    ast.items.iter().filter(|item| matches!(
-        &item.kind,
-        skull_parser::ItemKind::Function(f) if f.name.name == ustr("ordinary")
-    )).count()
+    ast.items
+        .iter()
+        .filter(|item| {
+            matches!(
+                &item.kind,
+                skull_parser::ItemKind::Function(f) if f.name.name == ustr("ordinary")
+            )
+        })
+        .count()
 }
 
 fn check_namespace(dialect: Dialect) {
     let ast = provider(dialect, "provider.rock");
     let ordinary_count = ordinary_declarations(&ast);
-    assert!(ordinary_count > 1, "fixture must exercise an overload family");
+    assert!(
+        ordinary_count > 1,
+        "fixture must exercise an overload family"
+    );
     let mut modules = vec![ast];
     if dialect == Dialect::Legacy {
         // A v1 consumer's dependency alias admits the legacy provider view.
@@ -62,7 +72,8 @@ fn check_namespace(dialect: Dialect) {
             "fn entry() {}",
             ustr("consumer.rock"),
             Dialect::V1,
-        ).expect("parse v1 consumer");
+        )
+        .expect("parse v1 consumer");
         consumer.package = Some(rock_core::source_code::PackageTag {
             id: 2,
             self_name: "consumer".to_string(),
@@ -72,24 +83,44 @@ fn check_namespace(dialect: Dialect) {
     }
     let mut ws = Workspace::default();
     build_namespaces(&mut ws, &modules, &aliases()).expect("build namespace");
-    let root = ws.ns.package(1).and_then(|pkg| pkg.node(ustr("")))
+    let root = ws
+        .ns
+        .package(1)
+        .and_then(|pkg| pkg.node(ustr("")))
         .expect("provider namespace root");
-    assert!(!root.owned_callables.contains_key(&ustr("identity_value")),
-        "{dialect:?}: expansion-owned macro leaked into callable namespace");
+    assert!(
+        !root.owned_callables.contains_key(&ustr("identity_value")),
+        "{dialect:?}: expansion-owned macro leaked into callable namespace"
+    );
     assert!(!root.callable_members.contains_key(&ustr("identity_value")));
-    assert!(!ws.defs.values().any(|meta| meta.name == ustr("identity_value")));
+    assert!(
+        !ws.defs
+            .values()
+            .any(|meta| meta.name == ustr("identity_value"))
+    );
     let ordinary = root.owned_callables[&ustr("ordinary")];
     if dialect == Dialect::V1 {
         assert_eq!(ws.defs[&ordinary].kind, DefKind::Callable);
-        assert_eq!(root.callable_members[&ustr("ordinary")].len(), ordinary_count);
+        assert_eq!(
+            root.callable_members[&ustr("ordinary")].len(),
+            ordinary_count
+        );
     } else {
         assert_eq!(ordinary, ustr("ordinary"));
     }
     let checked = semantic_pass_with_aliases(&mut modules, &aliases())
         .expect("macro expansion and ordinary overloads still lower");
     for module in &checked.modules {
-        assert!(module.lowering_errors.is_empty(), "{:?}", module.lowering_errors);
-        assert!(module.interface_errors.is_empty(), "{:?}", module.interface_errors);
+        assert!(
+            module.lowering_errors.is_empty(),
+            "{:?}",
+            module.lowering_errors
+        );
+        assert!(
+            module.interface_errors.is_empty(),
+            "{:?}",
+            module.interface_errors
+        );
     }
     for (_, inference) in checked.inferences_iter() {
         assert!(inference.errors.is_empty(), "{:?}", inference.errors);
@@ -100,10 +131,18 @@ fn check_namespace(dialect: Dialect) {
 fn raw_legacy_macro_ownership_excludes_expanded_definitions() {
     let ast = provider(Dialect::Legacy, "legacy.rock");
     let names = legacy_owned_names(&ast);
-    assert!(!names.iter().any(|(name, _)| *name == ustr("identity_value")));
-    assert_eq!(names.iter().filter(|(name, kind)|
-        *name == ustr("ordinary") && *kind == DefKind::Callable).count(),
-        ordinary_declarations(&ast));
+    assert!(
+        !names
+            .iter()
+            .any(|(name, _)| *name == ustr("identity_value"))
+    );
+    assert_eq!(
+        names
+            .iter()
+            .filter(|(name, kind)| *name == ustr("ordinary") && *kind == DefKind::Callable)
+            .count(),
+        ordinary_declarations(&ast)
+    );
 }
 
 #[test]

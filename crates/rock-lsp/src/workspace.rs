@@ -87,8 +87,16 @@ impl LspWorkspace {
     /// state when it differs, so the caller publishes only changed files.
     /// Empty diagnostics for a never-published (or already-empty) file are a
     /// no-op -- we never emit a redundant "clear".
-    pub fn diagnostics_changed(&mut self, path: &str, diagnostics: &[lsp_types::Diagnostic]) -> bool {
-        let prev_empty = self.published_diagnostics.get(path).map(|v| v.is_empty()).unwrap_or(true);
+    pub fn diagnostics_changed(
+        &mut self,
+        path: &str,
+        diagnostics: &[lsp_types::Diagnostic],
+    ) -> bool {
+        let prev_empty = self
+            .published_diagnostics
+            .get(path)
+            .map(|v| v.is_empty())
+            .unwrap_or(true);
         if diagnostics.is_empty() {
             if prev_empty {
                 return false;
@@ -99,7 +107,8 @@ impl LspWorkspace {
         if self.published_diagnostics.get(path).map(|v| v.as_slice()) == Some(diagnostics) {
             return false;
         }
-        self.published_diagnostics.insert(path.to_string(), diagnostics.to_vec());
+        self.published_diagnostics
+            .insert(path.to_string(), diagnostics.to_vec());
         true
     }
 
@@ -119,7 +128,11 @@ impl LspWorkspace {
     }
 
     /// Get cached semantic tokens if valid for the current document version
-    pub fn get_cached_semantic_tokens(&self, uri: &str, current_version: Option<i32>) -> Option<&SemanticTokenCache> {
+    pub fn get_cached_semantic_tokens(
+        &self,
+        uri: &str,
+        current_version: Option<i32>,
+    ) -> Option<&SemanticTokenCache> {
         let cache_entry = self.semantic_token_cache.get(uri)?;
         // SMART CACHE: Return stale tokens if we have them. The cache will be
         // updated when new tokens are successfully computed, so tokens don't
@@ -130,7 +143,12 @@ impl LspWorkspace {
     }
 
     /// Cache semantic tokens for a document version
-    pub fn cache_semantic_tokens(&mut self, uri: &str, tokens: lsp_types::SemanticTokensResult, document_version: Option<i32>) -> String {
+    pub fn cache_semantic_tokens(
+        &mut self,
+        uri: &str,
+        tokens: lsp_types::SemanticTokensResult,
+        document_version: Option<i32>,
+    ) -> String {
         // Defense in depth: never cache an empty SemanticTokensResult.
         //
         // An empty result in the cache is always worse than no cache:
@@ -175,7 +193,8 @@ impl LspWorkspace {
             document_version,
         };
 
-        self.semantic_token_cache.insert(uri.to_string(), cache_entry);
+        self.semantic_token_cache
+            .insert(uri.to_string(), cache_entry);
         result_id
     }
 
@@ -185,7 +204,12 @@ impl LspWorkspace {
     }
 
     /// Get cached inlay hints if valid for the current document version and range
-    pub fn get_cached_inlay_hints(&self, uri: &str, current_version: Option<i32>, range: &lsp_types::Range) -> Option<&InlayHintCache> {
+    pub fn get_cached_inlay_hints(
+        &self,
+        uri: &str,
+        current_version: Option<i32>,
+        range: &lsp_types::Range,
+    ) -> Option<&InlayHintCache> {
         let cache_entry = self.inlay_hint_cache.get(uri)?;
         // Check if the cached hints are for the current document version and range
         if cache_entry.document_version == current_version && cache_entry.range == *range {
@@ -196,7 +220,13 @@ impl LspWorkspace {
     }
 
     /// Cache inlay hints for a document version and range
-    pub fn cache_inlay_hints(&mut self, uri: &str, hints: Vec<lsp_types::InlayHint>, document_version: Option<i32>, range: lsp_types::Range) {
+    pub fn cache_inlay_hints(
+        &mut self,
+        uri: &str,
+        hints: Vec<lsp_types::InlayHint>,
+        document_version: Option<i32>,
+        range: lsp_types::Range,
+    ) {
         let cache_entry = InlayHintCache {
             hints,
             document_version,
@@ -248,7 +278,8 @@ impl LspWorkspace {
                 lsp_types::Position::new(0, 0),
             ),
         };
-        self.inlay_hint_cache.insert(uri.to_string(), invalidation_marker);
+        self.inlay_hint_cache
+            .insert(uri.to_string(), invalidation_marker);
     }
 }
 
@@ -263,7 +294,10 @@ mod published_diagnostics_tests {
     use super::*;
 
     fn diag(msg: &str) -> lsp_types::Diagnostic {
-        lsp_types::Diagnostic { message: msg.to_string(), ..Default::default() }
+        lsp_types::Diagnostic {
+            message: msg.to_string(),
+            ..Default::default()
+        }
     }
 
     /// `diagnostics_changed` gates the bone publish path so only files whose

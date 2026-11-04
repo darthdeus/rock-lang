@@ -4,7 +4,7 @@
 //! one. A registrar without its publish hook fails the load instead of
 //! skipping the publication.
 
-use crate::common::{emit_module, emit_v1_package, run_luajit, V1Fragment};
+use crate::common::{V1Fragment, emit_module, emit_v1_package, run_luajit};
 
 const HOOKS: &str = r#"
 @nomangle fn __rock_wgpu_shader_register(key: string, source: string, abi_wire: string, semantic_wire: string) {}
@@ -52,7 +52,10 @@ fn main() {}
 // Loads the chunk the way a reload does: the chunk's own code-slot
 // publication runs the WGPU hooks, and a failed load is followed by the abort.
 fn load_then_abort(lua: &str, tag: &str) -> String {
-    assert!(lua.contains("__rock_code_slot_publish()"), "the fixture must publish code slots");
+    assert!(
+        lua.contains("__rock_code_slot_publish()"),
+        "the fixture must publish code slots"
+    );
     run_luajit(
         &format!(
             "local chunk = assert(loadstring([=====[{lua}]=====]))\n\
@@ -66,7 +69,14 @@ fn load_then_abort(lua: &str, tag: &str) -> String {
 }
 
 fn v1_lua(src: &str) -> String {
-    emit_v1_package("v1wgpu", &[V1Fragment { file: "main.rock", src }]).lua
+    emit_v1_package(
+        "v1wgpu",
+        &[V1Fragment {
+            file: "main.rock",
+            src,
+        }],
+    )
+    .lua
 }
 
 #[test]
@@ -95,5 +105,8 @@ fn a_wgpu_registrar_without_its_publish_hook_fails_the_load() {
 
 #[test]
 fn a_program_without_wgpu_publishes_normally() {
-    assert_eq!(load_then_abort(&v1_lua(NO_WGPU), "wgpu_hooks_absent"), "true nil\ntrue nil");
+    assert_eq!(
+        load_then_abort(&v1_lua(NO_WGPU), "wgpu_hooks_absent"),
+        "true nil\ntrue nil"
+    );
 }

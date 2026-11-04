@@ -89,7 +89,11 @@ pub fn run() {
                 out.push_str(&format!("__SKULL__\tVALUE\t{}\t{}\n", job.name, serialized));
             }
             Err(detail) => {
-                out.push_str(&format!("__SKULL__\tFAIL\t{}: {}\n", job.name, escape(&detail)));
+                out.push_str(&format!(
+                    "__SKULL__\tFAIL\t{}: {}\n",
+                    job.name,
+                    escape(&detail)
+                ));
             }
         }
     }
@@ -128,7 +132,9 @@ fn parse_jobs(input: &str) -> Result<Vec<Job>, String> {
 /// A `\t`/`\n` escaper so a driver's multi-line compile log stays on one
 /// `__SKULL__` line (the parser splits on tabs past the marker).
 fn escape(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('\n', "\\n").replace('\t', " ")
+    s.replace('\\', "\\\\")
+        .replace('\n', "\\n")
+        .replace('\t', " ")
 }
 
 struct GlCtx {
@@ -334,18 +340,18 @@ unsafe fn compile_program(
     Ok(program)
 }
 
-unsafe fn compile_stage(
-    gl: &glow::Context,
-    kind: u32,
-    src: &str,
-) -> Result<glow::Shader, String> {
+unsafe fn compile_stage(gl: &glow::Context, kind: u32, src: &str) -> Result<glow::Shader, String> {
     let shader = gl.create_shader(kind).map_err(|e| format!("shader: {e}"))?;
     gl.shader_source(shader, src);
     gl.compile_shader(shader);
     if !gl.get_shader_compile_status(shader) {
         let log = gl.get_shader_info_log(shader);
         gl.delete_shader(shader);
-        let stage = if kind == glow::VERTEX_SHADER { "vertex" } else { "fragment" };
+        let stage = if kind == glow::VERTEX_SHADER {
+            "vertex"
+        } else {
+            "fragment"
+        };
         return Err(format!("glsl {stage} compile: {log}"));
     }
     Ok(shader)

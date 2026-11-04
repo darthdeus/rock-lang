@@ -121,8 +121,13 @@ fn clone_into_keeps_values_and_deep_copies_mutable_storage() {
 fn clone_into_strided_copies_only_live_rows() {
     require_luajit();
     let lua = emit_module(SRC);
-    assert_eq!(run_luajit(&format!("{lua}\nprint(clone_wide())\n"), "clone_into_strided_live"),
-        "4995 0 7 1 1000");
+    assert_eq!(
+        run_luajit(
+            &format!("{lua}\nprint(clone_wide())\n"),
+            "clone_into_strided_live"
+        ),
+        "4995 0 7 1 1000"
+    );
 }
 
 #[test]
@@ -132,6 +137,11 @@ fn clone_into_strided_edges_and_mutable_fallback() {
     assert!(function_body(&lua, "copy_wide").contains("__rock_stride_copy"));
     assert!(function_body(&lua, "copy_mixed").contains("__rock_stride_copy"));
     assert!(function_body(&lua, "clone_mutable_wide").contains("clone_into"));
-    assert_eq!(run_luajit(&format!("{lua}\nprint(clone_edges()); print(clone_mutable_wide())\n"),
-        "clone_into_strided_edges"), "0 100 vs 1 2 false nil\n2 1");
+    assert_eq!(
+        run_luajit(
+            &format!("{lua}\nprint(clone_edges()); print(clone_mutable_wide())\n"),
+            "clone_into_strided_edges"
+        ),
+        "0 100 vs 1 2 false nil\n2 1"
+    );
 }

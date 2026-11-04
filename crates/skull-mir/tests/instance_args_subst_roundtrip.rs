@@ -19,8 +19,8 @@ use std::sync::LazyLock;
 
 use skull_mir::instance::Instance;
 use skull_mir::lower::{spec_key_from_subst, spec_subst_from_key};
-use skull_mir::monoty::MonoInterner;
 use skull_mir::mir::FuncRef;
+use skull_mir::monoty::MonoInterner;
 use skull_mir::monoty::{MonoCtor, MonoTy};
 use ustr::Ustr;
 
@@ -52,7 +52,10 @@ fn main() {
 "#;
 
 fn decl(ws: &bone_semantic::inference::Workspace, name: &str) -> FuncRef {
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("test module");
+    let mid = *ws
+        .module_ids
+        .get(&Ustr::from("<test>"))
+        .expect("test module");
     let fid = ws
         .module(mid)
         .functions
@@ -60,7 +63,10 @@ fn decl(ws: &bone_semantic::inference::Workspace, name: &str) -> FuncRef {
         .find(|(_, f)| f.name.as_str() == name)
         .map(|(fid, _)| fid)
         .unwrap_or_else(|| panic!("no fn `{name}`"));
-    FuncRef { module: mid, func: fid }
+    FuncRef {
+        module: mid,
+        func: fid,
+    }
 }
 
 /// Every key shape a body identity can take, including the ones the two
@@ -68,17 +74,26 @@ fn decl(ws: &bone_semantic::inference::Workspace, name: &str) -> FuncRef {
 /// gave), a nullable, a nested application, and a MULTI-generic declaration
 /// where positional order is the only thing a substitution does not carry.
 fn key_shapes() -> Vec<(&'static str, Vec<MonoTy>)> {
-    let v2 = MonoTy::App { ctor: MonoCtor::Nominal(Ustr::from("V2")), params: vec![] };
+    let v2 = MonoTy::App {
+        ctor: MonoCtor::Nominal(Ustr::from("V2")),
+        params: vec![],
+    };
     vec![
         ("scalar", vec![MonoTy::Int]),
         ("value struct", vec![v2.clone()]),
-        ("tuple", vec![MonoTy::Tuple(vec![MonoTy::Int, MonoTy::Float])]),
+        (
+            "tuple",
+            vec![MonoTy::Tuple(vec![MonoTy::Int, MonoTy::Float])],
+        ),
         ("nullable", vec![MonoTy::Nullable(Box::new(MonoTy::Int))]),
         ("unit", vec![MonoTy::Unit]),
         ("any", vec![MonoTy::Any]),
         (
             "function",
-            vec![MonoTy::Function { params: vec![MonoTy::Int], ret: Box::new(MonoTy::Bool) }],
+            vec![MonoTy::Function {
+                params: vec![MonoTy::Int],
+                ret: Box::new(MonoTy::Bool),
+            }],
         ),
         ("nested app", vec![MonoTy::Nullable(Box::new(v2))]),
     ]
@@ -95,7 +110,11 @@ fn a_complete_key_survives_the_round_trip_through_its_substitution() {
     let ws = ws_of(SRC);
     let ident = decl(&ws, "ident");
     let shapes = key_shapes();
-    assert_eq!(shapes.len(), 8, "the shape table is the population under test");
+    assert_eq!(
+        shapes.len(),
+        8,
+        "the shape table is the population under test"
+    );
     for (what, key) in shapes {
         let subst = spec_subst_from_key(&ws, ident, &key);
         assert_eq!(

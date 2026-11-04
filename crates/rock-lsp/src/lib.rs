@@ -8,8 +8,9 @@ pub struct CompilerPolicy {
 
 impl CompilerPolicy {
     pub fn workspace(self) -> bone_query::BoneWorkspace {
-        bone_query::BoneWorkspace::new()
-            .with_lint_options(bone_lints::LintOptions::default().with_action_policy(self.action_layer))
+        bone_query::BoneWorkspace::new().with_lint_options(
+            bone_lints::LintOptions::default().with_action_policy(self.action_layer),
+        )
     }
 }
 
@@ -29,8 +30,8 @@ use log::error;
 use lsp_server::{Connection, ExtractError, Message, Request, RequestId, Response};
 use lsp_types::notification::Notification;
 use lsp_types::request::{
-    CodeActionRequest, Completion, DocumentHighlightRequest, DocumentSymbolRequest,
-    GotoDefinition, GotoTypeDefinition, GotoTypeDefinitionParams, HoverRequest, InlayHintRequest,
+    CodeActionRequest, Completion, DocumentHighlightRequest, DocumentSymbolRequest, GotoDefinition,
+    GotoTypeDefinition, GotoTypeDefinitionParams, HoverRequest, InlayHintRequest,
     PrepareRenameRequest, References, Rename, SemanticTokensFullDeltaRequest,
     SemanticTokensFullRequest, SemanticTokensRangeRequest, SignatureHelpRequest,
     WorkspaceSymbolRequest,
@@ -206,7 +207,6 @@ fn modules_json(summary: Vec<(String, Vec<bone_query::ModuleRecency>)>) -> serde
     serde_json::json!({ "total_modules": total, "contexts": contexts })
 }
 
-
 /// What this server tells the client it can do, sent back with `initialize`.
 ///
 /// The set below is load-bearing for editors: entries gate whether requests
@@ -215,9 +215,7 @@ fn modules_json(summary: Vec<(String, Vec<bone_query::ModuleRecency>)>) -> serde
 pub fn server_capabilities() -> ServerCapabilities {
     ServerCapabilities {
         definition_provider: Some(OneOf::Left(true)),
-        type_definition_provider: Some(
-            lsp_types::TypeDefinitionProviderCapability::Simple(true),
-        ),
+        type_definition_provider: Some(lsp_types::TypeDefinitionProviderCapability::Simple(true)),
         references_provider: Some(OneOf::Left(true)),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         signature_help_provider: Some(signature_options()),
@@ -279,13 +277,13 @@ fn completion_options() -> CompletionOptions {
         // `::`. `" "` opens the popup on a bare space (`let x = |`) with an
         // `isIncomplete` empty-prefix list that re-scores while typing.
         // See `extract_scope_resolution`.
-        trigger_characters: Some(vec![
-            ".".to_string(),
-            ":".to_string(),
-            " ".to_string(),
-        ]),
-        work_done_progress_options: WorkDoneProgressOptions { work_done_progress: Some(false) },
-        completion_item: Some(lsp_types::CompletionOptionsCompletionItem { label_details_support: Some(false) }),
+        trigger_characters: Some(vec![".".to_string(), ":".to_string(), " ".to_string()]),
+        work_done_progress_options: WorkDoneProgressOptions {
+            work_done_progress: Some(false),
+        },
+        completion_item: Some(lsp_types::CompletionOptionsCompletionItem {
+            label_details_support: Some(false),
+        }),
         ..CompletionOptions::default()
     }
 }
@@ -297,7 +295,9 @@ fn sync_options() -> TextDocumentSyncOptions {
     sync.change = Some(TextDocumentSyncKind::FULL);
     sync.will_save = Some(false);
     sync.will_save_wait_until = Some(false);
-    let save = SaveOptions { include_text: Some(false) };
+    let save = SaveOptions {
+        include_text: Some(false),
+    };
     sync.save = Some(TextDocumentSyncSaveOptions::SaveOptions(save));
     sync
 }
@@ -364,7 +364,11 @@ pub fn run_lsp_server_with_policy(policy: crate::CompilerPolicy) -> Result<()> {
     Ok(())
 }
 
-fn main_loop(link: Connection, params: serde_json::Value, policy: crate::CompilerPolicy) -> Result<()> {
+fn main_loop(
+    link: Connection,
+    params: serde_json::Value,
+    policy: crate::CompilerPolicy,
+) -> Result<()> {
     let mut server = LspServer::new(policy, params)?;
     let mut pending: Vec<Message> = Vec::new();
     for incoming in &link.receiver {
@@ -462,10 +466,38 @@ impl LspServer {
 
         // debug!("got request: {req:?}");
 
-        dispatch_request!(req, out, self.workspace, GotoDefinition, "lsp_goto_definition", go_to_definition_workspace);
-        dispatch_request!(req, out, self.workspace, GotoTypeDefinition, "lsp_goto_type_definition", go_to_type_definition_workspace);
-        dispatch_request!(req, out, self.workspace, References, "lsp_references", find_references_workspace);
-        dispatch_request!(req, out, self.workspace, HoverRequest, "lsp_hover", do_hover_workspace);
+        dispatch_request!(
+            req,
+            out,
+            self.workspace,
+            GotoDefinition,
+            "lsp_goto_definition",
+            go_to_definition_workspace
+        );
+        dispatch_request!(
+            req,
+            out,
+            self.workspace,
+            GotoTypeDefinition,
+            "lsp_goto_type_definition",
+            go_to_type_definition_workspace
+        );
+        dispatch_request!(
+            req,
+            out,
+            self.workspace,
+            References,
+            "lsp_references",
+            find_references_workspace
+        );
+        dispatch_request!(
+            req,
+            out,
+            self.workspace,
+            HoverRequest,
+            "lsp_hover",
+            do_hover_workspace
+        );
 
         let req = match take::<SignatureHelpRequest>(req) {
             Ok((req_id, args)) => {
@@ -493,14 +525,70 @@ impl LspServer {
             Err(ExtractError::MethodMismatch(rest)) => rest,
         };
 
-        dispatch_request!(req, out, self.workspace, InlayHintRequest, "lsp_inlay_hints", do_inlay_hints_workspace);
-        dispatch_request!(req, out, self.workspace, Completion, "lsp_completion", do_completion_workspace);
-        dispatch_request!(req, out, self.workspace, PrepareRenameRequest, "lsp_prepare_rename", prepare_rename_workspace);
-        dispatch_request!(req, out, self.workspace, Rename, "lsp_rename", do_rename_workspace);
-        dispatch_request!(req, out, self.workspace, lsp_types::request::References, "lsp_references_alt", find_references_workspace);
-        dispatch_request!(req, out, self.workspace, DocumentSymbolRequest, "lsp_document_symbols", do_document_symbols_workspace);
-        dispatch_request!(req, out, self.workspace, WorkspaceSymbolRequest, "lsp_workspace_symbols", do_workspace_symbols_workspace);
-        dispatch_request!(req, out, self.workspace, DocumentHighlightRequest, "lsp_document_highlight", do_document_highlight_workspace);
+        dispatch_request!(
+            req,
+            out,
+            self.workspace,
+            InlayHintRequest,
+            "lsp_inlay_hints",
+            do_inlay_hints_workspace
+        );
+        dispatch_request!(
+            req,
+            out,
+            self.workspace,
+            Completion,
+            "lsp_completion",
+            do_completion_workspace
+        );
+        dispatch_request!(
+            req,
+            out,
+            self.workspace,
+            PrepareRenameRequest,
+            "lsp_prepare_rename",
+            prepare_rename_workspace
+        );
+        dispatch_request!(
+            req,
+            out,
+            self.workspace,
+            Rename,
+            "lsp_rename",
+            do_rename_workspace
+        );
+        dispatch_request!(
+            req,
+            out,
+            self.workspace,
+            lsp_types::request::References,
+            "lsp_references_alt",
+            find_references_workspace
+        );
+        dispatch_request!(
+            req,
+            out,
+            self.workspace,
+            DocumentSymbolRequest,
+            "lsp_document_symbols",
+            do_document_symbols_workspace
+        );
+        dispatch_request!(
+            req,
+            out,
+            self.workspace,
+            WorkspaceSymbolRequest,
+            "lsp_workspace_symbols",
+            do_workspace_symbols_workspace
+        );
+        dispatch_request!(
+            req,
+            out,
+            self.workspace,
+            DocumentHighlightRequest,
+            "lsp_document_highlight",
+            do_document_highlight_workspace
+        );
 
         let req = match take::<SemanticTokensFullRequest>(req) {
             Ok((req_id, args)) => {
@@ -514,10 +602,10 @@ impl LspServer {
 
                 // Check if we have valid cached tokens and clone the data we need
                 let (has_cache, cached_is_current, cached_tokens, cached_result_id) = {
-                    let _span =
-                        tracing::debug_span!("check_semantic_tokens_cache").entered();
-                    if let Some(cached) =
-                        self.workspace.get_cached_semantic_tokens(&uri, current_version)
+                    let _span = tracing::debug_span!("check_semantic_tokens_cache").entered();
+                    if let Some(cached) = self
+                        .workspace
+                        .get_cached_semantic_tokens(&uri, current_version)
                     {
                         let is_current = cached.document_version == current_version;
                         (
@@ -536,8 +624,7 @@ impl LspServer {
                     // debug_log!("SEMANTIC_TOKENS_CACHE_HIT (current): id={}, uri={}, result_id={}", id, uri, cached_result_id.as_ref().unwrap());
                     let mut result = cached_tokens.unwrap();
                     // Update the result ID to the current cached one
-                    if let lsp_types::SemanticTokensResult::Tokens(ref mut tokens) = result
-                    {
+                    if let lsp_types::SemanticTokensResult::Tokens(ref mut tokens) = result {
                         tokens.result_id = cached_result_id;
                     }
                     Ok(Some(result))
@@ -547,13 +634,13 @@ impl LspServer {
 
                     let res = {
                         let _span =
-                            tracing::debug_span!("compute_semantic_tokens_workspace")
-                                .entered();
+                            tracing::debug_span!("compute_semantic_tokens_workspace").entered();
                         semantic_tokens::compute_semantic_tokens_workspace(
                             &mut self.workspace,
                             args.clone(),
                         )
-                    }; match res {
+                    };
+                    match res {
                         Ok(Some(tokens)) => {
                             // Defense in depth: if compute_semantic_tokens
                             // returned an empty result but we have a
@@ -575,10 +662,7 @@ impl LspServer {
                                     uri
                                 );
                                 let mut result = cached_tokens.unwrap();
-                                if let lsp_types::SemanticTokensResult::Tokens(
-                                    ref mut t,
-                                ) = result
-                                {
+                                if let lsp_types::SemanticTokensResult::Tokens(ref mut t) = result {
                                     t.result_id = cached_result_id;
                                 }
                                 Ok(Some(result))
@@ -591,10 +675,7 @@ impl LspServer {
                                 );
                                 let mut result = tokens;
                                 // Update the result ID
-                                if let lsp_types::SemanticTokensResult::Tokens(
-                                    ref mut t,
-                                ) = result
-                                {
+                                if let lsp_types::SemanticTokensResult::Tokens(ref mut t) = result {
                                     t.result_id = Some(result_id.clone());
                                 }
                                 Ok(Some(result))
@@ -607,9 +688,8 @@ impl LspServer {
                             if has_cache {
                                 // debug_log!("SEMANTIC_TOKENS_NO_RESULT_IN_CONTEXT: returning stale cache for {} to prevent token loss on buffer switch", uri);
                                 let mut result = cached_tokens.unwrap();
-                                if let lsp_types::SemanticTokensResult::Tokens(
-                                    ref mut tokens,
-                                ) = result
+                                if let lsp_types::SemanticTokensResult::Tokens(ref mut tokens) =
+                                    result
                                 {
                                     tokens.result_id = cached_result_id;
                                 }
@@ -624,9 +704,8 @@ impl LspServer {
                             if has_cache {
                                 // debug_log!("SEMANTIC_TOKENS_COMPUTE_ERROR: returning stale cache for {}, error: {:?}", uri, e);
                                 let mut result = cached_tokens.unwrap();
-                                if let lsp_types::SemanticTokensResult::Tokens(
-                                    ref mut tokens,
-                                ) = result
+                                if let lsp_types::SemanticTokensResult::Tokens(ref mut tokens) =
+                                    result
                                 {
                                     tokens.result_id = cached_result_id;
                                 }
@@ -650,14 +729,16 @@ impl LspServer {
 
         let req = match take::<SemanticTokensFullDeltaRequest>(req) {
             Ok((req_id, args)) => {
-                let _span = tracing::info_span!("lsp_semantic_tokens_delta", request_id = %req_id).entered();
+                let _span = tracing::info_span!("lsp_semantic_tokens_delta", request_id = %req_id)
+                    .entered();
                 let uri = args.text_document.uri.to_string();
                 let current_version = self.workspace.get_document_version(&uri);
                 let prev_id = args.previous_result_id.clone();
 
                 // Snapshot what the client currently holds (the array it
                 // got under `prev_id`), then compute the new tokens.
-                let prev = self.workspace
+                let prev = self
+                    .workspace
                     .get_cached_semantic_tokens(&uri, current_version)
                     .map(|c| (c.result_id.clone(), c.tokens.clone()));
 
@@ -737,7 +818,8 @@ impl LspServer {
 
         let req = match take::<SemanticTokensRangeRequest>(req) {
             Ok((req_id, args)) => {
-                let _span = tracing::info_span!("lsp_semantic_tokens_range", request_id = %req_id).entered();
+                let _span = tracing::info_span!("lsp_semantic_tokens_range", request_id = %req_id)
+                    .entered();
                 let found = semantic_tokens::compute_semantic_tokens_range_workspace(
                     &mut self.workspace,
                     args,
@@ -752,14 +834,27 @@ impl LspServer {
             Err(ExtractError::MethodMismatch(rest)) => rest,
         };
 
-        dispatch_request!(req, out, self.workspace, CodeActionRequest, "lsp_code_actions", compute_code_actions_workspace);
+        dispatch_request!(
+            req,
+            out,
+            self.workspace,
+            CodeActionRequest,
+            "lsp_code_actions",
+            compute_code_actions_workspace
+        );
 
         // Custom introspection requests for the rock.nvim panel. Bone
         // ports of the old rock-semantic endpoints (rock/consistency was
         // dropped in the port -- it had no bone equivalent worth the
         // surface).
         if req.method == "rock/stats" {
-            let loaded = self.workspace.bone.projects_summary().iter().map(|(_, m)| m.len()).sum();
+            let loaded = self
+                .workspace
+                .bone
+                .projects_summary()
+                .iter()
+                .map(|(_, m)| m.len())
+                .sum();
             send_response(out, req.id, Ok(request_stats_json(loaded)))?;
             return Ok(());
         }
@@ -773,11 +868,10 @@ impl LspServer {
         // run by the client after inserting a tagged completion item
         // (ROCK_LSP_RECORD).
         if req.method == "workspace/executeCommand" {
-            let parsed = serde_json::from_value::<lsp_types::ExecuteCommandParams>(
-                req.params.clone(),
-            )
-            .map_err(|e| format!("malformed executeCommand params: {e}"))
-            .and_then(|p| completion_record::handle_execute_command(&p));
+            let parsed =
+                serde_json::from_value::<lsp_types::ExecuteCommandParams>(req.params.clone())
+                    .map_err(|e| format!("malformed executeCommand params: {e}"))
+                    .and_then(|p| completion_record::handle_execute_command(&p));
             match parsed {
                 Ok(v) => send_response(out, req.id, Ok(v))?,
                 Err(detail) => {
@@ -803,7 +897,11 @@ impl LspServer {
         Ok(())
     }
 
-    fn handle_notification(&mut self, not: lsp_server::Notification, out: &mut Vec<Message>) -> Result<()> {
+    fn handle_notification(
+        &mut self,
+        not: lsp_server::Notification,
+        out: &mut Vec<Message>,
+    ) -> Result<()> {
         // debug_log!("NOTIFICATION_PROCESSING: method={}", not.method);
 
         // Handle exit notification
@@ -845,10 +943,7 @@ impl LspServer {
     fn on_save(&self, note: &lsp_server::Notification) -> Result<()> {
         let _span = tracing::debug_span!("lsp_did_save_notification").entered();
         let at = doc_uri(note)?;
-        log::debug!(
-            "got textDocument/didSave notification for {}",
-            at.as_str()
-        );
+        log::debug!("got textDocument/didSave notification for {}", at.as_str());
         regenerate_all_ctags(&self.workspace, "save");
         Ok(())
     }
@@ -887,10 +982,12 @@ impl LspServer {
         // Clear cached hints so the next request recomputes; the refresh
         // below makes the client actually re-request them.
         self.workspace.force_invalidate_inlay_hints(&at.to_string());
-        out.push(lsp_server::Message::Notification(lsp_server::Notification {
-            method: "workspace/inlayHint/refresh".to_string(),
-            params: serde_json::Value::Null,
-        }));
+        out.push(lsp_server::Message::Notification(
+            lsp_server::Notification {
+                method: "workspace/inlayHint/refresh".to_string(),
+                params: serde_json::Value::Null,
+            },
+        ));
         bone_reload_and_publish(out, &path, edited.text, &mut self.workspace)?;
         Ok(())
     }
@@ -911,72 +1008,84 @@ impl LspServer {
 }
 
 fn check_initialize_params(params: serde_json::Value) -> Result<()> {
-let mut params_val = params;
+    let mut params_val = params;
 
-// It has been observed that some LSP clients (e.g., some versions of Neovim's native LSP)
-// announce semantic token capabilities but omit the required `tokenTypes`, `tokenModifiers`,
-// and `formats` fields, which violates the LSP specification.
-// This non-compliance causes deserialization of `InitializeParams` to fail.
-// To ensure robustness, we defensively patch the `semanticTokens` object here by
-// inserting empty or default values for these missing fields before deserialization.
-if let Some(semantic_tokens) = params_val
-    .get_mut("capabilities")
-    .and_then(|caps| caps.get_mut("textDocument"))
-    .and_then(|td| td.get_mut("semanticTokens"))
-{
-    // Log what the CLIENT declares it supports BEFORE we patch defaults in.
-    // `requests.range` / `requests.full.delta` decide whether advertising
-    // semanticTokens/range or /full/delta is even useful -- a client that
-    // doesn't list a request kind won't send it no matter what we advertise.
-    let requests = semantic_tokens.get("requests").cloned();
-    log::info!("[semtok-caps] client semanticTokens.requests = {}",
-        requests.map(|r| r.to_string()).unwrap_or_else(|| "<absent>".to_string()));
-    if let Some(obj) = semantic_tokens.as_object_mut() {
-        if obj.get("tokenTypes").is_none() {
-            log::warn!("Client sent non-compliant semantic token capabilities. Patching missing 'tokenTypes'.");
-            obj.insert("tokenTypes".to_string(), serde_json::json!([]));
-        }
-        if obj.get("tokenModifiers").is_none() {
-            log::warn!("Client sent non-compliant semantic token capabilities. Patching missing 'tokenModifiers'.");
-            obj.insert("tokenModifiers".to_string(), serde_json::json!([]));
-        }
-        // Per LSP spec, `relative` is the only format currently defined.
-        // It's a safe default to assume if the client supports semantic tokens at all.
-        if obj.get("formats").is_none() {
-            log::warn!("Client sent non-compliant semantic token capabilities. Patching missing 'formats'.");
-            obj.insert("formats".to_string(), serde_json::json!(["relative"]));
-        }
-        // The 'requests' field is also required by the spec
-        if obj.get("requests").is_none() {
-            log::warn!("Client sent non-compliant semantic token capabilities. Patching missing 'requests'.");
-            obj.insert(
-                "requests".to_string(),
-                serde_json::json!({
-                    "full": true,
-                    "range": false
-                }),
-            );
+    // It has been observed that some LSP clients (e.g., some versions of Neovim's native LSP)
+    // announce semantic token capabilities but omit the required `tokenTypes`, `tokenModifiers`,
+    // and `formats` fields, which violates the LSP specification.
+    // This non-compliance causes deserialization of `InitializeParams` to fail.
+    // To ensure robustness, we defensively patch the `semanticTokens` object here by
+    // inserting empty or default values for these missing fields before deserialization.
+    if let Some(semantic_tokens) = params_val
+        .get_mut("capabilities")
+        .and_then(|caps| caps.get_mut("textDocument"))
+        .and_then(|td| td.get_mut("semanticTokens"))
+    {
+        // Log what the CLIENT declares it supports BEFORE we patch defaults in.
+        // `requests.range` / `requests.full.delta` decide whether advertising
+        // semanticTokens/range or /full/delta is even useful -- a client that
+        // doesn't list a request kind won't send it no matter what we advertise.
+        let requests = semantic_tokens.get("requests").cloned();
+        log::info!(
+            "[semtok-caps] client semanticTokens.requests = {}",
+            requests
+                .map(|r| r.to_string())
+                .unwrap_or_else(|| "<absent>".to_string())
+        );
+        if let Some(obj) = semantic_tokens.as_object_mut() {
+            if obj.get("tokenTypes").is_none() {
+                log::warn!(
+                    "Client sent non-compliant semantic token capabilities. Patching missing 'tokenTypes'."
+                );
+                obj.insert("tokenTypes".to_string(), serde_json::json!([]));
+            }
+            if obj.get("tokenModifiers").is_none() {
+                log::warn!(
+                    "Client sent non-compliant semantic token capabilities. Patching missing 'tokenModifiers'."
+                );
+                obj.insert("tokenModifiers".to_string(), serde_json::json!([]));
+            }
+            // Per LSP spec, `relative` is the only format currently defined.
+            // It's a safe default to assume if the client supports semantic tokens at all.
+            if obj.get("formats").is_none() {
+                log::warn!(
+                    "Client sent non-compliant semantic token capabilities. Patching missing 'formats'."
+                );
+                obj.insert("formats".to_string(), serde_json::json!(["relative"]));
+            }
+            // The 'requests' field is also required by the spec
+            if obj.get("requests").is_none() {
+                log::warn!(
+                    "Client sent non-compliant semantic token capabilities. Patching missing 'requests'."
+                );
+                obj.insert(
+                    "requests".to_string(),
+                    serde_json::json!({
+                        "full": true,
+                        "range": false
+                    }),
+                );
+            }
         }
     }
-}
 
-// TODO: are these not needed?
-let _params: InitializeParams = serde_json::from_value(params_val.clone()).map_err(|err| {
-    // Log the exact payload that failed deserialization (after patching)
-    eprintln!(
-        "Failed to deserialize InitializeParams after patching: {}. Payload: {}",
-        err,
-        serde_json::to_string_pretty(&params_val)
-            .unwrap_or_else(|_| "INVALID JSON".to_string())
-    );
-    err
-})?;
-// fs_err::write("/tmp/lsp_debug.log", "MAIN_LOOP_STARTED\n").ok();
-log::info!("Starting example main loop");
+    // TODO: are these not needed?
+    let _params: InitializeParams = serde_json::from_value(params_val.clone()).map_err(|err| {
+        // Log the exact payload that failed deserialization (after patching)
+        eprintln!(
+            "Failed to deserialize InitializeParams after patching: {}. Payload: {}",
+            err,
+            serde_json::to_string_pretty(&params_val)
+                .unwrap_or_else(|_| "INVALID JSON".to_string())
+        );
+        err
+    })?;
+    // fs_err::write("/tmp/lsp_debug.log", "MAIN_LOOP_STARTED\n").ok();
+    log::info!("Starting example main loop");
 
-// let _lsp_context = LspContext::new();
+    // let _lsp_context = LspContext::new();
 
-// debug_log!("LSP_SERVER_INITIALIZED: Workspace created, entering main loop");
+    // debug_log!("LSP_SERVER_INITIALIZED: Workspace created, entering main loop");
 
     Ok(())
 }
@@ -1013,7 +1122,10 @@ fn regenerate_all_ctags(workspace: &LspWorkspace, when: &str) {
     }
     for (root, res) in workspace.bone.write_all_ctags() {
         match res {
-            Ok(n) => log::debug!("wrote {}/.rock.tags on {when} ({n} symbols)", root.display()),
+            Ok(n) => log::debug!(
+                "wrote {}/.rock.tags on {when} ({n} symbols)",
+                root.display()
+            ),
             Err(e) => log::warn!("ctags: failed to write {}/.rock.tags: {e}", root.display()),
         }
     }
@@ -1029,7 +1141,6 @@ fn bone_reload_and_publish(
     contents: String,
     workspace: &mut LspWorkspace,
 ) -> Result<()> {
-
     // Compile-on-open/edit cost (ROCK_LSP_TIMING=1). This is the notification
     // path (didOpen/didChange) that head-of-line-blocks every queued request
     // behind it, so it's the number to watch when first-paint feels slow.
@@ -1067,10 +1178,12 @@ fn bone_reload_and_publish(
             version: None,
             diagnostics,
         };
-        out.push(lsp_server::Message::Notification(lsp_server::Notification {
-            method: lsp_types::notification::PublishDiagnostics::METHOD.to_string(),
-            params: serde_json::to_value(notice)?,
-        }));
+        out.push(lsp_server::Message::Notification(
+            lsp_server::Notification {
+                method: lsp_types::notification::PublishDiagnostics::METHOD.to_string(),
+                params: serde_json::to_value(notice)?,
+            },
+        ));
     }
     Ok(())
 }
@@ -1138,7 +1251,11 @@ fn opened_doc(note: &lsp_server::Notification) -> Result<OpenedDoc> {
         .and_then(|raw| raw.as_str())
         .map(|s| s.to_string())
         .ok_or_else(|| anyhow::anyhow!("Failed to get contents from didOpen notification"))?;
-    Ok(OpenedDoc { uri: at, version, text })
+    Ok(OpenedDoc {
+        uri: at,
+        version,
+        text,
+    })
 }
 
 /// The new version and full text a didChange carries (FULL sync sends the
@@ -1174,11 +1291,16 @@ fn notification_path(out: &mut Vec<Message>, uri: &Uri, method: &str) -> Result<
         Err(e) => {
             let message = format!("rock-lsp: ignoring {method}: {e}");
             log::warn!("{message}");
-            let params = lsp_types::ShowMessageParams { typ: lsp_types::MessageType::WARNING, message };
-            out.push(lsp_server::Message::Notification(lsp_server::Notification {
-                method: lsp_types::notification::ShowMessage::METHOD.to_string(),
-                params: serde_json::to_value(params)?,
-            }));
+            let params = lsp_types::ShowMessageParams {
+                typ: lsp_types::MessageType::WARNING,
+                message,
+            };
+            out.push(lsp_server::Message::Notification(
+                lsp_server::Notification {
+                    method: lsp_types::notification::ShowMessage::METHOD.to_string(),
+                    params: serde_json::to_value(params)?,
+                },
+            ));
             Ok(None)
         }
     }
@@ -1187,7 +1309,11 @@ fn notification_path(out: &mut Vec<Message>, uri: &Uri, method: &str) -> Result<
 /// Answer a request: serialize the handler's value into a response, or the
 /// handler's failure into a `RequestFailed` error. A value that cannot
 /// serialize becomes `InternalError`.
-fn send_response<T>(out: &mut Vec<Message>, id: RequestId, t: Result<T, anyhow::Error>) -> Result<(), anyhow::Error>
+fn send_response<T>(
+    out: &mut Vec<Message>,
+    id: RequestId,
+    t: Result<T, anyhow::Error>,
+) -> Result<(), anyhow::Error>
 where
     T: serde::Serialize,
 {
@@ -1203,11 +1329,19 @@ where
         }
     };
     let answer = match made {
-        Ok(payload) => Response { id, result: Some(payload), error: None },
+        Ok(payload) => Response {
+            id,
+            result: Some(payload),
+            error: None,
+        },
         Err((code, detail)) => Response {
             id,
             result: None,
-            error: Some(lsp_server::ResponseError { code: code as i32, message: detail, data: None }),
+            error: Some(lsp_server::ResponseError {
+                code: code as i32,
+                message: detail,
+                data: None,
+            }),
         },
     };
     out.push(Message::Response(answer));
@@ -1223,7 +1357,6 @@ fn notify(_msg: impl AsRef<str>) {
     //     log::error!("Failed to show notification: {}", e);
     // }
 }
-
 
 #[cfg(test)]
 mod response_tests {
@@ -1246,7 +1379,9 @@ mod response_tests {
         };
         assert_eq!(resp.id, RequestId::from(7));
         assert!(resp.result.is_none(), "{:?}", resp.result);
-        let err = resp.error.expect("serialization failure must be an error response");
+        let err = resp
+            .error
+            .expect("serialization failure must be an error response");
         assert_eq!(err.code, lsp_server::ErrorCode::InternalError as i32);
         assert!(err.message.contains("refused by test"), "{}", err.message);
     }

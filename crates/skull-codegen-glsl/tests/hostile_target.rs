@@ -33,7 +33,12 @@ static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
         .collect()
 });
 
-fn workspace(src: &str) -> (bone_semantic::inference::Workspace, bone_semantic::prelude::ModuleId) {
+fn workspace(
+    src: &str,
+) -> (
+    bone_semantic::inference::Workspace,
+    bone_semantic::prelude::ModuleId,
+) {
     let mut modules = STDLIB.clone();
     modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
@@ -105,7 +110,11 @@ impl HostileAbi {
             .collect();
         let names = iface.sampler_names();
         let m = names.len() as u32;
-        let units = names.iter().enumerate().map(|(i, s)| (*s, m - 1 - i as u32)).collect();
+        let units = names
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (*s, m - 1 - i as u32))
+            .collect();
         let mut offsets = Vec::new();
         for g in &iface.uniform_groups {
             let mut at = 0u32;
@@ -114,25 +123,47 @@ impl HostileAbi {
                 at += tight_size(*kind);
             }
         }
-        HostileAbi { bindings, units, offsets }
+        HostileAbi {
+            bindings,
+            units,
+            offsets,
+        }
     }
 }
 
 #[test]
 fn a_second_target_derives_a_different_physical_layout_from_the_same_interface() {
     let (ws, mid) = workspace(PIPELINE);
-    let em = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(&ws, mid, "hv", "hf", GlslProfile::Core330)
-        .expect("the fixture must emit");
+    let em = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
+        &ws,
+        mid,
+        "hv",
+        "hf",
+        GlslProfile::Core330,
+    )
+    .expect("the fixture must emit");
     let iface = &em.interface;
     let glsl = &em.abi;
     let hostile = HostileAbi::of(iface);
 
     // ---- DENOMINATORS. Each disagreement below is measured over a stated,
     // non-empty population; without these, "they differ" could be "both empty".
-    assert_eq!(iface.uniform_groups.len(), 3, "engine + vertex + fragment groups");
+    assert_eq!(
+        iface.uniform_groups.len(),
+        3,
+        "engine + vertex + fragment groups"
+    );
     assert_eq!(iface.sampler_names().len(), 2, "two samplers");
-    assert_eq!(iface.vertex_inputs.len(), 2, "per-vertex and per-instance inputs");
-    assert!(iface.varyings.iter().any(|v| v.name.as_str() == "uv"), "{:?}", iface.varyings);
+    assert_eq!(
+        iface.vertex_inputs.len(),
+        2,
+        "per-vertex and per-instance inputs"
+    );
+    assert!(
+        iface.varyings.iter().any(|v| v.name.as_str() == "uv"),
+        "{:?}",
+        iface.varyings
+    );
     assert!(!hostile.offsets.is_empty());
 
     // ---- BINDINGS disagree. GLSL puts @engine at 0 by role; the hostile
@@ -156,8 +187,12 @@ fn a_second_target_derives_a_different_physical_layout_from_the_same_interface()
     );
 
     // ---- UNITS disagree, over a population of two.
-    let glsl_units: Vec<(Ustr, u32)> =
-        glsl.texture_units.iter().enumerate().map(|(i, n)| (*n, i as u32)).collect();
+    let glsl_units: Vec<(Ustr, u32)> = glsl
+        .texture_units
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (*n, i as u32))
+        .collect();
     assert_ne!(
         glsl_units, hostile.units,
         "both targets assigned the same sampler units, so the interface plan decided them"
@@ -169,7 +204,10 @@ fn a_second_target_derives_a_different_physical_layout_from_the_same_interface()
     let mut b: Vec<Ustr> = hostile.units.iter().map(|(n, _)| *n).collect();
     a.sort();
     b.sort();
-    assert_eq!(a, b, "the two targets disagree about which samplers exist, not just where");
+    assert_eq!(
+        a, b,
+        "the two targets disagree about which samplers exist, not just where"
+    );
 
     // ---- OFFSETS disagree: std140 aligns `resolution: Vec2` to 8 and rounds
     // the block to 16; the hostile target packs tightly.
@@ -185,14 +223,26 @@ fn a_second_target_derives_a_different_physical_layout_from_the_same_interface()
 
     // ---- The IR is the program's real bodies, per stage, and its declaration
     // set is what a reload watches. A second backend renders THESE.
-    assert_eq!(em.ir.stages.len(), 2, "a pipeline publishes two stages of IR");
+    assert_eq!(
+        em.ir.stages.len(),
+        2,
+        "a pipeline publishes two stages of IR"
+    );
     let names: Vec<&str> = em
         .ir
         .stages
         .iter()
-        .map(|s| ws.module(s.entry.fref().module).functions[s.entry.fref().func].name.as_str())
+        .map(|s| {
+            ws.module(s.entry.fref().module).functions[s.entry.fref().func]
+                .name
+                .as_str()
+        })
         .collect();
-    assert_eq!(names, vec!["hv", "hf"], "the IR's stages are not the program's entries");
+    assert_eq!(
+        names,
+        vec!["hv", "hf"],
+        "the IR's stages are not the program's entries"
+    );
     // The stages carry their own kind, and the vertex stage's body really is
     // the vertex entry's -- not a clone of the fragment stage's.
     assert_eq!(
@@ -200,7 +250,8 @@ fn a_second_target_derives_a_different_physical_layout_from_the_same_interface()
         vec![IrStage::Vertex, IrStage::Fragment]
     );
     assert_ne!(
-        em.ir.stages[0].entry.fref(), em.ir.stages[1].entry.fref(),
+        em.ir.stages[0].entry.fref(),
+        em.ir.stages[1].entry.fref(),
         "both stages published the same entry instance"
     );
     assert_ne!(
@@ -214,8 +265,15 @@ fn a_second_target_derives_a_different_physical_layout_from_the_same_interface()
     let mut unique = decls.clone();
     unique.sort_by_key(|f| (f.module.raw(), f.func.into_raw().into_u32()));
     unique.dedup();
-    assert_eq!(decls.len(), unique.len(), "the reload set repeats a declaration: {decls:?}");
-    assert!(decls.len() >= 2, "the IR reports no declarations to reload: {decls:?}");
+    assert_eq!(
+        decls.len(),
+        unique.len(),
+        "the reload set repeats a declaration: {decls:?}"
+    );
+    assert!(
+        decls.len() >= 2,
+        "the IR reports no declarations to reload: {decls:?}"
+    );
 
     // ---- The INTERFACE itself names nothing physical. A round trip through a
     // second derivation cannot change it, because it was never asked.
@@ -226,8 +284,15 @@ fn a_second_target_derives_a_different_physical_layout_from_the_same_interface()
         "the ABI is not reproducible from the interface alone"
     );
     assert_eq!(
-        regenerated.uniform_blocks.iter().map(|(b, _)| *b).collect::<Vec<_>>(),
-        glsl.uniform_blocks.iter().map(|(b, _)| *b).collect::<Vec<_>>()
+        regenerated
+            .uniform_blocks
+            .iter()
+            .map(|(b, _)| *b)
+            .collect::<Vec<_>>(),
+        glsl.uniform_blocks
+            .iter()
+            .map(|(b, _)| *b)
+            .collect::<Vec<_>>()
     );
     assert_eq!(
         regenerated.attribute_locations, glsl.attribute_locations,
@@ -248,15 +313,32 @@ fn a_second_target_derives_a_different_physical_layout_from_the_same_interface()
 #[test]
 fn the_interface_plan_names_nothing_physical() {
     let (ws, mid) = workspace(PIPELINE);
-    let em = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(&ws, mid, "hv", "hf", GlslProfile::Core330)
-        .expect("the fixture must emit");
+    let em = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
+        &ws,
+        mid,
+        "hv",
+        "hf",
+        GlslProfile::Core330,
+    )
+    .expect("the fixture must emit");
     let rendered = format!("{:?}", em.interface);
 
     // The denominator: the fixture's interface is populated, so the absences
     // below are absences and not an empty string.
-    assert!(rendered.contains("EngineU") && rendered.contains("atlas"), "{rendered}");
+    assert!(
+        rendered.contains("EngineU") && rendered.contains("atlas"),
+        "{rendered}"
+    );
 
-    for banned in ["vec4", "vec2", "sampler2D", "std140", "binding", "offset", "layout"] {
+    for banned in [
+        "vec4",
+        "vec2",
+        "sampler2D",
+        "std140",
+        "binding",
+        "offset",
+        "layout",
+    ] {
         assert!(
             !rendered.to_lowercase().contains(banned),
             "the interface plan names `{banned}`, which is a target's answer:\n{rendered}"
@@ -276,7 +358,11 @@ fn the_interface_plan_names_nothing_physical() {
 fn perturbing_an_interface_member_moves_the_derived_layout() {
     let (ws, mid) = workspace(PIPELINE);
     let em = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
-        &ws, mid, "hv", "hf", GlslProfile::Core330,
+        &ws,
+        mid,
+        "hv",
+        "hf",
+        GlslProfile::Core330,
     )
     .expect("the fixture must emit");
     // Dropped before the layout below is derived: `ShaderAbiPlan::glsl` does
@@ -288,7 +374,16 @@ fn perturbing_an_interface_member_moves_the_derived_layout() {
         p.uniform_blocks
             .iter()
             .find(|(_, b)| b.plan.struct_name.as_str() == "EngineU")
-            .map(|(_, b)| (b.plan.size, b.plan.members.iter().map(|m| (m.name, m.offset)).collect::<Vec<_>>()))
+            .map(|(_, b)| {
+                (
+                    b.plan.size,
+                    b.plan
+                        .members
+                        .iter()
+                        .map(|m| (m.name, m.offset))
+                        .collect::<Vec<_>>(),
+                )
+            })
             .expect("the engine block")
     };
     let before = engine_of(&em.abi);
@@ -296,7 +391,11 @@ fn perturbing_an_interface_member_moves_the_derived_layout() {
     // The DENOMINATOR: `EngineU` is `{ time: float, resolution: Vec2 }`, so
     // std140 puts `resolution` at 8 (align 8 after a 4-byte float). Widening
     // `time` to a Vec4 must push it, and a re-read of the struct cannot.
-    assert_eq!(before.1.len(), 2, "the engine group lost a member: {before:?}");
+    assert_eq!(
+        before.1.len(),
+        2,
+        "the engine group lost a member: {before:?}"
+    );
     assert_eq!(before.1[0], (Ustr::from("time"), 0));
     assert_eq!(before.1[1], (Ustr::from("resolution"), 8));
 
@@ -306,7 +405,11 @@ fn perturbing_an_interface_member_moves_the_derived_layout() {
         .iter_mut()
         .find(|g| g.struct_name.key.as_str() == "EngineU")
         .expect("the engine group");
-    assert_eq!(g.members[0].1, WireKind::F32, "the fixture's first member is not the float");
+    assert_eq!(
+        g.members[0].1,
+        WireKind::F32,
+        "the fixture's first member is not the float"
+    );
     g.members[0].1 = WireKind::F32x4;
 
     let after = engine_of(
@@ -342,7 +445,10 @@ fn main() { let k = rock_shader(bare_frag) }
 "#;
     let (ws, mid) = workspace(src);
     let em = skull_codegen_glsl::emit_shader_entry_with_dependencies(
-        &ws, mid, "bare_frag", GlslProfile::Core330,
+        &ws,
+        mid,
+        "bare_frag",
+        GlslProfile::Core330,
     )
     .expect("a bare sampler entry must emit");
 
@@ -362,14 +468,21 @@ fn main() { let k = rock_shader(bare_frag) }
     );
     // ...and it takes NO compiler-assigned unit: the group is what those come
     // from, and there is no group here.
-    assert!(em.interface.textures.is_none(), "a bare sampler invented a @textures group");
+    assert!(
+        em.interface.textures.is_none(),
+        "a bare sampler invented a @textures group"
+    );
     assert!(
         em.abi.texture_units.is_empty(),
         "a bare sampler was given a compiler slot: {:?}",
         em.abi.texture_units
     );
     // The declaration still reaches GLSL, from the interface.
-    assert!(em.source.contains("uniform sampler2D uTexture;"), "{}", em.source);
+    assert!(
+        em.source.contains("uniform sampler2D uTexture;"),
+        "{}",
+        em.source
+    );
 
     // CONTROL: a GROUPED sampler does take a unit, so the emptiness above is
     // about bareness and not about samplers being absent from the ABI.
@@ -383,7 +496,10 @@ fn main() { let k = rock_shader(grouped_frag) }
 "#;
     let (ws2, mid2) = workspace(grouped);
     let em2 = skull_codegen_glsl::emit_shader_entry_with_dependencies(
-        &ws2, mid2, "grouped_frag", GlslProfile::Core330,
+        &ws2,
+        mid2,
+        "grouped_frag",
+        GlslProfile::Core330,
     )
     .expect("a grouped sampler entry must emit");
     assert_eq!(em2.abi.texture_units, vec![Ustr::from("atlas")]);
@@ -398,13 +514,26 @@ fn main() { let k = rock_shader(grouped_frag) }
 fn a_second_target_numbers_attribute_locations_differently() {
     let (ws, mid) = workspace(PIPELINE);
     let em = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
-        &ws, mid, "hv", "hf", GlslProfile::Core330,
+        &ws,
+        mid,
+        "hv",
+        "hf",
+        GlslProfile::Core330,
     )
     .expect("the fixture must emit");
 
     // DENOMINATOR: four attributes across two input structs.
-    let n = em.interface.vertex_inputs.iter().map(|i| i.attrs.len()).sum::<usize>();
-    assert_eq!(n, 4, "the fixture lost attributes: {:?}", em.interface.vertex_inputs);
+    let n = em
+        .interface
+        .vertex_inputs
+        .iter()
+        .map(|i| i.attrs.len())
+        .sum::<usize>();
+    assert_eq!(
+        n, 4,
+        "the fixture lost attributes: {:?}",
+        em.interface.vertex_inputs
+    );
     assert_eq!(em.abi.attribute_locations.len(), n);
 
     // GLSL numbers them in declaration order, continuing across structs.
@@ -423,7 +552,11 @@ fn a_second_target_numbers_attribute_locations_differently() {
     // this is meant to catch.
     let expect = |name: &str, ty: &str, loc: u32| {
         let line = format!("layout (location = {loc}) in {ty} {name};");
-        assert!(em.source.contains(&line), "missing declaration `{line}`:\n{}", em.source);
+        assert!(
+            em.source.contains(&line),
+            "missing declaration `{line}`:\n{}",
+            em.source
+        );
     };
     expect("pos", "vec2", 0);
     expect("texcoord", "vec2", 1);
@@ -435,7 +568,10 @@ fn a_second_target_numbers_attribute_locations_differently() {
         "layout (location = 1) in vec2 pos;",
         "layout (location = 3) in vec2 shift;",
     ] {
-        assert!(!em.source.contains(bad), "a permuted declaration `{bad}` is present");
+        assert!(
+            !em.source.contains(bad),
+            "a permuted declaration `{bad}` is present"
+        );
     }
 
     // The hostile target numbers them backwards from the SAME interface.
@@ -447,7 +583,10 @@ fn a_second_target_numbers_attribute_locations_differently() {
             .flat_map(|i| i.attrs.iter().map(|(n, _)| *n))
             .collect();
         flat.reverse();
-        flat.iter().enumerate().map(|(i, n)| (*n, i as u32)).collect()
+        flat.iter()
+            .enumerate()
+            .map(|(i, n)| (*n, i as u32))
+            .collect()
     };
     assert_ne!(
         em.abi.attribute_locations, hostile,
@@ -487,7 +626,11 @@ fn main() { let k = rock_shader(tv, tf) }
 "#;
     let (ws, mid) = workspace(src);
     let em = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
-        &ws, mid, "tv", "tf", GlslProfile::Core330,
+        &ws,
+        mid,
+        "tv",
+        "tf",
+        GlslProfile::Core330,
     )
     .expect("a pipeline sampling in both stages must emit");
 
@@ -498,7 +641,11 @@ fn main() { let k = rock_shader(tv, tf) }
     let (vert, frag) = {
         let v = em.source.find("#ifdef VERTEX").expect("a vertex section");
         let p = em.source.find("#ifdef PIXEL").expect("a pixel section");
-        if v < p { (&em.source[v..p], &em.source[p..]) } else { (&em.source[v..], &em.source[p..v]) }
+        if v < p {
+            (&em.source[v..p], &em.source[p..])
+        } else {
+            (&em.source[v..], &em.source[p..v])
+        }
     };
     for (label, section) in [("vertex", vert), ("fragment", frag)] {
         assert!(

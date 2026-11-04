@@ -5,34 +5,25 @@ use bone_semantic::hir::{TypeExpr, VarId};
 #[test]
 fn missing_wire_slot_rejects_instead_of_boxing() {
     let slots = [RetSlot::Opaque];
-    assert!(super::required_wire_slot(
-        &slots,
-        0,
-        false,
-        "fixture",
-        Clone::clone,
-        |message| super::gap(message),
-    )
-    .is_ok());
-    let err = super::required_wire_slot(
-        &slots,
-        1,
-        false,
-        "fixture",
-        Clone::clone,
-        |message| super::gap(message),
-    )
+    assert!(
+        super::required_wire_slot(&slots, 0, false, "fixture", Clone::clone, |message| {
+            super::gap(message)
+        },)
+        .is_ok()
+    );
+    let err = super::required_wire_slot(&slots, 1, false, "fixture", Clone::clone, |message| {
+        super::gap(message)
+    })
     .expect_err("a missing non-variadic slot must reject");
-    assert!(err.message.contains("fixture has no ABI slot 1"), "{}", err.message);
+    assert!(
+        err.message.contains("fixture has no ABI slot 1"),
+        "{}",
+        err.message
+    );
 
-    let variadic = super::required_wire_slot(
-        &slots,
-        3,
-        true,
-        "fixture",
-        Clone::clone,
-        |message| super::gap(message),
-    )
+    let variadic = super::required_wire_slot(&slots, 3, true, "fixture", Clone::clone, |message| {
+        super::gap(message)
+    })
     .expect("a variadic call reuses its declared tail slot");
     assert!(matches!(variadic, RetSlot::Opaque));
 }
@@ -47,7 +38,10 @@ fn spec_ws(src: &str) -> (Workspace, ModuleId) {
     let mut modules =
         vec![skull_parser::parse_module_clean(src, ustr::Ustr::from("<test>")).expect("parse")];
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
-    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("user module id");
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("user module id");
     (ws, mid)
 }
 fn spec_fn(ws: &Workspace, mid: ModuleId, name: &str) -> FuncRef {
@@ -78,10 +72,16 @@ fn spec_inf<'a>(ws: &'a Workspace, mid: ModuleId, name: &str) -> &'a BodyInferen
 fn missing_call_generic_bindings_rejects() {
     let (ws, mid) = spec_ws("fn id<T>(x: T) -> T { x }\nfn main() { let y = 1 }");
     let inf = spec_inf(&ws, mid, "main");
-    let body = ws.module(mid).bodies.get(&BodyOwner::Function(spec_fn(&ws, mid, "main").func))
+    let body = ws
+        .module(mid)
+        .bodies
+        .get(&BodyOwner::Function(spec_fn(&ws, mid, "main").func))
         .expect("main body");
     let e = body.expr_arena.iter().next().expect("an expr in main").0;
-    assert!(!inf.call_generic_bindings.contains_key(&e), "the probe expr must have no record");
+    assert!(
+        !inf.call_generic_bindings.contains_key(&e),
+        "the probe expr must have no record"
+    );
     let err = crate::lower::shape::callee_instance_subst(
         &ws,
         inf,
@@ -90,7 +90,11 @@ fn missing_call_generic_bindings_rejects() {
         &SpecSubst::default(),
     )
     .expect_err("a generic callee with no recorded bindings must reject");
-    assert!(err.message.contains("no recorded generic bindings"), "{}", err.message);
+    assert!(
+        err.message.contains("no recorded generic bindings"),
+        "{}",
+        err.message
+    );
 }
 
 #[test]
@@ -106,13 +110,22 @@ fn invalid_logical_type_bindings_reject_with_callee_spans() {
         &SpecSubst::default(),
     )
     .expect_err("inference recovery poison must reject");
-    assert!(recovery.message.contains("not a logical type"), "{}", recovery.message);
-    assert!(!recovery.labels.is_empty(), "recovery rejection lost its source label");
+    assert!(
+        recovery.message.contains("not a logical type"),
+        "{}",
+        recovery.message
+    );
+    assert!(
+        !recovery.labels.is_empty(),
+        "recovery rejection lost its source label"
+    );
     assert_ne!(recovery.labels[0].span.file.as_str(), "<unknown>");
 
     let unresolved = {
         let owner = BodyOwner::Function(fref.func);
-        let inference = ws.inferences[mid.raw() as usize].as_mut().expect("inference");
+        let inference = ws.inferences[mid.raw() as usize]
+            .as_mut()
+            .expect("inference");
         let body_inf = inference.per_fn.get_mut(&owner).expect("id inference");
         body_inf
             .ty_arena
@@ -126,8 +139,15 @@ fn invalid_logical_type_bindings_reject_with_callee_spans() {
         &SpecSubst::default(),
     )
     .expect_err("an unresolved inference variable must reject");
-    assert!(unresolved_err.message.contains("unresolved inference"), "{}", unresolved_err.message);
-    assert!(!unresolved_err.labels.is_empty(), "unresolved rejection lost its source label");
+    assert!(
+        unresolved_err.message.contains("unresolved inference"),
+        "{}",
+        unresolved_err.message
+    );
+    assert!(
+        !unresolved_err.labels.is_empty(),
+        "unresolved rejection lost its source label"
+    );
     assert_ne!(unresolved_err.labels[0].span.file.as_str(), "<unknown>");
 }
 
@@ -145,7 +165,11 @@ fn spec_binding_count_mismatch_rejects() {
         &SpecSubst::default(),
     )
     .expect_err("0 bindings against a 1-generic callee must reject");
-    assert!(err.message.contains("declares 1 generic"), "{}", err.message);
+    assert!(
+        err.message.contains("declares 1 generic"),
+        "{}",
+        err.message
+    );
 }
 
 /// A declared entry of `Function::generics` that is not `TypeExpr::Generic`.
@@ -154,8 +178,7 @@ fn spec_binding_count_mismatch_rejects() {
 /// `SpecSubst` while the key still claimed the instantiation.
 #[test]
 fn non_generic_declared_generic_rejects() {
-    let (mut ws, mid) =
-        spec_ws("fn id<T>(x: T) -> T { x }\nfn main() { let y: int = 1 }");
+    let (mut ws, mid) = spec_ws("fn id<T>(x: T) -> T { x }\nfn main() { let y: int = 1 }");
     let int_ty = ws.builtins.int();
     let fref = spec_fn(&ws, mid, "id");
     ws.modules[mid.index()].functions[fref.func].generics[0] = int_ty;
@@ -167,7 +190,11 @@ fn non_generic_declared_generic_rejects() {
         &SpecSubst::default(),
     )
     .expect_err("a non-generic declared generic must reject");
-    assert!(err.message.contains("is not a generic type variable"), "{}", err.message);
+    assert!(
+        err.message.contains("is not a generic type variable"),
+        "{}",
+        err.message
+    );
 }
 
 /// `update_body` is the one ABI-state mutation crossing emissions, and its
@@ -182,7 +209,10 @@ fn a_cleared_abi_memo_cannot_serve_a_worker_mirror() {
     let plan = std::sync::Arc::new(BackendFnAbiPlan::for_boundary_instance(&ws, &scx, &inst));
     let key = AbiPlanKey::Owner(inst);
     scx.abi_plan_store(key.clone(), &plan);
-    assert!(scx.abi_plan_cached(&key).is_some(), "the stored plan must hit before the clear");
+    assert!(
+        scx.abi_plan_cached(&key).is_some(),
+        "the stored plan must hit before the clear"
+    );
     let main_fn = spec_fn(&ws, mid, "main").func;
     let _ = scx.update_body(&ws, mid, BodyOwner::Function(main_fn));
     assert!(

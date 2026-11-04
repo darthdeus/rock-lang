@@ -19,9 +19,9 @@
 //! `lua_param_names` spells a foreign body's params. One physical plan shared
 //! across targets would be answering with another target's ABI.
 
+use bone_core::prelude::Instant;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
-use bone_core::prelude::Instant;
 
 use bone_semantic::hir::{FnBackend, Function};
 use bone_semantic::inference::Workspace;
@@ -29,8 +29,8 @@ use bone_semantic::prelude::Span;
 use ustr::Ustr;
 
 use super::{
-    slot_param_names, FieldShape, RetSlot, ScalarCtx, SpecSubst, TupleRetShape, ValueShape,
-    ValueStorage,
+    FieldShape, RetSlot, ScalarCtx, SpecSubst, TupleRetShape, ValueShape, ValueStorage,
+    slot_param_names,
 };
 use crate::concrete::{ConcreteBodyPlan, ConcreteSignature};
 use crate::mir::FuncRef;
@@ -124,7 +124,10 @@ pub struct RepUseFacts {
 
 impl Default for RepUseFacts {
     fn default() -> Self {
-        Self { tuple_spelled: false, span: None }
+        Self {
+            tuple_spelled: false,
+            span: None,
+        }
     }
 }
 
@@ -257,7 +260,10 @@ impl RepPlan {
             RepLayout::Opaque | RepLayout::Foreign { .. } => 1,
             RepLayout::Leaves(shape) => shape.leaf_count(),
             RepLayout::Tuple { slots, nullable } => {
-                slots.iter().map(|slot| arena.get(*slot).lanes(arena)).sum::<usize>()
+                slots
+                    .iter()
+                    .map(|slot| arena.get(*slot).lanes(arena))
+                    .sum::<usize>()
                     + usize::from(*nullable)
             }
         }
@@ -266,7 +272,9 @@ impl RepPlan {
     pub(crate) fn splats(&self, arena: &RepArena) -> bool {
         match self.layout() {
             RepLayout::Leaves(_) => true,
-            RepLayout::Tuple { slots, .. } => slots.iter().any(|slot| arena.get(*slot).splats(arena)),
+            RepLayout::Tuple { slots, .. } => {
+                slots.iter().any(|slot| arena.get(*slot).splats(arena))
+            }
             RepLayout::Opaque | RepLayout::Foreign { .. } => false,
         }
     }
@@ -303,14 +311,20 @@ impl GlobalPlan {
         scx: &ScalarCtx,
         ty: bone_semantic::prelude::TyId,
     ) -> Result<Self, RepError> {
-        let ty = crate::monoty::convert_decl(ws, ty, &SpecSubst::default()).map_err(|reason| RepError {
-            span: None,
-            message: format!("global type cannot be planned: {reason:?}"),
+        let ty = crate::monoty::convert_decl(ws, ty, &SpecSubst::default()).map_err(|reason| {
+            RepError {
+                span: None,
+                message: format!("global type cannot be planned: {reason:?}"),
+            }
         })?;
         Self::for_mono_type(ws, scx, ty)
     }
 
-    fn for_mono_type(ws: &Workspace, scx: &ScalarCtx, ty: crate::monoty::MonoTy) -> Result<Self, RepError> {
+    fn for_mono_type(
+        ws: &Workspace,
+        scx: &ScalarCtx,
+        ty: crate::monoty::MonoTy,
+    ) -> Result<Self, RepError> {
         let arena = scx.rep_arena();
         let representation = if scx.values_first_class {
             arena.intern(scx.target, RepUse::Value, RepLayout::Opaque)
@@ -321,10 +335,16 @@ impl GlobalPlan {
                 &ty,
                 RepUse::Value,
                 &RepUseFacts::default(),
-                RepGuarantees { nobox: true, allow_opaque: true },
+                RepGuarantees {
+                    nobox: true,
+                    allow_opaque: true,
+                },
             )?
         };
-        Ok(Self { representation, arena })
+        Ok(Self {
+            representation,
+            arena,
+        })
     }
 
     pub(crate) fn for_concrete_result(
@@ -420,7 +440,10 @@ impl FunctionRepPlan {
             .result
             .map(|id| rep_logical_fingerprint(arena, id))
             .unwrap_or_else(|| "none".to_string());
-        format!("params=[{params}];result={result};lanes={};scalar={}", self.return_lanes, self.scalar_abi)
+        format!(
+            "params=[{params}];result={result};lanes={};scalar={}",
+            self.return_lanes, self.scalar_abi
+        )
     }
 }
 
@@ -553,7 +576,11 @@ impl AbiPlanMemoStats {
         self.warm_keys += other.warm_keys;
         self.warm_failures += other.warm_failures;
         self.published_keys += other.published_keys;
-        for (dst, src) in self.plan_size_histogram.iter_mut().zip(other.plan_size_histogram) {
+        for (dst, src) in self
+            .plan_size_histogram
+            .iter_mut()
+            .zip(other.plan_size_histogram)
+        {
             *dst += src;
         }
         self.plan_size_max = self.plan_size_max.max(other.plan_size_max);
@@ -804,8 +831,11 @@ impl AbiPlanCache {
     pub(super) fn store(&self, key: AbiPlanKey, plan: &BackendFnAbiPlanHandle) {
         use std::sync::atomic::Ordering;
         let epoch = self.epoch.load(Ordering::Acquire);
-        let replaced =
-            self.plans.lock().expect("abi plan cache poisoned").insert(key.clone(), Arc::clone(plan));
+        let replaced = self
+            .plans
+            .lock()
+            .expect("abi plan cache poisoned")
+            .insert(key.clone(), Arc::clone(plan));
         ABI_PLAN_LOCAL.with(|cache| {
             let mut cache = cache.borrow_mut();
             cache.reset_for(epoch);
@@ -820,19 +850,26 @@ impl AbiPlanCache {
     pub(super) fn clear(&mut self) {
         // New epoch FIRST: a worker that raced the old epoch into its mirror
         // re-reads the shared map (now cleared) rather than serving stale plans.
-        self.epoch.store(next_abi_epoch(), std::sync::atomic::Ordering::Release);
+        self.epoch
+            .store(next_abi_epoch(), std::sync::atomic::Ordering::Release);
         self.plans.lock().expect("abi plan cache poisoned").clear();
         self.published = None;
-        self.warm_keys.store(0, std::sync::atomic::Ordering::Relaxed);
-        self.published_keys.store(0, std::sync::atomic::Ordering::Relaxed);
-        self.warm_failures.store(0, std::sync::atomic::Ordering::Relaxed);
+        self.warm_keys
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.published_keys
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.warm_failures
+            .store(0, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub(super) fn publish(&mut self, warm_keys: u64, warm_failures: u64) {
         let plans = std::mem::take(&mut *self.plans.lock().expect("abi plan cache poisoned"));
-        self.published_keys.store(plans.len() as u64, std::sync::atomic::Ordering::Relaxed);
-        self.warm_keys.store(warm_keys, std::sync::atomic::Ordering::Relaxed);
-        self.warm_failures.store(warm_failures, std::sync::atomic::Ordering::Relaxed);
+        self.published_keys
+            .store(plans.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        self.warm_keys
+            .store(warm_keys, std::sync::atomic::Ordering::Relaxed);
+        self.warm_failures
+            .store(warm_failures, std::sync::atomic::Ordering::Relaxed);
         self.published = Some(Arc::new(plans));
     }
 
@@ -849,7 +886,10 @@ impl AbiPlanCache {
             worker_local_hits: self.local_hits.load(Ordering::Relaxed),
             stores: self.stores.load(Ordering::Relaxed),
             duplicate_cold_stores: self.duplicate_cold_stores.load(Ordering::Relaxed),
-            unique_keys: self.published.as_ref().map_or(0, |plans| plans.len() as u64)
+            unique_keys: self
+                .published
+                .as_ref()
+                .map_or(0, |plans| plans.len() as u64)
                 + self.plans.lock().expect("abi plan cache poisoned").len() as u64,
             cloned_param_slots: self.cloned_param_slots.load(Ordering::Relaxed),
             shared_lookups: self.shared_lookups.load(Ordering::Relaxed),
@@ -933,7 +973,14 @@ impl Default for RepArena {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum RepKey {
-    Layout(FnBackend, RepUse, RepLayout, Option<ValueStorage>, bool, bool),
+    Layout(
+        FnBackend,
+        RepUse,
+        RepLayout,
+        Option<ValueStorage>,
+        bool,
+        bool,
+    ),
     Concrete {
         target: FnBackend,
         use_context: RepUse,
@@ -1003,19 +1050,28 @@ fn value_shape_facts(
 ) -> (Option<ValueStorage>, bool, bool) {
     let (payload, _) = ty.peel_nullable();
     let crate::monoty::MonoTy::App {
-        ctor: crate::monoty::MonoCtor::Nominal(name), ..
+        ctor: crate::monoty::MonoCtor::Nominal(name),
+        ..
     } = payload
     else {
         return (None, false, true);
     };
-    assert_eq!(*name, shape.name, "value shape must describe its nominal type");
+    assert_eq!(
+        *name, shape.name,
+        "value shape must describe its nominal type"
+    );
     let Some(plan) = super::shape::planned_value(ws, *name) else {
         return (None, false, true);
     };
     let column_eligible = ws.struct_by_name.get(name).is_some_and(|sid| {
         super::shape::has_value_plan(&ws.modules[sid.module.index()].structs[sid.def])
-    }) && (plan.shape.is_some() || (declared_nobox(ws, ty) && plan.gc_shape.is_some()));
-    (Some(plan.storage), column_eligible, !plan_box_materializes_nobox(ws, &plan))
+    }) && (plan.shape.is_some()
+        || (declared_nobox(ws, ty) && plan.gc_shape.is_some()));
+    (
+        Some(plan.storage),
+        column_eligible,
+        !plan_box_materializes_nobox(ws, &plan),
+    )
 }
 
 /// The Lua wide-value calling convention. An ORDINARY `value`
@@ -1085,7 +1141,8 @@ fn payload_leaf_count(shape: &ValueShape) -> usize {
 /// frame-limit diagnostic; what they do not get is the new wire.
 fn box_would_materialize_nobox(ws: &Workspace, ty: &crate::monoty::MonoTy) -> bool {
     let crate::monoty::MonoTy::App {
-        ctor: crate::monoty::MonoCtor::Nominal(name), ..
+        ctor: crate::monoty::MonoCtor::Nominal(name),
+        ..
     } = ty.peel_nullable().0
     else {
         return false;
@@ -1101,8 +1158,7 @@ fn plan_box_materializes_nobox(ws: &Workspace, plan: &super::shape::PlannedValue
     }
     plan.fields.iter().any(|(_, field)| match field {
         PlannedField::Nested(child) | PlannedField::Nullable(child) => {
-            crate::lower::is_nobox_nominal(ws, child.name)
-                || plan_box_materializes_nobox(ws, child)
+            crate::lower::is_nobox_nominal(ws, child.name) || plan_box_materializes_nobox(ws, child)
         }
         PlannedField::Primitive(_) | PlannedField::FlatEnum(_) | PlannedField::Opaque => false,
     })
@@ -1148,7 +1204,8 @@ fn wire_value_shape(
 fn declared_nobox(ws: &Workspace, ty: &crate::monoty::MonoTy) -> bool {
     let (payload, _) = ty.peel_nullable();
     let crate::monoty::MonoTy::App {
-        ctor: crate::monoty::MonoCtor::Nominal(name), ..
+        ctor: crate::monoty::MonoCtor::Nominal(name),
+        ..
     } = payload
     else {
         return false;
@@ -1164,7 +1221,13 @@ impl RepArena {
             if let Some(id) = cache.by_key.get(key) {
                 return Some(*id);
             }
-            let id = self.inner.lock().expect("RepArena lock poisoned").by_key.get(key).copied();
+            let id = self
+                .inner
+                .lock()
+                .expect("RepArena lock poisoned")
+                .by_key
+                .get(key)
+                .copied();
             if let Some(id) = id {
                 cache.by_key.insert(key.clone(), id);
             }
@@ -1173,7 +1236,11 @@ impl RepArena {
     }
 
     fn alias_key(&self, key: RepKey, id: RepId) {
-        self.inner.lock().expect("RepArena lock poisoned").by_key.insert(key.clone(), id);
+        self.inner
+            .lock()
+            .expect("RepArena lock poisoned")
+            .by_key
+            .insert(key.clone(), id);
         REP_READ_CACHE.with(|cache| {
             let mut cache = cache.borrow_mut();
             cache.reset_for(self.arena_id);
@@ -1218,13 +1285,15 @@ impl RepArena {
         nobox: bool,
         boxable: bool,
     ) -> RepId {
-        self.intern_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.intern_attempts
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let key = RepKey::Layout(target, use_context, layout, storage, column_eligible, nobox);
         REP_READ_CACHE.with(|cache| {
             let mut cache = cache.borrow_mut();
             cache.reset_for(self.arena_id);
             if let Some(id) = cache.by_key.get(&key) {
-                self.local_intern_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.local_intern_hits
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 return *id;
             }
             let id = {
@@ -1232,13 +1301,23 @@ impl RepArena {
                 match inner.by_key.get(&key) {
                     Some(id) => *id,
                     None => {
-                        self.intern_new.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        self.intern_new
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         let id = RepId {
                             arena: self.arena_id,
                             index: inner.plans.len() as u32,
                         };
-                        let RepKey::Layout(target, use_context, layout, storage, column_eligible, nobox) =
-                            key.clone() else { unreachable!() };
+                        let RepKey::Layout(
+                            target,
+                            use_context,
+                            layout,
+                            storage,
+                            column_eligible,
+                            nobox,
+                        ) = key.clone()
+                        else {
+                            unreachable!()
+                        };
                         inner.plans.push(RepPlan {
                             id,
                             target,
@@ -1293,7 +1372,9 @@ impl RepArena {
 
     fn intern_nested_value_plans(&self, ws: &Workspace, target: FnBackend, shape: &ValueShape) {
         for (_, field) in &shape.fields {
-            let FieldShape::Nested(child) = field else { continue };
+            let FieldShape::Nested(child) = field else {
+                continue;
+            };
             let child_ty = crate::monoty::MonoTy::App {
                 ctor: crate::monoty::MonoCtor::Nominal(child.name),
                 params: Vec::new(),
@@ -1318,18 +1399,26 @@ impl RepArena {
             ty,
             RepUse::Boundary,
             &RepUseFacts::default(),
-            RepGuarantees { nobox: declared_nobox(ws, ty), allow_opaque: false },
+            RepGuarantees {
+                nobox: declared_nobox(ws, ty),
+                allow_opaque: false,
+            },
         )
     }
 
     pub fn get(&self, id: RepId) -> RepPlan {
-        self.get_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        assert_eq!(id.arena, self.arena_id, "RepId must belong to its build arena");
+        self.get_calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            id.arena, self.arena_id,
+            "RepId must belong to its build arena"
+        );
         REP_READ_CACHE.with(|cache| {
             let mut cache = cache.borrow_mut();
             cache.reset_for(self.arena_id);
             if let Some(Some(plan)) = cache.plans.get(id.index as usize) {
-                self.local_get_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.local_get_hits
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 return plan.clone();
             }
             let plan = self
@@ -1353,7 +1442,12 @@ impl RepArena {
             intern_attempts: self.intern_attempts.load(Ordering::Relaxed),
             local_intern_hits: self.local_intern_hits.load(Ordering::Relaxed),
             intern_new: self.intern_new.load(Ordering::Relaxed),
-            plans: self.inner.lock().expect("RepArena lock poisoned").plans.len() as u64,
+            plans: self
+                .inner
+                .lock()
+                .expect("RepArena lock poisoned")
+                .plans
+                .len() as u64,
         }
     }
 
@@ -1402,7 +1496,10 @@ impl RepArena {
             &ty,
             RepUse::Value,
             &RepUseFacts::default(),
-            RepGuarantees { nobox: false, allow_opaque: true },
+            RepGuarantees {
+                nobox: false,
+                allow_opaque: true,
+            },
         )
     }
 
@@ -1434,7 +1531,9 @@ impl RepArena {
             ),
         };
         if nullable {
-            return Err(reject("nullable elements have no native C-array ctype".into()));
+            return Err(reject(
+                "nullable elements have no native C-array ctype".into(),
+            ));
         }
         match element {
             crate::monoty::MonoTy::Int => Ok((Ustr::from("int"), None)),
@@ -1442,7 +1541,8 @@ impl RepArena {
             crate::monoty::MonoTy::Float => Ok((Ustr::from("float"), None)),
             crate::monoty::MonoTy::Bool => Ok((Ustr::from("bool"), None)),
             crate::monoty::MonoTy::App {
-                ctor: crate::monoty::MonoCtor::Nominal(name), ..
+                ctor: crate::monoty::MonoCtor::Nominal(name),
+                ..
             } => {
                 let id = self
                     .plan(
@@ -1451,7 +1551,10 @@ impl RepArena {
                         element,
                         RepUse::Boundary,
                         &RepUseFacts::default(),
-                        RepGuarantees { nobox: false, allow_opaque: true },
+                        RepGuarantees {
+                            nobox: false,
+                            allow_opaque: true,
+                        },
                     )
                     .map_err(|error| reject(error.message))?;
                 let plan = self.get(id);
@@ -1531,7 +1634,8 @@ impl RepArena {
         target: FnBackend,
         name: Ustr,
     ) -> Result<usize, RepError> {
-        self.nominal_leaf_layout(ws, target, name).map(|(_, size, _)| size)
+        self.nominal_leaf_layout(ws, target, name)
+            .map(|(_, size, _)| size)
     }
 
     pub fn nominal_leaf_view_ctys(
@@ -1594,10 +1698,11 @@ impl RepArena {
                 message: format!("{} is not an FFI-clean CData representation", shape.name),
             });
         }
-        let (leaves, size, align) = crate::lower::value_leaf_layout(ws, shape.name).ok_or_else(|| RepError {
-            span: None,
-            message: format!("`{}` has no C leaf layout", shape.name),
-        })?;
+        let (leaves, size, align) =
+            crate::lower::value_leaf_layout(ws, shape.name).ok_or_else(|| RepError {
+                span: None,
+                message: format!("`{}` has no C leaf layout", shape.name),
+            })?;
         let want = crate::lower::value_leaf_paths(&shape);
         let got: Vec<Ustr> = leaves.iter().map(|leaf| leaf.path).collect();
         if want != got {
@@ -1666,9 +1771,15 @@ impl RepArena {
     ) -> Result<RepId, RepError> {
         use crate::monoty::{MonoCtor, MonoTy};
 
-        if !matches!(ty, MonoTy::Nullable(_) | MonoTy::Tuple(_)
-            | MonoTy::App { ctor: MonoCtor::Nominal(_), .. })
-        {
+        if !matches!(
+            ty,
+            MonoTy::Nullable(_)
+                | MonoTy::Tuple(_)
+                | MonoTy::App {
+                    ctor: MonoCtor::Nominal(_),
+                    ..
+                }
+        ) {
             return self.plan_uncached(ws, target, ty, use_context, facts, guarantees);
         }
         // The arena belongs to one build's declarations. Index successful
@@ -1701,7 +1812,10 @@ impl RepArena {
     ) -> Result<RepId, RepError> {
         use crate::monoty::{MonoCtor, MonoTy};
 
-        let reject = |message: String| RepError { span: facts.span, message };
+        let reject = |message: String| RepError {
+            span: facts.span,
+            message,
+        };
         let tuple_element_shape = matches!(use_context, RepUse::TupleElement);
         match ty {
             MonoTy::Nullable(inner) => match inner.as_ref() {
@@ -1709,14 +1823,7 @@ impl RepArena {
                     let slots = parts
                         .iter()
                         .map(|part| {
-                            self.plan(
-                                ws,
-                                target,
-                                part,
-                                RepUse::TupleElement,
-                                facts,
-                                guarantees,
-                            )
+                            self.plan(ws, target, part, RepUse::TupleElement, facts, guarantees)
                         })
                         .collect::<Result<Vec<_>, _>>()?;
                     let splats = slots.iter().any(|id| self.get(*id).lanes(self) > 1);
@@ -1727,7 +1834,10 @@ impl RepArena {
                         return Ok(self.intern(
                             target,
                             use_context,
-                            RepLayout::Tuple { slots, nullable: true },
+                            RepLayout::Tuple {
+                                slots,
+                                nullable: true,
+                            },
                         ));
                     }
                     if guarantees.nobox && !guarantees.allow_opaque {
@@ -1739,7 +1849,13 @@ impl RepArena {
                     let shape =
                         wire_value_shape(ws, ty, use_context, guarantees, tuple_element_shape);
                     if let Some(shape) = shape {
-                        return Ok(self.intern_value_shape_plan(ws, target, use_context, ty, shape));
+                        return Ok(self.intern_value_shape_plan(
+                            ws,
+                            target,
+                            use_context,
+                            ty,
+                            shape,
+                        ));
                     }
                     if guarantees.nobox && !guarantees.allow_opaque {
                         return Err(reject(format!(
@@ -1754,14 +1870,7 @@ impl RepArena {
                 let slots = parts
                     .iter()
                     .map(|part| {
-                        self.plan(
-                            ws,
-                            target,
-                            part,
-                            RepUse::TupleElement,
-                            facts,
-                            guarantees,
-                        )
+                        self.plan(ws, target, part, RepUse::TupleElement, facts, guarantees)
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 let splats = slots.iter().any(|id| self.get(*id).lanes(self) > 1);
@@ -1772,7 +1881,10 @@ impl RepArena {
                     return Ok(self.intern(
                         target,
                         use_context,
-                        RepLayout::Tuple { slots, nullable: false },
+                        RepLayout::Tuple {
+                            slots,
+                            nullable: false,
+                        },
                     ));
                 }
                 if guarantees.nobox && !facts.tuple_spelled {
@@ -1780,7 +1892,10 @@ impl RepArena {
                 }
                 Ok(self.intern(target, use_context, RepLayout::Opaque))
             }
-            MonoTy::App { ctor: MonoCtor::Nominal(_), .. } => {
+            MonoTy::App {
+                ctor: MonoCtor::Nominal(_),
+                ..
+            } => {
                 let shape = wire_value_shape(ws, ty, use_context, guarantees, tuple_element_shape);
                 if let Some(shape) = shape {
                     return Ok(self.intern_value_shape_plan(ws, target, use_context, ty, shape));
@@ -1795,7 +1910,10 @@ impl RepArena {
             }
             MonoTy::App { .. } => {
                 if guarantees.nobox && !guarantees.allow_opaque {
-                    return Err(reject(format!("{} cannot cross a nobox boundary", ty.render())));
+                    return Err(reject(format!(
+                        "{} cannot cross a nobox boundary",
+                        ty.render()
+                    )));
                 }
                 Ok(self.intern(target, use_context, RepLayout::Opaque))
             }
@@ -1807,9 +1925,7 @@ impl RepArena {
             | MonoTy::Any
             | MonoTy::Unit
             | MonoTy::Never
-            | MonoTy::Function { .. } => {
-                Ok(self.intern(target, use_context, RepLayout::Opaque))
-            }
+            | MonoTy::Function { .. } => Ok(self.intern(target, use_context, RepLayout::Opaque)),
         }
     }
 
@@ -1849,12 +1965,12 @@ impl RepArena {
                 .chain(result.map(|id| (params.len(), id, RepUse::Return)))
                 .filter(|(_, id, _)| {
                     let plan = self.get(*id);
-                    matches!(plan.layout(), RepLayout::Leaves(_))
-                        && !plan.nobox()
-                        && plan.boxable()
+                    matches!(plan.layout(), RepLayout::Leaves(_)) && !plan.nobox() && plan.boxable()
                 })
                 .max_by_key(|(index, id, _)| (lanes(id), std::cmp::Reverse(*index)));
-            let Some((index, _, use_context)) = widest else { return };
+            let Some((index, _, use_context)) = widest else {
+                return;
+            };
             let boxed = self.intern(target, use_context, RepLayout::Opaque);
             match use_context {
                 RepUse::Return => *result = Some(boxed),
@@ -1903,7 +2019,11 @@ impl RepArena {
         first_class: bool,
     ) -> Result<FunctionRepPlan, RepError> {
         let (ty, _) = ty.peel_nullable();
-        let crate::monoty::MonoTy::Function { params: fn_params, ret } = ty else {
+        let crate::monoty::MonoTy::Function {
+            params: fn_params,
+            ret,
+        } = ty
+        else {
             return Err(RepError {
                 span: None,
                 message: "a function-value representation requires a function type".into(),
@@ -1912,19 +2032,23 @@ impl RepArena {
         let mut params = fn_params
             .iter()
             .map(|param| {
-                let tuple_spelled = if matches!(param.peel_nullable().0, crate::monoty::MonoTy::Tuple(_)) {
-                    let id = self.plan(
-                        ws,
-                        target,
-                        param,
-                        RepUse::Return,
-                        &RepUseFacts::default(),
-                        RepGuarantees { nobox: true, allow_opaque: true },
-                    )?;
-                    self.get(id).splats(self)
-                } else {
-                    false
-                };
+                let tuple_spelled =
+                    if matches!(param.peel_nullable().0, crate::monoty::MonoTy::Tuple(_)) {
+                        let id = self.plan(
+                            ws,
+                            target,
+                            param,
+                            RepUse::Return,
+                            &RepUseFacts::default(),
+                            RepGuarantees {
+                                nobox: true,
+                                allow_opaque: true,
+                            },
+                        )?;
+                        self.get(id).splats(self)
+                    } else {
+                        false
+                    };
                 if first_class && !tuple_spelled {
                     Ok(self.intern(target, RepUse::Parameter, RepLayout::Opaque))
                 } else {
@@ -1933,17 +2057,21 @@ impl RepArena {
                         target,
                         param,
                         RepUse::Parameter,
-                        &RepUseFacts { tuple_spelled, span: None },
-                        RepGuarantees { nobox: nobox_only, allow_opaque: true },
+                        &RepUseFacts {
+                            tuple_spelled,
+                            span: None,
+                        },
+                        RepGuarantees {
+                            nobox: nobox_only,
+                            allow_opaque: true,
+                        },
                     )
                 }
             })
             .collect::<Result<Vec<_>, _>>()?;
         let mut result = if matches!(ret.as_ref(), crate::monoty::MonoTy::Unit) {
             None
-        } else if first_class
-            && !matches!(ret.peel_nullable().0, crate::monoty::MonoTy::Tuple(_))
-        {
+        } else if first_class && !matches!(ret.peel_nullable().0, crate::monoty::MonoTy::Tuple(_)) {
             Some(self.intern(target, RepUse::Return, RepLayout::Opaque))
         } else {
             Some(self.plan(
@@ -1955,11 +2083,16 @@ impl RepArena {
                     tuple_spelled: matches!(ret.peel_nullable().0, crate::monoty::MonoTy::Tuple(_)),
                     span: None,
                 },
-                RepGuarantees { nobox: nobox_only, allow_opaque: true },
+                RepGuarantees {
+                    nobox: nobox_only,
+                    allow_opaque: true,
+                },
             )?)
         };
         self.apply_lane_budget(target, &mut params, &mut result);
-        let scalar_abi = params.iter().any(|id| !matches!(self.get(*id).layout(), RepLayout::Opaque))
+        let scalar_abi = params
+            .iter()
+            .any(|id| !matches!(self.get(*id).layout(), RepLayout::Opaque))
             || result.is_some_and(|id| matches!(self.get(id).layout(), RepLayout::Leaves(_)));
         let return_lanes = result.map_or(0, |id| self.get(id).lanes(self));
         Ok(FunctionRepPlan {
@@ -1991,75 +2124,109 @@ impl RepArena {
                         tuple_spelled: declared_tuple_spelled(ws, param.ty),
                         span: None,
                     },
-                    RepGuarantees { nobox: mode.nobox_only_for(&ty), allow_opaque: true },
+                    RepGuarantees {
+                        nobox: mode.nobox_only_for(&ty),
+                        allow_opaque: true,
+                    },
                 )?,
                 (None, Some(ty)) if declared_tuple_spelled(ws, param.ty) => self.plan(
                     ws,
                     target,
                     &ty,
                     RepUse::Parameter,
-                    &RepUseFacts { tuple_spelled: true, span: None },
-                    RepGuarantees { nobox: false, allow_opaque: true },
+                    &RepUseFacts {
+                        tuple_spelled: true,
+                        span: None,
+                    },
+                    RepGuarantees {
+                        nobox: false,
+                        allow_opaque: true,
+                    },
                 )?,
                 _ => self.intern(target, RepUse::Parameter, RepLayout::Opaque),
             };
             params.push(id);
         }
 
-        let mut result = f.return_ty.map(|return_ty| {
-            let ty = declared_mono_type(ws, return_ty, subst)?;
-            if ty.as_ref().is_some_and(|ty| matches!(ty, crate::monoty::MonoTy::Unit)) {
-                return Ok(None);
-            }
-            let tuple_spelled = declared_tuple_spelled(ws, return_ty);
-            let id = if let Some(ty) = ty {
-                let is_tuple = matches!(ty, crate::monoty::MonoTy::Tuple(_));
-                if let Some(mode) = mode {
-                    self.plan(
-                        ws,
-                        target,
-                        &ty,
-                        RepUse::Return,
-                        &RepUseFacts { tuple_spelled: tuple_spelled || is_tuple, span: None },
-                        RepGuarantees { nobox: mode.nobox_only_for(&ty), allow_opaque: true },
-                    )?
-                } else if is_tuple {
-                    self.plan(
-                        ws,
-                        target,
-                        &ty,
-                        RepUse::Return,
-                        &RepUseFacts { tuple_spelled: true, span: None },
-                        RepGuarantees::default(),
-                    )?
+        let mut result = f
+            .return_ty
+            .map(|return_ty| {
+                let ty = declared_mono_type(ws, return_ty, subst)?;
+                if ty
+                    .as_ref()
+                    .is_some_and(|ty| matches!(ty, crate::monoty::MonoTy::Unit))
+                {
+                    return Ok(None);
+                }
+                let tuple_spelled = declared_tuple_spelled(ws, return_ty);
+                let id = if let Some(ty) = ty {
+                    let is_tuple = matches!(ty, crate::monoty::MonoTy::Tuple(_));
+                    if let Some(mode) = mode {
+                        self.plan(
+                            ws,
+                            target,
+                            &ty,
+                            RepUse::Return,
+                            &RepUseFacts {
+                                tuple_spelled: tuple_spelled || is_tuple,
+                                span: None,
+                            },
+                            RepGuarantees {
+                                nobox: mode.nobox_only_for(&ty),
+                                allow_opaque: true,
+                            },
+                        )?
+                    } else if is_tuple {
+                        self.plan(
+                            ws,
+                            target,
+                            &ty,
+                            RepUse::Return,
+                            &RepUseFacts {
+                                tuple_spelled: true,
+                                span: None,
+                            },
+                            RepGuarantees::default(),
+                        )?
+                    } else {
+                        self.intern(target, RepUse::Return, RepLayout::Opaque)
+                    }
                 } else {
                     self.intern(target, RepUse::Return, RepLayout::Opaque)
-                }
-            } else {
-                self.intern(target, RepUse::Return, RepLayout::Opaque)
-            };
-            Ok(Some(id))
-        }).transpose()?.flatten();
+                };
+                Ok(Some(id))
+            })
+            .transpose()?
+            .flatten();
         self.apply_lane_budget(target, &mut params, &mut result);
         let scalar_abi = mode.is_some()
-            && (params
-                .iter()
-                .any(|id| matches!(self.get(*id).layout(), RepLayout::Leaves(_) | RepLayout::Tuple { .. }))
-                || result.is_some_and(|id| matches!(self.get(id).layout(), RepLayout::Leaves(_))));
+            && (params.iter().any(|id| {
+                matches!(
+                    self.get(*id).layout(),
+                    RepLayout::Leaves(_) | RepLayout::Tuple { .. }
+                )
+            }) || result
+                .is_some_and(|id| matches!(self.get(id).layout(), RepLayout::Leaves(_))));
         let return_lanes = result.map_or(0, |id| self.get(id).lanes(self));
-        Ok(FunctionRepPlan { params, result, return_lanes, scalar_abi })
+        Ok(FunctionRepPlan {
+            params,
+            result,
+            return_lanes,
+            scalar_abi,
+        })
     }
 
-    pub(crate) fn boxed_function(
-        &self,
-        target: FnBackend,
-        param_count: usize,
-    ) -> FunctionRepPlan {
+    pub(crate) fn boxed_function(&self, target: FnBackend, param_count: usize) -> FunctionRepPlan {
         let params = (0..param_count)
             .map(|_| self.intern(target, RepUse::Parameter, RepLayout::Opaque))
             .collect();
         let result = self.intern(target, RepUse::Return, RepLayout::Opaque);
-        FunctionRepPlan { params, result: Some(result), return_lanes: 1, scalar_abi: false }
+        FunctionRepPlan {
+            params,
+            result: Some(result),
+            return_lanes: 1,
+            scalar_abi: false,
+        }
     }
 
     fn function_from_concrete(
@@ -2084,7 +2251,10 @@ impl RepArena {
                         target,
                         ty,
                         RepUse::Parameter,
-                        &RepUseFacts { tuple_spelled, span: None },
+                        &RepUseFacts {
+                            tuple_spelled,
+                            span: None,
+                        },
                         RepGuarantees {
                             nobox: mode.nobox_only_for(&ty),
                             allow_opaque: true,
@@ -2104,8 +2274,14 @@ impl RepArena {
                             target,
                             ty,
                             RepUse::Parameter,
-                            &RepUseFacts { tuple_spelled: true, span: None },
-                            RepGuarantees { nobox: false, allow_opaque: true },
+                            &RepUseFacts {
+                                tuple_spelled: true,
+                                span: None,
+                            },
+                            RepGuarantees {
+                                nobox: false,
+                                allow_opaque: true,
+                            },
                         )
                         .expect("concrete ABI planner must accept a validated tuple parameter")
                     } else {
@@ -2128,7 +2304,10 @@ impl RepArena {
                     target,
                     ty,
                     RepUse::Return,
-                    &RepUseFacts { tuple_spelled, span: None },
+                    &RepUseFacts {
+                        tuple_spelled,
+                        span: None,
+                    },
                     RepGuarantees {
                         nobox: mode.is_some_and(|mode| mode.nobox_only_for(ty)),
                         allow_opaque: true,
@@ -2202,13 +2381,15 @@ fn owner_abi_plan_impl(
     let derived = if !requires_concrete_body_plan(ws, owner) {
         BackendFnAbiPlan::for_boundary_instance(ws, scx, owner)
     } else {
-        let plan = in_hand.or_else(|| plans.get(owner).map(|plan| &**plan)).ok_or_else(|| {
-            skull_parser::CompilerError::new_no_location(format!(
-                "internal: concrete ABI plan is missing for owner `{}` ({})",
-                ws.module(owner.func.module).functions[owner.func.func].name,
-                owner.func.func.into_raw().into_u32(),
-            ))
-        })?;
+        let plan = in_hand
+            .or_else(|| plans.get(owner).map(|plan| &**plan))
+            .ok_or_else(|| {
+                skull_parser::CompilerError::new_no_location(format!(
+                    "internal: concrete ABI plan is missing for owner `{}` ({})",
+                    ws.module(owner.func.module).functions[owner.func.func].name,
+                    owner.func.func.into_raw().into_u32(),
+                ))
+            })?;
         BackendFnAbiPlan::for_concrete_plan(ws, scx, plan)
     };
     let derived = Arc::new(derived);
@@ -2255,9 +2436,9 @@ pub(super) fn callee_abi_plan_for_instance(
     let derived = if !requires_concrete_body_plan(ws, inst) {
         Arc::new(BackendFnAbiPlan::for_boundary_instance(ws, scx, &selected))
     } else {
-        if let Some(at) = crate::monoty::too_deep_to_instantiate(
-            inst.arg_types(scx.interner()).iter(),
-        ) {
+        if let Some(at) =
+            crate::monoty::too_deep_to_instantiate(inst.arg_types(scx.interner()).iter())
+        {
             let f = &ws.module(inst.func.module).functions[inst.func.func];
             return Err(skull_parser::CompilerError::new_with_label(
                 f.name_span,
@@ -2313,13 +2494,15 @@ pub fn selected_sibling_abi_plan(
     if let Some(selected_plan) = plans.get(selected) {
         return Arc::new(BackendFnAbiPlan::for_concrete_plan(ws, scx, selected_plan));
     }
-    Arc::new(BackendFnAbiPlan::for_concrete_signature(ws, scx, selected, &canonical.signature))
+    Arc::new(BackendFnAbiPlan::for_concrete_signature(
+        ws,
+        scx,
+        selected,
+        &canonical.signature,
+    ))
 }
 
-pub fn requires_concrete_body_plan(
-    ws: &Workspace,
-    inst: &crate::instance::Instance,
-) -> bool {
+pub fn requires_concrete_body_plan(ws: &Workspace, inst: &crate::instance::Instance) -> bool {
     let f = &ws.module(inst.func.module).functions[inst.func.func];
     !f.is_extern
         && f.inline_body.is_none()
@@ -2341,7 +2524,9 @@ impl AbiMode {
     fn nobox_only_for(self, ty: &crate::monoty::MonoTy) -> bool {
         // Declared boundaries keep their nullable nominal transport. Only
         // Rock bodies can adopt the ordinary value presence/leaf return.
-        self.nobox_only || (self.fixed_nullable_transport && matches!(ty,
+        self.nobox_only
+            || (self.fixed_nullable_transport
+                && matches!(ty,
             crate::monoty::MonoTy::Nullable(inner) if matches!(inner.as_ref(),
                 crate::monoty::MonoTy::App { ctor: crate::monoty::MonoCtor::Nominal(_), .. })))
     }
@@ -2391,9 +2576,10 @@ fn abi_mode_spec(
         return None;
     }
     let has_scalar_abi = f.annotations.iter().any(|a| a.is_builtin("scalar_abi"));
-    let name_is_fixed = f.annotations.iter().any(|a| {
-        (a.is_builtin("nomangle") && subst.is_empty()) || a.is_builtin("test")
-    });
+    let name_is_fixed = f
+        .annotations
+        .iter()
+        .any(|a| (a.is_builtin("nomangle") && subst.is_empty()) || a.is_builtin("test"));
     let nobox_only = if has_scalar_abi {
         false
     } else {
@@ -2404,7 +2590,9 @@ fn abi_mode_spec(
     };
     Some(AbiMode {
         nobox_only,
-        fixed_nullable_transport: f.inline_body.is_some() || name_is_fixed || f.name.as_str() == "main",
+        fixed_nullable_transport: f.inline_body.is_some()
+            || name_is_fixed
+            || f.name.as_str() == "main",
     })
 }
 
@@ -2460,15 +2648,28 @@ impl Eq for BackendFnAbiPlan {}
 
 pub(super) fn expanded_nullable_parameter_shape(ws: &Workspace, shape: &ValueShape) -> ValueShape {
     let mut expanded = shape.clone();
-    if shape.nullable { return expanded; }
+    if shape.nullable {
+        return expanded;
+    }
     if let Some(sid) = ws.struct_by_name.get(&shape.name) {
         let sd = &ws.modules[sid.module.index()].structs[sid.def];
         for (name, field) in &mut expanded.fields {
-            if !matches!(field, FieldShape::Prim) { continue; }
-            let Some(decl) = sd.fields.iter().find(|decl| decl.name == *name) else { continue };
-            let Some((child, true)) = super::shape::nominal_name_from_ty(ws, decl.ty) else { continue };
-            let Some(mut child) = super::shape::planned_value(ws, child).and_then(|p| p.shape) else { continue };
-            if child.leaf_count() > WIDE_VALUE_PAYLOAD_LEAF_CUT { continue; }
+            if !matches!(field, FieldShape::Prim) {
+                continue;
+            }
+            let Some(decl) = sd.fields.iter().find(|decl| decl.name == *name) else {
+                continue;
+            };
+            let Some((child, true)) = super::shape::nominal_name_from_ty(ws, decl.ty) else {
+                continue;
+            };
+            let Some(mut child) = super::shape::planned_value(ws, child).and_then(|p| p.shape)
+            else {
+                continue;
+            };
+            if child.leaf_count() > WIDE_VALUE_PAYLOAD_LEAF_CUT {
+                continue;
+            }
             child.nullable = true;
             *field = FieldShape::Nested(child);
         }
@@ -2494,11 +2695,7 @@ impl BackendFnAbiPlan {
 
     /// Build the ABI from the graph-owned concrete signature. No declaration
     /// substitution is reconstructed on this path.
-    pub fn for_concrete_plan(
-        ws: &Workspace,
-        scx: &ScalarCtx,
-        plan: &ConcreteBodyPlan,
-    ) -> Self {
+    pub fn for_concrete_plan(ws: &Workspace, scx: &ScalarCtx, plan: &ConcreteBodyPlan) -> Self {
         let inst = plan
             .function_instance()
             .expect("a function ABI plan needs an ordinary concrete owner");
@@ -2543,7 +2740,15 @@ impl BackendFnAbiPlan {
             transport: None,
             body_dependent_parameters: false,
         };
-        if !params.iter().any(|ty| matches!(ty, crate::monoty::MonoTy::App { ctor: crate::monoty::MonoCtor::Ref, .. })) {
+        if !params.iter().any(|ty| {
+            matches!(
+                ty,
+                crate::monoty::MonoTy::App {
+                    ctor: crate::monoty::MonoCtor::Ref,
+                    ..
+                }
+            )
+        }) {
             abi.expand_nullable_parameter_children(ws, scx);
             abi.narrow_parameter_transport(ws, scx);
         }
@@ -2561,7 +2766,8 @@ impl BackendFnAbiPlan {
         ty: &crate::monoty::MonoTy,
     ) -> Result<FunctionRepPlan, RepError> {
         if scx.values_first_class {
-            scx.rep_arena().function_value_first_class(ws, scx.target, ty)
+            scx.rep_arena()
+                .function_value_first_class(ws, scx.target, ty)
         } else {
             scx.rep_arena().function_value(ws, scx.target, ty)
         }
@@ -2573,7 +2779,8 @@ impl BackendFnAbiPlan {
         ty: &crate::monoty::MonoTy,
         nobox_only: bool,
     ) -> Result<FunctionRepPlan, RepError> {
-        scx.rep_arena().function_value_with_mode(ws, scx.target, ty, nobox_only)
+        scx.rep_arena()
+            .function_value_with_mode(ws, scx.target, ty, nobox_only)
     }
 
     fn assemble(
@@ -2599,13 +2806,23 @@ impl BackendFnAbiPlan {
         }
     }
 
-    fn permits_parameter_transport(&self, ws: &Workspace, scx: &ScalarCtx, with_defaults: bool) -> bool {
+    fn permits_parameter_transport(
+        &self,
+        ws: &Workspace,
+        scx: &ScalarCtx,
+        with_defaults: bool,
+    ) -> bool {
         let f = &ws.module(self.subject.func.module).functions[self.subject.func.func];
-        !(scx.values_first_class || !matches!(self.target, FnBackend::Lua | FnBackend::Any)
-            || scx.taken_by_ref.contains(&f.name) || f.is_extern || f.inline_body.is_some()
-            || f.is_coroutine || f.is_variadic || !f.annotations.is_empty()
-            || (!with_defaults && f.num_required != f.param_decls.len()) || !self.uses_scalar_abi()
-        )
+        !(scx.values_first_class
+            || !matches!(self.target, FnBackend::Lua | FnBackend::Any)
+            || scx.taken_by_ref.contains(&f.name)
+            || f.is_extern
+            || f.inline_body.is_some()
+            || f.is_coroutine
+            || f.is_variadic
+            || !f.annotations.is_empty()
+            || (!with_defaults && f.num_required != f.param_decls.len())
+            || !self.uses_scalar_abi())
     }
 
     // Parameter transport can snapshot compact nullable children as scalar
@@ -2613,7 +2830,9 @@ impl BackendFnAbiPlan {
     // A defaulted parameter keeps its declared wire, which its default fill and
     // omitted-argument nils are built against; the others still expand.
     fn expand_nullable_parameter_children(&mut self, ws: &Workspace, scx: &ScalarCtx) {
-        if !self.permits_parameter_transport(ws, scx, true) { return; }
+        if !self.permits_parameter_transport(ws, scx, true) {
+            return;
+        }
         let f = &ws.module(self.subject.func.module).functions[self.subject.func.func];
         let mut shapes = Vec::new();
         let mut lanes = 0;
@@ -2629,13 +2848,20 @@ impl BackendFnAbiPlan {
             lanes += expanded.leaf_count();
             shapes.push((expanded != *shape).then_some(expanded));
         }
-        if lanes + 1 > SIGNATURE_SCALAR_LANE_BUDGET { return; }
+        if lanes + 1 > SIGNATURE_SCALAR_LANE_BUDGET {
+            return;
+        }
         for (i, shape) in shapes.into_iter().enumerate() {
             let Some(shape) = shape else { continue };
             let rep = self.arena.get(self.representation.params[i]);
             self.representation.params[i] = self.arena.intern_with_facts(
-                self.target, RepUse::Parameter, RepLayout::Leaves(shape),
-                rep.storage, false, rep.nobox, false,
+                self.target,
+                RepUse::Parameter,
+                RepLayout::Leaves(shape),
+                rep.storage,
+                false,
+                rep.nobox,
+                false,
             );
         }
     }
@@ -2644,15 +2870,29 @@ impl BackendFnAbiPlan {
         use bone_semantic::hir::BodyOwner;
         // Field demand does not read default expressions, so defaults keep the
         // full transport here.
-        if !self.permits_parameter_transport(ws, scx, false) { return; }
+        if !self.permits_parameter_transport(ws, scx, false) {
+            return;
+        }
         self.body_dependent_parameters = self.representation.params.iter().any(|id| {
             matches!(self.arena.get(*id).layout(), RepLayout::Leaves(shape)
                 if !shape.nullable && ws.struct_by_name.contains_key(&shape.name))
         });
-        if !self.body_dependent_parameters { return; }
-        let Some(body) = ws.module(self.subject.func.module).bodies.get(&BodyOwner::Function(self.subject.func.func)) else { return };
-        let Some(demand) = super::parameter_demand::fields(body) else { return };
-        if demand.len() != self.representation.params.len() { return; }
+        if !self.body_dependent_parameters {
+            return;
+        }
+        let Some(body) = ws
+            .module(self.subject.func.module)
+            .bodies
+            .get(&BodyOwner::Function(self.subject.func.func))
+        else {
+            return;
+        };
+        let Some(demand) = super::parameter_demand::fields(body) else {
+            return;
+        };
+        if demand.len() != self.representation.params.len() {
+            return;
+        }
         let original = self.representation.params.clone();
         let mut lanes = Vec::new();
         let mut offset = 0;
@@ -2660,15 +2900,21 @@ impl BackendFnAbiPlan {
             let rep = self.arena.get(id);
             let width = rep.lanes(&self.arena);
             if let RepLayout::Leaves(shape) = rep.layout()
-                && !shape.nullable && ws.struct_by_name.contains_key(&shape.name)
+                && !shape.nullable
+                && ws.struct_by_name.contains_key(&shape.name)
                 && let Some(fields) = &demand[i]
-                && fields.iter().all(|field| shape.fields.iter().any(|(name, _)| name == field))
+                && fields
+                    .iter()
+                    .all(|field| shape.fields.iter().any(|(name, _)| name == field))
             {
                 let mut narrowed = shape.clone();
                 narrowed.fields.clear();
                 let mut leaf = offset;
                 for (name, field) in &shape.fields {
-                    let n = match field { FieldShape::Prim => 1, FieldShape::Nested(s) => s.leaf_count() };
+                    let n = match field {
+                        FieldShape::Prim => 1,
+                        FieldShape::Nested(s) => s.leaf_count(),
+                    };
                     if fields.contains(name) {
                         narrowed.fields.push((*name, field.clone()));
                         lanes.extend(leaf..leaf + n);
@@ -2677,31 +2923,55 @@ impl BackendFnAbiPlan {
                 }
                 if narrowed.fields.len() != shape.fields.len() {
                     self.representation.params[i] = self.arena.intern_with_facts(
-                        self.target, RepUse::Parameter, RepLayout::Leaves(narrowed),
-                        rep.storage, false, rep.nobox, false,
+                        self.target,
+                        RepUse::Parameter,
+                        RepLayout::Leaves(narrowed),
+                        rep.storage,
+                        false,
+                        rep.nobox,
+                        false,
                     );
                 }
-            } else { lanes.extend(offset..offset + width); }
+            } else {
+                lanes.extend(offset..offset + width);
+            }
             offset += width;
         }
-        if lanes.len() != offset { self.transport = Some(ParameterTransport { original, lanes }); }
+        if lanes.len() != offset {
+            self.transport = Some(ParameterTransport { original, lanes });
+        }
     }
 
     /// Evaluate the original argument layout before dropping unused transport.
     /// A projected layout is not a complete value and must never be boxed.
     pub(super) fn argument_shapes(&self) -> Vec<RetSlot> {
-        self.transport.as_ref().map_or_else(|| self.param_shapes(), |transport| {
-            transport.original.iter().map(|id| self.arena.ret_slot(*id)).collect()
-        })
+        self.transport.as_ref().map_or_else(
+            || self.param_shapes(),
+            |transport| {
+                transport
+                    .original
+                    .iter()
+                    .map(|id| self.arena.ret_slot(*id))
+                    .collect()
+            },
+        )
     }
 
-    pub(super) fn transport_arguments<T: Copy>(&self, args: Vec<T>) -> Result<Vec<T>, skull_parser::CompilerError> {
+    pub(super) fn transport_arguments<T: Copy>(
+        &self,
+        args: Vec<T>,
+    ) -> Result<Vec<T>, skull_parser::CompilerError> {
         match &self.transport {
             Some(transport) => {
-                let expected: usize = transport.original.iter().map(|id| self.arena.get(*id).lanes(&self.arena)).sum();
+                let expected: usize = transport
+                    .original
+                    .iter()
+                    .map(|id| self.arena.get(*id).lanes(&self.arena))
+                    .sum();
                 if args.len() != expected {
                     return Err(skull_parser::CompilerError::new_no_location(format!(
-                        "argument transport expected {expected} original lanes, received {}", args.len()
+                        "argument transport expected {expected} original lanes, received {}",
+                        args.len()
                     )));
                 }
                 Ok(transport.lanes.iter().map(|&lane| args[lane]).collect())
@@ -2711,7 +2981,9 @@ impl BackendFnAbiPlan {
     }
 
     /// Body edits can change this direct-call layout even when it is currently full.
-    pub fn body_dependent_parameters(&self) -> bool { self.body_dependent_parameters }
+    pub fn body_dependent_parameters(&self) -> bool {
+        self.body_dependent_parameters
+    }
 
     pub fn decl(&self) -> FuncRef {
         self.subject.func
@@ -2729,7 +3001,11 @@ impl BackendFnAbiPlan {
     /// The ABI compatibility witness for a code slot. It deliberately expands
     /// the representation through the arena instead of retaining a `RepId`.
     pub fn logical_fingerprint(&self) -> String {
-        format!("target={:?};{}", self.target, self.representation.logical_fingerprint(&self.arena))
+        format!(
+            "target={:?};{}",
+            self.target,
+            self.representation.logical_fingerprint(&self.arena)
+        )
     }
 
     pub fn rep_plan(&self, id: RepId) -> RepPlan {
@@ -2754,12 +3030,16 @@ impl BackendFnAbiPlan {
     /// distinct from [`Self::param_shapes`], which flattens the distinction
     /// away for the lowering path that treats both as "no splatting".
     pub(super) fn ret_shape(&self) -> Option<ValueShape> {
-        self.representation.result().and_then(|id| self.arena.value_shape(id))
+        self.representation
+            .result()
+            .and_then(|id| self.arena.value_shape(id))
     }
 
     /// The declared return's tuple shape under this body's substitution.
     pub(crate) fn ret_tuple(&self) -> Option<TupleRetShape> {
-        self.representation.result().and_then(|id| self.arena.tuple_shape(id))
+        self.representation
+            .result()
+            .and_then(|id| self.arena.tuple_shape(id))
     }
 
     /// Physical values on the result wire: 0 with no return, 1 for an ordinary
@@ -2799,8 +3079,12 @@ impl BackendFnAbiPlan {
     /// count, 1 otherwise). Per declared param rather than per slot so a
     /// defaulted value-struct param counts as its whole leaf group.
     pub fn param_leaf_widths(&self) -> Option<Vec<usize>> {
-        self.uses_scalar_abi()
-            .then(|| self.param_shapes().iter().map(RetSlot::slot_count).collect())
+        self.uses_scalar_abi().then(|| {
+            self.param_shapes()
+                .iter()
+                .map(RetSlot::slot_count)
+                .collect()
+        })
     }
 }
 pub(crate) fn rep_logical_fingerprint(arena: &RepArena, id: RepId) -> String {
@@ -2854,7 +3138,11 @@ mod wide_value_cut_tests {
         let cut = WIDE_VALUE_PAYLOAD_LEAF_CUT;
         assert_eq!(payload_leaf_count(&shape(cut, false)), cut);
         assert_eq!(payload_leaf_count(&shape(cut, true)), cut);
-        assert_eq!(shape(cut, true).leaf_count(), cut + 1, "the fixture must carry a presence flag");
+        assert_eq!(
+            shape(cut, true).leaf_count(),
+            cut + 1,
+            "the fixture must carry a presence flag"
+        );
         assert_eq!(payload_leaf_count(&shape(cut + 1, true)), cut + 1);
     }
 }
@@ -2874,16 +3162,25 @@ mod rep_read_cache_tests {
         let ib = b.intern(
             FnBackend::Lua,
             RepUse::Return,
-            RepLayout::Foreign { reason: Ustr::from("test") },
+            RepLayout::Foreign {
+                reason: Ustr::from("test"),
+            },
         );
-        assert_eq!(ia.raw(), ib.raw(), "both arenas must mint local id 0 for the fixture to discriminate");
+        assert_eq!(
+            ia.raw(),
+            ib.raw(),
+            "both arenas must mint local id 0 for the fixture to discriminate"
+        );
         assert_ne!(ia, ib, "arena ownership must distinguish equal local ids");
         for _ in 0..2 {
             assert!(matches!(a.get(ia).layout(), RepLayout::Opaque));
             assert!(matches!(b.get(ib).layout(), RepLayout::Foreign { .. }));
         }
         let ib2 = b.intern(FnBackend::Lua, RepUse::Return, RepLayout::Opaque);
-        assert_ne!(ib, ib2, "b's opaque return must not be served a's local mapping");
+        assert_ne!(
+            ib, ib2,
+            "b's opaque return must not be served a's local mapping"
+        );
     }
 
     /// An insert AFTER this thread warmed its local cache must still be
@@ -2907,17 +3204,25 @@ mod rep_read_cache_tests {
             RepUse::Value,
             RepLayout::Leaves(ValueShape {
                 name: Ustr::from("Pair"),
-                fields: vec![(Ustr::from("x"), FieldShape::Prim), (Ustr::from("y"), FieldShape::Prim)],
+                fields: vec![
+                    (Ustr::from("x"), FieldShape::Prim),
+                    (Ustr::from("y"), FieldShape::Prim),
+                ],
                 nullable: false,
             }),
         );
         let first = arena.get(id);
         let second = arena.get(id);
-        let (RepLayout::Leaves(left), RepLayout::Leaves(right)) = (first.layout(), second.layout()) else {
+        let (RepLayout::Leaves(left), RepLayout::Leaves(right)) = (first.layout(), second.layout())
+        else {
             panic!("shape representation expected");
         };
         assert_eq!(left, right);
-        assert_eq!(left.fields.as_ptr(), right.fields.as_ptr(), "immutable shape reads must not copy fields");
+        assert_eq!(
+            left.fields.as_ptr(),
+            right.fields.as_ptr(),
+            "immutable shape reads must not copy fields"
+        );
     }
 
     #[test]
@@ -2927,7 +3232,10 @@ mod rep_read_cache_tests {
         let id = arena.intern(
             FnBackend::Lua,
             RepUse::Return,
-            RepLayout::Tuple { slots: vec![scalar, scalar], nullable: false },
+            RepLayout::Tuple {
+                slots: vec![scalar, scalar],
+                nullable: false,
+            },
         );
         let first = arena.get(id);
         let second = arena.get(id);
@@ -2937,6 +3245,10 @@ mod rep_read_cache_tests {
             panic!("tuple representation expected");
         };
         assert_eq!(left, right);
-        assert_eq!(left.as_ptr(), right.as_ptr(), "immutable tuple reads must not copy slots");
+        assert_eq!(
+            left.as_ptr(),
+            right.as_ptr(),
+            "immutable tuple reads must not copy slots"
+        );
     }
 }

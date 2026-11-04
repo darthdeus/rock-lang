@@ -9,13 +9,13 @@
 //! compilation-unit loader, watch, global directory metadata) reads facts from
 //! here instead of re-walking manifests.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use rock_core::source_code::Dialect;
 
-use super::{dependency_matches_channel, StickConfig};
+use super::{StickConfig, dependency_matches_channel};
 
 /// Dense package id, stable within one graph build. Ids are assigned in
 /// DFS discovery order (root = 0, then each dependency subtree in declared
@@ -125,7 +125,11 @@ impl Builder {
                 manifest_dir.display()
             )
         })?;
-        if let Some((_, name)) = self.stack.iter().find(|(root_on_stack, _)| root_on_stack == &root) {
+        if let Some((_, name)) = self
+            .stack
+            .iter()
+            .find(|(root_on_stack, _)| root_on_stack == &root)
+        {
             let mut chain: Vec<&str> = self.stack.iter().map(|(_, n)| n.as_str()).collect();
             chain.push(name.as_str());
             return Err(anyhow!(
@@ -149,28 +153,47 @@ impl Builder {
         for (name, group) in declared_groups {
             let relative = Path::new(&group.directory);
             if relative.as_os_str().is_empty()
-                || !relative.components().all(|c| matches!(c, std::path::Component::Normal(_)))
+                || !relative
+                    .components()
+                    .all(|c| matches!(c, std::path::Component::Normal(_)))
             {
-                return Err(anyhow!("source group `{name}` directory must be a nonempty package-relative path"));
+                return Err(anyhow!(
+                    "source group `{name}` directory must be a nonempty package-relative path"
+                ));
             }
             if group.channels.is_empty() {
-                return Err(anyhow!("source group `{name}` must select at least one channel"));
+                return Err(anyhow!(
+                    "source group `{name}` must select at least one channel"
+                ));
             }
             for selected in &group.channels {
-                if !config.build.as_ref().is_some_and(|b| b.channels.contains(selected)) {
-                    return Err(anyhow!("source group `{name}` names undeclared channel `{selected}`"));
+                if !config
+                    .build
+                    .as_ref()
+                    .is_some_and(|b| b.channels.contains(selected))
+                {
+                    return Err(anyhow!(
+                        "source group `{name}` names undeclared channel `{selected}`"
+                    ));
                 }
             }
             let directory = fs_err::canonicalize(root.join(relative)).map_err(|e| {
-                anyhow!("source group `{name}` directory `{}` cannot be resolved: {e}", group.directory)
+                anyhow!(
+                    "source group `{name}` directory `{}` cannot be resolved: {e}",
+                    group.directory
+                )
             })?;
             if directory == root || !directory.starts_with(&root) || !directory.is_dir() {
-                return Err(anyhow!("source group `{name}` directory must be a directory below its package root"));
+                return Err(anyhow!(
+                    "source group `{name}` directory must be a directory below its package root"
+                ));
             }
             if source_groups.iter().any(|other: &SourceGroup| {
                 directory.starts_with(&other.directory) || other.directory.starts_with(&directory)
             }) {
-                return Err(anyhow!("source group `{name}` overlaps another source group"));
+                return Err(anyhow!(
+                    "source group `{name}` overlaps another source group"
+                ));
             }
             source_groups.push(SourceGroup {
                 name: name.clone(),
@@ -192,7 +215,8 @@ impl Builder {
                     let (dir, name) = match &detailed.source {
                         super::DependencySource::Path(path) => (manifest_dir.join(path), None),
                         super::DependencySource::Package(name) => (
-                            rock_stdlib::package_dir(name).map_err(|e| anyhow!("dependency `{key}`: {e}"))?,
+                            rock_stdlib::package_dir(name)
+                                .map_err(|e| anyhow!("dependency `{key}`: {e}"))?,
                             Some(name),
                         ),
                     };
@@ -212,7 +236,8 @@ impl Builder {
                 if dep_config.package.name != *name {
                     return Err(anyhow!(
                         "package `{name}` at `{}` declares name `{}`",
-                        dep_manifest.display(), dep_config.package.name
+                        dep_manifest.display(),
+                        dep_config.package.name
                     ));
                 }
             }
@@ -262,9 +287,7 @@ impl Builder {
                     .iter()
                     .any(|e| e.declared_key == *first_key && e.target == edge.target);
                 let detail = if same_target {
-                    format!(
-                        "both point at `{other}`; drop one or rename the keys"
-                    )
+                    format!("both point at `{other}`; drop one or rename the keys")
                 } else {
                     format!(
                         "they point at different packages (`{first_key}` also resolves here, `{other}` is distinct)"
@@ -300,9 +323,7 @@ impl Builder {
                 eprintln!(
                     "rock: warning: package `{}`: `allow_legacy` on dependency `{}` is redundant; \
                      `{}` already selects modules = \"v1\" and the flag can be removed",
-                    config.package.name,
-                    edge.declared_key,
-                    target.manifest_name,
+                    config.package.name, edge.declared_key, target.manifest_name,
                 );
             }
         }
@@ -355,8 +376,10 @@ pub fn normalize_dep_key(key: &str) -> Result<String> {
     let alias = key.replace('-', "_");
     let mut chars = alias.chars();
     let valid = match chars.next() {
-        Some(c) => (c.is_ascii_alphabetic() || c == '_')
-            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_'),
+        Some(c) => {
+            (c.is_ascii_alphabetic() || c == '_')
+                && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        }
         None => false,
     };
     if !valid {
@@ -425,7 +448,10 @@ impl PackageGraph {
         let path = match fs_err::canonicalize(path) {
             Ok(path) => path,
             Err(error) => {
-                log::debug!("cannot resolve package owner for {}: {error}", path.display());
+                log::debug!(
+                    "cannot resolve package owner for {}: {error}",
+                    path.display()
+                );
                 return None;
             }
         };
@@ -463,9 +489,11 @@ impl PackageGraph {
         if !self.owns_file(owner, path) {
             return false;
         }
-        !self.package(owner).source_groups.iter().any(|group| {
-            path.starts_with(&group.directory) && !group.active
-        })
+        !self
+            .package(owner)
+            .source_groups
+            .iter()
+            .any(|group| path.starts_with(&group.directory) && !group.active)
     }
 
     pub fn selected_rock_files(&self, owner: PackageId, directory: &Path) -> Result<Vec<PathBuf>> {
@@ -497,7 +525,10 @@ mod tests {
             "[package]\nname = \"x\"\nversion = \"0.1.0\"\n\n[language]\nmodules = \"v2\"\n",
         )
         .expect_err("unknown modules value must reject");
-        assert!(err.to_string().contains("unknown `[language] modules` value"));
+        assert!(
+            err.to_string()
+                .contains("unknown `[language] modules` value")
+        );
     }
 
     #[test]
@@ -533,8 +564,14 @@ mod tests {
 
         let err = PackageGraph::build(&root).expect_err("missing allow_legacy must reject");
         let msg = err.to_string();
-        assert!(msg.contains("allow_legacy"), "error should name the fix: {msg}");
-        assert!(msg.contains("legacy-lib"), "error should name the provider: {msg}");
+        assert!(
+            msg.contains("allow_legacy"),
+            "error should name the fix: {msg}"
+        );
+        assert!(
+            msg.contains("legacy-lib"),
+            "error should name the provider: {msg}"
+        );
 
         write_manifest(
             &root,
@@ -579,7 +616,10 @@ mod tests {
             "\n[dependencies]\na-b = { path = \"../p1\" }\na_b = { path = \"../p2\" }\n",
         );
         let err = PackageGraph::build(&root).expect_err("normalized collision must reject");
-        assert!(err.to_string().contains("a_b"), "error names the alias: {err}");
+        assert!(
+            err.to_string().contains("a_b"),
+            "error names the alias: {err}"
+        );
     }
 
     #[test]
@@ -594,7 +634,10 @@ mod tests {
             "\n[dependencies]\nstd = { path = \"../fake-std\" }\n",
         );
         let err = PackageGraph::build(&root).expect_err("reserved root must reject");
-        assert!(err.to_string().contains("reserved"), "error explains: {err}");
+        assert!(
+            err.to_string().contains("reserved"),
+            "error explains: {err}"
+        );
     }
 
     #[test]
@@ -616,7 +659,10 @@ mod tests {
             .iter()
             .map(|e| e.target)
             .collect();
-        assert_eq!(targets[0], targets[1], "both aliases resolve to one package");
+        assert_eq!(
+            targets[0], targets[1],
+            "both aliases resolve to one package"
+        );
         let shared = graph.package(targets[0]);
         assert_eq!(shared.manifest_name, "real-lib");
         assert_eq!(shared.self_name, "real_lib");
@@ -629,13 +675,29 @@ mod tests {
         let child = tmp.path().join("child");
         let grandchild = child.join("nested").join("grandchild");
         write_manifest(&grandchild, "grandchild", "");
-        write_manifest(&child, "child", "\n[dependencies]\ng = { path = \"nested/grandchild\" }\n");
-        write_manifest(&root, "app", "\n[dependencies]\nc = { path = \"../child\" }\n");
+        write_manifest(
+            &child,
+            "child",
+            "\n[dependencies]\ng = { path = \"nested/grandchild\" }\n",
+        );
+        write_manifest(
+            &root,
+            "app",
+            "\n[dependencies]\nc = { path = \"../child\" }\n",
+        );
 
         let graph = PackageGraph::build(&root).expect("transitive build");
         assert_eq!(graph.packages().len(), 3, "root + child + grandchild");
-        let names: Vec<&str> = graph.load_order().iter().map(|id| graph.package(*id).manifest_name.as_str()).collect();
-        assert_eq!(names, vec!["grandchild", "child", "app"], "providers load first");
+        let names: Vec<&str> = graph
+            .load_order()
+            .iter()
+            .map(|id| graph.package(*id).manifest_name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["grandchild", "child", "app"],
+            "providers load first"
+        );
     }
 
     #[test]
@@ -671,7 +733,11 @@ mod tests {
         );
 
         let graph = PackageGraph::build(&root).expect("build");
-        let names: Vec<&str> = graph.load_order().iter().map(|id| graph.package(*id).manifest_name.as_str()).collect();
+        let names: Vec<&str> = graph
+            .load_order()
+            .iter()
+            .map(|id| graph.package(*id).manifest_name.as_str())
+            .collect();
         assert_eq!(names, vec!["a-child", "b-child", "app"]);
     }
 
@@ -681,10 +747,17 @@ mod tests {
         let root = tmp.path().join("app");
         let inner = root.join("inner");
         write_manifest(&inner, "inner-v1", "\n[language]\nmodules = \"v1\"\n");
-        write_manifest(&root, "app", "\n[dependencies]\ninner = { path = \"inner\" }\n");
+        write_manifest(
+            &root,
+            "app",
+            "\n[dependencies]\ninner = { path = \"inner\" }\n",
+        );
 
         let err = PackageGraph::build(&root).expect_err("mixed ownership overlap must reject");
-        assert!(err.to_string().contains("inner-v1"), "error names the nested package: {err}");
+        assert!(
+            err.to_string().contains("inner-v1"),
+            "error names the nested package: {err}"
+        );
     }
 
     #[test]
@@ -694,7 +767,11 @@ mod tests {
         let root = tmp.path().join("app");
         let inner = root.join("lib");
         write_manifest(&inner, "inner", "\n[language]\nmodules = \"v1\"\n");
-        write_manifest(&root, "app", "\n[language]\nmodules = \"v1\"\n\n[dependencies]\ninner = { path = \"lib\" }\n");
+        write_manifest(
+            &root,
+            "app",
+            "\n[language]\nmodules = \"v1\"\n\n[dependencies]\ninner = { path = \"lib\" }\n",
+        );
         fs::write(root.join("main.rock"), "fn main() {}\n").expect("root source");
         fs::write(root.join("library.rock"), "fn sibling() {}\n").expect("sibling source");
         fs::write(inner.join("lib.rock"), "fn inner() {}\n").expect("dependency source");
@@ -707,10 +784,20 @@ mod tests {
         let root_id = graph.root();
         let inner_id = graph.package(root_id).dependencies[0].target;
         for path in [alias.join("main.rock"), alias.join("library.rock")] {
-            assert_eq!(graph.package_of_file(&path), Some(root_id), "{}", path.display());
+            assert_eq!(
+                graph.package_of_file(&path),
+                Some(root_id),
+                "{}",
+                path.display()
+            );
         }
         for path in [alias.join("lib/lib.rock"), alias.join("linked.rock")] {
-            assert_eq!(graph.package_of_file(&path), Some(inner_id), "{}", path.display());
+            assert_eq!(
+                graph.package_of_file(&path),
+                Some(inner_id),
+                "{}",
+                path.display()
+            );
         }
     }
 
@@ -720,7 +807,11 @@ mod tests {
         let root = tmp.path().join("app");
         let inner = root.join("inner");
         write_manifest(&inner, "inner-v1", "\n[language]\nmodules = \"v1\"\n");
-        write_manifest(&root, "app", "\n[language]\nmodules = \"v1\"\n\n[dependencies]\ninner = { path = \"inner\" }\n");
+        write_manifest(
+            &root,
+            "app",
+            "\n[language]\nmodules = \"v1\"\n\n[dependencies]\ninner = { path = \"inner\" }\n",
+        );
         fs::write(root.join("main.rock"), "fn main() {}\n").expect("write root source");
         fs::create_dir_all(&inner).expect("inner dir");
         fs::write(inner.join("lib.rock"), "fn inner_fn() {}\n").expect("write inner source");
@@ -730,8 +821,13 @@ mod tests {
         let main = fs::canonicalize(root.join("main.rock")).expect("canonical main");
         let inner_lib = fs::canonicalize(inner.join("lib.rock")).expect("canonical inner");
         assert!(graph.owns_file(root_id, &main));
-        assert!(!graph.owns_file(root_id, &inner_lib), "inner's file is not the root's");
-        let inner_id = graph.package_of_file(&inner_lib).expect("inner owns its file");
+        assert!(
+            !graph.owns_file(root_id, &inner_lib),
+            "inner's file is not the root's"
+        );
+        let inner_id = graph
+            .package_of_file(&inner_lib)
+            .expect("inner owns its file");
         assert_eq!(graph.package(inner_id).manifest_name, "inner-v1");
     }
 }

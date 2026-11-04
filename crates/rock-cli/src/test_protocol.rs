@@ -36,10 +36,17 @@ pub struct TestTime {
 /// a harness failure that shows the whole stdout; counting an unrecognized line
 /// as a pass would let a broken harness report green.
 pub fn parse_skull_markers(stdout: &str) -> Option<SkullMarkers> {
-    let mut markers = SkullMarkers { passed: 0, fails: Vec::new(), values: Vec::new(), times: Vec::new() };
+    let mut markers = SkullMarkers {
+        passed: 0,
+        fails: Vec::new(),
+        values: Vec::new(),
+        times: Vec::new(),
+    };
     let mut results = 0usize;
     for line in stdout.lines() {
-        let Some(body) = line.strip_prefix("__SKULL__\t") else { continue };
+        let Some(body) = line.strip_prefix("__SKULL__\t") else {
+            continue;
+        };
         let (kind, rest) = body.split_once('\t').unwrap_or((body, ""));
         let parsed = match kind {
             "PASS" if rest.is_empty() && body.len() > kind.len() => {
@@ -59,11 +66,13 @@ pub fn parse_skull_markers(stdout: &str) -> Option<SkullMarkers> {
             },
             "TIME" => {
                 let mut parts = rest.split('\t');
-                let time = (|| Some(TestTime {
-                    name: parts.next().filter(|n| !n.is_empty())?.to_string(),
-                    ms: parts.next()?.parse().ok()?,
-                    result: parts.next()?.to_string(),
-                }))();
+                let time = (|| {
+                    Some(TestTime {
+                        name: parts.next().filter(|n| !n.is_empty())?.to_string(),
+                        ms: parts.next()?.parse().ok()?,
+                        result: parts.next()?.to_string(),
+                    })
+                })();
                 match time {
                     Some(time) => {
                         markers.times.push(time);
@@ -109,7 +118,7 @@ pub fn compare_value(
                 _ => {
                     return Err(format!(
                         "value mismatch: expected <{b}> got unparseable <{got}>"
-                    ))
+                    ));
                 }
             };
             if g == *b {
@@ -145,15 +154,15 @@ pub fn compare_value(
 /// Bucket reason strings into a histogram sorted by count desc, ties by reason
 /// asc (deterministic output; the JS run's skip histogram IS the emitter work
 /// list, so ordering must be stable).
-pub fn reason_histogram<'a>(
-    reasons: impl IntoIterator<Item = &'a str>,
-) -> Vec<(String, usize)> {
+pub fn reason_histogram<'a>(reasons: impl IntoIterator<Item = &'a str>) -> Vec<(String, usize)> {
     let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     for r in reasons {
         *counts.entry(r).or_insert(0) += 1;
     }
-    let mut rows: Vec<(String, usize)> =
-        counts.into_iter().map(|(r, c)| (r.to_string(), c)).collect();
+    let mut rows: Vec<(String, usize)> = counts
+        .into_iter()
+        .map(|(r, c)| (r.to_string(), c))
+        .collect();
     rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     rows
 }
@@ -190,10 +199,21 @@ mod tests {
         let m = parse_skull_markers(stdout).expect("markers present");
         assert_eq!(m.passed, 1);
         assert_eq!(m.values.len(), 1);
-        assert_eq!(m.times, vec![
-            TestTime { name: "t_a".into(), ms: 12.5, result: "pass".into() },
-            TestTime { name: "t_b".into(), ms: 0.031, result: "value".into() },
-        ]);
+        assert_eq!(
+            m.times,
+            vec![
+                TestTime {
+                    name: "t_a".into(),
+                    ms: 12.5,
+                    result: "pass".into()
+                },
+                TestTime {
+                    name: "t_b".into(),
+                    ms: 0.031,
+                    result: "value".into()
+                },
+            ]
+        );
     }
 
     #[test]

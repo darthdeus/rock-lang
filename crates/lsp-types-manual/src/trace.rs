@@ -1,12 +1,14 @@
-
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub struct SetTraceParams {
     /// The new value that should be assigned to the trace setting.
     pub value: TraceValue,
 }
 
-impl_lsp_struct!(SetTraceParams,
-    required { value: TraceValue = "value" },
+impl_lsp_struct!(
+    SetTraceParams,
+    required {
+        value: TraceValue = "value"
+    },
     optional {}
 );
 
@@ -36,9 +38,14 @@ pub struct LogTraceParams {
     pub verbose: Option<String>,
 }
 
-impl_lsp_struct!(LogTraceParams,
-    required { message: String = "message" },
-    optional { verbose: String = "verbose" }
+impl_lsp_struct!(
+    LogTraceParams,
+    required {
+        message: String = "message"
+    },
+    optional {
+        verbose: String = "verbose"
+    }
 );
 
 #[cfg(test)]
@@ -49,7 +56,9 @@ mod tests {
     #[test]
     fn test_set_trace_params() {
         test_serialization(
-            &SetTraceParams { value: TraceValue::Off },
+            &SetTraceParams {
+                value: TraceValue::Off,
+            },
             r#"{"value":"off"}"#,
         );
     }
@@ -57,11 +66,17 @@ mod tests {
     #[test]
     fn test_log_trace_params() {
         test_serialization(
-            &LogTraceParams { message: "message".into(), verbose: None },
+            &LogTraceParams {
+                message: "message".into(),
+                verbose: None,
+            },
             r#"{"message":"message"}"#,
         );
         test_serialization(
-            &LogTraceParams { message: "message".into(), verbose: Some("verbose".into()) },
+            &LogTraceParams {
+                message: "message".into(),
+                verbose: Some("verbose".into()),
+            },
             r#"{"message":"message","verbose":"verbose"}"#,
         );
     }

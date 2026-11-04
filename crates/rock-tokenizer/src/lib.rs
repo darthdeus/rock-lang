@@ -9,9 +9,8 @@ pub mod lexical_regions;
 pub mod token;
 pub mod tokenizer;
 
-
-pub use interp::{scan_string, Flavor, Piece, Scan};
-pub use lexical_regions::{region_at, LexRegion};
+pub use interp::{Flavor, Piece, Scan, scan_string};
+pub use lexical_regions::{LexRegion, region_at};
 pub use token::*;
 pub use tokenizer::*;
 

@@ -174,7 +174,11 @@ fn a_named_out_of_order_column_argument_rejects() {
 /// The reach control: the same call written positionally already rejected.
 #[test]
 fn the_positional_form_rejects_too() {
-    assert!(outcome(POSITIONAL_CONTROL).expect_err("must reject").contains("column-stored `[G]`"));
+    assert!(
+        outcome(POSITIONAL_CONTROL)
+            .expect_err("must reject")
+            .contains("column-stored `[G]`")
+    );
 }
 
 #[test]
@@ -242,7 +246,10 @@ fn an_irrelevant_unbound_generic_does_not_disarm_the_rule() {
 
 #[test]
 fn an_irrelevant_unbound_generic_still_admits_a_boxed_element() {
-    assert_eq!(run(IRRELEVANT_UNBOUND_GENERIC_BOXED, "decl_unbound_boxed"), "1");
+    assert_eq!(
+        run(IRRELEVANT_UNBOUND_GENERIC_BOXED, "decl_unbound_boxed"),
+        "1"
+    );
 }
 
 /// A NULLABLE slot. `[T]?` names the same boxed representation once the value

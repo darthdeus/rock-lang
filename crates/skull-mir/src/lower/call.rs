@@ -38,17 +38,25 @@ impl Builder<'_> {
         {
             return Ok(None);
         }
-        let inst = self.concrete_callee_for_site(e)?
+        let inst = self
+            .concrete_callee_for_site(e)?
             .ok_or_else(|| self.gap_here("field_get has no concrete callee"))?;
-        let Some(ret) = self.concrete_callee_return_ty(e, &inst)? else { return Ok(None) };
+        let Some(ret) = self.concrete_callee_return_ty(e, &inst)? else {
+            return Ok(None);
+        };
         let (payload, nullable) = ret.peel_nullable();
-        let Some(child) = payload.nominal() else { return Ok(None) };
+        let Some(child) = payload.nominal() else {
+            return Ok(None);
+        };
         if !nullable || !self.is_nobox_struct(child) {
             return Ok(None);
         }
-        let owner = self.concrete_callee_param_ty(e, &inst, 0)?
+        let owner = self
+            .concrete_callee_param_ty(e, &inst, 0)?
             .ok_or_else(|| self.gap_here("field_get has no concrete owner type"))?;
-        let Some(parent) = owner.nominal() else { return Ok(None) };
+        let Some(parent) = owner.nominal() else {
+            return Ok(None);
+        };
         let fields = self.struct_field_names_required(parent)?;
         let mut flattened = false;
         for field in fields {
@@ -61,7 +69,10 @@ impl Builder<'_> {
             return Ok(None);
         }
         let id = self.concrete_rep_id(&ret, RepUse::Return, false, false)?;
-        let shape = self.scx.rep_arena().value_shape(id)
+        let shape = self
+            .scx
+            .rep_arena()
+            .value_shape(id)
             .ok_or_else(|| self.gap_here("flattened field_get result has no leaf shape"))?;
         let args = self.reorder_named_args(e, args, func, Some(&inst))?;
         let [owner, selector] = args.as_slice() else {
@@ -69,13 +80,17 @@ impl Builder<'_> {
         };
         // The field's own key is presence; its dotted keys hold the payload.
         let mut leaves = vec![self.emit_cur(Inst::Index {
-            base: *owner, index: *selector, kind: ContainerKind::Map,
+            base: *owner,
+            index: *selector,
+            kind: ContainerKind::Map,
         })];
         for path in value_leaf_paths(&shape) {
             let suffix = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(&format!(".{path}")))));
             let index = self.emit_cur(Inst::StringConcat(*selector, suffix));
             leaves.push(self.emit_cur(Inst::Index {
-                base: *owner, index, kind: ContainerKind::Map,
+                base: *owner,
+                index,
+                kind: ContainerKind::Map,
             }));
         }
         Ok(Some(self.rebuild_from_leaves(&shape, &leaves, &mut 0)))
@@ -96,7 +111,12 @@ impl Builder<'_> {
             expr: e,
             op: self.cur_op.clone(),
         };
-        let span = self.body.expr_spans.get(e).copied().unwrap_or(callee.name_span);
+        let span = self
+            .body
+            .expr_spans
+            .get(e)
+            .copied()
+            .unwrap_or(callee.name_span);
         let (category, detail) = if callee.inline_body.is_some() || callee.is_extern {
             (
                 crate::ablation::FatalCategory::TargetBoundary,
@@ -117,7 +137,13 @@ impl Builder<'_> {
         } else {
             return;
         };
-        crate::ablation::record(category, callee.name.as_str(), self.f.name.as_str(), span, detail);
+        crate::ablation::record(
+            category,
+            callee.name.as_str(),
+            self.f.name.as_str(),
+            span,
+            detail,
+        );
     }
 
     pub(crate) fn concrete_callee_for_site(
@@ -178,7 +204,8 @@ impl Builder<'_> {
             return Err(self.gap_here("concrete callee identity disagrees with its site plan"));
         }
         let signature = if crate::lower::requires_concrete_body_plan(self.ws, inst)
-            && crate::monoty::too_deep_to_instantiate(inst.arg_types(self.scx.interner()).iter()).is_none()
+            && crate::monoty::too_deep_to_instantiate(inst.arg_types(self.scx.interner()).iter())
+                .is_none()
         {
             &self
                 .concrete_plans
@@ -199,7 +226,10 @@ impl Builder<'_> {
         let id = slot.ok_or_else(|| {
             self.gap_here("concrete callee signature has no parameter for this argument")
         })?;
-        Ok(Some(self.concrete_mono_view(*id, ConcreteMonoConsumer::CallParameter)))
+        Ok(Some(self.concrete_mono_view(
+            *id,
+            ConcreteMonoConsumer::CallParameter,
+        )))
     }
 
     pub(crate) fn concrete_callee_return_ty(
@@ -217,18 +247,23 @@ impl Builder<'_> {
             return Err(self.gap_here("concrete callee identity disagrees with its site plan"));
         }
         let signature = if crate::lower::requires_concrete_body_plan(self.ws, inst)
-            && crate::monoty::too_deep_to_instantiate(inst.arg_types(self.scx.interner()).iter()).is_none()
+            && crate::monoty::too_deep_to_instantiate(inst.arg_types(self.scx.interner()).iter())
+                .is_none()
         {
             &self
                 .concrete_plans
                 .get(inst)
-                .ok_or_else(|| self.gap_here("concrete callee body plan is missing for its return"))?
+                .ok_or_else(|| {
+                    self.gap_here("concrete callee body plan is missing for its return")
+                })?
                 .signature
         } else {
             self.concrete_plan
                 .callee_signatures
                 .get(&site)
-                .ok_or_else(|| self.gap_here("concrete callee signature is missing for its return"))?
+                .ok_or_else(|| {
+                    self.gap_here("concrete callee signature is missing for its return")
+                })?
         };
         Ok(signature
             .result
@@ -247,12 +282,16 @@ impl Builder<'_> {
         };
         let result = if let Some(owner) = body_plan.callees.get(&site) {
             let signature = if crate::lower::requires_concrete_body_plan(self.ws, owner)
-                && crate::monoty::too_deep_to_instantiate(owner.arg_types(self.scx.interner()).iter()).is_none()
+                && crate::monoty::too_deep_to_instantiate(
+                    owner.arg_types(self.scx.interner()).iter(),
+                )
+                .is_none()
             {
-                &self.concrete_plans.get(owner).ok_or_else(|| {
-                    self.gap_here("concrete coroutine callee body plan is missing")
-                })?
-                .signature
+                &self
+                    .concrete_plans
+                    .get(owner)
+                    .ok_or_else(|| self.gap_here("concrete coroutine callee body plan is missing"))?
+                    .signature
             } else {
                 body_plan.callee_signatures.get(&site).ok_or_else(|| {
                     self.gap_here("concrete coroutine callee signature is missing")
@@ -262,11 +301,14 @@ impl Builder<'_> {
                 .result
                 .map(|id| self.concrete_mono_view(id, ConcreteMonoConsumer::CoroutineChannel))
         } else {
-            Some(self.concrete_expr_ty(receiver).ok_or_else(|| {
-                self.gap_here("concrete coroutine receiver has no type")
-            })?)
+            Some(
+                self.concrete_expr_ty(receiver)
+                    .ok_or_else(|| self.gap_here("concrete coroutine receiver has no type"))?,
+            )
         };
-        Ok(result.as_ref().and_then(|ty| CoroutinePlan::channel_for_concrete_type(self.ws, ty)))
+        Ok(result
+            .as_ref()
+            .and_then(|ty| CoroutinePlan::channel_for_concrete_type(self.ws, ty)))
     }
 
     pub(crate) fn callee_abi_plan_for_instance(
@@ -303,9 +345,15 @@ impl Builder<'_> {
         args: IdxRange<Expr>,
     ) -> Result<ValueRepr, CompilerError> {
         let trusted = match callee {
-            Callee::Unresolved { name, .. } => self.resolve_funcref(e, name).ok()
+            Callee::Unresolved { name, .. } => self
+                .resolve_funcref(e, name)
+                .ok()
                 .and_then(|f| self.select_backend_variant(e, name, f).ok())
-                .is_some_and(|f| self.ws.module(f.module).functions[f.func].inline_body.is_none()),
+                .is_some_and(|f| {
+                    self.ws.module(f.module).functions[f.func]
+                        .inline_body
+                        .is_none()
+                }),
             _ => false,
         };
         let r = self.with_value_lending(false, |s| s.lower_call_repr_inner(e, callee, args))?;
@@ -344,22 +392,37 @@ impl Builder<'_> {
         value: &ValueRepr,
     ) -> Result<Option<Rc<MonoTy>>, CompilerError> {
         if matches!(value, ValueRepr::Group { .. }) {
-            if let Expr::Call { callee: Callee::Unresolved { name, .. }, args, .. } =
-                &self.body.expr_arena[e]
+            if let Expr::Call {
+                callee: Callee::Unresolved { name, .. },
+                args,
+                ..
+            } = &self.body.expr_arena[e]
                 && name.as_str() == "__vec_data_get"
                 && let Some(recv) = args.into_iter().next()
                 && let Some(plan) = self.container_plan_for(recv, ContainerFamily::Vec)?
-                && matches!(plan.storage(), ContainerStorage::Columns { .. } | ContainerStorage::Strided { .. })
+                && matches!(
+                    plan.storage(),
+                    ContainerStorage::Columns { .. } | ContainerStorage::Strided { .. }
+                )
             {
                 let owner = self.concrete_ty(recv)?.ok_or_else(|| {
                     self.gap_here("intercepted Vec read has no concrete receiver type")
                 })?;
-                let MonoTy::App { ctor: MonoCtor::Array, params } = owner.peel_nullable().0 else {
+                let MonoTy::App {
+                    ctor: MonoCtor::Array,
+                    params,
+                } = owner.peel_nullable().0
+                else {
                     return Err(self.gap_here("intercepted Vec read has a non-Vec receiver type"));
                 };
-                return params.first().cloned().map(Rc::new).map(Some).ok_or_else(|| {
-                    self.gap_here("intercepted Vec read has no concrete element type")
-                });
+                return params
+                    .first()
+                    .cloned()
+                    .map(Rc::new)
+                    .map(Some)
+                    .ok_or_else(|| {
+                        self.gap_here("intercepted Vec read has no concrete element type")
+                    });
             }
         }
         Ok(self.concrete_expr_ty(e))
@@ -546,14 +609,19 @@ impl Builder<'_> {
         if let Callee::Unresolved { name, .. } = callee {
             if name.as_str() == "native_buffer_alloc" {
                 let [n_arg] = arg_idxs[..] else {
-                    return Err(gap("`native_buffer_alloc` takes exactly one argument (count)"));
+                    return Err(gap(
+                        "`native_buffer_alloc` takes exactly one argument (count)",
+                    ));
                 };
                 let span = self.body.expr_spans[e];
                 let (ctype, representation) = self.native_buffer_alloc_ctype(e, span)?;
                 let count = self.lower_expr(n_arg)?;
-                let ptr = self.emit_cur(Inst::FfiNewArray { ctype, count, representation });
-                let mut fields =
-                    vec![(Ustr::from("ptr"), ptr), (Ustr::from("len"), count)];
+                let ptr = self.emit_cur(Inst::FfiNewArray {
+                    ctype,
+                    count,
+                    representation,
+                });
+                let mut fields = vec![(Ustr::from("ptr"), ptr), (Ustr::from("len"), count)];
                 if representation.is_some() && self.is_leaf_addressed(ctype)? {
                     fields.extend(self.leaf_view_fields(ctype, ptr));
                 }
@@ -699,12 +767,18 @@ impl Builder<'_> {
             if name.as_str() == "resume" && !arg_idxs.is_empty() {
                 if let Some(channel) = self.concrete_coroutine_channel(arg_idxs[0])? {
                     let recv = self.lower_expr(arg_idxs[0])?;
-                    let advance = self.emit_cur(Inst::Field { base: recv, field: Ustr::from("__advance") });
+                    let advance = self.emit_cur(Inst::Field {
+                        base: recv,
+                        field: Ustr::from("__advance"),
+                    });
                     let mut cargs: Vec<Idx<Inst>> = vec![recv];
                     if let Some(&a) = arg_idxs.get(1) {
                         cargs.push(self.lower_expr(a)?);
                     }
-                    self.emit_cur(Inst::CallValue { callee: advance, args: cargs });
+                    self.emit_cur(Inst::CallValue {
+                        callee: advance,
+                        args: cargs,
+                    });
                     return Ok(self.resume_frame_read_channel(recv, &channel));
                 }
             }
@@ -731,8 +805,9 @@ impl Builder<'_> {
                 // it opaque forces the splice to rebuild an aggregate, which a
                 // presence-carrying element cannot be rebuilt into.
                 let shape = self.bound_next_tuple_shape(gidx)?;
-                let dests: Vec<Idx<Cell>> =
-                    (0..shape.slot_count()).map(|_| self.f.new_cell(None)).collect();
+                let dests: Vec<Idx<Cell>> = (0..shape.slot_count())
+                    .map(|_| self.f.new_cell(None))
+                    .collect();
                 let call = self.emit_cur(Inst::CallBoundMulti {
                     dests: dests.clone(),
                     generic_idx: gidx as u32,
@@ -741,8 +816,10 @@ impl Builder<'_> {
                 if shape.splats() {
                     self.f.bound_next_split.insert(call);
                 }
-                let loads: Vec<Idx<Inst>> =
-                    dests.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
+                let loads: Vec<Idx<Inst>> = dests
+                    .iter()
+                    .map(|c| self.emit_cur(Inst::Load(*c)))
+                    .collect();
                 return Ok(self.tuple_result(&shape, &loads));
             }
         }
@@ -756,7 +833,10 @@ impl Builder<'_> {
                 return Err(self.gap_here("fn-field call has no receiver"));
             };
             let receiver = self.lower_expr(receiver_arg)?;
-            let fieldv = self.emit_cur(Inst::Field { base: receiver, field });
+            let fieldv = self.emit_cur(Inst::Field {
+                base: receiver,
+                field,
+            });
             let field_ty = self
                 .inf
                 .and_then(|inf| inf.fn_field_call_types.get(&e))
@@ -764,9 +844,9 @@ impl Builder<'_> {
                 .ok_or_else(|| {
                     self.gap_here("fn-field call is missing its resolved function type")
                 })?;
-            let abi = self.fn_value_rep_plan(field_ty)?.ok_or_else(|| {
-                self.gap_here("fn-field call has no concrete function ABI plan")
-            })?;
+            let abi = self
+                .fn_value_rep_plan(field_ty)?
+                .ok_or_else(|| self.gap_here("fn-field call has no concrete function ABI plan"))?;
             return self.indirect_call_by_plan(abi, fieldv, call_args);
         }
         match callee {
@@ -793,18 +873,10 @@ impl Builder<'_> {
                     }
                     Some(ExpandKind::StructPairs) => self.expand_struct_pairs(e, func, &arg_idxs),
                     Some(ExpandKind::Materialize) => self.expand_materialize(&arg_idxs),
-                    Some(ExpandKind::ShaderPipeline) => {
-                        self.expand_shader_pipeline(e, &arg_idxs)
-                    }
-                    Some(ExpandKind::ComputeArtifact) => {
-                        self.expand_compute_artifact(e, &arg_idxs)
-                    }
-                    Some(ExpandKind::VertexLayout) => {
-                        self.expand_vertex_layout(e, func, &arg_idxs)
-                    }
-                    Some(ExpandKind::UniformBlock) => {
-                        self.expand_uniform_block(e, func, &arg_idxs)
-                    }
+                    Some(ExpandKind::ShaderPipeline) => self.expand_shader_pipeline(e, &arg_idxs),
+                    Some(ExpandKind::ComputeArtifact) => self.expand_compute_artifact(e, &arg_idxs),
+                    Some(ExpandKind::VertexLayout) => self.expand_vertex_layout(e, func, &arg_idxs),
+                    Some(ExpandKind::UniformBlock) => self.expand_uniform_block(e, func, &arg_idxs),
                     Some(ExpandKind::UniformValues) => {
                         self.expand_uniform_values(e, func, &arg_idxs)
                     }
@@ -833,8 +905,10 @@ impl Builder<'_> {
                             let g = self.emit_cur(Inst::Global(name));
                             return self.indirect_call_by_plan(abi, g, &arg_idxs);
                         }
-                        let arg_vals: Vec<Idx<Inst>> =
-                            arg_idxs.iter().map(|&a| self.lower_expr(a)).collect::<Result<_, _>>()?;
+                        let arg_vals: Vec<Idx<Inst>> = arg_idxs
+                            .iter()
+                            .map(|&a| self.lower_expr(a))
+                            .collect::<Result<_, _>>()?;
                         let g = self.emit_cur(Inst::Global(name));
                         let v = self.emit_call_value(e, g, arg_vals)?;
                         return Ok(ValueRepr::Scalar(v));
@@ -854,24 +928,28 @@ impl Builder<'_> {
                         self.f.code_value_identities.insert(g, identity);
                     }
                     let param_shapes = abi.param_slots(&self.scx.rep_arena());
-                    let arg_vals = self.slotted_call_args(
-                        e,
-                        &abi.param_names,
-                        &param_shapes,
-                        &arg_idxs,
-                        &[],
-                    )?;
+                    let arg_vals =
+                        self.slotted_call_args(e, &abi.param_names, &param_shapes, &arg_idxs, &[])?;
                     let Some(shape) = abi.result_shape(&self.scx.rep_arena()) else {
                         let v = self.emit_call_value(e, g, arg_vals)?;
                         self.f.call_rep_plans.insert(v, abi.representation.clone());
                         return Ok(ValueRepr::Scalar(v));
                     };
-                    let dests: Vec<Idx<Cell>> =
-                        (0..shape.leaf_count()).map(|_| self.f.new_cell(None)).collect();
-                    let call = self.emit_cur(Inst::CallValueMulti { dests: dests.clone(), callee: g, args: arg_vals });
-                    self.f.call_rep_plans.insert(call, abi.representation.clone());
-                    let leaves: Vec<Idx<Inst>> =
-                        dests.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
+                    let dests: Vec<Idx<Cell>> = (0..shape.leaf_count())
+                        .map(|_| self.f.new_cell(None))
+                        .collect();
+                    let call = self.emit_cur(Inst::CallValueMulti {
+                        dests: dests.clone(),
+                        callee: g,
+                        args: arg_vals,
+                    });
+                    self.f
+                        .call_rep_plans
+                        .insert(call, abi.representation.clone());
+                    let leaves: Vec<Idx<Inst>> = dests
+                        .iter()
+                        .map(|c| self.emit_cur(Inst::Load(*c)))
+                        .collect();
                     let mut idx = 0;
                     return Ok(self.rebuild_from_leaves(&shape, &leaves, &mut idx));
                 }
@@ -880,28 +958,39 @@ impl Builder<'_> {
                     .get(&raw(b))
                     .ok_or_else(|| gap("call to an unbound fn-typed local"))?;
                 let callee_v = self.emit_cur(Inst::Load(cell));
-                if let Some(abi) = self.fn_value_rep_plan(self.binding_ty(b).ok_or_else(|| {
-                    gap("fn-typed local has no physical function signature")
-                })?)? {
+                if let Some(abi) = self
+                    .fn_value_rep_plan(self.binding_ty(b).ok_or_else(|| {
+                        gap("fn-typed local has no physical function signature")
+                    })?)?
+                {
                     return self.indirect_call_by_plan(abi, callee_v, &arg_idxs);
                 }
                 // Nothing `nobox` in the signature -- args are boxed.
-                let arg_vals: Vec<Idx<Inst>> =
-                    arg_idxs.iter().map(|&a| self.lower_expr(a)).collect::<Result<_, _>>()?;
+                let arg_vals: Vec<Idx<Inst>> = arg_idxs
+                    .iter()
+                    .map(|&a| self.lower_expr(a))
+                    .collect::<Result<_, _>>()?;
                 let v = self.emit_call_value(e, callee_v, arg_vals)?;
                 Ok(ValueRepr::Scalar(v))
             }
             // A fn-typed expression result: lower it, call through it.
             Callee::Value(ve) => {
-                let abi = self.fn_value_rep_plan(*self.inf
-                    .and_then(|inf| inf.expr_types.get(ve))
-                    .ok_or_else(|| gap("fn-valued expression has no physical function signature"))?)?;
+                let abi = self.fn_value_rep_plan(
+                    *self
+                        .inf
+                        .and_then(|inf| inf.expr_types.get(ve))
+                        .ok_or_else(|| {
+                            gap("fn-valued expression has no physical function signature")
+                        })?,
+                )?;
                 let callee_v = self.lower_expr(ve)?;
                 if let Some(abi) = abi {
                     return self.indirect_call_by_plan(abi, callee_v, &arg_idxs);
                 }
-                let arg_vals: Vec<Idx<Inst>> =
-                    arg_idxs.iter().map(|&a| self.lower_expr(a)).collect::<Result<_, _>>()?;
+                let arg_vals: Vec<Idx<Inst>> = arg_idxs
+                    .iter()
+                    .map(|&a| self.lower_expr(a))
+                    .collect::<Result<_, _>>()?;
                 let v = self.emit_call_value(e, callee_v, arg_vals)?;
                 Ok(ValueRepr::Scalar(v))
             }
@@ -951,7 +1040,12 @@ impl Builder<'_> {
             .ok_or_else(|| self.gap_here("direct call has no concrete callee identity"))?;
         let delivery = self.concrete_delivery_instance(&callee_inst);
         let plan = self.callee_abi_plan_for_instance(&callee_inst)?;
-        Ok(DirectCall { tree, delivery, callee_inst, plan })
+        Ok(DirectCall {
+            tree,
+            delivery,
+            callee_inst,
+            plan,
+        })
     }
 
     /// Attach the bundle's identity records to the emitted call inst.
@@ -1002,7 +1096,9 @@ impl Builder<'_> {
             return Err(self.gap_here("concrete callee bound plan is empty for its site"));
         }
         if !plan.bound_tree.is_empty() {
-            self.f.resolved_bound_trees.insert(call, plan.bound_tree.clone());
+            self.f
+                .resolved_bound_trees
+                .insert(call, plan.bound_tree.clone());
         }
         Ok(())
     }
@@ -1071,7 +1167,9 @@ impl Builder<'_> {
         let callee = &self.ws.module(func.module).functions[func.func];
         // Resolve phantom before tuple flattening can project from its nil placeholder.
         if arg_idxs.is_empty()
-            && callee.inline_body.is_some_and(|(_, body)| body.trim() == "return nil")
+            && callee
+                .inline_body
+                .is_some_and(|(_, body)| body.trim() == "return nil")
         {
             return Ok(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))));
         }
@@ -1084,7 +1182,10 @@ impl Builder<'_> {
         let lua_opaque = self.call_scx.target() == bone_semantic::hir::FnBackend::Lua
             && callee.inline_body.is_some()
             && !callee.generics.is_empty()
-            && !callee.annotations.iter().any(|a| a.is_builtin("scalar_abi"));
+            && !callee
+                .annotations
+                .iter()
+                .any(|a| a.is_builtin("scalar_abi"));
         let ret_tuple = (!lua_opaque).then_some(declared_ret_tuple).flatten();
         // A flat-stored element passed to a `ref` parameter, or a `ref` result
         // addressing one, takes the flat-variant ABI (`flat_ref`). Only a
@@ -1092,7 +1193,9 @@ impl Builder<'_> {
         if matches!(self.cur_op, crate::site::SiteOp::DirectCall)
             && let Some(plan) = self.flat_call_plan(e)?
         {
-            return match self.lower_flat_call(e, func, arg_idxs, any_named, &dc, &plan, ret_tuple)? {
+            return match self
+                .lower_flat_call(e, func, arg_idxs, any_named, &dc, &plan, ret_tuple)?
+            {
                 FlatCallOut::Value(value) => Ok(value),
                 FlatCallOut::Flat(_) => Err(CompilerError::new_with_label(
                     self.body.expr_spans[e],
@@ -1121,10 +1224,16 @@ impl Builder<'_> {
             Some(shape) => {
                 let n = shape.leaf_count();
                 let dests: Vec<Idx<Cell>> = (0..n).map(|_| self.f.new_cell(None)).collect();
-                let call = self.emit_cur(Inst::CallMulti { dests: dests.clone(), func, args });
+                let call = self.emit_cur(Inst::CallMulti {
+                    dests: dests.clone(),
+                    func,
+                    args,
+                });
                 self.record_call(call, func, &dc)?;
-                let leaves: Vec<Idx<Inst>> =
-                    dests.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
+                let leaves: Vec<Idx<Inst>> = dests
+                    .iter()
+                    .map(|c| self.emit_cur(Inst::Load(*c)))
+                    .collect();
                 let mut idx = 0;
                 Ok(self.rebuild_from_leaves(&shape, &leaves, &mut idx))
             }
@@ -1156,10 +1265,7 @@ impl Builder<'_> {
         }
         let callee = &self.ws.module(func.module).functions[func.func];
         self.reject_nobox_boxed_call_args(func, arg_idxs)?;
-        self.reject_column_container_opaque_slots(
-            e,
-            &dc.callee_inst,
-        )?;
+        self.reject_column_container_opaque_slots(e, &dc.callee_inst)?;
         let has_tuple_storage = dc
             .plan
             .representation()
@@ -1178,12 +1284,16 @@ impl Builder<'_> {
                 .map(|(i, &a)| {
                     let t = self
                         .concrete_callee_param_ty(e, &dc.callee_inst, i)?
-                        .ok_or_else(|| self.gap_here("concrete call has no callee parameter type"))?;
+                        .ok_or_else(|| {
+                            self.gap_here("concrete call has no callee parameter type")
+                        })?;
                     if self.is_ref_call_arg(e, a) {
                         self.lower_ref_borrow(a)
                     } else {
                         let lend = callee.inline_body.is_none() && !callee.is_extern;
-                        let v = self.with_value_lending(lend, |s| s.lower_expr_with_expected(a, Some(t.as_ref())))?;
+                        let v = self.with_value_lending(lend, |s| {
+                            s.lower_expr_with_expected(a, Some(t.as_ref()))
+                        })?;
                         Ok(self.coerced_mono(v, a, t.as_ref()))
                     }
                 })
@@ -1221,9 +1331,16 @@ impl Builder<'_> {
             .into_iter()
             .map(|ty| self.f.new_cell_typed(None, ty))
             .collect();
-        let call = self.emit_cur(Inst::CallMulti { dests: dests.clone(), func, args });
+        let call = self.emit_cur(Inst::CallMulti {
+            dests: dests.clone(),
+            func,
+            args,
+        });
         self.record_call(call, func, dc)?;
-        let loads: Vec<Idx<Inst>> = dests.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
+        let loads: Vec<Idx<Inst>> = dests
+            .iter()
+            .map(|c| self.emit_cur(Inst::Load(*c)))
+            .collect();
         Ok(self.tuple_result(shape, &loads))
     }
 
@@ -1269,12 +1386,19 @@ impl Builder<'_> {
             return Ok(ValueRepr::Scalar(call));
         };
         if let Some(shape) = arena.tuple_shape(result) {
-            let dests: Vec<Idx<Cell>> =
-                (0..shape.slot_count()).map(|_| self.f.new_cell(None)).collect();
-            let call = self.emit_cur(Inst::CallValueMulti { dests: dests.clone(), callee, args: argv });
+            let dests: Vec<Idx<Cell>> = (0..shape.slot_count())
+                .map(|_| self.f.new_cell(None))
+                .collect();
+            let call = self.emit_cur(Inst::CallValueMulti {
+                dests: dests.clone(),
+                callee,
+                args: argv,
+            });
             self.f.call_rep_plans.insert(call, plan.clone());
-            let loads: Vec<Idx<Inst>> =
-                dests.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
+            let loads: Vec<Idx<Inst>> = dests
+                .iter()
+                .map(|c| self.emit_cur(Inst::Load(*c)))
+                .collect();
             return Ok(self.tuple_result(&shape, &loads));
         }
         let Some(shape) = arena.value_shape(result) else {
@@ -1282,12 +1406,19 @@ impl Builder<'_> {
             self.f.call_rep_plans.insert(call, plan.clone());
             return Ok(ValueRepr::Scalar(call));
         };
-        let dests: Vec<Idx<Cell>> =
-            (0..shape.leaf_count()).map(|_| self.f.new_cell(None)).collect();
-        let call = self.emit_cur(Inst::CallValueMulti { dests: dests.clone(), callee, args: argv });
+        let dests: Vec<Idx<Cell>> = (0..shape.leaf_count())
+            .map(|_| self.f.new_cell(None))
+            .collect();
+        let call = self.emit_cur(Inst::CallValueMulti {
+            dests: dests.clone(),
+            callee,
+            args: argv,
+        });
         self.f.call_rep_plans.insert(call, plan);
-        let leaves: Vec<Idx<Inst>> =
-            dests.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
+        let leaves: Vec<Idx<Inst>> = dests
+            .iter()
+            .map(|c| self.emit_cur(Inst::Load(*c)))
+            .collect();
         let mut idx = 0;
         Ok(self.rebuild_from_leaves(&shape, &leaves, &mut idx))
     }
@@ -1319,11 +1450,18 @@ impl Builder<'_> {
     ) -> Result<Idx<Inst>, CompilerError> {
         match shape {
             Some(shape) => {
-                let dests: Vec<Idx<Cell>> =
-                    (0..shape.slot_count()).map(|_| self.f.new_cell(None)).collect();
-                self.emit_cur(Inst::CallValueMulti { dests: dests.clone(), callee, args });
-                let loads: Vec<Idx<Inst>> =
-                    dests.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
+                let dests: Vec<Idx<Cell>> = (0..shape.slot_count())
+                    .map(|_| self.f.new_cell(None))
+                    .collect();
+                self.emit_cur(Inst::CallValueMulti {
+                    dests: dests.clone(),
+                    callee,
+                    args,
+                });
+                let loads: Vec<Idx<Inst>> = dests
+                    .iter()
+                    .map(|c| self.emit_cur(Inst::Load(*c)))
+                    .collect();
                 let r = self.tuple_result(&shape, &loads);
                 Ok(self.pack(r)?)
             }
@@ -1350,8 +1488,11 @@ impl Builder<'_> {
         recv: Idx<Inst>,
         arg_idxs: &[Idx<Expr>],
     ) -> Result<ValueRepr, CompilerError> {
-        let trusted = self.ws.module(func.module).functions[func.func].inline_body.is_none();
-        let r = self.with_value_lending(false, |s| s.ufcs_call_repr_inner(e, func, recv, arg_idxs))?;
+        let trusted = self.ws.module(func.module).functions[func.func]
+            .inline_body
+            .is_none();
+        let r =
+            self.with_value_lending(false, |s| s.ufcs_call_repr_inner(e, func, recv, arg_idxs))?;
         self.finish_call_repr(e, r, trusted)
     }
 
@@ -1420,11 +1561,16 @@ impl Builder<'_> {
             Some(shape) => {
                 let n = shape.leaf_count();
                 let dests: Vec<Idx<Cell>> = (0..n).map(|_| self.f.new_cell(None)).collect();
-                let call =
-                    self.emit_cur(Inst::CallMulti { dests: dests.clone(), func, args: argv });
+                let call = self.emit_cur(Inst::CallMulti {
+                    dests: dests.clone(),
+                    func,
+                    args: argv,
+                });
                 self.record_call(call, func, &dc)?;
-                let leaves: Vec<Idx<Inst>> =
-                    dests.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
+                let leaves: Vec<Idx<Inst>> = dests
+                    .iter()
+                    .map(|c| self.emit_cur(Inst::Load(*c)))
+                    .collect();
                 let mut idx = 0;
                 Ok(self.rebuild_from_leaves(&shape, &leaves, &mut idx))
             }
@@ -1499,9 +1645,12 @@ impl Builder<'_> {
             // literal operand is elided) and place each into its param slot.
             if self.body.spread_args.contains(&a) {
                 for (fname, r) in self.spread_field_bundles(a)? {
-                    let pidx = param_names.iter().position(|p| *p == fname).ok_or_else(|| {
-                        gap(format!("spread field `{fname}` matches no parameter"))
-                    })?;
+                    let pidx = param_names
+                        .iter()
+                        .position(|p| *p == fname)
+                        .ok_or_else(|| {
+                            gap(format!("spread field `{fname}` matches no parameter"))
+                        })?;
                     let representation = r.representation();
                     let owned = self.snapshot_opaque_value(r.into_value())?;
                     let bundle = ValueBundle::new(representation, owned);
@@ -1607,7 +1756,8 @@ impl Builder<'_> {
         };
         match r {
             ValueRepr::Scalar(v) => {
-                if !self.shallow_pack && !self.lending_pack
+                if !self.shallow_pack
+                    && !self.lending_pack
                     && (self.shareable_value_boxes.contains(&v)
                         || matches!(self.f.insts[v], Inst::Call { .. } | Inst::CallValue { .. }))
                     && let Some(ty) = self.borrowed_value_children.get(&v).cloned()
@@ -1650,11 +1800,11 @@ impl Builder<'_> {
                     tag: packed[0],
                     positional: packed[1..1 + shape.tuple_width()].to_vec(),
                     named: shape
-                    .record_fields
-                    .iter()
-                    .enumerate()
-                    .map(|(i, rf)| (*rf, packed[1 + shape.tuple_width() + i]))
-                    .collect(),
+                        .record_fields
+                        .iter()
+                        .enumerate()
+                        .map(|(i, rf)| (*rf, packed[1 + shape.tuple_width() + i]))
+                        .collect(),
                 };
                 Ok(self.materialize_flat_cells(&shape, cells))
             }
@@ -1671,15 +1821,23 @@ impl Builder<'_> {
             // An ORDINARY value has no residue check to catch a lost presence,
             // and its consumers (`let`, `== null`, a boxed argument) pack
             // without branching, so its box must be `nil` when absent.
-            ValueRepr::Group { name, parts, present: Some(present) }
-                if !self.is_nobox_struct(name) =>
-            {
-                self.pack_maybe_absent_boxed(
-                    ValueRepr::Group { name, parts, present: Some(present) },
-                    kind,
-                )
-            }
-            ValueRepr::Group { name, parts, present } => {
+            ValueRepr::Group {
+                name,
+                parts,
+                present: Some(present),
+            } if !self.is_nobox_struct(name) => self.pack_maybe_absent_boxed(
+                ValueRepr::Group {
+                    name,
+                    parts,
+                    present: Some(present),
+                },
+                kind,
+            ),
+            ValueRepr::Group {
+                name,
+                parts,
+                present,
+            } => {
                 // A leaf-table struct's physical keys ARE its leaves, so it
                 // packs through the flat `<Name>_lct` ctor. Packing it
                 // field-wise would box a flattened child under its declared
@@ -1701,10 +1859,16 @@ impl Builder<'_> {
                         .scx
                         .rep_arena()
                         .value_shape(representation)
-                        .ok_or_else(|| self.gap_here(format!("`{name}` has no planned value shape")))?;
+                        .ok_or_else(|| {
+                            self.gap_here(format!("`{name}` has no planned value shape"))
+                        })?;
                     let bundle = ValueBundle::new(
                         representation,
-                        ValueRepr::Group { name, parts, present },
+                        ValueRepr::Group {
+                            name,
+                            parts,
+                            present,
+                        },
                     );
                     let leaves = self.repr_to_leaves_bundle(&bundle)?;
                     let paths = value_leaf_paths(&shape);
@@ -1716,12 +1880,7 @@ impl Builder<'_> {
                         )));
                     }
                     let fields = paths.into_iter().zip(leaves).collect();
-                    let ctor = kind.value_ctor(
-                        name,
-                        representation,
-                        ValueCtorForm::Leaves,
-                        fields,
-                    );
+                    let ctor = kind.value_ctor(name, representation, ValueCtorForm::Leaves, fields);
                     Ok(self.emit_cur(ctor))
                 } else {
                     self.pack_group_fields(name, parts, kind)
@@ -1730,18 +1889,16 @@ impl Builder<'_> {
         }
     }
 
-    pub(crate) fn pack_bundle(
-        &mut self,
-        bundle: &ValueBundle,
-    ) -> Result<Idx<Inst>, CompilerError> {
-        if let ValueRepr::Group { name, parts, present: Some(present) } = bundle.value() {
+    pub(crate) fn pack_bundle(&mut self, bundle: &ValueBundle) -> Result<Idx<Inst>, CompilerError> {
+        if let ValueRepr::Group {
+            name,
+            parts,
+            present: Some(present),
+        } = bundle.value()
+        {
             return self.pack_typed_nullable(*name, parts.clone(), *present, BoxKind::Implicit);
         }
-        let Some(shape) = self
-            .scx
-            .rep_arena()
-            .tuple_shape(bundle.representation())
-        else {
+        let Some(shape) = self.scx.rep_arena().tuple_shape(bundle.representation()) else {
             return self.pack(bundle.value().clone());
         };
         let mut slots = self.tuple_repr_to_slots(bundle.value().clone(), &shape)?;
@@ -1806,7 +1963,14 @@ impl Builder<'_> {
         present: Idx<Inst>,
         kind: BoxKind,
     ) -> Result<Idx<Inst>, CompilerError> {
-        let value = self.pack_boxed(ValueRepr::Group { name, parts, present: None }, kind)?;
+        let value = self.pack_boxed(
+            ValueRepr::Group {
+                name,
+                parts,
+                present: None,
+            },
+            kind,
+        )?;
         Ok(self.emit_cur(Inst::MakeNullableValue { present, value }))
     }
 
@@ -1818,12 +1982,28 @@ impl Builder<'_> {
         kind: BoxKind,
     ) -> Result<Idx<Inst>, CompilerError> {
         let (present, value) = match r {
-            ValueRepr::Group { name, parts, present: Some(present) } => {
-                (present, ValueRepr::Group { name, parts, present: None })
-            }
-            ValueRepr::Tuple { parts, present: Some(present) } => {
-                (present, ValueRepr::Tuple { parts, present: None })
-            }
+            ValueRepr::Group {
+                name,
+                parts,
+                present: Some(present),
+            } => (
+                present,
+                ValueRepr::Group {
+                    name,
+                    parts,
+                    present: None,
+                },
+            ),
+            ValueRepr::Tuple {
+                parts,
+                present: Some(present),
+            } => (
+                present,
+                ValueRepr::Tuple {
+                    parts,
+                    present: None,
+                },
+            ),
             other => return self.pack_boxed(other, kind),
         };
         let result = self.f.new_cell(None);
@@ -1832,12 +2012,19 @@ impl Builder<'_> {
         let join = self.f.new_block();
         self.f.set_term(
             self.cur,
-            Term::Branch { cond: present, then_bb: present_bb, else_bb: absent_bb },
+            Term::Branch {
+                cond: present,
+                then_bb: present_bb,
+                else_bb: absent_bb,
+            },
         );
 
         self.cur = absent_bb;
         let nil = self.emit_cur(Inst::Const(Lit::Nil));
-        self.emit_cur(Inst::Store { cell: result, value: nil });
+        self.emit_cur(Inst::Store {
+            cell: result,
+            value: nil,
+        });
         self.f.set_term(self.cur, Term::Goto(join));
 
         self.cur = present_bb;
@@ -1845,7 +2032,10 @@ impl Builder<'_> {
         // same tier dispatch: a leaf-table or flat-enum payload has no
         // declared-field ctor to take.
         let boxed = self.pack_boxed(value, kind)?;
-        self.emit_cur(Inst::Store { cell: result, value: boxed });
+        self.emit_cur(Inst::Store {
+            cell: result,
+            value: boxed,
+        });
         self.f.set_term(self.cur, Term::Goto(join));
 
         self.cur = join;
@@ -1913,7 +2103,10 @@ impl Builder<'_> {
             for ((key, presence), leaf) in keys.into_iter().zip(leaves) {
                 let value = if presence {
                     let tag = self.emit_cur(Inst::Const(Lit::Bool(true)));
-                    self.emit_cur(Inst::MakeNullableValue { present: leaf, value: tag })
+                    self.emit_cur(Inst::MakeNullableValue {
+                        present: leaf,
+                        value: tag,
+                    })
                 } else {
                     leaf
                 };
@@ -1956,7 +2149,12 @@ impl Builder<'_> {
                     .ok_or_else(|| self.gap_here("a planned value group has too many fields"))?;
                 // A nullable nobox field is observable as null through its
                 // parent, so its presence must reach the field.
-                if let ValueRepr::Group { name, parts, present: Some(present) } = p {
+                if let ValueRepr::Group {
+                    name,
+                    parts,
+                    present: Some(present),
+                } = p
+                {
                     return Ok((fname, self.pack_typed_nullable(name, parts, present, kind)?));
                 }
                 Ok((fname, self.pack_boxed(p, kind)?))
@@ -2020,9 +2218,7 @@ impl Builder<'_> {
                 let v = self.pack(r.clone())?;
                 self.repr_to_leaves_shape(&ValueRepr::Scalar(v), shape)
             }
-            ValueRepr::Group {
-                parts, present, ..
-            } => {
+            ValueRepr::Group { parts, present, .. } => {
                 let mut out = Vec::new();
                 if shape.nullable {
                     out.push(match present {
@@ -2033,7 +2229,9 @@ impl Builder<'_> {
                 for ((_, fs), part) in shape.fields.iter().zip(parts) {
                     match fs {
                         FieldShape::Prim => out.push(self.pack_maybe_absent(part.clone())?),
-                        FieldShape::Nested(sub) => out.extend(self.repr_to_leaves_shape(part, sub)?),
+                        FieldShape::Nested(sub) => {
+                            out.extend(self.repr_to_leaves_shape(part, sub)?)
+                        }
                     }
                 }
                 Ok(out)
@@ -2068,10 +2266,7 @@ impl Builder<'_> {
                 self.cur = nil_bb;
                 for cell in &cells {
                     let value = self.emit_cur(Inst::Const(Lit::Nil));
-                    self.emit_cur(Inst::Store {
-                        cell: *cell,
-                        value,
-                    });
+                    self.emit_cur(Inst::Store { cell: *cell, value });
                 }
                 self.f.set_term(self.cur, Term::Goto(join));
 
@@ -2080,10 +2275,7 @@ impl Builder<'_> {
                 inner.nullable = false;
                 let leaves = self.cdata_leaves(*v, &inner)?;
                 for (cell, value) in cells.iter().zip(leaves) {
-                    self.emit_cur(Inst::Store {
-                        cell: *cell,
-                        value,
-                    });
+                    self.emit_cur(Inst::Store { cell: *cell, value });
                 }
                 self.f.set_term(self.cur, Term::Goto(join));
 
@@ -2203,7 +2395,13 @@ impl Builder<'_> {
         if !actual.nullable || expected.nullable {
             return self.repr_to_leaves_bundle_for_shape(bundle, expected);
         }
-        if !matches!(bundle.value(), ValueRepr::Group { present: Some(_), .. }) {
+        if !matches!(
+            bundle.value(),
+            ValueRepr::Group {
+                present: Some(_),
+                ..
+            }
+        ) {
             return Err(self.gap_here(format!(
                 "representation {:?} lost its presence witness before narrowing",
                 bundle.representation()
@@ -2259,7 +2457,8 @@ impl Builder<'_> {
                 match plan.layout() {
                     RepLayout::Leaves(actual) => {
                         if actual != expected
-                            && super::abi::expanded_nullable_parameter_shape(self.ws, actual) == *expected
+                            && super::abi::expanded_nullable_parameter_shape(self.ws, actual)
+                                == *expected
                         {
                             return self.repr_to_leaves_shape(bundle.value(), expected);
                         }
@@ -2274,8 +2473,9 @@ impl Builder<'_> {
                         }
                         self.repr_to_leaves_bundle_for_shape(bundle, expected)
                     }
-                    RepLayout::Opaque | RepLayout::Foreign { .. } => self
-                        .opaque_boundary_leaves(bundle, expected, "scalar ABI argument"),
+                    RepLayout::Opaque | RepLayout::Foreign { .. } => {
+                        self.opaque_boundary_leaves(bundle, expected, "scalar ABI argument")
+                    }
                     RepLayout::Tuple { .. } => Err(self.gap_here(format!(
                         "tuple representation {:?} cannot fill a leaves slot",
                         bundle.representation()
@@ -2328,7 +2528,9 @@ impl Builder<'_> {
         shape: &ValueShape,
         range: std::ops::Range<usize>,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
-        if let Some(es) = EnumPlan::for_name(self.ws, shape.name).and_then(|plan| plan.flat().cloned()) {
+        if let Some(es) =
+            EnumPlan::for_name(self.ws, shape.name).and_then(|plan| plan.flat().cloned())
+        {
             // NIL-SAFE spread: the box may be `nil` (a null nullable enum), and
             // `nil.__variant`/`nil[1]` would fault. Branch on nil -> all-nil leaves
             // (tag = nil, the null sentinel); else spread the box's keys.
@@ -2339,7 +2541,14 @@ impl Builder<'_> {
             let nil_bb = self.f.new_block();
             let val_bb = self.f.new_block();
             let join = self.f.new_block();
-            self.f.set_term(self.cur, Term::Branch { cond: is_nil, then_bb: nil_bb, else_bb: val_bb });
+            self.f.set_term(
+                self.cur,
+                Term::Branch {
+                    cond: is_nil,
+                    then_bb: nil_bb,
+                    else_bb: val_bb,
+                },
+            );
             self.cur = nil_bb;
             for c in &cells {
                 let z = self.emit_cur(Inst::Const(Lit::Nil));
@@ -2353,7 +2562,10 @@ impl Builder<'_> {
                 .chain(fc.named.into_iter().map(|(_, c)| c))
                 .collect();
             for (c, lv) in cells.iter().zip(leaves) {
-                self.emit_cur(Inst::Store { cell: *c, value: lv });
+                self.emit_cur(Inst::Store {
+                    cell: *c,
+                    value: lv,
+                });
             }
             self.f.set_term(self.cur, Term::Goto(join));
             self.cur = join;
@@ -2362,7 +2574,10 @@ impl Builder<'_> {
             } else {
                 &cells[range]
             };
-            return Ok(selected.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect());
+            return Ok(selected
+                .iter()
+                .map(|c| self.emit_cur(Inst::Load(*c)))
+                .collect());
         }
         // A shape with no nullable and no enum child anywhere is a plain key
         // walk: the paths come from the one rule the uniform packer reads a
@@ -2379,9 +2594,13 @@ impl Builder<'_> {
             while let Inst::Field { base, .. } = self.f.insts[root] {
                 root = base;
             }
-            let native_aliases = matches!(self.f.insts[v],
-                Inst::Global(_) | Inst::Index { .. } | Inst::Field { .. })
-                && !matches!(self.f.insts[root], Inst::MakeValueStruct { .. } | Inst::MakeStruct { .. });
+            let native_aliases = matches!(
+                self.f.insts[v],
+                Inst::Global(_) | Inst::Index { .. } | Inst::Field { .. }
+            ) && !matches!(
+                self.f.insts[root],
+                Inst::MakeValueStruct { .. } | Inst::MakeStruct { .. }
+            );
             let paths = self.boxed_leaf_paths(shape, native_aliases)?;
             let mut loaded: Vec<(Vec<Ustr>, Idx<Inst>)> = Vec::new();
             let mut out = Vec::with_capacity(range.len());
@@ -2393,7 +2612,10 @@ impl Builder<'_> {
                         cur = *inst;
                         continue;
                     }
-                    cur = self.emit_cur(Inst::Field { base: cur, field: path[depth - 1] });
+                    cur = self.emit_cur(Inst::Field {
+                        base: cur,
+                        field: path[depth - 1],
+                    });
                     if depth < path.len() {
                         loaded.push((prefix.to_vec(), cur));
                     }
@@ -2410,12 +2632,17 @@ impl Builder<'_> {
             .rep_arena()
             .nominal_value_storage_required(self.ws, self.scx.target, shape.name)
             .map_err(|e| self.gap_here(e.message))?;
-        if storage == ValueStorage::LeafTable && !shape.nullable
-        {
+        if storage == ValueStorage::LeafTable && !shape.nullable {
             return Ok(value_leaf_paths(shape)
                 .into_iter()
-                .skip(range.start).take(range.len())
-                .map(|path| self.emit_cur(Inst::Field { base: v, field: path }))
+                .skip(range.start)
+                .take(range.len())
+                .map(|path| {
+                    self.emit_cur(Inst::Field {
+                        base: v,
+                        field: path,
+                    })
+                })
                 .collect());
         }
         // A GC-table box keys an inline child's leaves by dotted path: the
@@ -2424,23 +2651,47 @@ impl Builder<'_> {
         let mut out = Vec::new();
         let mut offset = 0;
         for (i, (fname, fs)) in shape.fields.iter().enumerate() {
-            let count = match fs { FieldShape::Prim => 1, FieldShape::Nested(sub) => sub.leaf_count() };
+            let count = match fs {
+                FieldShape::Prim => 1,
+                FieldShape::Nested(sub) => sub.leaf_count(),
+            };
             let start = range.start.max(offset);
             let end = range.end.min(offset + count);
             offset += count;
-            if start >= end { continue; }
+            if start >= end {
+                continue;
+            }
             let child_range = start - (offset - count)..end - (offset - count);
-            if let Some(field) = inline.as_ref().and_then(|layout| layout.get(i)).filter(|f| f.is_inline()) {
-                for (key, _) in field.keys().into_iter().skip(child_range.start).take(child_range.len()) {
-                    out.push(self.emit_cur(Inst::Field { base: v, field: key }));
+            if let Some(field) = inline
+                .as_ref()
+                .and_then(|layout| layout.get(i))
+                .filter(|f| f.is_inline())
+            {
+                for (key, _) in field
+                    .keys()
+                    .into_iter()
+                    .skip(child_range.start)
+                    .take(child_range.len())
+                {
+                    out.push(self.emit_cur(Inst::Field {
+                        base: v,
+                        field: key,
+                    }));
                 }
                 continue;
             }
-            let fv = self.emit_cur(Inst::Field { base: v, field: *fname });
+            let fv = self.emit_cur(Inst::Field {
+                base: v,
+                field: *fname,
+            });
             match fs {
                 FieldShape::Prim => out.push(fv),
-                FieldShape::Nested(sub) if sub.nullable => out.extend(self.nullable_child_leaf_range(fv, sub, child_range)?),
-                FieldShape::Nested(sub) => out.extend(self.cdata_leaf_range(fv, sub, child_range)?),
+                FieldShape::Nested(sub) if sub.nullable => {
+                    out.extend(self.nullable_child_leaf_range(fv, sub, child_range)?)
+                }
+                FieldShape::Nested(sub) => {
+                    out.extend(self.cdata_leaf_range(fv, sub, child_range)?)
+                }
             }
         }
         Ok(out)
@@ -2496,7 +2747,14 @@ impl Builder<'_> {
         let nil_bb = self.f.new_block();
         let value_bb = self.f.new_block();
         let join = self.f.new_block();
-        self.f.set_term(self.cur, Term::Branch { cond: present, then_bb: value_bb, else_bb: nil_bb });
+        self.f.set_term(
+            self.cur,
+            Term::Branch {
+                cond: present,
+                then_bb: value_bb,
+                else_bb: nil_bb,
+            },
+        );
         self.cur = nil_bb;
         for c in &cells {
             let z = self.emit_cur(Inst::Const(Lit::Nil));
@@ -2508,11 +2766,18 @@ impl Builder<'_> {
         inner.nullable = false;
         let leaves = read(self, fv, &inner)?;
         for (c, lv) in cells.iter().zip(leaves) {
-            self.emit_cur(Inst::Store { cell: *c, value: lv });
+            self.emit_cur(Inst::Store {
+                cell: *c,
+                value: lv,
+            });
         }
         self.f.set_term(self.cur, Term::Goto(join));
         self.cur = join;
-        let mut out = if include_presence { vec![present] } else { Vec::new() };
+        let mut out = if include_presence {
+            vec![present]
+        } else {
+            Vec::new()
+        };
         out.extend(cells.iter().map(|c| self.emit_cur(Inst::Load(*c))));
         Ok(out)
     }
@@ -2531,7 +2796,10 @@ impl Builder<'_> {
             offset += usize::from(shape.nullable);
             let mut found = None;
             for (name, field_shape) in &shape.fields {
-                if name == field { found = Some(field_shape); break; }
+                if name == field {
+                    found = Some(field_shape);
+                    break;
+                }
                 offset += match field_shape {
                     FieldShape::Prim => 1,
                     FieldShape::Nested(shape) => shape.leaf_count(),
@@ -2540,7 +2808,9 @@ impl Builder<'_> {
             let field_shape = found?;
             selected = Some(field_shape);
             if depth + 1 < path.len() {
-                let FieldShape::Nested(child) = field_shape else { return None };
+                let FieldShape::Nested(child) = field_shape else {
+                    return None;
+                };
                 shape = child;
             }
         }
@@ -2600,7 +2870,8 @@ impl Builder<'_> {
             .rep_arena()
             .nominal_value_storage_required(self.ws, self.scx.target, shape.name)
             .map_err(|e| self.gap_here(e.message))?;
-        let native_aliases = native_aliases && self.scx.target == bone_semantic::hir::FnBackend::Lua
+        let native_aliases = native_aliases
+            && self.scx.target == bone_semantic::hir::FnBackend::Lua
             && storage == ValueStorage::CData;
         if storage == ValueStorage::LeafTable || native_aliases {
             for path in value_leaf_paths(shape) {
@@ -2617,7 +2888,11 @@ impl Builder<'_> {
         }
         let inline = self.gc_table_inline_layout(shape.name)?;
         for (i, (fname, fs)) in shape.fields.iter().enumerate() {
-            if let Some(field) = inline.as_ref().and_then(|layout| layout.get(i)).filter(|f| f.is_inline()) {
+            if let Some(field) = inline
+                .as_ref()
+                .and_then(|layout| layout.get(i))
+                .filter(|f| f.is_inline())
+            {
                 for (key, _) in field.keys() {
                     let mut full = prefix.clone();
                     full.push(key);
@@ -2628,7 +2903,9 @@ impl Builder<'_> {
             prefix.push(*fname);
             match fs {
                 FieldShape::Prim => out.push(prefix.clone()),
-                FieldShape::Nested(sub) => self.boxed_leaf_paths_into(sub, native_aliases, prefix, out)?,
+                FieldShape::Nested(sub) => {
+                    self.boxed_leaf_paths_into(sub, native_aliases, prefix, out)?
+                }
             }
             prefix.pop();
         }
@@ -2686,21 +2963,26 @@ impl Builder<'_> {
         match crate::monoty::convert_decl(self.ws, ty, &crate::monoty::MonoSubst::default()) {
             Ok(ty) => return Ok(Rc::new(ty)),
             Err(reason) if !self.struct_is_generic(owner) => {
-                return Err(self.gap_here(format!("field `{owner}.{field}` has no concrete type: {reason:?}")));
+                return Err(self.gap_here(format!(
+                    "field `{owner}.{field}` has no concrete type: {reason:?}"
+                )));
             }
             Err(_) => {}
         }
         let owner_ty = owner_ty.ok_or_else(|| {
-            self.gap_here(format!("a copy of generic value `{owner}` has no concrete type for `{field}`"))
+            self.gap_here(format!(
+                "a copy of generic value `{owner}` has no concrete type for `{field}`"
+            ))
         })?;
         self.struct_field_ty_in(owner, field, owner_ty)
     }
 
     fn struct_is_generic(&self, name: Ustr) -> bool {
-        self.ws
-            .struct_by_name
-            .get(&name)
-            .is_some_and(|sid| !self.ws.modules[sid.module.index()].structs[sid.def].generics.is_empty())
+        self.ws.struct_by_name.get(&name).is_some_and(|sid| {
+            !self.ws.modules[sid.module.index()].structs[sid.def]
+                .generics
+                .is_empty()
+        })
     }
 
     /// The type of `owner.field` when its plan holds an ordinary value as one
@@ -2713,7 +2995,9 @@ impl Builder<'_> {
         field: Ustr,
     ) -> Result<Option<Rc<MonoTy>>, CompilerError> {
         if !self.struct_is_generic(owner) {
-            let Some(ty) = self.struct_field_ty(owner, field) else { return Ok(None) };
+            let Some(ty) = self.struct_field_ty(owner, field) else {
+                return Ok(None);
+            };
             let Some((child, true)) = super::shape::nominal_name_from_ty(self.ws, ty) else {
                 return Ok(None);
             };
@@ -2754,7 +3038,9 @@ impl Builder<'_> {
         repr: &ValueRepr,
         owner_ty: Option<&MonoTy>,
     ) -> Result<(), CompilerError> {
-        let ValueRepr::Group { parts, .. } = repr else { return Ok(()) };
+        let ValueRepr::Group { parts, .. } = repr else {
+            return Ok(());
+        };
         if EnumPlan::for_name(self.ws, shape.name).is_some() {
             return Ok(());
         }
@@ -2783,19 +3069,34 @@ impl Builder<'_> {
         shape: &ValueShape,
     ) -> Result<ValueRepr, CompilerError> {
         match r {
-            ValueRepr::Group { name, parts, present } if parts.len() == shape.fields.len() => {
-                let parts = parts.into_iter().zip(&shape.fields).map(|(part, (_, field))| {
-                    match field {
+            ValueRepr::Group {
+                name,
+                parts,
+                present,
+            } if parts.len() == shape.fields.len() => {
+                let parts = parts
+                    .into_iter()
+                    .zip(&shape.fields)
+                    .map(|(part, (_, field))| match field {
                         FieldShape::Prim => self.owned_value_children(part),
-                        FieldShape::Nested(child) => self.own_opaque_parameter_children(part, child),
-                    }
-                }).collect::<Result<Vec<_>, _>>()?;
-                Ok(ValueRepr::Group { name, parts, present })
+                        FieldShape::Nested(child) => {
+                            self.own_opaque_parameter_children(part, child)
+                        }
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(ValueRepr::Group {
+                    name,
+                    parts,
+                    present,
+                })
             }
             // The boundary immediately reads this box into primitive lanes.
             // Those lanes, rather than a reconstructed box, own the snapshot.
-            ValueRepr::Scalar(v) if super::shape::planned_value(self.ws, shape.name)
-                .and_then(|plan| plan.shape).is_some_and(|plain| plain.fields == shape.fields) => {
+            ValueRepr::Scalar(v)
+                if super::shape::planned_value(self.ws, shape.name)
+                    .and_then(|plan| plan.shape)
+                    .is_some_and(|plain| plain.fields == shape.fields) =>
+            {
                 Ok(ValueRepr::Scalar(v))
             }
             r => self.owned_value_children(r),
@@ -2805,7 +3106,10 @@ impl Builder<'_> {
     /// Own borrowed boxes at mutable escapes. Immutable boundaries may share
     /// boxes whose source cannot be written through; mutable-place reads still
     /// snapshot their children before reaching such a boundary.
-    pub(crate) fn owned_value_children(&mut self, r: ValueRepr) -> Result<ValueRepr, CompilerError> {
+    pub(crate) fn owned_value_children(
+        &mut self,
+        r: ValueRepr,
+    ) -> Result<ValueRepr, CompilerError> {
         if self.scx.values_first_class || self.shallow_pack {
             return Ok(r);
         }
@@ -2819,19 +3123,32 @@ impl Builder<'_> {
                 }
                 Ok(ValueRepr::Scalar(v))
             }
-            ValueRepr::Group { name, parts, present } => {
+            ValueRepr::Group {
+                name,
+                parts,
+                present,
+            } => {
                 let parts = parts
                     .into_iter()
                     .map(|part| match part {
-                        ValueRepr::Scalar(v) => match self.borrowed_value_children.get(&v).cloned() {
-                            Some(_) if self.lending_pack && self.shareable_value_boxes.contains(&v) => Ok(ValueRepr::Scalar(v)),
+                        ValueRepr::Scalar(v) => match self.borrowed_value_children.get(&v).cloned()
+                        {
+                            Some(_)
+                                if self.lending_pack && self.shareable_value_boxes.contains(&v) =>
+                            {
+                                Ok(ValueRepr::Scalar(v))
+                            }
                             Some(ty) => self.copied_value_box(&ty, v).map(ValueRepr::Scalar),
                             None => Ok(ValueRepr::Scalar(v)),
                         },
                         part => self.owned_value_children(part),
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                Ok(ValueRepr::Group { name, parts, present })
+                Ok(ValueRepr::Group {
+                    name,
+                    parts,
+                    present,
+                })
             }
             ValueRepr::Tuple { parts, present } => {
                 let parts = parts
@@ -2846,7 +3163,10 @@ impl Builder<'_> {
 
     /// Retaining a scalar in cells loses its borrowed-box provenance. Snapshot
     /// it before a later expression can mutate the source it came from.
-    pub(crate) fn snapshot_opaque_value(&mut self, r: ValueRepr) -> Result<ValueRepr, CompilerError> {
+    pub(crate) fn snapshot_opaque_value(
+        &mut self,
+        r: ValueRepr,
+    ) -> Result<ValueRepr, CompilerError> {
         if matches!(&r, ValueRepr::Scalar(v) if !self.shareable_value_boxes.contains(v)) {
             self.with_value_lending(false, |s| {
                 if let ValueRepr::Scalar(v) = &r
@@ -2885,8 +3205,10 @@ impl Builder<'_> {
 
     pub(crate) fn value_repr_is_shareable(&self, r: &ValueRepr) -> bool {
         match r {
-            ValueRepr::Scalar(v) => !self.borrowed_value_children.contains_key(v)
-                || self.shareable_value_boxes.contains(v),
+            ValueRepr::Scalar(v) => {
+                !self.borrowed_value_children.contains_key(v)
+                    || self.shareable_value_boxes.contains(v)
+            }
             ValueRepr::Group { parts, .. } | ValueRepr::Tuple { parts, .. } => {
                 parts.iter().all(|p| self.value_repr_is_shareable(p))
             }
@@ -2911,18 +3233,26 @@ impl Builder<'_> {
         share: bool,
     ) -> Result<(), CompilerError> {
         let mut payload = ty;
-        while let MonoTy::Nullable(inner) = payload { payload = inner; }
+        while let MonoTy::Nullable(inner) = payload {
+            payload = inner;
+        }
         match r {
-            ValueRepr::Scalar(v) if payload.nominal().is_some_and(|name| {
-                self.is_value_struct(name) && !self.is_nobox_struct(name)
-            }) => {
+            ValueRepr::Scalar(v)
+                if payload.nominal().is_some_and(|name| {
+                    self.is_value_struct(name) && !self.is_nobox_struct(name)
+                }) =>
+            {
                 self.borrowed_value_children.insert(*v, Rc::new(ty.clone()));
-                if share { self.shareable_value_boxes.insert(*v); }
+                if share {
+                    self.shareable_value_boxes.insert(*v);
+                }
             }
             ValueRepr::Group { name, .. } => {
                 let shape = self.nominal_rep_shape_required(*name, false)?;
                 self.mark_borrowed_value_children(&shape, r, Some(payload))?;
-                if share { self.share_borrowed_children(r); }
+                if share {
+                    self.share_borrowed_children(r);
+                }
             }
             ValueRepr::Tuple { parts, .. } => {
                 if let MonoTy::Tuple(types) = payload {
@@ -2942,14 +3272,19 @@ impl Builder<'_> {
                 self.shareable_value_boxes.insert(*v);
             }
             ValueRepr::Group { parts, .. } | ValueRepr::Tuple { parts, .. } => {
-                for part in parts { self.share_borrowed_children(part); }
+                for part in parts {
+                    self.share_borrowed_children(part);
+                }
             }
             _ => {}
         }
     }
 
     /// Whether copies use declared GC fields, including shared enum boxes.
-    pub(crate) fn boxed_copy_uses_gc_fields(&self, shape: &ValueShape) -> Result<bool, CompilerError> {
+    pub(crate) fn boxed_copy_uses_gc_fields(
+        &self,
+        shape: &ValueShape,
+    ) -> Result<bool, CompilerError> {
         Ok(!self.scx.values_first_class
             && !shape.nullable
             && EnumPlan::for_name(self.ws, shape.name).is_none()
@@ -2980,10 +3315,19 @@ impl Builder<'_> {
         let inline = self.gc_table_inline_layout(shape.name)?;
         let mut parts = Vec::with_capacity(shape.fields.len());
         for i in 0..shape.fields.len() {
-            parts.push(self.boxed_gc_field_copy_repr(v, shape, owner_ty, i,
-                inline.as_ref().and_then(|layout| layout.get(i)))?);
+            parts.push(self.boxed_gc_field_copy_repr(
+                v,
+                shape,
+                owner_ty,
+                i,
+                inline.as_ref().and_then(|layout| layout.get(i)),
+            )?);
         }
-        Ok(ValueRepr::Group { name: shape.name, parts, present: None })
+        Ok(ValueRepr::Group {
+            name: shape.name,
+            parts,
+            present: None,
+        })
     }
 
     /// One field of the GC-table copy protocol. Immediate projections use the
@@ -3001,14 +3345,22 @@ impl Builder<'_> {
             let leaves: Vec<Idx<Inst>> = field
                 .keys()
                 .into_iter()
-                .map(|(key, _)| self.emit_cur(Inst::Field { base: v, field: key }))
+                .map(|(key, _)| {
+                    self.emit_cur(Inst::Field {
+                        base: v,
+                        field: key,
+                    })
+                })
                 .collect();
             return Ok(match fs {
                 FieldShape::Prim => ValueRepr::Scalar(leaves[0]),
                 FieldShape::Nested(sub) => self.rebuild_from_leaves(sub, &leaves, &mut 0),
             });
         }
-        let fv = self.emit_cur(Inst::Field { base: v, field: *fname });
+        let fv = self.emit_cur(Inst::Field {
+            base: v,
+            field: *fname,
+        });
         Ok(match fs {
             FieldShape::Prim => {
                 if let Some(ty) = self.opaque_value_child(shape.name, owner_ty, *fname)? {
@@ -3017,7 +3369,8 @@ impl Builder<'_> {
                 ValueRepr::Scalar(fv)
             }
             FieldShape::Nested(sub)
-                if EnumPlan::for_name(self.ws, sub.name).is_some_and(|plan| plan.flat().is_some()) =>
+                if EnumPlan::for_name(self.ws, sub.name)
+                    .is_some_and(|plan| plan.flat().is_some()) =>
             {
                 ValueRepr::Scalar(fv)
             }
@@ -3052,7 +3405,14 @@ impl Builder<'_> {
         let nil_bb = self.f.new_block();
         let val_bb = self.f.new_block();
         let join = self.f.new_block();
-        self.f.set_term(self.cur, Term::Branch { cond: is_nil, then_bb: nil_bb, else_bb: val_bb });
+        self.f.set_term(
+            self.cur,
+            Term::Branch {
+                cond: is_nil,
+                then_bb: nil_bb,
+                else_bb: val_bb,
+            },
+        );
 
         self.cur = nil_bb;
         let n = self.emit_cur(Inst::Const(Lit::Nil));
@@ -3062,7 +3422,9 @@ impl Builder<'_> {
         self.cur = val_bb;
         let shape = self.nominal_rep_shape_required(name, false)?;
         self.enter_value_copy(name)?;
-        let packed = self.boxed_copy_repr_of(boxed, &shape, owner_ty).and_then(|copy| self.pack(copy));
+        let packed = self
+            .boxed_copy_repr_of(boxed, &shape, owner_ty)
+            .and_then(|copy| self.pack(copy));
         self.value_copy_stack.pop();
         self.store_and_join(result, packed?, join);
 
@@ -3084,7 +3446,10 @@ impl Builder<'_> {
                 // boxed rather than promoting its fields across later copies.
                 let nil = s.emit_cur(Inst::Const(Lit::Nil));
                 let present = s.emit_cur(Inst::NotEq(copy, nil));
-                Ok(s.emit_cur(Inst::MakeNullableValue { present, value: copy }))
+                Ok(s.emit_cur(Inst::MakeNullableValue {
+                    present,
+                    value: copy,
+                }))
             }
             ValueRepr::Scalar(v) => Ok(v),
             copy => s.pack(copy),
@@ -3114,7 +3479,11 @@ impl Builder<'_> {
             return Ok(ValueRepr::Scalar(v));
         }
         if nullable {
-            return Ok(ValueRepr::Scalar(self.nullable_boxed_value_copy(v, name, Some(payload))?));
+            return Ok(ValueRepr::Scalar(self.nullable_boxed_value_copy(
+                v,
+                name,
+                Some(payload),
+            )?));
         }
         self.boxed_value_copy_repr(v, name, Some(payload))
     }
@@ -3134,12 +3503,12 @@ impl Builder<'_> {
         kind: ContainerKind,
     ) -> Result<ValueRepr, CompilerError> {
         match kind {
-            ContainerKind::VecValueColumns(elem) => {
-                self.column_element_repr(arr, index, elem).map(ValueBundle::into_value)
-            }
-            ContainerKind::VecValueStrided(elem) => {
-                self.strided_element_repr(arr, index, elem).map(ValueBundle::into_value)
-            }
+            ContainerKind::VecValueColumns(elem) => self
+                .column_element_repr(arr, index, elem)
+                .map(ValueBundle::into_value),
+            ContainerKind::VecValueStrided(elem) => self
+                .strided_element_repr(arr, index, elem)
+                .map(ValueBundle::into_value),
             ContainerKind::NativeBufferValue(elem) if self.is_leaf_addressed(elem)? => {
                 self.nb_leaf_element_repr(arr, index, elem)
             }

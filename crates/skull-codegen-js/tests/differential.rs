@@ -6,9 +6,8 @@
 //! Gated on `node` being present -- absent, the test skips WITH A LOG (never a
 //! silent pass). node is at `/run/current-system/sw/bin/node` on the dev box.
 
-
-use skull_codegen_js::{fill_template, JS_INTRINSICS};
 use crate::common::{emit_scalar, stdlib_ws};
+use skull_codegen_js::{JS_INTRINSICS, fill_template};
 
 fn node_available() -> bool {
     crate::common::node()
@@ -49,7 +48,11 @@ fn eval_fallback(
     args: &[f64],
 ) -> f64 {
     let js = emit_scalar(ws, name, arity);
-    let call = args.iter().map(|a| arg_lit(*a)).collect::<Vec<_>>().join(", ");
+    let call = args
+        .iter()
+        .map(|a| arg_lit(*a))
+        .collect::<Vec<_>>()
+        .join(", ");
     node_eval_number(&format!("{js}\nconsole.log({name}_fb({call}));"))
 }
 
@@ -59,13 +62,15 @@ fn eval_mapping(name: &str, arity: usize, args: &[f64]) -> f64 {
     let tmpl = JS_INTRINSICS
         .iter()
         .find(|(n, a, _)| *n == name && *a == arity)
-        .and_then(|(_, _, t)| match t { skull_mir::intrinsics::Emission::Template(t) => Some(*t), _ => None })
+        .and_then(|(_, _, t)| match t {
+            skull_mir::intrinsics::Emission::Template(t) => Some(*t),
+            _ => None,
+        })
         .unwrap_or_else(|| panic!("no JS mapping for `{name}`/{arity}"));
     let lits: Vec<String> = args.iter().map(|a| arg_lit(*a)).collect();
     let refs: Vec<&str> = lits.iter().map(|s| s.as_str()).collect();
     node_eval_number(&format!("console.log({});", fill_template(tmpl, &refs)))
 }
-
 
 /// (name, arity, args, reference) from `tests/intrinsics/fallback_reference.rock`
 /// -- the values the luajit fallback body produces. min/max are generic (no
@@ -90,10 +95,8 @@ const CASES: &[(&str, usize, &[f64], f64)] = &[
 /// Mapping-only cases: min/max are generic (`fn max<T>`), so no monomorphic
 /// MirFunc and no emittable fallback -- their differential is the JS mapping vs
 /// the luajit reference (the fallback side runs on luajit as that reference).
-const MAPPING_ONLY_CASES: &[(&str, usize, &[f64], f64)] = &[
-    ("min", 2, &[3.0, 5.0], 3.0),
-    ("max", 2, &[3.0, 5.0], 5.0),
-];
+const MAPPING_ONLY_CASES: &[(&str, usize, &[f64], f64)] =
+    &[("min", 2, &[3.0, 5.0], 3.0), ("max", 2, &[3.0, 5.0], 5.0)];
 
 // The emitted JS fallback bodies EXECUTE under node and reproduce the luajit
 // reference values -- proving the S2 emitter produces runnable, correct JS.

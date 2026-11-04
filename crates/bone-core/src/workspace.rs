@@ -252,7 +252,10 @@ impl Workspace {
         self.callable_members_of(self.defs.get(&key)?)
     }
 
-    fn callable_members_of(&self, meta: &crate::modules::DefMeta) -> Option<&[crate::modules::CallableMember]> {
+    fn callable_members_of(
+        &self,
+        meta: &crate::modules::DefMeta,
+    ) -> Option<&[crate::modules::CallableMember]> {
         if meta.kind != crate::modules::DefKind::Callable {
             return None;
         }
@@ -294,7 +297,9 @@ impl Workspace {
         fid: Idx<Function>,
         site: crate::modules::AccessSite<'_>,
     ) -> bool {
-        let Some(meta) = self.defs.get(&key) else { return true };
+        let Some(meta) = self.defs.get(&key) else {
+            return true;
+        };
         let vis = match self.callable_members_of(meta) {
             Some(members) => {
                 let Some(vis) = self.member_visibility(members, key, mid, fid) else {
@@ -305,7 +310,10 @@ impl Workspace {
             None => &meta.vis,
         };
         match site.package {
-            Some(from_pkg) => self.ns.can_access(vis, meta.package, &meta.module, from_pkg, site.module_path),
+            Some(from_pkg) => {
+                self.ns
+                    .can_access(vis, meta.package, &meta.module, from_pkg, site.module_path)
+            }
             None => *vis == crate::modules::NsVisibility::Pub,
         }
     }
@@ -393,7 +401,12 @@ impl Workspace {
 
     fn render_param_signature(&self, mid: ModuleId, fid: Idx<Function>) -> Ustr {
         let f = &self.module(mid).functions[fid];
-        Ustr::from(&f.param_decls.iter().map(|p| self.render(None, p.ty)).join("\u{1}"))
+        Ustr::from(
+            &f.param_decls
+                .iter()
+                .map(|p| self.render(None, p.ty))
+                .join("\u{1}"),
+        )
     }
 
     /// The backend-variant group identity of a lowered function: its name
@@ -404,7 +417,10 @@ impl Workspace {
     /// definitions: identical signatures there are not backend siblings
     /// (spec 8.3) but a tie.
     pub fn backend_variant_key(&self, mid: ModuleId, fid: Idx<Function>) -> (Ustr, Ustr) {
-        (self.module(mid).functions[fid].name, self.param_signatures[mid.index()][fid])
+        (
+            self.module(mid).functions[fid].name,
+            self.param_signatures[mid.index()][fid],
+        )
     }
 
     pub fn log_time(&mut self, label: &'static str, timer: Instant) {
@@ -717,7 +733,6 @@ impl BodyInference {
         self.any_erasures[cp.any_erasures..].to_vec()
     }
 }
-
 
 #[derive(Clone, Debug, Default)]
 pub struct InferenceResult {

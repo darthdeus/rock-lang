@@ -7,9 +7,7 @@ use std::collections::HashMap;
 
 use bone_semantic::prelude::Workspace;
 
-use lsp_types::{
-    CompletionItem, CompletionItemKind, CompletionItemLabelDetails, InsertTextFormat,
-};
+use lsp_types::{CompletionItem, CompletionItemKind, CompletionItemLabelDetails, InsertTextFormat};
 
 use crate::query::SymCat;
 use crate::rank_key::RankKey;
@@ -25,7 +23,9 @@ use super::sources::ArgPayload;
 /// none of them match the exact `($0)`/`()` suffix.
 pub(crate) fn strip_call_template(items: &mut [CompletionItem]) {
     for it in items.iter_mut() {
-        let Some(t) = it.insert_text.as_deref() else { continue };
+        let Some(t) = it.insert_text.as_deref() else {
+            continue;
+        };
         if let Some(bare) = t.strip_suffix("($0)").or_else(|| t.strip_suffix("()")) {
             it.insert_text = Some(bare.to_string());
             it.insert_text_format = None;
@@ -59,7 +59,9 @@ pub(crate) fn reconcile_suffix(items: &mut [CompletionItem], tail: &str) {
         if matches!(it.insert_text_format, Some(InsertTextFormat::SNIPPET)) {
             continue;
         }
-        let Some(t) = it.insert_text.as_deref() else { continue };
+        let Some(t) = it.insert_text.as_deref() else {
+            continue;
+        };
         let mut k = tail.len();
         while k > 0 {
             if tail.is_char_boundary(k) && t.ends_with(&tail[..k]) {
@@ -90,7 +92,9 @@ pub(crate) const DEFAULT_MAX_COMPLETION_ITEMS: usize = 200;
 pub(crate) fn max_completion_items() -> usize {
     static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     // An unset or non-Unicode optional tuning override selects the documented default.
-    *N.get_or_init(|| parse_max_completions(std::env::var("ROCK_LSP_MAX_COMPLETIONS").ok().as_deref()))
+    *N.get_or_init(|| {
+        parse_max_completions(std::env::var("ROCK_LSP_MAX_COMPLETIONS").ok().as_deref())
+    })
 }
 
 /// Parse the `ROCK_LSP_MAX_COMPLETIONS` value: a positive integer wins, anything
@@ -168,9 +172,18 @@ pub(crate) enum CandShape {
     /// `-> Coroutine<..>` return type offered after `co fn name()`.
     CoReturn { has_wait: bool },
     /// A reachability path; the cand name is the access form `root.suffix`.
-    Reach { final_ty: String, is_method: bool, takes_args: bool },
+    Reach {
+        final_ty: String,
+        is_method: bool,
+        takes_args: bool,
+    },
     /// A synthesized whole call; the cand name is `fname(arg)`.
-    CallThrough { fname: ustr::Ustr, arg: String, payload: ArgPayload, multiparam: bool },
+    CallThrough {
+        fname: ustr::Ustr,
+        arg: String,
+        payload: ArgPayload,
+        multiparam: bool,
+    },
     /// A `deco` declaration (decorator position).
     Decorator { detail: Option<String> },
 }
@@ -187,7 +200,11 @@ pub(crate) struct Cand {
 
 impl Cand {
     pub(crate) fn new(key: RankKey, name: CandName, shape: CandShape) -> Self {
-        Cand { key: key.clamped(), name, shape }
+        Cand {
+            key: key.clamped(),
+            name,
+            shape,
+        }
     }
 }
 
@@ -202,7 +219,10 @@ pub(crate) struct Sink {
 
 impl Sink {
     pub(crate) fn new() -> Self {
-        Sink { cands: Vec::new(), seen: std::collections::HashSet::new() }
+        Sink {
+            cands: Vec::new(),
+            seen: std::collections::HashSet::new(),
+        }
     }
 
     pub(crate) fn push(&mut self, cand: Cand) {
@@ -302,25 +322,29 @@ pub(crate) fn materialize_cand(
                 // `on_killed`/`on_resume`/`on_hot_reload` are contextual
                 // lifecycle-hook keywords with a statement BLOCK form
                 // (`on_killed { .. }`) -- complete to the block, not a call.
-                SymCat::Function if is_lifecycle_hook(c.name.as_str()) => {
-                    (Some(format!("{} {{ $0 }}", c.name)), Some(InsertTextFormat::SNIPPET))
-                }
+                SymCat::Function if is_lifecycle_hook(c.name.as_str()) => (
+                    Some(format!("{} {{ $0 }}", c.name)),
+                    Some(InsertTextFormat::SNIPPET),
+                ),
                 SymCat::Function | SymCat::Macro if strip_call => (Some(c.name.to_string()), None),
-                SymCat::Function | SymCat::Macro if c.takes_params => {
-                    (Some(format!("{}($0)", c.name)), Some(InsertTextFormat::SNIPPET))
-                }
+                SymCat::Function | SymCat::Macro if c.takes_params => (
+                    Some(format!("{}($0)", c.name)),
+                    Some(InsertTextFormat::SNIPPET),
+                ),
                 SymCat::Function | SymCat::Macro => (Some(format!("{}()", c.name)), None),
                 SymCat::Variant if pattern => (None, None),
                 SymCat::Variant => match c.variant_shape {
                     Some(crate::query::VariantShape::Tuple) if strip_call => {
                         (Some(c.name.to_string()), None)
                     }
-                    Some(crate::query::VariantShape::Tuple) => {
-                        (Some(format!("{}($0)", c.name)), Some(InsertTextFormat::SNIPPET))
-                    }
-                    Some(crate::query::VariantShape::Record) => {
-                        (Some(format!("{} {{ $0 }}", c.name)), Some(InsertTextFormat::SNIPPET))
-                    }
+                    Some(crate::query::VariantShape::Tuple) => (
+                        Some(format!("{}($0)", c.name)),
+                        Some(InsertTextFormat::SNIPPET),
+                    ),
+                    Some(crate::query::VariantShape::Record) => (
+                        Some(format!("{} {{ $0 }}", c.name)),
+                        Some(InsertTextFormat::SNIPPET),
+                    ),
                     _ => (None, None),
                 },
                 _ => (None, None),
@@ -372,7 +396,11 @@ pub(crate) fn materialize_cand(
             let (label, insert, fmt) = if with_wait {
                 ("Coroutine<Wait>", "Coroutine<Wait>", None)
             } else {
-                ("Coroutine<>", "Coroutine<$0>", Some(InsertTextFormat::SNIPPET))
+                (
+                    "Coroutine<>",
+                    "Coroutine<$0>",
+                    Some(InsertTextFormat::SNIPPET),
+                )
             };
             CompletionItem {
                 label: label.to_string(),
@@ -387,7 +415,11 @@ pub(crate) fn materialize_cand(
             let (label, insert, fmt) = if has_wait {
                 ("-> Coroutine<Wait>", "-> Coroutine<Wait>", None)
             } else {
-                ("-> Coroutine<>", "-> Coroutine<$0>", Some(InsertTextFormat::SNIPPET))
+                (
+                    "-> Coroutine<>",
+                    "-> Coroutine<$0>",
+                    Some(InsertTextFormat::SNIPPET),
+                )
             };
             CompletionItem {
                 label: label.to_string(),
@@ -398,7 +430,11 @@ pub(crate) fn materialize_cand(
                 ..Default::default()
             }
         }
-        CandShape::Reach { final_ty, is_method, takes_args } => {
+        CandShape::Reach {
+            final_ty,
+            is_method,
+            takes_args,
+        } => {
             let key = cand.name.as_str();
             let (label, kind, insert_text, insert_text_format) = if is_method {
                 let (insert, fmt) = if strip_call {
@@ -408,9 +444,19 @@ pub(crate) fn materialize_cand(
                 } else {
                     (format!("{key}()"), None)
                 };
-                (format!("{key}() -> {final_ty}"), CompletionItemKind::METHOD, insert, fmt)
+                (
+                    format!("{key}() -> {final_ty}"),
+                    CompletionItemKind::METHOD,
+                    insert,
+                    fmt,
+                )
             } else {
-                (format!("{key}: {final_ty}"), CompletionItemKind::FIELD, key.to_string(), None)
+                (
+                    format!("{key}: {final_ty}"),
+                    CompletionItemKind::FIELD,
+                    key.to_string(),
+                    None,
+                )
             };
             CompletionItem {
                 label,
@@ -422,7 +468,12 @@ pub(crate) fn materialize_cand(
                 ..Default::default()
             }
         }
-        CandShape::CallThrough { fname, arg: a, payload, multiparam } => {
+        CandShape::CallThrough {
+            fname,
+            arg: a,
+            payload,
+            multiparam,
+        } => {
             // Insert: a tuple/record variant arg carries a payload hole; the
             // trailing param (when multiparam) takes `$0`, so the payload
             // uses `$1` to keep the tab order arg-then-next-param.
@@ -486,17 +537,23 @@ pub(crate) fn is_lifecycle_hook(name: &str) -> bool {
 /// minus the redundant `fn name`); a binding/global shows `: type`. None when
 /// there's no detail. Structs/enums (label is the bare name, kind conveys it)
 /// and fields (label already `name: type`) pass `None`.
-pub(crate) fn fn_or_type_label_details(kind: SymCat, detail: Option<&str>) -> Option<CompletionItemLabelDetails> {
+pub(crate) fn fn_or_type_label_details(
+    kind: SymCat,
+    detail: Option<&str>,
+) -> Option<CompletionItemLabelDetails> {
     let d = detail?;
     let inline = match kind {
         // `fn name(a: T) -> R` -> `(a: T) -> R`
-        SymCat::Function | SymCat::Macro => {
-            d.find('(').map_or_else(|| d.to_string(), |i| d[i..].to_string())
-        }
+        SymCat::Function | SymCat::Macro => d
+            .find('(')
+            .map_or_else(|| d.to_string(), |i| d[i..].to_string()),
         SymCat::Local | SymCat::Param | SymCat::Global => format!(": {d}"),
         _ => return None,
     };
-    Some(CompletionItemLabelDetails { detail: Some(inline), description: None })
+    Some(CompletionItemLabelDetails {
+        detail: Some(inline),
+        description: None,
+    })
 }
 
 pub(crate) fn completion_kind(k: SymCat) -> CompletionItemKind {
@@ -517,7 +574,7 @@ pub(crate) fn completion_kind(k: SymCat) -> CompletionItemKind {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_max_completions, DEFAULT_MAX_COMPLETION_ITEMS};
+    use super::{DEFAULT_MAX_COMPLETION_ITEMS, parse_max_completions};
 
     #[test]
     fn max_completions_override_policy() {
@@ -526,9 +583,21 @@ mod tests {
         assert_eq!(parse_max_completions(Some("  10 ")), 10);
         // Everything else falls back to the default.
         assert_eq!(parse_max_completions(None), DEFAULT_MAX_COMPLETION_ITEMS);
-        assert_eq!(parse_max_completions(Some("")), DEFAULT_MAX_COMPLETION_ITEMS);
-        assert_eq!(parse_max_completions(Some("lots")), DEFAULT_MAX_COMPLETION_ITEMS);
-        assert_eq!(parse_max_completions(Some("0")), DEFAULT_MAX_COMPLETION_ITEMS);
-        assert_eq!(parse_max_completions(Some("-5")), DEFAULT_MAX_COMPLETION_ITEMS);
+        assert_eq!(
+            parse_max_completions(Some("")),
+            DEFAULT_MAX_COMPLETION_ITEMS
+        );
+        assert_eq!(
+            parse_max_completions(Some("lots")),
+            DEFAULT_MAX_COMPLETION_ITEMS
+        );
+        assert_eq!(
+            parse_max_completions(Some("0")),
+            DEFAULT_MAX_COMPLETION_ITEMS
+        );
+        assert_eq!(
+            parse_max_completions(Some("-5")),
+            DEFAULT_MAX_COMPLETION_ITEMS
+        );
     }
 }

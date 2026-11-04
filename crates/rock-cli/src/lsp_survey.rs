@@ -21,13 +21,13 @@
 //!    full per-module/per-function stats and every candidate's samples.
 
 use anyhow::Result;
-use bone_query::{offset_to_position, BoneWorkspace};
+use bone_core::prelude::Instant;
+use bone_query::{BoneWorkspace, offset_to_position};
 use bone_semantic::prelude::{Idx, ModuleId};
 use lsp_types::{Position, Range};
 use serde_json::json;
 use std::collections::HashMap;
 use std::path::Path;
-use bone_core::prelude::Instant;
 
 use crate::skull_backend::{body_digit_flip, ms};
 
@@ -56,12 +56,14 @@ mod tests {
         )
         .expect_err("a normal candidate failure must abort the survey");
         assert!(err.to_string().contains("unexpected update failure"));
-        assert!(super::require_expected_survey_update(
-            super::EditKind::Broken,
-            Err::<(), _>("expected parse failure"),
-        )
-        .expect("broken candidates classify expected parse failures")
-        .is_none());
+        assert!(
+            super::require_expected_survey_update(
+                super::EditKind::Broken,
+                Err::<(), _>("expected parse failure"),
+            )
+            .expect("broken candidates classify expected parse failures")
+            .is_none()
+        );
     }
 }
 
@@ -163,7 +165,11 @@ fn require_expected_survey_update<T, E: std::fmt::Display>(
 fn short(file: &str) -> String {
     let p = Path::new(file);
     let name = p.file_name().and_then(|s| s.to_str()).unwrap_or(file);
-    match p.parent().and_then(|d| d.file_name()).and_then(|s| s.to_str()) {
+    match p
+        .parent()
+        .and_then(|d| d.file_name())
+        .and_then(|s| s.to_str())
+    {
         Some(dir) => format!("{dir}/{name}"),
         None => name.to_string(),
     }
@@ -282,7 +288,11 @@ fn make_body_edit(orig: &str, f: &FnStat) -> Option<String> {
 fn make_sig_edit(orig: &str, f: &FnStat) -> Option<String> {
     let paren = orig[f.name_off..f.span_end].find('(')? + f.name_off;
     let after = paren + 1;
-    let insert = if f.params == 0 { "__lspx: int" } else { "__lspx: int, " };
+    let insert = if f.params == 0 {
+        "__lspx: int"
+    } else {
+        "__lspx: int, "
+    };
     let mut out = String::with_capacity(orig.len() + insert.len());
     out.push_str(&orig[..after]);
     out.push_str(insert);
@@ -319,7 +329,9 @@ pub fn lsp_survey(path: &str, iters: usize, warmup: usize, json_out: bool) -> Re
     }
     let proj_marker = format!(
         "{}/",
-        dir.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_else(|| path.to_string())
+        dir.file_name()
+            .map(|f| f.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.to_string())
     );
 
     // Discover the whole compilation unit (project + stick.toml deps) and warm a
@@ -348,7 +360,10 @@ pub fn lsp_survey(path: &str, iters: usize, warmup: usize, json_out: bool) -> Re
     // Generate candidates: top targets by each metric x edit kind, deduped.
     let mut seen = std::collections::HashSet::new();
     let mut candidates: Vec<(FnStat, EditKind)> = Vec::new();
-    let add = |f: &FnStat, kind: EditKind, out: &mut Vec<(FnStat, EditKind)>, seen: &mut std::collections::HashSet<(String, String, u8)>| {
+    let add = |f: &FnStat,
+               kind: EditKind,
+               out: &mut Vec<(FnStat, EditKind)>,
+               seen: &mut std::collections::HashSet<(String, String, u8)>| {
         let key = (f.file.clone(), f.name.clone(), kind as u8);
         if seen.insert(key) {
             out.push((f.clone(), kind));
@@ -375,7 +390,10 @@ pub fn lsp_survey(path: &str, iters: usize, warmup: usize, json_out: bool) -> Re
     }
 
     let iters = iters.max(15);
-    let full_range = Range { start: Position::new(0, 0), end: Position::new(u32::MAX, 0) };
+    let full_range = Range {
+        start: Position::new(0, 0),
+        end: Position::new(u32::MAX, 0),
+    };
     let mut results: Vec<CandResult> = Vec::new();
 
     for (f, kind) in &candidates {
@@ -383,13 +401,16 @@ pub fn lsp_survey(path: &str, iters: usize, warmup: usize, json_out: bool) -> Re
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|_| f.file.clone());
         let orig = read_survey_source(&canon)?;
-        let Some(edited) = make_edit(&orig, f, *kind) else { continue };
+        let Some(edited) = make_edit(&orig, f, *kind) else {
+            continue;
+        };
 
         // Ground-truth tier + reinferred count from the Session (then revert).
-        let (tier, reinferred) = match require_expected_survey_update(*kind, session.update_file(&canon, &edited))? {
-            Some(u) => (format!("{:?}", u.tier), u.reinferred.len()),
-            None => ("ParseErr".to_string(), 0),
-        };
+        let (tier, reinferred) =
+            match require_expected_survey_update(*kind, session.update_file(&canon, &edited))? {
+                Some(u) => (format!("{:?}", u.tier), u.reinferred.len()),
+                None => ("ParseErr".to_string(), 0),
+            };
         require_survey_restore(&canon, session.update_file(&canon, &orig))?;
 
         // Time the live LSP path on the BoneWorkspace, alternating edited/orig.
@@ -435,7 +456,13 @@ pub fn lsp_survey(path: &str, iters: usize, warmup: usize, json_out: bool) -> Re
         }
         bone.update(&canon, orig.clone()); // restore baseline
 
-        let mean = |v: &[f64]| if v.is_empty() { 0.0 } else { v.iter().sum::<f64>() / v.len() as f64 };
+        let mean = |v: &[f64]| {
+            if v.is_empty() {
+                0.0
+            } else {
+                v.iter().sum::<f64>() / v.len() as f64
+            }
+        };
         let max = samples.iter().cloned().fold(0.0_f64, f64::max);
         results.push(CandResult {
             file: f.file.clone(),
@@ -459,51 +486,94 @@ pub fn lsp_survey(path: &str, iters: usize, warmup: usize, json_out: bool) -> Re
     results.sort_by(|a, b| b.edit_max.partial_cmp(&a.edit_max).unwrap());
 
     if json_out {
-        let mods_json: Vec<_> = mods.iter().map(|m| json!({
-            "file": m.file, "fns": m.fns, "items": m.items,
-            "body_bytes": m.body_bytes, "fan_in": m.fan_in,
-        })).collect();
-        let fns_json: Vec<_> = fns.iter().map(|f| json!({
-            "file": f.file, "name": f.name, "line": f.line,
-            "body_bytes": f.body_bytes, "params": f.params, "has_ret": f.has_ret,
-            "call_fan_in": f.call_fan_in, "mod_fan_in": f.mod_fan_in,
-        })).collect();
-        let res_json: Vec<_> = results.iter().map(|r| json!({
-            "file": r.file, "name": r.name, "line": r.line,
-            "kind": r.kind.label(), "tier": r.tier, "reinferred": r.reinferred,
-            "diags": r.diags, "edit_mean_ms": r.edit_mean, "edit_max_ms": r.edit_max,
-            "update_mean_ms": r.update_mean, "semtok_mean_ms": r.semtok_mean,
-            "inlay_mean_ms": r.inlay_mean, "hover_mean_ms": r.hover_mean,
-            "compl_mean_ms": r.compl_mean, "samples_ms": r.samples,
-        })).collect();
-        println!("{}", serde_json::to_string_pretty(&json!({
-            "project": path,
-            "modules": mods_json,
-            "functions": fns_json,
-            "candidates": res_json,
-        }))?);
+        let mods_json: Vec<_> = mods
+            .iter()
+            .map(|m| {
+                json!({
+                    "file": m.file, "fns": m.fns, "items": m.items,
+                    "body_bytes": m.body_bytes, "fan_in": m.fan_in,
+                })
+            })
+            .collect();
+        let fns_json: Vec<_> = fns
+            .iter()
+            .map(|f| {
+                json!({
+                    "file": f.file, "name": f.name, "line": f.line,
+                    "body_bytes": f.body_bytes, "params": f.params, "has_ret": f.has_ret,
+                    "call_fan_in": f.call_fan_in, "mod_fan_in": f.mod_fan_in,
+                })
+            })
+            .collect();
+        let res_json: Vec<_> = results
+            .iter()
+            .map(|r| {
+                json!({
+                    "file": r.file, "name": r.name, "line": r.line,
+                    "kind": r.kind.label(), "tier": r.tier, "reinferred": r.reinferred,
+                    "diags": r.diags, "edit_mean_ms": r.edit_mean, "edit_max_ms": r.edit_max,
+                    "update_mean_ms": r.update_mean, "semtok_mean_ms": r.semtok_mean,
+                    "inlay_mean_ms": r.inlay_mean, "hover_mean_ms": r.hover_mean,
+                    "compl_mean_ms": r.compl_mean, "samples_ms": r.samples,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "project": path,
+                "modules": mods_json,
+                "functions": fns_json,
+                "candidates": res_json,
+            }))?
+        );
         return Ok(());
     }
 
     // -- pretty report --
     eprintln!("=== Rock LSP-Survey (bone backend): {path} ===");
-    eprintln!("{} project modules, {} editable fns | {iters} iters/candidate ({warmup} warmup)\n", mods.len(), fns.len());
+    eprintln!(
+        "{} project modules, {} editable fns | {iters} iters/candidate ({warmup} warmup)\n",
+        mods.len(),
+        fns.len()
+    );
 
     eprintln!("  biggest modules (by body bytes):");
     for m in mods.iter().take(8) {
-        eprintln!("    {:<28} {:>6} B  {:>3} fns  {:>3} items  fan-in {:>3}", short(&m.file), m.body_bytes, m.fns, m.items, m.fan_in);
+        eprintln!(
+            "    {:<28} {:>6} B  {:>3} fns  {:>3} items  fan-in {:>3}",
+            short(&m.file),
+            m.body_bytes,
+            m.fns,
+            m.items,
+            m.fan_in
+        );
     }
     eprintln!("\n  biggest functions (by body bytes):");
     for f in by_body.iter().take(8) {
-        eprintln!("    {:<22} {:<24} {:>6} B", format!("{}:{}", short(&f.file), f.line), f.name, f.body_bytes);
+        eprintln!(
+            "    {:<22} {:<24} {:>6} B",
+            format!("{}:{}", short(&f.file), f.line),
+            f.name,
+            f.body_bytes
+        );
     }
     eprintln!("\n  most-called functions (call-site fan-in):");
     for f in by_calls.iter().filter(|f| f.call_fan_in > 0).take(8) {
-        eprintln!("    {:<22} {:<24} {:>4} calls  {:>3} dep-mods", format!("{}:{}", short(&f.file), f.line), f.name, f.call_fan_in, f.mod_fan_in);
+        eprintln!(
+            "    {:<22} {:<24} {:>4} calls  {:>3} dep-mods",
+            format!("{}:{}", short(&f.file), f.line),
+            f.name,
+            f.call_fan_in,
+            f.mod_fan_in
+        );
     }
 
     eprintln!("\n  WORST EDITS (ranked by max per-edit auto-refresh latency):");
-    eprintln!("    {:<26} {:<22} {:<10} {:<9} {:>7} {:>7}  {}", "where", "fn", "kind", "tier", "mean", "max", "[upd/sem/inl/hov/cmp ms, reinf, diags]");
+    eprintln!(
+        "    {:<26} {:<22} {:<10} {:<9} {:>7} {:>7}  {}",
+        "where", "fn", "kind", "tier", "mean", "max", "[upd/sem/inl/hov/cmp ms, reinf, diags]"
+    );
     for r in results.iter().take(20) {
         let tier_tag = if r.tier.contains(r.kind.expected_tier()) || r.tier == "ParseErr" {
             r.tier.clone()
@@ -512,18 +582,35 @@ pub fn lsp_survey(path: &str, iters: usize, warmup: usize, json_out: bool) -> Re
         };
         eprintln!(
             "    {:<26} {:<22} {:<10} {:<9} {:>7.3} {:>7.3}  [{:.2}/{:.2}/{:.2}/{:.2}/{:.2} r{} d{}]",
-            format!("{}:{}", short(&r.file), r.line), r.name, r.kind.label(), tier_tag,
-            r.edit_mean, r.edit_max,
-            r.update_mean, r.semtok_mean, r.inlay_mean, r.hover_mean, r.compl_mean,
-            r.reinferred, r.diags,
+            format!("{}:{}", short(&r.file), r.line),
+            r.name,
+            r.kind.label(),
+            tier_tag,
+            r.edit_mean,
+            r.edit_max,
+            r.update_mean,
+            r.semtok_mean,
+            r.inlay_mean,
+            r.hover_mean,
+            r.compl_mean,
+            r.reinferred,
+            r.diags,
         );
     }
     if let Some(worst) = results.first() {
         eprintln!(
             "\n  slowest: {} edit in {} `{}` -- {:.3} ms mean ({:.3} ms max), tier {}",
-            worst.kind.label(), short(&worst.file), worst.name, worst.edit_mean, worst.edit_max, worst.tier,
+            worst.kind.label(),
+            short(&worst.file),
+            worst.name,
+            worst.edit_mean,
+            worst.edit_max,
+            worst.tier,
         );
-        eprintln!("  drill in: ITER_LSP_FN={} rock iter-lsp {}", worst.name, path);
+        eprintln!(
+            "  drill in: ITER_LSP_FN={} rock iter-lsp {}",
+            worst.name, path
+        );
     }
     Ok(())
 }

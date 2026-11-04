@@ -3,7 +3,7 @@
 //! (fields width, height) offers only `title:` -- not `width:`/`height:`.
 
 use lsp_types::*;
-use rock_lsp::{do_completion_workspace, LspWorkspace};
+use rock_lsp::{LspWorkspace, do_completion_workspace};
 use std::str::FromStr;
 
 const SRC: &str = "\
@@ -34,7 +34,9 @@ fn labels_at(line: u32, ch: u32) -> Vec<String> {
         context: None,
     };
 
-    let resp = do_completion_workspace(&mut ws, &params).unwrap().expect("completion response");
+    let resp = do_completion_workspace(&mut ws, &params)
+        .unwrap()
+        .expect("completion response");
     let items = match resp {
         CompletionResponse::List(list) => list.items,
         CompletionResponse::Array(items) => items,

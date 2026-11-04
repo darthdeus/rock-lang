@@ -10,7 +10,11 @@
 use std::process::Command;
 
 fn node_available() -> bool {
-    Command::new("node").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+    Command::new("node")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 // Exercises: a registry global (SYSTEMS) populated by a `deco init` at module
@@ -73,7 +77,10 @@ fn run(backend: Option<&str>, path: &std::path::Path) -> (String, bool) {
         cmd.args(["--backend", b]);
     }
     let out = cmd.output().expect("spawn rock");
-    (String::from_utf8_lossy(&out.stdout).into_owned(), out.status.success())
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        out.status.success(),
+    )
 }
 
 const COALESCE_VALUE_FIELD: &str = r#"
@@ -124,13 +131,22 @@ fn js_run_matches_luajit_end_to_end() {
 
     let (lua_out, lua_ok) = run(None, &path);
     assert!(lua_ok, "luajit run failed:\n{lua_out}");
-    assert_eq!(lua_out, EXPECTED, "luajit output drifted from the pinned expectation");
+    assert_eq!(
+        lua_out, EXPECTED,
+        "luajit output drifted from the pinned expectation"
+    );
 
     let (js_out, js_ok) = run(Some("js"), &path);
     assert!(js_ok, "js run failed:\n{js_out}");
-    assert_eq!(js_out, EXPECTED, "js output drifted from the pinned expectation");
+    assert_eq!(
+        js_out, EXPECTED,
+        "js output drifted from the pinned expectation"
+    );
 
-    assert_eq!(js_out, lua_out, "js and luajit `rock run` output must be byte-identical");
+    assert_eq!(
+        js_out, lua_out,
+        "js and luajit `rock run` output must be byte-identical"
+    );
 }
 
 // `rock run <dir> --backend js` (project mode) -- a multi-file
@@ -145,7 +161,11 @@ fn js_run_project_dir_matches_luajit() {
     let dir = std::env::temp_dir().join("rock_js_run_gate_proj");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("stick.toml"), "[package]\nname = \"proj\"\n").unwrap();
-    std::fs::write(dir.join("math.rock"), "fn square(x: int) -> int { return x * x }\n").unwrap();
+    std::fs::write(
+        dir.join("math.rock"),
+        "fn square(x: int) -> int { return x * x }\n",
+    )
+    .unwrap();
     std::fs::write(
         dir.join("main.rock"),
         "fn main() {\n  let t = 0\n  for i in 0..5 { t = t + square(i) }\n  print(\"sum={t}\")\n}\n",
@@ -157,7 +177,11 @@ fn js_run_project_dir_matches_luajit() {
     let (js_out, js_ok) = run(Some("js"), &dir);
     assert!(js_ok, "js project run failed:\n{js_out}");
     assert_eq!(js_out.trim(), "sum=30", "js project output drifted");
-    assert_eq!(js_out.trim(), lua_out.trim(), "js and luajit project run must agree");
+    assert_eq!(
+        js_out.trim(),
+        lua_out.trim(),
+        "js and luajit project run must agree"
+    );
 }
 
 // A file with no nullary `main` runs module-load effects only (ginit + deco
@@ -279,7 +303,10 @@ fn run_ablated(backend: Option<&str>, path: &std::path::Path) -> (String, bool) 
     }
     cmd.env("ROCK_MONO_ABLATION", "1");
     let out = cmd.output().expect("spawn rock");
-    (String::from_utf8_lossy(&out.stdout).into_owned(), out.status.success())
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        out.status.success(),
+    )
 }
 
 #[test]

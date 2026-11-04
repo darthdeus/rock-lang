@@ -18,19 +18,34 @@ use crate::ast::*;
 pub fn clone_expr(ast: &mut Ast, e: Idx<ExprData>) -> Idx<ExprData> {
     let data = ast.exprs[e].clone();
     let kind = clone_expr_kind(ast, data.kind);
-    ast.exprs.alloc(ExprData { span: data.span, kind })
+    ast.exprs.alloc(ExprData {
+        span: data.span,
+        kind,
+    })
 }
 
 pub fn clone_block(ast: &mut Ast, b: Idx<BlockData>) -> Idx<BlockData> {
     let data = ast.blocks[b].clone();
-    let statements = data.statements.iter().map(|&s| clone_stmt(ast, s)).collect();
-    ast.blocks.alloc(BlockData { span: data.span, braces: data.braces, statements })
+    let statements = data
+        .statements
+        .iter()
+        .map(|&s| clone_stmt(ast, s))
+        .collect();
+    ast.blocks.alloc(BlockData {
+        span: data.span,
+        braces: data.braces,
+        statements,
+    })
 }
 
 pub fn clone_type(ast: &mut Ast, t: Idx<TypeExprData>) -> Idx<TypeExprData> {
     let data = ast.types[t].clone();
     let kind = clone_type_kind(ast, data.kind);
-    ast.types.alloc(TypeExprData { span: data.span, kind, is_nullable: data.is_nullable })
+    ast.types.alloc(TypeExprData {
+        span: data.span,
+        kind,
+        is_nullable: data.is_nullable,
+    })
 }
 
 fn clone_stmt(ast: &mut Ast, s: Idx<StatementData>) -> Idx<StatementData> {
@@ -71,7 +86,10 @@ fn clone_stmt(ast: &mut Ast, s: Idx<StatementData>) -> Idx<StatementData> {
             return_ty: f.return_ty.map(|t| clone_type(ast, t)),
             body: clone_block(ast, f.body),
         }),
-        StatementKind::Return { keyword_span, value } => StatementKind::Return {
+        StatementKind::Return {
+            keyword_span,
+            value,
+        } => StatementKind::Return {
             keyword_span,
             value: value.map(|e| clone_expr(ast, e)),
         },
@@ -98,18 +116,27 @@ fn clone_stmt(ast: &mut Ast, s: Idx<StatementData>) -> Idx<StatementData> {
             value: clone_expr(ast, w.value),
             body: clone_block(ast, w.body),
         }),
-        StatementKind::Defer(DeferKind::Block(b)) => StatementKind::Defer(DeferKind::Block(clone_block(ast, b))),
+        StatementKind::Defer(DeferKind::Block(b)) => {
+            StatementKind::Defer(DeferKind::Block(clone_block(ast, b)))
+        }
         StatementKind::Defer(DeferKind::Expression(e)) => {
             StatementKind::Defer(DeferKind::Expression(clone_expr(ast, e)))
         }
-        StatementKind::LifecycleHook { keyword_span, name, body } => StatementKind::LifecycleHook {
+        StatementKind::LifecycleHook {
+            keyword_span,
+            name,
+            body,
+        } => StatementKind::LifecycleHook {
             keyword_span,
             name,
             body: clone_block(ast, body),
         },
         StatementKind::Comment(c) => StatementKind::Comment(c),
     };
-    ast.stmts.alloc(StatementData { span: data.span, kind })
+    ast.stmts.alloc(StatementData {
+        span: data.span,
+        kind,
+    })
 }
 
 fn clone_expr_kind(ast: &mut Ast, kind: ExprKind) -> ExprKind {
@@ -155,7 +182,11 @@ fn clone_expr_kind(ast: &mut Ast, kind: ExprKind) -> ExprKind {
         ExprKind::UnaryMinus(x) => ExprKind::UnaryMinus(ce(ast, x)),
         ExprKind::FieldAccess(x, id) => ExprKind::FieldAccess(ce(ast, x), id),
         ExprKind::SafeNavigation(x, id) => ExprKind::SafeNavigation(ce(ast, x), id),
-        ExprKind::SafeNavigationLet { receiver, binding, body } => ExprKind::SafeNavigationLet {
+        ExprKind::SafeNavigationLet {
+            receiver,
+            binding,
+            body,
+        } => ExprKind::SafeNavigationLet {
             receiver: ce(ast, receiver),
             binding,
             body: cb(ast, body),
@@ -171,7 +202,12 @@ fn clone_expr_kind(ast: &mut Ast, kind: ExprKind) -> ExprKind {
         ExprKind::ReturnExpr(o) => ExprKind::ReturnExpr(o.map(|e| ce(ast, e))),
         ExprKind::Yield(o) => ExprKind::Yield(o.map(|e| ce(ast, e))),
 
-        ExprKind::FunctionCall { func, generic_args, args, syntax } => ExprKind::FunctionCall {
+        ExprKind::FunctionCall {
+            func,
+            generic_args,
+            args,
+            syntax,
+        } => ExprKind::FunctionCall {
             func: ce(ast, func),
             generic_args: generic_args.into_iter().map(|t| ct(ast, t)).collect(),
             args: args
@@ -190,25 +226,43 @@ fn clone_expr_kind(ast: &mut Ast, kind: ExprKind) -> ExprKind {
             op,
             right: ce(ast, right),
         },
-        ExprKind::Assign { target, value, compound_op } => ExprKind::Assign {
+        ExprKind::Assign {
+            target,
+            value,
+            compound_op,
+        } => ExprKind::Assign {
             target: ce(ast, target),
             value: ce(ast, value),
             compound_op,
         },
-        ExprKind::ArrayLiteral(xs) => ExprKind::ArrayLiteral(xs.into_iter().map(|x| ce(ast, x)).collect()),
+        ExprKind::ArrayLiteral(xs) => {
+            ExprKind::ArrayLiteral(xs.into_iter().map(|x| ce(ast, x)).collect())
+        }
         ExprKind::Tuple(xs) => ExprKind::Tuple(xs.into_iter().map(|x| ce(ast, x)).collect()),
-        ExprKind::StructLiteral { name, bases, fields } => ExprKind::StructLiteral {
+        ExprKind::StructLiteral {
+            name,
+            bases,
+            fields,
+        } => ExprKind::StructLiteral {
             name,
             bases: bases.into_iter().map(|b| ce(ast, b)).collect(),
             fields: fields.into_iter().map(|(ns, v)| (ns, ce(ast, v))).collect(),
         },
-        ExprKind::EnumVariantRecord { enum_name, variant_name, fields } => ExprKind::EnumVariantRecord {
+        ExprKind::EnumVariantRecord {
+            enum_name,
+            variant_name,
+            fields,
+        } => ExprKind::EnumVariantRecord {
             enum_name,
             variant_name,
             fields: fields.into_iter().map(|(ns, v)| (ns, ce(ast, v))).collect(),
         },
         ExprKind::Block(b) => ExprKind::Block(cb(ast, b)),
-        ExprKind::Lambda { params, return_ty, body } => ExprKind::Lambda {
+        ExprKind::Lambda {
+            params,
+            return_ty,
+            body,
+        } => ExprKind::Lambda {
             params: params
                 .into_iter()
                 .map(|p| LambdaParam {
@@ -231,17 +285,32 @@ fn clone_expr_kind(ast: &mut Ast, kind: ExprKind) -> ExprKind {
                 })
                 .collect(),
         },
-        ExprKind::If { branches, else_branch } => ExprKind::If {
-            branches: branches.into_iter().map(|(c, b)| (ce(ast, c), cb(ast, b))).collect(),
+        ExprKind::If {
+            branches,
+            else_branch,
+        } => ExprKind::If {
+            branches: branches
+                .into_iter()
+                .map(|(c, b)| (ce(ast, c), cb(ast, b)))
+                .collect(),
             else_branch: else_branch.map(|b| cb(ast, b)),
         },
-        ExprKind::IfLet { pattern, value, then_block, else_block } => ExprKind::IfLet {
+        ExprKind::IfLet {
+            pattern,
+            value,
+            then_block,
+            else_block,
+        } => ExprKind::IfLet {
             pattern: clone_pattern(ast, pattern),
             value: ce(ast, value),
             then_block: cb(ast, then_block),
             else_block: else_block.map(|b| cb(ast, b)),
         },
-        ExprKind::IfLetChain { clauses, then_block, else_block } => ExprKind::IfLetChain {
+        ExprKind::IfLetChain {
+            clauses,
+            then_block,
+            else_block,
+        } => ExprKind::IfLetChain {
             clauses: clauses
                 .into_iter()
                 .map(|c| match c {
@@ -273,8 +342,14 @@ fn clone_pattern(ast: &mut Ast, p: Pattern) -> Pattern {
         Pattern::Wildcard => Pattern::Wildcard,
         Pattern::Ident(id) => Pattern::Ident(id),
         Pattern::Literal(e) => Pattern::Literal(clone_expr(ast, e)),
-        Pattern::Tuple(ps) => Pattern::Tuple(ps.into_iter().map(|p| clone_pattern(ast, p)).collect()),
-        Pattern::EnumVariant { enum_name, variant_name, args } => Pattern::EnumVariant {
+        Pattern::Tuple(ps) => {
+            Pattern::Tuple(ps.into_iter().map(|p| clone_pattern(ast, p)).collect())
+        }
+        Pattern::EnumVariant {
+            enum_name,
+            variant_name,
+            args,
+        } => Pattern::EnumVariant {
             enum_name,
             variant_name,
             args: args.map(|ps| ps.into_iter().map(|p| clone_pattern(ast, p)).collect()),
@@ -285,16 +360,31 @@ fn clone_pattern(ast: &mut Ast, p: Pattern) -> Pattern {
         },
         Pattern::PathRecord { path, fields, rest } => Pattern::PathRecord {
             path,
-            fields: fields.into_iter().map(|(id, p)| (id, clone_pattern(ast, p))).collect(),
+            fields: fields
+                .into_iter()
+                .map(|(id, p)| (id, clone_pattern(ast, p)))
+                .collect(),
             rest,
         },
-        Pattern::Record { enum_name, name, fields, rest } => Pattern::Record {
+        Pattern::Record {
             enum_name,
             name,
-            fields: fields.into_iter().map(|(id, p)| (id, clone_pattern(ast, p))).collect(),
+            fields,
+            rest,
+        } => Pattern::Record {
+            enum_name,
+            name,
+            fields: fields
+                .into_iter()
+                .map(|(id, p)| (id, clone_pattern(ast, p)))
+                .collect(),
             rest,
         },
-        Pattern::Range { start, end, inclusive } => Pattern::Range {
+        Pattern::Range {
+            start,
+            end,
+            inclusive,
+        } => Pattern::Range {
             start: start.map(|e| clone_expr(ast, e)),
             end: end.map(|e| clone_expr(ast, e)),
             inclusive,
@@ -327,7 +417,9 @@ fn clone_type_kind(ast: &mut Ast, kind: TypeExprKind) -> TypeExprKind {
             ctor,
             args: args.into_iter().map(|t| clone_type(ast, t)).collect(),
         },
-        TypeExprKind::Tuple(ts) => TypeExprKind::Tuple(ts.into_iter().map(|t| clone_type(ast, t)).collect()),
+        TypeExprKind::Tuple(ts) => {
+            TypeExprKind::Tuple(ts.into_iter().map(|t| clone_type(ast, t)).collect())
+        }
         TypeExprKind::Function { params, ret } => TypeExprKind::Function {
             params: params.into_iter().map(|t| clone_type(ast, t)).collect(),
             ret: clone_type(ast, ret),

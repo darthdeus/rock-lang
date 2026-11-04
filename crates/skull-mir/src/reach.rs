@@ -19,11 +19,11 @@
 //! native stack.
 
 use crate::mir::{Block, FuncRef, Inst, MirFunc};
-use comfy_la_arena::Idx;
-use ustr::Ustr;
 use bone_semantic::prelude::CompilerError;
+use comfy_la_arena::Idx;
 use rustc_hash::{FxHashMap, FxHashSet as HashSet};
 use std::hash::Hash;
+use ustr::Ustr;
 
 pub struct GlobalReach {
     id_of: FxHashMap<Ustr, u32>,
@@ -49,15 +49,15 @@ pub fn transitive_global_reads(
 ) -> GlobalReach {
     let mut id_of = FxHashMap::default();
     let mut names = Vec::new();
-    let intern = |name: Ustr, id_of: &mut FxHashMap<Ustr, u32>, names: &mut Vec<Ustr>| {
-        match id_of.get(&name) {
-            Some(&index) => index,
-            None => {
-                let index = names.len() as u32;
-                names.push(name);
-                id_of.insert(name, index);
-                index
-            }
+    let intern = |name: Ustr, id_of: &mut FxHashMap<Ustr, u32>, names: &mut Vec<Ustr>| match id_of
+        .get(&name)
+    {
+        Some(&index) => index,
+        None => {
+            let index = names.len() as u32;
+            names.push(name);
+            id_of.insert(name, index);
+            index
         }
     };
     for (body, globals) in direct_globals {
@@ -372,7 +372,9 @@ pub fn spec_bound_calls(
     let empty_resolved = crate::bound::ResolvedBoundTree::default();
     for bid in emitted_blocks(mf) {
         for &iid in &mf.blocks[bid].insts {
-            let Some(inst) = mf.spec_bindings.get(&iid) else { continue };
+            let Some(inst) = mf.spec_bindings.get(&iid) else {
+                continue;
+            };
             let fref = match &mf.insts[iid] {
                 Inst::Call { func, .. } | Inst::CallMulti { func, .. } => *func,
                 _ => continue,
@@ -380,10 +382,8 @@ pub fn spec_bound_calls(
             // Check the delivery identity before reading the bound plan. A
             // broken owner is the primary invariant at this site; otherwise a
             // missing secondary bound fact would mask the owner disagreement.
-            let owner_agrees = inst.func == fref
-                && mf.callee_instances.get(&iid).is_some_and(|oi| {
-                    oi == inst
-                });
+            let owner_agrees =
+                inst.func == fref && mf.callee_instances.get(&iid).is_some_and(|oi| oi == inst);
             if !owner_agrees {
                 return Err(CompilerError::new_no_location(format!(
                     "specialized call to `{}` in `{}` has no concrete owner agreeing with its \
@@ -407,7 +407,10 @@ pub fn spec_bound_calls(
                 }
                 None => empty_resolved.clone(),
             };
-            out.push(crate::bound::SpecDemand { inst: inst.clone(), tree });
+            out.push(crate::bound::SpecDemand {
+                inst: inst.clone(),
+                tree,
+            });
         }
     }
     Ok(())

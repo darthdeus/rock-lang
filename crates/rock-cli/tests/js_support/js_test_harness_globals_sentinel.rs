@@ -53,7 +53,9 @@ fn main() {
 "#;
 
 fn workspace_root() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("workspace root")
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace root")
 }
 
 /// Writes `src` to a temp `.rock` and runs `rock <cmd> <file> [args]`.
@@ -106,7 +108,11 @@ fn js_executor_keeps_shared_global_state() {
 fn single_js_program_keeps_shared_global_state() {
     let (ok, text) = rock("run", RUN_FIXTURE, &["--backend", "js"]);
     assert!(ok, "`rock run --backend js` failed:\n{text}");
-    let body: String = text.lines().filter(|l| !l.contains("]")).collect::<Vec<_>>().join("\n");
+    let body: String = text
+        .lines()
+        .filter(|l| !l.contains("]"))
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(
         body.contains('1') && body.contains('2'),
         "one JS program must print 1 and 2 like luajit:\n{text}"

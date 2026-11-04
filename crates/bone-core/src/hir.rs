@@ -1,8 +1,8 @@
 use std::sync::OnceLock;
 
 use rust_lapper::Interval;
-use skull_parser::Ident;
 pub use skull_parser::FnBackend;
+use skull_parser::Ident;
 
 use crate::modules::NsVisibility;
 use crate::prelude::*;
@@ -269,7 +269,10 @@ pub struct PathSegmentRef {
 pub enum SegmentTarget {
     /// A module the path walked into: its package and node key (`""` for a
     /// package root).
-    Module { package: crate::modules::PackageId, node: Ustr },
+    Module {
+        package: crate::modules::PackageId,
+        node: Ustr,
+    },
     /// A definition, by DefKey.
     Def(Ustr),
     /// An enum variant, by its enum's DefKey.
@@ -907,7 +910,10 @@ pub enum CallFamily {
     Legacy(Ustr),
     /// v1: the one definition the tiers bind, by canonical DefKey. `owner`
     /// is as for [`FamilyMember`].
-    Resolved { key: Ustr, owner: Option<crate::modules::PackageId> },
+    Resolved {
+        key: Ustr,
+        owner: Option<crate::modules::PackageId>,
+    },
     /// A bare name whose overload family spans several definitions, in
     /// either dialect: legacy callables merged with projected or imported v1
     /// ones (spec 3.2), or a v1 family spanning the lookup tiers (spec 8.3,
@@ -1009,7 +1015,6 @@ pub const OPERATOR_FNS: &[(&str, &str, bool)] = &[
 /// remains the table for binary/operator declarations and non-overloadable
 /// reserved symbols, while these names are ordinary callable families too.
 pub const UNARY_OPERATOR_FNS: &[(&str, &str)] = &[("__unm", "-"), ("__not", "!")];
-
 
 /// `None` for a name that is not an operator fn at all.
 pub fn operator_entry(name: &str) -> Option<(&'static str, bool)> {

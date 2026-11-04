@@ -142,7 +142,11 @@ fn fmt_inst(
         Inst::UintShl(a, b) => bin("uint.bit.shl", a, b),
         Inst::UintShr(a, b) => bin("uint.bit.shr", a, b),
 
-        Inst::CallBoundMulti { dests, generic_idx, args } => {
+        Inst::CallBoundMulti {
+            dests,
+            generic_idx,
+            args,
+        } => {
             let ds = dests
                 .iter()
                 .map(|c| format!("c{}", raw(*c)))
@@ -151,25 +155,57 @@ fn fmt_inst(
             format!("{ds} = call_bound <I{generic_idx}>({})", list(args))
         }
         Inst::Call { func, args } => {
-            let a = args.iter().map(|id| format!("v{}", num[id])).collect::<Vec<_>>().join(", ");
+            let a = args
+                .iter()
+                .map(|id| format!("v{}", num[id]))
+                .collect::<Vec<_>>()
+                .join(", ");
             format!("call {}:{}({a})", func.module.0, raw(func.func))
         }
         Inst::CallMulti { dests, func, args } => {
-            let d = dests.iter().map(|c| format!("c{}", raw(*c))).collect::<Vec<_>>().join(", ");
-            let a = args.iter().map(|id| format!("v{}", num[id])).collect::<Vec<_>>().join(", ");
+            let d = dests
+                .iter()
+                .map(|c| format!("c{}", raw(*c)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let a = args
+                .iter()
+                .map(|id| format!("v{}", num[id]))
+                .collect::<Vec<_>>()
+                .join(", ");
             format!("{d} = call {}:{}({a})", func.module.0, raw(func.func))
         }
         Inst::CallValue { callee, args } => {
-            let a = args.iter().map(|id| format!("v{}", num[id])).collect::<Vec<_>>().join(", ");
+            let a = args
+                .iter()
+                .map(|id| format!("v{}", num[id]))
+                .collect::<Vec<_>>()
+                .join(", ");
             format!("call_value v{}({a})", v(*callee))
         }
-        Inst::CallValueMulti { dests, callee, args } => {
-            let d = dests.iter().map(|c| format!("c{}", raw(*c))).collect::<Vec<_>>().join(", ");
-            let a = args.iter().map(|id| format!("v{}", num[id])).collect::<Vec<_>>().join(", ");
+        Inst::CallValueMulti {
+            dests,
+            callee,
+            args,
+        } => {
+            let d = dests
+                .iter()
+                .map(|c| format!("c{}", raw(*c)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let a = args
+                .iter()
+                .map(|id| format!("v{}", num[id]))
+                .collect::<Vec<_>>()
+                .join(", ");
             format!("{d} = call_value v{}({a})", v(*callee))
         }
         Inst::Lambda { params, entry } => {
-            let ps = params.iter().map(|c| format!("c{}", raw(*c))).collect::<Vec<_>>().join(", ");
+            let ps = params
+                .iter()
+                .map(|c| format!("c{}", raw(*c)))
+                .collect::<Vec<_>>()
+                .join(", ");
             format!("lambda ({ps}) -> bb{}", raw(*entry))
         }
 
@@ -244,12 +280,23 @@ fn fmt_inst(
             positional,
             named,
         } => {
-            let mut parts: Vec<String> = positional.iter().map(|id| format!("v{}", num[id])).collect();
+            let mut parts: Vec<String> = positional
+                .iter()
+                .map(|id| format!("v{}", num[id]))
+                .collect();
             parts.extend(named.iter().map(|(n, id)| format!("{n}=v{}", num[id])));
             format!("enum {ty}::{tag}({})", parts.join(", "))
         }
-        Inst::MakeEnumDyn { tag, ty, positional, named } => {
-            let mut parts: Vec<String> = positional.iter().map(|id| format!("v{}", num[id])).collect();
+        Inst::MakeEnumDyn {
+            tag,
+            ty,
+            positional,
+            named,
+        } => {
+            let mut parts: Vec<String> = positional
+                .iter()
+                .map(|id| format!("v{}", num[id]))
+                .collect();
             parts.extend(named.iter().map(|(n, id)| format!("{n}=v{}", num[id])));
             format!("enum_dyn {ty}::[v{}]({})", num[tag], parts.join(", "))
         }
@@ -264,7 +311,9 @@ fn fmt_inst(
         Inst::VecCheckedIndex { vec, index } => {
             format!("vec_checked_index v{}, v{}", v(*vec), v(*index))
         }
-        Inst::FfiNewArray { ctype, count, .. } => format!("ffi_new_array {ctype}[?], v{}", v(*count)),
+        Inst::FfiNewArray { ctype, count, .. } => {
+            format!("ffi_new_array {ctype}[?], v{}", v(*count))
+        }
 
         Inst::Store { cell, value } => format!("store c{}, v{}", raw(*cell), v(*value)),
         Inst::StoreField { base, field, value } => {
@@ -287,16 +336,20 @@ fn fmt_inst(
         }
         Inst::CoroSetInner(x) => format!("coro_set_inner v{}", v(*x)),
         Inst::MakeValueStruct { name, fields, .. } => {
-            let parts: Vec<String> =
-                fields.iter().map(|(fname, f)| format!("{fname}: v{}", v(*f))).collect();
+            let parts: Vec<String> = fields
+                .iter()
+                .map(|(fname, f)| format!("{fname}: v{}", v(*f)))
+                .collect();
             format!("{name}_ct({})", parts.join(", "))
         }
         Inst::MakeNullableValue { present, value } => {
             format!("nullable(v{}, v{})", v(*present), v(*value))
         }
         Inst::MaterializeValueStruct { name, fields, .. } => {
-            let parts: Vec<String> =
-                fields.iter().map(|(fname, f)| format!("{fname}: v{}", v(*f))).collect();
+            let parts: Vec<String> = fields
+                .iter()
+                .map(|(fname, f)| format!("{fname}: v{}", v(*f)))
+                .collect();
             format!("materialize {name}_ct({})", parts.join(", "))
         }
         Inst::CoroHook { kind, lambda } => {
@@ -319,7 +372,13 @@ fn fmt_term(t: &Term, num: &HashMap<Idx<Inst>, u32>) -> String {
     match t {
         Term::Return(vs) if vs.is_empty() => "return".to_string(),
         Term::Return(vs) => {
-            format!("return {}", vs.iter().map(|v| format!("v{}", num[v])).collect::<Vec<_>>().join(", "))
+            format!(
+                "return {}",
+                vs.iter()
+                    .map(|v| format!("v{}", num[v]))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
         }
         Term::Unreachable => "unreachable".to_string(),
         Term::Goto(b) => format!("goto bb{}", raw(*b)),
@@ -349,7 +408,11 @@ fn fmt_term(t: &Term, num: &HashMap<Idx<Inst>, u32>) -> String {
             if values.is_empty() {
                 format!("yield -> bb{}", raw(*resume))
             } else {
-                let vs = values.iter().map(|v| format!("v{}", num[v])).collect::<Vec<_>>().join(", ");
+                let vs = values
+                    .iter()
+                    .map(|v| format!("v{}", num[v]))
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 format!("yield {vs} -> bb{}", raw(*resume))
             }
         }

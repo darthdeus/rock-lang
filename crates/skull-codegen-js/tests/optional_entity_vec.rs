@@ -60,7 +60,10 @@ fn main() -> int {
 
 fn emit_js() -> String {
     let ws = ws_with(SRC);
-    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("test module");
     let fid = ws
         .module(mid)
         .functions
@@ -70,7 +73,13 @@ fn emit_js() -> String {
         .expect("main function");
     skull_codegen_js::emit::emit_with_closure(
         &ws,
-        &[(FuncRef { module: mid, func: fid }, "main".to_string())],
+        &[(
+            FuncRef {
+                module: mid,
+                func: fid,
+            },
+            "main".to_string(),
+        )],
     )
     .unwrap_or_else(|e| panic!("nullable Entity Vec must emit: {}", e.message))
 }
@@ -78,9 +87,18 @@ fn emit_js() -> String {
 #[test]
 fn nullable_entity_vec_uses_boxed_assignment_and_column_control_survives() {
     let js = emit_js();
-    assert!(js.contains("slots: ({_data:"), "nullable field default is not boxed:\n{js}");
-    assert!(js.contains("\"@vec\": {repr: \"columns\", elem: \"ColumnCell\""), "column control stopped using columns:\n{js}");
-    assert!(!js.contains("repr: \"columns\", elem: \"Entity\""), "nullable Entity assignment selected columns:\n{js}");
+    assert!(
+        js.contains("slots: ({_data:"),
+        "nullable field default is not boxed:\n{js}"
+    );
+    assert!(
+        js.contains("\"@vec\": {repr: \"columns\", elem: \"ColumnCell\""),
+        "column control stopped using columns:\n{js}"
+    );
+    assert!(
+        !js.contains("repr: \"columns\", elem: \"Entity\""),
+        "nullable Entity assignment selected columns:\n{js}"
+    );
 }
 
 #[test]
@@ -95,7 +113,11 @@ fn nullable_entity_vec_round_trips_through_node() {
         skull_codegen_js::JS_STRUCTURAL_EQ,
         skull_codegen_js::JS_STRING_RUNTIME,
     );
-    let out = crate::common::node().arg("-e").arg(&program).output().expect("spawn node");
+    let out = crate::common::node()
+        .arg("-e")
+        .arg(&program)
+        .output()
+        .expect("spawn node");
     assert!(
         out.status.success(),
         "node failed:\n--- stderr ---\n{}\n--- program ---\n{program}",

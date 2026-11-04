@@ -35,13 +35,16 @@ pub struct DocumentFormattingParams {
     pub work_done_progress_params: WorkDoneProgressParams,
 }
 
-impl_lsp_struct!(DocumentFormattingParams,
+impl_lsp_struct!(
+    DocumentFormattingParams,
     required {
         text_document: TextDocumentIdentifier = "textDocument",
         options: FormattingOptions = "options",
     },
     optional {},
-    flatten { work_done_progress_params: WorkDoneProgressParams }
+    flatten {
+        work_done_progress_params: WorkDoneProgressParams
+    }
 );
 
 /// Value-object describing what options formatting should use.
@@ -72,24 +75,37 @@ pub struct FormattingOptions {
 impl serde::Serialize for FormattingOptions {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         let mut map = serde_json::Map::new();
-        map.insert("tabSize".to_string(),
-            serde_json::to_value(self.tab_size).map_err(serde::ser::Error::custom)?);
-        map.insert("insertSpaces".to_string(),
-            serde_json::to_value(self.insert_spaces).map_err(serde::ser::Error::custom)?);
+        map.insert(
+            "tabSize".to_string(),
+            serde_json::to_value(self.tab_size).map_err(serde::ser::Error::custom)?,
+        );
+        map.insert(
+            "insertSpaces".to_string(),
+            serde_json::to_value(self.insert_spaces).map_err(serde::ser::Error::custom)?,
+        );
         if let Some(v) = &self.trim_trailing_whitespace {
-            map.insert("trimTrailingWhitespace".to_string(),
-                serde_json::to_value(v).map_err(serde::ser::Error::custom)?);
+            map.insert(
+                "trimTrailingWhitespace".to_string(),
+                serde_json::to_value(v).map_err(serde::ser::Error::custom)?,
+            );
         }
         if let Some(v) = &self.insert_final_newline {
-            map.insert("insertFinalNewline".to_string(),
-                serde_json::to_value(v).map_err(serde::ser::Error::custom)?);
+            map.insert(
+                "insertFinalNewline".to_string(),
+                serde_json::to_value(v).map_err(serde::ser::Error::custom)?,
+            );
         }
         if let Some(v) = &self.trim_final_newlines {
-            map.insert("trimFinalNewlines".to_string(),
-                serde_json::to_value(v).map_err(serde::ser::Error::custom)?);
+            map.insert(
+                "trimFinalNewlines".to_string(),
+                serde_json::to_value(v).map_err(serde::ser::Error::custom)?,
+            );
         }
         for (k, v) in &self.properties {
-            map.insert(k.clone(), serde_json::to_value(v).map_err(serde::ser::Error::custom)?);
+            map.insert(
+                k.clone(),
+                serde_json::to_value(v).map_err(serde::ser::Error::custom)?,
+            );
         }
         serde_json::Value::Object(map).serialize(s)
     }
@@ -98,13 +114,16 @@ impl serde::Serialize for FormattingOptions {
 impl<'de> serde::Deserialize<'de> for FormattingOptions {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let mut map = serde_json::Map::<String, serde_json::Value>::deserialize(d)?;
-        let tab_size = map.remove("tabSize")
+        let tab_size = map
+            .remove("tabSize")
             .ok_or_else(|| serde::de::Error::missing_field("tabSize"))
             .and_then(|v| serde_json::from_value(v).map_err(serde::de::Error::custom))?;
-        let insert_spaces = map.remove("insertSpaces")
+        let insert_spaces = map
+            .remove("insertSpaces")
             .ok_or_else(|| serde::de::Error::missing_field("insertSpaces"))
             .and_then(|v| serde_json::from_value(v).map_err(serde::de::Error::custom))?;
-        let trim_trailing_whitespace = crate::deserialize_optional(map.remove("trimTrailingWhitespace"))?;
+        let trim_trailing_whitespace =
+            crate::deserialize_optional(map.remove("trimTrailingWhitespace"))?;
         let insert_final_newline = crate::deserialize_optional(map.remove("insertFinalNewline"))?;
         let trim_final_newlines = crate::deserialize_optional(map.remove("trimFinalNewlines"))?;
         let mut properties = HashMap::with_capacity(map.len());
@@ -150,14 +169,17 @@ pub struct DocumentRangeFormattingParams {
     pub work_done_progress_params: WorkDoneProgressParams,
 }
 
-impl_lsp_struct!(DocumentRangeFormattingParams,
+impl_lsp_struct!(
+    DocumentRangeFormattingParams,
     required {
         text_document: TextDocumentIdentifier = "textDocument",
         range: Range = "range",
         options: FormattingOptions = "options",
     },
     optional {},
-    flatten { work_done_progress_params: WorkDoneProgressParams }
+    flatten {
+        work_done_progress_params: WorkDoneProgressParams
+    }
 );
 
 #[derive(Debug, PartialEq, Clone)]
@@ -172,13 +194,16 @@ pub struct DocumentOnTypeFormattingParams {
     pub options: FormattingOptions,
 }
 
-impl_lsp_struct!(DocumentOnTypeFormattingParams,
+impl_lsp_struct!(
+    DocumentOnTypeFormattingParams,
     required {
         ch: String = "ch",
         options: FormattingOptions = "options",
     },
     optional {},
-    flatten { text_document_position: TextDocumentPositionParams }
+    flatten {
+        text_document_position: TextDocumentPositionParams
+    }
 );
 
 /// Extends TextDocumentRegistrationOptions

@@ -35,7 +35,8 @@ pub struct NotebookCell {
     pub execution_summary: Option<ExecutionSummary>,
 }
 
-impl_lsp_struct!(NotebookCell,
+impl_lsp_struct!(
+    NotebookCell,
     required {
         kind: NotebookCellKind = "kind",
         document: Uri = "document",
@@ -52,9 +53,14 @@ pub struct ExecutionSummary {
     pub success: Option<bool>,
 }
 
-impl_lsp_struct!(ExecutionSummary,
-    required { execution_order: u32 = "executionOrder" },
-    optional { success: bool = "success" }
+impl_lsp_struct!(
+    ExecutionSummary,
+    required {
+        execution_order: u32 = "executionOrder"
+    },
+    optional {
+        success: bool = "success"
+    }
 );
 
 #[derive(Debug, Eq, PartialEq, Clone)]
@@ -77,7 +83,9 @@ impl<'de> serde::Deserialize<'de> for NotebookCellKind {
         match u8::deserialize(d)? {
             1 => Ok(NotebookCellKind::Markup),
             2 => Ok(NotebookCellKind::Code),
-            v => Err(serde::de::Error::custom(format!("unknown NotebookCellKind: {v}"))),
+            v => Err(serde::de::Error::custom(format!(
+                "unknown NotebookCellKind: {v}"
+            ))),
         }
     }
 }
@@ -90,8 +98,11 @@ pub struct NotebookDocumentClientCapabilities {
     pub synchronization: NotebookDocumentSyncClientCapabilities,
 }
 
-impl_lsp_struct!(NotebookDocumentClientCapabilities,
-    required { synchronization: NotebookDocumentSyncClientCapabilities = "synchronization" },
+impl_lsp_struct!(
+    NotebookDocumentClientCapabilities,
+    required {
+        synchronization: NotebookDocumentSyncClientCapabilities = "synchronization"
+    },
     optional {}
 );
 
@@ -104,7 +115,8 @@ pub struct NotebookDocumentSyncClientCapabilities {
     pub execution_summary_report: Option<bool>,
 }
 
-impl_lsp_struct!(NotebookDocumentSyncClientCapabilities,
+impl_lsp_struct!(
+    NotebookDocumentSyncClientCapabilities,
     required {},
     optional {
         dynamic_registration: bool = "dynamicRegistration",
@@ -152,9 +164,14 @@ pub struct NotebookCellTextDocumentFilter {
     pub language: Option<String>,
 }
 
-impl_lsp_struct!(NotebookCellTextDocumentFilter,
-    required { notebook: Notebook = "notebook" },
-    optional { language: String = "language" }
+impl_lsp_struct!(
+    NotebookCellTextDocumentFilter,
+    required {
+        notebook: Notebook = "notebook"
+    },
+    optional {
+        language: String = "language"
+    }
 );
 
 #[derive(Debug, Eq, PartialEq, Clone)]
@@ -177,13 +194,17 @@ impl serde::Serialize for NotebookSelector {
                 let n = if cells.is_some() { 2 } else { 1 };
                 let mut st = s.serialize_struct("ByNotebook", n)?;
                 st.serialize_field("notebook", notebook)?;
-                if let Some(c) = cells { st.serialize_field("cells", c)?; }
+                if let Some(c) = cells {
+                    st.serialize_field("cells", c)?;
+                }
                 st.end()
             }
             NotebookSelector::ByCells { notebook, cells } => {
                 let n = if notebook.is_some() { 2 } else { 1 };
                 let mut st = s.serialize_struct("ByCells", n)?;
-                if let Some(nb) = notebook { st.serialize_field("notebook", nb)?; }
+                if let Some(nb) = notebook {
+                    st.serialize_field("notebook", nb)?;
+                }
                 st.serialize_field("cells", cells)?;
                 st.end()
             }
@@ -199,8 +220,13 @@ impl<'de> serde::Deserialize<'de> for NotebookSelector {
         if let Some(notebook) = notebook {
             Ok(NotebookSelector::ByNotebook { notebook, cells })
         } else {
-            let cells = cells.ok_or_else(|| serde::de::Error::custom("NotebookSelector requires notebook or cells"))?;
-            Ok(NotebookSelector::ByCells { notebook: None, cells })
+            let cells = cells.ok_or_else(|| {
+                serde::de::Error::custom("NotebookSelector requires notebook or cells")
+            })?;
+            Ok(NotebookSelector::ByCells {
+                notebook: None,
+                cells,
+            })
         }
     }
 }
@@ -210,8 +236,11 @@ pub struct NotebookCellSelector {
     pub language: String,
 }
 
-impl_lsp_struct!(NotebookCellSelector,
-    required { language: String = "language" },
+impl_lsp_struct!(
+    NotebookCellSelector,
+    required {
+        language: String = "language"
+    },
     optional {}
 );
 
@@ -253,27 +282,51 @@ impl serde::Serialize for NotebookDocumentFilter {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
         match self {
-            NotebookDocumentFilter::ByType { notebook_type, scheme, pattern } => {
+            NotebookDocumentFilter::ByType {
+                notebook_type,
+                scheme,
+                pattern,
+            } => {
                 let n = 1 + scheme.is_some() as usize + pattern.is_some() as usize;
                 let mut st = s.serialize_struct("ByType", n)?;
                 st.serialize_field("notebook_type", notebook_type)?;
-                if let Some(v) = scheme { st.serialize_field("scheme", v)?; }
-                if let Some(v) = pattern { st.serialize_field("pattern", v)?; }
+                if let Some(v) = scheme {
+                    st.serialize_field("scheme", v)?;
+                }
+                if let Some(v) = pattern {
+                    st.serialize_field("pattern", v)?;
+                }
                 st.end()
             }
-            NotebookDocumentFilter::ByScheme { notebook_type, scheme, pattern } => {
+            NotebookDocumentFilter::ByScheme {
+                notebook_type,
+                scheme,
+                pattern,
+            } => {
                 let n = 1 + notebook_type.is_some() as usize + pattern.is_some() as usize;
                 let mut st = s.serialize_struct("ByScheme", n)?;
-                if let Some(v) = notebook_type { st.serialize_field("notebook_type", v)?; }
+                if let Some(v) = notebook_type {
+                    st.serialize_field("notebook_type", v)?;
+                }
                 st.serialize_field("scheme", scheme)?;
-                if let Some(v) = pattern { st.serialize_field("pattern", v)?; }
+                if let Some(v) = pattern {
+                    st.serialize_field("pattern", v)?;
+                }
                 st.end()
             }
-            NotebookDocumentFilter::ByPattern { notebook_type, scheme, pattern } => {
+            NotebookDocumentFilter::ByPattern {
+                notebook_type,
+                scheme,
+                pattern,
+            } => {
                 let n = 1 + notebook_type.is_some() as usize + scheme.is_some() as usize;
                 let mut st = s.serialize_struct("ByPattern", n)?;
-                if let Some(v) = notebook_type { st.serialize_field("notebook_type", v)?; }
-                if let Some(v) = scheme { st.serialize_field("scheme", v)?; }
+                if let Some(v) = notebook_type {
+                    st.serialize_field("notebook_type", v)?;
+                }
+                if let Some(v) = scheme {
+                    st.serialize_field("scheme", v)?;
+                }
                 st.serialize_field("pattern", pattern)?;
                 st.end()
             }
@@ -292,13 +345,27 @@ impl<'de> serde::Deserialize<'de> for NotebookDocumentFilter {
         let scheme = crate::deserialize_optional(map.remove("scheme"))?;
         let pattern = crate::deserialize_optional(map.remove("pattern"))?;
         if let Some(nt) = notebook_type {
-            Ok(NotebookDocumentFilter::ByType { notebook_type: nt, scheme, pattern })
+            Ok(NotebookDocumentFilter::ByType {
+                notebook_type: nt,
+                scheme,
+                pattern,
+            })
         } else if let Some(s) = scheme {
-            Ok(NotebookDocumentFilter::ByScheme { notebook_type: None, scheme: s, pattern })
+            Ok(NotebookDocumentFilter::ByScheme {
+                notebook_type: None,
+                scheme: s,
+                pattern,
+            })
         } else if let Some(p) = pattern {
-            Ok(NotebookDocumentFilter::ByPattern { notebook_type: None, scheme: None, pattern: p })
+            Ok(NotebookDocumentFilter::ByPattern {
+                notebook_type: None,
+                scheme: None,
+                pattern: p,
+            })
         } else {
-            Err(serde::de::Error::custom("NotebookDocumentFilter requires notebook_type, scheme, or pattern"))
+            Err(serde::de::Error::custom(
+                "NotebookDocumentFilter requires notebook_type, scheme, or pattern",
+            ))
         }
     }
 }
@@ -333,7 +400,8 @@ mod notification_params {
         pub change: NotebookDocumentChangeEvent,
     }
 
-    impl_lsp_struct!(DidChangeNotebookDocumentParams,
+    impl_lsp_struct!(
+        DidChangeNotebookDocumentParams,
         required {
             notebook_document: VersionedNotebookDocumentIdentifier = "notebookDocument",
             change: NotebookDocumentChangeEvent = "change",
@@ -348,7 +416,8 @@ mod notification_params {
         pub uri: Uri,
     }
 
-    impl_lsp_struct!(VersionedNotebookDocumentIdentifier,
+    impl_lsp_struct!(
+        VersionedNotebookDocumentIdentifier,
         required {
             version: i32 = "version",
             uri: Uri = "uri",
@@ -363,7 +432,8 @@ mod notification_params {
         pub cells: Option<NotebookDocumentCellChange>,
     }
 
-    impl_lsp_struct!(NotebookDocumentChangeEvent,
+    impl_lsp_struct!(
+        NotebookDocumentChangeEvent,
         required {},
         optional {
             metadata: LSPObject = "metadata",
@@ -438,8 +508,11 @@ mod notification_params {
         pub notebook_document: NotebookDocumentIdentifier,
     }
 
-    impl_lsp_struct!(DidSaveNotebookDocumentParams,
-        required { notebook_document: NotebookDocumentIdentifier = "notebookDocument" },
+    impl_lsp_struct!(
+        DidSaveNotebookDocumentParams,
+        required {
+            notebook_document: NotebookDocumentIdentifier = "notebookDocument"
+        },
         optional {}
     );
 
@@ -449,7 +522,8 @@ mod notification_params {
         pub uri: Uri,
     }
 
-    impl_lsp_struct!(NotebookDocumentIdentifier,
+    impl_lsp_struct!(
+        NotebookDocumentIdentifier,
         required { uri: Uri = "uri" },
         optional {}
     );

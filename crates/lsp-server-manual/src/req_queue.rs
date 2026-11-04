@@ -12,8 +12,13 @@ pub struct ReqQueue<I, O> {
 impl<I, O> Default for ReqQueue<I, O> {
     fn default() -> ReqQueue<I, O> {
         ReqQueue {
-            incoming: Incoming { pending: HashMap::default() },
-            outgoing: Outgoing { next_id: 0, pending: HashMap::default() },
+            incoming: Incoming {
+                pending: HashMap::default(),
+            },
+            outgoing: Outgoing {
+                next_id: 0,
+                pending: HashMap::default(),
+            },
         }
     }
 }
@@ -41,7 +46,11 @@ impl<I> Incoming<I> {
             message: "canceled by client".to_owned(),
             data: None,
         };
-        Some(Response { id, result: None, error: Some(error) })
+        Some(Response {
+            id,
+            result: None,
+            error: Some(error),
+        })
     }
 
     pub fn complete(&mut self, id: &RequestId) -> Option<I> {

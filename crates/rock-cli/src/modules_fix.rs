@@ -37,13 +37,15 @@ use bone_core::modules::{FragmentScope, PackageId};
 use bone_query::modules_scope::{self, ImportCandidate};
 use bone_semantic::inference::Workspace;
 use bone_semantic::lower::resolve;
+use rock_core::SourceFiles;
 use rock_core::errors::CompilerError;
 use rock_core::source_code::Dialect;
-use rock_core::SourceFiles;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use ustr::Ustr;
 
-use crate::modules_analysis::{self, load_ctx, map_sites, short_path, sites, Ctx, Edit, PopMode, Sites};
+use crate::modules_analysis::{
+    self, Ctx, Edit, PopMode, Sites, load_ctx, map_sites, short_path, sites,
+};
 use crate::modules_audit::Format;
 use crate::modules_migrate::Mode;
 
@@ -58,7 +60,9 @@ const MAX_ROUNDS: usize = 64;
 pub fn run(target: &Path, mode: Mode, format: Format) -> Result<i32> {
     let outcome = plan(target);
     let applied = match (&outcome, mode) {
-        (Outcome::Planned(p), Mode::Apply) if p.refused.is_none() && !p.fixes.is_empty() => Some(apply(p)),
+        (Outcome::Planned(p), Mode::Apply) if p.refused.is_none() && !p.fixes.is_empty() => {
+            Some(apply(p))
+        }
         _ => None,
     };
     let code = match (&outcome, &applied) {
@@ -70,7 +74,10 @@ pub fn run(target: &Path, mode: Mode, format: Format) -> Result<i32> {
     };
     match format {
         Format::Pretty => print!("{}", render_pretty(&outcome, mode, applied.as_ref())),
-        Format::Json => println!("{}", serde_json::to_string_pretty(&render_json(&outcome, mode, applied.as_ref()))?),
+        Format::Json => println!(
+            "{}",
+            serde_json::to_string_pretty(&render_json(&outcome, mode, applied.as_ref()))?
+        ),
     }
     std::io::stdout().flush()?;
     Ok(code)
@@ -152,7 +159,8 @@ fn edits_for(files: &[FixFile], fixes: &[Fix]) -> BTreeMap<usize, Vec<Edit>> {
             let mut edits: Vec<Edit> = paths
                 .into_iter()
                 .map(|path| {
-                    let (at, text) = modules_scope::use_insertion(&file.contribution, &file.text, path);
+                    let (at, text) =
+                        modules_scope::use_insertion(&file.contribution, &file.text, path);
                     Edit::new((at, at), text)
                 })
                 .collect();
@@ -163,14 +171,24 @@ fn edits_for(files: &[FixFile], fixes: &[Fix]) -> BTreeMap<usize, Vec<Edit>> {
 }
 
 fn plan(target: &Path) -> Outcome {
-    let failed = |stage: &str, message: String| Outcome::Failed { stage: stage.to_string(), message };
+    let failed = |stage: &str, message: String| Outcome::Failed {
+        stage: stage.to_string(),
+        message,
+    };
     let target = match target.canonicalize() {
         Ok(p) => p,
         Err(e) => return failed("target", format!("`{}`: {e}", target.display())),
     };
     let (root, only) = if target.is_file() {
-        let Some(root) = target.ancestors().skip(1).find(|d| d.join("stick.toml").is_file()) else {
-            return failed("target", format!("no stick.toml above `{}`", target.display()));
+        let Some(root) = target
+            .ancestors()
+            .skip(1)
+            .find(|d| d.join("stick.toml").is_file())
+        else {
+            return failed(
+                "target",
+                format!("no stick.toml above `{}`", target.display()),
+            );
         };
         (root.to_path_buf(), Some(target.clone()))
     } else {
@@ -241,10 +259,15 @@ struct Round {
 }
 
 impl Round {
-    fn check(ctx: &Ctx, files: &[FixFile], edits: &BTreeMap<usize, Vec<Edit>>) -> Result<Round, (&'static str, String)> {
+    fn check(
+        ctx: &Ctx,
+        files: &[FixFile],
+        edits: &BTreeMap<usize, Vec<Edit>>,
+    ) -> Result<Round, (&'static str, String)> {
         let mut texts: HashMap<Ustr, String> = HashMap::new();
         for (fi, e) in edits {
-            let text = modules_analysis::apply_edits(&files[*fi].text, e).map_err(|m| ("edit", m))?;
+            let text =
+                modules_analysis::apply_edits(&files[*fi].text, e).map_err(|m| ("edit", m))?;
             texts.insert(files[*fi].id, text);
         }
         let sources = SourceFiles {
@@ -266,12 +289,23 @@ impl Round {
             Ok(checked) => {
                 let refs = modules_analysis::references(&checked.ws);
                 let errors = flatten(checked.errors);
-                Ok(Round { sources, resolved: Some((checked.ws, refs)), errors, stopped: None })
+                Ok(Round {
+                    sources,
+                    resolved: Some((checked.ws, refs)),
+                    errors,
+                    stopped: None,
+                })
             }
-            Err(f) if f.stage == "parse" => {
-                Err(("parse", crate::skull_backend::render_project_errs(&sources, &f.errors)))
-            }
-            Err(f) => Ok(Round { sources, resolved: None, errors: flatten(f.errors), stopped: Some(f.stage.to_string()) }),
+            Err(f) if f.stage == "parse" => Err((
+                "parse",
+                crate::skull_backend::render_project_errs(&sources, &f.errors),
+            )),
+            Err(f) => Ok(Round {
+                sources,
+                resolved: None,
+                errors: flatten(f.errors),
+                stopped: Some(f.stage.to_string()),
+            }),
         }
     }
 
@@ -281,9 +315,15 @@ impl Round {
         if let Some((ws, _)) = &self.resolved {
             return Ok(std::borrow::Cow::Borrowed(ws));
         }
-        let (modules, _) = crate::skull_backend::skull_assemble_project(&self.sources)
-            .map_err(|e| ("parse", crate::skull_backend::render_project_errs(&self.sources, &e)))?;
-        let aliases = crate::bone_backend::aliases_for_modules(&modules).map_err(|e| ("package graph", e.message))?;
+        let (modules, _) =
+            crate::skull_backend::skull_assemble_project(&self.sources).map_err(|e| {
+                (
+                    "parse",
+                    crate::skull_backend::render_project_errs(&self.sources, &e),
+                )
+            })?;
+        let aliases = crate::bone_backend::aliases_for_modules(&modules)
+            .map_err(|e| ("package graph", e.message))?;
         let mut ws = Workspace::default();
         bone_semantic::semantic_passes::build_namespaces(&mut ws, &modules, &aliases)
             .map_err(|e| ("namespace tree", e.message))?;
@@ -303,8 +343,12 @@ fn flatten(errors: Vec<CompilerError>) -> Vec<CompilerError> {
 
 /// The bare name an error reports as unresolved.
 fn unresolved_name(e: &CompilerError) -> Option<Ustr> {
-    let name = e.message.strip_prefix('`')?.strip_suffix("` did not resolve to any definition")?;
-    (!name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')).then(|| Ustr::from(name))
+    let name = e
+        .message
+        .strip_prefix('`')?
+        .strip_suffix("` did not resolve to any definition")?;
+    (!name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+        .then(|| Ustr::from(name))
 }
 
 /// A baseline offset for an offset in text that `edits` (insertions only)
@@ -355,12 +399,21 @@ fn plan_rounds(
         let round = owned.as_ref().unwrap_or(baseline);
         let mut found: Vec<Site> = Vec::new();
         for e in &round.errors {
-            let (Some(name), Some(&fi)) = (unresolved_name(e), by_id.get(&e.location.file)) else { continue };
+            let (Some(name), Some(&fi)) = (unresolved_name(e), by_id.get(&e.location.file)) else {
+                continue;
+            };
             if !handled.insert((fi, name)) {
                 continue;
             }
-            let off = unmap(edits.get(&fi).map(Vec::as_slice).unwrap_or(&[]), e.location.offset);
-            found.push(Site { file: fi, line: line_of(&files[fi].text, off), name });
+            let off = unmap(
+                edits.get(&fi).map(Vec::as_slice).unwrap_or(&[]),
+                e.location.offset,
+            );
+            found.push(Site {
+                file: fi,
+                line: line_of(&files[fi].text, off),
+                name,
+            });
         }
         if found.is_empty() {
             break;
@@ -368,14 +421,22 @@ fn plan_rounds(
         let ws = round.namespace()?;
         let before = plan.fixes.len();
         for site in found {
-            let Some(frag) = ws.fragment_scopes.get(&files[site.file].id) else { continue };
+            let Some(frag) = ws.fragment_scopes.get(&files[site.file].id) else {
+                continue;
+            };
             classify(&ws, frag, site, allow_globs, &mut plan);
         }
         if plan.fixes.len() == before {
             break;
         }
     }
-    plan.fixes.sort_by(|a, b| (a.site.file, a.site.line, a.site.name.as_str()).cmp(&(b.site.file, b.site.line, b.site.name.as_str())));
+    plan.fixes.sort_by(|a, b| {
+        (a.site.file, a.site.line, a.site.name.as_str()).cmp(&(
+            b.site.file,
+            b.site.line,
+            b.site.name.as_str(),
+        ))
+    });
     let edits = edits_for(files, &plan.fixes);
     if plan.fixes.is_empty() {
         plan.verification = "nothing to verify: no import is planned".to_string();
@@ -392,31 +453,49 @@ fn plan_rounds(
 /// Decide what one unresolved name gets.
 fn classify(ws: &Workspace, frag: &FragmentScope, site: Site, allow_globs: bool, plan: &mut Plan) {
     let mut seen = BTreeSet::new();
-    let candidates: Vec<ImportCandidate> = modules_scope::import_candidates(ws, frag, |n| n == site.name.as_str())
-        .into_iter()
-        .filter(|c| seen.insert((c.key, c.package)))
-        .collect();
+    let candidates: Vec<ImportCandidate> =
+        modules_scope::import_candidates(ws, frag, |n| n == site.name.as_str())
+            .into_iter()
+            .filter(|c| seen.insert((c.key, c.package)))
+            .collect();
     match candidates.as_slice() {
         [one] => {
             let glob = allow_globs && globs_a_sibling(ws, frag, one);
             let path = if glob {
                 let prefix = if one.from_root { "::" } else { "" };
-                let module = one.module_path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
+                let module = one
+                    .module_path
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join("::");
                 format!("{prefix}{module}::*")
             } else {
                 one.path.clone()
             };
-            plan.fixes.push(Fix { site, path, glob, explicit: one.path.clone(), origin: origin(ws, one) });
+            plan.fixes.push(Fix {
+                site,
+                path,
+                glob,
+                explicit: one.path.clone(),
+                origin: origin(ws, one),
+            });
         }
         [] => {
             let reasons = unavailable(ws, frag, site.name);
             if reasons.is_empty() {
                 plan.unresolved.push(site);
             } else {
-                plan.unavailable.push(Listed { site, entries: reasons });
+                plan.unavailable.push(Listed {
+                    site,
+                    entries: reasons,
+                });
             }
         }
-        many => plan.ambiguous.push(Listed { site, entries: many.iter().map(|c| c.path.clone()).collect() }),
+        many => plan.ambiguous.push(Listed {
+            site,
+            entries: many.iter().map(|c| c.path.clone()).collect(),
+        }),
     }
 }
 
@@ -425,15 +504,22 @@ fn origin(ws: &Workspace, c: &ImportCandidate) -> String {
     if ws.defs.contains_key(&c.key) {
         return c.key.to_string();
     }
-    let package = ws.ns.package(c.package).map_or_else(|| c.package.to_string(), |p| p.self_name.to_string());
+    let package = ws
+        .ns
+        .package(c.package)
+        .map_or_else(|| c.package.to_string(), |p| p.self_name.to_string());
     format!("{package}::{} (legacy)", c.key)
 }
 
 /// Whether `frag` already globs a sibling of the module holding `c`: the
 /// same package, the same parent, not the package root (plan 7.4).
 fn globs_a_sibling(ws: &Workspace, frag: &FragmentScope, c: &ImportCandidate) -> bool {
-    let Some(meta) = ws.defs.get(&c.key) else { return false };
-    let Some((_, parent)) = meta.module.split_last() else { return false };
+    let Some(meta) = ws.defs.get(&c.key) else {
+        return false;
+    };
+    let Some((_, parent)) = meta.module.split_last() else {
+        return false;
+    };
     frag.globs.iter().any(|glob| {
         matches!(resolve::resolve_path_to_module(ws, frag, glob), Ok((pkg, path))
             if pkg == meta.package && path.len() == meta.module.len() && path.starts_with(parent) && path != meta.module)
@@ -449,15 +535,23 @@ fn unavailable(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Vec<String> 
         .package(frag.package)
         .map(|p| p.aliases.iter().map(|(a, t)| (*t, *a)).collect())
         .unwrap_or_default();
-    let own = ws.ns.package(frag.package).map_or_else(String::new, |p| p.self_name.to_string());
+    let own = ws
+        .ns
+        .package(frag.package)
+        .map_or_else(String::new, |p| p.self_name.to_string());
     let mut out = Vec::new();
     for (key, meta) in &ws.defs {
         if meta.name != name {
             continue;
         }
         if meta.package != frag.package && !aliases.contains_key(&meta.package) {
-            let pkg = ws.ns.package(meta.package).map_or_else(|| meta.package.to_string(), |p| p.self_name.to_string());
-            out.push(format!("`{key}` is in `{pkg}`, which is not a declared dependency of `{own}`"));
+            let pkg = ws
+                .ns
+                .package(meta.package)
+                .map_or_else(|| meta.package.to_string(), |p| p.self_name.to_string());
+            out.push(format!(
+                "`{key}` is in `{pkg}`, which is not a declared dependency of `{own}`"
+            ));
             continue;
         }
         let path = bone_core::modules::UsePathRef {
@@ -474,7 +568,11 @@ fn unavailable(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Vec<String> 
         if bone_core::modules::is_stdlib_module_file(file.as_str()) {
             continue;
         }
-        let viewed = aliases.keys().any(|p| ws.ns.package(*p).is_some_and(|pkg| pkg.legacy_files.contains(&file)));
+        let viewed = aliases.keys().any(|p| {
+            ws.ns
+                .package(*p)
+                .is_some_and(|pkg| pkg.legacy_files.contains(&file))
+        });
         if !viewed {
             out.push(format!(
                 "a legacy definition in {}: its package is not an `allow_legacy` dependency of `{own}`",
@@ -488,8 +586,19 @@ fn unavailable(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Vec<String> 
 
 /// Compare the candidate with the baseline (plan 7.4): every baseline site
 /// resolves as before, and no error is new.
-fn verify(ctx: &Ctx, files: &[FixFile], baseline: &Round, last: &Round, edits: &BTreeMap<usize, Vec<Edit>>, plan: &mut Plan) {
-    let fixed: BTreeSet<(Ustr, Ustr)> = plan.fixes.iter().map(|f| (files[f.site.file].id, f.site.name)).collect();
+fn verify(
+    ctx: &Ctx,
+    files: &[FixFile],
+    baseline: &Round,
+    last: &Round,
+    edits: &BTreeMap<usize, Vec<Edit>>,
+    plan: &mut Plan,
+) {
+    let fixed: BTreeSet<(Ustr, Ustr)> = plan
+        .fixes
+        .iter()
+        .map(|f| (files[f.site.file].id, f.site.name))
+        .collect();
     let mut problems = Vec::new();
     // Errors by (file, message); the fixed names' reports are gone.
     let key = |e: &CompilerError| (e.location.file, e.message.clone());
@@ -499,26 +608,41 @@ fn verify(ctx: &Ctx, files: &[FixFile], baseline: &Round, last: &Round, edits: &
     }
     for e in &last.errors {
         if unresolved_name(e).is_some_and(|n| fixed.contains(&(e.location.file, n))) {
-            problems.push(format!("`{}` still does not resolve in {}", unresolved_name(e).unwrap(), short_path(&e.location.file)));
+            problems.push(format!(
+                "`{}` still does not resolve in {}",
+                unresolved_name(e).unwrap(),
+                short_path(&e.location.file)
+            ));
             continue;
         }
         match before.get_mut(&key(e)) {
             Some(n) if *n > 0 => *n -= 1,
             _ if unresolved_name(e).is_some() => {}
-            _ => problems.push(format!("new error in {}: {}", short_path(&e.location.file), e.message)),
+            _ => problems.push(format!(
+                "new error in {}: {}",
+                short_path(&e.location.file),
+                e.message
+            )),
         }
     }
     match (&baseline.resolved, &last.resolved) {
         (Some((bws, brefs)), Some((cws, crefs))) => {
             let file_pkg: HashMap<Ustr, u32> = files.iter().map(|f| (f.id, ctx.p_id)).collect();
-            let by_id: HashMap<Ustr, Vec<Edit>> = edits.iter().map(|(fi, e)| (files[*fi].id, e.clone())).collect();
+            let by_id: HashMap<Ustr, Vec<Edit>> = edits
+                .iter()
+                .map(|(fi, e)| (files[*fi].id, e.clone()))
+                .collect();
             let base: Sites = map_sites(&sites(bws, brefs, &file_pkg, &HashMap::new()), &by_id);
             let cand: Sites = sites(cws, crefs, &file_pkg, &HashMap::new());
             let mut changed = 0;
             for (k, targets) in &base {
                 if cand.get(k) != Some(targets) {
                     changed += 1;
-                    problems.push(modules_analysis::describe_change(k, targets, cand.get(k).map(Vec::as_slice).unwrap_or(&[])));
+                    problems.push(modules_analysis::describe_change(
+                        k,
+                        targets,
+                        cand.get(k).map(Vec::as_slice).unwrap_or(&[]),
+                    ));
                 }
             }
             plan.verification = format!(
@@ -564,12 +688,22 @@ fn glob_moves(
     let explicit_fixes: Vec<Fix> = plan
         .fixes
         .iter()
-        .map(|f| Fix { site: f.site.clone(), path: f.explicit.clone(), glob: false, explicit: f.explicit.clone(), origin: f.origin.clone() })
+        .map(|f| Fix {
+            site: f.site.clone(),
+            path: f.explicit.clone(),
+            glob: false,
+            explicit: f.explicit.clone(),
+            origin: f.origin.clone(),
+        })
         .collect();
     let explicit_edits = edits_for(files, &explicit_fixes);
     let reference = match Round::check(ctx, files, &explicit_edits) {
         Ok(r) => r,
-        Err((stage, m)) => return vec![format!("the explicit-import check failed in its {stage}: {m}")],
+        Err((stage, m)) => {
+            return vec![format!(
+                "the explicit-import check failed in its {stage}: {m}"
+            )];
+        }
     };
     let Some((rws, rrefs)) = &reference.resolved else {
         return vec![format!(
@@ -578,7 +712,10 @@ fn glob_moves(
         )];
     };
     let to_base = |sites: Sites, edits: &BTreeMap<usize, Vec<Edit>>| -> Sites {
-        let by_id: HashMap<Ustr, &[Edit]> = edits.iter().map(|(fi, e)| (files[*fi].id, e.as_slice())).collect();
+        let by_id: HashMap<Ustr, &[Edit]> = edits
+            .iter()
+            .map(|(fi, e)| (files[*fi].id, e.as_slice()))
+            .collect();
         sites
             .into_iter()
             .map(|(mut k, v)| {
@@ -591,11 +728,20 @@ fn glob_moves(
             .collect()
     };
     let with_globs = to_base(sites(cws, crefs, file_pkg, &HashMap::new()), edits);
-    let explicit = to_base(sites(rws, rrefs, file_pkg, &HashMap::new()), &explicit_edits);
+    let explicit = to_base(
+        sites(rws, rrefs, file_pkg, &HashMap::new()),
+        &explicit_edits,
+    );
     explicit
         .iter()
         .filter(|(k, targets)| with_globs.get(*k) != Some(*targets))
-        .map(|(k, targets)| modules_analysis::describe_change(k, targets, with_globs.get(k).map(Vec::as_slice).unwrap_or(&[])))
+        .map(|(k, targets)| {
+            modules_analysis::describe_change(
+                k,
+                targets,
+                with_globs.get(k).map(Vec::as_slice).unwrap_or(&[]),
+            )
+        })
         .collect()
 }
 
@@ -611,11 +757,18 @@ fn apply(plan: &Plan) -> std::result::Result<Applied, String> {
     let mut writes = Vec::new();
     for (fi, edits) in plan.edits() {
         let f = &plan.files[fi];
-        let on_disk = std::fs::read_to_string(&f.path).map_err(|e| format!("{}: {e}", f.path.display()))?;
+        let on_disk =
+            std::fs::read_to_string(&f.path).map_err(|e| format!("{}: {e}", f.path.display()))?;
         if on_disk != f.text {
-            return Err(format!("{} changed since it was read; nothing written", f.path.display()));
+            return Err(format!(
+                "{} changed since it was read; nothing written",
+                f.path.display()
+            ));
         }
-        writes.push((f.path.clone(), modules_analysis::apply_edits(&f.text, &edits)?));
+        writes.push((
+            f.path.clone(),
+            modules_analysis::apply_edits(&f.text, &edits)?,
+        ));
     }
     let mut written = Vec::new();
     for (path, text) in writes {
@@ -623,8 +776,13 @@ fn apply(plan: &Plan) -> std::result::Result<Applied, String> {
         written.push(short_path(&path.to_string_lossy()));
     }
     let ctx = load_ctx(&plan.root, &plan.root, PopMode::Test)?;
-    let round = Round::check(&ctx, &[], &BTreeMap::new()).map_err(|(stage, m)| format!("re-check ({stage}): {m}"))?;
-    let errors = round.errors.iter().map(|e| crate::skull_backend::render_project_errs(&round.sources, std::slice::from_ref(e))).collect();
+    let round = Round::check(&ctx, &[], &BTreeMap::new())
+        .map_err(|(stage, m)| format!("re-check ({stage}): {m}"))?;
+    let errors = round
+        .errors
+        .iter()
+        .map(|e| crate::skull_backend::render_project_errs(&round.sources, std::slice::from_ref(e)))
+        .collect();
     Ok(Applied { written, errors })
 }
 
@@ -634,12 +792,22 @@ fn site_json(files: &[FixFile], s: &Site) -> Value {
     json!({ "file": short_path(&files[s.file].id), "line": s.line, "name": s.name.as_str() })
 }
 
-fn render_json(outcome: &Outcome, mode: Mode, applied: Option<&std::result::Result<Applied, String>>) -> Value {
-    let mode_s = if mode == Mode::Apply { "apply" } else { "check" };
+fn render_json(
+    outcome: &Outcome,
+    mode: Mode,
+    applied: Option<&std::result::Result<Applied, String>>,
+) -> Value {
+    let mode_s = if mode == Mode::Apply {
+        "apply"
+    } else {
+        "check"
+    };
     let p = match outcome {
-        Outcome::NotV1(package) => return json!({ "package": package, "mode": mode_s, "verdict": "not_v1" }),
+        Outcome::NotV1(package) => {
+            return json!({ "package": package, "mode": mode_s, "verdict": "not_v1" });
+        }
         Outcome::Failed { stage, message } => {
-            return json!({ "mode": mode_s, "verdict": "analysis_failed", "status": "unknown", "stage": stage, "message": message })
+            return json!({ "mode": mode_s, "verdict": "analysis_failed", "status": "unknown", "stage": stage, "message": message });
         }
         Outcome::Planned(p) => p,
     };
@@ -692,28 +860,51 @@ fn verdict(p: &Plan, applied: Option<&std::result::Result<Applied, String>>) -> 
     }
 }
 
-fn render_pretty(outcome: &Outcome, mode: Mode, applied: Option<&std::result::Result<Applied, String>>) -> String {
+fn render_pretty(
+    outcome: &Outcome,
+    mode: Mode,
+    applied: Option<&std::result::Result<Applied, String>>,
+) -> String {
     use std::fmt::Write as _;
     let mut s = String::new();
     let p = match outcome {
-        Outcome::NotV1(package) => return format!("rock fix --imports: {package} has no modules-v1 fragment; nothing to do\n"),
-        Outcome::Failed { stage, message } => return format!("rock fix --imports: analysis failed ({stage})\n{message}\n"),
+        Outcome::NotV1(package) => {
+            return format!(
+                "rock fix --imports: {package} has no modules-v1 fragment; nothing to do\n"
+            );
+        }
+        Outcome::Failed { stage, message } => {
+            return format!("rock fix --imports: analysis failed ({stage})\n{message}\n");
+        }
         Outcome::Planned(p) => p,
     };
-    let at = |site: &Site| format!("{}:{} `{}`", short_path(&p.files[site.file].id), site.line, site.name);
+    let at = |site: &Site| {
+        format!(
+            "{}:{} `{}`",
+            short_path(&p.files[site.file].id),
+            site.line,
+            site.name
+        )
+    };
     let _ = writeln!(s, "rock fix --imports: {}\n", p.package);
     let _ = writeln!(s, "imports [exact]: {} name(s)", p.fixes.len());
     for f in &p.fixes {
         let _ = writeln!(s, "  {} -> use {};  ({})", at(&f.site), f.path, f.origin);
     }
     if !p.ambiguous.is_empty() {
-        let _ = writeln!(s, "\nambiguous [exact]: several accessible candidates; qualify the use or import one (no edit)");
+        let _ = writeln!(
+            s,
+            "\nambiguous [exact]: several accessible candidates; qualify the use or import one (no edit)"
+        );
         for l in &p.ambiguous {
             let _ = writeln!(s, "  {}: {}", at(&l.site), l.entries.join(", "));
         }
     }
     if !p.unavailable.is_empty() {
-        let _ = writeln!(s, "\nunavailable [exact]: never added (a dependency, `allow_legacy` or visibility is the author's)");
+        let _ = writeln!(
+            s,
+            "\nunavailable [exact]: never added (a dependency, `allow_legacy` or visibility is the author's)"
+        );
         for l in &p.unavailable {
             let _ = writeln!(s, "  {}:", at(&l.site));
             for r in &l.entries {
@@ -722,21 +913,36 @@ fn render_pretty(outcome: &Outcome, mode: Mode, applied: Option<&std::result::Re
         }
     }
     if !p.unresolved.is_empty() {
-        let _ = writeln!(s, "\nno candidate [exact]: nothing in the unit defines these names");
+        let _ = writeln!(
+            s,
+            "\nno candidate [exact]: nothing in the unit defines these names"
+        );
         for site in &p.unresolved {
             let _ = writeln!(s, "  {}", at(site));
         }
     }
-    let _ = writeln!(s, "\nverification (the candidate, checked in memory) [exact]\n  {}", p.verification);
+    let _ = writeln!(
+        s,
+        "\nverification (the candidate, checked in memory) [exact]\n  {}",
+        p.verification
+    );
     if let Some(problems) = &p.refused {
-        let _ = writeln!(s, "\nrefused: the imports would change what the package resolves; nothing written");
+        let _ = writeln!(
+            s,
+            "\nrefused: the imports would change what the package resolves; nothing written"
+        );
         for problem in problems {
             let _ = writeln!(s, "  {problem}");
         }
     }
     match applied {
         Some(Ok(a)) => {
-            let _ = writeln!(s, "\napplied: {}; re-checked from disk: {} error(s)", a.written.join(", "), a.errors.len());
+            let _ = writeln!(
+                s,
+                "\napplied: {}; re-checked from disk: {} error(s)",
+                a.written.join(", "),
+                a.errors.len()
+            );
             for e in &a.errors {
                 let _ = writeln!(s, "{e}");
             }

@@ -1,7 +1,7 @@
 //! unused-pure-expr lint over bone HIR. Harness mirrors unused_var.rs:
 //! `semantic_pass(&mut [parse(src)])` -> `Workspace`.
 
-use bone_lints::{filter_suppressed, unused_pure_exprs, UnusedPureExpr};
+use bone_lints::{UnusedPureExpr, filter_suppressed, unused_pure_exprs};
 use bone_semantic::prelude::*;
 
 fn parse(src: &str) -> skull_parser::Ast {
@@ -39,7 +39,12 @@ fn flags_the_canonical_enum_comparison_bug() {
                struct Mob {\n    ai_state: S,\n}\n\
                fn tick(mob: Mob) -> int {\n    mob.ai_state == S::Wander\n    5\n}";
     let fs = findings(src);
-    assert_eq!(fs.len(), 1, "the enum comparison is flagged, got {:?}", fs.len());
+    assert_eq!(
+        fs.len(),
+        1,
+        "the enum comparison is flagged, got {:?}",
+        fs.len()
+    );
     assert!(fs[0].is_comparison);
 }
 
@@ -47,7 +52,11 @@ fn flags_the_canonical_enum_comparison_bug() {
 fn comparison_as_block_tail_is_not_flagged() {
     // `x == 1` is the block tail (VALUE position) -- the fn returns it.
     let src = "fn f() -> bool {\n    let x = 1\n    x == 1\n}";
-    assert_eq!(count(src), 0, "tail comparison is the return value, not a discard");
+    assert_eq!(
+        count(src),
+        0,
+        "tail comparison is the return value, not a discard"
+    );
 }
 
 #[test]
@@ -56,7 +65,11 @@ fn comparison_in_statement_if_branch_tail_is_not_flagged() {
     // Statement::Expr -- even though the enclosing `if` is in statement position
     // and the value is ultimately discarded. Conservative v1 does not flag it.
     let src = "fn f() {\n    let x = 1\n    if x == 1 {\n        x == 2\n    }\n}";
-    assert_eq!(count(src), 0, "branch tails are not HIR statement positions");
+    assert_eq!(
+        count(src),
+        0,
+        "branch tails are not HIR statement positions"
+    );
 }
 
 #[test]
@@ -91,7 +104,10 @@ fn flags_logical_binop() {
     let src = "fn f() -> int {\n    let x = 1\n    x > 0 && x < 5\n    x\n}";
     let fs = findings(src);
     assert_eq!(fs.len(), 1, "`&&` root is a discarded pure expr");
-    assert!(!fs[0].is_comparison, "a logical `&&` root is generic, not a comparison");
+    assert!(
+        !fs[0].is_comparison,
+        "a logical `&&` root is generic, not a comparison"
+    );
 }
 
 #[test]
@@ -147,12 +163,22 @@ fn allow_comment_above_suppresses() {
 
 #[test]
 fn trailing_allow_comment_suppresses() {
-    let src = "fn f() -> int {\n    let x = 1\n    x == 1 // rock: allow(unused_pure_expr)\n    x\n}";
-    assert_eq!(count_after_suppression(src), 0, "trailing comment silences it");
+    let src =
+        "fn f() -> int {\n    let x = 1\n    x == 1 // rock: allow(unused_pure_expr)\n    x\n}";
+    assert_eq!(
+        count_after_suppression(src),
+        0,
+        "trailing comment silences it"
+    );
 }
 
 #[test]
 fn allow_of_a_different_lint_does_not_suppress() {
-    let src = "fn f() -> int {\n    let x = 1\n    // rock: allow(unused_var)\n    x == 1\n    x\n}";
-    assert_eq!(count_after_suppression(src), 1, "wrong lint name -> still warns");
+    let src =
+        "fn f() -> int {\n    let x = 1\n    // rock: allow(unused_var)\n    x == 1\n    x\n}";
+    assert_eq!(
+        count_after_suppression(src),
+        1,
+        "wrong lint name -> still warns"
+    );
 }

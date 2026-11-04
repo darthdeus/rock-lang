@@ -59,5 +59,5 @@ pub struct PreprocessedSource {
     pub is_script: bool,
     pub is_test: bool,
     pub is_test_util: bool,
-    pub used_packages: Vec<String>,  // Package names from #use directives
+    pub used_packages: Vec<String>, // Package names from #use directives
 }

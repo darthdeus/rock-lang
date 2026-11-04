@@ -94,7 +94,10 @@ fn embed_nobox_value_uses_the_owned_representation_fact() {
     let lua = emit_module(EMBED_NOBOX_VALUE);
     let body = function_body(&lua, "mk");
     assert!(body.contains(r#"["p.x"]"#) && body.contains(r#"["p.y"]"#));
-    assert!(!body.contains(r#""Pt""#), "the embedded nobox value acquired a box:\n{body}");
+    assert!(
+        !body.contains(r#""Pt""#),
+        "the embedded nobox value acquired a box:\n{body}"
+    );
 }
 
 // Recursive: an embed chain composes the whole path, so the deepest leaf is a
@@ -242,15 +245,33 @@ inline(lua) fn embed_field_x(h: Holder) -> string = """
 fn probe() -> string { return embed_field_x(Holder { p: Pt { x: 4, y: 5 }, tag: 3 }) }
 fn main() {}
 "#;
-    let legacy = crate::common::emit_module(&format!("{src}\nfn legacy_probe() {{ print(probe()) }}"));
+    let legacy =
+        crate::common::emit_module(&format!("{src}\nfn legacy_probe() {{ print(probe()) }}"));
     let legacy_probe = crate::common::mangled_name(&legacy, "legacy_probe");
-    assert_eq!(crate::common::run_luajit(&format!("{legacy}\n{legacy_probe}()\n"), "embed_reflect_legacy"), "4");
+    assert_eq!(
+        crate::common::run_luajit(
+            &format!("{legacy}\n{legacy_probe}()\n"),
+            "embed_reflect_legacy"
+        ),
+        "4"
+    );
 
     let v1_src = src.replace("fn probe()", "pub fn probe()");
-    let emitted =
-        crate::common::emit_v1_package("v1embed", &[crate::common::V1Fragment { file: "main.rock", src: &v1_src }]);
+    let emitted = crate::common::emit_v1_package(
+        "v1embed",
+        &[crate::common::V1Fragment {
+            file: "main.rock",
+            src: &v1_src,
+        }],
+    );
     let probe = crate::common::mangled_name(&emitted.lua, "probe");
-    assert_eq!(crate::common::run_luajit(&format!("{}\nprint({probe}())\n", emitted.lua), "embed_reflect_v1"), "4");
+    assert_eq!(
+        crate::common::run_luajit(
+            &format!("{}\nprint({probe}())\n", emitted.lua),
+            "embed_reflect_v1"
+        ),
+        "4"
+    );
     // The flat-enum layout beside the type table is read by the same `__ty`
     // spelling (serialization.rock's column walk).
     let keys: Vec<&str> = emitted
@@ -261,5 +282,8 @@ fn main() {}
         .filter(|key| key.contains("Mode"))
         .collect();
     assert_eq!(keys.len(), 1, "flat layout rows for this package: {keys:?}");
-    assert!(!keys[0].contains("::"), "the flat layout is keyed by the DefKey: {keys:?}");
+    assert!(
+        !keys[0].contains("::"),
+        "the flat layout is keyed by the DefKey: {keys:?}"
+    );
 }

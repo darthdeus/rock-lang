@@ -4,25 +4,27 @@
 
 use bone_core::escape::lambda_is_nonescaping;
 use bone_core::identity_storage::{
+    IDENTITY_ERASURE_ANNOTATION, IDENTITY_STORAGE_ANNOTATION, IdentityStorageVia,
     identity_body_storage_violation, identity_body_violation, identity_local_storage_violation,
     identity_root_storage_violation, identity_storage_field_violation, identity_storage_violation,
-    is_identity_storage_edge, is_identity_storage_field, IdentityStorageVia, IDENTITY_ERASURE_ANNOTATION,
-    IDENTITY_STORAGE_ANNOTATION,
+    is_identity_storage_edge, is_identity_storage_field,
 };
 pub use bone_core::identity_storage::{
-    identity_violation_in, IdentityNode, IdentityPosition, IdentityStorageViolation,
-    IdentityTypes,
+    IdentityNode, IdentityPosition, IdentityStorageViolation, IdentityTypes, identity_violation_in,
 };
 use bone_core::modules::is_stdlib_module_file;
-use bone_core::suspension::{suspension_crossings, uses_after_suspension, SuspensionPolicy};
+use bone_core::suspension::{SuspensionPolicy, suspension_crossings, uses_after_suspension};
 use bone_core::workspace::BodyInference;
 
-use crate::hir::{BindingInfo, BindingKind, Callee, Expr, Function, Module, TypeCtor, TypeExpr, VariantArgs, VariantPayload};
+use crate::hir::{
+    BindingInfo, BindingKind, Callee, Expr, Function, Module, TypeCtor, TypeExpr, VariantArgs,
+    VariantPayload,
+};
 use crate::prelude::*;
 
 pub use bone_core::identity_storage::{
-    identity_storage_exemption, identity_storage_package, IdentityStorageExemption,
-    RUST_EMBEDDED_PACKAGES, STDLIB_PACKAGE, UNPACKAGED_PROGRAMS,
+    IdentityStorageExemption, RUST_EMBEDDED_PACKAGES, STDLIB_PACKAGE, UNPACKAGED_PROGRAMS,
+    identity_storage_exemption, identity_storage_package,
 };
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -93,7 +95,10 @@ pub fn identity_storage_exempt(ws: &Workspace, module: &Module) -> bool {
 /// Every declaration position in `module` that stores an identity struct.
 pub fn identity_storage_sites(ws: &Workspace, module: &Module) -> Vec<IdentityStorageSite> {
     let mut sites = Vec::new();
-    let mut push = |violation: Option<IdentityStorageViolation>, direct: IdentityStorageKind, span: Span, what: String| {
+    let mut push = |violation: Option<IdentityStorageViolation>,
+                    direct: IdentityStorageKind,
+                    span: Span,
+                    what: String| {
         let Some(violation) = violation else { return };
         let kind = match violation.via {
             IdentityStorageVia::Direct => direct,
@@ -116,7 +121,12 @@ pub fn identity_storage_sites(ws: &Workspace, module: &Module) -> Vec<IdentitySt
             } else {
                 identity_storage_violation(ws, field.ty)
             };
-            push(violation, IdentityStorageKind::Field, field.span, format!("field `{}`", field.name));
+            push(
+                violation,
+                IdentityStorageKind::Field,
+                field.span,
+                format!("field `{}`", field.name),
+            );
         }
     }
     for (_, def) in module.enums.iter() {
@@ -124,7 +134,9 @@ pub fn identity_storage_sites(ws: &Workspace, module: &Module) -> Vec<IdentitySt
             match &variant.payload {
                 VariantPayload::Unit => {}
                 VariantPayload::Tuple(types) => {
-                    let violation = types.iter().find_map(|ty| identity_storage_violation(ws, *ty));
+                    let violation = types
+                        .iter()
+                        .find_map(|ty| identity_storage_violation(ws, *ty));
                     push(
                         violation,
                         IdentityStorageKind::Payload,
@@ -237,7 +249,12 @@ fn row_edge_literals(ws: &Workspace, body: &Body, bi: &BodyInference) -> FxHashS
 /// Every position in one function body that stores an identity struct: the
 /// S0b body check. `bi` is the body's inference; types it left unresolved are
 /// not reported.
-pub fn identity_body_sites(ws: &Workspace, function: &Function, body: &Body, bi: &BodyInference) -> Vec<IdentityStorageSite> {
+pub fn identity_body_sites(
+    ws: &Workspace,
+    function: &Function,
+    body: &Body,
+    bi: &BodyInference,
+) -> Vec<IdentityStorageSite> {
     identity_body_sites_with(ws, function, body, bi, &InferredSlotTypes { ws, bi })
 }
 
@@ -257,8 +274,14 @@ pub fn identity_body_sites_with(
         if info.kind == BindingKind::Fn {
             continue;
         }
-        let Some(ty) = binding_ty(binding) else { continue };
-        let what = if info.kind == BindingKind::Param { "parameter" } else { "local" };
+        let Some(ty) = binding_ty(binding) else {
+            continue;
+        };
+        let what = if info.kind == BindingKind::Param {
+            "parameter"
+        } else {
+            "local"
+        };
         if let Some(violation) = types.local(ty) {
             sites.push(IdentityStorageSite {
                 kind: IdentityStorageKind::LocalStorage,
@@ -288,11 +311,19 @@ pub fn identity_body_sites_with(
         let what = match expr {
             Expr::Array(_) => "this Vec literal",
             Expr::StructLiteral { .. } => "this constructor",
-            Expr::EnumVariant { args, .. } if !matches!(args, VariantArgs::Unit) => "this enum constructor",
+            Expr::EnumVariant { args, .. } if !matches!(args, VariantArgs::Unit) => {
+                "this enum constructor"
+            }
             _ => continue,
         };
-        let Some(ty) = bi.expr_types.get(id).copied() else { continue };
-        let violation = if rows.contains(&id) { types.row(ty) } else { types.local(ty) };
+        let Some(ty) = bi.expr_types.get(id).copied() else {
+            continue;
+        };
+        let violation = if rows.contains(&id) {
+            types.row(ty)
+        } else {
+            types.local(ty)
+        };
         if let Some(violation) = violation {
             sites.push(IdentityStorageSite {
                 kind: IdentityStorageKind::LocalStorage,
@@ -329,7 +360,9 @@ pub fn identity_body_sites_with(
         let mut captured = FxHashSet::default();
         let mut escapes = None;
         for (use_id, use_expr) in body.expr_arena.iter() {
-            let Expr::Var(binding) = *use_expr else { continue };
+            let Expr::Var(binding) = *use_expr else {
+                continue;
+            };
             if !contains(lambda_span, body.expr_spans[use_id])
                 || contains(lambda_span, body.binding_spans[binding])
                 || !captured.insert(binding)
@@ -358,7 +391,9 @@ pub fn identity_body_sites_with(
     if function.is_coroutine {
         let policy = IdentityBorrowPolicy { body, bi, types };
         for at in uses_after_suspension(body, &policy) {
-            let Some(binding) = used_binding(body, at) else { continue };
+            let Some(binding) = used_binding(body, at) else {
+                continue;
+            };
             let Some(violation) = binding_ty(binding).and_then(|ty| types.stored(ty)) else {
                 continue;
             };
@@ -377,7 +412,14 @@ pub fn identity_body_sites_with(
 
     // A `let xs = [x]` reports its binding and its literal: one site.
     let mut seen = FxHashSet::default();
-    sites.retain(|site| seen.insert((site.kind, site.identity, site.span.file, site.span.line_range.0)));
+    sites.retain(|site| {
+        seen.insert((
+            site.kind,
+            site.identity,
+            site.span.file,
+            site.span.line_range.0,
+        ))
+    });
     sites
 }
 
@@ -391,8 +433,15 @@ struct IdentityBorrowPolicy<'a, T> {
 }
 
 impl<T: BodySlotTypes> SuspensionPolicy for IdentityBorrowPolicy<'_, T> {
-    fn binding_holds_frame_data(&self, binding: Idx<BindingInfo>, _value: Option<Idx<Expr>>) -> bool {
-        if matches!(self.body.binding_arena[binding].kind, BindingKind::Param | BindingKind::Fn) {
+    fn binding_holds_frame_data(
+        &self,
+        binding: Idx<BindingInfo>,
+        _value: Option<Idx<Expr>>,
+    ) -> bool {
+        if matches!(
+            self.body.binding_arena[binding].kind,
+            BindingKind::Param | BindingKind::Fn
+        ) {
             return false;
         }
         let Some(ty) = self.bi.binding_types.get(binding).copied() else {
@@ -416,7 +465,8 @@ pub fn identity_module_body_sites(ws: &Workspace, module: &Module) -> Vec<Identi
     let mut sites = Vec::new();
     for (f_id, function) in module.functions.iter() {
         let owner = BodyOwner::Function(f_id);
-        let (Some(body), Some(bi)) = (module.bodies.get(&owner), inference.per_fn.get(&owner)) else {
+        let (Some(body), Some(bi)) = (module.bodies.get(&owner), inference.per_fn.get(&owner))
+        else {
             continue;
         };
         sites.extend(identity_body_sites(ws, function, body, bi));
@@ -442,21 +492,35 @@ pub fn identity_suspension_crossings(ws: &Workspace, module: &Module) -> Vec<Ide
     let mut out = Vec::new();
     for (f_id, function) in module.functions.iter() {
         let owner = BodyOwner::Function(f_id);
-        let (Some(body), Some(bi)) = (module.bodies.get(&owner), inference.per_fn.get(&owner)) else {
+        let (Some(body), Some(bi)) = (module.bodies.get(&owner), inference.per_fn.get(&owner))
+        else {
             continue;
         };
         if !function.is_coroutine {
             continue;
         }
         let types = InferredSlotTypes { ws, bi };
-        let policy = IdentityBorrowPolicy { body, bi, types: &types };
+        let policy = IdentityBorrowPolicy {
+            body,
+            bi,
+            types: &types,
+        };
         for crossing in suspension_crossings(body, &policy) {
-            let Some(binding) = used_binding(body, crossing.at) else { continue };
-            let Some(ty) = bi.binding_types.get(binding).copied() else { continue };
+            let Some(binding) = used_binding(body, crossing.at) else {
+                continue;
+            };
+            let Some(ty) = bi.binding_types.get(binding).copied() else {
+                continue;
+            };
             if types.stored(ty).is_none() {
                 continue;
             }
-            out.push(IdentityCrossing { function: f_id, binding, at: crossing.at, suspensions: crossing.suspensions });
+            out.push(IdentityCrossing {
+                function: f_id,
+                binding,
+                at: crossing.at,
+                suspensions: crossing.suspensions,
+            });
         }
     }
     out
@@ -506,7 +570,8 @@ fn capability_errors(module: &Module) -> Vec<CompilerError> {
             {
                 errs.push(CompilerError::new_with_label(
                     annotation.span,
-                    "`@identity_erasure` is reserved for the standard Arena and Scene registries".to_string(),
+                    "`@identity_erasure` is reserved for the standard Arena and Scene registries"
+                        .to_string(),
                 ));
             }
         }
@@ -548,15 +613,20 @@ pub(crate) fn check_identity_storage(ws: &mut Workspace, fresh: &[ModuleId]) {
         if !fresh.contains(&module.id) {
             continue;
         }
-        errs.extend(capability_errors(module).into_iter().map(|e| (module.id, e)));
+        errs.extend(
+            capability_errors(module)
+                .into_iter()
+                .map(|e| (module.id, e)),
+        );
         if identity_storage_exempt(ws, module) {
             continue;
         }
-        errs.extend(
-            identity_storage_sites(ws, module)
-                .into_iter()
-                .map(|site| (module.id, CompilerError::new_with_label(site.span, site.message))),
-        );
+        errs.extend(identity_storage_sites(ws, module).into_iter().map(|site| {
+            (
+                module.id,
+                CompilerError::new_with_label(site.span, site.message),
+            )
+        }));
     }
     for (mid, err) in errs {
         ws.module_mut(mid).interface_errors.push(err);

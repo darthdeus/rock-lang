@@ -14,7 +14,7 @@
 //! These execute the emitted chunk rather than grepping it: a symbol that is
 //! wrong in either the definition or a use fails to parse or reads nil.
 
-use crate::common::{emit_v1_package, run_luajit, V1Fragment};
+use crate::common::{V1Fragment, emit_v1_package, run_luajit};
 
 const MAIN: &str = r#"
 fn main() {
@@ -63,9 +63,18 @@ fn package() -> skull::mir_emit::MirEmit {
     emit_v1_package(
         "v1state",
         &[
-            V1Fragment { file: "main.rock", src: MAIN },
-            V1Fragment { file: "a.rock", src: MOD_A },
-            V1Fragment { file: "b.rock", src: MOD_B },
+            V1Fragment {
+                file: "main.rock",
+                src: MAIN,
+            },
+            V1Fragment {
+                file: "a.rock",
+                src: MOD_A,
+            },
+            V1Fragment {
+                file: "b.rock",
+                src: MOD_B,
+            },
         ],
     )
 }
@@ -84,11 +93,15 @@ fn v1_module_globals_have_independent_storage() {
 fn v1_global_state_identity_is_its_def_key() {
     let emitted = package();
     assert!(
-        emitted.lua.contains("identity=\"global:v1state::a::COUNT\""),
+        emitted
+            .lua
+            .contains("identity=\"global:v1state::a::COUNT\""),
         "a v1 global's storage identity is its DefKey"
     );
     assert!(
-        emitted.lua.contains("identity=\"global:v1state::b::COUNT\""),
+        emitted
+            .lua
+            .contains("identity=\"global:v1state::b::COUNT\""),
         "two modules' same-named globals keep distinct identities"
     );
     assert!(
@@ -145,9 +158,18 @@ fn main() {
         emit_v1_package(
             "v1state",
             &[
-                V1Fragment { file: "main.rock", src: main },
-                V1Fragment { file: "a1.rock", src: front },
-                V1Fragment { file: "a2.rock", src: back },
+                V1Fragment {
+                    file: "main.rock",
+                    src: main,
+                },
+                V1Fragment {
+                    file: "a1.rock",
+                    src: front,
+                },
+                V1Fragment {
+                    file: "a2.rock",
+                    src: back,
+                },
             ],
         )
     };
@@ -169,12 +191,24 @@ fn main() {
 #[test]
 fn v1_code_identity_is_its_def_key() {
     let fragments = [
-        V1Fragment { file: "main.rock", src: MAIN },
-        V1Fragment { file: "a.rock", src: MOD_A },
-        V1Fragment { file: "b.rock", src: MOD_B },
+        V1Fragment {
+            file: "main.rock",
+            src: MAIN,
+        },
+        V1Fragment {
+            file: "a.rock",
+            src: MOD_A,
+        },
+        V1Fragment {
+            file: "b.rock",
+            src: MOD_B,
+        },
     ];
     let ws = crate::common::ws_v1_package("v1state", &fragments);
-    let mid = *ws.module_ids.get(&ustr::Ustr::from("main.rock")).expect("module id");
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("main.rock"))
+        .expect("module id");
     let emitted = skull::mir_emit::emit_workspace_mir(&ws, mid).expect("emit");
     let interner = skull_mir::monoty::MonoInterner::default();
     let bump = ws
@@ -182,14 +216,24 @@ fn v1_code_identity_is_its_def_key() {
         .iter()
         .filter(|module| module.file.as_str() == "a.rock")
         .find_map(|module| {
-            module.functions.iter().find(|(_, f)| f.name.as_str().ends_with("bump")).map(|(fid, _)| {
-                skull_mir::code_identity::CodeIdentity::Named(skull_mir::instance::Instance::base(
-                    skull_mir::mir::FuncRef { module: module.id, func: fid },
-                ))
-            })
+            module
+                .functions
+                .iter()
+                .find(|(_, f)| f.name.as_str().ends_with("bump"))
+                .map(|(fid, _)| {
+                    skull_mir::code_identity::CodeIdentity::Named(
+                        skull_mir::instance::Instance::base(skull_mir::mir::FuncRef {
+                            module: module.id,
+                            func: fid,
+                        }),
+                    )
+                })
         })
         .expect("a::bump");
-    assert!(emitted.code_artifact.entries.contains_key(&bump), "a::bump has no code identity");
+    assert!(
+        emitted.code_artifact.entries.contains_key(&bump),
+        "a::bump has no code identity"
+    );
     assert_eq!(
         bump.logical_key(&ws, &interner),
         "named:v1state::a::bump<>",
@@ -219,7 +263,10 @@ fn v1_static_identity_is_keyed_on_its_owner_def_key() {
         "a v1 static is keyed on its owner's DefKey, not on the owner's file"
     );
     let out = run_luajit(&format!("{}\nmain()\n", emitted.lua), "modules_v1_static");
-    assert_eq!(out, "t=12", "the static must initialize once and keep its value");
+    assert_eq!(
+        out, "t=12",
+        "the static must initialize once and keep its value"
+    );
 }
 
 const LOCALS_MAIN: &str = r#"
@@ -251,8 +298,14 @@ fn v1_static_cells_and_nested_fns_emit_identifiers() {
     let emitted = emit_v1_package(
         "v1loc",
         &[
-            V1Fragment { file: "main.rock", src: LOCALS_MAIN },
-            V1Fragment { file: "a.rock", src: LOCALS_MOD },
+            V1Fragment {
+                file: "main.rock",
+                src: LOCALS_MAIN,
+            },
+            V1Fragment {
+                file: "a.rock",
+                src: LOCALS_MOD,
+            },
         ],
     );
     let out = run_luajit(&format!("{}\nmain()\n", emitted.lua), "modules_v1_locals");

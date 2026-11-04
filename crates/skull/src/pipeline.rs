@@ -43,7 +43,10 @@ pub fn with_stdlib(user: impl IntoIterator<Item = Ast>) -> Vec<Ast> {
 /// total, so a compile refuses a program with any syntax error here; the
 /// editor keeps the partial tree and shows the same errors as diagnostics.
 pub fn syntax_errors(modules: &[Ast]) -> Vec<CompilerError> {
-    modules.iter().flat_map(|m| m.recovery_errors.iter().cloned()).collect()
+    modules
+        .iter()
+        .flat_map(|m| m.recovery_errors.iter().cloned())
+        .collect()
 }
 
 /// Whether the semantic pass enforces the API closure itself or leaves the
@@ -60,7 +63,8 @@ pub fn semantic_pass(
     aliases: &NsAliases,
     gate: ClosureGate,
 ) -> Result<Workspace, CompilerError> {
-    let ws = bone_semantic::semantic_passes::semantic_pass_into(Workspace::default(), modules, aliases)?;
+    let ws =
+        bone_semantic::semantic_passes::semantic_pass_into(Workspace::default(), modules, aliases)?;
     if gate == ClosureGate::Enforce {
         bone_semantic::semantic_passes::pass_validate_api_closure(&ws)?;
     }
@@ -121,8 +125,9 @@ pub fn warm_module_ids(ws: &Workspace, sources: &FxHashMap<Ustr, &str>) -> FxHas
 pub fn split_findings(
     found: Vec<bone_lints::Finding>,
 ) -> (Vec<CompilerError>, Vec<bone_lints::Finding>) {
-    let (errors, soft): (Vec<_>, Vec<_>) =
-        found.into_iter().partition(|f| f.level() == CompilerErrorLevel::Error);
+    let (errors, soft): (Vec<_>, Vec<_>) = found
+        .into_iter()
+        .partition(|f| f.level() == CompilerErrorLevel::Error);
     (errors.into_iter().map(|f| f.error).collect(), soft)
 }
 
@@ -146,7 +151,10 @@ pub trait CompileHost {
 
     /// Resolve compiler-derived inputs against the checked workspace. Hosts
     /// without deferred declarations retain the ordinary input contract.
-    fn checked_comptime_inputs(&mut self, _ws: &Workspace) -> Result<ComptimeInputs, CompilerError> {
+    fn checked_comptime_inputs(
+        &mut self,
+        _ws: &Workspace,
+    ) -> Result<ComptimeInputs, CompilerError> {
         self.comptime_inputs()
     }
 
@@ -165,7 +173,12 @@ pub trait CompileHost {
         entry: ModuleId,
         target: EmitTarget,
     ) -> Result<MirEmit, CompilerError> {
-        crate::mir_emit::emit_workspace_mir_in_for_renderer(ws, entry, target.project_root, target.renderer)
+        crate::mir_emit::emit_workspace_mir_in_for_renderer(
+            ws,
+            entry,
+            target.project_root,
+            target.renderer,
+        )
     }
     fn phase(&mut self, _phase: Phase<'_>) {}
 }
@@ -180,8 +193,10 @@ pub struct EmitTarget<'a> {
 }
 
 impl EmitTarget<'_> {
-    pub const SINGLE_SOURCE: EmitTarget<'static> =
-        EmitTarget { project_root: None, renderer: RendererTarget::Gl };
+    pub const SINGLE_SOURCE: EmitTarget<'static> = EmitTarget {
+        project_root: None,
+        renderer: RendererTarget::Gl,
+    };
 }
 
 /// The stage a compile stopped at.
@@ -245,8 +260,9 @@ pub fn compile_modules(
     // The workspace owns everything lints and emission read; the parse trees
     // would otherwise stay live through the emission peak.
     drop(modules);
-    ws.comptime_inputs =
-        host.checked_comptime_inputs(&ws).map_err(|e| CompileFailure::at(Stage::Comptime, vec![e]))?;
+    ws.comptime_inputs = host
+        .checked_comptime_inputs(&ws)
+        .map_err(|e| CompileFailure::at(Stage::Comptime, vec![e]))?;
     let entry = ws.module_ids[&entry];
     // Lints are a compiler pass: an `Error` finding refuses the program
     // through the same path a type error takes.
@@ -256,7 +272,12 @@ pub fn compile_modules(
         return Err(CompileFailure::at(Stage::Lint, lint_errors));
     }
     host.phase(Phase::Prepared);
-    let emission =
-        host.emit(&ws, entry, target).map_err(|e| CompileFailure::at(Stage::Emit, vec![e]))?;
-    Ok(Compiled { ws, entry, emission })
+    let emission = host
+        .emit(&ws, entry, target)
+        .map_err(|e| CompileFailure::at(Stage::Emit, vec![e]))?;
+    Ok(Compiled {
+        ws,
+        entry,
+        emission,
+    })
 }

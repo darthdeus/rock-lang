@@ -188,9 +188,18 @@ fn a_nested_nobox_field_does_not_box_when_the_outer_materializes() {
         "the nested nobox field materialized a cdata:
 {lua}"
     );
-    assert_eq!(run_luajit(&format!("{lua}
+    assert_eq!(
+        run_luajit(
+            &format!(
+                "{lua}
 main()
-"), "global_outer").trim(), "1 2 3 4 5");
+"
+            ),
+            "global_outer"
+        )
+        .trim(),
+        "1 2 3 4 5"
+    );
 }
 
 #[test]
@@ -208,9 +217,18 @@ fn a_two_level_nesting_flattens_through_the_intermediate() {
         "an intermediate cdata was allocated instead of flattening at the outermost ctor:
 {lua}"
     );
-    assert_eq!(run_luajit(&format!("{lua}
+    assert_eq!(
+        run_luajit(
+            &format!(
+                "{lua}
 main()
-"), "two_level").trim(), "1 2 3 4 5 6");
+"
+            ),
+            "two_level"
+        )
+        .trim(),
+        "1 2 3 4 5 6"
+    );
 }
 
 #[test]
@@ -221,9 +239,18 @@ fn an_opaque_nested_operand_is_decomposed_not_rejected() {
         "the nested nobox field materialized a cdata:
 {lua}"
     );
-    assert_eq!(run_luajit(&format!("{lua}
+    assert_eq!(
+        run_luajit(
+            &format!(
+                "{lua}
 main()
-"), "mixed").trim(), "6 7 1 2 8");
+"
+            ),
+            "mixed"
+        )
+        .trim(),
+        "6 7 1 2 8"
+    );
 }
 
 #[test]
@@ -241,18 +268,27 @@ fn a_nullable_nobox_field_in_a_gc_tier_outer_carries_presence() {
         "the GC-tier outer did not take the presence-carrying leaf ctor:
 {lua}"
     );
-    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "nullable_field").trim(), "1");
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "nullable_field").trim(),
+        "1"
+    );
 }
 
 #[test]
 fn a_leaf_table_element_read_out_of_a_container_projects_its_leaves() {
     let lua = emit_ok(LEAF_TABLE_OUT_OF_A_MAP, "a leaf-table Map value");
-    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "map_value").trim(), "1 2 3");
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "map_value").trim(),
+        "1 2 3"
+    );
 }
 
 #[test]
 fn both_absent_spellings_store_the_same_tag() {
-    let lua = emit_ok(ABSENT_SPELLINGS_AGREE, "an absent literal against a null write");
+    let lua = emit_ok(
+        ABSENT_SPELLINGS_AGREE,
+        "an absent literal against a null write",
+    );
     assert_eq!(
         run_luajit(&format!("{lua}\nmain()\n"), "absent_spellings").trim(),
         "true true"
@@ -293,12 +329,18 @@ fn a_coroutine_frame_carries_a_value_with_a_nested_nobox_field() {
 #[test]
 fn an_explicit_materialize_stays_legal() {
     let lua = emit_ok(EXPLICIT_MATERIALIZE, "an explicit materialize");
-    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "materialize").trim(), "1 2");
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "materialize").trim(),
+        "1 2"
+    );
 }
 
 #[test]
 fn an_explicitly_materialized_nested_operand_is_left_whole() {
-    let lua = emit_ok(MATERIALIZED_OPERAND, "an explicitly materialized nested operand");
+    let lua = emit_ok(
+        MATERIALIZED_OPERAND,
+        "an explicitly materialized nested operand",
+    );
     assert_eq!(
         run_luajit(&format!("{lua}\nmain()\n"), "materialized_operand").trim(),
         "1 2 3"

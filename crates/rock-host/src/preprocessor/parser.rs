@@ -55,7 +55,10 @@ impl PreprocessorParser {
                     i = construct.1; // Skip to after the #end
                     constructs.push(construct.0);
                 }
-                DirectiveType::Script | DirectiveType::Test | DirectiveType::TestUtil | DirectiveType::Use => {
+                DirectiveType::Script
+                | DirectiveType::Test
+                | DirectiveType::TestUtil
+                | DirectiveType::Use => {
                     // Skip script/test/use directives as they are handled separately
                     i += 1;
                 }
@@ -152,7 +155,10 @@ impl PreprocessorParser {
                         directive.line
                     ));
                 }
-                DirectiveType::Script | DirectiveType::Test | DirectiveType::TestUtil | DirectiveType::Use => {
+                DirectiveType::Script
+                | DirectiveType::Test
+                | DirectiveType::TestUtil
+                | DirectiveType::Use => {
                     // Skip script/test/use directives in conditional parsing
                     // They're handled separately
                     continue;

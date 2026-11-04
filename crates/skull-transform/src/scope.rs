@@ -96,7 +96,9 @@ impl ScopeTree {
     pub fn build(func: &MirFunc) -> ScopeTree {
         let mut scopes = vec![Scope {
             entry: func.entry(),
-            region: reachable_blocks_from(func, func.entry()).into_iter().collect(),
+            region: reachable_blocks_from(func, func.entry())
+                .into_iter()
+                .collect(),
             parent: None,
             lambda: None,
             params: func.params.clone(),
@@ -142,9 +144,12 @@ impl ScopeTree {
             while i < pending.len() {
                 let (lid, cblock) = pending[i];
                 if block_scope.contains_key(&cblock) {
-                    let Inst::Lambda { params, entry } = &func.insts[lid] else { unreachable!() };
+                    let Inst::Lambda { params, entry } = &func.insts[lid] else {
+                        unreachable!()
+                    };
                     let sid = scopes.len();
-                    let region: HashSet<Idx<Block>> = reachable_blocks_from(func, *entry).into_iter().collect();
+                    let region: HashSet<Idx<Block>> =
+                        reachable_blocks_from(func, *entry).into_iter().collect();
                     for &b in &region {
                         let prev = block_scope.insert(b, sid);
                         debug_assert!(
@@ -175,7 +180,10 @@ impl ScopeTree {
             let b = creating_block[sid];
             scopes[sid].parent = Some(block_scope[&b]);
         }
-        ScopeTree { scopes, block_scope }
+        ScopeTree {
+            scopes,
+            block_scope,
+        }
     }
 
     /// The scope owning block `b` (the scope whose region contains it).
@@ -237,7 +245,11 @@ impl ScopeTree {
                 acc.entry(c).or_default().insert(sid);
             }
             let mut write =
-                |c: Idx<Cell>, n: u32, b: Idx<Block>, pos: usize, acc: &mut HashMap<Idx<Cell>, HashSet<ScopeId>>| {
+                |c: Idx<Cell>,
+                 n: u32,
+                 b: Idx<Block>,
+                 pos: usize,
+                 acc: &mut HashMap<Idx<Cell>, HashSet<ScopeId>>| {
                     acc.entry(c).or_default().insert(sid);
                     *writes.entry(c).or_insert(0) += n;
                     writing.entry(c).or_default().insert(sid);
@@ -253,7 +265,9 @@ impl ScopeTree {
                             acc.entry(*c).or_default().insert(sid);
                         }
                         Inst::Store { cell, .. } => write(*cell, 1, b, pos, &mut acc),
-                        Inst::MapNext { key_cell, val_cell, .. } => {
+                        Inst::MapNext {
+                            key_cell, val_cell, ..
+                        } => {
                             write(*key_cell, 2, b, pos, &mut acc);
                             write(*val_cell, 2, b, pos, &mut acc);
                         }
@@ -303,7 +317,9 @@ impl ScopeTree {
                 let mut s = a;
                 while s != o {
                     captures[s].insert(*c);
-                    s = self.scopes[s].parent.expect("owner is an ancestor of every accessor");
+                    s = self.scopes[s]
+                        .parent
+                        .expect("owner is an ancestor of every accessor");
                 }
             }
         }
@@ -340,13 +356,17 @@ impl ScopeTree {
         for caps in &own.captures {
             captured.extend(caps.iter().copied());
         }
-        let is_param: HashSet<Idx<Cell>> =
-            self.scopes.iter().flat_map(|s| s.params.iter().copied()).collect();
+        let is_param: HashSet<Idx<Cell>> = self
+            .scopes
+            .iter()
+            .flat_map(|s| s.params.iter().copied())
+            .collect();
 
         captured
             .into_iter()
             .filter(|c| {
-                let effective = own.writes.get(c).copied().unwrap_or(0) + is_param.contains(c) as u32;
+                let effective =
+                    own.writes.get(c).copied().unwrap_or(0) + is_param.contains(c) as u32;
                 let written_non_owner = own
                     .writing_scopes
                     .get(c)
@@ -429,12 +449,20 @@ pub fn non_dominating_by_value_captures(
     for s in &tree.scopes {
         let Some(lid) = s.lambda else { continue };
         let parent = s.parent.expect("a lambda scope has a parent");
-        let Some(&cblock) = create_block.get(&lid) else { continue };
+        let Some(&cblock) = create_block.get(&lid) else {
+            continue;
+        };
         let sid = tree.scope_of_block(cblock); // sanity: create block is in the parent region
-        debug_assert_eq!(sid, Some(parent), "a lambda's creation block lies in its parent scope");
+        debug_assert_eq!(
+            sid,
+            Some(parent),
+            "a lambda's creation block lies in its parent scope"
+        );
         let parent_entry = tree.scopes[parent].entry;
         // captures of THIS scope owned by the parent: read directly at cblock.
-        let scope_id = (0..tree.scopes.len()).find(|&i| tree.scopes[i].lambda == Some(lid)).unwrap();
+        let scope_id = (0..tree.scopes.len())
+            .find(|&i| tree.scopes[i].lambda == Some(lid))
+            .unwrap();
         for &c in &own.captures[scope_id] {
             if boxed.contains(&c) || own.loop_bindings.contains(&c) || extra.contains(&c) {
                 continue;
@@ -474,7 +502,10 @@ pub fn non_dominating_by_value_captures(
                 // being compiled in (dead in release) -- keeps the fallback live in
                 // dev instead of dead code after an abort.
                 extra.insert(c);
-                debug_assert!(false, "by-value capture write must dominate its creation site (dominance rail)");
+                debug_assert!(
+                    false,
+                    "by-value capture write must dominate its creation site (dominance rail)"
+                );
                 // Release: assert is compiled out, so surface the fallback (never
                 // swallow) -- a non-dominating shape is a transform artifact worth
                 // seeing.

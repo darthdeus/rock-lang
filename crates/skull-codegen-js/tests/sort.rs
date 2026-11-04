@@ -5,19 +5,29 @@
 //! `tests/js_sort.rock` cross-checks against luajit (tie order is unspecified,
 //! so only order-invariant properties are asserted).
 
-use skull_mir::mir::FuncRef;
 use crate::common::ws_with;
+use skull_mir::mir::FuncRef;
 
 fn node_available() -> bool {
-    crate::common::node().arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+    crate::common::node()
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 fn emit_closure(ws: &bone_semantic::inference::Workspace, root: &str) -> Result<String, String> {
-    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("test module");
     let mut r = None;
     for (fid, f) in ws.module(mid).functions.iter() {
         if f.name.as_str() == root {
-            r = Some(FuncRef { module: mid, func: fid });
+            r = Some(FuncRef {
+                module: mid,
+                func: fid,
+            });
         }
     }
     skull_codegen_js::emit::emit_with_closure(ws, &[(r.unwrap(), root.to_string())])
@@ -36,7 +46,11 @@ fn eval_str(defs: &str, root: &str, expect: &str) {
         skull_codegen_js::JS_CALL_HELPER,
         skull_codegen_js::JS_STRING_RUNTIME,
     );
-    let out = crate::common::node().arg("-e").arg(&program).output().expect("spawn node");
+    let out = crate::common::node()
+        .arg("-e")
+        .arg(&program)
+        .output()
+        .expect("spawn node");
     assert!(
         out.status.success(),
         "node failed:\n--- program ---\n{program}\n--- stderr ---\n{}",
@@ -59,8 +73,14 @@ fn sort_ascending_by_identity() {
                }";
     let ws = ws_with(src);
     let js = emit_closure(&ws, "root").expect("sort emits");
-    assert!(js.contains("__vec_sort"), "renders the slice-sort runtime:\n{js}");
-    assert!(!js.contains("[null,"), "0-based hole-free Vec literal, no index-0 hole:\n{js}");
+    assert!(
+        js.contains("__vec_sort"),
+        "renders the slice-sort runtime:\n{js}"
+    );
+    assert!(
+        !js.contains("[null,"),
+        "0-based hole-free Vec literal, no index-0 hole:\n{js}"
+    );
     eval_str(&js, "root", "1 2 3 5 8");
 }
 

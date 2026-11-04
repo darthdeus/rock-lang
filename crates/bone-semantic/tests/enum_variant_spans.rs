@@ -80,7 +80,11 @@ fn f(c: Color, s: Shape) -> int {
     else {
         unreachable!()
     };
-    assert_eq!(text(src, enum_name_span), "Color", "expr enum-qualifier token");
+    assert_eq!(
+        text(src, enum_name_span),
+        "Color",
+        "expr enum-qualifier token"
+    );
     assert_eq!(text(src, variant_span), "Red", "expr variant token");
 
     // --- Unit-variant pattern: `Color::Green => ..`. ---
@@ -97,7 +101,10 @@ fn f(c: Color, s: Shape) -> int {
             _ => None,
         })
         .expect("a Pattern::EnumVariant for Color::Green");
-    assert_eq!(text(src, &green.0.expect("enum qualifier present")), "Color");
+    assert_eq!(
+        text(src, &green.0.expect("enum qualifier present")),
+        "Color"
+    );
     assert_eq!(text(src, &green.1), "Green");
 
     // --- Tuple-variant pattern: `Shape::Circle(r) => ..`. ---
@@ -114,7 +121,10 @@ fn f(c: Color, s: Shape) -> int {
             _ => None,
         })
         .expect("a Pattern::EnumVariant for Shape::Circle");
-    assert_eq!(text(src, &circle.0.expect("enum qualifier present")), "Shape");
+    assert_eq!(
+        text(src, &circle.0.expect("enum qualifier present")),
+        "Shape"
+    );
     assert_eq!(text(src, &circle.1), "Circle");
 
     // --- Record-variant pattern: `Shape::Rect { w } => ..`. ---
@@ -131,6 +141,12 @@ fn f(c: Color, s: Shape) -> int {
             _ => None,
         })
         .expect("a Pattern::Record for Shape::Rect");
-    assert_eq!(text(src, &rect_enum_span.expect("enum qualifier present")), "Shape");
-    assert_eq!(text(src, &rect_name_span.expect("variant head present")), "Rect");
+    assert_eq!(
+        text(src, &rect_enum_span.expect("enum qualifier present")),
+        "Shape"
+    );
+    assert_eq!(
+        text(src, &rect_name_span.expect("variant head present")),
+        "Rect"
+    );
 }

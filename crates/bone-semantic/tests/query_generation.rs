@@ -18,12 +18,14 @@ fn stale_body_generation_panics_at_type_at() {
     let module = skull_parser::parse_module_clean(src, Ustr::from("<query_generation>")).unwrap();
     let mut ws = semantic_pass(&mut [module]).unwrap();
 
-    let mid = ws.modules
+    let mid = ws
+        .modules
         .iter()
         .find(|m| m.id != ModuleId::builtin())
         .expect("one user module")
         .id;
-    let (f_idx, _) = ws.module(mid)
+    let (f_idx, _) = ws
+        .module(mid)
         .functions
         .iter()
         .find(|(_, f)| f.name.as_str() == "f")

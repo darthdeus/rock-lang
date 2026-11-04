@@ -1,4 +1,3 @@
-
 use crate::*;
 
 /// Expand every argument into the `.rock` files it names: a file argument
@@ -125,19 +124,11 @@ fn format_rock_file(file_path: &str) -> Result<String> {
     let source = rock_host::source_files::source_file_new_with_context(file_path)?;
     let input = source.contents;
     let dialect = source.dialect;
-    let formatted = skull_fmt::try_format_with_dialect(
-        &input,
-        &skull_fmt::FormatConfig::default(),
-        dialect,
-    )
-    .map_err(|error| {
-        anyhow::anyhow!(
-            "failed to format {} as {:?}: {}",
-            file_path,
-            dialect,
-            error
-        )
-    })?;
+    let formatted =
+        skull_fmt::try_format_with_dialect(&input, &skull_fmt::FormatConfig::default(), dialect)
+            .map_err(|error| {
+                anyhow::anyhow!("failed to format {} as {:?}: {}", file_path, dialect, error)
+            })?;
 
     // Defensive reparse: never overwrite a source file with output that no
     // longer parses. skull-fmt returns the input unchanged on a parse
@@ -146,9 +137,14 @@ fn format_rock_file(file_path: &str) -> Result<String> {
     // silently produced unparseable output for engine/engine/lib.rock).
     if formatted != input {
         let file: ustr::Ustr = format!("<reparse:{file_path}>").into();
-        let ast = skull_parser::parse_module_with_dialect(&formatted, file, dialect).map_err(|e| {
-            anyhow::anyhow!("formatter produced unparseable output for {}: {:?}", file_path, e)
-        })?;
+        let ast =
+            skull_parser::parse_module_with_dialect(&formatted, file, dialect).map_err(|e| {
+                anyhow::anyhow!(
+                    "formatter produced unparseable output for {}: {:?}",
+                    file_path,
+                    e
+                )
+            })?;
         if !ast.recovery_errors.is_empty() {
             anyhow::bail!(
                 "formatter produced output with parse-recovery errors for {}: {:?}",
@@ -195,8 +191,7 @@ mod tests {
         write(dir.path(), "nested/deep.rock");
         write(dir.path(), "nested/notes.txt");
 
-        let collected =
-            collect_rock_files(&[dir.path().to_string_lossy().to_string()]).unwrap();
+        let collected = collect_rock_files(&[dir.path().to_string_lossy().to_string()]).unwrap();
 
         let mut names: Vec<_> = collected
             .iter()

@@ -7,7 +7,11 @@
 use std::process::Command;
 
 fn node_available() -> bool {
-    Command::new("node").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+    Command::new("node")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 // `plus_one` and `triple` each carry a lua + js body under one name+signature;
@@ -35,7 +39,10 @@ fn run(backend: Option<&str>, path: &std::path::Path) -> (String, bool) {
         cmd.args(["--backend", b]);
     }
     let out = cmd.output().expect("spawn rock");
-    (String::from_utf8_lossy(&out.stdout).into_owned(), out.status.success())
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        out.status.success(),
+    )
 }
 
 #[test]

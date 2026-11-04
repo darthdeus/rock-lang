@@ -1,8 +1,8 @@
+use super::parallel_runner::{self, FileTestResult};
 use anyhow::Result;
 use std::io::{BufRead, BufReader, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use super::parallel_runner::{self, FileTestResult};
 
 /// `ROCK_BACKEND` override (if any) for the *spawned* `rock-lsp` child running
 /// `.rock.lsp` fixtures. The bone-backed LSP (`rock-lang/crates/rock-lsp/src/lib.rs`) is
@@ -25,7 +25,7 @@ fn lsp_child_backend_env(backend: crate::Backend) -> Option<(&'static str, &'sta
 #[derive(Debug, Clone)]
 struct LspTest {
     name: String,
-    test_type: String,  // completion, goto_definition, hover, etc.
+    test_type: String, // completion, goto_definition, hover, etc.
     code: String,
     /// Multi-file projects use `FILES:` / `FILE:` blocks in the test source.
     /// When non-empty, `code` holds the content of the primary file (the one
@@ -48,17 +48,41 @@ struct LspTest {
 
 #[derive(Debug, Clone)]
 enum LspOperation {
-    Completion { line: usize, character: usize },
-    GotoDefinition { line: usize, character: usize },
-    GotoTypeDefinition { line: usize, character: usize },
-    Hover { line: usize, character: usize },
-    References { line: usize, character: usize },
+    Completion {
+        line: usize,
+        character: usize,
+    },
+    GotoDefinition {
+        line: usize,
+        character: usize,
+    },
+    GotoTypeDefinition {
+        line: usize,
+        character: usize,
+    },
+    Hover {
+        line: usize,
+        character: usize,
+    },
+    References {
+        line: usize,
+        character: usize,
+    },
     InlayHints,
-    Rename { line: usize, character: usize, new_name: String },
+    Rename {
+        line: usize,
+        character: usize,
+        new_name: String,
+    },
     SemanticTokens,
-    SignatureHelp { line: usize, character: usize },
+    SignatureHelp {
+        line: usize,
+        character: usize,
+    },
     DocumentSymbols,
-    WorkspaceSymbols { query: String },
+    WorkspaceSymbols {
+        query: String,
+    },
 }
 
 /// An edit sequence test: multiple steps driving a persistent LSP server
@@ -74,9 +98,17 @@ enum StepMode {
     /// Replace the full document at once (existing behavior)
     FullReplace { code: String },
     /// Type characters one at a time, starting at (line, col) in the previous document
-    TypeAt { line: usize, col: usize, text: String },
+    TypeAt {
+        line: usize,
+        col: usize,
+        text: String,
+    },
     /// Delete N characters backwards from (line, col) in the previous document
-    DeleteAt { line: usize, col: usize, count: usize },
+    DeleteAt {
+        line: usize,
+        col: usize,
+        count: usize,
+    },
 }
 
 /// A single step in an edit sequence
@@ -99,17 +131,27 @@ struct EditStepCheck {
 enum EditStepOperation {
     SemanticTokens,
     Diagnostics,
-    Completion { line: usize, character: usize },
-    Hover { line: usize, character: usize },
+    Completion {
+        line: usize,
+        character: usize,
+    },
+    Hover {
+        line: usize,
+        character: usize,
+    },
     /// `CHECK: references(line, char)` -- EXPECTED lines are `LINE:CHAR`
     /// start positions; the returned set must match exactly (order-free).
-    References { line: usize, character: usize },
+    References {
+        line: usize,
+        character: usize,
+    },
 }
 
 /// Check if the given path contains LSP tests
 pub fn has_lsp_tests(path: &Path) -> bool {
     if path.is_file() {
-        return path.extension()
+        return path
+            .extension()
             .and_then(|s| s.to_str())
             .map(|s| s == "lsp")
             .unwrap_or(false);
@@ -141,7 +183,9 @@ pub fn has_lsp_tests(path: &Path) -> bool {
                     }
                 }
                 // Also check if there's an 'lsp' subdirectory with .lsp files (recursively)
-                if entry_path.is_dir() && entry_path.file_name().and_then(|s| s.to_str()) == Some("lsp") {
+                if entry_path.is_dir()
+                    && entry_path.file_name().and_then(|s| s.to_str()) == Some("lsp")
+                {
                     // Recursively check if the lsp subdirectory contains .lsp files
                     for entry in walkdir::WalkDir::new(&entry_path).into_iter().flatten() {
                         if entry.file_type().is_file() {
@@ -308,8 +352,7 @@ fn parse_lsp_test_file(path: &Path) -> Result<Vec<LspTest>> {
             }
 
             // Multi-file mode: `FILES:` after `TYPE:` instead of a code block.
-            let is_multi_file =
-                lines.peek().map(|l| l.trim() == "FILES:").unwrap_or(false);
+            let is_multi_file = lines.peek().map(|l| l.trim() == "FILES:").unwrap_or(false);
 
             let mut files: Vec<(String, String)> = Vec::new();
             let mut primary_file = String::new();
@@ -319,8 +362,7 @@ fn parse_lsp_test_file(path: &Path) -> Result<Vec<LspTest>> {
 
             if is_multi_file {
                 lines.next(); // consume `FILES:`
-                let (parsed_files, cur) =
-                    parse_files_block(&mut lines, &["OPERATION:"]);
+                let (parsed_files, cur) = parse_files_block(&mut lines, &["OPERATION:"]);
                 if let Some((fname, l, c)) = cur {
                     primary_file = fname.clone();
                     cursor_line = Some(l);
@@ -375,7 +417,8 @@ fn parse_lsp_test_file(path: &Path) -> Result<Vec<LspTest>> {
 
                     // Some operations don't need positions
                     match op_type {
-                        "inlay_hints" | "semantic_tokens" | "full_document" | "document_symbols" => {
+                        "inlay_hints" | "semantic_tokens" | "full_document"
+                        | "document_symbols" => {
                             // These operations work on the full document
                             match op_type {
                                 "inlay_hints" => LspOperation::InlayHints,
@@ -389,7 +432,11 @@ fn parse_lsp_test_file(path: &Path) -> Result<Vec<LspTest>> {
                             let query = if let Some(query_line) = lines.peek() {
                                 if query_line.starts_with("QUERY:") {
                                     let query_line = lines.next().unwrap();
-                                    query_line.strip_prefix("QUERY:").unwrap().trim().to_string()
+                                    query_line
+                                        .strip_prefix("QUERY:")
+                                        .unwrap()
+                                        .trim()
+                                        .to_string()
                                 } else {
                                     String::new()
                                 }
@@ -417,8 +464,12 @@ fn parse_lsp_test_file(path: &Path) -> Result<Vec<LspTest>> {
 
                             match op_type {
                                 "completion" => LspOperation::Completion { line, character },
-                                "goto_definition" => LspOperation::GotoDefinition { line, character },
-                                "goto_type_definition" => LspOperation::GotoTypeDefinition { line, character },
+                                "goto_definition" => {
+                                    LspOperation::GotoDefinition { line, character }
+                                }
+                                "goto_type_definition" => {
+                                    LspOperation::GotoTypeDefinition { line, character }
+                                }
                                 "hover" => LspOperation::Hover { line, character },
                                 "references" => LspOperation::References { line, character },
                                 "code_action" => {
@@ -439,14 +490,30 @@ fn parse_lsp_test_file(path: &Path) -> Result<Vec<LspTest>> {
                                     if let Some(name_line) = lines.peek() {
                                         if name_line.starts_with("NEW_NAME:") {
                                             let name_line = lines.next().unwrap();
-                                            let new_name = name_line.strip_prefix("NEW_NAME:").unwrap().trim().to_string();
-                                            LspOperation::Rename { line, character, new_name }
+                                            let new_name = name_line
+                                                .strip_prefix("NEW_NAME:")
+                                                .unwrap()
+                                                .trim()
+                                                .to_string();
+                                            LspOperation::Rename {
+                                                line,
+                                                character,
+                                                new_name,
+                                            }
                                         } else {
                                             // Default new name if not specified
-                                            LspOperation::Rename { line, character, new_name: "renamed".to_string() }
+                                            LspOperation::Rename {
+                                                line,
+                                                character,
+                                                new_name: "renamed".to_string(),
+                                            }
                                         }
                                     } else {
-                                        LspOperation::Rename { line, character, new_name: "renamed".to_string() }
+                                        LspOperation::Rename {
+                                            line,
+                                            character,
+                                            new_name: "renamed".to_string(),
+                                        }
                                     }
                                 }
                                 _ => {
@@ -504,64 +571,70 @@ fn parse_lsp_test_file(path: &Path) -> Result<Vec<LspTest>> {
                             .peek()
                             .map(|l| {
                                 l.starts_with("FILE:")
-                                    || (l.starts_with("---")
-                                        && {
-                                            // Peek one more: not straightforward with
-                                            // `Peekable`, so just allow the `---` leader.
-                                            true
-                                        })
+                                    || (l.starts_with("---") && {
+                                        // Peek one more: not straightforward with
+                                        // `Peekable`, so just allow the `---` leader.
+                                        true
+                                    })
                             })
                             .unwrap_or(false);
 
                     if is_multi_expected {
-                        let (parsed, _cur) =
-                            parse_files_block(&mut lines, &["==="]);
+                        let (parsed, _cur) = parse_files_block(&mut lines, &["==="]);
                         expected_files = parsed;
                         // Consume `===`
                         if lines.peek().map(|l| l.starts_with("===")).unwrap_or(false) {
                             lines.next();
                         }
                     } else {
-                    // FOOT-GUN: every new TYPE: must have a matching branch
-                    // below, or its expected lines will silently be dropped
-                    // and the test will no-op. See the compiler contract.
-                    while let Some(line) = lines.peek() {
-                        if line.starts_with("===") {
-                            lines.next();
-                            break;
-                        }
-                        let line = lines.next().unwrap();
-                        if test_type == "rename" {
-                            // Raw capture; snippet-vs-full-code is decided
-                            // after the loop from the first non-empty line.
-                            rename_lines.push(line.to_string());
-                        } else if line.starts_with("- ") {
-                            expected.push(line.strip_prefix("- ").unwrap().to_string());
-                        } else if line.starts_with("file:") || line.starts_with("line:") || line.starts_with("character:") || line.starts_with("min_tokens:") {
-                            expected.push(line.to_string());
-                        } else if (test_type == "goto_definition" || test_type == "goto_type_definition" || test_type == "references") && line.trim().eq_ignore_ascii_case("none") {
-                            // `EXPECTED: none` — this request should return no
-                            // targets (goto-def/type-def/references).
-                            expected.push("none".to_string());
-                        } else if test_type == "hover" {
-                            // For hover tests, include all lines as expected content
-                            expected.push(line.to_string());
-                        } else if test_type == "inlay_hints" {
-                            // Expected block is a re-rendering of the source
-                            // with `«hint::LABEL»` markers inline. Validator
-                            // parses these into (line, col, label) triples.
-                            expected.push(line.to_string());
-                        } else if test_type == "signature_help" {
-                            // Bare signature strings like `greet(name: string,
-                            // times: int)` match any returned signature. A
-                            // line starting with `ACTIVE:` matches the
-                            // *active* signature only (used to verify overload
-                            // resolution picked the right arm).
-                            if !line.trim().is_empty() {
+                        // FOOT-GUN: every new TYPE: must have a matching branch
+                        // below, or its expected lines will silently be dropped
+                        // and the test will no-op. See the compiler contract.
+                        while let Some(line) = lines.peek() {
+                            if line.starts_with("===") {
+                                lines.next();
+                                break;
+                            }
+                            let line = lines.next().unwrap();
+                            if test_type == "rename" {
+                                // Raw capture; snippet-vs-full-code is decided
+                                // after the loop from the first non-empty line.
+                                rename_lines.push(line.to_string());
+                            } else if line.starts_with("- ") {
+                                expected.push(line.strip_prefix("- ").unwrap().to_string());
+                            } else if line.starts_with("file:")
+                                || line.starts_with("line:")
+                                || line.starts_with("character:")
+                                || line.starts_with("min_tokens:")
+                            {
                                 expected.push(line.to_string());
+                            } else if (test_type == "goto_definition"
+                                || test_type == "goto_type_definition"
+                                || test_type == "references")
+                                && line.trim().eq_ignore_ascii_case("none")
+                            {
+                                // `EXPECTED: none` — this request should return no
+                                // targets (goto-def/type-def/references).
+                                expected.push("none".to_string());
+                            } else if test_type == "hover" {
+                                // For hover tests, include all lines as expected content
+                                expected.push(line.to_string());
+                            } else if test_type == "inlay_hints" {
+                                // Expected block is a re-rendering of the source
+                                // with `«hint::LABEL»` markers inline. Validator
+                                // parses these into (line, col, label) triples.
+                                expected.push(line.to_string());
+                            } else if test_type == "signature_help" {
+                                // Bare signature strings like `greet(name: string,
+                                // times: int)` match any returned signature. A
+                                // line starting with `ACTIVE:` matches the
+                                // *active* signature only (used to verify overload
+                                // resolution picked the right arm).
+                                if !line.trim().is_empty() {
+                                    expected.push(line.to_string());
+                                }
                             }
                         }
-                    }
                     }
                 }
             }
@@ -643,7 +716,6 @@ fn parse_edit_sequence_tests(path: &Path) -> Result<Vec<EditSequenceTest>> {
 
         // Parse steps until ===
         while let Some(&next) = lines.peek() {
-
             if next.starts_with("===") {
                 lines.next();
                 break;
@@ -683,31 +755,53 @@ fn parse_edit_sequence_tests(path: &Path) -> Result<Vec<EditSequenceTest>> {
                             .trim_start_matches(|c: char| c != 't')
                             .strip_prefix("type at ")
                             .and_then(|s| s.strip_suffix("):"))
-                            .or_else(|| hint
-                                .trim_start_matches(|c: char| c != 't')
-                                .strip_prefix("type at ")
-                                .and_then(|s| s.strip_suffix(")")))
+                            .or_else(|| {
+                                hint.trim_start_matches(|c: char| c != 't')
+                                    .strip_prefix("type at ")
+                                    .and_then(|s| s.strip_suffix(")"))
+                            })
                             .unwrap_or("0:0");
                         let parts: Vec<&str> = coords.split(':').collect();
-                        let line = parts.first().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
-                        let col = parts.get(1).and_then(|s| s.trim().parse().ok()).unwrap_or(0);
-                        StepMode::TypeAt { line, col, text: body }
+                        let line = parts
+                            .first()
+                            .and_then(|s| s.trim().parse().ok())
+                            .unwrap_or(0);
+                        let col = parts
+                            .get(1)
+                            .and_then(|s| s.trim().parse().ok())
+                            .unwrap_or(0);
+                        StepMode::TypeAt {
+                            line,
+                            col,
+                            text: body,
+                        }
                     } else if hint.contains("delete at") {
                         // Parse (delete at LINE:COL, COUNT):
                         let inner = hint
                             .trim_start_matches(|c: char| c != 'd')
                             .strip_prefix("delete at ")
                             .and_then(|s| s.strip_suffix("):"))
-                            .or_else(|| hint
-                                .trim_start_matches(|c: char| c != 'd')
-                                .strip_prefix("delete at ")
-                                .and_then(|s| s.strip_suffix(")")))
+                            .or_else(|| {
+                                hint.trim_start_matches(|c: char| c != 'd')
+                                    .strip_prefix("delete at ")
+                                    .and_then(|s| s.strip_suffix(")"))
+                            })
                             .unwrap_or("0:0, 1");
                         let parts: Vec<&str> = inner.split(',').collect();
-                        let coords: Vec<&str> = parts.first().unwrap_or(&"0:0").split(':').collect();
-                        let line = coords.first().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
-                        let col = coords.get(1).and_then(|s| s.trim().parse().ok()).unwrap_or(0);
-                        let count = parts.get(1).and_then(|s| s.trim().parse().ok()).unwrap_or(1);
+                        let coords: Vec<&str> =
+                            parts.first().unwrap_or(&"0:0").split(':').collect();
+                        let line = coords
+                            .first()
+                            .and_then(|s| s.trim().parse().ok())
+                            .unwrap_or(0);
+                        let col = coords
+                            .get(1)
+                            .and_then(|s| s.trim().parse().ok())
+                            .unwrap_or(0);
+                        let count = parts
+                            .get(1)
+                            .and_then(|s| s.trim().parse().ok())
+                            .unwrap_or(1);
                         StepMode::DeleteAt { line, col, count }
                     } else {
                         StepMode::FullReplace { code: body }
@@ -731,7 +825,8 @@ fn parse_edit_sequence_tests(path: &Path) -> Result<Vec<EditSequenceTest>> {
                             "diagnostics" => EditStepOperation::Diagnostics,
                             _ if op_str.starts_with("completion") => {
                                 // CHECK: completion(line, char)
-                                if let Some(params) = op_str.strip_prefix("completion(")
+                                if let Some(params) = op_str
+                                    .strip_prefix("completion(")
                                     .and_then(|s| s.strip_suffix(')'))
                                 {
                                     let parts: Vec<&str> = params.split(',').collect();
@@ -747,7 +842,8 @@ fn parse_edit_sequence_tests(path: &Path) -> Result<Vec<EditSequenceTest>> {
                                 }
                             }
                             _ if op_str.starts_with("hover") => {
-                                if let Some(params) = op_str.strip_prefix("hover(")
+                                if let Some(params) = op_str
+                                    .strip_prefix("hover(")
                                     .and_then(|s| s.strip_suffix(')'))
                                 {
                                     let parts: Vec<&str> = params.split(',').collect();
@@ -763,7 +859,8 @@ fn parse_edit_sequence_tests(path: &Path) -> Result<Vec<EditSequenceTest>> {
                                 }
                             }
                             _ if op_str.starts_with("references") => {
-                                if let Some(params) = op_str.strip_prefix("references(")
+                                if let Some(params) = op_str
+                                    .strip_prefix("references(")
                                     .and_then(|s| s.strip_suffix(')'))
                                 {
                                     let parts: Vec<&str> = params.split(',').collect();
@@ -790,8 +887,10 @@ fn parse_edit_sequence_tests(path: &Path) -> Result<Vec<EditSequenceTest>> {
                             if exp_line.starts_with("EXPECTED:") {
                                 lines.next();
                                 while let Some(line) = lines.peek() {
-                                    if line.starts_with("---") || line.starts_with("STEP")
-                                        || line.starts_with("===") || line.starts_with("CHECK:")
+                                    if line.starts_with("---")
+                                        || line.starts_with("STEP")
+                                        || line.starts_with("===")
+                                        || line.starts_with("CHECK:")
                                     {
                                         break;
                                     }
@@ -805,7 +904,10 @@ fn parse_edit_sequence_tests(path: &Path) -> Result<Vec<EditSequenceTest>> {
                             }
                         }
 
-                        checks.push(EditStepCheck { operation, expected });
+                        checks.push(EditStepCheck {
+                            operation,
+                            expected,
+                        });
                     } else {
                         lines.next();
                     }
@@ -871,8 +973,14 @@ fn apply_text_edits(source: &str, edits: &[&serde_json::Value]) -> String {
     let mut edits: Vec<&serde_json::Value> = edits.to_vec();
     let pos = |v: &serde_json::Value, which: &str| -> (u64, u64) {
         let range = v.get("range").and_then(|r| r.get(which));
-        let line = range.and_then(|s| s.get("line")).and_then(|l| l.as_u64()).unwrap_or(0);
-        let ch = range.and_then(|s| s.get("character")).and_then(|c| c.as_u64()).unwrap_or(0);
+        let line = range
+            .and_then(|s| s.get("line"))
+            .and_then(|l| l.as_u64())
+            .unwrap_or(0);
+        let ch = range
+            .and_then(|s| s.get("character"))
+            .and_then(|c| c.as_u64())
+            .unwrap_or(0);
         (line, ch)
     };
     edits.sort_by_key(|e| std::cmp::Reverse(pos(e, "start")));
@@ -920,12 +1028,14 @@ fn parse_position(line: &str) -> Result<(usize, usize)> {
         return Err(anyhow::anyhow!("Invalid position format: {}", pos_str));
     }
 
-    let line = parts[0].trim()
+    let line = parts[0]
+        .trim()
         .strip_prefix("line=")
         .ok_or_else(|| anyhow::anyhow!("Missing 'line=' in position"))?
         .parse::<usize>()?;
 
-    let character = parts[1].trim()
+    let character = parts[1]
+        .trim()
         .strip_prefix("character=")
         .ok_or_else(|| anyhow::anyhow!("Missing 'character=' in position"))?
         .parse::<usize>()?;
@@ -1074,7 +1184,10 @@ fn run_lsp_test(test: &LspTest, backend: crate::Backend) -> Result<bool> {
             "[package]\nname = \"lsp_test\"\nversion = \"0.1.0\"\n",
         )?;
         let primary = if test.primary_file.is_empty() {
-            test.files.first().map(|(n, _)| n.clone()).unwrap_or_default()
+            test.files
+                .first()
+                .map(|(n, _)| n.clone())
+                .unwrap_or_default()
         } else {
             test.primary_file.clone()
         };
@@ -1101,37 +1214,73 @@ fn run_lsp_test(test: &LspTest, backend: crate::Backend) -> Result<bool> {
     // Note: The CLI expects 1-indexed line and column numbers
     let args: Vec<String> = match &test.operation {
         LspOperation::Completion { line, character } => {
-            vec!["completion".to_string(), format!("{}:{}:{}", test_file.display(), line + 1, character + 1)]
+            vec![
+                "completion".to_string(),
+                format!("{}:{}:{}", test_file.display(), line + 1, character + 1),
+            ]
         }
         LspOperation::GotoDefinition { line, character } => {
-            vec!["definition".to_string(), format!("{}:{}:{}", test_file.display(), line + 1, character + 1)]
+            vec![
+                "definition".to_string(),
+                format!("{}:{}:{}", test_file.display(), line + 1, character + 1),
+            ]
         }
         LspOperation::GotoTypeDefinition { line, character } => {
-            vec!["type-definition".to_string(), format!("{}:{}:{}", test_file.display(), line + 1, character + 1)]
+            vec![
+                "type-definition".to_string(),
+                format!("{}:{}:{}", test_file.display(), line + 1, character + 1),
+            ]
         }
         LspOperation::Hover { line, character } => {
-            vec!["hover".to_string(), format!("{}:{}:{}", test_file.display(), line + 1, character + 1)]
+            vec![
+                "hover".to_string(),
+                format!("{}:{}:{}", test_file.display(), line + 1, character + 1),
+            ]
         }
         LspOperation::References { line, character } => {
-            vec!["references".to_string(), format!("{}:{}:{}", test_file.display(), line + 1, character + 1)]
+            vec![
+                "references".to_string(),
+                format!("{}:{}:{}", test_file.display(), line + 1, character + 1),
+            ]
         }
         LspOperation::InlayHints => {
             vec!["inlay-hints".to_string(), test_file.display().to_string()]
         }
-        LspOperation::Rename { line, character, new_name } => {
-            vec!["rename".to_string(), format!("{}:{}:{}", test_file.display(), line + 1, character + 1), new_name.clone()]
+        LspOperation::Rename {
+            line,
+            character,
+            new_name,
+        } => {
+            vec![
+                "rename".to_string(),
+                format!("{}:{}:{}", test_file.display(), line + 1, character + 1),
+                new_name.clone(),
+            ]
         }
         LspOperation::SemanticTokens => {
-            vec!["semantic-tokens".to_string(), test_file.display().to_string()]
+            vec![
+                "semantic-tokens".to_string(),
+                test_file.display().to_string(),
+            ]
         }
         LspOperation::SignatureHelp { line, character } => {
-            vec!["signature-help".to_string(), format!("{}:{}:{}", test_file.display(), line + 1, character + 1)]
+            vec![
+                "signature-help".to_string(),
+                format!("{}:{}:{}", test_file.display(), line + 1, character + 1),
+            ]
         }
         LspOperation::DocumentSymbols => {
-            vec!["document-symbols".to_string(), test_file.display().to_string()]
+            vec![
+                "document-symbols".to_string(),
+                test_file.display().to_string(),
+            ]
         }
         LspOperation::WorkspaceSymbols { query } => {
-            vec!["workspace-symbols".to_string(), test_file.display().to_string(), query.clone()]
+            vec![
+                "workspace-symbols".to_string(),
+                test_file.display().to_string(),
+                query.clone(),
+            ]
         }
     };
 
@@ -1164,7 +1313,10 @@ fn run_lsp_test(test: &LspTest, backend: crate::Backend) -> Result<bool> {
     // Only fail if we see actual error output patterns, not just the word "error" in warnings
     if !output.status.success() {
         if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-            eprintln!("    LSP command failed with exit code: {:?}", output.status.code());
+            eprintln!(
+                "    LSP command failed with exit code: {:?}",
+                output.status.code()
+            );
             if !stderr.is_empty() {
                 eprintln!("    LSP stderr: {}", stderr);
             }
@@ -1239,11 +1391,18 @@ fn run_lsp_test(test: &LspTest, backend: crate::Backend) -> Result<bool> {
                         // The test expectations use "main.rock" but that's just a placeholder
                         continue;
                     } else if expected_item.starts_with("line:") {
-                        let expected_line: usize = expected_item.strip_prefix("line:").unwrap().trim().parse().unwrap_or(0);
-                        if let Some(line) = def.get("range")
+                        let expected_line: usize = expected_item
+                            .strip_prefix("line:")
+                            .unwrap()
+                            .trim()
+                            .parse()
+                            .unwrap_or(0);
+                        if let Some(line) = def
+                            .get("range")
                             .and_then(|r| r.get("start"))
                             .and_then(|s| s.get("line"))
-                            .and_then(|l| l.as_u64()) {
+                            .and_then(|l| l.as_u64())
+                        {
                             if line != expected_line as u64 {
                                 all_found = false;
                                 if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
@@ -1257,15 +1416,25 @@ fn run_lsp_test(test: &LspTest, backend: crate::Backend) -> Result<bool> {
                             }
                         }
                     } else if expected_item.starts_with("character:") {
-                        let expected_char: usize = expected_item.strip_prefix("character:").unwrap().trim().parse().unwrap_or(0);
-                        if let Some(character) = def.get("range")
+                        let expected_char: usize = expected_item
+                            .strip_prefix("character:")
+                            .unwrap()
+                            .trim()
+                            .parse()
+                            .unwrap_or(0);
+                        if let Some(character) = def
+                            .get("range")
                             .and_then(|r| r.get("start"))
                             .and_then(|s| s.get("character"))
-                            .and_then(|c| c.as_u64()) {
+                            .and_then(|c| c.as_u64())
+                        {
                             if character != expected_char as u64 {
                                 all_found = false;
                                 if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                                    eprintln!("    Expected character {}, got {}", expected_char, character);
+                                    eprintln!(
+                                        "    Expected character {}, got {}",
+                                        expected_char, character
+                                    );
                                 }
                             }
                         } else {
@@ -1352,10 +1521,8 @@ fn run_lsp_test(test: &LspTest, backend: crate::Backend) -> Result<bool> {
                             actual_refs.iter().collect();
                         let expected_set: std::collections::BTreeSet<_> =
                             expected_refs.iter().collect();
-                        let missing: Vec<_> =
-                            expected_set.difference(&actual_set).collect();
-                        let extra: Vec<_> =
-                            actual_set.difference(&expected_set).collect();
+                        let missing: Vec<_> = expected_set.difference(&actual_set).collect();
+                        let extra: Vec<_> = actual_set.difference(&expected_set).collect();
                         if !missing.is_empty() {
                             eprintln!("    Missing references (expected, not returned):");
                             for r in &missing {
@@ -1402,7 +1569,10 @@ fn run_lsp_test(test: &LspTest, backend: crate::Backend) -> Result<bool> {
                         if token_count < min_tokens {
                             all_found = false;
                             if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                                eprintln!("    Expected at least {} tokens, got {}", min_tokens, token_count);
+                                eprintln!(
+                                    "    Expected at least {} tokens, got {}",
+                                    min_tokens, token_count
+                                );
                             }
                         }
                     }
@@ -1427,7 +1597,11 @@ fn run_lsp_test(test: &LspTest, backend: crate::Backend) -> Result<bool> {
                 vec![sig.to_string()]
             } else if let Some(sigs) = json.get("signatures").and_then(|s| s.as_array()) {
                 sigs.iter()
-                    .filter_map(|s| s.get("label").and_then(|l| l.as_str()).map(|s| s.to_string()))
+                    .filter_map(|s| {
+                        s.get("label")
+                            .and_then(|l| l.as_str())
+                            .map(|s| s.to_string())
+                    })
                     .collect()
             } else {
                 return Err(anyhow::anyhow!(
@@ -1464,7 +1638,10 @@ fn run_lsp_test(test: &LspTest, backend: crate::Backend) -> Result<bool> {
                 if !found {
                     all_found = false;
                     if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                        eprintln!("    Expected '{}' not found (searched {:?})", needle, search_target);
+                        eprintln!(
+                            "    Expected '{}' not found (searched {:?})",
+                            needle, search_target
+                        );
                         eprintln!("    All signatures: {:?}", labels);
                     }
                 }
@@ -1480,8 +1657,14 @@ fn run_lsp_test(test: &LspTest, backend: crate::Backend) -> Result<bool> {
             let actual: Vec<(u64, u64, String)> = reply_array(&request, &stdout, &json, "hints")?
                 .iter()
                 .filter_map(|h| {
-                    let line = h.get("position").and_then(|p| p.get("line")).and_then(|v| v.as_u64())?;
-                    let ch = h.get("position").and_then(|p| p.get("character")).and_then(|v| v.as_u64())?;
+                    let line = h
+                        .get("position")
+                        .and_then(|p| p.get("line"))
+                        .and_then(|v| v.as_u64())?;
+                    let ch = h
+                        .get("position")
+                        .and_then(|p| p.get("character"))
+                        .and_then(|v| v.as_u64())?;
                     let label = h.get("label").and_then(|v| v.as_str())?.to_string();
                     Some((line, ch, label))
                 })
@@ -1518,26 +1701,29 @@ fn run_lsp_test(test: &LspTest, backend: crate::Backend) -> Result<bool> {
                     eprintln!("    No «hint::...» markers parsed from EXPECTED block");
                 }
             }
-
         }
         ReplyKind::Hover => {
             // For hover, check the hover contents
             let json = decode_reply(&request, &stdout)?;
-            let hover_contents = json.get("hover")
+            let hover_contents = json
+                .get("hover")
                 .and_then(|h| h.get("contents"))
                 .and_then(|c| {
                     // Handle both string and MarkupContent formats
                     if let Some(s) = c.as_str() {
                         Some(s.to_string())
                     } else if let Some(markup) = c.as_object() {
-                        markup.get("value").and_then(|v| v.as_str()).map(|s| s.to_string())
+                        markup
+                            .get("value")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
                     } else {
                         None
                     }
                 })
-                .ok_or_else(|| anyhow::anyhow!(
-                    "{request}: reply has no `hover.contents`; raw reply: {stdout}"
-                ))?;
+                .ok_or_else(|| {
+                    anyhow::anyhow!("{request}: reply has no `hover.contents`; raw reply: {stdout}")
+                })?;
 
             // Join all expected lines into a single expected string
             let expected_full = test.expected.join("\n");
@@ -1578,12 +1764,14 @@ fn run_lsp_test(test: &LspTest, backend: crate::Backend) -> Result<bool> {
                     let expected_kind = parts[1].trim();
 
                     let found = symbols.iter().any(|sym| {
-                        let name_matches = sym.get("name")
+                        let name_matches = sym
+                            .get("name")
                             .and_then(|n| n.as_str())
                             .map(|n| n == expected_name)
                             .unwrap_or(false);
 
-                        let kind_matches = sym.get("kind")
+                        let kind_matches = sym
+                            .get("kind")
                             .and_then(|k| k.as_str())
                             .map(|k| k.to_lowercase().contains(&expected_kind.to_lowercase()))
                             .unwrap_or(false);
@@ -1594,7 +1782,10 @@ fn run_lsp_test(test: &LspTest, backend: crate::Backend) -> Result<bool> {
                     if !found {
                         all_found = false;
                         if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                            eprintln!("    Expected symbol '{}' of kind '{}' not found", expected_name, expected_kind);
+                            eprintln!(
+                                "    Expected symbol '{}' of kind '{}' not found",
+                                expected_name, expected_kind
+                            );
                         }
                     }
                 } else {
@@ -1619,40 +1810,40 @@ fn run_lsp_test(test: &LspTest, backend: crate::Backend) -> Result<bool> {
             // For rename tests, apply the text edits and check the resulting code
             let json = decode_reply(&request, &stdout)?;
             if let Some(changes) = json.get("changes").and_then(|c| c.as_object()) {
-                    // Multi-file rename: apply edits per file, compare against
-                    // expected per-file content.
-                    if !test.expected_files.is_empty() {
-                        for (fname, expected_content) in &test.expected_files {
-                            // Skip non-rock manifest entries that the renamer never touches.
-                            if fname == "project.toml" || fname == "stick.toml" {
-                                continue;
-                            }
-                            let original = test
-                                .files
-                                .iter()
-                                .find(|(n, _)| n == fname)
-                                .map(|(_, c)| c.clone())
-                                .unwrap_or_default();
-                            // Find edits whose URI ends with `/<fname>`.
-                            let edits_for_file: Vec<&serde_json::Value> = changes
-                                .iter()
-                                .filter(|(uri, _)| uri.ends_with(&format!("/{}", fname)))
-                                .filter_map(|(_, edits)| edits.as_array())
-                                .flat_map(|arr| arr.iter())
-                                .collect();
-                            let actual = apply_text_edits(&original, &edits_for_file);
-                            let expected_norm = expected_content.trim_end().to_string();
-                            let actual_norm = actual.trim_end().to_string();
-                            if expected_norm != actual_norm {
-                                all_found = false;
-                                if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                                    eprintln!("    Rename mismatch in file {}", fname);
-                                    eprintln!("    Expected:\n{}", expected_norm);
-                                    eprintln!("    Actual:\n{}", actual_norm);
-                                }
+                // Multi-file rename: apply edits per file, compare against
+                // expected per-file content.
+                if !test.expected_files.is_empty() {
+                    for (fname, expected_content) in &test.expected_files {
+                        // Skip non-rock manifest entries that the renamer never touches.
+                        if fname == "project.toml" || fname == "stick.toml" {
+                            continue;
+                        }
+                        let original = test
+                            .files
+                            .iter()
+                            .find(|(n, _)| n == fname)
+                            .map(|(_, c)| c.clone())
+                            .unwrap_or_default();
+                        // Find edits whose URI ends with `/<fname>`.
+                        let edits_for_file: Vec<&serde_json::Value> = changes
+                            .iter()
+                            .filter(|(uri, _)| uri.ends_with(&format!("/{}", fname)))
+                            .filter_map(|(_, edits)| edits.as_array())
+                            .flat_map(|arr| arr.iter())
+                            .collect();
+                        let actual = apply_text_edits(&original, &edits_for_file);
+                        let expected_norm = expected_content.trim_end().to_string();
+                        let actual_norm = actual.trim_end().to_string();
+                        if expected_norm != actual_norm {
+                            all_found = false;
+                            if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
+                                eprintln!("    Rename mismatch in file {}", fname);
+                                eprintln!("    Expected:\n{}", expected_norm);
+                                eprintln!("    Actual:\n{}", actual_norm);
                             }
                         }
-                    } else {
+                    }
+                } else {
                     // Single-file rename: apply all edits to one result buffer,
                     // then compare -- exactly against `expected_code`, or by
                     // substring for `- snippet` style expectations.
@@ -1663,19 +1854,29 @@ fn run_lsp_test(test: &LspTest, backend: crate::Backend) -> Result<bool> {
                             // Sort edits by position in reverse order (so we apply from end to start)
                             let mut edits_sorted: Vec<_> = edits_array.iter().collect();
                             edits_sorted.sort_by(|a, b| {
-                                let start_a = a.get("range")
+                                let start_a = a
+                                    .get("range")
                                     .and_then(|r| r.get("start"))
                                     .map(|s| {
-                                        let line = s.get("line").and_then(|l| l.as_u64()).unwrap_or(0);
-                                        let char = s.get("character").and_then(|c| c.as_u64()).unwrap_or(0);
+                                        let line =
+                                            s.get("line").and_then(|l| l.as_u64()).unwrap_or(0);
+                                        let char = s
+                                            .get("character")
+                                            .and_then(|c| c.as_u64())
+                                            .unwrap_or(0);
                                         (line, char)
                                     })
                                     .unwrap_or((0, 0));
-                                let start_b = b.get("range")
+                                let start_b = b
+                                    .get("range")
                                     .and_then(|r| r.get("start"))
                                     .map(|s| {
-                                        let line = s.get("line").and_then(|l| l.as_u64()).unwrap_or(0);
-                                        let char = s.get("character").and_then(|c| c.as_u64()).unwrap_or(0);
+                                        let line =
+                                            s.get("line").and_then(|l| l.as_u64()).unwrap_or(0);
+                                        let char = s
+                                            .get("character")
+                                            .and_then(|c| c.as_u64())
+                                            .unwrap_or(0);
                                         (line, char)
                                     })
                                     .unwrap_or((0, 0));
@@ -1687,24 +1888,32 @@ fn run_lsp_test(test: &LspTest, backend: crate::Backend) -> Result<bool> {
                             for edit in edits_sorted {
                                 if let (Some(new_text), Some(range)) = (
                                     edit.get("new_text").and_then(|t| t.as_str()),
-                                    edit.get("range")
+                                    edit.get("range"),
                                 ) {
-                                    let start_line = range.get("start")
+                                    let start_line = range
+                                        .get("start")
                                         .and_then(|s| s.get("line"))
                                         .and_then(|l| l.as_u64())
-                                        .unwrap_or(0) as usize;
-                                    let start_char = range.get("start")
+                                        .unwrap_or(0)
+                                        as usize;
+                                    let start_char = range
+                                        .get("start")
                                         .and_then(|s| s.get("character"))
                                         .and_then(|c| c.as_u64())
-                                        .unwrap_or(0) as usize;
-                                    let end_line = range.get("end")
+                                        .unwrap_or(0)
+                                        as usize;
+                                    let end_line = range
+                                        .get("end")
                                         .and_then(|e| e.get("line"))
                                         .and_then(|l| l.as_u64())
-                                        .unwrap_or(0) as usize;
-                                    let end_char = range.get("end")
+                                        .unwrap_or(0)
+                                        as usize;
+                                    let end_char = range
+                                        .get("end")
                                         .and_then(|e| e.get("character"))
                                         .and_then(|c| c.as_u64())
-                                        .unwrap_or(0) as usize;
+                                        .unwrap_or(0)
+                                        as usize;
 
                                     // Apply the edit
                                     let lines: Vec<&str> = result_code.lines().collect();
@@ -1717,7 +1926,8 @@ fn run_lsp_test(test: &LspTest, backend: crate::Backend) -> Result<bool> {
                                             // Edit is on a single line
                                             let before = &line[..start_char.min(line.len())];
                                             let after = &line[end_char.min(line.len())..];
-                                            new_lines.push(format!("{}{}{}", before, new_text, after));
+                                            new_lines
+                                                .push(format!("{}{}{}", before, new_text, after));
                                         } else if i == start_line {
                                             let before = &line[..start_char.min(line.len())];
                                             new_lines.push(format!("{}{}", before, new_text));
@@ -1761,17 +1971,20 @@ fn run_lsp_test(test: &LspTest, backend: crate::Backend) -> Result<bool> {
                             if !result_code.contains(expected_item) {
                                 all_found = false;
                                 if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                                    eprintln!("    Expected '{}' not found in output", expected_item);
+                                    eprintln!(
+                                        "    Expected '{}' not found in output",
+                                        expected_item
+                                    );
                                 }
                             }
                         }
                     }
-                    } // end single-file rename branch
-                } else {
-                    return Err(anyhow::anyhow!(
-                        "{request}: reply has no `changes` object; raw reply: {stdout}"
-                    ));
-                }
+                } // end single-file rename branch
+            } else {
+                return Err(anyhow::anyhow!(
+                    "{request}: reply has no `changes` object; raw reply: {stdout}"
+                ));
+            }
         }
     }
 
@@ -1821,9 +2034,14 @@ fn read_jsonrpc(reader: &mut BufReader<std::process::ChildStdout>) -> Result<ser
 /// instead of directly from stdout, so the server never blocks waiting for
 /// us to drain. See the long comment at the spawn site for the pipe-buffer
 /// deadlock this avoids (`edit_sequence_stress` non-determinism).
-fn read_response_from_chan(rx: &std::sync::mpsc::Receiver<serde_json::Value>, expected_id: i64) -> Result<serde_json::Value> {
+fn read_response_from_chan(
+    rx: &std::sync::mpsc::Receiver<serde_json::Value>,
+    expected_id: i64,
+) -> Result<serde_json::Value> {
     loop {
-        let msg = rx.recv().map_err(|e| anyhow::anyhow!("LSP reader channel closed: {}", e))?;
+        let msg = rx
+            .recv()
+            .map_err(|e| anyhow::anyhow!("LSP reader channel closed: {}", e))?;
         if let Some(id) = msg.get("id").and_then(|v| v.as_i64()) {
             if id == expected_id {
                 return Ok(msg);
@@ -1834,7 +2052,9 @@ fn read_response_from_chan(rx: &std::sync::mpsc::Receiver<serde_json::Value>, ex
 
 /// Run a single edit sequence test against a persistent LSP server
 fn file_uri(path: &Path) -> Result<String> {
-    let path = path.to_str().ok_or_else(|| anyhow::anyhow!("path is not UTF-8: {}", path.display()))?;
+    let path = path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("path is not UTF-8: {}", path.display()))?;
     Ok(lsp_types::Uri::from_file_path(path)?.as_str().to_string())
 }
 
@@ -1843,7 +2063,9 @@ fn file_uri(path: &Path) -> Result<String> {
 /// named once on stderr so a hang or panic leaves a findable breadcrumb.
 fn server_stderr_log() -> Result<PathBuf> {
     static LOG: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
-    let mut log = LOG.lock().map_err(|_| anyhow::anyhow!("LSP server stderr log lock poisoned"))?;
+    let mut log = LOG
+        .lock()
+        .map_err(|_| anyhow::anyhow!("LSP server stderr log lock poisoned"))?;
     if let Some(path) = &*log {
         return Ok(path.clone());
     }
@@ -1858,12 +2080,22 @@ fn new_server_stderr_log(dir: &Path) -> Result<PathBuf> {
         .prefix("rock-lsp-test-stderr-")
         .suffix(".log")
         .tempfile_in(dir)
-        .map_err(|e| anyhow::anyhow!("cannot create the LSP server stderr log in {}: {e}", dir.display()))?;
-    let (_, path) = file.keep().map_err(|e| anyhow::anyhow!("cannot keep the LSP server stderr log: {e}"))?;
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "cannot create the LSP server stderr log in {}: {e}",
+                dir.display()
+            )
+        })?;
+    let (_, path) = file
+        .keep()
+        .map_err(|e| anyhow::anyhow!("cannot keep the LSP server stderr log: {e}"))?;
     Ok(path)
 }
 
-fn run_edit_sequence_test(test: &EditSequenceTest, backend: crate::Backend) -> Result<(usize, usize, Vec<String>)> {
+fn run_edit_sequence_test(
+    test: &EditSequenceTest,
+    backend: crate::Backend,
+) -> Result<(usize, usize, Vec<String>)> {
     let verbose = std::env::var("ROCK_TEST_VERBOSE").is_ok();
     let mut passed = 0;
     let mut failed = 0;
@@ -1874,16 +2106,22 @@ fn run_edit_sequence_test(test: &EditSequenceTest, backend: crate::Backend) -> R
     std::fs::create_dir_all(&test_dir)?;
     let test_file = test_dir.join(format!(
         "{}.rock",
-        test.name.chars().map(|c| if c == ' ' || c == '/' { '_' } else { c }).collect::<String>()
+        test.name
+            .chars()
+            .map(|c| if c == ' ' || c == '/' { '_' } else { c })
+            .collect::<String>()
     ));
-    let test_uri = file_uri(&std::fs::canonicalize(&test_dir)?.join(test_file.file_name().unwrap()))?;
+    let test_uri =
+        file_uri(&std::fs::canonicalize(&test_dir)?.join(test_file.file_name().unwrap()))?;
 
     // Write initial content so the LSP can find it
     let initial_code = match &test.steps[0].mode {
         StepMode::FullReplace { code } => code.clone(),
         StepMode::TypeAt { .. } | StepMode::DeleteAt { .. } => {
             // First step must be FullReplace to establish the initial document
-            return Err(anyhow::anyhow!("First step in edit_sequence must be a full document (STEP N:), not a typing/delete step"));
+            return Err(anyhow::anyhow!(
+                "First step in edit_sequence must be a full document (STEP N:), not a typing/delete step"
+            ));
         }
     };
     std::fs::write(&test_file, &initial_code)?;
@@ -1915,8 +2153,14 @@ fn run_edit_sequence_test(test: &EditSequenceTest, backend: crate::Backend) -> R
     }
     let mut child = cmd.spawn()?;
 
-    let mut stdin = child.stdin.take().ok_or_else(|| anyhow::anyhow!("Failed to open stdin"))?;
-    let stdout = child.stdout.take().ok_or_else(|| anyhow::anyhow!("Failed to open stdout"))?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("Failed to open stdin"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("Failed to open stdout"))?;
 
     // CRITICAL: drain stdout in a dedicated thread. The lsp-server crate uses
     // bounded(0) crossbeam channels for stdio, so its writer thread blocks on
@@ -2120,14 +2364,21 @@ fn run_edit_sequence_test(test: &EditSequenceTest, backend: crate::Backend) -> R
                     let mut cursor_col = *col;
 
                     if verbose {
-                        eprintln!("    Step {}: typing {} chars at {}:{}", step_idx + 1, text.len(), line, col);
+                        eprintln!(
+                            "    Step {}: typing {} chars at {}:{}",
+                            step_idx + 1,
+                            text.len(),
+                            line,
+                            col
+                        );
                     }
 
                     for ch in text.chars() {
                         version += 1;
                         if ch == '\n' {
                             // Simulate pressing Enter: split the line at cursor
-                            let mut lines: Vec<String> = current_doc.lines().map(|l| l.to_string()).collect();
+                            let mut lines: Vec<String> =
+                                current_doc.lines().map(|l| l.to_string()).collect();
                             while lines.len() <= cursor_line {
                                 lines.push(String::new());
                             }
@@ -2152,12 +2403,19 @@ fn run_edit_sequence_test(test: &EditSequenceTest, backend: crate::Backend) -> R
                     let mut cursor_col = *col;
 
                     if verbose {
-                        eprintln!("    Step {}: deleting {} chars at {}:{}", step_idx + 1, count, line, col);
+                        eprintln!(
+                            "    Step {}: deleting {} chars at {}:{}",
+                            step_idx + 1,
+                            count,
+                            line,
+                            col
+                        );
                     }
 
                     for _ in 0..*count {
                         version += 1;
-                        let (new_doc, new_line, new_col) = delete_char_at(&current_doc, cursor_line, cursor_col);
+                        let (new_doc, new_line, new_col) =
+                            delete_char_at(&current_doc, cursor_line, cursor_col);
                         current_doc = new_doc;
                         cursor_line = new_line;
                         cursor_col = new_col;
@@ -2193,7 +2451,10 @@ fn run_edit_sequence_test(test: &EditSequenceTest, backend: crate::Backend) -> R
                     // Diagnostics come as notifications -- for now just check no crash
                     // TODO: capture diagnostics from notifications between steps
                     if verbose {
-                        eprintln!("    Step {}: diagnostics check (pass-through)", step_idx + 1);
+                        eprintln!(
+                            "    Step {}: diagnostics check (pass-through)",
+                            step_idx + 1
+                        );
                     }
                     true
                 }
@@ -2314,7 +2575,11 @@ fn check_semantic_tokens_response(
         .unwrap_or(0);
 
     if verbose {
-        eprintln!("    Step {}: semantic_tokens count = {}", step_idx + 1, token_count);
+        eprintln!(
+            "    Step {}: semantic_tokens count = {}",
+            step_idx + 1,
+            token_count
+        );
     }
 
     let mut all_ok = true;
@@ -2326,7 +2591,9 @@ fn check_semantic_tokens_response(
                 if verbose {
                     eprintln!(
                         "    Step {}: FAIL - expected at least {} tokens, got {}",
-                        step_idx + 1, min_tokens, token_count
+                        step_idx + 1,
+                        min_tokens,
+                        token_count
                     );
                 }
             }
@@ -2334,7 +2601,10 @@ fn check_semantic_tokens_response(
             if token_count == 0 {
                 all_ok = false;
                 if verbose {
-                    eprintln!("    Step {}: FAIL - expected non-zero tokens, got 0", step_idx + 1);
+                    eprintln!(
+                        "    Step {}: FAIL - expected non-zero tokens, got 0",
+                        step_idx + 1
+                    );
                 }
             }
         }
@@ -2367,7 +2637,11 @@ fn check_completion_response(
         .unwrap_or_default();
 
     if verbose {
-        eprintln!("    Step {}: completion labels = {:?}", step_idx + 1, labels);
+        eprintln!(
+            "    Step {}: completion labels = {:?}",
+            step_idx + 1,
+            labels
+        );
     }
 
     let mut all_ok = true;
@@ -2375,7 +2649,11 @@ fn check_completion_response(
         if !labels.iter().any(|l| l.contains(exp)) {
             all_ok = false;
             if verbose {
-                eprintln!("    Step {}: FAIL - expected completion '{}' not found", step_idx + 1, exp);
+                eprintln!(
+                    "    Step {}: FAIL - expected completion '{}' not found",
+                    step_idx + 1,
+                    exp
+                );
             }
         }
     }
@@ -2444,7 +2722,8 @@ fn check_hover_response(
         .and_then(|r| r.get("contents"))
         .and_then(|c| {
             // MarkupContent or string
-            c.get("value").and_then(|v| v.as_str())
+            c.get("value")
+                .and_then(|v| v.as_str())
                 .or_else(|| c.as_str())
         })
         .unwrap_or("");
@@ -2472,7 +2751,11 @@ fn check_hover_response(
         if !hover_text.contains(exp) {
             all_ok = false;
             if verbose {
-                eprintln!("    Step {}: FAIL - expected '{}' in hover", step_idx + 1, exp);
+                eprintln!(
+                    "    Step {}: FAIL - expected '{}' in hover",
+                    step_idx + 1,
+                    exp
+                );
             }
         }
     }
@@ -2664,22 +2947,27 @@ pub fn run_lsp_tests(
 
     let start_time = bone_core::prelude::Instant::now();
 
-    let (total, passed, failed, ignored) = parallel_runner::run_files_parallel(
-        lsp_files,
-        None,
-        move |file| {
+    let (total, passed, failed, ignored) =
+        parallel_runner::run_files_parallel(lsp_files, None, move |file| {
             let display_name = display_name_for_lsp_file(file, &root_dir);
             run_lsp_file(file, &display_name, backend)
-        },
-    );
+        });
 
     // Print section summary (matches formatter/error test pattern)
     if total > 0 {
         use colored::Colorize;
-        let result_text = if failed == 0 { "ok".green() } else { "FAILED".red() };
+        let result_text = if failed == 0 {
+            "ok".green()
+        } else {
+            "FAILED".red()
+        };
         println!(
             "\nLSP tests: {}. {} passed; {} failed; {} ignored; finished in {:.2}s",
-            result_text, passed, failed, ignored, start_time.elapsed().as_secs_f64()
+            result_text,
+            passed,
+            failed,
+            ignored,
+            start_time.elapsed().as_secs_f64()
         );
     }
 
@@ -2733,7 +3021,10 @@ mod runner_tests {
         let previous = std::env::var_os(LSP_TEST_BIN_ENV);
         // SAFETY: holding BIN_ENV_LOCK keeps other override-setting tests out.
         unsafe { std::env::set_var(LSP_TEST_BIN_ENV, path) };
-        BinOverride { previous, _lock: lock }
+        BinOverride {
+            previous,
+            _lock: lock,
+        }
     }
 
     /// Write an executable stub server that records each spawn in
@@ -3079,17 +3370,29 @@ EXPECTED:\n\
 
     #[test]
     fn a_malformed_definition_reply_fails_the_fixture() {
-        assert_fixture_fails(DEFINITION_FIXTURE, "not json line: 2 character: 12", "goto_definition");
+        assert_fixture_fails(
+            DEFINITION_FIXTURE,
+            "not json line: 2 character: 12",
+            "goto_definition",
+        );
     }
 
     #[test]
     fn a_definition_reply_without_the_array_fails_the_none_expectation() {
-        assert_fixture_fails(DEFINITION_NONE_FIXTURE, r#"{"status": "ok"}"#, "goto_definition");
+        assert_fixture_fails(
+            DEFINITION_NONE_FIXTURE,
+            r#"{"status": "ok"}"#,
+            "goto_definition",
+        );
     }
 
     #[test]
     fn a_malformed_references_reply_fails_the_none_expectation() {
-        assert_fixture_fails(REFERENCES_NONE_FIXTURE, r#"{"references": [{"range": "#, "references");
+        assert_fixture_fails(
+            REFERENCES_NONE_FIXTURE,
+            r#"{"references": [{"range": "#,
+            "references",
+        );
     }
 
     #[test]
@@ -3108,7 +3411,11 @@ EXPECTED:\n\
 
     #[test]
     fn a_malformed_symbols_reply_fails_the_fixture() {
-        assert_fixture_fails(SYMBOLS_FIXTURE, "not json Widget: struct", "document_symbols");
+        assert_fixture_fails(
+            SYMBOLS_FIXTURE,
+            "not json Widget: struct",
+            "document_symbols",
+        );
     }
 
     #[test]
@@ -3129,7 +3436,11 @@ EXPECTED:\n\
             (COMPLETION_FIXTURE, "count", "completion"),
             (DEFINITION_FIXTURE, "character: 12", "goto_definition"),
             (REFERENCES_NONE_FIXTURE, "none", "references"),
-            (SIGNATURE_HELP_FIXTURE, "greet(name: string)", "signature_help"),
+            (
+                SIGNATURE_HELP_FIXTURE,
+                "greet(name: string)",
+                "signature_help",
+            ),
             (SYMBOLS_FIXTURE, "Widget: struct", "document_symbols"),
             (HOVER_FIXTURE, "fn main()", "hover"),
             (INLAY_HINTS_FIXTURE, ": int", "inlay_hints"),
@@ -3187,8 +3498,7 @@ EXPECTED:\n\
     fn an_unknown_operation_is_rejected_at_parse_time() {
         let message = parse_error_of(UNKNOWN_OPERATION_FIXTURE);
         assert!(
-            message.contains("OPERATION 'teleport'")
-                && message.contains("stub unknown operation"),
+            message.contains("OPERATION 'teleport'") && message.contains("stub unknown operation"),
             "{message}"
         );
     }
@@ -3198,7 +3508,10 @@ EXPECTED:\n\
     #[test]
     fn well_formed_replies_pass_the_fixtures() {
         let cases = [
-            (COMPLETION_FIXTURE, r#"{"completions": [{"label": "count"}]}"#),
+            (
+                COMPLETION_FIXTURE,
+                r#"{"completions": [{"label": "count"}]}"#,
+            ),
             (
                 DEFINITION_FIXTURE,
                 r#"{"definitions": [{"range": {"start": {"line": 2, "character": 12}}}]}"#,
@@ -3209,7 +3522,10 @@ EXPECTED:\n\
                 SIGNATURE_HELP_FIXTURE,
                 r#"{"signatures": [{"label": "greet(name: string)"}], "activeSignature": 0}"#,
             ),
-            (SYMBOLS_FIXTURE, r#"{"symbols": [{"name": "Widget", "kind": "Struct"}]}"#),
+            (
+                SYMBOLS_FIXTURE,
+                r#"{"symbols": [{"name": "Widget", "kind": "Struct"}]}"#,
+            ),
             (HOVER_FIXTURE, r#"{"hover": {"contents": "fn main()"}}"#),
             (
                 INLAY_HINTS_FIXTURE,
@@ -3233,4 +3549,3 @@ EXPECTED:\n\
         }
     }
 }
-

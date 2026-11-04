@@ -62,7 +62,9 @@ impl Builder<'_> {
             *c += 1;
             v
         };
-        let cell = Ustr::from(format!("__static_{}_{}_{}", self.static_owner_symbol(), sname, ctr).as_str());
+        let cell = Ustr::from(
+            format!("__static_{}_{}_{}", self.static_owner_symbol(), sname, ctr).as_str(),
+        );
         let done_flag = Ustr::from(format!("{cell}__done").as_str());
         self.static_cells.insert(raw(name), cell);
 
@@ -94,14 +96,26 @@ impl Builder<'_> {
         let done_v = self.emit_cur(Inst::Global(done_flag));
         let init_bb = self.f.new_block();
         let join = self.f.new_block();
-        self.f
-            .set_term(self.cur, Term::Branch { cond: done_v, then_bb: join, else_bb: init_bb });
+        self.f.set_term(
+            self.cur,
+            Term::Branch {
+                cond: done_v,
+                then_bb: join,
+                else_bb: init_bb,
+            },
+        );
         self.cur = init_bb;
         let expected = self.binding_ty(name).and_then(|ty| self.concrete_ty_id(ty));
         let v = self.lower_expr_with_expected(value, expected.as_deref())?;
-        self.emit_cur(Inst::StoreGlobal { name: cell, value: v });
+        self.emit_cur(Inst::StoreGlobal {
+            name: cell,
+            value: v,
+        });
         let t = self.emit_cur(Inst::Const(Lit::Bool(true)));
-        self.emit_cur(Inst::StoreGlobal { name: done_flag, value: t });
+        self.emit_cur(Inst::StoreGlobal {
+            name: done_flag,
+            value: t,
+        });
         self.f.set_term(self.cur, Term::Goto(join));
         self.cur = join;
         Ok(())
@@ -117,8 +131,10 @@ impl Builder<'_> {
         params: IdxRange<BindingInfo>,
         hoisted: Ustr,
     ) -> Result<NestedFn, CompilerError> {
-        let param_names: Vec<Ustr> =
-            params.into_iter().map(|pb| self.body.binding_arena[pb].name).collect();
+        let param_names: Vec<Ustr> = params
+            .into_iter()
+            .map(|pb| self.body.binding_arena[pb].name)
+            .collect();
         let fn_ty = self
             .binding_ty(name)
             .and_then(|ty| self.concrete_ty_id(ty))
@@ -126,7 +142,10 @@ impl Builder<'_> {
         let boxed = NestedFn {
             hoisted,
             param_names: param_names.clone(),
-            representation: self.scx.rep_arena().boxed_function(self.call_scx.target, param_names.len()),
+            representation: self
+                .scx
+                .rep_arena()
+                .boxed_function(self.call_scx.target, param_names.len()),
             logical_type: (*fn_ty).clone(),
         };
         let taken_by_value = self
@@ -181,7 +200,9 @@ impl Builder<'_> {
             *c += 1;
             v
         };
-        let hoisted = Ustr::from(format!("__local_{}_{}_{}", self.static_owner_symbol(), sname, ctr).as_str());
+        let hoisted = Ustr::from(
+            format!("__local_{}_{}_{}", self.static_owner_symbol(), sname, ctr).as_str(),
+        );
         let abi = self.nested_fn_abi(name, params, hoisted)?;
         self.nested_fn_globals.insert(raw(name), abi.clone());
 
@@ -190,12 +211,16 @@ impl Builder<'_> {
         let nested_identity = self
             .site_owner
             .clone()
-            .zip(crate::code_identity::LambdaSiteId::from_span(self.body.expr_spans[body]))
-            .map(|(enclosing, site)| crate::code_identity::CodeIdentity::Nested {
-                enclosing: crate::code_identity::CodeOwner::Instance(enclosing),
-                site,
-                name: sname,
-            });
+            .zip(crate::code_identity::LambdaSiteId::from_span(
+                self.body.expr_spans[body],
+            ))
+            .map(
+                |(enclosing, site)| crate::code_identity::CodeIdentity::Nested {
+                    enclosing: crate::code_identity::CodeOwner::Instance(enclosing),
+                    site,
+                    name: sname,
+                },
+            );
         let entry = mf.entry();
         let param_reps = abi.representation.params().to_vec();
         let mut child = Builder {
@@ -246,7 +271,7 @@ impl Builder<'_> {
             shallow_pack: false,
             lending_pack: false,
             f32_round_exprs: HashSet::new(),
-        tuple_binds: HashMap::new(),
+            tuple_binds: HashMap::new(),
             // In-scope statics + sibling nested fns are module-level, so the
             // hoisted body may reference them; enclosing params/locals are NOT
             // inherited (bone rejects capturing them).
@@ -268,7 +293,8 @@ impl Builder<'_> {
         child.f.abi_logical_type = Some(abi.logical_type.clone());
         child.f.code_identity = nested_identity;
         child.f.code_abi_fingerprint = Some(
-            abi.representation.logical_fingerprint(&self.scx.rep_arena()),
+            abi.representation
+                .logical_fingerprint(&self.scx.rep_arena()),
         );
         if child.f.code_identity.is_some() {
             child.f.code_compatibility = Some(crate::code_identity::CodeCompatibility {
@@ -315,7 +341,10 @@ impl Builder<'_> {
         Ok(())
     }
 
-    pub(crate) fn lower_stmts(&mut self, stmts: IdxRange<Statement>) -> Result<bool, CompilerError> {
+    pub(crate) fn lower_stmts(
+        &mut self,
+        stmts: IdxRange<Statement>,
+    ) -> Result<bool, CompilerError> {
         for sidx in stmts {
             // Coarse anchor for anything lowered outside an expression (a `for`
             // desugaring's element bind, a scope-exit splice). `lower_expr`
@@ -326,24 +355,31 @@ impl Builder<'_> {
                     if self.lower_flat_let(name, value)? {
                         continue;
                     }
-                    if self.binding_is_ref(name) { self.check_ref_holder(value)?; }
+                    if self.binding_is_ref(name) {
+                        self.check_ref_holder(value)?;
+                    }
                     // Scalar values live in leaf cells, matching the call ABI
                     // instead of relying on later SROA.
-                    let threaded_shape = if let Some(shape) = self.flat_enum_value_shape_of(value)? {
-                        Some(shape)
-                    } else if let Some(shape) = self.nobox_binding_shape(name)? {
-                        Some(shape)
-                    } else {
-                        self.nobox_value_shape_of(value)?
-                            .or(self.nullable_value_shape_of(value)?)
-                    };
+                    let threaded_shape =
+                        if let Some(shape) = self.flat_enum_value_shape_of(value)? {
+                            Some(shape)
+                        } else if let Some(shape) = self.nobox_binding_shape(name)? {
+                            Some(shape)
+                        } else {
+                            self.nobox_value_shape_of(value)?
+                                .or(self.nullable_value_shape_of(value)?)
+                        };
                     let mut threaded = false;
                     let mut opaque_repr = None;
                     if let Some(shape) = threaded_shape {
                         let r = self.with_value_lending(false, |s| s.lower_expr_repr(value))?;
                         let owned = self.snapshot_opaque_value(r.value().clone())?;
                         let r = ValueBundle::new(r.representation(), owned);
-                        let threaded_leaves = match self.scx.rep_arena().value_shape(r.representation()) {
+                        let threaded_leaves = match self
+                            .scx
+                            .rep_arena()
+                            .value_shape(r.representation())
+                        {
                             Some(actual) => {
                                 if actual.name != shape.name || actual.fields != shape.fields {
                                     return Err(self.gap_here(format!(
@@ -354,8 +390,15 @@ impl Builder<'_> {
                                 // A nullable binding keeps its presence lane even when
                                 // the source plan is non-null with presence on the
                                 // Group (a map column `get`).
-                                let shape = if shape.nullable && !actual.nullable { shape } else { actual };
-                                Some((shape.clone(), self.repr_to_leaves_bundle_for_shape(&r, &shape)?))
+                                let shape = if shape.nullable && !actual.nullable {
+                                    shape
+                                } else {
+                                    actual
+                                };
+                                Some((
+                                    shape.clone(),
+                                    self.repr_to_leaves_bundle_for_shape(&r, &shape)?,
+                                ))
                             }
                             // A container-read copy's producer plan is boxed, so
                             // it has no leaf shape - but the snapshot just split
@@ -363,25 +406,29 @@ impl Builder<'_> {
                             // those instead of packing them straight back into
                             // a fresh wrapper (#827).
                             None if matches!(r.value(), ValueRepr::Group { parts, .. } if parts.len() == shape.fields.len()) => {
-                                Some((shape.clone(), self.repr_to_leaves_shape(&r.value().clone(), &shape)?))
+                                Some((
+                                    shape.clone(),
+                                    self.repr_to_leaves_shape(&r.value().clone(), &shape)?,
+                                ))
                             }
                             None => None,
                         };
                         if let Some((shape, leaves)) = threaded_leaves {
                             let bname = self.body.binding_arena[name].name;
-                            let owner = self
-                                .binding_ty(name)
-                                .and_then(|ty| self.concrete_ty_id(ty));
+                            let owner =
+                                self.binding_ty(name).and_then(|ty| self.concrete_ty_id(ty));
                             let cells = self
                                 .new_flat_enum_cells(name, bname, &shape, owner.as_deref())?
                                 .unwrap_or_else(|| {
                                     (0..leaves.len())
-                                        .map(|li| self.new_binding_cell(
-                                            name,
-                                            Ustr::from(format!("{bname}__{li}").as_str()),
-                                            None,
-                                            Ustr::from(li.to_string().as_str()),
-                                        ))
+                                        .map(|li| {
+                                            self.new_binding_cell(
+                                                name,
+                                                Ustr::from(format!("{bname}__{li}").as_str()),
+                                                None,
+                                                Ustr::from(li.to_string().as_str()),
+                                            )
+                                        })
                                         .collect()
                                 });
                             if cells.len() != leaves.len() {
@@ -406,60 +453,68 @@ impl Builder<'_> {
                             .nullable_tuple_wire_shape(value)?
                             .or(self.expr_tuple_shape(value)?.filter(TupleRetShape::splats));
                         if let Some(shape) = shape {
-                        // A splatting tuple binds its WIRE -- one cell per slot, led
-                        // by presence when the wire carries one. Packing it instead
-                        // boxes the `nobox` element the splat exists to keep
-                        // unboxed; a packed tuple is also structurally never nil, so
-                        // a nullable one answered `t == null` as false when absent.
-                        let r = self.lower_expr_repr(value)?.into_value();
-                        let slots = self.tuple_repr_to_slots(r, &shape)?;
+                            // A splatting tuple binds its WIRE -- one cell per slot, led
+                            // by presence when the wire carries one. Packing it instead
+                            // boxes the `nobox` element the splat exists to keep
+                            // unboxed; a packed tuple is also structurally never nil, so
+                            // a nullable one answered `t == null` as false when absent.
+                            let r = self.lower_expr_repr(value)?.into_value();
+                            let slots = self.tuple_repr_to_slots(r, &shape)?;
                             self.bind_tuple_slots(name, &slots, shape);
                         } else {
-                        let expected = self.binding_ty(name).and_then(|ty| self.concrete_ty_id(ty));
-                        let mut shareable = true;
-                        let v = match opaque_repr {
-                            Some(r) => self.pack_bundle(&r)?,
-                            None if self.binding_is_ref(name) => self.lower_ref_borrow(value)?,
-                            // The binding's own box is not an escape: every
-                            // whole use of the binding copies again. A `ref`
-                            // borrow writes the box in place, so a binding one
-                            // reaches owns its value children.
-                            None if self
-                                .value_struct_of(value)
-                                .is_some_and(|n| !self.is_nobox_struct(n)) =>
-                            {
-                                let lend = !self.binding_ref_borrowed(name);
-                                self.with_value_lending(lend, |s| {
-                                    let source_lend = lend && matches!(s.body.expr_arena[value], Expr::Var(_));
-                                    let r = s.with_value_lending(source_lend, |s| s.lower_expr_repr(value))?.into_value();
-                                    let r = s.snapshot_opaque_value(r)?;
-                                    shareable = s.value_repr_is_shareable(&r);
-                                    if lend { s.pack_lent(r) } else { s.pack(r) }
-                                })?
+                            let expected =
+                                self.binding_ty(name).and_then(|ty| self.concrete_ty_id(ty));
+                            let mut shareable = true;
+                            let v = match opaque_repr {
+                                Some(r) => self.pack_bundle(&r)?,
+                                None if self.binding_is_ref(name) => {
+                                    self.lower_ref_borrow(value)?
+                                }
+                                // The binding's own box is not an escape: every
+                                // whole use of the binding copies again. A `ref`
+                                // borrow writes the box in place, so a binding one
+                                // reaches owns its value children.
+                                None if self
+                                    .value_struct_of(value)
+                                    .is_some_and(|n| !self.is_nobox_struct(n)) =>
+                                {
+                                    let lend = !self.binding_ref_borrowed(name);
+                                    self.with_value_lending(lend, |s| {
+                                        let source_lend = lend
+                                            && matches!(s.body.expr_arena[value], Expr::Var(_));
+                                        let r = s
+                                            .with_value_lending(source_lend, |s| {
+                                                s.lower_expr_repr(value)
+                                            })?
+                                            .into_value();
+                                        let r = s.snapshot_opaque_value(r)?;
+                                        shareable = s.value_repr_is_shareable(&r);
+                                        if lend { s.pack_lent(r) } else { s.pack(r) }
+                                    })?
+                                }
+                                None => self.with_value_lending(false, |s| {
+                                    s.lower_expr_with_expected(value, expected.as_deref())
+                                })?,
+                            };
+                            let v = self.coerced_to_binding(v, value, name);
+                            let cty = self.binding_ty(name);
+                            let cell = self.new_binding_cell(
+                                name,
+                                self.body.binding_arena[name].name,
+                                cty,
+                                Ustr::from(""),
+                            );
+                            if self.binding_is_nonnull_value_struct(name) {
+                                self.f.mark_nonnull_value_struct(cell);
                             }
-                            None => self.with_value_lending(false, |s| {
-                                s.lower_expr_with_expected(value, expected.as_deref())
-                            })?,
-                        };
-                        let v = self.coerced_to_binding(v, value, name);
-                        let cty = self.binding_ty(name);
-                        let cell = self.new_binding_cell(
-                            name,
-                            self.body.binding_arena[name].name,
-                            cty,
-                            Ustr::from(""),
-                        );
-                        if self.binding_is_nonnull_value_struct(name) {
-                            self.f.mark_nonnull_value_struct(cell);
-                        }
-                        if !shareable {
-                            self.unshareable_value_cells.insert(cell);
-                        }
-                        if matches!(self.f.insts[v], Inst::MakeValueStruct { .. }) {
-                            self.owned_value_binds.insert(raw(name));
-                        }
-                        self.emit_cur(Inst::Store { cell, value: v });
-                        self.binds.insert(raw(name), cell);
+                            if !shareable {
+                                self.unshareable_value_cells.insert(cell);
+                            }
+                            if matches!(self.f.insts[v], Inst::MakeValueStruct { .. }) {
+                                self.owned_value_binds.insert(raw(name));
+                            }
+                            self.emit_cur(Inst::Store { cell, value: v });
+                            self.binds.insert(raw(name), cell);
                         }
                     }
                 }
@@ -480,7 +535,10 @@ impl Builder<'_> {
                         DeferMode::CoFlag => {
                             let flag = self.f.new_cell(Some(Ustr::from("__defer")));
                             let on = self.emit_cur(Inst::Const(Lit::Bool(true)));
-                            self.emit_cur(Inst::Store { cell: flag, value: on });
+                            self.emit_cur(Inst::Store {
+                                cell: flag,
+                                value: on,
+                            });
                             let entry = self.lower_detached_defer(body, Some(flag))?;
                             self.f.coro_defers.push((flag, entry));
                             PendingDefer::CoFlag(flag)
@@ -525,7 +583,9 @@ impl Builder<'_> {
                 Statement::Static { name, value } => {
                     self.lower_static(name, value)?;
                 }
-                Statement::Fn { name, params, body, .. } => {
+                Statement::Fn {
+                    name, params, body, ..
+                } => {
                     self.lower_nested_fn(name, params, body)?;
                 }
                 Statement::Comment(_) => {}
@@ -583,8 +643,14 @@ impl Builder<'_> {
     /// deeper (innermost first, each LIFO) — the scopes a `return` (depth 0)
     /// or a `break`/`continue` (the loop's entry depth) leaves.
     pub(crate) fn run_defers_above(&mut self, depth: usize) -> Result<(), CompilerError> {
-        let frames: Vec<Vec<(Idx<Expr>, PendingDefer)>> =
-            self.defers.get(depth..).unwrap_or_default().iter().rev().cloned().collect();
+        let frames: Vec<Vec<(Idx<Expr>, PendingDefer)>> = self
+            .defers
+            .get(depth..)
+            .unwrap_or_default()
+            .iter()
+            .rev()
+            .cloned()
+            .collect();
         for frame in frames {
             for (body, pending) in frame.into_iter().rev() {
                 self.lower_defer_splice(body, pending)?;
@@ -600,16 +666,30 @@ impl Builder<'_> {
     /// otherwise double-fires on the trailing scope exit). An unwind defer
     /// pops its cleanup closure first, so an error raised by the body itself
     /// does not run it again.
-    pub(crate) fn lower_defer_splice(&mut self, body: Idx<Expr>, pending: PendingDefer) -> Result<(), CompilerError> {
+    pub(crate) fn lower_defer_splice(
+        &mut self,
+        body: Idx<Expr>,
+        pending: PendingDefer,
+    ) -> Result<(), CompilerError> {
         match pending {
             PendingDefer::CoFlag(f) => {
                 let b_body = self.f.new_block();
                 let b_done = self.f.new_block();
                 let fv = self.emit_cur(Inst::Load(f));
-                self.f.set_term(self.cur, Term::Branch { cond: fv, then_bb: b_body, else_bb: b_done });
+                self.f.set_term(
+                    self.cur,
+                    Term::Branch {
+                        cond: fv,
+                        then_bb: b_body,
+                        else_bb: b_done,
+                    },
+                );
                 self.cur = b_body;
                 let off = self.emit_cur(Inst::Const(Lit::Bool(false)));
-                self.emit_cur(Inst::Store { cell: f, value: off });
+                self.emit_cur(Inst::Store {
+                    cell: f,
+                    value: off,
+                });
                 let was = std::mem::replace(&mut self.in_defer_body, true);
                 let res = self.lower_stmt_expr(body);
                 self.in_defer_body = was;
@@ -620,7 +700,10 @@ impl Builder<'_> {
             PendingDefer::Unwind | PendingDefer::Inline => {
                 if pending == PendingDefer::Unwind {
                     let pop = self.emit_cur(Inst::Global(Ustr::from(crate::mir::DEFER_POP)));
-                    self.emit_cur(Inst::CallValue { callee: pop, args: Vec::new() });
+                    self.emit_cur(Inst::CallValue {
+                        callee: pop,
+                        args: Vec::new(),
+                    });
                 }
                 let was = std::mem::replace(&mut self.in_defer_body, true);
                 let res = self.lower_stmt_expr(body);
@@ -648,14 +731,20 @@ impl Builder<'_> {
         // The closure's CodeRef site is the defer body: the statement span is
         // not recorded inside a lambda body, where it would alias the lambda.
         self.cur_span = self.body.expr_spans.get(body).copied();
-        let lambda = self.emit_cur(Inst::Lambda { params: Vec::new(), entry });
+        let lambda = self.emit_cur(Inst::Lambda {
+            params: Vec::new(),
+            entry,
+        });
         self.cur_span = span;
         self.f
             .lambda_abi_fingerprints
             .insert(lambda, plan.logical_fingerprint(&self.scx.rep_arena()));
         self.f.lambda_abi_representations.insert(lambda, plan);
         let push = self.emit_cur(Inst::Global(Ustr::from(crate::mir::DEFER_PUSH)));
-        self.emit_cur(Inst::CallValue { callee: push, args: vec![lambda] });
+        self.emit_cur(Inst::CallValue {
+            callee: push,
+            args: vec![lambda],
+        });
         Ok(())
     }
 
@@ -688,10 +777,20 @@ impl Builder<'_> {
         self.cur = entry;
         if let (Some(flag), Some(b_body)) = (flag, b_body) {
             let fv = self.emit_cur(Inst::Load(flag));
-            self.f.set_term(entry, Term::Branch { cond: fv, then_bb: b_body, else_bb: b_done });
+            self.f.set_term(
+                entry,
+                Term::Branch {
+                    cond: fv,
+                    then_bb: b_body,
+                    else_bb: b_done,
+                },
+            );
             self.cur = b_body;
             let off = self.emit_cur(Inst::Const(Lit::Bool(false)));
-            self.emit_cur(Inst::Store { cell: flag, value: off });
+            self.emit_cur(Inst::Store {
+                cell: flag,
+                value: off,
+            });
         }
         let was = std::mem::replace(&mut self.in_defer_body, true);
         let res = self.lower_stmt_expr(body);
@@ -749,9 +848,11 @@ impl Builder<'_> {
             // Control flow in statement position: lower WITHOUT a result cell (the
             // discarded if/match result + its store/load is the bulk of skull's
             // trace-hostile dead-cell soup). Arms recurse statement-position.
-            Expr::If { cond, then_branch, else_branch } => {
-                self.lower_if_stmt(cond, then_branch, else_branch)
-            }
+            Expr::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => self.lower_if_stmt(cond, then_branch, else_branch),
             Expr::IfLet {
                 pattern,
                 value,

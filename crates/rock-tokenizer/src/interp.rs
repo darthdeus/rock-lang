@@ -138,7 +138,10 @@ impl Scan {
         let mut map: Vec<usize> = Vec::with_capacity(raw.len() + 1);
         let mut i = 0;
         while i < raw.len() {
-            let c = raw[i..].chars().next().expect("byte index on a char boundary");
+            let c = raw[i..]
+                .chars()
+                .next()
+                .expect("byte index on a char boundary");
             let (ch, width) = if self.flavor.escapes() && c == '\\' {
                 let e = resolve_escape(raw, i + 1);
                 (e.ch, 1 + e.len)
@@ -201,12 +204,22 @@ pub fn scan_string(src: &str, start: usize) -> Scan {
     while i < n {
         if b[i..].starts_with(close) {
             flush_literal!(i);
-            return Scan { flavor, pieces, end: i + close.len(), terminated: true, bad_escapes };
+            return Scan {
+                flavor,
+                pieces,
+                end: i + close.len(),
+                terminated: true,
+                bad_escapes,
+            };
         }
         if flavor.escapes() && b[i] == b'\\' {
             let e = resolve_escape(src, i + 1);
             if let Some(message) = e.bad {
-                bad_escapes.push(BadEscape { at: i, len: 1 + e.len, message });
+                bad_escapes.push(BadEscape {
+                    at: i,
+                    len: 1 + e.len,
+                    message,
+                });
             }
             if let Some(ch) = e.ch {
                 lit_text.push(ch);
@@ -216,10 +229,7 @@ pub fn scan_string(src: &str, start: usize) -> Scan {
             i += 1 + e.len;
             continue;
         }
-        if flavor.interpolates()
-            && (b[i] == b'{' || b[i] == b'}')
-            && b.get(i + 1) == Some(&b[i])
-        {
+        if flavor.interpolates() && (b[i] == b'{' || b[i] == b'}') && b.get(i + 1) == Some(&b[i]) {
             // `{{` / `}}` emit a literal brace and never open a hole. Kept
             // doubled here; see `Piece::Literal`.
             lit_text.push(b[i] as char);
@@ -235,12 +245,21 @@ pub fn scan_string(src: &str, start: usize) -> Scan {
             lit_start = i;
             continue;
         }
-        let c = src[i..].chars().next().expect("byte index on a char boundary");
+        let c = src[i..]
+            .chars()
+            .next()
+            .expect("byte index on a char boundary");
         lit_text.push(c);
         i += c.len_utf8();
     }
     flush_literal!(n);
-    Scan { flavor, pieces, end: n, terminated: false, bad_escapes }
+    Scan {
+        flavor,
+        pieces,
+        end: n,
+        terminated: false,
+        bad_escapes,
+    }
 }
 
 /// Why an escape is not a valid one. The scan stays infallible so the LSP keeps
@@ -268,13 +287,25 @@ struct Esc {
 
 impl Esc {
     fn ok(ch: char, len: usize) -> Esc {
-        Esc { ch: Some(ch), len, bad: None }
+        Esc {
+            ch: Some(ch),
+            len,
+            bad: None,
+        }
     }
     fn empty(len: usize) -> Esc {
-        Esc { ch: None, len, bad: None }
+        Esc {
+            ch: None,
+            len,
+            bad: None,
+        }
     }
     fn bad(ch: char, len: usize, message: impl Into<String>) -> Esc {
-        Esc { ch: Some(ch), len, bad: Some(message.into()) }
+        Esc {
+            ch: Some(ch),
+            len,
+            bad: Some(message.into()),
+        }
     }
 }
 
@@ -332,7 +363,11 @@ fn resolve_escape(src: &str, at: usize) -> Esc {
 fn resolve_unicode_escape(src: &str, at: usize) -> Esc {
     let b = src.as_bytes();
     if b.get(at) != Some(&b'{') {
-        return Esc::bad('u', 1, "`\\u` must be written `\\u{H..}` with braces, e.g. `\\u{00c1}`");
+        return Esc::bad(
+            'u',
+            1,
+            "`\\u` must be written `\\u{H..}` with braces, e.g. `\\u{00c1}`",
+        );
     }
     let digits_at = at + 1;
     let mut i = digits_at;
@@ -343,7 +378,11 @@ fn resolve_unicode_escape(src: &str, at: usize) -> Esc {
     // whole escape and cannot cascade into the rest of the literal.
     let consumed = |end: usize| end - (at - 1);
     if i >= b.len() {
-        return Esc::bad('u', consumed(i), "unterminated `\\u{` escape: expected a closing `}`");
+        return Esc::bad(
+            'u',
+            consumed(i),
+            "unterminated `\\u{` escape: expected a closing `}`",
+        );
     }
     let digits = &src[digits_at..i];
     let len = consumed(i + 1);
@@ -351,24 +390,32 @@ fn resolve_unicode_escape(src: &str, at: usize) -> Esc {
         return Esc::bad('u', len, "`\\u{}` needs at least one hex digit");
     }
     if digits.len() > 6 {
-        return Esc::bad('u', len, format!(
-            "`\\u{{{digits}}}` has {} hex digits; a scalar takes at most six",
-            digits.len()
-        ));
+        return Esc::bad(
+            'u',
+            len,
+            format!(
+                "`\\u{{{digits}}}` has {} hex digits; a scalar takes at most six",
+                digits.len()
+            ),
+        );
     }
     let Ok(cp) = u32::from_str_radix(digits, 16) else {
         return Esc::bad('u', len, format!("`\\u{{{digits}}}` is not hex"));
     };
     if (0xD800..=0xDFFF).contains(&cp) {
-        return Esc::bad('u', len, format!(
-            "U+{cp:04X} is a surrogate, not a Unicode scalar value"
-        ));
+        return Esc::bad(
+            'u',
+            len,
+            format!("U+{cp:04X} is a surrogate, not a Unicode scalar value"),
+        );
     }
     match char::from_u32(cp) {
         Some(ch) => Esc::ok(ch, len),
-        None => Esc::bad('u', len, format!(
-            "U+{cp:X} is above the maximum scalar value U+10FFFF"
-        )),
+        None => Esc::bad(
+            'u',
+            len,
+            format!("U+{cp:X} is above the maximum scalar value U+10FFFF"),
+        ),
     }
 }
 
@@ -405,7 +452,15 @@ fn scan_hole(src: &str, open: usize, flavor: Flavor) -> (usize, Piece) {
             b'}' if depth == 0 => {
                 let expr = (expr_start, spec_start.map_or(i, |s| s - 1));
                 let spec = spec_start.map(|s| (s, i));
-                return (i + 1, Piece::Hole { range: (open, i + 1), expr, spec, closed: true });
+                return (
+                    i + 1,
+                    Piece::Hole {
+                        range: (open, i + 1),
+                        expr,
+                        spec,
+                        closed: true,
+                    },
+                );
             }
             // `::` is a path separator, not the spec split: `{Col::Green}`.
             b':' if depth == 0 && spec_start.is_none() && b.get(i + 1) == Some(&b':') => {
@@ -441,7 +496,15 @@ fn scan_hole(src: &str, open: usize, flavor: Flavor) -> (usize, Piece) {
     expr_end = expr_end.min(end);
     let expr = (expr_start, spec_start.map_or(expr_end, |s| s - 1));
     let spec = spec_start.map(|s| (s, end));
-    (end, Piece::Hole { range: (open, end), expr, spec, closed: false })
+    (
+        end,
+        Piece::Hole {
+            range: (open, end),
+            expr,
+            spec,
+            closed: false,
+        },
+    )
 }
 
 #[cfg(test)]
@@ -488,7 +551,9 @@ mod tests {
     fn hole_ranges_are_raw_source_offsets() {
         let src = "\"a\\nb{x} c\"";
         let s = scan(src);
-        let Piece::Hole { range, expr, .. } = s.pieces[1] else { panic!("{s:?}") };
+        let Piece::Hole { range, expr, .. } = s.pieces[1] else {
+            panic!("{s:?}")
+        };
         assert_eq!(&src[range.0..range.1], "{x}");
         assert_eq!(&src[expr.0..expr.1], "x");
         // The `\n` is two source bytes; deriving from processed content loses one.
@@ -498,7 +563,9 @@ mod tests {
     #[test]
     fn triple_quote_hole_offsets_account_for_three_delimiters() {
         let src = "\"\"\"ab{x}\"\"\"";
-        let Piece::Hole { expr, .. } = scan(src).pieces[1] else { panic!() };
+        let Piece::Hole { expr, .. } = scan(src).pieces[1] else {
+            panic!()
+        };
         assert_eq!(expr.0, src.find('x').unwrap());
     }
 
@@ -525,13 +592,17 @@ mod tests {
     #[test]
     fn format_spec_splits_at_a_depth_zero_colon() {
         let src = "\"{x:>8.2}\"";
-        let Piece::Hole { expr, spec, .. } = scan(src).pieces[0].clone() else { panic!() };
+        let Piece::Hole { expr, spec, .. } = scan(src).pieces[0].clone() else {
+            panic!()
+        };
         assert_eq!(&src[expr.0..expr.1], "x");
         let spec = spec.unwrap();
         assert_eq!(&src[spec.0..spec.1], ">8.2");
         // A `:` inside brackets belongs to the expression.
         let src = "\"{m[\"a:b\"]}\"";
-        let Piece::Hole { expr, spec, .. } = scan(src).pieces[0].clone() else { panic!() };
+        let Piece::Hole { expr, spec, .. } = scan(src).pieces[0].clone() else {
+            panic!()
+        };
         assert_eq!(&src[expr.0..expr.1], "m[\"a:b\"]");
         assert_eq!(spec, None);
     }
@@ -572,13 +643,18 @@ mod tests {
     fn hole_source_replays_the_escape_pass_and_maps_back() {
         let src = "\"[{join(p, \\\",\\\")}]\"";
         let s = scan(src);
-        let Piece::Hole { expr, .. } = s.pieces[1] else { panic!("{s:?}") };
+        let Piece::Hole { expr, .. } = s.pieces[1] else {
+            panic!("{s:?}")
+        };
         let (text, map) = s.hole_source(src, expr);
         assert_eq!(text, "join(p, \",\")");
         assert_eq!(map.len(), text.len() + 1);
         // Every output byte maps to the source byte it came from.
         for (k, off) in map.iter().enumerate().take(text.len()) {
-            assert!(*off >= expr.0 && *off < expr.1, "map[{k}]={off} outside {expr:?}");
+            assert!(
+                *off >= expr.0 && *off < expr.1,
+                "map[{k}]={off} outside {expr:?}"
+            );
         }
         // The identifier is byte-identical at its mapped position.
         let j = text.find("join").unwrap();
@@ -591,7 +667,9 @@ mod tests {
     fn hole_source_is_identity_without_escapes() {
         let src = "\"{a.b(c)}\"";
         let s = scan(src);
-        let Piece::Hole { expr, .. } = s.pieces[0] else { panic!() };
+        let Piece::Hole { expr, .. } = s.pieces[0] else {
+            panic!()
+        };
         let (text, map) = s.hole_source(src, expr);
         assert_eq!(text, "a.b(c)");
         assert_eq!(map, (expr.0..=expr.1).collect::<Vec<_>>());
@@ -600,7 +678,9 @@ mod tests {
     #[test]
     fn non_ascii_text_keeps_byte_offsets() {
         let src = "\"caf\u{e9} {x}\"";
-        let Piece::Hole { expr, .. } = scan(src).pieces[1] else { panic!() };
+        let Piece::Hole { expr, .. } = scan(src).pieces[1] else {
+            panic!()
+        };
         assert_eq!(expr.0, src.find('x').unwrap());
     }
 }

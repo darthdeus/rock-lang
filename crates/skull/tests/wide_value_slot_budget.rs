@@ -25,12 +25,26 @@ use crate::common::{
 
 #[test]
 fn retained_optional_loader_results_fit_the_local_budget() {
-    let fields = (0..8).map(|i| format!("item{i}: Item")).collect::<Vec<_>>().join(", ");
-    let scalars = (0..20).map(|i| format!("let s{i} = scalar(seed, {i})\n")).collect::<String>();
-    let loads = (0..8).map(|i| format!("let item{i} = load(seed + {i}) ?? return null\n")).collect::<String>();
-    let sum = (0..20).map(|i| format!("s{i}")).collect::<Vec<_>>().join(" + ");
-    let items = (0..8).map(|i| format!("item{i}")).collect::<Vec<_>>().join(", ");
-    let source = format!(r#"
+    let fields = (0..8)
+        .map(|i| format!("item{i}: Item"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let scalars = (0..20)
+        .map(|i| format!("let s{i} = scalar(seed, {i})\n"))
+        .collect::<String>();
+    let loads = (0..8)
+        .map(|i| format!("let item{i} = load(seed + {i}) ?? return null\n"))
+        .collect::<String>();
+    let sum = (0..20)
+        .map(|i| format!("s{i}"))
+        .collect::<Vec<_>>()
+        .join(" + ");
+    let items = (0..8)
+        .map(|i| format!("item{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let source = format!(
+        r#"
 nobox value Pair {{ x: float, y: float }}
 value Triple {{ a: int, b: int, c: int }}
 value Item {{
@@ -52,10 +66,18 @@ fn make_item(seed: int) -> Item? {{
     return Bundle {{ checksum: {sum}, {items} }}
 }}
 fn main() {{ assert(gather(-20) == null); print(gather(1).unwrap().checksum) }}
-"#);
-    let lua = try_emit_module(&source).expect("retained loader results must fit LuaJIT's local limit");
+"#
+    );
+    let lua =
+        try_emit_module(&source).expect("retained loader results must fit LuaJIT's local limit");
     luajit_loads(&lua, "retained_optional_loader_results").expect("emitted loader must load");
-    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "retained_optional_loader_results"), "210");
+    assert_eq!(
+        run_luajit(
+            &format!("{lua}\nmain()\n"),
+            "retained_optional_loader_results"
+        ),
+        "210"
+    );
 }
 
 /// `held` values of a `leaves`-wide nobox struct, all live across the calls
@@ -92,7 +114,10 @@ fn fixture(leaves: usize, held: usize) -> String {
 fn three_live_fifty_leaf_values_load_and_run() {
     let lua = try_emit_module(&fixture(50, 3)).expect("emits");
     // v0: 1 + 50, v1: 2 + 50 + 1, v2: 3 + 50 + 2.
-    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "wide_slot_budget_3x50"), "159");
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "wide_slot_budget_3x50"),
+        "159"
+    );
 }
 
 #[test]
@@ -119,19 +144,32 @@ fn four_live_fifty_leaf_values_are_a_spanned_compile_error() {
     let err = try_emit_module(&fixture(50, 4))
         .expect_err("four live 50-leaf values must not emit: LuaJIT cannot load the result");
     let message = &err.message;
-    assert!(message.contains("`run`"), "no Rock function named:\n{message}");
-    assert!(message.contains("LuaJIT"), "no mention of the limit's owner:\n{message}");
+    assert!(
+        message.contains("`run`"),
+        "no Rock function named:\n{message}"
+    );
+    assert!(
+        message.contains("LuaJIT"),
+        "no mention of the limit's owner:\n{message}"
+    );
     assert!(
         message.contains("LJ_MAX_LOCVAR") || message.contains("LJ_MAX_SLOTS"),
         "no LuaJIT limit named:\n{message}"
     );
-    assert!(message.contains("nobox"), "no nobox contributor:\n{message}");
+    assert!(
+        message.contains("nobox"),
+        "no nobox contributor:\n{message}"
+    );
     assert!(
         message.contains("cannot be boxed"),
         "the remedy does not say a nobox value cannot be boxed:\n{message}"
     );
     let label = err.labels.first().expect("a spanned label");
-    assert_eq!(label.span.file.as_str(), "<test>", "the rejection has no source location: {err:?}");
+    assert_eq!(
+        label.span.file.as_str(),
+        "<test>",
+        "the rejection has no source location: {err:?}"
+    );
     assert_eq!(
         err.location.file.as_str(),
         "<test>",
@@ -183,8 +221,9 @@ fn verdicts_agree(tag: &str, src: &str) -> bool {
 /// Walk `lo..=hi` of a family and require the boundary to sit inside the
 /// window: a window with only one verdict pins nothing.
 fn walk(name: &str, lo: usize, hi: usize, mk: impl Fn(usize) -> String) {
-    let verdicts: Vec<bool> =
-        (lo..=hi).map(|w| verdicts_agree(&format!("{name}_{w}"), &mk(w))).collect();
+    let verdicts: Vec<bool> = (lo..=hi)
+        .map(|w| verdicts_agree(&format!("{name}_{w}"), &mk(w)))
+        .collect();
     assert!(
         verdicts.iter().any(|ok| *ok),
         "{name}: every member of {lo}..={hi} was rejected -- the window is past the boundary"
@@ -195,7 +234,10 @@ fn walk(name: &str, lo: usize, hi: usize, mk: impl Fn(usize) -> String) {
     );
     // Monotone by construction: once the frame is too wide, widening it further
     // cannot make it load again.
-    let flip = verdicts.iter().position(|ok| !*ok).expect("a rejected member");
+    let flip = verdicts
+        .iter()
+        .position(|ok| !*ok)
+        .expect("a rejected member");
     assert!(
         verdicts[flip..].iter().all(|ok| !*ok),
         "{name}: verdicts are not monotone across {lo}..={hi}: {verdicts:?}"
@@ -371,7 +413,10 @@ fn the_frame_limit_rejection_reaches_the_incremental_path() {
 /// The `(ModuleId, BodyOwner)` reinferred id of the fixture's `run`.
 fn run_body_id(
     ws: &bone_semantic::inference::Workspace,
-) -> (bone_semantic::prelude::ModuleId, bone_semantic::hir::BodyOwner) {
+) -> (
+    bone_semantic::prelude::ModuleId,
+    bone_semantic::hir::BodyOwner,
+) {
     for module in ws.modules.iter() {
         for (fid, f) in module.functions.iter() {
             if f.name.as_str() == "run" {

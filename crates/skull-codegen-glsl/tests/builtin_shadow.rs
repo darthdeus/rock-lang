@@ -19,7 +19,12 @@ static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
         .collect()
 });
 
-fn workspace(src: &str) -> (bone_semantic::inference::Workspace, bone_semantic::prelude::ModuleId) {
+fn workspace(
+    src: &str,
+) -> (
+    bone_semantic::inference::Workspace,
+    bone_semantic::prelude::ModuleId,
+) {
     let mut modules = STDLIB.clone();
     modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
@@ -41,7 +46,8 @@ fn emit_lib(src: &str, roots: &[&str]) -> String {
         .collect::<Result<Vec<_>, _>>()
         .expect("resolve");
     let session = skull_codegen_glsl::shader_library_session(&ws, root_refs).expect("session");
-    skull_codegen_glsl::emit_shader_library_with_view(&ws, &session.scx, &session.view).expect("emit")
+    skull_codegen_glsl::emit_shader_library_with_view(&ws, &session.scx, &session.view)
+        .expect("emit")
 }
 
 fn emit_entry(src: &str, root: &str) -> ShaderEmission {
@@ -55,7 +61,11 @@ fn emit_entry(src: &str, root: &str) -> ShaderEmission {
 /// A builtin call (`cos(angle)`) never matches these shapes, so every
 /// remaining `name(` is the builtin.
 fn assert_no_bare_binding(glsl: &str, name: &str) {
-    for pat in [format!(" {name};"), format!(" {name},"), format!(" {name})")] {
+    for pat in [
+        format!(" {name};"),
+        format!(" {name},"),
+        format!(" {name})"),
+    ] {
         assert!(
             !glsl.contains(&pat),
             "a binding of `{name}` shadows the builtin:\n{glsl}"
@@ -72,7 +82,10 @@ fn helper_local_named_cos_renamed_apart_from_builtin() {
         return cos + (angle + 1.0).cos()
     }"#;
     let glsl = emit_lib(src, &["spin"]);
-    assert!(glsl.contains("cos(angle)"), "the builtin call must survive:\n{glsl}");
+    assert!(
+        glsl.contains("cos(angle)"),
+        "the builtin call must survive:\n{glsl}"
+    );
     assert_no_bare_binding(&glsl, "cos");
     assert!(
         glsl.contains("cos_1 = cos(angle)"),
@@ -86,9 +99,18 @@ fn helper_local_named_cos_renamed_apart_from_builtin() {
 fn stdlib_vec2_rotate_keeps_builtin_calls_valid() {
     let src = r#"fn root(a: Vec2, angle: float) -> Vec2 { return a.rotate(angle) }"#;
     let glsl = emit_lib(src, &["root"]);
-    assert!(glsl.contains("rotate"), "the rotate helper body must be emitted:\n{glsl}");
-    assert!(glsl.contains("cos(angle)"), "the cos call must survive:\n{glsl}");
-    assert!(glsl.contains("sin(angle)"), "the sin call must survive:\n{glsl}");
+    assert!(
+        glsl.contains("rotate"),
+        "the rotate helper body must be emitted:\n{glsl}"
+    );
+    assert!(
+        glsl.contains("cos(angle)"),
+        "the cos call must survive:\n{glsl}"
+    );
+    assert!(
+        glsl.contains("sin(angle)"),
+        "the sin call must survive:\n{glsl}"
+    );
     assert_no_bare_binding(&glsl, "cos");
     assert_no_bare_binding(&glsl, "sin");
 }
@@ -106,7 +128,10 @@ fn entry_local_named_cos_renamed_apart_from_builtin() {
     "#;
     let e = emit_entry(src, "spin_frag");
     let glsl = &e.source;
-    assert!(glsl.contains("cos(tc.x)"), "the builtin call must survive:\n{glsl}");
+    assert!(
+        glsl.contains("cos(tc.x)"),
+        "the builtin call must survive:\n{glsl}"
+    );
     assert_no_bare_binding(glsl, "cos");
     assert!(
         glsl.contains("cos_1 = cos(tc.x)"),

@@ -1,7 +1,7 @@
 //! unused-var lint over bone HIR. Harness mirrors bone-incremental's
 //! error_recovery tests: `semantic_pass(&mut [parse(src)])` -> `Workspace`.
 
-use bone_lints::{filter_suppressed, unused_vars, UnusedVar};
+use bone_lints::{UnusedVar, filter_suppressed, unused_vars};
 use bone_semantic::prelude::*;
 
 fn parse(src: &str) -> skull_parser::Ast {
@@ -75,20 +75,34 @@ fn destructure_flags_only_the_unused_leg() {
 #[test]
 fn allow_comment_above_suppresses() {
     let src = "fn f() -> int {\n    // rock: allow(unused_var)\n    let x = 5\n    3\n}";
-    assert_eq!(names(src), vec!["x".to_string()], "raw finding still exists");
-    assert!(names_after_suppression(src).is_empty(), "comment above silences it");
+    assert_eq!(
+        names(src),
+        vec!["x".to_string()],
+        "raw finding still exists"
+    );
+    assert!(
+        names_after_suppression(src).is_empty(),
+        "comment above silences it"
+    );
 }
 
 #[test]
 fn trailing_allow_comment_suppresses() {
     let src = "fn f() -> int {\n    let x = 5 // rock: allow(unused_var)\n    3\n}";
-    assert!(names_after_suppression(src).is_empty(), "trailing comment silences it");
+    assert!(
+        names_after_suppression(src).is_empty(),
+        "trailing comment silences it"
+    );
 }
 
 #[test]
 fn allow_of_a_different_lint_does_not_suppress() {
     let src = "fn f() -> int {\n    // rock: allow(pure)\n    let x = 5\n    3\n}";
-    assert_eq!(names_after_suppression(src), vec!["x".to_string()], "wrong lint name -> still warns");
+    assert_eq!(
+        names_after_suppression(src),
+        vec!["x".to_string()],
+        "wrong lint name -> still warns"
+    );
 }
 
 #[test]
@@ -103,7 +117,10 @@ fn artifact_definition_key_param_is_metadata_used() {
 @artifact_definition(catalog="widgets", key_param="key")
 deco init widget(key: string) {}
 "#;
-    assert!(names(src).is_empty(), "artifact-definition metadata consumes `key`");
+    assert!(
+        names(src).is_empty(),
+        "artifact-definition metadata consumes `key`"
+    );
 }
 
 #[test]
@@ -138,7 +155,11 @@ fn inline_lua_fn_params_are_not_flagged() {
     // The Lua body uses a/b invisibly (no HIR body -> root is None). Flagging
     // these would false-positive on every FFI/inline(lua) shim.
     let src = "inline(lua) fn add(a: int, b: int) -> int = \"\"\"return a + b\"\"\"";
-    assert!(names(src).is_empty(), "inline(lua) params are used by the Lua body: {:?}", names(src));
+    assert!(
+        names(src).is_empty(),
+        "inline(lua) params are used by the Lua body: {:?}",
+        names(src)
+    );
 }
 
 #[test]
@@ -152,7 +173,11 @@ fn lambda_param_is_not_flagged() {
     // `a` is a lambda param (Param-kind but outside the fn's param_bindings).
     // Only the enclosing fn's OWN params are candidates.
     let src = "fn f() -> int {\n    let g = (a: int) => 1\n    g(5)\n}";
-    assert!(names(src).is_empty(), "lambda params are exempt: {:?}", names(src));
+    assert!(
+        names(src).is_empty(),
+        "lambda params are exempt: {:?}",
+        names(src)
+    );
 }
 
 #[test]
@@ -174,7 +199,8 @@ fn read_match_payload_bind_is_not_flagged() {
 
 #[test]
 fn unused_if_let_bind_is_flagged() {
-    let src = "fn f(o: int?) -> int {\n    if let x = o {\n        7\n    } else {\n        0\n    }\n}";
+    let src =
+        "fn f(o: int?) -> int {\n    if let x = o {\n        7\n    } else {\n        0\n    }\n}";
     assert_eq!(names(src), vec!["x".to_string()], "if-let bind never read");
 }
 

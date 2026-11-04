@@ -65,7 +65,10 @@ pub fn discover_sources(source_spec: &SourceSpec) -> Result<SourceFiles> {
                 if rock_files.len() == 1 {
                     SourceFiles::from_single_path_preprocessed(&rock_files[0])
                 } else if rock_files.is_empty() {
-                    Err(anyhow::anyhow!("No .rock files found in directory: {}", project_dir.display()))
+                    Err(anyhow::anyhow!(
+                        "No .rock files found in directory: {}",
+                        project_dir.display()
+                    ))
                 } else {
                     Err(anyhow::anyhow!(
                         "Directory contains {} .rock files but no stick.toml. Please specify a single file or add a stick.toml",
@@ -77,7 +80,10 @@ pub fn discover_sources(source_spec: &SourceSpec) -> Result<SourceFiles> {
         SourceSpec::Files(file_paths) => {
             // Check if this is a script file with dependencies
             if file_paths.len() == 1 {
-                let compilation_unit = rock_host::compilation_units::determine_compilation_unit_for_file(&file_paths[0])?;
+                let compilation_unit =
+                    rock_host::compilation_units::determine_compilation_unit_for_file(
+                        &file_paths[0],
+                    )?;
                 rock_host::compilation_units::load_sources_for_compilation_unit(&compilation_unit)
             } else {
                 SourceFiles::from_multiple_paths(file_paths, true)

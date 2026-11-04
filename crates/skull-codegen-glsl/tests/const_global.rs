@@ -20,7 +20,11 @@ fn emit(src: &str, roots: &[&str]) -> Result<String, String> {
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
     let errs = skull_mir::verdict::body_errors(&ws);
     if !errs.is_empty() {
-        return Err(errs.iter().map(|e| e.message.clone()).collect::<Vec<_>>().join("; "));
+        return Err(errs
+            .iter()
+            .map(|e| e.message.clone())
+            .collect::<Vec<_>>()
+            .join("; "));
     }
     let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
     let roots: Vec<String> = roots.iter().map(|s| s.to_string()).collect();
@@ -29,8 +33,8 @@ fn emit(src: &str, roots: &[&str]) -> Result<String, String> {
         .map(|root| skull_codegen_glsl::resolve_root(&ws, mid, root))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.message)?;
-    let session = skull_codegen_glsl::shader_library_session(&ws, root_refs)
-        .map_err(|e| e.message)?;
+    let session =
+        skull_codegen_glsl::shader_library_session(&ws, root_refs).map_err(|e| e.message)?;
     skull_codegen_glsl::emit_shader_library_with_view(&ws, &session.scx, &session.view)
         .map_err(|e| e.message)
 }
@@ -70,7 +74,10 @@ fn const_negative_float_inlines() {
         }
     "#;
     let glsl = emit(src, &["shift"]).expect("emit");
-    assert!(glsl.contains("-2.25"), "negative const not inlined:\n{glsl}");
+    assert!(
+        glsl.contains("-2.25"),
+        "negative const not inlined:\n{glsl}"
+    );
 }
 
 /// A const initialized from another const chains through.

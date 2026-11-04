@@ -30,7 +30,11 @@ fn assert_no_bone_errors(ws: &Workspace) {
         .iter()
         .flatten()
         .flat_map(|inf| inf.errors.values().flatten())
-        .chain(ws.modules.iter().flat_map(|m| m.lowering_errors.values().flatten()))
+        .chain(
+            ws.modules
+                .iter()
+                .flat_map(|m| m.lowering_errors.values().flatten()),
+        )
         .chain(ws.modules.iter().flat_map(|m| m.interface_errors.iter()))
         .map(|e| e.message.clone())
         .collect();
@@ -43,7 +47,10 @@ fn assert_no_bone_errors(ws: &Workspace) {
 /// malformed fixture), so a test whose subject IS a bone-level rejection --
 /// annotation-registry violations, for one -- cannot use it.
 pub fn bone_rejections(src: &str) -> Vec<String> {
-    bone_rejection_errors(src).into_iter().map(|e| e.message).collect()
+    bone_rejection_errors(src)
+        .into_iter()
+        .map(|e| e.message)
+        .collect()
 }
 
 /// [`bone_rejections`] with each error's location and labels.
@@ -62,7 +69,11 @@ pub fn bone_rejection_errors(src: &str) -> Vec<skull_parser::CompilerError> {
         .iter()
         .flatten()
         .flat_map(|inf| inf.errors.values().flatten())
-        .chain(ws.modules.iter().flat_map(|m| m.lowering_errors.values().flatten()))
+        .chain(
+            ws.modules
+                .iter()
+                .flat_map(|m| m.lowering_errors.values().flatten()),
+        )
         .chain(ws.modules.iter().flat_map(|m| m.interface_errors.iter()))
         .cloned()
         .collect()
@@ -103,7 +114,8 @@ pub fn emit_mir_with_inputs(
 ) -> skull::mir_emit::MirEmit {
     let mut modules = STDLIB.clone();
     modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
-    let mut ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    let mut ws =
+        bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
     assert_no_bone_errors(&ws);
     ws.comptime_inputs = inputs;
     let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
@@ -116,7 +128,8 @@ pub fn try_emit_mir_with_inputs(
 ) -> Result<skull::mir_emit::MirEmit, skull_parser::CompilerError> {
     let mut modules = STDLIB.clone();
     modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
-    let mut ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    let mut ws =
+        bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
     assert_no_bone_errors(&ws);
     ws.comptime_inputs = inputs;
     let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
@@ -188,7 +201,8 @@ pub fn try_emit_module_with(
 ) -> Result<String, skull_parser::CompilerError> {
     let mut modules = STDLIB.clone();
     modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
-    let mut ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    let mut ws =
+        bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
     assert_no_bone_errors(&ws);
     ws.comptime_inputs = inputs;
     let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
@@ -205,7 +219,8 @@ pub fn try_emit_module_with_file(
 ) -> Result<String, skull_parser::CompilerError> {
     let mut modules = STDLIB.clone();
     modules.push(skull_parser::parse_module_clean(src, Ustr::from(file)).expect("parse"));
-    let mut ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    let mut ws =
+        bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
     assert_no_bone_errors(&ws);
     ws.comptime_inputs = inputs;
     let mid = *ws.module_ids.get(&Ustr::from(file)).expect("module id");
@@ -226,7 +241,9 @@ pub fn try_emit_module(src: &str) -> Result<String, skull_parser::CompilerError>
 
 /// [`try_emit_module`] with identity storage enforced on the unpackaged
 /// `<test>` module, as bone fixtures do: the program's package is not exempt.
-pub fn try_emit_module_enforcing_identity_storage(src: &str) -> Result<String, skull_parser::CompilerError> {
+pub fn try_emit_module_enforcing_identity_storage(
+    src: &str,
+) -> Result<String, skull_parser::CompilerError> {
     let mut modules = STDLIB.clone();
     modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
     let ws = bone_semantic::semantic_passes::semantic_pass_enforcing_identity_storage(&mut modules)
@@ -244,13 +261,20 @@ pub fn emit_module_without_frame_limits(src: &str) -> String {
     emit_module_shaped(
         src,
         "<test>",
-        skull::mir_emit::ShapeOverrides { frame_limits: Some(false), ..Default::default() },
+        skull::mir_emit::ShapeOverrides {
+            frame_limits: Some(false),
+            ..Default::default()
+        },
     )
 }
 
 /// The full program of `src`, parsed as module FILE `file`, under explicit
 /// emitted shapes.
-pub fn emit_module_shaped(src: &str, file: &str, shapes: skull::mir_emit::ShapeOverrides) -> String {
+pub fn emit_module_shaped(
+    src: &str,
+    file: &str,
+    shapes: skull::mir_emit::ShapeOverrides,
+) -> String {
     let mut modules = STDLIB.clone();
     modules.push(skull_parser::parse_module_clean(src, Ustr::from(file)).expect("parse"));
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
@@ -322,8 +346,10 @@ pub fn function_body<'a>(lua: &'a str, name: &str) -> &'a str {
     let (start, terminator) = match lua.find(&global) {
         Some(at) => (at + 1, "\nend\n"),
         None => {
-            let head =
-                format!("\n{}{resolved} = function(", skull_codegen_lua::CALLEE_FACTORY_PREFIX);
+            let head = format!(
+                "\n{}{resolved} = function(",
+                skull_codegen_lua::CALLEE_FACTORY_PREFIX
+            );
             let at = lua
                 .find(&head)
                 .unwrap_or_else(|| panic!("definition `{resolved}` has neither shape in:\n{lua}"));
@@ -331,7 +357,10 @@ pub fn function_body<'a>(lua: &'a str, name: &str) -> &'a str {
         }
     };
     let rest = &lua[start..];
-    let end = rest.find(terminator).map(|e| e + terminator.len()).unwrap_or(rest.len());
+    let end = rest
+        .find(terminator)
+        .map(|e| e + terminator.len())
+        .unwrap_or(rest.len());
     &rest[..end]
 }
 
@@ -386,7 +415,10 @@ pub fn definition_names(lua: &str) -> Vec<&str> {
 /// function(`, so a raw substring count reports zero and whatever was built on
 /// it passes or fails for the wrong reason.
 pub fn definitions_matching<'a>(lua: &'a str, needle: &str) -> Vec<&'a str> {
-    definition_names(lua).into_iter().filter(|n| n.contains(needle)).collect()
+    definition_names(lua)
+        .into_iter()
+        .filter(|n| n.contains(needle))
+        .collect()
 }
 
 /// The body of the single emitted function whose name contains `needle`.
@@ -399,7 +431,11 @@ pub fn body_of_synthetic<'a>(lua: &'a str, needle: &str) -> &'a str {
         .into_iter()
         .filter(|n| n.contains(needle))
         .collect();
-    assert_eq!(names.len(), 1, "expected exactly one fn containing `{needle}`, got {names:?}");
+    assert_eq!(
+        names.len(),
+        1,
+        "expected exactly one fn containing `{needle}`, got {names:?}"
+    );
     function_body(lua, names[0])
 }
 
@@ -427,7 +463,9 @@ pub fn try_emit_with_stdlib_module(
     src: &str,
 ) -> Result<String, skull_parser::CompilerError> {
     let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module_clean(lib, Ustr::from("<stdlib:probe>")).expect("parse lib"));
+    modules.push(
+        skull_parser::parse_module_clean(lib, Ustr::from("<stdlib:probe>")).expect("parse lib"),
+    );
     modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
     assert_no_bone_errors(&ws);
@@ -440,7 +478,9 @@ pub fn try_emit_with_stdlib_module(
 /// therefore prunable) rather than as own-project source.
 pub fn ws_with_stdlib_module(lib: &str, src: &str) -> Workspace {
     let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module_clean(lib, Ustr::from("<stdlib:probe>")).expect("parse lib"));
+    modules.push(
+        skull_parser::parse_module_clean(lib, Ustr::from("<stdlib:probe>")).expect("parse lib"),
+    );
     modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
     assert_no_bone_errors(&ws);
@@ -450,8 +490,11 @@ pub fn ws_with_stdlib_module(lib: &str, src: &str) -> Workspace {
 pub fn ws_with_dependency_module(lib: &str, src: &str) -> Workspace {
     let mut modules = STDLIB.clone();
     modules.push(
-        skull_parser::parse_module_clean(lib, Ustr::from("/tmp/rock-mono-project-library/engine.rock"))
-            .expect("parse lib"),
+        skull_parser::parse_module_clean(
+            lib,
+            Ustr::from("/tmp/rock-mono-project-library/engine.rock"),
+        )
+        .expect("parse lib"),
     );
     modules.push(
         skull_parser::parse_module_clean(src, Ustr::from("/tmp/rock-mono-project/main.rock"))
@@ -470,11 +513,19 @@ pub fn fn_ref(ws: &Workspace, name: &str) -> skull_mir::mir::FuncRef {
     for m in ws.modules.iter() {
         for (fid, f) in m.functions.iter() {
             if f.name.as_str() == name {
-                found.push(skull_mir::mir::FuncRef { module: m.id, func: fid });
+                found.push(skull_mir::mir::FuncRef {
+                    module: m.id,
+                    func: fid,
+                });
             }
         }
     }
-    assert_eq!(found.len(), 1, "expected exactly one fn named `{name}`, got {}", found.len());
+    assert_eq!(
+        found.len(),
+        1,
+        "expected exactly one fn named `{name}`, got {}",
+        found.len()
+    );
     found[0]
 }
 
@@ -488,7 +539,11 @@ pub fn ws_of(src: &str) -> Workspace {
 /// instead of skipping when the binary is absent: a host without luajit must
 /// report red for tests that never ran, never green.
 pub fn require_luajit() {
-    if std::process::Command::new("luajit").arg("-v").output().is_err() {
+    if std::process::Command::new("luajit")
+        .arg("-v")
+        .output()
+        .is_err()
+    {
         panic!("luajit is required for this execution test but was not found on PATH");
     }
 }
@@ -500,7 +555,10 @@ pub fn run_luajit(prog: &str, tag: &str) -> String {
     use std::process::Command;
     let path = std::env::temp_dir().join(format!("skull_test_{}_{tag}.lua", std::process::id()));
     std::fs::write(&path, prog).expect("write program");
-    let out = Command::new("luajit").arg(&path).output().expect("spawn luajit");
+    let out = Command::new("luajit")
+        .arg(&path)
+        .output()
+        .expect("spawn luajit");
     let _ = std::fs::remove_file(&path);
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     assert!(
@@ -543,9 +601,7 @@ impl AllocationReportGuard {
     }
 }
 
-pub struct AllocationActivationGuard(
-    #[allow(dead_code)] skull::allocation_report::ActivationScope,
-);
+pub struct AllocationActivationGuard(#[allow(dead_code)] skull::allocation_report::ActivationScope);
 
 impl AllocationActivationGuard {
     pub fn on() -> Self {

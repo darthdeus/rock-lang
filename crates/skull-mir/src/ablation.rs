@@ -147,7 +147,9 @@ pub struct Scope {
 
 pub fn scope(on: bool) -> Scope {
     let context = Context::fresh(on);
-    Scope { _context: enter_context(context) }
+    Scope {
+        _context: enter_context(context),
+    }
 }
 
 impl Drop for Scope {
@@ -217,7 +219,11 @@ pub fn record(
         detail: detail.into(),
     };
     with_current(|context| {
-        context.registry.lock().expect("ablation registry poisoned").push(f);
+        context
+            .registry
+            .lock()
+            .expect("ablation registry poisoned")
+            .push(f);
     });
 }
 
@@ -231,7 +237,11 @@ pub fn take() -> Vec<Fatal> {
 pub fn clear() {
     with_current(|context| {
         context.examined.store(0, Ordering::Relaxed);
-        context.registry.lock().expect("ablation registry poisoned").clear();
+        context
+            .registry
+            .lock()
+            .expect("ablation registry poisoned")
+            .clear();
     });
 }
 
@@ -251,7 +261,11 @@ fn site_key(f: &Fatal) -> (Ustr, (usize, usize)) {
 /// it, which is a property of the compiler's internal structure and not of the
 /// corpus.
 pub fn distinct_sites(fatals: &[Fatal]) -> usize {
-    fatals.iter().map(site_key).collect::<std::collections::BTreeSet<_>>().len()
+    fatals
+        .iter()
+        .map(site_key)
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
 }
 
 /// Distinct callee NAMES per category. A category's pair count and its callee
@@ -285,5 +299,7 @@ pub fn distinct(fatals: &[Fatal]) -> Vec<(FatalCategory, String, String, usize, 
             .or_insert_with(|| (BTreeSet::new(), f.span));
         e.0.insert(site_key(f));
     }
-    by.into_iter().map(|((c, callee, caller), (n, s))| (c, callee, caller, n.len(), s)).collect()
+    by.into_iter()
+        .map(|((c, callee, caller), (n, s))| (c, callee, caller, n.len(), s))
+        .collect()
 }

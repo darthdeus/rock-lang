@@ -30,13 +30,16 @@
 //! generics at large. The discriminant was generic-vs-non-generic, not the UFCS
 //! spelling -- a plain call through the same generic failed identically.
 
-
 use std::process::Command;
 
 fn run_capturing(prog: &str, tag: &str) -> (bool, String) {
-    let path = std::env::temp_dir().join(format!("skull_sentinel_{}_{tag}.lua", std::process::id()));
+    let path =
+        std::env::temp_dir().join(format!("skull_sentinel_{}_{tag}.lua", std::process::id()));
     std::fs::write(&path, prog).expect("write program");
-    let out = Command::new("luajit").arg(&path).output().expect("spawn luajit");
+    let out = Command::new("luajit")
+        .arg(&path)
+        .output()
+        .expect("spawn luajit");
     let _ = std::fs::remove_file(&path);
     let combined = format!(
         "{}{}",

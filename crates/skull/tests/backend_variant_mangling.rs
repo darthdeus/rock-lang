@@ -18,10 +18,21 @@ fn return_only_overloads_in_separate_modules_are_rejected() {
         Ok(_) => panic!("return-only overloads compiled successfully"),
         Err(error) => error,
     };
-    assert!(error.message.contains("differ only in return type"), "{}", error.message);
+    assert!(
+        error.message.contains("differ only in return type"),
+        "{}",
+        error.message
+    );
     assert!(error.message.contains("return_pair"), "{}", error.message);
-    let files: Vec<_> = error.labels.iter().map(|label| label.span.file.as_str()).collect();
-    assert!(files.contains(&"<test>") && files.contains(&"<stdlib:probe>"), "{files:?}");
+    let files: Vec<_> = error
+        .labels
+        .iter()
+        .map(|label| label.span.file.as_str())
+        .collect();
+    assert!(
+        files.contains(&"<test>") && files.contains(&"<stdlib:probe>"),
+        "{files:?}"
+    );
 }
 
 #[test]
@@ -34,8 +45,14 @@ fn parameter_pair(g: fn(int) -> string) -> string { return g(1) }
     );
     let defs = crate::common::definitions_matching(&lua, "parameter_pair");
     assert_eq!(defs.len(), 2, "{defs:?}");
-    assert!(defs.iter().any(|name| name.contains("fn_int_ret_int")), "{defs:?}");
-    assert!(defs.iter().any(|name| name.contains("fn_int_ret_string")), "{defs:?}");
+    assert!(
+        defs.iter().any(|name| name.contains("fn_int_ret_int")),
+        "{defs:?}"
+    );
+    assert!(
+        defs.iter().any(|name| name.contains("fn_int_ret_string")),
+        "{defs:?}"
+    );
 }
 
 #[test]
@@ -47,7 +64,10 @@ extern(js) fn portable_now() -> float
 fn read_clock() -> float { return portable_now() }
 "#,
     );
-    assert_eq!(crate::common::definitions_matching(&lua, "portable_now").len(), 1);
+    assert_eq!(
+        crate::common::definitions_matching(&lua, "portable_now").len(),
+        1
+    );
 }
 
 const DBL_ALONE: &str = r#"

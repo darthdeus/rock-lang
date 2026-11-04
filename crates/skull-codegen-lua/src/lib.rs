@@ -19,8 +19,8 @@
 //! is a later refinement.)
 
 mod frame_limits;
-mod trace_frames;
 mod regalloc;
+mod trace_frames;
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::cell::RefCell;
@@ -31,14 +31,12 @@ use bone_semantic::hir::Function;
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::{CompilerError, Span};
 use comfy_la_arena::Idx;
-use skull_mir::cfg::{
-    PredMap, predecessors, reachable_blocks_from, reverse_postorder, successors,
-};
+use skull_mir::cfg::{PredMap, predecessors, reachable_blocks_from, reverse_postorder, successors};
 use skull_mir::mir::*;
 use skull_mir::monoty::MonoInterner;
 
-pub use skull_mir::mangle::mangle_fn;
 pub use regalloc::color_cells;
+pub use skull_mir::mangle::mangle_fn;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum EmittedAllocationKind {
@@ -131,15 +129,22 @@ mod uint_constant_tests {
     fn uint_constant_folding_keeps_invalid_values_checked() {
         let mut func = MirFunc::new(ustr::Ustr::from("checked"));
         for value in [
-            Lit::Int(-1), Lit::Int(4294967296), Lit::Float(-0.1),
-            Lit::Float(4294967295.5), Lit::Float(f64::NAN),
-            Lit::Float(f64::INFINITY), Lit::Float(f64::NEG_INFINITY),
+            Lit::Int(-1),
+            Lit::Int(4294967296),
+            Lit::Float(-0.1),
+            Lit::Float(4294967295.5),
+            Lit::Float(f64::NAN),
+            Lit::Float(f64::INFINITY),
+            Lit::Float(f64::NEG_INFINITY),
         ] {
             let x = func.alloc_inst(Inst::Const(value));
             assert_eq!(checked_u32_constant(&func, x), None);
         }
         let x = func.alloc_inst(Inst::Const(Lit::Float(-0.0)));
-        assert_eq!(checked_u32_constant(&func, x).unwrap().to_bits(), (-0.0f64).to_bits());
+        assert_eq!(
+            checked_u32_constant(&func, x).unwrap().to_bits(),
+            (-0.0f64).to_bits()
+        );
     }
 }
 
@@ -542,9 +547,7 @@ fn emitted_value_allocation_kind(inst: &Inst) -> Option<EmittedAllocationKind> {
         Inst::MakeVecStridedHeader { .. } => EmittedAllocationKind::StructConstruction,
         Inst::MakeStruct { .. } => EmittedAllocationKind::StructConstruction,
         Inst::MakeValueStruct { .. } => EmittedAllocationKind::ValueConstruction,
-        Inst::MaterializeValueStruct { .. } => {
-            EmittedAllocationKind::ExplicitValueMaterialization
-        }
+        Inst::MaterializeValueStruct { .. } => EmittedAllocationKind::ExplicitValueMaterialization,
         Inst::MakeEnum { .. } => EmittedAllocationKind::EnumConstruction,
         Inst::MakeEnumDyn { .. } => EmittedAllocationKind::DynamicEnumConstruction,
         Inst::MakeEnv { .. } => EmittedAllocationKind::ClosureEnvironment,
@@ -689,7 +692,10 @@ impl Clone for CodegenCtx {
             call_sccs: self.call_sccs.clone(),
             frame_limits: self.frame_limits,
             line_directives: self.line_directives,
-            trace_frames: self.trace_frames.as_ref().map(|rows| Mutex::new(rows.lock().expect("trace frame sink").clone())),
+            trace_frames: self
+                .trace_frames
+                .as_ref()
+                .map(|rows| Mutex::new(rows.lock().expect("trace frame sink").clone())),
         }
     }
 }
@@ -738,7 +744,7 @@ fn reserved_namespace_collision(name: &str, span: Span, sink: &mut Vec<(String, 
 fn scalar_constants(ws: &Workspace) -> HashMap<ustr::Ustr, Lit> {
     use bone_semantic::hir::{Body, BodyOwner, Callee, Expr};
     use bone_semantic::inference::BodyInference;
-    use skull_mir::monoty::{convert, MonoSubst, MonoTy};
+    use skull_mir::monoty::{MonoSubst, MonoTy, convert};
 
     struct Folder<'a> {
         ws: &'a Workspace,
@@ -757,7 +763,9 @@ fn scalar_constants(ws: &Workspace) -> HashMap<ustr::Ustr, Lit> {
         fn fold(&self, id: Idx<Expr>, depth: usize) -> Option<Lit> {
             // Initializers can be arbitrarily nested; leave large expressions at
             // runtime instead of growing the compiler stack without a bound.
-            if depth >= 64 { return None; }
+            if depth >= 64 {
+                return None;
+            }
             match self.body.expr_arena[id] {
                 Expr::Int(v) => Some(Lit::Int(v)),
                 Expr::Float(v) => Some(Lit::Float(v.into_inner())),
@@ -769,13 +777,21 @@ fn scalar_constants(ws: &Workspace) -> HashMap<ustr::Ustr, Lit> {
                     Lit::Float(v) => Some(Lit::Float(-v)),
                     _ => None,
                 },
-                Expr::Call { callee: Callee::Unresolved { name, .. }, args, .. }
-                    if matches!(name.as_str(), "__op_add" | "__op_sub" | "__op_mul" | "__op_div") =>
+                Expr::Call {
+                    callee: Callee::Unresolved { name, .. },
+                    args,
+                    ..
+                } if matches!(
+                    name.as_str(),
+                    "__op_add" | "__op_sub" | "__op_mul" | "__op_div"
+                ) =>
                 {
                     let mut args = args.into_iter();
                     let left = args.next()?;
                     let right = args.next()?;
-                    if args.next().is_some() { return None; }
+                    if args.next().is_some() {
+                        return None;
+                    }
                     // Only the primitive numeric route is admitted. In particular,
                     // uint, newtype operators and string coercions keep their
                     // runtime checks and overload behavior.
@@ -796,11 +812,17 @@ fn scalar_constants(ws: &Workspace) -> HashMap<ustr::Ustr, Lit> {
                         "__op_div" if right != 0.0 => left / right,
                         _ => return None,
                     };
-                    if !result.is_finite() { return None; }
+                    if !result.is_finite() {
+                        return None;
+                    }
                     match result_ty {
                         MonoTy::Float => Some(Lit::Float(result)),
-                        MonoTy::Int if result.abs() <= 9_007_199_254_740_991.0
-                            && !(result == 0.0 && result.is_sign_negative()) => Some(Lit::Int(result as i64)),
+                        MonoTy::Int
+                            if result.abs() <= 9_007_199_254_740_991.0
+                                && !(result == 0.0 && result.is_sign_negative()) =>
+                        {
+                            Some(Lit::Int(result as i64))
+                        }
                         _ => None,
                     }
                 }
@@ -808,20 +830,37 @@ fn scalar_constants(ws: &Workspace) -> HashMap<ustr::Ustr, Lit> {
             }
         }
     }
-    let mut pending: Vec<_> = ws.modules.iter().flat_map(|module| {
-        module.globals.iter().filter_map(|(id, global)| {
-            if !global.is_const { return None; }
-            let owner = BodyOwner::Global(id);
-            let inf = ws.inference(module.id).and_then(|inf| inf.per_fn.get(&owner));
-            module.bodies.get(&owner).map(|body| (global.name, body, inf))
+    let mut pending: Vec<_> = ws
+        .modules
+        .iter()
+        .flat_map(|module| {
+            module.globals.iter().filter_map(|(id, global)| {
+                if !global.is_const {
+                    return None;
+                }
+                let owner = BodyOwner::Global(id);
+                let inf = ws
+                    .inference(module.id)
+                    .and_then(|inf| inf.per_fn.get(&owner));
+                module
+                    .bodies
+                    .get(&owner)
+                    .map(|body| (global.name, body, inf))
+            })
         })
-    }).collect();
+        .collect();
     let mut known = HashMap::default();
     let subst = MonoSubst::default();
     loop {
         let before = pending.len();
         pending.retain(|(name, body, inf)| {
-            let folder = Folder { ws, body, inf: *inf, known: &known, subst: &subst };
+            let folder = Folder {
+                ws,
+                body,
+                inf: *inf,
+                known: &known,
+                subst: &subst,
+            };
             if let Some(lit) = body.root.and_then(|root| folder.fold(root, 0)) {
                 known.insert(*name, lit);
                 false
@@ -829,7 +868,9 @@ fn scalar_constants(ws: &Workspace) -> HashMap<ustr::Ustr, Lit> {
                 true
             }
         });
-        if pending.len() == before { return known; }
+        if pending.len() == before {
+            return known;
+        }
     }
 }
 
@@ -838,12 +879,18 @@ impl CodegenCtx {
     /// every returned name need new emitted text, including readers of aliases.
     pub fn refresh_scalar_constants(&mut self, ws: &Workspace) -> HashSet<ustr::Ustr> {
         let next = scalar_constants(ws);
-        let changed = self.scalar_constants.keys().chain(next.keys()).filter(|name| {
-            match (self.scalar_constants.get(name), next.get(name)) {
-                (Some(Lit::Float(x)), Some(Lit::Float(y))) => x.to_bits() != y.to_bits(),
-                (a, b) => a != b,
-            }
-        }).copied().collect();
+        let changed = self
+            .scalar_constants
+            .keys()
+            .chain(next.keys())
+            .filter(
+                |name| match (self.scalar_constants.get(name), next.get(name)) {
+                    (Some(Lit::Float(x)), Some(Lit::Float(y))) => x.to_bits() != y.to_bits(),
+                    (a, b) => a != b,
+                },
+            )
+            .copied()
+            .collect();
         self.scalar_constants = next;
         changed
     }
@@ -995,19 +1042,25 @@ impl CodegenCtx {
     /// LuaJIT parses the chunk without running its initializers or user code.
     /// Diagnostic failures remain warnings and never change parse-limit checks.
     pub fn report_trace_frames(&self, lua: &str) {
-        let Some(rows) = &self.trace_frames else { return; };
+        let Some(rows) = &self.trace_frames else {
+            return;
+        };
         let result = trace_frames::report(lua, &rows.lock().expect("trace frame sink"));
         match result {
             Ok(report) => {
                 if let Some(path) = std::env::var_os("ROCK_LUA_TRACE_FRAME_REPORT") {
                     if let Err(error) = std::fs::write(path, report) {
-                        eprintln!("warning: cannot write LuaJIT emitted-call frame report: {error}");
+                        eprintln!(
+                            "warning: cannot write LuaJIT emitted-call frame report: {error}"
+                        );
                     }
                 } else {
                     eprint!("{report}");
                 }
             }
-            Err(error) => eprintln!("warning: LuaJIT emitted-call frame report unavailable: {error}"),
+            Err(error) => {
+                eprintln!("warning: LuaJIT emitted-call frame report unavailable: {error}")
+            }
         }
     }
 
@@ -1066,7 +1119,10 @@ impl CodegenCtx {
     /// ordering across rayon scheduling. THE sink for anything the render path
     /// cannot return a `Result` from.
     pub fn reject(&self, key: String, err: CompilerError) {
-        self.rejections.lock().expect("rejection sink").push((key, err));
+        self.rejections
+            .lock()
+            .expect("rejection sink")
+            .push((key, err));
     }
 
     /// Drain the recorded rejections and return the first (by key, for
@@ -1118,9 +1174,15 @@ fn referenced_cells_in_region(
                 continue;
             }
             match &func.insts[iid] {
-                Inst::Load(c) => { cells.insert(*c); }
-                Inst::Store { cell, .. } => { cells.insert(*cell); }
-                Inst::MapNext { key_cell, val_cell, .. } => {
+                Inst::Load(c) => {
+                    cells.insert(*c);
+                }
+                Inst::Store { cell, .. } => {
+                    cells.insert(*cell);
+                }
+                Inst::MapNext {
+                    key_cell, val_cell, ..
+                } => {
                     cells.insert(*key_cell);
                     cells.insert(*val_cell);
                 }
@@ -1141,8 +1203,15 @@ fn referenced_cells_in_region(
 
 #[derive(Clone)]
 enum TailForwardCall {
-    Direct { call: Idx<Inst>, func: FuncRef, args: Vec<Idx<Inst>> },
-    Value { callee: Idx<Inst>, args: Vec<Idx<Inst>> },
+    Direct {
+        call: Idx<Inst>,
+        func: FuncRef,
+        args: Vec<Idx<Inst>>,
+    },
+    Value {
+        callee: Idx<Inst>,
+        args: Vec<Idx<Inst>>,
+    },
 }
 
 #[derive(Clone)]
@@ -1173,7 +1242,9 @@ fn cell_reference_counts(func: &MirFunc) -> Vec<u32> {
                         counts[raw(*cell) as usize] += 1;
                     }
                 }
-                Inst::MapNext { key_cell, val_cell, .. } => {
+                Inst::MapNext {
+                    key_cell, val_cell, ..
+                } => {
                     counts[raw(*key_cell) as usize] += 1;
                     counts[raw(*val_cell) as usize] += 1;
                 }
@@ -1314,7 +1385,11 @@ fn tarjan_components(edges: impl IntoIterator<Item = (FuncRef, FuncRef)>) -> Cal
             }
         }
     }
-    CallComponents { nodes, component, is_cycle }
+    CallComponents {
+        nodes,
+        component,
+        is_cycle,
+    }
 }
 
 /// Every function that lies on a cycle of `edges`, the input
@@ -1342,7 +1417,11 @@ pub fn callees_on_cycles(edges: impl IntoIterator<Item = (FuncRef, FuncRef)>) ->
 /// its caller's whenever they differ -- see [`CallComponents`].
 pub fn call_sccs(edges: impl IntoIterator<Item = (FuncRef, FuncRef)>) -> HashMap<FuncRef, u32> {
     let c = tarjan_components(edges);
-    c.nodes.iter().copied().zip(c.component.iter().copied()).collect()
+    c.nodes
+        .iter()
+        .copied()
+        .zip(c.component.iter().copied())
+        .collect()
 }
 
 /// Which calls in tail position keep Lua's `do return f(...) end` shape.
@@ -1406,11 +1485,13 @@ pub enum CalleeBindingMode {
 /// the shipped default, so the switch can only be entered deliberately.
 pub fn callee_binding_mode() -> CalleeBindingMode {
     static MODE: std::sync::OnceLock<CalleeBindingMode> = std::sync::OnceLock::new();
-    *MODE.get_or_init(|| match std::env::var("ROCK_SKULL_CALLEE_BINDING").as_deref() {
-        Ok("upvalue") => CalleeBindingMode::Upvalue,
-        Ok("global") => CalleeBindingMode::Global,
-        _ => DEFAULT_CALLEE_BINDING,
-    })
+    *MODE.get_or_init(
+        || match std::env::var("ROCK_SKULL_CALLEE_BINDING").as_deref() {
+            Ok("upvalue") => CalleeBindingMode::Upvalue,
+            Ok("global") => CalleeBindingMode::Global,
+            _ => DEFAULT_CALLEE_BINDING,
+        },
+    )
 }
 
 /// `ROCK_SKULL_LINE_DIRECTIVES=1` writes LuaJIT line directives into every
@@ -1418,7 +1499,12 @@ pub fn callee_binding_mode() -> CalleeBindingMode {
 /// without directive support rejects them as a syntax error.
 pub fn line_directives_mode() -> bool {
     static MODE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *MODE.get_or_init(|| matches!(std::env::var("ROCK_SKULL_LINE_DIRECTIVES").as_deref(), Ok("1")))
+    *MODE.get_or_init(|| {
+        matches!(
+            std::env::var("ROCK_SKULL_LINE_DIRECTIVES").as_deref(),
+            Ok("1")
+        )
+    })
 }
 
 /// The global holding the `Lit::Omitted` marker: a private table, so no Rock
@@ -1437,7 +1523,12 @@ pub const STATE_CELL: &str = "__rock_state_cell";
 /// Default: on.
 pub fn state_reserve_mode() -> bool {
     static MODE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *MODE.get_or_init(|| !matches!(std::env::var("ROCK_SKULL_STATE_RESERVE").as_deref(), Ok("0")))
+    *MODE.get_or_init(|| {
+        !matches!(
+            std::env::var("ROCK_SKULL_STATE_RESERVE").as_deref(),
+            Ok("0")
+        )
+    })
 }
 
 /// `ROCK_SKULL_STATE_CELL=0` keeps the `_G.__rock_globals` read under the
@@ -1540,11 +1631,13 @@ pub enum IndexShape {
 /// default, so the switch can only be entered deliberately.
 pub fn index_shape() -> IndexShape {
     static SHAPE: std::sync::OnceLock<IndexShape> = std::sync::OnceLock::new();
-    *SHAPE.get_or_init(|| match std::env::var("ROCK_SKULL_INDEX_SHAPE").as_deref() {
-        Ok("call") => IndexShape::Call,
-        Ok("inline") => IndexShape::Inline,
-        _ => DEFAULT_INDEX_SHAPE,
-    })
+    *SHAPE.get_or_init(
+        || match std::env::var("ROCK_SKULL_INDEX_SHAPE").as_deref() {
+            Ok("call") => IndexShape::Call,
+            Ok("inline") => IndexShape::Inline,
+            _ => DEFAULT_INDEX_SHAPE,
+        },
+    )
 }
 
 /// How a one-expression wrapper -- an `extern(ffi)` binding, a value-struct
@@ -1565,11 +1658,13 @@ pub enum WrapperRetShape {
 /// switch can only be entered deliberately.
 pub fn wrapper_ret_shape() -> WrapperRetShape {
     static SHAPE: std::sync::OnceLock<WrapperRetShape> = std::sync::OnceLock::new();
-    *SHAPE.get_or_init(|| match std::env::var("ROCK_SKULL_WRAPPER_RET").as_deref() {
-        Ok("tail") => WrapperRetShape::Tail,
-        Ok("local") => WrapperRetShape::Local,
-        _ => DEFAULT_WRAPPER_RET_SHAPE,
-    })
+    *SHAPE.get_or_init(
+        || match std::env::var("ROCK_SKULL_WRAPPER_RET").as_deref() {
+            Ok("tail") => WrapperRetShape::Tail,
+            Ok("local") => WrapperRetShape::Local,
+            _ => DEFAULT_WRAPPER_RET_SHAPE,
+        },
+    )
 }
 
 /// The shipped wrapper return shape.
@@ -1641,7 +1736,10 @@ mod emitted_body_header_tests {
     #[test]
     fn recognizes_both_emitted_definition_shapes() {
         assert_eq!(emitted_body_name("function leaf_int(c0)"), Some("leaf_int"));
-        assert_eq!(emitted_body_name("__rock_mk_leaf_int = function(callee) return function(c0)"), Some("leaf_int"));
+        assert_eq!(
+            emitted_body_name("__rock_mk_leaf_int = function(callee) return function(c0)"),
+            Some("leaf_int")
+        );
     }
 
     #[test]
@@ -1652,15 +1750,17 @@ mod emitted_body_header_tests {
             "__rock_mk_leaf = function(callee) return callee()",
             "__rock_mk_ = function() return function()",
             "__rock_mk_bad-name = function() return function()",
-            "function ()", "function bad.name()", "function 1bad()",
-            "  function nested()", "-- function commented()",
+            "function ()",
+            "function bad.name()",
+            "function 1bad()",
+            "  function nested()",
+            "-- function commented()",
             "local function nested()",
         ] {
             assert_eq!(emitted_body_name(line), None, "{line}");
         }
     }
 }
-
 
 /// The callees one body binds as immutable upvalues, and the rank its binding
 /// line must sort at. Built by [`callee_binding_plan`]; consumed by the emitter
@@ -1764,7 +1864,10 @@ pub fn callee_binding_plan(
     // Cleanup unlinks instructions without freeing arena slots. Match the
     // emitted body's CFG so discarded calls and separate scopes use no slots.
     let blocks = reverse_postorder(func, func.entry());
-    for id in blocks.iter().flat_map(|bid| func.blocks[*bid].insts.iter().copied()) {
+    for id in blocks
+        .iter()
+        .flat_map(|bid| func.blocks[*bid].insts.iter().copied())
+    {
         let inst = &func.insts[id];
         touches_state |= matches!(inst, Inst::Global(_) | Inst::StoreGlobal { .. });
         match inst {
@@ -1832,7 +1935,6 @@ pub fn callee_binding_plan(
     })
 }
 
-
 /// THE gate for the emitted tail-call shape. Returning false drops the forward,
 /// which leaves the ordinary emission path to write `r<N> = f(args)` followed by
 /// `do return r<N> end` -- the same statements a non-tail-position call already
@@ -1859,27 +1961,38 @@ fn tail_forwards(
     let mut forwards = vec![None; func.blocks.len()];
     let cell_references = cell_reference_counts(func);
     for (block_id, block) in func.blocks.iter() {
-        let Term::Return(values) = &block.term else { continue };
-        if direct && let Some(&call_id) = block.insts.last()
-            && let Inst::Call { func: callee_ref, args } = &func.insts[call_id]
+        let Term::Return(values) = &block.term else {
+            continue;
+        };
+        if direct
+            && let Some(&call_id) = block.insts.last()
+            && let Inst::Call {
+                func: callee_ref,
+                args,
+            } = &func.insts[call_id]
         {
             let callee = func_of(ws, *callee_ref);
-            let exact_wire = func.call_abi_plans.get(&call_id).is_some_and(|abi| {
-                match abi.result_lanes() {
-                    0 => values.is_empty(),
-                    1 => values.as_slice() == [call_id],
-                    _ => false,
-                }
-            });
+            let exact_wire =
+                func.call_abi_plans
+                    .get(&call_id)
+                    .is_some_and(|abi| match abi.result_lanes() {
+                        0 => values.is_empty(),
+                        1 => values.as_slice() == [call_id],
+                        _ => false,
+                    });
             // Foreign bodies can return extra Lua values beyond their declared wire.
-            if exact_wire && callee.inline_body.is_none() && !callee.is_extern
+            if exact_wire
+                && callee.inline_body.is_none()
+                && !callee.is_extern
                 && !callee.is_coroutine
             {
                 forwards[raw(block_id) as usize] = Some(TailForward {
                     first_suppressed: block.insts.len() - 1,
                     suppressed: vec![call_id],
                     call: TailForwardCall::Direct {
-                        call: call_id, func: *callee_ref, args: args.clone(),
+                        call: call_id,
+                        func: *callee_ref,
+                        args: args.clone(),
                     },
                 });
                 continue;
@@ -1893,22 +2006,37 @@ fn tail_forwards(
         let (dests, call) = match &func.insts[call_id] {
             Inst::CallMulti { dests, func, args } => (
                 dests,
-                TailForwardCall::Direct { call: call_id, func: *func, args: args.clone() },
+                TailForwardCall::Direct {
+                    call: call_id,
+                    func: *func,
+                    args: args.clone(),
+                },
             ),
-            Inst::CallValueMulti { dests, callee, args } => (
+            Inst::CallValueMulti {
                 dests,
-                TailForwardCall::Value { callee: *callee, args: args.clone() },
+                callee,
+                args,
+            } => (
+                dests,
+                TailForwardCall::Value {
+                    callee: *callee,
+                    args: args.clone(),
+                },
             ),
             _ => continue,
         };
         if dests.len() != values.len() {
             continue;
         }
-        let exact_wire = values.iter().zip(dests).enumerate().all(|(i, (&value, &dest))| {
-            block.insts[first + i + 1] == value
-                && matches!(func.insts[value], Inst::Load(cell) if cell == dest)
-                && cell_references[raw(dest) as usize] == 2
-        });
+        let exact_wire = values
+            .iter()
+            .zip(dests)
+            .enumerate()
+            .all(|(i, (&value, &dest))| {
+                block.insts[first + i + 1] == value
+                    && matches!(func.insts[value], Inst::Load(cell) if cell == dest)
+                    && cell_references[raw(dest) as usize] == 2
+            });
         if !exact_wire {
             continue;
         }
@@ -1920,7 +2048,10 @@ fn tail_forwards(
     }
     if ctx.tail_calls != TailCallShape::All {
         for forward in forwards.iter_mut() {
-            if forward.as_ref().is_some_and(|tail| !keeps_tail_call(ctx, &tail.call)) {
+            if forward
+                .as_ref()
+                .is_some_and(|tail| !keeps_tail_call(ctx, &tail.call))
+            {
                 *forward = None;
             }
         }
@@ -1928,10 +2059,7 @@ fn tail_forwards(
     forwards
 }
 
-fn call_arg_forwards(
-    ws: &Workspace,
-    func: &MirFunc,
-) -> (Vec<Option<CallArgForward>>, Vec<bool>) {
+fn call_arg_forwards(ws: &Workspace, func: &MirFunc) -> (Vec<Option<CallArgForward>>, Vec<bool>) {
     let mut forwards = vec![None; func.insts.len()];
     let mut suppressed = vec![false; func.insts.len()];
     let cell_references = cell_reference_counts(func);
@@ -1948,7 +2076,11 @@ fn call_arg_forwards(
                         args: args.clone(),
                     },
                 ),
-                Inst::CallValueMulti { dests, callee, args } => (
+                Inst::CallValueMulti {
+                    dests,
+                    callee,
+                    args,
+                } => (
                     dests,
                     TailForwardCall::Value {
                         callee: *callee,
@@ -1962,7 +2094,10 @@ fn call_arg_forwards(
                 continue;
             }
             let consumer = block.insts[consumer_position];
-            let Inst::Call { func: consumer_func, args: consumer_args } = &func.insts[consumer]
+            let Inst::Call {
+                func: consumer_func,
+                args: consumer_args,
+            } = &func.insts[consumer]
             else {
                 continue;
             };
@@ -1973,14 +2108,16 @@ fn call_arg_forwards(
             }
             let prefix_len = consumer_args.len() - dests.len();
             let loads = &block.insts[first + 1..consumer_position];
-            let exact_wire = loads.iter().zip(dests).enumerate().all(
-                |(i, (&load, &dest))| {
+            let exact_wire = loads
+                .iter()
+                .zip(dests)
+                .enumerate()
+                .all(|(i, (&load, &dest))| {
                     consumer_args[prefix_len + i] == load
                         && matches!(func.insts[load], Inst::Load(cell) if cell == dest)
                         && cell_references[raw(dest) as usize] == 2
                         && instruction_references[raw(load) as usize] == 1
-                },
-            );
+                });
             if !exact_wire {
                 continue;
             }
@@ -2087,7 +2224,16 @@ pub fn emit_named_with_statics(
     inherited_statics: &[StaticCell],
     bound: Option<&CalleeBindingPlan>,
 ) -> String {
-    emit_named_framed_with_statics(ws, ctx, interner, name, func, None, inherited_statics, bound)
+    emit_named_framed_with_statics(
+        ws,
+        ctx,
+        interner,
+        name,
+        func,
+        None,
+        inherited_statics,
+        bound,
+    )
 }
 
 /// The coroutine state-table context: a `co fn`'s `__step` reads/writes its
@@ -2188,8 +2334,10 @@ pub fn emit_named_framed_with_allocation_sites(
         }),
     );
     let mut allocation_sites = sites.into_inner();
-    let function_line_offset =
-        lua.as_bytes()[..header_offset].iter().filter(|byte| **byte == b'\n').count() as u32;
+    let function_line_offset = lua.as_bytes()[..header_offset]
+        .iter()
+        .filter(|byte| **byte == b'\n')
+        .count() as u32;
     allocation_sites.sort_by_key(|site| site.lua_byte_offset);
     let mut byte_cursor = 0;
     let mut line = 1;
@@ -2242,32 +2390,66 @@ fn emit_named_framed_with_statics_impl(
         if let Some(abi) = &func.abi_plan {
             let decl = func_of(ws, abi.decl());
             let subst = abi.subject.subst(ws, interner);
-            let type_name = |ty| skull_mir::monoty::convert_decl(ws, ty, &subst)
-                .map(|ty| ty.render()).unwrap_or_else(|_| ws.render(None, ty));
+            let type_name = |ty| {
+                skull_mir::monoty::convert_decl(ws, ty, &subst)
+                    .map(|ty| ty.render())
+                    .unwrap_or_else(|_| ws.render(None, ty))
+            };
             if let Some(widths) = abi.param_leaf_widths() {
-                for (i, width) in widths.into_iter().enumerate().filter(|(_, width)| *width > 1) {
+                for (i, width) in widths
+                    .into_iter()
+                    .enumerate()
+                    .filter(|(_, width)| *width > 1)
+                {
                     let rep = abi.representation().params()[i];
                     let nobox = abi.rep_plan(rep).nobox();
                     let param = &decl.param_decls[i];
-                    contributors.push(format!("input `{}` of `{}` has type `{}` and is {width} scalar lanes{}",
-                        param.name, func.name, type_name(param.ty), if nobox { " (nobox: cannot be boxed)" } else { "" }));
+                    contributors.push(format!(
+                        "input `{}` of `{}` has type `{}` and is {width} scalar lanes{}",
+                        param.name,
+                        func.name,
+                        type_name(param.ty),
+                        if nobox {
+                            " (nobox: cannot be boxed)"
+                        } else {
+                            ""
+                        }
+                    ));
                 }
             }
             if abi.result_lanes() > 1 {
-                let nobox = abi.representation().result().is_some_and(|rep| abi.rep_plan(rep).nobox());
-                let ty = decl.return_ty.map(type_name).unwrap_or_else(|| "unit".into());
-                contributors.push(format!("return of `{}` has type `{ty}` and is {} scalar lanes{}",
-                    func.name, abi.result_lanes(), if nobox { " (nobox: cannot be boxed)" } else { "" }));
+                let nobox = abi
+                    .representation()
+                    .result()
+                    .is_some_and(|rep| abi.rep_plan(rep).nobox());
+                let ty = decl
+                    .return_ty
+                    .map(type_name)
+                    .unwrap_or_else(|| "unit".into());
+                contributors.push(format!(
+                    "return of `{}` has type `{ty}` and is {} scalar lanes{}",
+                    func.name,
+                    abi.result_lanes(),
+                    if nobox {
+                        " (nobox: cannot be boxed)"
+                    } else {
+                        ""
+                    }
+                ));
             }
         }
         for &block in &rpo {
             for &id in &func.blocks[block].insts {
                 for line in wide_call_contributors(ws, func, id) {
-                    if !contributors.contains(&line) { contributors.push(line); }
+                    if !contributors.contains(&line) {
+                        contributors.push(line);
+                    }
                 }
             }
         }
-        rows.lock().expect("trace frame sink").insert(name.to_string(), contributors);
+        rows.lock()
+            .expect("trace frame sink")
+            .insert(name.to_string(), contributors);
     }
     let tail_forwards = tail_forwards(ws, ctx, func, frame.is_none());
     let (call_arg_forwards, suppressed) = if frame.is_some() {
@@ -2315,20 +2497,12 @@ fn emit_named_framed_with_statics_impl(
     // re-running the def on reload is a harmless no-op (no preservation guard).
     record_representation_violations(ctx, func);
     let (hoist, hoist_names, hoist_defs) = collect_const_hoists(ws, ctx, func, name);
-    let static_slots = static_slots_for(
-        ws,
-        interner,
-        func,
-        inherited_statics,
-        name,
-        ctx,
-    );
+    let static_slots = static_slots_for(ws, interner, func, inherited_statics, name, ctx);
     // An unnamed definition is an expression its caller embeds mid-line, where
     // a directive (which must start a line) cannot go.
     let line_marks = (ctx.line_directives() && !name.is_empty()).then(|| RefCell::new(Vec::new()));
     let estimated_body_bytes = func.insts.len() * 24;
-    let mut out =
-        String::with_capacity(hoist_defs.len() + name.len() + 64 + estimated_body_bytes);
+    let mut out = String::with_capacity(hoist_defs.len() + name.len() + 64 + estimated_body_bytes);
     out.push_str(&hoist_defs);
     // Under `CalleeBindingMode::Upvalue` the definition becomes a factory whose
     // parameters are named exactly like the callees they replace, so the body
@@ -2388,13 +2562,19 @@ fn emit_named_framed_with_statics_impl(
     let Some(marks) = line_marks else {
         return (out, header_offset);
     };
-    let Some((lua, inserted)) = write_line_directives(&out, header_offset, &marks.into_inner()) else {
+    let Some((lua, inserted)) = write_line_directives(&out, header_offset, &marks.into_inner())
+    else {
         return (out, header_offset);
     };
     // A directive goes in front of a line, so an offset at that line's start
     // moves past it.
     let shift = |offset: usize| {
-        offset + inserted.iter().take_while(|(at, _)| *at <= offset).map(|(_, len)| len).sum::<usize>()
+        offset
+            + inserted
+                .iter()
+                .take_while(|(at, _)| *at <= offset)
+                .map(|(_, len)| len)
+                .sum::<usize>()
     };
     if let Some(allocation) = allocation {
         for site in allocation.sites.borrow_mut().iter_mut() {
@@ -2443,7 +2623,11 @@ fn write_line_directives(
     }
     // `max_by_key` keeps the last maximum; reversing makes a tie go to the
     // file seen first.
-    let (file, _) = counts.iter().rev().max_by_key(|(_, count)| *count).copied()?;
+    let (file, _) = counts
+        .iter()
+        .rev()
+        .max_by_key(|(_, count)| *count)
+        .copied()?;
     let own: Vec<(usize, u32)> = marks
         .iter()
         .filter(|(_, span)| span.file == file)
@@ -2460,7 +2644,9 @@ fn write_line_directives(
     let mut current: Option<u32> = None;
     let mut start = header_line;
     while start < lua.len() {
-        let end = lua[start..].find('\n').map_or(lua.len(), |at| start + at + 1);
+        let end = lua[start..]
+            .find('\n')
+            .map_or(lua.len(), |at| start + at + 1);
         while next_mark < own.len() && own[next_mark].0 < end {
             target = own[next_mark].1;
             next_mark += 1;
@@ -2551,8 +2737,16 @@ fn const_hoist_uses_are_read_only(_ws: &Workspace, func: &MirFunc, cand: Idx<Ins
             // field, and a `slot.f = v` into a NativeBuffer element writes bytes.
             // A TABLE destination (plain struct, GC-tier `<Name>_vt`, Vec element,
             // global, cell) stores the REFERENCE and is what aliases.
-            Inst::MakeValueStruct { representation, fields, .. }
-            | Inst::MaterializeValueStruct { representation, fields, .. } => {
+            Inst::MakeValueStruct {
+                representation,
+                fields,
+                ..
+            }
+            | Inst::MaterializeValueStruct {
+                representation,
+                fields,
+                ..
+            } => {
                 !fields.iter().any(|(_, v)| *v == cand)
                     || !matches!(
                         func.rep_arena
@@ -2569,7 +2763,10 @@ fn const_hoist_uses_are_read_only(_ws: &Workspace, func: &MirFunc, cand: Idx<Ins
                 *value != cand
                     || matches!(
                         func.insts[*base],
-                        Inst::Index { kind: ContainerKind::NativeBuffer | ContainerKind::NativeBufferValue(_), .. }
+                        Inst::Index {
+                            kind: ContainerKind::NativeBuffer | ContainerKind::NativeBufferValue(_),
+                            ..
+                        }
                     )
             }
             _ => false,
@@ -2593,7 +2790,6 @@ fn const_hoist_uses_are_read_only(_ws: &Workspace, func: &MirFunc, cand: Idx<Ins
     })
 }
 
-
 /// Whether a construction may be written in place instead of called.
 ///
 /// Only the GC-table tier (`_vt`), whose ctor body is exactly the table this
@@ -2612,8 +2808,18 @@ fn splice_is_admissible(suffix: &str, fields: &[(ustr::Ustr, Idx<Inst>)]) -> boo
 /// question drift, and a model that guessed CALL for a spliced construction
 /// would over-count the frame and reject a program LuaJIT loads.
 fn value_ctor_is_spliced(ctx: &CodegenCtx, func: &MirFunc, inst: &Inst) -> bool {
-    let (Inst::MakeValueStruct { representation, form, fields, .. }
-    | Inst::MaterializeValueStruct { representation, form, fields, .. }) = inst
+    let (Inst::MakeValueStruct {
+        representation,
+        form,
+        fields,
+        ..
+    }
+    | Inst::MaterializeValueStruct {
+        representation,
+        form,
+        fields,
+        ..
+    }) = inst
     else {
         return false;
     };
@@ -2622,7 +2828,11 @@ fn value_ctor_is_spliced(ctx: &CodegenCtx, func: &MirFunc, inst: &Inst) -> bool 
             .is_some_and(|suffix| splice_is_admissible(suffix, fields))
 }
 
-fn ctor_suffix(func: &MirFunc, representation: skull_mir::lower::RepId, form: ValueCtorForm) -> Option<&'static str> {
+fn ctor_suffix(
+    func: &MirFunc,
+    representation: skull_mir::lower::RepId,
+    form: ValueCtorForm,
+) -> Option<&'static str> {
     let arena = func.rep_arena.as_ref()?;
     let plan = arena.try_get(representation)?;
     Some(match form {
@@ -2651,7 +2861,7 @@ pub fn leaf_form_violation(
         return None;
     }
     Some(CompilerError::new_no_location(format!(
-            "leaf-form constructor does not match its canonical leaf plan: {got:?} vs {canonical:?}"
+        "leaf-form constructor does not match its canonical leaf plan: {got:?} vs {canonical:?}"
     )))
 }
 
@@ -2661,10 +2871,18 @@ pub fn leaf_form_violation(
 fn record_representation_violations(ctx: &CodegenCtx, func: &MirFunc) {
     for (_, inst) in func.insts.iter() {
         let (name, representation, form, fields) = match inst {
-            Inst::MakeValueStruct { name, representation, form, fields }
-            | Inst::MaterializeValueStruct { name, representation, form, fields } => {
-                (*name, *representation, *form, fields)
+            Inst::MakeValueStruct {
+                name,
+                representation,
+                form,
+                fields,
             }
+            | Inst::MaterializeValueStruct {
+                name,
+                representation,
+                form,
+                fields,
+            } => (*name, *representation, *form, fields),
             _ => continue,
         };
         let Some(suffix) = ctor_suffix(func, representation, form) else {
@@ -2729,19 +2947,29 @@ fn collect_const_hoists(
     func: &MirFunc,
     base: &str,
 ) -> (HashMap<Idx<Inst>, u32>, Vec<String>, String) {
-    let mut groups: Vec<(ustr::Ustr, skull_mir::lower::RepId, ValueCtorForm, Vec<Lit>)> = Vec::new();
+    let mut groups: Vec<(ustr::Ustr, skull_mir::lower::RepId, ValueCtorForm, Vec<Lit>)> =
+        Vec::new();
     let mut hoist: HashMap<Idx<Inst>, u32> = HashMap::default();
     // Only insts still REACHED BY A BLOCK. The arena keeps orphans (DCE unlinks
     // from blocks, it does not free), and hoisting one emits a module-scope ctor
     // call for a value the program never builds -- which for a nobox type is a
     // materialization the verifier cannot see, since it walks `block.insts`.
-    let live: HashSet<Idx<Inst>> =
-        func.blocks.iter().flat_map(|(_, b)| b.insts.iter().copied()).collect();
+    let live: HashSet<Idx<Inst>> = func
+        .blocks
+        .iter()
+        .flat_map(|(_, b)| b.insts.iter().copied())
+        .collect();
     for (id, inst) in func.insts.iter() {
         if !live.contains(&id) {
             continue;
         }
-        let Inst::MakeValueStruct { name, representation, form, fields } = inst else {
+        let Inst::MakeValueStruct {
+            name,
+            representation,
+            form,
+            fields,
+        } = inst
+        else {
             continue;
         };
         // An int->float-subsumed constant field (`IntToFloat(Const)`) is still a
@@ -2762,10 +2990,9 @@ fn collect_const_hoists(
         if !const_hoist_uses_are_read_only(ws, func, id) {
             continue;
         }
-        let g = match groups
-            .iter()
-            .position(|(n, rep, ctor_form, l)| *n == *name && *rep == *representation && *ctor_form == *form && *l == lits)
-        {
+        let g = match groups.iter().position(|(n, rep, ctor_form, l)| {
+            *n == *name && *rep == *representation && *ctor_form == *form && *l == lits
+        }) {
             Some(p) => p as u32,
             None => {
                 groups.push((*name, *representation, *form, lits));
@@ -2790,7 +3017,11 @@ fn collect_const_hoists(
             );
             continue;
         };
-        let _ = write!(defs, "{gname} = {}{suffix}(", skull_mir::mangle::type_symbol(ws, *name));
+        let _ = write!(
+            defs,
+            "{gname} = {}{suffix}(",
+            skull_mir::mangle::type_symbol(ws, *name)
+        );
         for (i, l) in lits.iter().enumerate() {
             if i > 0 {
                 defs.push_str(", ");
@@ -2830,7 +3061,10 @@ fn write_cellname(
         if f.fields.contains(&c) {
             write_cellname(out, func, None, colors, f.s_cell);
             out.push_str(".c");
-            let slot = *f.slots.get(&c).expect("frame field cell must carry a dense slot");
+            let slot = *f
+                .slots
+                .get(&c)
+                .expect("frame field cell must carry a dense slot");
             push_uint(out, slot);
             return;
         }
@@ -2914,7 +3148,12 @@ fn try_match_loop(
     goto_preds: &PredMap,
     frame: Option<&FrameCtx>,
 ) -> Option<CountedLoop> {
-    let Term::Branch { cond, then_bb, else_bb } = func.blocks[h].term else {
+    let Term::Branch {
+        cond,
+        then_bb,
+        else_bb,
+    } = func.blocks[h].term
+    else {
         return None;
     };
     // Header is entered by exactly the preheader + the latch, both via goto.
@@ -2945,7 +3184,15 @@ fn try_match_loop(
     if !slot_sound(func, slot, h, latch, &region) {
         return None;
     }
-    Some(CountedLoop { slot, hi, inclusive, body_entry: then_bb, latch, exit: else_bb, region })
+    Some(CountedLoop {
+        slot,
+        hi,
+        inclusive,
+        body_entry: then_bb,
+        latch,
+        exit: else_bb,
+        region,
+    })
 }
 
 /// `Some(slot)` iff block `p` is a pure 4-inst increment latch jumping to
@@ -2960,8 +3207,17 @@ fn latch_slot(func: &MirFunc, p: Idx<Block>, header: Idx<Block>) -> Option<Idx<C
     if ins.len() != 4 {
         return None;
     }
-    let (Inst::Load(slot), Inst::Const(Lit::Int(1)), Inst::IntAdd(a, b), Inst::Store { cell, value }) =
-        (&func.insts[ins[0]], &func.insts[ins[1]], &func.insts[ins[2]], &func.insts[ins[3]])
+    let (
+        Inst::Load(slot),
+        Inst::Const(Lit::Int(1)),
+        Inst::IntAdd(a, b),
+        Inst::Store { cell, value },
+    ) = (
+        &func.insts[ins[0]],
+        &func.insts[ins[1]],
+        &func.insts[ins[2]],
+        &func.insts[ins[3]],
+    )
     else {
         return None;
     };
@@ -2987,8 +3243,7 @@ fn match_header(
         return None;
     }
     // RHS is either a bound cell loaded in the header, or a preheader value.
-    let rhs_is_cell_load =
-        matches!(&func.insts[rhs], Inst::Load(_)) && insts.contains(&rhs);
+    let rhs_is_cell_load = matches!(&func.insts[rhs], Inst::Load(_)) && insts.contains(&rhs);
     let allowed: HashSet<Idx<Inst>> = if rhs_is_cell_load {
         [lhs, rhs, cond].into_iter().collect()
     } else {
@@ -3056,8 +3311,7 @@ fn slot_sound(
     latch: Idx<Block>,
     region: &HashSet<Idx<Block>>,
 ) -> bool {
-    let in_loop: HashSet<Idx<Block>> =
-        region.iter().copied().chain([header, latch]).collect();
+    let in_loop: HashSet<Idx<Block>> = region.iter().copied().chain([header, latch]).collect();
     let mut stores = 0usize;
     for (bid, b) in func.blocks.iter() {
         let inside = in_loop.contains(&bid);
@@ -3065,11 +3319,9 @@ fn slot_sound(
             match &func.insts[i] {
                 Inst::Store { cell, .. } if *cell == slot => stores += 1,
                 Inst::Load(c) if *c == slot && !inside => return false,
-                Inst::MapNext { key_cell, val_cell, .. }
-                    if *key_cell == slot || *val_cell == slot =>
-                {
-                    return false
-                }
+                Inst::MapNext {
+                    key_cell, val_cell, ..
+                } if *key_cell == slot || *val_cell == slot => return false,
                 _ => {}
             }
         }
@@ -3161,9 +3413,9 @@ fn recognize_structured_loops(
             continue;
         }
         let single_entry = nl.region.iter().all(|b| {
-            all_preds.get(b).is_none_or(|ps| {
-                ps.iter().all(|p| *p == nl.header || nl.region.contains(p))
-            })
+            all_preds
+                .get(b)
+                .is_none_or(|ps| ps.iter().all(|p| *p == nl.header || nl.region.contains(p)))
         });
         if !single_entry {
             continue;
@@ -3239,7 +3491,10 @@ fn classify_inline_lua_body(body: &str) -> Option<InlineLuaShape> {
         return Some(InlineLuaShape::UnitStmts);
     }
     let nonempty: Vec<&str> = t.lines().filter(|l| !l.trim().is_empty()).collect();
-    let returns = nonempty.iter().filter(|l| inline_lua_return_rest(l).is_some()).count();
+    let returns = nonempty
+        .iter()
+        .filter(|l| inline_lua_return_rest(l).is_some())
+        .count();
     if returns == 0 {
         return Some(if is_expr_inline_lua_body(t) {
             InlineLuaShape::Expr
@@ -3248,7 +3503,9 @@ fn classify_inline_lua_body(body: &str) -> Option<InlineLuaShape> {
         });
     }
     // Exactly one return, and it is the LAST non-empty line -> tail return.
-    let last_is_return = nonempty.last().is_some_and(|l| inline_lua_return_rest(l).is_some());
+    let last_is_return = nonempty
+        .last()
+        .is_some_and(|l| inline_lua_return_rest(l).is_some());
     if returns == 1 && last_is_return {
         Some(InlineLuaShape::TailReturn)
     } else {
@@ -3305,7 +3562,9 @@ fn is_expr_inline_lua_body(s: &str) -> bool {
         return false; // multi-line => statements
     }
     let f = first.trim_start();
-    for kw in ["local ", "if ", "for ", "while ", "do ", "return", "::", "repeat", "break", "goto "] {
+    for kw in [
+        "local ", "if ", "for ", "while ", "do ", "return", "::", "repeat", "break", "goto ",
+    ] {
         if f.starts_with(kw) {
             return false;
         }
@@ -3338,23 +3597,68 @@ fn always_inlinable(inst: &Inst) -> bool {
     matches!(
         inst,
         Inst::Const(_)
-            | Inst::IntAdd(..) | Inst::IntSub(..) | Inst::IntMul(..) | Inst::IntDiv(..) | Inst::IntMod(..)
-            | Inst::UintAdd(..) | Inst::UintSub(..) | Inst::UintMul(..) | Inst::UintDiv(..) | Inst::UintMod(..)
-            | Inst::FloatAdd(..) | Inst::FloatSub(..) | Inst::FloatMul(..) | Inst::FloatDiv(..) | Inst::FloatMod(..)
+            | Inst::IntAdd(..)
+            | Inst::IntSub(..)
+            | Inst::IntMul(..)
+            | Inst::IntDiv(..)
+            | Inst::IntMod(..)
+            | Inst::UintAdd(..)
+            | Inst::UintSub(..)
+            | Inst::UintMul(..)
+            | Inst::UintDiv(..)
+            | Inst::UintMod(..)
+            | Inst::FloatAdd(..)
+            | Inst::FloatSub(..)
+            | Inst::FloatMul(..)
+            | Inst::FloatDiv(..)
+            | Inst::FloatMod(..)
             | Inst::StringConcat(..)
-            | Inst::IntLt(..) | Inst::IntLeq(..) | Inst::IntGt(..) | Inst::IntGeq(..)
-            | Inst::UintLt(..) | Inst::UintLeq(..) | Inst::UintGt(..) | Inst::UintGeq(..)
-            | Inst::FloatLt(..) | Inst::FloatLeq(..) | Inst::FloatGt(..) | Inst::FloatGeq(..)
-            | Inst::Eq(..) | Inst::NotEq(..)
-            | Inst::BitAnd(..) | Inst::BitOr(..) | Inst::BitXor(..) | Inst::Shl(..) | Inst::Shr(..)
-            | Inst::UintBitAnd(..) | Inst::UintBitOr(..) | Inst::UintBitXor(..) | Inst::UintShl(..) | Inst::UintShr(..)
-            | Inst::Neg(_) | Inst::Not(_) | Inst::BitNot(_) | Inst::UintBitNot(_) | Inst::ToString(_)
-            | Inst::FloatToInt(_) | Inst::IntToFloat(_) | Inst::UintToFloat(_) | Inst::FloatToF32(_) | Inst::IntToUint(_)
-            | Inst::UintToInt(_) | Inst::FloatToUint(_) | Inst::UintBitcastInt(_) | Inst::IntBitcastUint(_)
-            | Inst::Format { .. } | Inst::FormatDyn { .. }
-            | Inst::MakeTuple(_) | Inst::MakeVec(_)
-            | Inst::MakeStruct { .. } | Inst::MakeValueStruct { .. }
-            | Inst::MakeNullableValue { .. } | Inst::MakeEnum { .. }
+            | Inst::IntLt(..)
+            | Inst::IntLeq(..)
+            | Inst::IntGt(..)
+            | Inst::IntGeq(..)
+            | Inst::UintLt(..)
+            | Inst::UintLeq(..)
+            | Inst::UintGt(..)
+            | Inst::UintGeq(..)
+            | Inst::FloatLt(..)
+            | Inst::FloatLeq(..)
+            | Inst::FloatGt(..)
+            | Inst::FloatGeq(..)
+            | Inst::Eq(..)
+            | Inst::NotEq(..)
+            | Inst::BitAnd(..)
+            | Inst::BitOr(..)
+            | Inst::BitXor(..)
+            | Inst::Shl(..)
+            | Inst::Shr(..)
+            | Inst::UintBitAnd(..)
+            | Inst::UintBitOr(..)
+            | Inst::UintBitXor(..)
+            | Inst::UintShl(..)
+            | Inst::UintShr(..)
+            | Inst::Neg(_)
+            | Inst::Not(_)
+            | Inst::BitNot(_)
+            | Inst::UintBitNot(_)
+            | Inst::ToString(_)
+            | Inst::FloatToInt(_)
+            | Inst::IntToFloat(_)
+            | Inst::UintToFloat(_)
+            | Inst::FloatToF32(_)
+            | Inst::IntToUint(_)
+            | Inst::UintToInt(_)
+            | Inst::FloatToUint(_)
+            | Inst::UintBitcastInt(_)
+            | Inst::IntBitcastUint(_)
+            | Inst::Format { .. }
+            | Inst::FormatDyn { .. }
+            | Inst::MakeTuple(_)
+            | Inst::MakeVec(_)
+            | Inst::MakeStruct { .. }
+            | Inst::MakeValueStruct { .. }
+            | Inst::MakeNullableValue { .. }
+            | Inst::MakeEnum { .. }
             | Inst::MakeEnumDyn { .. }
     )
 }
@@ -3366,7 +3670,11 @@ fn always_inlinable(inst: &Inst) -> bool {
 /// which is what pushed functions holding a few wide values past LuaJIT's
 /// 250-slot frame limit. No later write can intervene, because the one write
 /// dominates every read. Narrow receives qualify too.
-fn single_receive_cells(func: &MirFunc, scope: &[Idx<Block>], pinned: &[bool]) -> HashSet<Idx<Cell>> {
+fn single_receive_cells(
+    func: &MirFunc,
+    scope: &[Idx<Block>],
+    pinned: &[bool],
+) -> HashSet<Idx<Cell>> {
     // cell -> (defs, the receive's block and position). Only a receive records
     // a position, so a cell qualifies iff its one def is one.
     let mut defs: rustc_hash::FxHashMap<Idx<Cell>, (u32, Option<(Idx<Block>, usize)>)> =
@@ -3411,7 +3719,9 @@ fn single_receive_cells(func: &MirFunc, scope: &[Idx<Block>], pinned: &[bool]) -
                 if !out.contains(&cell) {
                     return;
                 }
-                let Some((_, Some((def_block, def_pos)))) = defs.get(&cell) else { return };
+                let Some((_, Some((def_block, def_pos)))) = defs.get(&cell) else {
+                    return;
+                };
                 if *def_block != b || *def_pos >= pos || !matches!(func.insts[id], Inst::Load(_)) {
                     out.remove(&cell);
                 }
@@ -3574,7 +3884,11 @@ fn concat_run(func: &MirFunc, inlinable: &[bool], parts: &mut Vec<Idx<Inst>>, id
 /// instrumented and plain builds fold alike.
 fn fold_operand_levels(func: &MirFunc, inlinable: &[bool], id: Idx<Inst>) -> Vec<(Idx<Inst>, u32)> {
     let inst = &func.insts[id];
-    let instrument = if emitted_value_allocation_kind(inst).is_some() { 2 } else { 0 };
+    let instrument = if emitted_value_allocation_kind(inst).is_some() {
+        2
+    } else {
+        0
+    };
     let uniform = |levels: u32| {
         let mut out = Vec::new();
         regalloc::inst_uses(inst, &mut |u| out.push((u, levels)));
@@ -3587,14 +3901,29 @@ fn fold_operand_levels(func: &MirFunc, inlinable: &[bool], id: Idx<Inst>) -> Vec
             concat_run(func, inlinable, &mut run, b);
             run.into_iter().zip(instrument..).collect()
         }
-        Inst::IntAdd(a, b) | Inst::FloatAdd(a, b) | Inst::IntSub(a, b) | Inst::FloatSub(a, b)
-        | Inst::IntMul(a, b) | Inst::FloatMul(a, b) | Inst::FloatDiv(a, b)
-        | Inst::IntMod(a, b) | Inst::FloatMod(a, b)
-        | Inst::IntLt(a, b) | Inst::UintLt(a, b) | Inst::FloatLt(a, b)
-        | Inst::IntLeq(a, b) | Inst::UintLeq(a, b) | Inst::FloatLeq(a, b)
-        | Inst::IntGt(a, b) | Inst::UintGt(a, b) | Inst::FloatGt(a, b)
-        | Inst::IntGeq(a, b) | Inst::UintGeq(a, b) | Inst::FloatGeq(a, b)
-        | Inst::Eq(a, b) | Inst::NotEq(a, b) => vec![(a, 0), (b, 1)],
+        Inst::IntAdd(a, b)
+        | Inst::FloatAdd(a, b)
+        | Inst::IntSub(a, b)
+        | Inst::FloatSub(a, b)
+        | Inst::IntMul(a, b)
+        | Inst::FloatMul(a, b)
+        | Inst::FloatDiv(a, b)
+        | Inst::IntMod(a, b)
+        | Inst::FloatMod(a, b)
+        | Inst::IntLt(a, b)
+        | Inst::UintLt(a, b)
+        | Inst::FloatLt(a, b)
+        | Inst::IntLeq(a, b)
+        | Inst::UintLeq(a, b)
+        | Inst::FloatLeq(a, b)
+        | Inst::IntGt(a, b)
+        | Inst::UintGt(a, b)
+        | Inst::FloatGt(a, b)
+        | Inst::IntGeq(a, b)
+        | Inst::UintGeq(a, b)
+        | Inst::FloatGeq(a, b)
+        | Inst::Eq(a, b)
+        | Inst::NotEq(a, b) => vec![(a, 0), (b, 1)],
         Inst::Neg(x) | Inst::Not(x) => vec![(x, 1)],
         Inst::UintMul(..) => uniform(8),
         Inst::UintShr(..) => uniform(5),
@@ -3709,14 +4038,20 @@ fn render_scope(
     // nears LuaJIT's 200-active-locals parse cap, drop the partitions.
     let mut loop_scopes: Vec<regalloc::LoopScope> = loops
         .iter()
-        .map(|(&h, cl)| regalloc::LoopScope { header: h, region: cl.region.iter().copied().collect() })
+        .map(|(&h, cl)| regalloc::LoopScope {
+            header: h,
+            region: cl.region.iter().copied().collect(),
+        })
         .collect();
     loop_scopes.sort_by_key(|ls| func.emit_block_id(ls.header));
     let mut va = regalloc::color_values(func, rpo, &inlinable, &loop_scopes);
     if va.color_scope.len() > 150 && !loop_scopes.is_empty() {
         va = regalloc::color_values(func, rpo, &inlinable, &[]);
     }
-    let regalloc::ValueAlloc { colors, color_scope } = va;
+    let regalloc::ValueAlloc {
+        colors,
+        color_scope,
+    } = va;
     // Only cells this region actually references get a local (a hoisted lambda
     // body is a full-arena clone; declaring the dead enclosing/sibling cells would
     // blow LuaJIT's 200-local cap on a large co-fn step). Computed once per top
@@ -3749,7 +4084,11 @@ fn render_scope(
         // A counted loop's header (compare) and latch (increment) are subsumed
         // by the `for` line; their instructions never run as statements.
         for (h, cl) in loops.iter() {
-            for &id in func.blocks[*h].insts.iter().chain(func.blocks[cl.latch].insts.iter()) {
+            for &id in func.blocks[*h]
+                .insts
+                .iter()
+                .chain(func.blocks[cl.latch].insts.iter())
+            {
                 emits_nothing[raw(id) as usize] = true;
             }
         }
@@ -3760,7 +4099,12 @@ fn render_scope(
             .iter()
             .map(|(&h, cl)| regalloc::LoopScope {
                 header: h,
-                region: cl.region.iter().copied().chain(std::iter::once(cl.latch)).collect(),
+                region: cl
+                    .region
+                    .iter()
+                    .copied()
+                    .chain(std::iter::once(cl.latch))
+                    .collect(),
             })
             .collect();
         // A cell with no local of its own is excluded exactly like a pinned one:
@@ -3804,7 +4148,10 @@ fn render_scope(
     // error escapes and re-raises it. The flag is consumed by that re-entry,
     // so a recursive or nested call is protected again.
     if is_top && func.registers_defer_cleanup(rpo) {
-        assert!(frame.is_none(), "coroutine step `{lua_name}` registers an unwind defer");
+        assert!(
+            frame.is_none(),
+            "coroutine step `{lua_name}` registers an unwind defer"
+        );
         out.push_str("  if not __rock_defer_entering then return ");
         out.push_str(skull_mir::mir::DEFER_CALL);
         out.push('(');
@@ -3869,9 +4216,9 @@ fn render_scope(
                 continue;
             }
             let (decl, col) = match cell_colors[raw(cid) as usize] {
-                u32::MAX => (true, None),                        // uncolored -> c<raw>
+                u32::MAX => (true, None), // uncolored -> c<raw>
                 col if !param_colors.contains(&col) => (seen_color.insert(col), Some(col)),
-                _ => (false, None),                             // color already a param's
+                _ => (false, None), // color already a param's
             };
             if !decl {
                 continue;
@@ -4004,7 +4351,11 @@ fn check_frame_limits(
         emits_nothing[raw(*id) as usize] = true;
     }
     for (header, cl) in loops.iter() {
-        for &id in func.blocks[*header].insts.iter().chain(func.blocks[cl.latch].insts.iter()) {
+        for &id in func.blocks[*header]
+            .insts
+            .iter()
+            .chain(func.blocks[cl.latch].insts.iter())
+        {
             emits_nothing[raw(id) as usize] = true;
         }
     }
@@ -4104,9 +4455,7 @@ fn frame_limit_error(
              live across one call, or split this function",
         );
     } else {
-        message.push_str(
-            "\n  keep fewer values live across one call, or split this function",
-        );
+        message.push_str("\n  keep fewer values live across one call, or split this function");
     }
     let span = overflow
         .at
@@ -4150,7 +4499,11 @@ fn wide_call_contributors(ws: &Workspace, func: &MirFunc, id: Idx<Inst>) -> Vec<
                 width,
                 format!(
                     "parameter `{param}` of `{callee_name}` is {width} scalar lanes{}",
-                    if nobox { " (nobox: cannot be boxed)" } else { "" }
+                    if nobox {
+                        " (nobox: cannot be boxed)"
+                    } else {
+                        ""
+                    }
                 ),
             ));
         }
@@ -4165,7 +4518,11 @@ fn wide_call_contributors(ws: &Workspace, func: &MirFunc, id: Idx<Inst>) -> Vec<
             result_lanes,
             format!(
                 "the return of `{callee_name}` is {result_lanes} scalar lanes{}",
-                if nobox { " (nobox: cannot be boxed)" } else { "" }
+                if nobox {
+                    " (nobox: cannot be boxed)"
+                } else {
+                    ""
+                }
             ),
         ));
     }
@@ -4224,16 +4581,20 @@ enum SelectionTarget {
 
 #[derive(Clone, Copy)]
 enum SelectionArm {
-    Join { store: Option<(Idx<Cell>, Idx<Inst>)>, join: Idx<Block> },
+    Join {
+        store: Option<(Idx<Cell>, Idx<Inst>)>,
+        join: Idx<Block>,
+    },
     Return(Idx<Inst>),
 }
 
 impl SelectionArm {
     fn target_value(self) -> Option<(SelectionTarget, Idx<Inst>)> {
         match self {
-            Self::Join { store: Some((cell, value)), join } => {
-                Some((SelectionTarget::Cell { cell, join }, value))
-            }
+            Self::Join {
+                store: Some((cell, value)),
+                join,
+            } => Some((SelectionTarget::Cell { cell, join }, value)),
             Self::Return(value) => Some((SelectionTarget::Return, value)),
             _ => None,
         }
@@ -4341,7 +4702,13 @@ impl Emitter<'_> {
 
     /// The kills due before the next statement of `bb`: the block's entry kills
     /// when no statement has been written yet, else the ones after `after`.
-    fn write_pending_kills(&self, out: &mut String, bb: Idx<Block>, at_entry: bool, after: Option<Idx<Inst>>) {
+    fn write_pending_kills(
+        &self,
+        out: &mut String,
+        bb: Idx<Block>,
+        at_entry: bool,
+        after: Option<Idx<Inst>>,
+    ) {
         let locals: &[regalloc::KillLocal] = if at_entry {
             &self.kills.at_entry[raw(bb) as usize]
         } else {
@@ -4363,7 +4730,6 @@ impl Emitter<'_> {
         let symbol = skull_mir::mangle::symbol_of_key(name);
         self.state_slots.contains_key(&symbol) || self.static_slots.contains_key(&symbol)
     }
-
 
     fn write_state_slot(&self, out: &mut String, name: ustr::Ustr) {
         let name = skull_mir::mangle::symbol_of_key(name);
@@ -4445,7 +4811,11 @@ impl Emitter<'_> {
     /// body: a backward `goto` would make LuaJIT emit its own rangeless
     /// `BC_LOOP` inside the loop the `while` is there to close.
     fn write_label_ref(&self, out: &mut String, t: Idx<Block>) {
-        out.push_str(if self.open_loops.contains(&t) { "lc" } else { "bb" });
+        out.push_str(if self.open_loops.contains(&t) {
+            "lc"
+        } else {
+            "bb"
+        });
         push_uint(out, self.func.emit_block_id(t));
     }
 
@@ -4464,14 +4834,18 @@ impl Emitter<'_> {
         // last statement of a returning block are dropped: `return` (and a
         // tail call, which replaces the frame) drops every slot itself.
         let returns = tail.is_some()
-            || matches!(self.func.blocks[bb].term, Term::Return(_) | Term::Unreachable);
+            || matches!(
+                self.func.blocks[bb].term,
+                Term::Return(_) | Term::Unreachable
+            );
         // In a returning block, only a statement that may call can expose a
         // stale slot to an exit; kills past the last such statement are dropped.
         let last_impure = if returns {
             insts[..emitted_len]
                 .iter()
                 .rposition(|&id| {
-                    self.emits_statement(id) && !regalloc::statement_is_pure(self.func, &self.inlinable, id)
+                    self.emits_statement(id)
+                        && !regalloc::statement_is_pure(self.func, &self.inlinable, id)
                 })
                 .map(|i| insts[i])
         } else {
@@ -4629,8 +5003,7 @@ impl Emitter<'_> {
     /// exits stay ordinary `goto`s to labels outside, which Lua allows and the
     /// single-entry proof in [`recognize_structured_loops`] is what makes safe.
     fn expand_while(&mut self, out: &mut String, header: Idx<Block>) {
-        let region: HashSet<Idx<Block>> =
-            self.structured[&header].region.iter().copied().collect();
+        let region: HashSet<Idx<Block>> = self.structured[&header].region.iter().copied().collect();
         self.emitted[raw(header) as usize] = true;
         self.write_block_label(out, header);
         out.push_str("  while true do\n");
@@ -5027,9 +5400,7 @@ impl Emitter<'_> {
                 self.write_opnd(out, *x);
                 out.push(')');
             }
-            Inst::IntToUint(x) | Inst::FloatToUint(x) => {
-                self.write_checked_u32(out, *x)
-            }
+            Inst::IntToUint(x) | Inst::FloatToUint(x) => self.write_checked_u32(out, *x),
             Inst::UintBitcastInt(x) => {
                 out.push_str("(((");
                 self.write_opnd(out, *x);
@@ -5156,7 +5527,14 @@ impl Emitter<'_> {
                 self.write_opnd(out, *capacity);
                 out.push('}');
             }
-            Inst::MakeVecStrided { elem, stride, values, len, capacity, .. } => {
+            Inst::MakeVecStrided {
+                elem,
+                stride,
+                values,
+                len,
+                capacity,
+                ..
+            } => {
                 out.push_str("{_data = {");
                 self.write_csv(out, values);
                 out.push_str("}, len = ");
@@ -5171,7 +5549,12 @@ impl Emitter<'_> {
                 self.write_opnd(out, *capacity);
                 out.push_str("}}");
             }
-            Inst::MakeVecStridedHeader { elem, stride, capacity, .. } => {
+            Inst::MakeVecStridedHeader {
+                elem,
+                stride,
+                capacity,
+                ..
+            } => {
                 out.push_str("{repr = ");
                 write_lua_string(out, skull_mir::mir::VEC_STRIDED_REPR);
                 out.push_str(", elem = ");
@@ -5198,8 +5581,18 @@ impl Emitter<'_> {
                 }
                 out.push('}');
             }
-            Inst::MakeValueStruct { name, representation, form, fields }
-            | Inst::MaterializeValueStruct { name, representation, form, fields } => {
+            Inst::MakeValueStruct {
+                name,
+                representation,
+                form,
+                fields,
+            }
+            | Inst::MaterializeValueStruct {
+                name,
+                representation,
+                form,
+                fields,
+            } => {
                 let Some(suffix) = ctor_suffix(self.func, *representation, *form) else {
                     self.ctx.reject(
                         name.to_string(),
@@ -5223,10 +5616,18 @@ impl Emitter<'_> {
                     let symbol = skull_mir::mangle::type_symbol(self.ws, *name);
                     let _ = write!(out, "__ty = ");
                     write_lua_string(out, symbol.as_str());
-                    let _ = write!(out, " }}, {})", value_struct_metatable_name(symbol.as_str()));
+                    let _ = write!(
+                        out,
+                        " }}, {})",
+                        value_struct_metatable_name(symbol.as_str())
+                    );
                     return;
                 }
-                let _ = write!(out, "{}{suffix}(", skull_mir::mangle::type_symbol(self.ws, *name));
+                let _ = write!(
+                    out,
+                    "{}{suffix}(",
+                    skull_mir::mangle::type_symbol(self.ws, *name)
+                );
                 for (i, (_, id)) in fields.iter().enumerate() {
                     if i > 0 {
                         out.push_str(", ");
@@ -5262,17 +5663,30 @@ impl Emitter<'_> {
                 }
                 out.push('}');
             }
-            Inst::MakeEnumDyn { tag, ty, positional, named } => {
+            Inst::MakeEnumDyn {
+                tag,
+                ty,
+                positional,
+                named,
+            } => {
                 self.write_dynamic_enum(out, *tag, *ty, positional, named);
             }
 
             Inst::FfiNewArray { ctype, count, .. } => {
-                let _ = write!(out, "ffi.new(\"{}[?]\", ", skull_mir::mangle::type_symbol(self.ws, *ctype));
+                let _ = write!(
+                    out,
+                    "ffi.new(\"{}[?]\", ",
+                    skull_mir::mangle::type_symbol(self.ws, *ctype)
+                );
                 self.write_opnd(out, *count);
                 out.push(')');
             }
             Inst::FfiViewCast { cty, ptr } => {
-                let _ = write!(out, "ffi.cast(\"{}*\", ", skull_mir::mangle::type_symbol(self.ws, *cty));
+                let _ = write!(
+                    out,
+                    "ffi.cast(\"{}*\", ",
+                    skull_mir::mangle::type_symbol(self.ws, *cty)
+                );
                 self.write_opnd(out, *ptr);
                 out.push(')');
             }
@@ -5460,7 +5874,13 @@ impl Emitter<'_> {
     /// `__vec_checked_get`) — skull runs debug; release stripping is future
     /// release-mode work. Map indexes raw (miss returns nil; `.get` is the
     /// checked form).
-    fn write_index(&self, out: &mut String, base: Idx<Inst>, index: Idx<Inst>, kind: ContainerKind) {
+    fn write_index(
+        &self,
+        out: &mut String,
+        base: Idx<Inst>,
+        index: Idx<Inst>,
+        kind: ContainerKind,
+    ) {
         match kind {
             ContainerKind::Vec => {
                 out.push_str("__vec_checked_get(");
@@ -5534,7 +5954,9 @@ impl Emitter<'_> {
     ) {
         out.push_str("  do local ");
         for i in 0..targets.len() {
-            if i > 0 { out.push_str(", "); }
+            if i > 0 {
+                out.push_str(", ");
+            }
             write!(out, "v{i}").unwrap();
         }
         out.push_str(" = ");
@@ -5542,7 +5964,11 @@ impl Emitter<'_> {
         out.push('\n');
         for (i, (target, frame)) in targets.iter().enumerate() {
             if *frame {
-                writeln!(out, "    if v{i} ~= nil or {target} ~= nil then {target} = v{i} end").unwrap();
+                writeln!(
+                    out,
+                    "    if v{i} ~= nil or {target} ~= nil then {target} = v{i} end"
+                )
+                .unwrap();
             } else {
                 writeln!(out, "    {target} = v{i}").unwrap();
             }
@@ -5560,7 +5986,9 @@ impl Emitter<'_> {
             Inst::Store { cell, value } => {
                 if self.cell_is_frame_field(*cell) {
                     let target = cellname(self.func, self.frame, self.cell_colors, *cell);
-                    self.write_frame_assignment(out, &[(target, true)], |out| self.write_opnd(out, *value));
+                    self.write_frame_assignment(out, &[(target, true)], |out| {
+                        self.write_opnd(out, *value)
+                    });
                     return;
                 }
                 out.push_str("  ");
@@ -5574,13 +6002,16 @@ impl Emitter<'_> {
                     if matches!(self.func.insts[*base], Inst::Load(cell) if cell == frame.s_cell) {
                         let mut target = cellname(self.func, None, self.cell_colors, frame.s_cell);
                         write_field_key(&mut target, field.as_str());
-                        self.write_frame_assignment(out, &[(target, true)], |out| self.write_opnd(out, *value));
+                        self.write_frame_assignment(out, &[(target, true)], |out| {
+                            self.write_opnd(out, *value)
+                        });
                         return;
                     }
                 }
                 // LuaJIT can rehash when assigning nil to an absent key.
                 // Metatable writes remain observable; plain operands evaluate once.
-                let guard = self.opnd_is_plain(*base) && self.opnd_is_plain(*value)
+                let guard = self.opnd_is_plain(*base)
+                    && self.opnd_is_plain(*value)
                     && !matches!(&self.func.insts[*value], Inst::Const(lit) if !matches!(lit, Lit::Nil));
                 if guard {
                     out.push_str("  if ");
@@ -5598,7 +6029,9 @@ impl Emitter<'_> {
                 out.push_str(" = ");
                 self.write_opnd(out, *value);
                 out.push('\n');
-                if guard { out.push_str("  end\n"); }
+                if guard {
+                    out.push_str("  end\n");
+                }
             }
             Inst::StoreIndex {
                 base,
@@ -5707,9 +6140,15 @@ impl Emitter<'_> {
                 table,
             } => {
                 if self.cell_is_frame_field(*key_cell) || self.cell_is_frame_field(*val_cell) {
-                    let targets: Vec<_> = [*key_cell, *val_cell].iter().map(|c| (
-                        cellname(self.func, self.frame, self.cell_colors, *c), self.cell_is_frame_field(*c),
-                    )).collect();
+                    let targets: Vec<_> = [*key_cell, *val_cell]
+                        .iter()
+                        .map(|c| {
+                            (
+                                cellname(self.func, self.frame, self.cell_colors, *c),
+                                self.cell_is_frame_field(*c),
+                            )
+                        })
+                        .collect();
                     self.write_frame_assignment(out, &targets, |out| {
                         out.push_str("next(");
                         self.write_opnd(out, *table);
@@ -5729,9 +6168,15 @@ impl Emitter<'_> {
             // a value-returning fn whose return is scalarized to N leaf values.
             Inst::CallMulti { dests, func, args } => {
                 if dests.iter().any(|c| self.cell_is_frame_field(*c)) {
-                    let targets: Vec<_> = dests.iter().map(|c| (
-                        cellname(self.func, self.frame, self.cell_colors, *c), self.cell_is_frame_field(*c),
-                    )).collect();
+                    let targets: Vec<_> = dests
+                        .iter()
+                        .map(|c| {
+                            (
+                                cellname(self.func, self.frame, self.cell_colors, *c),
+                                self.cell_is_frame_field(*c),
+                            )
+                        })
+                        .collect();
                     self.write_frame_assignment(out, &targets, |out| {
                         write!(out, "{}(", self.callee_name(id, *func)).unwrap();
                         self.write_csv(out, args);
@@ -5747,18 +6192,30 @@ impl Emitter<'_> {
                     write_cellname(out, self.func, self.frame, self.cell_colors, *c);
                 }
                 let callee = self.callee_name(id, *func);
-                if !dests.is_empty() { out.push_str(" = "); }
+                if !dests.is_empty() {
+                    out.push_str(" = ");
+                }
                 let _ = write!(out, "{callee}(");
                 self.write_csv(out, args);
                 out.push_str(")\n");
             }
             // Indirect multi-return: `d0, d1, ... = callee(args)` -- a tuple
             // returned through a fn-value. Multi-assign so Lua doesn't truncate.
-            Inst::CallValueMulti { dests, callee, args } => {
+            Inst::CallValueMulti {
+                dests,
+                callee,
+                args,
+            } => {
                 if dests.iter().any(|c| self.cell_is_frame_field(*c)) {
-                    let targets: Vec<_> = dests.iter().map(|c| (
-                        cellname(self.func, self.frame, self.cell_colors, *c), self.cell_is_frame_field(*c),
-                    )).collect();
+                    let targets: Vec<_> = dests
+                        .iter()
+                        .map(|c| {
+                            (
+                                cellname(self.func, self.frame, self.cell_colors, *c),
+                                self.cell_is_frame_field(*c),
+                            )
+                        })
+                        .collect();
                     self.write_frame_assignment(out, &targets, |out| {
                         self.write_opnd(out, *callee);
                         out.push('(');
@@ -5774,7 +6231,9 @@ impl Emitter<'_> {
                     }
                     write_cellname(out, self.func, self.frame, self.cell_colors, *c);
                 }
-                if !dests.is_empty() { out.push_str(" = "); }
+                if !dests.is_empty() {
+                    out.push_str(" = ");
+                }
                 self.write_opnd(out, *callee);
                 out.push('(');
                 self.write_csv(out, args);
@@ -5782,27 +6241,35 @@ impl Emitter<'_> {
             }
             // Rewritten to `s.__inner = ..` by the coroutine transform; if it
             // reaches codegen the transform didn't run (a bug).
-            Inst::CoroSetInner(_) => unreachable!("CoroSetInner must be removed by the coroutine transform"),
+            Inst::CoroSetInner(_) => {
+                unreachable!("CoroSetInner must be removed by the coroutine transform")
+            }
             // Relocated to the constructor by the coroutine transform.
-            Inst::CoroHook { .. } => unreachable!("CoroHook must be relocated by the coroutine transform"),
+            Inst::CoroHook { .. } => {
+                unreachable!("CoroHook must be relocated by the coroutine transform")
+            }
             _ => unreachable!("not an effect"),
         }
     }
 
-    fn selection_arm(&self, bb: Idx<Block>)
-        -> Option<SelectionArm>
-    {
+    fn selection_arm(&self, bb: Idx<Block>) -> Option<SelectionArm> {
         let block = &self.func.blocks[bb];
         if let Term::Return(values) = &block.term {
-            let [value] = values.as_slice() else { return None; };
+            let [value] = values.as_slice() else {
+                return None;
+            };
             // A return destination can replace the old store/join sink, but
             // skipping its arm must obey the same no-effects restriction.
-            if !block.insts.iter().all(|id| *id == *value
-                && matches!(self.func.insts[*id], Inst::Load(_) | Inst::Const(_)))
-            { return None; }
+            if !block.insts.iter().all(|id| {
+                *id == *value && matches!(self.func.insts[*id], Inst::Load(_) | Inst::Const(_))
+            }) {
+                return None;
+            }
             return Some(SelectionArm::Return(*value));
         }
-        let Term::Goto(join) = block.term else { return None; };
+        let Term::Goto(join) = block.term else {
+            return None;
+        };
         let store = match block.insts.as_slice() {
             [] => None,
             [s] => match self.func.insts[*s] {
@@ -5814,22 +6281,31 @@ impl Emitter<'_> {
                     Inst::Store { cell, value } if value == *l => Some((cell, value)),
                     _ => return None,
                 }
-            },
+            }
             _ => return None,
         };
         Some(SelectionArm::Join { store, join })
     }
 
-    fn selection_cell_matches(&self, bb: Idx<Block>, cond: Idx<Inst>, cell: Idx<Cell>, operand: Idx<Inst>) -> bool {
+    fn selection_cell_matches(
+        &self,
+        bb: Idx<Block>,
+        cond: Idx<Inst>,
+        cell: Idx<Cell>,
+        operand: Idx<Inst>,
+    ) -> bool {
         // A selected cell can still hold the captured comparison operand after
         // copy propagation. Do not carry that equivalence across effects.
         let insts = &self.func.blocks[bb].insts;
         for &id in insts.iter().rev() {
             match self.func.insts[id] {
-                Inst::Store { cell: target, value } if target == cell => return value == operand,
+                Inst::Store {
+                    cell: target,
+                    value,
+                } if target == cell => return value == operand,
                 Inst::Load(source) if id == operand && source == cell => return true,
-                Inst::Load(_) | Inst::Const(_) => {},
-                _ if id == cond => {},
+                Inst::Load(_) | Inst::Const(_) => {}
+                _ if id == cond => {}
                 _ => return false,
             }
         }
@@ -5837,8 +6313,16 @@ impl Emitter<'_> {
             && self.inlinable[raw(operand) as usize]
     }
 
-    fn selection_matches(&self, bb: Idx<Block>, cond: Idx<Inst>, value: Idx<Inst>, operand: Idx<Inst>) -> bool {
-        if value == operand { return true; }
+    fn selection_matches(
+        &self,
+        bb: Idx<Block>,
+        cond: Idx<Inst>,
+        value: Idx<Inst>,
+        operand: Idx<Inst>,
+    ) -> bool {
+        if value == operand {
+            return true;
+        }
         match (&self.func.insts[value], &self.func.insts[operand]) {
             (Inst::Const(Lit::Float(x)), Inst::Const(Lit::Float(y))) => x.to_bits() == y.to_bits(),
             (Inst::Const(x), Inst::Const(y)) => x == y,
@@ -5847,10 +6331,16 @@ impl Emitter<'_> {
         }
     }
 
-    fn numeric_selection(&self, bb: Idx<Block>, cond: Idx<Inst>, yes: Idx<Block>, no: Idx<Block>)
-        -> Option<(SelectionTarget, Idx<Inst>, Idx<Inst>, &'static str)>
-    {
-        if !self.inlinable[raw(cond) as usize] { return None; }
+    fn numeric_selection(
+        &self,
+        bb: Idx<Block>,
+        cond: Idx<Inst>,
+        yes: Idx<Block>,
+        no: Idx<Block>,
+    ) -> Option<(SelectionTarget, Idx<Inst>, Idx<Inst>, &'static str)> {
+        if !self.inlinable[raw(cond) as usize] {
+            return None;
+        }
         let (a, b, less) = match self.func.insts[cond] {
             Inst::FloatLt(a, b) | Inst::IntLt(a, b) => (a, b, true),
             Inst::FloatGt(a, b) | Inst::IntGt(a, b) => (a, b, false),
@@ -5861,30 +6351,45 @@ impl Emitter<'_> {
             if self.inlinable[raw(id) as usize]
                 && !matches!(self.func.insts[id], Inst::Load(_) | Inst::Const(_))
                 && !self.plain_int_to_float(id)
-            { return None; }
+            {
+                return None;
+            }
         }
-        let (target, yes_value, no_value) = match (self.selection_arm(yes)?, self.selection_arm(no)?) {
-            (SelectionArm::Return(yes), SelectionArm::Return(no)) => {
-                (SelectionTarget::Return, Some(yes), Some(no))
-            }
-            (SelectionArm::Join { store: yes, join }, SelectionArm::Join { store: no, join: no_join }) => {
-                if join != no_join { return None; }
-                let cell = yes.or(no)?.0;
-                if yes.is_some_and(|s| s.0 != cell) || no.is_some_and(|s| s.0 != cell) {
-                    return None;
+        let (target, yes_value, no_value) =
+            match (self.selection_arm(yes)?, self.selection_arm(no)?) {
+                (SelectionArm::Return(yes), SelectionArm::Return(no)) => {
+                    (SelectionTarget::Return, Some(yes), Some(no))
                 }
-                (SelectionTarget::Cell { cell, join }, yes.map(|s| s.1), no.map(|s| s.1))
-            }
-            _ => return None,
-        };
-        let matches = |value: Option<Idx<Inst>>, operand: Idx<Inst>| {
-            match value {
-                Some(value) => self.selection_matches(bb, cond, value, operand),
-                None => match target {
-                    SelectionTarget::Cell { cell, .. } => self.selection_cell_matches(bb, cond, cell, operand),
-                    SelectionTarget::Return => false,
-                },
-            }
+                (
+                    SelectionArm::Join { store: yes, join },
+                    SelectionArm::Join {
+                        store: no,
+                        join: no_join,
+                    },
+                ) => {
+                    if join != no_join {
+                        return None;
+                    }
+                    let cell = yes.or(no)?.0;
+                    if yes.is_some_and(|s| s.0 != cell) || no.is_some_and(|s| s.0 != cell) {
+                        return None;
+                    }
+                    (
+                        SelectionTarget::Cell { cell, join },
+                        yes.map(|s| s.1),
+                        no.map(|s| s.1),
+                    )
+                }
+                _ => return None,
+            };
+        let matches = |value: Option<Idx<Inst>>, operand: Idx<Inst>| match value {
+            Some(value) => self.selection_matches(bb, cond, value, operand),
+            None => match target {
+                SelectionTarget::Cell { cell, .. } => {
+                    self.selection_cell_matches(bb, cond, cell, operand)
+                }
+                SelectionTarget::Return => false,
+            },
         };
         if matches(yes_value, a) && matches(no_value, b) {
             Some((target, a, b, if less { "min" } else { "max" }))
@@ -5896,48 +6401,96 @@ impl Emitter<'_> {
         }
     }
 
-    fn numeric_clamp(&self, bb: Idx<Block>, cond: Idx<Inst>, yes: Idx<Block>, no: Idx<Block>)
-        -> Option<(SelectionTarget, Idx<Inst>, f64, f64)>
-    {
-        if !self.inlinable[raw(cond) as usize] { return None; }
-        let Inst::FloatLt(value, lower) = self.func.insts[cond] else { return None; };
+    fn numeric_clamp(
+        &self,
+        bb: Idx<Block>,
+        cond: Idx<Inst>,
+        yes: Idx<Block>,
+        no: Idx<Block>,
+    ) -> Option<(SelectionTarget, Idx<Inst>, f64, f64)> {
+        if !self.inlinable[raw(cond) as usize] {
+            return None;
+        }
+        let Inst::FloatLt(value, lower) = self.func.insts[cond] else {
+            return None;
+        };
         let (target, low_value) = self.selection_arm(yes)?.target_value()?;
-        if !self.selection_matches(bb, cond, low_value, lower) { return None; }
+        if !self.selection_matches(bb, cond, low_value, lower) {
+            return None;
+        }
         let block = &self.func.blocks[no];
-        let Term::Branch { cond: inner, then_bb, else_bb } = block.term else { return None; };
-        if !block.insts.iter().all(|id| *id == inner
-            || matches!(self.func.insts[*id], Inst::Load(_) | Inst::Const(_))) { return None; }
+        let Term::Branch {
+            cond: inner,
+            then_bb,
+            else_bb,
+        } = block.term
+        else {
+            return None;
+        };
+        if !block.insts.iter().all(|id| {
+            *id == inner || matches!(self.func.insts[*id], Inst::Load(_) | Inst::Const(_))
+        }) {
+            return None;
+        }
         let (inner_target, upper, inner_value, "min") =
-            self.numeric_selection(no, inner, then_bb, else_bb)? else { return None; };
+            self.numeric_selection(no, inner, then_bb, else_bb)?
+        else {
+            return None;
+        };
         let lo = self.selection_float_literal(bb, lower)?;
         let hi = self.selection_float_literal(no, upper)?;
         // The source tests the lower bound first; an inverted range would lose
         // that priority in a nested min/max expression.
-        if !(lo <= hi) || !self.selection_matches(bb, cond, inner_value, value) { return None; }
+        if !(lo <= hi) || !self.selection_matches(bb, cond, inner_value, value) {
+            return None;
+        }
         if inner_target != target {
-            let SelectionTarget::Cell { cell: inner_cell, join: tail } = inner_target else { return None; };
+            let SelectionTarget::Cell {
+                cell: inner_cell,
+                join: tail,
+            } = inner_target
+            else {
+                return None;
+            };
             let (forwarded_target, forwarded) = self.selection_arm(tail)?.target_value()?;
             if forwarded_target != target
                 || !matches!(self.func.insts[forwarded], Inst::Load(c) if c == inner_cell)
-            { return None; }
+            {
+                return None;
+            }
         }
         if self.inlinable[raw(value) as usize]
             && !matches!(self.func.insts[value], Inst::Load(_) | Inst::Const(_))
-        { return None; }
+        {
+            return None;
+        }
         Some((target, value, lo, hi))
     }
 
     fn selection_float_literal(&self, bb: Idx<Block>, operand: Idx<Inst>) -> Option<f64> {
-        if let Inst::Const(Lit::Float(value)) = self.func.insts[operand] { return Some(value); }
-        let Inst::Load(cell) = self.func.insts[operand] else { return None; };
+        if let Inst::Const(Lit::Float(value)) = self.func.insts[operand] {
+            return Some(value);
+        }
+        let Inst::Load(cell) = self.func.insts[operand] else {
+            return None;
+        };
         // Captured frame fields can change through callbacks without a cell def.
-        if self.cell_is_frame_field(cell) { return None; }
-        let preds = self.selection_preds.get_or_init(|| predecessors(self.func, self.rpo).0);
+        if self.cell_is_frame_field(cell) {
+            return None;
+        }
+        let preds = self
+            .selection_preds
+            .get_or_init(|| predecessors(self.func, self.rpo).0);
         let mut block = bb;
-        let mut limit = self.func.blocks[bb].insts.iter().position(|id| *id == operand)?;
+        let mut limit = self.func.blocks[bb]
+            .insts
+            .iter()
+            .position(|id| *id == operand)?;
         let mut seen = HashSet::default();
         loop {
-            if !seen.insert(block) { return None; }
+            if !seen.insert(block) {
+                return None;
+            }
             for &id in self.func.blocks[block].insts[..limit].iter().rev() {
                 let mut writes = false;
                 regalloc::cell_defs(&self.func.insts[id], &mut |target| writes |= target == cell);
@@ -5951,7 +6504,9 @@ impl Emitter<'_> {
                     };
                 }
             }
-            let [parent] = preds.get(&block)?.as_slice() else { return None; };
+            let [parent] = preds.get(&block)?.as_slice() else {
+                return None;
+            };
             block = *parent;
             limit = self.func.blocks[block].insts.len();
         }
@@ -6015,7 +6570,9 @@ impl Emitter<'_> {
                 then_bb,
                 else_bb,
             } => {
-                if let Some((target, value, lo, hi)) = self.numeric_clamp(bb, *cond, *then_bb, *else_bb) {
+                if let Some((target, value, lo, hi)) =
+                    self.numeric_clamp(bb, *cond, *then_bb, *else_bb)
+                {
                     self.write_selection_result(out, bb, target, |out| {
                         write!(out, "math.max({lo:?}, math.min({hi:?}, ").unwrap();
                         self.write_opnd(out, value);
@@ -6023,7 +6580,9 @@ impl Emitter<'_> {
                     });
                     return;
                 }
-                if let Some((target, a, b, op)) = self.numeric_selection(bb, *cond, *then_bb, *else_bb) {
+                if let Some((target, a, b, op)) =
+                    self.numeric_selection(bb, *cond, *then_bb, *else_bb)
+                {
                     self.write_selection_result(out, bb, target, |out| {
                         out.push_str("math.");
                         out.push_str(op);
@@ -6106,32 +6665,47 @@ impl Emitter<'_> {
                     groups.push((vec![variant.name], layout));
                 }
             }
-            let common = groups.iter().enumerate().max_by_key(|(_, (members, _))| members.len())
-                .map(|(i, _)| i).expect("flat enum has payload variants");
+            let common = groups
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, (members, _))| members.len())
+                .map(|(i, _)| i)
+                .expect("flat enum has payload variants");
             let last = groups.remove(common);
             groups.push(last);
             let groups = std::rc::Rc::new(groups);
             self.enum_box_groups.borrow_mut().insert(ty, groups.clone());
             groups
         };
-        if groups.len() > 1 { out.push('('); }
+        if groups.len() > 1 {
+            out.push('(');
+        }
         for (i, (members, (width, fields))) in groups.iter().enumerate() {
             if i + 1 < groups.len() {
                 out.push('(');
                 for (j, variant) in members.iter().enumerate() {
-                    if j > 0 { out.push_str(" or "); }
+                    if j > 0 {
+                        out.push_str(" or ");
+                    }
                     self.write_opnd(out, tag);
                     out.push_str(" == ");
                     write_lua_string(out, variant.as_str());
                 }
                 out.push_str(") and ");
             }
-            let selected: Vec<_> = named.iter().copied()
-                .filter(|(name, _)| fields.contains(name)).collect();
+            let selected: Vec<_> = named
+                .iter()
+                .copied()
+                .filter(|(name, _)| fields.contains(name))
+                .collect();
             self.write_enum_box(out, tag, ty, &positional[..*width], &selected);
-            if i + 1 < groups.len() { out.push_str(" or "); }
+            if i + 1 < groups.len() {
+                out.push_str(" or ");
+            }
         }
-        if groups.len() > 1 { out.push(')'); }
+        if groups.len() > 1 {
+            out.push(')');
+        }
     }
 
     fn write_enum_box(
@@ -6165,7 +6739,6 @@ impl Emitter<'_> {
             self.write_opnd(out, *id);
         }
     }
-
 }
 
 fn write_lit(out: &mut String, l: &Lit) {
@@ -6234,7 +6807,8 @@ pub fn lua_int_vec(items: &[i64]) -> String {
 /// to the same `TGETS` as dot sugar, so the bracket form costs nothing.
 fn is_lua_ident(s: &str) -> bool {
     let mut cs = s.chars();
-    cs.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+    cs.next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
         && cs.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 

@@ -41,7 +41,9 @@ impl Builder<'_> {
         spec: Option<bone_semantic::hir::InterpSpec>,
     ) -> Result<Idx<Inst>, CompilerError> {
         match spec {
-            None if self.dispatch().structural_route(expr).is_some() => self.stringify_structural(expr),
+            None if self.dispatch().structural_route(expr).is_some() => {
+                self.stringify_structural(expr)
+            }
             // A tuple whose box would WIDEN is packed narrow here -- one slot
             // per element, the nobox part materialized. The widening exists for
             // readers that derive the layout from the declared type; `inspect`
@@ -71,7 +73,10 @@ impl Builder<'_> {
 
     /// A structural hole renders from the value's own representation, so a
     /// scalarized or flat value is never packed just to be printed.
-    pub(crate) fn stringify_structural(&mut self, expr: Idx<Expr>) -> Result<Idx<Inst>, CompilerError> {
+    pub(crate) fn stringify_structural(
+        &mut self,
+        expr: Idx<Expr>,
+    ) -> Result<Idx<Inst>, CompilerError> {
         let route = self
             .dispatch()
             .structural_route(expr)
@@ -81,19 +86,34 @@ impl Builder<'_> {
             ValueRepr::Scalar(v) if self.expr_is_nullable(expr) => {
                 self.nil_guarded_render(v, |s| s.render_stringify(&route, Vec::new(), v))
             }
-            ValueRepr::Group { name, parts, present: Some(present) } => {
-                let group = ValueRepr::Group { name, parts, present: None };
+            ValueRepr::Group {
+                name,
+                parts,
+                present: Some(present),
+            } => {
+                let group = ValueRepr::Group {
+                    name,
+                    parts,
+                    present: None,
+                };
                 self.render_structural_route(&route, group, Some(present))
             }
             // A flat enum has no presence leaf: a nil tag is its null.
-            ValueRepr::Group { name, parts, present: None }
-                if self.expr_is_nullable(expr)
-                    && EnumPlan::for_name(self.ws, name).is_some_and(|plan| plan.flat().is_some()) =>
+            ValueRepr::Group {
+                name,
+                parts,
+                present: None,
+            } if self.expr_is_nullable(expr)
+                && EnumPlan::for_name(self.ws, name).is_some_and(|plan| plan.flat().is_some()) =>
             {
                 let Some(&ValueRepr::Scalar(tag)) = parts.first() else {
                     return Err(self.gap_here("nullable flat enum hole lost its tag"));
                 };
-                let group = ValueRepr::Group { name, parts, present: None };
+                let group = ValueRepr::Group {
+                    name,
+                    parts,
+                    present: None,
+                };
                 self.nil_guarded_render(tag, |s| s.render_structural_route(&route, group, None))
             }
             repr => self.render_structural_route(&route, repr, None),
@@ -117,7 +137,9 @@ impl Builder<'_> {
             return self.render_fmt(&tree, Vec::new(), repr);
         };
         // A nullable scalarized hole: the same null text as any other hole.
-        self.render_present_or_null(present, true, "nil", |s| s.render_fmt(&tree, Vec::new(), repr))
+        self.render_present_or_null(present, true, "nil", |s| {
+            s.render_fmt(&tree, Vec::new(), repr)
+        })
     }
 
     pub(crate) fn unprintable_error(&self, reason: &str) -> CompilerError {
@@ -138,7 +160,11 @@ impl Builder<'_> {
 
     /// Default `{x}` stringify for value `v` of expression `expr`, dispatched on
     /// `expr`'s static type (mirrors rock-codegen's interp dispatch).
-    pub(crate) fn stringify(&mut self, expr: Idx<Expr>, v: Idx<Inst>) -> Result<Idx<Inst>, CompilerError> {
+    pub(crate) fn stringify(
+        &mut self,
+        expr: Idx<Expr>,
+        v: Idx<Inst>,
+    ) -> Result<Idx<Inst>, CompilerError> {
         // A literal `{null}` hole renders `tostring(nil)` = "nil".
         if matches!(self.body.expr_arena[expr], Expr::Null) {
             return Ok(self.emit_cur(Inst::ToString(v)));
@@ -168,7 +194,14 @@ impl Builder<'_> {
         let nil_bb = self.f.new_block();
         let val_bb = self.f.new_block();
         let join = self.f.new_block();
-        self.f.set_term(self.cur, Term::Branch { cond: is_nil, then_bb: nil_bb, else_bb: val_bb });
+        self.f.set_term(
+            self.cur,
+            Term::Branch {
+                cond: is_nil,
+                then_bb: nil_bb,
+                else_bb: val_bb,
+            },
+        );
 
         self.cur = nil_bb;
         let n = self.emit_cur(Inst::Const(Lit::Str(Ustr::from("nil"))));
@@ -213,7 +246,9 @@ impl Builder<'_> {
             // A transparent newtype renders `Name(<inner>)`; its runtime value IS
             // the raw inner, so `tostring` it directly.
             StringifyRoute::Newtype(name) => {
-                let open = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(format!("{name}(").as_str()))));
+                let open = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(
+                    format!("{name}(").as_str(),
+                ))));
                 let inner = self.emit_cur(Inst::ToString(v));
                 let close = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(")"))));
                 let a = self.emit_cur(Inst::StringConcat(open, inner));
@@ -228,21 +263,31 @@ impl Builder<'_> {
             // enum passed to `inspect`/stored in `any`/inside a composite) is the
             // deferred box-on-escape-into-`any` work.
             StringifyRoute::EnumNames(name) => {
-                let names =
-                    self.emit_cur(Inst::Global(Ustr::from(
-                        format!("__rock_enum_{}_names", crate::mangle::type_symbol(self.ws, *name)).as_str(),
-                    )));
-                Ok(self.emit_cur(Inst::Index { base: names, index: v, kind: ContainerKind::Map }))
+                let names = self.emit_cur(Inst::Global(Ustr::from(
+                    format!(
+                        "__rock_enum_{}_names",
+                        crate::mangle::type_symbol(self.ws, *name)
+                    )
+                    .as_str(),
+                )));
+                Ok(self.emit_cur(Inst::Index {
+                    base: names,
+                    index: v,
+                    kind: ContainerKind::Map,
+                }))
             }
             StringifyRoute::Inspect => self.dispatched_call("inspect", path, vec![v]),
-            StringifyRoute::EscapedString => self.dispatched_call("__rock_quote_string", path, vec![v]),
+            StringifyRoute::EscapedString => {
+                self.dispatched_call("__rock_quote_string", path, vec![v])
+            }
             StringifyRoute::Structural(tree) => {
                 let tree = tree.as_ref().clone();
                 self.render_fmt(&tree, path, ValueRepr::Scalar(v))
             }
             StringifyRoute::Unprintable(reason) => Err(self.unprintable_error(reason)),
             StringifyRoute::Unsupported => Err(self.error_at_hole(
-                "skull-mir: lowering gap: interpolation hole of unknown/unsupported type".to_string(),
+                "skull-mir: lowering gap: interpolation hole of unknown/unsupported type"
+                    .to_string(),
             )),
         }
     }
@@ -315,10 +360,10 @@ impl Builder<'_> {
                 } else {
                     v
                 };
-                let pieces =
-                    fmt_pieces(spec, plan.inferred, plan.skip_width, plan.needs_pad).ok_or_else(
-                        || gap("interpolation format specifier (grouping / fill / center)"),
-                    )?;
+                let pieces = fmt_pieces(spec, plan.inferred, plan.skip_width, plan.needs_pad)
+                    .ok_or_else(|| {
+                        gap("interpolation format specifier (grouping / fill / center)")
+                    })?;
                 self.emit_format_pieces(v, pieces)?
             }
         };
@@ -326,7 +371,8 @@ impl Builder<'_> {
         if let Some((sep, group)) = plan.grouping {
             let sep_v = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(sep.to_string().as_str()))));
             let grp_v = self.emit_cur(Inst::Const(Lit::Int(group)));
-            out = self.dispatched_call("__rock_fmt_grouping", Vec::new(), vec![out, sep_v, grp_v])?;
+            out =
+                self.dispatched_call("__rock_fmt_grouping", Vec::new(), vec![out, sep_v, grp_v])?;
         }
         if plan.needs_pad {
             // Pad AFTER grouping (separators count toward the field width).
@@ -348,7 +394,10 @@ impl Builder<'_> {
             (None, Some(we)) => self.lower_expr(we)?,
             (None, None) => self.emit_cur(Inst::Const(Lit::Int(0))),
         };
-        let align = spec.alignment.map(|c| c.to_string()).unwrap_or_else(|| ">".to_string());
+        let align = spec
+            .alignment
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| ">".to_string());
         let align_v = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(align.as_str()))));
         let fill = spec.fill.unwrap_or(' ').to_string();
         let fill_v = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(fill.as_str()))));
@@ -357,7 +406,10 @@ impl Builder<'_> {
 
     /// A spec's precision as a value: static `Int`, dynamic `{.{p}}` expression,
     /// or `-1` (none).
-    pub(crate) fn lower_precision(&mut self, spec: &bone_semantic::hir::InterpSpec) -> Result<Idx<Inst>, CompilerError> {
+    pub(crate) fn lower_precision(
+        &mut self,
+        spec: &bone_semantic::hir::InterpSpec,
+    ) -> Result<Idx<Inst>, CompilerError> {
         match (spec.precision, spec.precision_expr) {
             (Some(p), _) => Ok(self.emit_cur(Inst::Const(Lit::Int(p as i64)))),
             (None, Some(pe)) => self.lower_expr(pe),
@@ -374,7 +426,10 @@ impl Builder<'_> {
         pieces: Vec<FmtPiece>,
     ) -> Result<Idx<Inst>, CompilerError> {
         if let [FmtPiece::Lit(s)] = &pieces[..] {
-            return Ok(self.emit_cur(Inst::Format { value: v, fmt: Ustr::from(s.as_str()) }));
+            return Ok(self.emit_cur(Inst::Format {
+                value: v,
+                fmt: Ustr::from(s.as_str()),
+            }));
         }
         let mut fmt: Option<Idx<Inst>> = None;
         for piece in pieces {

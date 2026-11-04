@@ -34,7 +34,10 @@ pub enum LuaDisplayPart {
     /// A Lua expression evaluating to a string.
     Expr(String),
     /// `"nil"` when the Lua expression `value` is nil, otherwise `parts`.
-    UnlessNil { value: String, parts: Vec<LuaDisplayPart> },
+    UnlessNil {
+        value: String,
+        parts: Vec<LuaDisplayPart>,
+    },
 }
 
 impl LuaDisplayPart {
@@ -103,7 +106,11 @@ pub fn display_return(parts: &[LuaDisplayPart], indent: &str) -> String {
     if let Some(expr) = display_expr(parts) {
         return format!("{indent}return {expr}\n");
     }
-    let mut appender = Appender { out: String::new(), run: Vec::new(), declared: false };
+    let mut appender = Appender {
+        out: String::new(),
+        run: Vec::new(),
+        declared: false,
+    };
     appender.append(parts, indent);
     appender.flush(indent);
     let _ = writeln!(appender.out, "{indent}return {ACCUMULATOR}");
@@ -130,7 +137,10 @@ impl<'a> Appender<'a> {
                     // Declares the accumulator outside the branches.
                     self.flush(indent);
                     let _ = writeln!(self.out, "{indent}if {value} == nil then");
-                    let _ = writeln!(self.out, "{indent}  {ACCUMULATOR} = {ACCUMULATOR} .. \"nil\"");
+                    let _ = writeln!(
+                        self.out,
+                        "{indent}  {ACCUMULATOR} = {ACCUMULATOR} .. \"nil\""
+                    );
                     let _ = writeln!(self.out, "{indent}else");
                     let inner = format!("{indent}  ");
                     self.append(parts, &inner);
@@ -145,7 +155,11 @@ impl<'a> Appender<'a> {
         if self.run.is_empty() && self.declared {
             return;
         }
-        let run = if self.run.is_empty() { "\"\"".to_string() } else { self.run.join(" .. ") };
+        let run = if self.run.is_empty() {
+            "\"\"".to_string()
+        } else {
+            self.run.join(" .. ")
+        };
         self.run.clear();
         if self.declared {
             let _ = writeln!(self.out, "{indent}{ACCUMULATOR} = {ACCUMULATOR} .. {run}");
@@ -161,7 +175,9 @@ mod tests {
     use super::*;
 
     fn exprs(n: usize) -> Vec<LuaDisplayPart> {
-        (0..n).map(|i| LuaDisplayPart::Expr(format!("e{i}"))).collect()
+        (0..n)
+            .map(|i| LuaDisplayPart::Expr(format!("e{i}")))
+            .collect()
     }
 
     #[test]
@@ -175,19 +191,39 @@ mod tests {
         let lines: Vec<&str> = body.lines().collect();
         assert_eq!(lines.len(), 4, "{body}");
         assert!(lines[0].starts_with("local __rock_text = e0 .. "), "{body}");
-        assert!(lines[1].starts_with("__rock_text = __rock_text .. "), "{body}");
-        assert_eq!(lines[2], format!("__rock_text = __rock_text .. e{}", DISPLAY_CONCAT_RUN * 2));
+        assert!(
+            lines[1].starts_with("__rock_text = __rock_text .. "),
+            "{body}"
+        );
+        assert_eq!(
+            lines[2],
+            format!("__rock_text = __rock_text .. e{}", DISPLAY_CONCAT_RUN * 2)
+        );
         assert_eq!(lines[3], "return __rock_text");
-        assert!(lines.iter().all(|l| l.matches(" .. ").count() <= DISPLAY_CONCAT_RUN), "{body}");
+        assert!(
+            lines
+                .iter()
+                .all(|l| l.matches(" .. ").count() <= DISPLAY_CONCAT_RUN),
+            "{body}"
+        );
     }
 
     #[test]
     fn a_nullable_group_branches_outside_the_runs() {
         let mut parts = exprs(DISPLAY_CONCAT_RUN);
-        parts.push(LuaDisplayPart::UnlessNil { value: "v.m".to_string(), parts: exprs(2) });
+        parts.push(LuaDisplayPart::UnlessNil {
+            value: "v.m".to_string(),
+            parts: exprs(2),
+        });
         let body = display_return(&parts, "");
         assert!(body.contains("\nif v.m == nil then\n  __rock_text = __rock_text .. \"nil\"\nelse\n  __rock_text = __rock_text .. e0 .. e1\nend\nreturn __rock_text\n"), "{body}");
-        let short = vec![LuaDisplayPart::UnlessNil { value: "v.m".to_string(), parts: exprs(2) }];
-        assert_eq!(display_expr(&short).unwrap(), "(v.m == nil and \"nil\" or (e0 .. e1))");
+        let short = vec![LuaDisplayPart::UnlessNil {
+            value: "v.m".to_string(),
+            parts: exprs(2),
+        }];
+        assert_eq!(
+            display_expr(&short).unwrap(),
+            "(v.m == nil and \"nil\" or (e0 .. e1))"
+        );
     }
 }

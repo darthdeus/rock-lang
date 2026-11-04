@@ -35,7 +35,8 @@ pub fn enter_compiler_process() -> io::Result<()> {
     #[cfg(not(target_os = "linux"))]
     let inherited = 0;
     let mut command = Command::new(crate::process_management::current_executable_image()?);
-    command.args(std::env::args_os().skip(1))
+    command
+        .args(std::env::args_os().skip(1))
         .env("MIMALLOC_ALLOW_THP", "0")
         .env(DEFAULT_MARKER, inherited.to_string());
     #[cfg(unix)]
@@ -52,7 +53,9 @@ pub fn enter_compiler_process() -> io::Result<()> {
 
 /// Lua, C, JS and GLSL execution share this runtime spawn boundary.
 pub fn configure_runtime_command(command: &mut Command) {
-    let Some(inherited) = std::env::var_os(DEFAULT_MARKER) else { return; };
+    let Some(inherited) = std::env::var_os(DEFAULT_MARKER) else {
+        return;
+    };
     command.env_remove(DEFAULT_MARKER);
     if std::env::var("MIMALLOC_ALLOW_THP").as_deref() != Ok("0")
         || std::env::var_os("mimalloc_allow_thp").is_some()
@@ -68,7 +71,8 @@ pub fn configure_runtime_command(command: &mut Command) {
         // PR_SET_THP_DISABLE survives exec, independently of mimalloc's env.
         unsafe {
             command.pre_exec(move || {
-                let state = state.filter(|s| *s == 0 || *s == 1)
+                let state = state
+                    .filter(|s| *s == 0 || *s == 1)
                     .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
                 if prctl(PR_SET_THP_DISABLE, state as usize, 0usize, 0usize, 0usize) != 0 {
                     return Err(io::Error::last_os_error());

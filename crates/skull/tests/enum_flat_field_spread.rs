@@ -100,7 +100,11 @@ fn call_spread_carries_a_nobox_child_from_its_physical_slots() {
 #[test]
 fn call_spread_carries_nullable_nobox_presence_and_leaves() {
     assert_eq!(
-        run(NULLABLE_NOBOX_CHILD_CALL_SPREAD, "nullable_nobox_child_call_spread").trim(),
+        run(
+            NULLABLE_NOBOX_CHILD_CALL_SPREAD,
+            "nullable_nobox_child_call_spread"
+        )
+        .trim(),
         "43 37 41\n47 absent"
     );
 }

@@ -20,7 +20,8 @@ fn def_line_at_hole(line: &str) -> Option<u32> {
     let col = text[..text.find("{x}").expect("hole")].chars().count() + 1;
     let mut bone = BoneWorkspace::new();
     bone.update(PATH, src.clone());
-    bone.definition(PATH, Position::new(2, col as u32)).map(|l| l.range.start.line)
+    bone.definition(PATH, Position::new(2, col as u32))
+        .map(|l| l.range.start.line)
 }
 
 /// The control: no escape before the hole, so nothing can have shifted.
@@ -87,11 +88,19 @@ fn hole_with_escaped_quotes_resolves_its_identifiers() {
     // the control.
     let col = line[..line.find("pick(").unwrap()].chars().count();
     let d = bone.definition(PATH, Position::new(3, col as u32));
-    assert_eq!(d.map(|l| l.range.start.line), Some(0), "callee before the escapes");
+    assert_eq!(
+        d.map(|l| l.range.start.line),
+        Some(0),
+        "callee before the escapes"
+    );
     // `count` sits after two escaped bytes, so an unmapped span covers
     // `", cou` instead -- probe its LAST character, which only the mapped span
     // reaches.
     let col = line[..line.find("count)").unwrap()].chars().count() + 4;
     let d = bone.definition(PATH, Position::new(3, col as u32));
-    assert_eq!(d.map(|l| l.range.start.line), Some(2), "arg after the escapes");
+    assert_eq!(
+        d.map(|l| l.range.start.line),
+        Some(2),
+        "arg after the escapes"
+    );
 }

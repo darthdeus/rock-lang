@@ -11,9 +11,12 @@ pub struct DiagnosticWorkspaceClientCapabilities {
     pub refresh_support: Option<bool>,
 }
 
-impl_lsp_struct!(DiagnosticWorkspaceClientCapabilities,
+impl_lsp_struct!(
+    DiagnosticWorkspaceClientCapabilities,
     required {},
-    optional { refresh_support: bool = "refreshSupport" }
+    optional {
+        refresh_support: bool = "refreshSupport"
+    }
 );
 
 /// A previous result ID in a workspace pull request.
@@ -25,7 +28,8 @@ pub struct PreviousResultId {
     pub value: String,
 }
 
-impl_lsp_struct!(PreviousResultId,
+impl_lsp_struct!(
+    PreviousResultId,
     required {
         uri: Uri = "uri",
         value: String = "value",
@@ -75,11 +79,16 @@ pub struct WorkspaceFullDocumentDiagnosticReport {
     pub full_document_diagnostic_report: FullDocumentDiagnosticReport,
 }
 
-impl_lsp_struct!(WorkspaceFullDocumentDiagnosticReport,
+impl_lsp_struct!(
+    WorkspaceFullDocumentDiagnosticReport,
     required { uri: Uri = "uri" },
-    nullable { version: i64 = "version" },
+    nullable {
+        version: i64 = "version"
+    },
     optional {},
-    flatten { full_document_diagnostic_report: FullDocumentDiagnosticReport }
+    flatten {
+        full_document_diagnostic_report: FullDocumentDiagnosticReport
+    }
 );
 
 /// An unchanged document diagnostic report for a workspace diagnostic result.
@@ -98,11 +107,16 @@ pub struct WorkspaceUnchangedDocumentDiagnosticReport {
     pub unchanged_document_diagnostic_report: UnchangedDocumentDiagnosticReport,
 }
 
-impl_lsp_struct!(WorkspaceUnchangedDocumentDiagnosticReport,
+impl_lsp_struct!(
+    WorkspaceUnchangedDocumentDiagnosticReport,
     required { uri: Uri = "uri" },
-    nullable { version: i64 = "version" },
+    nullable {
+        version: i64 = "version"
+    },
     optional {},
-    flatten { unchanged_document_diagnostic_report: UnchangedDocumentDiagnosticReport }
+    flatten {
+        unchanged_document_diagnostic_report: UnchangedDocumentDiagnosticReport
+    }
 );
 
 /// A workspace diagnostic document report.

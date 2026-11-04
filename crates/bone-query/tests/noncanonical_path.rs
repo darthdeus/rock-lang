@@ -22,7 +22,10 @@ fn camera_fixture() -> (String, String, String) {
         .to_string_lossy()
         .to_string();
     let parent = camera.parent().expect("camera has a parent");
-    let name = camera.file_name().expect("camera has a file name").to_string_lossy();
+    let name = camera
+        .file_name()
+        .expect("camera has a file name")
+        .to_string_lossy();
     let noncanon = format!("{}/./{name}", parent.display());
     let text = std::fs::read_to_string(camera).expect("fixture camera is readable");
     (canon, noncanon, text)
@@ -41,11 +44,17 @@ fn noncanonical_path_does_not_duplicate_module() {
         .flat_map(|(_, d)| d)
         .filter(|d| d.message.contains("duplicate struct"))
         .collect();
-    assert!(dup.is_empty(), "non-canonical path duplicated the module: {dup:?}");
+    assert!(
+        dup.is_empty(),
+        "non-canonical path duplicated the module: {dup:?}"
+    );
     let via_canon = bone.semantic_tokens(&canon).data.len();
     let via_noncanon = bone.semantic_tokens(&noncanon).data.len();
     assert!(via_canon > 0, "canonical path should yield tokens");
-    assert_eq!(via_noncanon, via_canon, "non-canonical path must resolve to the same module");
+    assert_eq!(
+        via_noncanon, via_canon,
+        "non-canonical path must resolve to the same module"
+    );
 }
 
 #[test]
@@ -62,5 +71,8 @@ fn read_queries_resolve_via_noncanonical_path() {
     let via_canon = bone.semantic_tokens(&canon).data.len();
     let via_noncanon = bone.semantic_tokens(&noncanon).data.len();
     assert!(via_canon > 0, "canonical path should yield tokens");
-    assert_eq!(via_noncanon, via_canon, "non-canonical path must resolve to the same module");
+    assert_eq!(
+        via_noncanon, via_canon,
+        "non-canonical path must resolve to the same module"
+    );
 }

@@ -138,10 +138,14 @@ fn a_generic_field_default_and_its_declared_type_share_one_inference_class() {
         .map(|(i, _)| i)
         .expect("Box");
     let body = &ws.module(mid).bodies[&BodyOwner::StructDefaults(sidx)];
-    let value_default =
-        *body.field_defaults.get(&Ustr::from("value")).expect("`value` has a default");
-    let echo_default =
-        *body.field_defaults.get(&Ustr::from("echo")).expect("`echo` has a default");
+    let value_default = *body
+        .field_defaults
+        .get(&Ustr::from("value"))
+        .expect("`value` has a default");
+    let echo_default = *body
+        .field_defaults
+        .get(&Ustr::from("echo"))
+        .expect("`echo` has a default");
 
     // The fixture must really be a sibling reference, or it reads some other
     // expression's type and proves nothing about the declared field type.
@@ -152,7 +156,10 @@ fn a_generic_field_default_and_its_declared_type_share_one_inference_class() {
     );
 
     // `value`'s SUBSTITUTED declared type, reached through the sibling ref.
-    let declared = *inf.expr_types.get(echo_default).expect("the sibling ref is typed");
+    let declared = *inf
+        .expr_types
+        .get(echo_default)
+        .expect("the sibling ref is typed");
     // The binding the CALL recorded for `seed`'s own generic.
     let binding = inf
         .call_generic_bindings
@@ -203,8 +210,10 @@ fn the_defaults_body_publishes_its_declared_generic_slots() {
     );
 
     let body = &ws.module(mid).bodies[&BodyOwner::StructDefaults(sidx)];
-    let value_default =
-        *body.field_defaults.get(&Ustr::from("value")).expect("`value` has a default");
+    let value_default = *body
+        .field_defaults
+        .get(&Ustr::from("value"))
+        .expect("`value` has a default");
     let class = unresolved_var(
         &ws,
         inf,
@@ -258,7 +267,10 @@ fn main() {
     assert_eq!(inf.struct_default_generic_slots.len(), 2);
 
     for (slot, field) in [(0usize, "a"), (1, "b")] {
-        let default = *body.field_defaults.get(&Ustr::from(field)).expect("default");
+        let default = *body
+            .field_defaults
+            .get(&Ustr::from(field))
+            .expect("default");
         let class = unresolved_var(
             &ws,
             inf,
@@ -267,7 +279,10 @@ fn main() {
                 .and_then(|b| b.first())
                 .expect("binding"),
         );
-        assert!(class.is_some(), "field `{field}` is no longer the generic case");
+        assert!(
+            class.is_some(),
+            "field `{field}` is no longer the generic case"
+        );
         assert_eq!(
             unresolved_var(&ws, inf, inf.struct_default_generic_slots[slot]),
             class,

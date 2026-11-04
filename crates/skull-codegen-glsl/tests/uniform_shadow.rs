@@ -17,7 +17,12 @@ static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
         .collect()
 });
 
-fn workspace(src: &str) -> (bone_semantic::inference::Workspace, bone_semantic::prelude::ModuleId) {
+fn workspace(
+    src: &str,
+) -> (
+    bone_semantic::inference::Workspace,
+    bone_semantic::prelude::ModuleId,
+) {
     let mut modules = STDLIB.clone();
     modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
@@ -33,8 +38,14 @@ fn emit_entry(src: &str, root: &str) -> ShaderEmission {
 
 fn emit_pipeline(src: &str, vert: &str, frag: &str) -> ShaderEmission {
     let (ws, mid) = workspace(src);
-    skull_codegen_glsl::emit_shader_pipeline_with_dependencies(&ws, mid, vert, frag, GlslProfile::Core330)
-        .expect("emit")
+    skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
+        &ws,
+        mid,
+        vert,
+        frag,
+        GlslProfile::Core330,
+    )
+    .expect("emit")
 }
 
 /// No hoisted `float` local shadows `lane`: block members indent 4, hoisted
@@ -66,8 +77,14 @@ fn hoisted_local_renamed_apart_from_uniform_lane() {
         .iter()
         .flat_map(|g| g.members.iter().map(|(n, _)| n.to_string()))
         .collect();
-    assert!(lanes.contains(&"density".to_string()), "fixture must declare the collided lane, got: {lanes:?}\n{glsl}");
-    assert!(glsl.contains("(density * 2.0)"), "the multiply must read the uniform lane:\n{glsl}");
+    assert!(
+        lanes.contains(&"density".to_string()),
+        "fixture must declare the collided lane, got: {lanes:?}\n{glsl}"
+    );
+    assert!(
+        glsl.contains("(density * 2.0)"),
+        "the multiply must read the uniform lane:\n{glsl}"
+    );
     for lane in &lanes {
         assert_no_hoisted_shadow(glsl, lane);
     }
@@ -107,16 +124,39 @@ fn vertex_locals_renamed_apart_from_attribute_and_varying() {
         .iter()
         .flat_map(|i| i.attrs.iter().map(|(n, _)| n.to_string()))
         .collect();
-    assert!(attrs.contains(&"aPos".to_string()), "fixture must declare the collided attribute, got: {attrs:?}\n{glsl}");
-    let varyings: Vec<String> = e.interface.varyings.iter().map(|v| v.name.to_string()).collect();
-    assert!(varyings.contains(&"shade".to_string()), "fixture must declare the collided varying, got: {varyings:?}\n{glsl}");
-    assert!(glsl.contains("(aPos.x + 1.0)"), "the attribute read must survive:\n{glsl}");
-    assert!(glsl.contains("shade = "), "the varying assignment must survive:\n{glsl}");
+    assert!(
+        attrs.contains(&"aPos".to_string()),
+        "fixture must declare the collided attribute, got: {attrs:?}\n{glsl}"
+    );
+    let varyings: Vec<String> = e
+        .interface
+        .varyings
+        .iter()
+        .map(|v| v.name.to_string())
+        .collect();
+    assert!(
+        varyings.contains(&"shade".to_string()),
+        "fixture must declare the collided varying, got: {varyings:?}\n{glsl}"
+    );
+    assert!(
+        glsl.contains("(aPos.x + 1.0)"),
+        "the attribute read must survive:\n{glsl}"
+    );
+    assert!(
+        glsl.contains("shade = "),
+        "the varying assignment must survive:\n{glsl}"
+    );
     for name in attrs.iter().chain(varyings.iter()) {
         assert_no_hoisted_shadow(glsl, name);
     }
-    assert!(glsl.contains("aPos_1 = (aPos.x + 1.0)"), "the renamed local must hold the attribute sum:\n{glsl}");
-    assert!(glsl.contains("shade_1 = (aPos.y + 2.0)"), "the renamed local must hold the varying sum:\n{glsl}");
+    assert!(
+        glsl.contains("aPos_1 = (aPos.x + 1.0)"),
+        "the renamed local must hold the attribute sum:\n{glsl}"
+    );
+    assert!(
+        glsl.contains("shade_1 = (aPos.y + 2.0)"),
+        "the renamed local must hold the varying sum:\n{glsl}"
+    );
 }
 
 /// Fragment stage: a local shadowing a `@textures` group sampler. The group
@@ -150,11 +190,23 @@ fn fragment_local_renamed_apart_from_group_sampler() {
         .iter()
         .flat_map(|t| t.samplers.iter().map(|(n, _)| n.to_string()))
         .collect();
-    assert!(samplers.contains(&"tint".to_string()), "fixture must declare the collided sampler, got: {samplers:?}\n{glsl}");
-    assert!(glsl.contains("uniform sampler2D tint;"), "the sampler declaration must survive:\n{glsl}");
-    assert!(glsl.contains("texture(tint, uv)"), "the sample must read the sampler global:\n{glsl}");
+    assert!(
+        samplers.contains(&"tint".to_string()),
+        "fixture must declare the collided sampler, got: {samplers:?}\n{glsl}"
+    );
+    assert!(
+        glsl.contains("uniform sampler2D tint;"),
+        "the sampler declaration must survive:\n{glsl}"
+    );
+    assert!(
+        glsl.contains("texture(tint, uv)"),
+        "the sample must read the sampler global:\n{glsl}"
+    );
     for name in &samplers {
         assert_no_hoisted_shadow(glsl, name);
     }
-    assert!(glsl.contains("tint_1 = (uv.x + 1.0)"), "the renamed local must hold the sum:\n{glsl}");
+    assert!(
+        glsl.contains("tint_1 = (uv.x + 1.0)"),
+        "the renamed local must hold the sum:\n{glsl}"
+    );
 }

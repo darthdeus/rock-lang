@@ -30,7 +30,11 @@ pub fn value_struct_all_float_leaf_count(ws: &Workspace, name: Ustr) -> Option<u
     all_float_leaf_count_rec(ws, name, &mut Vec::new())
 }
 
-pub(crate) fn all_float_leaf_count_rec(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>) -> Option<usize> {
+pub(crate) fn all_float_leaf_count_rec(
+    ws: &Workspace,
+    name: Ustr,
+    visiting: &mut Vec<Ustr>,
+) -> Option<usize> {
     let sid = *ws.struct_by_name.get(&name)?;
     let sd = &ws.modules[sid.module.index()].structs[sid.def];
     if !has_value_plan(sd) || visiting.contains(&name) {
@@ -41,15 +45,16 @@ pub(crate) fn all_float_leaf_count_rec(ws: &Workspace, name: Ustr, visiting: &mu
     for f in &sd.fields {
         let n = match static_ty(ws, f.storage_ty)? {
             TypeExpr::Builtin(BuiltinTy::Float | BuiltinTy::F32) => 1,
-            TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => {
-                match all_float_leaf_count_rec(ws, n, visiting) {
-                    Some(k) => k,
-                    None => {
-                        visiting.pop();
-                        return None;
-                    }
+            TypeExpr::App {
+                ctor: TypeCtor::Nominal(n),
+                ..
+            } => match all_float_leaf_count_rec(ws, n, visiting) {
+                Some(k) => k,
+                None => {
+                    visiting.pop();
+                    return None;
                 }
-            }
+            },
             _ => {
                 visiting.pop();
                 return None;
@@ -84,12 +89,23 @@ pub fn value_struct_slot_fields(ws: &Workspace, name: Ustr) -> Option<Vec<ValueS
     for f in &sd.fields {
         match static_ty(ws, f.storage_ty)? {
             TypeExpr::Builtin(BuiltinTy::Float | BuiltinTy::F32) => {
-                out.push(ValueSlotField { name: f.name, offset, nested: None });
+                out.push(ValueSlotField {
+                    name: f.name,
+                    offset,
+                    nested: None,
+                });
                 offset += 1;
             }
-            TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => {
+            TypeExpr::App {
+                ctor: TypeCtor::Nominal(n),
+                ..
+            } => {
                 let w = value_struct_all_float_leaf_count(ws, n)?;
-                out.push(ValueSlotField { name: f.name, offset, nested: Some(n) });
+                out.push(ValueSlotField {
+                    name: f.name,
+                    offset,
+                    nested: Some(n),
+                });
                 offset += w;
             }
             _ => return None,
@@ -185,7 +201,10 @@ pub fn column_leaf_paths(shape: &ValueShape) -> Vec<Ustr> {
 /// reason `embed` storage is: `.` cannot appear in a Rock identifier, so the
 /// encoding is injective and can never collide with a sibling leaf.
 pub fn value_leaf_paths(shape: &ValueShape) -> Vec<Ustr> {
-    leaf_names(shape, "", ".").into_iter().map(|s| Ustr::from(&s)).collect()
+    leaf_names(shape, "", ".")
+        .into_iter()
+        .map(|s| Ustr::from(&s))
+        .collect()
 }
 
 /// Which entries of [`value_leaf_paths`] are a nullable child's PRESENCE tag
@@ -247,8 +266,11 @@ pub(crate) fn leaf_names_rec(shape: &ValueShape, prefix: &str, sep: &str, out: &
         // emitted `f(r__x, r__y, r__x, r__y)`, and Lua binds the later pair over
         // the earlier, so a hand-written body silently read `br` where it wrote
         // `tl`.
-        let joined =
-            if prefix.is_empty() { fname.to_string() } else { format!("{prefix}{sep}{fname}") };
+        let joined = if prefix.is_empty() {
+            fname.to_string()
+        } else {
+            format!("{prefix}{sep}{fname}")
+        };
         match fs {
             FieldShape::Prim => out.push(joined),
             FieldShape::Nested(sub) => leaf_names_rec(sub, &joined, sep, out),
@@ -321,7 +343,10 @@ pub struct LeafAddr {
 /// The JS emitter needs it to pick the TypedArray and to know a `bool` view
 /// stores 0/1 where the language wants `true`/`false`.
 pub fn leaf_view_cty(field: &str) -> Option<&'static str> {
-    LEAF_VIEWS.iter().find(|(_, f, _)| *f == field).map(|(t, ..)| *t)
+    LEAF_VIEWS
+        .iter()
+        .find(|(_, f, _)| *f == field)
+        .map(|(t, ..)| *t)
 }
 
 /// Every element type a `NativeBuffer`'s storage can be allocated with that is
@@ -363,20 +388,31 @@ fn nb_storage_call(ctype: &str, size: usize, views: &[&str]) -> String {
             format!("{field} = \"{cast}\"")
         })
         .collect();
-    format!("__rock_nb_storage(\"{ctype}\", {size}, {{ {} }})\n", views.join(", "))
+    format!(
+        "__rock_nb_storage(\"{ctype}\", {size}, {{ {} }})\n",
+        views.join(", ")
+    )
 }
 
 /// The registrations for [`NB_PRIM_ELEMS`]. A primitive element carries no leaf
 /// views -- its storage IS one C type, so `buf.ptr` already addresses it.
 pub fn nb_prim_storage_lua() -> String {
-    NB_PRIM_ELEMS.iter().map(|(cty, size)| nb_storage_call(cty, *size, &[])).collect()
+    NB_PRIM_ELEMS
+        .iter()
+        .map(|(cty, size)| nb_storage_call(cty, *size, &[]))
+        .collect()
 }
 
 /// The registration for FFI-clean value struct `elem` used as a buffer element,
 /// derived from the layout its caller ALREADY validated. Takes the checked
 /// leaves and size rather than re-walking: the emitter needs one layout per
 /// struct and the registry is a second view of it, not a second computation.
-pub fn nb_value_storage_lua(ws: &Workspace, elem: Ustr, leaves: &[LeafSlot], size: usize) -> String {
+pub fn nb_value_storage_lua(
+    ws: &Workspace,
+    elem: Ustr,
+    leaves: &[LeafSlot],
+    size: usize,
+) -> String {
     // `__rock_nb_storage` runs `ffi.typeof` on this name: a C type, not a DefKey.
     let elem = crate::mangle::type_symbol(ws, elem);
     let mut views: Vec<&'static str> = Vec::new();
@@ -436,7 +472,10 @@ pub(crate) fn c_prim_size_align(cty: &str) -> Option<(usize, usize)> {
 /// `RepArena::nominal_leaf_layout` is the only public way out of this module,
 /// and it rejects on drift. Keep the raw walker private so a future lowering
 /// cannot reach around the representation plan.
-pub(crate) fn value_leaf_layout(ws: &Workspace, name: Ustr) -> Option<(Vec<LeafSlot>, usize, usize)> {
+pub(crate) fn value_leaf_layout(
+    ws: &Workspace,
+    name: Ustr,
+) -> Option<(Vec<LeafSlot>, usize, usize)> {
     let plan = planned_value(ws, name)?;
     if plan.storage != ValueStorage::CData {
         return None;
@@ -587,11 +626,7 @@ pub(crate) struct PlannedValue {
     pub(crate) gc_shape: Option<ValueShape>,
 }
 
-fn planned_shape(
-    name: Ustr,
-    fields: &[(Ustr, PlannedField)],
-    gc: bool,
-) -> Option<ValueShape> {
+fn planned_shape(name: Ustr, fields: &[(Ustr, PlannedField)], gc: bool) -> Option<ValueShape> {
     let mut out = Vec::with_capacity(fields.len());
     for (field, planned) in fields {
         let shape = match planned {
@@ -620,7 +655,11 @@ fn planned_shape(
         };
         out.push((*field, shape));
     }
-    Some(ValueShape { name, fields: out, nullable: false })
+    Some(ValueShape {
+        name,
+        fields: out,
+        nullable: false,
+    })
 }
 
 pub(super) fn nominal_name_from_ty(ws: &Workspace, ty: TyId) -> Option<(Ustr, bool)> {
@@ -631,16 +670,15 @@ pub(super) fn nominal_name_from_ty(ws: &Workspace, ty: TyId) -> Option<(Ustr, bo
         node = static_ty(ws, ty.with_idx(inner))?;
     }
     match node {
-        TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } => Some((name, nullable)),
+        TypeExpr::App {
+            ctor: TypeCtor::Nominal(name),
+            ..
+        } => Some((name, nullable)),
         _ => None,
     }
 }
 
-fn planned_value_rec(
-    ws: &Workspace,
-    name: Ustr,
-    visiting: &mut Vec<Ustr>,
-) -> Option<PlannedValue> {
+fn planned_value_rec(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>) -> Option<PlannedValue> {
     if let Some(enum_plan) = EnumPlan::for_name(ws, name).and_then(|plan| plan.cdata().cloned()) {
         let mut fields = vec![(Ustr::from("__tag"), PlannedField::Primitive("int"))];
         fields.extend(
@@ -673,12 +711,14 @@ fn planned_value_rec(
             Some(TypeExpr::Builtin(BuiltinTy::Float)) => PlannedField::Primitive("double"),
             Some(TypeExpr::Builtin(BuiltinTy::F32)) => PlannedField::Primitive("float"),
             Some(TypeExpr::Builtin(BuiltinTy::Bool)) => PlannedField::Primitive("bool"),
-            Some(TypeExpr::App { ctor: TypeCtor::Nominal(child), .. })
-                if payload_free_enum_variants(ws, child).is_some() =>
-            {
-                PlannedField::Primitive("int")
-            }
-            Some(TypeExpr::App { ctor: TypeCtor::Nominal(child), .. }) => {
+            Some(TypeExpr::App {
+                ctor: TypeCtor::Nominal(child),
+                ..
+            }) if payload_free_enum_variants(ws, child).is_some() => PlannedField::Primitive("int"),
+            Some(TypeExpr::App {
+                ctor: TypeCtor::Nominal(child),
+                ..
+            }) => {
                 if let Some(flat) =
                     EnumPlan::for_name(ws, child).and_then(|plan| plan.flat().cloned())
                 {
@@ -710,9 +750,10 @@ fn planned_value_rec(
                     fields.push((field.name, PlannedField::Opaque));
                     continue;
                 };
-                let nobox = ws.struct_by_name.get(&child).is_some_and(|sid| {
-                    ws.modules[sid.module.index()].structs[sid.def].is_nobox
-                });
+                let nobox = ws
+                    .struct_by_name
+                    .get(&child)
+                    .is_some_and(|sid| ws.modules[sid.module.index()].structs[sid.def].is_nobox);
                 if !nobox {
                     cdata = false;
                     scalarizable = false;
@@ -734,7 +775,9 @@ fn planned_value_rec(
         }
         fields.push((field.name, planned));
     }
-    let shape = scalarizable.then(|| planned_shape(name, &fields, false)).flatten();
+    let shape = scalarizable
+        .then(|| planned_shape(name, &fields, false))
+        .flatten();
     let storage = if cdata {
         ValueStorage::CData
     } else if scalarizable && sd.generics.is_empty() {
@@ -746,7 +789,13 @@ fn planned_value_rec(
         .then(|| planned_shape(name, &fields, true))
         .flatten();
     visiting.pop();
-    Some(PlannedValue { name, storage, fields, shape, gc_shape })
+    Some(PlannedValue {
+        name,
+        storage,
+        fields,
+        shape,
+        gc_shape,
+    })
 }
 
 pub(crate) fn planned_value(ws: &Workspace, name: Ustr) -> Option<PlannedValue> {
@@ -787,9 +836,10 @@ pub(crate) fn lua_value_is_immutable(ws: &Workspace, ty: &MonoTy) -> bool {
     match ty {
         MonoTy::Int | MonoTy::Uint | MonoTy::Float | MonoTy::Bool | MonoTy::String => true,
         MonoTy::Nullable(inner) => lua_value_is_immutable(ws, inner),
-        MonoTy::App { ctor: MonoCtor::Nominal(name), params } if params.is_empty() => {
-            lua_nominal_is_immutable(ws, *name, &mut Vec::new())
-        }
+        MonoTy::App {
+            ctor: MonoCtor::Nominal(name),
+            params,
+        } if params.is_empty() => lua_nominal_is_immutable(ws, *name, &mut Vec::new()),
         _ => false,
     }
 }
@@ -798,13 +848,18 @@ fn lua_nominal_is_immutable(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>
     if payload_free_enum_variants(ws, name).is_some() {
         return true;
     }
-    let Some(sid) = ws.struct_by_name.get(&name) else { return false };
+    let Some(sid) = ws.struct_by_name.get(&name) else {
+        return false;
+    };
     let sd = &ws.modules[sid.module.index()].structs[sid.def];
     if !has_value_plan(sd) || !sd.is_nobox || !sd.generics.is_empty() || visiting.contains(&name) {
         return false;
     }
     visiting.push(name);
-    let immutable = sd.fields.iter().all(|field| lua_decl_is_immutable(ws, field.ty, visiting));
+    let immutable = sd
+        .fields
+        .iter()
+        .all(|field| lua_decl_is_immutable(ws, field.ty, visiting));
     visiting.pop();
     immutable
 }
@@ -812,12 +867,17 @@ fn lua_nominal_is_immutable(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>
 fn lua_decl_is_immutable(ws: &Workspace, ty: TyId, visiting: &mut Vec<Ustr>) -> bool {
     match static_ty(ws, ty) {
         Some(TypeExpr::Builtin(
-            BuiltinTy::Int | BuiltinTy::Uint | BuiltinTy::Float | BuiltinTy::Bool | BuiltinTy::String,
+            BuiltinTy::Int
+            | BuiltinTy::Uint
+            | BuiltinTy::Float
+            | BuiltinTy::Bool
+            | BuiltinTy::String,
         )) => true,
         Some(TypeExpr::Nullable(inner)) => lua_decl_is_immutable(ws, ty.with_idx(inner), visiting),
-        Some(TypeExpr::App { ctor: TypeCtor::Nominal(child), params }) if params.is_empty() => {
-            lua_nominal_is_immutable(ws, child, visiting)
-        }
+        Some(TypeExpr::App {
+            ctor: TypeCtor::Nominal(child),
+            params,
+        }) if params.is_empty() => lua_nominal_is_immutable(ws, child, visiting),
         _ => false,
     }
 }
@@ -856,10 +916,18 @@ impl BoxKind {
         fields: Vec<(Ustr, Idx<Inst>)>,
     ) -> Inst {
         match self {
-            BoxKind::Implicit => Inst::MakeValueStruct { name, representation, form, fields },
-            BoxKind::Explicit => {
-                Inst::MaterializeValueStruct { name, representation, form, fields }
-            }
+            BoxKind::Implicit => Inst::MakeValueStruct {
+                name,
+                representation,
+                form,
+                fields,
+            },
+            BoxKind::Explicit => Inst::MaterializeValueStruct {
+                name,
+                representation,
+                form,
+                fields,
+            },
         }
     }
 }
@@ -900,7 +968,10 @@ pub(crate) struct ValueBundle {
 
 impl ValueBundle {
     pub(crate) fn new(representation: RepId, value: ValueRepr) -> Self {
-        Self { representation, value }
+        Self {
+            representation,
+            value,
+        }
     }
 
     pub(crate) fn representation(&self) -> RepId {
@@ -914,7 +985,6 @@ impl ValueBundle {
     pub(crate) fn into_value(self) -> ValueRepr {
         self.value
     }
-
 }
 
 /// A safe-nav receiver after lowering: either an ordinary boxed value, or an
@@ -988,7 +1058,9 @@ pub(crate) fn declared_value_storage(
 /// Declaration field order of `name` iff it is a GC-free value STRUCT proper.
 pub fn gc_free_value_struct_field_order(ws: &Workspace, name: Ustr) -> Option<Vec<Ustr>> {
     ws.struct_by_name.get(&name)?;
-    planned_value(ws, name)?.shape.map(|_| struct_field_names(ws, name))
+    planned_value(ws, name)?
+        .shape
+        .map(|_| struct_field_names(ws, name))
 }
 
 /// The scalar-ABI shape of a GC-CARRYING value struct:
@@ -1034,7 +1106,11 @@ pub fn struct_field_names(ws: &Workspace, name: Ustr) -> Vec<Ustr> {
 /// The enum name `E` in a return type shaped exactly `[(string, E)]` (E nominal
 /// and a real enum). `None` for any other shape.
 pub(crate) fn pairs_return_enum(ws: &Workspace, ret: TyId) -> Option<Ustr> {
-    let TypeExpr::App { ctor: TypeCtor::Array, params } = static_ty(ws, ret)? else {
+    let TypeExpr::App {
+        ctor: TypeCtor::Array,
+        params,
+    } = static_ty(ws, ret)?
+    else {
         return None;
     };
     let elem = ret.with_idx(params.into_iter().next()?);
@@ -1046,10 +1122,17 @@ pub(crate) fn pairs_return_enum(ws: &Workspace, ret: TyId) -> Option<Ustr> {
     if it.next().is_some() {
         return None;
     }
-    if !matches!(static_ty(ws, elem.with_idx(a))?, TypeExpr::Builtin(BuiltinTy::String)) {
+    if !matches!(
+        static_ty(ws, elem.with_idx(a))?,
+        TypeExpr::Builtin(BuiltinTy::String)
+    ) {
         return None;
     }
-    let TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } = static_ty(ws, elem.with_idx(b))? else {
+    let TypeExpr::App {
+        ctor: TypeCtor::Nominal(name),
+        ..
+    } = static_ty(ws, elem.with_idx(b))?
+    else {
         return None;
     };
     ws.enums_by_name.get(&name)?;
@@ -1069,7 +1152,10 @@ pub(crate) enum VertexExpandRet {
 pub(crate) fn vertex_expand_return(ws: &Workspace, ret: TyId) -> Option<VertexExpandRet> {
     match static_ty(ws, ret)? {
         TypeExpr::Builtin(BuiltinTy::Int) => Some(VertexExpandRet::Stride),
-        TypeExpr::App { ctor: TypeCtor::Array, params } => {
+        TypeExpr::App {
+            ctor: TypeCtor::Array,
+            params,
+        } => {
             let elem = ret.with_idx(params.into_iter().next()?);
             matches!(static_ty(ws, elem)?, TypeExpr::Builtin(BuiltinTy::Int))
                 .then_some(VertexExpandRet::Sizes)
@@ -1084,7 +1170,8 @@ pub(crate) fn vertex_expand_ret_msg(ws: &Workspace, fname: Ustr, ret: Option<TyI
     format!(
         "`@vertex_expand` fn `{fname}` must return `int` (the stride in floats) or `[int]` \
          (per-attribute component counts), got `{}`",
-        ret.map(|r| ws.render(None, r)).unwrap_or_else(|| "()".to_string())
+        ret.map(|r| ws.render(None, r))
+            .unwrap_or_else(|| "()".to_string())
     )
 }
 
@@ -1113,7 +1200,10 @@ pub fn uniform_block_checked(
     let Some(shape) = value_shape(ws, name) else {
         return Err(format!("`{name}` has a std140 plan but no value shape"));
     };
-    let want: Vec<String> = value_leaf_paths(&shape).iter().map(|u| u.to_string()).collect();
+    let want: Vec<String> = value_leaf_paths(&shape)
+        .iter()
+        .map(|u| u.to_string())
+        .collect();
     let got = plan.leaf_paths();
     if want != got {
         return Err(format!(
@@ -1132,15 +1222,24 @@ pub(crate) fn uniform_semantic_checked(
     ws: &Workspace,
     name: Ustr,
 ) -> Result<Vec<(Ustr, crate::gpu_layout::WireKind)>, String> {
-    let members = crate::gpu_layout::uniform_group_members(ws, name)
-        .map_err(|e| e.message.clone())?;
+    let members =
+        crate::gpu_layout::uniform_group_members(ws, name).map_err(|e| e.message.clone())?;
     let Some(shape) = value_shape(ws, name) else {
-        return Err(format!("`{name}` has a uniform interface but no value shape"));
+        return Err(format!(
+            "`{name}` has a uniform interface but no value shape"
+        ));
     };
-    let want: Vec<String> = value_leaf_paths(&shape).iter().map(|u| u.to_string()).collect();
+    let want: Vec<String> = value_leaf_paths(&shape)
+        .iter()
+        .map(|u| u.to_string())
+        .collect();
     let got: Vec<String> = members
         .iter()
-        .flat_map(|(field, kind)| kind.leaf_suffixes().into_iter().map(move |suffix| format!("{field}{suffix}")))
+        .flat_map(|(field, kind)| {
+            kind.leaf_suffixes()
+                .into_iter()
+                .map(move |suffix| format!("{field}{suffix}"))
+        })
         .collect();
     if want != got {
         return Err(format!(
@@ -1169,35 +1268,58 @@ pub(crate) fn uniform_values_return_shape(
     block_name: Ustr,
 ) -> Result<UniformValuesShape, String> {
     let Some(&sid) = ws.struct_by_name.get(&block_name) else {
-        return Err(format!("`@uniform_values` must return a named packet struct, got `{block_name}`"));
+        return Err(format!(
+            "`@uniform_values` must return a named packet struct, got `{block_name}`"
+        ));
     };
     let sd = &ws.modules[sid.module.index()].structs[sid.def];
     let Some(fp) = sd.fields.iter().find(|f| f.name.as_str() == "fingerprint") else {
         return Err(format!("`{block_name}` needs an `int fingerprint` field"));
     };
-    if !matches!(static_ty(ws, fp.ty), Some(TypeExpr::Builtin(BuiltinTy::Int))) {
+    if !matches!(
+        static_ty(ws, fp.ty),
+        Some(TypeExpr::Builtin(BuiltinTy::Int))
+    ) {
         return Err(format!("`{block_name}.fingerprint` must be an int"));
     }
     let Some(leaves) = sd.fields.iter().find(|f| f.name.as_str() == "leaves") else {
-        return Err(format!("`{block_name}` needs a `[CanonicalUniformLeaf] leaves` field"));
+        return Err(format!(
+            "`{block_name}` needs a `[CanonicalUniformLeaf] leaves` field"
+        ));
     };
-    let Some(TypeExpr::App { ctor: TypeCtor::Array, params }) = static_ty(ws, leaves.ty) else {
-        return Err(format!("`{block_name}.leaves` must be an array of canonical leaves"));
+    let Some(TypeExpr::App {
+        ctor: TypeCtor::Array,
+        params,
+    }) = static_ty(ws, leaves.ty)
+    else {
+        return Err(format!(
+            "`{block_name}.leaves` must be an array of canonical leaves"
+        ));
     };
-    let elem = leaves.ty.with_idx(params.into_iter().next().ok_or_else(|| {
-        format!("`{block_name}.leaves` must name its canonical leaf type")
-    })?);
-    let TypeExpr::App { ctor: TypeCtor::Nominal(leaf_enum), .. } = static_ty(ws, elem).ok_or_else(|| {
-        format!("`{block_name}.leaves` must contain a named canonical leaf enum")
-    })? else {
-        return Err(format!("`{block_name}.leaves` must contain a named canonical leaf enum"));
+    let elem = leaves.ty.with_idx(
+        params
+            .into_iter()
+            .next()
+            .ok_or_else(|| format!("`{block_name}.leaves` must name its canonical leaf type"))?,
+    );
+    let TypeExpr::App {
+        ctor: TypeCtor::Nominal(leaf_enum),
+        ..
+    } = static_ty(ws, elem)
+        .ok_or_else(|| format!("`{block_name}.leaves` must contain a named canonical leaf enum"))?
+    else {
+        return Err(format!(
+            "`{block_name}.leaves` must contain a named canonical leaf enum"
+        ));
     };
     let Some(&eid) = ws.enums_by_name.get(&leaf_enum) else {
         return Err(format!("canonical leaf type `{leaf_enum}` is not an enum"));
     };
     let ed = &ws.modules[eid.module.index()].enums[eid.def];
     if ed.variants.len() != 4 {
-        return Err(format!("canonical leaf enum `{leaf_enum}` must have float, int, uint and bool variants"));
+        return Err(format!(
+            "canonical leaf enum `{leaf_enum}` must have float, int, uint and bool variants"
+        ));
     }
     let mut float_variant = None;
     let mut int_variant = None;
@@ -1205,26 +1327,42 @@ pub(crate) fn uniform_values_return_shape(
     let mut bool_variant = None;
     for variant in &ed.variants {
         let VariantPayload::Tuple(types) = &variant.payload else {
-            return Err(format!("canonical leaf `{}` must carry one primitive payload", variant.name));
+            return Err(format!(
+                "canonical leaf `{}` must carry one primitive payload",
+                variant.name
+            ));
         };
         let Some(&ty) = types.first() else {
-            return Err(format!("canonical leaf `{}` must carry one primitive payload", variant.name));
+            return Err(format!(
+                "canonical leaf `{}` must carry one primitive payload",
+                variant.name
+            ));
         };
         if types.len() != 1 {
-            return Err(format!("canonical leaf `{}` must carry one primitive payload", variant.name));
+            return Err(format!(
+                "canonical leaf `{}` must carry one primitive payload",
+                variant.name
+            ));
         }
         match static_ty(ws, ty) {
             Some(TypeExpr::Builtin(BuiltinTy::Float)) => float_variant = Some(variant.name),
             Some(TypeExpr::Builtin(BuiltinTy::Int)) => int_variant = Some(variant.name),
             Some(TypeExpr::Builtin(BuiltinTy::Uint)) => uint_variant = Some(variant.name),
             Some(TypeExpr::Builtin(BuiltinTy::Bool)) => bool_variant = Some(variant.name),
-            _ => return Err(format!("canonical leaf `{}` must carry float, int, uint or bool", variant.name)),
+            _ => {
+                return Err(format!(
+                    "canonical leaf `{}` must carry float, int, uint or bool",
+                    variant.name
+                ));
+            }
         }
     }
     let (Some(float_variant), Some(int_variant), Some(uint_variant), Some(bool_variant)) =
         (float_variant, int_variant, uint_variant, bool_variant)
     else {
-        return Err(format!("canonical leaf enum `{leaf_enum}` needs float, int, uint and bool variants"));
+        return Err(format!(
+            "canonical leaf enum `{leaf_enum}` needs float, int, uint and bool variants"
+        ));
     };
     Ok(UniformValuesShape {
         block_name,
@@ -1301,12 +1439,12 @@ pub(crate) fn struct_expand_variants(
             [] => {
                 return Err(format!(
                     "field `{field}: {want}` has no variant of `{enum_name}` carrying that payload type"
-                ))
+                ));
             }
             _ => {
                 return Err(format!(
                     "field `{field}: {want}` matches more than one variant of `{enum_name}` (ambiguous payload type)"
-                ))
+                ));
             }
         }
     }
@@ -1325,7 +1463,8 @@ pub(crate) fn sig_shape_of_nominal(ws: &Workspace, n: Ustr) -> Option<ValueShape
 pub(crate) fn sig_shape_of_nullable_nominal(ws: &Workspace, n: Ustr) -> Option<ValueShape> {
     let scalar = is_nobox_nominal(ws, n) || ws.struct_by_name.contains_key(&n);
     if scalar {
-        if let Some(mut shape) = planned_value(ws, n).and_then(|plan| plan.shape.or(plan.gc_shape)) {
+        if let Some(mut shape) = planned_value(ws, n).and_then(|plan| plan.shape.or(plan.gc_shape))
+        {
             shape.nullable = true;
             return Some(shape);
         }
@@ -1337,7 +1476,9 @@ pub(crate) fn sig_shape_of_nullable_nominal(ws: &Workspace, n: Ustr) -> Option<V
 pub(crate) fn value_shape_of_nominal(ws: &Workspace, name: Ustr) -> Option<ValueShape> {
     planned_value(ws, name)
         .and_then(|plan| plan.shape.or(plan.gc_shape))
-        .or_else(|| EnumPlan::for_name(ws, name).and_then(|plan| plan.flat().map(|s| s.value_shape())))
+        .or_else(|| {
+            EnumPlan::for_name(ws, name).and_then(|plan| plan.flat().map(|s| s.value_shape()))
+        })
 }
 
 /// The Lua global holding leaf `leaf` of the `nobox` global `base`. A global is
@@ -1391,17 +1532,25 @@ pub fn nobox_global_accessor_shape(
     ty: TyId,
 ) -> Result<Option<NoboxGlobalAccessorShape>, RepError> {
     let plan = GlobalPlan::for_declared_type(ws, scx, ty)?;
-    let Some(shape) = plan.value_shape() else { return Ok(None) };
+    let Some(shape) = plan.value_shape() else {
+        return Ok(None);
+    };
     let paths = plan.leaf_paths().ok_or_else(|| RepError {
         span: None,
-        message: format!("`{}` has no physical leaf-path plan for global accessors", shape.name),
+        message: format!(
+            "`{}` has no physical leaf-path plan for global accessors",
+            shape.name
+        ),
     })?;
     // `value_leaf_paths` omits the global's own presence leaf, and
     // `value_leaf_presence_flags` omits it too; both sequences therefore line
     // up directly. Nested nullable fields remain represented in both.
     let flags = plan.presence_flags().ok_or_else(|| RepError {
         span: None,
-        message: format!("`{}` has no physical presence plan for global accessors", shape.name),
+        message: format!(
+            "`{}` has no physical presence plan for global accessors",
+            shape.name
+        ),
     })?;
     if flags.len() != paths.len() {
         return Err(RepError {
@@ -1414,11 +1563,17 @@ pub fn nobox_global_accessor_shape(
             ),
         });
     }
-    let presence_path =
-        flags.iter().zip(paths.iter()).find(|(is_tag, _)| **is_tag).map(|(_, p)| *p);
+    let presence_path = flags
+        .iter()
+        .zip(paths.iter())
+        .find(|(is_tag, _)| **is_tag)
+        .map(|(_, p)| *p);
     let storage = plan.value_storage().ok_or_else(|| RepError {
         span: None,
-        message: format!("`{}` has no physical storage plan for global accessors", shape.name),
+        message: format!(
+            "`{}` has no physical storage plan for global accessors",
+            shape.name
+        ),
     })?;
     let has_nested = paths.iter().any(|p| p.contains('.'));
     let ctor_suffix = match storage {
@@ -1478,12 +1633,15 @@ pub fn growth_depth(t: &MonoTy) -> u32 {
         | MonoTy::Unit
         | MonoTy::Never => 1,
         MonoTy::Nullable(inner) => 1 + growth_depth(inner),
-        MonoTy::App { params, .. } => {
-            1 + params.iter().map(growth_depth).max().unwrap_or(0)
-        }
+        MonoTy::App { params, .. } => 1 + params.iter().map(growth_depth).max().unwrap_or(0),
         MonoTy::Tuple(parts) => 1 + parts.iter().map(growth_depth).max().unwrap_or(0),
         MonoTy::Function { params, ret } => {
-            1 + params.iter().map(growth_depth).chain([growth_depth(ret)]).max().unwrap_or(0)
+            1 + params
+                .iter()
+                .map(growth_depth)
+                .chain([growth_depth(ret)])
+                .max()
+                .unwrap_or(0)
         }
     }
 }
@@ -1507,7 +1665,11 @@ pub type SpecSubst = crate::monoty::MonoSubst;
 
 pub(crate) fn mono_value_shape(ws: &Workspace, ty: &MonoTy) -> Option<ValueShape> {
     let (payload, nullable) = peel_nullable_layers(ty);
-    let MonoTy::App { ctor: MonoCtor::Nominal(name), .. } = payload else {
+    let MonoTy::App {
+        ctor: MonoCtor::Nominal(name),
+        ..
+    } = payload
+    else {
         return None;
     };
     if nullable {
@@ -1519,7 +1681,11 @@ pub(crate) fn mono_value_shape(ws: &Workspace, ty: &MonoTy) -> Option<ValueShape
 
 pub(crate) fn mono_nobox_value_shape(ws: &Workspace, ty: &MonoTy) -> Option<ValueShape> {
     let (payload, nullable) = peel_nullable_layers(ty);
-    let MonoTy::App { ctor: MonoCtor::Nominal(name), .. } = payload else {
+    let MonoTy::App {
+        ctor: MonoCtor::Nominal(name),
+        ..
+    } = payload
+    else {
         return None;
     };
     is_nobox_nominal(ws, *name).then(|| {
@@ -1625,7 +1791,7 @@ pub(crate) fn instance_subst_from_bindings(
                         "internal: a call to `{}` has unresolved inference type `{name}`",
                         f.name
                     ),
-                ))
+                ));
             }
             Err(reason) => {
                 return Err(CompilerError::new_with_label(
@@ -1635,13 +1801,12 @@ pub(crate) fn instance_subst_from_bindings(
                         f.name,
                         reason.bucket()
                     ),
-                ))
+                ));
             }
         }
     }
     Ok(Some(subst))
 }
-
 
 /// The CONCRETE INSTANCE an iterator-protocol WITNESS resolves to, from the
 /// `VarId -> TyId` map bone recorded for it.
@@ -1665,11 +1830,15 @@ pub fn witness_instance_subst(
     }
     let mut bindings = Vec::with_capacity(f.generics.len());
     for generic in &f.generics {
-        let Some(TypeExpr::Generic(var, _)) = ty_node(ws, inf, *generic) else { return Ok(None) };
+        let Some(TypeExpr::Generic(var, _)) = ty_node(ws, inf, *generic) else {
+            return Ok(None);
+        };
         // A generic the resolution left unbound leaves the instantiation
         // INCOMPLETE, which the census reports as its own cause rather than
         // being papered over with a default.
-        let Some(bound) = generics.get(&var).copied() else { return Ok(None) };
+        let Some(bound) = generics.get(&var).copied() else {
+            return Ok(None);
+        };
         bindings.push(bound);
     }
     instance_subst_from_bindings(ws, inf, func, &bindings, enclosing)
@@ -1703,14 +1872,20 @@ pub fn spec_key_from_next_generics(
 ///
 /// The declaration supplies the ORDER, which is the only thing a substitution
 /// lacks: a key is positional over `f.generics` and a subst is keyed by `VarId`.
-pub fn spec_key_from_subst(ws: &Workspace, fref: FuncRef, subst: &SpecSubst) -> Option<Vec<MonoTy>> {
+pub fn spec_key_from_subst(
+    ws: &Workspace,
+    fref: FuncRef,
+    subst: &SpecSubst,
+) -> Option<Vec<MonoTy>> {
     let f = &ws.module(fref.module).functions[fref.func];
     if f.generics.is_empty() {
         return None;
     }
     let mut key: Vec<MonoTy> = Vec::with_capacity(f.generics.len());
     for g in f.generics.iter() {
-        let Some(TypeExpr::Generic(var, _)) = static_ty(ws, *g) else { return None };
+        let Some(TypeExpr::Generic(var, _)) = static_ty(ws, *g) else {
+            return None;
+        };
         key.push(subst.get(&var)?.clone());
     }
     Some(key)
@@ -1758,11 +1933,8 @@ pub(crate) fn value_shape_can_fill(actual: &ValueShape, expected: &ValueShape) -
     actual.name == expected.name
         && (!actual.nullable || expected.nullable)
         && actual.fields.len() == expected.fields.len()
-        && actual
-            .fields
-            .iter()
-            .zip(&expected.fields)
-            .all(|((actual_name, actual_field), (expected_name, expected_field))| {
+        && actual.fields.iter().zip(&expected.fields).all(
+            |((actual_name, actual_field), (expected_name, expected_field))| {
                 actual_name == expected_name
                     && match (actual_field, expected_field) {
                         (FieldShape::Prim, FieldShape::Prim) => true,
@@ -1771,7 +1943,8 @@ pub(crate) fn value_shape_can_fill(actual: &ValueShape, expected: &ValueShape) -
                         }
                         _ => false,
                     }
-            })
+            },
+        )
 }
 
 pub(crate) fn ret_slot_can_fill(actual: &RetSlot, expected: &RetSlot) -> bool {
@@ -1902,7 +2075,10 @@ fn elem_rebuild_from_rep(arena: &RepArena, id: RepId) -> Option<ElemRebuild> {
                 .collect();
             fields.map(|f| ElemRebuild::Value(shape.name, id, f))
         }
-        RepLayout::Tuple { slots, nullable: false } => slots
+        RepLayout::Tuple {
+            slots,
+            nullable: false,
+        } => slots
             .iter()
             .map(|slot| elem_rebuild_from_rep(arena, *slot))
             .collect::<Option<Vec<_>>>()
@@ -1925,24 +2101,33 @@ pub fn bound_next_shape_from_concrete(
     interner: &crate::monoty::MonoInterner,
     signature: &ConcreteSignature,
 ) -> Result<BoundNextShape, RepError> {
-    let result = signature.result.map(|id| interner.get(id)).ok_or_else(|| RepError {
-        span: None,
-        message: "a concrete bound witness has no result type".into(),
-    })?;
-    let id = scx
-        .rep_arena()
-        .plan(
-            ws,
-            scx.target(),
-            &result,
-            RepUse::Return,
-            &RepUseFacts { tuple_spelled: true, span: None },
-            RepGuarantees { nobox: true, allow_opaque: true },
-        )
-        ?;
+    let result = signature
+        .result
+        .map(|id| interner.get(id))
+        .ok_or_else(|| RepError {
+            span: None,
+            message: "a concrete bound witness has no result type".into(),
+        })?;
+    let id = scx.rep_arena().plan(
+        ws,
+        scx.target(),
+        &result,
+        RepUse::Return,
+        &RepUseFacts {
+            tuple_spelled: true,
+            span: None,
+        },
+        RepGuarantees {
+            nobox: true,
+            allow_opaque: true,
+        },
+    )?;
     let shape = scx.rep_arena().tuple_shape(id).ok_or_else(|| RepError {
         span: None,
-        message: format!("bound witness result `{}` has no tuple return plan", result.render()),
+        message: format!(
+            "bound witness result `{}` has no tuple return plan",
+            result.render()
+        ),
     })?;
     let plan = scx.rep_arena().try_get(id).ok_or_else(|| RepError {
         span: None,
@@ -1965,12 +2150,14 @@ pub fn bound_next_shape_from_concrete(
             return Err(RepError {
                 span: None,
                 message: "bound witness return plan has no element slot".into(),
-            })
+            });
         }
         ids => ids,
     };
     let arena = scx.rep_arena();
-    let elem_splats = elem_slots.iter().any(|slot| arena.get(*slot).splats(&arena));
+    let elem_splats = elem_slots
+        .iter()
+        .any(|slot| arena.get(*slot).splats(&arena));
     let elem = if elem_splats {
         let rebuild = if elem_slots.len() == 1 {
             elem_rebuild_from_rep(&arena, elem_slots[0])
@@ -1988,7 +2175,10 @@ pub fn bound_next_shape_from_concrete(
     } else {
         BoundNextElem::Opaque
     };
-    Ok(BoundNextShape { slot_count: shape.slot_count(), elem })
+    Ok(BoundNextShape {
+        slot_count: shape.slot_count(),
+        elem,
+    })
 }
 
 /// Cdata enum shape: an enum whose every variant is `Unit` or a positional TUPLE
@@ -2016,7 +2206,10 @@ pub struct EnumCdataShape {
 impl EnumCdataShape {
     /// The variant's runtime int tag (its declaration-order index).
     pub fn tag_of(&self, v: Ustr) -> Option<i64> {
-        self.variants.iter().position(|(n, _)| *n == v).map(|p| p as i64)
+        self.variants
+            .iter()
+            .position(|(n, _)| *n == v)
+            .map(|p| p as i64)
     }
 
     /// All field names in `<Enum>_ct` ctor order: `[__tag, <slot names>]`.
@@ -2032,7 +2225,11 @@ impl EnumCdataShape {
     pub(crate) fn value_shape(&self) -> ValueShape {
         ValueShape {
             name: self.name,
-            fields: self.field_names().into_iter().map(|n| (n, FieldShape::Prim)).collect(),
+            fields: self
+                .field_names()
+                .into_iter()
+                .map(|n| (n, FieldShape::Prim))
+                .collect(),
             nullable: false,
         }
     }
@@ -2096,7 +2293,11 @@ fn build_enum_cdata_shape(ws: &Workspace, name: Ustr) -> Option<EnumCdataShape> 
     if !any_payload {
         return None; // payload-free -> int (increment 1)
     }
-    Some(EnumCdataShape { name, slots, variants })
+    Some(EnumCdataShape {
+        name,
+        slots,
+        variants,
+    })
 }
 
 /// The C type for a `value`-struct field, or `None` when the field is NOT
@@ -2120,21 +2321,24 @@ pub(crate) fn value_field_c_type_guarded(ws: &Workspace, ty: TyId) -> Option<Str
         // A nested value struct is C-mappable iff it is itself FFI-clean; a
         // GC-carrying nested value struct makes this field (and its parent)
         // GC-carrying too.
-        TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } if map_is_value_struct(ws, name) => {
+        TypeExpr::App {
+            ctor: TypeCtor::Nominal(name),
+            ..
+        } if map_is_value_struct(ws, name) => {
             if value_storage_is_gc_guarded(ws, name) {
                 None
             } else {
                 Some(name.as_str().to_string())
             }
         }
-        TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }
-            if payload_free_enum_variants(ws, name).is_some() =>
-        {
-            Some("int".into())
-        }
-        TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }
-            if EnumPlan::for_name(ws, name).is_some_and(|plan| plan.cdata().is_some()) =>
-        {
+        TypeExpr::App {
+            ctor: TypeCtor::Nominal(name),
+            ..
+        } if payload_free_enum_variants(ws, name).is_some() => Some("int".into()),
+        TypeExpr::App {
+            ctor: TypeCtor::Nominal(name),
+            ..
+        } if EnumPlan::for_name(ws, name).is_some_and(|plan| plan.cdata().is_some()) => {
             Some(name.as_str().to_string())
         }
         _ => None,
@@ -2158,7 +2362,10 @@ pub fn gc_field_eq(ws: &Workspace, ty: TyId) -> GcFieldEq {
     }
     match static_ty(ws, ty) {
         Some(TypeExpr::Nullable(inner)) => gc_field_eq(ws, ty.with_idx(inner)),
-        Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }) => {
+        Some(TypeExpr::App {
+            ctor: TypeCtor::Nominal(name),
+            ..
+        }) => {
             if map_is_value_struct(ws, name) {
                 GcFieldEq::Native
             } else if ws.enums_by_name.contains_key(&name) {
@@ -2303,7 +2510,8 @@ fn build_flat_enum_shape_inner(
 ) -> Option<EnumFlatShape> {
     let eid = *ws.enums_by_name.get(&name)?;
     // Payload-free enums are ints; cdata-eligible enums scalarize via cdata.
-    if payload_free_enum_variants(ws, name).is_some() || build_enum_cdata_shape(ws, name).is_some() {
+    if payload_free_enum_variants(ws, name).is_some() || build_enum_cdata_shape(ws, name).is_some()
+    {
         return None;
     }
     if visiting.contains(&name) {
@@ -2326,7 +2534,9 @@ fn build_flat_enum_shape_inner(
                     want.resize(tys.len(), Vec::new());
                 }
                 for (i, ty) in tys.iter().enumerate() {
-                    let Some(vs) = flat_payload_shape(ws, *ty, visiting) else { continue };
+                    let Some(vs) = flat_payload_shape(ws, *ty, visiting) else {
+                        continue;
+                    };
                     if !want[i].iter().any(|prev| prev.name == vs.name) {
                         want[i].push(vs);
                     }
@@ -2343,10 +2553,20 @@ fn build_flat_enum_shape_inner(
     }
     let slots = want
         .into_iter()
-        .map(|w| if w.is_empty() { FlatSlot::Opaque } else { FlatSlot::Leaves(w) })
+        .map(|w| {
+            if w.is_empty() {
+                FlatSlot::Opaque
+            } else {
+                FlatSlot::Leaves(w)
+            }
+        })
         .collect();
     visiting.pop();
-    Some(EnumFlatShape { name, slots, record_fields })
+    Some(EnumFlatShape {
+        name,
+        slots,
+        record_fields,
+    })
 }
 
 /// The single static representation decision for an enum. The operational
@@ -2413,12 +2633,12 @@ impl EnumPlan {
 /// Keyed on the DECLARED payload type, like every other splat decision on this
 /// arc: both the ctor that writes the slots and the match arm that reads them
 /// derive the layout from the enum declaration, so neither has to see the other.
-fn flat_payload_shape(
-    ws: &Workspace,
-    ty: TyId,
-    visiting: &mut Vec<Ustr>,
-) -> Option<ValueShape> {
-    let TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } = static_ty(ws, ty)? else {
+fn flat_payload_shape(ws: &Workspace, ty: TyId, visiting: &mut Vec<Ustr>) -> Option<ValueShape> {
+    let TypeExpr::App {
+        ctor: TypeCtor::Nominal(n),
+        ..
+    } = static_ty(ws, ty)?
+    else {
         return None;
     };
     if map_is_value_struct(ws, n) {
@@ -2446,22 +2666,18 @@ fn flat_enum_equality_is_leafwise_inner(
     let ed = &ws.modules[eid.module.index()].enums[eid.def];
     let leafwise = ed.variants.iter().all(|variant| match &variant.payload {
         VariantPayload::Unit => true,
-        VariantPayload::Tuple(tys) => {
-            tys.iter().all(|ty| equality_payload_is_leafwise(ws, *ty, visiting))
-        }
-        VariantPayload::Record(fields) => {
-            fields.iter().all(|field| equality_payload_is_leafwise(ws, field.ty, visiting))
-        }
+        VariantPayload::Tuple(tys) => tys
+            .iter()
+            .all(|ty| equality_payload_is_leafwise(ws, *ty, visiting)),
+        VariantPayload::Record(fields) => fields
+            .iter()
+            .all(|field| equality_payload_is_leafwise(ws, field.ty, visiting)),
     });
     visiting.pop();
     leafwise
 }
 
-fn equality_payload_is_leafwise(
-    ws: &Workspace,
-    ty: TyId,
-    visiting: &mut Vec<Ustr>,
-) -> bool {
+fn equality_payload_is_leafwise(ws: &Workspace, ty: TyId, visiting: &mut Vec<Ustr>) -> bool {
     let TyId::Static(mid, idx) = ty else {
         return false;
     };
@@ -2480,7 +2696,10 @@ fn equality_payload_is_leafwise(
         TypeExpr::Nullable(inner) => {
             equality_payload_is_leafwise(ws, TyId::Static(mid, inner), visiting)
         }
-        TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => {
+        TypeExpr::App {
+            ctor: TypeCtor::Nominal(n),
+            ..
+        } => {
             if map_is_value_struct(ws, n) {
                 return true;
             }
@@ -2539,10 +2758,18 @@ impl YieldChannel {
 
 /// The [`YieldChannel`] of a co fn's declared return type `Coroutine<Y, ...>`.
 pub fn coroutine_yield_channel(ws: &Workspace, return_ty: TyId) -> Option<YieldChannel> {
-    let TyId::Static(m, idx) = return_ty else { return None };
-    let TypeExpr::App { params, .. } = ws.module(m).ty_arena[idx] else { return None };
+    let TyId::Static(m, idx) = return_ty else {
+        return None;
+    };
+    let TypeExpr::App { params, .. } = ws.module(m).ty_arena[idx] else {
+        return None;
+    };
     let y_idx = params.into_iter().next()?;
-    let TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } = ws.module(m).ty_arena[y_idx] else {
+    let TypeExpr::App {
+        ctor: TypeCtor::Nominal(n),
+        ..
+    } = ws.module(m).ty_arena[y_idx]
+    else {
         return None;
     };
     let shape = EnumPlan::for_name(ws, n).and_then(|plan| plan.flat().cloned())?;

@@ -11,19 +11,29 @@
 use crate::common::{emit_user, ws_with};
 
 fn node_available() -> bool {
-    crate::common::node().arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+    crate::common::node()
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 fn node_eval_int(defs: &str, call: &str) -> i64 {
     let program = format!("{defs}\nconsole.log({call});");
-    let out = crate::common::node().arg("-e").arg(&program).output().expect("spawn node");
+    let out = crate::common::node()
+        .arg("-e")
+        .arg(&program)
+        .output()
+        .expect("spawn node");
     assert!(
         out.status.success(),
         "node failed:\n--- program ---\n{program}\n--- stderr ---\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
     let s = String::from_utf8_lossy(&out.stdout);
-    s.trim().parse::<i64>().unwrap_or_else(|_| panic!("node did not print an int: {s:?}\n{program}"))
+    s.trim()
+        .parse::<i64>()
+        .unwrap_or_else(|_| panic!("node did not print an int: {s:?}\n{program}"))
 }
 
 /// Emit `f` and evaluate `f(arg)` under node (skips if node is absent).
@@ -33,7 +43,10 @@ fn eval1(src: &str, arg: i64, expect: i64) {
         return;
     }
     let ws = ws_with(src);
-    assert_eq!(node_eval_int(&emit_user(&ws, "f"), &format!("f({arg})")), expect);
+    assert_eq!(
+        node_eval_int(&emit_user(&ws, "f"), &format!("f({arg})")),
+        expect
+    );
 }
 
 #[test]

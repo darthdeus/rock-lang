@@ -22,7 +22,9 @@ fn nested_nobox_struct_rows_reject_materialization_in_overlay() {
 
 fn check_struct_rows(use_overlay: bool) {
     require_luajit();
-    let gc_rows = STRUCT_ROWS.replace("c: int", "c: string").replace("c: 3", "c: \"tag\"");
+    let gc_rows = STRUCT_ROWS
+        .replace("c: int", "c: string")
+        .replace("c: 3", "c: \"tag\"");
     let empty_rows = STRUCT_ROWS.replace("[Row { a: 1, flag: false, c: 3, d: 4, e: 5 }]", "[]");
     for source in [STRUCT_ROWS, gc_rows.as_str(), empty_rows.as_str()] {
         check_struct_source(source, use_overlay);
@@ -49,7 +51,10 @@ assert(tostring(message):find("cannot materialize strided nobox struct", 1, true
 print("rejected")
 "#;
     assert_eq!(
-        run_luajit(&format!("{program}\n{driver}"), &format!("nested_strided_inspect_{mode}")),
+        run_luajit(
+            &format!("{program}\n{driver}"),
+            &format!("nested_strided_inspect_{mode}")
+        ),
         "rejected",
     );
 }
@@ -87,7 +92,10 @@ print("enum rows")
         ("overlay", format!("{}\n{}", full.lua, overlay.lua)),
     ] {
         assert_eq!(
-            run_luajit(&format!("{program}\n{driver}"), &format!("nested_strided_enum_inspect_{mode}")),
+            run_luajit(
+                &format!("{program}\n{driver}"),
+                &format!("nested_strided_enum_inspect_{mode}")
+            ),
             "enum rows",
         );
     }

@@ -36,12 +36,10 @@ static SHUFFLE_SEED: OnceLock<Option<u64>> = OnceLock::new();
 /// Returns the `ROCK_SHUFFLE_SEED` value, or `None` if unset. Invalid settings panic.
 /// Cached after first read so repeated calls cost a single atomic load.
 pub fn shuffle_seed() -> Option<u64> {
-    *SHUFFLE_SEED.get_or_init(|| {
-        match std::env::var("ROCK_SHUFFLE_SEED") {
-            Ok(seed) => Some(seed.parse().expect("ROCK_SHUFFLE_SEED must be a u64")),
-            Err(std::env::VarError::NotPresent) => None,
-            Err(error) => panic!("invalid ROCK_SHUFFLE_SEED: {error}"),
-        }
+    *SHUFFLE_SEED.get_or_init(|| match std::env::var("ROCK_SHUFFLE_SEED") {
+        Ok(seed) => Some(seed.parse().expect("ROCK_SHUFFLE_SEED must be a u64")),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => panic!("invalid ROCK_SHUFFLE_SEED: {error}"),
     })
 }
 
@@ -144,8 +142,15 @@ mod invalid_seed_tests {
             return;
         }
         let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["shuffle::invalid_seed_tests::invalid_seed_is_reported", "--exact", "--nocapture"])
-            .env("SHUFFLE_TEST_CHILD", "1").env("ROCK_SHUFFLE_SEED", "invalid").output().unwrap();
+            .args([
+                "shuffle::invalid_seed_tests::invalid_seed_is_reported",
+                "--exact",
+                "--nocapture",
+            ])
+            .env("SHUFFLE_TEST_CHILD", "1")
+            .env("ROCK_SHUFFLE_SEED", "invalid")
+            .output()
+            .unwrap();
         assert!(!output.status.success());
         assert!(String::from_utf8_lossy(&output.stderr).contains("ROCK_SHUFFLE_SEED"));
     }

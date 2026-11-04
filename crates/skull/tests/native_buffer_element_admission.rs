@@ -42,7 +42,10 @@ fn assert_planner_rejection(error: &skull_parser::CompilerError, element: &str) 
         msg.contains("requires a valid native-buffer element ctype") && msg.contains(element),
         "{msg}"
     );
-    assert!(!error.labels.is_empty(), "native-buffer rejection must be located");
+    assert!(
+        !error.labels.is_empty(),
+        "native-buffer rejection must be located"
+    );
 }
 
 #[test]
@@ -66,6 +69,9 @@ fn gc_carrying_value_rejects_with_its_concrete_name() {
 #[test]
 fn native_buffer_primitives_and_ffi_value_are_valid_controls() {
     let ws = ws_with_stdlib(VALID_CONTROLS);
-    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("test module");
     skull::mir_emit::emit_workspace_mir(&ws, mid).expect("valid c-mappable elements must emit");
 }

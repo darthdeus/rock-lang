@@ -22,7 +22,9 @@ fn emit_module(src: &str) -> String {
     modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
     let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
-    skull::mir_emit::emit_workspace_mir(&ws, mid).expect("emit").lua
+    skull::mir_emit::emit_workspace_mir(&ws, mid)
+        .expect("emit")
+        .lua
 }
 
 #[test]
@@ -32,7 +34,10 @@ fn struct_field_hole_emits_a_runtime_error_and_keeps_the_function() {
     let lua = emit_module(
         "struct P { x: int, y: int }\nfn boom() -> int {\n    let p = P { x: 1, y: ? }\n    return p.y\n}\nfn main() {}\n",
     );
-    assert!(!crate::common::definitions_matching(&lua, "boom").is_empty(), "boom must be emitted, not skipped:\n{lua}");
+    assert!(
+        !crate::common::definitions_matching(&lua, "boom").is_empty(),
+        "boom must be emitted, not skipped:\n{lua}"
+    );
     assert!(
         lua.contains("error(") && lua.contains("unfilled hole"),
         "hole must lower to a readable runtime error:\n{lua}"
@@ -42,7 +47,10 @@ fn struct_field_hole_emits_a_runtime_error_and_keeps_the_function() {
 #[test]
 fn typed_let_hole_emits_a_runtime_error() {
     let lua = emit_module("fn boom() {\n    let x: int = ?\n    print(\"{x}\")\n}\nfn main() {}\n");
-    assert!(!crate::common::definitions_matching(&lua, "boom").is_empty(), "boom emitted:\n{lua}");
+    assert!(
+        !crate::common::definitions_matching(&lua, "boom").is_empty(),
+        "boom emitted:\n{lua}"
+    );
     assert!(
         lua.contains("error(") && lua.contains("unfilled hole"),
         "typed let hole -> runtime error:\n{lua}"
@@ -52,6 +60,12 @@ fn typed_let_hole_emits_a_runtime_error() {
 #[test]
 fn named_hole_reports_its_name() {
     let lua = emit_module("fn boom() -> int {\n    return ?width\n}\nfn main() {}\n");
-    assert!(!crate::common::definitions_matching(&lua, "boom").is_empty(), "boom emitted:\n{lua}");
-    assert!(lua.contains("?width"), "named hole must surface its name:\n{lua}");
+    assert!(
+        !crate::common::definitions_matching(&lua, "boom").is_empty(),
+        "boom emitted:\n{lua}"
+    );
+    assert!(
+        lua.contains("?width"),
+        "named hole must surface its name:\n{lua}"
+    );
 }

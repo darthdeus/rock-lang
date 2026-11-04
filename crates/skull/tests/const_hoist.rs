@@ -16,7 +16,7 @@
 //!
 //! Emitted in the function's OWN chunk (not shared scaffolding), so an incremental
 //! body-edit overlay carries the def with the function it serves.
-use crate::common::{emit_module, emit_v1_package, function_body, run_luajit, V1Fragment};
+use crate::common::{V1Fragment, emit_module, emit_v1_package, function_body, run_luajit};
 
 fn count(hay: &str, needle: &str) -> usize {
     hay.matches(needle).count()
@@ -114,8 +114,14 @@ fn hoisted_package_value_ctor_uses_the_emitted_type_symbol() {
     let emitted = emit_v1_package(
         "kcpkg",
         &[
-            V1Fragment { file: "main.rock", src: PACKAGE_MAIN },
-            V1Fragment { file: "a.rock", src: PACKAGE_MOD_A },
+            V1Fragment {
+                file: "main.rock",
+                src: PACKAGE_MAIN,
+            },
+            V1Fragment {
+                file: "a.rock",
+                src: PACKAGE_MOD_A,
+            },
         ],
     );
     assert!(
@@ -123,6 +129,9 @@ fn hoisted_package_value_ctor_uses_the_emitted_type_symbol() {
         "the all-constant package value literal must be hoisted:\n{}",
         emitted.lua
     );
-    let out = run_luajit(&format!("{}\nmain()\n", emitted.lua), "const_hoist_package_value");
+    let out = run_luajit(
+        &format!("{}\nmain()\n", emitted.lua),
+        "const_hoist_package_value",
+    );
     assert_eq!(out, "3/7 1/1");
 }

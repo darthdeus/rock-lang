@@ -1,7 +1,7 @@
 //! backend-sibling-mismatch lint over bone HIR. Same harness as unused_fn:
 //! `semantic_pass(&mut [parse(src)])` -> `Workspace`.
 
-use bone_lints::{backend_sibling_mismatches, BackendSiblingIssue, BackendSiblingMismatch};
+use bone_lints::{BackendSiblingIssue, BackendSiblingMismatch, backend_sibling_mismatches};
 use bone_semantic::prelude::*;
 
 fn parse_named(src: &str, name: &str) -> skull_parser::Ast {
@@ -17,7 +17,12 @@ fn findings(srcs: &[&str]) -> Vec<BackendSiblingMismatch> {
     let ws = semantic_pass(&mut asts).expect("clean program typechecks");
     let mut out = backend_sibling_mismatches(&ws);
     out.sort_by(|a, b| {
-        (a.name, &a.signature, a.backend, &a.issue).cmp(&(b.name, &b.signature, b.backend, &b.issue))
+        (a.name, &a.signature, a.backend, &a.issue).cmp(&(
+            b.name,
+            &b.signature,
+            b.backend,
+            &b.issue,
+        ))
     });
     out
 }
@@ -27,9 +32,15 @@ fn summary(srcs: &[&str]) -> Vec<String> {
         .iter()
         .map(|f| match &f.issue {
             BackendSiblingIssue::MissingOn { backend } => {
-                format!("{}{} on {} missing on {backend}", f.name, f.signature, f.backend)
+                format!(
+                    "{}{} on {} missing on {backend}",
+                    f.name, f.signature, f.backend
+                )
             }
-            BackendSiblingIssue::ReturnDiffers { other_backend, other_ret } => format!(
+            BackendSiblingIssue::ReturnDiffers {
+                other_backend,
+                other_ret,
+            } => format!(
                 "{}{} on {} returns differ vs {other_backend} ({other_ret})",
                 f.name, f.signature, f.backend
             ),
@@ -57,7 +68,10 @@ fn flags_a_sibling_pair_whose_param_types_drifted() {
 fn matching_siblings_are_not_flagged() {
     let src = "inline(lua) fn probe(x: int) -> int = \"return x\"\n\
                inline(js) fn probe(x: int) -> int = \"return x;\"";
-    assert!(summary(&[src]).is_empty(), "identical signatures are a clean sibling pair");
+    assert!(
+        summary(&[src]).is_empty(),
+        "identical signatures are a clean sibling pair"
+    );
 }
 
 #[test]
@@ -81,7 +95,10 @@ fn a_single_backend_fn_is_not_flagged() {
     // Platform-exclusive by construction: one backend declares it, nobody
     // claimed a sibling. Flagging these would fire on every lua-only ffi fn.
     let src = "inline(lua) fn only_native(x: int) -> int = \"return x\"";
-    assert!(summary(&[src]).is_empty(), "a lone lua decl is not a drifted sibling");
+    assert!(
+        summary(&[src]).is_empty(),
+        "a lone lua decl is not a drifted sibling"
+    );
 }
 
 #[test]
@@ -93,7 +110,10 @@ fn a_portable_decl_covers_the_missing_backend() {
     let src = "inline(lua) fn probe(x: int) -> int = \"return x\"\n\
                inline(js) fn probe(x: int) -> int = \"return x;\"\n\
                fn probe(x: float) -> int {\n    return 0\n}";
-    assert!(summary(&[src]).is_empty(), "the portable body serves both backends");
+    assert!(
+        summary(&[src]).is_empty(),
+        "the portable body serves both backends"
+    );
 }
 
 #[test]
@@ -102,7 +122,10 @@ fn a_full_overload_set_on_both_backends_is_not_flagged() {
                inline(lua) fn probe(x: float) -> int = \"return x\"\n\
                inline(js) fn probe(x: int) -> int = \"return x;\"\n\
                inline(js) fn probe(x: float) -> int = \"return x;\"";
-    assert!(summary(&[src]).is_empty(), "every signature has both backends");
+    assert!(
+        summary(&[src]).is_empty(),
+        "every signature has both backends"
+    );
 }
 
 #[test]
@@ -110,7 +133,10 @@ fn param_names_do_not_count_as_drift() {
     // `os_getenv` renames its param on the js side; only types are the ABI.
     let src = "inline(lua) fn probe(var: string) -> string = \"return var\"\n\
                inline(js) fn probe(v: string) -> string = \"return v;\"";
-    assert!(summary(&[src]).is_empty(), "param names are not part of the signature");
+    assert!(
+        summary(&[src]).is_empty(),
+        "param names are not part of the signature"
+    );
 }
 
 #[test]
@@ -136,8 +162,17 @@ fn the_finding_points_at_the_unmatched_decl() {
     let js = "\n\ninline(js) fn make_window(title: string) -> int = \"return 1;\"";
     let fs = findings(&[lua, js]);
     // `line_range` is 0-based, the unit `filter_suppressed` matches against.
-    let js_side = fs.iter().find(|f| f.backend == "js").expect("js-side finding");
-    assert_eq!(js_side.span.line_range.0, 2, "reports on the js decl's own line");
-    let lua_side = fs.iter().find(|f| f.backend == "lua").expect("lua-side finding");
+    let js_side = fs
+        .iter()
+        .find(|f| f.backend == "js")
+        .expect("js-side finding");
+    assert_eq!(
+        js_side.span.line_range.0, 2,
+        "reports on the js decl's own line"
+    );
+    let lua_side = fs
+        .iter()
+        .find(|f| f.backend == "lua")
+        .expect("lua-side finding");
     assert_eq!(lua_side.span.line_range.0, 0);
 }

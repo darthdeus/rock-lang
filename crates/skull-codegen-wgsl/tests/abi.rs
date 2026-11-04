@@ -3,18 +3,21 @@ use skull_codegen_glsl::ShaderAbiPlan;
 use skull_codegen_wgsl::WgslAbiPlan;
 use skull_mir::gpu_layout::{ArrayMemberDecl, AttrKind, SamplerKind, WireKind};
 use skull_mir::shader_ir::{
-    ComputeAccess, ComputeAddressSpace, ComputeDispatchContract, ComputeInterfacePlan,
-    ComputeResourceShape, ComputeValueKind, ComputeBuiltin, ComputeWorkgroupSize, FragmentOutput,
-    LogicalArrayGroup, LogicalComputeResource, LogicalTextureGroup, LogicalUniformGroup,
-    LogicalVarying, LogicalVertexInput, NominalType, ShaderInterfacePlan, ShaderStage, UniformRole,
-    VertexRate,
+    ComputeAccess, ComputeAddressSpace, ComputeBuiltin, ComputeDispatchContract,
+    ComputeInterfacePlan, ComputeResourceShape, ComputeValueKind, ComputeWorkgroupSize,
+    FragmentOutput, LogicalArrayGroup, LogicalComputeResource, LogicalTextureGroup,
+    LogicalUniformGroup, LogicalVarying, LogicalVertexInput, NominalType, ShaderInterfacePlan,
+    ShaderStage, UniformRole, VertexRate,
 };
 use skull_wgsl_abi::WgslAbi;
 use ustr::Ustr;
 
 /// A legacy-spelled type: its key is already its symbol.
 fn nominal(name: &str) -> NominalType {
-    NominalType { key: Ustr::from(name), symbol: Ustr::from(name) }
+    NominalType {
+        key: Ustr::from(name),
+        symbol: Ustr::from(name),
+    }
 }
 
 fn fixture() -> ShaderInterfacePlan {
@@ -63,7 +66,10 @@ fn wgsl_and_glsl_project_the_same_interface_independently() {
     let glsl_block = &glsl.uniform_blocks[0];
     let wgsl_block = &wgsl.uniform_blocks[0];
     assert_eq!(glsl_block.0, 2, "GLSL fragment binding");
-    assert_eq!(wgsl_block.binding, 1, "WGSL reserves binding 0 for geometry");
+    assert_eq!(
+        wgsl_block.binding, 1,
+        "WGSL reserves binding 0 for geometry"
+    );
     assert_eq!(wgsl_block.members[0].offset, 0);
     assert_eq!(wgsl_block.members[1].offset, 8);
     assert_eq!(
@@ -110,11 +116,22 @@ fn fullscreen_uniform_arrays_keep_abi_order() {
     let plan = WgslAbiPlan::wgsl(&iface, Span::default()).expect("fullscreen array projection");
     assert_eq!(plan.uniform_blocks[0].binding, 1, "ordinary block binding");
     assert_eq!(plan.array_blocks.len(), 1, "array block population");
-    assert_eq!(plan.array_blocks[0].binding, 2, "array follows ordinary blocks");
-    assert_eq!(plan.textures[0].texture_binding, 3, "textures follow both block classes");
-    plan.validate(&iface, Span::default()).expect("projection validates");
-    let parsed = WgslAbi::parse(&plan.wire().expect("WGSL ABI wire")).expect("fullscreen array ABI parses");
-    assert_eq!(parsed.array_blocks[0].binding, 2, "array binding reaches the runtime wire");
+    assert_eq!(
+        plan.array_blocks[0].binding, 2,
+        "array follows ordinary blocks"
+    );
+    assert_eq!(
+        plan.textures[0].texture_binding, 3,
+        "textures follow both block classes"
+    );
+    plan.validate(&iface, Span::default())
+        .expect("projection validates");
+    let parsed =
+        WgslAbi::parse(&plan.wire().expect("WGSL ABI wire")).expect("fullscreen array ABI parses");
+    assert_eq!(
+        parsed.array_blocks[0].binding, 2,
+        "array binding reaches the runtime wire"
+    );
 }
 
 /// A non-root module's entry owns its array group under a qualified key. The
@@ -131,8 +148,10 @@ fn module_qualified_array_owner_reaches_the_runtime_wire() {
     }];
 
     let plan = WgslAbiPlan::wgsl(&iface, Span::default()).expect("qualified array projection");
-    plan.validate(&iface, Span::default()).expect("projection validates");
-    let parsed = WgslAbi::parse(&plan.wire().expect("WGSL ABI wire")).expect("qualified array ABI parses");
+    plan.validate(&iface, Span::default())
+        .expect("projection validates");
+    let parsed =
+        WgslAbi::parse(&plan.wire().expect("WGSL ABI wire")).expect("qualified array ABI parses");
     let semantic = iface.semantic_wire(true);
     let semantic_names: Vec<&str> = semantic
         .lines()
@@ -151,19 +170,31 @@ fn semantic_wire_has_no_physical_layout_and_mutations_are_load_bearing() {
     let iface = fixture();
     let wire = iface.semantic_wire(true);
     for forbidden in ["offset", "binding", "std140", "WGSL", "GLSL"] {
-        assert!(!wire.contains(forbidden), "semantic wire leaked {forbidden}: {wire}");
+        assert!(
+            !wire.contains(forbidden),
+            "semantic wire leaked {forbidden}: {wire}"
+        );
     }
 
     let mut swapped = iface.clone();
     swapped.textures.as_mut().unwrap().samplers.swap(0, 1);
-    assert_ne!(iface.semantic_fingerprint(true), swapped.semantic_fingerprint(true));
+    assert_ne!(
+        iface.semantic_fingerprint(true),
+        swapped.semantic_fingerprint(true)
+    );
 
     let explicit = iface.clone();
-    assert_ne!(iface.semantic_fingerprint(true), explicit.semantic_fingerprint(false));
+    assert_ne!(
+        iface.semantic_fingerprint(true),
+        explicit.semantic_fingerprint(false)
+    );
 
     let mut changed_member = iface.clone();
     changed_member.uniform_groups[0].members[0].0 = Ustr::from("renamed");
-    assert_ne!(iface.semantic_fingerprint(true), changed_member.semantic_fingerprint(true));
+    assert_ne!(
+        iface.semantic_fingerprint(true),
+        changed_member.semantic_fingerprint(true)
+    );
 }
 
 #[test]
@@ -260,11 +291,16 @@ fn a_bool_uniform_member_is_laid_out_and_declared_as_u32() {
 #[test]
 fn explicit_abi_spells_type_symbols() {
     let mut iface = explicit_fixture(vec![decl("values", WireKind::F32, 1)]);
-    iface.vertex_inputs[0].struct_name =
-        NominalType { key: Ustr::from("pkg::gfx::Vertex"), symbol: Ustr::from("Vertex") };
+    iface.vertex_inputs[0].struct_name = NominalType {
+        key: Ustr::from("pkg::gfx::Vertex"),
+        symbol: Ustr::from("Vertex"),
+    };
     iface.uniform_groups = vec![LogicalUniformGroup {
         role: UniformRole::Stage(ShaderStage::Fragment),
-        struct_name: NominalType { key: Ustr::from("pkg::gfx::Params"), symbol: Ustr::from("Params") },
+        struct_name: NominalType {
+            key: Ustr::from("pkg::gfx::Params"),
+            symbol: Ustr::from("Params"),
+        },
         members: vec![(Ustr::from("gain"), WireKind::F32)],
     }];
     let plan = WgslAbiPlan::explicit(&iface, "vertex_main", "fragment_main", Span::default())
@@ -281,10 +317,26 @@ fn explicit_abi_spells_type_symbols() {
 fn explicit_vec3_uses_one_location_and_keeps_uniform_fourth_lane() {
     let mut iface = explicit_fixture(vec![decl("values", WireKind::F32, 1)]);
     iface.varyings = vec![
-        LogicalVarying { name: Ustr::from("scalar"), kind: WireKind::F32, flat: false },
-        LogicalVarying { name: Ustr::from("uv"), kind: WireKind::F32x2, flat: false },
-        LogicalVarying { name: Ustr::from("emission"), kind: WireKind::F32x3, flat: true },
-        LogicalVarying { name: Ustr::from("tint"), kind: WireKind::F32x4, flat: false },
+        LogicalVarying {
+            name: Ustr::from("scalar"),
+            kind: WireKind::F32,
+            flat: false,
+        },
+        LogicalVarying {
+            name: Ustr::from("uv"),
+            kind: WireKind::F32x2,
+            flat: false,
+        },
+        LogicalVarying {
+            name: Ustr::from("emission"),
+            kind: WireKind::F32x3,
+            flat: true,
+        },
+        LogicalVarying {
+            name: Ustr::from("tint"),
+            kind: WireKind::F32x4,
+            flat: false,
+        },
     ];
     iface.uniform_groups = vec![LogicalUniformGroup {
         role: UniformRole::Engine,
@@ -299,7 +351,10 @@ fn explicit_vec3_uses_one_location_and_keeps_uniform_fourth_lane() {
     let plan = WgslAbiPlan::explicit(&iface, "vertex_main", "fragment_main", Span::default())
         .expect("Vec3 explicit ABI");
     assert_eq!(
-        plan.varyings.iter().map(|varying| varying.location).collect::<Vec<_>>(),
+        plan.varyings
+            .iter()
+            .map(|varying| varying.location)
+            .collect::<Vec<_>>(),
         [0, 1, 2, 3]
     );
     let block = &plan.uniform_blocks[0];
@@ -307,7 +362,12 @@ fn explicit_vec3_uses_one_location_and_keeps_uniform_fourth_lane() {
         block
             .members
             .iter()
-            .map(|member| (member.name.as_str(), member.offset, member.align, member.size))
+            .map(|member| (
+                member.name.as_str(),
+                member.offset,
+                member.align,
+                member.size
+            ))
             .collect::<Vec<_>>(),
         [
             ("direction", 0, 16, 12),
@@ -343,7 +403,11 @@ fn abi_wire_is_deterministic_and_carries_physical_order() {
     let parsed = WgslAbi::parse(&wire).expect("compiler output uses the production parser");
     assert_eq!(parsed.fragment_outputs.len(), 1);
     assert_eq!(parsed.array_blocks.len(), 0);
-    assert_eq!(wire, plan.wire().expect("WGSL ABI wire"), "the compiler wire must be deterministic");
+    assert_eq!(
+        wire,
+        plan.wire().expect("WGSL ABI wire"),
+        "the compiler wire must be deterministic"
+    );
 }
 
 fn compute_fixture() -> ShaderInterfacePlan {
@@ -352,7 +416,10 @@ fn compute_fixture() -> ShaderInterfacePlan {
         uniform_groups: vec![LogicalUniformGroup {
             role: UniformRole::Stage(ShaderStage::Compute),
             struct_name: nominal("SaxpyParams"),
-            members: vec![(Ustr::from("a"), WireKind::I32), (Ustr::from("n"), WireKind::I32)],
+            members: vec![
+                (Ustr::from("a"), WireKind::I32),
+                (Ustr::from("n"), WireKind::I32),
+            ],
         }],
         compute: Some(ComputeInterfacePlan {
             resources: vec![
@@ -436,15 +503,33 @@ fn rect_loss_interface_fixture() -> ShaderInterfacePlan {
 
 #[test]
 fn rect_loss_neutral_plan_has_ordered_resources_builtins_and_2d_dispatch() {
-    let abi = WgslAbiPlan::compute(&rect_loss_interface_fixture(), "rect_loss_compute", Span::default())
-        .expect("rect-loss neutral interface is representable without source syntax");
+    let abi = WgslAbiPlan::compute(
+        &rect_loss_interface_fixture(),
+        "rect_loss_compute",
+        Span::default(),
+    )
+    .expect("rect-loss neutral interface is representable without source syntax");
     let compute = abi.compute.as_ref().unwrap();
     assert_eq!(compute.dispatch_dimensions, 2);
     assert_eq!(compute.workgroup_size, [64, 1, 1]);
     assert_eq!(compute.builtins.len(), 3);
-    assert_eq!(compute.resources.len(), 4, "the complete storage population is examined");
-    assert_eq!(compute.resources.iter().map(|resource| resource.binding).collect::<Vec<_>>(), [0, 1, 2, 3]);
-    assert_eq!(compute.resources[3].element, skull_wgsl_abi::WgslStorageElementKind::AtomicU32);
+    assert_eq!(
+        compute.resources.len(),
+        4,
+        "the complete storage population is examined"
+    );
+    assert_eq!(
+        compute
+            .resources
+            .iter()
+            .map(|resource| resource.binding)
+            .collect::<Vec<_>>(),
+        [0, 1, 2, 3]
+    );
+    assert_eq!(
+        compute.resources[3].element,
+        skull_wgsl_abi::WgslStorageElementKind::AtomicU32
+    );
     assert_eq!(abi.uniform_blocks[0].binding, 4);
 }
 
@@ -490,18 +575,28 @@ fn compute_abi_preserves_atomic_output_element_identity() {
 #[test]
 fn compute_abi_retains_four_ordered_storage_resources() {
     let mut iface = compute_fixture();
-    iface.compute.as_mut().unwrap().resources.push(LogicalComputeResource {
-        name: Ustr::from("scratch_input"),
-        shape: ComputeResourceShape::Array(ComputeValueKind::I32),
-        address_space: ComputeAddressSpace::Storage,
-        access: ComputeAccess::Read,
-    });
-    iface.compute.as_mut().unwrap().resources.push(LogicalComputeResource {
-        name: Ustr::from("scratch_output"),
-        shape: ComputeResourceShape::Array(ComputeValueKind::I32),
-        address_space: ComputeAddressSpace::Storage,
-        access: ComputeAccess::ReadWrite,
-    });
+    iface
+        .compute
+        .as_mut()
+        .unwrap()
+        .resources
+        .push(LogicalComputeResource {
+            name: Ustr::from("scratch_input"),
+            shape: ComputeResourceShape::Array(ComputeValueKind::I32),
+            address_space: ComputeAddressSpace::Storage,
+            access: ComputeAccess::Read,
+        });
+    iface
+        .compute
+        .as_mut()
+        .unwrap()
+        .resources
+        .push(LogicalComputeResource {
+            name: Ustr::from("scratch_output"),
+            shape: ComputeResourceShape::Array(ComputeValueKind::I32),
+            address_space: ComputeAddressSpace::Storage,
+            access: ComputeAccess::ReadWrite,
+        });
 
     let abi = WgslAbiPlan::compute(&iface, "rect_loss_compute", Span::default())
         .expect("four ordinary storage resources are already representable");
@@ -535,7 +630,11 @@ fn compute_abi_round_trips_resources_workgroup_and_builtin() {
     let parsed = WgslAbi::parse(&wire).expect("compute ABI parser");
     assert_eq!(parsed.artifact, skull_wgsl_abi::WgslArtifactKind::Compute);
     assert_eq!(parsed.compute.unwrap().resources.len(), 2);
-    assert_eq!(wire, plan.wire().expect("WGSL ABI wire"), "compute wire order is deterministic");
+    assert_eq!(
+        wire,
+        plan.wire().expect("WGSL ABI wire"),
+        "compute wire order is deterministic"
+    );
 }
 
 #[test]
@@ -546,7 +645,8 @@ fn compute_projection_mutations_are_rejected_against_the_neutral_plan() {
     assert!(workgroup.validate(&iface, Span::default()).is_err());
 
     let mut access = WgslAbiPlan::compute(&iface, "saxpy_compute", Span::default()).unwrap();
-    access.compute.as_mut().unwrap().resources[0].access = skull_wgsl_abi::WgslStorageAccess::ReadWrite;
+    access.compute.as_mut().unwrap().resources[0].access =
+        skull_wgsl_abi::WgslStorageAccess::ReadWrite;
     assert!(access.validate(&iface, Span::default()).is_err());
 
     let mut binding = WgslAbiPlan::compute(&iface, "saxpy_compute", Span::default()).unwrap();
@@ -654,13 +754,26 @@ fn texture_orientation_mask_bounds_are_checked_from_the_declared_group() {
         members: vec![(Ustr::from("uTextureVFlip"), WireKind::U32)],
     });
     iface.textures.as_mut().unwrap().samplers = (0..u32::BITS)
-        .map(|slot| (Ustr::from(format!("image_{slot}").as_str()), SamplerKind::Float)).collect();
+        .map(|slot| {
+            (
+                Ustr::from(format!("image_{slot}").as_str()),
+                SamplerKind::Float,
+            )
+        })
+        .collect();
     WgslAbiPlan::wgsl(&iface, Span::default()).expect("every uint mask bit is admitted");
-    iface.textures.as_mut().unwrap().samplers.push((Ustr::from("overflow"), SamplerKind::Float));
-    let error = WgslAbiPlan::wgsl(&iface, Span::default()).expect_err("declared slot cannot wrap its mask");
+    iface
+        .textures
+        .as_mut()
+        .unwrap()
+        .samplers
+        .push((Ustr::from("overflow"), SamplerKind::Float));
+    let error =
+        WgslAbiPlan::wgsl(&iface, Span::default()).expect_err("declared slot cannot wrap its mask");
     assert!(error.message.contains("orientation mask"), "{error:?}");
     iface.textures.as_mut().unwrap().samplers.pop();
     iface.uniform_groups.last_mut().unwrap().members[0].1 = WireKind::F32x4;
-    let error = WgslAbiPlan::wgsl(&iface, Span::default()).expect_err("an obsolete layout cannot silently disable orientation");
+    let error = WgslAbiPlan::wgsl(&iface, Span::default())
+        .expect_err("an obsolete layout cannot silently disable orientation");
     assert!(error.message.contains("uint mask"), "{error:?}");
 }

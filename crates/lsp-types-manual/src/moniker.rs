@@ -10,8 +10,11 @@ pub struct MonikerOptions {
     pub work_done_progress_options: WorkDoneProgressOptions,
 }
 
-impl_lsp_struct!(MonikerOptions,
-    flatten { work_done_progress_options: WorkDoneProgressOptions }
+impl_lsp_struct!(
+    MonikerOptions,
+    flatten {
+        work_done_progress_options: WorkDoneProgressOptions
+    }
 );
 
 #[derive(Debug, Eq, PartialEq, Clone)]
@@ -20,7 +23,8 @@ pub struct MonikerRegistrationOptions {
     pub moniker_options: MonikerOptions,
 }
 
-impl_lsp_struct!(MonikerRegistrationOptions,
+impl_lsp_struct!(
+    MonikerRegistrationOptions,
     flatten {
         text_document_registration_options: TextDocumentRegistrationOptions,
         moniker_options: MonikerOptions,
@@ -71,7 +75,8 @@ pub struct MonikerParams {
     pub partial_result_params: PartialResultParams,
 }
 
-impl_lsp_struct!(MonikerParams,
+impl_lsp_struct!(
+    MonikerParams,
     flatten {
         text_document_position_params: TextDocumentPositionParams,
         work_done_progress_params: WorkDoneProgressParams,
@@ -96,13 +101,16 @@ pub struct Moniker {
     pub kind: Option<MonikerKind>,
 }
 
-impl_lsp_struct!(Moniker,
+impl_lsp_struct!(
+    Moniker,
     required {
         scheme: String = "scheme",
         identifier: String = "identifier",
         unique: UniquenessLevel = "unique",
     },
-    optional { kind: MonikerKind = "kind" }
+    optional {
+        kind: MonikerKind = "kind"
+    }
 );
 
 #[derive(Debug, Eq, PartialEq, Clone)]

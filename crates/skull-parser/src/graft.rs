@@ -21,7 +21,11 @@ pub fn graft_item(src: &Ast, dst: &mut Ast, item: &Item) -> Item {
             keyword_span: s.keyword_span,
             name: s.name.clone(),
             generics: graft_generics(src, dst, &s.generics),
-            fields: s.fields.iter().map(|fl| graft_field(src, dst, fl)).collect(),
+            fields: s
+                .fields
+                .iter()
+                .map(|fl| graft_field(src, dst, fl))
+                .collect(),
             is_value: s.is_value,
             is_nobox: s.is_nobox,
         }),
@@ -30,7 +34,11 @@ pub fn graft_item(src: &Ast, dst: &mut Ast, item: &Item) -> Item {
             keyword_span: e.keyword_span,
             name: e.name.clone(),
             generics: graft_generics(src, dst, &e.generics),
-            variants: e.variants.iter().map(|v| graft_variant(src, dst, v)).collect(),
+            variants: e
+                .variants
+                .iter()
+                .map(|v| graft_variant(src, dst, v))
+                .collect(),
         }),
         ItemKind::Newtype(n) => ItemKind::Newtype(NewtypeDef {
             span: n.span,
@@ -76,7 +84,11 @@ fn graft_fn(src: &Ast, dst: &mut Ast, f: &FunctionDef) -> FunctionDef {
         is_macro: f.is_macro,
         is_coroutine: f.is_coroutine,
         is_synthetic: f.is_synthetic,
-        macro_items: f.macro_items.iter().map(|it| graft_item(src, dst, it)).collect(),
+        macro_items: f
+            .macro_items
+            .iter()
+            .map(|it| graft_item(src, dst, it))
+            .collect(),
         receiver_surface: f.receiver_surface.clone(),
     }
 }
@@ -137,7 +149,11 @@ pub fn graft_block(src: &Ast, dst: &mut Ast, b: Idx<BlockData>) -> Idx<BlockData
     let braces = data.braces;
     let stmts: Vec<Idx<StatementData>> = data.statements.clone();
     let statements = stmts.into_iter().map(|s| graft_stmt(src, dst, s)).collect();
-    dst.blocks.alloc(BlockData { span, braces, statements })
+    dst.blocks.alloc(BlockData {
+        span,
+        braces,
+        statements,
+    })
 }
 
 pub fn graft_expr(src: &Ast, dst: &mut Ast, e: Idx<ExprData>) -> Idx<ExprData> {
@@ -151,7 +167,11 @@ pub(crate) fn graft_type(src: &Ast, dst: &mut Ast, t: Idx<TypeExprData>) -> Idx<
     let span = data.span;
     let is_nullable = data.is_nullable;
     let kind = graft_type_kind(src, dst, &data.kind);
-    dst.types.alloc(TypeExprData { span, kind, is_nullable })
+    dst.types.alloc(TypeExprData {
+        span,
+        kind,
+        is_nullable,
+    })
 }
 
 fn graft_stmt(src: &Ast, dst: &mut Ast, s: Idx<StatementData>) -> Idx<StatementData> {
@@ -193,12 +213,19 @@ fn graft_stmt(src: &Ast, dst: &mut Ast, s: Idx<StatementData>) -> Idx<StatementD
             return_ty: f.return_ty.map(|t| graft_type(src, dst, t)),
             body: graft_block(src, dst, f.body),
         }),
-        StatementKind::Return { keyword_span, value } => StatementKind::Return {
+        StatementKind::Return {
+            keyword_span,
+            value,
+        } => StatementKind::Return {
             keyword_span: *keyword_span,
             value: value.map(|e| graft_expr(src, dst, e)),
         },
-        StatementKind::Break { keyword_span } => StatementKind::Break { keyword_span: *keyword_span },
-        StatementKind::Continue { keyword_span } => StatementKind::Continue { keyword_span: *keyword_span },
+        StatementKind::Break { keyword_span } => StatementKind::Break {
+            keyword_span: *keyword_span,
+        },
+        StatementKind::Continue { keyword_span } => StatementKind::Continue {
+            keyword_span: *keyword_span,
+        },
         StatementKind::For(f) => StatementKind::For(For {
             span: f.span,
             keyword_span: f.keyword_span,
@@ -220,11 +247,17 @@ fn graft_stmt(src: &Ast, dst: &mut Ast, s: Idx<StatementData>) -> Idx<StatementD
             value: graft_expr(src, dst, w.value),
             body: graft_block(src, dst, w.body),
         }),
-        StatementKind::Defer(DeferKind::Block(b)) => StatementKind::Defer(DeferKind::Block(graft_block(src, dst, *b))),
+        StatementKind::Defer(DeferKind::Block(b)) => {
+            StatementKind::Defer(DeferKind::Block(graft_block(src, dst, *b)))
+        }
         StatementKind::Defer(DeferKind::Expression(e)) => {
             StatementKind::Defer(DeferKind::Expression(graft_expr(src, dst, *e)))
         }
-        StatementKind::LifecycleHook { keyword_span, name, body } => StatementKind::LifecycleHook {
+        StatementKind::LifecycleHook {
+            keyword_span,
+            name,
+            body,
+        } => StatementKind::LifecycleHook {
             keyword_span: *keyword_span,
             name: *name,
             body: graft_block(src, dst, *body),
@@ -278,7 +311,11 @@ fn graft_expr_kind(src: &Ast, dst: &mut Ast, kind: &ExprKind) -> ExprKind {
         ExprKind::UnaryMinus(x) => ExprKind::UnaryMinus(ge(dst, *x)),
         ExprKind::FieldAccess(x, id) => ExprKind::FieldAccess(ge(dst, *x), id.clone()),
         ExprKind::SafeNavigation(x, id) => ExprKind::SafeNavigation(ge(dst, *x), id.clone()),
-        ExprKind::SafeNavigationLet { receiver, binding, body } => ExprKind::SafeNavigationLet {
+        ExprKind::SafeNavigationLet {
+            receiver,
+            binding,
+            body,
+        } => ExprKind::SafeNavigationLet {
             receiver: ge(dst, *receiver),
             binding: binding.clone(),
             body: gb(dst, *body),
@@ -294,9 +331,17 @@ fn graft_expr_kind(src: &Ast, dst: &mut Ast, kind: &ExprKind) -> ExprKind {
         ExprKind::ReturnExpr(o) => ExprKind::ReturnExpr(o.map(|e| ge(dst, e))),
         ExprKind::Yield(o) => ExprKind::Yield(o.map(|e| ge(dst, e))),
 
-        ExprKind::FunctionCall { func, generic_args, args, syntax } => ExprKind::FunctionCall {
+        ExprKind::FunctionCall {
+            func,
+            generic_args,
+            args,
+            syntax,
+        } => ExprKind::FunctionCall {
             func: ge(dst, *func),
-            generic_args: generic_args.iter().map(|t| graft_type(src, dst, *t)).collect(),
+            generic_args: generic_args
+                .iter()
+                .map(|t| graft_type(src, dst, *t))
+                .collect(),
             args: args
                 .iter()
                 .map(|a| FunctionCallArg {
@@ -313,25 +358,49 @@ fn graft_expr_kind(src: &Ast, dst: &mut Ast, kind: &ExprKind) -> ExprKind {
             op: *op,
             right: ge(dst, *right),
         },
-        ExprKind::Assign { target, value, compound_op } => ExprKind::Assign {
+        ExprKind::Assign {
+            target,
+            value,
+            compound_op,
+        } => ExprKind::Assign {
             target: ge(dst, *target),
             value: ge(dst, *value),
             compound_op: *compound_op,
         },
-        ExprKind::ArrayLiteral(xs) => ExprKind::ArrayLiteral(xs.iter().map(|x| ge(dst, *x)).collect()),
+        ExprKind::ArrayLiteral(xs) => {
+            ExprKind::ArrayLiteral(xs.iter().map(|x| ge(dst, *x)).collect())
+        }
         ExprKind::Tuple(xs) => ExprKind::Tuple(xs.iter().map(|x| ge(dst, *x)).collect()),
-        ExprKind::StructLiteral { name, bases, fields } => ExprKind::StructLiteral {
+        ExprKind::StructLiteral {
+            name,
+            bases,
+            fields,
+        } => ExprKind::StructLiteral {
             name: name.clone(),
             bases: bases.iter().map(|b| ge(dst, *b)).collect(),
-            fields: fields.iter().map(|(ns, v)| (ns.clone(), ge(dst, *v))).collect(),
+            fields: fields
+                .iter()
+                .map(|(ns, v)| (ns.clone(), ge(dst, *v)))
+                .collect(),
         },
-        ExprKind::EnumVariantRecord { enum_name, variant_name, fields } => ExprKind::EnumVariantRecord {
+        ExprKind::EnumVariantRecord {
+            enum_name,
+            variant_name,
+            fields,
+        } => ExprKind::EnumVariantRecord {
             enum_name: enum_name.clone(),
             variant_name: variant_name.clone(),
-            fields: fields.iter().map(|(ns, v)| (ns.clone(), ge(dst, *v))).collect(),
+            fields: fields
+                .iter()
+                .map(|(ns, v)| (ns.clone(), ge(dst, *v)))
+                .collect(),
         },
         ExprKind::Block(b) => ExprKind::Block(gb(dst, *b)),
-        ExprKind::Lambda { params, return_ty, body } => ExprKind::Lambda {
+        ExprKind::Lambda {
+            params,
+            return_ty,
+            body,
+        } => ExprKind::Lambda {
             params: params
                 .iter()
                 .map(|p| LambdaParam {
@@ -354,17 +423,32 @@ fn graft_expr_kind(src: &Ast, dst: &mut Ast, kind: &ExprKind) -> ExprKind {
                 })
                 .collect(),
         },
-        ExprKind::If { branches, else_branch } => ExprKind::If {
-            branches: branches.iter().map(|(c, b)| (ge(dst, *c), gb(dst, *b))).collect(),
+        ExprKind::If {
+            branches,
+            else_branch,
+        } => ExprKind::If {
+            branches: branches
+                .iter()
+                .map(|(c, b)| (ge(dst, *c), gb(dst, *b)))
+                .collect(),
             else_branch: else_branch.map(|b| gb(dst, b)),
         },
-        ExprKind::IfLet { pattern, value, then_block, else_block } => ExprKind::IfLet {
+        ExprKind::IfLet {
+            pattern,
+            value,
+            then_block,
+            else_block,
+        } => ExprKind::IfLet {
             pattern: graft_pattern(src, dst, pattern),
             value: ge(dst, *value),
             then_block: gb(dst, *then_block),
             else_block: else_block.map(|b| gb(dst, b)),
         },
-        ExprKind::IfLetChain { clauses, then_block, else_block } => ExprKind::IfLetChain {
+        ExprKind::IfLetChain {
+            clauses,
+            then_block,
+            else_block,
+        } => ExprKind::IfLetChain {
             clauses: clauses
                 .iter()
                 .map(|c| match c {
@@ -386,15 +470,25 @@ fn graft_pattern(src: &Ast, dst: &mut Ast, p: &Pattern) -> Pattern {
         Pattern::Wildcard => Pattern::Wildcard,
         Pattern::Ident(id) => Pattern::Ident(id.clone()),
         Pattern::Literal(e) => Pattern::Literal(graft_expr(src, dst, *e)),
-        Pattern::Tuple(ps) => Pattern::Tuple(ps.iter().map(|p| graft_pattern(src, dst, p)).collect()),
-        Pattern::EnumVariant { enum_name, variant_name, args } => Pattern::EnumVariant {
+        Pattern::Tuple(ps) => {
+            Pattern::Tuple(ps.iter().map(|p| graft_pattern(src, dst, p)).collect())
+        }
+        Pattern::EnumVariant {
+            enum_name,
+            variant_name,
+            args,
+        } => Pattern::EnumVariant {
             enum_name: enum_name.clone(),
             variant_name: variant_name.clone(),
-            args: args.as_ref().map(|ps| ps.iter().map(|p| graft_pattern(src, dst, p)).collect()),
+            args: args
+                .as_ref()
+                .map(|ps| ps.iter().map(|p| graft_pattern(src, dst, p)).collect()),
         },
         Pattern::PathVariant { path, args } => Pattern::PathVariant {
             path: path.clone(),
-            args: args.as_ref().map(|ps| ps.iter().map(|p| graft_pattern(src, dst, p)).collect()),
+            args: args
+                .as_ref()
+                .map(|ps| ps.iter().map(|p| graft_pattern(src, dst, p)).collect()),
         },
         Pattern::PathRecord { path, fields, rest } => Pattern::PathRecord {
             path: path.clone(),
@@ -404,13 +498,25 @@ fn graft_pattern(src: &Ast, dst: &mut Ast, p: &Pattern) -> Pattern {
                 .collect(),
             rest: *rest,
         },
-        Pattern::Record { enum_name, name, fields, rest } => Pattern::Record {
+        Pattern::Record {
+            enum_name,
+            name,
+            fields,
+            rest,
+        } => Pattern::Record {
             enum_name: enum_name.clone(),
             name: name.clone(),
-            fields: fields.iter().map(|(id, p)| (id.clone(), graft_pattern(src, dst, p))).collect(),
+            fields: fields
+                .iter()
+                .map(|(id, p)| (id.clone(), graft_pattern(src, dst, p)))
+                .collect(),
             rest: *rest,
         },
-        Pattern::Range { start, end, inclusive } => Pattern::Range {
+        Pattern::Range {
+            start,
+            end,
+            inclusive,
+        } => Pattern::Range {
             start: start.map(|e| graft_expr(src, dst, e)),
             end: end.map(|e| graft_expr(src, dst, e)),
             inclusive: *inclusive,
@@ -461,7 +567,9 @@ fn graft_type_kind(src: &Ast, dst: &mut Ast, kind: &TypeExprKind) -> TypeExprKin
             ctor: ctor.clone(),
             args: args.iter().map(|t| graft_type(src, dst, *t)).collect(),
         },
-        TypeExprKind::Tuple(ts) => TypeExprKind::Tuple(ts.iter().map(|t| graft_type(src, dst, *t)).collect()),
+        TypeExprKind::Tuple(ts) => {
+            TypeExprKind::Tuple(ts.iter().map(|t| graft_type(src, dst, *t)).collect())
+        }
         TypeExprKind::Function { params, ret } => TypeExprKind::Function {
             params: params.iter().map(|t| graft_type(src, dst, *t)).collect(),
             ret: graft_type(src, dst, *ret),

@@ -30,7 +30,10 @@ fn a_non_canonical_leaf_sequence_rejects() {
         .expect("E5 has a representation plan");
     let plan = arena.get(plan_id);
     let canonical = plan.leaf_paths().expect("E5 has a leaf layout");
-    assert!(canonical.len() > 2, "need a multi-leaf type to reorder: {canonical:?}");
+    assert!(
+        canonical.len() > 2,
+        "need a multi-leaf type to reorder: {canonical:?}"
+    );
 
     assert!(
         skull_codegen_lua::leaf_form_violation(&plan, &canonical).is_none(),

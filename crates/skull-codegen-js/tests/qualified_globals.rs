@@ -99,7 +99,8 @@ fn qualified_enum_display_globals_match_luajit() {
 
 #[test]
 fn clone_into_preserves_argument_effects_and_owns_mutable_storage() {
-    differential(r#"
+    differential(
+        r#"
 struct Counter { calls: int }
 fn destination(counter: Counter) -> Map<string, int> {
     counter.calls = counter.calls + 1
@@ -112,7 +113,9 @@ fn root() -> int {
     original.set(0, 9)
     return counter.calls * 1000 + original[0] * 100 + copy[0]
 }
-"#, "1901");
+"#,
+        "1901",
+    );
 }
 
 fn lua_value(ws: &Workspace) -> String {

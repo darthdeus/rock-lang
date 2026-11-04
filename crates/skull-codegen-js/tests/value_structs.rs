@@ -6,19 +6,29 @@
 //! REFERENCE on luajit, which a generic contents-eq cannot reproduce). The
 //! node-executed checks are the correctness oracle.
 
-use skull_mir::mir::FuncRef;
 use crate::common::ws_with;
+use skull_mir::mir::FuncRef;
 
 fn node_available() -> bool {
-    crate::common::node().arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+    crate::common::node()
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 fn emit_closure(ws: &bone_semantic::inference::Workspace, root: &str) -> Result<String, String> {
-    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("test module");
     let mut r = None;
     for (fid, f) in ws.module(mid).functions.iter() {
         if f.name.as_str() == root {
-            r = Some(FuncRef { module: mid, func: fid });
+            r = Some(FuncRef {
+                module: mid,
+                func: fid,
+            });
         }
     }
     skull_codegen_js::emit::emit_with_closure(ws, &[(r.unwrap(), root.to_string())])
@@ -38,14 +48,21 @@ fn eval_int(defs: &str, root: &str, expect: i64) {
         skull_codegen_js::JS_STRUCTURAL_EQ,
         skull_codegen_js::JS_STRING_RUNTIME,
     );
-    let out = crate::common::node().arg("-e").arg(&program).output().expect("spawn node");
+    let out = crate::common::node()
+        .arg("-e")
+        .arg(&program)
+        .output()
+        .expect("spawn node");
     assert!(
         out.status.success(),
         "node failed:\n--- program ---\n{program}\n--- stderr ---\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
     let s = String::from_utf8_lossy(&out.stdout);
-    let got: i64 = s.trim().parse().unwrap_or_else(|_| panic!("not an int: {s:?}\n{program}"));
+    let got: i64 = s
+        .trim()
+        .parse()
+        .unwrap_or_else(|_| panic!("not an int: {s:?}\n{program}"));
     assert_eq!(got, expect, "wrong result\n{program}");
 }
 
@@ -64,7 +81,10 @@ fn all_scalar_value_struct_eq_by_contents() {
                }";
     let ws = ws_with(src);
     let js = emit_closure(&ws, "root").expect("all-scalar value struct emits");
-    assert!(js.contains("__ty: \"V\""), "value struct emits a `{{__ty, ...}}` object:\n{js}");
+    assert!(
+        js.contains("__ty: \"V\""),
+        "value struct emits a `{{__ty, ...}}` object:\n{js}"
+    );
     eval_int(&js, "root", 10); // a==b -> 1, a==c -> 0
 }
 
@@ -99,7 +119,9 @@ fn gc_carrying_value_struct_eq() {
     let ws = ws_with(src);
     let js = emit_closure(&ws, "root").expect("GC-carrying value struct emits (T8g)");
     assert!(
-        js.contains("__rock_vt_eq[\"W\"] = function(a, b) { return a.s === b.s && __op_eq(a.n, b.n); };"),
+        js.contains(
+            "__rock_vt_eq[\"W\"] = function(a, b) { return a.s === b.s && __op_eq(a.n, b.n); };"
+        ),
         "emits the W registry entry (string ref, scalar structural):\n{js}"
     );
     eval_int(&js, "root", 1);
@@ -120,9 +142,18 @@ fn nobox_value_return_crosses_as_leaves_not_a_box() {
                }";
     let ws = ws_with(src);
     let js = emit_closure(&ws, "root").expect("a nobox return emits under the scratch ABI");
-    assert!(!js.contains("\"V\""), "nobox value materialized an object:\n{js}");
-    assert!(!js.contains("return ["), "nobox return allocated a transport array:\n{js}");
-    assert!(js.contains("__rock_ret1 = "), "leaf 1 must ride the scratch bank:\n{js}");
+    assert!(
+        !js.contains("\"V\""),
+        "nobox value materialized an object:\n{js}"
+    );
+    assert!(
+        !js.contains("return ["),
+        "nobox return allocated a transport array:\n{js}"
+    );
+    assert!(
+        js.contains("__rock_ret1 = "),
+        "leaf 1 must ride the scratch bank:\n{js}"
+    );
     eval_int(&js, "root", 12);
 }
 
@@ -150,7 +181,10 @@ fn ordinary_value_with_a_flat_enum_return_crosses_as_leaves() {
                fn root() -> int { consume(make(Kind::Payload(Payload::B), 4)) }";
     let ws = ws_with(src);
     let js = emit_closure(&ws, "root").expect("ordinary nested-enum value emits");
-    assert!(!js.contains("__ty: \"Row\""), "the returned row materialized an object:\n{js}");
+    assert!(
+        !js.contains("__ty: \"Row\""),
+        "the returned row materialized an object:\n{js}"
+    );
     eval_int(&js, "root", 19);
 }
 
@@ -197,21 +231,30 @@ fn owner_once(owner: Owner) -> Owner {
 
 #[test]
 fn nullable_field_get_evaluates_owner_once_and_copies() {
-    let src = format!("{REFLECTED_NULLABLE}{}", r#"
+    let src = format!(
+        "{REFLECTED_NULLABLE}{}",
+        r#"
 fn root() -> int {
     let owner = Owner { place: Place { area: 3, x: 5, y: 7 }, other: null, reads: 0 }
     let snapshot = field_get(f: .place, o: owner_once(owner)).unwrap()
     owner.place = Place { area: 11, x: 13, y: 17 }
     if owner.reads == 1 && snapshot.area == 3 && snapshot.x == 5 && snapshot.y == 7 { 1 } else { 0 }
 }
-"#);
+"#
+    );
     let ws = ws_with(&src);
-    eval_int(&emit_closure(&ws, "root").expect("nullable field_get emits"), "root", 1);
+    eval_int(
+        &emit_closure(&ws, "root").expect("nullable field_get emits"),
+        "root",
+        1,
+    );
 }
 
 #[test]
 fn nullable_field_get_preserves_false_and_nested_presence() {
-    let src = format!("{REFLECTED_NULLABLE}{}", r#"
+    let src = format!(
+        "{REFLECTED_NULLABLE}{}",
+        r#"
 fn root() -> int {
     let owner = Flags { flag: Flag { enabled: false, place: null } }
     let read = reflected_read(owner, .flag).unwrap()
@@ -222,14 +265,21 @@ fn root() -> int {
     owner.flag = null
     if reflected_read(owner, .flag) == null { 1 } else { 0 }
 }
-"#);
+"#
+    );
     let ws = ws_with(&src);
-    eval_int(&emit_closure(&ws, "root").expect("nested nullable field_get emits"), "root", 1);
+    eval_int(
+        &emit_closure(&ws, "root").expect("nested nullable field_get emits"),
+        "root",
+        1,
+    );
 }
 
 #[test]
 fn nullable_field_get_reads_present_absent_and_reassigned_payloads() {
-    let src = format!("{REFLECTED_NULLABLE}{}", r#"
+    let src = format!(
+        "{REFLECTED_NULLABLE}{}",
+        r#"
 fn root() -> int {
     let owner = Owner { place: Place { area: 7, x: 11, y: 13 }, other: null, reads: 0 }
     let read = reflected_read(owner, .place).unwrap()
@@ -241,7 +291,12 @@ fn root() -> int {
     let reread = reflected_read(owner, .place).unwrap()
     if reread.area == 17 && reread.x == 19 && reread.y == 23 { 1 } else { 0 }
 }
-"#);
+"#
+    );
     let ws = ws_with(&src);
-    eval_int(&emit_closure(&ws, "root").expect("nullable field_get emits"), "root", 1);
+    eval_int(
+        &emit_closure(&ws, "root").expect("nullable field_get emits"),
+        "root",
+        1,
+    );
 }

@@ -6,20 +6,30 @@
 //! omitting a defaulted param is a legal shorter shape (was the arity-guard
 //! false positive). The node-executed value checks are the correctness oracle.
 
-use skull_mir::mir::FuncRef;
 use crate::common::ws_with;
+use skull_mir::mir::FuncRef;
 
 fn node_available() -> bool {
-    crate::common::node().arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+    crate::common::node()
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 /// Co-emit `root` + its transitive callee closure through the shared pipeline.
 fn emit_closure(ws: &bone_semantic::inference::Workspace, root: &str) -> Result<String, String> {
-    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("test module");
     let mut r = None;
     for (fid, f) in ws.module(mid).functions.iter() {
         if f.name.as_str() == root {
-            r = Some(FuncRef { module: mid, func: fid });
+            r = Some(FuncRef {
+                module: mid,
+                func: fid,
+            });
         }
     }
     skull_codegen_js::emit::emit_with_closure(ws, &[(r.unwrap(), root.to_string())])
@@ -40,14 +50,21 @@ fn eval_int(defs: &str, root: &str, expect: i64) {
         skull_codegen_js::JS_STRUCTURAL_EQ,
         skull_codegen_js::JS_CALL_HELPER,
     );
-    let out = crate::common::node().arg("-e").arg(&program).output().expect("spawn node");
+    let out = crate::common::node()
+        .arg("-e")
+        .arg(&program)
+        .output()
+        .expect("spawn node");
     assert!(
         out.status.success(),
         "node failed:\n--- program ---\n{program}\n--- stderr ---\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
     let s = String::from_utf8_lossy(&out.stdout);
-    let got: i64 = s.trim().parse().unwrap_or_else(|_| panic!("not an int: {s:?}\n{program}"));
+    let got: i64 = s
+        .trim()
+        .parse()
+        .unwrap_or_else(|_| panic!("not an int: {s:?}\n{program}"));
     assert_eq!(got, expect, "wrong result\n{program}");
 }
 
@@ -57,7 +74,10 @@ fn eval_int(defs: &str, root: &str, expect: i64) {
 fn inline_callee_is_spliced() {
     let ws = ws_with("@inline fn dbl(x: int) -> int { x * 2 }\nfn root() -> int { dbl(3) }");
     let js = emit_closure(&ws, "root").expect("emits");
-    assert!(!js.contains("function dbl"), "@inline callee should be spliced, not co-emitted:\n{js}");
+    assert!(
+        !js.contains("function dbl"),
+        "@inline callee should be spliced, not co-emitted:\n{js}"
+    );
     eval_int(&js, "root", 6);
 }
 
@@ -66,7 +86,10 @@ fn inline_callee_is_spliced() {
 fn pure_callee_is_spliced() {
     let ws = ws_with("@pure fn sq(x: int) -> int { x * x }\nfn root() -> int { sq(3) }");
     let js = emit_closure(&ws, "root").expect("emits");
-    assert!(!js.contains("function sq"), "@pure callee should be spliced, not co-emitted:\n{js}");
+    assert!(
+        !js.contains("function sq"),
+        "@pure callee should be spliced, not co-emitted:\n{js}"
+    );
     eval_int(&js, "root", 9);
 }
 
@@ -83,7 +106,8 @@ fn combinator_terminal_chain_structures() {
              v.map(_ * 2).filter(_ > 2).reduce(0, (a, b) => a + b)\n\
          }",
     );
-    let js = emit_closure(&ws, "root").expect("inlined combinator chain structures via labeled loops");
+    let js =
+        emit_closure(&ws, "root").expect("inlined combinator chain structures via labeled loops");
     eval_int(&js, "root", 10);
 }
 
@@ -111,15 +135,22 @@ fn exhaustive_match_callee_is_spliced() {
     let ws = ws_with(EXHAUSTIVE_MATCH);
     let js = emit_closure(&ws, "root").expect("exhaustive match emits");
     assert!(js.contains("function root("), "missing caller:\n{js}");
-    assert!(!js.contains("choose"), "exhaustive match callee was not spliced:\n{js}");
+    assert!(
+        !js.contains("choose"),
+        "exhaustive match callee was not spliced:\n{js}"
+    );
 }
 
 #[test]
 fn exhaustive_match_fallback_throws() {
-    for source in [EXHAUSTIVE_MATCH.to_string(), EXHAUSTIVE_MATCH.replace("@inline ", "")] {
+    for source in [
+        EXHAUSTIVE_MATCH.to_string(),
+        EXHAUSTIVE_MATCH.replace("@inline ", ""),
+    ] {
         let ws = ws_with(&source);
         let js = emit_closure(&ws, "root").expect("exhaustive match emits");
-        let program = format!(r#"{js}
+        let program = format!(
+            r#"{js}
 if (root(0) !== 11 || root(1) !== 21) throw new Error("wrong match result");
 let caught = false;
 try {{ root(99); }} catch (err) {{
@@ -127,16 +158,25 @@ try {{ root(99); }} catch (err) {{
     if (err.message !== "rock: reached an unreachable block") throw err;
 }}
 if (!caught) throw new Error("exhaustive match fallback returned");
-"#);
-        let out = crate::common::node().arg("-e").arg(&program).output().expect("spawn node");
-        assert!(out.status.success(), "{program}\n{}", String::from_utf8_lossy(&out.stderr));
+"#
+        );
+        let out = crate::common::node()
+            .arg("-e")
+            .arg(&program)
+            .output()
+            .expect("spawn node");
+        assert!(
+            out.status.success(),
+            "{program}\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 }
 
 #[test]
 fn unreachable_is_terminal_in_structured_and_trampoline_output() {
-    use skull_mir::mir::{Inst, Lit, MirFunc, Term};
     use skull_codegen_js::emit::{CalleeNames, GlobalCtx};
+    use skull_mir::mir::{Inst, Lit, MirFunc, Term};
 
     let ws = ws_with("fn main() {}");
     let mut mf = MirFunc::new(ustr::Ustr::from("root"));
@@ -148,22 +188,48 @@ fn unreachable_is_terminal_in_structured_and_trampoline_output() {
     let success = mf.new_block();
     let trap = mf.new_block();
     let condition = mf.emit(mf.entry, Inst::Load(first));
-    mf.set_term(mf.entry, Term::Branch { cond: condition, then_bb: left, else_bb: right });
+    mf.set_term(
+        mf.entry,
+        Term::Branch {
+            cond: condition,
+            then_bb: left,
+            else_bb: right,
+        },
+    );
     // Both arms share the trap: the second visit uses tail duplication.
     for block in [left, right] {
         let condition = mf.emit(block, Inst::Load(second));
-        mf.set_term(block, Term::Branch { cond: condition, then_bb: success, else_bb: trap });
+        mf.set_term(
+            block,
+            Term::Branch {
+                cond: condition,
+                then_bb: success,
+                else_bb: trap,
+            },
+        );
     }
     let value = mf.emit(success, Inst::Const(Lit::Int(42)));
     mf.set_term(success, Term::Return(vec![value]));
     let structured = skull_codegen_js::emit::emit_fn(&ws, &mf, "root").expect("structured emit");
     let trampoline = skull_codegen_js::emit::emit_fn_trampoline(
-        &ws, &mf, "root", &CalleeNames::default(), &Default::default(),
-        &GlobalCtx::default(), mf.entry, &mf.params, true,
-    ).expect("trampoline emit");
-    assert!(!structured.contains("switch (__bb"), "expected tail duplication:\n{structured}");
+        &ws,
+        &mf,
+        "root",
+        &CalleeNames::default(),
+        &Default::default(),
+        &GlobalCtx::default(),
+        mf.entry,
+        &mf.params,
+        true,
+    )
+    .expect("trampoline emit");
+    assert!(
+        !structured.contains("switch (__bb"),
+        "expected tail duplication:\n{structured}"
+    );
     for js in [structured, trampoline] {
-        let program = format!(r#"{js}
+        let program = format!(
+            r#"{js}
 for (const first of [true, false]) {{
     if (root(first, true) !== 42) throw new Error("wrong result");
     let caught = false;
@@ -173,8 +239,17 @@ for (const first of [true, false]) {{
     }}
     if (!caught) throw new Error("unreachable block returned");
 }}
-"#);
-        let out = crate::common::node().arg("-e").arg(&program).output().expect("spawn node");
-        assert!(out.status.success(), "{program}\n{}", String::from_utf8_lossy(&out.stderr));
+"#
+        );
+        let out = crate::common::node()
+            .arg("-e")
+            .arg(&program)
+            .output()
+            .expect("spawn node");
+        assert!(
+            out.status.success(),
+            "{program}\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 }

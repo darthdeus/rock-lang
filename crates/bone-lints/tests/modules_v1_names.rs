@@ -3,7 +3,7 @@
 //! segment, or they go silent (or noisy) the moment a package converts.
 
 use crate::support;
-use bone_lints::{lint_workspace, task_null_abandon, unused_fns, LintOptions, ACTION_CALLERS};
+use bone_lints::{ACTION_CALLERS, LintOptions, lint_workspace, task_null_abandon, unused_fns};
 use bone_semantic::prelude::*;
 
 fn ws_v1(src: &str) -> Workspace {
@@ -13,7 +13,11 @@ fn ws_v1(src: &str) -> Workspace {
         skull_parser::Dialect::V1,
     )
     .expect("parse");
-    module.package = Some(skull_parser::PackageTag { id: 0, self_name: "lintv1".to_string(), identity_storage: Default::default() });
+    module.package = Some(skull_parser::PackageTag {
+        id: 0,
+        self_name: "lintv1".to_string(),
+        identity_storage: Default::default(),
+    });
     semantic_pass(&mut [module]).expect("clean program typechecks")
 }
 
@@ -27,7 +31,11 @@ fn abandon() { SLOT = null }
 fn main() { SLOT = Task { id: 1 }; abandon() }
 "#,
     );
-    assert_eq!(task_null_abandon(&ws).len(), 1, "a v1 `Task?` slot set to null must be flagged");
+    assert_eq!(
+        task_null_abandon(&ws).len(),
+        1,
+        "a v1 `Task?` slot set to null must be flagged"
+    );
 }
 
 #[test]
@@ -35,14 +43,23 @@ fn v1_main_is_a_reachability_root() {
     let ws = ws_v1("fn main() { used() }\nfn used() {}\nfn dead() {}");
     let mut names: Vec<String> = unused_fns(&ws).iter().map(|f| f.name.to_string()).collect();
     names.sort();
-    assert_eq!(names, vec!["lintv1::dead".to_string()], "only `dead` is unused");
+    assert_eq!(
+        names,
+        vec!["lintv1::dead".to_string()],
+        "only `dead` is unused"
+    );
 }
 
 fn action_gaps(src: &str, dialect: skull_parser::Dialect) -> Vec<String> {
     let file = Ustr::from("app/actions.rock");
-    let mut module = skull_parser::parse_module_clean_with_dialect(src, file, dialect).expect("parse");
+    let mut module =
+        skull_parser::parse_module_clean_with_dialect(src, file, dialect).expect("parse");
     if dialect == skull_parser::Dialect::V1 {
-        module.package = Some(skull_parser::PackageTag { id: 0, self_name: "lintv1".to_string(), identity_storage: Default::default() });
+        module.package = Some(skull_parser::PackageTag {
+            id: 0,
+            self_name: "lintv1".to_string(),
+            identity_storage: Default::default(),
+        });
     }
     let ws = semantic_pass(&mut [module]).expect("clean program typechecks");
     let mut sources = FxHashMap::default();
@@ -81,10 +98,16 @@ fn assert_registration_is_not_a_caller(gaps: Vec<String>) {
 
 #[test]
 fn legacy_action_registration_reads_are_not_callers() {
-    assert_registration_is_not_a_caller(action_gaps(ACTION_REGISTRATION, skull_parser::Dialect::Legacy));
+    assert_registration_is_not_a_caller(action_gaps(
+        ACTION_REGISTRATION,
+        skull_parser::Dialect::Legacy,
+    ));
 }
 
 #[test]
 fn v1_action_registration_reads_are_not_callers() {
-    assert_registration_is_not_a_caller(action_gaps(ACTION_REGISTRATION, skull_parser::Dialect::V1));
+    assert_registration_is_not_a_caller(action_gaps(
+        ACTION_REGISTRATION,
+        skull_parser::Dialect::V1,
+    ));
 }

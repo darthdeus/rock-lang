@@ -18,7 +18,7 @@ use bone_core::hir;
 use bone_core::hir::{BinOp, BindingInfo, Callee, Expr, Statement};
 use bone_core::prelude::*;
 
-use crate::{fn_has_anno, infer_expr_used, peel_nullable, BodyCtx, Gamma, Use};
+use crate::{BodyCtx, Gamma, Use, fn_has_anno, infer_expr_used, peel_nullable};
 
 /// The root of a refinement path: a local binding or a global (by name).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -80,10 +80,14 @@ fn cond_has_effect(gamma: &Gamma, c: BodyCtx, e: Idx<Expr>) -> bool {
             args,
             ..
         } => {
-            let callee_pure = gamma.out.resolved_overload_calls.get(&e)
-                .is_some_and(|&(mid, fid)| {
-                    fn_has_anno(&gamma.workspace.module(mid).functions[fid], "pure")
-                });
+            let callee_pure =
+                gamma
+                    .out
+                    .resolved_overload_calls
+                    .get(&e)
+                    .is_some_and(|&(mid, fid)| {
+                        fn_has_anno(&gamma.workspace.module(mid).functions[fid], "pure")
+                    });
             let callee_pure = callee_pure || name.as_str() == "is_null";
             if !callee_pure {
                 return true;

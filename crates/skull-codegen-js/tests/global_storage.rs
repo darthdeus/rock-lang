@@ -28,7 +28,8 @@ fn mutable_global_accesses_use_the_global_storage() {
         "mutable global writes must use the global storage"
     );
     assert!(
-        emitted.program.matches(slot).count() > emitted.program.matches(&format!("{slot} = ")).count(),
+        emitted.program.matches(slot).count()
+            > emitted.program.matches(&format!("{slot} = ")).count(),
         "mutable global reads must use the global storage"
     );
 }
@@ -110,14 +111,20 @@ __G.FLAT_x = 3;
 __G.FLAT_y = 4;
 console.log(__rock_globals["global:<test>::FLAT::leaf0"] + ":" + (__G.FLAT_x + __G.FLAT_y));
 "#;
-    assert_eq!(run_node(&format!("{}\n{}", skull_codegen_js::JS_GLOBALS_RUNTIME, program)), "3:7");
+    assert_eq!(
+        run_node(&format!(
+            "{}\n{}",
+            skull_codegen_js::JS_GLOBALS_RUNTIME,
+            program
+        )),
+        "3:7"
+    );
 }
 
 #[test]
 fn layout_changing_edit_requires_a_full_js_publication() {
-    let before = ws_with(
-        "global STATE: int = 0\n@nomangle fn hot() -> int { STATE }\nfn main() {}\n",
-    );
+    let before =
+        ws_with("global STATE: int = 0\n@nomangle fn hot() -> int { STATE }\nfn main() {}\n");
     let after = ws_with(
         "global STATE: int = 0\nglobal OTHER: int = 1\n@nomangle fn hot() -> int { STATE }\nfn main() {}\n",
     );
@@ -125,7 +132,8 @@ fn layout_changing_edit_requires_a_full_js_publication() {
         .module_ids
         .get(&ustr::Ustr::from("<test>"))
         .expect("test module");
-    let (_, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).expect("full JS emit");
+    let (_, mut cache) =
+        skull_codegen_js::emit::emit_program_cached(&before, mid).expect("full JS emit");
     let after_mid = *after
         .module_ids
         .get(&ustr::Ustr::from("<test>"))
@@ -145,6 +153,9 @@ fn layout_changing_edit_requires_a_full_js_publication() {
         &[(after_mid, BodyOwner::Global(other))],
     )
     .expect("overlay decision");
-    assert!(matches!(reload, skull_codegen_js::emit::JsReload::FullRequired));
+    assert!(matches!(
+        reload,
+        skull_codegen_js::emit::JsReload::FullRequired
+    ));
     assert_eq!(cache.global_layout(), old_layout);
 }

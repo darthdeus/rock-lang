@@ -1,10 +1,6 @@
 use super::*;
 
-fn reject_ref_captures(
-    c: BodyCtx,
-    gamma: &Gamma,
-    lambda_span: Span,
-) -> Result<(), CompilerError> {
+fn reject_ref_captures(c: BodyCtx, gamma: &Gamma, lambda_span: Span) -> Result<(), CompilerError> {
     let contains = |outer: Span, inner: Span| {
         outer.file == inner.file
             && outer.offset_range.0 <= inner.offset_range.0
@@ -14,7 +10,8 @@ fn reject_ref_captures(
     for (expr, node) in c.body.expr_arena.iter() {
         let Expr::Var(binding) = node else { continue };
         let use_span = c.body.expr_spans[expr];
-        if !contains(lambda_span, use_span) || contains(lambda_span, c.body.binding_spans[*binding]) {
+        if !contains(lambda_span, use_span) || contains(lambda_span, c.body.binding_spans[*binding])
+        {
             continue;
         }
         let ty = gamma
@@ -70,7 +67,10 @@ pub(crate) fn infer_lambda(
         let name = binding.name;
         let r = resolve(gamma, ty, expr_span);
         if let TypeExpr::Infer(v, _) = *gamma.get(r) {
-            let origin = DeferOrigin { name, span: expr_span };
+            let origin = DeferOrigin {
+                name,
+                span: expr_span,
+            };
             gamma.deferrable_vars.entry(v).or_insert(origin);
         }
 
@@ -89,8 +89,7 @@ pub(crate) fn infer_lambda(
 
     let saved_ret = gamma.declared_ret_ty.replace(ret_var);
     let saved_coro = gamma.coroutine_ret.take();
-    let saved_ref_source =
-        std::mem::replace(&mut gamma.allow_frame_ref_return_place, false);
+    let saved_ref_source = std::mem::replace(&mut gamma.allow_frame_ref_return_place, false);
     // A lambda body runs at CALL time, after arbitrary intervening effects, and a
     // global is read fresh on each call -- so no enclosing GLOBAL refinement holds
     // inside it. Save + clear the global entries for the body, restore after.
@@ -154,9 +153,9 @@ pub(crate) fn make_fn_ty(gamma: &mut Gamma, param_tys: &[TyId], ret: TyId, span:
     let params_range = alloc_contiguous(&mut gamma.out.ty_arena, texps);
     let r = resolve(gamma, ret, span);
     let ret_idx = reify(gamma, r, span);
-    let idx = gamma
-        .out
-        .ty_arena
-        .alloc(TypeExpr::Function { params: params_range, ret: ret_idx });
+    let idx = gamma.out.ty_arena.alloc(TypeExpr::Function {
+        params: params_range,
+        ret: ret_idx,
+    });
     TyId::Local(idx)
 }

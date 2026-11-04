@@ -13,7 +13,8 @@ pub struct DocumentLinkClientCapabilities {
     pub tooltip_support: Option<bool>,
 }
 
-impl_lsp_struct!(DocumentLinkClientCapabilities,
+impl_lsp_struct!(
+    DocumentLinkClientCapabilities,
     required {},
     optional {
         dynamic_registration: bool = "dynamicRegistration",
@@ -29,9 +30,14 @@ pub struct DocumentLinkOptions {
     pub work_done_progress_options: WorkDoneProgressOptions,
 }
 
-impl_lsp_struct!(DocumentLinkOptions,
-    optional { resolve_provider: bool = "resolveProvider" },
-    flatten { work_done_progress_options: WorkDoneProgressOptions }
+impl_lsp_struct!(
+    DocumentLinkOptions,
+    optional {
+        resolve_provider: bool = "resolveProvider"
+    },
+    flatten {
+        work_done_progress_options: WorkDoneProgressOptions
+    }
 );
 
 #[derive(Debug, Eq, PartialEq, Clone)]
@@ -43,8 +49,11 @@ pub struct DocumentLinkParams {
     pub partial_result_params: PartialResultParams,
 }
 
-impl_lsp_struct!(DocumentLinkParams,
-    required { text_document: TextDocumentIdentifier = "textDocument" },
+impl_lsp_struct!(
+    DocumentLinkParams,
+    required {
+        text_document: TextDocumentIdentifier = "textDocument"
+    },
     optional {},
     flatten {
         work_done_progress_params: WorkDoneProgressParams,
@@ -73,8 +82,11 @@ pub struct DocumentLink {
     pub data: Option<Value>,
 }
 
-impl_lsp_struct!(DocumentLink,
-    required { range: Range = "range" },
+impl_lsp_struct!(
+    DocumentLink,
+    required {
+        range: Range = "range"
+    },
     optional {
         target: Uri = "target",
         tooltip: String = "tooltip",

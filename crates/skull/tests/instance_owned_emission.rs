@@ -17,7 +17,10 @@ use common::{definition_names, emit_module, function_body, ws_with_stdlib};
 /// `__rock_mk_<sym> = function(`). The header IS the definition, so this cannot
 /// be satisfied by a mention inside some other body.
 fn definition_symbols(lua: &str) -> Vec<String> {
-    definition_names(lua).into_iter().map(str::to_string).collect()
+    definition_names(lua)
+        .into_iter()
+        .map(str::to_string)
+        .collect()
 }
 
 /// The definition symbols derived from source fn `name` -- its own mangling and
@@ -71,7 +74,11 @@ fn main() {
     let defs = definitions_of(&lua, "identity");
     assert_eq!(defs.len(), 2, "one definition per instance, got {defs:?}");
     let called = callees_named_in(&lua, "main", "identity");
-    assert_eq!(called.len(), 2, "each call names its own instance, got {called:?} of {defs:?}");
+    assert_eq!(
+        called.len(),
+        2,
+        "each call names its own instance, got {called:?} of {defs:?}"
+    );
 }
 
 /// The same generic at two concrete types with the SAME ABI width. Identity is
@@ -102,7 +109,11 @@ fn main() {
          generic snapshot to be one, got {defs:?}"
     );
     let called = callees_named_in(&lua, "main", "identity");
-    assert_eq!(called.len(), 2, "each call names its own instance, got {called:?} of {defs:?}");
+    assert_eq!(
+        called.len(),
+        2,
+        "each call names its own instance, got {called:?} of {defs:?}"
+    );
 }
 
 /// ADMISSION CONTROL for both cases above. A non-generic declaration has one
@@ -122,8 +133,15 @@ fn main() {
 "#,
     );
     let defs = definitions_of(&lua, "plain");
-    assert_eq!(defs, vec!["plain_int".to_string()], "non-generic emits once, unrenamed");
-    assert_eq!(callees_named_in(&lua, "main", "plain"), vec!["plain_int".to_string()]);
+    assert_eq!(
+        defs,
+        vec!["plain_int".to_string()],
+        "non-generic emits once, unrenamed"
+    );
+    assert_eq!(
+        callees_named_in(&lua, "main", "plain"),
+        vec!["plain_int".to_string()]
+    );
 }
 
 /// A generic caller invoking a generic callee: the callee instance is selected
@@ -157,8 +175,16 @@ fn main() {
     // that the name occurs somewhere in the chunk.
     let first = callees_named_in(&lua, &outers[0], "inner");
     let second = callees_named_in(&lua, &outers[1], "inner");
-    assert_eq!(first.len(), 1, "each `outer` names exactly one `inner`, got {first:?}");
-    assert_eq!(second.len(), 1, "each `outer` names exactly one `inner`, got {second:?}");
+    assert_eq!(
+        first.len(),
+        1,
+        "each `outer` names exactly one `inner`, got {first:?}"
+    );
+    assert_eq!(
+        second.len(),
+        1,
+        "each `outer` names exactly one `inner`, got {second:?}"
+    );
     assert_ne!(
         first, second,
         "the two `outer` instances must name DIFFERENT `inner` instances -- \
@@ -181,7 +207,9 @@ fn iter_called_in(lua: &str, caller: &str) -> String {
         .find_map(|(at, _)| {
             let rest = &body[at..];
             let name = &rest[..rest.find('(')?];
-            name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_').then(|| name.to_string())
+            name.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_')
+                .then(|| name.to_string())
         })
         .unwrap_or_else(|| panic!("no `iter` call in `{caller}`:\n{body}"))
 }
@@ -273,19 +301,31 @@ fn main() {
 
     // The graph is authoritative and non-empty -- not `None`, not deferred.
     let graph = cache.graph();
-    assert!(!graph.instances.is_empty(), "the eager graph must be built by emit_full, not deferred");
+    assert!(
+        !graph.instances.is_empty(),
+        "the eager graph must be built by emit_full, not deferred"
+    );
 
     // The Lua view realized from that same graph retains a non-zero Rock
     // population.
     let view = cache.lua_view();
-    assert!(!view.instances.is_empty(), "the Lua artifact view must retain Rock instances");
+    assert!(
+        !view.instances.is_empty(),
+        "the Lua artifact view must retain Rock instances"
+    );
 
     // Both a generic and a non-generic instance participate in the retained
     // population.
     let generic_count = view.instances.iter().filter(|i| !i.args.is_empty()).count();
     let nongeneric_count = view.instances.iter().filter(|i| i.args.is_empty()).count();
-    assert!(generic_count >= 2, "expected >=2 generic instances (identity<int>, identity<string>), got {generic_count}");
-    assert!(nongeneric_count >= 1, "expected >=1 non-generic instance, got {nongeneric_count}");
+    assert!(
+        generic_count >= 2,
+        "expected >=2 generic instances (identity<int>, identity<string>), got {generic_count}"
+    );
+    assert!(
+        nongeneric_count >= 1,
+        "expected >=1 non-generic instance, got {nongeneric_count}"
+    );
 
     // Retention and standalone delivery are separate. Roots and function-value
     // targets must have definitions; a residual call below is the other
@@ -301,16 +341,25 @@ fn main() {
         .chain(view.fn_value_targets.iter())
         .filter(|inst| view.instances.contains(*inst))
     {
-        let sym = view.symbols.get(inst).expect("every retained instance has a symbol");
+        let sym = view
+            .symbols
+            .get(inst)
+            .expect("every retained instance has a symbol");
         assert!(
             defs.contains(sym),
             "delivered instance `{sym}` has no emitted definition -- production is not driven by the graph/view population"
         );
         checked_delivery += 1;
     }
-    assert!(checked_delivery > 0, "fixture defect: no root or function-value delivery population");
+    assert!(
+        checked_delivery > 0,
+        "fixture defect: no root or function-value delivery population"
+    );
     for inst in &view.instances {
-        if graph.logical_symbol(&ws, inst).contains("leaf_only_reached_via_helper") {
+        if graph
+            .logical_symbol(&ws, inst)
+            .contains("leaf_only_reached_via_helper")
+        {
             checked_transitive_leaf = true;
         }
     }

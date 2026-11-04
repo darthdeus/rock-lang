@@ -47,7 +47,12 @@ pub fn print_file_result(r: &FileTestResult) {
             let exec_time = r.duration.saturating_sub(compile_time);
             println!(
                 "{} {} {} ({}/{} tests, {:.2}ms total, {:.2}ms exec + {:.2}ms compile)",
-                r.file_name, dots, status, r.passed, total, total_ms,
+                r.file_name,
+                dots,
+                status,
+                r.passed,
+                total,
+                total_ms,
                 exec_time.as_secs_f64() * 1000.0,
                 compile_time.as_secs_f64() * 1000.0,
             );

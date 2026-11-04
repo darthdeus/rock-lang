@@ -92,23 +92,35 @@ pub fn census_report(path: &str, ignores: &[String]) -> Result<Census> {
 /// applied). Returns `None` when nothing survives, so the file is omitted, and
 /// the parse error when the file does not parse.
 fn file_stat(disp: &str, src: &str, ignores: &[String]) -> Result<Option<FileStat>, String> {
-    let ast = skull_parser::parse_module_clean(src, Ustr::from(disp)).map_err(|e| format!("parse error: {e}"))?;
+    let ast = skull_parser::parse_module_clean(src, Ustr::from(disp))
+        .map_err(|e| format!("parse error: {e}"))?;
     let mut fns: Vec<FnStat> = Vec::new();
     for item in &ast.items {
-        let ItemKind::Function(func) = &item.kind else { continue };
-        let FunctionBody::Inline(skull_parser::FnBackend::Lua, body) = &func.body else { continue };
+        let ItemKind::Function(func) = &item.kind else {
+            continue;
+        };
+        let FunctionBody::Inline(skull_parser::FnBackend::Lua, body) = &func.body else {
+            continue;
+        };
         let name = func.name.name.as_str();
         if ignores.iter().any(|ig| name.contains(ig.as_str())) {
             continue;
         }
-        fns.push(FnStat { name: name.to_string(), lines: count_meaningful_lines(body) });
+        fns.push(FnStat {
+            name: name.to_string(),
+            lines: count_meaningful_lines(body),
+        });
     }
     if fns.is_empty() {
         return Ok(None);
     }
     fns.sort_by(|a, b| b.lines.cmp(&a.lines).then_with(|| a.name.cmp(&b.name)));
     let total_lines = fns.iter().map(|s| s.lines).sum();
-    Ok(Some(FileStat { file: disp.to_string(), fns, total_lines }))
+    Ok(Some(FileStat {
+        file: disp.to_string(),
+        fns,
+        total_lines,
+    }))
 }
 
 /// Path relative to `cwd` when the file lives under it, else the path as given.
@@ -143,7 +155,12 @@ pub fn render(census: &Census, summary: bool) -> String {
         out.push('\n');
         let width = f.fns.iter().map(|s| s.name.len()).max().unwrap_or(0).max(1);
         for s in &f.fns {
-            out.push_str(&format!("  {:<width$} {:>4} lines\n", s.name, s.lines, width = width));
+            out.push_str(&format!(
+                "  {:<width$} {:>4} lines\n",
+                s.name,
+                s.lines,
+                width = width
+            ));
         }
         out.push_str(&format!(
             "  ({} fns, {} meaningful lines)\n\n",
@@ -173,7 +190,11 @@ pub fn inline_lua_census(paths: &[String], ignores: &[String], summary: bool) ->
     print!("{}", render(&census, summary));
     if !census.unreadable.is_empty() {
         let names: Vec<&str> = census.unreadable.iter().map(|(f, _)| f.as_str()).collect();
-        anyhow::bail!("{} files could not be read or parsed: {}", names.len(), names.join(", "));
+        anyhow::bail!(
+            "{} files could not be read or parsed: {}",
+            names.len(),
+            names.join(", ")
+        );
     }
     Ok(())
 }

@@ -62,29 +62,41 @@ impl ContainerPlan {
         match (family, ty.peel_nullable().0) {
             (
                 ContainerFamily::Vec,
-                crate::monoty::MonoTy::App { ctor: crate::monoty::MonoCtor::Array, .. },
+                crate::monoty::MonoTy::App {
+                    ctor: crate::monoty::MonoCtor::Array,
+                    ..
+                },
             ) => true,
             (
                 ContainerFamily::Map,
-                crate::monoty::MonoTy::App { ctor: crate::monoty::MonoCtor::Map, .. },
+                crate::monoty::MonoTy::App {
+                    ctor: crate::monoty::MonoCtor::Map,
+                    ..
+                },
             ) => true,
             (
                 ContainerFamily::Arena,
                 crate::monoty::MonoTy::App {
-                    ctor: crate::monoty::MonoCtor::Nominal(name), ..
+                    ctor: crate::monoty::MonoCtor::Nominal(name),
+                    ..
                 },
             ) if family == ContainerFamily::Arena
-                && bone_semantic::prelude::is_intrinsic_key(*name, "Arena") => true,
+                && bone_semantic::prelude::is_intrinsic_key(*name, "Arena") =>
+            {
+                true
+            }
             (
                 ContainerFamily::NativeBuffer,
                 crate::monoty::MonoTy::App {
-                    ctor: crate::monoty::MonoCtor::Nominal(name), ..
+                    ctor: crate::monoty::MonoCtor::Nominal(name),
+                    ..
                 },
             ) if bone_semantic::prelude::is_intrinsic_key(*name, "NativeBuffer") => true,
             (
                 ContainerFamily::FlatVec,
                 crate::monoty::MonoTy::App {
-                    ctor: crate::monoty::MonoCtor::Nominal(name), ..
+                    ctor: crate::monoty::MonoCtor::Nominal(name),
+                    ..
                 },
             ) if bone_semantic::prelude::is_intrinsic_key(*name, "FlatVec") => true,
             _ => false,
@@ -150,7 +162,8 @@ impl ContainerPlan {
             ) if (family == ContainerFamily::NativeBuffer
                 && bone_semantic::prelude::is_intrinsic_key(*name, "NativeBuffer"))
                 || (family == ContainerFamily::FlatVec
-                    && bone_semantic::prelude::is_intrinsic_key(*name, "FlatVec")) => {
+                    && bone_semantic::prelude::is_intrinsic_key(*name, "FlatVec")) =>
+            {
                 let element = params.first().ok_or_else(|| RepError {
                     span: None,
                     message: "native buffer has no element type".into(),
@@ -162,7 +175,7 @@ impl ContainerPlan {
                 return Err(RepError {
                     span: None,
                     message: format!("{} is not a {:?} container", ty.render(), family),
-                })
+                });
             }
         };
         let physical_element = if nullable {
@@ -207,8 +220,8 @@ impl ContainerPlan {
                 let paths = crate::lower::value_leaf_paths(shape);
                 (paths.len() + usize::from(nullable) <= crate::lower::MAX_COLUMN_LEAVES
                     || arena.get(element_rep).nobox())
-                    .then(|| !paths.iter().any(|path| path.as_str() == "len"))
-                    .unwrap_or(false)
+                .then(|| !paths.iter().any(|path| path.as_str() == "len"))
+                .unwrap_or(false)
             }
             (ContainerFamily::Map | ContainerFamily::Arena, Some(shape))
                 if !nullable && column_eligible =>
@@ -220,23 +233,38 @@ impl ContainerPlan {
             _ => false,
         };
         let leaf_addresses = if !nullable
-            && matches!(family, ContainerFamily::NativeBuffer | ContainerFamily::FlatVec)
-        {
+            && matches!(
+                family,
+                ContainerFamily::NativeBuffer | ContainerFamily::FlatVec
+            ) {
             arena.leaf_addresses(ws, element_rep)?
         } else {
             None
         };
         let leaf_addressed = leaf_addresses.is_some();
         let storage = if columns {
-            ContainerStorage::Columns { element: element_rep }
+            ContainerStorage::Columns {
+                element: element_rep,
+            }
         } else if dense_strided || wide_nobox_struct {
-            ContainerStorage::Strided { element: element_rep }
+            ContainerStorage::Strided {
+                element: element_rep,
+            }
         } else if leaf_addressed {
-            ContainerStorage::LeafAddressed { element: element_rep }
+            ContainerStorage::LeafAddressed {
+                element: element_rep,
+            }
         } else {
-            ContainerStorage::Boxed { element: element_rep }
+            ContainerStorage::Boxed {
+                element: element_rep,
+            }
         };
-        Ok(Self { target, family, storage, leaf_addresses })
+        Ok(Self {
+            target,
+            family,
+            storage,
+            leaf_addresses,
+        })
     }
 
     /// Leaf path -> 1-based row offset for a `[name]` whose element is a
@@ -254,7 +282,10 @@ impl ContainerPlan {
         }
         let ty = MonoTy::App {
             ctor: MonoCtor::Array,
-            params: vec![MonoTy::App { ctor: MonoCtor::Nominal(name), params: Vec::new() }],
+            params: vec![MonoTy::App {
+                ctor: MonoCtor::Nominal(name),
+                params: Vec::new(),
+            }],
         };
         let arena = RepArena::default();
         let plan = Self::for_type(ws, target, &arena, ContainerFamily::Vec, &ty).ok()?;
@@ -294,7 +325,9 @@ impl ContainerPlan {
     }
 
     pub fn column_elem(&self, arena: &RepArena) -> Option<crate::mir::ColumnElem> {
-        let ContainerStorage::Columns { element } = self.storage else { return None };
+        let ContainerStorage::Columns { element } = self.storage else {
+            return None;
+        };
         let shape = arena.value_shape(element)?;
         Some(crate::mir::ColumnElem::planned(
             shape.name,
@@ -305,7 +338,9 @@ impl ContainerPlan {
     }
 
     pub fn strided_elem(&self, arena: &RepArena) -> Option<crate::mir::ColumnElem> {
-        let ContainerStorage::Strided { element } = self.storage else { return None };
+        let ContainerStorage::Strided { element } = self.storage else {
+            return None;
+        };
         let shape = arena.value_shape(element)?;
         Some(crate::mir::ColumnElem::planned(
             shape.name,
@@ -317,7 +352,9 @@ impl ContainerPlan {
 
     pub fn ffi_element_name(&self, arena: &RepArena) -> Option<ustr::Ustr> {
         let shape = self.element_shape(arena)?;
-        arena.column_eligible(self.element_rep()).then_some(shape.name)
+        arena
+            .column_eligible(self.element_rep())
+            .then_some(shape.name)
     }
 
     pub fn leaf_addresses(&self) -> Option<&[LeafAddr]> {
@@ -335,6 +372,9 @@ impl ContainerPlan {
                 message: "a non-leaf-addressed container cannot produce a leaf place".into(),
             });
         }
-        Ok(PlaceBundle { representation: self.element_rep(), address })
+        Ok(PlaceBundle {
+            representation: self.element_rep(),
+            address,
+        })
     }
 }

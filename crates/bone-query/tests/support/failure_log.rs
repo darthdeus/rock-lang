@@ -8,7 +8,9 @@ thread_local! {
 struct Capture;
 
 impl log::Log for Capture {
-    fn enabled(&self, _: &log::Metadata<'_>) -> bool { true }
+    fn enabled(&self, _: &log::Metadata<'_>) -> bool {
+        true
+    }
 
     fn log(&self, record: &log::Record<'_>) {
         if record.level() <= log::Level::Warn {

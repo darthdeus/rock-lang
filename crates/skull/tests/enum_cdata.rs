@@ -46,14 +46,20 @@ fn cdata_enum_emits_ctype_and_no_table() {
         lua.split("\nfunction ").next().unwrap_or(&lua)
     );
     // No `{__variant}` table anywhere for a cdata enum (reflection sacrificed).
-    assert!(!lua.contains("__variant = \"Circle\""), "cdata enum must not build a table:\n{lua}");
+    assert!(
+        !lua.contains("__variant = \"Circle\""),
+        "cdata enum must not build a table:\n{lua}"
+    );
     // The value `__eq` metatype is attached (escaping equality).
     assert!(
         lua.contains("ffi.metatype, \"Shape\""),
         "expected an ffi.metatype for the Shape enum cdata:\n{lua}"
     );
     // Match int-compares the tag (`.__tag`), not a `.__variant` string.
-    assert!(lua.contains(".__tag"), "expected a `.__tag` int-tag match:\n{lua}");
+    assert!(
+        lua.contains(".__tag"),
+        "expected a `.__tag` int-tag match:\n{lua}"
+    );
     // (The non-escaping construct+match SROAs to scalars on the full CLI pipeline --
     // the alloc-zero is gated by benchmarks/value-scalarize/enum_payload_scalarize.rock,
     // not asserted here, since `emit_module` runs a lighter pass set than `rock compile`.)
@@ -104,9 +110,16 @@ fn cdata_enum_as_value_struct_field() {
     );
     let path = std::env::temp_dir().join(format!("skull_enum_field_{}.lua", std::process::id()));
     std::fs::write(&path, &prog).expect("write lua");
-    let out = std::process::Command::new("luajit").arg(&path).output().expect("run luajit");
+    let out = std::process::Command::new("luajit")
+        .arg(&path)
+        .output()
+        .expect("run luajit");
     let _ = std::fs::remove_file(&path);
-    assert!(out.status.success(), "luajit failed:\n{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "luajit failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "15 30");
 }
 
@@ -149,9 +162,16 @@ fn cdata_enum_multi_field_tuple() {
     );
     let path = std::env::temp_dir().join(format!("skull_enum_multi_{}.lua", std::process::id()));
     std::fs::write(&path, &prog).expect("write lua");
-    let out = std::process::Command::new("luajit").arg(&path).output().expect("run luajit");
+    let out = std::process::Command::new("luajit")
+        .arg(&path)
+        .output()
+        .expect("run luajit");
     let _ = std::fs::remove_file(&path);
-    assert!(out.status.success(), "luajit failed:\n{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "luajit failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "15 12 0");
 }
 
@@ -197,11 +217,21 @@ fn cdata_enum_record_payload() {
     );
     let path = std::env::temp_dir().join(format!("skull_enum_rec_{}.lua", std::process::id()));
     std::fs::write(&path, &prog).expect("write lua");
-    let out = std::process::Command::new("luajit").arg(&path).output().expect("run luajit");
+    let out = std::process::Command::new("luajit")
+        .arg(&path)
+        .output()
+        .expect("run luajit");
     let _ = std::fs::remove_file(&path);
-    assert!(out.status.success(), "luajit failed:\n{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "luajit failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     // Record fields sorted alphabetically (h before w) -- matches rock's inspect.
-    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "15 12 0 | Shape::Box { h = 4, w = 3 }");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "15 12 0 | Shape::Box { h = 4, w = 3 }"
+    );
 }
 
 // A cdata enum passed through a scalar-ABI call and then matched must NOT be
@@ -249,9 +279,16 @@ fn cdata_enum_runs_correctly() {
     );
     let path = std::env::temp_dir().join(format!("skull_enum_cdata_{}.lua", std::process::id()));
     std::fs::write(&path, &prog).expect("write lua");
-    let out = std::process::Command::new("luajit").arg(&path).output().expect("run luajit");
+    let out = std::process::Command::new("luajit")
+        .arg(&path)
+        .output()
+        .expect("run luajit");
     let _ = std::fs::remove_file(&path);
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success(), "luajit failed:\nstderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "luajit failed:\nstderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert_eq!(stdout.trim(), "1 4 7 4 | 10", "got {stdout:?}");
 }

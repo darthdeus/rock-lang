@@ -6,22 +6,32 @@
 //! execution is the correctness oracle; `tests/js_module_globals.rock`
 //! cross-checks against luajit.
 
-use skull_mir::mir::FuncRef;
 use crate::common::ws_with;
+use skull_mir::mir::FuncRef;
 
 fn node_available() -> bool {
-    crate::common::node().arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+    crate::common::node()
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 fn emit_closure(ws: &bone_semantic::inference::Workspace, root: &str) -> Result<String, String> {
     // Target JS explicitly (as the real per-test path does): a fn taken by value
     // keeps its surface name only on the JS target, where JS resolves it through
     // its own `discover_globals`; a non-Js target mangles the value ref.
-    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("test module");
     let mut r = None;
     for (fid, f) in ws.module(mid).functions.iter() {
         if f.name.as_str() == root {
-            r = Some(FuncRef { module: mid, func: fid });
+            r = Some(FuncRef {
+                module: mid,
+                func: fid,
+            });
         }
     }
     skull_codegen_js::emit::emit_with_closure(ws, &[(r.unwrap(), root.to_string())])
@@ -43,14 +53,21 @@ fn eval_int(defs: &str, root: &str, expect: i64) {
         skull_codegen_js::JS_STRING_RUNTIME,
         skull_codegen_js::JS_GLOBALS_RUNTIME,
     );
-    let out = crate::common::node().arg("-e").arg(&program).output().expect("spawn node");
+    let out = crate::common::node()
+        .arg("-e")
+        .arg(&program)
+        .output()
+        .expect("spawn node");
     assert!(
         out.status.success(),
         "node failed:\n--- program ---\n{program}\n--- stderr ---\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
     let s = String::from_utf8_lossy(&out.stdout);
-    let got: i64 = s.trim().parse().unwrap_or_else(|_| panic!("not an int: {s:?}\n{program}"));
+    let got: i64 = s
+        .trim()
+        .parse()
+        .unwrap_or_else(|_| panic!("not an int: {s:?}\n{program}"));
     assert_eq!(got, expect, "wrong result\n{program}");
 }
 
@@ -106,7 +123,10 @@ fn transitive_global_init_order_through_call() {
     let act_at = js
         .find("__rock_globals[\"global:<test>::ACT::value\"] = __ginit")
         .expect("ACT init emitted");
-    assert!(reg_at < act_at, "REG must init before ACT (transitive dep):\n{js}");
+    assert!(
+        reg_at < act_at,
+        "REG must init before ACT (transitive dep):\n{js}"
+    );
     eval_int(&js, "root", 42);
 }
 

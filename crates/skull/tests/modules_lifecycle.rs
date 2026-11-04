@@ -1,7 +1,7 @@
 //! Modules-v1 lifecycle discovery keeps private hooks discoverable and treats
 //! aliases/re-exports as one decorator identity.
 
-use crate::common::{emit_v1_package, run_luajit, ws_v1_package, V1Fragment};
+use crate::common::{V1Fragment, emit_v1_package, run_luajit, ws_v1_package};
 use ustr::Ustr;
 
 const MAIN: &str = r#"
@@ -29,8 +29,14 @@ fn v1_lifecycle_aliases_register_one_private_hook() {
     let emitted = emit_v1_package(
         "v1lifecycle",
         &[
-            V1Fragment { file: "main.rock", src: MAIN },
-            V1Fragment { file: "facade.rock", src: FACADE },
+            V1Fragment {
+                file: "main.rock",
+                src: MAIN,
+            },
+            V1Fragment {
+                file: "facade.rock",
+                src: FACADE,
+            },
         ],
     );
     assert_eq!(emitted.lifecycle_plan.entries.len(), 1);
@@ -70,8 +76,15 @@ pub use ::test;
         },
     ];
     let ws = ws_v1_package("v1custom", &fragments);
-    let mid = *ws.module_ids.get(&Ustr::from("main.rock")).expect("module id");
-    assert!(skull::module_tests(&ws, mid).expect("test discovery").is_empty());
+    let mid = *ws
+        .module_ids
+        .get(&Ustr::from("main.rock"))
+        .expect("module id");
+    assert!(
+        skull::module_tests(&ws, mid)
+            .expect("test discovery")
+            .is_empty()
+    );
 
     let emitted = emit_v1_package("v1custom", &fragments);
     let decorator = skull::decorator_fn_name("v1custom::test");
@@ -115,7 +128,9 @@ pub use ::wire;
 #[test]
 fn v1_wire_const_arithmetic_admits_a_namespaced_operator_family() {
     let fragments = [
-        V1Fragment { file: "main.rock", src: r#"
+        V1Fragment {
+            file: "main.rock",
+            src: r#"
 use geometry::*;
 const BASE: int = 2
 const DEP: int = BASE + 1
@@ -124,22 +139,40 @@ deco init wire {}
 @wire(onchange=[DEP])
 fn apply() {}
 fn main() { print(DEP) }
-"# },
-        V1Fragment { file: "geometry.rock", src: r#"
+"#,
+        },
+        V1Fragment {
+            file: "geometry.rock",
+            src: r#"
 mod geometry;
 pub struct Point { x: int }
 pub operator +(a: Point, b: Point) -> Point { Point { x: a.x + b.x } }
-"# },
+"#,
+        },
     ];
     let emitted = emit_v1_package("wire_ops", &fragments);
     assert_eq!(emitted.lifecycle_plan.entries.len(), 1);
-    assert_eq!(emitted.lifecycle_plan.entries[0].qualification.dependencies().len(), 2);
-    assert_eq!(run_luajit(&format!("{}\nmain()\n", emitted.lua), "wire_module_operator"), "3");
+    assert_eq!(
+        emitted.lifecycle_plan.entries[0]
+            .qualification
+            .dependencies()
+            .len(),
+        2
+    );
+    assert_eq!(
+        run_luajit(
+            &format!("{}\nmain()\n", emitted.lua),
+            "wire_module_operator"
+        ),
+        "3"
+    );
 }
 
 #[test]
 fn v1_wire_still_rejects_a_namespaced_ordinary_function_dependency() {
-    let fragments = [V1Fragment { file: "main.rock", src: r#"
+    let fragments = [V1Fragment {
+        file: "main.rock",
+        src: r#"
 fn helper() -> int { 3 }
 const DEP: int = helper()
 @lifecycle(phase="wire", owner="process")
@@ -147,10 +180,16 @@ deco init wire {}
 @wire(onchange=[DEP])
 fn apply() {}
 fn main() {}
-"# }];
+"#,
+    }];
     let ws = ws_v1_package("wire_functions", &fragments);
-    let error = skull_mir::lifecycle::collect(&ws).expect_err("ordinary functions are not const identities");
-    assert!(error.message.contains("wire_functions::helper"), "{}", error.message);
+    let error = skull_mir::lifecycle::collect(&ws)
+        .expect_err("ordinary functions are not const identities");
+    assert!(
+        error.message.contains("wire_functions::helper"),
+        "{}",
+        error.message
+    );
 }
 
 /// Only a decorator claims an annotation spelling. A v1 fn that shares a
@@ -174,7 +213,14 @@ fn main() {}
 "#,
     }];
     let ws = ws_v1_package("v1builtin", &fragments);
-    let mid = *ws.module_ids.get(&Ustr::from("main.rock")).expect("module id");
+    let mid = *ws
+        .module_ids
+        .get(&Ustr::from("main.rock"))
+        .expect("module id");
     let tests = skull::module_tests(&ws, mid).expect("test discovery");
-    assert_eq!(tests.len(), 1, "builtin @test must still discover `doubles`");
+    assert_eq!(
+        tests.len(),
+        1,
+        "builtin @test must still discover `doubles`"
+    );
 }

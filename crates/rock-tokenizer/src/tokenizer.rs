@@ -212,8 +212,7 @@ impl<'a> Tokenizer<'a> {
     pub fn peek_n(&self, n: usize) -> Option<char> {
         let raw = self.input.as_bytes();
         let base = self.byte_index;
-        let fast_ok = base + n < raw.len()
-            && raw[base..base + n].iter().all(|b| b.is_ascii());
+        let fast_ok = base + n < raw.len() && raw[base..base + n].iter().all(|b| b.is_ascii());
         if fast_ok {
             let ahead = raw[base + n];
             if ahead.is_ascii() {
@@ -393,9 +392,7 @@ impl<'a> Tokenizer<'a> {
             return Err(CompilerError::new_with_label(
                 self.end_span(open_span),
                 match scan.flavor {
-                    crate::interp::Flavor::Triple => {
-                        "unterminated multiline string".to_string()
-                    }
+                    crate::interp::Flavor::Triple => "unterminated multiline string".to_string(),
                     crate::interp::Flavor::RawTriple => {
                         "unterminated multiline raw string".to_string()
                     }
@@ -410,8 +407,7 @@ impl<'a> Tokenizer<'a> {
             self.advance_to(scan.end);
             return Err(CompilerError::new_with_label(
                 self.end_span(open_span),
-                "unmatched `{` in string literal: use `{{` to emit a literal `{`"
-                    .to_string(),
+                "unmatched `{` in string literal: use `{{` to emit a literal `{`".to_string(),
             ));
         }
         // After the structural refusals above, so an unterminated literal is
@@ -489,7 +485,6 @@ impl<'a> Tokenizer<'a> {
             "deco" => Ok(TokenKind::Deco),
             // Note: "wrap" and "init" are NOT keywords - they are contextual
             // and only recognized in the context of decorator definitions
-
             "macro" => Ok(TokenKind::Macro),
 
             "true" => Ok(TokenKind::True),
@@ -680,153 +675,153 @@ impl<'a> Tokenizer<'a> {
 
         match radix {
             Radix::Binary => {
-            loop {
-                let Some(cur) = self.current else { break };
-                match cur {
-                    '0' | '1' => {
-                        digits.push(cur);
-                        kept.push(cur);
-                        self.advance();
-                    }
-                    '_' => {
-                        kept.push(cur);
-                        self.advance();
-                    }
-                    _ => break,
-                }
-            }
-
-            if digits.is_empty() {
-                return Err(CompilerError::new_with_label(
-                    self.end_span(origin.clone()),
-                    "Invalid binary literal: no digits after 0b".to_string(),
-                )
-                .with_code(CompilerErrorCode::TokenizerError));
-            }
-
-            let value = i64::from_str_radix(&digits, 2).map_err(|e| {
-                CompilerError::new_with_label(
-                    self.end_span(origin.clone()),
-                    format!("Invalid binary literal '{}': {}", digits, e),
-                )
-                .with_code(CompilerErrorCode::TokenizerError)
-            })?;
-            Ok(TokenKind::Int(value, kept.into()))
-            }
-            Radix::Hex => {
-            loop {
-                let Some(cur) = self.current else { break };
-                if cur.is_ascii_hexdigit() {
-                    digits.push(cur);
-                    kept.push(cur);
-                    self.advance();
-                } else if cur == '_' {
-                    kept.push(cur);
-                    self.advance();
-                } else {
-                    break;
-                }
-            }
-
-            if digits.is_empty() {
-                return Err(CompilerError::new_with_label(
-                    self.end_span(origin.clone()),
-                    "Invalid hex literal: no digits after 0x".to_string(),
-                )
-                .with_code(CompilerErrorCode::TokenizerError));
-            }
-
-            let value = i64::from_str_radix(&digits, 16).map_err(|e| {
-                CompilerError::new_with_label(
-                    self.end_span(origin.clone()),
-                    format!("Invalid hex literal '{}': {}", digits, e),
-                )
-                .with_code(CompilerErrorCode::TokenizerError)
-            })?;
-            Ok(TokenKind::Int(value, kept.into()))
-            }
-            Radix::Decimal => {
-            loop {
-                let Some(cur) = self.current else { break };
-                match cur {
-                    '0'..='9' => {
-                        digits.push(cur);
-                        kept.push(cur);
-                        self.advance();
-                        continue;
-                    }
-                    '.' => {
-                        if dot_seen {
-                            break;
-                        }
-                        if matches!(&self.last_token_kind, Some(TokenKind::Dot)) {
-                            break;
-                        }
-                        if !self.peek_n(1).is_some_and(|c| c.is_ascii_digit()) {
-                            break;
-                        }
-                        floaty = true;
-                        digits.push(cur);
-                        kept.push(cur);
-                        dot_seen = true;
-                        self.advance();
-                        continue;
-                    }
-                    'e' | 'E' => {
-                        floaty = true;
-                        digits.push(cur);
-                        kept.push(cur);
-                        self.advance();
-                        if let Some(sign) = self.current {
-                            if sign == '+' || sign == '-' {
-                                digits.push(sign);
-                                kept.push(sign);
-                                self.advance();
-                            }
-                        }
-                        let mut exp_digits = false;
-                        loop {
-                            let Some(ec) = self.current else { break };
-                            if !ec.is_ascii_digit() {
-                                break;
-                            }
-                            digits.push(ec);
-                            kept.push(ec);
-                            exp_digits = true;
+                loop {
+                    let Some(cur) = self.current else { break };
+                    match cur {
+                        '0' | '1' => {
+                            digits.push(cur);
+                            kept.push(cur);
                             self.advance();
                         }
-                        if !exp_digits {
-                            return Err(CompilerError::new_with_label(
+                        '_' => {
+                            kept.push(cur);
+                            self.advance();
+                        }
+                        _ => break,
+                    }
+                }
+
+                if digits.is_empty() {
+                    return Err(CompilerError::new_with_label(
+                        self.end_span(origin.clone()),
+                        "Invalid binary literal: no digits after 0b".to_string(),
+                    )
+                    .with_code(CompilerErrorCode::TokenizerError));
+                }
+
+                let value = i64::from_str_radix(&digits, 2).map_err(|e| {
+                    CompilerError::new_with_label(
+                        self.end_span(origin.clone()),
+                        format!("Invalid binary literal '{}': {}", digits, e),
+                    )
+                    .with_code(CompilerErrorCode::TokenizerError)
+                })?;
+                Ok(TokenKind::Int(value, kept.into()))
+            }
+            Radix::Hex => {
+                loop {
+                    let Some(cur) = self.current else { break };
+                    if cur.is_ascii_hexdigit() {
+                        digits.push(cur);
+                        kept.push(cur);
+                        self.advance();
+                    } else if cur == '_' {
+                        kept.push(cur);
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+
+                if digits.is_empty() {
+                    return Err(CompilerError::new_with_label(
+                        self.end_span(origin.clone()),
+                        "Invalid hex literal: no digits after 0x".to_string(),
+                    )
+                    .with_code(CompilerErrorCode::TokenizerError));
+                }
+
+                let value = i64::from_str_radix(&digits, 16).map_err(|e| {
+                    CompilerError::new_with_label(
+                        self.end_span(origin.clone()),
+                        format!("Invalid hex literal '{}': {}", digits, e),
+                    )
+                    .with_code(CompilerErrorCode::TokenizerError)
+                })?;
+                Ok(TokenKind::Int(value, kept.into()))
+            }
+            Radix::Decimal => {
+                loop {
+                    let Some(cur) = self.current else { break };
+                    match cur {
+                        '0'..='9' => {
+                            digits.push(cur);
+                            kept.push(cur);
+                            self.advance();
+                            continue;
+                        }
+                        '.' => {
+                            if dot_seen {
+                                break;
+                            }
+                            if matches!(&self.last_token_kind, Some(TokenKind::Dot)) {
+                                break;
+                            }
+                            if !self.peek_n(1).is_some_and(|c| c.is_ascii_digit()) {
+                                break;
+                            }
+                            floaty = true;
+                            digits.push(cur);
+                            kept.push(cur);
+                            dot_seen = true;
+                            self.advance();
+                            continue;
+                        }
+                        'e' | 'E' => {
+                            floaty = true;
+                            digits.push(cur);
+                            kept.push(cur);
+                            self.advance();
+                            if let Some(sign) = self.current {
+                                if sign == '+' || sign == '-' {
+                                    digits.push(sign);
+                                    kept.push(sign);
+                                    self.advance();
+                                }
+                            }
+                            let mut exp_digits = false;
+                            loop {
+                                let Some(ec) = self.current else { break };
+                                if !ec.is_ascii_digit() {
+                                    break;
+                                }
+                                digits.push(ec);
+                                kept.push(ec);
+                                exp_digits = true;
+                                self.advance();
+                            }
+                            if !exp_digits {
+                                return Err(CompilerError::new_with_label(
                                 self.end_span(origin.clone()),
                                 format!("Invalid scientific notation: expected digits after exponent in '{}'", kept),
                             )
                             .with_code(CompilerErrorCode::TokenizerError));
+                            }
+                            break;
                         }
-                        break;
+                        _ => break,
                     }
-                    _ => break,
                 }
-            }
 
-            Ok(if floaty {
-                let parsed_float = digits.parse().map_err(|_| {
-                    CompilerError::new_with_label(
-                        self.end_span(origin.clone()),
-                        format!("Invalid floating point literal: '{}'", digits),
-                    )
-                    .with_code(CompilerErrorCode::TokenizerError)
-                })?;
-                TokenKind::Float(parsed_float)
-            } else {
-                let parsed_int = digits.parse::<i64>().map_err(|e| {
-                    CompilerError::new_with_label(
-                        self.end_span(origin.clone()),
-                        format!("Invalid integer literal '{}': {}", digits, e),
-                    )
-                    .with_code(CompilerErrorCode::TokenizerError)
-                })?;
-                TokenKind::Int(parsed_int, kept.into())
-            })
+                Ok(if floaty {
+                    let parsed_float = digits.parse().map_err(|_| {
+                        CompilerError::new_with_label(
+                            self.end_span(origin.clone()),
+                            format!("Invalid floating point literal: '{}'", digits),
+                        )
+                        .with_code(CompilerErrorCode::TokenizerError)
+                    })?;
+                    TokenKind::Float(parsed_float)
+                } else {
+                    let parsed_int = digits.parse::<i64>().map_err(|e| {
+                        CompilerError::new_with_label(
+                            self.end_span(origin.clone()),
+                            format!("Invalid integer literal '{}': {}", digits, e),
+                        )
+                        .with_code(CompilerErrorCode::TokenizerError)
+                    })?;
+                    TokenKind::Int(parsed_int, kept.into())
+                })
             }
         }
     }
@@ -841,9 +836,7 @@ impl<'a> Tokenizer<'a> {
             let kind = self.read_keyword_or_ident()?;
             return self.finish_token(origin, kind);
         }
-        if head.is_ascii_digit()
-            || ((head == '-' || head == '.') && self.lookahead_number())
-        {
+        if head.is_ascii_digit() || ((head == '-' || head == '.') && self.lookahead_number()) {
             let kind = self.read_number()?;
             return self.finish_token(origin, kind);
         }
@@ -1050,51 +1043,49 @@ impl<'a> Tokenizer<'a> {
 
             Some('\'') => self.read_string_literal(self.byte_index)?,
 
-            Some('#') => {
-                match self.peek_n(1) {
-                    Some(nxt) if nxt.is_ascii_lowercase() => {
-                        self.advance();
-                        let src = self.input;
-                        let word_at = self.byte_index;
-                        {
-                            let raw = src.as_bytes();
-                            let mut j = self.byte_index;
-                            while j < raw.len() && raw[j].is_ascii_alphabetic() {
-                                j += 1;
-                            }
-                            let took = j - self.byte_index;
-                            self.byte_index = j;
-                            self.byte_offset += took;
-                            self.column += took;
-                            self.current = decode_at(raw, j).map(|(got, _)| got);
+            Some('#') => match self.peek_n(1) {
+                Some(nxt) if nxt.is_ascii_lowercase() => {
+                    self.advance();
+                    let src = self.input;
+                    let word_at = self.byte_index;
+                    {
+                        let raw = src.as_bytes();
+                        let mut j = self.byte_index;
+                        while j < raw.len() && raw[j].is_ascii_alphabetic() {
+                            j += 1;
                         }
-                        match &src[word_at..self.byte_index] {
-                            "if" => TokenKind::DirectiveIf,
-                            "elseif" => TokenKind::DirectiveElseIf,
-                            "else" => TokenKind::DirectiveElse,
-                            "end" => TokenKind::DirectiveEnd,
-                            _ => {
-                                let _ = self.read_line_rest();
-                                TokenKind::Comment(src[word_at..self.byte_index].into())
-                            }
+                        let took = j - self.byte_index;
+                        self.byte_index = j;
+                        self.byte_offset += took;
+                        self.column += took;
+                        self.current = decode_at(raw, j).map(|(got, _)| got);
+                    }
+                    match &src[word_at..self.byte_index] {
+                        "if" => TokenKind::DirectiveIf,
+                        "elseif" => TokenKind::DirectiveElseIf,
+                        "else" => TokenKind::DirectiveElse,
+                        "end" => TokenKind::DirectiveEnd,
+                        _ => {
+                            let _ = self.read_line_rest();
+                            TokenKind::Comment(src[word_at..self.byte_index].into())
                         }
-                    }
-                    Some(_) => {
-                        self.advance();
-                        TokenKind::Comment(self.read_line_rest().into())
-                    }
-                    None => {
-                        self.advance();
-                        TokenKind::Comment(String::new().into())
                     }
                 }
-            }
+                Some(_) => {
+                    self.advance();
+                    TokenKind::Comment(self.read_line_rest().into())
+                }
+                None => {
+                    self.advance();
+                    TokenKind::Comment(String::new().into())
+                }
+            },
 
             _ => {
                 return Err(CompilerError::new_with_label(
                     Span::unknown(),
                     format!("I done a bad thing: {:?}", self.current),
-                ))
+                ));
             }
         };
 
@@ -1206,11 +1197,15 @@ mod test {
         // A `.` is a decimal point only when a digit follows. Trailing-dot
         // floats (`456.`) are removed so `2./4` lexes as `2 ./ 4`.
         assert_eq!(
-            Tokenizer::from_code("t.rock", "456.").tokenize_kinds().unwrap(),
+            Tokenizer::from_code("t.rock", "456.")
+                .tokenize_kinds()
+                .unwrap(),
             vec![TokenKind::Int(456, "456".into()), TokenKind::Dot]
         );
         assert_eq!(
-            Tokenizer::from_code("t.rock", "2./4").tokenize_kinds().unwrap(),
+            Tokenizer::from_code("t.rock", "2./4")
+                .tokenize_kinds()
+                .unwrap(),
             vec![
                 TokenKind::Int(2, "2".into()),
                 TokenKind::IntDiv,
@@ -1219,7 +1214,9 @@ mod test {
         );
         // Spaced form and decimal points are unaffected.
         assert_eq!(
-            Tokenizer::from_code("t.rock", "7 ./ 2").tokenize_kinds().unwrap(),
+            Tokenizer::from_code("t.rock", "7 ./ 2")
+                .tokenize_kinds()
+                .unwrap(),
             vec![
                 TokenKind::Int(7, "7".into()),
                 TokenKind::IntDiv,
@@ -1227,7 +1224,9 @@ mod test {
             ]
         );
         assert_eq!(
-            Tokenizer::from_code("t.rock", "2.5").tokenize_kinds().unwrap(),
+            Tokenizer::from_code("t.rock", "2.5")
+                .tokenize_kinds()
+                .unwrap(),
             vec![TokenKind::Float(OrderedFloat(2.5))]
         );
     }
@@ -1236,13 +1235,17 @@ mod test {
     fn test_leading_dot_is_a_float() {
         // A bare `.5` in expression-start position is a float literal (`0.5`).
         assert_eq!(
-            Tokenizer::from_code("t.rock", ".35").tokenize_kinds().unwrap(),
+            Tokenizer::from_code("t.rock", ".35")
+                .tokenize_kinds()
+                .unwrap(),
             vec![TokenKind::Float(OrderedFloat(0.35))]
         );
         // Every prefix position where a unary minus is allowed also admits a
         // leading-dot float.
         assert_eq!(
-            Tokenizer::from_code("t.rock", "restitution: .35").tokenize_kinds().unwrap(),
+            Tokenizer::from_code("t.rock", "restitution: .35")
+                .tokenize_kinds()
+                .unwrap(),
             vec![
                 TokenKind::Ident("restitution".into()),
                 TokenKind::Colon,
@@ -1250,7 +1253,9 @@ mod test {
             ]
         );
         assert_eq!(
-            Tokenizer::from_code("t.rock", "[.5, .25]").tokenize_kinds().unwrap(),
+            Tokenizer::from_code("t.rock", "[.5, .25]")
+                .tokenize_kinds()
+                .unwrap(),
             vec![
                 TokenKind::OpenSquare,
                 TokenKind::Float(OrderedFloat(0.5)),
@@ -1260,7 +1265,9 @@ mod test {
             ]
         );
         assert_eq!(
-            Tokenizer::from_code("t.rock", "2 + .5").tokenize_kinds().unwrap(),
+            Tokenizer::from_code("t.rock", "2 + .5")
+                .tokenize_kinds()
+                .unwrap(),
             vec![
                 TokenKind::Int(2, "2".into()),
                 TokenKind::Plus,
@@ -1269,12 +1276,16 @@ mod test {
         );
         // `-.5` stays a negative float (unchanged).
         assert_eq!(
-            Tokenizer::from_code("t.rock", "-.5").tokenize_kinds().unwrap(),
+            Tokenizer::from_code("t.rock", "-.5")
+                .tokenize_kinds()
+                .unwrap(),
             vec![TokenKind::Float(OrderedFloat(-0.5))]
         );
         // Tuple/field index `.0` after a value stays Dot + Int, NOT a float.
         assert_eq!(
-            Tokenizer::from_code("t.rock", "w.0").tokenize_kinds().unwrap(),
+            Tokenizer::from_code("t.rock", "w.0")
+                .tokenize_kinds()
+                .unwrap(),
             vec![
                 TokenKind::Ident("w".into()),
                 TokenKind::Dot,
@@ -1282,7 +1293,9 @@ mod test {
             ]
         );
         assert_eq!(
-            Tokenizer::from_code("t.rock", "w.0.0").tokenize_kinds().unwrap(),
+            Tokenizer::from_code("t.rock", "w.0.0")
+                .tokenize_kinds()
+                .unwrap(),
             vec![
                 TokenKind::Ident("w".into()),
                 TokenKind::Dot,
@@ -1381,25 +1394,33 @@ mod test {
     pub fn test_string_fast_and_slow_paths() {
         // Plain string -> fast path (verbatim slice).
         assert_eq!(
-            Tokenizer::from_code("t.rock", "\"hello world\"").tokenize_kinds().unwrap(),
+            Tokenizer::from_code("t.rock", "\"hello world\"")
+                .tokenize_kinds()
+                .unwrap(),
             vec![TokenKind::String("hello world".into())]
         );
         // Escapes -> slow path: `\n`/`\t` are transformed, so the fast path
         // MUST bail (a slice would keep the literal backslash).
         assert_eq!(
-            Tokenizer::from_code("t.rock", "\"a\\nb\\tc\"").tokenize_kinds().unwrap(),
+            Tokenizer::from_code("t.rock", "\"a\\nb\\tc\"")
+                .tokenize_kinds()
+                .unwrap(),
             vec![TokenKind::String("a\nb\tc".into())]
         );
         // Interpolation braces are kept verbatim (re-parsed later); `{` forces
         // the slow path but the stored text matches a slice anyway.
         assert_eq!(
-            Tokenizer::from_code("t.rock", "\"hp={x}\"").tokenize_kinds().unwrap(),
+            Tokenizer::from_code("t.rock", "\"hp={x}\"")
+                .tokenize_kinds()
+                .unwrap(),
             vec![TokenKind::String("hp={x}".into())]
         );
         // A `"` inside `{...}` must NOT end the outer string -- the fast path's
         // first-quote-wins scan would get this wrong, so `{` bailing is load-bearing.
         assert_eq!(
-            Tokenizer::from_code("t.rock", "\"a{f(\"x\")}b\"").tokenize_kinds().unwrap(),
+            Tokenizer::from_code("t.rock", "\"a{f(\"x\")}b\"")
+                .tokenize_kinds()
+                .unwrap(),
             vec![TokenKind::String("a{f(\"x\")}b".into())]
         );
     }
@@ -1626,9 +1647,11 @@ fn main() {       // trailing comment
 
         assert!(result.is_err());
         let error = result.unwrap_err();
-        assert!(error
-            .message
-            .contains("`let mut` is not supported, all bindings are mut, use just `let`"));
+        assert!(
+            error
+                .message
+                .contains("`let mut` is not supported, all bindings are mut, use just `let`")
+        );
     }
 
     #[test]
@@ -1765,7 +1788,12 @@ mod escape_tests {
     }
 
     fn text(src: &str) -> String {
-        match lex(src).expect("lexes").into_iter().next().expect("one token") {
+        match lex(src)
+            .expect("lexes")
+            .into_iter()
+            .next()
+            .expect("one token")
+        {
             TokenKind::String(s) | TokenKind::RawString(s) => s.to_string(),
             other => panic!("not a string token: {other:?}"),
         }
@@ -1821,7 +1849,10 @@ mod escape_tests {
 
     #[test]
     fn a_malformed_unicode_escape_is_rejected() {
-        assert!(rejection(r#""\u41""#).contains("\\u{"), "braces are required");
+        assert!(
+            rejection(r#""\u41""#).contains("\\u{"),
+            "braces are required"
+        );
         assert!(rejection(r#""\u{}""#).contains("at least one"));
         assert!(rejection(r#""\u{41""#).contains("unterminated"));
         assert!(rejection(r#""\u{XY}""#).contains("hex"));

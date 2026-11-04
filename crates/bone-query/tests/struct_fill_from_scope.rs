@@ -11,7 +11,9 @@ const PATH: &str = "/tmp/rock_struct_fill_scope.rock";
 fn fill(src: &str, pos: Position) -> String {
     let mut bone = BoneWorkspace::new();
     bone.update(PATH, src.to_string());
-    bone.fill_struct_fields(PATH, pos).expect("fill should be offered").new_text
+    bone.fill_struct_fields(PATH, pos)
+        .expect("fill should be offered")
+        .new_text
 }
 
 #[test]
@@ -20,7 +22,10 @@ fn matching_name_and_type_bindings_fill_as_shorthand() {
     let src = "struct P { x: int, y: int }\nfn f(x: int) {\n    let y = 5\n    let p = P {  }\n}\n";
     // cursor inside `P {  }` on line 3.
     let t = fill(src, Position::new(3, 15));
-    assert!(!t.contains('?'), "both fields should be shorthand, no holes: {t:?}");
+    assert!(
+        !t.contains('?'),
+        "both fields should be shorthand, no holes: {t:?}"
+    );
     assert!(t.contains('x') && t.contains('y'), "names present: {t:?}");
 }
 
@@ -29,7 +34,10 @@ fn name_match_wrong_type_falls_back_to_hole() {
     // param `x` exists but is a string; field `x` is int -> not shorthand.
     let src = "struct P { x: int }\nfn f(x: string) {\n    let p = P {  }\n}\n";
     let t = fill(src, Position::new(2, 15));
-    assert!(t.contains("x: ?"), "wrong-type binding must not shorthand: {t:?}");
+    assert!(
+        t.contains("x: ?"),
+        "wrong-type binding must not shorthand: {t:?}"
+    );
 }
 
 #[test]
@@ -56,5 +64,8 @@ fn fills_a_struct_literal_written_as_a_bare_match_arm_body() {
     let src = "enum K { A, B }\nvalue S { x: float, y: float }\nfn f(k: K) -> S {\n    match k {\n        K::A => S { x: 1.0 }\n        K::B => S { x: 2.0, y: 3.0 }\n    }\n}\n";
     // cursor inside `S { x: 1.0 }` on line 4 (0-indexed).
     let t = fill(src, Position::new(4, 22));
-    assert!(t.contains('y'), "the missing field `y` must be filled: {t:?}");
+    assert!(
+        t.contains('y'),
+        "the missing field `y` must be filled: {t:?}"
+    );
 }

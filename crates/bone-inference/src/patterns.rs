@@ -4,7 +4,11 @@ use super::*;
 /// record pattern covers its variant; an or-pattern covers the union of its
 /// alternatives; everything else (wildcard/binding/literal/...) covers no named
 /// variant. Guard handling is the caller's job -- only unguarded arms are fed in.
-pub(crate) fn collect_covered_enum_variants(c: BodyCtx, pat: Idx<Pattern>, out: &mut FxHashSet<Ustr>) {
+pub(crate) fn collect_covered_enum_variants(
+    c: BodyCtx,
+    pat: Idx<Pattern>,
+    out: &mut FxHashSet<Ustr>,
+) {
     match c.body.pattern_arena[pat] {
         Pattern::EnumVariant { variant, .. } => {
             out.insert(variant);
@@ -42,7 +46,10 @@ pub(crate) fn unqualified_arm_variant(
     };
 
     let name = c.body.binding_arena[b].name;
-    if !name.as_str().starts_with(|ch: char| ch.is_ascii_uppercase()) {
+    if !name
+        .as_str()
+        .starts_with(|ch: char| ch.is_ascii_uppercase())
+    {
         return Ok(None);
     }
 

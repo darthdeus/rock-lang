@@ -8,7 +8,7 @@ fn contains_preprocessor_directives(input: &str) -> bool {
     if input.starts_with('#') {
         return true;
     }
-    
+
     // Look for '\n#' pattern (directive at start of any other line)
     // This is a simple string search, much faster than character-by-character lexing
     input.contains("\n#")
@@ -32,9 +32,11 @@ fn check_for_special_directives(input: &str) -> (bool, bool, bool, Vec<String>) 
                 if let Some(package_name) = directive.condition {
                     let package_name = package_name.trim();
                     // Remove quotes if present
-                    let package_name = if (package_name.starts_with('"') && package_name.ends_with('"')) ||
-                                       (package_name.starts_with('\'') && package_name.ends_with('\'')) {
-                        package_name[1..package_name.len()-1].to_string()
+                    let package_name = if (package_name.starts_with('"')
+                        && package_name.ends_with('"'))
+                        || (package_name.starts_with('\'') && package_name.ends_with('\''))
+                    {
+                        package_name[1..package_name.len() - 1].to_string()
                     } else {
                         package_name.to_string()
                     };
@@ -69,7 +71,8 @@ pub fn preprocess(input: &str, context: &PreprocessorContext) -> Result<Preproce
     let mut parser = PreprocessorParser::new();
     let constructs = parser.parse_directives(input)?;
 
-    if constructs.is_empty() && !is_script && !is_test && !is_test_util && used_packages.is_empty() {
+    if constructs.is_empty() && !is_script && !is_test && !is_test_util && used_packages.is_empty()
+    {
         // No preprocessing needed (shouldn't happen after fast check, but keep for safety)
         return Ok(PreprocessedSource {
             content: input.to_string(),
@@ -170,7 +173,6 @@ fn find_line_end(input: &str, pos: usize) -> usize {
     }
     end
 }
-
 
 #[cfg(test)]
 mod tests {

@@ -49,7 +49,10 @@ fn a_value_element_registers_its_luajit_width_and_every_leaf_view() {
         .lines()
         .find(|l| l.starts_with("__rock_nb_storage(\"Mix\","))
         .unwrap_or_else(|| panic!("no `Mix` storage registration in:\n{lua}"));
-    assert!(line.contains("\"Mix\", 12,"), "expected `Mix` to be 12 bytes wide, got: {line}");
+    assert!(
+        line.contains("\"Mix\", 12,"),
+        "expected `Mix` to be 12 bytes wide, got: {line}"
+    );
     for view in ["__vf = \"float*\"", "__vi = \"int*\"", "__vb = \"bool*\""] {
         assert!(
             line.contains(view),

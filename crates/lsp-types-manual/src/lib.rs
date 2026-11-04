@@ -246,8 +246,11 @@ pub struct CancelParams {
     pub id: NumberOrString,
 }
 
-impl_lsp_struct!(CancelParams,
-    required { id: NumberOrString = "id" },
+impl_lsp_struct!(
+    CancelParams,
+    required {
+        id: NumberOrString = "id"
+    },
     optional {}
 );
 
@@ -270,9 +273,7 @@ pub type LSPArray = Vec<serde_json::Value>;
 
 /// Position in a text document expressed as zero-based line and character offset.
 /// A position is between two characters like an 'insert' cursor in a editor.
-#[derive(
-    Debug, Eq, PartialEq, Ord, PartialOrd, Copy, Clone, Default, Hash,
-)]
+#[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Copy, Clone, Default, Hash)]
 pub struct Position {
     /// Line position in a document (zero-based).
     pub line: u32,
@@ -284,7 +285,8 @@ pub struct Position {
     pub character: u32,
 }
 
-impl_lsp_struct!(Position,
+impl_lsp_struct!(
+    Position,
     required {
         line: u32 = "line",
         character: u32 = "character",
@@ -308,7 +310,8 @@ pub struct Range {
     pub end: Position,
 }
 
-impl_lsp_struct!(Range,
+impl_lsp_struct!(
+    Range,
     required {
         start: Position = "start",
         end: Position = "end",
@@ -329,7 +332,8 @@ pub struct Location {
     pub range: Range,
 }
 
-impl_lsp_struct!(Location,
+impl_lsp_struct!(
+    Location,
     required {
         uri: Uri = "uri",
         range: Range = "range",
@@ -362,7 +366,8 @@ pub struct LocationLink {
     pub target_selection_range: Range,
 }
 
-impl_lsp_struct!(LocationLink,
+impl_lsp_struct!(
+    LocationLink,
     required {
         target_uri: Uri = "targetUri",
         target_range: Range = "targetRange",
@@ -426,7 +431,9 @@ impl serde::Serialize for PositionEncodingKind {
 
 impl<'de> serde::Deserialize<'de> for PositionEncodingKind {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        Ok(PositionEncodingKind(std::borrow::Cow::Owned(String::deserialize(d)?)))
+        Ok(PositionEncodingKind(std::borrow::Cow::Owned(
+            String::deserialize(d)?,
+        )))
     }
 }
 
@@ -488,7 +495,8 @@ pub struct CodeDescription {
     pub href: Uri,
 }
 
-impl_lsp_struct!(CodeDescription,
+impl_lsp_struct!(
+    CodeDescription,
     required { href: Uri = "href" },
     optional {}
 );
@@ -559,7 +567,8 @@ pub struct DiagnosticRelatedInformation {
     pub message: String,
 }
 
-impl_lsp_struct!(DiagnosticRelatedInformation,
+impl_lsp_struct!(
+    DiagnosticRelatedInformation,
     required {
         location: Location = "location",
         message: String = "message",
@@ -634,7 +643,8 @@ pub struct TextEdit {
     pub new_text: String,
 }
 
-impl_lsp_struct!(TextEdit,
+impl_lsp_struct!(
+    TextEdit,
     required {
         range: Range = "range",
         new_text: String = "newText",
@@ -665,10 +675,15 @@ pub struct AnnotatedTextEdit {
     pub text_edit: TextEdit,
 }
 
-impl_lsp_struct!(AnnotatedTextEdit,
-    required { annotation_id: ChangeAnnotationIdentifier = "annotationId" },
+impl_lsp_struct!(
+    AnnotatedTextEdit,
+    required {
+        annotation_id: ChangeAnnotationIdentifier = "annotationId"
+    },
     optional {},
-    flatten { text_edit: TextEdit }
+    flatten {
+        text_edit: TextEdit
+    }
 );
 
 /// Describes textual changes on a single text document. The text document is referred to as a
@@ -714,8 +729,11 @@ pub struct ChangeAnnotation {
     pub description: Option<String>,
 }
 
-impl_lsp_struct!(ChangeAnnotation,
-    required { label: String = "label" },
+impl_lsp_struct!(
+    ChangeAnnotation,
+    required {
+        label: String = "label"
+    },
     optional {
         needs_confirmation: bool = "needsConfirmation",
         description: String = "description",
@@ -730,9 +748,12 @@ pub struct ChangeAnnotationWorkspaceEditClientCapabilities {
     pub groups_on_label: Option<bool>,
 }
 
-impl_lsp_struct!(ChangeAnnotationWorkspaceEditClientCapabilities,
+impl_lsp_struct!(
+    ChangeAnnotationWorkspaceEditClientCapabilities,
     required {},
-    optional { groups_on_label: bool = "groupsOnLabel" }
+    optional {
+        groups_on_label: bool = "groupsOnLabel"
+    }
 );
 
 /// Options to create a file.
@@ -744,7 +765,8 @@ pub struct CreateFileOptions {
     pub ignore_if_exists: Option<bool>,
 }
 
-impl_lsp_struct!(CreateFileOptions,
+impl_lsp_struct!(
+    CreateFileOptions,
     required {},
     optional {
         overwrite: bool = "overwrite",
@@ -766,7 +788,8 @@ pub struct CreateFile {
     pub annotation_id: Option<ChangeAnnotationIdentifier>,
 }
 
-impl_lsp_struct!(CreateFile,
+impl_lsp_struct!(
+    CreateFile,
     required { uri: Uri = "uri" },
     optional {
         options: CreateFileOptions = "options",
@@ -783,7 +806,8 @@ pub struct RenameFileOptions {
     pub ignore_if_exists: Option<bool>,
 }
 
-impl_lsp_struct!(RenameFileOptions,
+impl_lsp_struct!(
+    RenameFileOptions,
     required {},
     optional {
         overwrite: bool = "overwrite",
@@ -807,7 +831,8 @@ pub struct RenameFile {
     pub annotation_id: Option<ChangeAnnotationIdentifier>,
 }
 
-impl_lsp_struct!(RenameFile,
+impl_lsp_struct!(
+    RenameFile,
     required {
         old_uri: Uri = "oldUri",
         new_uri: Uri = "newUri",
@@ -832,7 +857,8 @@ pub struct DeleteFileOptions {
     pub annotation_id: Option<ChangeAnnotationIdentifier>,
 }
 
-impl_lsp_struct!(DeleteFileOptions,
+impl_lsp_struct!(
+    DeleteFileOptions,
     required {},
     optional {
         recursive: bool = "recursive",
@@ -850,9 +876,12 @@ pub struct DeleteFile {
     pub options: Option<DeleteFileOptions>,
 }
 
-impl_lsp_struct!(DeleteFile,
+impl_lsp_struct!(
+    DeleteFile,
     required { uri: Uri = "uri" },
-    optional { options: DeleteFileOptions = "options" }
+    optional {
+        options: DeleteFileOptions = "options"
+    }
 );
 
 /// A workspace edit represents changes to many resources managed in the workspace.
@@ -967,7 +996,8 @@ pub struct ConfigurationItem {
     pub section: Option<String>,
 }
 
-impl_lsp_struct!(ConfigurationItem,
+impl_lsp_struct!(
+    ConfigurationItem,
     required {},
     optional {
         scope_uri: Uri = "scopeUri",
@@ -997,7 +1027,8 @@ pub struct TextDocumentIdentifier {
     pub uri: Uri,
 }
 
-impl_lsp_struct!(TextDocumentIdentifier,
+impl_lsp_struct!(
+    TextDocumentIdentifier,
     required { uri: Uri = "uri" },
     optional {}
 );
@@ -1025,7 +1056,8 @@ pub struct TextDocumentItem {
     pub text: String,
 }
 
-impl_lsp_struct!(TextDocumentItem,
+impl_lsp_struct!(
+    TextDocumentItem,
     required {
         uri: Uri = "uri",
         language_id: String = "languageId",
@@ -1060,7 +1092,8 @@ pub struct VersionedTextDocumentIdentifier {
     pub version: i32,
 }
 
-impl_lsp_struct!(VersionedTextDocumentIdentifier,
+impl_lsp_struct!(
+    VersionedTextDocumentIdentifier,
     required {
         uri: Uri = "uri",
         version: i32 = "version",
@@ -1093,9 +1126,12 @@ pub struct OptionalVersionedTextDocumentIdentifier {
     pub version: Option<i32>,
 }
 
-impl_lsp_struct!(OptionalVersionedTextDocumentIdentifier,
+impl_lsp_struct!(
+    OptionalVersionedTextDocumentIdentifier,
     required { uri: Uri = "uri" },
-    nullable { version: i32 = "version" },
+    nullable {
+        version: i32 = "version"
+    },
     optional {}
 );
 
@@ -1122,7 +1158,8 @@ pub struct TextDocumentPositionParams {
     pub position: Position,
 }
 
-impl_lsp_struct!(TextDocumentPositionParams,
+impl_lsp_struct!(
+    TextDocumentPositionParams,
     required {
         text_document: TextDocumentIdentifier = "textDocument",
         position: Position = "position",
@@ -1160,7 +1197,8 @@ pub struct DocumentFilter {
     pub pattern: Option<String>,
 }
 
-impl_lsp_struct!(DocumentFilter,
+impl_lsp_struct!(
+    DocumentFilter,
     required {},
     optional {
         language: String = "language",
@@ -1243,18 +1281,20 @@ pub struct ClientInfo {
     pub version: Option<String>,
 }
 
-impl_lsp_struct!(ClientInfo,
-    required { name: String = "name" },
-    optional { version: String = "version" }
+impl_lsp_struct!(
+    ClientInfo,
+    required {
+        name: String = "name"
+    },
+    optional {
+        version: String = "version"
+    }
 );
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub struct InitializedParams {}
 
-impl_lsp_struct!(InitializedParams,
-    required {},
-    optional {}
-);
+impl_lsp_struct!(InitializedParams, required {}, optional {});
 
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub struct GenericRegistrationOptions {
@@ -1263,7 +1303,8 @@ pub struct GenericRegistrationOptions {
     pub static_registration_options: StaticRegistrationOptions,
 }
 
-impl_lsp_struct!(GenericRegistrationOptions,
+impl_lsp_struct!(
+    GenericRegistrationOptions,
     flatten {
         text_document_registration_options: TextDocumentRegistrationOptions,
         options: GenericOptions,
@@ -1276,8 +1317,11 @@ pub struct GenericOptions {
     pub work_done_progress_options: WorkDoneProgressOptions,
 }
 
-impl_lsp_struct!(GenericOptions,
-    flatten { work_done_progress_options: WorkDoneProgressOptions }
+impl_lsp_struct!(
+    GenericOptions,
+    flatten {
+        work_done_progress_options: WorkDoneProgressOptions
+    }
 );
 
 #[derive(Debug, Eq, PartialEq, Clone)]
@@ -1287,7 +1331,8 @@ pub struct GenericParams {
     pub partial_result_params: PartialResultParams,
 }
 
-impl_lsp_struct!(GenericParams,
+impl_lsp_struct!(
+    GenericParams,
     flatten {
         text_document_position_params: TextDocumentPositionParams,
         work_done_progress_params: WorkDoneProgressParams,
@@ -1301,9 +1346,12 @@ pub struct DynamicRegistrationClientCapabilities {
     pub dynamic_registration: Option<bool>,
 }
 
-impl_lsp_struct!(DynamicRegistrationClientCapabilities,
+impl_lsp_struct!(
+    DynamicRegistrationClientCapabilities,
     required {},
-    optional { dynamic_registration: bool = "dynamicRegistration" }
+    optional {
+        dynamic_registration: bool = "dynamicRegistration"
+    }
 );
 
 #[derive(Debug, Eq, PartialEq, Clone, Copy, Default)]
@@ -1314,7 +1362,8 @@ pub struct GotoCapability {
     pub link_support: Option<bool>,
 }
 
-impl_lsp_struct!(GotoCapability,
+impl_lsp_struct!(
+    GotoCapability,
     required {},
     optional {
         dynamic_registration: bool = "dynamicRegistration",
@@ -1499,12 +1548,14 @@ pub struct WorkspaceClientCapabilities {
     pub diagnostic: Option<DiagnosticWorkspaceClientCapabilities>,
 }
 
-impl_lsp_struct!(WorkspaceClientCapabilities,
+impl_lsp_struct!(
+    WorkspaceClientCapabilities,
     required {},
     optional {
         apply_edit: bool = "applyEdit",
         workspace_edit: WorkspaceEditClientCapabilities = "workspaceEdit",
-        did_change_configuration: DidChangeConfigurationClientCapabilities = "didChangeConfiguration",
+        did_change_configuration: DidChangeConfigurationClientCapabilities =
+            "didChangeConfiguration",
         did_change_watched_files: DidChangeWatchedFilesClientCapabilities = "didChangeWatchedFiles",
         symbol: WorkspaceSymbolClientCapabilities = "symbol",
         execute_command: ExecuteCommandClientCapabilities = "executeCommand",
@@ -1536,7 +1587,8 @@ pub struct TextDocumentSyncClientCapabilities {
     pub did_save: Option<bool>,
 }
 
-impl_lsp_struct!(TextDocumentSyncClientCapabilities,
+impl_lsp_struct!(
+    TextDocumentSyncClientCapabilities,
     required {},
     optional {
         dynamic_registration: bool = "dynamicRegistration",
@@ -1610,7 +1662,10 @@ impl<'de> serde::Deserialize<'de> for PublishDiagnosticsClientCapabilities {
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
                 write!(f, "PublishDiagnosticsClientCapabilities object")
             }
-            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Self::Value, A::Error> {
                 let mut result = PublishDiagnosticsClientCapabilities::default();
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
@@ -1618,7 +1673,12 @@ impl<'de> serde::Deserialize<'de> for PublishDiagnosticsClientCapabilities {
                             result.related_information = Some(map.next_value()?);
                         }
                         "tagSupport" => {
-                            result.tag_support = TagSupport::deserialize_compat(map.next_value::<serde_json::Value>().map(serde::de::IntoDeserializer::into_deserializer).map_err(serde::de::Error::custom)?).map_err(serde::de::Error::custom)?;
+                            result.tag_support = TagSupport::deserialize_compat(
+                                map.next_value::<serde_json::Value>()
+                                    .map(serde::de::IntoDeserializer::into_deserializer)
+                                    .map_err(serde::de::Error::custom)?,
+                            )
+                            .map_err(serde::de::Error::custom)?;
                         }
                         "versionSupport" => {
                             result.version_support = Some(map.next_value()?);
@@ -1629,7 +1689,9 @@ impl<'de> serde::Deserialize<'de> for PublishDiagnosticsClientCapabilities {
                         "dataSupport" => {
                             result.data_support = Some(map.next_value()?);
                         }
-                        _ => { let _ = map.next_value::<serde_json::Value>()?; }
+                        _ => {
+                            let _ = map.next_value::<serde_json::Value>()?;
+                        }
                     }
                 }
                 Ok(result)
@@ -1662,15 +1724,23 @@ impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for TagSupport<T> 
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
                 write!(f, "TagSupport object")
             }
-            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Self::Value, A::Error> {
                 let mut value_set = None;
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
-                        "valueSet" => { value_set = Some(map.next_value()?); }
-                        _ => { let _ = map.next_value::<serde_json::Value>()?; }
+                        "valueSet" => {
+                            value_set = Some(map.next_value()?);
+                        }
+                        _ => {
+                            let _ = map.next_value::<serde_json::Value>()?;
+                        }
                     }
                 }
-                let value_set = value_set.ok_or_else(|| serde::de::Error::missing_field("valueSet"))?;
+                let value_set =
+                    value_set.ok_or_else(|| serde::de::Error::missing_field("valueSet"))?;
                 Ok(TagSupport { value_set })
             }
         }
@@ -1682,7 +1752,9 @@ impl<T> TagSupport<T> {
     /// Support for deserializing a boolean tag Support, in case it's present.
     ///
     /// This is currently the case for vscode 1.41.1
-    pub(crate) fn deserialize_compat<'de, S>(serializer: S) -> Result<Option<TagSupport<T>>, S::Error>
+    pub(crate) fn deserialize_compat<'de, S>(
+        serializer: S,
+    ) -> Result<Option<TagSupport<T>>, S::Error>
     where
         S: serde::Deserializer<'de>,
         T: serde::Deserialize<'de>,
@@ -1814,7 +1886,8 @@ pub struct TextDocumentClientCapabilities {
     pub inline_completion: Option<InlineCompletionClientCapabilities>,
 }
 
-impl_lsp_struct!(TextDocumentClientCapabilities,
+impl_lsp_struct!(
+    TextDocumentClientCapabilities,
     required {},
     optional {
         synchronization: TextDocumentSyncClientCapabilities = "synchronization",
@@ -1884,23 +1957,51 @@ impl serde::Serialize for ClientCapabilities {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;
         let mut hint = 0usize;
-        if self.workspace.is_some() { hint += 1; }
-        if self.text_document.is_some() { hint += 1; }
-        if self.notebook_document.is_some() { hint += 1; }
-        if self.window.is_some() { hint += 1; }
-        if self.general.is_some() { hint += 1; }
-        if self.experimental.is_some() { hint += 1; }
+        if self.workspace.is_some() {
+            hint += 1;
+        }
+        if self.text_document.is_some() {
+            hint += 1;
+        }
+        if self.notebook_document.is_some() {
+            hint += 1;
+        }
+        if self.window.is_some() {
+            hint += 1;
+        }
+        if self.general.is_some() {
+            hint += 1;
+        }
+        if self.experimental.is_some() {
+            hint += 1;
+        }
         #[cfg(feature = "proposed")]
-        if self.offset_encoding.is_some() { hint += 1; }
+        if self.offset_encoding.is_some() {
+            hint += 1;
+        }
         let mut map = serializer.serialize_map(Some(hint))?;
-        if let Some(ref v) = self.workspace { map.serialize_entry("workspace", v)?; }
-        if let Some(ref v) = self.text_document { map.serialize_entry("textDocument", v)?; }
-        if let Some(ref v) = self.notebook_document { map.serialize_entry("notebookDocument", v)?; }
-        if let Some(ref v) = self.window { map.serialize_entry("window", v)?; }
-        if let Some(ref v) = self.general { map.serialize_entry("general", v)?; }
-        if let Some(ref v) = self.experimental { map.serialize_entry("experimental", v)?; }
+        if let Some(ref v) = self.workspace {
+            map.serialize_entry("workspace", v)?;
+        }
+        if let Some(ref v) = self.text_document {
+            map.serialize_entry("textDocument", v)?;
+        }
+        if let Some(ref v) = self.notebook_document {
+            map.serialize_entry("notebookDocument", v)?;
+        }
+        if let Some(ref v) = self.window {
+            map.serialize_entry("window", v)?;
+        }
+        if let Some(ref v) = self.general {
+            map.serialize_entry("general", v)?;
+        }
+        if let Some(ref v) = self.experimental {
+            map.serialize_entry("experimental", v)?;
+        }
         #[cfg(feature = "proposed")]
-        if let Some(ref v) = self.offset_encoding { map.serialize_entry("offsetEncoding", v)?; }
+        if let Some(ref v) = self.offset_encoding {
+            map.serialize_entry("offsetEncoding", v)?;
+        }
         map.end()
     }
 }
@@ -1913,19 +2014,38 @@ impl<'de> serde::Deserialize<'de> for ClientCapabilities {
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
                 write!(f, "ClientCapabilities object")
             }
-            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Self::Value, A::Error> {
                 let mut result = ClientCapabilities::default();
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
-                        "workspace" => { result.workspace = Some(map.next_value()?); }
-                        "textDocument" => { result.text_document = Some(map.next_value()?); }
-                        "notebookDocument" => { result.notebook_document = Some(map.next_value()?); }
-                        "window" => { result.window = Some(map.next_value()?); }
-                        "general" => { result.general = Some(map.next_value()?); }
-                        "experimental" => { result.experimental = Some(map.next_value()?); }
+                        "workspace" => {
+                            result.workspace = Some(map.next_value()?);
+                        }
+                        "textDocument" => {
+                            result.text_document = Some(map.next_value()?);
+                        }
+                        "notebookDocument" => {
+                            result.notebook_document = Some(map.next_value()?);
+                        }
+                        "window" => {
+                            result.window = Some(map.next_value()?);
+                        }
+                        "general" => {
+                            result.general = Some(map.next_value()?);
+                        }
+                        "experimental" => {
+                            result.experimental = Some(map.next_value()?);
+                        }
                         #[cfg(feature = "proposed")]
-                        "offsetEncoding" => { result.offset_encoding = Some(map.next_value()?); }
-                        _ => { let _ = map.next_value::<serde_json::Value>()?; }
+                        "offsetEncoding" => {
+                            result.offset_encoding = Some(map.next_value()?);
+                        }
+                        _ => {
+                            let _ = map.next_value::<serde_json::Value>()?;
+                        }
                     }
                 }
                 Ok(result)
@@ -2018,9 +2138,14 @@ pub struct RegularExpressionsClientCapabilities {
     pub version: Option<String>,
 }
 
-impl_lsp_struct!(RegularExpressionsClientCapabilities,
-    required { engine: String = "engine" },
-    optional { version: String = "version" }
+impl_lsp_struct!(
+    RegularExpressionsClientCapabilities,
+    required {
+        engine: String = "engine"
+    },
+    optional {
+        version: String = "version"
+    }
 );
 
 #[derive(Debug, PartialEq, Clone, Default)]
@@ -2065,14 +2190,22 @@ impl serde::Serialize for InitializeResult {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;
         let mut hint = 1usize;
-        if self.server_info.is_some() { hint += 1; }
+        if self.server_info.is_some() {
+            hint += 1;
+        }
         #[cfg(feature = "proposed")]
-        if self.offset_encoding.is_some() { hint += 1; }
+        if self.offset_encoding.is_some() {
+            hint += 1;
+        }
         let mut map = serializer.serialize_map(Some(hint))?;
         map.serialize_entry("capabilities", &self.capabilities)?;
-        if let Some(ref v) = self.server_info { map.serialize_entry("serverInfo", v)?; }
+        if let Some(ref v) = self.server_info {
+            map.serialize_entry("serverInfo", v)?;
+        }
         #[cfg(feature = "proposed")]
-        if let Some(ref v) = self.offset_encoding { map.serialize_entry("offsetEncoding", v)?; }
+        if let Some(ref v) = self.offset_encoding {
+            map.serialize_entry("offsetEncoding", v)?;
+        }
         map.end()
     }
 }
@@ -2085,15 +2218,26 @@ impl<'de> serde::Deserialize<'de> for InitializeResult {
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
                 write!(f, "InitializeResult object")
             }
-            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Self::Value, A::Error> {
                 let mut result = InitializeResult::default();
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
-                        "capabilities" => { result.capabilities = map.next_value()?; }
-                        "serverInfo" => { result.server_info = Some(map.next_value()?); }
+                        "capabilities" => {
+                            result.capabilities = map.next_value()?;
+                        }
+                        "serverInfo" => {
+                            result.server_info = Some(map.next_value()?);
+                        }
                         #[cfg(feature = "proposed")]
-                        "offsetEncoding" => { result.offset_encoding = Some(map.next_value()?); }
-                        _ => { let _ = map.next_value::<serde_json::Value>()?; }
+                        "offsetEncoding" => {
+                            result.offset_encoding = Some(map.next_value()?);
+                        }
+                        _ => {
+                            let _ = map.next_value::<serde_json::Value>()?;
+                        }
                     }
                 }
                 Ok(result)
@@ -2111,9 +2255,14 @@ pub struct ServerInfo {
     pub version: Option<String>,
 }
 
-impl_lsp_struct!(ServerInfo,
-    required { name: String = "name" },
-    optional { version: String = "version" }
+impl_lsp_struct!(
+    ServerInfo,
+    required {
+        name: String = "name"
+    },
+    optional {
+        version: String = "version"
+    }
 );
 
 #[derive(Debug, Eq, PartialEq, Clone, Default)]
@@ -2126,8 +2275,11 @@ pub struct InitializeError {
     pub retry: bool,
 }
 
-impl_lsp_struct!(InitializeError,
-    required { retry: bool = "retry" },
+impl_lsp_struct!(
+    InitializeError,
+    required {
+        retry: bool = "retry"
+    },
     optional {}
 );
 
@@ -2174,9 +2326,12 @@ pub struct SaveOptions {
     pub include_text: Option<bool>,
 }
 
-impl_lsp_struct!(SaveOptions,
+impl_lsp_struct!(
+    SaveOptions,
     required {},
-    optional { include_text: bool = "includeText" }
+    optional {
+        include_text: bool = "includeText"
+    }
 );
 
 #[derive(Debug, Eq, PartialEq, Clone)]
@@ -2221,7 +2376,8 @@ pub struct TextDocumentSyncOptions {
     pub save: Option<TextDocumentSyncSaveOptions>,
 }
 
-impl_lsp_struct!(TextDocumentSyncOptions,
+impl_lsp_struct!(
+    TextDocumentSyncOptions,
     required {},
     optional {
         open_close: bool = "openClose",
@@ -2270,7 +2426,9 @@ where
         if let Ok(v) = serde_json::from_value::<B>(val) {
             return Ok(OneOf::Right(v));
         }
-        Err(serde::de::Error::custom("data did not match either variant of OneOf"))
+        Err(serde::de::Error::custom(
+            "data did not match either variant of OneOf",
+        ))
     }
 }
 
@@ -2477,42 +2635,112 @@ impl serde::Serialize for ServerCapabilities {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;
         let mut map = serializer.serialize_map(None)?;
-        if let Some(ref v) = self.position_encoding { map.serialize_entry("positionEncoding", v)?; }
-        if let Some(ref v) = self.text_document_sync { map.serialize_entry("textDocumentSync", v)?; }
-        if let Some(ref v) = self.notebook_document_sync { map.serialize_entry("notebookDocumentSync", v)?; }
-        if let Some(ref v) = self.selection_range_provider { map.serialize_entry("selectionRangeProvider", v)?; }
-        if let Some(ref v) = self.hover_provider { map.serialize_entry("hoverProvider", v)?; }
-        if let Some(ref v) = self.completion_provider { map.serialize_entry("completionProvider", v)?; }
-        if let Some(ref v) = self.signature_help_provider { map.serialize_entry("signatureHelpProvider", v)?; }
-        if let Some(ref v) = self.definition_provider { map.serialize_entry("definitionProvider", v)?; }
-        if let Some(ref v) = self.type_definition_provider { map.serialize_entry("typeDefinitionProvider", v)?; }
-        if let Some(ref v) = self.implementation_provider { map.serialize_entry("implementationProvider", v)?; }
-        if let Some(ref v) = self.references_provider { map.serialize_entry("referencesProvider", v)?; }
-        if let Some(ref v) = self.document_highlight_provider { map.serialize_entry("documentHighlightProvider", v)?; }
-        if let Some(ref v) = self.document_symbol_provider { map.serialize_entry("documentSymbolProvider", v)?; }
-        if let Some(ref v) = self.workspace_symbol_provider { map.serialize_entry("workspaceSymbolProvider", v)?; }
-        if let Some(ref v) = self.code_action_provider { map.serialize_entry("codeActionProvider", v)?; }
-        if let Some(ref v) = self.code_lens_provider { map.serialize_entry("codeLensProvider", v)?; }
-        if let Some(ref v) = self.document_formatting_provider { map.serialize_entry("documentFormattingProvider", v)?; }
-        if let Some(ref v) = self.document_range_formatting_provider { map.serialize_entry("documentRangeFormattingProvider", v)?; }
-        if let Some(ref v) = self.document_on_type_formatting_provider { map.serialize_entry("documentOnTypeFormattingProvider", v)?; }
-        if let Some(ref v) = self.rename_provider { map.serialize_entry("renameProvider", v)?; }
-        if let Some(ref v) = self.document_link_provider { map.serialize_entry("documentLinkProvider", v)?; }
-        if let Some(ref v) = self.color_provider { map.serialize_entry("colorProvider", v)?; }
-        if let Some(ref v) = self.folding_range_provider { map.serialize_entry("foldingRangeProvider", v)?; }
-        if let Some(ref v) = self.declaration_provider { map.serialize_entry("declarationProvider", v)?; }
-        if let Some(ref v) = self.execute_command_provider { map.serialize_entry("executeCommandProvider", v)?; }
-        if let Some(ref v) = self.workspace { map.serialize_entry("workspace", v)?; }
-        if let Some(ref v) = self.call_hierarchy_provider { map.serialize_entry("callHierarchyProvider", v)?; }
-        if let Some(ref v) = self.semantic_tokens_provider { map.serialize_entry("semanticTokensProvider", v)?; }
-        if let Some(ref v) = self.moniker_provider { map.serialize_entry("monikerProvider", v)?; }
-        if let Some(ref v) = self.linked_editing_range_provider { map.serialize_entry("linkedEditingRangeProvider", v)?; }
-        if let Some(ref v) = self.inline_value_provider { map.serialize_entry("inlineValueProvider", v)?; }
-        if let Some(ref v) = self.inlay_hint_provider { map.serialize_entry("inlayHintProvider", v)?; }
-        if let Some(ref v) = self.diagnostic_provider { map.serialize_entry("diagnosticProvider", v)?; }
+        if let Some(ref v) = self.position_encoding {
+            map.serialize_entry("positionEncoding", v)?;
+        }
+        if let Some(ref v) = self.text_document_sync {
+            map.serialize_entry("textDocumentSync", v)?;
+        }
+        if let Some(ref v) = self.notebook_document_sync {
+            map.serialize_entry("notebookDocumentSync", v)?;
+        }
+        if let Some(ref v) = self.selection_range_provider {
+            map.serialize_entry("selectionRangeProvider", v)?;
+        }
+        if let Some(ref v) = self.hover_provider {
+            map.serialize_entry("hoverProvider", v)?;
+        }
+        if let Some(ref v) = self.completion_provider {
+            map.serialize_entry("completionProvider", v)?;
+        }
+        if let Some(ref v) = self.signature_help_provider {
+            map.serialize_entry("signatureHelpProvider", v)?;
+        }
+        if let Some(ref v) = self.definition_provider {
+            map.serialize_entry("definitionProvider", v)?;
+        }
+        if let Some(ref v) = self.type_definition_provider {
+            map.serialize_entry("typeDefinitionProvider", v)?;
+        }
+        if let Some(ref v) = self.implementation_provider {
+            map.serialize_entry("implementationProvider", v)?;
+        }
+        if let Some(ref v) = self.references_provider {
+            map.serialize_entry("referencesProvider", v)?;
+        }
+        if let Some(ref v) = self.document_highlight_provider {
+            map.serialize_entry("documentHighlightProvider", v)?;
+        }
+        if let Some(ref v) = self.document_symbol_provider {
+            map.serialize_entry("documentSymbolProvider", v)?;
+        }
+        if let Some(ref v) = self.workspace_symbol_provider {
+            map.serialize_entry("workspaceSymbolProvider", v)?;
+        }
+        if let Some(ref v) = self.code_action_provider {
+            map.serialize_entry("codeActionProvider", v)?;
+        }
+        if let Some(ref v) = self.code_lens_provider {
+            map.serialize_entry("codeLensProvider", v)?;
+        }
+        if let Some(ref v) = self.document_formatting_provider {
+            map.serialize_entry("documentFormattingProvider", v)?;
+        }
+        if let Some(ref v) = self.document_range_formatting_provider {
+            map.serialize_entry("documentRangeFormattingProvider", v)?;
+        }
+        if let Some(ref v) = self.document_on_type_formatting_provider {
+            map.serialize_entry("documentOnTypeFormattingProvider", v)?;
+        }
+        if let Some(ref v) = self.rename_provider {
+            map.serialize_entry("renameProvider", v)?;
+        }
+        if let Some(ref v) = self.document_link_provider {
+            map.serialize_entry("documentLinkProvider", v)?;
+        }
+        if let Some(ref v) = self.color_provider {
+            map.serialize_entry("colorProvider", v)?;
+        }
+        if let Some(ref v) = self.folding_range_provider {
+            map.serialize_entry("foldingRangeProvider", v)?;
+        }
+        if let Some(ref v) = self.declaration_provider {
+            map.serialize_entry("declarationProvider", v)?;
+        }
+        if let Some(ref v) = self.execute_command_provider {
+            map.serialize_entry("executeCommandProvider", v)?;
+        }
+        if let Some(ref v) = self.workspace {
+            map.serialize_entry("workspace", v)?;
+        }
+        if let Some(ref v) = self.call_hierarchy_provider {
+            map.serialize_entry("callHierarchyProvider", v)?;
+        }
+        if let Some(ref v) = self.semantic_tokens_provider {
+            map.serialize_entry("semanticTokensProvider", v)?;
+        }
+        if let Some(ref v) = self.moniker_provider {
+            map.serialize_entry("monikerProvider", v)?;
+        }
+        if let Some(ref v) = self.linked_editing_range_provider {
+            map.serialize_entry("linkedEditingRangeProvider", v)?;
+        }
+        if let Some(ref v) = self.inline_value_provider {
+            map.serialize_entry("inlineValueProvider", v)?;
+        }
+        if let Some(ref v) = self.inlay_hint_provider {
+            map.serialize_entry("inlayHintProvider", v)?;
+        }
+        if let Some(ref v) = self.diagnostic_provider {
+            map.serialize_entry("diagnosticProvider", v)?;
+        }
         #[cfg(feature = "proposed")]
-        if let Some(ref v) = self.inline_completion_provider { map.serialize_entry("inlineCompletionProvider", v)?; }
-        if let Some(ref v) = self.experimental { map.serialize_entry("experimental", v)?; }
+        if let Some(ref v) = self.inline_completion_provider {
+            map.serialize_entry("inlineCompletionProvider", v)?;
+        }
+        if let Some(ref v) = self.experimental {
+            map.serialize_entry("experimental", v)?;
+        }
         map.end()
     }
 }
@@ -2525,47 +2753,122 @@ impl<'de> serde::Deserialize<'de> for ServerCapabilities {
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
                 write!(f, "ServerCapabilities object")
             }
-            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Self::Value, A::Error> {
                 let mut result = ServerCapabilities::default();
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
-                        "positionEncoding" => { result.position_encoding = Some(map.next_value()?); }
-                        "textDocumentSync" => { result.text_document_sync = Some(map.next_value()?); }
-                        "notebookDocumentSync" => { result.notebook_document_sync = Some(map.next_value()?); }
-                        "selectionRangeProvider" => { result.selection_range_provider = Some(map.next_value()?); }
-                        "hoverProvider" => { result.hover_provider = Some(map.next_value()?); }
-                        "completionProvider" => { result.completion_provider = Some(map.next_value()?); }
-                        "signatureHelpProvider" => { result.signature_help_provider = Some(map.next_value()?); }
-                        "definitionProvider" => { result.definition_provider = Some(map.next_value()?); }
-                        "typeDefinitionProvider" => { result.type_definition_provider = Some(map.next_value()?); }
-                        "implementationProvider" => { result.implementation_provider = Some(map.next_value()?); }
-                        "referencesProvider" => { result.references_provider = Some(map.next_value()?); }
-                        "documentHighlightProvider" => { result.document_highlight_provider = Some(map.next_value()?); }
-                        "documentSymbolProvider" => { result.document_symbol_provider = Some(map.next_value()?); }
-                        "workspaceSymbolProvider" => { result.workspace_symbol_provider = Some(map.next_value()?); }
-                        "codeActionProvider" => { result.code_action_provider = Some(map.next_value()?); }
-                        "codeLensProvider" => { result.code_lens_provider = Some(map.next_value()?); }
-                        "documentFormattingProvider" => { result.document_formatting_provider = Some(map.next_value()?); }
-                        "documentRangeFormattingProvider" => { result.document_range_formatting_provider = Some(map.next_value()?); }
-                        "documentOnTypeFormattingProvider" => { result.document_on_type_formatting_provider = Some(map.next_value()?); }
-                        "renameProvider" => { result.rename_provider = Some(map.next_value()?); }
-                        "documentLinkProvider" => { result.document_link_provider = Some(map.next_value()?); }
-                        "colorProvider" => { result.color_provider = Some(map.next_value()?); }
-                        "foldingRangeProvider" => { result.folding_range_provider = Some(map.next_value()?); }
-                        "declarationProvider" => { result.declaration_provider = Some(map.next_value()?); }
-                        "executeCommandProvider" => { result.execute_command_provider = Some(map.next_value()?); }
-                        "workspace" => { result.workspace = Some(map.next_value()?); }
-                        "callHierarchyProvider" => { result.call_hierarchy_provider = Some(map.next_value()?); }
-                        "semanticTokensProvider" => { result.semantic_tokens_provider = Some(map.next_value()?); }
-                        "monikerProvider" => { result.moniker_provider = Some(map.next_value()?); }
-                        "linkedEditingRangeProvider" => { result.linked_editing_range_provider = Some(map.next_value()?); }
-                        "inlineValueProvider" => { result.inline_value_provider = Some(map.next_value()?); }
-                        "inlayHintProvider" => { result.inlay_hint_provider = Some(map.next_value()?); }
-                        "diagnosticProvider" => { result.diagnostic_provider = Some(map.next_value()?); }
+                        "positionEncoding" => {
+                            result.position_encoding = Some(map.next_value()?);
+                        }
+                        "textDocumentSync" => {
+                            result.text_document_sync = Some(map.next_value()?);
+                        }
+                        "notebookDocumentSync" => {
+                            result.notebook_document_sync = Some(map.next_value()?);
+                        }
+                        "selectionRangeProvider" => {
+                            result.selection_range_provider = Some(map.next_value()?);
+                        }
+                        "hoverProvider" => {
+                            result.hover_provider = Some(map.next_value()?);
+                        }
+                        "completionProvider" => {
+                            result.completion_provider = Some(map.next_value()?);
+                        }
+                        "signatureHelpProvider" => {
+                            result.signature_help_provider = Some(map.next_value()?);
+                        }
+                        "definitionProvider" => {
+                            result.definition_provider = Some(map.next_value()?);
+                        }
+                        "typeDefinitionProvider" => {
+                            result.type_definition_provider = Some(map.next_value()?);
+                        }
+                        "implementationProvider" => {
+                            result.implementation_provider = Some(map.next_value()?);
+                        }
+                        "referencesProvider" => {
+                            result.references_provider = Some(map.next_value()?);
+                        }
+                        "documentHighlightProvider" => {
+                            result.document_highlight_provider = Some(map.next_value()?);
+                        }
+                        "documentSymbolProvider" => {
+                            result.document_symbol_provider = Some(map.next_value()?);
+                        }
+                        "workspaceSymbolProvider" => {
+                            result.workspace_symbol_provider = Some(map.next_value()?);
+                        }
+                        "codeActionProvider" => {
+                            result.code_action_provider = Some(map.next_value()?);
+                        }
+                        "codeLensProvider" => {
+                            result.code_lens_provider = Some(map.next_value()?);
+                        }
+                        "documentFormattingProvider" => {
+                            result.document_formatting_provider = Some(map.next_value()?);
+                        }
+                        "documentRangeFormattingProvider" => {
+                            result.document_range_formatting_provider = Some(map.next_value()?);
+                        }
+                        "documentOnTypeFormattingProvider" => {
+                            result.document_on_type_formatting_provider = Some(map.next_value()?);
+                        }
+                        "renameProvider" => {
+                            result.rename_provider = Some(map.next_value()?);
+                        }
+                        "documentLinkProvider" => {
+                            result.document_link_provider = Some(map.next_value()?);
+                        }
+                        "colorProvider" => {
+                            result.color_provider = Some(map.next_value()?);
+                        }
+                        "foldingRangeProvider" => {
+                            result.folding_range_provider = Some(map.next_value()?);
+                        }
+                        "declarationProvider" => {
+                            result.declaration_provider = Some(map.next_value()?);
+                        }
+                        "executeCommandProvider" => {
+                            result.execute_command_provider = Some(map.next_value()?);
+                        }
+                        "workspace" => {
+                            result.workspace = Some(map.next_value()?);
+                        }
+                        "callHierarchyProvider" => {
+                            result.call_hierarchy_provider = Some(map.next_value()?);
+                        }
+                        "semanticTokensProvider" => {
+                            result.semantic_tokens_provider = Some(map.next_value()?);
+                        }
+                        "monikerProvider" => {
+                            result.moniker_provider = Some(map.next_value()?);
+                        }
+                        "linkedEditingRangeProvider" => {
+                            result.linked_editing_range_provider = Some(map.next_value()?);
+                        }
+                        "inlineValueProvider" => {
+                            result.inline_value_provider = Some(map.next_value()?);
+                        }
+                        "inlayHintProvider" => {
+                            result.inlay_hint_provider = Some(map.next_value()?);
+                        }
+                        "diagnosticProvider" => {
+                            result.diagnostic_provider = Some(map.next_value()?);
+                        }
                         #[cfg(feature = "proposed")]
-                        "inlineCompletionProvider" => { result.inline_completion_provider = Some(map.next_value()?); }
-                        "experimental" => { result.experimental = Some(map.next_value()?); }
-                        _ => { let _ = map.next_value::<serde_json::Value>()?; }
+                        "inlineCompletionProvider" => {
+                            result.inline_completion_provider = Some(map.next_value()?);
+                        }
+                        "experimental" => {
+                            result.experimental = Some(map.next_value()?);
+                        }
+                        _ => {
+                            let _ = map.next_value::<serde_json::Value>()?;
+                        }
                     }
                 }
                 Ok(result)
@@ -2583,7 +2886,8 @@ pub struct WorkspaceServerCapabilities {
     pub file_operations: Option<WorkspaceFileOperationsServerCapabilities>,
 }
 
-impl_lsp_struct!(WorkspaceServerCapabilities,
+impl_lsp_struct!(
+    WorkspaceServerCapabilities,
     required {},
     optional {
         workspace_folders: WorkspaceFoldersServerCapabilities = "workspaceFolders",
@@ -2605,12 +2909,15 @@ pub struct Registration {
     pub register_options: Option<Value>,
 }
 
-impl_lsp_struct!(Registration,
+impl_lsp_struct!(
+    Registration,
     required {
         id: String = "id",
         method: String = "method",
     },
-    optional { register_options: Value = "registerOptions" }
+    optional {
+        register_options: Value = "registerOptions"
+    }
 );
 
 #[derive(Debug, PartialEq, Clone)]
@@ -2632,9 +2939,12 @@ pub struct TextDocumentRegistrationOptions {
     pub document_selector: Option<DocumentSelector>,
 }
 
-impl_lsp_struct!(TextDocumentRegistrationOptions,
+impl_lsp_struct!(
+    TextDocumentRegistrationOptions,
     required {},
-    nullable { document_selector: DocumentSelector = "documentSelector" },
+    nullable {
+        document_selector: DocumentSelector = "documentSelector"
+    },
     optional {}
 );
 
@@ -2658,7 +2968,8 @@ pub struct DeclarationRegistrationOptions {
     pub static_registration_options: StaticRegistrationOptions,
 }
 
-impl_lsp_struct!(DeclarationRegistrationOptions,
+impl_lsp_struct!(
+    DeclarationRegistrationOptions,
     flatten {
         declaration_options: DeclarationOptions,
         text_document_registration_options: TextDocumentRegistrationOptions,
@@ -2671,8 +2982,11 @@ pub struct DeclarationOptions {
     pub work_done_progress_options: WorkDoneProgressOptions,
 }
 
-impl_lsp_struct!(DeclarationOptions,
-    flatten { work_done_progress_options: WorkDoneProgressOptions }
+impl_lsp_struct!(
+    DeclarationOptions,
+    flatten {
+        work_done_progress_options: WorkDoneProgressOptions
+    }
 );
 
 #[derive(Debug, Eq, PartialEq, Clone, Default)]
@@ -2680,7 +2994,8 @@ pub struct StaticRegistrationOptions {
     pub id: Option<String>,
 }
 
-impl_lsp_struct!(StaticRegistrationOptions,
+impl_lsp_struct!(
+    StaticRegistrationOptions,
     required {},
     optional { id: String = "id" }
 );
@@ -2690,9 +3005,12 @@ pub struct WorkDoneProgressOptions {
     pub work_done_progress: Option<bool>,
 }
 
-impl_lsp_struct!(WorkDoneProgressOptions,
+impl_lsp_struct!(
+    WorkDoneProgressOptions,
     required {},
-    optional { work_done_progress: bool = "workDoneProgress" }
+    optional {
+        work_done_progress: bool = "workDoneProgress"
+    }
 );
 
 #[derive(Debug, Eq, PartialEq, Clone, Default)]
@@ -2700,8 +3018,11 @@ pub struct DocumentFormattingOptions {
     pub work_done_progress_options: WorkDoneProgressOptions,
 }
 
-impl_lsp_struct!(DocumentFormattingOptions,
-    flatten { work_done_progress_options: WorkDoneProgressOptions }
+impl_lsp_struct!(
+    DocumentFormattingOptions,
+    flatten {
+        work_done_progress_options: WorkDoneProgressOptions
+    }
 );
 
 #[derive(Debug, Eq, PartialEq, Clone)]
@@ -2709,8 +3030,11 @@ pub struct DocumentRangeFormattingOptions {
     pub work_done_progress_options: WorkDoneProgressOptions,
 }
 
-impl_lsp_struct!(DocumentRangeFormattingOptions,
-    flatten { work_done_progress_options: WorkDoneProgressOptions }
+impl_lsp_struct!(
+    DocumentRangeFormattingOptions,
+    flatten {
+        work_done_progress_options: WorkDoneProgressOptions
+    }
 );
 
 #[derive(Debug, Eq, PartialEq, Clone)]
@@ -2718,8 +3042,11 @@ pub struct DefinitionOptions {
     pub work_done_progress_options: WorkDoneProgressOptions,
 }
 
-impl_lsp_struct!(DefinitionOptions,
-    flatten { work_done_progress_options: WorkDoneProgressOptions }
+impl_lsp_struct!(
+    DefinitionOptions,
+    flatten {
+        work_done_progress_options: WorkDoneProgressOptions
+    }
 );
 
 #[derive(Debug, Eq, PartialEq, Clone)]
@@ -2733,9 +3060,14 @@ pub struct DocumentSymbolOptions {
     pub work_done_progress_options: WorkDoneProgressOptions,
 }
 
-impl_lsp_struct!(DocumentSymbolOptions,
-    optional { label: String = "label" },
-    flatten { work_done_progress_options: WorkDoneProgressOptions }
+impl_lsp_struct!(
+    DocumentSymbolOptions,
+    optional {
+        label: String = "label"
+    },
+    flatten {
+        work_done_progress_options: WorkDoneProgressOptions
+    }
 );
 
 #[derive(Debug, Eq, PartialEq, Clone)]
@@ -2743,8 +3075,11 @@ pub struct ReferencesOptions {
     pub work_done_progress_options: WorkDoneProgressOptions,
 }
 
-impl_lsp_struct!(ReferencesOptions,
-    flatten { work_done_progress_options: WorkDoneProgressOptions }
+impl_lsp_struct!(
+    ReferencesOptions,
+    flatten {
+        work_done_progress_options: WorkDoneProgressOptions
+    }
 );
 
 #[derive(Debug, Eq, PartialEq, Clone)]
@@ -2752,8 +3087,11 @@ pub struct DocumentHighlightOptions {
     pub work_done_progress_options: WorkDoneProgressOptions,
 }
 
-impl_lsp_struct!(DocumentHighlightOptions,
-    flatten { work_done_progress_options: WorkDoneProgressOptions }
+impl_lsp_struct!(
+    DocumentHighlightOptions,
+    flatten {
+        work_done_progress_options: WorkDoneProgressOptions
+    }
 );
 
 #[derive(Debug, Eq, PartialEq, Clone)]
@@ -2767,9 +3105,14 @@ pub struct WorkspaceSymbolOptions {
     pub resolve_provider: Option<bool>,
 }
 
-impl_lsp_struct!(WorkspaceSymbolOptions,
-    optional { resolve_provider: bool = "resolveProvider" },
-    flatten { work_done_progress_options: WorkDoneProgressOptions }
+impl_lsp_struct!(
+    WorkspaceSymbolOptions,
+    optional {
+        resolve_provider: bool = "resolveProvider"
+    },
+    flatten {
+        work_done_progress_options: WorkDoneProgressOptions
+    }
 );
 
 #[derive(Debug, Eq, PartialEq, Clone)]
@@ -2781,9 +3124,12 @@ pub struct StaticTextDocumentRegistrationOptions {
     pub id: Option<String>,
 }
 
-impl_lsp_struct!(StaticTextDocumentRegistrationOptions,
+impl_lsp_struct!(
+    StaticTextDocumentRegistrationOptions,
     required {},
-    nullable { document_selector: DocumentSelector = "documentSelector" },
+    nullable {
+        document_selector: DocumentSelector = "documentSelector"
+    },
     optional { id: String = "id" }
 );
 
@@ -2798,7 +3144,8 @@ pub struct Unregistration {
     pub method: String,
 }
 
-impl_lsp_struct!(Unregistration,
+impl_lsp_struct!(
+    Unregistration,
     required {
         id: String = "id",
         method: String = "method",
@@ -2822,8 +3169,11 @@ pub struct DidChangeConfigurationParams {
     pub settings: Value,
 }
 
-impl_lsp_struct!(DidChangeConfigurationParams,
-    required { settings: Value = "settings" },
+impl_lsp_struct!(
+    DidChangeConfigurationParams,
+    required {
+        settings: Value = "settings"
+    },
     optional {}
 );
 
@@ -2833,8 +3183,11 @@ pub struct DidOpenTextDocumentParams {
     pub text_document: TextDocumentItem,
 }
 
-impl_lsp_struct!(DidOpenTextDocumentParams,
-    required { text_document: TextDocumentItem = "textDocument" },
+impl_lsp_struct!(
+    DidOpenTextDocumentParams,
+    required {
+        text_document: TextDocumentItem = "textDocument"
+    },
     optional {}
 );
 
@@ -2872,8 +3225,11 @@ pub struct TextDocumentContentChangeEvent {
     pub text: String,
 }
 
-impl_lsp_struct!(TextDocumentContentChangeEvent,
-    required { text: String = "text" },
+impl_lsp_struct!(
+    TextDocumentContentChangeEvent,
+    required {
+        text: String = "text"
+    },
     optional {
         range: Range = "range",
         range_length: u32 = "rangeLength",
@@ -2894,9 +3250,14 @@ pub struct TextDocumentChangeRegistrationOptions {
     pub sync_kind: TextDocumentSyncKind,
 }
 
-impl_lsp_struct!(TextDocumentChangeRegistrationOptions,
-    required { sync_kind: TextDocumentSyncKind = "syncKind" },
-    nullable { document_selector: DocumentSelector = "documentSelector" },
+impl_lsp_struct!(
+    TextDocumentChangeRegistrationOptions,
+    required {
+        sync_kind: TextDocumentSyncKind = "syncKind"
+    },
+    nullable {
+        document_selector: DocumentSelector = "documentSelector"
+    },
     optional {}
 );
 
@@ -2910,7 +3271,8 @@ pub struct WillSaveTextDocumentParams {
     pub reason: TextDocumentSaveReason,
 }
 
-impl_lsp_struct!(WillSaveTextDocumentParams,
+impl_lsp_struct!(
+    WillSaveTextDocumentParams,
     required {
         text_document: TextDocumentIdentifier = "textDocument",
         reason: TextDocumentSaveReason = "reason",
@@ -2941,8 +3303,11 @@ pub struct DidCloseTextDocumentParams {
     pub text_document: TextDocumentIdentifier,
 }
 
-impl_lsp_struct!(DidCloseTextDocumentParams,
-    required { text_document: TextDocumentIdentifier = "textDocument" },
+impl_lsp_struct!(
+    DidCloseTextDocumentParams,
+    required {
+        text_document: TextDocumentIdentifier = "textDocument"
+    },
     optional {}
 );
 
@@ -2956,9 +3321,14 @@ pub struct DidSaveTextDocumentParams {
     pub text: Option<String>,
 }
 
-impl_lsp_struct!(DidSaveTextDocumentParams,
-    required { text_document: TextDocumentIdentifier = "textDocument" },
-    optional { text: String = "text" }
+impl_lsp_struct!(
+    DidSaveTextDocumentParams,
+    required {
+        text_document: TextDocumentIdentifier = "textDocument"
+    },
+    optional {
+        text: String = "text"
+    }
 );
 
 #[derive(Debug, Eq, PartialEq, Clone)]
@@ -2969,9 +3339,14 @@ pub struct TextDocumentSaveRegistrationOptions {
     pub text_document_registration_options: TextDocumentRegistrationOptions,
 }
 
-impl_lsp_struct!(TextDocumentSaveRegistrationOptions,
-    optional { include_text: bool = "includeText" },
-    flatten { text_document_registration_options: TextDocumentRegistrationOptions }
+impl_lsp_struct!(
+    TextDocumentSaveRegistrationOptions,
+    optional {
+        include_text: bool = "includeText"
+    },
+    flatten {
+        text_document_registration_options: TextDocumentRegistrationOptions
+    }
 );
 
 #[derive(Debug, Eq, PartialEq, Clone, Copy, Default)]
@@ -2988,7 +3363,8 @@ pub struct DidChangeWatchedFilesClientCapabilities {
     pub relative_pattern_support: Option<bool>,
 }
 
-impl_lsp_struct!(DidChangeWatchedFilesClientCapabilities,
+impl_lsp_struct!(
+    DidChangeWatchedFilesClientCapabilities,
     required {},
     optional {
         dynamic_registration: bool = "dynamicRegistration",
@@ -3033,7 +3409,8 @@ pub struct FileEvent {
     pub typ: FileChangeType,
 }
 
-impl_lsp_struct!(FileEvent,
+impl_lsp_struct!(
+    FileEvent,
     required {
         uri: Uri = "uri",
         typ: FileChangeType = "type",
@@ -3072,9 +3449,14 @@ pub struct FileSystemWatcher {
     pub kind: Option<WatchKind>,
 }
 
-impl_lsp_struct!(FileSystemWatcher,
-    required { glob_pattern: GlobPattern = "globPattern" },
-    optional { kind: WatchKind = "kind" }
+impl_lsp_struct!(
+    FileSystemWatcher,
+    required {
+        glob_pattern: GlobPattern = "globPattern"
+    },
+    optional {
+        kind: WatchKind = "kind"
+    }
 );
 
 /// The glob pattern. Either a string pattern or a relative pattern.
@@ -3248,7 +3630,8 @@ pub struct LanguageString {
     pub value: String,
 }
 
-impl_lsp_struct!(LanguageString,
+impl_lsp_struct!(
+    LanguageString,
     required {
         language: String = "language",
         value: String = "value",
@@ -3276,7 +3659,8 @@ pub struct GotoDefinitionParams {
     pub partial_result_params: PartialResultParams,
 }
 
-impl_lsp_struct!(GotoDefinitionParams,
+impl_lsp_struct!(
+    GotoDefinitionParams,
     flatten {
         text_document_position_params: TextDocumentPositionParams,
         work_done_progress_params: WorkDoneProgressParams,
@@ -3361,9 +3745,14 @@ pub struct ApplyWorkspaceEditParams {
     pub edit: WorkspaceEdit,
 }
 
-impl_lsp_struct!(ApplyWorkspaceEditParams,
-    required { edit: WorkspaceEdit = "edit" },
-    optional { label: String = "label" }
+impl_lsp_struct!(
+    ApplyWorkspaceEditParams,
+    required {
+        edit: WorkspaceEdit = "edit"
+    },
+    optional {
+        label: String = "label"
+    }
 );
 
 #[derive(Debug, Eq, PartialEq, Clone)]
@@ -3383,8 +3772,11 @@ pub struct ApplyWorkspaceEditResponse {
     pub failed_change: Option<u32>,
 }
 
-impl_lsp_struct!(ApplyWorkspaceEditResponse,
-    required { applied: bool = "applied" },
+impl_lsp_struct!(
+    ApplyWorkspaceEditResponse,
+    required {
+        applied: bool = "applied"
+    },
     optional {
         failure_reason: String = "failureReason",
         failed_change: u32 = "failedChange",
@@ -3435,7 +3827,8 @@ pub struct MarkupContent {
     pub value: String,
 }
 
-impl_lsp_struct!(MarkupContent,
+impl_lsp_struct!(
+    MarkupContent,
     required {
         kind: MarkupKind = "kind",
         value: String = "value",
@@ -3449,9 +3842,12 @@ pub struct PartialResultParams {
     pub partial_result_token: Option<ProgressToken>,
 }
 
-impl_lsp_struct!(PartialResultParams,
+impl_lsp_struct!(
+    PartialResultParams,
     required {},
-    optional { partial_result_token: ProgressToken = "partialResultToken" }
+    optional {
+        partial_result_token: ProgressToken = "partialResultToken"
+    }
 );
 
 /// Symbol tags are extra annotations that tweak the rendering of a symbol.

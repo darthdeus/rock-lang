@@ -13,7 +13,10 @@
 //! be a nil call at load.
 
 mod common;
-use common::{emit_v1_package, fn_ref, ws_v1_package, ws_with_dependency_module, ws_with_stdlib_module, V1Fragment};
+use common::{
+    V1Fragment, emit_v1_package, fn_ref, ws_v1_package, ws_with_dependency_module,
+    ws_with_stdlib_module,
+};
 use skull::mir_emit::emit_full;
 use skull_mir::instance::Instance;
 use ustr::Ustr;
@@ -59,8 +62,17 @@ fn sim_glue_retains_register_sim_through_the_view() {
     let ws = ws_with_stdlib_module(SIM_LIB, SIM_SRC);
     let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
     let sims = skull::mir_emit::collect_sim_fns(&ws);
-    assert_eq!(sims.len(), 1, "fixture must register exactly one sim, got {}", sims.len());
-    assert_eq!(sims[0].0.as_str(), "<test>", "sim collection retains its HIR module file");
+    assert_eq!(
+        sims.len(),
+        1,
+        "fixture must register exactly one sim, got {}",
+        sims.len()
+    );
+    assert_eq!(
+        sims[0].0.as_str(),
+        "<test>",
+        "sim collection retains its HIR module file"
+    );
 
     let (emit, cache) = emit_full(&ws, mid).expect("emit");
     let view = cache.lua_view();
@@ -74,7 +86,10 @@ fn sim_glue_retains_register_sim_through_the_view() {
 
     // End-to-end control: retention must reach a real definition, since the
     // generated call is what fails at load if it does not.
-    let symbol = view.symbols.get(&register).expect("a retained instance has a symbol");
+    let symbol = view
+        .symbols
+        .get(&register)
+        .expect("a retained instance has a symbol");
     assert!(
         definition_symbols(&emit.lua).iter().any(|s| s == symbol),
         "`register_sim` retained but not defined; symbol `{symbol}`"
@@ -99,7 +114,9 @@ fn an_unrelated_library_body_stays_pruned() {
         "an uncalled library body must not be retained"
     );
     assert!(
-        !definition_symbols(&emit.lua).iter().any(|s| s.starts_with("unrelated_library_body")),
+        !definition_symbols(&emit.lua)
+            .iter()
+            .any(|s| s.starts_with("unrelated_library_body")),
         "an uncalled library body must not be defined"
     );
 }
@@ -118,12 +135,29 @@ fn shared_prefix_dependency_retains_only_reached_bodies() {
         .expect("pruned dependency bodies must not require lowering plans");
     let unused = Instance::base(fn_ref(&ws, "unused_dependency_body"));
     let reached = Instance::base(fn_ref(&ws, "reached_dependency_body"));
-    assert!(!cache.lua_view().retains(&unused), "a sibling directory is not part of the target");
-    assert!(cache.lua_view().retains(&reached), "reachable dependency bodies must remain");
-    assert!(!definition_symbols(&emit.lua).iter().any(|s| s.starts_with("unused_dependency_body")));
-    assert!(definition_symbols(&emit.lua).iter().any(|s| s.starts_with("reached_dependency_body")));
+    assert!(
+        !cache.lua_view().retains(&unused),
+        "a sibling directory is not part of the target"
+    );
+    assert!(
+        cache.lua_view().retains(&reached),
+        "reachable dependency bodies must remain"
+    );
+    assert!(
+        !definition_symbols(&emit.lua)
+            .iter()
+            .any(|s| s.starts_with("unused_dependency_body"))
+    );
+    assert!(
+        definition_symbols(&emit.lua)
+            .iter()
+            .any(|s| s.starts_with("reached_dependency_body"))
+    );
     common::require_luajit();
-    assert_eq!(common::run_luajit(&format!("{}\nmain()", emit.lua), "shared_prefix_dependency"), "9");
+    assert_eq!(
+        common::run_luajit(&format!("{}\nmain()", emit.lua), "shared_prefix_dependency"),
+        "9"
+    );
 
     let edited = ws_with_dependency_module(
         "fn unused_dependency_body() -> int { return 7 }\nfn reached_dependency_body() -> int { return 9 }",
@@ -131,14 +165,30 @@ fn shared_prefix_dependency_retains_only_reached_bodies() {
     );
     let main = fn_ref(&edited, "main");
     let incremental = skull::mir_emit::emit_incremental(
-        &edited, &mut cache, &[(main.module, bone_semantic::hir::BodyOwner::Function(main.func))],
-    ).expect("remove the dependency call incrementally");
+        &edited,
+        &mut cache,
+        &[(
+            main.module,
+            bone_semantic::hir::BodyOwner::Function(main.func),
+        )],
+    )
+    .expect("remove the dependency call incrementally");
     let removed = Instance::base(fn_ref(&edited, "reached_dependency_body"));
-    assert!(!cache.lua_view().retains(&removed), "cached roots must not pin sibling bodies");
+    assert!(
+        !cache.lua_view().retains(&removed),
+        "cached roots must not pin sibling bodies"
+    );
     let fresh = skull::mir_emit::emit_full_in(&edited, main.module, Some("/tmp/rock-mono-project"))
-        .expect("fresh emission after removing the dependency call").0;
+        .expect("fresh emission after removing the dependency call")
+        .0;
     assert_eq!(incremental.lua, fresh.lua);
-    assert_eq!(common::run_luajit(&format!("{}\nmain()", incremental.lua), "shared_prefix_incremental"), "0");
+    assert_eq!(
+        common::run_luajit(
+            &format!("{}\nmain()", incremental.lua),
+            "shared_prefix_incremental"
+        ),
+        "0"
+    );
 }
 
 /// A registered `rock_shader` program's dependencies -- its stage entries and
@@ -254,13 +304,27 @@ fn shader_glue_dependencies_are_retained_through_the_view() {
 #[test]
 fn v1_sim_glue_finds_register_sim_by_declared_name() {
     let fragments = [
-        V1Fragment { file: "main.rock", src: SIM_SRC },
-        V1Fragment { file: "engine.rock", src: &format!("mod engine;\npub {}", SIM_LIB.trim_start()) },
+        V1Fragment {
+            file: "main.rock",
+            src: SIM_SRC,
+        },
+        V1Fragment {
+            file: "engine.rock",
+            src: &format!("mod engine;\npub {}", SIM_LIB.trim_start()),
+        },
     ];
     let emit = emit_v1_package("v1sims", &fragments);
-    let registrations: Vec<&str> =
-        emit.lua.lines().filter(|l| l.starts_with("register_sim_") && l.contains("probe_sim\"")).collect();
-    assert_eq!(registrations.len(), 1, "v1 sim glue must register `probe_sim` once:\n{}", emit.lua);
+    let registrations: Vec<&str> = emit
+        .lua
+        .lines()
+        .filter(|l| l.starts_with("register_sim_") && l.contains("probe_sim\""))
+        .collect();
+    assert_eq!(
+        registrations.len(),
+        1,
+        "v1 sim glue must register `probe_sim` once:\n{}",
+        emit.lua
+    );
 }
 
 /// Two registrars in one v1 build are ambiguous; the glue must name both
@@ -268,22 +332,37 @@ fn v1_sim_glue_finds_register_sim_by_declared_name() {
 #[test]
 fn v1_sim_glue_rejects_two_register_sim_definitions() {
     let lib = |module: &str| {
-        format!("mod {module};\npub fn register_sim(name: string, body: () -> int) {{ print(\"{{name}}\") }}\n")
+        format!(
+            "mod {module};\npub fn register_sim(name: string, body: () -> int) {{ print(\"{{name}}\") }}\n"
+        )
     };
     let (a, b) = (lib("engine_a"), lib("engine_b"));
     let fragments = [
-        V1Fragment { file: "main.rock", src: SIM_SRC },
-        V1Fragment { file: "engine_a.rock", src: &a },
-        V1Fragment { file: "engine_b.rock", src: &b },
+        V1Fragment {
+            file: "main.rock",
+            src: SIM_SRC,
+        },
+        V1Fragment {
+            file: "engine_a.rock",
+            src: &a,
+        },
+        V1Fragment {
+            file: "engine_b.rock",
+            src: &b,
+        },
     ];
     let ws = ws_v1_package("v1sims_twice", &fragments);
-    let mid = *ws.module_ids.get(&Ustr::from("main.rock")).expect("module id");
+    let mid = *ws
+        .module_ids
+        .get(&Ustr::from("main.rock"))
+        .expect("module id");
     let error = match skull::mir_emit::emit_workspace_mir(&ws, mid) {
         Ok(_) => panic!("two registrars must not emit"),
         Err(error) => error,
     };
     assert!(
-        error.message.contains("engine_a::register_sim") && error.message.contains("engine_b::register_sim"),
+        error.message.contains("engine_a::register_sim")
+            && error.message.contains("engine_b::register_sim"),
         "{}",
         error.message
     );
@@ -295,23 +374,36 @@ fn a_shared_prefix_alone_does_not_validate_the_project_root() {
         "fn unused_dependency_body() -> int { return 7 }",
         "fn main() { print(\"hi\") }",
     );
-    let mid = *ws.module_ids.get(&Ustr::from("/tmp/rock-mono-project/main.rock")).unwrap();
+    let mid = *ws
+        .module_ids
+        .get(&Ustr::from("/tmp/rock-mono-project/main.rock"))
+        .unwrap();
     let result = skull::mir_emit::emit_full_in(&ws, mid, Some("/tmp/rock-mono"));
-    assert!(result.is_err(), "textual prefixes must not validate a nonexistent project root");
+    assert!(
+        result.is_err(),
+        "textual prefixes must not validate a nonexistent project root"
+    );
 }
 
 #[test]
 fn nested_project_sources_keep_uncalled_public_functions() {
     let file = "/tmp/rock-root-contract/app/nested/helpers.rock";
-    let ws = ws_v1_package("root_contract", &[
-        V1Fragment { file, src: "mod helpers;\npub fn uncalled_api() -> int { return 7 }" },
-    ]);
+    let ws = ws_v1_package(
+        "root_contract",
+        &[V1Fragment {
+            file,
+            src: "mod helpers;\npub fn uncalled_api() -> int { return 7 }",
+        }],
+    );
     let mid = *ws.module_ids.get(&Ustr::from(file)).expect("nested module");
-    let (emit, cache) = skull::mir_emit::emit_full_in(
-        &ws, mid, Some("/tmp/rock-root-contract/app"),
-    ).expect("a nested source validates its project root");
+    let (emit, cache) =
+        skull::mir_emit::emit_full_in(&ws, mid, Some("/tmp/rock-root-contract/app"))
+            .expect("a nested source validates its project root");
     let api = Instance::base(fn_ref(&ws, "root_contract::helpers::uncalled_api"));
-    assert!(cache.lua_view().retains(&api), "uncalled project APIs are roots");
+    assert!(
+        cache.lua_view().retains(&api),
+        "uncalled project APIs are roots"
+    );
     let symbol = &cache.lua_view().symbols[&api];
     assert!(definition_symbols(&emit.lua).contains(symbol));
 }
@@ -319,10 +411,16 @@ fn nested_project_sources_keep_uncalled_public_functions() {
 #[test]
 fn single_file_compilation_keeps_uncalled_functions() {
     let ws = common::ws_with_stdlib("fn uncalled_helper() -> int { return 7 }");
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("single-file module");
+    let mid = *ws
+        .module_ids
+        .get(&Ustr::from("<test>"))
+        .expect("single-file module");
     let (emit, cache) = emit_full(&ws, mid).expect("single-file emission");
     let helper = Instance::base(fn_ref(&ws, "uncalled_helper"));
-    assert!(cache.lua_view().retains(&helper), "single-file helpers are roots");
+    assert!(
+        cache.lua_view().retains(&helper),
+        "single-file helpers are roots"
+    );
     let symbol = &cache.lua_view().symbols[&helper];
     assert!(definition_symbols(&emit.lua).contains(symbol));
 }
@@ -333,12 +431,20 @@ fn shared_prefix_dependency_keeps_bare_name_api_roots() {
         "@nomangle fn external_api() -> int { return 7 }",
         "fn main() {}",
     );
-    let mid = *ws.module_ids.get(&Ustr::from("/tmp/rock-mono-project/main.rock"))
+    let mid = *ws
+        .module_ids
+        .get(&Ustr::from("/tmp/rock-mono-project/main.rock"))
         .expect("project module");
-    let (emit, cache) = skull::mir_emit::emit_full_in(
-        &ws, mid, Some("/tmp/rock-mono-project"),
-    ).expect("dependency API emission");
+    let (emit, cache) = skull::mir_emit::emit_full_in(&ws, mid, Some("/tmp/rock-mono-project"))
+        .expect("dependency API emission");
     let api = Instance::base(fn_ref(&ws, "external_api"));
-    assert!(cache.lua_view().retains(&api), "bare-name APIs remain roots in dependencies");
-    assert!(definition_symbols(&emit.lua).iter().any(|s| s == "external_api"));
+    assert!(
+        cache.lua_view().retains(&api),
+        "bare-name APIs remain roots in dependencies"
+    );
+    assert!(
+        definition_symbols(&emit.lua)
+            .iter()
+            .any(|s| s == "external_api")
+    );
 }

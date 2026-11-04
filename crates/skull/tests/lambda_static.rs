@@ -44,8 +44,9 @@ fn lambda_body_static_folds_into_enclosing_chunk_statics() {
     // The reset preamble (generated from chunk statics) must guard it, so a reload
     // can nil it on an init-edit.
     assert!(
-        lua.lines()
-            .any(|l| l.contains("static:named:<test>::setup") && l.contains("__rock_static_prepare")),
+        lua.lines().any(
+            |l| l.contains("static:named:<test>::setup") && l.contains("__rock_static_prepare")
+        ),
         "the static must appear in the hot-reload reset preamble"
     );
 }
@@ -65,7 +66,10 @@ fn lambda_body_static_reinits_on_initializer_edit() {
          else print(\"FAIL RESULT=\"..tostring(__rock_globals[result_key])) end\n"
     );
     let out = run_luajit(&script, "reinit");
-    assert!(out.starts_with("PASS"), "expected lambda static to reset on init-edit; got: {out}");
+    assert!(
+        out.starts_with("PASS"),
+        "expected lambda static to reset on init-edit; got: {out}"
+    );
 }
 
 /// PRESERVE otherwise: reload the SAME source, key unchanged -> the live value
@@ -82,5 +86,8 @@ fn lambda_body_static_preserved_across_identical_reload() {
          else print(\"FAIL RESULT=\"..tostring(__rock_globals[result_key])) end\n"
     );
     let out = run_luajit(&script, "preserve");
-    assert!(out.starts_with("PASS"), "expected lambda static preserved across identical reload; got: {out}");
+    assert!(
+        out.starts_with("PASS"),
+        "expected lambda static preserved across identical reload; got: {out}"
+    );
 }

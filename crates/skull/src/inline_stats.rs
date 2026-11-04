@@ -52,12 +52,8 @@ struct CalleeAgg {
 /// emitted code attributable to that callee.
 pub fn report(ws: &Workspace) -> InlineStatsReport {
     let scx = skull_mir::lower::ScalarCtx::new(ws);
-    let graph = skull_graph::instance_graph::build_in(
-        ws,
-        concrete_roots(ws),
-        false,
-        scx.interner_handle(),
-    );
+    let graph =
+        skull_graph::instance_graph::build_in(ws, concrete_roots(ws), false, scx.interner_handle());
     let concrete = skull_graph::concrete_body::build(ws, &graph);
     let mut cache = skull_transform::InlineCache::default();
 
@@ -72,12 +68,9 @@ pub fn report(ws: &Workspace) -> InlineStatsReport {
         }
         funcs_scanned += 1;
         let self_ref = inst.func;
-        let Ok(mut mf) = skull_mir::lower::lower_instance_with_plans(
-            ws,
-            &scx,
-            plan,
-            &concrete.plans,
-        ) else {
+        let Ok(mut mf) =
+            skull_mir::lower::lower_instance_with_plans(ws, &scx, plan, &concrete.plans)
+        else {
             continue;
         };
         let Ok((_deps, splices, _scan_stats)) = skull_transform::inline_functions_with_plans(
@@ -99,7 +92,9 @@ pub fn report(ws: &Workspace) -> InlineStatsReport {
             total_copies += r.callee_insts;
             caller_copies += r.callee_insts;
             let agg = per_callee.entry(r.callee).or_insert_with(|| CalleeAgg {
-                name: ws.module(r.callee.module).functions[r.callee.func].name.to_string(),
+                name: ws.module(r.callee.module).functions[r.callee.func]
+                    .name
+                    .to_string(),
                 body_insts: r.callee_insts,
                 kind: if r.straight { "straight" } else { "general" },
                 times: 0,
@@ -112,7 +107,11 @@ pub fn report(ws: &Workspace) -> InlineStatsReport {
     }
 
     let mut callee_rows: Vec<&CalleeAgg> = per_callee.values().collect();
-    callee_rows.sort_by(|a, b| b.total_copies.cmp(&a.total_copies).then(a.name.cmp(&b.name)));
+    callee_rows.sort_by(|a, b| {
+        b.total_copies
+            .cmp(&a.total_copies)
+            .then(a.name.cmp(&b.name))
+    });
     callers.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(&b.0)));
 
     let top_callee = callee_rows
@@ -121,11 +120,28 @@ pub fn report(ws: &Workspace) -> InlineStatsReport {
 
     let mut t = String::new();
     let _ = writeln!(t, "skull inline stats");
-    let _ = writeln!(t, "  concrete bodies scanned (inlinable callers):  {funcs_scanned}");
-    let _ = writeln!(t, "  callers that inlined >=1 site:          {}", callers.len());
-    let _ = writeln!(t, "  total splices:                          {total_splices}");
-    let _ = writeln!(t, "  distinct callees inlined:               {}", per_callee.len());
-    let _ = writeln!(t, "  total inst-copies (sum callee_insts):   {total_copies}");
+    let _ = writeln!(
+        t,
+        "  concrete bodies scanned (inlinable callers):  {funcs_scanned}"
+    );
+    let _ = writeln!(
+        t,
+        "  callers that inlined >=1 site:          {}",
+        callers.len()
+    );
+    let _ = writeln!(
+        t,
+        "  total splices:                          {total_splices}"
+    );
+    let _ = writeln!(
+        t,
+        "  distinct callees inlined:               {}",
+        per_callee.len()
+    );
+    let _ = writeln!(
+        t,
+        "  total inst-copies (sum callee_insts):   {total_copies}"
+    );
     let _ = writeln!(t, "\n=== TOP 25 CALLERS BY INST-COPIES ADDED ===");
     let _ = writeln!(t, "{:>8}  {:>8}  caller", "copies", "splices");
     for (name, splices, copies) in callers.iter().take(25) {
@@ -133,13 +149,21 @@ pub fn report(ws: &Workspace) -> InlineStatsReport {
     }
 
     let _ = writeln!(t, "\n=== ALL INLINED CALLEES (by total inst-copies) ===");
-    let _ = writeln!(t, "{:>8}  {:>6}  {:>5}  {:>5}  {:<8} callee", "copies", "times", "body", "avg", "kind");
+    let _ = writeln!(
+        t,
+        "{:>8}  {:>6}  {:>5}  {:>5}  {:<8} callee",
+        "copies", "times", "body", "avg", "kind"
+    );
     for c in &callee_rows {
         let _ = writeln!(
             t,
             "{:>8}  {:>6}  {:>5}  {:>5}  {:<8} {}",
-            c.total_copies, c.times, c.body_insts, c.total_copies / c.times.max(1),
-            c.kind, c.name
+            c.total_copies,
+            c.times,
+            c.body_insts,
+            c.total_copies / c.times.max(1),
+            c.kind,
+            c.name
         );
     }
 

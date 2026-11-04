@@ -26,8 +26,11 @@ pub struct HoverOptions {
     pub work_done_progress_options: WorkDoneProgressOptions,
 }
 
-impl_lsp_struct!(HoverOptions,
-    flatten { work_done_progress_options: WorkDoneProgressOptions }
+impl_lsp_struct!(
+    HoverOptions,
+    flatten {
+        work_done_progress_options: WorkDoneProgressOptions
+    }
 );
 
 #[derive(Debug, Eq, PartialEq, Clone, Default)]
@@ -36,7 +39,8 @@ pub struct HoverRegistrationOptions {
     pub hover_options: HoverOptions,
 }
 
-impl_lsp_struct!(HoverRegistrationOptions,
+impl_lsp_struct!(
+    HoverRegistrationOptions,
     flatten {
         text_document_registration_options: TextDocumentRegistrationOptions,
         hover_options: HoverOptions,
@@ -72,7 +76,8 @@ pub struct HoverParams {
     pub work_done_progress_params: WorkDoneProgressParams,
 }
 
-impl_lsp_struct!(HoverParams,
+impl_lsp_struct!(
+    HoverParams,
     flatten {
         text_document_position_params: TextDocumentPositionParams,
         work_done_progress_params: WorkDoneProgressParams,
@@ -89,9 +94,14 @@ pub struct Hover {
     pub range: Option<Range>,
 }
 
-impl_lsp_struct!(Hover,
-    required { contents: HoverContents = "contents" },
-    optional { range: Range = "range" }
+impl_lsp_struct!(
+    Hover,
+    required {
+        contents: HoverContents = "contents"
+    },
+    optional {
+        range: Range = "range"
+    }
 );
 
 /// Hover contents could be single entry or multiple entries.

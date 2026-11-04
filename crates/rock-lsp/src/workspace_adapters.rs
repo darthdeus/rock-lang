@@ -56,7 +56,11 @@ pub fn do_document_highlight_workspace(
     params: &DocumentHighlightParams,
 ) -> Result<Option<Vec<DocumentHighlight>>> {
     crate::scope!("do_document_highlight_workspace");
-    let file_path = params.text_document_position_params.text_document.uri.to_file_path()?;
+    let file_path = params
+        .text_document_position_params
+        .text_document
+        .uri
+        .to_file_path()?;
     let pos = params.text_document_position_params.position;
     let hl = workspace.bone.document_highlight(&file_path, pos);
     Ok((!hl.is_empty()).then_some(hl))

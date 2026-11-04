@@ -41,7 +41,10 @@ fn xorshift32_seed42_matches_luajit_draws_and_signed_state() {
          d.push(__rock_rng_next32()); d.push(__rock_rng_next32()); \
          console.log(d.join(\",\")+\"|\"+secondState);",
     );
-    assert_eq!(got, "1349475785,4158816443,2940726184,3486860168|-136153255");
+    assert_eq!(
+        got,
+        "1349475785,4158816443,2940726184,3486860168|-136153255"
+    );
 }
 
 #[test]
@@ -61,7 +64,9 @@ fn signed_seed_and_state_set_wrap_to_luajit_state() {
 #[test]
 fn presentation_stream_is_independent_and_matches_luajit_sequence() {
     if !node_available() {
-        eprintln!("SKIP presentation_stream_is_independent_and_matches_luajit_sequence: node not found");
+        eprintln!(
+            "SKIP presentation_stream_is_independent_and_matches_luajit_sequence: node not found"
+        );
         return;
     }
     let got = node_run(

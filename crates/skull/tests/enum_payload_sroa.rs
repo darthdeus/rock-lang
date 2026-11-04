@@ -29,7 +29,10 @@ fn main() { print(select_resource(null)) }
 fn nullable_enum_coalesce_keeps_join_in_leaves() {
     let lua = emit_module(COALESCE_SRC);
     let body = function_body(&lua, "select_resource");
-    assert!(!body.contains("{__variant"), "nullable enum coalesce boxes its join:\n{body}");
+    assert!(
+        !body.contains("{__variant"),
+        "nullable enum coalesce boxes its join:\n{body}"
+    );
 }
 
 const COALESCE_SEMANTICS_SRC: &str = r#"
@@ -185,8 +188,7 @@ fn runtime_program_paths_are_unique_within_process() {
 }
 
 fn run_t_path() -> std::path::PathBuf {
-    static NEXT_PATH: std::sync::atomic::AtomicU64 =
-        std::sync::atomic::AtomicU64::new(0);
+    static NEXT_PATH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = NEXT_PATH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     std::env::temp_dir().join(format!("skull_enum_sroa_{}_{}.lua", std::process::id(), n))
 }
@@ -204,9 +206,16 @@ fn run_t(src: &str) -> String {
     );
     let path = run_t_path();
     std::fs::write(&path, &prog).expect("write lua");
-    let out = std::process::Command::new("luajit").arg(&path).output().expect("run luajit");
+    let out = std::process::Command::new("luajit")
+        .arg(&path)
+        .output()
+        .expect("run luajit");
     let _ = std::fs::remove_file(&path);
-    assert!(out.status.success(), "luajit failed:\nstderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "luajit failed:\nstderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 

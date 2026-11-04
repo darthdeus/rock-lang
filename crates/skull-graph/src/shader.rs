@@ -3,9 +3,9 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use skull_mir::concrete::ConcretePlans;
 use skull_mir::mir::FuncRef;
 use skull_mir::shader_ir::ShaderStage;
-use skull_mir::concrete::ConcretePlans;
 
 use crate::instance_graph::Instance;
 

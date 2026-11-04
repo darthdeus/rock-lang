@@ -1,7 +1,7 @@
 use std::sync::{Arc, Barrier};
 use std::thread;
 
-use crate::common::{emit_module, InlineOffGuard};
+use crate::common::{InlineOffGuard, emit_module};
 
 const SRC: &str = r#"
 @inline fn twice(x: int) -> int { return x + x }
@@ -36,6 +36,12 @@ fn concurrent_inline_off_and_normal_compiles_keep_their_modes() {
     let normal = normal.join().expect("normal compile thread panicked");
     assert_ne!(off, normal, "the two compile modes produced identical Lua");
     let call = "r0 = twice_int((3))";
-    assert!(off.contains(call), "inline-off compilation lost the retained call");
-    assert!(!normal.contains(call), "normal compilation retained the inlineable call");
+    assert!(
+        off.contains(call),
+        "inline-off compilation lost the retained call"
+    );
+    assert!(
+        !normal.contains(call),
+        "normal compilation retained the inlineable call"
+    );
 }

@@ -70,7 +70,11 @@ impl From<CompilerError> for StructFieldError {
 impl From<StructFieldError> for CompilerError {
     fn from(error: StructFieldError) -> Self {
         match error {
-            StructFieldError::MissingField { struct_name, field, span } => {
+            StructFieldError::MissingField {
+                struct_name,
+                field,
+                span,
+            } => {
                 let message = match struct_name {
                     Some(struct_name) => format!("struct `{struct_name}` has no field `{field}`"),
                     None => format!("no struct has a field `{field}`"),
@@ -131,7 +135,7 @@ pub(crate) fn struct_field_ty(
                         struct_name: None,
                         field,
                         span,
-                    })
+                    });
                 }
                 _ => {
                     return Err(StructFieldError::Other(CompilerError::new_with_label(
@@ -140,7 +144,7 @@ pub(crate) fn struct_field_ty(
                             "ambiguous field `{}`: multiple structs define it; annotate the parameter",
                             field
                         ),
-                    )))
+                    )));
                 }
             };
 
@@ -174,7 +178,7 @@ pub(crate) fn struct_field_ty(
                     field,
                     gamma.workspace.render(Some(&gamma.out), base_ty)
                 ),
-            )))
+            )));
         }
     };
 
@@ -243,11 +247,14 @@ pub(crate) fn vec_swizzle_ty(
             return Some(Err(CompilerError::new_with_label(
                 span,
                 format!("swizzle `{s}` mixes the `xyzw` and `rgba` alphabets"),
-            )))
+            )));
         }
     };
     if let Some(pos) = idxs.iter().position(|&i| i >= arity) {
-        let ch = s.chars().nth(pos).expect("swizzle component position in range");
+        let ch = s
+            .chars()
+            .nth(pos)
+            .expect("swizzle component position in range");
         return Some(Err(CompilerError::new_with_label(
             span,
             format!("`{struct_name}` has no `{ch}` component (swizzle `{s}`)"),
@@ -273,7 +280,11 @@ pub(crate) fn reject_swizzle_write(
 ) -> Result<(), CompilerError> {
     let base_ty = infer_expr(c, gamma, base)?;
     let base_ty = resolve(gamma, base_ty, span);
-    let TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } = *gamma.get(base_ty) else {
+    let TypeExpr::App {
+        ctor: TypeCtor::Nominal(name),
+        ..
+    } = *gamma.get(base_ty)
+    else {
         return Ok(());
     };
     if vec_swizzle_components(name.as_str(), field.as_str()).is_none() {
@@ -286,14 +297,22 @@ pub(crate) fn reject_swizzle_write(
             .any(|f| f.name == field)
     });
     if !is_real_field {
-        comp_error!(span, "cannot assign to swizzle `{}`: swizzles are read-only", field);
+        comp_error!(
+            span,
+            "cannot assign to swizzle `{}`: swizzles are read-only",
+            field
+        );
     }
     Ok(())
 }
 
 /// Whether `ty` resolves to a `value` struct (C-layout / GC-tier both).
 fn ty_is_value_struct(gamma: &Gamma, ty: TyId) -> Option<Ustr> {
-    let TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } = *gamma.get(ty) else {
+    let TypeExpr::App {
+        ctor: TypeCtor::Nominal(name),
+        ..
+    } = *gamma.get(ty)
+    else {
         return None;
     };
     resolve_struct(gamma, name)
@@ -506,19 +525,28 @@ pub enum AccessDenied {
 impl AccessDenied {
     pub fn to_compiler_error(&self, span: Span) -> CompilerError {
         match self {
-            AccessDenied::NoSuchField { struct_name, field } => {
-                CompilerError::new_with_label(
-                    span,
-                    format!("struct `{}` has no field `{}`", struct_name, field),
-                )
-            }
-            AccessDenied::Privilege { struct_name, field, vis: _, need } => {
+            AccessDenied::NoSuchField { struct_name, field } => CompilerError::new_with_label(
+                span,
+                format!("struct `{}` has no field `{}`", struct_name, field),
+            ),
+            AccessDenied::Privilege {
+                struct_name,
+                field,
+                vis: _,
+                need,
+            } => {
                 let msg = match need {
                     FieldAccessNeed::Read => {
-                        format!("field `{}` on struct `{}` is not accessible from this module", field, struct_name)
+                        format!(
+                            "field `{}` on struct `{}` is not accessible from this module",
+                            field, struct_name
+                        )
                     }
                     FieldAccessNeed::Write => {
-                        format!("field `{}` on struct `{}` is not writable from this module", field, struct_name)
+                        format!(
+                            "field `{}` on struct `{}` is not writable from this module",
+                            field, struct_name
+                        )
                     }
                 };
                 CompilerError::new_with_label(span, msg)
@@ -609,7 +637,8 @@ pub(crate) fn check_field_write_access(
     if let TypeExpr::App {
         ctor: TypeCtor::Nominal(struct_key),
         ..
-    } = *gamma.get(base_ty) {
+    } = *gamma.get(base_ty)
+    {
         let site = gamma.access_site();
         field_access(gamma, struct_key, field, site, FieldAccessNeed::Write)
             .map_err(|e| e.to_compiler_error(span))?;
@@ -618,7 +647,11 @@ pub(crate) fn check_field_write_access(
     // Value-place and embed writeback: if `base_ty` is a value struct, or if `base` is an `embed`
     // field on an enclosing struct, writing to this field writes into `base`'s storage.
     // That enclosing field must also be writable (spec 10.3)!
-    if let Expr::FieldAccess { base: parent, field: parent_field } = c.body.expr_arena[base] {
+    if let Expr::FieldAccess {
+        base: parent,
+        field: parent_field,
+    } = c.body.expr_arena[base]
+    {
         let is_value = ty_is_value_struct(gamma, base_ty).is_some();
         let mut is_embed = false;
         let parent_ty = infer_expr(c, gamma, parent)?;
@@ -626,7 +659,11 @@ pub(crate) fn check_field_write_access(
         if let TypeExpr::Nullable(inner) = *gamma.get(p_ty) {
             p_ty = resolve(gamma, p_ty.with_idx(inner), span);
         }
-        if let TypeExpr::App { ctor: TypeCtor::Nominal(p_name), .. } = *gamma.get(p_ty) {
+        if let TypeExpr::App {
+            ctor: TypeCtor::Nominal(p_name),
+            ..
+        } = *gamma.get(p_ty)
+        {
             if let Some(sid) = resolve_struct(gamma, p_name) {
                 is_embed = gamma.workspace.module(sid.module).structs[sid.def]
                     .fields

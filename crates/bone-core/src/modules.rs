@@ -51,8 +51,17 @@ pub fn intrinsic_type_name(key: Ustr) -> Option<&'static str> {
 /// cdata for a `Ptr`, the buffer table with its leaf views for a
 /// `NativeBuffer`): copying one shares the referent and never rebuilds it.
 pub const STD_DESCRIPTOR_TYPES: &[&str] = &[
-    "Ptr", "PtrU8", "PtrI8", "PtrU16", "PtrI16", "PtrU32",
-    "NativeBuffer", "NativeBufferU8", "NativeBufferI8", "NativeBufferU16", "NativeBufferI16",
+    "Ptr",
+    "PtrU8",
+    "PtrI8",
+    "PtrU16",
+    "PtrI16",
+    "PtrU32",
+    "NativeBuffer",
+    "NativeBufferU8",
+    "NativeBufferI8",
+    "NativeBufferU16",
+    "NativeBufferI16",
     "NativeBufferU32",
 ];
 
@@ -61,7 +70,9 @@ pub fn is_descriptor_key(key: Ustr) -> bool {
 }
 
 pub fn is_intrinsic_key_in(key: Ustr, spellings: &[&str]) -> bool {
-    spellings.iter().any(|spelling| is_intrinsic_key(key, spelling))
+    spellings
+        .iter()
+        .any(|spelling| is_intrinsic_key(key, spelling))
 }
 
 /// Package-root-relative module path (`combat::casting`).
@@ -77,7 +88,10 @@ pub struct AccessSite<'a> {
 
 impl<'a> AccessSite<'a> {
     pub fn new(package: Option<PackageId>, module_path: &'a [Ustr]) -> Self {
-        Self { package, module_path }
+        Self {
+            package,
+            module_path,
+        }
     }
 }
 
@@ -331,7 +345,10 @@ pub enum LegacyName {
     Family(Vec<Ustr>),
     /// A legacy definition and a v1 definition that cannot merge (not both
     /// callable): ambiguous at use.
-    Collision { owners: Vec<Ustr>, foreign: Vec<Ustr> },
+    Collision {
+        owners: Vec<Ustr>,
+        foreign: Vec<Ustr>,
+    },
 }
 
 pub fn legacy_name(ws: &crate::workspace::Workspace, file: Ustr, name: Ustr) -> LegacyName {
@@ -353,7 +370,11 @@ pub fn legacy_name(ws: &crate::workspace::Workspace, file: Ustr, name: Ustr) -> 
     }
     let Some(entries) = imports
         .and_then(|i| i.globs.by_name.get(&name))
-        .or_else(|| ws.legacy_projections.get(&file).and_then(|view| view.by_name.get(&name)))
+        .or_else(|| {
+            ws.legacy_projections
+                .get(&file)
+                .and_then(|view| view.by_name.get(&name))
+        })
     else {
         return LegacyName::Bare;
     };
@@ -368,8 +389,14 @@ pub fn legacy_name(ws: &crate::workspace::Workspace, file: Ustr, name: Ustr) -> 
     }
     // A v1 re-export of a legacy definition keeps the bare key: it is the
     // legacy definition itself, not a second candidate.
-    let foreign: Vec<Ustr> = entries.iter().filter(|e| e.key != name).map(|e| e.key).collect();
-    let foreign_callable = entries.iter().all(|e| e.key == name || e.kind == DefKind::Callable);
+    let foreign: Vec<Ustr> = entries
+        .iter()
+        .filter(|e| e.key != name)
+        .map(|e| e.key)
+        .collect();
+    let foreign_callable = entries
+        .iter()
+        .all(|e| e.key == name || e.kind == DefKind::Callable);
     let owners = ws.ns.legacy_owned.files_defining(name);
     // Legacy overloading merges every same-named callable, so several
     // projected v1 callables are one family even with no legacy member.
@@ -397,7 +424,11 @@ pub enum ScopeProbe {
     /// named export binding and child module of that name, the owned
     /// definition's `DefMeta`, and -- through the node's glob export
     /// bindings -- whatever they open. A glob target is probed in turn.
-    Member { package: PackageId, node: Ustr, name: Ustr },
+    Member {
+        package: PackageId,
+        node: Ustr,
+        name: Ustr,
+    },
     /// Module `node` of `package` entered as a path segment: its presence and
     /// its declared visibility.
     Node { package: PackageId, node: Ustr },
@@ -428,7 +459,11 @@ pub struct LegacyOwnedNames {
 
 impl LegacyOwnedNames {
     pub fn replace_file(&mut self, file: Ustr, mut names: Vec<(Ustr, DefKind)>) {
-        names.sort_unstable_by(|a, b| a.0.as_str().cmp(b.0.as_str()).then(kind_rank(a.1).cmp(&kind_rank(b.1))));
+        names.sort_unstable_by(|a, b| {
+            a.0.as_str()
+                .cmp(b.0.as_str())
+                .then(kind_rank(a.1).cmp(&kind_rank(b.1)))
+        });
         names.dedup();
         if let Some(old) = self.by_file.remove(&file) {
             for (name, _) in old {
@@ -443,7 +478,11 @@ impl LegacyOwnedNames {
         for &(name, kind) in &names {
             let files = self.by_name.entry(name).or_default();
             files.push((file, kind));
-            files.sort_unstable_by(|a, b| a.0.as_str().cmp(b.0.as_str()).then(kind_rank(a.1).cmp(&kind_rank(b.1))));
+            files.sort_unstable_by(|a, b| {
+                a.0.as_str()
+                    .cmp(b.0.as_str())
+                    .then(kind_rank(a.1).cmp(&kind_rank(b.1)))
+            });
         }
         if !names.is_empty() {
             self.by_file.insert(file, names);
@@ -457,8 +496,13 @@ impl LegacyOwnedNames {
 
     /// The legacy files defining `name`, sorted.
     pub fn files_defining(&self, name: Ustr) -> Vec<Ustr> {
-        let mut files: Vec<Ustr> =
-            self.by_name.get(&name).into_iter().flatten().map(|(file, _)| *file).collect();
+        let mut files: Vec<Ustr> = self
+            .by_name
+            .get(&name)
+            .into_iter()
+            .flatten()
+            .map(|(file, _)| *file)
+            .collect();
         files.dedup();
         files
     }
@@ -501,7 +545,11 @@ impl NsPackage {
 
     /// `::`-join module segments into the node key.
     pub fn path_key(segments: &[Ustr]) -> Ustr {
-        let joined = segments.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
+        let joined = segments
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join("::");
         Ustr::from(&joined)
     }
 
@@ -527,7 +575,8 @@ impl NsTree {
         if owner == STD_PACKAGE_ID {
             return is_stdlib_module_file(file.as_str());
         }
-        self.package(owner).is_some_and(|pkg| pkg.legacy_files.contains(&file))
+        self.package(owner)
+            .is_some_and(|pkg| pkg.legacy_files.contains(&file))
     }
 
     /// Look up one member of the compiler-owned default export view.

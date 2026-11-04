@@ -24,7 +24,8 @@ pub struct InlayHintClientCapabilities {
     pub resolve_support: Option<InlayHintResolveClientCapabilities>,
 }
 
-impl_lsp_struct!(InlayHintClientCapabilities,
+impl_lsp_struct!(
+    InlayHintClientCapabilities,
     required {},
     optional {
         dynamic_registration: bool = "dynamicRegistration",
@@ -44,9 +45,14 @@ pub struct InlayHintOptions {
     pub resolve_provider: Option<bool>,
 }
 
-impl_lsp_struct!(InlayHintOptions,
-    optional { resolve_provider: bool = "resolveProvider" },
-    flatten { work_done_progress_options: WorkDoneProgressOptions }
+impl_lsp_struct!(
+    InlayHintOptions,
+    optional {
+        resolve_provider: bool = "resolveProvider"
+    },
+    flatten {
+        work_done_progress_options: WorkDoneProgressOptions
+    }
 );
 
 /// Inlay hint options used during static or dynamic registration.
@@ -59,7 +65,8 @@ pub struct InlayHintRegistrationOptions {
     pub static_registration_options: StaticRegistrationOptions,
 }
 
-impl_lsp_struct!(InlayHintRegistrationOptions,
+impl_lsp_struct!(
+    InlayHintRegistrationOptions,
     flatten {
         inlay_hint_options: InlayHintOptions,
         text_document_registration_options: TextDocumentRegistrationOptions,
@@ -81,13 +88,16 @@ pub struct InlayHintParams {
     pub range: Range,
 }
 
-impl_lsp_struct!(InlayHintParams,
+impl_lsp_struct!(
+    InlayHintParams,
     required {
         text_document: TextDocumentIdentifier = "textDocument",
         range: Range = "range",
     },
     optional {},
-    flatten { work_done_progress_params: WorkDoneProgressParams }
+    flatten {
+        work_done_progress_params: WorkDoneProgressParams
+    }
 );
 
 /// Inlay hint information.
@@ -180,8 +190,11 @@ pub struct InlayHintLabelPart {
     pub command: Option<Command>,
 }
 
-impl_lsp_struct!(InlayHintLabelPart,
-    required { value: String = "value" },
+impl_lsp_struct!(
+    InlayHintLabelPart,
+    required {
+        value: String = "value"
+    },
     optional {
         tooltip: InlayHintLabelPartTooltip = "tooltip",
         location: Location = "location",
@@ -250,9 +263,12 @@ pub struct InlayHintWorkspaceClientCapabilities {
     pub refresh_support: Option<bool>,
 }
 
-impl_lsp_struct!(InlayHintWorkspaceClientCapabilities,
+impl_lsp_struct!(
+    InlayHintWorkspaceClientCapabilities,
     required {},
-    optional { refresh_support: bool = "refreshSupport" }
+    optional {
+        refresh_support: bool = "refreshSupport"
+    }
 );
 
 // TODO(sno2): add tests once stabilized

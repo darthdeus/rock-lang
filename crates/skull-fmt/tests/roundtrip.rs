@@ -27,7 +27,10 @@ fn nullable_parenthesized_function_type_roundtrips_as_the_same_ast() {
         formatted_ast.module_sexp(),
         "formatting `(fn())?` must preserve its nullable function-type AST; output was:\n{formatted}"
     );
-    assert_eq!(formatted.trim(), "struct Hooks {\n    on_close: (fn() -> ())? = null,\n}");
+    assert_eq!(
+        formatted.trim(),
+        "struct Hooks {\n    on_close: (fn() -> ())? = null,\n}"
+    );
 }
 
 /// Modules-v1 forms round-trip under the v1 dialect: format(format(x)) == f
@@ -75,7 +78,10 @@ fn v1_visibility_on_an_annotated_item_is_kept() {
     let cfg = skull_fmt::FormatConfig::default();
     let src = "pub @inline fn a() -> int { 1 }\n\npub(package) @pure\nfn b() -> int {\n    2\n}\n";
     let plain = "pub fn c() -> int {\n    3\n}\n\npub struct S {\n    x: int,\n    pub(package) y: int,\n    pub private(set) z: int = 0,\n}\n\nprivate global G: int = 1\n\npub(in a::b) @inline inline(lua) fn d() -> int = \"\"\"return 1\"\"\"\n";
-    assert_eq!(skull_fmt::try_format_with_dialect(plain, &cfg, Dialect::V1).expect("format"), plain);
+    assert_eq!(
+        skull_fmt::try_format_with_dialect(plain, &cfg, Dialect::V1).expect("format"),
+        plain
+    );
     let out = skull_fmt::try_format_with_dialect(src, &cfg, Dialect::V1).expect("format");
     assert_eq!(out, src);
 }
@@ -87,6 +93,12 @@ fn v1_ascription_prints_parenthesized() {
     let src = "fn f() {\n    let x = (5 : int)\n    print(x)\n}\n";
     let cfg = skull_fmt::FormatConfig::default();
     let out = skull_fmt::try_format_with_dialect(src, &cfg, Dialect::V1).expect("format");
-    assert!(out.contains("(5 : int)"), "expected parenthesized spelling, got:\n{out}");
-    assert!(!out.contains("5 :: int"), "infix spelling leaked into v1 output:\n{out}");
+    assert!(
+        out.contains("(5 : int)"),
+        "expected parenthesized spelling, got:\n{out}"
+    );
+    assert!(
+        !out.contains("5 :: int"),
+        "infix spelling leaked into v1 output:\n{out}"
+    );
 }

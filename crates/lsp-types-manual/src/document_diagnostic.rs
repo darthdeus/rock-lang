@@ -14,7 +14,8 @@ pub struct DiagnosticClientCapabilities {
     pub related_document_support: Option<bool>,
 }
 
-impl_lsp_struct!(DiagnosticClientCapabilities,
+impl_lsp_struct!(
+    DiagnosticClientCapabilities,
     required {},
     optional {
         dynamic_registration: bool = "dynamicRegistration",
@@ -41,13 +42,18 @@ pub struct DiagnosticOptions {
     pub work_done_progress_options: WorkDoneProgressOptions,
 }
 
-impl_lsp_struct!(DiagnosticOptions,
+impl_lsp_struct!(
+    DiagnosticOptions,
     required {
         inter_file_dependencies: bool = "interFileDependencies",
         workspace_diagnostics: bool = "workspaceDiagnostics",
     },
-    optional { identifier: String = "identifier" },
-    flatten { work_done_progress_options: WorkDoneProgressOptions }
+    optional {
+        identifier: String = "identifier"
+    },
+    flatten {
+        work_done_progress_options: WorkDoneProgressOptions
+    }
 );
 
 /// Diagnostic registration options.
@@ -60,7 +66,8 @@ pub struct DiagnosticRegistrationOptions {
     pub static_registration_options: StaticRegistrationOptions,
 }
 
-impl_lsp_struct!(DiagnosticRegistrationOptions,
+impl_lsp_struct!(
+    DiagnosticRegistrationOptions,
     flatten {
         text_document_registration_options: TextDocumentRegistrationOptions,
         diagnostic_options: DiagnosticOptions,
@@ -97,8 +104,11 @@ pub struct DocumentDiagnosticParams {
     pub partial_result_params: PartialResultParams,
 }
 
-impl_lsp_struct!(DocumentDiagnosticParams,
-    required { text_document: TextDocumentIdentifier = "textDocument" },
+impl_lsp_struct!(
+    DocumentDiagnosticParams,
+    required {
+        text_document: TextDocumentIdentifier = "textDocument"
+    },
     nullable {
         identifier: String = "identifier",
         previous_result_id: String = "previousResultId",
@@ -134,8 +144,11 @@ pub struct UnchangedDocumentDiagnosticReport {
     pub result_id: String,
 }
 
-impl_lsp_struct!(UnchangedDocumentDiagnosticReport,
-    required { result_id: String = "resultId" },
+impl_lsp_struct!(
+    UnchangedDocumentDiagnosticReport,
+    required {
+        result_id: String = "resultId"
+    },
     optional {}
 );
 
@@ -289,8 +302,11 @@ pub struct DiagnosticServerCancellationData {
     pub retrigger_request: bool,
 }
 
-impl_lsp_struct!(DiagnosticServerCancellationData,
-    required { retrigger_request: bool = "retriggerRequest" },
+impl_lsp_struct!(
+    DiagnosticServerCancellationData,
+    required {
+        retrigger_request: bool = "retriggerRequest"
+    },
     optional {}
 );
 

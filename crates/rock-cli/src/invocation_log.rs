@@ -11,6 +11,7 @@
 //! overlaps a long command and never contends with a short one. Recording never changes the command's outcome:
 //! write errors are logged and dropped.
 
+use bone_core::prelude::Instant;
 use serde_json::{Map, Value, json};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -18,7 +19,6 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use bone_core::prelude::Instant;
 
 const SCHEMA: u64 = 1;
 const LOG_ENV: &str = "ROCK_INVOCATION_LOG";
@@ -26,10 +26,7 @@ const LOG_ENV: &str = "ROCK_INVOCATION_LOG";
 /// such instead of reading as a separate loop step.
 pub const PARENT_ENV: &str = "ROCK_INVOCATION_PARENT";
 /// Context variables copied into `env` when set.
-const CONTEXT_ENV: &[&str] = &[
-    "ROCK_TEST_FILTER",
-    "ROCK_TEST_SHARDS",
-];
+const CONTEXT_ENV: &[&str] = &["ROCK_TEST_FILTER", "ROCK_TEST_SHARDS"];
 /// `git status` takes 30-100 ms of stat-heavy work on the Rock tree; run
 /// alongside a 100 ms command it slowed that command by about 60 ms. Starting
 /// it after this delay keeps short commands free of it (`git_status:
@@ -45,7 +42,10 @@ struct GitProbe {
     child: Option<Child>,
     finished: bool,
 }
-static GIT_PROBE: Mutex<GitProbe> = Mutex::new(GitProbe { child: None, finished: false });
+static GIT_PROBE: Mutex<GitProbe> = Mutex::new(GitProbe {
+    child: None,
+    finished: false,
+});
 /// Dirty paths stat'ed for the newest edit time; a larger dirty set records
 /// the newest among the first this many.
 const MTIME_STAT_CAP: usize = 4000;
@@ -93,7 +93,11 @@ pub fn log_path() -> Option<PathBuf> {
     let state = std::env::var_os("XDG_STATE_HOME")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").filter(|v| !v.is_empty()).map(|h| PathBuf::from(h).join(".local/state")))?;
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .filter(|v| !v.is_empty())
+                .map(|h| PathBuf::from(h).join(".local/state"))
+        })?;
     Some(state.join("rock").join("invocations.jsonl"))
 }
 
@@ -110,7 +114,9 @@ pub fn begin(command: &'static str, backend: &str) {
     let cwd = std::env::current_dir().ok();
     let repo_root = cwd.as_deref().and_then(find_repo_root);
     let (head, branch) = repo_root.as_deref().map(read_head).unwrap_or((None, None));
-    let parent = std::env::var(PARENT_ENV).ok().and_then(|v| v.parse::<u64>().ok());
+    let parent = std::env::var(PARENT_ENV)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok());
     let pid = std::process::id();
     // SAFETY: called from `main` before any thread or child is spawned.
     unsafe { std::env::set_var(PARENT_ENV, pid.to_string()) };
@@ -134,8 +140,18 @@ pub fn begin(command: &'static str, backend: &str) {
     let env: Map<String, Value> = CONTEXT_ENV
         .iter()
         .copied()
-        .chain(crate::registry::registered().invocation_context_keys.iter().map(|(key, _)| *key))
-        .filter_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty()).map(|v| (k.to_string(), json!(v))))
+        .chain(
+            crate::registry::registered()
+                .invocation_context_keys
+                .iter()
+                .map(|(key, _)| *key),
+        )
+        .filter_map(|k| {
+            std::env::var(k)
+                .ok()
+                .filter(|v| !v.is_empty())
+                .map(|v| (k.to_string(), json!(v)))
+        })
         .collect();
     record.insert("env".into(), Value::Object(env));
 
@@ -257,15 +273,25 @@ fn render(mut p: Pending, exit_code: Option<i32>, exit_path: &str) -> (PathBuf, 
     r.insert("exit_code".into(), json!(exit_code));
     r.insert("exit_path".into(), json!(exit_path));
     let (dirty, dirty_paths, dirty_mtime_ms) = match git {
-        Some(g) => (json!(g.dirty_paths > 0), json!(g.dirty_paths), json!(g.dirty_mtime_ms)),
+        Some(g) => (
+            json!(g.dirty_paths > 0),
+            json!(g.dirty_paths),
+            json!(g.dirty_mtime_ms),
+        ),
         None => (Value::Null, Value::Null, Value::Null),
     };
     r.insert("git_status".into(), json!(git_status));
     r.insert("dirty".into(), dirty);
     r.insert("dirty_paths".into(), dirty_paths);
     r.insert("dirty_mtime_ms".into(), dirty_mtime_ms);
-    r.insert("counts".into(), Value::Object(std::mem::take(&mut p.counts)));
-    r.insert("phases_ms".into(), Value::Object(std::mem::take(&mut p.phases)));
+    r.insert(
+        "counts".into(),
+        Value::Object(std::mem::take(&mut p.counts)),
+    );
+    r.insert(
+        "phases_ms".into(),
+        Value::Object(std::mem::take(&mut p.phases)),
+    );
     let mut line = Value::Object(std::mem::take(r)).to_string();
     line.push('\n');
     (p.path, line)
@@ -277,23 +303,38 @@ fn append_line(path: &Path, line: &str) -> std::io::Result<()> {
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir)?;
     }
-    let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
     let written = file.write(line.as_bytes())?;
     if written != line.len() {
-        return Err(std::io::Error::other(format!("short write: {written} of {} bytes", line.len())));
+        return Err(std::io::Error::other(format!(
+            "short write: {written} of {} bytes",
+            line.len()
+        )));
     }
     Ok(())
 }
 
 fn find_repo_root(start: &Path) -> Option<PathBuf> {
-    start.ancestors().find(|dir| dir.join(".git").exists()).map(Path::to_path_buf)
+    start
+        .ancestors()
+        .find(|dir| dir.join(".git").exists())
+        .map(Path::to_path_buf)
 }
 
 fn spawn_git_status(root: &Path) -> Option<Child> {
     // `--no-optional-locks`: a background status must never take index.lock
     // and fail the author's concurrent `git commit`.
     let spawned = Command::new("git")
-        .args(["--no-optional-locks", "status", "--porcelain=v2", "-z", "--untracked-files=normal"])
+        .args([
+            "--no-optional-locks",
+            "status",
+            "--porcelain=v2",
+            "-z",
+            "--untracked-files=normal",
+        ])
         .current_dir(root)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -329,7 +370,11 @@ fn collect_git(mut child: Child, root: Option<&Path>) -> (&'static str, Option<G
         }
     }
     let mut out = Vec::new();
-    match child.stdout.as_mut().map(|s| std::io::Read::read_to_end(s, &mut out)) {
+    match child
+        .stdout
+        .as_mut()
+        .map(|s| std::io::Read::read_to_end(s, &mut out))
+    {
         Some(Ok(_)) => ("done", Some(parse_status(&out, root))),
         _ => ("failed", None),
     }
@@ -350,7 +395,9 @@ fn read_head(root: &Path) -> (Option<String>, Option<String>) {
     let common_dir = std::fs::read_to_string(git_dir.join("commondir"))
         .map(|rel| git_dir.join(rel.trim()))
         .unwrap_or_else(|_| git_dir.clone());
-    let Ok(head) = std::fs::read_to_string(git_dir.join("HEAD")) else { return (None, None) };
+    let Ok(head) = std::fs::read_to_string(git_dir.join("HEAD")) else {
+        return (None, None);
+    };
     let head = head.trim();
     let Some(refname) = head.strip_prefix("ref: ") else {
         return (Some(head.to_string()), None);
@@ -372,7 +419,10 @@ fn read_head(root: &Path) -> (Option<String>, Option<String>) {
 
 /// Parse `git status --porcelain=v2 -z`.
 fn parse_status(out: &[u8], root: Option<&Path>) -> GitState {
-    let mut state = GitState { dirty_paths: 0, dirty_mtime_ms: None };
+    let mut state = GitState {
+        dirty_paths: 0,
+        dirty_mtime_ms: None,
+    };
     let mut fields = out.split(|b| *b == 0).map(String::from_utf8_lossy);
     let mut stat_budget = MTIME_STAT_CAP;
     while let Some(entry) = fields.next() {
@@ -396,7 +446,9 @@ fn parse_status(out: &[u8], root: Option<&Path>) -> GitState {
             stat_budget -= 1;
             if let Some(root) = root {
                 // A deleted path has no mtime; the newest surviving edit stands.
-                if let Ok(mtime) = std::fs::symlink_metadata(root.join(&path)).and_then(|m| m.modified()) {
+                if let Ok(mtime) =
+                    std::fs::symlink_metadata(root.join(&path)).and_then(|m| m.modified())
+                {
                     let ms = unix_ms(mtime);
                     state.dirty_mtime_ms = Some(state.dirty_mtime_ms.map_or(ms, |cur| cur.max(ms)));
                 }
@@ -407,7 +459,9 @@ fn parse_status(out: &[u8], root: Option<&Path>) -> GitState {
 }
 
 fn unix_ms(t: SystemTime) -> u64 {
-    t.duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+    t.duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// RFC 3339 UTC with milliseconds, e.g. `2026-10-06T12:34:56.789Z`.
@@ -452,7 +506,9 @@ fn hostname() -> Option<String> {
 fn process_name(pid: libc::pid_t) -> Option<String> {
     #[cfg(target_os = "linux")]
     {
-        std::fs::read_to_string(format!("/proc/{pid}/comm")).ok().map(|s| s.trim().to_string())
+        std::fs::read_to_string(format!("/proc/{pid}/comm"))
+            .ok()
+            .map(|s| s.trim().to_string())
     }
     #[cfg(target_os = "macos")]
     {
@@ -485,7 +541,9 @@ pub(crate) fn redact_var_values(args: impl IntoIterator<Item = String>) -> Vec<S
             continue;
         };
         value_next = false;
-        let name = assignment.split_once('=').map_or(assignment, |(name, _)| name);
+        let name = assignment
+            .split_once('=')
+            .map_or(assignment, |(name, _)| name);
         out.push(format!("{prefix}{name}=<redacted>"));
     }
     out
@@ -497,10 +555,32 @@ mod tests {
 
     #[test]
     fn recorded_argv_redacts_every_var_value() {
-        let args = ["rock", "package", "example", "--var", "TOKEN=s3cret", "--channel", "steam", "--var=K=v=2", "--var"];
+        let args = [
+            "rock",
+            "package",
+            "example",
+            "--var",
+            "TOKEN=s3cret",
+            "--channel",
+            "steam",
+            "--var=K=v=2",
+            "--var",
+        ];
         let redacted = redact_var_values(args.iter().map(|arg| arg.to_string()));
-        assert_eq!(redacted, ["rock", "package", "example", "--var", "TOKEN=<redacted>", "--channel", "steam",
-            "--var=K=<redacted>", "--var"]);
+        assert_eq!(
+            redacted,
+            [
+                "rock",
+                "package",
+                "example",
+                "--var",
+                "TOKEN=<redacted>",
+                "--channel",
+                "steam",
+                "--var=K=<redacted>",
+                "--var"
+            ]
+        );
     }
 
     #[test]
@@ -533,7 +613,11 @@ mod tests {
         std::fs::write(wt.join(".git"), format!("gitdir: {}\n", wt_git.display())).unwrap();
         std::fs::write(wt_git.join("commondir"), "../..\n").unwrap();
         std::fs::write(wt_git.join("HEAD"), "ref: refs/heads/feat\n").unwrap();
-        std::fs::write(common.join("packed-refs"), "# pack-refs\nabc refs/heads/feat\n").unwrap();
+        std::fs::write(
+            common.join("packed-refs"),
+            "# pack-refs\nabc refs/heads/feat\n",
+        )
+        .unwrap();
         assert_eq!(read_head(&wt), (Some("abc".into()), Some("feat".into())));
         std::fs::write(common.join("refs/heads/feat"), "def\n").unwrap();
         assert_eq!(read_head(&wt), (Some("def".into()), Some("feat".into())));
@@ -547,7 +631,12 @@ mod tests {
         std::fs::write(dir.path().join("x.rs"), "x").unwrap();
         let s = parse_status(b"? x.rs\0? gone.rs\0", Some(dir.path()));
         assert_eq!(s.dirty_paths, 2);
-        let mtime = unix_ms(std::fs::metadata(dir.path().join("x.rs")).unwrap().modified().unwrap());
+        let mtime = unix_ms(
+            std::fs::metadata(dir.path().join("x.rs"))
+                .unwrap()
+                .modified()
+                .unwrap(),
+        );
         assert_eq!(s.dirty_mtime_ms, Some(mtime));
     }
 }

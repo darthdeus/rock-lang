@@ -1,10 +1,11 @@
-use crate::common::{ws_with_stdlib, run_luajit};
+use crate::common::{run_luajit, ws_with_stdlib};
 use skull::mir_emit::emit_full;
 
 #[test]
 fn compact_arguments_keep_discarded_errors_before_later_argument_effects() {
     let _inline = crate::common::InlineOffGuard::on();
-    let ws = ws_with_stdlib(r#"
+    let ws = ws_with_stdlib(
+        r#"
 value Sample { kept: int, dropped: uint }
 global marks: int = 0
 fn forward(n: int) -> int { return n }
@@ -15,16 +16,26 @@ fn mark() -> int { marks += 1; return 0 }
     return demand_read(value, mark())
 }
 @nomangle fn observed() -> int { return marks }
-"#);
-    let lua = emit_full(&ws, skull::user_module_id(&ws).unwrap()).unwrap().0.lua;
-    let program = format!("{lua}\nlocal ok = pcall(probe, -1); print(ok, observed(), probe(1), observed())\n");
-    assert_eq!(run_luajit(&program, "compact_argument_errors"), "false\t0\t7\t1");
+"#,
+    );
+    let lua = emit_full(&ws, skull::user_module_id(&ws).unwrap())
+        .unwrap()
+        .0
+        .lua;
+    let program = format!(
+        "{lua}\nlocal ok = pcall(probe, -1); print(ok, observed(), probe(1), observed())\n"
+    );
+    assert_eq!(
+        run_luajit(&program, "compact_argument_errors"),
+        "false\t0\t7\t1"
+    );
 }
 
 #[test]
 fn compact_arguments_keep_discarded_field_errors() {
     let _inline = crate::common::InlineOffGuard::on();
-    let ws = ws_with_stdlib(r#"
+    let ws = ws_with_stdlib(
+        r#"
 struct Ref { n: int }
 value Sample { kept: int, dropped: int }
 inline(lua) fn foreign_ref() -> Ref = "return nil"
@@ -33,13 +44,23 @@ fn demand_read(v: Sample) -> int { return v.kept }
     let value = Sample { kept: 7, dropped: foreign_ref().n }
     return demand_read(value)
 }
-"#);
-    let lua = emit_full(&ws, skull::user_module_id(&ws).unwrap()).unwrap().0.lua;
+"#,
+    );
+    let lua = emit_full(&ws, skull::user_module_id(&ws).unwrap())
+        .unwrap()
+        .0
+        .lua;
     let program = format!("{lua}\nprint(pcall(probe))\n");
     assert!(run_luajit(&program, "compact_argument_field_errors").starts_with("false\t"));
 }
 
-fn body_id(ws: &bone_semantic::inference::Workspace, name: &str) -> (bone_semantic::prelude::ModuleId, bone_semantic::hir::BodyOwner) {
+fn body_id(
+    ws: &bone_semantic::inference::Workspace,
+    name: &str,
+) -> (
+    bone_semantic::prelude::ModuleId,
+    bone_semantic::hir::BodyOwner,
+) {
     let f = crate::common::fn_ref(ws, name);
     (f.module, bone_semantic::hir::BodyOwner::Function(f.func))
 }
@@ -64,15 +85,34 @@ fn demand_read(v: Sample) -> int { return forward(v.y) }
     let incremental = skull::mir_emit::emit_incremental(&ws2, &mut cache, &edited).unwrap();
     let fresh = emit_full(&ws2, mid).unwrap().0;
     assert_eq!(incremental.lua, fresh.lua);
-    assert_eq!(run_luajit(&format!("{}\nprint(caller())", incremental.lua), "changed_demand"), "34");
+    assert_eq!(
+        run_luajit(
+            &format!("{}\nprint(caller())", incremental.lua),
+            "changed_demand"
+        ),
+        "34"
+    );
     match skull::mir_emit::emit_overlay(&ws2, &mut overlay_cache, &edited) {
         Ok(overlay) => {
-            let program = format!("{}\nlocal saved = save_caller()\n{}\nprint(caller(), saved())", full1.lua, overlay.lua);
+            let program = format!(
+                "{}\nlocal saved = save_caller()\n{}\nprint(caller(), saved())",
+                full1.lua, overlay.lua
+            );
             assert_eq!(run_luajit(&program, "changed_demand_overlay"), "34\t34");
         }
         Err(error) => {
-            assert!(error.message.contains("compatibility") && error.message.contains("restart"), "{}", error.message);
-            assert_eq!(run_luajit(&format!("{}\nlocal saved = save_caller(); print(saved())", full1.lua), "demand_old_callable"), "23");
+            assert!(
+                error.message.contains("compatibility") && error.message.contains("restart"),
+                "{}",
+                error.message
+            );
+            assert_eq!(
+                run_luajit(
+                    &format!("{}\nlocal saved = save_caller(); print(saved())", full1.lua),
+                    "demand_old_callable"
+                ),
+                "23"
+            );
         }
     }
 }
@@ -112,26 +152,46 @@ fn demand_match_read(event: MatchEvent) -> int {
     let mid = skull::user_module_id(&ws1).unwrap();
     let (full1, mut cache) = emit_full(&ws1, mid).unwrap();
     let (_, mut overlay_cache) = emit_full(&ws1, mid).unwrap();
-    assert_eq!(run_luajit(&format!("{}\nprint(match_demand_caller())", full1.lua), "match_demand_before"), "47");
+    assert_eq!(
+        run_luajit(
+            &format!("{}\nprint(match_demand_caller())", full1.lua),
+            "match_demand_before"
+        ),
+        "47"
+    );
     let ws2 = ws_with_stdlib(&after);
     let edited = [body_id(&ws2, "demand_match_read")];
     let incremental = skull::mir_emit::emit_incremental(&ws2, &mut cache, &edited).unwrap();
     let fresh = emit_full(&ws2, mid).unwrap().0;
     assert_eq!(incremental.lua, fresh.lua);
-    assert_eq!(run_luajit(&format!("{}\nprint(match_demand_caller())", fresh.lua), "match_demand_after"), "5");
+    assert_eq!(
+        run_luajit(
+            &format!("{}\nprint(match_demand_caller())", fresh.lua),
+            "match_demand_after"
+        ),
+        "5"
+    );
     match skull::mir_emit::emit_overlay(&ws2, &mut overlay_cache, &edited) {
         Ok(overlay) => {
-            let program = format!("{}\nlocal saved = match_demand_save()\n{}\nprint(match_demand_caller(), saved())", full1.lua, overlay.lua);
+            let program = format!(
+                "{}\nlocal saved = match_demand_save()\n{}\nprint(match_demand_caller(), saved())",
+                full1.lua, overlay.lua
+            );
             assert_eq!(run_luajit(&program, "match_demand_overlay"), "5\t5");
         }
-        Err(error) => assert!(error.message.contains("compatibility") && error.message.contains("restart"), "{}", error.message),
+        Err(error) => assert!(
+            error.message.contains("compatibility") && error.message.contains("restart"),
+            "{}",
+            error.message
+        ),
     }
 }
 
 #[test]
 fn match_unit_enum_result_preserves_payload_variants_and_absence() {
     let _inline = crate::common::InlineOffGuard::on();
-    let ws = ws_with_stdlib(r#"
+    let ws = ws_with_stdlib(
+        r#"
 nobox value DirectionIdentity { scene: int, arena: int, index: int, generation: int }
 enum DirectionSubject { Absent, Primary, First(DirectionIdentity), Second(DirectionIdentity) }
 enum DirectionResult { ToPrimary, ToEntity }
@@ -155,7 +215,19 @@ fn demand_direction_result(event: DirectionEvent) -> DirectionResult? {
     let result = demand_direction_result(DirectionEvent { cold: 97, subject: subject }) ?? return -1
     return match result { DirectionResult::ToPrimary => 11, DirectionResult::ToEntity => 23 }
 }
-"#);
-    let lua = emit_full(&ws, skull::user_module_id(&ws).unwrap()).unwrap().0.lua;
-    assert_eq!(run_luajit(&format!("{lua}\nprint(unit_match_probe(0), unit_match_probe(1), unit_match_probe(2), unit_match_probe(3))"), "unit_match_results"), "-1\t11\t23\t23");
+"#,
+    );
+    let lua = emit_full(&ws, skull::user_module_id(&ws).unwrap())
+        .unwrap()
+        .0
+        .lua;
+    assert_eq!(
+        run_luajit(
+            &format!(
+                "{lua}\nprint(unit_match_probe(0), unit_match_probe(1), unit_match_probe(2), unit_match_probe(3))"
+            ),
+            "unit_match_results"
+        ),
+        "-1\t11\t23\t23"
+    );
 }

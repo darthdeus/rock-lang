@@ -14,15 +14,15 @@
 
 pub mod allocation_report;
 pub mod coroutine_emit;
+pub mod graph_snapshot;
 pub mod inline_stats;
 pub mod mem2reg_stats;
-pub mod graph_snapshot;
+pub mod mir_emit;
 pub mod shader_artifact;
 pub mod site_join;
-pub mod mir_emit;
 
 /// Emitted callee shape, shared by CLI sessions and the Lua printer.
-pub use skull_codegen_lua::{callee_binding_is_bound, callee_binding_mode, CalleeBindingMode};
+pub use skull_codegen_lua::{CalleeBindingMode, callee_binding_is_bound, callee_binding_mode};
 
 pub use skull_codegen_lua::emitted_body_name;
 
@@ -33,13 +33,15 @@ pub use skull_codegen_lua::line_directives_mode;
 // the backends (`skull-graph`) so the JS and GLSL emitters can realize the same
 // graph the luajit driver does; consumers name it the same way either side of
 // that move.
-pub use skull_graph::{artifact, concrete_body, expr_subtree, instance_graph, shader, target_projection};
+pub use skull_graph::{
+    artifact, concrete_body, expr_subtree, instance_graph, shader, target_projection,
+};
 pub mod artifact_fingerprint;
 pub mod pipeline;
 
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;
-use skull_mir::lua_nesting::{display_expr, display_record, display_return, LuaDisplayPart};
+use skull_mir::lua_nesting::{LuaDisplayPart, display_expr, display_record, display_return};
 use skull_parser::CompilerError;
 
 /// Per-nominal-type layout hash, keyed by type name (unique workspace-wide).
@@ -168,7 +170,11 @@ pub fn shape_diff(old: &ShapeHashes, new: &ShapeHashes) -> Vec<String> {
         .filter(|(name, hash)| old.get(*name) != Some(hash))
         .map(|(name, _)| name.to_string())
         .collect();
-    changed.extend(old.keys().filter(|n| !new.contains_key(*n)).map(|n| n.to_string()));
+    changed.extend(
+        old.keys()
+            .filter(|n| !new.contains_key(*n))
+            .map(|n| n.to_string()),
+    );
     changed.sort();
     changed
 }
@@ -243,7 +249,10 @@ fn unescape_expected(s: &str) -> String {
 /// `returns` + `expect_failure` together) -- a spanned rejection, never a
 /// silently-ignored annotation.
 pub fn module_tests(ws: &Workspace, mid: ModuleId) -> Result<Vec<SkullTest>, CompilerError> {
-    Ok(module_tests_with_ids(ws, mid)?.into_iter().map(|(_, t)| t).collect())
+    Ok(module_tests_with_ids(ws, mid)?
+        .into_iter()
+        .map(|(_, t)| t)
+        .collect())
 }
 
 /// [`module_tests`] carrying each test's `Idx<Function>` too -- the JS test
@@ -251,8 +260,13 @@ pub fn module_tests(ws: &Workspace, mid: ModuleId) -> Result<Vec<SkullTest>, Com
 pub fn module_tests_with_ids(
     ws: &Workspace,
     mid: ModuleId,
-) -> Result<Vec<(bone_semantic::prelude::Idx<bone_semantic::hir::Function>, SkullTest)>, CompilerError>
-{
+) -> Result<
+    Vec<(
+        bone_semantic::prelude::Idx<bone_semantic::hir::Function>,
+        SkullTest,
+    )>,
+    CompilerError,
+> {
     let Some(module) = ws.modules.get(mid.index()) else {
         return Ok(Vec::new());
     };
@@ -266,11 +280,11 @@ pub fn module_tests_with_ids(
         if f.annotations.iter().any(|a| a.is_builtin("ignore")) {
             continue;
         }
-        let returns = match test_ann
-            .args
-            .iter()
-            .find(|arg| arg.name.as_ref().map_or(false, |n| n.name.as_str() == "returns"))
-        {
+        let returns = match test_ann.args.iter().find(|arg| {
+            arg.name
+                .as_ref()
+                .map_or(false, |n| n.name.as_str() == "returns")
+        }) {
             Some(arg) => Some(match &arg.value {
                 bone_semantic::hir::AnnoValue::Int(i) => ValueExpect::Int(*i),
                 bone_semantic::hir::AnnoValue::Float(f) => ValueExpect::Float(*f),
@@ -293,7 +307,9 @@ pub fn module_tests_with_ids(
         // compile-fail / backend-diff harnesses cover rejection. Combining it
         // with `returns` (a runtime-value assertion) is contradictory.
         if test_ann.args.iter().any(|arg| {
-            arg.name.as_ref().map_or(false, |n| n.name.as_str() == "expect_failure")
+            arg.name
+                .as_ref()
+                .map_or(false, |n| n.name.as_str() == "expect_failure")
                 && matches!(arg.value, bone_semantic::hir::AnnoValue::Bool(true))
         }) {
             if returns.is_some() {
@@ -308,11 +324,11 @@ pub fn module_tests_with_ids(
             }
             continue;
         }
-        let output = match test_ann
-            .args
-            .iter()
-            .find(|arg| arg.name.as_ref().map_or(false, |n| n.name.as_str() == "output"))
-        {
+        let output = match test_ann.args.iter().find(|arg| {
+            arg.name
+                .as_ref()
+                .map_or(false, |n| n.name.as_str() == "output")
+        }) {
             Some(arg) => match &arg.value {
                 bone_semantic::hir::AnnoValue::String(s) => Some(unescape_expected(s.as_str())),
                 // A lone `{` makes the literal an interpolation expression
@@ -366,7 +382,10 @@ pub fn global_init_fn_name(global: &str) -> String {
 
 /// Lua name for a decorator fn (`@register` -> `__deco_register`).
 pub fn decorator_fn_name(deco: &str) -> String {
-    format!("__deco_{}", skull_mir::mangle::symbol_of_key(ustr::Ustr::from(deco)))
+    format!(
+        "__deco_{}",
+        skull_mir::mangle::symbol_of_key(ustr::Ustr::from(deco))
+    )
 }
 
 /// A `@deco`-annotation argument (or `deco` param default) as a Lua literal.
@@ -479,7 +498,10 @@ fn runtime_prelude() -> &'static str {
             .replace("{FN_MT}", "")
             .replace("{UINT_CHECK}", skull_codegen_lua::UINT_CHECK_PRELUDE)
             .replace("{LEAF_VIEWS}", &skull_mir::lower::leaf_views_lua_table())
-            .replace("{NB_PRIM_STORAGE}", &skull_mir::lower::nb_prim_storage_lua());
+            .replace(
+                "{NB_PRIM_STORAGE}",
+                &skull_mir::lower::nb_prim_storage_lua(),
+            );
         // `str::replace` on a placeholder that drifted out of the template is a
         // NO-OP, and the survivor is valid Lua: `= {LEAF_VIEWS}` reads an unset
         // global, so the table is EMPTY rather than a syntax error. `pairs({})`
@@ -499,8 +521,7 @@ fn runtime_prelude() -> &'static str {
     &PRELUDE
 }
 
-const PRELUDE_TEMPLATE: &str =
-    r#"if jit and jit.opt then local __mc = tonumber(os.getenv("ROCK_JIT_MCODE_KB") or "") or 65536 local __he = tonumber(os.getenv("ROCK_JIT_HOTEXIT") or "") or 100 local __hl = tonumber(os.getenv("ROCK_JIT_HOTLOOP") or "") or 56 local __lu = tonumber(os.getenv("ROCK_JIT_LOOPUNROLL") or "") or 15 local __mt = tonumber(os.getenv("ROCK_JIT_MAXTRACE") or "") or 32000 local __mk = tonumber(os.getenv("ROCK_JIT_MAXIRCONST") or "") or 500 jit.opt.start("maxmcode=" .. __mc, "sizemcode=" .. __mc, "maxtrace=" .. __mt, "maxrecord=32000", "maxsnap=4000", "maxirconst=" .. __mk, "hotexit=" .. __he, "hotloop=" .. __hl, "loopunroll=" .. __lu) end
+const PRELUDE_TEMPLATE: &str = r#"if jit and jit.opt then local __mc = tonumber(os.getenv("ROCK_JIT_MCODE_KB") or "") or 65536 local __he = tonumber(os.getenv("ROCK_JIT_HOTEXIT") or "") or 100 local __hl = tonumber(os.getenv("ROCK_JIT_HOTLOOP") or "") or 56 local __lu = tonumber(os.getenv("ROCK_JIT_LOOPUNROLL") or "") or 15 local __mt = tonumber(os.getenv("ROCK_JIT_MAXTRACE") or "") or 32000 local __mk = tonumber(os.getenv("ROCK_JIT_MAXIRCONST") or "") or 500 jit.opt.start("maxmcode=" .. __mc, "sizemcode=" .. __mc, "maxtrace=" .. __mt, "maxrecord=32000", "maxsnap=4000", "maxirconst=" .. __mk, "hotexit=" .. __he, "hotloop=" .. __hl, "loopunroll=" .. __lu) end
 -- Everything up to the entry call runs inside one block, so the block's locals
 -- -- the storage cell first of all -- are CLOSED upvalues (UREFC: one guard,
 -- no constant) by the time an emitted function runs under the JIT. Left open,
@@ -874,7 +895,11 @@ fn c_field_type(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> Option<Stri
 fn is_value_struct(ws: &Workspace, name: ustr::Ustr) -> bool {
     ws.struct_by_name
         .get(&name)
-        .and_then(|sid| ws.modules.get(sid.module.index()).map(|m| skull_mir::lower::has_value_plan(&m.structs[sid.def])))
+        .and_then(|sid| {
+            ws.modules
+                .get(sid.module.index())
+                .map(|m| skull_mir::lower::has_value_plan(&m.structs[sid.def]))
+        })
         .unwrap_or(false)
 }
 
@@ -894,7 +919,6 @@ fn canonical_value_structs(ws: &Workspace) -> Vec<bone_semantic::hir::StructDef>
     v
 }
 
-
 /// Allocate a native value from scalar leaves without nested FFI descriptors.
 fn leaf_ctor_def(ws: &Workspace, name: ustr::Ustr, paths: &[ustr::Ustr]) -> String {
     let sym = skull_mir::mangle::type_symbol(ws, name);
@@ -908,7 +932,10 @@ fn leaf_ctor_def(ws: &Workspace, name: ustr::Ustr, paths: &[ustr::Ustr]) -> Stri
         };
         body.push_str(&format!("  t.{key} = {}\n", params[i]));
     }
-    format!("{sym}_lct = function({})\n{body}  return t\nend\n", params.join(", "))
+    format!(
+        "{sym}_lct = function({})\n{body}  return t\nend\n",
+        params.join(", ")
+    )
 }
 
 fn cdata_alias_fields(
@@ -918,8 +945,8 @@ fn cdata_alias_fields(
     child: ustr::Ustr,
     prefix: &str,
 ) -> Result<String, CompilerError> {
-    if let Some(shape) = skull_mir::lower::EnumPlan::for_name(ws, child)
-        .and_then(|plan| plan.cdata().cloned())
+    if let Some(shape) =
+        skull_mir::lower::EnumPlan::for_name(ws, child).and_then(|plan| plan.cdata().cloned())
     {
         let tag = skull_mir::lower::cdata_leaf_alias(ws, root, &format!("{prefix}.__tag"));
         let mut out = format!("int {tag}; ");
@@ -932,18 +959,26 @@ fn cdata_alias_fields(
     let sid = ws.struct_by_name[&child];
     let mut out = String::new();
     for field in &ws.modules[sid.module.index()].structs[sid.def].fields {
-        let ct = c_field_type(ws, field.storage_ty)
-            .ok_or_else(|| CompilerError::new_no_location(format!("native leaf alias has no C type: {child}.{}", field.name)))?;
+        let ct = c_field_type(ws, field.storage_ty).ok_or_else(|| {
+            CompilerError::new_no_location(format!(
+                "native leaf alias has no C type: {child}.{}",
+                field.name
+            ))
+        })?;
         let dep = ustr::Ustr::from(&ct);
         let path = format!("{prefix}.{}", field.name);
-        if ffi_names.contains(&dep) || skull_mir::lower::EnumPlan::for_name(ws, dep)
-            .is_some_and(|plan| plan.cdata().is_some())
+        if ffi_names.contains(&dep)
+            || skull_mir::lower::EnumPlan::for_name(ws, dep)
+                .is_some_and(|plan| plan.cdata().is_some())
         {
             let nested = cdata_alias_fields(ws, ffi_names, root, dep, &path)?;
             out.push_str(&format!("struct {{ {nested} }}; "));
         } else {
             let alias = skull_mir::lower::cdata_leaf_alias(ws, root, &path);
-            out.push_str(&format!("{} {alias}; ", skull_mir::mangle::type_symbol(ws, dep)));
+            out.push_str(&format!(
+                "{} {alias}; ",
+                skull_mir::mangle::type_symbol(ws, dep)
+            ));
         }
     }
     Ok(out)
@@ -970,8 +1005,14 @@ fn cdata_alias_fields(
 fn value_struct_defs(
     ws: &Workspace,
     rep_arena: &skull_mir::lower::RepArena,
-) -> Result<(String, rustc_hash::FxHashSet<ustr::Ustr>, rustc_hash::FxHashSet<ustr::Ustr>), CompilerError>
-{
+) -> Result<
+    (
+        String,
+        rustc_hash::FxHashSet<ustr::Ustr>,
+        rustc_hash::FxHashSet<ustr::Ustr>,
+    ),
+    CompilerError,
+> {
     let vstructs = canonical_value_structs(ws);
     let mut emitted: rustc_hash::FxHashSet<ustr::Ustr> = Default::default();
     let mut gc: rustc_hash::FxHashSet<ustr::Ustr> = Default::default();
@@ -1018,14 +1059,18 @@ fn value_struct_defs(
                 // The dependency key above is the LOGICAL name (what the
                 // workspace sets hold); the cdef text is the C one.
                 let field_type = skull_mir::mangle::type_symbol(ws, dep);
-                if ffi_names.contains(&dep) || skull_mir::lower::EnumPlan::for_name(ws, dep)
-                    .is_some_and(|plan| plan.cdata().is_some())
+                if ffi_names.contains(&dep)
+                    || skull_mir::lower::EnumPlan::for_name(ws, dep)
+                        .is_some_and(|plan| plan.cdata().is_some())
                 {
                     // Mirror nested aggregates rather than spelling padding as
                     // char arrays: padding fields would change the native ABI's
                     // integer/SSE classification for by-value FFI calls.
                     let aliases = cdata_alias_fields(ws, &ffi_names, s.name, dep, f.name.as_str())?;
-                    body.push_str(&format!("  union {{ {field_type} {}; struct {{ {aliases} }}; }};\n", f.name));
+                    body.push_str(&format!(
+                        "  union {{ {field_type} {}; struct {{ {aliases} }}; }};\n",
+                        f.name
+                    ));
                 } else {
                     body.push_str(&format!("  {field_type} {};\n", f.name));
                 }
@@ -1073,7 +1118,11 @@ fn value_struct_defs(
     // is a genuine emit bug and must abort with LuaJIT's own message — the old
     // pcall swallowed it and every `<Name>_ct` use downstream failed cryptically.
     let (checks, storage) = value_leaf_layout_checks(ws, &emitted, rep_arena)?;
-    Ok((format!("ffi.cdef[[\n{}]]\n{}{}{}", typedefs, ctors, checks, storage), emitted, gc))
+    Ok((
+        format!("ffi.cdef[[\n{}]]\n{}{}{}", typedefs, ctors, checks, storage),
+        emitted,
+        gc,
+    ))
 }
 
 /// Assert, once at chunk load, that skull's C layout model agrees with LuaJIT's
@@ -1136,11 +1185,15 @@ fn value_leaf_layout_checks(
         }
         for leaf in leaves.iter().filter(|leaf| leaf.path.contains('.')) {
             let alias = skull_mir::lower::cdata_leaf_alias(ws, name, leaf.path.as_str());
-            let _ = writeln!(out,
+            let _ = writeln!(
+                out,
                 "if ffi.offsetof(\"{sym}\", \"{alias}\") ~= {off} then error(\"skull leaf alias drift: {sym}.{alias}\", 0) end",
-                off = leaf.byte_off);
+                off = leaf.byte_off
+            );
         }
-        storage.push_str(&skull_mir::lower::nb_value_storage_lua(ws, name, &leaves, size));
+        storage.push_str(&skull_mir::lower::nb_value_storage_lua(
+            ws, name, &leaves, size,
+        ));
     }
     Ok((out, storage))
 }
@@ -1186,11 +1239,17 @@ fn value_struct_gc_defs(
             out.push_str(
                 "  if type(a) ~= \"table\" or type(b) ~= \"table\" then return false end\n",
             );
-            let cmps: Vec<String> =
-                paths.iter().map(|p| format!("a[\"{p}\"] == b[\"{p}\"]")).collect();
+            let cmps: Vec<String> = paths
+                .iter()
+                .map(|p| format!("a[\"{p}\"] == b[\"{p}\"]"))
+                .collect();
             out.push_str(&format!(
                 "  return {}\n",
-                if cmps.is_empty() { "true".to_string() } else { cmps.join(" and ") }
+                if cmps.is_empty() {
+                    "true".to_string()
+                } else {
+                    cmps.join(" and ")
+                }
             ));
             out.push_str("end\n");
             out.push_str(&format!("{mt}.__tostring = function(v)\n"));
@@ -1204,7 +1263,10 @@ fn value_struct_gc_defs(
                 display_record(
                     &format!("{n} {{ "),
                     paths.iter().map(|p| {
-                        (format!("{p}: "), vec![LuaDisplayPart::Expr(format!("tostring(v[\"{p}\"])"))])
+                        (
+                            format!("{p}: "),
+                            vec![LuaDisplayPart::Expr(format!("tostring(v[\"{p}\"])"))],
+                        )
                     }),
                     " }",
                 )
@@ -1217,14 +1279,22 @@ fn value_struct_gc_defs(
             // `false` on the wire, and two logically-equal absent values then
             // compared unequal (`__eq` is a per-key compare, and `false ~= nil`).
             let presence = rep_arena
-                .nominal_value_leaf_presence_flags_required(ws, bone_semantic::hir::FnBackend::Lua, n)
+                .nominal_value_leaf_presence_flags_required(
+                    ws,
+                    bone_semantic::hir::FnBackend::Lua,
+                    n,
+                )
                 .map_err(|e| CompilerError::new_no_location(e.message))?;
             let assigns: Vec<String> = paths
                 .iter()
                 .enumerate()
                 .map(|(i, p)| {
                     let tag = presence.get(i).copied().unwrap_or(false);
-                    let v = if tag { format!("l{i} or nil") } else { format!("l{i}") };
+                    let v = if tag {
+                        format!("l{i} or nil")
+                    } else {
+                        format!("l{i}")
+                    };
                     format!("[\"{p}\"] = {v}, ")
                 })
                 .collect();
@@ -1250,7 +1320,10 @@ fn value_struct_gc_defs(
             .iter()
             .flat_map(|f| f.keys().into_iter().zip(f.keys_eq(ws)))
             .map(|((key, _), equality)| {
-                let (a, b) = (lua_key_read("a", key.as_str()), lua_key_read("b", key.as_str()));
+                let (a, b) = (
+                    lua_key_read("a", key.as_str()),
+                    lua_key_read("b", key.as_str()),
+                );
                 match equality {
                     skull_mir::lower::GcFieldEq::Reference => format!("rawequal({a}, {b})"),
                     skull_mir::lower::GcFieldEq::Native => format!("{a} == {b}"),
@@ -1271,7 +1344,9 @@ fn value_struct_gc_defs(
         } else {
             let parts = display_record(
                 &format!("{n} {{ "),
-                fields.iter().map(|f| (format!("{}: ", f.name), f.lua_display_parts())),
+                fields
+                    .iter()
+                    .map(|f| (format!("{}: ", f.name), f.lua_display_parts())),
                 " }",
             );
             out.push_str(&display_return(&parts, "  "));
@@ -1290,7 +1365,11 @@ fn value_struct_gc_defs(
                     key.as_str().to_string()
                 };
                 // An absent tag canonicalizes to `nil`, as the leaf-table ctor's.
-                let value = if presence { format!("{param} or nil") } else { param.clone() };
+                let value = if presence {
+                    format!("{param} or nil")
+                } else {
+                    param.clone()
+                };
                 if f.is_inline() {
                     body.push_str(&format!("[\"{key}\"] = {value}, "));
                 } else {
@@ -1312,7 +1391,11 @@ fn value_struct_gc_defs(
 
 /// `t.key`, or `t["a.b"]` for a dotted leaf key.
 fn lua_key_read(table: &str, key: &str) -> String {
-    if key.contains('.') { format!("{table}[\"{key}\"]") } else { format!("{table}.{key}") }
+    if key.contains('.') {
+        format!("{table}[\"{key}\"]")
+    } else {
+        format!("{table}.{key}")
+    }
 }
 
 /// Emit the `ffi.cdef` typedef + `<Enum>_ct` ctor for every cdata-eligible enum
@@ -1328,13 +1411,19 @@ fn enum_cdata_defs(ws: &Workspace) -> String {
     let mut typedefs = String::new();
     let mut ctors = String::new();
     for name in names {
-        if let Some(shape) = skull_mir::lower::EnumPlan::for_name(ws, name)
-            .and_then(|plan| plan.cdata().cloned())
+        if let Some(shape) =
+            skull_mir::lower::EnumPlan::for_name(ws, name).and_then(|plan| plan.cdata().cloned())
         {
-            let slots: String =
-                shape.slots.iter().map(|(nm, t)| format!(" {t} {nm};")).collect();
+            let slots: String = shape
+                .slots
+                .iter()
+                .map(|(nm, t)| format!(" {t} {nm};"))
+                .collect();
             let sym = skull_mir::mangle::type_symbol(ws, name);
-            typedefs.push_str(&format!("typedef struct {{ int __tag;{slots} }} {n};\n", n = sym));
+            typedefs.push_str(&format!(
+                "typedef struct {{ int __tag;{slots} }} {n};\n",
+                n = sym
+            ));
             ctors.push_str(&format!("{n}_ct = ffi.typeof(\"{n}\")\n", n = sym));
         }
     }
@@ -1356,8 +1445,8 @@ fn enum_cdata_metatypes(ws: &Workspace) -> String {
     let mut out = String::new();
     let mut any = false;
     for name in names {
-        let Some(shape) = skull_mir::lower::EnumPlan::for_name(ws, name)
-            .and_then(|plan| plan.cdata().cloned())
+        let Some(shape) =
+            skull_mir::lower::EnumPlan::for_name(ws, name).and_then(|plan| plan.cdata().cloned())
         else {
             continue;
         };
@@ -1393,7 +1482,10 @@ fn enum_cdata_metatypes(ws: &Workspace) -> String {
                     VariantPayload::Tuple(tys) if !tys.is_empty() => display_record(
                         &open,
                         (0..tys.len()).map(|j| {
-                            (format!("[{}] = ", j + 1), vec![LuaDisplayPart::Expr(format!("tostring(v._{j})"))])
+                            (
+                                format!("[{}] = ", j + 1),
+                                vec![LuaDisplayPart::Expr(format!("tostring(v._{j})"))],
+                            )
                         }),
                         " }",
                     ),
@@ -1403,7 +1495,10 @@ fn enum_cdata_metatypes(ws: &Workspace) -> String {
                         display_record(
                             &open,
                             fns.iter().map(|f| {
-                                (format!("{f} = "), vec![LuaDisplayPart::Expr(format!("tostring(v._{f})"))])
+                                (
+                                    format!("{f} = "),
+                                    vec![LuaDisplayPart::Expr(format!("tostring(v._{f})"))],
+                                )
                             }),
                             " }",
                         )
@@ -1411,7 +1506,9 @@ fn enum_cdata_metatypes(ws: &Workspace) -> String {
                     _ => vec![LuaDisplayPart::literal(&format!("{name}::{vn}"))], // unit (or empty tuple/record)
                 };
                 match display_expr(&parts) {
-                    Some(render) => ts.push_str(&format!("    if t == {i} then return {render} end\n")),
+                    Some(render) => {
+                        ts.push_str(&format!("    if t == {i} then return {render} end\n"))
+                    }
                     None => {
                         ts.push_str(&format!("    if t == {i} then\n"));
                         ts.push_str(&display_return(&parts, "      "));
@@ -1475,7 +1572,10 @@ fn value_struct_metatypes(ws: &Workspace, emitted: &rustc_hash::FxHashSet<ustr::
                 let parts = display_record(
                     &format!("{n} {{ "),
                     s.fields.iter().map(|f| {
-                        (format!("{}: ", f.name), vec![LuaDisplayPart::Expr(format!("tostring(v.{})", f.name))])
+                        (
+                            format!("{}: ", f.name),
+                            vec![LuaDisplayPart::Expr(format!("tostring(v.{})", f.name))],
+                        )
                     }),
                     " }",
                 );
@@ -1529,8 +1629,10 @@ fn enum_runtime_defs(ws: &Workspace) -> String {
             {
                 continue;
             }
-            let all_unit =
-                !e.variants.is_empty() && e.variants.iter().all(|v| matches!(v.payload, VariantPayload::Unit));
+            let all_unit = !e.variants.is_empty()
+                && e.variants
+                    .iter()
+                    .all(|v| matches!(v.payload, VariantPayload::Unit));
             if all_unit {
                 // Payload-free: int repr. Emit the ordinal->display-name table for
                 // interp stringify (`__rock_enum_<E>_names[tag]`).
@@ -1567,7 +1669,8 @@ fn enum_runtime_defs(ws: &Workspace) -> String {
                 if !units.is_empty() {
                     out.push_str(&format!(
                         "_G.__ROCK_ENUM_UNITS[{:?}] = {{ {} }}\n",
-                        skull_mir::mangle::type_symbol(ws, e.name).as_str(), units.join(", "),
+                        skull_mir::mangle::type_symbol(ws, e.name).as_str(),
+                        units.join(", "),
                     ));
                 }
             }
@@ -1608,8 +1711,11 @@ fn c_struct_inspect_defs(ws: &Workspace, emitted: &rustc_hash::FxHashSet<ustr::U
             else {
                 continue;
             };
-            let copy_args: Vec<String> =
-                shape.field_names().iter().map(|f| format!("v.{f}")).collect();
+            let copy_args: Vec<String> = shape
+                .field_names()
+                .iter()
+                .map(|f| format!("v.{f}"))
+                .collect();
             let sym = skull_mir::mangle::type_symbol(ws, name);
             out.push_str(&format!(
                 "_G.__ROCK_C_STRUCT[\"{sym}\"] = {{ inspect = function(v)\n  return tostring(v)\n\
@@ -1623,21 +1729,25 @@ fn c_struct_inspect_defs(ws: &Workspace, emitted: &rustc_hash::FxHashSet<ustr::U
             }
             let n = s.name;
             let sym = skull_mir::mangle::type_symbol(ws, n);
-            out.push_str(&format!("_G.__ROCK_C_STRUCT[\"{sym}\"] = {{ inspect = function(v)\n"));
+            out.push_str(&format!(
+                "_G.__ROCK_C_STRUCT[\"{sym}\"] = {{ inspect = function(v)\n"
+            ));
             if s.fields.is_empty() {
                 out.push_str(&format!("  return \"{n} {{ }}\"\n"));
             } else {
                 let parts = display_record(
                     &format!("{n} {{ "),
                     s.fields.iter().map(|f| {
-                        (format!("{}: ", f.name), vec![LuaDisplayPart::Expr(format!("inspect(v.{})", f.name))])
+                        (
+                            format!("{}: ", f.name),
+                            vec![LuaDisplayPart::Expr(format!("inspect(v.{})", f.name))],
+                        )
                     }),
                     " }",
                 );
                 out.push_str(&display_return(&parts, "  "));
             }
-            let copy_args: Vec<String> =
-                s.fields.iter().map(|f| format!("v.{}", f.name)).collect();
+            let copy_args: Vec<String> = s.fields.iter().map(|f| format!("v.{}", f.name)).collect();
             out.push_str(&format!(
                 "end, copy = function(v)\n  return {sym}_ct({})\nend, name = \"{sym}\" }}\n",
                 copy_args.join(", ")
@@ -1693,7 +1803,12 @@ fn field_desc_lua(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> Option<St
 /// is a finite TypeExpr graph but an unbounded TREE, so an unguarded walk would
 /// not terminate. The cutoff renders `{k="any"}`, which every consumer already
 /// has to handle -- it is the descriptor of an untyped value, not a wrong one.
-fn desc_into(ws: &Workspace, ty: bone_semantic::prelude::TyId, out: &mut String, depth: u32) -> bool {
+fn desc_into(
+    ws: &Workspace,
+    ty: bone_semantic::prelude::TyId,
+    out: &mut String,
+    depth: u32,
+) -> bool {
     use bone_semantic::hir::{TypeCtor, TypeExpr};
     use bone_semantic::prelude::TyId;
 
@@ -1717,7 +1832,10 @@ fn desc_into(ws: &Workspace, ty: bone_semantic::prelude::TyId, out: &mut String,
         }
     };
     match te {
-        TypeExpr::Builtin(_) | TypeExpr::Generic(..) | TypeExpr::Infer(..) | TypeExpr::Function { .. } => {
+        TypeExpr::Builtin(_)
+        | TypeExpr::Generic(..)
+        | TypeExpr::Infer(..)
+        | TypeExpr::Function { .. } => {
             out.push_str("{k=\"any\"}");
             false
         }
@@ -1843,7 +1961,9 @@ fn reflect_field_type(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> (Stri
     use bone_semantic::hir::{BuiltinTy, TypeCtor, TypeExpr};
     let resolve = |t: bone_semantic::prelude::TyId| -> Option<TypeExpr> {
         match t {
-            bone_semantic::prelude::TyId::Static(mid, idx) => ws.modules.get(mid.index()).map(|m| m.ty_arena[idx]),
+            bone_semantic::prelude::TyId::Static(mid, idx) => {
+                ws.modules.get(mid.index()).map(|m| m.ty_arena[idx])
+            }
             bone_semantic::prelude::TyId::Local(_) => None,
         }
     };
@@ -1857,7 +1977,12 @@ fn reflect_field_type(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> (Stri
         Some(TypeExpr::App {
             ctor: TypeCtor::Nominal(name),
             ..
-        }) => (skull_mir::mangle::type_symbol(ws, name).as_str().to_string(), false),
+        }) => (
+            skull_mir::mangle::type_symbol(ws, name)
+                .as_str()
+                .to_string(),
+            false,
+        ),
         Some(TypeExpr::App {
             ctor: TypeCtor::Array,
             ..
@@ -1892,7 +2017,10 @@ fn type_table_defs(
                     .map(|(path, offset)| format!("[\"{path}\"] = {offset}"))
                     .collect::<Vec<_>>()
                     .join(", ");
-                out.push_str(&format!("_G.__ROCK_STRIDED_ROWS[\"{}\"] = {{ {entries} }}\n", skull_mir::mangle::type_symbol(ws, s.name)));
+                out.push_str(&format!(
+                    "_G.__ROCK_STRIDED_ROWS[\"{}\"] = {{ {entries} }}\n",
+                    skull_mir::mangle::type_symbol(ws, s.name)
+                ));
             }
             // Tier-distinguishing kind so reflection/inspect/serialize stay honest:
             // FFI-clean value structs are cdata (`c_struct`), GC-carrying ones are
@@ -1917,7 +2045,12 @@ fn type_table_defs(
                 .map_err(|e| CompilerError::new_no_location(e.message))?;
                 let nullable = plan.nullable();
                 let (tystr, embed) = match plan.inline_child() {
-                    Some(child) => (skull_mir::mangle::type_symbol(ws, child).as_str().to_string(), ", embed = true"),
+                    Some(child) => (
+                        skull_mir::mangle::type_symbol(ws, child)
+                            .as_str()
+                            .to_string(),
+                        ", embed = true",
+                    ),
                     None => (tystr, ""),
                 };
                 let desc = match field_desc_lua(ws, f.ty) {
@@ -1949,16 +2082,18 @@ fn type_table_defs(
 
             let plan = skull_mir::lower::EnumPlan::for_name(ws, e.name);
             if let Some(flat) = plan.as_ref().and_then(|plan| plan.flat()) {
-                let names = flat.record_fields().iter()
+                let names = flat
+                    .record_fields()
+                    .iter()
                     .map(|name| format!("\"{name}\""))
-                    .collect::<Vec<_>>().join(", ");
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 out.push_str(&format!(
                     "_G.__ROCK_ENUM_FLAT_LAYOUT[\"{}\"] = {{ tuple_width = {}, record_fields = {{ {} }} }}\n",
                     skull_mir::mangle::type_symbol(ws, e.name), flat.tuple_width(), names,
                 ));
             }
-            let Some(shape) = plan.and_then(|plan| plan.cdata().cloned())
-            else {
+            let Some(shape) = plan.and_then(|plan| plan.cdata().cloned()) else {
                 // A BOXED enum has no value shape, and until now no reflection
                 // entry at all -- so a serializer reaching one had nothing to
                 // ask about its payload and rendered every handle in it as a
@@ -1973,14 +2108,11 @@ fn type_table_defs(
                 }
                 continue;
             };
-            let mut fields = vec![
-                "{ name = \"__tag\", type = \"int\", nullable = false }".to_string(),
-            ];
+            let mut fields =
+                vec!["{ name = \"__tag\", type = \"int\", nullable = false }".to_string()];
             fields.extend(shape.slots.iter().map(|(name, c_type)| {
                 let field_type = if *c_type == "double" { "float" } else { c_type };
-                format!(
-                    "{{ name = \"{name}\", type = \"{field_type}\", nullable = false }}"
-                )
+                format!("{{ name = \"{name}\", type = \"{field_type}\", nullable = false }}")
             }));
             let variants: Vec<String> = e
                 .variants
@@ -2056,8 +2188,16 @@ mod tests {
     #[test]
     fn runtime_prelude_keeps_the_application_trace_working_set() {
         let prelude = super::runtime_prelude();
-        for knob in ["\"maxtrace=\" .. __mt", "maxrecord=32000", "maxsnap=4000", "\"maxirconst=\" .. __mk"] {
-            assert!(prelude.contains(knob), "runtime prelude stopped setting {knob}");
+        for knob in [
+            "\"maxtrace=\" .. __mt",
+            "maxrecord=32000",
+            "maxsnap=4000",
+            "\"maxirconst=\" .. __mk",
+        ] {
+            assert!(
+                prelude.contains(knob),
+                "runtime prelude stopped setting {knob}"
+            );
         }
         // One block, not several: a trace must fit a single `sizemcode` area,
         // and on arm64 macOS dyld only leaves room for the first one near the
@@ -2117,7 +2257,9 @@ mod tests {
             Ok(ws) => ws,
             Err(_) => return String::new(),
         };
-        let Ok(mid) = super::user_module_id(&ws) else { return String::new() };
+        let Ok(mid) = super::user_module_id(&ws) else {
+            return String::new();
+        };
         use std::collections::HashMap;
         let mut counts: HashMap<ustr::Ustr, usize> = HashMap::new();
         for (_, f) in ws.module(mid).functions.iter() {
@@ -2160,9 +2302,16 @@ mod tests {
         let none: Vec<String> = Vec::new();
 
         let body = base.replace("{ m.hp }", "{ m.hp + 1 }");
-        assert_eq!(super::shape_diff(&h0, &hashes(&body)), none, "a body edit must not drift any shape");
+        assert_eq!(
+            super::shape_diff(&h0, &hashes(&body)),
+            none,
+            "a body edit must not drift any shape"
+        );
 
-        let field_add = base.replace("struct Mob { hp: int }", "struct Mob { hp: int, armor: int }");
+        let field_add = base.replace(
+            "struct Mob { hp: int }",
+            "struct Mob { hp: int, armor: int }",
+        );
         assert_eq!(super::shape_diff(&h0, &hashes(&field_add)), vec!["Mob"]);
 
         let field_retype = base.replace("struct Mob { hp: int }", "struct Mob { hp: float }");
@@ -2175,13 +2324,20 @@ mod tests {
         assert_eq!(super::shape_diff(&h0, &hashes(&payload_widen)), vec!["Ev"]);
 
         let variant_reorder = base.replace("Ev { Tick(int), Done }", "Ev { Done, Tick(int) }");
-        assert_eq!(super::shape_diff(&h0, &hashes(&variant_reorder)), vec!["Ev"]);
+        assert_eq!(
+            super::shape_diff(&h0, &hashes(&variant_reorder)),
+            vec!["Ev"]
+        );
 
         let rewrap = base.replace("newtype Gold(int)", "newtype Gold(float)");
         assert_eq!(super::shape_diff(&h0, &hashes(&rewrap)), vec!["Gold"]);
 
         let removed = base.replace("newtype Gold(int)\n", "");
-        assert_eq!(super::shape_diff(&h0, &hashes(&removed)), vec!["Gold"], "a removed type counts as drifted");
+        assert_eq!(
+            super::shape_diff(&h0, &hashes(&removed)),
+            vec!["Gold"],
+            "a removed type counts as drifted"
+        );
     }
 
     /// `embed` moves the PARENT's layout: the child's leaves become the parent's
@@ -2211,7 +2367,8 @@ mod tests {
 
         // (b) The child's fields ARE the parent's keys, so widening the child
         // widens the parent.
-        let embedded_wide = "struct Pt { x: int, y: int }\nstruct Holder { embed p: Pt, tag: int }\n";
+        let embedded_wide =
+            "struct Pt { x: int, y: int }\nstruct Holder { embed p: Pt, tag: int }\n";
         assert_eq!(
             super::shape_diff(&hashes(embedded), &hashes(embedded_wide)),
             vec!["Holder", "Pt"],
@@ -2274,7 +2431,10 @@ mod tests {
             lua.contains("then goto bb"),
             "expected a conditional branch to a block, got:\n{lua}"
         );
-        assert!(lua.contains("::bb0::"), "expected block labels, got:\n{lua}");
+        assert!(
+            lua.contains("::bb0::"),
+            "expected block labels, got:\n{lua}"
+        );
     }
 
     /// Execution oracle: emit Lua, append a `driver`, run under luajit, return
@@ -2347,8 +2507,12 @@ mod tests {
     /// latch). (No arithmetic: the stdlib-less test path has no `__op_add`.)
     #[test]
     fn exec_global_init_dep_through_call() {
-        exec_eq("global A: int = read_b()\nglobal B: int = 42\n\
-                   fn read_b() -> int { B }\nfn get_a() -> int { A }", "print(get_a())", "42");
+        exec_eq(
+            "global A: int = read_b()\nglobal B: int = 42\n\
+                   fn read_b() -> int { B }\nfn get_a() -> int { A }",
+            "print(get_a())",
+            "42",
+        );
     }
 
     #[test]
@@ -2369,11 +2533,14 @@ mod tests {
     /// as a call edge too, or `A` runs before `B` and indexes nil.
     #[test]
     fn exec_global_init_dep_through_value_returning_call() {
-        exec_eq("global A: int = read_b().x\nvalue P { x: int, s: string }\n\
+        exec_eq(
+            "global A: int = read_b().x\nvalue P { x: int, s: string }\n\
                    global B: P = P { x: 42, s: \"b\" }\n\
-                   fn read_b() -> P { B }\nfn get_a() -> int { A }", "print(get_a())", "42");
+                   fn read_b() -> P { B }\nfn get_a() -> int { A }",
+            "print(get_a())",
+            "42",
+        );
     }
-
 
     /// Execution oracle for interpolated strings:
     /// `tostring("n=") .. tostring(7) .. tostring("!")` -> "n=7!".
@@ -2398,73 +2565,125 @@ mod tests {
 
     #[test]
     fn exec_if_and_identity() {
-        exec_eq("fn pick(c: bool) -> int { if c { 1 } else { 2 } }\nfn id(x: int) -> int { x }", "print(pick(true)); print(pick(false)); print(id(42))", "1\n2\n42");
+        exec_eq(
+            "fn pick(c: bool) -> int { if c { 1 } else { 2 } }\nfn id(x: int) -> int { x }",
+            "print(pick(true)); print(pick(false)); print(id(42))",
+            "1\n2\n42",
+        );
     }
 
     #[test]
     fn exec_comparison() {
-        exec_eq("fn lt(a: int, b: int) -> bool { a < b }", "print(lt(1, 2)); print(lt(2, 1))", "true\nfalse");
+        exec_eq(
+            "fn lt(a: int, b: int) -> bool { a < b }",
+            "print(lt(1, 2)); print(lt(2, 1))",
+            "true\nfalse",
+        );
     }
 
     #[test]
     fn exec_short_circuit_and_or() {
-        exec_eq("fn band(a: bool, b: bool) -> bool { a && b }\nfn bor(a: bool, b: bool) -> bool { a || b }", "print(band(true,false)); print(band(true,true)); print(bor(false,false)); print(bor(false,true))", "false\ntrue\nfalse\ntrue");
+        exec_eq(
+            "fn band(a: bool, b: bool) -> bool { a && b }\nfn bor(a: bool, b: bool) -> bool { a || b }",
+            "print(band(true,false)); print(band(true,true)); print(bor(false,false)); print(bor(false,true))",
+            "false\ntrue\nfalse\ntrue",
+        );
     }
 
     #[test]
     fn exec_let_then_compare() {
-        exec_eq("fn f(x: int) -> bool {\n    let lo = 0\n    lo < x\n}", "print(f(5)); print(f(-3))", "true\nfalse");
+        exec_eq(
+            "fn f(x: int) -> bool {\n    let lo = 0\n    lo < x\n}",
+            "print(f(5)); print(f(-3))",
+            "true\nfalse",
+        );
     }
 
     #[test]
     fn exec_nested_if() {
-        exec_eq("fn sign(x: int) -> int { if x < 0 { 0 } else { if x == 0 { 1 } else { 2 } } }", "print(sign(-9)); print(sign(0)); print(sign(9))", "0\n1\n2");
+        exec_eq(
+            "fn sign(x: int) -> int { if x < 0 { 0 } else { if x == 0 { 1 } else { 2 } } }",
+            "print(sign(-9)); print(sign(0)); print(sign(9))",
+            "0\n1\n2",
+        );
     }
 
     #[test]
     fn exec_unary_minus() {
-        exec_eq("fn neg(x: int) -> int { -x }\nfn negf(x: float) -> float { -x }", "print(neg(5)); print(neg(-3)); print(negf(2.5))", "-5\n3\n-2.5");
+        exec_eq(
+            "fn neg(x: int) -> int { -x }\nfn negf(x: float) -> float { -x }",
+            "print(neg(5)); print(neg(-3)); print(negf(2.5))",
+            "-5\n3\n-2.5",
+        );
     }
 
     #[test]
     fn exec_for_range_with_assignment() {
         // `last` returns the final loop index (n-1), or 0 when the loop is empty.
-        exec_eq("fn last(n: int) -> int {\n    let r = 0\n    for i in 0..n {\n        r = i\n    }\n    r\n}", "print(last(5)); print(last(1)); print(last(0))", "4\n0\n0");
+        exec_eq(
+            "fn last(n: int) -> int {\n    let r = 0\n    for i in 0..n {\n        r = i\n    }\n    r\n}",
+            "print(last(5)); print(last(1)); print(last(0))",
+            "4\n0\n0",
+        );
     }
 
     #[test]
     fn exec_while_with_assignment() {
         // Loops once: sets r, then flips the flag false.
-        exec_eq("fn once() -> int {\n    let flag = true\n    let r = 0\n    while flag {\n        r = 1\n        flag = false\n    }\n    r\n}", "print(once())", "1");
+        exec_eq(
+            "fn once() -> int {\n    let flag = true\n    let r = 0\n    while flag {\n        r = 1\n        flag = false\n    }\n    r\n}",
+            "print(once())",
+            "1",
+        );
     }
 
     #[test]
     fn exec_lambda_return_and_call() {
         // bone can't call a function value yet, so call the returned closure
         // from the Lua driver.
-        exec_eq("fn make() -> (int) -> int {\n    (x: int) => x\n}", "print(make()(5))", "5");
+        exec_eq(
+            "fn make() -> (int) -> int {\n    (x: int) => x\n}",
+            "print(make()(5))",
+            "5",
+        );
     }
 
     #[test]
     fn exec_lambda_captures_upvalue() {
         // The lambda captures `n` (outer slot) as a Lua upvalue and ignores x.
-        exec_eq("fn constfn(n: int) -> (int) -> int {\n    (x: int) => n\n}", "print(constfn(7)(99)); print(constfn(3)(0))", "7\n3");
+        exec_eq(
+            "fn constfn(n: int) -> (int) -> int {\n    (x: int) => n\n}",
+            "print(constfn(7)(99)); print(constfn(3)(0))",
+            "7\n3",
+        );
     }
 
     #[test]
     fn exec_field_assignment() {
-        exec_eq("struct P { x: int, y: int }\nfn f() -> int {\n    let p = P { x: 1, y: 2 }\n    p.x = 10\n    p.x\n}", "print(f())", "10");
+        exec_eq(
+            "struct P { x: int, y: int }\nfn f() -> int {\n    let p = P { x: 1, y: 2 }\n    p.x = 10\n    p.x\n}",
+            "print(f())",
+            "10",
+        );
     }
 
     #[test]
     fn exec_index_assignment() {
-        exec_eq("fn f() -> int {\n    let xs = [1, 2, 3]\n    xs[1] = 9\n    xs[1]\n}", "print(f())", "9");
+        exec_eq(
+            "fn f() -> int {\n    let xs = [1, 2, 3]\n    xs[1] = 9\n    xs[1]\n}",
+            "print(f())",
+            "9",
+        );
     }
 
     #[test]
     fn exec_array_index() {
         // 0-indexed Rock -> 1-indexed Lua: xs[1] is the second element.
-        exec_eq("fn f() -> int {\n    let xs = [10, 20, 30]\n    xs[1]\n}", "print(f())", "20");
+        exec_eq(
+            "fn f() -> int {\n    let xs = [10, 20, 30]\n    xs[1]\n}",
+            "print(f())",
+            "20",
+        );
     }
 
     #[test]
@@ -2486,17 +2705,20 @@ mod tests {
         );
     }
 
-
     #[test]
     fn exec_coroutine_yield() {
         // A `co fn` emits a stackless state machine; calling it returns a
         // Frame driven by the per-co-fn `__resume` stored as a literal field
         // (the ctor returns the frame; `__`-method fields take it explicitly).
-        exec_eq("co fn counter() -> Coroutine<int> {\n\
+        exec_eq(
+            "co fn counter() -> Coroutine<int> {\n\
                        yield 1\n\
                        yield 2\n\
                        yield 3\n\
-                   }", "local c = counter(); print(c.__resume(c)); print(c.__resume(c)); print(c.__resume(c))", "1\n2\n3");
+                   }",
+            "local c = counter(); print(c.__resume(c)); print(c.__resume(c)); print(c.__resume(c))",
+            "1\n2\n3",
+        );
     }
 
     #[test]
@@ -2538,13 +2760,19 @@ mod tests {
         // State machine: writes to the state field + a completed terminal -3
         // (killed is -1, errored -2), over an ordinary goto-CFG — NOT the
         // emit-time goto-into-block re-entry labels.
-        assert!(lua.contains(".__state ="), "expected state-saving write, got:\n{lua}");
+        assert!(
+            lua.contains(".__state ="),
+            "expected state-saving write, got:\n{lua}"
+        );
         exec_eq(
             "co fn counter() -> Coroutine<int> {\n yield 1\n yield 2\n }",
             "local c = counter(); c.__resume(c); c.__resume(c); c.__resume(c); print(c.__state)",
             "-3",
         );
-        assert!(lua.contains("goto bb"), "expected ordinary goto CFG, got:\n{lua}");
+        assert!(
+            lua.contains("goto bb"),
+            "expected ordinary goto CFG, got:\n{lua}"
+        );
         assert!(
             !lua.contains("__co_resume_"),
             "transform must NOT use emit-time re-entry labels, got:\n{lua}"
@@ -2554,7 +2782,8 @@ mod tests {
     #[test]
     fn exec_coroutine_yield_delegate() {
         // `await inner()` pumps the inner coroutine's values outward.
-        exec_eq("co fn inner() -> Coroutine<int> {\n\
+        exec_eq(
+            "co fn inner() -> Coroutine<int> {\n\
                        yield 1\n\
                        yield 2\n\
                    }\n\
@@ -2562,18 +2791,25 @@ mod tests {
                        yield 0\n\
                        await inner()\n\
                        yield 9\n\
-                   }", "local c = outer(); for i=1,4 do print(c.__resume(c)) end", "0\n1\n2\n9");
+                   }",
+            "local c = outer(); for i=1,4 do print(c.__resume(c)) end",
+            "0\n1\n2\n9",
+        );
     }
 
     #[test]
     fn exec_format_dynamic_width_precision() {
         // `{x:{w}.{p}f}` assembles the string.format conversion at runtime.
-        exec_eq("fn f() -> string {\n\
+        exec_eq(
+            "fn f() -> string {\n\
                        let x = 3.14159\n\
                        let w = 8\n\
                        let p = 2\n\
                        \"[{x:{w}.{p}f}]\"\n\
-                   }", "print(f())", "[    3.14]");
+                   }",
+            "print(f())",
+            "[    3.14]",
+        );
     }
 
     #[test]
@@ -2603,9 +2839,13 @@ mod tests {
         // the resolved target's signature makes `pick(5)` reach the int
         // overload (5), not the bool one (1). `use_it` is uniquely named, so it
         // stays callable by its surface name from the driver.
-        exec_eq("fn pick(x: int) -> int { x }\n\
+        exec_eq(
+            "fn pick(x: int) -> int { x }\n\
                    fn pick(x: bool) -> int { 1 }\n\
-                   fn use_it() -> int { pick(5) }", "print(use_it())", "5");
+                   fn use_it() -> int { pick(5) }",
+            "print(use_it())",
+            "5",
+        );
     }
 
     #[test]
@@ -2613,22 +2853,31 @@ mod tests {
         // bone now hands skull the verbatim `inline(lua)` body (it used to drop
         // it). skull emits it as a real function with the original param names,
         // and a Rock caller resolves to it.
-        exec_eq("@nomangle inline(lua) fn double(x: int) -> int = \"return x * 2\"\n\
-                   fn use_it(n: int) -> int { double(n) }", "print(use_it(21))", "42");
+        exec_eq(
+            "@nomangle inline(lua) fn double(x: int) -> int = \"return x * 2\"\n\
+                   fn use_it(n: int) -> int { double(n) }",
+            "print(use_it(21))",
+            "42",
+        );
     }
 
     #[test]
     fn exec_bitwise() {
         // Bitwise binops lower to LuaJIT `bit.*` calls.
-        exec_eq("fn band(a: int, b: int) -> int { a & b }\n\
-                   fn shl(a: int, n: int) -> int { a << n }", "print(band(6, 3)); print(shl(1, 4))", "2\n16");
+        exec_eq(
+            "fn band(a: int, b: int) -> int { a & b }\n\
+                   fn shl(a: int, n: int) -> int { a << n }",
+            "print(band(6, 3)); print(shl(1, 4))",
+            "2\n16",
+        );
     }
 
     #[test]
     fn exec_for_enumerate() {
         // `enumerate(coll)` yields (0-based index, element); bone special-cases
         // it in for-position, so skull detects it syntactically.
-        exec_eq("fn idx() -> int {\n\
+        exec_eq(
+            "fn idx() -> int {\n\
                        let r = 0\n\
                        for (i, v) in enumerate([10, 20, 30]) { r = i }\n\
                        r\n\
@@ -2637,24 +2886,32 @@ mod tests {
                        let r = 0\n\
                        for (i, v) in enumerate([10, 20, 30]) { r = v }\n\
                        r\n\
-                   }", "print(idx()); print(elem())", "2\n30");
+                   }",
+            "print(idx()); print(elem())",
+            "2\n30",
+        );
     }
 
     #[test]
     fn exec_for_over_map() {
         // `next`-based iteration; single-entry map so order is unambiguous.
-        exec_eq("fn val(m: Map<string, int>) -> int {\n\
+        exec_eq(
+            "fn val(m: Map<string, int>) -> int {\n\
                        let n = 0\n\
                        for (k, v) in m { n = v }\n\
                        n\n\
-                   }", "print(val({a = 42}))", "42");
+                   }",
+            "print(val({a = 42}))",
+            "42",
+        );
     }
 
     #[test]
     fn exec_enum_match() {
         // Tuple-payload variants -> tagged tables; match discriminates on
         // `__tag` and reads payload by position.
-        exec_eq("enum Shape { Circle(int), Square(int, int) }\n\
+        exec_eq(
+            "enum Shape { Circle(int), Square(int, int) }\n\
                    fn pick(s: Shape) -> int {\n\
                        match s {\n\
                            Circle(r) => r,\n\
@@ -2662,7 +2919,10 @@ mod tests {
                        }\n\
                    }\n\
                    fn mkc(r: int) -> Shape { Shape::Circle(r) }\n\
-                   fn mks(w: int, h: int) -> Shape { Shape::Square(w, h) }", "print(pick(mkc(7))); print(pick(mks(3, 4)))", "7\n3");
+                   fn mks(w: int, h: int) -> Shape { Shape::Square(w, h) }",
+            "print(pick(mkc(7))); print(pick(mks(3, 4)))",
+            "7\n3",
+        );
     }
 
     #[test]
@@ -2670,7 +2930,8 @@ mod tests {
         // Nested binding patterns: enum payload is a tuple, struct field is a
         // struct. The inner reads materialize in the matched arm (guarded), so
         // the `None` case never faults reading a missing payload.
-        exec_eq("enum Opt { Some((int, int)), None }\n\
+        exec_eq(
+            "enum Opt { Some((int, int)), None }\n\
                    fn fst(o: Opt) -> int {\n\
                        match o {\n\
                            Some((x, y)) => x,\n\
@@ -2685,19 +2946,26 @@ mod tests {
                        }\n\
                    }\n\
                    fn mk(a: int, b: int) -> Opt { Opt::Some((a, b)) }\n\
-                   fn none() -> Opt { Opt::None }", "print(fst(mk(3, 4))); print(fst(none())); \
-             print(inner_x({inner = {x = 10, y = 20}, tag = 5}))", "3\n-1\n10");
+                   fn none() -> Opt { Opt::None }",
+            "print(fst(mk(3, 4))); print(fst(none())); \
+             print(inner_x({inner = {x = 10, y = 20}, tag = 5}))",
+            "3\n-1\n10",
+        );
     }
 
     #[test]
     fn exec_match_literal_arms() {
-        exec_eq("fn name(n: int) -> string {\n\
+        exec_eq(
+            "fn name(n: int) -> string {\n\
                        match n {\n\
                            0 => \"zero\",\n\
                            1 => \"one\",\n\
                            _ => \"many\",\n\
                        }\n\
-                   }", "print(name(0)); print(name(1)); print(name(9))", "zero\none\nmany");
+                   }",
+            "print(name(0)); print(name(1)); print(name(9))",
+            "zero\none\nmany",
+        );
     }
 
     #[test]
@@ -2707,14 +2975,18 @@ mod tests {
         // `Opt` is now a cdata enum that multi-returns `(tag, _0)`, so calling
         // `opt_unwrap(mk(5), 0)` directly in Lua would TRUNCATE `mk`'s second return.
         // The Rock wrappers spill the multi-return correctly (skull's own ABI).
-        exec_eq("enum Opt { Some(int), None }\n\
+        exec_eq(
+            "enum Opt { Some(int), None }\n\
                    fn opt_unwrap(o: Opt, d: int) -> int {\n\
                        if let Some(x) = o { x } else { d }\n\
                    }\n\
                    fn mk(x: int) -> Opt { Opt::Some(x) }\n\
                    fn empty() -> Opt { Opt::None }\n\
                    fn check_some() -> int { return opt_unwrap(mk(5), 0) }\n\
-                   fn check_none() -> int { return opt_unwrap(empty(), 99) }", "print(check_some()); print(check_none())", "5\n99");
+                   fn check_none() -> int { return opt_unwrap(empty(), 99) }",
+            "print(check_some()); print(check_none())",
+            "5\n99",
+        );
     }
 
     #[test]
@@ -2722,7 +2994,11 @@ mod tests {
         // Conditional assignment inside the loop: r tracks i only while i < 3.
         // (Uses no `break`/`continue` — bone's inference doesn't support those
         // yet, though skull's lowering for them is in place; see skull-plan.md.)
-        exec_eq("fn upto3(n: int) -> int {\n    let r = 0\n    for i in 0..n {\n        if i < 3 {\n            r = i\n        }\n    }\n    r\n}", "print(upto3(10)); print(upto3(2))", "2\n1");
+        exec_eq(
+            "fn upto3(n: int) -> int {\n    let r = 0\n    for i in 0..n {\n        if i < 3 {\n            r = i\n        }\n    }\n    r\n}",
+            "print(upto3(10)); print(upto3(2))",
+            "2\n1",
+        );
     }
 
     /// `recv?.f(args)` on a fn-typed FIELD: nil-guarded `(recv.f)(args)`
@@ -2730,12 +3006,16 @@ mod tests {
     /// rock (legacy) rejects the shape — bone-only language rule.
     #[test]
     fn exec_safe_nav_field_call() {
-        exec_eq("struct S { f: fn() -> int, g: fn(int) -> int }\n\
+        exec_eq(
+            "struct S { f: fn() -> int, g: fn(int) -> int }\n\
                    fn mk() -> S? { S { f: () => 42, g: (x) => x } }\n\
                    fn none() -> S? { null }\n\
                    fn a() -> int { mk()?.f() ?? -1 }\n\
                    fn b() -> int { mk()?.g(7) ?? -1 }\n\
-                   fn c() -> int { none()?.f() ?? -1 }", "print(a()); print(b()); print(c())", "42\n7\n-1");
+                   fn c() -> int { none()?.f() ?? -1 }",
+            "print(a()); print(b()); print(c())",
+            "42\n7\n-1",
+        );
     }
 
     /// Body slice of a single emitted function — from its `function NAME()`
@@ -2758,7 +3038,10 @@ mod tests {
                 let at = lua
                     .find(&head)
                     .unwrap_or_else(|| panic!("no `function {name}` or `{head}` in:\n{lua}"));
-                (at, lua[at..].find(inner).expect("a factory returns its body") + inner.len())
+                (
+                    at,
+                    lua[at..].find(inner).expect("a factory returns its body") + inner.len(),
+                )
             }
         };
         let rest = &lua[start + header_end..];
@@ -2870,7 +3153,10 @@ mod tests {
                    fn drive() -> float { br_x(mk(1.0, 2.0, 3.0, 4.0)) }";
         let lua = emit(src);
         let mk = fn_body(&lua, "mk");
-        assert!(!mk.contains("_ct("), "mk must build nested value as scalars; got:\n{mk}");
+        assert!(
+            !mk.contains("_ct("),
+            "mk must build nested value as scalars; got:\n{mk}"
+        );
         let drive = fn_body(&lua, "drive");
         assert!(
             !drive.contains("_ct("),
@@ -2909,9 +3195,15 @@ mod tests {
                    fn not_wall(t: E) -> bool { t != E::Wall }";
         let lua = emit(src);
         let w = fn_body(&lua, "is_wall");
-        assert!(!w.contains("__op_eq"), "payloadless enum == must be native; got:\n{w}");
+        assert!(
+            !w.contains("__op_eq"),
+            "payloadless enum == must be native; got:\n{w}"
+        );
         let nw = fn_body(&lua, "not_wall");
-        assert!(!nw.contains("__op_ne"), "payloadless enum != must be native; got:\n{nw}");
+        assert!(
+            !nw.contains("__op_ne"),
+            "payloadless enum != must be native; got:\n{nw}"
+        );
     }
 
     /// Runtime correctness: payloadless-enum equality (both arms) and nil compare
@@ -2920,10 +3212,14 @@ mod tests {
     /// run here — the native lowering is what makes this executable at all.)
     #[test]
     fn exec_payloadless_enum_eq() {
-        exec_eq("enum E { Ground, Wall }\n\
+        exec_eq(
+            "enum E { Ground, Wall }\n\
                    fn check(t: E) -> int { if t == E::Wall { 1 } else { 0 } }\n\
                    fn a() -> int { check(E::Wall) }\n\
-                   fn b() -> int { check(E::Ground) }", "print(a()); print(b())", "1\n0");
+                   fn b() -> int { check(E::Ground) }",
+            "print(a()); print(b())",
+            "1\n0",
+        );
     }
 
     /// Function inlining: a tiny single-block value-struct constructor called in
@@ -3025,8 +3321,14 @@ mod tests {
                    fn b() -> int { c() }\n\
                    fn a() -> int { b() }";
         let lua = emit(src);
-        assert!(!lua.contains("= b("), "expected b() inlined into a(), got:\n{lua}");
-        assert!(!lua.contains("= c("), "expected c() inlined transitively, got:\n{lua}");
+        assert!(
+            !lua.contains("= b("),
+            "expected b() inlined into a(), got:\n{lua}"
+        );
+        assert!(
+            !lua.contains("= c("),
+            "expected c() inlined transitively, got:\n{lua}"
+        );
         exec_eq(src, "print(a())", "3");
     }
 
@@ -3067,7 +3369,9 @@ mod tests {
             lua.contains("for c"),
             "expected a numeric for-loop (FORL), got:\n{lua}"
         );
-        let Some(out) = run(src, "print(sum(5))") else { return };
+        let Some(out) = run(src, "print(sum(5))") else {
+            return;
+        };
         assert_eq!(out, "4");
     }
 
@@ -3084,7 +3388,9 @@ mod tests {
             2,
             "expected two numeric for-loops (outer + inner), got:\n{lua}"
         );
-        let Some(out) = run(src, "print(grid(5, 3))") else { return };
+        let Some(out) = run(src, "print(grid(5, 3))") else {
+            return;
+        };
         assert_eq!(out, "4");
     }
 
@@ -3094,9 +3400,13 @@ mod tests {
     /// synthesized `for`). Execution proves the elements copy exactly once.
     #[test]
     fn array_spread_not_restructured_no_double_increment() {
-        exec_eq("fn cat(a: [int], b: [int]) -> [int] { [...a, ...b] }", "local r = cat({_data={1,2},len=2}, {_data={3,4},len=2})\n\
+        exec_eq(
+            "fn cat(a: [int], b: [int]) -> [int] { [...a, ...b] }",
+            "local r = cat({_data={1,2},len=2}, {_data={3,4},len=2})\n\
              local s = {} for i=1,r.len do s[i]=tostring(r._data[i]) end\n\
-             print(r.len .. ':' .. table.concat(s, ','))", "4:1,2,3,4");
+             print(r.len .. ':' .. table.concat(s, ','))",
+            "4:1,2,3,4",
+        );
     }
 
     /// Guard: a loop that reassigns its own counter in the body can't become a
@@ -3120,7 +3430,9 @@ mod tests {
             !lua.contains("for c"),
             "counter-reassigning loop must NOT become a for (slot stored >2x), got:\n{lua}"
         );
-        let Some(out) = run(src, "print(f(10))") else { return };
+        let Some(out) = run(src, "print(f(10))") else {
+            return;
+        };
         assert_eq!(out, "0");
     }
 }

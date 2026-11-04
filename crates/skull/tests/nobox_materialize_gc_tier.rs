@@ -176,7 +176,10 @@ fn a_string_field_boxes_through_the_value_table() {
         function_body(&lua, "main").contains("SRow_vt("),
         "the explicit box did not take the value-table ctor:\n{lua}"
     );
-    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "gc_tier_string"), "1a");
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "gc_tier_string"),
+        "1a"
+    );
 }
 
 /// The mark is the only variable, so the emitted constructor must be the same
@@ -189,7 +192,11 @@ fn the_marked_and_unmarked_boxes_are_the_same_shape() {
     let ctor = |lua: &str| -> String {
         let body = function_body(lua, "main");
         let at = body.find("SRow_").expect("a SRow constructor in main");
-        body[at..].split('(').next().expect("a constructor name").to_string()
+        body[at..]
+            .split('(')
+            .next()
+            .expect("a constructor name")
+            .to_string()
     };
     assert_eq!(
         ctor(&marked),
@@ -210,18 +217,32 @@ fn an_array_field_boxes_through_the_value_table() {
         function_body(&lua, "main").contains("ARow_vt("),
         "the explicit box did not take the value-table ctor:\n{lua}"
     );
-    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "gc_tier_array"), "1:3:20");
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "gc_tier_array"),
+        "1:3:20"
+    );
 }
 
 #[test]
 fn a_closure_field_boxes_through_the_value_table() {
-    assert_eq!(run(CLOSURE_FIELD, "a closure field at the GC tier", "gc_tier_closure"), "2:8");
+    assert_eq!(
+        run(
+            CLOSURE_FIELD,
+            "a closure field at the GC tier",
+            "gc_tier_closure"
+        ),
+        "2:8"
+    );
 }
 
 #[test]
 fn a_flat_enum_field_boxes_both_variant_kinds() {
     assert_eq!(
-        run(FLAT_ENUM_FIELD, "a flat-enum field at the GC tier", "gc_tier_flat_enum"),
+        run(
+            FLAT_ENUM_FIELD,
+            "a flat-enum field at the GC tier",
+            "gc_tier_flat_enum"
+        ),
         "1:Silent:nil\n2:Say:hi"
     );
 }
@@ -229,7 +250,11 @@ fn a_flat_enum_field_boxes_both_variant_kinds() {
 #[test]
 fn a_nested_nobox_field_boxes_inside_a_gc_tier_outer() {
     assert_eq!(
-        run(NESTED_NOBOX_FIELD, "a nested nobox field at the GC tier", "gc_tier_nested"),
+        run(
+            NESTED_NOBOX_FIELD,
+            "a nested nobox field at the GC tier",
+            "gc_tier_nested"
+        ),
         "L:1:2"
     );
 }
@@ -237,7 +262,11 @@ fn a_nested_nobox_field_boxes_inside_a_gc_tier_outer() {
 #[test]
 fn a_nullable_gc_tier_value_reaches_the_sink_as_nil_when_absent() {
     assert_eq!(
-        run(NULLABLE_GC_TIER, "a nullable GC-tier nobox value", "gc_tier_nullable"),
+        run(
+            NULLABLE_GC_TIER,
+            "a nullable GC-tier nobox value",
+            "gc_tier_nullable"
+        ),
         "7z\nabsent"
     );
 }
@@ -249,7 +278,10 @@ fn a_leaf_table_value_boxes_through_its_dotted_key_constructor() {
         function_body(&lua, "main").contains("Opt_lct("),
         "the explicit box did not take the leaf-table ctor:\n{lua}"
     );
-    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "leaf_table_tier"), "true:1:2:3");
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "leaf_table_tier"),
+        "true:1:2:3"
+    );
 }
 
 #[test]
@@ -264,7 +296,10 @@ fn a_nested_cdata_value_boxes_as_one_leaf_constructor() {
         !main.contains("NV2_ct("),
         "the explicit box built an intermediate cdata per nested field:\n{lua}"
     );
-    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "cdata_tier_nested"), "1 4");
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "cdata_tier_nested"),
+        "1 4"
+    );
 }
 
 #[test]
@@ -275,15 +310,27 @@ fn an_implicit_box_of_a_gc_tier_value_is_still_rejected() {
         err.message.contains("cannot cross boxed call boundary"),
         "the implicit box was rejected for an unrelated reason: {err:?}"
     );
-    assert!(err.location.line > 0, "the rejection lost its span: {err:?}");
+    assert!(
+        err.location.line > 0,
+        "the rejection lost its span: {err:?}"
+    );
 }
 
 #[test]
 fn a_nobox_field_under_a_gc_tier_parent_stores_as_leaves() {
-    let lua = emit_ok(NOBOX_FIELD_UNDER_A_GC_TIER_PARENT, "a nobox field of a stored GC-tier value");
+    let lua = emit_ok(
+        NOBOX_FIELD_UNDER_A_GC_TIER_PARENT,
+        "a nobox field of a stored GC-tier value",
+    );
     let setup = function_body(&lua, "setup");
-    assert!(!setup.contains("NV2_ct("), "the stored parent boxed its nobox field:\n{setup}");
-    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "gc_tier_parent_leaves"), "1 L");
+    assert!(
+        !setup.contains("NV2_ct("),
+        "the stored parent boxed its nobox field:\n{setup}"
+    );
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "gc_tier_parent_leaves"),
+        "1 L"
+    );
 }
 
 #[test]
@@ -310,7 +357,10 @@ fn main() {
 }
 "#;
     let lua = try_emit_module(source).expect("a scalarized closure local must emit");
-    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "nobox_closure_local"), "10");
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "nobox_closure_local"),
+        "10"
+    );
 }
 
 // The live-body tests need a box that is still real: a tuple holding a `nobox`
@@ -330,9 +380,19 @@ fn main() {
 }
 "#;
     let err = try_emit_module(source).expect_err("live closure boxes must still reject");
-    assert!(err.message.contains("survived lowering as an implicit materialization"), "{err:?}");
-    assert!(err.message.contains("lambda"), "the rejection must name the live body: {err:?}");
-    assert!(err.location.line > 0, "the rejection lost its span: {err:?}");
+    assert!(
+        err.message
+            .contains("survived lowering as an implicit materialization"),
+        "{err:?}"
+    );
+    assert!(
+        err.message.contains("lambda"),
+        "the rejection must name the live body: {err:?}"
+    );
+    assert!(
+        err.location.line > 0,
+        "the rejection lost its span: {err:?}"
+    );
 }
 
 #[test]
@@ -353,6 +413,13 @@ fn main() {
 }
 "#;
     let err = try_emit_module(source).expect_err("live coroutine hook boxes must still reject");
-    assert!(err.message.contains("survived lowering as an implicit materialization"), "{err:?}");
-    assert!(err.location.line > 0, "the rejection lost its span: {err:?}");
+    assert!(
+        err.message
+            .contains("survived lowering as an implicit materialization"),
+        "{err:?}"
+    );
+    assert!(
+        err.location.line > 0,
+        "the rejection lost its span: {err:?}"
+    );
 }

@@ -15,8 +15,8 @@
 use skull_mir::lower::{SIGNATURE_SCALAR_LANE_BUDGET, WIDE_VALUE_PAYLOAD_LEAF_CUT};
 
 use crate::common::{
-    definition_names, emit_module_without_frame_limits, function_body, luajit_loads,
-    run_luajit, try_emit_module,
+    definition_names, emit_module_without_frame_limits, function_body, luajit_loads, run_luajit,
+    try_emit_module,
 };
 
 /// The emitted Lua parameter list of the definition `name` names.
@@ -33,11 +33,17 @@ fn emitted_params<'a>(lua: &'a str, name: &str) -> Vec<&'a str> {
 
 /// `leaves` float fields, `f0 .. f{leaves-1}`.
 fn float_fields(leaves: usize) -> String {
-    (0..leaves).map(|k| format!("f{k}: float")).collect::<Vec<_>>().join(", ")
+    (0..leaves)
+        .map(|k| format!("f{k}: float"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn float_inits(leaves: usize, base: &str) -> String {
-    (0..leaves).map(|k| format!("f{k}: {base} + {k}.0")).collect::<Vec<_>>().join(", ")
+    (0..leaves)
+        .map(|k| format!("f{k}: {base} + {k}.0"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 // --- gate 1: the wide-uniform witness compiles, loads and computes ---------
@@ -125,7 +131,10 @@ fn the_wide_uniform_witness_compiles_loads_and_computes() {
     // Per iteration: count 1 + sprite_position.x (the index) + sprite_receiver 1
     // + origin.x 0.5, plus 0 + 1 + 2 from the three live narrow locals.
     // (2.5 + 3.5 + 4.5) + 3 * 3 = 19.5.
-    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "wide_value_abi_uniform_run"), "19.5");
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "wide_value_abi_uniform_run"),
+        "19.5"
+    );
 }
 
 /// The 58-leaf ordinary value crosses as ONE slot, so the helper's emitted
@@ -153,8 +162,7 @@ fn the_wide_uniform_helper_takes_one_slot_per_wide_value() {
 /// new one from them.
 #[test]
 fn a_boxed_wide_value_carrying_nobox_fields_reads_and_writes_them() {
-    let types = WIDE_UNIFORM_SRC
-        .replace("fn main() { print(\"{queue_sprites(0.5, 3)}\") }", "");
+    let types = WIDE_UNIFORM_SRC.replace("fn main() { print(\"{queue_sprites(0.5, 3)}\") }", "");
     let src = format!(
         "{types}
 fn anchor_of(u: RelightU) -> P4 {{ return u.mesh_info }}
@@ -173,7 +181,10 @@ fn main() {{ print(\"{{roundtrip(0.0)}}\") }}
 "
     );
     let lua = try_emit_module(&src).expect("reading nobox fields out of a boxed wide value");
-    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "wide_value_abi_nobox_fields"), "16");
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "wide_value_abi_nobox_fields"),
+        "16"
+    );
     // The `nobox` value that IS a parameter keeps its scalar lanes.
     assert_eq!(
         emitted_params(&lua, "with_anchor").len(),
@@ -199,7 +210,11 @@ fn the_retained_old_abi_witness_still_fails_to_load() {
 /// return; `nullable` makes the parameter and return `T?`.
 fn cut_fixture(payload: usize, nullable: bool) -> String {
     let q = if nullable { "?" } else { "" };
-    let read = if nullable { "if u == null { return -1.0 }\n    return u.unwrap().f0" } else { "return u.f0" };
+    let read = if nullable {
+        "if u == null { return -1.0 }\n    return u.unwrap().f0"
+    } else {
+        "return u.f0"
+    };
     format!(
         "value V {{ {fields} }}\n\
          fn mk(x: float) -> V {{ return V {{ {inits} }} }}\n\
@@ -248,7 +263,11 @@ fn a_nullable_ordinary_value_takes_the_cut_of_its_payload() {
             function_body(&lua, "thru")
         );
     }
-    for payload in [2, WIDE_VALUE_PAYLOAD_LEAF_CUT, WIDE_VALUE_PAYLOAD_LEAF_CUT + 1] {
+    for payload in [
+        2,
+        WIDE_VALUE_PAYLOAD_LEAF_CUT,
+        WIDE_VALUE_PAYLOAD_LEAF_CUT + 1,
+    ] {
         assert_eq!(
             run_luajit(
                 &format!(
@@ -282,7 +301,10 @@ fn a_wide_nobox_value_keeps_its_scalar_lanes() {
         "a nobox value wider than the cut must keep its lanes:\n{}",
         function_body(&lua, "thru")
     );
-    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "wide_value_abi_nobox_wide"), "1");
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "wide_value_abi_nobox_wide"),
+        "1"
+    );
 }
 
 // --- gate 2: the per-signature lane budget --------------------------------
@@ -304,8 +326,14 @@ const BUDGET_NARROW: usize = 12;
 fn budget_src() -> String {
     // Whole-value bindings retain the declared transport for the budget test.
     let value = |kw: &str, name: &str, n: usize| {
-        let fields = (0..n).map(|k| format!("m{k}: float")).collect::<Vec<_>>().join(", ");
-        let inits = (0..n).map(|k| format!("m{k}: x")).collect::<Vec<_>>().join(", ");
+        let fields = (0..n)
+            .map(|k| format!("m{k}: float"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let inits = (0..n)
+            .map(|k| format!("m{k}: x"))
+            .collect::<Vec<_>>()
+            .join(", ");
         format!(
             "{kw} value {name} {{ {fields} }}\nfn mk{name}(x: float) -> {name} {{ return {name} {{ {inits} }} }}\n"
         )
@@ -351,9 +379,18 @@ fn the_budget_fixtures_are_in_the_regime_they_claim() {
             && BUDGET_NARROW <= WIDE_VALUE_PAYLOAD_LEAF_CUT,
         "a member wider than the cut would be boxed by the CUT, not the budget"
     );
-    assert!(5 * BUDGET_MEMBER + 1 > b, "five members must exceed the budget");
-    assert!(1 + 4 * BUDGET_MEMBER + 1 > b, "boxing one member must not be enough");
-    assert!(2 + 3 * BUDGET_MEMBER + 1 <= b, "boxing two members must be enough");
+    assert!(
+        5 * BUDGET_MEMBER + 1 > b,
+        "five members must exceed the budget"
+    );
+    assert!(
+        1 + 4 * BUDGET_MEMBER + 1 > b,
+        "boxing one member must not be enough"
+    );
+    assert!(
+        2 + 3 * BUDGET_MEMBER + 1 <= b,
+        "boxing two members must be enough"
+    );
     assert!(
         3 * BUDGET_MEMBER + BUDGET_NARROW * 2 + 1 > b
             && 1 + 2 * BUDGET_MEMBER + BUDGET_NARROW * 2 + 1 <= b,
@@ -418,7 +455,10 @@ fn the_budget_never_boxes_a_nobox_member() {
 /// tracks the cut instead of pinning a width the cut can outgrow.
 fn over_cut_value() -> String {
     let n = WIDE_VALUE_PAYLOAD_LEAF_CUT + 1;
-    let fields = (0..n).map(|k| format!("a{k}: float")).collect::<Vec<_>>().join(", ");
+    let fields = (0..n)
+        .map(|k| format!("a{k}: float"))
+        .collect::<Vec<_>>()
+        .join(", ");
     let inits = std::iter::once("a0: x".to_string())
         .chain((1..n).map(|k| format!("a{k}: 0.0")))
         .collect::<Vec<_>>()
@@ -555,9 +595,20 @@ fn main() {{
     );
     let lua = try_emit_module(&src).expect("emits");
     let body = function_body(&lua, "forward");
-    assert_eq!(emitted_params(&lua, "forward").len(), 1, "the forwarder must take the box:\n{body}");
-    assert_eq!(body.matches("_ct(").count(), 0, "the forwarder must reuse the argument box:\n{body}");
-    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "wide_value_abi_forward"), "3 9");
+    assert_eq!(
+        emitted_params(&lua, "forward").len(),
+        1,
+        "the forwarder must take the box:\n{body}"
+    );
+    assert_eq!(
+        body.matches("_ct(").count(),
+        0,
+        "the forwarder must reuse the argument box:\n{body}"
+    );
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "wide_value_abi_forward"),
+        "3 9"
+    );
 }
 
 /// The boxed wire is a property of the type alone, so a body whose CALLEE's
@@ -607,7 +658,11 @@ fn a_frame_limit_rejection_still_names_the_nobox_value() {
     }
     src.push_str("    return total\n}\nfn main() { print(\"{run(1.0)}\") }\n");
     let err = try_emit_module(&src).expect_err("four live 50-leaf nobox values must not emit");
-    assert!(err.message.contains("nobox"), "no nobox contributor:\n{}", err.message);
+    assert!(
+        err.message.contains("nobox"),
+        "no nobox contributor:\n{}",
+        err.message
+    );
     let lua = emit_module_without_frame_limits(&src);
     luajit_loads(&lua, "wide_value_abi_nobox_frame").expect_err("must not load");
 }

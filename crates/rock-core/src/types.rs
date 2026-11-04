@@ -73,7 +73,6 @@ pub enum TypeVarKind {
     TypeHole(u32, Option<Ustr>),
 }
 
-
 #[derive(Clone, Debug, Hash, Eq, PartialEq, Ord, PartialOrd)]
 pub enum TypeRef {
     Var(TypeVarId),
@@ -121,7 +120,6 @@ impl TypeRef {
         }
     }
 
-
     pub fn to_ref(&self) -> Self {
         self.clone()
     }
@@ -161,6 +159,4 @@ impl TypeRef {
             TypeRef::Var(_) | TypeRef::Tuple(_) | TypeRef::Error => None,
         }
     }
-
 }
-

@@ -90,7 +90,9 @@ fn declared_on(line: &str) -> Vec<String> {
         if rest[..open].contains(')') || rest[..open].contains(',') {
             continue;
         }
-        let Some(close) = rest[open..].find(')') else { break };
+        let Some(close) = rest[open..].find(')') else {
+            break;
+        };
         for p in rest[open + 1..open + close].split(',') {
             let p = p.trim();
             if !p.is_empty() {
@@ -118,8 +120,9 @@ fn definition_head(line: &str) -> Option<&str> {
     if line.starts_with(char::is_whitespace) {
         return None;
     }
-    if let Some(rest) =
-        line.strip_prefix("local function ").or_else(|| line.strip_prefix("function "))
+    if let Some(rest) = line
+        .strip_prefix("local function ")
+        .or_else(|| line.strip_prefix("function "))
     {
         return rest.split('(').next();
     }
@@ -134,7 +137,10 @@ fn undeclared_kills(lua: &str) -> Vec<(String, usize, String)> {
     let mut current: Option<String> = None;
     let mut declared: Vec<String> = Vec::new();
     let mut pending: Vec<(usize, String)> = Vec::new();
-    let flush = |current: &Option<String>, declared: &Vec<String>, pending: &mut Vec<(usize, String)>, out: &mut Vec<(String, usize, String)>| {
+    let flush = |current: &Option<String>,
+                 declared: &Vec<String>,
+                 pending: &mut Vec<(usize, String)>,
+                 out: &mut Vec<(String, usize, String)>| {
         let Some(name) = current else {
             pending.clear();
             return;

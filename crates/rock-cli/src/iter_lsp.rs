@@ -21,10 +21,10 @@
 //! - `ITER_LSP_FILE=<sub>` -- restrict the auto-picked file to one matching `<sub>`.
 
 use anyhow::Result;
-use bone_query::{offset_to_position, BoneWorkspace};
+use bone_core::prelude::Instant;
+use bone_query::{BoneWorkspace, offset_to_position};
 use lsp_types::{Position, Range};
 use std::path::{Path, PathBuf};
-use bone_core::prelude::Instant;
 
 use crate::skull_backend::{body_digit_flip, body_touch, ms};
 
@@ -38,7 +38,11 @@ struct Stat {
 
 impl Stat {
     fn new(label: &'static str) -> Self {
-        Stat { label, samples: Vec::new(), last_count: 0 }
+        Stat {
+            label,
+            samples: Vec::new(),
+            last_count: 0,
+        }
     }
 
     fn report(&self) {
@@ -50,7 +54,11 @@ impl Stat {
         let mean = self.samples.iter().sum::<f64>() / n;
         let var = self.samples.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / n;
         let stddev = var.sqrt();
-        let cv = if mean > 0.0 { stddev / mean * 100.0 } else { 0.0 };
+        let cv = if mean > 0.0 {
+            stddev / mean * 100.0
+        } else {
+            0.0
+        };
         let mut sorted = self.samples.clone();
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let pct = |p: f64| sorted[((p / 100.0) * (sorted.len() as f64 - 1.0)).round() as usize];
@@ -74,10 +82,14 @@ impl Stat {
 /// return early and under-report the O(workspace) cost).
 fn body_cursor(text: &str) -> Option<usize> {
     const KEYWORDS: &[&str] = &[
-        "let", "mut", "if", "else", "for", "while", "return", "match", "in", "co", "yield",
-        "true", "false", "null", "break", "continue", "and", "or", "not", "as", "fn", "const",
+        "let", "mut", "if", "else", "for", "while", "return", "match", "in", "co", "yield", "true",
+        "false", "null", "break", "continue", "and", "or", "not", "as", "fn", "const",
     ];
-    let fn_pos = if text.starts_with("fn ") { 0 } else { text.find("\nfn ")? + 1 };
+    let fn_pos = if text.starts_with("fn ") {
+        0
+    } else {
+        text.find("\nfn ")? + 1
+    };
     let brace = text[fn_pos..].find('{')? + fn_pos;
     let body = &text[brace + 1..];
     let is_ident = |c: char| c.is_alphanumeric() || c == '_';
@@ -88,7 +100,10 @@ fn body_cursor(text: &str) -> Option<usize> {
             return None;
         };
         let start = i + rel;
-        let end = start + body[start..].find(|c: char| !is_ident(c)).unwrap_or(body.len() - start);
+        let end = start
+            + body[start..]
+                .find(|c: char| !is_ident(c))
+                .unwrap_or(body.len() - start);
         let word = &body[start..end];
         if !KEYWORDS.contains(&word) {
             return Some(brace + 1 + start);
@@ -103,7 +118,11 @@ fn body_cursor(text: &str) -> Option<usize> {
 /// the preceding `.`), which reparses and is invisible to the plain-completion
 /// timing. One char in so the path also pays its prefix filter.
 fn member_cursor(text: &str) -> Option<usize> {
-    let fn_pos = if text.starts_with("fn ") { 0 } else { text.find("\nfn ")? + 1 };
+    let fn_pos = if text.starts_with("fn ") {
+        0
+    } else {
+        text.find("\nfn ")? + 1
+    };
     let b = text.as_bytes();
     let mut i = fn_pos;
     while i + 2 < b.len() {
@@ -158,7 +177,9 @@ pub fn iter_lsp(path: &str, iters: usize, warmup: usize) -> Result<()> {
         // Edit a real digit in `fn <fname>`'s body, alternating flipped <-> original.
         let mut chosen = None;
         for p in &candidates {
-            let Ok(t) = fs_err::read_to_string(p) else { continue };
+            let Ok(t) = fs_err::read_to_string(p) else {
+                continue;
+            };
             if t.contains(&format!("fn {fname}")) {
                 if let Some(flipped) = body_digit_flip(&t, &fname) {
                     chosen = Some((p.clone(), flipped, t));
@@ -233,7 +254,11 @@ pub fn iter_lsp(path: &str, iters: usize, warmup: usize) -> Result<()> {
     let mut s_sig = Stat::new("signature_help");
     // Realistic Ctrl-T query: a short substring (workspace_symbols matches by
     // `.contains`). "" would be the all-symbols worst case; 2 chars is typical.
-    let ws_query: String = target_name.chars().filter(|c| c.is_alphabetic()).take(2).collect();
+    let ws_query: String = target_name
+        .chars()
+        .filter(|c| c.is_alphabetic())
+        .take(2)
+        .collect();
     let mut per_edit: Vec<f64> = Vec::with_capacity(iters);
 
     for i in 0..(warmup + iters) {
@@ -355,14 +380,14 @@ pub fn iter_lsp(path: &str, iters: usize, warmup: usize) -> Result<()> {
     };
 
     eprintln!("=== Rock Iter-LSP (bone backend): {path} ===");
-    eprintln!(
-        "editing `{target_name}` | {iters} iters ({warmup} warmup) | {cursor_note}\n"
-    );
+    eprintln!("editing `{target_name}` | {iters} iters ({warmup} warmup) | {cursor_note}\n");
     eprintln!("  per-op latency [ms]:");
     s_update.report();
     s_semtok.report();
     s_inlay.report();
-    eprintln!("    (inlay_hints over the WHOLE file -- an upper bound; editors request only the viewport range)");
+    eprintln!(
+        "    (inlay_hints over the WHOLE file -- an upper bound; editors request only the viewport range)"
+    );
     s_hover.report();
     s_compl.report();
     s_member.report();
@@ -377,6 +402,8 @@ pub fn iter_lsp(path: &str, iters: usize, warmup: usize) -> Result<()> {
         "\n  per-edit auto refresh (update + semantic_tokens + inlay_hints): mean {:.3} ms",
         edit_mean
     );
-    eprintln!("  (the work the editor does on EVERY keystroke; others are on cursor-move / on-demand)");
+    eprintln!(
+        "  (the work the editor does on EVERY keystroke; others are on cursor-move / on-demand)"
+    );
     Ok(())
 }

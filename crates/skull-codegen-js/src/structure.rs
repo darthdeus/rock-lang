@@ -6,9 +6,11 @@
 //! test-fn scale.
 
 use comfy_la_arena::Idx;
-use skull_mir::cfg::dense::{bi, bx, collect_loop_body, dominates, idoms, pred_list, rpo, succ_list};
-use skull_mir::mir::{Block, MirFunc, Term};
 use rustc_hash::FxHashSet;
+use skull_mir::cfg::dense::{
+    bi, bx, collect_loop_body, dominates, idoms, pred_list, rpo, succ_list,
+};
+use skull_mir::mir::{Block, MirFunc, Term};
 use std::collections::{HashMap, HashSet};
 
 /// One natural loop: its header (back-edge target), the set of body blocks, and
@@ -43,7 +45,10 @@ impl Structure {
     /// emission never consults ipdoms or loops (the post-coroutine-transform
     /// CFG is irreducible by construction, so the relooper analyses don't apply).
     pub(crate) fn empty(n: usize) -> Structure {
-        Structure { ipdom: vec![None; n], loops: HashMap::new() }
+        Structure {
+            ipdom: vec![None; n],
+            loops: HashMap::new(),
+        }
     }
 }
 
@@ -217,7 +222,11 @@ mod tests {
         let f = mk(
             4,
             vec![
-                Term::Branch { cond: cond(), then_bb: bi(1), else_bb: bi(2) },
+                Term::Branch {
+                    cond: cond(),
+                    then_bb: bi(1),
+                    else_bb: bi(2),
+                },
                 Term::Goto(bi(3)),
                 Term::Goto(bi(3)),
                 Term::Return(vec![]),
@@ -237,8 +246,16 @@ mod tests {
             7,
             vec![
                 Term::Goto(bi(1)),
-                Term::Branch { cond: cond(), then_bb: bi(2), else_bb: bi(6) },
-                Term::Branch { cond: cond(), then_bb: bi(3), else_bb: bi(5) },
+                Term::Branch {
+                    cond: cond(),
+                    then_bb: bi(2),
+                    else_bb: bi(6),
+                },
+                Term::Branch {
+                    cond: cond(),
+                    then_bb: bi(3),
+                    else_bb: bi(5),
+                },
                 Term::Goto(bi(4)),
                 Term::Goto(bi(2)),
                 Term::Goto(bi(1)),

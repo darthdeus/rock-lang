@@ -36,17 +36,17 @@ use atomic_refcell::AtomicRefCell;
 use bone_core::modules::is_stdlib_module_file;
 use bone_core::prelude::ModuleId;
 use bone_semantic::inference::Workspace;
+use rock_core::SourceFiles;
 use rock_core::errors::CompilerError;
 use rock_core::source_code::{Dialect, FileContents};
-use rock_core::SourceFiles;
-use rock_host::stick::graph::PackageId;
 use rock_host::stick::StickConfig;
-use serde_json::{json, Value};
+use rock_host::stick::graph::PackageId;
+use serde_json::{Value, json};
 use ustr::Ustr;
 
 use crate::modules_analysis::{
-    self, apply_edits, declared_name, describe_change, load_ctx, map_offset, map_sites, short_path, sites, Ctx, Edit,
-    PopMode, Ref, RefKind, SiteKey, Sites, Target,
+    self, Ctx, Edit, PopMode, Ref, RefKind, SiteKey, Sites, Target, apply_edits, declared_name,
+    describe_change, load_ctx, map_offset, map_sites, short_path, sites,
 };
 use crate::modules_audit::Format;
 
@@ -120,7 +120,16 @@ struct Def {
     exempt_symbol: bool,
 }
 
-fn parse_defs(files: &[PkgFile]) -> Result<(Vec<Def>, Vec<Vec<modules_analysis::Ascription>>, Vec<Vec<(usize, usize)>>), String> {
+fn parse_defs(
+    files: &[PkgFile],
+) -> Result<
+    (
+        Vec<Def>,
+        Vec<Vec<modules_analysis::Ascription>>,
+        Vec<Vec<(usize, usize)>>,
+    ),
+    String,
+> {
     let mut defs = Vec::new();
     let mut ascriptions = Vec::new();
     let mut parens = Vec::new();
@@ -145,7 +154,11 @@ fn parse_defs(files: &[PkgFile]) -> Result<(Vec<Def>, Vec<Vec<modules_analysis::
                     } else {
                         DefKind::Fn
                     };
-                    let extern_body = !matches!(fd.body, skull_parser::FunctionBody::Rock(_) | skull_parser::FunctionBody::Inline(..));
+                    let extern_body = !matches!(
+                        fd.body,
+                        skull_parser::FunctionBody::Rock(_)
+                            | skull_parser::FunctionBody::Inline(..)
+                    );
                     (fd.name.name, kind, extern_body)
                 }
                 skull_parser::ItemKind::Struct(s) => (s.name.name, DefKind::Struct, false),
@@ -178,7 +191,10 @@ fn parse_defs(files: &[PkgFile]) -> Result<(Vec<Def>, Vec<Vec<modules_analysis::
                 .iter()
                 .filter_map(|(_, e)| match &e.kind {
                     skull_parser::ExprKind::Paren(inner)
-                        if matches!(ast.exprs[*inner].kind, skull_parser::ExprKind::TypeAscription(..)) =>
+                        if matches!(
+                            ast.exprs[*inner].kind,
+                            skull_parser::ExprKind::TypeAscription(..)
+                        ) =>
                     {
                         Some(ast.exprs[*inner].span.offset_range)
                     }
@@ -199,7 +215,9 @@ struct Checked {
     errors: Vec<CompilerError>,
 }
 
-fn check_sources(sources: &SourceFiles) -> std::result::Result<Checked, (String, Vec<CompilerError>)> {
+fn check_sources(
+    sources: &SourceFiles,
+) -> std::result::Result<Checked, (String, Vec<CompilerError>)> {
     let modules_analysis::Checked { ws, errors, .. } =
         modules_analysis::check(sources).map_err(|f| (f.stage.to_string(), f.errors))?;
     let refs = modules_analysis::references(&ws);
@@ -292,19 +310,30 @@ pub fn run(package: &Path, consumers: &[PathBuf], mode: Mode, format: Format) ->
     }
     let code = match &applied {
         Some(Err(_)) => EXIT_ANALYSIS_FAILED,
-        Some(Ok(v)) if v.iter().any(|v| !v.changed.is_empty() || !v.errors.is_empty()) => EXIT_NOT_CLEAN,
+        Some(Ok(v))
+            if v.iter()
+                .any(|v| !v.changed.is_empty() || !v.errors.is_empty()) =>
+        {
+            EXIT_NOT_CLEAN
+        }
         _ => code,
     };
     match format {
         Format::Pretty => print!("{}", render_pretty(&outcome, mode, applied.as_ref())),
-        Format::Json => println!("{}", serde_json::to_string_pretty(&render_json(&outcome, mode, applied.as_ref()))?),
+        Format::Json => println!(
+            "{}",
+            serde_json::to_string_pretty(&render_json(&outcome, mode, applied.as_ref()))?
+        ),
     }
     std::io::stdout().flush()?;
     Ok(code)
 }
 
 fn plan(package: &Path, consumer_dirs: &[PathBuf]) -> Outcome {
-    let failed = |stage: &str, message: String| Outcome::Failed { stage: stage.to_string(), message };
+    let failed = |stage: &str, message: String| Outcome::Failed {
+        stage: stage.to_string(),
+        message,
+    };
     let p_root = match package.canonicalize() {
         Ok(p) => p,
         Err(e) => return failed("package", format!("`{}`: {e}", package.display())),
@@ -319,8 +348,26 @@ fn plan(package: &Path, consumer_dirs: &[PathBuf]) -> Outcome {
     }
     let pbase = match check_sources(&pctx.sources) {
         Ok(b) if b.errors.is_empty() => b,
-        Ok(b) => return failed("baseline", format!("{} does not check before migration:\n{}", pctx.name(), render(&pctx.sources, &b.errors))),
-        Err((stage, errs)) => return failed("baseline", format!("{} ({stage}) does not check before migration:\n{}", pctx.name(), render(&pctx.sources, &errs))),
+        Ok(b) => {
+            return failed(
+                "baseline",
+                format!(
+                    "{} does not check before migration:\n{}",
+                    pctx.name(),
+                    render(&pctx.sources, &b.errors)
+                ),
+            );
+        }
+        Err((stage, errs)) => {
+            return failed(
+                "baseline",
+                format!(
+                    "{} ({stage}) does not check before migration:\n{}",
+                    pctx.name(),
+                    render(&pctx.sources, &errs)
+                ),
+            );
+        }
     };
     let mut ctxs = vec![pctx];
     let mut baselines = vec![pbase];
@@ -336,8 +383,16 @@ fn plan(package: &Path, consumer_dirs: &[PathBuf]) -> Outcome {
                 baselines.push(b);
                 continue;
             }
-            Ok(b) => tests_unknown.push(format!("{} ({} error(s))", with_tests.name(), b.errors.len())),
-            Err((stage, errs)) => tests_unknown.push(format!("{} ({stage}, {} error(s))", with_tests.name(), errs.len())),
+            Ok(b) => tests_unknown.push(format!(
+                "{} ({} error(s))",
+                with_tests.name(),
+                b.errors.len()
+            )),
+            Err((stage, errs)) => tests_unknown.push(format!(
+                "{} ({stage}, {} error(s))",
+                with_tests.name(),
+                errs.len()
+            )),
         }
         let production = match load_ctx(dir, &p_root, PopMode::Production) {
             Ok(c) => c,
@@ -348,8 +403,26 @@ fn plan(package: &Path, consumer_dirs: &[PathBuf]) -> Outcome {
                 ctxs.push(production);
                 baselines.push(b);
             }
-            Ok(b) => return failed("baseline", format!("{} does not check before migration:\n{}", production.name(), render(&production.sources, &b.errors))),
-            Err((stage, errs)) => return failed("baseline", format!("{} ({stage}) does not check before migration:\n{}", production.name(), render(&production.sources, &errs))),
+            Ok(b) => {
+                return failed(
+                    "baseline",
+                    format!(
+                        "{} does not check before migration:\n{}",
+                        production.name(),
+                        render(&production.sources, &b.errors)
+                    ),
+                );
+            }
+            Err((stage, errs)) => {
+                return failed(
+                    "baseline",
+                    format!(
+                        "{} ({stage}) does not check before migration:\n{}",
+                        production.name(),
+                        render(&production.sources, &errs)
+                    ),
+                );
+            }
         }
     }
 
@@ -361,19 +434,37 @@ fn plan(package: &Path, consumer_dirs: &[PathBuf]) -> Outcome {
             continue;
         }
         let FileContents::Filesystem { path, .. } = &f.file else {
-            return failed("package", format!("package file `{}` is not on disk", f.file.to_id_path()));
+            return failed(
+                "package",
+                format!("package file `{}` is not on disk", f.file.to_id_path()),
+            );
         };
-        files.push(PkgFile { id: Ustr::from(f.file.to_id_path().as_str()), path: PathBuf::from(path), text: f.contents.clone() });
+        files.push(PkgFile {
+            id: Ustr::from(f.file.to_id_path().as_str()),
+            path: PathBuf::from(path),
+            text: f.contents.clone(),
+        });
     }
     files.sort_by(|a, b| a.path.cmp(&b.path));
-    let file_index: HashMap<Ustr, usize> = files.iter().enumerate().map(|(i, f)| (f.id, i)).collect();
+    let file_index: HashMap<Ustr, usize> =
+        files.iter().enumerate().map(|(i, f)| (f.id, i)).collect();
     // A consumer loads the same files; its module ids must agree.
     for c in &ctxs[1..] {
-        let theirs: BTreeSet<Ustr> =
-            c.file_pkg.iter().filter(|(_, id)| **id == c.p_id).map(|(f, _)| *f).collect();
+        let theirs: BTreeSet<Ustr> = c
+            .file_pkg
+            .iter()
+            .filter(|(_, id)| **id == c.p_id)
+            .map(|(f, _)| *f)
+            .collect();
         for f in &theirs {
             if !file_index.contains_key(f) {
-                return failed("consumer", format!("consumer `{}` loads `{f}` as part of the package, which its own unit does not", c.name()));
+                return failed(
+                    "consumer",
+                    format!(
+                        "consumer `{}` loads `{f}` as part of the package, which its own unit does not",
+                        c.name()
+                    ),
+                );
             }
         }
     }
@@ -383,11 +474,13 @@ fn plan(package: &Path, consumer_dirs: &[PathBuf]) -> Outcome {
         Err(e) => return failed("parse", e),
     };
 
-
     let mut plan = Plan {
         package: p_node.manifest_name.clone(),
         package_root: p_root.clone(),
-        consumers: ctxs[1..].iter().map(|c| (c.name().to_string(), c.root.clone(), c.mode)).collect(),
+        consumers: ctxs[1..]
+            .iter()
+            .map(|c| (c.name().to_string(), c.root.clone(), c.mode))
+            .collect(),
         test_uses: BTreeMap::new(),
         files,
         defs,
@@ -416,10 +509,17 @@ fn plan(package: &Path, consumer_dirs: &[PathBuf]) -> Outcome {
     // Definitions by file, for mapping a HIR definition back to its item.
     let mut defs_by_file: HashMap<Ustr, Vec<(usize, usize, usize)>> = HashMap::new();
     for (i, d) in plan.defs.iter().enumerate() {
-        defs_by_file.entry(plan.files[d.file].id).or_default().push((d.span.0, d.span.1, i));
+        defs_by_file
+            .entry(plan.files[d.file].id)
+            .or_default()
+            .push((d.span.0, d.span.1, i));
     }
     let def_at = |file: Ustr, offset: usize| -> Option<usize> {
-        defs_by_file.get(&file)?.iter().find(|(a, b, _)| *a <= offset && offset < *b).map(|(_, _, i)| *i)
+        defs_by_file
+            .get(&file)?
+            .iter()
+            .find(|(a, b, _)| *a <= offset && offset < *b)
+            .map(|(_, _, i)| *i)
     };
 
     // Imports: what the package's bodies reference in other packages.
@@ -430,7 +530,9 @@ fn plan(package: &Path, consumer_dirs: &[PathBuf]) -> Outcome {
     let mut legacy_referenced: BTreeSet<u32> = BTreeSet::new();
     for r in &base.refs {
         let from_file = base.ws.module(r.from).file;
-        let Some(&fi) = file_index.get(&from_file) else { continue };
+        let Some(&fi) = file_index.get(&from_file) else {
+            continue;
+        };
         for owner in owners(&base.ws, &r.target, &pctx.file_pkg) {
             if owner != pctx.p_id {
                 *needs.entry(owner).or_default().entry(fi).or_default() += 1;
@@ -456,12 +558,19 @@ fn plan(package: &Path, consumer_dirs: &[PathBuf]) -> Outcome {
                     fragments.values().sum::<usize>(),
                 ));
             }
-            Some(e) => plan.imports.push(ImportNeed { alias: e.alias.clone(), package: node.manifest_name.clone(), fragments }),
+            Some(e) => plan.imports.push(ImportNeed {
+                alias: e.alias.clone(),
+                package: node.manifest_name.clone(),
+                fragments,
+            }),
         }
     }
     for e in &p_node.dependencies {
         let target = pctx.graph.package(e.target);
-        if target.dialect == Dialect::Legacy && !e.allow_legacy && !legacy_referenced.contains(&e.target.0) {
+        if target.dialect == Dialect::Legacy
+            && !e.allow_legacy
+            && !legacy_referenced.contains(&e.target.0)
+        {
             owner_blockers.insert(format!(
                 "dependency `{}` is legacy: a v1 package needs `allow_legacy = true` on that edge (spec 3.2); the migrator does not opt in on the author's behalf",
                 e.declared_key
@@ -474,12 +583,21 @@ fn plan(package: &Path, consumer_dirs: &[PathBuf]) -> Outcome {
     for (c, b) in ctxs[1..].iter().zip(&baselines[1..]) {
         for r in &b.refs {
             let from_file = b.ws.module(r.from).file;
-            if c.file_pkg.get(&from_file) == Some(&c.p_id) || is_stdlib_module_file(from_file.as_str()) {
+            if c.file_pkg.get(&from_file) == Some(&c.p_id)
+                || is_stdlib_module_file(from_file.as_str())
+            {
                 if c.file_pkg.get(&from_file) == Some(&c.p_id) {
                     // The package's own bodies inside a consumer unit: a legacy
                     // body may resolve against the consumer (spec 3.2).
                     for owner in owners(&b.ws, &r.target, &c.file_pkg) {
-                        if owner != c.p_id && !c.graph.package(PackageId(c.p_id)).dependencies.iter().any(|e| e.target.0 == owner) {
+                        if owner != c.p_id
+                            && !c
+                                .graph
+                                .package(PackageId(c.p_id))
+                                .dependencies
+                                .iter()
+                                .any(|e| e.target.0 == owner)
+                        {
                             plan.blockers.push(format!(
                                 "inside `{}`, the package's `{}` references `{}`, which the package does not declare (a back-reference or an undeclared peer)",
                                 c.name(),
@@ -501,7 +619,8 @@ fn plan(package: &Path, consumer_dirs: &[PathBuf]) -> Outcome {
                     .get(&from_file)
                     .map(|package_id| c.graph.package(PackageId(*package_id)).root.as_path())
                     .unwrap_or(c.root.as_path());
-                let test_only = match SourceFiles::is_test_only_path(from_file.as_str(), from_root) {
+                let test_only = match SourceFiles::is_test_only_path(from_file.as_str(), from_root)
+                {
                     Ok(test_only) => test_only,
                     Err(error) => {
                         plan.blockers.push(format!(
@@ -513,14 +632,27 @@ fn plan(package: &Path, consumer_dirs: &[PathBuf]) -> Outcome {
                     }
                 };
                 let u = if test_only {
-                    plan.test_uses.entry(di).or_default().entry(c.name().to_string()).or_default()
+                    plan.test_uses
+                        .entry(di)
+                        .or_default()
+                        .entry(c.name().to_string())
+                        .or_default()
                 } else {
-                    plan.exports.entry(di).or_default().consumers.entry(c.name().to_string()).or_default()
+                    plan.exports
+                        .entry(di)
+                        .or_default()
+                        .consumers
+                        .entry(c.name().to_string())
+                        .or_default()
                 };
                 *u.by_kind.entry(r.kind).or_default() += 1;
                 if u.example.is_none() {
                     if let Some(span) = r.span {
-                        u.example = Some(format!("{}:{}", short_path(&span.file), span.line_range.0 + 1));
+                        u.example = Some(format!(
+                            "{}:{}",
+                            short_path(&span.file),
+                            span.line_range.0 + 1
+                        ));
                     }
                 }
             }
@@ -529,7 +661,8 @@ fn plan(package: &Path, consumer_dirs: &[PathBuf]) -> Outcome {
     // A definition only a consumer's tests reach is exported like any other
     // use (author decision, 2026-09-18: spec 16's relocate-the-test advice is
     // not worth a library API split here); the report lists it as test-only.
-    plan.test_uses.retain(|di, _| !plan.exports.contains_key(di));
+    plan.test_uses
+        .retain(|di, _| !plan.exports.contains_key(di));
     for (&di, uses) in &plan.test_uses {
         let reasons = plan.exports.entry(di).or_default();
         for (c, u) in uses {
@@ -567,7 +700,10 @@ fn plan(package: &Path, consumer_dirs: &[PathBuf]) -> Outcome {
         }
     }
     if let Err(message) = raw_abi_scan(&mut plan, &ctxs, &baselines) {
-        return Outcome::Failed { stage: "raw-ABI census".to_string(), message };
+        return Outcome::Failed {
+            stage: "raw-ABI census".to_string(),
+            message,
+        };
     }
 
     if !plan.blockers.is_empty() {
@@ -581,12 +717,19 @@ fn plan(package: &Path, consumer_dirs: &[PathBuf]) -> Outcome {
 /// Candidate rounds: grow the exports by the closure and add call repairs
 /// until the candidate checks clean in every unit with every site resolving
 /// as the baseline did, or record why it cannot.
-fn verify_candidate(plan: &mut Plan, ctxs: &[Ctx], baselines: &[Checked], file_index: &HashMap<Ustr, usize>) {
+fn verify_candidate(
+    plan: &mut Plan,
+    ctxs: &[Ctx],
+    baselines: &[Checked],
+    file_index: &HashMap<Ustr, usize>,
+) {
     // A site inside a rewritten ascription moves by an amount that depends on
     // whether it is the node or its operand, so it is compared by the
     // re-parse (`verify_ascriptions`) and the clean check instead.
     let inside_ascription = |k: &SiteKey| {
-        plan.ascriptions.iter().any(|(fi, a, _)| plan.files[*fi].id == k.file && a.node.0 <= k.start && k.end <= a.node.1)
+        plan.ascriptions.iter().any(|(fi, a, _)| {
+            plan.files[*fi].id == k.file && a.node.0 <= k.start && k.end <= a.node.1
+        })
     };
     let base_sites: Vec<Sites> = ctxs
         .iter()
@@ -625,8 +768,10 @@ fn verify_candidate(plan: &mut Plan, ctxs: &[Ctx], baselines: &[Checked], file_i
             plan.blockers.push(e);
             break;
         }
-        let edits_by_id: HashMap<Ustr, Vec<Edit>> =
-            edits.iter().map(|(fi, e)| (plan.files[*fi].id, e.clone())).collect();
+        let edits_by_id: HashMap<Ustr, Vec<Edit>> = edits
+            .iter()
+            .map(|(fi, e)| (plan.files[*fi].id, e.clone()))
+            .collect();
 
         let mut progressed = false;
         let mut verification = Vec::new();
@@ -659,12 +804,20 @@ fn verify_candidate(plan: &mut Plan, ctxs: &[Ctx], baselines: &[Checked], file_i
                         continue;
                     };
                     let reasons = plan.exports.entry(di).or_default();
-                    if reasons.closure.insert((declared_name(req.exporter.as_str()).to_string(), req.reason.to_string())) {
+                    if reasons.closure.insert((
+                        declared_name(req.exporter.as_str()).to_string(),
+                        req.reason.to_string(),
+                    )) {
                         progressed = true;
                     }
                 }
             }
-            let cand = sites(&checked.ws, &checked.refs, &candidate_file_pkg(c, &plan), &HashMap::new());
+            let cand = sites(
+                &checked.ws,
+                &checked.refs,
+                &candidate_file_pkg(c, &plan),
+                &HashMap::new(),
+            );
             let mapped = map_sites(&base_sites[ci], &edits_by_id);
             let mut changed = Vec::new();
             for (key, before) in &mapped {
@@ -673,7 +826,12 @@ fn verify_candidate(plan: &mut Plan, ctxs: &[Ctx], baselines: &[Checked], file_i
                     continue;
                 }
                 match repair_for(&plan, &file_index, &baselines[ci], c, key, &edits_by_id) {
-                    Some(r) if !plan.repairs.iter().any(|x| x.file == r.file && x.offset == r.offset) => {
+                    Some(r)
+                        if !plan
+                            .repairs
+                            .iter()
+                            .any(|x| x.file == r.file && x.offset == r.offset) =>
+                    {
                         plan.repairs.push(r);
                         progressed = true;
                     }
@@ -685,7 +843,11 @@ fn verify_candidate(plan: &mut Plan, ctxs: &[Ctx], baselines: &[Checked], file_i
                 ctx: c.name().to_string(),
                 compared: mapped.len(),
                 changed,
-                errors: checked.errors.iter().map(|e| render_one(&sources, e)).collect(),
+                errors: checked
+                    .errors
+                    .iter()
+                    .map(|e| render_one(&sources, e))
+                    .collect(),
             });
         }
         plan.verification = verification;
@@ -732,8 +894,14 @@ fn owners(ws: &Workspace, t: &Target, file_pkg: &HashMap<Ustr, u32>) -> BTreeSet
 
 /// The definition spans (file, start offset) a target names inside package
 /// `p_id`.
-fn p_def_spans(ws: &Workspace, t: &Target, file_pkg: &HashMap<Ustr, u32>, p_id: u32) -> Vec<(Ustr, usize)> {
-    let in_p = |m: ModuleId| m != ModuleId::builtin() && file_pkg.get(&ws.module(m).file) == Some(&p_id);
+fn p_def_spans(
+    ws: &Workspace,
+    t: &Target,
+    file_pkg: &HashMap<Ustr, u32>,
+    p_id: u32,
+) -> Vec<(Ustr, usize)> {
+    let in_p =
+        |m: ModuleId| m != ModuleId::builtin() && file_pkg.get(&ws.module(m).file) == Some(&p_id);
     let mut out = Vec::new();
     match t {
         Target::Fn(mid, fid) => {
@@ -810,9 +978,17 @@ fn candidate_edits(plan: &Plan) -> std::result::Result<HashMap<usize, Vec<Edit>>
         }
         let at = d.span.0;
         if !text[at..].starts_with(|c: char| c == '@' || c.is_ascii_alphabetic()) {
-            return Err(format!("{}:{}: unexpected item start for `{}`", short_path(&plan.files[d.file].id), d.line, d.name));
+            return Err(format!(
+                "{}:{}: unexpected item start for `{}`",
+                short_path(&plan.files[d.file].id),
+                d.line,
+                d.name
+            ));
         }
-        edits.entry(d.file).or_default().push(Edit::new((at, at), "pub "));
+        edits
+            .entry(d.file)
+            .or_default()
+            .push(Edit::new((at, at), "pub "));
     }
     for (fi, a, parenthesized) in &plan.ascriptions {
         let text = &plan.files[*fi].text;
@@ -831,11 +1007,18 @@ fn candidate_edits(plan: &Plan) -> std::result::Result<HashMap<usize, Vec<Edit>>
         }
         e.push(Edit::new((a.operand.1, a.ty.0), " : "));
         if !parenthesized {
-            e.push(Edit { range: (a.node.1, a.node.1), text: ")".to_string(), closes: true });
+            e.push(Edit {
+                range: (a.node.1, a.node.1),
+                text: ")".to_string(),
+                closes: true,
+            });
         }
     }
     for r in &plan.repairs {
-        edits.entry(r.file).or_default().push(Edit::new((r.offset, r.offset), format!("{}::", r.qualifier)));
+        edits.entry(r.file).or_default().push(Edit::new(
+            (r.offset, r.offset),
+            format!("{}::", r.qualifier),
+        ));
     }
     for list in edits.values_mut() {
         list.sort_by_key(|e| e.range);
@@ -863,7 +1046,10 @@ fn imports_text(plan: &Plan) -> Option<String> {
 
 /// The re-parsed candidate must hold exactly the rewritten ascriptions, each
 /// with its original operand and type text.
-fn verify_ascriptions(plan: &Plan, texts: &HashMap<usize, String>) -> std::result::Result<(), String> {
+fn verify_ascriptions(
+    plan: &Plan,
+    texts: &HashMap<usize, String>,
+) -> std::result::Result<(), String> {
     for (fi, f) in plan.files.iter().enumerate() {
         let want: Vec<(&str, &str)> = plan
             .ascriptions
@@ -872,10 +1058,20 @@ fn verify_ascriptions(plan: &Plan, texts: &HashMap<usize, String>) -> std::resul
             .map(|(_, a, _)| (&f.text[a.operand.0..a.operand.1], &f.text[a.ty.0..a.ty.1]))
             .collect();
         let text = &texts[&fi];
-        let ast = skull_parser::parse_module_with_dialect(text, f.id, Dialect::V1)
-            .map_err(|e| format!("{}: the candidate does not parse as v1: {}", short_path(&f.id), e.message))?;
+        let ast =
+            skull_parser::parse_module_with_dialect(text, f.id, Dialect::V1).map_err(|e| {
+                format!(
+                    "{}: the candidate does not parse as v1: {}",
+                    short_path(&f.id),
+                    e.message
+                )
+            })?;
         if let Some(e) = ast.recovery_errors.first() {
-            return Err(format!("{}: the candidate does not parse as v1: {}", short_path(&f.id), e.message));
+            return Err(format!(
+                "{}: the candidate does not parse as v1: {}",
+                short_path(&f.id),
+                e.message
+            ));
         }
         let mut got: Vec<(usize, &str, &str)> = ast
             .exprs
@@ -927,8 +1123,16 @@ fn candidate_sources(
         files.push(Arc::new(AtomicRefCell::new(f)));
     }
     if let Some(src) = imports {
-        let path = plan.package_root.join(IMPORTS_FILE).to_string_lossy().into_owned();
-        let mut f = rock_core::source_file_from_path_and_contents(path, IMPORTS_FILE.to_string(), src.to_string());
+        let path = plan
+            .package_root
+            .join(IMPORTS_FILE)
+            .to_string_lossy()
+            .into_owned();
+        let mut f = rock_core::source_file_from_path_and_contents(
+            path,
+            IMPORTS_FILE.to_string(),
+            src.to_string(),
+        );
         f.package = tag;
         f.dialect = Dialect::V1;
         files.push(Arc::new(AtomicRefCell::new(f)));
@@ -941,7 +1145,15 @@ fn candidate_sources(
 
 fn candidate_file_pkg(c: &Ctx, plan: &Plan) -> HashMap<Ustr, u32> {
     let mut m = c.file_pkg.clone();
-    m.insert(Ustr::from(plan.package_root.join(IMPORTS_FILE).to_string_lossy().as_ref()), c.p_id);
+    m.insert(
+        Ustr::from(
+            plan.package_root
+                .join(IMPORTS_FILE)
+                .to_string_lossy()
+                .as_ref(),
+        ),
+        c.p_id,
+    );
     m
 }
 
@@ -968,21 +1180,28 @@ fn repair_for(
         r.kind == RefKind::Call
             && base.ws.module(r.from).file == key.file
             && r.span.is_some_and(|s| {
-                map_offset(&file_edits, s.offset_range.0) == key.start && map_offset(&file_edits, s.offset_range.1) == key.end
+                map_offset(&file_edits, s.offset_range.0) == key.start
+                    && map_offset(&file_edits, s.offset_range.1) == key.end
             })
     })?;
     let site = r.callee?;
     if site.method || site.name.starts_with("__op_") {
         return None;
     }
-    let Target::Fn(mid, _) = r.target else { return None };
+    let Target::Fn(mid, _) = r.target else {
+        return None;
+    };
     let owner_file = base.ws.module(mid).file;
     let qualifier = if is_stdlib_module_file(owner_file.as_str()) {
         "std".to_string()
     } else {
         let owner = *c.file_pkg.get(&owner_file)?;
         let node = c.graph.package(PackageId(owner));
-        plan.imports.iter().find(|i| i.package == node.manifest_name)?.alias.clone()
+        plan.imports
+            .iter()
+            .find(|i| i.package == node.manifest_name)?
+            .alias
+            .clone()
     };
     let text = &plan.files[fi].text;
     let (a, b) = site.name_span.offset_range;
@@ -998,7 +1217,11 @@ fn repair_for(
         reason: format!(
             "in v1 another overload of `{}` would win over the one this call selected from `{}` (spec 8.3); qualifying keeps the target",
             site.name,
-            if qualifier == "std" { "std".to_string() } else { qualifier }
+            if qualifier == "std" {
+                "std".to_string()
+            } else {
+                qualifier
+            }
         ),
     })
 }
@@ -1007,14 +1230,24 @@ fn repair_for(
 /// changes, in the package and its consumers. The census distinguishes exact
 /// Lua references from conservative reflection candidates and reports unknown
 /// dynamic names. Paused JavaScript bodies are counted, not gated.
-fn raw_abi_scan(plan: &mut Plan, ctxs: &[Ctx], baselines: &[Checked]) -> std::result::Result<(), String> {
+fn raw_abi_scan(
+    plan: &mut Plan,
+    ctxs: &[Ctx],
+    baselines: &[Checked],
+) -> std::result::Result<(), String> {
     let mut moved_globals: BTreeMap<&str, BTreeSet<DefKind>> = BTreeMap::new();
     for d in &plan.defs {
         if !d.exempt_symbol
             && !d.receiver_method
-            && matches!(d.kind, DefKind::Fn | DefKind::Global | DefKind::Struct | DefKind::Enum | DefKind::Newtype)
+            && matches!(
+                d.kind,
+                DefKind::Fn | DefKind::Global | DefKind::Struct | DefKind::Enum | DefKind::Newtype
+            )
         {
-            moved_globals.entry(d.name.as_str()).or_default().insert(d.kind);
+            moved_globals
+                .entry(d.name.as_str())
+                .or_default()
+                .insert(d.kind);
         }
     }
     // Inline Lua's bare globals can address package globals and constructors,
@@ -1038,21 +1271,36 @@ fn raw_abi_scan(plan: &mut Plan, ctxs: &[Ctx], baselines: &[Checked]) -> std::re
                 continue;
             }
             for (fid, f) in m.functions.iter() {
-                let Some((backend, src)) = f.inline_body else { continue };
+                let Some((backend, src)) = f.inline_body else {
+                    continue;
+                };
                 if backend == bone_core::hir::FnBackend::Js {
                     js_sites.insert((m.file, f.span.offset_range));
                     continue;
                 }
-                let fref = skull_mir::mir::FuncRef { module: m.id, func: fid };
-                let params: Vec<Ustr> = skull_mir::lower::BackendFnAbiPlan::for_boundary_declaration(ws, &scx, fref)
-                    .lua_param_names(ws)
-                    .map(|names| names.into_iter().map(|s| Ustr::from(&s)).collect())
-                    .unwrap_or_else(|| f.param_decls.iter().map(|p| p.name).collect());
+                let fref = skull_mir::mir::FuncRef {
+                    module: m.id,
+                    func: fid,
+                };
+                let params: Vec<Ustr> =
+                    skull_mir::lower::BackendFnAbiPlan::for_boundary_declaration(ws, &scx, fref)
+                        .lua_param_names(ws)
+                        .map(|names| names.into_iter().map(|s| Ustr::from(&s)).collect())
+                        .unwrap_or_else(|| f.param_decls.iter().map(|p| p.name).collect());
                 if !seen.insert((m.file, f.span.offset_range, params.clone(), src)) {
                     continue;
                 }
-                sites.push(format!("{}:{} `{}`", short_path(&m.file), f.span.line_range.0 + 1, f.name));
-                bodies.push(modules_analysis::LuaBody { params, returns_value: f.return_ty.is_some(), src });
+                sites.push(format!(
+                    "{}:{} `{}`",
+                    short_path(&m.file),
+                    f.span.line_range.0 + 1,
+                    f.name
+                ));
+                bodies.push(modules_analysis::LuaBody {
+                    params,
+                    returns_value: f.return_ty.is_some(),
+                    src,
+                });
             }
         }
     }
@@ -1063,12 +1311,20 @@ fn raw_abi_scan(plan: &mut Plan, ctxs: &[Ctx], baselines: &[Checked]) -> std::re
         ));
     }
     let refs = modules_analysis::lua_references(&bodies)?;
-    let listed = |names: &BTreeSet<String>| names.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", ");
+    let listed = |names: &BTreeSet<String>| {
+        names
+            .iter()
+            .map(|n| format!("`{n}`"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
     // `@nomangle` is accepted only on a fn (bone-core `validate_one`); a
     // global or a type keeps its hashed symbol and must be reached through Rock.
     let tail = |names: &BTreeSet<String>| -> String {
-        let (fns, others): (BTreeSet<String>, BTreeSet<String>) =
-            names.iter().cloned().partition(|n| moved_globals[n.as_str()].iter().all(|k| *k == DefKind::Fn));
+        let (fns, others): (BTreeSet<String>, BTreeSet<String>) = names
+            .iter()
+            .cloned()
+            .partition(|n| moved_globals[n.as_str()].iter().all(|k| *k == DefKind::Fn));
         let kinds: BTreeSet<&str> = others
             .iter()
             .flat_map(|n| moved_globals[n.as_str()].iter())
@@ -1078,17 +1334,30 @@ fn raw_abi_scan(plan: &mut Plan, ctxs: &[Ctx], baselines: &[Checked]) -> std::re
         let mixed = !fns.is_empty() && !others.is_empty();
         let mut remedies = Vec::new();
         if !fns.is_empty() {
-            let who = if mixed { format!("for {}, ", listed(&fns)) } else { String::new() };
-            remedies.push(format!("{who}mark the fn `@nomangle` or reach it through Rock before migrating"));
+            let who = if mixed {
+                format!("for {}, ", listed(&fns))
+            } else {
+                String::new()
+            };
+            remedies.push(format!(
+                "{who}mark the fn `@nomangle` or reach it through Rock before migrating"
+            ));
         }
         if !others.is_empty() {
-            let who = if mixed { format!("for {}, ", listed(&others)) } else { String::new() };
+            let who = if mixed {
+                format!("for {}, ", listed(&others))
+            } else {
+                String::new()
+            };
             remedies.push(format!(
                 "{who}reach it through Rock before migrating (an accessor fn, or a `@nomangle` fn wrapper; `@nomangle` is not accepted on a {})",
                 kinds.into_iter().collect::<Vec<_>>().join(" or ")
             ));
         }
-        format!("whose emitted symbol changes when the package becomes v1; {}", remedies.join("; "))
+        format!(
+            "whose emitted symbol changes when the package becomes v1; {}",
+            remedies.join("; ")
+        )
     };
     for (site, r) in sites.iter().zip(refs) {
         if let Some(error) = r.error {
@@ -1113,7 +1382,11 @@ fn raw_abi_scan(plan: &mut Plan, ctxs: &[Ctx], baselines: &[Checked]) -> std::re
         }
         let globals = moved_names(&mut r.globals.iter().map(String::as_str));
         if !globals.is_empty() {
-            plan.blockers.push(format!("raw ABI review [exact]: the inline body at {site} names {}, {}", listed(&globals), tail(&globals)));
+            plan.blockers.push(format!(
+                "raw ABI review [exact]: the inline body at {site} names {}, {}",
+                listed(&globals),
+                tail(&globals)
+            ));
         }
         let via_g = moved_names(&mut r.via_g.iter().map(String::as_str));
         if !via_g.is_empty() {
@@ -1124,11 +1397,17 @@ fn raw_abi_scan(plan: &mut Plan, ctxs: &[Ctx], baselines: &[Checked]) -> std::re
             ));
         }
     }
-    let moved_types: BTreeSet<&str> =
-        moved_globals.iter().filter(|(_, kinds)| kinds.iter().any(|k| k.is_type())).map(|(n, _)| *n).collect();
+    let moved_types: BTreeSet<&str> = moved_globals
+        .iter()
+        .filter(|(_, kinds)| kinds.iter().any(|k| k.is_type()))
+        .map(|(n, _)| *n)
+        .collect();
     // A C type any cdef declares is the hand-written ABI's own name, in whichever
     // body the `ffi.new` or `sizeof` that spells it sits.
-    let scanned: Vec<LuaTypeStrings> = bodies.iter().map(|body| lua_type_strings(body.src.as_str())).collect();
+    let scanned: Vec<LuaTypeStrings> = bodies
+        .iter()
+        .map(|body| lua_type_strings(body.src.as_str()))
+        .collect();
     let cdef_declared: BTreeSet<&String> = scanned.iter().flat_map(|s| &s.declared).collect();
     for (site, found) in sites.iter().zip(&scanned) {
         let named: BTreeSet<String> = found
@@ -1159,7 +1438,9 @@ struct LuaTypeStrings {
 /// The type names an inline Lua body spells inside string literals. Comments
 /// are skipped.
 fn lua_type_strings(src: &str) -> LuaTypeStrings {
-    const FFI_TYPE_FNS: &[&str] = &["new", "sizeof", "typeof", "cast", "istype", "offsetof", "metatype"];
+    const FFI_TYPE_FNS: &[&str] = &[
+        "new", "sizeof", "typeof", "cast", "istype", "offsetof", "metatype",
+    ];
     let b = src.as_bytes();
     let mut c_texts: Vec<&str> = Vec::new();
     let mut tags = BTreeSet::new();
@@ -1215,9 +1496,14 @@ fn lua_type_strings(src: &str) -> LuaTypeStrings {
             continue;
         };
         let before = src[..at].trim_end();
-        let before = before.strip_suffix('(').map(str::trim_end).unwrap_or(before);
+        let before = before
+            .strip_suffix('(')
+            .map(str::trim_end)
+            .unwrap_or(before);
         let is_c = before.ends_with("ffi.cdef")
-            || FFI_TYPE_FNS.iter().any(|f| before.ends_with(&format!("ffi.{f}")));
+            || FFI_TYPE_FNS
+                .iter()
+                .any(|f| before.ends_with(&format!("ffi.{f}")));
         if is_c {
             c_texts.push(text);
         } else if !text.is_empty()
@@ -1281,7 +1567,11 @@ fn manifest_with_v1(text: &str) -> std::result::Result<String, String> {
     let header = |l: &str| l.trim_start().starts_with('[');
     let is = |l: &str, name: &str| l.trim() == name;
     let out = if let Some(li) = lines.iter().position(|l| is(l, "[language]")) {
-        let end = lines[li + 1..].iter().position(|l| header(l)).map(|p| li + 1 + p).unwrap_or(lines.len());
+        let end = lines[li + 1..]
+            .iter()
+            .position(|l| header(l))
+            .map(|p| li + 1 + p)
+            .unwrap_or(lines.len());
         let mut out: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
         match (li + 1..end).find(|&i| lines[i].trim_start().starts_with("modules")) {
             Some(i) => out[i] = "modules = \"v1\"\n".to_string(),
@@ -1289,8 +1579,14 @@ fn manifest_with_v1(text: &str) -> std::result::Result<String, String> {
         }
         out.concat()
     } else {
-        let pkg = lines.iter().position(|l| is(l, "[package]")).ok_or("no [package] table")?;
-        let next = lines[pkg + 1..].iter().position(|l| header(l)).map(|p| pkg + 1 + p);
+        let pkg = lines
+            .iter()
+            .position(|l| is(l, "[package]"))
+            .ok_or("no [package] table")?;
+        let next = lines[pkg + 1..]
+            .iter()
+            .position(|l| header(l))
+            .map(|p| pkg + 1 + p);
         let mut out: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
         match next {
             Some(i) => out.insert(i, "[language]\nmodules = \"v1\"\n\n".to_string()),
@@ -1303,7 +1599,8 @@ fn manifest_with_v1(text: &str) -> std::result::Result<String, String> {
         }
         out.concat()
     };
-    let parsed = StickConfig::new_from_str(&out).map_err(|e| format!("the edited manifest does not parse: {e:#}"))?;
+    let parsed = StickConfig::new_from_str(&out)
+        .map_err(|e| format!("the edited manifest does not parse: {e:#}"))?;
     if parsed.dialect() != Dialect::V1 {
         return Err("the edited manifest does not select modules-v1".to_string());
     }
@@ -1315,21 +1612,32 @@ fn manifest_with_v1(text: &str) -> std::result::Result<String, String> {
 fn apply(plan: &Plan) -> std::result::Result<Vec<Verification>, String> {
     // Stale check first: every file must still hold what was analyzed.
     for f in &plan.files {
-        let now = std::fs::read_to_string(&f.path).map_err(|e| format!("{}: {e}", f.path.display()))?;
+        let now =
+            std::fs::read_to_string(&f.path).map_err(|e| format!("{}: {e}", f.path.display()))?;
         if now != f.text {
-            return Err(format!("{} changed since it was analyzed; nothing written", f.path.display()));
+            return Err(format!(
+                "{} changed since it was analyzed; nothing written",
+                f.path.display()
+            ));
         }
     }
     let manifest_path = plan.package_root.join("stick.toml");
     let imports_path = plan.package_root.join(IMPORTS_FILE);
     if let Some((before, _)) = &plan.manifest {
-        let now = std::fs::read_to_string(&manifest_path).map_err(|e| format!("{}: {e}", manifest_path.display()))?;
+        let now = std::fs::read_to_string(&manifest_path)
+            .map_err(|e| format!("{}: {e}", manifest_path.display()))?;
         if &now != before {
-            return Err(format!("{} changed since it was analyzed; nothing written", manifest_path.display()));
+            return Err(format!(
+                "{} changed since it was analyzed; nothing written",
+                manifest_path.display()
+            ));
         }
     }
     if plan.imports_text.is_some() && imports_path.exists() {
-        return Err(format!("{} already exists; nothing written", imports_path.display()));
+        return Err(format!(
+            "{} already exists; nothing written",
+            imports_path.display()
+        ));
     }
     let mut writes: Vec<(PathBuf, String)> = Vec::new();
     for (fi, f) in plan.files.iter().enumerate() {
@@ -1351,19 +1659,33 @@ fn apply(plan: &Plan) -> std::result::Result<Vec<Verification>, String> {
     // closure gate, and every site resolves as the baseline did.
     let mut out = Vec::new();
     let mut units = vec![(plan.package_root.clone(), PopMode::Test)];
-    units.extend(plan.consumers.iter().map(|(_, root, mode)| (root.clone(), *mode)));
+    units.extend(
+        plan.consumers
+            .iter()
+            .map(|(_, root, mode)| (root.clone(), *mode)),
+    );
     for (dir, mode) in &units {
         let c = load_ctx(dir, &plan.package_root, *mode)?;
-        let mut v = Verification { ctx: c.name().to_string(), compared: 0, changed: Vec::new(), errors: Vec::new() };
+        let mut v = Verification {
+            ctx: c.name().to_string(),
+            compared: 0,
+            changed: Vec::new(),
+            errors: Vec::new(),
+        };
         match check_sources(&c.sources) {
             Ok(checked) => {
-                v.errors.extend(checked.errors.iter().map(|e| render_one(&c.sources, e)));
-                if let Err(e) = bone_semantic::semantic_passes::pass_validate_api_closure(&checked.ws) {
+                v.errors
+                    .extend(checked.errors.iter().map(|e| render_one(&c.sources, e)));
+                if let Err(e) =
+                    bone_semantic::semantic_passes::pass_validate_api_closure(&checked.ws)
+                {
                     v.errors.push(render_one(&c.sources, &e));
                 }
                 v.compared = modules_analysis::references(&checked.ws).len();
             }
-            Err((stage, errs)) => v.errors.push(format!("{stage}:\n{}", render(&c.sources, &errs))),
+            Err((stage, errs)) => v
+                .errors
+                .push(format!("{stage}:\n{}", render(&c.sources, &errs))),
         }
         out.push(v);
     }
@@ -1380,21 +1702,34 @@ fn render_one(sources: &SourceFiles, e: &CompilerError) -> String {
     render(sources, std::slice::from_ref(e))
 }
 
-
 fn kinds_text(by_kind: &BTreeMap<RefKind, usize>) -> String {
-    by_kind.iter().map(|(k, n)| format!("{} {n}", k.as_str().replace('_', " "))).collect::<Vec<_>>().join(", ")
+    by_kind
+        .iter()
+        .map(|(k, n)| format!("{} {n}", k.as_str().replace('_', " ")))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
-fn render_pretty(outcome: &Outcome, mode: Mode, applied: Option<&std::result::Result<Vec<Verification>, String>>) -> String {
+fn render_pretty(
+    outcome: &Outcome,
+    mode: Mode,
+    applied: Option<&std::result::Result<Vec<Verification>, String>>,
+) -> String {
     use std::fmt::Write as _;
     let mut o = String::new();
     let plan = match outcome {
         Outcome::AlreadyV1(name) => {
-            let _ = writeln!(o, "rock modules migrate: {name} is already modules-v1; nothing to migrate");
+            let _ = writeln!(
+                o,
+                "rock modules migrate: {name} is already modules-v1; nothing to migrate"
+            );
             return o;
         }
         Outcome::Failed { stage, message } => {
-            let _ = writeln!(o, "rock modules migrate: analysis FAILED at {stage} [unknown]");
+            let _ = writeln!(
+                o,
+                "rock modules migrate: analysis FAILED at {stage} [unknown]"
+            );
             for l in message.lines() {
                 let _ = writeln!(o, "  {l}");
             }
@@ -1403,9 +1738,18 @@ fn render_pretty(outcome: &Outcome, mode: Mode, applied: Option<&std::result::Re
         }
         Outcome::Planned(p) => p,
     };
-    let _ = writeln!(o, "rock modules migrate: {} ({})", plan.package, short_path(&plan.package_root.to_string_lossy()));
+    let _ = writeln!(
+        o,
+        "rock modules migrate: {} ({})",
+        plan.package,
+        short_path(&plan.package_root.to_string_lossy())
+    );
     let _ = writeln!(o, "\nconfiguration [exact]");
-    let _ = writeln!(o, "  package analyzed with its tests: {} file(s)", plan.files.len());
+    let _ = writeln!(
+        o,
+        "  package analyzed with its tests: {} file(s)",
+        plan.files.len()
+    );
     if plan.consumers.is_empty() {
         let _ = writeln!(
             o,
@@ -1415,9 +1759,15 @@ fn render_pretty(outcome: &Outcome, mode: Mode, applied: Option<&std::result::Re
     for (name, root, mode) in &plan.consumers {
         let pop = match mode {
             PopMode::Test => "with its tests (the `rock test` population)",
-            PopMode::Production => "its `rock compile` population only (its test population does not check; see the notes)",
+            PopMode::Production => {
+                "its `rock compile` population only (its test population does not check; see the notes)"
+            }
         };
-        let _ = writeln!(o, "  consumer: {name} ({}), {pop}", short_path(&root.to_string_lossy()));
+        let _ = writeln!(
+            o,
+            "  consumer: {name} ({}), {pop}",
+            short_path(&root.to_string_lossy())
+        );
     }
 
     let _ = writeln!(o, "\nmanifest [exact]");
@@ -1429,11 +1779,17 @@ fn render_pretty(outcome: &Outcome, mode: Mode, applied: Option<&std::result::Re
             let _ = writeln!(o, "  stick.toml: no edit (blocked)");
         }
     }
-    let _ = writeln!(o, "\nmodule headers\n  none: every file stays in the package root (the spec 15.2 default)");
+    let _ = writeln!(
+        o,
+        "\nmodule headers\n  none: every file stays in the package root (the spec 15.2 default)"
+    );
 
     let _ = writeln!(o, "\nimports [exact]");
     if plan.imports.is_empty() {
-        let _ = writeln!(o, "  none: the package's bodies reference only themselves and std");
+        let _ = writeln!(
+            o,
+            "  none: the package's bodies reference only themselves and std"
+        );
     } else {
         let _ = writeln!(o, "  {IMPORTS_FILE} (new):");
         for i in &plan.imports {
@@ -1450,24 +1806,55 @@ fn render_pretty(outcome: &Outcome, mode: Mode, applied: Option<&std::result::Re
         let mut per_file: BTreeMap<usize, Vec<String>> = BTreeMap::new();
         for i in &plan.imports {
             for (fi, n) in &i.fragments {
-                per_file.entry(*fi).or_default().push(format!("{} ({n})", i.alias));
+                per_file
+                    .entry(*fi)
+                    .or_default()
+                    .push(format!("{} ({n})", i.alias));
             }
         }
         for (fi, list) in per_file {
-            let _ = writeln!(o, "    {}: {}", short_path(&plan.files[fi].id), list.join(", "));
+            let _ = writeln!(
+                o,
+                "    {}: {}",
+                short_path(&plan.files[fi].id),
+                list.join(", ")
+            );
         }
     }
 
-    let exportable = plan.defs.iter().filter(|d| d.kind != DefKind::Macro).count();
-    let _ = writeln!(o, "\nexports [exact]: {} of {} top-level definition(s) become `pub`", plan.exports.len(), exportable);
+    let exportable = plan
+        .defs
+        .iter()
+        .filter(|d| d.kind != DefKind::Macro)
+        .count();
+    let _ = writeln!(
+        o,
+        "\nexports [exact]: {} of {} top-level definition(s) become `pub`",
+        plan.exports.len(),
+        exportable
+    );
     for (&di, reasons) in &plan.exports {
         let d = &plan.defs[di];
         let mut why: Vec<String> = reasons
             .consumers
             .iter()
-            .map(|(c, u)| format!("used by {c} ({}{})", kinds_text(&u.by_kind), u.example.as_ref().map(|e| format!("; first at {e}")).unwrap_or_default()))
+            .map(|(c, u)| {
+                format!(
+                    "used by {c} ({}{})",
+                    kinds_text(&u.by_kind),
+                    u.example
+                        .as_ref()
+                        .map(|e| format!("; first at {e}"))
+                        .unwrap_or_default()
+                )
+            })
             .collect();
-        why.extend(reasons.closure.iter().map(|(e, r)| format!("{r} `{e}` (API closure)")));
+        why.extend(
+            reasons
+                .closure
+                .iter()
+                .map(|(e, r)| format!("{r} `{e}` (API closure)")),
+        );
         let _ = writeln!(
             o,
             "  pub {} {}  {}:{}  -- {}",
@@ -1485,9 +1872,21 @@ fn render_pretty(outcome: &Outcome, mode: Mode, applied: Option<&std::result::Re
         .filter(|(i, d)| !plan.exports.contains_key(i) && d.kind != DefKind::Macro)
         .map(|(_, d)| d.name.to_string())
         .collect();
-    let _ = writeln!(o, "  stays private (no named consumer uses it): {}", if private.is_empty() { "none".to_string() } else { private.join(", ") });
+    let _ = writeln!(
+        o,
+        "  stays private (no named consumer uses it): {}",
+        if private.is_empty() {
+            "none".to_string()
+        } else {
+            private.join(", ")
+        }
+    );
 
-    let _ = writeln!(o, "\nascriptions [exact]: {} legacy `expr :: T` node(s)", plan.ascriptions.len());
+    let _ = writeln!(
+        o,
+        "\nascriptions [exact]: {} legacy `expr :: T` node(s)",
+        plan.ascriptions.len()
+    );
     for (fi, a, _) in &plan.ascriptions {
         let f = &plan.files[*fi];
         let _ = writeln!(
@@ -1501,9 +1900,22 @@ fn render_pretty(outcome: &Outcome, mode: Mode, applied: Option<&std::result::Re
         );
     }
 
-    let _ = writeln!(o, "\nrepairs [exact]: {} qualified call(s)", plan.repairs.len());
+    let _ = writeln!(
+        o,
+        "\nrepairs [exact]: {} qualified call(s)",
+        plan.repairs.len()
+    );
     for r in &plan.repairs {
-        let _ = writeln!(o, "  {}:{} `{}` -> `{}::{}`: {}", short_path(&plan.files[r.file].id), r.line, r.name, r.qualifier, r.name, r.reason);
+        let _ = writeln!(
+            o,
+            "  {}:{} `{}` -> `{}::{}`: {}",
+            short_path(&plan.files[r.file].id),
+            r.line,
+            r.name,
+            r.qualifier,
+            r.name,
+            r.reason
+        );
     }
 
     if !plan.notes.is_empty() {
@@ -1513,9 +1925,15 @@ fn render_pretty(outcome: &Outcome, mode: Mode, applied: Option<&std::result::Re
         }
     }
 
-    let _ = writeln!(o, "\nverification (the candidate, checked in memory) [exact]");
+    let _ = writeln!(
+        o,
+        "\nverification (the candidate, checked in memory) [exact]"
+    );
     if plan.verification.is_empty() {
-        let _ = writeln!(o, "  not run: the plan is blocked before a candidate exists");
+        let _ = writeln!(
+            o,
+            "  not run: the plan is blocked before a candidate exists"
+        );
     }
     for v in &plan.verification {
         let _ = writeln!(
@@ -1537,7 +1955,11 @@ fn render_pretty(outcome: &Outcome, mode: Mode, applied: Option<&std::result::Re
     }
 
     if !plan.blockers.is_empty() {
-        let _ = writeln!(o, "\nBLOCKED -- {} item(s); nothing is written:", plan.blockers.len());
+        let _ = writeln!(
+            o,
+            "\nBLOCKED -- {} item(s); nothing is written:",
+            plan.blockers.len()
+        );
         for b in &plan.blockers {
             let _ = writeln!(o, "  - {b}");
         }
@@ -1545,15 +1967,27 @@ fn render_pretty(outcome: &Outcome, mode: Mode, applied: Option<&std::result::Re
     }
     match (mode, applied) {
         (Mode::Check, _) => {
-            let _ = writeln!(o, "\nmigration needed: run with --apply to write the edits above");
+            let _ = writeln!(
+                o,
+                "\nmigration needed: run with --apply to write the edits above"
+            );
         }
         (Mode::Apply, Some(Err(e))) => {
             let _ = writeln!(o, "\napply FAILED: {e}");
         }
         (Mode::Apply, Some(Ok(vs))) => {
-            let _ = writeln!(o, "\napplied; re-checked from disk (typecheck and API closure; emission is not part of this check -- run `rock test` on the package and build each consumer):");
+            let _ = writeln!(
+                o,
+                "\napplied; re-checked from disk (typecheck and API closure; emission is not part of this check -- run `rock test` on the package and build each consumer):"
+            );
             for v in vs {
-                let _ = writeln!(o, "  {}: {} error(s), {} reference(s)", v.ctx, v.errors.len(), v.compared);
+                let _ = writeln!(
+                    o,
+                    "  {}: {} error(s), {} reference(s)",
+                    v.ctx,
+                    v.errors.len(),
+                    v.compared
+                );
                 for e in &v.errors {
                     for l in e.lines() {
                         let _ = writeln!(o, "    {l}");
@@ -1566,15 +2000,21 @@ fn render_pretty(outcome: &Outcome, mode: Mode, applied: Option<&std::result::Re
     o
 }
 
-fn render_json(outcome: &Outcome, mode: Mode, applied: Option<&std::result::Result<Vec<Verification>, String>>) -> Value {
+fn render_json(
+    outcome: &Outcome,
+    mode: Mode,
+    applied: Option<&std::result::Result<Vec<Verification>, String>>,
+) -> Value {
     let mode_s = match mode {
         Mode::Check => "check",
         Mode::Apply => "apply",
     };
     let plan = match outcome {
-        Outcome::AlreadyV1(name) => return json!({ "package": name, "mode": mode_s, "verdict": "already_v1" }),
+        Outcome::AlreadyV1(name) => {
+            return json!({ "package": name, "mode": mode_s, "verdict": "already_v1" });
+        }
         Outcome::Failed { stage, message } => {
-            return json!({ "mode": mode_s, "verdict": "analysis_failed", "status": "unknown", "stage": stage, "message": message })
+            return json!({ "mode": mode_s, "verdict": "analysis_failed", "status": "unknown", "stage": stage, "message": message });
         }
         Outcome::Planned(p) => p,
     };
@@ -1670,9 +2110,14 @@ mod tests {
     fn manifest_gains_a_language_table_after_package() {
         let src = "[package]\nname = \"x\"\nversion = \"0.1.0\"\n\n# deps\n[dependencies]\n";
         let out = manifest_with_v1(src).unwrap();
-        assert_eq!(out, "[package]\nname = \"x\"\nversion = \"0.1.0\"\n\n# deps\n[language]\nmodules = \"v1\"\n\n[dependencies]\n");
+        assert_eq!(
+            out,
+            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n\n# deps\n[language]\nmodules = \"v1\"\n\n[dependencies]\n"
+        );
         let src = "[package]\nname = \"x\"\nversion = \"0.1.0\"\n\n[language]\nmodules = \"legacy\" # old\n";
-        assert_eq!(manifest_with_v1(src).unwrap(), "[package]\nname = \"x\"\nversion = \"0.1.0\"\n\n[language]\nmodules = \"v1\"\n");
+        assert_eq!(
+            manifest_with_v1(src).unwrap(),
+            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n\n[language]\nmodules = \"v1\"\n"
+        );
     }
-
 }

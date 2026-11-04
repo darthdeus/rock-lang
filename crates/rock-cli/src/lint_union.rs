@@ -83,8 +83,10 @@ pub fn do_lint_union(lib: &str, consumers_root: Option<&str>) -> Result<()> {
     }
 
     let dead = intersection.unwrap_or_default();
-    let mut findings: Vec<rock_core::CompilerError> =
-        dead.iter().filter_map(|k| rendered.get(k).cloned()).collect();
+    let mut findings: Vec<rock_core::CompilerError> = dead
+        .iter()
+        .filter_map(|k| rendered.get(k).cloned())
+        .collect();
     findings.sort_by_key(|e| (e.location.file, e.location.line));
 
     if findings.is_empty() {
@@ -160,7 +162,9 @@ pub fn bin_projects_under(root: &Path) -> Vec<PathBuf> {
             }
             continue;
         }
-        let Ok(entries) = fs_err::read_dir(&dir) else { continue };
+        let Ok(entries) = fs_err::read_dir(&dir) else {
+            continue;
+        };
         for e in entries.flatten() {
             let p = e.path();
             if !p.is_dir() {

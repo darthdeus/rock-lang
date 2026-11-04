@@ -24,11 +24,11 @@
 //! ignore `--backend`.
 
 use crate::Result;
-use rock_core::{CompilerError, CompileStats, ModuleId, SourceFiles};
-use rock_tokenizer::{count_source_stats, Token, Tokenizer};
-use ustr::Ustr;
-use std::time::Duration;
 use bone_core::prelude::Instant;
+use rock_core::{CompileStats, CompilerError, ModuleId, SourceFiles};
+use rock_tokenizer::{Token, Tokenizer, count_source_stats};
+use std::time::Duration;
+use ustr::Ustr;
 
 fn discover(path: &str) -> Result<SourceFiles> {
     let spec = crate::common::path_to_source_spec(path);
@@ -127,7 +127,10 @@ pub fn iter_parse_skull(path: &str, iters: usize) -> Result<()> {
     let mut parsed = 0usize;
     for _ in 0..iters {
         for (tokens, _, _, contents) in &prepared {
-            if skull_parser::Parser::new(tokens.clone(), contents, 0).parse_module().is_ok() {
+            if skull_parser::Parser::new(tokens.clone(), contents, 0)
+                .parse_module()
+                .is_ok()
+            {
                 parsed += 1;
             }
         }

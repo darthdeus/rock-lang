@@ -1,9 +1,9 @@
 //! Bounded edits through the real workspace, checked without production position helpers.
 //! Columns deliberately count Unicode scalars, not bytes or UTF-16 code units.
 
-use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 
-use bone_query::{semantic_tokens_legend, semantic_tokens_modifiers_legend, BoneWorkspace};
+use bone_query::{BoneWorkspace, semantic_tokens_legend, semantic_tokens_modifiers_legend};
 use lsp_types::{Position, Range, SemanticToken};
 
 const PATH: &str = "/tmp/rock_bone_semantic_mutations.rock";
@@ -357,28 +357,32 @@ fn validator_rejects_corrupt_streams_before_production_controls() {
         validate("", &[], false).is_ok(),
         "malformed/empty buffers may emit nothing"
     );
-    assert!(decode(&[
-        SemanticToken {
-            delta_start: u32::MAX,
-            ..good
-        },
-        SemanticToken {
-            delta_start: 1,
-            ..good
-        }
-    ])
-    .is_err());
-    assert!(decode(&[
-        SemanticToken {
-            delta_line: u32::MAX,
-            ..good
-        },
-        SemanticToken {
-            delta_line: 1,
-            ..good
-        }
-    ])
-    .is_err());
+    assert!(
+        decode(&[
+            SemanticToken {
+                delta_start: u32::MAX,
+                ..good
+            },
+            SemanticToken {
+                delta_start: 1,
+                ..good
+            }
+        ])
+        .is_err()
+    );
+    assert!(
+        decode(&[
+            SemanticToken {
+                delta_line: u32::MAX,
+                ..good
+            },
+            SemanticToken {
+                delta_line: 1,
+                ..good
+            }
+        ])
+        .is_err()
+    );
     assert!(
         validate("xx\n", &[good, good], true).is_err(),
         "overlap accepted"

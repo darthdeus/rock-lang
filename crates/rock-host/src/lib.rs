@@ -21,7 +21,11 @@ static SOURCE_ROOT: std::sync::OnceLock<&'static std::path::Path> = std::sync::O
 
 /// Supply the binary host's source fallback before the first call to `rock_dir`.
 pub fn install_source_root(root: &'static std::path::Path) {
-    assert_eq!(*SOURCE_ROOT.get_or_init(|| root), root, "source root already installed");
+    assert_eq!(
+        *SOURCE_ROOT.get_or_init(|| root),
+        root,
+        "source root already installed"
+    );
 }
 
 /// Resolve the Rock root directory from environment, exe path, CWD, or a host fallback.
@@ -66,7 +70,11 @@ pub fn resolve_rock_dir_with(
         }
     }
 
-    source_root.or(cwd).unwrap_or_else(|| std::path::Path::new(".")).to_string_lossy().into_owned()
+    source_root
+        .or(cwd)
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// Resolve the Rock root directory at runtime. `ROCK_DIR` env wins; else derive
@@ -80,7 +88,12 @@ pub fn rock_dir() -> String {
             let env = std::env::var("ROCK_DIR").ok();
             let exe = std::env::current_exe().ok();
             let cwd = std::env::current_dir().ok();
-            resolve_rock_dir_with(env, exe.as_deref(), cwd.as_deref(), SOURCE_ROOT.get().copied())
+            resolve_rock_dir_with(
+                env,
+                exe.as_deref(),
+                cwd.as_deref(),
+                SOURCE_ROOT.get().copied(),
+            )
         })
         .clone()
 }
@@ -94,12 +107,29 @@ mod tests {
     fn source_fallback_follows_runtime_roots() {
         let source = TempDir::new().unwrap();
         let cwd = TempDir::new().unwrap();
-        assert_eq!(resolve_rock_dir_with(None, None, Some(cwd.path()), Some(source.path())), source.path().to_string_lossy());
-        assert_eq!(resolve_rock_dir_with(None, None, Some(cwd.path()), None), cwd.path().to_string_lossy());
-        assert_eq!(resolve_rock_dir_with(Some("chosen-root".into()), None, Some(cwd.path()), Some(source.path())), "chosen-root");
+        assert_eq!(
+            resolve_rock_dir_with(None, None, Some(cwd.path()), Some(source.path())),
+            source.path().to_string_lossy()
+        );
+        assert_eq!(
+            resolve_rock_dir_with(None, None, Some(cwd.path()), None),
+            cwd.path().to_string_lossy()
+        );
+        assert_eq!(
+            resolve_rock_dir_with(
+                Some("chosen-root".into()),
+                None,
+                Some(cwd.path()),
+                Some(source.path())
+            ),
+            "chosen-root"
+        );
         fs_err::write(cwd.path().join("Cargo.toml"), "[workspace]\n").unwrap();
         fs_err::create_dir(cwd.path().join("crates")).unwrap();
-        assert_eq!(resolve_rock_dir_with(None, None, Some(cwd.path()), Some(source.path())), cwd.path().canonicalize().unwrap().to_string_lossy());
+        assert_eq!(
+            resolve_rock_dir_with(None, None, Some(cwd.path()), Some(source.path())),
+            cwd.path().canonicalize().unwrap().to_string_lossy()
+        );
     }
 
     #[test]
@@ -110,7 +140,10 @@ mod tests {
         fs_err::create_dir(root.join("lib")).unwrap();
         let exe = root.join("bin/rock");
         fs_err::write(&exe, "").unwrap();
-        assert_eq!(resolve_rock_dir_with(None, Some(&exe), None, None), root.to_string_lossy());
+        assert_eq!(
+            resolve_rock_dir_with(None, Some(&exe), None, None),
+            root.to_string_lossy()
+        );
     }
 
     #[test]

@@ -24,7 +24,7 @@
 //! A vertex buffer is laid out by C rules, NOT std140: a `Vec3` occupies 12
 //! bytes with the next attribute immediately after.
 
-use crate::gpu_layout::{vertex_attrs, AttrKind};
+use crate::gpu_layout::{AttrKind, vertex_attrs};
 use crate::lower::RepArena;
 use bone_semantic::inference::Workspace;
 use skull_parser::CompilerError;
@@ -178,7 +178,9 @@ pub fn vertex_plan(
         for (i, l) in group.iter().enumerate() {
             let path = l.path.as_str();
             let owned = path == a.name.as_str()
-                || path.strip_prefix(a.name.as_str()).is_some_and(|r| r.starts_with('.'));
+                || path
+                    .strip_prefix(a.name.as_str())
+                    .is_some_and(|r| r.starts_with('.'));
             if !owned {
                 return Err(reject(format!(
                     "`{struct_name}` field `{}` expected leaf {i} to belong to it, but the \
@@ -222,5 +224,9 @@ pub fn vertex_plan(
         )));
     }
 
-    Ok(VertexPlan { struct_name, slots, byte_stride })
+    Ok(VertexPlan {
+        struct_name,
+        slots,
+        byte_stride,
+    })
 }

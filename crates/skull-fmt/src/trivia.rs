@@ -80,8 +80,12 @@ impl Trivia {
                             },
                         );
                     } else if code_on_line == Some(line) {
-                        trailing.insert(line, (text.as_str().to_string(), tok.span.col_range.0, lo));
-                    } else if lines.get(line).is_some_and(|l| l.trim_start().starts_with("//")) {
+                        trailing
+                            .insert(line, (text.as_str().to_string(), tok.span.col_range.0, lo));
+                    } else if lines
+                        .get(line)
+                        .is_some_and(|l| l.trim_start().starts_with("//"))
+                    {
                         standalone.insert(line, text.as_str().to_string());
                     }
                 }
@@ -89,7 +93,10 @@ impl Trivia {
             }
         }
 
-        let blank = lines.iter().map(|l| l.trim().is_empty()).collect::<Vec<_>>();
+        let blank = lines
+            .iter()
+            .map(|l| l.trim().is_empty())
+            .collect::<Vec<_>>();
 
         Ok(Trivia {
             trailing,
@@ -102,17 +109,15 @@ impl Trivia {
     /// The trailing comment on a given 0-based line: `(text without //, source
     /// column of the //, start byte offset of the //)`.
     pub fn trailing_comment(&self, line: usize) -> Option<(&str, usize, usize)> {
-        self.trailing.get(&line).map(|(t, c, o)| (t.as_str(), *c, *o))
+        self.trailing
+            .get(&line)
+            .map(|(t, c, o)| (t.as_str(), *c, *o))
     }
 
     /// Standalone `//` comments on lines strictly between `after` and `before`
     /// (both 0-based, both exclusive), in source order: `(line, text-without-//)`.
     /// Used to recover comments inside delimited bodies the parser discards.
-    pub fn standalone_comments_between(
-        &self,
-        after: usize,
-        before: usize,
-    ) -> Vec<(usize, &str)> {
+    pub fn standalone_comments_between(&self, after: usize, before: usize) -> Vec<(usize, &str)> {
         if after + 1 >= before {
             return Vec::new();
         }

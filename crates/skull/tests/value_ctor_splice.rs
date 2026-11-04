@@ -61,12 +61,17 @@ fn main() {
 fn emit(shape: ValueCtorShape) -> String {
     let ws = ws_with_stdlib(SRC);
     let mid = skull::user_module_id(&ws).unwrap();
-    emit_full_with_value_ctor(&ws, mid, shape).expect("emit_full").0.lua
+    emit_full_with_value_ctor(&ws, mid, shape)
+        .expect("emit_full")
+        .0
+        .lua
 }
 
 /// Lines carrying a construction, not the `<Name>_vt` definition itself.
 fn construction_sites(lua: &str, needle: &str) -> usize {
-    lua.lines().filter(|l| l.contains(needle) && !l.contains("_vt = function(")).count()
+    lua.lines()
+        .filter(|l| l.contains(needle) && !l.contains("_vt = function("))
+        .count()
 }
 
 #[test]
@@ -78,7 +83,10 @@ fn splice_replaces_every_gc_table_construction_and_leaves_the_cdata_tier_alone()
         construction_sites(&call, "Bag_vt(") > 0,
         "fixture builds no GC-table value; the test would prove nothing:\n{call}"
     );
-    assert!(function_body(&call, "main").contains("Pt_ct("), "fixture stores no cdata value; the tier control would prove nothing");
+    assert!(
+        function_body(&call, "main").contains("Pt_ct("),
+        "fixture stores no cdata value; the tier control would prove nothing"
+    );
     assert_eq!(
         construction_sites(&splice, "Bag_vt("),
         0,
@@ -90,7 +98,8 @@ fn splice_replaces_every_gc_table_construction_and_leaves_the_cdata_tier_alone()
          the reflection surface for the type"
     );
     assert!(
-        splice.contains(r#"setmetatable({ xs = "#) && splice.contains(r#"__ty = "Bag" }, __rock_vt_Bag)"#),
+        splice.contains(r#"setmetatable({ xs = "#)
+            && splice.contains(r#"__ty = "Bag" }, __rock_vt_Bag)"#),
         "the spliced site must build the same table with the same shared metatable:\n{splice}"
     );
 
@@ -104,9 +113,15 @@ fn splice_replaces_every_gc_table_construction_and_leaves_the_cdata_tier_alone()
     for lua in [&call, &splice] {
         for (name, ctor) in [("find_bag", "Bag_vt("), ("find_pt", "Pt_ct(")] {
             let body = function_body(lua, name);
-            assert!(!body.contains(ctor), "nullable return boxes before its field sink:\n{body}");
+            assert!(
+                !body.contains(ctor),
+                "nullable return boxes before its field sink:\n{body}"
+            );
         }
-        assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "value_ctor_splice_boxed_sink"), "3\n2\ntrue\ntrue\ntrue\ntrue");
+        assert_eq!(
+            run_luajit(&format!("{lua}\nmain()\n"), "value_ctor_splice_boxed_sink"),
+            "3\n2\ntrue\ntrue\ntrue\ntrue"
+        );
     }
 }
 

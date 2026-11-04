@@ -111,16 +111,36 @@ impl serde::Serialize for CompletionItemCapability {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
         let mut st = s.serialize_struct("CompletionItemCapability", 9)?;
-        if let Some(ref v) = self.snippet_support { st.serialize_field("snippetSupport", v)?; }
-        if let Some(ref v) = self.commit_characters_support { st.serialize_field("commitCharactersSupport", v)?; }
-        if let Some(ref v) = self.documentation_format { st.serialize_field("documentationFormat", v)?; }
-        if let Some(ref v) = self.deprecated_support { st.serialize_field("deprecatedSupport", v)?; }
-        if let Some(ref v) = self.preselect_support { st.serialize_field("preselectSupport", v)?; }
-        if let Some(ref v) = self.tag_support { st.serialize_field("tagSupport", v)?; }
-        if let Some(ref v) = self.insert_replace_support { st.serialize_field("insertReplaceSupport", v)?; }
-        if let Some(ref v) = self.resolve_support { st.serialize_field("resolveSupport", v)?; }
-        if let Some(ref v) = self.insert_text_mode_support { st.serialize_field("insertTextModeSupport", v)?; }
-        if let Some(ref v) = self.label_details_support { st.serialize_field("labelDetailsSupport", v)?; }
+        if let Some(ref v) = self.snippet_support {
+            st.serialize_field("snippetSupport", v)?;
+        }
+        if let Some(ref v) = self.commit_characters_support {
+            st.serialize_field("commitCharactersSupport", v)?;
+        }
+        if let Some(ref v) = self.documentation_format {
+            st.serialize_field("documentationFormat", v)?;
+        }
+        if let Some(ref v) = self.deprecated_support {
+            st.serialize_field("deprecatedSupport", v)?;
+        }
+        if let Some(ref v) = self.preselect_support {
+            st.serialize_field("preselectSupport", v)?;
+        }
+        if let Some(ref v) = self.tag_support {
+            st.serialize_field("tagSupport", v)?;
+        }
+        if let Some(ref v) = self.insert_replace_support {
+            st.serialize_field("insertReplaceSupport", v)?;
+        }
+        if let Some(ref v) = self.resolve_support {
+            st.serialize_field("resolveSupport", v)?;
+        }
+        if let Some(ref v) = self.insert_text_mode_support {
+            st.serialize_field("insertTextModeSupport", v)?;
+        }
+        if let Some(ref v) = self.label_details_support {
+            st.serialize_field("labelDetailsSupport", v)?;
+        }
         st.end()
     }
 }
@@ -129,7 +149,8 @@ impl<'de> serde::Deserialize<'de> for CompletionItemCapability {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let mut map = serde_json::Map::<String, serde_json::Value>::deserialize(d)?;
         let snippet_support = crate::deserialize_optional(map.remove("snippetSupport"))?;
-        let commit_characters_support = crate::deserialize_optional(map.remove("commitCharactersSupport"))?;
+        let commit_characters_support =
+            crate::deserialize_optional(map.remove("commitCharactersSupport"))?;
         let documentation_format = crate::deserialize_optional(map.remove("documentationFormat"))?;
         let deprecated_support = crate::deserialize_optional(map.remove("deprecatedSupport"))?;
         let preselect_support = crate::deserialize_optional(map.remove("preselectSupport"))?;
@@ -140,9 +161,11 @@ impl<'de> serde::Deserialize<'de> for CompletionItemCapability {
             .map_err(serde::de::Error::custom)?,
             None => None,
         };
-        let insert_replace_support = crate::deserialize_optional(map.remove("insertReplaceSupport"))?;
+        let insert_replace_support =
+            crate::deserialize_optional(map.remove("insertReplaceSupport"))?;
         let resolve_support = crate::deserialize_optional(map.remove("resolveSupport"))?;
-        let insert_text_mode_support = crate::deserialize_optional(map.remove("insertTextModeSupport"))?;
+        let insert_text_mode_support =
+            crate::deserialize_optional(map.remove("insertTextModeSupport"))?;
         let label_details_support = crate::deserialize_optional(map.remove("labelDetailsSupport"))?;
         Ok(CompletionItemCapability {
             snippet_support,
@@ -278,7 +301,8 @@ pub struct CompletionClientCapabilities {
     pub completion_list: Option<CompletionListCapability>,
 }
 
-impl_lsp_struct!(CompletionClientCapabilities,
+impl_lsp_struct!(
+    CompletionClientCapabilities,
     required {},
     optional {
         dynamic_registration: bool = "dynamicRegistration",
@@ -305,7 +329,8 @@ pub struct InsertReplaceEdit {
     pub replace: Range,
 }
 
-impl_lsp_struct!(InsertReplaceEdit,
+impl_lsp_struct!(
+    InsertReplaceEdit,
     required {
         new_text: String = "newText",
         insert: Range = "insert",
@@ -379,9 +404,12 @@ pub struct CompletionOptionsCompletionItem {
     pub label_details_support: Option<bool>,
 }
 
-impl_lsp_struct!(CompletionOptionsCompletionItem,
+impl_lsp_struct!(
+    CompletionOptionsCompletionItem,
     required {},
-    optional { label_details_support: bool = "labelDetailsSupport" }
+    optional {
+        label_details_support: bool = "labelDetailsSupport"
+    }
 );
 
 #[derive(Debug, PartialEq, Clone)]
@@ -390,7 +418,8 @@ pub struct CompletionRegistrationOptions {
     pub completion_options: CompletionOptions,
 }
 
-impl_lsp_struct!(CompletionRegistrationOptions,
+impl_lsp_struct!(
+    CompletionRegistrationOptions,
     flatten {
         text_document_registration_options: TextDocumentRegistrationOptions,
         completion_options: CompletionOptions,
@@ -428,8 +457,11 @@ pub struct CompletionParams {
     pub context: Option<CompletionContext>,
 }
 
-impl_lsp_struct!(CompletionParams,
-    optional { context: CompletionContext = "context" },
+impl_lsp_struct!(
+    CompletionParams,
+    optional {
+        context: CompletionContext = "context"
+    },
     flatten {
         text_document_position: TextDocumentPositionParams,
         work_done_progress_params: WorkDoneProgressParams,
@@ -447,9 +479,14 @@ pub struct CompletionContext {
     pub trigger_character: Option<String>,
 }
 
-impl_lsp_struct!(CompletionContext,
-    required { trigger_kind: CompletionTriggerKind = "triggerKind" },
-    optional { trigger_character: String = "triggerCharacter" }
+impl_lsp_struct!(
+    CompletionContext,
+    required {
+        trigger_kind: CompletionTriggerKind = "triggerKind"
+    },
+    optional {
+        trigger_character: String = "triggerCharacter"
+    }
 );
 
 /// How a completion was triggered.
@@ -618,7 +655,8 @@ pub struct CompletionItemLabelDetails {
     pub description: Option<String>,
 }
 
-impl_lsp_struct!(CompletionItemLabelDetails,
+impl_lsp_struct!(
+    CompletionItemLabelDetails,
     required {},
     optional {
         detail: String = "detail",

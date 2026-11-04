@@ -22,12 +22,12 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use bone_core::modules::is_stdlib_module_file;
 use bone_core::prelude::ModuleId;
+use rock_core::SourceFiles;
 use rock_core::errors::CompilerError;
 use rock_core::source_code::Dialect;
-use rock_core::SourceFiles;
-use rock_host::stick::graph::{PackageGraph, PackageId};
 use rock_host::stick::StickConfig;
-use serde_json::{json, Value};
+use rock_host::stick::graph::{PackageGraph, PackageId};
+use serde_json::{Value, json};
 
 use crate::modules_analysis::{self, PopMode, RefKind, Target};
 
@@ -160,7 +160,10 @@ struct Population {
 }
 
 enum Revision {
-    Known { commit: String, dirty_paths: Vec<String> },
+    Known {
+        commit: String,
+        dirty_paths: Vec<String>,
+    },
     Unknown(String),
 }
 
@@ -216,7 +219,10 @@ pub fn run(project: &Path, closed: bool, format: Format) -> Result<i32> {
     let verdict = closed_verdict(&report);
     match format {
         Format::Pretty => print!("{}", render_pretty(&report, &verdict)),
-        Format::Json => println!("{}", serde_json::to_string_pretty(&render_json(&report, &verdict))?),
+        Format::Json => println!(
+            "{}",
+            serde_json::to_string_pretty(&render_json(&report, &verdict))?
+        ),
     }
     std::io::stdout().flush()?;
 
@@ -239,7 +245,16 @@ fn analyze(project: &Path, graph: &PackageGraph) -> (Option<Population>, Analysi
     let mut rows: BTreeMap<u32, PopRow> = graph
         .packages()
         .iter()
-        .map(|n| (n.id.0, PopRow { package: n.id.0, included: 0, excluded_test_only: 0 }))
+        .map(|n| {
+            (
+                n.id.0,
+                PopRow {
+                    package: n.id.0,
+                    included: 0,
+                    excluded_test_only: 0,
+                },
+            )
+        })
         .collect();
     for id in file_pkg.values() {
         if let Some(row) = rows.get_mut(id) {
@@ -268,17 +283,27 @@ fn analyze(project: &Path, graph: &PackageGraph) -> (Option<Population>, Analysi
         );
         return (Some(population), failed_msg("package attribution", message));
     }
-    let modules_analysis::Checked { ws, errors: body_errors, census } = match modules_analysis::check(&pop.analyzed) {
+    let modules_analysis::Checked {
+        ws,
+        errors: body_errors,
+        census,
+    } = match modules_analysis::check(&pop.analyzed) {
         Ok(v) => v,
         Err(f) => return (Some(population), failed(f.stage, &pop.analyzed, &f.errors)),
     };
     // A body error or an unsatisfied API closure is what `rock compile`
     // rejects; the audit of such a program is unknown, never clean.
     if !body_errors.is_empty() {
-        return (Some(population), failed("semantic pass", &pop.analyzed, &body_errors));
+        return (
+            Some(population),
+            failed("semantic pass", &pop.analyzed, &body_errors),
+        );
     }
     if let Err(e) = bone_semantic::semantic_passes::pass_validate_api_closure(&ws) {
-        return (Some(population), failed("semantic pass", &pop.analyzed, &[e]));
+        return (
+            Some(population),
+            failed("semantic pass", &pop.analyzed, &[e]),
+        );
     }
     match count_references(&ws, &file_pkg, graph, &census) {
         Ok(table) => (Some(population), Analysis::Ok(table)),
@@ -290,7 +315,12 @@ fn analyze(project: &Path, graph: &PackageGraph) -> (Option<Population>, Analysi
 fn failed_msg(stage: &'static str, message: String) -> Analysis {
     Analysis::Failed {
         stage,
-        diagnostics: vec![Diag { file: String::new(), line: 0, col: 0, message: message.clone() }],
+        diagnostics: vec![Diag {
+            file: String::new(),
+            line: 0,
+            col: 0,
+            message: message.clone(),
+        }],
         rendered: message,
     }
 }
@@ -331,7 +361,9 @@ fn count_references(
     let owner_of = |mid: ModuleId| owner_of(ws, file_pkg, mid);
     let mut table = RefTable::default();
     for r in modules_analysis::references(ws) {
-        let Owner::Package(from) = owner_of(r.from)? else { continue };
+        let Owner::Package(from) = owner_of(r.from)? else {
+            continue;
+        };
         let from_file = ws.module(r.from).file;
         // Fragment import families and the legacy export seeds read the
         // single package a target belongs to.
@@ -364,12 +396,21 @@ fn count_references(
                     .or_default() += 1;
                 if graph.package(PackageId(to)).dialect == Dialect::Legacy {
                     let (name, kind) = match &r.target {
-                        Target::Fn(mid, fid) => (ws.module(*mid).functions[*fid].name.to_string(), "fn"),
+                        Target::Fn(mid, fid) => {
+                            (ws.module(*mid).functions[*fid].name.to_string(), "fn")
+                        }
                         Target::Key { key, .. } => (key.to_string(), key_kind(ws, *key)),
-                        Target::Unrecorded(_) | Target::Field { .. } => unreachable!("an unrecorded or field call has no owner"),
+                        Target::Unrecorded(_) | Target::Field { .. } => {
+                            unreachable!("an unrecorded or field call has no owner")
+                        }
                     };
                     let name = modules_analysis::declared_name(&name).to_string();
-                    let slot = table.legacy_exports.entry(to).or_default().entry((name, kind)).or_default();
+                    let slot = table
+                        .legacy_exports
+                        .entry(to)
+                        .or_default()
+                        .entry((name, kind))
+                        .or_default();
                     slot.0.insert(from);
                     slot.1 += 1;
                 }
@@ -386,7 +427,9 @@ fn count_references(
             }
             // A nominal the checker accepted with no defining module is a
             // compiler-provided type (`FieldRef`, `Coroutine`).
-            Target::Key { key, modules } if modules.is_empty() && matches!(r.kind, RefKind::Type | RefKind::Pattern) => {
+            Target::Key { key, modules }
+                if modules.is_empty() && matches!(r.kind, RefKind::Type | RefKind::Pattern) =>
+            {
                 if bone_core::modules::STD_INTRINSIC_TYPES.contains(&key.as_str()) {
                     Owner::Std
                 } else {
@@ -394,10 +437,17 @@ fn count_references(
                 }
             }
             Target::Key { key, modules } => {
-                let found: BTreeSet<Owner> = modules.iter().map(|m| owner_of(*m)).collect::<Result<_, _>>()?;
+                let found: BTreeSet<Owner> = modules
+                    .iter()
+                    .map(|m| owner_of(*m))
+                    .collect::<Result<_, _>>()?;
                 if found.len() != 1 {
                     let bucket = table.unattributed.entry(from).or_default();
-                    let map = if found.is_empty() { &mut bucket.no_definition } else { &mut bucket.several_owners };
+                    let map = if found.is_empty() {
+                        &mut bucket.no_definition
+                    } else {
+                        &mut bucket.several_owners
+                    };
                     *map.entry(key.to_string()).or_default() += 1;
                     continue;
                 }
@@ -405,23 +455,36 @@ fn count_references(
             }
         };
         if to != Owner::Package(from) {
-            *table.edges.entry((from, to)).or_default().by_kind.entry(r.kind).or_default() += 1;
+            *table
+                .edges
+                .entry((from, to))
+                .or_default()
+                .by_kind
+                .entry(r.kind)
+                .or_default() += 1;
         }
     }
 
     for req in bone_semantic::semantic_passes::api_closure_requirements(ws) {
-        let Some(meta) = ws.defs.get(&req.exporter) else { continue };
+        let Some(meta) = ws.defs.get(&req.exporter) else {
+            continue;
+        };
         table
             .closure
             .entry(meta.package)
             .or_default()
             .entry(req.required.to_string())
             .or_default()
-            .insert((req.reason, modules_analysis::declared_name(req.exporter.as_str()).to_string()));
+            .insert((
+                req.reason,
+                modules_analysis::declared_name(req.exporter.as_str()).to_string(),
+            ));
     }
 
     for (file, c) in census {
-        let Some(&p) = file_pkg.get(file) else { continue };
+        let Some(&p) = file_pkg.get(file) else {
+            continue;
+        };
         let sum = table.census.entry(p).or_default();
         sum.legacy_ascriptions += c.legacy_ascriptions;
         sum.paren_ascriptions += c.paren_ascriptions;
@@ -434,7 +497,10 @@ fn count_references(
     let mut define = |key: ustr::Ustr, mid: ModuleId| -> std::result::Result<(), String> {
         let owner = owner_of(mid)?;
         if owner != Owner::Builtin {
-            defined.entry(modules_analysis::declared_name(key.as_str()).to_string()).or_default().insert(owner);
+            defined
+                .entry(modules_analysis::declared_name(key.as_str()).to_string())
+                .or_default()
+                .insert(owner);
         }
         Ok(())
     };
@@ -457,12 +523,18 @@ fn count_references(
             define(*key, m.id)?;
         }
     }
-    table.collisions = defined.into_iter().filter(|(_, owners)| owners.len() > 1).collect();
+    table.collisions = defined
+        .into_iter()
+        .filter(|(_, owners)| owners.len() > 1)
+        .collect();
     Ok(table)
 }
 
 fn key_kind(ws: &bone_semantic::inference::Workspace, key: ustr::Ustr) -> &'static str {
-    if ws.struct_by_name.contains_key(&key) || ws.enums_by_name.contains_key(&key) || ws.newtypes_by_name.contains_key(&key) {
+    if ws.struct_by_name.contains_key(&key)
+        || ws.enums_by_name.contains_key(&key)
+        || ws.newtypes_by_name.contains_key(&key)
+    {
         "type"
     } else if ws.functions_by_name.contains_key(&key) {
         "fn"
@@ -519,7 +591,10 @@ fn revision(manifest_dir: &Path, graph: &PackageGraph) -> Revision {
     match git(&args) {
         Ok(status) => Revision::Known {
             commit,
-            dirty_paths: status.lines().map(|l| l.get(3..).unwrap_or(l).to_string()).collect(),
+            dirty_paths: status
+                .lines()
+                .map(|l| l.get(3..).unwrap_or(l).to_string())
+                .collect(),
         },
         Err(e) => Revision::Unknown(format!("git status over the package roots failed: {e}")),
     }
@@ -602,7 +677,11 @@ fn reach(graph: &PackageGraph) -> Vec<Reach> {
                 .collect();
             paths.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
             paths.truncate(PATHS_LISTED);
-            Reach { package, path_count, paths }
+            Reach {
+                package,
+                path_count,
+                paths,
+            }
         })
         .collect();
     out.sort_by_key(|r| (r.package != root, name(r.package)));
@@ -610,7 +689,9 @@ fn reach(graph: &PackageGraph) -> Vec<Reach> {
 }
 
 fn closed_verdict(report: &Report) -> Verdict {
-    let Ok(graph) = &report.graph else { return Verdict::Unknown("package graph failed") };
+    let Ok(graph) = &report.graph else {
+        return Verdict::Unknown("package graph failed");
+    };
     let offending: Vec<u32> = reach(graph)
         .into_iter()
         .filter(|r| graph.package(PackageId(r.package)).dialect == Dialect::Legacy)
@@ -654,7 +735,13 @@ fn display_path(p: &Path) -> String {
         .ok()
         .and_then(|cwd| cwd.canonicalize().ok())
         .and_then(|cwd| p.strip_prefix(&cwd).ok().map(Path::to_path_buf))
-        .map(|rel| if rel.as_os_str().is_empty() { PathBuf::from(".") } else { rel })
+        .map(|rel| {
+            if rel.as_os_str().is_empty() {
+                PathBuf::from(".")
+            } else {
+                rel
+            }
+        })
         .unwrap_or_else(|| p.to_path_buf())
         .display()
         .to_string()
@@ -698,7 +785,11 @@ fn undeclared(graph: &PackageGraph, table: &RefTable) -> Vec<(u32, u32, &'static
         if direct.contains(&to) {
             continue;
         }
-        let class = if reachable_from(graph, to).contains(&from) { "back_reference" } else { "undeclared_peer" };
+        let class = if reachable_from(graph, to).contains(&from) {
+            "back_reference"
+        } else {
+            "undeclared_peer"
+        };
         out.push((from, to, class, counts.total()));
     }
     out
@@ -716,10 +807,19 @@ fn render_pretty(report: &Report, verdict: &Verdict) -> String {
     // Configuration.
     let _ = writeln!(o, "\nconfiguration {}", tag(Status::Exact));
     match &report.revision {
-        Revision::Known { commit, dirty_paths } if dirty_paths.is_empty() => {
-            let _ = writeln!(o, "  source revision: {commit} (package roots and stdlib clean)");
+        Revision::Known {
+            commit,
+            dirty_paths,
+        } if dirty_paths.is_empty() => {
+            let _ = writeln!(
+                o,
+                "  source revision: {commit} (package roots and stdlib clean)"
+            );
         }
-        Revision::Known { commit, dirty_paths } => {
+        Revision::Known {
+            commit,
+            dirty_paths,
+        } => {
             let _ = writeln!(
                 o,
                 "  source revision: {commit} + {} uncommitted path(s) under the package roots/stdlib: {}",
@@ -744,8 +844,7 @@ fn render_pretty(report: &Report, verdict: &Verdict) -> String {
                 match pop.mode {
                     PopMode::Production =>
                         "production -- the `rock compile` set; each package's own `tests/` files are excluded",
-                    PopMode::Test =>
-                        "test -- the whole-package set `rock test <dir>` builds",
+                    PopMode::Test => "test -- the whole-package set `rock test <dir>` builds",
                 }
             );
             for row in &pop.rows {
@@ -757,7 +856,11 @@ fn render_pretty(report: &Report, verdict: &Verdict) -> String {
                     row.excluded_test_only
                 );
             }
-            let _ = writeln!(o, "    {:<16} {} compiler-owned module(s)", "std", pop.std_modules);
+            let _ = writeln!(
+                o,
+                "    {:<16} {} compiler-owned module(s)",
+                "std", pop.std_modules
+            );
         }
         _ => {
             let _ = writeln!(o, "  population: {unknown}");
@@ -767,8 +870,16 @@ fn render_pretty(report: &Report, verdict: &Verdict) -> String {
         Analysis::Ok(_) => {
             let _ = writeln!(o, "  analysis result: ok");
         }
-        Analysis::Failed { stage, diagnostics, rendered } => {
-            let _ = writeln!(o, "  analysis result: FAILED at {stage} ({} diagnostic(s))", diagnostics.len());
+        Analysis::Failed {
+            stage,
+            diagnostics,
+            rendered,
+        } => {
+            let _ = writeln!(
+                o,
+                "  analysis result: FAILED at {stage} ({} diagnostic(s))",
+                diagnostics.len()
+            );
             for line in rendered.lines() {
                 let _ = writeln!(o, "    {line}");
             }
@@ -785,7 +896,11 @@ fn render_pretty(report: &Report, verdict: &Verdict) -> String {
             let aliases = bone_query::package_aliases::from_graph(graph);
             let _ = writeln!(o, "\npackage graph {}", tag(Status::Exact));
             for node in graph.packages() {
-                let root_mark = if node.id == graph.root() { ", selected root" } else { "" };
+                let root_mark = if node.id == graph.root() {
+                    ", selected root"
+                } else {
+                    ""
+                };
                 let _ = writeln!(
                     o,
                     "  #{} {} ({}{root_mark}) {}",
@@ -798,7 +913,9 @@ fn render_pretty(report: &Report, verdict: &Verdict) -> String {
                 let _ = writeln!(
                     o,
                     "      self name: {}",
-                    resolver.map(|p| p.self_name.to_string()).unwrap_or_default()
+                    resolver
+                        .map(|p| p.self_name.to_string())
+                        .unwrap_or_default()
                 );
                 if node.dependencies.is_empty() {
                     let _ = writeln!(o, "      dependencies: none");
@@ -812,23 +929,42 @@ fn render_pretty(report: &Report, verdict: &Verdict) -> String {
                         target.manifest_name,
                         edge.target.0,
                         dialect_str(target.dialect),
-                        if edge.allow_legacy { " allow_legacy" } else { "" }
+                        if edge.allow_legacy {
+                            " allow_legacy"
+                        } else {
+                            ""
+                        }
                     );
                 }
             }
-            let _ = writeln!(o, "  unresolved edges: none; cycles: none (the graph build rejects both)");
+            let _ = writeln!(
+                o,
+                "  unresolved edges: none; cycles: none (the graph build rejects both)"
+            );
         }
     }
 
     // Legacy boundaries.
     match &report.graph {
         Err(_) => {
-            let _ = writeln!(o, "\nreachable legacy boundaries {}\n  {unknown}", tag(Status::Unknown));
+            let _ = writeln!(
+                o,
+                "\nreachable legacy boundaries {}\n  {unknown}",
+                tag(Status::Unknown)
+            );
         }
         Ok(graph) => {
             let root = graph.package(graph.root());
-            let _ = writeln!(o, "\nreachable legacy boundaries from {} {}", root.manifest_name, tag(Status::Exact));
-            let _ = writeln!(o, "  std: compiler-owned standard library, the allowed boundary (spec 5); never counted");
+            let _ = writeln!(
+                o,
+                "\nreachable legacy boundaries from {} {}",
+                root.manifest_name,
+                tag(Status::Exact)
+            );
+            let _ = writeln!(
+                o,
+                "  std: compiler-owned standard library, the allowed boundary (spec 5); never counted"
+            );
             for r in reach(graph) {
                 let node = graph.package(PackageId(r.package));
                 let role = match (node.dialect, r.package == graph.root().0) {
@@ -837,30 +973,59 @@ fn render_pretty(report: &Report, verdict: &Verdict) -> String {
                     (Dialect::V1, true) => "v1 (selected root)",
                     (Dialect::V1, false) => "v1",
                 };
-                let _ = writeln!(o, "  {} {role}, {} path(s)", node.manifest_name, r.path_count);
+                let _ = writeln!(
+                    o,
+                    "  {} {role}, {} path(s)",
+                    node.manifest_name, r.path_count
+                );
                 for p in &r.paths {
                     let _ = writeln!(o, "      {}", p.join(" -> "));
                 }
                 if r.path_count > r.paths.len() {
-                    let _ = writeln!(o, "      ... {} more path(s) not listed", r.path_count - r.paths.len());
+                    let _ = writeln!(
+                        o,
+                        "      ... {} more path(s) not listed",
+                        r.path_count - r.paths.len()
+                    );
                 }
             }
         }
     }
 
     // Closure verdict.
-    let label = if report.closed_requested { "--closed" } else { "closure (--closed not requested)" };
+    let label = if report.closed_requested {
+        "--closed"
+    } else {
+        "closure (--closed not requested)"
+    };
     match verdict {
         Verdict::Pass => {
-            let _ = writeln!(o, "\n{label}: pass -- every reachable package is v1; std is the only boundary");
+            let _ = writeln!(
+                o,
+                "\n{label}: pass -- every reachable package is v1; std is the only boundary"
+            );
         }
         Verdict::Fail(ids) => {
-            let graph = report.graph.as_ref().expect("a failing verdict has a graph");
-            let _ = writeln!(o, "\n{label}: FAIL -- {} legacy package(s) reachable:", ids.len());
+            let graph = report
+                .graph
+                .as_ref()
+                .expect("a failing verdict has a graph");
+            let _ = writeln!(
+                o,
+                "\n{label}: FAIL -- {} legacy package(s) reachable:",
+                ids.len()
+            );
             let reaches = reach(graph);
             for id in ids {
-                let r = reaches.iter().find(|r| r.package == *id).expect("offending package is reachable");
-                let why = if *id == graph.root().0 { "the selected root is legacy" } else { "reachable legacy package" };
+                let r = reaches
+                    .iter()
+                    .find(|r| r.package == *id)
+                    .expect("offending package is reachable");
+                let why = if *id == graph.root().0 {
+                    "the selected root is legacy"
+                } else {
+                    "reachable legacy package"
+                };
                 let _ = writeln!(
                     o,
                     "  {} ({why}): {}",
@@ -877,7 +1042,11 @@ fn render_pretty(report: &Report, verdict: &Verdict) -> String {
     // Cross-package references.
     match (&report.analysis, &report.graph) {
         (Analysis::Ok(table), Ok(graph)) => {
-            let _ = writeln!(o, "\ncross-package references by original owner {}", tag(Status::Exact));
+            let _ = writeln!(
+                o,
+                "\ncross-package references by original owner {}",
+                tag(Status::Exact)
+            );
             let _ = writeln!(
                 o,
                 "  counted: calls, value references, constructions (struct literals, newtype constructors), enum variants, synthesized protocol calls (for-in iter/next, iterator coercions) in lowered bodies; nominal types in signatures, fields, annotations and casts; enum/record names in patterns"
@@ -886,8 +1055,10 @@ fn render_pretty(report: &Report, verdict: &Verdict) -> String {
                 let _ = writeln!(o, "  none");
             }
             for (&(from, to), c) in &table.edges {
-                let kinds: Vec<String> =
-                    KINDS.iter().map(|k| format!("{} {}", k.as_str().replace('_', " "), c.get(*k))).collect();
+                let kinds: Vec<String> = KINDS
+                    .iter()
+                    .map(|k| format!("{} {}", k.as_str().replace('_', " "), c.get(*k)))
+                    .collect();
                 let _ = writeln!(
                     o,
                     "  {} -> {}: {} ({})",
@@ -900,22 +1071,44 @@ fn render_pretty(report: &Report, verdict: &Verdict) -> String {
             for (&from, u) in &table.unattributed {
                 let from = &graph.package(PackageId(from)).manifest_name;
                 for (label, map) in [
-                    ("value reference(s) with no definition (raw global)", &u.no_definition),
-                    ("value reference(s) whose key is defined in several packages", &u.several_owners),
+                    (
+                        "value reference(s) with no definition (raw global)",
+                        &u.no_definition,
+                    ),
+                    (
+                        "value reference(s) whose key is defined in several packages",
+                        &u.several_owners,
+                    ),
                     ("named call(s) with no recorded target", &u.unrecorded_calls),
                 ] {
                     if map.is_empty() {
                         continue;
                     }
                     let total: usize = map.values().sum();
-                    let keys: Vec<String> = map.iter().take(KEYS_LISTED).map(|(k, n)| format!("{k} x{n}")).collect();
-                    let more = if map.len() > KEYS_LISTED { format!(", ... {} more key(s)", map.len() - KEYS_LISTED) } else { String::new() };
-                    let _ = writeln!(o, "  {from}: {total} unattributed {label}: {}{more}", keys.join(", "));
+                    let keys: Vec<String> = map
+                        .iter()
+                        .take(KEYS_LISTED)
+                        .map(|(k, n)| format!("{k} x{n}"))
+                        .collect();
+                    let more = if map.len() > KEYS_LISTED {
+                        format!(", ... {} more key(s)", map.len() - KEYS_LISTED)
+                    } else {
+                        String::new()
+                    };
+                    let _ = writeln!(
+                        o,
+                        "  {from}: {total} unattributed {label}: {}{more}",
+                        keys.join(", ")
+                    );
                 }
             }
 
             let und = undeclared(graph, table);
-            let _ = writeln!(o, "\nreferences to undeclared peers or back to consumers {}", tag(Status::Exact));
+            let _ = writeln!(
+                o,
+                "\nreferences to undeclared peers or back to consumers {}",
+                tag(Status::Exact)
+            );
             let _ = writeln!(o, "  over the counted reference kinds above");
             if und.is_empty() {
                 let _ = writeln!(o, "  none");
@@ -932,7 +1125,11 @@ fn render_pretty(report: &Report, verdict: &Verdict) -> String {
             render_derived_pretty(&mut o, graph, table);
         }
         _ => {
-            let _ = writeln!(o, "\ncross-package references by original owner {}\n  {unknown}", tag(Status::Unknown));
+            let _ = writeln!(
+                o,
+                "\ncross-package references by original owner {}\n  {unknown}",
+                tag(Status::Unknown)
+            );
             let _ = writeln!(
                 o,
                 "\nreferences to undeclared peers or back to consumers {}\n  {unknown}",
@@ -944,12 +1141,19 @@ fn render_pretty(report: &Report, verdict: &Verdict) -> String {
         }
     }
 
-    let _ = writeln!(o, "\nnot computed by this version {}", tag(Status::NotComputed));
+    let _ = writeln!(
+        o,
+        "\nnot computed by this version {}",
+        tag(Status::NotComputed)
+    );
     for (item, missing) in NOT_COMPUTED {
         let _ = writeln!(o, "  - {item}: {missing}");
     }
     if analysis_failed {
-        let _ = writeln!(o, "\nanalysis failed: derived sections are unknown, not zero");
+        let _ = writeln!(
+            o,
+            "\nanalysis failed: derived sections are unknown, not zero"
+        );
     }
     o
 }
@@ -968,7 +1172,12 @@ const NAMES_LISTED: usize = 12;
 
 fn listed(names: impl IntoIterator<Item = String>) -> String {
     let all: Vec<String> = names.into_iter().collect();
-    let mut out = all.iter().take(NAMES_LISTED).cloned().collect::<Vec<_>>().join(", ");
+    let mut out = all
+        .iter()
+        .take(NAMES_LISTED)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
     if all.len() > NAMES_LISTED {
         out.push_str(&format!(", ... {} more", all.len() - NAMES_LISTED));
     }
@@ -981,7 +1190,10 @@ fn render_derived_pretty(o: &mut String, graph: &PackageGraph, table: &RefTable)
     let exact = "[exact]";
 
     let _ = writeln!(o, "\n{} {exact}", DERIVED_SECTIONS[0]);
-    let _ = writeln!(o, "  read from each analyzed file's parse tree before expansion");
+    let _ = writeln!(
+        o,
+        "  read from each analyzed file's parse tree before expansion"
+    );
     for (&p, c) in &table.census {
         let _ = writeln!(
             o,
@@ -996,7 +1208,10 @@ fn render_derived_pretty(o: &mut String, graph: &PackageGraph, table: &RefTable)
     }
 
     let _ = writeln!(o, "\n{} {exact}", DERIVED_SECTIONS[1]);
-    let _ = writeln!(o, "  the other packages each fragment references (std, the prelude, is not listed); JSON has every fragment");
+    let _ = writeln!(
+        o,
+        "  the other packages each fragment references (std, the prelude, is not listed); JSON has every fragment"
+    );
     if table.fragments.is_empty() {
         let _ = writeln!(o, "  none");
     }
@@ -1007,8 +1222,17 @@ fn render_derived_pretty(o: &mut String, graph: &PackageGraph, table: &RefTable)
                 *by_target.entry(t).or_default() += 1;
             }
         }
-        let parts: Vec<String> = by_target.iter().map(|(t, n)| format!("{n} reference {}", name(*t))).collect();
-        let _ = writeln!(o, "  {}: {} fragment(s); {}", name(p), files.len(), parts.join(", "));
+        let parts: Vec<String> = by_target
+            .iter()
+            .map(|(t, n)| format!("{n} reference {}", name(*t)))
+            .collect();
+        let _ = writeln!(
+            o,
+            "  {}: {} fragment(s); {}",
+            name(p),
+            files.len(),
+            parts.join(", ")
+        );
     }
 
     let _ = writeln!(o, "\n{} {exact}", DERIVED_SECTIONS[2]);
@@ -1026,13 +1250,19 @@ fn render_derived_pretty(o: &mut String, graph: &PackageGraph, table: &RefTable)
             name(p),
             defs.len(),
             listed(defs.iter().map(|((n, k), (from, refs))| {
-                format!("{n} ({k}, {refs} from {})", from.iter().map(|f| name(*f)).collect::<Vec<_>>().join("/"))
+                format!(
+                    "{n} ({k}, {refs} from {})",
+                    from.iter().map(|f| name(*f)).collect::<Vec<_>>().join("/")
+                )
             }))
         );
     }
 
     let _ = writeln!(o, "\n{} {exact}", DERIVED_SECTIONS[3]);
-    let _ = writeln!(o, "  every nominal an exported interface names, with its reason (spec 11)");
+    let _ = writeln!(
+        o,
+        "  every nominal an exported interface names, with its reason (spec 11)"
+    );
     if table.closure.is_empty() {
         let _ = writeln!(o, "  none");
     }
@@ -1042,7 +1272,10 @@ fn render_derived_pretty(o: &mut String, graph: &PackageGraph, table: &RefTable)
             let _ = writeln!(
                 o,
                 "    {ty}: {}",
-                listed(why.iter().map(|(reason, exporter)| format!("{reason} `{exporter}`")))
+                listed(
+                    why.iter()
+                        .map(|(reason, exporter)| format!("{reason} `{exporter}`"))
+                )
             );
         }
     }
@@ -1058,7 +1291,14 @@ fn render_derived_pretty(o: &mut String, graph: &PackageGraph, table: &RefTable)
             o,
             "  {}",
             listed(table.collisions.iter().map(|(n, owners)| {
-                format!("{n} ({})", owners.iter().map(|w| owner_name(graph, *w)).collect::<Vec<_>>().join(", "))
+                format!(
+                    "{n} ({})",
+                    owners
+                        .iter()
+                        .map(|w| owner_name(graph, *w))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
             }))
         );
     }
@@ -1135,7 +1375,10 @@ fn render_json(report: &Report, verdict: &Verdict) -> Value {
     let unknown_reason = "analysis failed";
 
     let revision = match &report.revision {
-        Revision::Known { commit, dirty_paths } => json!({
+        Revision::Known {
+            commit,
+            dirty_paths,
+        } => json!({
             "status": "exact",
             "commit": commit,
             "dirty_paths": dirty_paths,
@@ -1157,7 +1400,9 @@ fn render_json(report: &Report, verdict: &Verdict) -> Value {
     };
     let analysis = match &report.analysis {
         Analysis::Ok(_) => json!({ "status": "ok", "stage": Value::Null, "diagnostics": [] }),
-        Analysis::Failed { stage, diagnostics, .. } => json!({
+        Analysis::Failed {
+            stage, diagnostics, ..
+        } => json!({
             "status": "failed",
             "stage": stage,
             "diagnostics": diagnostics.iter().map(|d| json!({
@@ -1227,10 +1472,17 @@ fn render_json(report: &Report, verdict: &Verdict) -> Value {
     };
 
     let closed = match verdict {
-        Verdict::Pass => json!({ "requested": report.closed_requested, "verdict": "pass", "root_is_legacy": false, "offending": [] }),
-        Verdict::Unknown(why) => json!({ "requested": report.closed_requested, "verdict": "unknown", "reason": why, "offending": [] }),
+        Verdict::Pass => {
+            json!({ "requested": report.closed_requested, "verdict": "pass", "root_is_legacy": false, "offending": [] })
+        }
+        Verdict::Unknown(why) => {
+            json!({ "requested": report.closed_requested, "verdict": "unknown", "reason": why, "offending": [] })
+        }
         Verdict::Fail(ids) => {
-            let graph = report.graph.as_ref().expect("a failing verdict has a graph");
+            let graph = report
+                .graph
+                .as_ref()
+                .expect("a failing verdict has a graph");
             let reaches = reach(graph);
             json!({
                 "requested": report.closed_requested,
@@ -1256,7 +1508,10 @@ fn render_json(report: &Report, verdict: &Verdict) -> Value {
                 .iter()
                 .map(|(&(from, to), c)| {
                     let mut row = serde_json::Map::new();
-                    row.insert("from".into(), json!(graph.package(PackageId(from)).manifest_name));
+                    row.insert(
+                        "from".into(),
+                        json!(graph.package(PackageId(from)).manifest_name),
+                    );
                     row.insert("to".into(), json!(owner_name(graph, to)));
                     for k in KINDS {
                         row.insert(k.as_str().into(), json!(c.get(k)));
@@ -1268,21 +1523,25 @@ fn render_json(report: &Report, verdict: &Verdict) -> Value {
             let unattributed: Vec<Value> = table
                 .unattributed
                 .iter()
-                .map(|(&from, u)| json!({
-                    "from": graph.package(PackageId(from)).manifest_name,
-                    "no_definition": u.no_definition,
-                    "several_owners": u.several_owners,
-                    "unrecorded_calls": u.unrecorded_calls,
-                }))
+                .map(|(&from, u)| {
+                    json!({
+                        "from": graph.package(PackageId(from)).manifest_name,
+                        "no_definition": u.no_definition,
+                        "several_owners": u.several_owners,
+                        "unrecorded_calls": u.unrecorded_calls,
+                    })
+                })
                 .collect();
             let und: Vec<Value> = undeclared(graph, table)
                 .into_iter()
-                .map(|(from, to, class, n)| json!({
-                    "from": graph.package(PackageId(from)).manifest_name,
-                    "to": graph.package(PackageId(to)).manifest_name,
-                    "class": class,
-                    "references": n,
-                }))
+                .map(|(from, to, class, n)| {
+                    json!({
+                        "from": graph.package(PackageId(from)).manifest_name,
+                        "to": graph.package(PackageId(to)).manifest_name,
+                        "class": class,
+                        "references": n,
+                    })
+                })
                 .collect();
             (
                 json!({
@@ -1302,10 +1561,21 @@ fn render_json(report: &Report, verdict: &Verdict) -> Value {
 
     let derived = match (&report.analysis, &report.graph) {
         (Analysis::Ok(table), Ok(graph)) => derived_json(graph, table),
-        _ => ["census", "import_families", "legacy_exports", "api_closure", "name_collisions"]
-            .iter()
-            .map(|k| (k.to_string(), json!({ "status": "unknown", "reason": unknown_reason })))
-            .collect(),
+        _ => [
+            "census",
+            "import_families",
+            "legacy_exports",
+            "api_closure",
+            "name_collisions",
+        ]
+        .iter()
+        .map(|k| {
+            (
+                k.to_string(),
+                json!({ "status": "unknown", "reason": unknown_reason }),
+            )
+        })
+        .collect(),
     };
     let mut doc = json!({
         "project": report.project,

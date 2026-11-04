@@ -15,10 +15,17 @@ use crate::workspace::{BodyInference, Workspace};
 /// Whether `lambda`, an `Expr::Lambda` in `body`, provably cannot outlive the
 /// call it is passed to. `bi` is `body`'s inference, used for its resolved
 /// overloads.
-pub fn lambda_is_nonescaping(ws: &Workspace, body: &Body, bi: &BodyInference, lambda: Idx<Expr>) -> bool {
+pub fn lambda_is_nonescaping(
+    ws: &Workspace,
+    body: &Body,
+    bi: &BodyInference,
+    lambda: Idx<Expr>,
+) -> bool {
     let mut visiting = FxHashSet::default();
     for (call, expr) in body.expr_arena.iter() {
-        let Expr::Call { callee, args, .. } = expr else { continue };
+        let Expr::Call { callee, args, .. } = expr else {
+            continue;
+        };
         if matches!(callee, Callee::Value(value) if *value == lambda) {
             return true;
         }
@@ -36,8 +43,14 @@ pub fn lambda_is_nonescaping(ws: &Workspace, body: &Body, bi: &BodyInference, la
 }
 
 fn unique_target(ws: &Workspace, callee: &Callee) -> Option<(ModuleId, Idx<Function>)> {
-    let Callee::Unresolved { name, .. } = callee else { return None };
-    match ws.functions_by_name.get(name).map(|candidates| candidates.as_slice()) {
+    let Callee::Unresolved { name, .. } = callee else {
+        return None;
+    };
+    match ws
+        .functions_by_name
+        .get(name)
+        .map(|candidates| candidates.as_slice())
+    {
         Some([only]) => Some(*only),
         _ => None,
     }
@@ -74,7 +87,11 @@ fn param_body_is_nonescaping(
     let function = &module.functions[fid];
     // A co fn keeps its parameters in the coroutine frame; extern, inline and
     // variadic bodies are opaque.
-    if function.is_coroutine || function.is_extern || function.inline_body.is_some() || function.is_variadic {
+    if function.is_coroutine
+        || function.is_extern
+        || function.inline_body.is_some()
+        || function.is_variadic
+    {
         return false;
     }
     let Some(body) = module.bodies.get(&BodyOwner::Function(fid)) else {
@@ -89,10 +106,16 @@ fn param_body_is_nonescaping(
         .filter(|(_, expr)| matches!(expr, Expr::Lambda { .. }))
         .map(|(id, _)| body.expr_spans[id])
         .collect();
-    let in_lambda = |id: Idx<Expr>| lambdas.iter().any(|outer| contains(*outer, body.expr_spans[id]));
+    let in_lambda = |id: Idx<Expr>| {
+        lambdas
+            .iter()
+            .any(|outer| contains(*outer, body.expr_spans[id]))
+    };
     let mut forwarded = FxHashSet::default();
     for (call, expr) in body.expr_arena.iter() {
-        let Expr::Call { callee, args, .. } = expr else { continue };
+        let Expr::Call { callee, args, .. } = expr else {
+            continue;
+        };
         if matches!(callee, Callee::Local(binding) if *binding == param) && in_lambda(call) {
             return false;
         }
@@ -112,7 +135,7 @@ fn param_body_is_nonescaping(
             forwarded.insert(arg);
         }
     }
-    body.expr_arena
-        .iter()
-        .all(|(id, expr)| !matches!(expr, Expr::Var(binding) if *binding == param) || forwarded.contains(&id))
+    body.expr_arena.iter().all(|(id, expr)| {
+        !matches!(expr, Expr::Var(binding) if *binding == param) || forwarded.contains(&id)
+    })
 }

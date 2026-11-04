@@ -7,10 +7,8 @@
 
 mod common;
 
-use skull_codegen_lua::{emit_function, CalleeBindingMode, CodegenCtx, LoopShape, TailCallShape};
+use skull_codegen_lua::{CalleeBindingMode, CodegenCtx, LoopShape, TailCallShape, emit_function};
 use skull_mir::mir::FuncRef;
-
-
 
 /// Lower `fn_name` from `modules` (last = the user `<test>` module), emit Lua.
 fn emit_dump(modules: Vec<skull_parser::Ast>, fn_name: &str) -> String {
@@ -38,7 +36,17 @@ fn emit_dump_with(
         .unwrap_or_else(|e| panic!("lower failed: {}", e.message));
     let mut ctx = CodegenCtx::new(&ws);
     configure(&mut ctx);
-    emit_function(&ws, &ctx, &interner, FuncRef { module: mid, func: fid }, &func, None)
+    emit_function(
+        &ws,
+        &ctx,
+        &interner,
+        FuncRef {
+            module: mid,
+            func: fid,
+        },
+        &func,
+        None,
+    )
 }
 
 /// Stdlib-free: literals, vars, `let`, builtin comparisons, control flow.
@@ -60,10 +68,19 @@ fn absent_field_store_skips_nil_key_insertion_and_preserves_clearing() {
         "struct Row { payload: string? = null } fn update(row: Row, value: string?) { row.payload = value }",
         "update",
     );
-    assert!(lua.contains(" ~= nil or ") && lua.contains(".payload ~= nil then"), "{lua}");
-    let symbol = lua.lines().find_map(|line| line.strip_prefix("function "))
-        .expect("function definition").split('(').next().unwrap();
-    let driver = format!(r#"{lua}
+    assert!(
+        lua.contains(" ~= nil or ") && lua.contains(".payload ~= nil then"),
+        "{lua}"
+    );
+    let symbol = lua
+        .lines()
+        .find_map(|line| line.strip_prefix("function "))
+        .expect("function definition")
+        .split('(')
+        .next()
+        .unwrap();
+    let driver = format!(
+        r#"{lua}
 local row = {{}}
 {symbol}(row, nil)
 assert(row.payload == nil)
@@ -79,15 +96,26 @@ local observed = setmetatable({{}}, {{
 {symbol}(observed, nil)
 {symbol}(observed, nil)
 assert(hits == 2 and reads == 0)
-"#);
-    let run = std::process::Command::new("luajit").arg("-e").arg(driver).output()
+"#
+    );
+    let run = std::process::Command::new("luajit")
+        .arg("-e")
+        .arg(driver)
+        .output()
         .expect("run field-store semantics");
-    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
 }
 
 #[test]
 fn non_nil_constant_field_store_keeps_direct_assignment() {
-    let lua = emit_clean("struct Row { count: int = 0 } fn update(row: Row) { row.count = 42 }", "update");
+    let lua = emit_clean(
+        "struct Row { count: int = 0 } fn update(row: Row) { row.count = 42 }",
+        "update",
+    );
     assert!(!lua.contains("getmetatable("), "{lua}");
     assert!(lua.contains(".count = (42)"), "{lua}");
 }
@@ -96,7 +124,9 @@ fn non_nil_constant_field_store_keeps_direct_assignment() {
 fn sinking_preserves_dynamic_format_error_order() {
     common::require_luajit();
     for result in ["s", "\"[{s}]\""] {
-        let lua = emit_clean(&format!(r#"
+        let lua = emit_clean(
+            &format!(
+                r#"
 @nomangle fn compute(w: int, mark: fn()) -> string {{
     let x = 3.25
     let s = "{{x:{{w}}.2f}}"
@@ -104,8 +134,12 @@ fn sinking_preserves_dynamic_format_error_order() {
     mark()
     return result
 }}
-"#), "compute");
-        let driver = format!(r#"{lua}
+"#
+            ),
+            "compute",
+        );
+        let driver = format!(
+            r#"{lua}
 for _, width in ipairs({{8, 1000, 1000000000}}) do
     local actual_marks, expected_marks = 0, 0
     local ok, value = pcall(compute, width, function() actual_marks = actual_marks + 1 end)
@@ -119,22 +153,43 @@ for _, width in ipairs({{8, 1000, 1000000000}}) do
     assert(actual_marks == expected_marks, 'side effects before error: ' .. actual_marks .. ' vs ' .. expected_marks)
     if ok then assert(value == expected) else assert(actual_marks == 0) end
 end
-"#, control = if result == "s" { "s" } else { "'[' .. s .. ']'" });
-        let run = std::process::Command::new("luajit").arg("-e").arg(&driver).output().expect("run ordering probe");
-        assert!(run.status.success(), "{}\n{lua}", String::from_utf8_lossy(&run.stderr));
+"#,
+            control = if result == "s" {
+                "s"
+            } else {
+                "'[' .. s .. ']'"
+            }
+        );
+        let run = std::process::Command::new("luajit")
+            .arg("-e")
+            .arg(&driver)
+            .output()
+            .expect("run ordering probe");
+        assert!(
+            run.status.success(),
+            "{}\n{lua}",
+            String::from_utf8_lossy(&run.stderr)
+        );
     }
 }
 
 #[test]
 fn sinking_preserves_checked_numeric_error_order() {
     common::require_luajit();
-    for (ty, expr, bad) in [("float", "x as uint", "-1"), ("uint", "(1 as uint) << x", "32")] {
-        let lua = emit_clean(&format!(
-            "@nomangle fn compute(x: {ty}, mark: fn()) -> uint {{ let v = {expr}; let result = v + (1 as uint); mark(); return result }}"
-        ), "compute");
+    for (ty, expr, bad) in [
+        ("float", "x as uint", "-1"),
+        ("uint", "(1 as uint) << x", "32"),
+    ] {
+        let lua = emit_clean(
+            &format!(
+                "@nomangle fn compute(x: {ty}, mark: fn()) -> uint {{ let v = {expr}; let result = v + (1 as uint); mark(); return result }}"
+            ),
+            "compute",
+        );
         // Checked casts and shifts bind the shared runtime helpers, which this
         // bare harness does not emit -- pull in the canonical definitions.
-        let driver = format!(r#"{prelude}
+        let driver = format!(
+            r#"{prelude}
 {lua}
 for _, input in ipairs({{2, {bad}}}) do
     local marks = 0
@@ -142,39 +197,95 @@ for _, input in ipairs({{2, {bad}}}) do
     assert(ok == (input == 2))
     assert(marks == (ok and 1 or 0), 'side effects before checked numeric error: ' .. marks)
 end
-"#, prelude = skull_codegen_lua::UINT_CHECK_PRELUDE);
-        let run = std::process::Command::new("luajit").arg("-e").arg(&driver).output().expect("run numeric ordering probe");
-        assert!(run.status.success(), "{}\n{lua}", String::from_utf8_lossy(&run.stderr));
+"#,
+            prelude = skull_codegen_lua::UINT_CHECK_PRELUDE
+        );
+        let run = std::process::Command::new("luajit")
+            .arg("-e")
+            .arg(&driver)
+            .output()
+            .expect("run numeric ordering probe");
+        assert!(
+            run.status.success(),
+            "{}\n{lua}",
+            String::from_utf8_lossy(&run.stderr)
+        );
     }
 }
 
 #[test]
 fn numeric_selection_through_local_copies_uses_native_minmax() {
     for (comparison, yes, no, native) in [
-        ("<", "d", "b", "min"), ("<", "b", "d", "max"),
-        (">", "d", "b", "max"), (">", "b", "d", "min"),
+        ("<", "d", "b", "min"),
+        ("<", "b", "d", "max"),
+        (">", "d", "b", "max"),
+        (">", "b", "d", "min"),
     ] {
-        let lua = emit_clean(&format!("@nomangle fn choose(a: float, b: float) -> float {{ let d = a + 1.0; return if d {comparison} b {{ {yes} }} else {{ {no} }} }}"), "choose");
+        let lua = emit_clean(
+            &format!(
+                "@nomangle fn choose(a: float, b: float) -> float {{ let d = a + 1.0; return if d {comparison} b {{ {yes} }} else {{ {no} }} }}"
+            ),
+            "choose",
+        );
         assert!(lua.contains(&format!("math.{native}(")), "{lua}");
-        check_selection_values(&lua, &format!("local d = a + 1.0; if d {comparison} b then expected = {yes} else expected = {no} end"));
+        check_selection_values(
+            &lua,
+            &format!(
+                "local d = a + 1.0; if d {comparison} b then expected = {yes} else expected = {no} end"
+            ),
+        );
     }
-    let lua = emit_clean("@nomangle fn choose(a: float, b: float) -> float { let d = if a > b { a } else { b }; return if d < 0.0 { d } else { 0.0 } }", "choose");
-    assert!(lua.contains("math.min(") && lua.contains("math.max("), "{lua}");
-    check_selection_values(&lua, "local d; if a > b then d = a else d = b end; if d < 0 then expected = d else expected = 0 end");
+    let lua = emit_clean(
+        "@nomangle fn choose(a: float, b: float) -> float { let d = if a > b { a } else { b }; return if d < 0.0 { d } else { 0.0 } }",
+        "choose",
+    );
+    assert!(
+        lua.contains("math.min(") && lua.contains("math.max("),
+        "{lua}"
+    );
+    check_selection_values(
+        &lua,
+        "local d; if a > b then d = a else d = b end; if d < 0 then expected = d else expected = 0 end",
+    );
 }
 
 #[test]
 fn numeric_selection_clamp_with_ordered_bounds_uses_native_minmax() {
-    let lua = emit_clean("@nomangle fn choose(a: float) -> float { return if a < -1.0 { -1.0 } else if a > 1.0 { 1.0 } else { a } }", "choose");
+    let lua = emit_clean(
+        "@nomangle fn choose(a: float) -> float { return if a < -1.0 { -1.0 } else if a > 1.0 { 1.0 } else { a } }",
+        "choose",
+    );
     assert!(lua.contains("math.max(-1.0, math.min(1.0, "), "{lua}");
-    check_selection_values(&lua, "if a < -1 then expected = -1 elseif a > 1 then expected = 1 else expected = a end");
-    let lua = emit_inlined("@nomangle fn choose(a: float) -> float { clamp(a, -1.0, 1.0) }", "choose");
+    check_selection_values(
+        &lua,
+        "if a < -1 then expected = -1 elseif a > 1 then expected = 1 else expected = a end",
+    );
+    let lua = emit_inlined(
+        "@nomangle fn choose(a: float) -> float { clamp(a, -1.0, 1.0) }",
+        "choose",
+    );
     assert!(lua.contains("math.max(-1.0, math.min(1.0, "), "{lua}");
-    check_selection_values(&lua, "if a < -1 then expected = -1 elseif a > 1 then expected = 1 else expected = a end");
+    check_selection_values(
+        &lua,
+        "if a < -1 then expected = -1 elseif a > 1 then expected = 1 else expected = a end",
+    );
     for (lo, hi) in [("0.0", "0.0"), ("-0.0", "0.0"), ("0.0", "-0.0")] {
-        let lua = emit_clean(&format!("@nomangle fn choose(a: float) -> float {{ return if a < {lo} {{ {lo} }} else if a > {hi} {{ {hi} }} else {{ a }} }}"), "choose");
-        assert!(lua.contains("math.max(") && lua.contains("math.min("), "{lua}");
-        check_selection_values(&lua, &format!("if a < {lo} then expected = {lo} elseif a > {hi} then expected = {hi} else expected = a end"));
+        let lua = emit_clean(
+            &format!(
+                "@nomangle fn choose(a: float) -> float {{ return if a < {lo} {{ {lo} }} else if a > {hi} {{ {hi} }} else {{ a }} }}"
+            ),
+            "choose",
+        );
+        assert!(
+            lua.contains("math.max(") && lua.contains("math.min("),
+            "{lua}"
+        );
+        check_selection_values(
+            &lua,
+            &format!(
+                "if a < {lo} then expected = {lo} elseif a > {hi} then expected = {hi} else expected = a end"
+            ),
+        );
     }
     for src in [
         "@nomangle fn choose(a: float) -> float { return if a < 1.0 { 1.0 } else if a > -1.0 { -1.0 } else { a } }",
@@ -195,38 +306,73 @@ fn numeric_selection_clamp_keeps_mutable_frame_bounds() {
     ).expect("parse");
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut vec![ast]).expect("semantic_pass");
     let mid = ws.module_ids[&ustr::Ustr::from("<test>")];
-    let fid = ws.module(mid).functions.iter().find(|(_, f)| f.name == "choose").unwrap().0;
+    let fid = ws
+        .module(mid)
+        .functions
+        .iter()
+        .find(|(_, f)| f.name == "choose")
+        .unwrap()
+        .0;
     let (mut func, interner) = common::lower_test_ref(&ws, mid, fid).expect("lower");
-    let lo = func.cells.iter().find(|(_, c)| c.name.is_some_and(|n| n == "lo")).unwrap().0;
+    let lo = func
+        .cells
+        .iter()
+        .find(|(_, c)| c.name.is_some_and(|n| n == "lo"))
+        .unwrap()
+        .0;
     // Frame reads stay as Load while a converted callback writes the state table.
     let state = func.new_cell(Some(ustr::Ustr::from("state")));
     func.params.insert(0, state);
     let callee = func.alloc_inst(Inst::Global(ustr::Ustr::from("mutate")));
     let receiver = func.alloc_inst(Inst::Load(state));
-    let call = func.alloc_inst(Inst::CallValue { callee, args: vec![receiver] });
+    let call = func.alloc_inst(Inst::CallValue {
+        callee,
+        args: vec![receiver],
+    });
     let entry = func.entry();
-    let at = func.blocks[entry].insts.iter().position(|id| {
-        matches!(func.insts[*id], Inst::Store { cell, .. } if cell == lo)
-    }).expect("bound initialization") + 1;
-    func.blocks[entry].insts.splice(at..at, [callee, receiver, call]);
+    let at = func.blocks[entry]
+        .insts
+        .iter()
+        .position(|id| matches!(func.insts[*id], Inst::Store { cell, .. } if cell == lo))
+        .expect("bound initialization")
+        + 1;
+    func.blocks[entry]
+        .insts
+        .splice(at..at, [callee, receiver, call]);
     let frame = skull_codegen_lua::FrameCtx {
         s_cell: state,
         fields: [lo].into_iter().collect(),
         slots: [(lo, 0)].into_iter().collect(),
     };
     let lua = skull_codegen_lua::emit_named_framed(
-        &ws, &CodegenCtx::new(&ws), &interner, "choose", &func, Some(&frame), None,
+        &ws,
+        &CodegenCtx::new(&ws),
+        &interner,
+        "choose",
+        &func,
+        Some(&frame),
+        None,
     );
     common::require_luajit();
-    let driver = format!("local flushes = 0\njit.attach(function(what) if what == 'flush' then flushes = flushes + 1 end end, 'trace')\nfunction mutate(s) s.c0 = 0 end\n{lua}\nassert(choose({{}}, -0.5) == 0)\nprint('frame-ok flushes=' .. flushes)");
-    let run = std::process::Command::new("luajit").args(["-e", &driver]).output().expect("frame-bound semantics");
-    assert!(run.status.success(), "{lua}\n{}", String::from_utf8_lossy(&run.stderr));
+    let driver = format!(
+        "local flushes = 0\njit.attach(function(what) if what == 'flush' then flushes = flushes + 1 end end, 'trace')\nfunction mutate(s) s.c0 = 0 end\n{lua}\nassert(choose({{}}, -0.5) == 0)\nprint('frame-ok flushes=' .. flushes)"
+    );
+    let run = std::process::Command::new("luajit")
+        .args(["-e", &driver])
+        .output()
+        .expect("frame-bound semantics");
+    assert!(
+        run.status.success(),
+        "{lua}\n{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
     eprint!("{}", String::from_utf8_lossy(&run.stdout));
 }
 
 fn check_selection_values(lua: &str, reference: &str) {
     common::require_luajit();
-    let driver = format!(r#"{lua}
+    let driver = format!(
+        r#"{lua}
 local flushes = 0
 jit.attach(function(what) if what == 'flush' then flushes = flushes + 1 end end, 'trace')
 local values = {{0/0, math.huge, -math.huge, 0.0, -0.0, 1, -1, 1.5, -1.5}}
@@ -238,9 +384,17 @@ for pass = 1,2000 do for _,a in ipairs(values) do for _,b in ipairs(values) do
     (got == expected and (got ~= 0 or 1/got == 1/expected)))
 end end end
 print('selection-ok flushes=' .. flushes)
-"#);
-    let run = std::process::Command::new("luajit").args(["-e", &driver]).output().expect("selection semantics");
-    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+"#
+    );
+    let run = std::process::Command::new("luajit")
+        .args(["-e", &driver])
+        .output()
+        .expect("selection semantics");
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
     let stdout = String::from_utf8_lossy(&run.stdout);
     assert!(stdout.starts_with("selection-ok flushes="), "{stdout}");
     eprint!("{stdout}");
@@ -250,17 +404,37 @@ print('selection-ok flushes=' .. flushes)
 fn scalar_constants_are_literals_at_use_sites() {
     for (declarations, result, literal) in [
         ("const NUMBER: float = -2.5", "float", "-2.5"),
-        ("const ORIGINAL: int = 42; const NUMBER: int = ORIGINAL", "int", "42"),
+        (
+            "const ORIGINAL: int = 42; const NUMBER: int = ORIGINAL",
+            "int",
+            "42",
+        ),
         ("const NUMBER: bool = true", "bool", "true"),
-        ("const NUMBER: string = \"literal\"", "string", "\"literal\""),
+        (
+            "const NUMBER: string = \"literal\"",
+            "string",
+            "\"literal\"",
+        ),
     ] {
-        let lua = emit_clean(&format!("{declarations}\nfn choose() -> {result} {{ return NUMBER }}"), "choose");
-        assert!(!lua.contains("NUMBER") && !lua.contains("ORIGINAL"), "{lua}");
+        let lua = emit_clean(
+            &format!("{declarations}\nfn choose() -> {result} {{ return NUMBER }}"),
+            "choose",
+        );
+        assert!(
+            !lua.contains("NUMBER") && !lua.contains("ORIGINAL"),
+            "{lua}"
+        );
         assert!(lua.contains(literal), "{lua}");
     }
-    let lua = emit_clean("global NUMBER: int = 42\nfn choose() -> int { NUMBER }", "choose");
+    let lua = emit_clean(
+        "global NUMBER: int = 42\nfn choose() -> int { NUMBER }",
+        "choose",
+    );
     assert!(lua.contains("NUMBER"), "{lua}");
-    let lua = emit_clean("fn init() -> int { 42 }\nconst NUMBER: int = init()\nfn choose() -> int { NUMBER }", "choose");
+    let lua = emit_clean(
+        "fn init() -> int { 42 }\nconst NUMBER: int = init()\nfn choose() -> int { NUMBER }",
+        "choose",
+    );
     assert!(lua.contains("NUMBER"), "{lua}");
 }
 
@@ -268,11 +442,22 @@ fn scalar_constants_are_literals_at_use_sites() {
 fn derived_scalar_constants_fold_arithmetic_without_runtime_reads() {
     for (declarations, result, expected) in [
         ("const NUMBER: float = 1.0 + 0.000001", "float", "1.000001"),
-        ("const BASE: int = 8; const NUMBER: int = BASE * 128", "int", "1024"),
-        ("const BASE: float = 4.5; const NUMBER: float = (BASE - 1.5) * 2.0", "float", "6.0"),
+        (
+            "const BASE: int = 8; const NUMBER: int = BASE * 128",
+            "int",
+            "1024",
+        ),
+        (
+            "const BASE: float = 4.5; const NUMBER: float = (BASE - 1.5) * 2.0",
+            "float",
+            "6.0",
+        ),
         ("const NUMBER: float = 7 / 2", "float", "3.5"),
     ] {
-        let lua = emit_clean(&format!("{declarations}\nfn choose() -> {result} {{ NUMBER }}"), "choose");
+        let lua = emit_clean(
+            &format!("{declarations}\nfn choose() -> {result} {{ NUMBER }}"),
+            "choose",
+        );
         assert!(!lua.contains("NUMBER") && !lua.contains("BASE"), "{lua}");
         assert!(lua.contains(expected), "{lua}");
     }
@@ -281,29 +466,59 @@ fn derived_scalar_constants_fold_arithmetic_without_runtime_reads() {
 #[test]
 fn scalar_arithmetic_keeps_effects_checks_and_unrepresentable_values_at_runtime() {
     for (declarations, result) in [
-        ("global BASE: int = 8; const NUMBER: int = BASE * 128", "int"),
-        ("fn input() -> int { 8 }; const NUMBER: int = input() * 128", "int"),
-        ("const BASE: uint = 4294967295; const ONE: uint = 1; const NUMBER: uint = BASE + ONE", "uint"),
+        (
+            "global BASE: int = 8; const NUMBER: int = BASE * 128",
+            "int",
+        ),
+        (
+            "fn input() -> int { 8 }; const NUMBER: int = input() * 128",
+            "int",
+        ),
+        (
+            "const BASE: uint = 4294967295; const ONE: uint = 1; const NUMBER: uint = BASE + ONE",
+            "uint",
+        ),
         ("const NUMBER: float = 1.0 / 0.0", "float"),
         ("const NUMBER: float = 1e308 * 1e308", "float"),
-        ("const BASE: int = 9007199254740991; const NUMBER: int = BASE + 2", "int"),
+        (
+            "const BASE: int = 9007199254740991; const NUMBER: int = BASE + 2",
+            "int",
+        ),
     ] {
-        let lua = emit_clean(&format!("{declarations}\nfn choose() -> {result} {{ NUMBER }}"), "choose");
+        let lua = emit_clean(
+            &format!("{declarations}\nfn choose() -> {result} {{ NUMBER }}"),
+            "choose",
+        );
         assert!(lua.contains("NUMBER"), "{lua}");
     }
-    let lua = emit_clean("const NUMBER: float = -0.0 * 2.0; fn choose() -> float { NUMBER }", "choose");
+    let lua = emit_clean(
+        "const NUMBER: float = -0.0 * 2.0; fn choose() -> float { NUMBER }",
+        "choose",
+    );
     assert!(lua.contains("-0.0") && !lua.contains("NUMBER"), "{lua}");
 }
 
 #[test]
 fn numeric_selection_uses_native_minmax() {
-    let lua = emit_clean("fn choose(a: float, b: float) -> float { return if a < b { a } else { b } }", "choose");
+    let lua = emit_clean(
+        "fn choose(a: float, b: float) -> float { return if a < b { a } else { b } }",
+        "choose",
+    );
     assert!(lua.contains("math.min("), "{lua}");
-    let lua = emit_clean("fn choose(a: float, b: float) -> float { return if a < b { b } else { a } }", "choose");
+    let lua = emit_clean(
+        "fn choose(a: float, b: float) -> float { return if a < b { b } else { a } }",
+        "choose",
+    );
     assert!(lua.contains("math.max("), "{lua}");
-    let lua = emit_clean("fn choose(a: int, b: int) -> int { return if a < b { a } else { b } }", "choose");
+    let lua = emit_clean(
+        "fn choose(a: int, b: int) -> int { return if a < b { a } else { b } }",
+        "choose",
+    );
     assert!(lua.contains("math.min("), "{lua}");
-    let lua = emit_clean("fn choose(a: int, b: int) -> int { if b > a { a = b }; return a }", "choose");
+    let lua = emit_clean(
+        "fn choose(a: int, b: int) -> int { if b > a { a = b }; return a }",
+        "choose",
+    );
     assert!(lua.contains("math.max("), "{lua}");
 }
 
@@ -318,7 +533,10 @@ fn numeric_selection_rejects_effectful_and_inclusive_branches() {
         "fn choose(a: float, b: float) -> float { return if a < b { b = 7.0; a } else { b } }",
     ] {
         let lua = emit_clean(src, "choose");
-        assert!(!lua.contains("math.min(") && !lua.contains("math.max("), "{lua}");
+        assert!(
+            !lua.contains("math.min(") && !lua.contains("math.max("),
+            "{lua}"
+        );
     }
 }
 
@@ -331,9 +549,15 @@ fn numeric_selection_preserves_special_values_and_guarded_assignment() {
         (">", "a", "b", "max"),
         (">", "b", "a", "min"),
     ] {
-        let lua = emit_clean(&format!("@nomangle fn choose(a: float, b: float) -> float {{ return if a {condition} b {{ {yes} }} else {{ {no} }} }}"), "choose");
+        let lua = emit_clean(
+            &format!(
+                "@nomangle fn choose(a: float, b: float) -> float {{ return if a {condition} b {{ {yes} }} else {{ {no} }} }}"
+            ),
+            "choose",
+        );
         assert!(lua.contains(&format!("math.{native}(")), "{lua}");
-        let driver = format!(r#"{lua}
+        let driver = format!(
+            r#"{lua}
 local values = {{0/0, math.huge, -math.huge, 0, -0.0, 1, -1, 1.5, -1.5}}
 local cases = {{}}
 for _,a in ipairs(values) do for _,b in ipairs(values) do
@@ -346,37 +570,63 @@ for pass=1,2000 do for _,r in ipairs(cases) do
     (got==expected and (got~=0 or 1/got==1/expected)))
 end end
 print('selection-ok')
-"#);
-        let result = std::process::Command::new("luajit").args(["-e", &driver]).output().expect("LuaJIT semantic gate");
-        assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
-        assert_eq!(String::from_utf8_lossy(&result.stdout).trim(), "selection-ok");
+"#
+        );
+        let result = std::process::Command::new("luajit")
+            .args(["-e", &driver])
+            .output()
+            .expect("LuaJIT semantic gate");
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&result.stdout).trim(),
+            "selection-ok"
+        );
     }
-    let lua = emit_clean("fn choose(a: float, b: float) -> float { if b > a { a = b }; return a }", "choose");
+    let lua = emit_clean(
+        "fn choose(a: float, b: float) -> float { if b > a { a = b }; return a }",
+        "choose",
+    );
     assert!(lua.contains("math.max("), "{lua}");
 }
 
 #[test]
 fn numeric_selection_preserves_writes_before_the_comparison() {
     common::require_luajit();
-    let lua = emit_clean(r#"
+    let lua = emit_clean(
+        r#"
 struct Probe { value: float, writes: int }
 @nomangle fn choose(a: float, b: float, p: Probe) -> float {
     p.value = b
     p.writes += 1
     return if a < b { a } else { b }
 }
-"#, "choose");
+"#,
+        "choose",
+    );
     assert!(lua.contains("math.min("), "{lua}");
-    let driver = format!(r#"{lua}
+    let driver = format!(
+        r#"{lua}
 for i=1,2000 do
   local p = {{value=i/10, writes=0}}
   assert(choose(i/10,i/10+1,p)==i/10)
   assert(p.value==i/10+1 and p.writes==1)
 end
 print('effects-ok')
-"#);
-    let result = std::process::Command::new("luajit").args(["-e", &driver]).output().expect("LuaJIT effect gate");
-    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+"#
+    );
+    let result = std::process::Command::new("luajit")
+        .args(["-e", &driver])
+        .output()
+        .expect("LuaJIT effect gate");
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
     assert_eq!(String::from_utf8_lossy(&result.stdout).trim(), "effects-ok");
 }
 
@@ -408,7 +658,10 @@ fn emit_clean_with(src: &str, fn_name: &str, configure: impl FnOnce(&mut Codegen
     let mut modules = STDLIB.clone();
     modules.push(skull_parser::parse_module_clean(src, ustr::Ustr::from("<test>")).expect("parse"));
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
-    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("user module id");
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("user module id");
     let (fid, _) = ws
         .module(mid)
         .functions
@@ -421,7 +674,17 @@ fn emit_clean_with(src: &str, fn_name: &str, configure: impl FnOnce(&mut Codegen
     let mut ctx = CodegenCtx::new(&ws);
     ctx.set_recursive_callees(common::cycle_callees(&graph));
     configure(&mut ctx);
-    emit_function(&ws, &ctx, &interner, FuncRef { module: mid, func: fid }, &func, None)
+    emit_function(
+        &ws,
+        &ctx,
+        &interner,
+        FuncRef {
+            module: mid,
+            func: fid,
+        },
+        &func,
+        None,
+    )
 }
 
 /// Emit the graph-reached lowerable instances for the `<test>` module's user
@@ -443,7 +706,13 @@ fn run_shaped(src: &str, driver: &str, shape: TailCallShape) -> String {
 
 /// [`run`] under an explicit emitted loop shape.
 fn run_looped(src: &str, driver: &str, loops: LoopShape) -> String {
-    run_shaped_bound_looped(src, driver, TailCallShape::All, CalleeBindingMode::Global, loops)
+    run_shaped_bound_looped(
+        src,
+        driver,
+        TailCallShape::All,
+        CalleeBindingMode::Global,
+        loops,
+    )
 }
 
 /// [`run_shaped`] with an explicit callee-binding mode, assembled the way
@@ -479,7 +748,10 @@ fn run_shaped_bound_looped(
     let mut modules = STDLIB.clone();
     modules.push(skull_parser::parse_module_clean(src, ustr::Ustr::from("<test>")).expect("parse"));
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
-    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("user module id");
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("user module id");
     let mut ctx = CodegenCtx::new(&ws);
     ctx.set_tail_call_shape(shape);
     ctx.set_callee_binding(binding);
@@ -488,7 +760,10 @@ fn run_shaped_bound_looped(
         .module(mid)
         .functions
         .iter()
-        .map(|(fid, _)| FuncRef { module: mid, func: fid })
+        .map(|(fid, _)| FuncRef {
+            module: mid,
+            func: fid,
+        })
         .collect();
     let interner = std::sync::Arc::new(skull_mir::monoty::MonoInterner::new());
     let graph = skull_graph::instance_graph::build_in(&ws, roots, false, interner.clone());
@@ -516,13 +791,12 @@ fn run_shaped_bound_looped(
         if f.inline_body.is_some() {
             continue;
         }
-        let Some(plan) = concrete.plans.get(inst) else { continue };
-        if let Ok(mut func) = skull_mir::lower::lower_instance_with_plans(
-            &ws,
-            &scx,
-            plan,
-            &concrete.plans,
-        ) {
+        let Some(plan) = concrete.plans.get(inst) else {
+            continue;
+        };
+        if let Ok(mut func) =
+            skull_mir::lower::lower_instance_with_plans(&ws, &scx, plan, &concrete.plans)
+        {
             skull_transform::cleanup(&mut func).unwrap();
             skull_transform::recover_counted_loops(&ws, &mut func);
             let name = inst.symbol(&ws, scx.interner());
@@ -532,10 +806,20 @@ fn run_shaped_bound_looped(
             unit_artifact.set_body_names(&func, &name);
             code_artifact.merge(unit_artifact);
             let plan = skull_codegen_lua::callee_binding_plan(
-                &ws, &ctx, scx.interner(), &name, inst.func, &func,
+                &ws,
+                &ctx,
+                scx.interner(),
+                &name,
+                inst.func,
+                &func,
             );
             lua.push_str(&skull_codegen_lua::emit_named(
-                &ws, &ctx, scx.interner(), &name, &func, plan.as_ref(),
+                &ws,
+                &ctx,
+                scx.interner(),
+                &name,
+                &func,
+                plan.as_ref(),
             ));
             if let Some(plan) = plan {
                 binds.push(plan);
@@ -544,7 +828,12 @@ fn run_shaped_bound_looped(
                 skull_transform::cleanup_with_nobox(&ws, nf).unwrap();
                 skull_transform::recover_counted_loops(&ws, nf);
                 lua.push_str(&skull_codegen_lua::emit_named(
-                    &ws, &ctx, scx.interner(), nf.name.as_str(), nf, None,
+                    &ws,
+                    &ctx,
+                    scx.interner(),
+                    nf.name.as_str(),
+                    nf,
+                    None,
                 ));
             }
         }
@@ -568,12 +857,12 @@ fn run_shaped_bound_looped(
     if !entries.is_empty() {
         lua.push_str("__rock_code_slot_begin()\n");
         for entry in entries {
-            let body = entry.body_name.expect("escaping CodeRef has no emitted body");
+            let body = entry
+                .body_name
+                .expect("escaping CodeRef has no emitted body");
             lua.push_str(&format!(
                 "__rock_code_slot_stage({}, {}, {})\n",
-                skull_codegen_lua::lua_string(
-                    &entry.identity.logical_key(&ws, scx.interner())
-                ),
+                skull_codegen_lua::lua_string(&entry.identity.logical_key(&ws, scx.interner())),
                 body,
                 skull_codegen_lua::lua_string(&entry.compatibility.call_abi),
             ));
@@ -659,10 +948,16 @@ fn zero_argument_call_preserves_value_without_a_bare_global() {
     let lua = format!("{}{}", emit(src, "five"), emit(src, "answer"));
     let run = std::process::Command::new(rock_host::project::luajit_path())
         .arg("-e")
-        .arg(format!("{lua}\nassert(_G.five == nil and _G.answer == nil)\nprint(answer_0())"))
+        .arg(format!(
+            "{lua}\nassert(_G.five == nil and _G.answer == nil)\nprint(answer_0())"
+        ))
         .output()
         .expect("run emitted zero-argument call");
-    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
     assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "5");
 }
 
@@ -706,8 +1001,14 @@ fn exec_sign_branch() {
 #[test]
 fn exec_arith_and_floor_div() {
     // int `./` is floor division; -7 ./ 2 = -4 (floor), not -3 (trunc).
-    assert_eq!(run("fn f(a: int, b: int) -> int { a ./ b }", "f(-7, 2)"), "-4");
-    assert_eq!(run("fn f(a: int, b: int) -> int { a * b + 1 }", "f(6, 7)"), "43");
+    assert_eq!(
+        run("fn f(a: int, b: int) -> int { a ./ b }", "f(-7, 2)"),
+        "-4"
+    );
+    assert_eq!(
+        run("fn f(a: int, b: int) -> int { a * b + 1 }", "f(6, 7)"),
+        "43"
+    );
 }
 
 #[test]
@@ -769,7 +1070,10 @@ fn total(xs: [int]) -> int {
     for x in xs { s = s + x; }
     s
 }";
-    assert_eq!(run(src, "total({_data = {4, 5, 6}, len = 3, __ty = \"Vec\"})"), "15");
+    assert_eq!(
+        run(src, "total({_data = {4, 5, 6}, len = 3, __ty = \"Vec\"})"),
+        "15"
+    );
 }
 
 #[test]
@@ -880,7 +1184,10 @@ fn f(a: int, b: int = 7, c: float = 0.5, d: string = \"x\", e: bool = true) -> i
 fn go() -> int { f(1) }
 fn go_named() -> int { f(1, d: \"y\") }";
     let lua = emit_clean(src, "go");
-    assert!(lua.contains("((1), (7), (0.5), (\"x\"), (true))"), "trailing defaults must be passed:\n{lua}");
+    assert!(
+        lua.contains("((1), (7), (0.5), (\"x\"), (true))"),
+        "trailing defaults must be passed:\n{lua}"
+    );
     let lua = emit_clean(src, "go_named");
     assert!(
         lua.contains("((1), (7), (0.5), (\"y\"), (true))"),
@@ -892,7 +1199,10 @@ fn go_named() -> int { f(1, d: \"y\") }";
 fn a_null_default_emits_no_callee_prologue_branch() {
     let src = "fn g(a: int, b: int? = null) -> int { a }";
     let lua = emit_clean(src, "g");
-    assert!(!lua.contains("(nil)"), "omitted IS null; no branch may test for it:\n{lua}");
+    assert!(
+        !lua.contains("(nil)"),
+        "omitted IS null; no branch may test for it:\n{lua}"
+    );
 }
 
 #[test]
@@ -902,9 +1212,15 @@ global K: int = 3
 fn h(a: int, b: int = K) -> int { a + b }
 fn go() -> int { h(1) }";
     let lua = emit_clean(src, "go");
-    assert!(lua.contains("((1))"), "a global-valued default is the callee's to evaluate:\n{lua}");
+    assert!(
+        lua.contains("((1))"),
+        "a global-valued default is the callee's to evaluate:\n{lua}"
+    );
     let callee = emit_clean(src, "h");
-    assert!(callee.contains("(nil)"), "the callee prologue must remain:\n{callee}");
+    assert!(
+        callee.contains("(nil)"),
+        "the callee prologue must remain:\n{callee}"
+    );
 }
 
 #[test]
@@ -962,16 +1278,28 @@ fn exec_cast_float_to_int() {
 #[test]
 fn uint_checked_casts_emit_no_closure() {
     for ty in ["int", "float"] {
-        let lua = emit(&format!("fn cast(value: {ty}) -> uint {{ value as uint }}"), "cast");
-        assert!(!lua.lines().skip(1).any(|line| line.contains("function")), "{lua}");
+        let lua = emit(
+            &format!("fn cast(value: {ty}) -> uint {{ value as uint }}"),
+            "cast",
+        );
+        assert!(
+            !lua.lines().skip(1).any(|line| line.contains("function")),
+            "{lua}"
+        );
     }
 }
 
 #[test]
 fn uint_checked_shifts_emit_no_closure() {
     for op in ["<<", ">>"] {
-        let lua = emit(&format!("fn shift(value: uint, count: uint) -> uint {{ value {op} count }}"), "shift");
-        assert!(!lua.lines().skip(1).any(|line| line.contains("function")), "{lua}");
+        let lua = emit(
+            &format!("fn shift(value: uint, count: uint) -> uint {{ value {op} count }}"),
+            "shift",
+        );
+        assert!(
+            !lua.lines().skip(1).any(|line| line.contains("function")),
+            "{lua}"
+        );
     }
 }
 
@@ -979,7 +1307,10 @@ fn uint_checked_shifts_emit_no_closure() {
 fn uint_constant_casts_emit_folded_numbers() {
     for (value, expected) in [("0", "0"), ("4294967295", "4294967295"), ("3.9", "3")] {
         let lua = emit(&format!("fn cast() -> uint {{ {value} as uint }}"), "cast");
-        assert!(lua.contains(&format!("do return ({expected}) end")), "{lua}");
+        assert!(
+            lua.contains(&format!("do return ({expected}) end")),
+            "{lua}"
+        );
     }
 }
 
@@ -990,7 +1321,10 @@ fn uint_checks_bind_shared_helpers_as_upvalues() {
         "checked",
         CalleeBindingMode::Upvalue,
     );
-    assert!(lua.contains("function(__rock_checked_u32, __rock_u32_shift_count) return function"), "{lua}");
+    assert!(
+        lua.contains("function(__rock_checked_u32, __rock_u32_shift_count) return function"),
+        "{lua}"
+    );
 }
 
 #[test]
@@ -1039,7 +1373,10 @@ assert(right_once(values) == 0 and values._data[1] == 3)
 return true
 end)()"#;
     for binding in [CalleeBindingMode::Global, CalleeBindingMode::Upvalue] {
-        assert_eq!(run_shaped_bound(src, driver, TailCallShape::All, binding), "true");
+        assert_eq!(
+            run_shaped_bound(src, driver, TailCallShape::All, binding),
+            "true"
+        );
     }
 }
 
@@ -1176,7 +1513,10 @@ fn tuple_return_callee_splats_multi_value() {
 fn tuple_return_tail_expr_splats() {
     // Tail-position tuple (no explicit `return`) splats the same way.
     let body = emit_clean("fn pair() -> (bool, int) { (true, 42) }", "pair");
-    assert!(!body.contains("{"), "tail tuple must not build a table:\n{body}");
+    assert!(
+        !body.contains("{"),
+        "tail tuple must not build a table:\n{body}"
+    );
     assert!(
         body.contains("do return (true), (42) end"),
         "expected `do return (true), (42) end`:\n{body}"
@@ -1196,7 +1536,8 @@ fn use_it() -> int { let (ok, n) = pair(); if ok { n } else { 0 } }";
         "destructure must be zero-alloc multi-assign, not a table build:\n{body}"
     );
     assert!(
-        body.lines().any(|l| l.contains(", ") && l.contains("= pair_0(")),
+        body.lines()
+            .any(|l| l.contains(", ") && l.contains("= pair_0(")),
         "expected a multi-assign call line `a, b = pair_0(...)`:\n{body}"
     );
 }
@@ -1215,7 +1556,10 @@ fn use_it() -> int { let t = pair(); t.1 }";
         !body.contains("[1]") && !body.contains("[2]"),
         "non-escaping whole-stored tuple should scalarize, not pack:\n{body}"
     );
-    assert!(body.contains("= pair_0()"), "multi-assign call expected:\n{body}");
+    assert!(
+        body.contains("= pair_0()"),
+        "multi-assign call expected:\n{body}"
+    );
 }
 
 #[test]
@@ -1224,7 +1568,10 @@ fn if_as_value_branch_and_cell_join() {
     // terminal ifs forward their return destination. Cell coloring coalesces
     // the dead param with result cells; pure values fold into their uses.
     assert_eq!(
-        emit("fn sign(x: int) -> int { let value = if x < 0 { 0 } else { 1 }; value }", "sign"),
+        emit(
+            "fn sign(x: int) -> int { let value = if x < 0 { 0 } else { 1 }; value }",
+            "sign"
+        ),
         "\
 function sign_int(c0)
   local r0
@@ -1269,7 +1616,10 @@ fn emit_inlined_shaped(src: &str, fn_name: &str, loops: LoopShape) -> String {
     let mut modules = STDLIB.clone();
     modules.push(skull_parser::parse_module_clean(src, ustr::Ustr::from("<test>")).expect("parse"));
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
-    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("user module id");
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("user module id");
     let (fid, _) = ws
         .module(mid)
         .functions
@@ -1282,14 +1632,20 @@ fn emit_inlined_shaped(src: &str, fn_name: &str, loops: LoopShape) -> String {
         ws.module(mid)
             .functions
             .iter()
-            .map(|(fid, _)| FuncRef { module: mid, func: fid })
+            .map(|(fid, _)| FuncRef {
+                module: mid,
+                func: fid,
+            })
             .collect(),
         false,
         interner.clone(),
     );
     let bodies = skull_graph::concrete_body::build(&ws, &graph);
     let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(interner);
-    let self_ref = FuncRef { module: mid, func: fid };
+    let self_ref = FuncRef {
+        module: mid,
+        func: fid,
+    };
     let self_inst = skull_mir::instance::Instance::base(self_ref);
     let plan = bodies.plans.get(&self_inst).expect("concrete self plan");
     let mut func = skull_mir::lower::lower_instance_with_plans(&ws, &scx, plan, &bodies.plans)
@@ -1415,7 +1771,8 @@ fn for_vec_backed_iter_inline_emits_forl() {
     // The element read's own bounds guard (`i >= v.len then __rock_vec_oob`)
     // is the one `>=` the body may keep.
     assert!(
-        !lua.lines().any(|l| l.contains(">=") && !l.contains("__rock_vec_oob(")),
+        !lua.lines()
+            .any(|l| l.contains(">=") && !l.contains("__rock_vec_oob(")),
         "the slot exit-compare must be absorbed into the `for` header:\n{lua}"
     );
 }
@@ -1623,21 +1980,36 @@ fn loop_scoped_registers_are_never_killed_outside_their_loop() {
         "probe",
     );
     let lines: Vec<&str> = lua.lines().map(str::trim).collect();
-    let for_line = lines.iter().position(|l| l.starts_with("for ")).unwrap_or_else(|| panic!("no for:\n{lua}"));
+    let for_line = lines
+        .iter()
+        .position(|l| l.starts_with("for "))
+        .unwrap_or_else(|| panic!("no for:\n{lua}"));
     let inner_decl = lines[for_line + 1];
-    assert!(inner_decl.starts_with("local r"), "loop-scoped registers expected right after the for:\n{lua}");
+    assert!(
+        inner_decl.starts_with("local r"),
+        "loop-scoped registers expected right after the for:\n{lua}"
+    );
     let end_line = lines.iter().rposition(|l| *l == "end").unwrap();
-    let end_line = lines[..end_line].iter().rposition(|l| *l == "end").unwrap_or_else(|| panic!("no loop end:\n{lua}"));
+    let end_line = lines[..end_line]
+        .iter()
+        .rposition(|l| *l == "end")
+        .unwrap_or_else(|| panic!("no loop end:\n{lua}"));
     let scoped: Vec<&str> = inner_decl["local ".len()..].split(", ").collect();
     for name in scoped {
         let kill = format!("{name} = nil");
         for (i, l) in lines.iter().enumerate() {
             if *l == kill {
-                assert!(for_line < i && i < end_line, "loop-scoped `{kill}` outside its for block at line {i}:\n{lua}");
+                assert!(
+                    for_line < i && i < end_line,
+                    "loop-scoped `{kill}` outside its for block at line {i}:\n{lua}"
+                );
             }
         }
     }
-    assert!(lines.iter().any(|l| l.ends_with(" = nil")), "no kills emitted at all:\n{lua}");
+    assert!(
+        lines.iter().any(|l| l.ends_with(" = nil")),
+        "no kills emitted at all:\n{lua}"
+    );
 }
 
 // -- Emitted tail-call shape (ROCK_SKULL_TAIL_CALLS) ------------------------
@@ -1737,11 +2109,7 @@ fn deep_tail_recursion_survives_the_tco_preserving_shapes() {
 fn deep_tail_recursion_overflows_under_the_measurement_only_shape() {
     let src = "fn count_down(n: int, acc: int) -> int { if n == 0 { return acc }\n  return count_down(n - 1, acc + 1) }";
     assert_eq!(
-        run_shaped(
-            src,
-            "(pcall(count_down, 200000, 0))",
-            TailCallShape::None
-        ),
+        run_shaped(src, "(pcall(count_down, 200000, 0))", TailCallShape::None),
         "false",
         "None must lose tail-call elimination -- otherwise the switch is not reaching the site"
     );
@@ -1754,7 +2122,11 @@ fn a_multi_return_forward_delivers_the_same_values_under_every_shape() {
     let src = "fn pair(a: int) -> (int, int) { (a, a + 1) }\n\
                fn forward_pair(a: int) -> (int, int) { return pair(a) }\n\
                fn total(a: int) -> int { let (x, y) = forward_pair(a); x * 100 + y }";
-    for shape in [TailCallShape::All, TailCallShape::None, TailCallShape::Cycles] {
+    for shape in [
+        TailCallShape::All,
+        TailCallShape::None,
+        TailCallShape::Cycles,
+    ] {
         assert_eq!(
             run_shaped(src, "total(7)", shape),
             "708",
@@ -1797,14 +2169,20 @@ fn emit_clean_bound_checked(
     let mut modules = STDLIB.clone();
     modules.push(skull_parser::parse_module_clean(src, ustr::Ustr::from("<test>")).expect("parse"));
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
-    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("user module id");
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("user module id");
     let (fid, _) = ws
         .module(mid)
         .functions
         .iter()
         .find(|(_, f)| f.name.as_str() == fn_name)
         .expect("function by name");
-    let self_ref = FuncRef { module: mid, func: fid };
+    let self_ref = FuncRef {
+        module: mid,
+        func: fid,
+    };
     let (mut func, interner, graph) = common::lower_test_ref_with_graph(&ws, mid, fid)
         .unwrap_or_else(|e| panic!("lower failed: {}", e.message));
     skull_transform::cleanup(&mut func).unwrap();
@@ -1814,9 +2192,9 @@ fn emit_clean_bound_checked(
     ctx.set_recursive_callees(common::cycle_callees(&graph));
     ctx.set_call_sccs(common::call_sccs(&graph));
     let name = skull_codegen_lua::mangle_fn(&ws, &ws.module(mid).functions[fid]);
-    let plan =
-        skull_codegen_lua::callee_binding_plan(&ws, &ctx, &interner, &name, self_ref, &func);
-    let lua = skull_codegen_lua::emit_function(&ws, &ctx, &interner, self_ref, &func, plan.as_ref());
+    let plan = skull_codegen_lua::callee_binding_plan(&ws, &ctx, &interner, &name, self_ref, &func);
+    let lua =
+        skull_codegen_lua::emit_function(&ws, &ctx, &interner, self_ref, &func, plan.as_ref());
     match plan {
         Some(plan) => format!("{lua}{}", plan.bind_line()),
         None => lua,
@@ -1828,22 +2206,39 @@ fn callee_binding_ignores_calls_removed_by_cleanup() {
     let src = "fn discarded(a: int) -> int { a + 2 }\nfn live(a: int) -> int { a + 1 }\nfn caller(a: int) -> int { if false { discarded(a) } else { live(a) } }";
     let lua = emit_clean_bound_checked(src, "caller", CalleeBindingMode::Upvalue, |ws, func| {
         use skull_mir::mir::Inst;
-        let is_discarded = |inst: &Inst| matches!(inst,
-            Inst::Call { func: callee, .. }
-                if ws.module(callee.module).functions[callee.func].name.as_str() == "discarded"
+        let is_discarded = |inst: &Inst| {
+            matches!(inst,
+                Inst::Call { func: callee, .. }
+                    if ws.module(callee.module).functions[callee.func].name.as_str() == "discarded"
+            )
+        };
+        assert!(
+            func.insts.iter().any(|(_, inst)| is_discarded(inst)),
+            "fixture must retain the discarded call in its arena"
         );
-        assert!(func.insts.iter().any(|(_, inst)| is_discarded(inst)),
-            "fixture must retain the discarded call in its arena");
-        assert!(!skull_mir::cfg::reverse_postorder(func, func.entry()).iter()
-            .flat_map(|bid| func.blocks[*bid].insts.iter())
-            .any(|id| is_discarded(&func.insts[*id])),
-            "cleanup must remove the call from emitted instructions");
+        assert!(
+            !skull_mir::cfg::reverse_postorder(func, func.entry())
+                .iter()
+                .flat_map(|bid| func.blocks[*bid].insts.iter())
+                .any(|id| is_discarded(&func.insts[*id])),
+            "cleanup must remove the call from emitted instructions"
+        );
     });
-    assert!(lua.starts_with("__rock_mk_caller_int = function(live_int) return function("),
-        "only the live callee should consume a binding slot:\n{lua}");
-    assert!(!lua.contains("discarded_int"), "discarded call must not be bound:\n{lua}");
+    assert!(
+        lua.starts_with("__rock_mk_caller_int = function(live_int) return function("),
+        "only the live callee should consume a binding slot:\n{lua}"
+    );
+    assert!(
+        !lua.contains("discarded_int"),
+        "discarded call must not be bound:\n{lua}"
+    );
     assert_eq!(
-        run_shaped_bound(src, "caller(7)", TailCallShape::All, CalleeBindingMode::Upvalue),
+        run_shaped_bound(
+            src,
+            "caller(7)",
+            TailCallShape::All,
+            CalleeBindingMode::Upvalue
+        ),
         "8"
     );
 }
@@ -1852,14 +2247,24 @@ fn callee_binding_ignores_calls_removed_by_cleanup() {
 fn callee_binding_ignores_discarded_uint_helpers() {
     let src = "fn checked(value: float, count: uint) -> uint { if false { (value as uint) << count } else { count } }";
     let lua = emit_clean_bound_checked(src, "checked", CalleeBindingMode::Upvalue, |_, func| {
-        assert!(func.insts.iter().any(|(_, inst)| matches!(inst,
-            skull_mir::mir::Inst::FloatToUint(_))),
-            "fixture must retain the discarded conversion in its arena");
+        assert!(
+            func.insts
+                .iter()
+                .any(|(_, inst)| matches!(inst, skull_mir::mir::Inst::FloatToUint(_))),
+            "fixture must retain the discarded conversion in its arena"
+        );
     });
-    assert!(!lua.contains(skull_codegen_lua::CALLEE_FACTORY_PREFIX),
-        "discarded validators must not create a factory:\n{lua}");
+    assert!(
+        !lua.contains(skull_codegen_lua::CALLEE_FACTORY_PREFIX),
+        "discarded validators must not create a factory:\n{lua}"
+    );
     assert_eq!(
-        run_shaped_bound(src, "checked(-1, 3)", TailCallShape::All, CalleeBindingMode::Upvalue),
+        run_shaped_bound(
+            src,
+            "checked(-1, 3)",
+            TailCallShape::All,
+            CalleeBindingMode::Upvalue
+        ),
         "3"
     );
 }
@@ -1913,7 +2318,8 @@ global METADATA: Map<string, SlotMetadata> = map_new()
 /// test in this file pins, so binding must not reach it.
 #[test]
 fn callee_binding_global_mode_emits_no_factory() {
-    let src = "fn leaf(a: int) -> int { a + 1 }\nfn caller(a: int) -> int { leaf(a) + leaf(a + 1) }";
+    let src =
+        "fn leaf(a: int) -> int { a + 1 }\nfn caller(a: int) -> int { leaf(a) + leaf(a + 1) }";
     let lua = emit_clean_bound(src, "caller", CalleeBindingMode::Global);
     assert!(
         lua.starts_with("function caller_int("),
@@ -1930,13 +2336,12 @@ fn callee_binding_global_mode_emits_no_factory() {
 /// verbatim, and the binding line that calls the factory with those globals.
 #[test]
 fn callee_binding_upvalue_wraps_the_body_in_a_factory() {
-    let src = "fn leaf(a: int) -> int { a + 1 }\nfn caller(a: int) -> int { leaf(a) + leaf(a + 1) }";
+    let src =
+        "fn leaf(a: int) -> int { a + 1 }\nfn caller(a: int) -> int { leaf(a) + leaf(a + 1) }";
     let global = emit_clean_bound(src, "caller", CalleeBindingMode::Global);
     let bound = emit_clean_bound(src, "caller", CalleeBindingMode::Upvalue);
     assert!(
-        bound.starts_with(
-            "__rock_mk_caller_int = function(leaf_int) return function("
-        ),
+        bound.starts_with("__rock_mk_caller_int = function(leaf_int) return function("),
         "expected the factory header:\n{bound}"
     );
     assert!(
@@ -2033,7 +2438,12 @@ fn callee_binding_caps_at_the_lua_upvalue_limit() {
     // binding would make this program fail to load at all.
     let expected: i64 = (0..count as i64).map(|i| 7 + i).sum();
     assert_eq!(
-        run_shaped_bound(&src, "caller(7)", TailCallShape::All, CalleeBindingMode::Upvalue),
+        run_shaped_bound(
+            &src,
+            "caller(7)",
+            TailCallShape::All,
+            CalleeBindingMode::Upvalue
+        ),
         expected.to_string(),
         "a body with more bindable callees than LuaJIT allows upvalues must still load and run"
     );
@@ -2074,7 +2484,9 @@ fn goto_refs(lua: &str) -> Vec<(usize, String)> {
         let mut rest = line;
         while let Some(at) = rest.find("goto ") {
             rest = &rest[at + 5..];
-            let end = rest.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(rest.len());
+            let end = rest
+                .find(|c: char| !c.is_alphanumeric() && c != '_')
+                .unwrap_or(rest.len());
             out.push((i, rest[..end].to_string()));
             rest = &rest[end..];
         }
@@ -2088,7 +2500,9 @@ fn label_lines(lua: &str) -> std::collections::HashMap<String, usize> {
         .enumerate()
         .filter_map(|(i, l)| {
             let t = l.trim();
-            t.strip_prefix("::")?.strip_suffix("::").map(|n| (n.to_string(), i))
+            t.strip_prefix("::")?
+                .strip_suffix("::")
+                .map(|n| (n.to_string(), i))
         })
         .collect()
 }
@@ -2125,8 +2539,14 @@ fn structured_while_is_a_lua_while_with_the_header_label_outside() {
         lua.contains("  ::bb1::\n  while true do\n"),
         "header label belongs outside the `while`:\n{lua}"
     );
-    assert!(backward_gotos(&lua).is_empty(), "no back edge may remain:\n{lua}");
-    assert!(lua.contains("  ::lc1::\n  end\n"), "continue label closes the body:\n{lua}");
+    assert!(
+        backward_gotos(&lua).is_empty(),
+        "no back edge may remain:\n{lua}"
+    );
+    assert!(
+        lua.contains("  ::lc1::\n  end\n"),
+        "continue label closes the body:\n{lua}"
+    );
 }
 
 /// A `continue` is a second back edge. Both become FORWARD `goto`s to the
@@ -2140,12 +2560,21 @@ fn structured_continue_is_a_forward_goto_to_the_continue_label() {
         LoopShape::Structured,
     );
     let labels = label_lines(&lua);
-    let jumps: Vec<(usize, String)> =
-        goto_refs(&lua).into_iter().filter(|(_, t)| t.starts_with("lc")).collect();
-    assert_eq!(jumps.len(), 1, "one explicit continue jump expected:\n{lua}");
+    let jumps: Vec<(usize, String)> = goto_refs(&lua)
+        .into_iter()
+        .filter(|(_, t)| t.starts_with("lc"))
+        .collect();
+    assert_eq!(
+        jumps.len(),
+        1,
+        "one explicit continue jump expected:\n{lua}"
+    );
     let (at, target) = &jumps[0];
     assert!(*at < labels[target], "a continue must jump FORWARD:\n{lua}");
-    assert!(backward_gotos(&lua).is_empty(), "no back edge may remain:\n{lua}");
+    assert!(
+        backward_gotos(&lua).is_empty(),
+        "no back edge may remain:\n{lua}"
+    );
 }
 
 /// Several exit targets need no dispatch: Lua forbids jumping INTO a block, not
@@ -2157,7 +2586,10 @@ fn structured_several_exits_stay_plain_gotos_out_of_the_block() {
         "f",
         LoopShape::Structured,
     );
-    let close = lua.lines().position(|l| l.trim() == "end").expect("the `while` closes");
+    let close = lua
+        .lines()
+        .position(|l| l.trim() == "end")
+        .expect("the `while` closes");
     let labels = label_lines(&lua);
     let mut exits: Vec<String> = goto_refs(&lua)
         .into_iter()
@@ -2166,8 +2598,14 @@ fn structured_several_exits_stay_plain_gotos_out_of_the_block() {
         .collect();
     exits.sort();
     exits.dedup();
-    assert!(exits.len() >= 2, "two distinct exit targets expected, got {exits:?}:\n{lua}");
-    assert!(backward_gotos(&lua).is_empty(), "no back edge may remain:\n{lua}");
+    assert!(
+        exits.len() >= 2,
+        "two distinct exit targets expected, got {exits:?}:\n{lua}"
+    );
+    assert!(
+        backward_gotos(&lua).is_empty(),
+        "no back edge may remain:\n{lua}"
+    );
 }
 
 /// An iterator loop nested inside another loop: its preheader is reachable
@@ -2184,10 +2622,22 @@ struct D { bindings: [B] }\n\
 fn f(ds: [D]) -> int { for d in ds { for b in d.bindings { if b.slot < 0 { return 1 } } }; 0 }";
     for shape in [LoopShape::Goto, LoopShape::Structured] {
         let lua = emit_inlined_shaped(src, "f", shape);
-        let fors = lua.lines().filter(|l| l.trim_start().starts_with("for ")).count();
-        assert_eq!(fors, 2, "both iterator loops must print as counted `for`s ({shape:?}):\n{lua}");
-        assert!(backward_gotos(&lua).is_empty(), "no back edge may remain ({shape:?}):\n{lua}");
-        assert!(!lua.contains("while true do"), "nothing is left for the structured shape ({shape:?}):\n{lua}");
+        let fors = lua
+            .lines()
+            .filter(|l| l.trim_start().starts_with("for "))
+            .count();
+        assert_eq!(
+            fors, 2,
+            "both iterator loops must print as counted `for`s ({shape:?}):\n{lua}"
+        );
+        assert!(
+            backward_gotos(&lua).is_empty(),
+            "no back edge may remain ({shape:?}):\n{lua}"
+        );
+        assert!(
+            !lua.contains("while true do"),
+            "nothing is left for the structured shape ({shape:?}):\n{lua}"
+        );
     }
 }
 
@@ -2201,9 +2651,17 @@ struct D { bindings: [B] }\n\
 fn f(ds: [D]) -> int { for d in ds { for b in d.bindings { if b.slot < 0 { return 1 } } }; 0 }";
     let goto = emit_inlined_shaped(src, "f", LoopShape::Goto);
     let structured = emit_inlined_shaped(src, "f", LoopShape::Structured);
-    let fors = |s: &str| s.lines().filter(|l| l.trim_start().starts_with("for c")).count();
+    let fors = |s: &str| {
+        s.lines()
+            .filter(|l| l.trim_start().starts_with("for c"))
+            .count()
+    };
     assert_eq!(fors(&goto), 2, "two counted `for`s expected:\n{goto}");
-    assert_eq!(fors(&structured), fors(&goto), "the counted `for` must survive:\n{structured}");
+    assert_eq!(
+        fors(&structured),
+        fors(&goto),
+        "the counted `for` must survive:\n{structured}"
+    );
 }
 
 /// The default shape emits the same BYTES it emitted before the switch existed.
@@ -2361,17 +2819,26 @@ fn coalesced_pair(present: bool, x: int) -> int {
 }
 fn absent_pair(present: bool, x: int) -> bool { return pair(present, x) == null }
 "#;
-    let materializes = |lua: &str| {
-        lua.contains("_ct(") || lua.contains("_vt(") || lua.contains("setmetatable(")
-    };
+    let materializes =
+        |lua: &str| lua.contains("_ct(") || lua.contains("_vt(") || lua.contains("setmetatable(");
     let mut materialized = Vec::new();
-    for name in ["pair", "label", "entity", "local_pair", "coalesced_pair", "absent_pair"] {
+    for name in [
+        "pair",
+        "label",
+        "entity",
+        "local_pair",
+        "coalesced_pair",
+        "absent_pair",
+    ] {
         let lua = emit_clean(src, name);
         if materializes(&lua) {
             materialized.push(format!("{name}: {lua}"));
         }
     }
-    assert!(materialized.is_empty(), "nullable returns materialize boxes: {materialized:#?}");
+    assert!(
+        materialized.is_empty(),
+        "nullable returns materialize boxes: {materialized:#?}"
+    );
 }
 
 #[test]
@@ -2384,7 +2851,10 @@ fn packed_result(present: bool) -> PackedResult? {
 }
 "#;
     let lua = emit_clean(src, "packed_result");
-    assert!(lua.contains("return (nil)"), "nullable enum changed transport: {lua}");
+    assert!(
+        lua.contains("return (nil)"),
+        "nullable enum changed transport: {lua}"
+    );
     assert!(lua.contains("_ct("), "nullable enum lost its box: {lua}");
 }
 
@@ -2398,7 +2868,10 @@ value Pair { x: int, y: int }
 }
 "#;
     let lua = emit_clean(src, "fixed_pair");
-    assert!(lua.contains("_ct("), "fixed nullable return changed transport: {lua}");
+    assert!(
+        lua.contains("_ct("),
+        "fixed nullable return changed transport: {lua}"
+    );
 }
 
 /// `rN = rM` / `rN = cM` lines: a register filled from another local unchanged.
@@ -2406,9 +2879,12 @@ fn register_moves(lua: &str) -> Vec<&str> {
     lua.lines()
         .map(str::trim)
         .filter(|line| {
-            let Some((dst, src)) = line.split_once(" = ") else { return false };
+            let Some((dst, src)) = line.split_once(" = ") else {
+                return false;
+            };
             let local = |s: &str, p: char| {
-                s.strip_prefix(p).is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+                s.strip_prefix(p)
+                    .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
             };
             local(dst, 'r') && (local(src, 'r') || local(src, 'c'))
         })
@@ -2437,18 +2913,32 @@ fn unreachable_block_traps_instead_of_returning() {
         "enum Dir { Up, Down } fn pick(d: Dir) -> int { match d { Dir::Up => { return 1 } Dir::Down => { return 2 } } }",
         "pick",
     );
-    let symbol = lua.lines().find_map(|line| line.strip_prefix("function "))
-        .expect("function definition").split('(').next().unwrap();
+    let symbol = lua
+        .lines()
+        .find_map(|line| line.strip_prefix("function "))
+        .expect("function definition")
+        .split('(')
+        .next()
+        .unwrap();
     // A value outside the enum reaches the arm chain's dead end; it must not
     // read as an early return of nil.
-    let driver = format!(r#"{lua}
+    let driver = format!(
+        r#"{lua}
 local ok, err = pcall({symbol}, "Sideways")
 assert(not ok, "an unreachable block returned")
 assert(tostring(err):find("unreachable", 1, true), tostring(err))
-"#);
-    let run = std::process::Command::new("luajit").arg("-e").arg(driver).output()
+"#
+    );
+    let run = std::process::Command::new("luajit")
+        .arg("-e")
+        .arg(driver)
+        .output()
         .expect("run unreachable trap");
-    assert!(run.status.success(), "{lua}\n{}", String::from_utf8_lossy(&run.stderr));
+    assert!(
+        run.status.success(),
+        "{lua}\n{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
 }
 
 /// The (line, chunk name) LuaJIT 2.1's lexer assigns to each line of `lua`,
@@ -2461,20 +2951,30 @@ fn lexer_lines(lua: &str) -> Vec<Option<(u32, String)>> {
     let mut chunk = String::from("=chunk");
     let mut out = Vec::new();
     for text in lua.lines() {
-        let directive = text.strip_prefix('#').map(str::trim_start).filter(|rest| {
-            rest.starts_with(|c: char| c.is_ascii_digit())
-        });
+        let directive = text
+            .strip_prefix('#')
+            .map(str::trim_start)
+            .filter(|rest| rest.starts_with(|c: char| c.is_ascii_digit()));
         let Some(rest) = directive else {
             out.push(Some((line, chunk.clone())));
             line += 1;
             continue;
         };
-        let digits = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+        let digits = rest
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(rest.len());
         line = rest[..digits].parse().expect("directive line");
         let file = rest[digits..].trim();
         if !file.is_empty() {
-            let name = file.strip_prefix('"').and_then(|f| f.strip_suffix('"')).expect("quoted file");
-            chunk = if name.starts_with(['=', '@', ' ']) { name.to_string() } else { format!("@{name}") };
+            let name = file
+                .strip_prefix('"')
+                .and_then(|f| f.strip_suffix('"'))
+                .expect("quoted file");
+            chunk = if name.starts_with(['=', '@', ' ']) {
+                name.to_string()
+            } else {
+                format!("@{name}")
+            };
         }
         out.push(None);
     }
@@ -2494,7 +2994,10 @@ fn line_directives_number_each_statement_with_its_rock_line() {
     let lua = emit_clean_with(LINE_DIRECTIVE_SRC, "f", |ctx| ctx.set_line_directives(true));
     let lines = lexer_lines(&lua);
     let at = |needle: &str| -> (u32, String) {
-        let index = lua.lines().position(|l| l.contains(needle)).unwrap_or_else(|| panic!("`{needle}` in\n{lua}"));
+        let index = lua
+            .lines()
+            .position(|l| l.contains(needle))
+            .unwrap_or_else(|| panic!("`{needle}` in\n{lua}"));
         lines[index].clone().expect("a statement, not a directive")
     };
     let chunk = String::from("@<test>");
@@ -2507,6 +3010,8 @@ fn line_directives_number_each_statement_with_its_rock_line() {
 
 #[test]
 fn line_directives_off_writes_no_directive() {
-    let lua = emit_clean_with(LINE_DIRECTIVE_SRC, "f", |ctx| ctx.set_line_directives(false));
+    let lua = emit_clean_with(LINE_DIRECTIVE_SRC, "f", |ctx| {
+        ctx.set_line_directives(false)
+    });
     assert!(lexer_lines(&lua).iter().all(Option::is_some), "{lua}");
 }

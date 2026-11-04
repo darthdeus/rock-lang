@@ -56,7 +56,10 @@ fn main() {}
 "#,
         }],
     );
-    let mid = *ws.module_ids.get(&ustr::Ustr::from("main.rock")).expect("module id");
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("main.rock"))
+        .expect("module id");
     let err = match skull::mir_emit::emit_workspace_mir(&ws, mid) {
         Ok(_) => panic!("a @nomangle `Vec2` must not share the stdlib Vec2's symbol"),
         Err(e) => e.message,

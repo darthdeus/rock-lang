@@ -1,6 +1,10 @@
 use super::*;
 
-pub(crate) fn infer_statement(c: BodyCtx, gamma: &mut Gamma, s: Idx<Statement>) -> Result<(), CompilerError> {
+pub(crate) fn infer_statement(
+    c: BodyCtx,
+    gamma: &mut Gamma,
+    s: Idx<Statement>,
+) -> Result<(), CompilerError> {
     let span = c.body.statement_spans[s];
 
     match &c.body.statement_arena[s] {
@@ -89,7 +93,12 @@ pub(crate) fn infer_statement(c: BodyCtx, gamma: &mut Gamma, s: Idx<Statement>) 
             let declared = c.body.binding_arena[*name].declared_ty;
             let binding_ty = match declared {
                 Some(ann) => {
-                    let vspan = c.body.expr_spans.get(*value).copied().unwrap_or(Span::unknown());
+                    let vspan = c
+                        .body
+                        .expr_spans
+                        .get(*value)
+                        .copied()
+                        .unwrap_or(Span::unknown());
                     gamma.assign_named_type(*name, ann)?;
                     check_expr(c, gamma, *value, ann, vspan)?;
                     ann
@@ -117,7 +126,12 @@ pub(crate) fn infer_statement(c: BodyCtx, gamma: &mut Gamma, s: Idx<Statement>) 
             reject_static_init_captures(c, *value, c.body.statement_spans[s])?;
         }
 
-        Statement::Fn { name, params, ret_ty, body } => {
+        Statement::Fn {
+            name,
+            params,
+            ret_ty,
+            body,
+        } => {
             let (name, params, ret_ty, body) = (*name, *params, *ret_ty, *body);
 
             // Params always carry a declared type (the signature is mandatory).
@@ -288,7 +302,12 @@ pub(crate) fn infer_statement(c: BodyCtx, gamma: &mut Gamma, s: Idx<Statement>) 
                 TypeExpr::Infer(..) | TypeExpr::Generic(..) => {}
 
                 _ => {
-                    comp_error!(span, "cannot destructure this value with newtype pattern `{}` - the value is not a newtype `{}`", newtype_name, newtype_name)
+                    comp_error!(
+                        span,
+                        "cannot destructure this value with newtype pattern `{}` - the value is not a newtype `{}`",
+                        newtype_name,
+                        newtype_name
+                    )
                 }
             };
 
@@ -504,7 +523,11 @@ pub fn infer_expr_used(
             resolve(gamma, inner_ty, c.body.expr_spans[*target])
         }
 
-        Expr::As { value, target, kind } => {
+        Expr::As {
+            value,
+            target,
+            kind,
+        } => {
             let (value, kind) = (*value, *kind);
             let target = resolve(gamma, *target, expr_span);
             let value_span = c.body.expr_spans[value];
@@ -604,14 +627,14 @@ pub fn infer_expr_used(
                         name,
                         &["NativeBuffer", "FlatVec"],
                     ) {
-                            let p = params.into_iter().next().ok_or_else(|| {
-                                CompilerError::new_with_label(
-                                    expr_span,
-                                    "NativeBuffer type must have one parameter".to_string(),
-                                )
-                            })?;
+                        let p = params.into_iter().next().ok_or_else(|| {
+                            CompilerError::new_with_label(
+                                expr_span,
+                                "NativeBuffer type must have one parameter".to_string(),
+                            )
+                        })?;
 
-                            base_ty.with_idx(p)
+                        base_ty.with_idx(p)
                     } else if bone_core::modules::is_intrinsic_key_in(
                         name,
                         &[
@@ -689,8 +712,10 @@ pub fn infer_expr_used(
             // representative before deciding value-ness, exactly as the call
             // path does. Genuine overloads (different signatures) survive and
             // still reject below.
-            None => match &*collapse_backend_variants(gamma, &resolve_callee(gamma, &fn_value_family(c, e, *name)))
-            {
+            None => match &*collapse_backend_variants(
+                gamma,
+                &resolve_callee(gamma, &fn_value_family(c, e, *name)),
+            ) {
                 [(mid, fid)] => {
                     let function = gamma.workspace.module(*mid).functions[*fid].clone();
                     // A view-owned value names one definition among the bare
@@ -1068,10 +1093,10 @@ pub fn infer_expr_used(
             let elem_texp = *gamma.get(TyId::Local(elem_idx));
             let params = alloc_contiguous(&mut gamma.out.ty_arena, [elem_texp]);
 
-            let arr_ty = gamma
-                .out
-                .ty_arena
-                .alloc(TypeExpr::App { ctor: TypeCtor::Array, params });
+            let arr_ty = gamma.out.ty_arena.alloc(TypeExpr::App {
+                ctor: TypeCtor::Array,
+                params,
+            });
 
             let ret_ty = TyId::Local(arr_ty);
 
@@ -1084,22 +1109,25 @@ pub fn infer_expr_used(
             tuple_of(gamma, &tys, expr_span)
         }
 
-        Expr::Call { callee, args, generic_args, family } => {
+        Expr::Call {
+            callee,
+            args,
+            generic_args,
+            family,
+        } => {
             let args = *args;
 
             match callee {
-                hir::Callee::Unresolved { .. } => {
-                    resolve_named_call_with_generics(
-                        gamma,
-                        c,
-                        *family,
-                        None,
-                        args,
-                        *generic_args,
-                        e,
-                        expr_span,
-                    )?
-                }
+                hir::Callee::Unresolved { .. } => resolve_named_call_with_generics(
+                    gamma,
+                    c,
+                    *family,
+                    None,
+                    args,
+                    *generic_args,
+                    e,
+                    expr_span,
+                )?,
 
                 hir::Callee::Local(binding) => {
                     let binding = *binding;
@@ -1120,7 +1148,10 @@ pub fn infer_expr_used(
                         })?;
 
                     if !generic_args.is_empty() {
-                        comp_error!(expr_span, "explicit type arguments require a named function call");
+                        comp_error!(
+                            expr_span,
+                            "explicit type arguments require a named function call"
+                        );
                     }
                     call_fn_value(c, gamma, fn_ty, args, expr_span)?
                 }
@@ -1128,14 +1159,21 @@ pub fn infer_expr_used(
                 hir::Callee::Value(callee) => {
                     let fn_ty = infer_expr(c, gamma, *callee)?;
                     if !generic_args.is_empty() {
-                        comp_error!(expr_span, "explicit type arguments require a named function call");
+                        comp_error!(
+                            expr_span,
+                            "explicit type arguments require a named function call"
+                        );
                     }
                     call_fn_value(c, gamma, fn_ty, args, expr_span)?
                 }
             }
         }
 
-        Expr::StructLiteral { name, fields, bases } => {
+        Expr::StructLiteral {
+            name,
+            fields,
+            bases,
+        } => {
             let name = *name;
             let fields = *fields;
             let bases = *bases;
@@ -1180,7 +1218,15 @@ pub fn infer_expr_used(
             }
 
             check_named_fields(
-                c, gamma, Some(name), &def.fields, &provided, &subs, expr_span, &what, has_base,
+                c,
+                gamma,
+                Some(name),
+                &def.fields,
+                &provided,
+                &subs,
+                expr_span,
+                &what,
+                has_base,
             )?;
 
             result_ty
@@ -1334,7 +1380,9 @@ pub fn infer_expr_used(
                         })
                         .collect();
 
-                    check_named_fields(c, gamma, None, fields, &provided, &subs, expr_span, &what, false)?;
+                    check_named_fields(
+                        c, gamma, None, fields, &provided, &subs, expr_span, &what, false,
+                    )?;
                 }
 
                 _ => comp_error!(
@@ -1426,7 +1474,10 @@ pub fn infer_expr_used(
                     && arm.guard.is_none()
                 {
                     if seen_unguarded_wildcard {
-                        comp_error!(c.body.expr_spans[arm.body], "duplicate wildcard pattern in match expression - only one unguarded `_` arm is allowed");
+                        comp_error!(
+                            c.body.expr_spans[arm.body],
+                            "duplicate wildcard pattern in match expression - only one unguarded `_` arm is allowed"
+                        );
                     }
 
                     seen_unguarded_wildcard = true;
@@ -1799,19 +1850,19 @@ fn frame_ref_provenance(c: BodyCtx, gamma: &mut Gamma, e: Idx<Expr>) -> RefProve
             else_branch,
             ..
         } => else_branch.map_or(RefProvenance::Unknown, |else_branch| {
-            frame_ref_provenance(c, gamma, then_branch)
-                .merge(frame_ref_provenance(c, gamma, else_branch))
+            frame_ref_provenance(c, gamma, then_branch).merge(frame_ref_provenance(
+                c,
+                gamma,
+                else_branch,
+            ))
         }),
-        Expr::Match { arms, .. } => arms.into_iter().fold(
-            RefProvenance::Stable,
-            |origin, arm| {
-                origin.merge(frame_ref_provenance(
-                    c,
-                    gamma,
-                    c.body.match_arm_arena[arm].body,
-                ))
-            },
-        ),
+        Expr::Match { arms, .. } => arms.into_iter().fold(RefProvenance::Stable, |origin, arm| {
+            origin.merge(frame_ref_provenance(
+                c,
+                gamma,
+                c.body.match_arm_arena[arm].body,
+            ))
+        }),
         _ => RefProvenance::Unknown,
     }
 }
@@ -1911,7 +1962,6 @@ pub(crate) fn redundant_optional_on(gamma: &mut Gamma, ty: TyId, span: Span) -> 
     )
 }
 
-
 /// A block's statements, scoping and tail -- the shared body of the `Expr::Block`
 /// arm above and [`check_expr`]'s. `expected` is `Some` only on the checked
 /// path, where it is pushed to the TAIL; everything else is identical, which is
@@ -1926,84 +1976,86 @@ fn infer_block(
     expr_span: Span,
     expected: Option<TyId>,
 ) -> TyId {
-            let mut g_saved: Vec<(Idx<BindingInfo>, TyId)> = vec![];
-            // Snapshot the path-refinement set on entry; intersect on exit. This
-            // scopes to the block BOTH escaping guard narrows AND
-            // assignment-refinements (`x.f = nonNull` marks `x.f` non-null):
-            // flow-sensitively, a refinement established inside a block must not
-            // survive past it (the other control path didn't run it). Whole-local
-            // narrows peel `binding_types` and are restored via `g_saved`. The set
-            // is usually empty/small, so the clone is cheap (an empty FxHashSet
-            // clone doesn't allocate).
-            let refined_snapshot = gamma.refined_nonnull.clone();
+    let mut g_saved: Vec<(Idx<BindingInfo>, TyId)> = vec![];
+    // Snapshot the path-refinement set on entry; intersect on exit. This
+    // scopes to the block BOTH escaping guard narrows AND
+    // assignment-refinements (`x.f = nonNull` marks `x.f` non-null):
+    // flow-sensitively, a refinement established inside a block must not
+    // survive past it (the other control path didn't run it). Whole-local
+    // narrows peel `binding_types` and are restored via `g_saved`. The set
+    // is usually empty/small, so the clone is cheap (an empty FxHashSet
+    // clone doesn't allocate).
+    let refined_snapshot = gamma.refined_nonnull.clone();
 
-            for statement in *statements {
-                if let Err(e) = infer_statement(c, gamma, statement) {
-                    gamma.body_errors.push(e);
-                    continue;
-                };
+    for statement in *statements {
+        if let Err(e) = infer_statement(c, gamma, statement) {
+            gamma.body_errors.push(e);
+            continue;
+        };
 
-                for (root, fields) in stmt_guard_narrows(gamma, c, statement) {
-                    match root {
-                        Root::Local(b) if fields.is_empty() => {
-                            if let Some(cur) = gamma.out.binding_types.get(b).copied() {
-                                let narrowed = peel_nullable(gamma, cur, expr_span);
-                                gamma.out.binding_types.insert(b, narrowed);
-                                g_saved.push((b, cur));
-                            }
-                        }
-                        _ => {
-                            gamma.refined_nonnull.insert((root, fields));
-                        }
+        for (root, fields) in stmt_guard_narrows(gamma, c, statement) {
+            match root {
+                Root::Local(b) if fields.is_empty() => {
+                    if let Some(cur) = gamma.out.binding_types.get(b).copied() {
+                        let narrowed = peel_nullable(gamma, cur, expr_span);
+                        gamma.out.binding_types.insert(b, narrowed);
+                        g_saved.push((b, cur));
                     }
                 }
-            }
-
-            let result = match tail {
-                // The ONE difference between inferring a block and checking one:
-                // a checked block pushes the hole down to its TAIL. Without it a
-                // lambda in tail position records its own type, which is narrower
-                // than the hole it fills, and the fn-value ABI disagrees at the
-                // two ends (`nobox_fn_value_nullable_return_sentinel`).
-                Some(tail) => match expected {
-                    Some(exp) => match check_expr(c, gamma, *tail, exp, c.body.expr_spans[*tail]) {
-                        Ok(()) => exp,
-                        Err(err) => {
-                            gamma.body_errors.push(err);
-                            gamma.workspace.builtins.error()
-                        }
-                    },
-                    None => match infer_expr_used(c, gamma, *tail, used) {
-                        Ok(t) => t,
-                        Err(err) => {
-                            gamma.body_errors.push(err);
-                            gamma.workspace.builtins.error()
-                        }
-                    },
-                },
-                None => {
-                    let diverges = (*statements)
-                        .into_iter()
-                        .rfind(|&s| !matches!(c.body.statement_arena[s], Statement::Comment(_)))
-                        .is_some_and(|s| matches!(c.body.statement_arena[s], Statement::Return(_)));
-
-                    if diverges {
-                        gamma.workspace.builtins.never()
-                    } else {
-                        gamma.workspace.builtins.unit()
-                    }
+                _ => {
+                    gamma.refined_nonnull.insert((root, fields));
                 }
-            };
-
-            for (b, old) in g_saved {
-                gamma.out.binding_types.insert(b, old);
             }
+        }
+    }
 
-            // Remove block-local facts without resurrecting paths invalidated
-            // by an effect inside the block.
-            gamma.refined_nonnull.retain(|p| refined_snapshot.contains(p));
+    let result = match tail {
+        // The ONE difference between inferring a block and checking one:
+        // a checked block pushes the hole down to its TAIL. Without it a
+        // lambda in tail position records its own type, which is narrower
+        // than the hole it fills, and the fn-value ABI disagrees at the
+        // two ends (`nobox_fn_value_nullable_return_sentinel`).
+        Some(tail) => match expected {
+            Some(exp) => match check_expr(c, gamma, *tail, exp, c.body.expr_spans[*tail]) {
+                Ok(()) => exp,
+                Err(err) => {
+                    gamma.body_errors.push(err);
+                    gamma.workspace.builtins.error()
+                }
+            },
+            None => match infer_expr_used(c, gamma, *tail, used) {
+                Ok(t) => t,
+                Err(err) => {
+                    gamma.body_errors.push(err);
+                    gamma.workspace.builtins.error()
+                }
+            },
+        },
+        None => {
+            let diverges = (*statements)
+                .into_iter()
+                .rfind(|&s| !matches!(c.body.statement_arena[s], Statement::Comment(_)))
+                .is_some_and(|s| matches!(c.body.statement_arena[s], Statement::Return(_)));
 
-            result
+            if diverges {
+                gamma.workspace.builtins.never()
+            } else {
+                gamma.workspace.builtins.unit()
+            }
+        }
+    };
+
+    for (b, old) in g_saved {
+        gamma.out.binding_types.insert(b, old);
+    }
+
+    // Remove block-local facts without resurrecting paths invalidated
+    // by an effect inside the block.
+    gamma
+        .refined_nonnull
+        .retain(|p| refined_snapshot.contains(p));
+
+    result
 }
 
 pub(crate) fn check_expr(
@@ -2014,8 +2066,7 @@ pub(crate) fn check_expr(
     span: Span,
 ) -> Result<(), CompilerError> {
     let expected_r = resolve(gamma, expected, span);
-    if frame_ref_target(gamma, expected_r).is_some()
-        && !matches!(c.body.expr_arena[e], Expr::Null)
+    if frame_ref_target(gamma, expected_r).is_some() && !matches!(c.body.expr_arena[e], Expr::Null)
     {
         let actual = infer_expr(c, gamma, e)?;
         let actual_r = resolve(gamma, actual, span);
@@ -2079,7 +2130,7 @@ pub(crate) fn check_expr(
         // so look through a nullable wrapper to reach the function type.
         let fn_ty = match *gamma.get(exp_r) {
             TypeExpr::Nullable(inner) => exp_r.with_idx(inner),
-            _ => exp_r
+            _ => exp_r,
         };
 
         if let TypeExpr::Function { params: ep, ret } = *gamma.get(fn_ty) {
@@ -2144,8 +2195,10 @@ pub(crate) fn check_expr(
                 &["FieldRef", "ReadFieldRef", "WriteFieldRef"],
             ) {
                 let is_field_ref = bone_core::modules::is_intrinsic_key(former, "FieldRef");
-                let is_read_field_ref = bone_core::modules::is_intrinsic_key(former, "ReadFieldRef");
-                let is_write_field_ref = bone_core::modules::is_intrinsic_key(former, "WriteFieldRef");
+                let is_read_field_ref =
+                    bone_core::modules::is_intrinsic_key(former, "ReadFieldRef");
+                let is_write_field_ref =
+                    bone_core::modules::is_intrinsic_key(former, "WriteFieldRef");
                 let mut it = params.into_iter();
                 let t = exp_r.with_idx(it.next().unwrap());
                 let v = exp_r.with_idx(it.next().unwrap());
@@ -2157,9 +2210,14 @@ pub(crate) fn check_expr(
                 // (read-only, `field_get`) allows it -- reading a value-struct
                 // field is fine.
                 if is_field_ref || is_write_field_ref {
-                    if let TypeExpr::App { ctor: TypeCtor::Nominal(tn), .. } = *gamma.get(t_r) {
-                        let is_value = resolve_struct(gamma, tn)
-                            .is_some_and(|sid| gamma.workspace.module(sid.module).structs[sid.def].is_value);
+                    if let TypeExpr::App {
+                        ctor: TypeCtor::Nominal(tn),
+                        ..
+                    } = *gamma.get(t_r)
+                    {
+                        let is_value = resolve_struct(gamma, tn).is_some_and(|sid| {
+                            gamma.workspace.module(sid.module).structs[sid.def].is_value
+                        });
                         if is_value {
                             comp_error!(
                                 span,
@@ -2176,7 +2234,11 @@ pub(crate) fn check_expr(
                 // coerces onward to `ReadFieldRef`, so it re-opens the same
                 // extraction.
                 if is_field_ref || is_read_field_ref {
-                    if let TypeExpr::App { ctor: TypeCtor::Nominal(tn), .. } = *gamma.get(t_r) {
+                    if let TypeExpr::App {
+                        ctor: TypeCtor::Nominal(tn),
+                        ..
+                    } = *gamma.get(t_r)
+                    {
                         let is_embed = resolve_struct(gamma, tn).is_some_and(|sid| {
                             gamma.workspace.module(sid.module).structs[sid.def]
                                 .fields
@@ -2195,7 +2257,11 @@ pub(crate) fn check_expr(
                     }
                 }
                 if is_field_ref || is_write_field_ref {
-                    if let TypeExpr::App { ctor: TypeCtor::Nominal(tn), .. } = *gamma.get(t_r) {
+                    if let TypeExpr::App {
+                        ctor: TypeCtor::Nominal(tn),
+                        ..
+                    } = *gamma.get(t_r)
+                    {
                         let site = gamma.access_site();
                         field_access(gamma, tn, field, site, FieldAccessNeed::Write)
                             .map_err(|e| e.to_compiler_error(span))?;
@@ -2212,10 +2278,8 @@ pub(crate) fn check_expr(
                 // reading an `int` as `int?` is sound.
                 if is_field_ref || is_write_field_ref {
                     let (fty_r, v_r) = (resolve(gamma, fty, span), resolve(gamma, v, span));
-                    let unbound_v = matches!(
-                        gamma.get(v_r),
-                        TypeExpr::Infer(..) | TypeExpr::Generic(..)
-                    );
+                    let unbound_v =
+                        matches!(gamma.get(v_r), TypeExpr::Infer(..) | TypeExpr::Generic(..));
                     if !unbound_v
                         && matches!(gamma.get(v_r), TypeExpr::Nullable(_))
                         && !matches!(gamma.get(fty_r), TypeExpr::Nullable(_))
@@ -2262,7 +2326,10 @@ pub(crate) fn check_expr(
                 // When the `/` reached the hole through a local binding, keep a
                 // breadcrumb at the actual mismatch site.
                 if div_span != span {
-                    err = err.with_label(span, "this `float` is used where `int` is required".to_string());
+                    err = err.with_label(
+                        span,
+                        "this `float` is used where `int` is required".to_string(),
+                    );
                 }
                 return Err(err);
             }
@@ -2275,8 +2342,9 @@ pub(crate) fn check_expr(
         if let Some(origin) = gamma.span_of(expected).or_else(|| gamma.span_of(exp_r)) {
             if origin != span && !origin.is_empty() {
                 let exp_str = gamma.workspace.render(Some(&gamma.out), exp_r);
-                return Err(coerce_err
-                    .with_label(origin, format!("expected `{exp_str}` because of this")));
+                return Err(
+                    coerce_err.with_label(origin, format!("expected `{exp_str}` because of this"))
+                );
             }
         }
         return Err(coerce_err);
@@ -2392,12 +2460,7 @@ fn check_interpolated_value(gamma: &mut Gamma, ty: TyId, span: Span) -> Result<(
     ))
 }
 
-fn check_bitcast(
-    gamma: &mut Gamma,
-    from: TyId,
-    to: TyId,
-    span: Span,
-) -> Result<(), CompilerError> {
+fn check_bitcast(gamma: &mut Gamma, from: TyId, to: TyId, span: Span) -> Result<(), CompilerError> {
     let from_r = resolve(gamma, from, span);
     let to_r = resolve(gamma, to, span);
     if matches!(
@@ -2524,16 +2587,17 @@ pub(crate) fn find_float_div_span_rec(c: BodyCtx, e: Idx<Expr>, depth: usize) ->
 // it float. Params, tuple/loop/pattern bindings have no single initializer here
 // and yield None.
 pub(crate) fn binding_initializer(c: BodyCtx, b: Idx<BindingInfo>) -> Option<Idx<Expr>> {
-    c.body.statement_arena.iter().find_map(|(_, stmt)| match stmt {
-        Statement::Let { name, value }
-        | Statement::Static { name, value }
-        | Statement::LetNewtype { var: name, value, .. }
-            if *name == b =>
-        {
-            Some(*value)
-        }
-        _ => None,
-    })
+    c.body
+        .statement_arena
+        .iter()
+        .find_map(|(_, stmt)| match stmt {
+            Statement::Let { name, value }
+            | Statement::Static { name, value }
+            | Statement::LetNewtype {
+                var: name, value, ..
+            } if *name == b => Some(*value),
+            _ => None,
+        })
 }
 
 pub(crate) fn coroutine_yrn(

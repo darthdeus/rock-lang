@@ -34,13 +34,19 @@ fn main() {
 
 fn emit_main(src: &str) -> Result<String, skull_parser::CompilerError> {
     let ws = ws_with(src);
-    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("test module");
     let root = ws
         .module(mid)
         .functions
         .iter()
         .find(|(_, f)| f.name.as_str() == "main")
-        .map(|(fid, _)| skull_mir::mir::FuncRef { module: mid, func: fid })
+        .map(|(fid, _)| skull_mir::mir::FuncRef {
+            module: mid,
+            func: fid,
+        })
         .expect("main");
     skull_codegen_js::emit::emit_with_closure(&ws, &[(root, "main".to_string())])
 }
@@ -55,7 +61,10 @@ fn assert_planner_rejection(error: &skull_parser::CompilerError, element: &str) 
         msg.contains("requires a valid native-buffer element ctype") && msg.contains(element),
         "{msg}"
     );
-    assert!(!error.labels.is_empty(), "native-buffer rejection must be located");
+    assert!(
+        !error.labels.is_empty(),
+        "native-buffer rejection must be located"
+    );
 }
 
 #[test]
@@ -80,5 +89,8 @@ fn gc_carrying_value_rejects_with_its_concrete_name() {
 fn native_buffer_primitives_and_ffi_value_are_valid_controls() {
     let js = emit_main(VALID_CONTROLS).expect("valid c-mappable elements must emit");
     assert!(js.contains("Int32Array") && js.contains("Uint32Array") && js.contains("Float32Array"));
-    assert!(js.contains("Uint8Array"), "bool must have a concrete JS byte storage");
+    assert!(
+        js.contains("Uint8Array"),
+        "bool must have a concrete JS byte storage"
+    );
 }

@@ -1,15 +1,21 @@
+use super::common;
 use bone_semantic::hir::BodyOwner;
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;
-use super::common;
 use skull_codegen_shader::{ConcreteStageInput, ShaderPlannerPolicy};
 use ustr::Ustr;
 
 fn emit_errors(src: &str) -> Vec<String> {
     let ws = common::ws_with_stdlib(src);
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("test module");
+    let mid = *ws
+        .module_ids
+        .get(&Ustr::from("<test>"))
+        .expect("test module");
     match skull::mir_emit::emit_full_in_for_renderer(
-        &ws, mid, None, skull::mir_emit::RendererTarget::Wgpu,
+        &ws,
+        mid,
+        None,
+        skull::mir_emit::RendererTarget::Wgpu,
     ) {
         Ok(_) => Vec::new(),
         Err(error) => vec![error.message],
@@ -17,7 +23,9 @@ fn emit_errors(src: &str) -> Vec<String> {
 }
 
 fn test_mid(ws: &Workspace) -> ModuleId {
-    *ws.module_ids.get(&Ustr::from("<test>")).expect("test module")
+    *ws.module_ids
+        .get(&Ustr::from("<test>"))
+        .expect("test module")
 }
 
 fn body_id(ws: &Workspace, name: &str) -> (ModuleId, BodyOwner) {
@@ -357,7 +365,8 @@ global RECT_LOSS: string = rock_compute(rect_loss)
 #[test]
 fn non_compute_programs_do_not_emit_compute_runtime_calls() {
     let ws = common::ws_with_stdlib("fn root() {}");
-    let (emit, _) = skull::mir_emit::emit_full(&ws, test_mid(&ws)).expect("plain Lua program emits");
+    let (emit, _) =
+        skull::mir_emit::emit_full(&ws, test_mid(&ws)).expect("plain Lua program emits");
     assert!(!emit.lua.contains("__rock_wgpu_compute_snapshot_begin()"));
     assert!(!emit.lua.contains("__rock_wgpu_compute_snapshot_end()"));
 }
@@ -371,7 +380,9 @@ fn uint_atomic_workgroup_compute_surface_is_admitted() {
         None,
         skull::mir_emit::RendererTarget::Wgpu,
     )
-    .unwrap_or_else(|error| panic!("the intended compiler-authored compute surface is still RED: {error}"));
+    .unwrap_or_else(|error| {
+        panic!("the intended compiler-authored compute surface is still RED: {error}")
+    });
 }
 
 #[test]
@@ -386,10 +397,19 @@ fn compiler_authored_rect_loss_fixture_is_naga_validated() {
     )
     .expect("the faithful compiler-authored rect-loss fixture should emit");
     let compute = &cache.shader_view().compute_views[0];
-    assert!(!compute.stage.helpers.is_empty(), "helper population is nonzero");
-    assert!(!compute.stage.builtins.is_empty(), "compute builtin population is nonzero");
+    assert!(
+        !compute.stage.helpers.is_empty(),
+        "helper population is nonzero"
+    );
+    assert!(
+        !compute.stage.builtins.is_empty(),
+        "compute builtin population is nonzero"
+    );
     assert!(compute.concrete_plans.contains_key(&compute.stage.entry));
-    assert!(emit.lua.contains("__rock_wgpu_compute_register(\"rect_loss\""));
+    assert!(
+        emit.lua
+            .contains("__rock_wgpu_compute_register(\"rect_loss\"")
+    );
 
     let input = ConcreteStageInput {
         stage: compute.stage.stage,
@@ -410,22 +430,46 @@ fn compiler_authored_rect_loss_fixture_is_naga_validated() {
         &skull_codegen_wgsl::WgslShaderPolicy,
     )
     .expect("the faithful fixture has a concrete compute plan");
-    let compute_iface = neutral.interface.compute.as_ref().expect("compute interface");
+    let compute_iface = neutral
+        .interface
+        .compute
+        .as_ref()
+        .expect("compute interface");
     assert_eq!(
-        compute_iface.resources.iter().map(|resource| resource.name.as_str()).collect::<Vec<_>>(),
+        compute_iface
+            .resources
+            .iter()
+            .map(|resource| resource.name.as_str())
+            .collect::<Vec<_>>(),
         ["backdrop", "reference", "batch", "loss"]
     );
     assert_eq!(
-        compute_iface.resources.iter().map(|resource| resource.shape).collect::<Vec<_>>(),
+        compute_iface
+            .resources
+            .iter()
+            .map(|resource| resource.shape)
+            .collect::<Vec<_>>(),
         [
-            skull_mir::shader_ir::ComputeResourceShape::Array(skull_mir::shader_ir::ComputeValueKind::U32),
-            skull_mir::shader_ir::ComputeResourceShape::Array(skull_mir::shader_ir::ComputeValueKind::U32),
-            skull_mir::shader_ir::ComputeResourceShape::Array(skull_mir::shader_ir::ComputeValueKind::U32),
-            skull_mir::shader_ir::ComputeResourceShape::Array(skull_mir::shader_ir::ComputeValueKind::AtomicU32),
+            skull_mir::shader_ir::ComputeResourceShape::Array(
+                skull_mir::shader_ir::ComputeValueKind::U32
+            ),
+            skull_mir::shader_ir::ComputeResourceShape::Array(
+                skull_mir::shader_ir::ComputeValueKind::U32
+            ),
+            skull_mir::shader_ir::ComputeResourceShape::Array(
+                skull_mir::shader_ir::ComputeValueKind::U32
+            ),
+            skull_mir::shader_ir::ComputeResourceShape::Array(
+                skull_mir::shader_ir::ComputeValueKind::AtomicU32
+            ),
         ]
     );
     assert_eq!(
-        compute_iface.resources.iter().map(|resource| resource.access).collect::<Vec<_>>(),
+        compute_iface
+            .resources
+            .iter()
+            .map(|resource| resource.access)
+            .collect::<Vec<_>>(),
         [
             skull_mir::shader_ir::ComputeAccess::Read,
             skull_mir::shader_ir::ComputeAccess::Read,
@@ -453,7 +497,10 @@ fn compiler_authored_rect_loss_fixture_is_naga_validated() {
     );
     assert_eq!(compute_iface.workgroup.len(), 1);
     assert_eq!(compute_iface.workgroup[0].name, Ustr::from("partial"));
-    assert_eq!(compute_iface.workgroup[0].kind, skull_mir::shader_ir::ComputeValueKind::U32);
+    assert_eq!(
+        compute_iface.workgroup[0].kind,
+        skull_mir::shader_ir::ComputeValueKind::U32
+    );
     assert_eq!(compute_iface.workgroup[0].size, 64);
 
     let entry = neutral.entry.inst.symbol(&ws, &scx.interner());
@@ -471,9 +518,21 @@ fn compiler_authored_rect_loss_fixture_is_naga_validated() {
         bone_semantic::prelude::Span::default(),
     )
     .expect("Naga validates the faithful compiler-authored rect-loss WGSL");
-    assert!(emission.source.contains("var<storage, read> s_batch: array<u32>"));
-    assert!(emission.source.contains("var<storage, read_write> s_loss: array<atomic<u32>>"));
-    assert!(emission.source.contains("var<workgroup> wg_partial: array<u32, 64>"));
+    assert!(
+        emission
+            .source
+            .contains("var<storage, read> s_batch: array<u32>")
+    );
+    assert!(
+        emission
+            .source
+            .contains("var<storage, read_write> s_loss: array<atomic<u32>>")
+    );
+    assert!(
+        emission
+            .source
+            .contains("var<workgroup> wg_partial: array<u32, 64>")
+    );
     assert!(emission.source.contains("atomicAdd(&s_loss"));
     assert_eq!(
         emission.source.matches("workgroupBarrier()").count(),
@@ -481,7 +540,13 @@ fn compiler_authored_rect_loss_fixture_is_naga_validated() {
         "the reduction keeps both uniform-control-flow barriers"
     );
     assert!(emission.source.contains("fn"));
-    assert!(emission.abi.wire().expect("WGSL ABI wire").starts_with("WGSL_ABI_V4\n"));
+    assert!(
+        emission
+            .abi
+            .wire()
+            .expect("WGSL ABI wire")
+            .starts_with("WGSL_ABI_V4\n")
+    );
 }
 
 #[test]
@@ -496,12 +561,14 @@ fn compute_numeric_conversion_is_rejected_before_backend_specific_wrapping() {
         test_mid(&ws),
         None,
         skull::mir_emit::RendererTarget::Wgpu,
-    )
-    {
+    ) {
         Ok(_) => panic!("compute numeric casts must not silently wrap in WGSL"),
         Err(error) => error,
     };
-    assert!(error.message.contains("numeric conversion") || error.message.contains("compute"), "{error}");
+    assert!(
+        error.message.contains("numeric conversion") || error.message.contains("compute"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -543,7 +610,9 @@ fn compute_helper_resource_reordering_is_rejected() {
     );
     let errors = emit_errors(&source);
     assert!(
-        errors.iter().any(|error| error.contains("resource forwarding changed")),
+        errors
+            .iter()
+            .any(|error| error.contains("resource forwarding changed")),
         "a helper must not reorder the compiler-owned storage resources: {errors:#?}"
     );
 }
@@ -556,7 +625,9 @@ fn workgroup_memory_cannot_escape_through_a_local_alias() {
     );
     let errors = emit_errors(&source);
     assert!(
-        errors.iter().any(|error| error.contains("cannot escape workgroup memory")),
+        errors
+            .iter()
+            .any(|error| error.contains("cannot escape workgroup memory")),
         "a workgroup handle copied into another local must reject: {errors:#?}"
     );
 }
@@ -566,7 +637,9 @@ fn workgroup_memory_cannot_cross_a_function_boundary() {
     let source = "fn cpu(a: WorkgroupArray<uint>) {}\n";
     let errors = emit_errors(source);
     assert!(
-        errors.iter().any(|error| error.contains("cannot cross a function boundary")),
+        errors
+            .iter()
+            .any(|error| error.contains("cannot cross a function boundary")),
         "a workgroup handle parameter must reject outside its owning entry: {errors:#?}"
     );
 }
@@ -574,20 +647,39 @@ fn workgroup_memory_cannot_cross_a_function_boundary() {
 #[test]
 fn valid_saxpy_compute_declaration_is_admitted() {
     let errors = common::bone_rejections(SAXPY);
-    assert!(errors.is_empty(), "valid compute declaration was rejected: {errors:#?}");
+    assert!(
+        errors.is_empty(),
+        "valid compute declaration was rejected: {errors:#?}"
+    );
     let ws = common::ws_with_stdlib(SAXPY);
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("test module");
+    let mid = *ws
+        .module_ids
+        .get(&Ustr::from("<test>"))
+        .expect("test module");
     let (_emit, cache) = skull::mir_emit::emit_full(&ws, mid).expect("full compute emit");
     let view = cache.shader_view();
     assert_eq!(view.compute_views.len(), 1, "one compute root is retained");
     let compute = &view.compute_views[0];
-    assert_eq!(compute.stage.stage, skull_mir::shader_ir::ShaderStage::Compute);
     assert_eq!(
-        ws.module(compute.stage.entry.func.module).functions[compute.stage.entry.func.func].name.as_str(),
+        compute.stage.stage,
+        skull_mir::shader_ir::ShaderStage::Compute
+    );
+    assert_eq!(
+        ws.module(compute.stage.entry.func.module).functions[compute.stage.entry.func.func]
+            .name
+            .as_str(),
         "saxpy"
     );
-    assert_eq!(compute.stage.retained.len(), 1, "entry plus no helper declarations");
-    assert_eq!(compute.stage.builtins.len(), 3, "three compute intrinsics are retained as builtins");
+    assert_eq!(
+        compute.stage.retained.len(),
+        1,
+        "entry plus no helper declarations"
+    );
+    assert_eq!(
+        compute.stage.builtins.len(),
+        3,
+        "three compute intrinsics are retained as builtins"
+    );
     assert!(compute.concrete_plans.contains_key(&compute.stage.entry));
 
     struct NeutralComputePolicy;
@@ -596,7 +688,9 @@ fn valid_saxpy_compute_declaration_is_admitted() {
             skull_mir::intrinsics::is_intrinsic(function)
                 || (function.name.as_str().starts_with("__op_") && function.param_decls.len() == 2)
         }
-        fn backend_name(&self) -> &'static str { "compute-test" }
+        fn backend_name(&self) -> &'static str {
+            "compute-test"
+        }
     }
     let scx = skull_mir::lower::ScalarCtx::new_values_first_class(&ws)
         .sharing(cache.graph().interner().clone());
@@ -610,26 +704,53 @@ fn valid_saxpy_compute_declaration_is_admitted() {
         dependencies: compute.stage.dependencies.clone(),
         concrete_plans: compute.concrete_plans.clone(),
     };
-    let artifact = skull_codegen_shader::plan_compute_from_concrete(
-        &ws,
-        &scx,
-        &input,
-        &NeutralComputePolicy,
-    )
-    .expect("retained compute plan");
-    let compute_iface = artifact.interface.compute.as_ref().expect("compute interface");
+    let artifact =
+        skull_codegen_shader::plan_compute_from_concrete(&ws, &scx, &input, &NeutralComputePolicy)
+            .expect("retained compute plan");
+    let compute_iface = artifact
+        .interface
+        .compute
+        .as_ref()
+        .expect("compute interface");
     assert_eq!(
-        compute_iface.resources.iter().map(|resource| resource.name.as_str()).collect::<Vec<_>>(),
+        compute_iface
+            .resources
+            .iter()
+            .map(|resource| resource.name.as_str())
+            .collect::<Vec<_>>(),
         ["x", "y", "out"]
     );
-    assert_eq!(compute_iface.resources[0].shape, skull_mir::shader_ir::ComputeResourceShape::Array(skull_mir::shader_ir::ComputeValueKind::I32));
-    assert_eq!(compute_iface.resources[0].access, skull_mir::shader_ir::ComputeAccess::Read);
-    assert_eq!(compute_iface.resources[2].access, skull_mir::shader_ir::ComputeAccess::ReadWrite);
-    assert_eq!(compute_iface.builtins, [skull_mir::shader_ir::ComputeBuiltin::GlobalInvocationId]);
-    assert_eq!(compute_iface.workgroup_size, skull_mir::shader_ir::ComputeWorkgroupSize { x: 64, y: 1, z: 1 });
-    assert_eq!(compute_iface.dispatch, skull_mir::shader_ir::ComputeDispatchContract::Runtime { dimensions: 1 });
+    assert_eq!(
+        compute_iface.resources[0].shape,
+        skull_mir::shader_ir::ComputeResourceShape::Array(
+            skull_mir::shader_ir::ComputeValueKind::I32
+        )
+    );
+    assert_eq!(
+        compute_iface.resources[0].access,
+        skull_mir::shader_ir::ComputeAccess::Read
+    );
+    assert_eq!(
+        compute_iface.resources[2].access,
+        skull_mir::shader_ir::ComputeAccess::ReadWrite
+    );
+    assert_eq!(
+        compute_iface.builtins,
+        [skull_mir::shader_ir::ComputeBuiltin::GlobalInvocationId]
+    );
+    assert_eq!(
+        compute_iface.workgroup_size,
+        skull_mir::shader_ir::ComputeWorkgroupSize { x: 64, y: 1, z: 1 }
+    );
+    assert_eq!(
+        compute_iface.dispatch,
+        skull_mir::shader_ir::ComputeDispatchContract::Runtime { dimensions: 1 }
+    );
     assert_eq!(artifact.interface.uniform_groups.len(), 1);
-    assert_eq!(artifact.interface.uniform_groups[0].role, skull_mir::shader_ir::UniformRole::Stage(skull_mir::shader_ir::ShaderStage::Compute));
+    assert_eq!(
+        artifact.interface.uniform_groups[0].role,
+        skull_mir::shader_ir::UniformRole::Stage(skull_mir::shader_ir::ShaderStage::Compute)
+    );
 
     let mut missing = (*compute.concrete_plans).clone();
     assert!(missing.remove(&compute.stage.entry).is_some());
@@ -659,11 +780,21 @@ fn rect_loss_shaped_compute_keeps_root_helper_plan_and_naga_population() {
         skull::mir_emit::RendererTarget::Wgpu,
     )
     .expect("the int-shaped rect-loss control should reach the compiler consumer");
-    assert_eq!(cache.shader_view().compute_views.len(), 1, "one direct root is retained");
+    assert_eq!(
+        cache.shader_view().compute_views.len(),
+        1,
+        "one direct root is retained"
+    );
     let compute = &cache.shader_view().compute_views[0];
-    assert!(!compute.stage.helpers.is_empty(), "helper population is nonzero");
+    assert!(
+        !compute.stage.helpers.is_empty(),
+        "helper population is nonzero"
+    );
     assert!(compute.concrete_plans.contains_key(&compute.stage.entry));
-    assert!(emit.lua.contains("__rock_wgpu_compute_register(\"rect_loss_shaped\""));
+    assert!(
+        emit.lua
+            .contains("__rock_wgpu_compute_register(\"rect_loss_shaped\"")
+    );
 
     let input = ConcreteStageInput {
         stage: compute.stage.stage,
@@ -686,13 +817,26 @@ fn rect_loss_shaped_compute_keeps_root_helper_plan_and_naga_population() {
     .expect("the retained control has a concrete neutral plan");
     let compute_iface = neutral.interface.compute.as_ref().unwrap();
     assert_eq!(
-        compute_iface.resources.iter().map(|resource| resource.name.as_str()).collect::<Vec<_>>(),
+        compute_iface
+            .resources
+            .iter()
+            .map(|resource| resource.name.as_str())
+            .collect::<Vec<_>>(),
         ["backdrop", "reference", "batch", "loss"],
         "the four-resource population is declaration ordered"
     );
-    assert_eq!(compute_iface.builtins, [skull_mir::shader_ir::ComputeBuiltin::GlobalInvocationId]);
-    assert_eq!(compute_iface.workgroup_size, skull_mir::shader_ir::ComputeWorkgroupSize { x: 64, y: 1, z: 1 });
-    assert_eq!(compute_iface.dispatch, skull_mir::shader_ir::ComputeDispatchContract::Runtime { dimensions: 1 });
+    assert_eq!(
+        compute_iface.builtins,
+        [skull_mir::shader_ir::ComputeBuiltin::GlobalInvocationId]
+    );
+    assert_eq!(
+        compute_iface.workgroup_size,
+        skull_mir::shader_ir::ComputeWorkgroupSize { x: 64, y: 1, z: 1 }
+    );
+    assert_eq!(
+        compute_iface.dispatch,
+        skull_mir::shader_ir::ComputeDispatchContract::Runtime { dimensions: 1 }
+    );
     let entry = neutral.entry.inst.symbol(&ws, &scx.interner());
     let abi = skull_codegen_wgsl::WgslAbiPlan::compute(
         &neutral.interface,
@@ -708,14 +852,27 @@ fn rect_loss_shaped_compute_keeps_root_helper_plan_and_naga_population() {
         bone_semantic::prelude::Span::default(),
     )
     .expect("Naga validation of the compiler-authored control");
-    assert!(emission.source.contains("@compute @workgroup_size(64, 1, 1)"));
-    assert!(emission.abi.wire().expect("WGSL ABI wire").starts_with("WGSL_ABI_V4\n"));
+    assert!(
+        emission
+            .source
+            .contains("@compute @workgroup_size(64, 1, 1)")
+    );
+    assert!(
+        emission
+            .abi
+            .wire()
+            .expect("WGSL ABI wire")
+            .starts_with("WGSL_ABI_V4\n")
+    );
 }
 
 #[test]
 fn float_storage_compute_surface_is_admitted() {
     let source = RECT_LOSS_SHAPED
-        .replace("a: int, b: int, c: int) -> int", "a: float, b: float, c: float) -> float")
+        .replace(
+            "a: int, b: int, c: int) -> int",
+            "a: float, b: float, c: float) -> float",
+        )
         .replace("StorageBuffer<int>", "StorageBuffer<float>");
     let ws = common::ws_with_stdlib(&source);
     skull::mir_emit::emit_full_in_for_renderer(
@@ -731,16 +888,24 @@ fn float_storage_compute_surface_is_admitted() {
 fn non_numeric_storage_shape_is_a_nonempty_fail_closed_rejection() {
     let source = RECT_LOSS_SHAPED.replace("StorageBuffer<int>", "StorageBuffer<bool>");
     let errors = emit_errors(&source);
-    assert!(!errors.is_empty(), "the non-numeric storage rejection fixture must report an error");
+    assert!(
+        !errors.is_empty(),
+        "the non-numeric storage rejection fixture must report an error"
+    );
 }
 
 #[test]
 fn rect_loss_multidimensional_workgroup_shape_is_a_nonempty_rejection() {
     let source = RECT_LOSS_SHAPED.replace("@workgroup(64, 1, 1)", "@workgroup(64, 1)");
     let errors = emit_errors(&source);
-    assert!(!errors.is_empty(), "the multidimensional workgroup fixture must report an error");
     assert!(
-        errors.iter().any(|error| error.contains("@workgroup") && error.contains("exactly three")),
+        !errors.is_empty(),
+        "the multidimensional workgroup fixture must report an error"
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("@workgroup") && error.contains("exactly three")),
         "the current workgroup rejection must name its contract: {errors:#?}"
     );
 }
@@ -756,7 +921,9 @@ fn rect_loss_packed_integer_shape_is_a_nonempty_wgsl_rejection() {
         skull::mir_emit::RendererTarget::Wgpu,
     );
     let error = match result {
-        Ok(_) => panic!("packed extraction must not silently lower through the incomplete WGSL emitter"),
+        Ok(_) => {
+            panic!("packed extraction must not silently lower through the incomplete WGSL emitter")
+        }
         Err(error) => error,
     };
     assert!(
@@ -777,10 +944,16 @@ fn dropping_a_retained_compute_helper_rejects_graph_view_disagreement() {
             "params.a * saxpy_double(storage_load(x, i)) + storage_load(y, i)",
         );
     let ws = common::ws_with_stdlib(&source);
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("test module");
+    let mid = *ws
+        .module_ids
+        .get(&Ustr::from("<test>"))
+        .expect("test module");
     let (_emit, cache) = skull::mir_emit::emit_full(&ws, mid).expect("helper compute emit");
     let compute = &cache.shader_view().compute_views[0];
-    assert!(!compute.stage.helpers.is_empty(), "fixture did not retain a helper");
+    assert!(
+        !compute.stage.helpers.is_empty(),
+        "fixture did not retain a helper"
+    );
     let mut input = ConcreteStageInput {
         stage: compute.stage.stage,
         entry: compute.stage.entry.clone(),
@@ -802,13 +975,20 @@ fn dropping_a_retained_compute_helper_rejects_graph_view_disagreement() {
         Ok(_) => panic!("a helper population disagreement must reject"),
         Err(error) => error,
     };
-    assert!(rejected.message.contains("helper order") || rejected.message.contains("entry plus helpers"), "{rejected}");
+    assert!(
+        rejected.message.contains("helper order")
+            || rejected.message.contains("entry plus helpers"),
+        "{rejected}"
+    );
 }
 
 #[test]
 fn saxpy_compute_emits_deterministic_wgsl_and_v4_abi() {
     let ws = common::ws_with_stdlib(SAXPY);
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("test module");
+    let mid = *ws
+        .module_ids
+        .get(&Ustr::from("<test>"))
+        .expect("test module");
     let (_emit, cache) = skull::mir_emit::emit_full(&ws, mid).expect("compute emit admission");
     let compute = &cache.shader_view().compute_views[0];
     let input = ConcreteStageInput {
@@ -837,7 +1017,16 @@ fn saxpy_compute_emits_deterministic_wgsl_and_v4_abi() {
         bone_semantic::prelude::Span::default(),
     )
     .expect("compute ABI");
-    assert_eq!(abi.compute.as_ref().unwrap().resources.iter().map(|resource| resource.name.as_str()).collect::<Vec<_>>(), ["x", "y", "out"]);
+    assert_eq!(
+        abi.compute
+            .as_ref()
+            .unwrap()
+            .resources
+            .iter()
+            .map(|resource| resource.name.as_str())
+            .collect::<Vec<_>>(),
+        ["x", "y", "out"]
+    );
     assert_eq!(abi.compute.as_ref().unwrap().resources[0].binding, 0);
     assert_eq!(abi.compute.as_ref().unwrap().resources[2].binding, 2);
     let emission = skull_codegen_wgsl::emit_compute_shader(
@@ -848,11 +1037,31 @@ fn saxpy_compute_emits_deterministic_wgsl_and_v4_abi() {
         bone_semantic::prelude::Span::default(),
     )
     .expect("compute WGSL emission");
-    assert!(emission.source.contains("@compute @workgroup_size(64, 1, 1)"));
-    assert!(emission.source.contains("@builtin(global_invocation_id) global_id: vec3<u32>"));
-    assert!(emission.source.contains("var<storage, read> s_x: array<i32>"));
-    assert!(emission.source.contains("var<storage, read_write> s_out: array<i32>"));
-    assert!(emission.source.contains("s_out[i] = ((u_SaxpyParams.a * s_x[i]) + s_y[i])"));
+    assert!(
+        emission
+            .source
+            .contains("@compute @workgroup_size(64, 1, 1)")
+    );
+    assert!(
+        emission
+            .source
+            .contains("@builtin(global_invocation_id) global_id: vec3<u32>")
+    );
+    assert!(
+        emission
+            .source
+            .contains("var<storage, read> s_x: array<i32>")
+    );
+    assert!(
+        emission
+            .source
+            .contains("var<storage, read_write> s_out: array<i32>")
+    );
+    assert!(
+        emission
+            .source
+            .contains("s_out[i] = ((u_SaxpyParams.a * s_x[i]) + s_y[i])")
+    );
     let wire = abi.wire().expect("WGSL ABI wire");
     assert!(wire.starts_with("WGSL_ABI_V4\n"));
 
@@ -874,7 +1083,10 @@ fn saxpy_compute_emits_deterministic_wgsl_and_v4_abi() {
 #[test]
 fn wgpu_renderer_registers_the_compute_artifact_from_the_view() {
     let ws = common::ws_with_stdlib(SAXPY);
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("test module");
+    let mid = *ws
+        .module_ids
+        .get(&Ustr::from("<test>"))
+        .expect("test module");
     let (emit, cache) = skull::mir_emit::emit_full_in_for_renderer(
         &ws,
         mid,
@@ -884,8 +1096,18 @@ fn wgpu_renderer_registers_the_compute_artifact_from_the_view() {
     .expect("compute WGPU registration");
     assert_eq!(cache.shader_view().compute_views.len(), 1);
     assert_eq!(emit.lua.matches("__rock_wgpu_compute_register(").count(), 1);
-    assert_eq!(emit.lua.matches("__rock_wgpu_compute_snapshot_begin()").count(), 1);
-    assert_eq!(emit.lua.matches("__rock_wgpu_compute_snapshot_end()").count(), 1);
+    assert_eq!(
+        emit.lua
+            .matches("__rock_wgpu_compute_snapshot_begin()")
+            .count(),
+        1
+    );
+    assert_eq!(
+        emit.lua
+            .matches("__rock_wgpu_compute_snapshot_end()")
+            .count(),
+        1
+    );
     assert!(emit.lua.contains("__rock_wgpu_compute_register(\"saxpy\""));
 }
 
@@ -908,11 +1130,37 @@ fn compute_body_edit_reloads_the_compiler_artifact_through_the_overlay() {
     let ws2 = common::ws_with_stdlib(&source2);
     let overlay = skull::mir_emit::emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "saxpy")])
         .expect("compute body overlay");
-    assert_eq!(overlay.lua.matches("__rock_wgpu_compute_register(\"saxpy\"").count(), 1);
-    assert_eq!(overlay.lua.matches("__rock_wgpu_compute_snapshot_begin()").count(), 1);
-    assert_eq!(overlay.lua.matches("__rock_wgpu_compute_snapshot_end()").count(), 1);
-    assert!(overlay.lua.contains("(u_SaxpyParams.a + 1)"), "edited compute source missing:\n{}", overlay.lua);
-    assert_eq!(cache.shader_registration_contracts(), initial_contracts, "body edit changed the ABI contract");
+    assert_eq!(
+        overlay
+            .lua
+            .matches("__rock_wgpu_compute_register(\"saxpy\"")
+            .count(),
+        1
+    );
+    assert_eq!(
+        overlay
+            .lua
+            .matches("__rock_wgpu_compute_snapshot_begin()")
+            .count(),
+        1
+    );
+    assert_eq!(
+        overlay
+            .lua
+            .matches("__rock_wgpu_compute_snapshot_end()")
+            .count(),
+        1
+    );
+    assert!(
+        overlay.lua.contains("(u_SaxpyParams.a + 1)"),
+        "edited compute source missing:\n{}",
+        overlay.lua
+    );
+    assert_eq!(
+        cache.shader_registration_contracts(),
+        initial_contracts,
+        "body edit changed the ABI contract"
+    );
 }
 
 #[test]
@@ -926,7 +1174,10 @@ fn compute_helper_body_edit_updates_the_same_registered_key() {
             "params.a * storage_load(x, i) + storage_load(y, i)",
             "params.a * saxpy_bias(storage_load(x, i)) + storage_load(y, i)",
         );
-    let source2 = source1.replace("fn saxpy_bias(v: int) -> int { return v }", "fn saxpy_bias(v: int) -> int { return v + 1 }");
+    let source2 = source1.replace(
+        "fn saxpy_bias(v: int) -> int { return v }",
+        "fn saxpy_bias(v: int) -> int { return v + 1 }",
+    );
     let ws1 = common::ws_with_stdlib(&source1);
     let mut cache = skull::mir_emit::emit_full_in_for_renderer(
         &ws1,
@@ -940,9 +1191,23 @@ fn compute_helper_body_edit_updates_the_same_registered_key() {
     let ws2 = common::ws_with_stdlib(&source2);
     let overlay = skull::mir_emit::emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "saxpy_bias")])
         .expect("helper body overlay");
-    assert_eq!(overlay.lua.matches("__rock_wgpu_compute_register(\"saxpy\"").count(), 1);
-    assert!(overlay.lua.contains("+ 1"), "edited helper body missing from compiler artifact:\n{}", overlay.lua);
-    assert_eq!(cache.shader_registration_contracts(), initial_contracts, "helper body edit changed the ABI contract");
+    assert_eq!(
+        overlay
+            .lua
+            .matches("__rock_wgpu_compute_register(\"saxpy\"")
+            .count(),
+        1
+    );
+    assert!(
+        overlay.lua.contains("+ 1"),
+        "edited helper body missing from compiler artifact:\n{}",
+        overlay.lua
+    );
+    assert_eq!(
+        cache.shader_registration_contracts(),
+        initial_contracts,
+        "helper body edit changed the ABI contract"
+    );
 }
 
 #[test]
@@ -1001,28 +1266,40 @@ fn compute_root_addition_and_removal_request_a_full_reload() {
     )
     .expect("initial compute emit");
 
-    let removed = common::ws_with_stdlib(&SAXPY.replace("global SAXPY: string = rock_compute(saxpy)", ""));
-    assert!(cache.shader_registration_keys_changed(&removed).expect("removed key set"));
+    let removed =
+        common::ws_with_stdlib(&SAXPY.replace("global SAXPY: string = rock_compute(saxpy)", ""));
+    assert!(
+        cache
+            .shader_registration_keys_changed(&removed)
+            .expect("removed key set")
+    );
 
     let added_source = format!(
         "{}\n\n@shader(compute)\n@workgroup(64)\nfn saxpy_extra(\n    @storage(read) x: StorageBuffer<int>,\n    @storage(read) y: StorageBuffer<int>,\n    @storage(read_write) out: StorageBuffer<int>,\n    @uniform params: SaxpyParams,\n) {{\n    let i = global_invocation_id().x\n    if i >= params.n {{ return }}\n    storage_store(out, i, params.a * storage_load(x, i) + storage_load(y, i))\n}}\n\nglobal SAXPY_EXTRA: string = rock_compute(saxpy_extra)\n",
         SAXPY
     );
-    let added_source = added_source.replace(
-        "@workgroup(64)",
-        "@workgroup(64, 1, 1)\n@dispatch(1)",
-    );
+    let added_source = added_source.replace("@workgroup(64)", "@workgroup(64, 1, 1)\n@dispatch(1)");
     let added = common::ws_with_stdlib(&added_source);
-    assert!(cache.shader_registration_keys_changed(&added).expect("added key set"));
+    assert!(
+        cache
+            .shader_registration_keys_changed(&added)
+            .expect("added key set")
+    );
 }
 
 #[test]
 fn missing_compute_root_is_reported_by_the_compute_population() {
     let source = SAXPY.replace("global SAXPY: string = rock_compute(saxpy)", "");
     let ws = common::ws_with_stdlib(&source);
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("test module");
+    let mid = *ws
+        .module_ids
+        .get(&Ustr::from("<test>"))
+        .expect("test module");
     let (_emit, cache) = skull::mir_emit::emit_full(&ws, mid).expect("emit without compute root");
-    assert!(cache.shader_view().compute_views.is_empty(), "omitted root was retained");
+    assert!(
+        cache.shader_view().compute_views.is_empty(),
+        "omitted root was retained"
+    );
 }
 
 #[test]
@@ -1033,7 +1310,9 @@ fn an_indirect_compute_root_is_rejected() {
     );
     let errors = emit_errors(&source);
     assert!(
-        errors.iter().any(|error| error.contains("direct reference")),
+        errors
+            .iter()
+            .any(|error| error.contains("direct reference")),
         "indirect compute root must reject at its argument: {errors:#?}"
     );
 }
@@ -1053,7 +1332,9 @@ fn storage_store_requires_read_write_access() {
     let source = SAXPY.replace("@storage(read_write) out", "@storage(read) out");
     let errors = emit_errors(&source);
     assert!(
-        errors.iter().any(|error| error.contains("storage_store") && error.contains("Read")),
+        errors
+            .iter()
+            .any(|error| error.contains("storage_store") && error.contains("Read")),
         "store through a read resource must reject: {errors:#?}"
     );
 }
@@ -1063,7 +1344,9 @@ fn storage_load_rejects_write_only_access() {
     let source = SAXPY.replace("@storage(read) x", "@storage(write) x");
     let errors = emit_errors(&source);
     assert!(
-        errors.iter().any(|error| error.contains("storage_load") && error.contains("Write")),
+        errors
+            .iter()
+            .any(|error| error.contains("storage_load") && error.contains("Write")),
         "load through a write-only resource must reject: {errors:#?}"
     );
 }
@@ -1076,7 +1359,9 @@ fn atomic_storage_rejects_ordinary_load_and_store() {
     );
     let load_bone_errors = common::bone_rejections(&load_source);
     assert!(
-        load_bone_errors.iter().any(|error| error.contains("AtomicStorageBuffer")),
+        load_bone_errors
+            .iter()
+            .any(|error| error.contains("AtomicStorageBuffer")),
         "ordinary load through atomic storage must reject: {load_bone_errors:#?}"
     );
 
@@ -1086,7 +1371,9 @@ fn atomic_storage_rejects_ordinary_load_and_store() {
     );
     let store_errors = common::bone_rejections(&store_source);
     assert!(
-        store_errors.iter().any(|error| error.contains("AtomicStorageBuffer")),
+        store_errors
+            .iter()
+            .any(|error| error.contains("AtomicStorageBuffer")),
         "ordinary store through atomic storage must reject: {store_errors:#?}"
     );
 }
@@ -1098,7 +1385,9 @@ fn graphics_entries_cannot_declare_compute_storage() {
         .replace("rock_compute(saxpy)", "rock_shader(saxpy)");
     let errors = emit_errors(&source);
     assert!(
-        errors.iter().any(|error| error.contains("compute") && error.contains("storage")),
+        errors
+            .iter()
+            .any(|error| error.contains("compute") && error.contains("storage")),
         "graphics storage must reject: {errors:#?}"
     );
 }

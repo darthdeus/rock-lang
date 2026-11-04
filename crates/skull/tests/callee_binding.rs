@@ -32,7 +32,9 @@ fn emit(src: &str) -> String {
 
 /// The byte offset of `needle`, which must occur exactly once.
 fn only(lua: &str, needle: &str) -> usize {
-    let first = lua.find(needle).unwrap_or_else(|| panic!("missing `{needle}`"));
+    let first = lua
+        .find(needle)
+        .unwrap_or_else(|| panic!("missing `{needle}`"));
     assert!(
         lua[first + needle.len()..].find(needle).is_none(),
         "`{needle}` occurs more than once"
@@ -52,7 +54,8 @@ fn every_binding_line_follows_every_definition() {
         .filter_map(|rest| rest.split_once(" = function(").map(|(name, _)| name))
         .collect();
     assert!(
-        factories.iter().any(|n| n.starts_with("top_")) && factories.iter().any(|n| n.starts_with("mid_")),
+        factories.iter().any(|n| n.starts_with("top_"))
+            && factories.iter().any(|n| n.starts_with("mid_")),
         "expected `top` and `mid` bound: {factories:?}"
     );
     let last_definition = lua
@@ -176,7 +179,10 @@ fn emits_main_is_reported_under_both_shapes() {
 fn body_id(
     ws: &bone_semantic::inference::Workspace,
     name: &str,
-) -> (bone_semantic::prelude::ModuleId, bone_semantic::hir::BodyOwner) {
+) -> (
+    bone_semantic::prelude::ModuleId,
+    bone_semantic::hir::BodyOwner,
+) {
     for module in ws.modules.iter() {
         for (fid, f) in module.functions.iter() {
             if f.name.as_str() == name {
@@ -213,7 +219,9 @@ fn bound_overlay_rebinds_transitive_callers_and_escaped_code_refs() {
         "{}\nlocal saved_top = saved()\nassert(top_int(3) == 33)\n{}\nassert(top_int(3) == 36)\nassert(saved_top(3) == 36)\nprint('PASS')\n",
         full.lua, overlay.lua,
     );
-    let out = rock_host::lua_runner::run_lua_code_with_timeout(&script, Some(test_utils::HANG_BACKSTOP)).expect("loaded overlay");
+    let out =
+        rock_host::lua_runner::run_lua_code_with_timeout(&script, Some(test_utils::HANG_BACKSTOP))
+            .expect("loaded overlay");
     assert!(out.success, "{}", out.combined());
     assert!(out.stdout.contains("PASS"), "{}", out.combined());
 }
@@ -230,14 +238,18 @@ fn bound_overlay_rebinds_a_residual_inline_caller_without_rebuilding_its_chunk()
     let ws2 = ws_with_stdlib(&v2);
     let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "helper")]).expect("overlay");
     let stats = cache.repair_stats();
-    assert_eq!(stats.chunks_rebuilt, 1, "the residual caller chunk should be reused: {stats:?}");
+    assert_eq!(
+        stats.chunks_rebuilt, 1,
+        "the residual caller chunk should be reused: {stats:?}"
+    );
 
     let script = format!(
         "{}\nassert(caller() == 3)\n{}\nassert(caller() == 5)\nprint('PASS')\n",
         full.lua, overlay.lua,
     );
-    let out = rock_host::lua_runner::run_lua_code_with_timeout(&script, Some(test_utils::HANG_BACKSTOP))
-        .expect("loaded residual-caller overlay");
+    let out =
+        rock_host::lua_runner::run_lua_code_with_timeout(&script, Some(test_utils::HANG_BACKSTOP))
+            .expect("loaded residual-caller overlay");
     assert!(out.success, "{}", out.combined());
     assert!(out.stdout.contains("PASS"), "{}", out.combined());
 }
@@ -255,7 +267,9 @@ fn bound_overlay_cells_read_the_live_global_storage() {
         "{}\nbump()\n{}\nbump()\nassert(COUNT == 3)\nCOUNT = 20\nbump()\nassert(COUNT == 22)\nprint('PASS')\n",
         full.lua, overlay.lua,
     );
-    let out = rock_host::lua_runner::run_lua_code_with_timeout(&script, Some(test_utils::HANG_BACKSTOP)).expect("loaded overlay");
+    let out =
+        rock_host::lua_runner::run_lua_code_with_timeout(&script, Some(test_utils::HANG_BACKSTOP))
+            .expect("loaded overlay");
     assert!(out.success, "{}", out.combined());
     assert!(out.stdout.contains("PASS"), "{}", out.combined());
 }
@@ -269,12 +283,16 @@ fn bound_overlay_new_backedge_keeps_capture_binding_acyclic() {
         emit_full_with_callee_binding(&ws1, mid, CalleeBindingMode::Upvalue).expect("full");
     let ws2 = ws_with_stdlib(&v1.replace("{ n }", "{ if n == 0 { return 10 }\n top(n - 1) }"));
     let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "leaf")]).expect("overlay");
-    let script = format!("{}\n{}\nassert(answer() == 10)\nprint('PASS')\n", full.lua, overlay.lua);
-    let out = rock_host::lua_runner::run_lua_code_with_timeout(&script, Some(test_utils::HANG_BACKSTOP)).expect("loaded overlay");
+    let script = format!(
+        "{}\n{}\nassert(answer() == 10)\nprint('PASS')\n",
+        full.lua, overlay.lua
+    );
+    let out =
+        rock_host::lua_runner::run_lua_code_with_timeout(&script, Some(test_utils::HANG_BACKSTOP))
+            .expect("loaded overlay");
     assert!(out.success, "{}", out.combined());
     assert!(out.stdout.contains("PASS"), "{}", out.combined());
 }
-
 
 #[test]
 fn repeated_stripped_overlays_share_one_storage_table_and_old_closures_live() {
@@ -311,7 +329,9 @@ print('PASS')
         full = skull_codegen_lua::lua_string(&full.lua),
         overlay = skull_codegen_lua::lua_string(&overlay.lua),
     );
-    let out = rock_host::lua_runner::run_lua_code_with_timeout(&script, Some(test_utils::HANG_BACKSTOP)).expect("loaded bytecode overlays");
+    let out =
+        rock_host::lua_runner::run_lua_code_with_timeout(&script, Some(test_utils::HANG_BACKSTOP))
+            .expect("loaded bytecode overlays");
     assert!(out.success, "{}", out.combined());
     assert!(out.stdout.contains("PASS"), "{}", out.combined());
 }

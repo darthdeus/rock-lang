@@ -4,7 +4,7 @@
 //! what identifies the slot), so the harness runs a full `semantic_pass`.
 //! `Task` is declared locally -- the lint keys on the target type, not on the host library.
 
-use bone_lints::{filter_suppressed, task_null_abandon, LintFinding, TaskNullAbandon};
+use bone_lints::{LintFinding, TaskNullAbandon, filter_suppressed, task_null_abandon};
 use bone_semantic::prelude::*;
 use rock_core::errors::CompilerErrorLevel;
 
@@ -59,21 +59,33 @@ fn prelude_typechecks() {
 #[test]
 fn field_null_assign_is_flagged() {
     let body = "fn bad(m: Mob) {\n    m.co = null\n}";
-    assert_eq!(count(body), 1, "`m.co = null` abandons the coroutine mid-stack");
+    assert_eq!(
+        count(body),
+        1,
+        "`m.co = null` abandons the coroutine mid-stack"
+    );
 }
 
 #[test]
 fn diagnostic_names_the_slot() {
     let fs = findings("fn bad(m: Mob) {\n    m.co = null\n}");
     assert_eq!(fs.len(), 1, "expected the one finding: {fs:?}");
-    assert_eq!(fs[0].place.as_deref(), Some("m.co"), "the message points at the slot");
+    assert_eq!(
+        fs[0].place.as_deref(),
+        Some("m.co"),
+        "the message points at the slot"
+    );
 }
 
 #[test]
 fn diagnostic_names_a_safe_nav_slot() {
     let fs = findings("fn bad(e: Entity<Mob>) {\n    e.get()?.co = null\n}");
     assert_eq!(fs.len(), 1, "expected the one finding: {fs:?}");
-    assert_eq!(fs[0].place.as_deref(), Some("e.get()?.co"), "the whole path is re-spelled");
+    assert_eq!(
+        fs[0].place.as_deref(),
+        Some("e.get()?.co"),
+        "the whole path is re-spelled"
+    );
 }
 
 #[test]
@@ -88,7 +100,11 @@ fn diagnostic_names_a_global_slot() {
 #[test]
 fn stop_call_is_clean() {
     let body = "fn good(m: Mob) {\n    stop(m, .co)\n}";
-    assert_eq!(count(body), 0, "`stop` fires the terminal defers -- that is the fix");
+    assert_eq!(
+        count(body),
+        0,
+        "`stop` fires the terminal defers -- that is the fix"
+    );
 }
 
 // An initializer is not an assignment: there is no live coroutine in the slot to
@@ -96,7 +112,11 @@ fn stop_call_is_clean() {
 #[test]
 fn struct_literal_initializer_is_clean() {
     let body = "fn good() -> Mob {\n    return Mob { co: null, name: null }\n}";
-    assert_eq!(count(body), 0, "a literal initializes the slot, it does not overwrite one");
+    assert_eq!(
+        count(body),
+        0,
+        "a literal initializes the slot, it does not overwrite one"
+    );
 }
 
 #[test]
@@ -124,13 +144,21 @@ fn non_null_assign_is_clean() {
 #[test]
 fn deep_safe_nav_target_is_flagged() {
     let body = "fn bad(e: Entity<Mob>) {\n    e.get()?.co = null\n}";
-    assert_eq!(count(body), 1, "the safe-nav target is still a `Task?` place");
+    assert_eq!(
+        count(body),
+        1,
+        "the safe-nav target is still a `Task?` place"
+    );
 }
 
 #[test]
 fn local_task_slot_is_flagged() {
     let body = "fn bad() {\n    let t: Task? = make_task()\n    t = null\n}";
-    assert_eq!(count(body), 1, "a local is a place too -- the task is just as abandoned");
+    assert_eq!(
+        count(body),
+        1,
+        "a local is a place too -- the task is just as abandoned"
+    );
 }
 
 #[test]
@@ -164,5 +192,8 @@ fn trailing_allow_comment_suppresses() {
     let body = "fn bad(m: Mob) {\n    m.co = null // rock: allow(task_null_abandon)\n}";
     let src = format!("{PRELUDE}\n{body}\n");
     let kept = filter_suppressed(findings(body), &src);
-    assert!(kept.is_empty(), "trailing allow comment silences it: {kept:?}");
+    assert!(
+        kept.is_empty(),
+        "trailing allow comment silences it: {kept:?}"
+    );
 }

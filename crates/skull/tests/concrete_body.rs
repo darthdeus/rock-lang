@@ -14,8 +14,8 @@ use comfy_la_arena::{ArenaMap, Idx, IdxRange};
 use skull::concrete_body::{self, Callee, ConcreteBodies, IteratorOpKind, Slot};
 use skull::instance_graph::{self, InstanceGraph, Site, SiteOp, SiteOutcome};
 use skull_mir::concrete::ConcreteTypeTables;
-use skull_mir::monoty::{MonoTy, MonoTyId, MonoTyReason};
 use skull_mir::mir::{Inst, MirFunc, Term};
+use skull_mir::monoty::{MonoTy, MonoTyId, MonoTyReason};
 use ustr::Ustr;
 
 static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
@@ -135,7 +135,10 @@ fn main() {
             unique.push(ty);
         }
     }
-    assert!(!unique.is_empty(), "fixture exposed no nested type population");
+    assert!(
+        !unique.is_empty(),
+        "fixture exposed no nested type population"
+    );
     for ty in unique {
         assert!(
             plan.types.ty_types.contains_key(&ty),
@@ -186,7 +189,10 @@ fn main() {
         .chain(plan.types.binding_types.values())
         .map(|id| g.interner().get(*id))
         .find(|ty| matches!(ty, MonoTy::App { params, .. } if matches!(params.first(), Some(MonoTy::App { .. }))));
-    assert!(nested.is_some(), "the concrete plan lost the nested application tree");
+    assert!(
+        nested.is_some(),
+        "the concrete plan lost the nested application tree"
+    );
 
     let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
     skull_mir::lower::lower_instance_with_plans(&ws, &scx, plan, &bodies.plans)
@@ -210,7 +216,10 @@ fn main() {
 }
 "#,
     );
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("test module");
+    let mid = *ws
+        .module_ids
+        .get(&Ustr::from("<test>"))
+        .expect("test module");
     let (inst, plan) = bodies
         .plans
         .iter()
@@ -230,12 +239,16 @@ fn main() {
         .find(|(_, binding)| binding.name == Ustr::from("value"))
         .map(|(idx, _)| idx)
         .expect("value binding");
-    body.binding_arena[binding].declared_ty = Some(bone_semantic::prelude::TyId::Static(mid, extra));
+    body.binding_arena[binding].declared_ty =
+        Some(bone_semantic::prelude::TyId::Static(mid, extra));
 
     let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
     let err = skull_mir::lower::lower_instance_with_plans(&ws, &scx, &plan, &bodies.plans)
         .expect_err("lowering accepted a declaration type absent from its concrete plan");
-    assert!(err.message.contains("missing concrete type node"), "{err:?}");
+    assert!(
+        err.message.contains("missing concrete type node"),
+        "{err:?}"
+    );
 }
 
 #[test]
@@ -246,7 +259,10 @@ fn id(value: int) -> int { return value }
 fn main() { print("{id(1)}") }
 "#,
     );
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("test module");
+    let mid = *ws
+        .module_ids
+        .get(&Ustr::from("<test>"))
+        .expect("test module");
     let (inst, plan) = bodies
         .plans
         .iter()
@@ -262,7 +278,10 @@ fn main() { print("{id(1)}") }
     let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
     let err = skull_mir::lower::lower_instance_with_plans(&ws, &scx, &plan, &bodies.plans)
         .expect_err("lowering accepted a signature type absent from its concrete plan");
-    assert!(err.message.contains("missing concrete type node"), "{err:?}");
+    assert!(
+        err.message.contains("missing concrete type node"),
+        "{err:?}"
+    );
 }
 
 #[test]
@@ -280,21 +299,31 @@ fn main() {
         .iter()
         .find(|(inst, _)| g.identity(&ws, inst).starts_with("main"))
         .expect("main has no concrete plan");
-    let body = ws.module(inst.func.module).bodies.get(&BodyOwner::Function(inst.func.func)).unwrap();
+    let body = ws
+        .module(inst.func.module)
+        .bodies
+        .get(&BodyOwner::Function(inst.func.func))
+        .unwrap();
     let null = body
         .expr_arena
         .iter()
         .find(|(_, expr)| matches!(expr, Expr::Null))
         .map(|(expr, _)| expr)
         .expect("fixture has no null expression");
-    assert!(plan.types.is_untyped_expr(null), "unresolved null slot was not recorded");
+    assert!(
+        plan.types.is_untyped_expr(null),
+        "unresolved null slot was not recorded"
+    );
 
     let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
     let mut poisoned = (**plan).clone();
     poisoned.types.untyped_exprs.clear();
     let err = skull_mir::lower::lower_instance_with_plans(&ws, &scx, &poisoned, &bodies.plans)
         .expect_err("lowering accepted an untyped slot after its plan marker was removed");
-    assert!(err.message.contains("missing concrete type node"), "{err:?}");
+    assert!(
+        err.message.contains("missing concrete type node"),
+        "{err:?}"
+    );
 }
 
 #[test]
@@ -309,7 +338,12 @@ fn main() { let v = make(); print("{v.x}") }
     let make = bodies
         .plans
         .keys()
-        .find(|inst| ws.module(inst.func.module).functions[inst.func.func].name.as_str() == "make")
+        .find(|inst| {
+            ws.module(inst.func.module).functions[inst.func.func]
+                .name
+                .as_str()
+                == "make"
+        })
         .cloned()
         .expect("make has no concrete plan");
     let plan = bodies.plans.get(&make).expect("make plan disappeared");
@@ -337,20 +371,33 @@ fn main() {
     let main_plan = bodies
         .plans
         .iter()
-        .find(|(inst, _)| ws.module(inst.func.module).functions[inst.func.func].name.as_str() == "main")
+        .find(|(inst, _)| {
+            ws.module(inst.func.module).functions[inst.func.func]
+                .name
+                .as_str()
+                == "main"
+        })
         .map(|(_, plan)| plan)
         .expect("main has no concrete plan");
     let callee = main_plan
         .callees
         .values()
-        .find(|inst| ws.module(inst.func.module).functions[inst.func.func].name.as_str() == "id")
+        .find(|inst| {
+            ws.module(inst.func.module).functions[inst.func.func]
+                .name
+                .as_str()
+                == "id"
+        })
         .cloned()
         .expect("main has no concrete id call");
     let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
     skull_mir::lower::lower_instance_with_plans(&ws, &scx, main_plan, &bodies.plans)
         .expect("call lowering rejected the intact selected callee plan");
     let mut plans = (*bodies.plans).clone();
-    assert!(plans.remove(&callee).is_some(), "the fixture has no selected id plan");
+    assert!(
+        plans.remove(&callee).is_some(),
+        "the fixture has no selected id plan"
+    );
     assert!(
         skull_mir::lower::lower_instance_with_plans(&ws, &scx, main_plan, &plans).is_err(),
         "call lowering fell back after the selected callee ABI plan was removed"
@@ -372,13 +419,23 @@ fn main() {
     let main_plan = bodies
         .plans
         .iter()
-        .find(|(inst, _)| ws.module(inst.func.module).functions[inst.func.func].name.as_str() == "main")
+        .find(|(inst, _)| {
+            ws.module(inst.func.module).functions[inst.func.func]
+                .name
+                .as_str()
+                == "main"
+        })
         .map(|(_, plan)| plan)
         .expect("main has no concrete plan");
     let callee = main_plan
         .callees
         .values()
-        .find(|inst| ws.module(inst.func.module).functions[inst.func.func].name.as_str() == "id")
+        .find(|inst| {
+            ws.module(inst.func.module).functions[inst.func.func]
+                .name
+                .as_str()
+                == "id"
+        })
         .cloned()
         .expect("main has no concrete id call");
     let site = main_plan
@@ -435,13 +492,23 @@ fn main() {
     let main_plan = bodies
         .plans
         .iter()
-        .find(|(inst, _)| ws.module(inst.func.module).functions[inst.func.func].name.as_str() == "main")
+        .find(|(inst, _)| {
+            ws.module(inst.func.module).functions[inst.func.func]
+                .name
+                .as_str()
+                == "main"
+        })
         .map(|(_, plan)| plan)
         .expect("main has no concrete plan");
     let callee = main_plan
         .callees
         .values()
-        .find(|inst| ws.module(inst.func.module).functions[inst.func.func].name.as_str() == "id")
+        .find(|inst| {
+            ws.module(inst.func.module).functions[inst.func.func]
+                .name
+                .as_str()
+                == "id"
+        })
         .cloned()
         .expect("main has no concrete id call");
     let site = main_plan
@@ -479,7 +546,10 @@ fn main() {
         err.message.contains("UFCS receiver has no ABI slot 0"),
         "unexpected missing-receiver diagnostic: {err:?}"
     );
-    assert!(!err.labels.is_empty(), "missing receiver diagnostic lost its source span");
+    assert!(
+        !err.labels.is_empty(),
+        "missing receiver diagnostic lost its source span"
+    );
 }
 
 #[test]
@@ -499,7 +569,10 @@ fn main() {
         .find(|(inst, _)| g.identity(&ws, inst).starts_with("main"))
         .map(|(_, plan)| plan)
         .expect("main has no concrete plan");
-    assert!(!main_plan.callees.is_empty(), "fixture has no concrete site population");
+    assert!(
+        !main_plan.callees.is_empty(),
+        "fixture has no concrete site population"
+    );
     let mut poisoned = (**main_plan).clone();
     poisoned.callees.clear();
     let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
@@ -526,20 +599,34 @@ fn main() {
     let main_plan = bodies
         .plans
         .iter()
-        .find(|(inst, _)| ws.module(inst.func.module).functions[inst.func.func].name.as_str() == "main")
+        .find(|(inst, _)| {
+            ws.module(inst.func.module).functions[inst.func.func]
+                .name
+                .as_str()
+                == "main"
+        })
         .map(|(_, plan)| plan)
         .expect("main has no concrete plan");
     let callee = main_plan
         .callees
         .values()
-        .find(|inst| ws.module(inst.func.module).functions[inst.func.func].name.as_str() == "variadic")
+        .find(|inst| {
+            ws.module(inst.func.module).functions[inst.func.func]
+                .name
+                .as_str()
+                == "variadic"
+        })
         .expect("main has no variadic callee");
     let variadic_sites: Vec<_> = main_plan
         .callees
         .iter()
         .filter(|(_, inst)| *inst == callee)
         .collect();
-    assert_eq!(variadic_sites.len(), 2, "fixture lost its direct or UFCS call");
+    assert_eq!(
+        variadic_sites.len(),
+        2,
+        "fixture lost its direct or UFCS call"
+    );
     for (site, _) in variadic_sites {
         assert_eq!(
             main_plan
@@ -570,12 +657,16 @@ fn main() {
     let (main, plan) = bodies
         .plans
         .iter()
-        .find(|(inst, _)| ws.module(inst.func.module).functions[inst.func.func].name.as_str() == "main")
+        .find(|(inst, _)| {
+            ws.module(inst.func.module).functions[inst.func.func]
+                .name
+                .as_str()
+                == "main"
+        })
         .map(|(inst, plan)| (inst.clone(), plan.clone()))
         .expect("main has no concrete plan");
     let mid = main.func.module;
-    let body = ws
-        .modules[mid.index()]
+    let body = ws.modules[mid.index()]
         .bodies
         .get_mut(&BodyOwner::Function(main.func.func))
         .expect("main has no body");
@@ -587,7 +678,11 @@ fn main() {
             _ => None,
         })
         .expect("fixture has no lambda");
-    assert_eq!(params.len(), 1, "fixture did not expose one lambda parameter");
+    assert_eq!(
+        params.len(),
+        1,
+        "fixture did not expose one lambda parameter"
+    );
     let extra = body
         .binding_arena
         .iter()
@@ -606,7 +701,10 @@ fn main() {
         err.message.contains("lambda ABI has no parameter slot 1"),
         "unexpected lambda missing-slot diagnostic: {err:?}"
     );
-    assert!(!err.labels.is_empty(), "lambda missing-slot diagnostic lost its source span");
+    assert!(
+        !err.labels.is_empty(),
+        "lambda missing-slot diagnostic lost its source span"
+    );
 }
 
 fn count_int_to_float(mir: &MirFunc) -> usize {
@@ -637,7 +735,12 @@ fn main() {
     let callee = main_plan
         .callees
         .values()
-        .find(|inst| ws.module(inst.func.module).functions[inst.func.func].name.as_str() == "id")
+        .find(|inst| {
+            ws.module(inst.func.module).functions[inst.func.func]
+                .name
+                .as_str()
+                == "id"
+        })
         .cloned()
         .expect("main has no concrete id call");
     let callee_plan = bodies.plans.get(&callee).expect("id has no concrete plan");
@@ -696,7 +799,12 @@ fn main() {
     let callee = main_plan
         .callees
         .values()
-        .find(|inst| ws.module(inst.func.module).functions[inst.func.func].name.as_str() == "id")
+        .find(|inst| {
+            ws.module(inst.func.module).functions[inst.func.func]
+                .name
+                .as_str()
+                == "id"
+        })
         .cloned()
         .expect("main has no concrete id call");
     let mut plans = (*bodies.plans).clone();
@@ -705,12 +813,14 @@ fn main() {
             .get_mut(&callee)
             .expect("selected callee plan disappeared"),
     );
-    std::sync::Arc::make_mut(&mut callee_plan.signature).params[0] = g.interner().intern(MonoTy::Float);
+    std::sync::Arc::make_mut(&mut callee_plan.signature).params[0] =
+        g.interner().intern(MonoTy::Float);
     let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
     let err = skull_mir::lower::lower_instance_with_plans(&ws, &scx, main_plan, &plans)
         .expect_err("lowering accepted a mismatched callee body plan");
     assert!(
-        err.message.contains("concrete callee signature disagrees with its body plan"),
+        err.message
+            .contains("concrete callee signature disagrees with its body plan"),
         "unexpected mismatch diagnostic: {err:?}"
     );
 }
@@ -729,11 +839,19 @@ fn main() {
     let callee = bodies
         .plans
         .keys()
-        .find(|inst| ws.module(inst.func.module).functions[inst.func.func].name.as_str() == "id")
+        .find(|inst| {
+            ws.module(inst.func.module).functions[inst.func.func]
+                .name
+                .as_str()
+                == "id"
+        })
         .cloned()
         .expect("id has no concrete plan");
     let mut plan = (**bodies.plans.get(&callee).expect("id plan disappeared")).clone();
-    assert!(plan.signature.result.is_some(), "body signature has no result population");
+    assert!(
+        plan.signature.result.is_some(),
+        "body signature has no result population"
+    );
     std::sync::Arc::make_mut(&mut plan.signature).result = Some(g.interner().intern(MonoTy::Float));
     let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
     let mir = skull_mir::lower::lower_instance_with_plans(&ws, &scx, &plan, &bodies.plans)
@@ -758,7 +876,10 @@ fn main() {
 "#,
     );
     let census = bodies.census();
-    assert!(census.type_nodes_examined > 0, "the type-node population is empty: {census:?}");
+    assert!(
+        census.type_nodes_examined > 0,
+        "the type-node population is empty: {census:?}"
+    );
     assert!(
         census.type_node_conversion_attempts > 0,
         "the type-node conversion population is empty: {census:?}"
@@ -786,7 +907,11 @@ fn main() {
         .find(|(inst, _)| g.identity(&ws, inst).starts_with("main"))
         .map(|(_, plan)| plan)
         .expect("main has no concrete plan");
-    assert_eq!(main.foreign_domains.len(), 2, "expected both Box instantiation domains");
+    assert_eq!(
+        main.foreign_domains.len(),
+        2,
+        "expected both Box instantiation domains"
+    );
     let mut rendered = main
         .foreign_domains
         .values()
@@ -794,11 +919,22 @@ fn main() {
         .map(|id| g.interner().render(*id))
         .collect::<Vec<_>>();
     rendered.sort();
-    assert!(rendered.iter().any(|ty| ty == "int?"), "missing int default table: {rendered:?}");
-    assert!(rendered.iter().any(|ty| ty == "string?"), "missing string default table: {rendered:?}");
+    assert!(
+        rendered.iter().any(|ty| ty == "int?"),
+        "missing int default table: {rendered:?}"
+    );
+    assert!(
+        rendered.iter().any(|ty| ty == "string?"),
+        "missing string default table: {rendered:?}"
+    );
 
     let mut poisoned = (**main).clone();
-    let domain = poisoned.foreign_domains.keys().next().cloned().expect("domain");
+    let domain = poisoned
+        .foreign_domains
+        .keys()
+        .next()
+        .cloned()
+        .expect("domain");
     poisoned.foreign_domains.remove(&domain);
     let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
     assert!(
@@ -837,12 +973,20 @@ fn main() {
         .map(|id| g.interner().render(*id))
         .collect::<Vec<_>>();
     rendered.sort();
-    assert!(rendered.iter().any(|ty| ty == "int?"), "missing int default table: {rendered:?}");
+    assert!(
+        rendered.iter().any(|ty| ty == "int?"),
+        "missing int default table: {rendered:?}"
+    );
     assert!(
         rendered.iter().any(|ty| ty == "string?"),
         "missing string default table: {rendered:?}"
     );
-    let domain = main.foreign_domains.keys().next().cloned().expect("default domain");
+    let domain = main
+        .foreign_domains
+        .keys()
+        .next()
+        .cloned()
+        .expect("default domain");
     let mut poisoned = (**main).clone();
     poisoned.foreign_domains.remove(&domain);
     let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
@@ -861,7 +1005,10 @@ fn read_startup() -> int { return 7 }
 fn main() { print("{startup}") }
 "#,
     );
-    let user_mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("test module");
+    let user_mid = *ws
+        .module_ids
+        .get(&Ustr::from("<test>"))
+        .expect("test module");
     let (owner, plan) = bodies
         .always_plans
         .iter()
@@ -872,7 +1019,10 @@ fn main() { print("{startup}") }
             )
         })
         .expect("global has no concrete plan");
-    assert!(plan.signature.result.is_some(), "global plan lost its concrete result type");
+    assert!(
+        plan.signature.result.is_some(),
+        "global plan lost its concrete result type"
+    );
     assert_eq!(
         plan.callees.len(),
         1,
@@ -886,7 +1036,7 @@ fn main() { print("{startup}") }
         &bodies.plans,
         Ustr::from("__test_ginit"),
     )
-        .expect("plan-driven global lowering failed");
+    .expect("plan-driven global lowering failed");
     let mut poisoned = plan.clone();
     poisoned.types.expr_types = ArenaMap::default();
     assert!(
@@ -897,7 +1047,7 @@ fn main() { print("{startup}") }
             &bodies.plans,
             Ustr::from("__test_ginit"),
         )
-            .is_err(),
+        .is_err(),
         "global lowering ignored its concrete type plan"
     );
     let mut missing_callee = plan.clone();
@@ -921,7 +1071,8 @@ fn main() { print("{startup}") }
             .get_mut(&callee)
             .expect("global callee plan disappeared"),
     );
-    std::sync::Arc::make_mut(&mut callee_plan.signature).result = Some(g.interner().intern(MonoTy::Float));
+    std::sync::Arc::make_mut(&mut callee_plan.signature).result =
+        Some(g.interner().intern(MonoTy::Float));
     let err = skull_mir::lower::lower_global_with_plans(
         &ws,
         &scx,
@@ -931,7 +1082,8 @@ fn main() { print("{startup}") }
     )
     .expect_err("global lowering accepted a mismatched callee body plan");
     assert!(
-        err.message.contains("concrete callee signature disagrees with its body plan"),
+        err.message
+            .contains("concrete callee signature disagrees with its body plan"),
         "unexpected always-emitted mismatch diagnostic: {err:?}"
     );
     let _ = owner;
@@ -958,7 +1110,10 @@ fn main() { let value = startup.value }
         default_domain_population > 0,
         "fixture did not put a struct-default domain on an always-emitted contribution"
     );
-    let user_mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("test module");
+    let user_mid = *ws
+        .module_ids
+        .get(&Ustr::from("<test>"))
+        .expect("test module");
     let global = bodies
         .always_plans
         .iter()
@@ -989,7 +1144,10 @@ fn system() {}
 fn main() {}
 "#,
     );
-    let user_mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("test module");
+    let user_mid = *ws
+        .module_ids
+        .get(&Ustr::from("<test>"))
+        .expect("test module");
     let plan = bodies
         .always_plans
         .iter()
@@ -1018,7 +1176,10 @@ fn main() {}
         .abi_representation
         .as_ref()
         .expect("decorator lost its owned ABI representation");
-    assert!(mir.rep_arena.is_some(), "decorator lost its representation arena");
+    assert!(
+        mir.rep_arena.is_some(),
+        "decorator lost its representation arena"
+    );
     assert_eq!(abi.params().len(), plan.signature.params.len());
     assert_eq!(mir.params.len(), plan.signature.params.len());
     assert!(abi.result().is_some(), "decorator lost its ABI result slot");
@@ -1043,7 +1204,10 @@ global G: V = V { x: 1.0, y: 2.0 }
 fn main() { print("{G.x}") }
 "#,
     );
-    let user_mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("test module");
+    let user_mid = *ws
+        .module_ids
+        .get(&Ustr::from("<test>"))
+        .expect("test module");
     let (owner, plan) = bodies
         .always_plans
         .iter()
@@ -1064,16 +1228,24 @@ fn main() { print("{G.x}") }
     )
     .expect("intact global plan failed")
     .expect("global initializer disappeared");
-    let global_rep = intact.global_plan.as_ref().expect("global initializer lost its owned plan");
+    let global_rep = intact
+        .global_plan
+        .as_ref()
+        .expect("global initializer lost its owned plan");
     assert_eq!(
         global_rep.lanes(),
         2,
         "the global plan must own V's two physical lanes"
     );
-    assert_eq!(return_arity(&intact), 2, "fixture has no multi-leaf global result");
+    assert_eq!(
+        return_arity(&intact),
+        2,
+        "fixture has no multi-leaf global result"
+    );
 
     let mut poisoned = plan.clone();
-    std::sync::Arc::make_mut(&mut poisoned.signature).result = Some(g.interner().intern(MonoTy::Float));
+    std::sync::Arc::make_mut(&mut poisoned.signature).result =
+        Some(g.interner().intern(MonoTy::Float));
     let lowered = skull_mir::lower::lower_global_with_plans(
         &ws,
         &scx,
@@ -1103,7 +1275,10 @@ global G: int = pick()
 fn main() { let x = G }
 "#,
     );
-    let user_mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("test module");
+    let user_mid = *ws
+        .module_ids
+        .get(&Ustr::from("<test>"))
+        .expect("test module");
     let roots = skull::mir_emit::emission_roots(&ws, Some("<project>"));
     let mut g = instance_graph::build(&ws, roots, false);
     let mut bodies = concrete_body::build(&ws, &mut g);
@@ -1118,9 +1293,20 @@ fn main() { let x = G }
             )
         })
         .expect("global has no concrete plan");
-    assert_eq!(plan.callees.len(), 0, "failed call was fabricated as resolved");
-    assert_eq!(plan.failed_sites.len(), 1, "failed site was dropped from the plan");
-    assert_eq!(plan.failed_sites.values().next(), Some(&"unconstrained-type-var"));
+    assert_eq!(
+        plan.callees.len(),
+        0,
+        "failed call was fabricated as resolved"
+    );
+    assert_eq!(
+        plan.failed_sites.len(),
+        1,
+        "failed site was dropped from the plan"
+    );
+    assert_eq!(
+        plan.failed_sites.values().next(),
+        Some(&"unconstrained-type-var")
+    );
     let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
     let err = skull_mir::lower::lower_global_with_plans(
         &ws,
@@ -1152,21 +1338,39 @@ fn main() {
 "#,
     );
     let c = bodies.census();
-    assert!(c.expr_examined > 0, "no expression slots were converted: {c:?}");
-    assert!(c.binding_examined > 0, "no binding slots were converted: {c:?}");
+    assert!(
+        c.expr_examined > 0,
+        "no expression slots were converted: {c:?}"
+    );
+    assert!(
+        c.binding_examined > 0,
+        "no binding slots were converted: {c:?}"
+    );
     assert_eq!(
         bodies.free_types.len(),
         0,
         "free types in supposedly concrete bodies, over {} expr and {} binding slots: {:?}",
         c.expr_examined,
         c.binding_examined,
-        bodies.render_free_types(&ws, &g).iter().take(10).collect::<Vec<_>>()
+        bodies
+            .render_free_types(&ws, &g)
+            .iter()
+            .take(10)
+            .collect::<Vec<_>>()
     );
-    assert_eq!(bodies.gaps.len(), 0, "expanded instances with no body: {:?}", c.gaps);
+    assert_eq!(
+        bodies.gaps.len(),
+        0,
+        "expanded instances with no body: {:?}",
+        c.gaps
+    );
     // The zero above is only as strong as the space it was measured over: a
     // body that never consults its substitution reports no free types for the
     // trivial reason. These say the substitution was actually load-bearing.
-    assert!(c.generic_bodies > 0, "no body was built under a non-empty substitution: {c:?}");
+    assert!(
+        c.generic_bodies > 0,
+        "no body was built under a non-empty substitution: {c:?}"
+    );
     assert!(
         c.generics_bound > 0,
         "no slot resolved a declared generic through the substitution, so zero \
@@ -1202,7 +1406,11 @@ fn main() {
         .keys()
         .filter(|i| g.identity(&ws, i).starts_with("ident"))
         .collect();
-    assert_eq!(insts.len(), 2, "expected two ident instances, got {insts:?}");
+    assert_eq!(
+        insts.len(),
+        2,
+        "expected two ident instances, got {insts:?}"
+    );
     let (a, b) = (&bodies.plans[insts[0]].types, &bodies.plans[insts[1]].types);
     let shared: Vec<_> = a
         .expr_types
@@ -1224,7 +1432,9 @@ fn main() {
         .map(|(_, x, y)| (g.interner().render(*x), g.interner().render(*y)))
         .collect();
     assert!(
-        rendered.iter().any(|(x, y)| (x == "int" && y == "string") || (x == "string" && y == "int")),
+        rendered
+            .iter()
+            .any(|(x, y)| (x == "int" && y == "string") || (x == "string" && y == "int")),
         "the disagreement is not the instantiation: {rendered:?}"
     );
 }
@@ -1247,7 +1457,10 @@ fn main() { let a = plain(1) }
         .map(|(_, plan)| &plan.types)
         .expect("`plain` has no ConcreteBody");
     assert_arena_tables(found);
-    assert!(found.expr_types.values().next().is_some(), "`plain`'s table is empty");
+    assert!(
+        found.expr_types.values().next().is_some(),
+        "`plain`'s table is empty"
+    );
     assert_eq!(bodies.free_types.len(), 0);
 }
 
@@ -1320,20 +1533,34 @@ fn main() { let a = ident(1) }
     let module = ws.module(inst.func.module);
     let inf = ws
         .inference(inst.func.module)
-        .and_then(|ir| ir.per_fn.get(&bone_semantic::hir::BodyOwner::Function(inst.func.func)))
+        .and_then(|ir| {
+            ir.per_fn
+                .get(&bone_semantic::hir::BodyOwner::Function(inst.func.func))
+        })
         .expect("ident has no inference");
     let body = module
         .bodies
         .get(&bone_semantic::hir::BodyOwner::Function(inst.func.func))
         .expect("ident has no body");
 
-    let subst = g.substitution(&inst).expect("ident instance kept no substitution").clone();
-    let with = g.interner().with_mut(|a| concrete_body::convert_body(a, &ws, inf, body, &subst));
-    assert_eq!(with.failures.len(), 0, "the real substitution left slots unbound: {:?}", with.failures);
+    let subst = g
+        .substitution(&inst)
+        .expect("ident instance kept no substitution")
+        .clone();
+    let with = g
+        .interner()
+        .with_mut(|a| concrete_body::convert_body(a, &ws, inf, body, &subst));
+    assert_eq!(
+        with.failures.len(),
+        0,
+        "the real substitution left slots unbound: {:?}",
+        with.failures
+    );
     assert!(with.examined() > 0);
 
-    let without =
-        g.interner().with_mut(|a| concrete_body::convert_body(a, &ws, inf, body, &Default::default()));
+    let without = g
+        .interner()
+        .with_mut(|a| concrete_body::convert_body(a, &ws, inf, body, &Default::default()));
     assert!(
         !without.failures.is_empty(),
         "an EMPTY substitution converted every slot of a generic body, so the \
@@ -1345,7 +1572,11 @@ fn main() { let a = ident(1) }
             .iter()
             .any(|f| matches!(f.reason, MonoTyReason::UnboundGeneric(_))),
         "expected an unbound generic, got {:?}",
-        without.failures.iter().map(|f| f.reason.bucket()).collect::<Vec<_>>()
+        without
+            .failures
+            .iter()
+            .map(|f| f.reason.bucket())
+            .collect::<Vec<_>>()
     );
     // A failure with no location cannot become a compile error at the cutover.
     for f in &without.failures {
@@ -1356,7 +1587,10 @@ fn main() { let a = ident(1) }
         );
     }
     assert!(
-        without.failures.iter().any(|f| matches!(f.slot, Slot::Expr(_))),
+        without
+            .failures
+            .iter()
+            .any(|f| matches!(f.slot, Slot::Expr(_))),
         "no expression slot failed, so only bindings were examined"
     );
 }
@@ -1423,21 +1657,35 @@ fn main() { let a = body([1, 2]) }
     let hir_body = ws
         .module(body_inst.func.module)
         .bodies
-        .get(&bone_semantic::hir::BodyOwner::Function(body_inst.func.func))
+        .get(&bone_semantic::hir::BodyOwner::Function(
+            body_inst.func.func,
+        ))
         .expect("`body` has no HIR body");
     let mut annotated_targets = Vec::new();
     let mut inferred_targets = Vec::new();
     for (_, expr) in hir_body.expr_arena.iter() {
-        let Expr::Assign { target, .. } = expr else { continue };
-        let Expr::Var(binding) = hir_body.expr_arena[*target] else { continue };
+        let Expr::Assign { target, .. } = expr else {
+            continue;
+        };
+        let Expr::Var(binding) = hir_body.expr_arena[*target] else {
+            continue;
+        };
         match hir_body.binding_arena[binding].name.as_str() {
             "annotated" => annotated_targets.push(*target),
             "inferred" => inferred_targets.push(*target),
             _ => {}
         }
     }
-    assert_eq!(annotated_targets.len(), 2, "fixture has the wrong annotated targets");
-    assert_eq!(inferred_targets.len(), 2, "fixture has the wrong inferred targets");
+    assert_eq!(
+        annotated_targets.len(),
+        2,
+        "fixture has the wrong annotated targets"
+    );
+    assert_eq!(
+        inferred_targets.len(),
+        2,
+        "fixture has the wrong inferred targets"
+    );
     let body_types = &bodies.plans[body_inst].types;
     assert!(
         annotated_targets
@@ -1508,10 +1756,16 @@ fn concrete_result_order_gate_exercises_the_reversed_merge_population() {
         reverse_graph,
         concrete_body::BuildResultOrder::Reverse,
     );
-    assert!(canonical_order.len() > 1, "fixture exposed only one concrete result");
+    assert!(
+        canonical_order.len() > 1,
+        "fixture exposed only one concrete result"
+    );
     let mut expected = canonical_order.clone();
     expected.reverse();
-    assert_eq!(reverse_order, expected, "the test did not force opposite result order");
+    assert_eq!(
+        reverse_order, expected,
+        "the test did not force opposite result order"
+    );
 }
 
 #[test]
@@ -1520,18 +1774,31 @@ fn concrete_reverse_completion_gate_exercises_parallel_publication() {
     let ws = check(RICH);
     let roots = skull::mir_emit::emission_roots(&ws, None);
     let graph = instance_graph::build(&ws, roots, false);
-    let (mut scheduled, merge_order, trace) = concrete_body::build_with_reverse_completion(&ws, &graph);
+    let (mut scheduled, merge_order, trace) =
+        concrete_body::build_with_reverse_completion(&ws, &graph);
     scheduled.refresh_flat_views();
 
-    assert!(merge_order.len() > 1, "fixture exposed only one concrete result");
-    assert!(trace.worker_count > 1, "dedicated test pool used only one worker");
+    assert!(
+        merge_order.len() > 1,
+        "fixture exposed only one concrete result"
+    );
+    assert!(
+        trace.worker_count > 1,
+        "dedicated test pool used only one worker"
+    );
     let canonical_ready = merge_order
         .iter()
         .filter(|instance| scheduled.bodies.contains_key(*instance))
         .cloned()
         .collect::<Vec<_>>();
-    assert!(canonical_ready.len() > 1, "fixture exposed only one ready result");
-    assert!(trace.completion_order.len() > 1, "scheduler recorded fewer than two results");
+    assert!(
+        canonical_ready.len() > 1,
+        "fixture exposed only one ready result"
+    );
+    assert!(
+        trace.completion_order.len() > 1,
+        "scheduler recorded fewer than two results"
+    );
     let first = canonical_ready
         .iter()
         .position(|instance| instance == &trace.completion_order[0])
@@ -1546,21 +1813,48 @@ fn concrete_reverse_completion_gate_exercises_parallel_publication() {
     );
 
     let census = scheduled.census();
-    assert!(scheduled.generic_bodies > 0, "fixture published no generic body");
-    assert!(scheduled.build_stats.type_nodes_examined > 0, "fixture published no type nodes");
-    assert!(scheduled.signature_derivations > 0, "fixture derived no signatures");
+    assert!(
+        scheduled.generic_bodies > 0,
+        "fixture published no generic body"
+    );
+    assert!(
+        scheduled.build_stats.type_nodes_examined > 0,
+        "fixture published no type nodes"
+    );
+    assert!(
+        scheduled.signature_derivations > 0,
+        "fixture derived no signatures"
+    );
     assert!(
         scheduled.signature_requests > scheduled.signature_derivations,
         "fixture did not exercise signature reuse: {}/{}",
         scheduled.signature_requests,
         scheduled.signature_derivations
     );
-    assert!(scheduled.build_stats.plan_successes > 0, "fixture published no ordinary plans");
-    assert!(census.direct_calls > 0, "fixture published no direct-call rows");
-    assert!(census.fn_values > 0, "fixture published no function-value rows");
-    assert!(census.iterator_ops.values().sum::<usize>() > 0, "fixture published no iterator rows");
-    assert!(census.synthesized_calls > 0, "fixture published no synthesized-call rows");
-    assert!(!scheduled.always_plans.is_empty(), "fixture published no always-emitted plans");
+    assert!(
+        scheduled.build_stats.plan_successes > 0,
+        "fixture published no ordinary plans"
+    );
+    assert!(
+        census.direct_calls > 0,
+        "fixture published no direct-call rows"
+    );
+    assert!(
+        census.fn_values > 0,
+        "fixture published no function-value rows"
+    );
+    assert!(
+        census.iterator_ops.values().sum::<usize>() > 0,
+        "fixture published no iterator rows"
+    );
+    assert!(
+        census.synthesized_calls > 0,
+        "fixture published no synthesized-call rows"
+    );
+    assert!(
+        !scheduled.always_plans.is_empty(),
+        "fixture published no always-emitted plans"
+    );
 }
 
 #[cfg(feature = "sequential")]
@@ -1572,11 +1866,26 @@ fn concrete_sequential_route_uses_one_worker_without_parallel_handshake() {
     let (mut scheduled, trace) = concrete_body::build_with_default_trace(&ws, &graph);
     scheduled.refresh_flat_views();
 
-    assert!(scheduled.plans.len() > 1, "fixture exposed too few ordinary plans");
-    assert!(!scheduled.always_plans.is_empty(), "fixture exposed no always-emitted plans");
-    assert_eq!(trace.worker_count, 1, "sequential ordinary production used multiple workers");
-    assert_eq!(trace.always_worker_count, 1, "sequential always-emitted production used multiple workers");
-    assert_eq!(trace.scheduler_entries, 0, "sequential production entered the parallel scheduler handshake");
+    assert!(
+        scheduled.plans.len() > 1,
+        "fixture exposed too few ordinary plans"
+    );
+    assert!(
+        !scheduled.always_plans.is_empty(),
+        "fixture exposed no always-emitted plans"
+    );
+    assert_eq!(
+        trace.worker_count, 1,
+        "sequential ordinary production used multiple workers"
+    );
+    assert_eq!(
+        trace.always_worker_count, 1,
+        "sequential always-emitted production used multiple workers"
+    );
+    assert_eq!(
+        trace.scheduler_entries, 0,
+        "sequential production entered the parallel scheduler handshake"
+    );
 }
 
 #[test]
@@ -1643,7 +1952,10 @@ fn main() {
                 })
         })
         .collect::<Vec<_>>();
-    assert_eq!(canonical.render_free_types(&ws, &canonical_graph), expected_free);
+    assert_eq!(
+        canonical.render_free_types(&ws, &canonical_graph),
+        expected_free
+    );
     let mut canonical_stats = canonical.build_stats;
     let mut reverse_stats = reverse.build_stats;
     canonical_stats.signature_ns = 0;
@@ -1684,7 +1996,10 @@ fn main() {
 fn every_recorded_operation_becomes_one_entry_a_hole_or_a_rejection() {
     let (ws, g, bodies) = bodies_of(RICH);
     let c = bodies.census();
-    assert!(c.sites_examined > 0, "no callee sites were examined at all: {c:?}");
+    assert!(
+        c.sites_examined > 0,
+        "no callee sites were examined at all: {c:?}"
+    );
     assert_eq!(
         c.callee_entries() + c.callee_hole_total(),
         c.sites_examined,
@@ -1706,12 +2021,19 @@ fn every_recorded_operation_becomes_one_entry_a_hole_or_a_rejection() {
         "the walk recorded {} edges but {resolved} resolved sites",
         g.edges().count()
     );
-    assert!(bodies.gaps.is_empty(), "an expanded instance got no body: {:?}", c.gaps);
+    assert!(
+        bodies.gaps.is_empty(),
+        "an expanded instance got no body: {:?}",
+        c.gaps
+    );
     // Each table has a population, so the identity above is not satisfied by
     // one table carrying everything.
     assert!(c.direct_calls > 0, "no direct call was tabulated: {c:?}");
     assert!(c.fn_values > 0, "no function value was tabulated: {c:?}");
-    assert!(c.synthesized_calls > 0, "no synthesized call was tabulated: {c:?}");
+    assert!(
+        c.synthesized_calls > 0,
+        "no synthesized call was tabulated: {c:?}"
+    );
     for kind in ["iter", "next", "bound-next"] {
         assert!(
             c.iterator_ops.contains_key(kind),
@@ -1749,7 +2071,9 @@ fn every_recorded_operation_becomes_one_entry_a_hole_or_a_rejection() {
     // (`artifact_view::an_artifact_realizes_the_shared_instance_to_the_sibling_that_serves_it`).
     for b in bodies.bodies.values() {
         for (site, callee) in b.callees() {
-            let Callee::Boundary(inst, class) = callee else { continue };
+            let Callee::Boundary(inst, class) = callee else {
+                continue;
+            };
             let f = &ws.module(inst.func.module).functions[inst.func.func];
             assert_eq!(
                 Some(*class),
@@ -1765,7 +2089,10 @@ fn every_recorded_operation_becomes_one_entry_a_hole_or_a_rejection() {
 fn concrete_plan_attribution_uses_one_authoritative_type_table() {
     let (_ws, _g, bodies) = bodies_of(RICH);
     let stats = bodies.build_stats;
-    assert!(stats.plan_attempts > 0, "no ordinary concrete plans were attempted: {stats:?}");
+    assert!(
+        stats.plan_attempts > 0,
+        "no ordinary concrete plans were attempted: {stats:?}"
+    );
     assert_eq!(
         stats.plan_attempts,
         stats.plan_successes + stats.plan_failures,
@@ -1798,15 +2125,17 @@ fn concrete_plan_attribution_uses_one_authoritative_type_table() {
 #[test]
 fn fresh_publication_does_not_eagerly_fold_owner_records() {
     let (_ws, _g, bodies) = bodies_of_raw(RICH);
-    assert!(!bodies.plans.is_empty(), "fixture exposed no concrete plans");
+    assert!(
+        !bodies.plans.is_empty(),
+        "fixture exposed no concrete plans"
+    );
     assert_eq!(
         bodies.eager_owner_fact_scans(),
         0,
         "fresh publication folded every owner record into a compatibility snapshot"
     );
     assert_eq!(
-        bodies.build_stats.plan_successes,
-        0,
+        bodies.build_stats.plan_successes, 0,
         "fresh publication eagerly folded owner counters into the compatibility snapshot"
     );
 }
@@ -1816,7 +2145,10 @@ fn fresh_workers_do_not_construct_global_concrete_indexes() {
     let before = concrete_body::concrete_default_invocations();
     let (_ws, _g, bodies) = bodies_of_raw(RICH);
     let default_invocations = concrete_body::concrete_default_invocations().saturating_sub(before);
-    assert!(!bodies.plans.is_empty(), "fixture exposed no concrete plans");
+    assert!(
+        !bodies.plans.is_empty(),
+        "fixture exposed no concrete plans"
+    );
     assert_eq!(
         default_invocations, 1,
         "fresh workers constructed ConcreteBodies' global indexes instead of owner facts"
@@ -1833,7 +2165,10 @@ fn fresh_publication_publishes_the_authoritative_candidate_index() {
             .or_insert_with(rustc_hash::FxHashSet::default)
             .insert(key.clone());
     }
-    assert!(!rebuilt.is_empty(), "fixture exposed no candidate population");
+    assert!(
+        !rebuilt.is_empty(),
+        "fixture exposed no candidate population"
+    );
     assert_eq!(
         bodies.candidate_keys_by_func(),
         &rebuilt,
@@ -1888,20 +2223,31 @@ fn vanishing() -> int {
     let before = local.diagnostic_snapshot(&ws1, &graph);
     assert!(!before.is_empty(), "fixture exposed no diagnostic rows");
     assert!(
-        before.iter().any(|row| row.starts_with("free-type:") || row.starts_with("untyped:")),
+        before
+            .iter()
+            .any(|row| row.starts_with("free-type:") || row.starts_with("untyped:")),
         "fixture exposed neither free-type nor untyped rows: {before:?}"
     );
     let stable_identity = graph
         .expanded()
         .find(|instance| {
-            ws1.module(instance.func.module).functions[instance.func.func].name.as_str() == "stable"
+            ws1.module(instance.func.module).functions[instance.func.func]
+                .name
+                .as_str()
+                == "stable"
         })
         .map(|instance| graph.identity(&ws1, instance))
         .expect("stable instance was not expanded");
 
     let ws2 = check(source_v2);
-    let module = *ws2.module_ids.get(&Ustr::from("<test>")).expect("test module");
-    let old_module = *ws1.module_ids.get(&Ustr::from("<test>")).expect("test module");
+    let module = *ws2
+        .module_ids
+        .get(&Ustr::from("<test>"))
+        .expect("test module");
+    let old_module = *ws1
+        .module_ids
+        .get(&Ustr::from("<test>"))
+        .expect("test module");
     let old_main_span = ws1
         .module(old_module)
         .functions
@@ -1916,7 +2262,9 @@ fn vanishing() -> int {
         .find(|(_, function)| function.name.as_str() == "main")
         .map(|(function, _)| (module, BodyOwner::Function(function)))
         .expect("main body");
-    let BodyOwner::Function(main_fid) = main.1 else { panic!("main is not a function") };
+    let BodyOwner::Function(main_fid) = main.1 else {
+        panic!("main is not a function")
+    };
     let new_main_span = ws2.module(module).functions[main_fid].span;
     let span_edit = instance_graph::SpanEdit {
         file: Ustr::from("<test>"),
@@ -1925,7 +2273,10 @@ fn vanishing() -> int {
         line_delta: new_main_span.line_range.1 as isize - old_main_span.line_range.1 as isize,
     };
     let update = graph.update_bodies_with_root_delta(&ws2, &[], &[], &[main], &[span_edit]);
-    assert!(!update.removed.is_empty(), "the changed main body did not remove a live edge: {update:?}");
+    assert!(
+        !update.removed.is_empty(),
+        "the changed main body did not remove a live edge: {update:?}"
+    );
     let _stats = local.update_local_with_span_edits(
         &ws2,
         &graph,
@@ -1947,9 +2298,18 @@ fn vanishing() -> int {
     assert_eq!(local_stats.plan_attempts, fresh_stats.plan_attempts);
     assert_eq!(local_stats.plan_successes, fresh_stats.plan_successes);
     assert_eq!(local_stats.plan_failures, fresh_stats.plan_failures);
-    assert_eq!(local_stats.always_plan_attempts, fresh_stats.always_plan_attempts);
-    assert_eq!(local_stats.type_nodes_examined, fresh_stats.type_nodes_examined);
-    assert_eq!(local_stats.foreign_domain_unique, fresh_stats.foreign_domain_unique);
+    assert_eq!(
+        local_stats.always_plan_attempts,
+        fresh_stats.always_plan_attempts
+    );
+    assert_eq!(
+        local_stats.type_nodes_examined,
+        fresh_stats.type_nodes_examined
+    );
+    assert_eq!(
+        local_stats.foreign_domain_unique,
+        fresh_stats.foreign_domain_unique
+    );
     assert!(
         local
             .diagnostic_snapshot(&ws2, &graph)
@@ -1998,12 +2358,21 @@ fn main() {
     let bad = graph
         .expanded()
         .find(|instance| {
-            ws.module(instance.func.module).functions[instance.func.func].name.as_str() == "bad"
+            ws.module(instance.func.module).functions[instance.func.func]
+                .name
+                .as_str()
+                == "bad"
         })
         .cloned()
         .expect("bad instance");
-    assert!(!graph.root_instances.contains(&bad), "fixture made bad a root");
-    assert!(graph.index.subst.remove(&bad).is_some(), "fixture did not expose bad's substitution");
+    assert!(
+        !graph.root_instances.contains(&bad),
+        "fixture made bad a root"
+    );
+    assert!(
+        graph.index.subst.remove(&bad).is_some(),
+        "fixture did not expose bad's substitution"
+    );
     let mut bodies = concrete_body::build(&ws, &mut graph);
     bodies.refresh_flat_views();
     let snapshot = bodies.diagnostic_snapshot(&ws, &graph);
@@ -2026,9 +2395,18 @@ fn main() {
         !bodies.always_plan_failures.is_empty(),
         "fixture exposed no always-emitted plan failure: {snapshot:?}"
     );
-    assert!(!bodies.free_types.is_empty(), "fixture exposed no free type: {snapshot:?}");
-    assert!(!bodies.untyped.is_empty(), "fixture exposed no untyped slot: {snapshot:?}");
-    assert!(!bodies.callee_holes.is_empty(), "fixture exposed no callee hole: {snapshot:?}");
+    assert!(
+        !bodies.free_types.is_empty(),
+        "fixture exposed no free type: {snapshot:?}"
+    );
+    assert!(
+        !bodies.untyped.is_empty(),
+        "fixture exposed no untyped slot: {snapshot:?}"
+    );
+    assert!(
+        !bodies.callee_holes.is_empty(),
+        "fixture exposed no callee hole: {snapshot:?}"
+    );
 }
 
 #[test]
@@ -2064,18 +2442,31 @@ fn main() {
     let bad = graph
         .expanded()
         .find(|instance| {
-            ws1.module(instance.func.module).functions[instance.func.func].name.as_str() == "bad"
+            ws1.module(instance.func.module).functions[instance.func.func]
+                .name
+                .as_str()
+                == "bad"
         })
         .cloned()
         .expect("bad instance");
-    assert!(graph.index.subst.remove(&bad).is_some(), "fixture did not expose bad's substitution");
+    assert!(
+        graph.index.subst.remove(&bad).is_some(),
+        "fixture did not expose bad's substitution"
+    );
     let mut local = concrete_body::build(&ws1, &mut graph);
     let before = local.diagnostic_snapshot(&ws1, &graph);
     assert!(before.iter().any(|row| row.starts_with("plan-failure:")));
-    assert!(before.iter().any(|row| row.starts_with("always-plan-failure:")));
+    assert!(
+        before
+            .iter()
+            .any(|row| row.starts_with("always-plan-failure:"))
+    );
 
     let ws2 = check(source_v2);
-    let module = *ws2.module_ids.get(&Ustr::from("<test>")).expect("test module");
+    let module = *ws2
+        .module_ids
+        .get(&Ustr::from("<test>"))
+        .expect("test module");
     let owners = ws2
         .module(module)
         .functions
@@ -2083,10 +2474,16 @@ fn main() {
         .filter_map(|(function, f)| {
             matches!(f.name.as_str(), "main").then_some((module, BodyOwner::Function(function)))
         })
-        .chain(std::iter::once((module, BodyOwner::Global(Idx::from_raw(0u32.into())))))
+        .chain(std::iter::once((
+            module,
+            BodyOwner::Global(Idx::from_raw(0u32.into())),
+        )))
         .collect::<Vec<_>>();
     let update = graph.update_bodies_with_root_delta(&ws2, &[], &[], &owners, &[]);
-    assert!(!update.removed.is_empty(), "the last bad edge was not removed: {update:?}");
+    assert!(
+        !update.removed.is_empty(),
+        "the last bad edge was not removed: {update:?}"
+    );
     local.update_local(
         &ws2,
         &graph,
@@ -2103,10 +2500,9 @@ fn main() {
         "local failure records diverged after the last edge disappeared"
     );
     assert!(
-        local
-            .diagnostic_snapshot(&ws2, &graph)
-            .iter()
-            .all(|row| !row.starts_with("plan-failure:") && !row.starts_with("always-plan-failure:")),
+        local.diagnostic_snapshot(&ws2, &graph).iter().all(
+            |row| !row.starts_with("plan-failure:") && !row.starts_with("always-plan-failure:")
+        ),
         "stale plan failure survived owner retraction: {:?}",
         local.diagnostic_snapshot(&ws2, &graph)
     );
@@ -2119,16 +2515,26 @@ fn main() {
 #[test]
 fn one_generic_body_names_a_different_callee_per_instance() {
     let (ws, g, bodies) = bodies_of(RICH);
-    let wraps: Vec<&skull::instance_graph::Instance> =
-        bodies.bodies.keys().filter(|i| g.identity(&ws, i).starts_with("wrap")).collect();
-    assert_eq!(wraps.len(), 2, "expected two `wrap` instances, got {wraps:?}");
+    let wraps: Vec<&skull::instance_graph::Instance> = bodies
+        .bodies
+        .keys()
+        .filter(|i| g.identity(&ws, i).starts_with("wrap"))
+        .collect();
+    assert_eq!(
+        wraps.len(),
+        2,
+        "expected two `wrap` instances, got {wraps:?}"
+    );
     let (a, b) = (&bodies.bodies[wraps[0]], &bodies.bodies[wraps[1]]);
     let shared: Vec<(skull::instance_graph::Site, &Callee, &Callee)> = a
         .direct_calls
         .iter()
         .filter_map(|(s, x)| b.direct_calls.get(s).map(|y| (s.clone(), x, y)))
         .collect();
-    assert!(!shared.is_empty(), "the two `wrap` bodies share no call site");
+    assert!(
+        !shared.is_empty(),
+        "the two `wrap` bodies share no call site"
+    );
     let named: Vec<(String, String)> = shared
         .iter()
         .filter_map(|(_, x, y)| match (x, y) {
@@ -2191,7 +2597,9 @@ fn main() {
         })
         .collect();
     assert!(
-        pull_calls.iter().any(|n| n.starts_with("next_VecIter") && n.contains("int")),
+        pull_calls
+            .iter()
+            .any(|n| n.starts_with("next_VecIter") && n.contains("int")),
         "the explicit bounded call did not resolve inside `pull`: {pull_calls:?}"
     );
 
@@ -2210,7 +2618,9 @@ fn main() {
         })
         .collect();
     assert!(
-        loop_nexts.iter().any(|n| n.starts_with("next_VecIter") && n.contains("int")),
+        loop_nexts
+            .iter()
+            .any(|n| n.starts_with("next_VecIter") && n.contains("int")),
         "the caller-generic loop witness did not resolve inside `sum_it`: {loop_nexts:?}"
     );
 }
@@ -2235,7 +2645,10 @@ fn main() { let n = sum_it([1, 2].iter()) }
         .cloned()
         .expect("no concrete `sum_it` instance");
     let recorded = g.bound_tree(&inst).cloned().expect("no witness tree");
-    assert!(!recorded.next.is_empty(), "fixture has no bound witness tree");
+    assert!(
+        !recorded.next.is_empty(),
+        "fixture has no bound witness tree"
+    );
     // A disagreement IS two owners supplying different witnesses, so it is
     // constructed as a second index entry rather than as a record beside them.
     // The synthetic owner sorts after every `Owner::Instance`, so the real
@@ -2257,7 +2670,10 @@ fn main() { let n = sum_it([1, 2].iter()) }
 
     let mut bodies = concrete_body::build(&ws, &mut g);
     bodies.refresh_flat_views();
-    assert!(!bodies.bodies.contains_key(&inst), "an ambiguous body was still built");
+    assert!(
+        !bodies.bodies.contains_key(&inst),
+        "an ambiguous body was still built"
+    );
     assert!(
         bodies
             .gaps
@@ -2295,7 +2711,9 @@ fn iterator_operations_resolve_to_concrete_witnesses() {
     // Named, not merely present: the `for` over `[int]` resolves `next` at
     // `VecIter<int>`, so the ELEMENT type is in the callee's identity.
     assert!(
-        named.iter().any(|(k, n)| *k == IteratorOpKind::Iter && n.contains("p_int")),
+        named
+            .iter()
+            .any(|(k, n)| *k == IteratorOpKind::Iter && n.contains("p_int")),
         "no concrete `iter` at the int element: {named:?}"
     );
     assert!(
@@ -2310,7 +2728,11 @@ fn iterator_operations_resolve_to_concrete_witnesses() {
         .keys()
         .filter(|s| matches!(&s.op, SiteOp::BoundNext(p) if p.len() > 1))
         .collect();
-    assert!(!nested.is_empty(), "no nested conformance witness was recorded: {:?}", ops.keys());
+    assert!(
+        !nested.is_empty(),
+        "no nested conformance witness was recorded: {:?}",
+        ops.keys()
+    );
     let deep_expr = nested[0].expr;
     let at_expr: Vec<&Site> = ops.keys().filter(|s| s.expr == deep_expr).collect();
     assert!(
@@ -2337,7 +2759,11 @@ fn main() {
 }
 "#,
     );
-    let main = bodies.bodies.keys().find(|i| g.identity(&ws, i).starts_with("main@")).expect("no `main`");
+    let main = bodies
+        .bodies
+        .keys()
+        .find(|i| g.identity(&ws, i).starts_with("main@"))
+        .expect("no `main`");
     let mut names: Vec<&str> = bodies.bodies[main]
         .synthesized_calls
         .keys()
@@ -2400,7 +2826,11 @@ nobox value Q { x: float, y: float }
 fn main() { let qs: [Q] = []; qs.sort(_.x) }
 "#,
     );
-    assert_eq!(boxed, vec!["__rock_col_sort"], "a boxed element took the leaf arm");
+    assert_eq!(
+        boxed,
+        vec!["__rock_col_sort"],
+        "a boxed element took the leaf arm"
+    );
     assert_eq!(
         leaves,
         vec!["__rock_col_sort_leaves"],
@@ -2441,10 +2871,17 @@ fn main() { let a = body([1, 2]) }
         .expect("no `body` instance");
     // The fixture can distinguish: it HAS untyped slots of every pinned kind,
     // and it HAS callee entries. A body with neither would pass vacuously.
-    let untyped: Vec<&str> =
-        bodies.untyped.iter().filter(|(i, _)| i == inst).map(|(_, u)| u.kind).collect();
+    let untyped: Vec<&str> = bodies
+        .untyped
+        .iter()
+        .filter(|(i, _)| i == inst)
+        .map(|(_, u)| u.kind)
+        .collect();
     for kind in ["Call", "IfLet", "Range", "Var"] {
-        assert!(untyped.contains(&kind), "the fixture has no untyped `{kind}`: {untyped:?}");
+        assert!(
+            untyped.contains(&kind),
+            "the fixture has no untyped `{kind}`: {untyped:?}"
+        );
     }
     assert!(
         !bodies.bodies[inst].direct_calls.is_empty(),
@@ -2468,7 +2905,11 @@ fn main() { let a = body([1, 2]) }
         bodies.bodies[inst].callees().all(|(s, _)| s.expr != header),
         "the template-lowered `for` header has a callee entry after all"
     );
-    assert_eq!(g.storage_failures().count(), 0, "a synthesized receiver had no concrete type");
+    assert_eq!(
+        g.storage_failures().count(),
+        0,
+        "a synthesized receiver had no concrete type"
+    );
 }
 
 /// A normal full emission builds the concrete-plan table ONCE and shares it;
@@ -2515,7 +2956,10 @@ fn the_signature_memo_serves_repeated_callee_questions() {
          fn second() -> int { return helper(2) }\n\
          fn main() { let r = first() + second() print(\"{r}\") }",
     );
-    assert!(bodies.signature_requests > 0, "no signature question was asked");
+    assert!(
+        bodies.signature_requests > 0,
+        "no signature question was asked"
+    );
     assert!(
         bodies.signature_derivations < bodies.signature_requests,
         "every request derived ({} of {}) -- per-site callee questions bypassed the memo",
@@ -2536,11 +2980,13 @@ fn the_signature_memo_serves_repeated_callee_questions() {
 /// goes red here.
 #[test]
 fn the_tyid_memo_deduplicates_conversions_and_replays_the_census() {
-    let mut modules = vec![skull_parser::parse_module(
-        "fn id<T>(x: T) -> T { x }\nfn main() { let a = id(1)\n let b = id(2) }",
-        Ustr::from("<tyid-memo-test>"),
-    )
-    .expect("parse")];
+    let mut modules = vec![
+        skull_parser::parse_module(
+            "fn id<T>(x: T) -> T { x }\nfn main() { let a = id(1)\n let b = id(2) }",
+            Ustr::from("<tyid-memo-test>"),
+        )
+        .expect("parse"),
+    ];
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
     let roots = skull::mir_emit::emission_roots(&ws, None);
     let mut g = instance_graph::build(&ws, roots, false);
@@ -2553,7 +2999,10 @@ fn the_tyid_memo_deduplicates_conversions_and_replays_the_census() {
         "every slot converted ({} of {slots}) -- repeated TyIds bypassed the per-body memo",
         bodies.slot_conversions,
     );
-    assert!(bodies.generics_bound > 0, "the fixture must bind generics through the substitution");
+    assert!(
+        bodies.generics_bound > 0,
+        "the fixture must bind generics through the substitution"
+    );
     assert_eq!(
         bodies.generics_bound, GENERICS_BOUND_PER_SLOT,
         "generics_bound counts per SLOT; a memo hit must replay its cached delta"

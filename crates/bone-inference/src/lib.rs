@@ -1,11 +1,11 @@
 use bone_core::hir::{Expr, Module, Statement};
-use bone_core::suspension::{uses_after_suspension, SuspensionPolicy};
+use bone_core::suspension::{SuspensionPolicy, uses_after_suspension};
 
 use bone_core::{
     hir::{
-        AsKind, BindingInfo, BindingKind, BindingPattern, BuiltinTy, CallFamily, Callee, DecoratorDef,
-        Function, GlobalDef, InterpPart, Pattern, StructDef, StructFieldDef, TyId, TypeCtor,
-        TypeExpr, VarId, VariantArgs, VariantPayload,
+        AsKind, BindingInfo, BindingKind, BindingPattern, BuiltinTy, CallFamily, Callee,
+        DecoratorDef, Function, GlobalDef, InterpPart, Pattern, StructDef, StructFieldDef, TyId,
+        TypeCtor, TypeExpr, VarId, VariantArgs, VariantPayload,
     },
     prelude::*,
 };
@@ -18,32 +18,32 @@ pub use bone_core::modules::{AccessSite, NsVisibility, PackageId};
 pub use bone_core::workspace::{
     BodyInference, ComptimeInputs, ComptimeVarValue, InferenceResult, Substitutions, Workspace,
 };
-pub use fields::{field_access, vec_swizzle_components, AccessDenied, FieldAccessNeed};
+pub use fields::{AccessDenied, FieldAccessNeed, field_access, vec_swizzle_components};
 
 mod narrowing;
 
-use narrowing::{detect_null_narrow, infer_branch, path_key, stmt_guard_narrows, Narrow, Root};
+use narrowing::{Narrow, Root, detect_null_narrow, infer_branch, path_key, stmt_guard_narrows};
 
+mod calls;
 mod defer;
 mod embed;
-mod purity;
 mod expr;
-mod lambda;
-mod unify;
-mod calls;
 mod fields;
-mod patterns;
 mod iter;
+mod lambda;
+mod patterns;
+mod purity;
+mod unify;
 
-pub(crate) use defer::*;
-pub(crate) use purity::*;
-pub use expr::*;
-pub(crate) use lambda::*;
-pub use unify::*;
 pub(crate) use calls::*;
+pub(crate) use defer::*;
+pub use expr::*;
 pub(crate) use fields::*;
-pub(crate) use patterns::*;
 pub(crate) use iter::*;
+pub(crate) use lambda::*;
+pub(crate) use patterns::*;
+pub(crate) use purity::*;
+pub use unify::*;
 
 static NULL: LazyLock<Ustr> = LazyLock::new(|| ustr("null"));
 
@@ -215,7 +215,12 @@ impl<'a> Gamma<'a> {
         }
     }
 
-    pub fn for_query(workspace: &'a Workspace, body: &'a Body, mid: ModuleId, seed: &BodyInference) -> Gamma<'a> {
+    pub fn for_query(
+        workspace: &'a Workspace,
+        body: &'a Body,
+        mid: ModuleId,
+        seed: &BodyInference,
+    ) -> Gamma<'a> {
         let mut g = Gamma::new(workspace, body, mid);
         let mut high = g.next_var_id;
 
@@ -239,7 +244,10 @@ impl<'a> Gamma<'a> {
     /// outside the syntactic walk, where no `c` is threaded through.
     pub(crate) fn body_ctx(&self) -> BodyCtx<'a> {
         let ws: &'a Workspace = self.workspace;
-        BodyCtx { module: &ws.modules[self.current_module_id.index()], body: self.body }
+        BodyCtx {
+            module: &ws.modules[self.current_module_id.index()],
+            body: self.body,
+        }
     }
 
     pub fn render(&self, ty: TyId) -> String {
@@ -419,9 +427,12 @@ impl<'a> Gamma<'a> {
 /// (`render_default_lit` in skull's `mir_emit.rs`).
 fn is_literal_default(body: &bone_core::hir::Body, e: Idx<Expr>) -> bool {
     match body.expr_arena[e] {
-        Expr::Null | Expr::Unit | Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::String(_) => {
-            true
-        }
+        Expr::Null
+        | Expr::Unit
+        | Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::Bool(_)
+        | Expr::String(_) => true,
         Expr::UnaryMinus(inner, _) => is_literal_default(body, inner),
         _ => false,
     }
@@ -457,7 +468,9 @@ pub fn check_function(
 
     for (idx, (g, b)) in f.generics.iter().zip(f.generic_bounds.iter()).enumerate() {
         let Some(elem) = *b else { continue };
-        let TypeExpr::Generic(var_id, _) = *gamma.get(*g) else { continue };
+        let TypeExpr::Generic(var_id, _) = *gamma.get(*g) else {
+            continue;
+        };
         gamma.fn_bounds.push((var_id, idx, elem));
     }
 

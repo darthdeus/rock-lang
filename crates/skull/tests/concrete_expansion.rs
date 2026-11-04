@@ -164,15 +164,29 @@ fn generic_struct_wrapper_uses_the_reached_concrete_instance() {
         !crate::common::definitions_matching(&lua, "wrapped_").is_empty(),
         "no retained concrete wrapper body"
     );
-    assert!(lua.contains("__variant = (\"F\")"), "no concrete struct expansion was emitted:\n{lua}");
-    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "generic_struct_expand"), "1");
+    assert!(
+        lua.contains("__variant = (\"F\")"),
+        "no concrete struct expansion was emitted:\n{lua}"
+    );
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "generic_struct_expand"),
+        "1"
+    );
 }
 
 #[test]
 fn invalid_concrete_struct_wrapper_rejects_at_the_expander() {
     let err = try_emit_module(STRUCT_INVALID).expect_err("invalid concrete struct expansion");
-    assert!(err.message.contains("no variant"), "wrong rejection:\n{}", err.message);
-    assert!(err.message.contains("flag: bool"), "rejection lost the concrete field:\n{}", err.message);
+    assert!(
+        err.message.contains("no variant"),
+        "wrong rejection:\n{}",
+        err.message
+    );
+    assert!(
+        err.message.contains("flag: bool"),
+        "rejection lost the concrete field:\n{}",
+        err.message
+    );
 }
 
 #[test]
@@ -187,16 +201,33 @@ fn unreachable_generic_struct_wrapper_is_not_source_rejected() {
 #[test]
 fn generic_vertex_wrapper_uses_the_reached_concrete_instance() {
     let lua = try_emit_module(VERTEX_VALID).expect("valid concrete vertex expansion");
-    assert!(lua.matches("function wrapped_").count() > 0, "no retained concrete wrapper body");
-    assert!(lua.contains("do return (3) end"), "no concrete vertex stride was emitted:\n{lua}");
-    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "generic_vertex_expand"), "3");
+    assert!(
+        lua.matches("function wrapped_").count() > 0,
+        "no retained concrete wrapper body"
+    );
+    assert!(
+        lua.contains("do return (3) end"),
+        "no concrete vertex stride was emitted:\n{lua}"
+    );
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "generic_vertex_expand"),
+        "3"
+    );
 }
 
 #[test]
 fn invalid_concrete_vertex_wrapper_rejects_at_the_expander() {
     let err = try_emit_module(VERTEX_INVALID).expect_err("invalid concrete vertex expansion");
-    assert!(err.message.contains("integer attribute"), "wrong rejection:\n{}", err.message);
-    assert!(err.message.contains("id"), "rejection lost the concrete field:\n{}", err.message);
+    assert!(
+        err.message.contains("integer attribute"),
+        "wrong rejection:\n{}",
+        err.message
+    );
+    assert!(
+        err.message.contains("id"),
+        "rejection lost the concrete field:\n{}",
+        err.message
+    );
 }
 
 #[test]
@@ -219,13 +250,22 @@ fn generic_uniform_wrapper_matches_the_direct_fingerprint() {
 #[test]
 fn invalid_concrete_uniform_wrapper_rejects_at_the_expander() {
     let err = try_emit_module(UNIFORM_INVALID).expect_err("invalid concrete uniform expansion");
-    assert!(err.message.contains("@uniform_expand"), "wrong rejection:\n{}", err.message);
-    assert!(err.message.contains("Outer"), "rejection lost the concrete subject:\n{}", err.message);
+    assert!(
+        err.message.contains("@uniform_expand"),
+        "wrong rejection:\n{}",
+        err.message
+    );
+    assert!(
+        err.message.contains("Outer"),
+        "rejection lost the concrete subject:\n{}",
+        err.message
+    );
 }
 
 #[test]
 fn generic_uniform_values_wrapper_uses_the_reached_concrete_instance() {
-    let lua = try_emit_module(UNIFORM_VALUES_VALID).expect("valid concrete uniform-values expansion");
+    let lua =
+        try_emit_module(UNIFORM_VALUES_VALID).expect("valid concrete uniform-values expansion");
     assert!(
         !crate::common::definitions_matching(&lua, "generic_values_").is_empty(),
         "no retained concrete wrapper body"
@@ -238,7 +278,16 @@ fn generic_uniform_values_wrapper_uses_the_reached_concrete_instance() {
 
 #[test]
 fn invalid_concrete_uniform_values_wrapper_rejects_at_the_expander() {
-    let err = try_emit_module(UNIFORM_VALUES_INVALID).expect_err("invalid concrete uniform-values expansion");
-    assert!(err.message.contains("@uniform_values"), "wrong rejection:\n{}", err.message);
-    assert!(err.message.contains("Bad"), "rejection lost the concrete subject:\n{}", err.message);
+    let err = try_emit_module(UNIFORM_VALUES_INVALID)
+        .expect_err("invalid concrete uniform-values expansion");
+    assert!(
+        err.message.contains("@uniform_values"),
+        "wrong rejection:\n{}",
+        err.message
+    );
+    assert!(
+        err.message.contains("Bad"),
+        "rejection lost the concrete subject:\n{}",
+        err.message
+    );
 }

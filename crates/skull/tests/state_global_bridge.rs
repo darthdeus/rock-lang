@@ -22,7 +22,10 @@ const SRC: &str = "global bar: int = 7\nfn main() {}\n";
 fn program() -> String {
     let ws = ws_of(SRC);
     let mid = skull::user_module_id(&ws).unwrap();
-    skull::mir_emit::emit_full(&ws, mid).expect("emit_full").0.lua
+    skull::mir_emit::emit_full(&ws, mid)
+        .expect("emit_full")
+        .0
+        .lua
 }
 
 /// The body of `mt.<name> = function(..)` inside the installer, up to the
@@ -33,7 +36,9 @@ fn metamethod_body<'a>(lua: &'a str, name: &str) -> &'a str {
         .find(&head)
         .unwrap_or_else(|| panic!("no `mt.{name}` assignment in the emitted prelude"));
     let rest = &lua[at + 1..];
-    let end = rest.find("\n  end\n").unwrap_or_else(|| panic!("`mt.{name}` body is unterminated"));
+    let end = rest
+        .find("\n  end\n")
+        .unwrap_or_else(|| panic!("`mt.{name}` body is unterminated"));
     &rest[..end]
 }
 

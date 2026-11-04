@@ -24,10 +24,10 @@ mod completion_ranking;
 mod completion_sweep;
 #[path = "cross_file_diagnostics.rs"]
 mod cross_file_diagnostics;
-#[path = "cw7_backend_failure_reporting.rs"]
-mod cw7_backend_failure_reporting;
 #[path = "ctags.rs"]
 mod ctags;
+#[path = "cw7_backend_failure_reporting.rs"]
+mod cw7_backend_failure_reporting;
 #[path = "enum_variant_nav.rs"]
 mod enum_variant_nav;
 #[path = "hole_info.rs"]
@@ -68,7 +68,7 @@ mod stale_spans_after_body_edit;
 mod stdlib_lsp;
 #[path = "struct_fill_from_scope.rs"]
 mod struct_fill_from_scope;
-#[path = "workspace.rs"]
-mod workspace;
 #[path = "type_sources.rs"]
 mod type_sources;
+#[path = "workspace.rs"]
+mod workspace;

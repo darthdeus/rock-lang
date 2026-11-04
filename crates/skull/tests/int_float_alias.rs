@@ -1,7 +1,10 @@
 use crate::common;
 
 fn function_body<'a>(lua: &'a str, name: &str) -> &'a str {
-    let body = lua.split(&format!("function {name}(")).nth(1).expect("function");
+    let body = lua
+        .split(&format!("function {name}("))
+        .nth(1)
+        .expect("function");
     &body[..body.find("\nend\n").expect("function end")]
 }
 
@@ -11,9 +14,12 @@ fn register_moves(body: &str) -> Vec<&str> {
     body.lines()
         .map(str::trim)
         .filter(|line| {
-            let Some((dst, src)) = line.split_once(" = ") else { return false };
+            let Some((dst, src)) = line.split_once(" = ") else {
+                return false;
+            };
             let register = |s: &str| {
-                s.strip_prefix('r').is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+                s.strip_prefix('r')
+                    .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
             };
             register(dst) && register(src)
         })
@@ -47,7 +53,10 @@ fn reused_int_to_float_across_a_yield_aliases_and_resumes_its_value() {
     let lua = common::try_emit_module(YIELD_ACROSS).expect("emit");
     let step = function_body(&lua, "scaled_int__step");
     assert_eq!(register_moves(step), Vec::<&str>::new(), "{step}");
-    assert_eq!(common::run_luajit(&format!("{lua}\nmain()\n"), "int_float_alias_yield"), "42\n18\n7");
+    assert_eq!(
+        common::run_luajit(&format!("{lua}\nmain()\n"), "int_float_alias_yield"),
+        "42\n18\n7"
+    );
 }
 
 // `a` is one conversion, read by the comparison, by an arm and (in

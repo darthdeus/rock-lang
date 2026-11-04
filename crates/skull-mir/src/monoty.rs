@@ -34,7 +34,7 @@
 //! the instance graph's cheap equality, and never becomes a second
 //! representation of a type.
 
-use bone_semantic::hir::{BuiltinTy, TypeExpr, TypeCtor, VarId};
+use bone_semantic::hir::{BuiltinTy, TypeCtor, TypeExpr, VarId};
 use bone_semantic::inference::{BodyInference, Workspace};
 use bone_semantic::prelude::TyId;
 use rustc_hash::FxHashMap;
@@ -77,8 +77,14 @@ pub enum MonoTy {
     Never,
     Nullable(Box<MonoTy>),
     Tuple(Vec<MonoTy>),
-    App { ctor: MonoCtor, params: Vec<MonoTy> },
-    Function { params: Vec<MonoTy>, ret: Box<MonoTy> },
+    App {
+        ctor: MonoCtor,
+        params: Vec<MonoTy>,
+    },
+    Function {
+        params: Vec<MonoTy>,
+        ret: Box<MonoTy>,
+    },
 }
 
 /// How a nominal constructor's name is spelled inside a canonical encoding.
@@ -185,9 +191,7 @@ impl MonoTy {
             | MonoTy::Never => 0,
             MonoTy::Nullable(inner) => 1 + inner.depth(),
             MonoTy::Tuple(parts) => 1 + parts.iter().map(MonoTy::depth).max().unwrap_or(0),
-            MonoTy::App { params, .. } => {
-                1 + params.iter().map(MonoTy::depth).max().unwrap_or(0)
-            }
+            MonoTy::App { params, .. } => 1 + params.iter().map(MonoTy::depth).max().unwrap_or(0),
             MonoTy::Function { params, ret } => {
                 let p = params.iter().map(MonoTy::depth).max().unwrap_or(0);
                 1 + p.max(ret.depth())
@@ -317,7 +321,10 @@ impl MonoTy {
     /// [`Self::peel_nullable`] and handle the flag explicitly.
     pub fn nominal(&self) -> Option<Ustr> {
         match self {
-            Self::App { ctor: MonoCtor::Nominal(name), .. } => Some(*name),
+            Self::App {
+                ctor: MonoCtor::Nominal(name),
+                ..
+            } => Some(*name),
             _ => None,
         }
     }
@@ -414,7 +421,11 @@ pub enum NewtypeResolutionError {
     Conversion(MonoTyReason),
     Cycle(Ustr),
     MissingDefinition(Ustr),
-    ArityMismatch { name: Ustr, actual: usize, expected: usize },
+    ArityMismatch {
+        name: Ustr,
+        actual: usize,
+        expected: usize,
+    },
     InvalidGeneric(Ustr),
     StepLimit,
 }
@@ -432,13 +443,21 @@ impl std::fmt::Display for NewtypeResolutionError {
                 f.write_str("a type inference could not recover")
             }
             Self::Conversion(reason) => {
-                write!(f, "a type the compiler cannot normalize ({})", reason.bucket())
+                write!(
+                    f,
+                    "a type the compiler cannot normalize ({})",
+                    reason.bucket()
+                )
             }
             Self::Cycle(_) => f.write_str("a newtype whose representation contains itself"),
             Self::MissingDefinition(name) => {
                 write!(f, "a newtype `{name}` whose definition is missing")
             }
-            Self::ArityMismatch { name, actual, expected } => write!(
+            Self::ArityMismatch {
+                name,
+                actual,
+                expected,
+            } => write!(
                 f,
                 "`{name}` applied to {actual} argument(s) where its declaration takes {expected}"
             ),
@@ -453,10 +472,7 @@ impl std::fmt::Display for NewtypeResolutionError {
 /// Resolve the declared representation through newtypes using interned type
 /// instantiations as the cycle key. Generic arguments are converted in their
 /// current environment before they are bound into the next declaration.
-pub fn resolve_newtype_chain(
-    ws: &Workspace,
-    ty: MonoTy,
-) -> Result<MonoTy, NewtypeResolutionError> {
+pub fn resolve_newtype_chain(ws: &Workspace, ty: MonoTy) -> Result<MonoTy, NewtypeResolutionError> {
     use bone_semantic::hir::TypeExpr;
 
     const MAX_STEPS: usize = 256;
@@ -467,7 +483,10 @@ pub fn resolve_newtype_chain(
 
     for _ in 0..MAX_STEPS {
         let (name, params) = match arena.get(current) {
-            MonoTy::App { ctor: MonoCtor::Nominal(name), params } => (*name, params.clone()),
+            MonoTy::App {
+                ctor: MonoCtor::Nominal(name),
+                params,
+            } => (*name, params.clone()),
             _ => return Ok(arena.get(current).clone()),
         };
         let Some(nid) = ws.newtypes_by_name.get(&name).copied() else {
@@ -494,10 +513,9 @@ pub fn resolve_newtype_chain(
 
         let mut subst = MonoSubst::default();
         for (generic, arg) in def.generics.iter().zip(params) {
-            let (TypeExpr::Generic(var, _) | TypeExpr::Infer(var, _)) =
-                TyEnv::Decl
-                    .decl_node(ws, *generic)
-                    .map_err(NewtypeResolutionError::Conversion)?
+            let (TypeExpr::Generic(var, _) | TypeExpr::Infer(var, _)) = TyEnv::Decl
+                .decl_node(ws, *generic)
+                .map_err(NewtypeResolutionError::Conversion)?
             else {
                 return Err(NewtypeResolutionError::InvalidGeneric(name));
             };
@@ -689,7 +707,10 @@ impl MonoArena {
     pub fn function(&mut self, params: &[MonoTyId], ret: MonoTyId) -> MonoTyId {
         let params = self.cloned(params);
         let ret = self.get(ret).clone();
-        self.intern(MonoTy::Function { params, ret: Box::new(ret) })
+        self.intern(MonoTy::Function {
+            params,
+            ret: Box::new(ret),
+        })
     }
 
     fn cloned(&self, ids: &[MonoTyId]) -> Vec<MonoTy> {
@@ -855,14 +876,16 @@ impl MonoInterner {
     }
 
     pub fn intern(&self, ty: MonoTy) -> MonoTyId {
-        self.write_acqs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.write_acqs
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.arena.write().expect("mono arena poisoned").intern(ty)
     }
 
     /// One lock acquisition for a whole argument list, which is how an
     /// instance's arguments arrive.
     pub fn intern_all(&self, tys: impl IntoIterator<Item = MonoTy>) -> Vec<MonoTyId> {
-        self.write_acqs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.write_acqs
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut arena = self.arena.write().expect("mono arena poisoned");
         tys.into_iter().map(|ty| arena.intern(ty)).collect()
     }
@@ -891,7 +914,8 @@ impl MonoInterner {
             let mut cache = cache.borrow_mut();
             cache.reset_for(self.arena_gen);
             if let Some(Some(ty)) = cache.tys.get(id.index()) {
-                self.local_read_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.local_read_hits
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 return (Rc::clone(ty), false);
             }
             let ty = Rc::new(self.with(|a| a.get(id).clone()));
@@ -919,20 +943,24 @@ impl MonoInterner {
 
     /// Read-only access under one lock, for a caller doing several reads.
     pub fn with<R>(&self, f: impl FnOnce(&MonoArena) -> R) -> R {
-        self.read_acqs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.read_acqs
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         f(&self.arena.read().expect("mono arena poisoned"))
     }
 
     /// Mutable access under one lock, for a caller doing several interns.
     pub fn with_mut<R>(&self, f: impl FnOnce(&mut MonoArena) -> R) -> R {
-        self.write_acqs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.write_acqs
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         f(&mut self.arena.write().expect("mono arena poisoned"))
     }
 
     pub fn stats(&self) -> MonoInternerStats {
         use std::sync::atomic::Ordering;
-        let (intern_attempts, intern_new, types) =
-            self.with(|a| { let (at, new) = a.intern_stats(); (at, new, a.len() as u64) });
+        let (intern_attempts, intern_new, types) = self.with(|a| {
+            let (at, new) = a.intern_stats();
+            (at, new, a.len() as u64)
+        });
         MonoInternerStats {
             // Subtract the read this snapshot itself just took.
             read_acqs: self.read_acqs.load(Ordering::Relaxed).saturating_sub(1),
@@ -1038,25 +1066,42 @@ fn convert_at<S: std::hash::BuildHasher>(
             match env.solved(var)? {
                 Some(next) => return convert_at(ws, env, next, subst, depth + 1, bound),
                 None => {
-                    let bound_to =
-                        subst.get(&var).cloned().ok_or(MonoTyReason::UnresolvedInfer(name))?;
+                    let bound_to = subst
+                        .get(&var)
+                        .cloned()
+                        .ok_or(MonoTyReason::UnresolvedInfer(name))?;
                     *bound += 1;
                     return Ok(bound_to);
                 }
             }
         }
         TypeExpr::Generic(var, name) => {
-            let bound_to = subst.get(&var).cloned().ok_or(MonoTyReason::UnboundGeneric(name))?;
+            let bound_to = subst
+                .get(&var)
+                .cloned()
+                .ok_or(MonoTyReason::UnboundGeneric(name))?;
             *bound += 1;
             return Ok(bound_to);
         }
-        TypeExpr::Nullable(inner) => {
-            MonoTy::Nullable(Box::new(convert_at(ws, env, ty.with_idx(inner), subst, depth + 1, bound)?))
-        }
+        TypeExpr::Nullable(inner) => MonoTy::Nullable(Box::new(convert_at(
+            ws,
+            env,
+            ty.with_idx(inner),
+            subst,
+            depth + 1,
+            bound,
+        )?)),
         TypeExpr::Tuple { elements } => {
             let mut parts = Vec::new();
             for el in elements {
-                parts.push(convert_at(ws, env, ty.with_idx(el), subst, depth + 1, bound)?);
+                parts.push(convert_at(
+                    ws,
+                    env,
+                    ty.with_idx(el),
+                    subst,
+                    depth + 1,
+                    bound,
+                )?);
             }
             MonoTy::Tuple(parts)
         }
@@ -1069,17 +1114,34 @@ fn convert_at<S: std::hash::BuildHasher>(
             };
             let mut ps = Vec::new();
             for p in params {
-                ps.push(convert_at(ws, env, ty.with_idx(p), subst, depth + 1, bound)?);
+                ps.push(convert_at(
+                    ws,
+                    env,
+                    ty.with_idx(p),
+                    subst,
+                    depth + 1,
+                    bound,
+                )?);
             }
             MonoTy::App { ctor, params: ps }
         }
         TypeExpr::Function { params, ret } => {
             let mut ps = Vec::new();
             for p in params {
-                ps.push(convert_at(ws, env, ty.with_idx(p), subst, depth + 1, bound)?);
+                ps.push(convert_at(
+                    ws,
+                    env,
+                    ty.with_idx(p),
+                    subst,
+                    depth + 1,
+                    bound,
+                )?);
             }
             let ret = convert_at(ws, env, ty.with_idx(ret), subst, depth + 1, bound)?;
-            MonoTy::Function { params: ps, ret: Box::new(ret) }
+            MonoTy::Function {
+                params: ps,
+                ret: Box::new(ret),
+            }
         }
     })
 }
@@ -1136,7 +1198,10 @@ mod mono_read_cache_tests {
         let b = MonoInterner::new();
         let ia = a.intern(MonoTy::Int);
         let ib = b.intern(MonoTy::Bool);
-        assert_eq!(ia, ib, "both interners must mint id 0 for the fixture to discriminate");
+        assert_eq!(
+            ia, ib,
+            "both interners must mint id 0 for the fixture to discriminate"
+        );
         for _ in 0..2 {
             assert_eq!(a.get(ia), MonoTy::Int);
             assert_eq!(b.get(ib), MonoTy::Bool);
@@ -1153,7 +1218,10 @@ mod mono_read_cache_tests {
         let second = a.intern(MonoTy::Float);
         assert_ne!(first, second);
         assert_eq!(a.get(second), MonoTy::Float);
-        assert_eq!(a.get_all(&[first, second]), vec![MonoTy::Int, MonoTy::Float]);
+        assert_eq!(
+            a.get_all(&[first, second]),
+            vec![MonoTy::Int, MonoTy::Float]
+        );
     }
 
     #[test]

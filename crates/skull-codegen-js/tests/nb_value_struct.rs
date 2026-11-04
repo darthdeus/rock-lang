@@ -20,7 +20,9 @@ value Vertex {
 #[test]
 fn all_float_value_struct_nb_lowers_to_float32array() {
     let mut src = String::from(VERTEX);
-    src.push_str("fn make_pool(n: int) -> NativeBuffer<Vertex> { return native_buffer_alloc(n) }\n");
+    src.push_str(
+        "fn make_pool(n: int) -> NativeBuffer<Vertex> { return native_buffer_alloc(n) }\n",
+    );
     let ws = ws_with(&src);
     let js = emit_user(&ws, "make_pool");
     assert!(

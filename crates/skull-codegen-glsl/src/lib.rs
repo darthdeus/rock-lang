@@ -34,25 +34,23 @@ use skull_graph::instance_graph::{InstanceGraph, SiteOutcome};
 pub use skull_graph::shader::ShaderLibraryView;
 use skull_graph::shader::{ShaderProgram, ShaderProgramView, ShaderStageView};
 use skull_mir::cfg::reverse_postorder;
+use skull_mir::concrete::{ConcreteBodyPlan, ConcretePlans, ConcreteSignature};
 use skull_mir::gpu_layout::{
     ArrayMemberDecl, AttrKind, SamplerKind, UniformArrayBlockPlan, UniformBlockPlan, WireKind,
     texture_slots, uniform_array_block, vertex_attrs,
 };
-use skull_mir::intrinsics::{Emission, IntrinsicEntry, IntrinsicTable};
-use skull_mir::concrete::{ConcreteBodyPlan, ConcretePlans, ConcreteSignature};
-use skull_mir::lower::{ScalarCtx, SpecSubst};
 use skull_mir::instance::Instance;
+use skull_mir::intrinsics::{Emission, IntrinsicEntry, IntrinsicTable};
+use skull_mir::lower::{ScalarCtx, SpecSubst};
 use skull_mir::mangle::{declared_name, symbol_of_key};
+use skull_mir::mir::*;
 use skull_mir::monoty::MonoInterner;
 use skull_mir::monoty::{MonoCtor, MonoTy};
 use skull_mir::shader_ir::{
-    FragmentOutput, LogicalSampler, ShaderIR, ShaderStageIr,
-    LogicalArrayGroup, LogicalTextureGroup, LogicalUniformGroup, LogicalVarying,
-    LogicalVertexInput, NominalType, ShaderInstance, ShaderInterfacePlan, ShaderStage,
-    ShaderStage as IrStage, UniformRole,
-    VertexRate,
+    FragmentOutput, LogicalArrayGroup, LogicalSampler, LogicalTextureGroup, LogicalUniformGroup,
+    LogicalVarying, LogicalVertexInput, NominalType, ShaderIR, ShaderInstance, ShaderInterfacePlan,
+    ShaderStage, ShaderStage as IrStage, ShaderStageIr, UniformRole, VertexRate,
 };
-use skull_mir::mir::*;
 use skull_parser::CompilerError;
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -147,7 +145,10 @@ fn mono_glsl_ty(t: &MonoTy) -> Option<GlslTy> {
         MonoTy::Int => Some(GlslTy::Int),
         MonoTy::Uint => Some(GlslTy::Uint),
         MonoTy::Bool => Some(GlslTy::Bool),
-        MonoTy::App { ctor: MonoCtor::Nominal(n), .. } => nominal_glsl_ty(n.as_str()),
+        MonoTy::App {
+            ctor: MonoCtor::Nominal(n),
+            ..
+        } => nominal_glsl_ty(n.as_str()),
         _ => None,
     }
 }
@@ -183,7 +184,12 @@ fn glsl_ty(
     what: &str,
 ) -> Result<GlslTy, CompilerError> {
     let reject = || {
-        err(span, format!("shader profile: {what} type is not tier 0 (only float/int/uint/bool/Vec2/Vec3/Vec4)"))
+        err(
+            span,
+            format!(
+                "shader profile: {what} type is not tier 0 (only float/int/uint/bool/Vec2/Vec3/Vec4)"
+            ),
+        )
     };
     match ty_expr(ws, ty) {
         Some(TypeExpr::Builtin(BuiltinTy::Float)) => Ok(GlslTy::Float),
@@ -212,7 +218,12 @@ fn glsl_ty(
 /// strict: `float x = 1;` is an error, so `1.0` must never render as `1`).
 fn fmt_float(f: f64) -> String {
     let s = format!("{f}");
-    if s.contains('.') || s.contains('e') || s.contains('E') || s.contains("inf") || s.contains("nan") {
+    if s.contains('.')
+        || s.contains('e')
+        || s.contains('E')
+        || s.contains("inf")
+        || s.contains("nan")
+    {
         s
     } else {
         format!("{s}.0")
@@ -327,11 +338,20 @@ fn check_tier0_signature_spec(
     f: &Function,
 ) -> Result<(), CompilerError> {
     for pd in &f.param_decls {
-        glsl_ty(ws, subst, pd.ty, f.name_span, &format!("parameter `{}`", pd.name))?;
+        glsl_ty(
+            ws,
+            subst,
+            pd.ty,
+            f.name_span,
+            &format!("parameter `{}`", pd.name),
+        )?;
     }
     if let Some(rt) = f.return_ty {
         if glsl_ty(ws, subst, rt, f.name_span, "return")?.is_sampler() {
-            return Err(err(f.name_span, "shader profile: a sampler cannot be returned (GLSL forbids sampler locals/returns)"));
+            return Err(err(
+                f.name_span,
+                "shader profile: a sampler cannot be returned (GLSL forbids sampler locals/returns)",
+            ));
         }
     }
     Ok(())
@@ -380,18 +400,30 @@ fn profile_body(
             Inst::Global(name) => {
                 if const_lit(ws, *name).is_none() {
                     if ws.const_globals.contains(name) {
-                        return Err(err(span, format!(
-                            "shader profile: const `{name}` has an initializer that is not a constant expression -- only literals and const aliases fold for GLSL"
-                        )));
+                        return Err(err(
+                            span,
+                            format!(
+                                "shader profile: const `{name}` has an initializer that is not a constant expression -- only literals and const aliases fold for GLSL"
+                            ),
+                        ));
                     }
-                    return Err(err(span, format!(
-                        "shader profile: `{}` uses a non-tier-0 construct (global read) that has no GLSL lowering -- a mutable `global` has no GLSL equivalent; a `const` folds to its literal",
-                        f.name
-                    )));
+                    return Err(err(
+                        span,
+                        format!(
+                            "shader profile: `{}` uses a non-tier-0 construct (global read) that has no GLSL lowering -- a mutable `global` has no GLSL equivalent; a `const` folds to its literal",
+                            f.name
+                        ),
+                    ));
                 }
             }
             Inst::Const(Lit::Str(_)) => {
-                return Err(err(span, format!("shader profile: `{}` uses a non-tier-0 construct (string literal) that has no GLSL lowering", f.name)));
+                return Err(err(
+                    span,
+                    format!(
+                        "shader profile: `{}` uses a non-tier-0 construct (string literal) that has no GLSL lowering",
+                        f.name
+                    ),
+                ));
             }
             // A bare `Nil` const may be a dead placeholder (`return` in expression
             // position emits an unused nil, `lower.rs`); a genuinely-used null /
@@ -401,19 +433,58 @@ fn profile_body(
             // Allowed tier-0 instructions.
             Inst::Const(_)
             | Inst::Load(_)
-            | Inst::IntAdd(..) | Inst::IntSub(..) | Inst::IntMul(..) | Inst::IntDiv(..) | Inst::IntMod(..)
-            | Inst::UintAdd(..) | Inst::UintSub(..) | Inst::UintMul(..) | Inst::UintDiv(..) | Inst::UintMod(..)
-            | Inst::FloatAdd(..) | Inst::FloatSub(..) | Inst::FloatMul(..) | Inst::FloatDiv(..) | Inst::FloatMod(..)
-            | Inst::IntLt(..) | Inst::IntLeq(..) | Inst::IntGt(..) | Inst::IntGeq(..)
-            | Inst::UintLt(..) | Inst::UintLeq(..) | Inst::UintGt(..) | Inst::UintGeq(..)
-            | Inst::FloatLt(..) | Inst::FloatLeq(..) | Inst::FloatGt(..) | Inst::FloatGeq(..)
-            | Inst::Eq(..) | Inst::NotEq(..)
-            | Inst::BitAnd(..) | Inst::BitOr(..) | Inst::BitXor(..) | Inst::Shl(..) | Inst::Shr(..)
-            | Inst::UintBitAnd(..) | Inst::UintBitOr(..) | Inst::UintBitXor(..)
-            | Inst::UintShl(..) | Inst::UintShr(..)
-            | Inst::Neg(_) | Inst::Not(_) | Inst::BitNot(_) | Inst::UintBitNot(_)
-            | Inst::FloatToInt(_) | Inst::IntToFloat(_) | Inst::UintToFloat(_) | Inst::FloatToF32(_) | Inst::IntToUint(_)
-            | Inst::UintToInt(_) | Inst::FloatToUint(_) | Inst::UintBitcastInt(_) | Inst::IntBitcastUint(_)
+            | Inst::IntAdd(..)
+            | Inst::IntSub(..)
+            | Inst::IntMul(..)
+            | Inst::IntDiv(..)
+            | Inst::IntMod(..)
+            | Inst::UintAdd(..)
+            | Inst::UintSub(..)
+            | Inst::UintMul(..)
+            | Inst::UintDiv(..)
+            | Inst::UintMod(..)
+            | Inst::FloatAdd(..)
+            | Inst::FloatSub(..)
+            | Inst::FloatMul(..)
+            | Inst::FloatDiv(..)
+            | Inst::FloatMod(..)
+            | Inst::IntLt(..)
+            | Inst::IntLeq(..)
+            | Inst::IntGt(..)
+            | Inst::IntGeq(..)
+            | Inst::UintLt(..)
+            | Inst::UintLeq(..)
+            | Inst::UintGt(..)
+            | Inst::UintGeq(..)
+            | Inst::FloatLt(..)
+            | Inst::FloatLeq(..)
+            | Inst::FloatGt(..)
+            | Inst::FloatGeq(..)
+            | Inst::Eq(..)
+            | Inst::NotEq(..)
+            | Inst::BitAnd(..)
+            | Inst::BitOr(..)
+            | Inst::BitXor(..)
+            | Inst::Shl(..)
+            | Inst::Shr(..)
+            | Inst::UintBitAnd(..)
+            | Inst::UintBitOr(..)
+            | Inst::UintBitXor(..)
+            | Inst::UintShl(..)
+            | Inst::UintShr(..)
+            | Inst::Neg(_)
+            | Inst::Not(_)
+            | Inst::BitNot(_)
+            | Inst::UintBitNot(_)
+            | Inst::FloatToInt(_)
+            | Inst::IntToFloat(_)
+            | Inst::UintToFloat(_)
+            | Inst::FloatToF32(_)
+            | Inst::IntToUint(_)
+            | Inst::UintToInt(_)
+            | Inst::FloatToUint(_)
+            | Inst::UintBitcastInt(_)
+            | Inst::IntBitcastUint(_)
             | Inst::MakeValueStruct { .. }
             | Inst::MaterializeValueStruct { .. }
             | Inst::Field { .. }
@@ -423,7 +494,11 @@ fn profile_body(
             other => {
                 return Err(err(
                     span,
-                    format!("shader profile: `{}` uses a non-tier-0 construct ({}) that has no GLSL lowering", f.name, inst_kind(other)),
+                    format!(
+                        "shader profile: `{}` uses a non-tier-0 construct ({}) that has no GLSL lowering",
+                        f.name,
+                        inst_kind(other)
+                    ),
                 ));
             }
         }
@@ -435,20 +510,40 @@ fn profile_body(
 fn inst_kind(inst: &Inst) -> &'static str {
     match inst {
         Inst::Global(_) => "global read",
-        Inst::StringConcat(..) | Inst::ToString(_) | Inst::Format { .. } | Inst::FormatDyn { .. } => "string",
-        Inst::BitAnd(..) | Inst::BitOr(..) | Inst::BitXor(..) | Inst::Shl(..) | Inst::Shr(..)
-        | Inst::BitNot(_) | Inst::UintBitAnd(..) | Inst::UintBitOr(..) | Inst::UintBitXor(..)
-        | Inst::UintShl(..) | Inst::UintShr(..) | Inst::UintBitNot(_) => "bitwise op",
-        Inst::CallMulti { .. } | Inst::CallValue { .. } | Inst::CallValueMulti { .. } | Inst::CallBoundMulti { .. } => "indirect/multi-value call",
+        Inst::StringConcat(..)
+        | Inst::ToString(_)
+        | Inst::Format { .. }
+        | Inst::FormatDyn { .. } => "string",
+        Inst::BitAnd(..)
+        | Inst::BitOr(..)
+        | Inst::BitXor(..)
+        | Inst::Shl(..)
+        | Inst::Shr(..)
+        | Inst::BitNot(_)
+        | Inst::UintBitAnd(..)
+        | Inst::UintBitOr(..)
+        | Inst::UintBitXor(..)
+        | Inst::UintShl(..)
+        | Inst::UintShr(..)
+        | Inst::UintBitNot(_) => "bitwise op",
+        Inst::CallMulti { .. }
+        | Inst::CallValue { .. }
+        | Inst::CallValueMulti { .. }
+        | Inst::CallBoundMulti { .. } => "indirect/multi-value call",
         Inst::Lambda { .. } => "closure",
         Inst::MakeTuple(_) => "tuple",
         Inst::MakeVec(_) => "Vec",
         Inst::MakeStruct { .. } => "heap struct",
         Inst::MakeEnum { .. } | Inst::MakeEnumDyn { .. } => "enum",
-        Inst::Index { .. } | Inst::Len { .. } | Inst::ArrayPush { .. } | Inst::StoreIndex { .. } => "container op",
+        Inst::Index { .. }
+        | Inst::Len { .. }
+        | Inst::ArrayPush { .. }
+        | Inst::StoreIndex { .. } => "container op",
         Inst::StoreField { .. } => "field mutation",
         Inst::StoreGlobal { .. } => "global write",
-        Inst::CoroSetInner(_) | Inst::CoroHook { .. } | Inst::MapNext { .. } => "coroutine/iteration",
+        Inst::CoroSetInner(_) | Inst::CoroHook { .. } | Inst::MapNext { .. } => {
+            "coroutine/iteration"
+        }
         _ => "unsupported instruction",
     }
 }
@@ -565,7 +660,10 @@ impl IntrinsicTable for GlslIntrinsics {
     fn entries(&self) -> Vec<IntrinsicEntry> {
         GLSL_INTRINSICS
             .iter()
-            .map(|(name, arity, _)| IntrinsicEntry { name, arity: *arity })
+            .map(|(name, arity, _)| IntrinsicEntry {
+                name,
+                arity: *arity,
+            })
             .collect()
     }
 }
@@ -575,7 +673,8 @@ impl IntrinsicTable for GlslIntrinsics {
 /// this predicate: lowering turns them into native MIR instructions.
 pub fn renders_inline(f: &Function) -> bool {
     GlslIntrinsics.lookup(f).is_some()
-        || (vec_op_symbol(declared_name(f.name.as_str())).is_some() && f.param_decls.iter().count() == 2)
+        || (vec_op_symbol(declared_name(f.name.as_str())).is_some()
+            && f.param_decls.iter().count() == 2)
 }
 
 // Union of lexical and future-use keywords in GLSL ES 3.00 section 3.8 and
@@ -624,7 +723,9 @@ fn glsl_builtin_callables() -> Vec<&'static str> {
         let bytes = tmpl.as_bytes();
         for (i, _) in tmpl.match_indices('(') {
             let mut start = i;
-            while start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_') {
+            while start > 0
+                && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_')
+            {
                 start -= 1;
             }
             if start < i {
@@ -657,7 +758,8 @@ pub fn renders_inline_instance(
     if GlslIntrinsics.lookup(f).is_some() {
         return true;
     }
-    if vec_op_symbol(declared_name(f.name.as_str())).is_none() || f.param_decls.iter().count() != 2 {
+    if vec_op_symbol(declared_name(f.name.as_str())).is_none() || f.param_decls.iter().count() != 2
+    {
         return false;
     }
     let subst = inst.subst(ws, interner);
@@ -854,23 +956,33 @@ impl FnEmit<'_> {
     /// `emit_fn_def_with` recorded the answers. A miss is compiler state --
     /// the map is built from the same `mf.insts` walk this renders from.
     fn callee_inst(&self, iid: Idx<Inst>) -> &ShaderInstance {
-        self.callee_insts.get(&iid).expect(
-            "every Call in this body was resolved by `callee_inst_at` before emission",
-        )
+        self.callee_insts
+            .get(&iid)
+            .expect("every Call in this body was resolved by `callee_inst_at` before emission")
     }
 
     fn concrete_call_signature(&self, iid: Idx<Inst>) -> Result<&ConcreteSignature, CompilerError> {
-        let plan = self
-            .concrete_plan
-            .ok_or_else(|| err(self.span(), "shader profile: concrete call queried without a body plan"))?;
-        let site = self
-            .f
-            .call_sites
-            .get(&iid)
-            .ok_or_else(|| err(self.span(), "shader profile: concrete call has no site identity"))?;
-        plan.callee_signatures.get(&site.site).ok_or_else(|| {
-            err(self.span(), "shader profile: concrete call has no signature in the body plan")
-        }).map(std::sync::Arc::as_ref)
+        let plan = self.concrete_plan.ok_or_else(|| {
+            err(
+                self.span(),
+                "shader profile: concrete call queried without a body plan",
+            )
+        })?;
+        let site = self.f.call_sites.get(&iid).ok_or_else(|| {
+            err(
+                self.span(),
+                "shader profile: concrete call has no site identity",
+            )
+        })?;
+        plan.callee_signatures
+            .get(&site.site)
+            .ok_or_else(|| {
+                err(
+                    self.span(),
+                    "shader profile: concrete call has no signature in the body plan",
+                )
+            })
+            .map(std::sync::Arc::as_ref)
     }
 
     fn call_param_types(
@@ -889,7 +1001,16 @@ impl FnEmit<'_> {
         Ok(cf
             .param_decls
             .iter()
-            .map(|p| glsl_ty(self.ws, &self.callee_inst(iid).subst(self.ws, self.interner), p.ty, cf.name_span, "arg").ok())
+            .map(|p| {
+                glsl_ty(
+                    self.ws,
+                    &self.callee_inst(iid).subst(self.ws, self.interner),
+                    p.ty,
+                    cf.name_span,
+                    "arg",
+                )
+                .ok()
+            })
             .collect())
     }
 }
@@ -925,9 +1046,14 @@ fn callee_inst_at(
         mf.spec_bindings.get(&iid).cloned()
     };
     if renders_inline(cf) || cf.generics.is_empty() {
-        return Ok(ShaderInstance::new(recorded.unwrap_or_else(|| Instance::base(func))));
+        return Ok(ShaderInstance::new(
+            recorded.unwrap_or_else(|| Instance::base(func)),
+        ));
     }
-    let key = recorded.as_ref().map(|i| i.args.clone()).unwrap_or_default();
+    let key = recorded
+        .as_ref()
+        .map(|i| i.args.clone())
+        .unwrap_or_default();
     // Covers both shapes: a call that recorded nothing, and one whose key the
     // producer declined to build because a type parameter did not reify. Those
     // used to be two arms, the second scanning for a `None` slot; a key is
@@ -961,7 +1087,9 @@ fn callee_inst_at(
             ),
         ));
     }
-    Ok(ShaderInstance::new(recorded.expect("a non-empty key implies a recorded instance")))
+    Ok(ShaderInstance::new(
+        recorded.expect("a non-empty key implies a recorded instance"),
+    ))
 }
 
 /// A `void main()` entry that destructures its terminal `return <struct
@@ -1045,7 +1173,9 @@ fn emit_fn_def_with(
             match f.return_ty {
                 Some(rt) => Some(glsl_ty(
                     ws,
-                    subst.as_ref().expect("source GLSL emission has a substitution"),
+                    subst
+                        .as_ref()
+                        .expect("source GLSL emission has a substitution"),
                     rt,
                     f.name_span,
                     "return",
@@ -1061,7 +1191,10 @@ fn emit_fn_def_with(
     let mut callee_insts: HashMap<Idx<Inst>, ShaderInstance> = HashMap::default();
     for (iid, inst) in mf.insts.iter() {
         if let Inst::Call { func, .. } = inst {
-            callee_insts.insert(iid, callee_inst_at(ws, mf, iid, *func, f.name_span, concrete_plan.is_some())?);
+            callee_insts.insert(
+                iid,
+                callee_inst_at(ws, mf, iid, *func, f.name_span, concrete_plan.is_some())?,
+            );
         }
     }
 
@@ -1100,7 +1233,9 @@ fn emit_fn_def_with(
         global_cells: entry
             .map(|s| s.global_params.iter().map(|&i| mf.params[i]).collect())
             .unwrap_or_default(),
-        uniform_fields: entry.map(|s| s.uniform_fields.iter().copied().collect()).unwrap_or_default(),
+        uniform_fields: entry
+            .map(|s| s.uniform_fields.iter().copied().collect())
+            .unwrap_or_default(),
         global_ref_cells: entry
             .map(|s| {
                 s.sampler_params
@@ -1151,7 +1286,13 @@ fn emit_fn_def_with(
     // either -- their only legal use is as `at()`'s first arg, which renders the
     // cell name (= the declared uniform array).
     let struct_params: HashSet<usize> = entry
-        .map(|s| s.global_params.iter().copied().chain(s.arrays.iter().copied()).collect())
+        .map(|s| {
+            s.global_params
+                .iter()
+                .copied()
+                .chain(s.arrays.iter().copied())
+                .collect()
+        })
         .unwrap_or_default();
     for (i, &c) in mf.params.iter().enumerate() {
         if struct_params.contains(&i) {
@@ -1159,13 +1300,18 @@ fn emit_fn_def_with(
         }
         let ty = if let Some(plan) = concrete_plan {
             let id = plan.signature.params.get(i).copied().ok_or_else(|| {
-                err(f.name_span, format!("shader profile: concrete parameter {i} is missing from the plan"))
+                err(
+                    f.name_span,
+                    format!("shader profile: concrete parameter {i} is missing from the plan"),
+                )
             })?;
             concrete_glsl_ty(interner, id, f.name_span, "parameter")?
         } else {
             glsl_ty(
                 ws,
-                subst.as_ref().expect("source GLSL emission has a substitution"),
+                subst
+                    .as_ref()
+                    .expect("source GLSL emission has a substitution"),
                 f.param_decls[i].ty,
                 f.name_span,
                 "parameter",
@@ -1290,7 +1436,9 @@ impl FnEmit<'_> {
             for &iid in &self.f.blocks[b].insts {
                 self.f.insts[iid].uses_each(&mut |v| *uses.entry(v).or_default() += 1);
             }
-            self.f.blocks[b].term.uses_each(&mut |v| *uses.entry(v).or_default() += 1);
+            self.f.blocks[b]
+                .term
+                .uses_each(&mut |v| *uses.entry(v).or_default() += 1);
         }
         let mut trivial = HashMap::default();
         let mut pending: Vec<_> = uses
@@ -1329,11 +1477,17 @@ impl FnEmit<'_> {
         // no longer be absorbed into a folded expression.
         let mut unfold = Vec::new();
         for (&block, &cell) in &self.folded_block {
-            let Term::Branch { then_bb, else_bb, .. } = self.f.blocks[block].term else {
+            let Term::Branch {
+                then_bb, else_bb, ..
+            } = self.f.blocks[block].term
+            else {
                 unreachable!("a folded diamond starts at a branch")
             };
             if [then_bb, else_bb].iter().any(|&b| {
-                self.f.blocks[b].insts.iter().any(|i| self.value_name.contains_key(i))
+                self.f.blocks[b]
+                    .insts
+                    .iter()
+                    .any(|i| self.value_name.contains_key(i))
             }) {
                 unfold.push((block, cell));
             }
@@ -1410,13 +1564,18 @@ impl FnEmit<'_> {
             if let Some(ty) = cell.ty {
                 let g = if let Some(plan) = self.concrete_plan {
                     let id = plan.types.ty_type(ty).ok_or_else(|| {
-                        err(self.span(), "shader profile: local cell is missing from the concrete type plan")
+                        err(
+                            self.span(),
+                            "shader profile: local cell is missing from the concrete type plan",
+                        )
                     })?;
                     concrete_glsl_ty(self.interner, id, self.span(), "local")?
                 } else {
                     glsl_ty(
                         self.ws,
-                        self.subst.as_ref().expect("source GLSL emission has a substitution"),
+                        self.subst
+                            .as_ref()
+                            .expect("source GLSL emission has a substitution"),
                         ty,
                         self.span(),
                         "local",
@@ -1445,7 +1604,9 @@ impl FnEmit<'_> {
                 continue;
             }
             if let Some(ty) = self.cell_ty.get(&cid).filter(|ty| ty.is_sampler()) {
-                let what = cell.name.map_or_else(|| "a temporary".to_string(), |n| format!("local `{n}`"));
+                let what = cell
+                    .name
+                    .map_or_else(|| "a temporary".to_string(), |n| format!("local `{n}`"));
                 return Err(err(
                     self.span(),
                     format!(
@@ -1461,8 +1622,9 @@ impl FnEmit<'_> {
     /// Detect the cosmetic-tier folds: `&&`/`||`
     /// short-circuit diamonds collapse back to infix boolean expressions.
     fn compute_folds(&mut self) {
-        let reach: HashSet<Idx<Block>> =
-            reverse_postorder(self.f, self.f.entry).into_iter().collect();
+        let reach: HashSet<Idx<Block>> = reverse_postorder(self.f, self.f.entry)
+            .into_iter()
+            .collect();
         // Cell load-counts over reachable code -- a fold is only sound when the
         // diamond's result cell has exactly one use.
         let mut load_count: HashMap<Idx<Cell>, usize> = HashMap::default();
@@ -1487,12 +1649,23 @@ impl FnEmit<'_> {
         // `a && b` lowers to `if a then b else false`; `a || b` to
         // `if a then true else b` (`lower_and`/`lower_or`, no And/Or inst).
         for b in reach.iter().copied() {
-            let Term::Branch { cond, then_bb, else_bb } = self.f.blocks[b].term else {
+            let Term::Branch {
+                cond,
+                then_bb,
+                else_bb,
+            } = self.f.blocks[b].term
+            else {
                 continue;
             };
-            let Some(join) = self.structure.ipdom(b) else { continue };
-            let Some((tcell, tval)) = self.single_store_arm(then_bb, join) else { continue };
-            let Some((ecell, eval)) = self.single_store_arm(else_bb, join) else { continue };
+            let Some(join) = self.structure.ipdom(b) else {
+                continue;
+            };
+            let Some((tcell, tval)) = self.single_store_arm(then_bb, join) else {
+                continue;
+            };
+            let Some((ecell, eval)) = self.single_store_arm(else_bb, join) else {
+                continue;
+            };
             if tcell != ecell {
                 continue;
             }
@@ -1503,7 +1676,9 @@ impl FnEmit<'_> {
             if store_count.get(&rcell).copied().unwrap_or(0) != 2 {
                 continue;
             }
-            let Some(&result_ty) = self.cell_ty.get(&rcell) else { continue };
+            let Some(&result_ty) = self.cell_ty.get(&rcell) else {
+                continue;
+            };
             // Soundness: the fold moves the expression to the cell's use site, so
             // its inputs must be unchanged there. The arms go straight to `join`
             // and store only `rcell`, so the only place an input could be mutated
@@ -1521,7 +1696,13 @@ impl FnEmit<'_> {
             };
             self.folded_cond.insert(
                 rcell,
-                FoldedDiamond { cond, then_val: tval, else_val: eval, kind, result_ty },
+                FoldedDiamond {
+                    cond,
+                    then_val: tval,
+                    else_val: eval,
+                    kind,
+                    result_ty,
+                },
             );
             self.folded_block.insert(b, rcell);
         }
@@ -1539,11 +1720,15 @@ impl FnEmit<'_> {
         // is correct; the counted-loop regression covers the emitted bound.
         let bounds: Vec<Idx<Inst>> = self.counted.values().map(|li| li.bound).collect();
         for bound in bounds {
-            let Inst::Load(bcell) = self.f.insts[bound] else { continue };
+            let Inst::Load(bcell) = self.f.insts[bound] else {
+                continue;
+            };
             if load_count.get(&bcell).copied().unwrap_or(0) != 1 {
                 continue;
             }
-            let Some(v) = self.single_store_value(bcell) else { continue };
+            let Some(v) = self.single_store_value(bcell) else {
+                continue;
+            };
             if self.bound_value_is_invariant(v) {
                 self.folded_bound.insert(bcell, v);
             }
@@ -1559,7 +1744,9 @@ impl FnEmit<'_> {
     fn bound_value_is_invariant(&self, v: Idx<Inst>) -> bool {
         match self.f.insts[v] {
             Inst::Const(_) => true,
-            Inst::Load(c) => !self.global_cells.contains(&c) && self.single_store_value(c).is_some(),
+            Inst::Load(c) => {
+                !self.global_cells.contains(&c) && self.single_store_value(c).is_some()
+            }
             Inst::IntAdd(a, b) | Inst::IntSub(a, b) | Inst::IntMul(a, b) => {
                 self.bound_value_is_invariant(a) && self.bound_value_is_invariant(b)
             }
@@ -1603,7 +1790,11 @@ impl FnEmit<'_> {
 
     /// If `arm` is a single-store block (exactly one `Store`, any number of pure
     /// value insts) ending `Goto(join)`, return its `(cell, stored value)`.
-    fn single_store_arm(&self, arm: Idx<Block>, join: Idx<Block>) -> Option<(Idx<Cell>, Idx<Inst>)> {
+    fn single_store_arm(
+        &self,
+        arm: Idx<Block>,
+        join: Idx<Block>,
+    ) -> Option<(Idx<Cell>, Idx<Inst>)> {
         if self.f.blocks[arm].term != Term::Goto(join) {
             return None;
         }
@@ -1646,29 +1837,68 @@ impl FnEmit<'_> {
             Inst::Const(Lit::Uint(_)) => GlslTy::Uint,
             Inst::Const(Lit::Bool(_)) => GlslTy::Bool,
             Inst::Const(Lit::Nil) => {
-                return Err(err(self.span(), "shader profile: a null/optional value has no GLSL type"));
+                return Err(err(
+                    self.span(),
+                    "shader profile: a null/optional value has no GLSL type",
+                ));
             }
             Inst::Const(Lit::Str(_)) => {
-                return Err(err(self.span(), "shader profile: string literal is not tier 0"));
+                return Err(err(
+                    self.span(),
+                    "shader profile: string literal is not tier 0",
+                ));
             }
-            Inst::FloatAdd(..) | Inst::FloatSub(..) | Inst::FloatMul(..) | Inst::FloatDiv(..) | Inst::FloatMod(..) => GlslTy::Float,
-            Inst::IntAdd(..) | Inst::IntSub(..) | Inst::IntMul(..) | Inst::IntDiv(..) | Inst::IntMod(..) => GlslTy::Int,
-            Inst::UintAdd(..) | Inst::UintSub(..) | Inst::UintMul(..) | Inst::UintDiv(..) | Inst::UintMod(..) => GlslTy::Uint,
-            Inst::IntLt(..) | Inst::IntLeq(..) | Inst::IntGt(..) | Inst::IntGeq(..)
-            | Inst::UintLt(..) | Inst::UintLeq(..) | Inst::UintGt(..) | Inst::UintGeq(..)
-            | Inst::FloatLt(..) | Inst::FloatLeq(..) | Inst::FloatGt(..) | Inst::FloatGeq(..)
-            | Inst::Eq(..) | Inst::NotEq(..) | Inst::Not(_) => GlslTy::Bool,
+            Inst::FloatAdd(..)
+            | Inst::FloatSub(..)
+            | Inst::FloatMul(..)
+            | Inst::FloatDiv(..)
+            | Inst::FloatMod(..) => GlslTy::Float,
+            Inst::IntAdd(..)
+            | Inst::IntSub(..)
+            | Inst::IntMul(..)
+            | Inst::IntDiv(..)
+            | Inst::IntMod(..) => GlslTy::Int,
+            Inst::UintAdd(..)
+            | Inst::UintSub(..)
+            | Inst::UintMul(..)
+            | Inst::UintDiv(..)
+            | Inst::UintMod(..) => GlslTy::Uint,
+            Inst::IntLt(..)
+            | Inst::IntLeq(..)
+            | Inst::IntGt(..)
+            | Inst::IntGeq(..)
+            | Inst::UintLt(..)
+            | Inst::UintLeq(..)
+            | Inst::UintGt(..)
+            | Inst::UintGeq(..)
+            | Inst::FloatLt(..)
+            | Inst::FloatLeq(..)
+            | Inst::FloatGt(..)
+            | Inst::FloatGeq(..)
+            | Inst::Eq(..)
+            | Inst::NotEq(..)
+            | Inst::Not(_) => GlslTy::Bool,
             Inst::Neg(x) | Inst::BitNot(x) | Inst::UintBitNot(x) => self.ty_of(*x)?,
             Inst::FloatToInt(_) => GlslTy::Int,
             Inst::IntToFloat(_) => GlslTy::Float,
             Inst::UintToFloat(_) | Inst::FloatToF32(_) => GlslTy::Float,
             Inst::IntToUint(_) | Inst::FloatToUint(_) | Inst::IntBitcastUint(_) => GlslTy::Uint,
             Inst::UintToInt(_) | Inst::UintBitcastInt(_) => GlslTy::Int,
-            Inst::BitAnd(..) | Inst::BitOr(..) | Inst::BitXor(..) | Inst::Shl(..) | Inst::Shr(..) => GlslTy::Int,
-            Inst::UintBitAnd(..) | Inst::UintBitOr(..) | Inst::UintBitXor(..)
-            | Inst::UintShl(..) | Inst::UintShr(..) => GlslTy::Uint,
+            Inst::BitAnd(..)
+            | Inst::BitOr(..)
+            | Inst::BitXor(..)
+            | Inst::Shl(..)
+            | Inst::Shr(..) => GlslTy::Int,
+            Inst::UintBitAnd(..)
+            | Inst::UintBitOr(..)
+            | Inst::UintBitXor(..)
+            | Inst::UintShl(..)
+            | Inst::UintShr(..) => GlslTy::Uint,
             Inst::Load(c) => self.cell_ty.get(c).copied().ok_or_else(|| {
-                err(self.span(), "shader profile: a value is read from a local that has no GLSL type")
+                err(
+                    self.span(),
+                    "shader profile: a value is read from a local that has no GLSL type",
+                )
             })?,
             Inst::Global(name) => match const_lit(self.ws, *name) {
                 Some(lit) => const_lit_ty(&lit),
@@ -1676,8 +1906,10 @@ impl FnEmit<'_> {
                 None => {
                     return Err(err(
                         self.span(),
-                        format!("internal error: global `{name}` reached GLSL emission without a constant value; the shader profile pass must reject it"),
-                    ))
+                        format!(
+                            "internal error: global `{name}` reached GLSL emission without a constant value; the shader profile pass must reject it"
+                        ),
+                    ));
                 }
             },
             Inst::Field { base, field } => {
@@ -1692,22 +1924,28 @@ impl FnEmit<'_> {
                         other => {
                             return Err(err(
                                 self.span(),
-                                format!("shader profile: field `{field}` read on a `{}` value has no GLSL lowering", other.name()),
-                            ))
+                                format!(
+                                    "shader profile: field `{field}` read on a `{}` value has no GLSL lowering",
+                                    other.name()
+                                ),
+                            ));
                         }
                     }
                 }
             }
             Inst::MakeValueStruct { name, .. } | Inst::MaterializeValueStruct { name, .. } => {
                 match name.as_str() {
-                "Vec2" | "Vec2f" => GlslTy::Vec2,
-                "Vec3" | "Vec3f" => GlslTy::Vec3,
-                "Vec4" | "Vec4f" => GlslTy::Vec4,
-                "Bvec3" => GlslTy::Bvec3,
-                "Mat4" => GlslTy::Mat4,
-                other => {
-                    return Err(err(self.span(), format!("shader profile: value struct `{other}` is not tier 0")))
-                }
+                    "Vec2" | "Vec2f" => GlslTy::Vec2,
+                    "Vec3" | "Vec3f" => GlslTy::Vec3,
+                    "Vec4" | "Vec4f" => GlslTy::Vec4,
+                    "Bvec3" => GlslTy::Bvec3,
+                    "Mat4" => GlslTy::Mat4,
+                    other => {
+                        return Err(err(
+                            self.span(),
+                            format!("shader profile: value struct `{other}` is not tier 0"),
+                        ));
+                    }
                 }
             }
             Inst::Call { func, args } => {
@@ -1715,26 +1953,40 @@ impl FnEmit<'_> {
                 if self.concrete_plan.is_some() {
                     let sig = self.concrete_call_signature(iid)?;
                     let id = sig.result.ok_or_else(|| {
-                        err(self.span(), format!("shader profile: call to `{}` has no concrete result type", cf.name))
+                        err(
+                            self.span(),
+                            format!(
+                                "shader profile: call to `{}` has no concrete result type",
+                                cf.name
+                            ),
+                        )
                     })?;
                     concrete_glsl_ty(self.interner, id, self.span(), "call result")?
                 } else {
                     let csub = self.callee_inst(iid).subst(self.ws, self.interner);
-                    match cf.return_ty.and_then(|rt| glsl_ty(self.ws, &csub, rt, cf.name_span, "return").ok()) {
+                    match cf
+                        .return_ty
+                        .and_then(|rt| glsl_ty(self.ws, &csub, rt, cf.name_span, "return").ok())
+                    {
                         Some(t) => t,
                         // Generic-return genType builtins (min<T>/max<T>/clamp/abs):
                         // GLSL's result type is the argument type. Load-bearing under
                         // ES300, which has no implicit int->float on assignment.
-                        None if matches!(declared_name(cf.name.as_str()), "min" | "max" | "clamp" | "abs")
-                            && !args.is_empty() =>
+                        None if matches!(
+                            declared_name(cf.name.as_str()),
+                            "min" | "max" | "clamp" | "abs"
+                        ) && !args.is_empty() =>
                         {
                             self.ty_of(args[0])?
                         }
                         None => {
                             return Err(err(
                                 self.span(),
-                                format!("shader profile: call to `{}` has no tier-0 GLSL result type", cf.name),
-                            ))
+                                format!(
+                                    "shader profile: call to `{}` has no tier-0 GLSL result type",
+                                    cf.name
+                                ),
+                            ));
                         }
                     }
                 }
@@ -1742,8 +1994,11 @@ impl FnEmit<'_> {
             other => {
                 return Err(err(
                     self.span(),
-                    format!("shader profile: {} has no GLSL value type", inst_kind(other)),
-                ))
+                    format!(
+                        "shader profile: {} has no GLSL value type",
+                        inst_kind(other)
+                    ),
+                ));
             }
         })
     }
@@ -1771,17 +2026,24 @@ impl FnEmit<'_> {
         if let Some(name) = self.value_name.get(&iid) {
             return Ok(name.clone());
         }
-        let bin = |a: &Idx<Inst>, op: &str, b: &Idx<Inst>, s: &Self| -> Result<String, CompilerError> {
-            Ok(format!("({} {} {})", s.render_val(*a)?, op, s.render_val(*b)?))
-        };
-        let fbin = |a: &Idx<Inst>, op: &str, b: &Idx<Inst>, s: &Self| -> Result<String, CompilerError> {
-            Ok(format!(
-                "({} {} {})",
-                s.render_val_t(*a, GlslTy::Float)?,
-                op,
-                s.render_val_t(*b, GlslTy::Float)?
-            ))
-        };
+        let bin =
+            |a: &Idx<Inst>, op: &str, b: &Idx<Inst>, s: &Self| -> Result<String, CompilerError> {
+                Ok(format!(
+                    "({} {} {})",
+                    s.render_val(*a)?,
+                    op,
+                    s.render_val(*b)?
+                ))
+            };
+        let fbin =
+            |a: &Idx<Inst>, op: &str, b: &Idx<Inst>, s: &Self| -> Result<String, CompilerError> {
+                Ok(format!(
+                    "({} {} {})",
+                    s.render_val_t(*a, GlslTy::Float)?,
+                    op,
+                    s.render_val_t(*b, GlslTy::Float)?
+                ))
+            };
         Ok(match &self.f.insts[iid] {
             Inst::Const(Lit::Float(f)) => fmt_float(*f),
             Inst::Const(Lit::Int(i)) => i.to_string(),
@@ -1934,14 +2196,25 @@ impl FnEmit<'_> {
         if let Some(sym) = vec_op_symbol(name) {
             if args.len() == 2 {
                 let render_operand = |i: usize, e: &Self| -> Result<String, CompilerError> {
-                    let pt = param_types
-                        .get(i)
-                        .and_then(|t| *t)
-                        .ok_or_else(|| err(e.span(), "shader profile: vector operator parameter has no GLSL type"))?;
+                    let pt = param_types.get(i).and_then(|t| *t).ok_or_else(|| {
+                        err(
+                            e.span(),
+                            "shader profile: vector operator parameter has no GLSL type",
+                        )
+                    })?;
                     let s = e.render_val(args[i])?;
-                    Ok(if pt == GlslTy::Int { format!("float({s})") } else { s })
+                    Ok(if pt == GlslTy::Int {
+                        format!("float({s})")
+                    } else {
+                        s
+                    })
                 };
-                return Ok(format!("({} {} {})", render_operand(0, self)?, sym, render_operand(1, self)?));
+                return Ok(format!(
+                    "({} {} {})",
+                    render_operand(0, self)?,
+                    sym,
+                    render_operand(1, self)?
+                ));
             }
         }
         // Args render against the declared param type where it maps to GLSL
@@ -1958,7 +2231,10 @@ impl FnEmit<'_> {
         // hazard. GLSL constructors take mixed components natively, so emit
         // vecN(...) with N = the summed component count.
         if name == "v"
-            && param_types.iter().flatten().any(|ty| matches!(ty, GlslTy::Vec2 | GlslTy::Vec3 | GlslTy::Vec4))
+            && param_types
+                .iter()
+                .flatten()
+                .any(|ty| matches!(ty, GlslTy::Vec2 | GlslTy::Vec3 | GlslTy::Vec4))
         {
             let n: usize = param_types
                 .iter()
@@ -1977,19 +2253,24 @@ impl FnEmit<'_> {
                     return Err(err(
                         self.span(),
                         format!("shader profile: v(...) ctor with {n} total components"),
-                    ))
+                    ));
                 }
             };
-            let rargs: Result<Vec<String>, CompilerError> =
-                args.iter().enumerate().map(|(i, a)| arg_t(i, *a, self)).collect();
+            let rargs: Result<Vec<String>, CompilerError> = args
+                .iter()
+                .enumerate()
+                .map(|(i, a)| arg_t(i, *a, self))
+                .collect();
             return Ok(format!("{ctor}({})", rargs?.join(", ")));
         }
         if let Some(Emission::Template(tmpl)) = GlslIntrinsics.lookup(cf) {
             let mut s = tmpl.to_string();
             let vector_bound_ty = if matches!(name, "min" | "max" | "clamp") {
-                param_types.first().copied().flatten().filter(|ty| {
-                    matches!(ty, GlslTy::Vec2 | GlslTy::Vec3 | GlslTy::Vec4)
-                })
+                param_types
+                    .first()
+                    .copied()
+                    .flatten()
+                    .filter(|ty| matches!(ty, GlslTy::Vec2 | GlslTy::Vec3 | GlslTy::Vec4))
             } else {
                 None
             };
@@ -2007,8 +2288,11 @@ impl FnEmit<'_> {
         }
         // An emittable user fn -> a plain call to THIS INSTANCE's GLSL name.
         let gname = glsl_name(self.ws, self.interner, callee);
-        let rargs: Result<Vec<String>, CompilerError> =
-            args.iter().enumerate().map(|(i, a)| arg_t(i, *a, self)).collect();
+        let rargs: Result<Vec<String>, CompilerError> = args
+            .iter()
+            .enumerate()
+            .map(|(i, a)| arg_t(i, *a, self))
+            .collect();
         Ok(format!("{gname}({})", rargs?.join(", ")))
     }
 
@@ -2020,7 +2304,12 @@ impl FnEmit<'_> {
     /// `stop` (its continuation). Handles straight-line code, if-diamonds,
     /// counted `for` loops, and general `while` loops; `ctx` carries the
     /// enclosing loop's break/continue targets.
-    fn emit_seq(&mut self, start: Idx<Block>, stop: Option<Idx<Block>>, ctx: LoopCtx) -> Result<(), CompilerError> {
+    fn emit_seq(
+        &mut self,
+        start: Idx<Block>,
+        stop: Option<Idx<Block>>,
+        ctx: LoopCtx,
+    ) -> Result<(), CompilerError> {
         let mut cur = start;
         loop {
             if Some(cur) == stop {
@@ -2042,7 +2331,10 @@ impl FnEmit<'_> {
                 }
             }
             if !self.visited.insert(cur) {
-                return Err(err(self.span(), "shader profile: unstructured control flow (unsupported loop/branch shape)"));
+                return Err(err(
+                    self.span(),
+                    "shader profile: unstructured control flow (unsupported loop/branch shape)",
+                ));
             }
             self.emit_block_effects(cur)?;
             match self.f.blocks[cur].term.clone() {
@@ -2065,7 +2357,11 @@ impl FnEmit<'_> {
                     }
                     cur = t;
                 }
-                Term::Branch { cond, then_bb, else_bb } => {
+                Term::Branch {
+                    cond,
+                    then_bb,
+                    else_bb,
+                } => {
                     // Direct shader calls materialize scalar literal defaults
                     // at the call site. Other MIR defaults still need their
                     // nil path, which GLSL cannot represent and must reject.
@@ -2097,7 +2393,10 @@ impl FnEmit<'_> {
                     return Err(err(self.span(), "shader profile: `match` is not tier 0"));
                 }
                 Term::Yield { .. } => {
-                    return Err(err(self.span(), "shader profile: `yield` (coroutine) is not tier 0"));
+                    return Err(err(
+                        self.span(),
+                        "shader profile: `yield` (coroutine) is not tier 0",
+                    ));
                 }
             }
         }
@@ -2108,12 +2407,9 @@ impl FnEmit<'_> {
     /// `break`/`continue` block.
     fn empty_forward(&self, b: Idx<Block>) -> Option<Idx<Block>> {
         if let Term::Goto(t) = self.f.blocks[b].term {
-            let has_statement = self.f.blocks[b]
-                .insts
-                .iter()
-                .any(|&i| {
-                    matches!(self.f.insts[i], Inst::Store { .. }) || self.value_name.contains_key(&i)
-                });
+            let has_statement = self.f.blocks[b].insts.iter().any(|&i| {
+                matches!(self.f.insts[i], Inst::Store { .. }) || self.value_name.contains_key(&i)
+            });
             if !has_statement {
                 return Some(t);
             }
@@ -2180,7 +2476,8 @@ impl FnEmit<'_> {
                 Inst::Store { cell, value } => {
                     let (cell, value) = (*cell, *value);
                     // Folded diamond result / bound temp: no storage, inlined.
-                    if self.folded_cond.contains_key(&cell) || self.folded_bound.contains_key(&cell) {
+                    if self.folded_cond.contains_key(&cell) || self.folded_bound.contains_key(&cell)
+                    {
                         None
                     } else {
                         let rhs = match self.cell_ty.get(&cell) {
@@ -2220,7 +2517,10 @@ impl FnEmit<'_> {
         // gl_FragDepth).
         if let Some(mo) = self.main_out.clone() {
             let [v] = vs else {
-                return Err(err(self.span(), "shader entry: a void-main entry must return its output struct"));
+                return Err(err(
+                    self.span(),
+                    "shader entry: a void-main entry must return its output struct",
+                ));
             };
             let fields: Vec<(Ustr, Idx<Inst>)> = match &self.f.insts[*v] {
                 Inst::MakeValueStruct { fields, .. }
@@ -2231,7 +2531,7 @@ impl FnEmit<'_> {
                     return Err(err(
                         self.span(),
                         "shader entry: a void-main entry must return an output struct literal",
-                    ))
+                    ));
                 }
             };
             for (name, val) in fields {
@@ -2269,7 +2569,12 @@ impl FnEmit<'_> {
                 };
                 self.push(&format!("return {s};"));
             }
-            _ => return Err(err(self.span(), "shader profile: multi-value return is not tier 0")),
+            _ => {
+                return Err(err(
+                    self.span(),
+                    "shader profile: multi-value return is not tier 0",
+                ));
+            }
         }
         Ok(())
     }
@@ -2278,10 +2583,15 @@ impl FnEmit<'_> {
         let slot = self.cell_name[&li.slot].clone();
         let bound = self.render_val(li.bound)?;
         let cmp = if li.inclusive { "<=" } else { "<" };
-        self.push(&format!("for (; {slot} {cmp} {bound}; {slot} = {slot} + 1) {{"));
+        self.push(&format!(
+            "for (; {slot} {cmp} {bound}; {slot} = {slot} + 1) {{"
+        ));
         self.indent += 1;
         let body_len = self.out.len();
-        let ctx = LoopCtx { cont: Some(li.latch), brk: Some(li.exit) };
+        let ctx = LoopCtx {
+            cont: Some(li.latch),
+            brk: Some(li.exit),
+        };
         self.emit_seq(li.body_entry, None, ctx)?;
         self.trim_trailing_continue(body_len);
         self.indent -= 1;
@@ -2312,7 +2622,10 @@ impl FnEmit<'_> {
             self.push(&format!("if (!({cond_s})) {{ break; }}"));
         }
 
-        let ctx = LoopCtx { cont: Some(h), brk: Some(exit) };
+        let ctx = LoopCtx {
+            cont: Some(h),
+            brk: Some(exit),
+        };
         let body_len = self.out.len();
         self.emit_seq(body_start, None, ctx)?;
         self.trim_trailing_continue(body_len);
@@ -2330,7 +2643,12 @@ impl FnEmit<'_> {
         region: &LoopRegion,
     ) -> Result<(Idx<Block>, Idx<Inst>, Idx<Block>, bool), CompilerError> {
         for &b in &region.body {
-            if let Term::Branch { cond, then_bb, else_bb } = self.f.blocks[b].term {
+            if let Term::Branch {
+                cond,
+                then_bb,
+                else_bb,
+            } = self.f.blocks[b].term
+            {
                 if then_bb == region.exit {
                     return Ok((b, cond, else_bb, true));
                 }
@@ -2339,7 +2657,10 @@ impl FnEmit<'_> {
                 }
             }
         }
-        Err(err(self.span(), "shader profile: unstructured loop (no single condition test)"))
+        Err(err(
+            self.span(),
+            "shader profile: unstructured loop (no single condition test)",
+        ))
     }
 
     /// Drop a redundant trailing `continue;` that is the loop body's natural
@@ -2365,7 +2686,12 @@ impl FnEmit<'_> {
 /// sets, so a `while i < n { ..; i = i + 1 }` (manual counter) is NOT mistaken
 /// for a range-for and takes the general path instead.
 fn match_counted_loop(f: &MirFunc, h: Idx<Block>) -> Option<LoopInfo> {
-    let Term::Branch { cond, then_bb, else_bb } = f.blocks[h].term else {
+    let Term::Branch {
+        cond,
+        then_bb,
+        else_bb,
+    } = f.blocks[h].term
+    else {
         return None;
     };
     let (slot, bound, inclusive) = match &f.insts[cond] {
@@ -2410,7 +2736,8 @@ fn is_incr_latch(f: &MirFunc, p: Idx<Block>, slot: Idx<Cell>) -> bool {
             if cell == slot {
                 if let Inst::IntAdd(a, b) = f.insts[value] {
                     let is_one = |x: Idx<Inst>| matches!(f.insts[x], Inst::Const(Lit::Int(1)));
-                    let loads_slot = |x: Idx<Inst>| matches!(f.insts[x], Inst::Load(c) if c == slot);
+                    let loads_slot =
+                        |x: Idx<Inst>| matches!(f.insts[x], Inst::Load(c) if c == slot);
                     return (loads_slot(a) && is_one(b)) || (loads_slot(b) && is_one(a));
                 }
                 return false;
@@ -2423,10 +2750,16 @@ fn is_incr_latch(f: &MirFunc, p: Idx<Block>, slot: Idx<Cell>) -> bool {
 // --- public API --------------------------------------------------------------
 
 /// Resolve a root fn name to a unique [`FuncRef`], preferring the user module.
-pub fn resolve_root(ws: &Workspace, user_mid: ModuleId, name: &str) -> Result<FuncRef, CompilerError> {
+pub fn resolve_root(
+    ws: &Workspace,
+    user_mid: ModuleId,
+    name: &str,
+) -> Result<FuncRef, CompilerError> {
     let key = Ustr::from(name);
     let Some(list): Option<&FnList> = ws.functions_by_name.get(&key) else {
-        return Err(CompilerError::new_no_location(format!("shader root `{name}` not found")));
+        return Err(CompilerError::new_no_location(format!(
+            "shader root `{name}` not found"
+        )));
     };
     let in_user: Vec<_> = list.iter().filter(|(m, _)| *m == user_mid).collect();
     let pick = if in_user.len() == 1 {
@@ -2439,7 +2772,10 @@ pub fn resolve_root(ws: &Workspace, user_mid: ModuleId, name: &str) -> Result<Fu
             list.len()
         )));
     };
-    Ok(FuncRef { module: pick.0, func: pick.1 })
+    Ok(FuncRef {
+        module: pick.0,
+        func: pick.1,
+    })
 }
 
 /// The GLSL helper functions for tier-0 semantics GLSL's builtins get wrong:
@@ -2448,9 +2784,7 @@ pub fn resolve_root(ws: &Workspace, user_mid: ModuleId, name: &str) -> Result<Fu
 fn helper_prelude(uses_idiv: bool, uses_imod: bool) -> String {
     let mut s = String::new();
     if uses_idiv {
-        s.push_str(
-            "int rock_idiv(int a, int b) {\n  return int(floor(float(a) / float(b)));\n}\n",
-        );
+        s.push_str("int rock_idiv(int a, int b) {\n  return int(floor(float(a) / float(b)));\n}\n");
     }
     if uses_imod {
         s.push_str(
@@ -2493,7 +2827,10 @@ fn visit_shader_library(
         let f = &ws.module(instance.func.module).functions[instance.func.func];
         return Err(err(
             f.name_span,
-            format!("shader profile: recursion through `{}` is not allowed on GLSL", f.name),
+            format!(
+                "shader profile: recursion through `{}` is not allowed on GLSL",
+                f.name
+            ),
         ));
     }
     if !done.insert(instance.clone()) {
@@ -2535,16 +2872,7 @@ fn visit_shader_library(
                 // reports the boundary after any earlier body-level rejection.
                 continue;
             } else {
-                visit_shader_library(
-                    ws,
-                    graph,
-                    callee,
-                    retained,
-                    builtins,
-                    active,
-                    done,
-                    order,
-                )?;
+                visit_shader_library(ws, graph, callee, retained, builtins, active, done, order)?;
             }
         }
     }
@@ -2589,7 +2917,10 @@ pub fn realize_shader_library_view(
     let mut dependencies = Vec::new();
     let mut seen_dependencies = BTreeSet::new();
     for instance in order.iter().chain(root_instances.iter()) {
-        if seen_dependencies.insert((instance.func.module.raw(), instance.func.func.into_raw().into_u32())) {
+        if seen_dependencies.insert((
+            instance.func.module.raw(),
+            instance.func.func.into_raw().into_u32(),
+        )) {
             dependencies.push(instance.func);
         }
     }
@@ -2617,7 +2948,8 @@ pub fn shader_library_session(
     roots: Vec<FuncRef>,
 ) -> Result<ShaderLibrarySession, CompilerError> {
     let interner = Arc::new(MonoInterner::new());
-    let graph = skull_graph::instance_graph::build_in(ws, roots.clone(), false, Arc::clone(&interner));
+    let graph =
+        skull_graph::instance_graph::build_in(ws, roots.clone(), false, Arc::clone(&interner));
     let scx = ScalarCtx::new_values_first_class(ws).sharing(interner);
     let view = realize_shader_library_view(ws, &graph, &roots)?;
     Ok(ShaderLibrarySession { graph, scx, view })
@@ -2704,9 +3036,13 @@ fn shader_stage_view(
         .collect();
     let mut builtins = BTreeSet::new();
     for caller in &retained {
-        let Some(sites) = graph.sites_of(caller) else { continue };
+        let Some(sites) = graph.sites_of(caller) else {
+            continue;
+        };
         for record in sites.values() {
-            let SiteOutcome::Resolved(callee) = &record.outcome else { continue };
+            let SiteOutcome::Resolved(callee) = &record.outcome else {
+                continue;
+            };
             let f = &ws.module(callee.func.module).functions[callee.func.func];
             if renders_inline_instance(ws, f, callee, graph.interner()) {
                 builtins.insert(callee.clone());
@@ -2726,12 +3062,23 @@ fn shader_stage_view(
     let mut dependencies = Vec::new();
     let mut seen = BTreeSet::new();
     for instance in order.iter().chain(std::iter::once(&entry)) {
-        let key = (instance.func.module.raw(), instance.func.func.into_raw().into_u32());
+        let key = (
+            instance.func.module.raw(),
+            instance.func.func.into_raw().into_u32(),
+        );
         if seen.insert(key) {
             dependencies.push(instance.func);
         }
     }
-    ShaderStageView { stage, entry, retained, helpers, builtins, order, dependencies }
+    ShaderStageView {
+        stage,
+        entry,
+        retained,
+        helpers,
+        builtins,
+        order,
+        dependencies,
+    }
 }
 
 fn realize_shader_program_view(
@@ -2750,12 +3097,14 @@ fn realize_shader_program_view(
     let mut edges: std::collections::BTreeMap<Instance, Vec<Instance>> =
         std::collections::BTreeMap::new();
     while let Some(caller) = queue.pop() {
-        let Some(sites) = graph.sites_of(&caller) else { continue };
+        let Some(sites) = graph.sites_of(&caller) else {
+            continue;
+        };
         for record in sites.values() {
-            let SiteOutcome::Resolved(callee) = &record.outcome else { continue };
-            if graph.concreteness(callee)
-                == skull_graph::instance_graph::Concreteness::Missing
-            {
+            let SiteOutcome::Resolved(callee) = &record.outcome else {
+                continue;
+            };
+            if graph.concreteness(callee) == skull_graph::instance_graph::Concreteness::Missing {
                 return Err(CompilerError::new_no_location(format!(
                     "shader graph has no substitution for `{}`",
                     ws.module(callee.func.module).functions[callee.func.func].name
@@ -2767,7 +3116,10 @@ fn realize_shader_program_view(
             {
                 continue;
             }
-            edges.entry(caller.clone()).or_default().push(callee.clone());
+            edges
+                .entry(caller.clone())
+                .or_default()
+                .push(callee.clone());
             if seen.insert(callee.clone()) {
                 queue.push(callee.clone());
             }
@@ -2799,7 +3151,11 @@ fn realize_shader_program_view(
         )],
     };
     let concrete_plans = skull_graph::concrete_body::build(ws, graph).plans;
-    Ok(ShaderProgramView { program, stages, concrete_plans })
+    Ok(ShaderProgramView {
+        program,
+        stages,
+        concrete_plans,
+    })
 }
 
 /// Build a registered-program view from the shared graph. The returned session
@@ -2815,12 +3171,7 @@ pub fn shader_program_session(
         .chain(std::iter::once(program.frag))
         .collect();
     let interner = Arc::new(MonoInterner::new());
-    let graph = skull_graph::instance_graph::build_in(
-        ws,
-        roots,
-        false,
-        Arc::clone(&interner),
-    );
+    let graph = skull_graph::instance_graph::build_in(ws, roots, false, Arc::clone(&interner));
     let scx = ScalarCtx::new_values_first_class(ws).sharing(interner);
     let view = realize_shader_program_view(ws, &graph, program)?;
     Ok(ShaderProgramSession { graph, scx, view })
@@ -2894,15 +3245,22 @@ pub fn emit_shader_library_with_view(
         let instance = ShaderInstance::new(raw.clone());
         let f = &ws.module(instance.fref().module).functions[instance.fref().func];
         let plan = view.concrete_plans.get(raw).ok_or_else(|| {
-            err(f.name_span, format!("shader profile: no concrete plan for `{}`", f.name))
-        })?;
-        check_tier0_signature_concrete(scx.interner(), &plan.signature, f.name_span)?;
-        let body = skull_mir::lower::lower_instance_with_plans(ws, scx, plan, &view.concrete_plans).map_err(|e| {
             err(
                 f.name_span,
-                format!("shader profile: `{}` cannot lower for GLSL: {}", f.name, e.message),
+                format!("shader profile: no concrete plan for `{}`", f.name),
             )
         })?;
+        check_tier0_signature_concrete(scx.interner(), &plan.signature, f.name_span)?;
+        let body = skull_mir::lower::lower_instance_with_plans(ws, scx, plan, &view.concrete_plans)
+            .map_err(|e| {
+                err(
+                    f.name_span,
+                    format!(
+                        "shader profile: `{}` cannot lower for GLSL: {}",
+                        f.name, e.message
+                    ),
+                )
+            })?;
         let mut direct = Vec::new();
         profile_body(ws, f, &body, &mut direct, true)?;
         let retained = checked_library_callees(
@@ -2932,7 +3290,10 @@ pub fn emit_shader_library_with_view(
     let mut dependencies = Vec::new();
     let mut seen_dependencies = BTreeSet::new();
     for instance in view.order.iter().chain(view.roots.iter()) {
-        if seen_dependencies.insert((instance.func.module.raw(), instance.func.func.into_raw().into_u32())) {
+        if seen_dependencies.insert((
+            instance.func.module.raw(),
+            instance.func.func.into_raw().into_u32(),
+        )) {
             dependencies.push(instance.func);
         }
     }
@@ -2951,10 +3312,11 @@ pub fn emit_shader_library_with_view(
         }
         let instance = ShaderInstance::new(raw.clone());
         let body = bodies.get(&instance).expect("view order body was lowered");
-        let body_plan = view
-            .concrete_plans
-            .get(raw)
-            .ok_or_else(|| CompilerError::new_no_location("shader profile: helper has no concrete plan".to_string()))?;
+        let body_plan = view.concrete_plans.get(raw).ok_or_else(|| {
+            CompilerError::new_no_location(
+                "shader profile: helper has no concrete plan".to_string(),
+            )
+        })?;
         out.push_str(&emit_fn_def_with(
             ws,
             scx.interner(),
@@ -3028,7 +3390,10 @@ void main() {
 /// The nominal name behind a declared type, if any (`ShimmerU`, `Sampler2D`).
 fn nominal_name(ws: &Workspace, ty: TyId) -> Option<Ustr> {
     match ty_expr(ws, ty)? {
-        TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => Some(n),
+        TypeExpr::App {
+            ctor: TypeCtor::Nominal(n),
+            ..
+        } => Some(n),
         _ => None,
     }
 }
@@ -3080,7 +3445,6 @@ pub struct ShaderEmission {
     /// the entry and re-deciding what the program packages.
     pub ir: ShaderIR,
 }
-
 
 /// A program's uniform blocks -- scalar AND array -- flattened into the
 /// PARALLEL LISTS the registration call carries.
@@ -3211,10 +3575,7 @@ fn wire_kind_of(t: GlslTy) -> WireKind {
 ///
 /// From the INTERFACE. The shapes carried a second GLSL-typed copy of the same
 /// fields, which is the drift this split exists to remove.
-fn stage_uniform_fields(
-    iface: &ShaderInterfacePlan,
-    stage: IrStage,
-) -> Vec<(Ustr, GlslTy)> {
+fn stage_uniform_fields(iface: &ShaderInterfacePlan, stage: IrStage) -> Vec<(Ustr, GlslTy)> {
     iface
         .uniform_group(UniformRole::Engine)
         .into_iter()
@@ -3223,20 +3584,21 @@ fn stage_uniform_fields(
         .collect()
 }
 
-
 /// The varyings a program passes between stages, spelled for GLSL. Names,
 /// kinds and `@flat` come from the INTERFACE; only the spelling is this
 /// target's.
 fn interface_varyings(iface: &ShaderInterfacePlan) -> Vec<(Ustr, GlslTy, bool)> {
-    iface.varyings.iter().map(|v| (v.name, wire_glsl(v.kind), v.flat)).collect()
+    iface
+        .varyings
+        .iter()
+        .map(|v| (v.name, wire_glsl(v.kind), v.flat))
+        .collect()
 }
 
 /// The fragment stage's MRT outputs, or `None` for the single implicit one.
 fn interface_mrt_outputs(iface: &ShaderInterfacePlan) -> Option<Vec<(Ustr, GlslTy)>> {
     match &iface.fragment_output {
-        FragmentOutput::Mrt(outs) => {
-            Some(outs.iter().map(|(n, k)| (*n, wire_glsl(*k))).collect())
-        }
+        FragmentOutput::Mrt(outs) => Some(outs.iter().map(|(n, k)| (*n, wire_glsl(*k))).collect()),
         FragmentOutput::Single(_) | FragmentOutput::None => None,
     }
 }
@@ -3280,48 +3642,66 @@ fn validate_abi(
     // Two groups claiming one role makes the binding ambiguous, and the defect
     // is the interface's rather than the plan's.
     if let Some(w) = expected.windows(2).find(|w| w[0].0 == w[1].0) {
-        return Err(err(span, format!(
-            "internal: the interface declares two uniform groups at binding {} (`{}` and `{}`)",
-            w[0].0, w[0].1.struct_name.key, w[1].1.struct_name.key
-        )));
+        return Err(err(
+            span,
+            format!(
+                "internal: the interface declares two uniform groups at binding {} (`{}` and `{}`)",
+                w[0].0, w[0].1.struct_name.key, w[1].1.struct_name.key
+            ),
+        ));
     }
     let mut seen: HashSet<u32> = HashSet::default();
     for (b, block) in &abi.uniform_blocks {
         let plan = &block.plan;
         if !seen.insert(*b) {
-            return Err(err(span, format!(
-                "internal: the GLSL ABI plan holds more than one uniform block at binding {b}"
-            )));
+            return Err(err(
+                span,
+                format!(
+                    "internal: the GLSL ABI plan holds more than one uniform block at binding {b}"
+                ),
+            ));
         }
         let Some((_, g)) = expected.iter().find(|(eb, _)| eb == b) else {
-            return Err(err(span, format!(
-                "internal: the GLSL ABI plan holds a uniform block at binding {b}, which no \
+            return Err(err(
+                span,
+                format!(
+                    "internal: the GLSL ABI plan holds a uniform block at binding {b}, which no \
                  interface group claims"
-            )));
+                ),
+            ));
         };
         if (plan.struct_name, block.name) != (g.struct_name.key, g.struct_name.symbol) {
-            return Err(err(span, format!(
-                "internal: binding {b} holds block `{}` (`{}`) but the interface's group there is \
+            return Err(err(
+                span,
+                format!(
+                    "internal: binding {b} holds block `{}` (`{}`) but the interface's group there is \
                  `{}` (`{}`)",
-                plan.struct_name, block.name, g.struct_name.key, g.struct_name.symbol
-            )));
+                    plan.struct_name, block.name, g.struct_name.key, g.struct_name.symbol
+                ),
+            ));
         }
         let laid: Vec<(Ustr, WireKind)> = plan.members.iter().map(|m| (m.name, m.kind)).collect();
         if laid != g.members {
-            return Err(err(span, format!(
-                "internal: block `{}` at binding {b} was laid out over {laid:?}, but the \
+            return Err(err(
+                span,
+                format!(
+                    "internal: block `{}` at binding {b} was laid out over {laid:?}, but the \
                  interface declares {:?}",
-                plan.struct_name, g.members
-            )));
+                    plan.struct_name, g.members
+                ),
+            ));
         }
     }
     for (b, g) in &expected {
         if !seen.contains(b) {
-            return Err(err(span, format!(
-                "internal: the interface declares group `{}` at binding {b}, which the GLSL ABI \
+            return Err(err(
+                span,
+                format!(
+                    "internal: the interface declares group `{}` at binding {b}, which the GLSL ABI \
                  plan has no block for -- its members would be referenced without being declared",
-                g.struct_name.key
-            )));
+                    g.struct_name.key
+                ),
+            ));
         }
     }
 
@@ -3334,86 +3714,123 @@ fn validate_abi(
         .collect();
     expected_arrays.sort_by_key(|(b, _)| *b);
     if let Some(w) = expected_arrays.windows(2).find(|w| w[0].0 == w[1].0) {
-        return Err(err(span, format!(
-            "internal: the interface declares two array groups for one stage at binding {} \
+        return Err(err(
+            span,
+            format!(
+                "internal: the interface declares two array groups for one stage at binding {} \
              (owned by `{}` and `{}`)",
-            w[0].0, w[0].1.owner, w[1].1.owner
-        )));
+                w[0].0, w[0].1.owner, w[1].1.owner
+            ),
+        ));
     }
     let mut seen_arrays: HashSet<u32> = HashSet::default();
     for (b, plan) in &abi.uniform_array_blocks {
         if !seen_arrays.insert(*b) {
-            return Err(err(span, format!(
-                "internal: the GLSL ABI plan holds more than one array block at binding {b}"
-            )));
+            return Err(err(
+                span,
+                format!(
+                    "internal: the GLSL ABI plan holds more than one array block at binding {b}"
+                ),
+            ));
         }
         let Some((_, g)) = expected_arrays.iter().find(|(eb, _)| eb == b) else {
-            return Err(err(span, format!(
-                "internal: the GLSL ABI plan holds an array block at binding {b}, which no \
+            return Err(err(
+                span,
+                format!(
+                    "internal: the GLSL ABI plan holds an array block at binding {b}, which no \
                  interface group claims"
-            )));
+                ),
+            ));
         };
         if plan.block_name != g.block_name() {
-            return Err(err(span, format!(
-                "internal: binding {b} holds array block `{}`, but the interface's group there \
+            return Err(err(
+                span,
+                format!(
+                    "internal: binding {b} holds array block `{}`, but the interface's group there \
                  is owned by `{}`",
-                plan.block_name, g.owner
-            )));
+                    plan.block_name, g.owner
+                ),
+            ));
         }
-        let laid: Vec<(Ustr, WireKind, u32)> =
-            plan.members.iter().map(|m| (m.name, m.elem, m.capacity)).collect();
-        let want: Vec<(Ustr, WireKind, u32)> =
-            g.members.iter().map(|m| (m.name, m.elem, m.capacity)).collect();
+        let laid: Vec<(Ustr, WireKind, u32)> = plan
+            .members
+            .iter()
+            .map(|m| (m.name, m.elem, m.capacity))
+            .collect();
+        let want: Vec<(Ustr, WireKind, u32)> = g
+            .members
+            .iter()
+            .map(|m| (m.name, m.elem, m.capacity))
+            .collect();
         if laid != want {
-            return Err(err(span, format!(
-                "internal: array block `{}` was laid out over {laid:?}, but the interface \
+            return Err(err(
+                span,
+                format!(
+                    "internal: array block `{}` was laid out over {laid:?}, but the interface \
                  declares {want:?}",
-                plan.block_name
-            )));
+                    plan.block_name
+                ),
+            ));
         }
     }
     for (b, g) in &expected_arrays {
         if !seen_arrays.contains(b) {
-            return Err(err(span, format!(
-                "internal: the interface declares an array group owned by `{}` at binding {b}, \
+            return Err(err(
+                span,
+                format!(
+                    "internal: the interface declares an array group owned by `{}` at binding {b}, \
                  which the GLSL ABI plan has no block for",
-                g.owner
-            )));
+                    g.owner
+                ),
+            ));
         }
     }
 
     // --- attribute locations: a bijection on names AND non-overlapping
     // location RANGES. Two attributes at one location is a silent aliasing
     // that a name bijection alone accepts.
-    let attrs: Vec<(Ustr, AttrKind)> =
-        iface.vertex_inputs.iter().flat_map(|i| i.attrs.iter().copied()).collect();
+    let attrs: Vec<(Ustr, AttrKind)> = iface
+        .vertex_inputs
+        .iter()
+        .flat_map(|i| i.attrs.iter().copied())
+        .collect();
     if attrs.len() != abi.attribute_locations.len() {
-        return Err(err(span, format!(
-            "internal: the interface declares {} vertex attribute(s) and the GLSL ABI plan \
+        return Err(err(
+            span,
+            format!(
+                "internal: the interface declares {} vertex attribute(s) and the GLSL ABI plan \
              assigns {} location(s)",
-            attrs.len(),
-            abi.attribute_locations.len()
-        )));
+                attrs.len(),
+                abi.attribute_locations.len()
+            ),
+        ));
     }
     let mut occupied: HashMap<u32, Ustr> = HashMap::default();
     for (name, kind) in &attrs {
         let Some((_, loc)) = abi.attribute_locations.iter().find(|(an, _)| an == name) else {
-            return Err(err(span, format!(
-                "internal: vertex attribute `{name}` has no location in the GLSL ABI plan"
-            )));
+            return Err(err(
+                span,
+                format!("internal: vertex attribute `{name}` has no location in the GLSL ABI plan"),
+            ));
         };
         let Some(end) = loc.checked_add(attr_location_span(*kind)) else {
-            return Err(err(span, format!(
-                "internal: vertex attribute `{name}` at location {loc} spans past the end of the \
+            return Err(err(
+                span,
+                format!(
+                    "internal: vertex attribute `{name}` at location {loc} spans past the end of the \
                  location space"
-            )));
+                ),
+            ));
         };
         for slot in *loc..end {
             if let Some(other) = occupied.insert(slot, *name) {
-                return Err(err(span, format!(
-                    "internal: vertex attributes `{other}` and `{name}` both occupy location \
+                return Err(err(
+                    span,
+                    format!(
+                        "internal: vertex attributes `{other}` and `{name}` both occupy location \
                      {slot}"
-                )));
+                    ),
+                ));
             }
         }
     }
@@ -3424,23 +3841,30 @@ fn validate_abi(
     let mut units: HashSet<Ustr> = HashSet::default();
     for u in &abi.texture_units {
         if !units.insert(*u) {
-            return Err(err(span, format!(
-                "internal: the GLSL ABI plan assigns sampler `{u}` more than one unit"
-            )));
+            return Err(err(
+                span,
+                format!("internal: the GLSL ABI plan assigns sampler `{u}` more than one unit"),
+            ));
         }
         if !group.contains(u) {
-            return Err(err(span, format!(
-                "internal: the GLSL ABI plan assigns a unit to `{u}`, which the interface's \
+            return Err(err(
+                span,
+                format!(
+                    "internal: the GLSL ABI plan assigns a unit to `{u}`, which the interface's \
                  @textures group does not name"
-            )));
+                ),
+            ));
         }
     }
     for n in &group {
         if !units.contains(n) {
-            return Err(err(span, format!(
-                "internal: the interface's @textures group names `{n}`, which the GLSL ABI plan \
+            return Err(err(
+                span,
+                format!(
+                    "internal: the interface's @textures group names `{n}`, which the GLSL ABI plan \
                  gives no unit -- it would be referenced without being declared"
-            )));
+                ),
+            ));
         }
     }
     Ok(())
@@ -3478,21 +3902,28 @@ fn require_block<'a, T>(
     let mut found = blocks.iter().filter(|(b, _)| *b == binding);
     let first = found.next();
     if found.next().is_some() {
-        return Err(err(span, format!(
-            "internal: the GLSL ABI plan holds more than one {what} at binding {binding}"
-        )));
+        return Err(err(
+            span,
+            format!("internal: the GLSL ABI plan holds more than one {what} at binding {binding}"),
+        ));
     }
     match (want, first) {
         (true, Some((_, p))) => Ok(Some(p)),
         (false, None) => Ok(None),
-        (true, None) => Err(err(span, format!(
-            "internal: the interface declares a {what} but the GLSL ABI plan has none at \
+        (true, None) => Err(err(
+            span,
+            format!(
+                "internal: the interface declares a {what} but the GLSL ABI plan has none at \
              binding {binding} -- its members would be referenced without being declared"
-        ))),
-        (false, Some(_)) => Err(err(span, format!(
-            "internal: the GLSL ABI plan holds a {what} at binding {binding} that the interface \
+            ),
+        )),
+        (false, Some(_)) => Err(err(
+            span,
+            format!(
+                "internal: the GLSL ABI plan holds a {what} at binding {binding} that the interface \
              does not declare"
-        ))),
+            ),
+        )),
     }
 }
 
@@ -3555,10 +3986,13 @@ impl<'a> ProgramAbi<'a> {
         let mut stages = Vec::with_capacity(required.len());
         for &stage in required {
             if !iface.stages.contains(&stage) {
-                return Err(err(span, format!(
-                    "internal: the program emits a {} stage, which its interface does not declare",
-                    stage.name()
-                )));
+                return Err(err(
+                    span,
+                    format!(
+                        "internal: the program emits a {} stage, which its interface does not declare",
+                        stage.name()
+                    ),
+                ));
             }
             stages.push((stage, project_stage_abi(iface, abi, stage, span)?));
         }
@@ -3574,10 +4008,15 @@ impl<'a> ProgramAbi<'a> {
             .iter()
             .find(|(s, _)| *s == stage)
             .map(|(_, a)| a)
-            .ok_or_else(|| err(self.span, format!(
-                "internal: no {} stage was projected for this program",
-                stage.name()
-            )))
+            .ok_or_else(|| {
+                err(
+                    self.span,
+                    format!(
+                        "internal: no {} stage was projected for this program",
+                        stage.name()
+                    ),
+                )
+            })
     }
 }
 
@@ -3635,10 +4074,13 @@ fn attribute_declarations(
     let mut out = Vec::new();
     for (n, k) in iface.vertex_inputs.iter().flat_map(|i| i.attrs.iter()) {
         let Some((_, loc)) = abi.attribute_locations.iter().find(|(an, _)| an == n) else {
-            return Err(err(span, format!(
-                "internal: vertex attribute `{n}` has no location in the GLSL ABI plan -- it \
+            return Err(err(
+                span,
+                format!(
+                    "internal: vertex attribute `{n}` has no location in the GLSL ABI plan -- it \
                  would be referenced without being declared"
-            )));
+                ),
+            ));
         };
         out.push((*n, attr_glsl_ty(*k), *loc));
     }
@@ -3656,7 +4098,11 @@ fn bare_sampler_list(
     samplers
         .iter()
         .filter(|(i, _, _)| !grouped_params.contains(i))
-        .map(|(_, n, k)| LogicalSampler { name: *n, kind: *k, stage })
+        .map(|(_, n, k)| LogicalSampler {
+            name: *n,
+            kind: *k,
+            stage,
+        })
         .collect()
 }
 
@@ -3671,8 +4117,7 @@ fn logical_members(
     struct_name: Ustr,
     span: Span,
 ) -> Result<Vec<(Ustr, WireKind)>, CompilerError> {
-    skull_mir::gpu_layout::uniform_group_members(ws, struct_name)
-        .map_err(|e| err(span, e.message))
+    skull_mir::gpu_layout::uniform_group_members(ws, struct_name).map_err(|e| err(span, e.message))
 }
 
 fn logical_uniform_group(
@@ -3697,9 +4142,12 @@ fn logical_textures(
 ) -> Result<Option<LogicalTextureGroup>, CompilerError> {
     let Some(g) = group else { return Ok(None) };
     if has_bare_sampler {
-        return Err(err(span, format!(
-            "shader: `{g}` is a @textures group, so every sampler must join it -- a bare Sampler2D param keeps a CPU-assigned unit, which can collide with a compiler-assigned slot"
-        )));
+        return Err(err(
+            span,
+            format!(
+                "shader: `{g}` is a @textures group, so every sampler must join it -- a bare Sampler2D param keeps a CPU-assigned unit, which can collide with a compiler-assigned slot"
+            ),
+        ));
     }
     let ts = texture_slots(ws, g).map_err(|e| err(span, e.message))?;
     Ok(Some(LogicalTextureGroup {
@@ -3780,10 +4228,7 @@ impl ShaderAbiPlan {
         }
     }
 
-    pub fn glsl(
-        iface: &ShaderInterfacePlan,
-        span: Span,
-    ) -> Result<Self, CompilerError> {
+    pub fn glsl(iface: &ShaderInterfacePlan, span: Span) -> Result<Self, CompilerError> {
         if iface.compute.is_some() || iface.stages.contains(&IrStage::Compute) {
             return Err(err(
                 span,
@@ -3797,17 +4242,23 @@ impl ShaderAbiPlan {
         // lay the same members out its own way.
         let mut uniform_blocks: Vec<(u32, GlslUniformBlock)> = Vec::new();
         for g in &iface.uniform_groups {
-            let plan = skull_mir::gpu_layout::std140_block(g.struct_name.key, &g.members, Some(span))
-                .map_err(|e| err(span, e.message))?;
-            uniform_blocks.push((binding(g.role), GlslUniformBlock { name: g.struct_name.symbol, plan }));
+            let plan =
+                skull_mir::gpu_layout::std140_block(g.struct_name.key, &g.members, Some(span))
+                    .map_err(|e| err(span, e.message))?;
+            uniform_blocks.push((
+                binding(g.role),
+                GlslUniformBlock {
+                    name: g.struct_name.symbol,
+                    plan,
+                },
+            ));
         }
         uniform_blocks.sort_by_key(|(b, _)| *b);
 
         let mut uniform_array_blocks: Vec<(u32, UniformArrayBlockPlan)> = Vec::new();
         for g in &iface.array_groups {
             let b = Self::array_binding_of(g.stage);
-            uniform_array_blocks
-                .push((b, uniform_array_block(g.block_name(), &g.members)?));
+            uniform_array_blocks.push((b, uniform_array_block(g.block_name(), &g.members)?));
         }
         uniform_array_blocks.sort_by_key(|(b, _)| *b);
 
@@ -3833,7 +4284,10 @@ impl ShaderAbiPlan {
     }
 
     pub fn block_at(&self, binding: u32) -> Option<&UniformBlockPlan> {
-        self.uniform_blocks.iter().find(|(b, _)| *b == binding).map(|(_, p)| &p.plan)
+        self.uniform_blocks
+            .iter()
+            .find(|(b, _)| *b == binding)
+            .map(|(_, p)| &p.plan)
     }
 }
 
@@ -3878,11 +4332,14 @@ fn check_stage_sampler_budget(
         IrStage::Fragment => "fragment",
         IrStage::Compute => "compute",
     };
-    Err(err(span, format!(
-        "shader `{entry}`: the {name} stage declares {count} samplers, over the \
+    Err(err(
+        span,
+        format!(
+            "shader `{entry}`: the {name} stage declares {count} samplers, over the \
          {GLSL_STAGE_SAMPLER_BUDGET} texture units GL 4.1 core (macOS) and GLES 3.0 guarantee \
          per stage -- pack inputs into shared textures"
-    )))
+        ),
+    ))
 }
 
 pub const UNIFORM_BLOCK_BINDING_ENGINE: u32 = 0;
@@ -3928,13 +4385,10 @@ impl StagePlan {
             out.push('\n');
         }
         for href in &self.ir.order {
-            let body_plan = self
-                .concrete_plans
-                .get(&href.inst)
-                .ok_or_else(|| {
-                    let f = &ws.module(href.fref().module).functions[href.fref().func];
-                    err(f.name_span, "shader profile: helper has no concrete plan")
-                })?;
+            let body_plan = self.concrete_plans.get(&href.inst).ok_or_else(|| {
+                let f = &ws.module(href.fref().module).functions[href.fref().func];
+                err(f.name_span, "shader profile: helper has no concrete plan")
+            })?;
             out.push_str(&emit_fn_def_with(
                 ws,
                 interner,
@@ -3983,12 +4437,7 @@ fn plan_stage_from_view(
         dependencies: view.dependencies.clone(),
         concrete_plans: Arc::clone(concrete_plans),
     };
-    let ir = skull_codegen_shader::plan_stage_from_concrete(
-        ws,
-        scx,
-        &input,
-        &GlslShaderPolicy,
-    )?;
+    let ir = skull_codegen_shader::plan_stage_from_concrete(ws, scx, &input, &GlslShaderPolicy)?;
     let (mut uses_idiv, mut uses_imod) = (false, false);
     for body in ir.bodies.values().chain(std::iter::once(&ir.body)) {
         for (_, inst) in body.insts.iter() {
@@ -4024,7 +4473,10 @@ fn reject_population_cycles(
             let f = &ws.module(node.fref().module).functions[node.fref().func];
             return Err(err(
                 f.name_span,
-                format!("shader profile: recursion through `{}` is not allowed on GLSL", f.name),
+                format!(
+                    "shader profile: recursion through `{}` is not allowed on GLSL",
+                    f.name
+                ),
             ));
         }
         if !done.insert(node.clone()) {
@@ -4093,10 +4545,21 @@ fn plan_shader_entry_inner(
     match shader_stage(f) {
         Some("fragment") => {}
         Some(stage) => {
-            return Err(err(f.name_span, format!("shader entry: @shader({stage}) is not supported yet -- only @shader(fragment) (vertex entries are A2)")));
+            return Err(err(
+                f.name_span,
+                format!(
+                    "shader entry: @shader({stage}) is not supported yet -- only @shader(fragment) (vertex entries are A2)"
+                ),
+            ));
         }
         None => {
-            return Err(err(f.name_span, format!("shader entry: `{}` has no @shader(fragment) annotation", f.name)));
+            return Err(err(
+                f.name_span,
+                format!(
+                    "shader entry: `{}` has no @shader(fragment) annotation",
+                    f.name
+                ),
+            ));
         }
     }
     // The entry's signature is validated by its STAGE classification, never by
@@ -4109,7 +4572,9 @@ fn plan_shader_entry_inner(
         stages: vec![IrStage::Fragment],
         uniform_groups: class
             .uniform_group
-            .map(|g| logical_uniform_group(ws, UniformRole::Stage(IrStage::Fragment), g, f.name_span))
+            .map(|g| {
+                logical_uniform_group(ws, UniformRole::Stage(IrStage::Fragment), g, f.name_span)
+            })
             .transpose()?
             .into_iter()
             .collect(),
@@ -4120,11 +4585,7 @@ fn plan_shader_entry_inner(
             vec![IrStage::Fragment],
             f.name_span,
         )?,
-        bare_samplers: bare_sampler_list(
-            &class.samplers,
-            &class.global_params,
-            IrStage::Fragment,
-        ),
+        bare_samplers: bare_sampler_list(&class.samplers, &class.global_params, IrStage::Fragment),
         // A1's entry returns one colour; MRT is an A2 feature.
         fragment_output: FragmentOutput::Single(WireKind::F32x4),
         // A1 has no vertex stage of its own (it rides the fullscreen quad), and
@@ -4136,7 +4597,13 @@ fn plan_shader_entry_inner(
     check_stage_sampler_budget(&interface, IrStage::Fragment, &f.name, f.name_span)?;
     let abi = ShaderAbiPlan::glsl(&interface, f.name_span)?;
     let shape = entry_shape(&class.global_params, &class.sampler_params, &interface);
-    Ok(EntryPlan { fref, shape, stage, interface, abi })
+    Ok(EntryPlan {
+        fref,
+        shape,
+        stage,
+        interface,
+        abi,
+    })
 }
 
 /// Validate one shader ENTRY exactly as emission does, without emitting.
@@ -4151,7 +4618,13 @@ fn plan_shader_entry_inner(
 /// takes no substitution -- so a caller holding concrete instances must not
 /// hand this a generic declaration and read the answer as concrete.
 pub fn check_entry_profile(ws: &Workspace, fref: FuncRef) -> Result<(), CompilerError> {
-    let session = shader_program_session(ws, ShaderProgram { vert: None, frag: fref })?;
+    let session = shader_program_session(
+        ws,
+        ShaderProgram {
+            vert: None,
+            frag: fref,
+        },
+    )?;
     check_entry_profile_with_view(ws, &session.scx, &session.view)
 }
 
@@ -4180,7 +4653,13 @@ pub fn emit_shader_entry_with_dependencies(
     profile: GlslProfile,
 ) -> Result<ShaderEmission, CompilerError> {
     let fref = resolve_root(ws, mid, root)?;
-    let session = shader_program_session(ws, ShaderProgram { vert: None, frag: fref })?;
+    let session = shader_program_session(
+        ws,
+        ShaderProgram {
+            vert: None,
+            frag: fref,
+        },
+    )?;
     emit_shader_entry_with_view(ws, &session.scx, &session.view, profile)
 }
 
@@ -4224,8 +4703,12 @@ fn render_shader_entry(
     // A1 goes through the SAME resolver A2 does. Rendering every ABI block
     // directly would emit one the interface never claimed, which is exactly
     // what the program-wide validation exists to refuse.
-    let program =
-        ProgramAbi::of(&plan.interface, &plan.abi, &[IrStage::Fragment], f.name_span)?;
+    let program = ProgramAbi::of(
+        &plan.interface,
+        &plan.abi,
+        &[IrStage::Fragment],
+        f.name_span,
+    )?;
     let resolved = program.stage(IrStage::Fragment)?;
 
     let mut px = String::new();
@@ -4240,7 +4723,11 @@ fn render_shader_entry(
     // stay loose beside it and bind by unit. Declared from the INTERFACE -- the
     // grouped ones in the ABI's unit order, then the bare ones.
     for (n, k) in &resolved.samplers {
-        px.push_str(&format!("uniform {} {};\n", sampler_glsl_ty(*k).uniform_decl(), n));
+        px.push_str(&format!(
+            "uniform {} {};\n",
+            sampler_glsl_ty(*k).uniform_decl(),
+            n
+        ));
     }
     px.push('\n');
     px.push_str(&plan.stage.render_helpers(ws, interner)?);
@@ -4281,7 +4768,6 @@ fn render_shader_entry(
         },
     })
 }
-
 
 // --- A2: vertex+fragment pipeline ---------------------
 
@@ -4397,15 +4883,26 @@ fn anno_int(annos: &[bone_semantic::hir::Annotation], name: &str) -> Option<i64>
 /// likewise `uniform_array_block`'s answer, not this function's -- it rejects
 /// `Vec3`/`Mat4`/`bool` with a span, so re-stating the set here would be the same
 /// drift one level down.
-fn uniform_array_elem(ws: &Workspace, ty: TyId, span: Span) -> Result<Option<WireKind>, CompilerError> {
-    let Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), params }) = ty_expr(ws, ty) else {
+fn uniform_array_elem(
+    ws: &Workspace,
+    ty: TyId,
+    span: Span,
+) -> Result<Option<WireKind>, CompilerError> {
+    let Some(TypeExpr::App {
+        ctor: TypeCtor::Nominal(n),
+        params,
+    }) = ty_expr(ws, ty)
+    else {
         return Ok(None);
     };
     if n.as_str() != "UniformArray" {
         return Ok(None);
     }
     let Some(first) = params.into_iter().next() else {
-        return Err(err(span, "shader: UniformArray needs an element type argument"));
+        return Err(err(
+            span,
+            "shader: UniformArray needs an element type argument",
+        ));
     };
     let ety = ty.with_idx(first);
     if let Some(k) = skull_mir::gpu_layout::wire_kind(ws, ety) {
@@ -4416,11 +4913,20 @@ fn uniform_array_elem(ws: &Workspace, ty: TyId, span: Span) -> Result<Option<Wir
     // it knows why the type is unusable, and this function does not. Replacing
     // it with a fabricated `?` would discard the compiler's own information at
     // exactly the point the author needs it.
-    let name = glsl_ty(ws, &SpecSubst::default(), ety, span, "uniform-array element")?;
-    Err(err(span, format!(
-        "shader: UniformArray element type `{}` has no std140 form (allowed: float, int, Vec2, Vec4)",
-        name.name()
-    )))
+    let name = glsl_ty(
+        ws,
+        &SpecSubst::default(),
+        ety,
+        span,
+        "uniform-array element",
+    )?;
+    Err(err(
+        span,
+        format!(
+            "shader: UniformArray element type `{}` has no std140 form (allowed: float, int, Vec2, Vec4)",
+            name.name()
+        ),
+    ))
 }
 
 /// One classified `UniformArray<T>` param: where it sits in the entry's
@@ -4445,7 +4951,9 @@ fn classify_array_param(
     span: Span,
     stage: &str,
 ) -> Result<Option<ArrayParam>, CompilerError> {
-    let Some(elem) = uniform_array_elem(ws, pd.ty, span)? else { return Ok(None) };
+    let Some(elem) = uniform_array_elem(ws, pd.ty, span)? else {
+        return Ok(None);
+    };
     let anno = pd.annotations.iter().find(|a| a.name.name.as_str() == "size").ok_or_else(|| {
         err(span, format!(
             "shader {stage}: uniform-array param `{}` needs @size(N) (the declared GLSL array capacity)",
@@ -4464,7 +4972,12 @@ fn classify_array_param(
     })?;
     Ok(Some(ArrayParam {
         param: i,
-        decl: ArrayMemberDecl { name: pd.name, elem, capacity, span: anno.span },
+        decl: ArrayMemberDecl {
+            name: pd.name,
+            elem,
+            capacity,
+            span: anno.span,
+        },
     }))
 }
 
@@ -4478,12 +4991,14 @@ fn classify_array_param(
 /// declaration and a layout drift into disagreeing, and "one layout authority"
 /// would stop being true the moment it existed.
 fn uniform_array_block_decl(plan: &UniformArrayBlockPlan) -> String {
-    let mut s = format!(
-        "layout(std140) uniform {} {{\n",
-        plan.block_name
-    );
+    let mut s = format!("layout(std140) uniform {} {{\n", plan.block_name);
     for m in &plan.members {
-        s.push_str(&format!("    {} {}[{}];\n", wire_glsl_ty(m.elem), m.name, m.capacity));
+        s.push_str(&format!(
+            "    {} {}[{}];\n",
+            wire_glsl_ty(m.elem),
+            m.name,
+            m.capacity
+        ));
     }
     s.push_str("};\n");
     s
@@ -4532,17 +5047,40 @@ fn uniform_block_decl(block: &GlslUniformBlock) -> String {
 
 /// Attribute/uniform fields of a struct param, GLSL-typed (a sampler-typed field
 /// rejects -- samplers are params, not struct fields).
-fn struct_gl_fields(ws: &Workspace, ty: TyId, span: Span, what: &str) -> Result<Vec<(Ustr, GlslTy)>, CompilerError> {
+fn struct_gl_fields(
+    ws: &Workspace,
+    ty: TyId,
+    span: Span,
+    what: &str,
+) -> Result<Vec<(Ustr, GlslTy)>, CompilerError> {
     let sd = struct_def_of(ws, ty)
         .ok_or_else(|| err(span, format!("shader: {what} must be a value struct")))?;
     let mut out = Vec::new();
     for fd in &sd.fields {
-        let fty = glsl_ty(ws, &SpecSubst::default(), fd.ty, span, &format!("{what} field `{}`", fd.name))?;
+        let fty = glsl_ty(
+            ws,
+            &SpecSubst::default(),
+            fd.ty,
+            span,
+            &format!("{what} field `{}`", fd.name),
+        )?;
         if fty.is_sampler() {
-            return Err(err(span, format!("shader: {what} field `{}` cannot be a sampler -- pass samplers as fn params", fd.name)));
+            return Err(err(
+                span,
+                format!(
+                    "shader: {what} field `{}` cannot be a sampler -- pass samplers as fn params",
+                    fd.name
+                ),
+            ));
         }
         if fty == GlslTy::Bvec3 {
-            return Err(err(span, format!("shader: {what} field `{}` cannot be a bvec3 -- bool-vector {what}s are unsupported (bvec3 is local/temp only)", fd.name)));
+            return Err(err(
+                span,
+                format!(
+                    "shader: {what} field `{}` cannot be a bvec3 -- bool-vector {what}s are unsupported (bvec3 is local/temp only)",
+                    fd.name
+                ),
+            ));
         }
         out.push((fd.name, fty));
     }
@@ -4584,10 +5122,18 @@ fn texture_group_samplers(
     span: Span,
     stage: &str,
 ) -> Result<Vec<(usize, Ustr, SamplerKind)>, CompilerError> {
-    let sname = nominal_name(ws, ty)
-        .ok_or_else(|| err(span, format!("shader {stage}: an @textures param must be a struct")))?;
+    let sname = nominal_name(ws, ty).ok_or_else(|| {
+        err(
+            span,
+            format!("shader {stage}: an @textures param must be a struct"),
+        )
+    })?;
     let ts = texture_slots(ws, sname).map_err(|e| err(span, e.message))?;
-    Ok(ts.slots.iter().map(|s| (param_index, s.name, s.kind)).collect())
+    Ok(ts
+        .slots
+        .iter()
+        .map(|s| (param_index, s.name, s.kind))
+        .collect())
 }
 
 /// Every param role, so a check that means "all the others" cannot go stale by
@@ -4608,7 +5154,9 @@ fn reject_conflicting_texture_role(
         if has_anno(annos, other) {
             return Err(err(
                 span,
-                format!("shader {stage}: param `{name}` has conflicting role markers (@textures and @{other})"),
+                format!(
+                    "shader {stage}: param `{name}` has conflicting role markers (@textures and @{other})"
+                ),
             ));
         }
     }
@@ -4648,7 +5196,10 @@ fn classify_vertex(ws: &Workspace, f: &Function) -> Result<VertexShape, Compiler
         if has_anno(&pd.annotations, "textures") {
             reject_conflicting_texture_role(&pd.annotations, pd.name, span, "vertex")?;
             if texture_group.is_some() {
-                return Err(err(span, "shader vertex: at most one @textures group param is allowed -- one group is the binding set"));
+                return Err(err(
+                    span,
+                    "shader vertex: at most one @textures group param is allowed -- one group is the binding set",
+                ));
             }
             texture_group = nominal_name(ws, pd.ty);
             samplers.extend(texture_group_samplers(ws, pd.ty, i, span, "vertex")?);
@@ -4658,12 +5209,21 @@ fn classify_vertex(ws: &Workspace, f: &Function) -> Result<VertexShape, Compiler
         match glsl_ty(ws, &SpecSubst::default(), pd.ty, span, "parameter") {
             Ok(t) if t.is_sampler() => samplers.push((i, pd.name, sampler_kind_of(t))),
             Ok(other) => {
-                return Err(err(span, format!(
-                    "shader vertex: param `{}` ({}) must be an @attr/@instance/@uniform value struct or a Sampler2D",
-                    pd.name, other.name()
-                )));
+                return Err(err(
+                    span,
+                    format!(
+                        "shader vertex: param `{}` ({}) must be an @attr/@instance/@uniform value struct or a Sampler2D",
+                        pd.name,
+                        other.name()
+                    ),
+                ));
             }
-            Err(_) => match (has_anno(&pd.annotations, "attr"), has_anno(&pd.annotations, "instance"), has_anno(&pd.annotations, "uniform"), has_anno(&pd.annotations, "engine")) {
+            Err(_) => match (
+                has_anno(&pd.annotations, "attr"),
+                has_anno(&pd.annotations, "instance"),
+                has_anno(&pd.annotations, "uniform"),
+                has_anno(&pd.annotations, "engine"),
+            ) {
                 (true, false, false, false) => per_vertex.push(i),
                 (false, true, false, false) => instanced.push(i),
                 (false, false, true, false) => {
@@ -4675,20 +5235,37 @@ fn classify_vertex(ws: &Workspace, f: &Function) -> Result<VertexShape, Compiler
                     engine_params.push(i);
                 }
                 (false, false, false, false) => {
-                    return Err(err(span, format!(
-                        "shader vertex: value-struct param `{}` needs a role marker -- @attr (per-vertex attributes), @instance (per-instance attributes), @uniform (this shader's uniform block), or @engine (the engine-owned frame/pass block)",
-                        pd.name
-                    )));
+                    return Err(err(
+                        span,
+                        format!(
+                            "shader vertex: value-struct param `{}` needs a role marker -- @attr (per-vertex attributes), @instance (per-instance attributes), @uniform (this shader's uniform block), or @engine (the engine-owned frame/pass block)",
+                            pd.name
+                        ),
+                    ));
                 }
-                _ => return Err(err(span, format!("shader vertex: param `{}` has conflicting role markers", pd.name))),
+                _ => {
+                    return Err(err(
+                        span,
+                        format!(
+                            "shader vertex: param `{}` has conflicting role markers",
+                            pd.name
+                        ),
+                    ));
+                }
             },
         }
     }
     if uniform_params.len() > 1 {
-        return Err(err(span, "shader vertex: at most one @uniform struct param is allowed"));
+        return Err(err(
+            span,
+            "shader vertex: at most one @uniform struct param is allowed",
+        ));
     }
     if engine_params.len() > 1 {
-        return Err(err(span, "shader vertex: at most one @engine struct param is allowed -- it is one engine-owned block"));
+        return Err(err(
+            span,
+            "shader vertex: at most one @engine struct param is allowed -- it is one engine-owned block",
+        ));
     }
     let mut attr_params = Vec::new();
     let mut inputs: Vec<LogicalVertexInput> = Vec::new();
@@ -4702,22 +5279,36 @@ fn classify_vertex(ws: &Workspace, f: &Function) -> Result<VertexShape, Compiler
         // reject bool too, but only as "not a vertex-attribute type".
         let gl_fields = struct_gl_fields(ws, f.param_decls[i].ty, span, "attribute")?;
         if let Some((n, _)) = gl_fields.iter().find(|&&(_, t)| t == GlslTy::Bool) {
-            return Err(err(span, format!(
-                "shader vertex: attribute `{n}` cannot be bool (GLSL forbids bool vertex inputs) -- use int or float"
-            )));
+            return Err(err(
+                span,
+                format!(
+                    "shader vertex: attribute `{n}` cannot be bool (GLSL forbids bool vertex inputs) -- use int or float"
+                ),
+            ));
         }
-        let sname = nominal_name(ws, f.param_decls[i].ty)
-            .ok_or_else(|| err(span, "shader vertex: attribute param must be a value struct"))?;
+        let sname = nominal_name(ws, f.param_decls[i].ty).ok_or_else(|| {
+            err(
+                span,
+                "shader vertex: attribute param must be a value struct",
+            )
+        })?;
         let va = vertex_attrs(ws, sname).map_err(|e| err(span, e.message))?;
         inputs.push(LogicalVertexInput {
             struct_name: NominalType::of(ws, sname),
-            rate: if n < instanced_from { VertexRate::PerVertex } else { VertexRate::PerInstance },
+            rate: if n < instanced_from {
+                VertexRate::PerVertex
+            } else {
+                VertexRate::PerInstance
+            },
             attrs: va.attrs.iter().map(|a| (a.name, a.kind)).collect(),
         });
     }
-    let varyings_ty = f
-        .return_ty
-        .ok_or_else(|| err(span, "shader vertex: entry must return a varyings value struct"))?;
+    let varyings_ty = f.return_ty.ok_or_else(|| {
+        err(
+            span,
+            "shader vertex: entry must return a varyings value struct",
+        )
+    })?;
     Ok(VertexShape {
         uniform_group,
         engine_params,
@@ -4742,36 +5333,64 @@ fn classify_varyings(ws: &Workspace, ty: TyId, span: Span) -> Result<VaryingsSha
     let mut has_position = false;
     let mut varyings = Vec::new();
     for fd in &sd.fields {
-        let fty = glsl_ty(ws, &SpecSubst::default(), fd.ty, span, &format!("varying `{}`", fd.name))?;
+        let fty = glsl_ty(
+            ws,
+            &SpecSubst::default(),
+            fd.ty,
+            span,
+            &format!("varying `{}`", fd.name),
+        )?;
         let kind = wire_kind_of(fty);
         if fty == GlslTy::Bvec3 {
-            return Err(err(span, format!("shader: varying `{}` cannot be a bvec3 (GLSL forbids bool-vector interpolants) -- bvec3 is local/temp only", fd.name)));
+            return Err(err(
+                span,
+                format!(
+                    "shader: varying `{}` cannot be a bvec3 (GLSL forbids bool-vector interpolants) -- bvec3 is local/temp only",
+                    fd.name
+                ),
+            ));
         }
         if fd.name.as_str() == "position" {
             if fty != GlslTy::Vec4 {
-                return Err(err(span, "shader: the varyings `position` field must be Vec4 (it becomes gl_Position)"));
+                return Err(err(
+                    span,
+                    "shader: the varyings `position` field must be Vec4 (it becomes gl_Position)",
+                ));
             }
             has_position = true;
             continue;
         }
         let flat = has_anno(&fd.annotations, "flat");
         if fty == GlslTy::Int && !flat {
-            return Err(err(span, format!(
-                "shader: int-typed varying `{}` needs @flat (GLSL requires flat integer interpolation)",
-                fd.name
-            )));
+            return Err(err(
+                span,
+                format!(
+                    "shader: int-typed varying `{}` needs @flat (GLSL requires flat integer interpolation)",
+                    fd.name
+                ),
+            ));
         }
         // GLSL forbids bool in/out variables entirely (even flat).
         if fty == GlslTy::Bool {
-            return Err(err(span, format!(
-                "shader: varying `{}` cannot be bool (GLSL forbids bool varyings) -- use float or int + @flat",
-                fd.name
-            )));
+            return Err(err(
+                span,
+                format!(
+                    "shader: varying `{}` cannot be bool (GLSL forbids bool varyings) -- use float or int + @flat",
+                    fd.name
+                ),
+            ));
         }
-        varyings.push(LogicalVarying { name: fd.name, kind, flat });
+        varyings.push(LogicalVarying {
+            name: fd.name,
+            kind,
+            flat,
+        });
     }
     if !has_position {
-        return Err(err(span, "shader: the varyings struct must have a `position: Vec4` field (it becomes gl_Position)"));
+        return Err(err(
+            span,
+            "shader: the varyings struct must have a `position: Vec4` field (it becomes gl_Position)",
+        ));
     }
     Ok(VaryingsShape { varyings })
 }
@@ -4779,13 +5398,25 @@ fn classify_varyings(ws: &Workspace, ty: TyId, span: Span) -> Result<VaryingsSha
 /// Classify a pipeline `@shader(fragment)` entry: the first param is the varyings
 /// struct (its type must equal the vertex entry's return type); the rest are
 /// `@uniform` structs and samplers.
-fn classify_pipeline_fragment(ws: &Workspace, f: &Function, vert_varyings_ty: TyId) -> Result<FragShape, CompilerError> {
+fn classify_pipeline_fragment(
+    ws: &Workspace,
+    f: &Function,
+    vert_varyings_ty: TyId,
+) -> Result<FragShape, CompilerError> {
     let span = f.name_span;
     let Some(first) = f.param_decls.first() else {
-        return Err(err(span, "shader fragment: the entry must take the varyings struct as its first param"));
+        return Err(err(
+            span,
+            "shader fragment: the entry must take the varyings struct as its first param",
+        ));
     };
-    if nominal_name(ws, first.ty).is_none() || nominal_name(ws, first.ty) != nominal_name(ws, vert_varyings_ty) {
-        return Err(err(span, "shader fragment: the first param must be the varyings struct (the vertex entry's return type) -- the pair's varyings types do not match"));
+    if nominal_name(ws, first.ty).is_none()
+        || nominal_name(ws, first.ty) != nominal_name(ws, vert_varyings_ty)
+    {
+        return Err(err(
+            span,
+            "shader fragment: the first param must be the varyings struct (the vertex entry's return type) -- the pair's varyings types do not match",
+        ));
     }
     let (mut uniform_params, mut samplers, mut arrays) = (Vec::new(), Vec::new(), Vec::new());
     let mut texture_params = Vec::new();
@@ -4801,7 +5432,10 @@ fn classify_pipeline_fragment(ws: &Workspace, f: &Function, vert_varyings_ty: Ty
         if has_anno(&pd.annotations, "textures") {
             reject_conflicting_texture_role(&pd.annotations, pd.name, span, "fragment")?;
             if texture_group.is_some() {
-                return Err(err(span, "shader fragment: at most one @textures group param is allowed -- one group is the binding set"));
+                return Err(err(
+                    span,
+                    "shader fragment: at most one @textures group param is allowed -- one group is the binding set",
+                ));
             }
             texture_group = nominal_name(ws, pd.ty);
             samplers.extend(texture_group_samplers(ws, pd.ty, i, span, "fragment")?);
@@ -4811,12 +5445,25 @@ fn classify_pipeline_fragment(ws: &Workspace, f: &Function, vert_varyings_ty: Ty
         match glsl_ty(ws, &SpecSubst::default(), pd.ty, span, "parameter") {
             Ok(t) if t.is_sampler() => samplers.push((i, pd.name, sampler_kind_of(t))),
             Ok(other) => {
-                return Err(err(span, format!("shader fragment: param `{}` ({}) must be @uniform or a Sampler2D", pd.name, other.name())));
+                return Err(err(
+                    span,
+                    format!(
+                        "shader fragment: param `{}` ({}) must be @uniform or a Sampler2D",
+                        pd.name,
+                        other.name()
+                    ),
+                ));
             }
             Err(_) => {
                 if has_anno(&pd.annotations, "engine") {
                     if has_anno(&pd.annotations, "uniform") {
-                        return Err(err(span, format!("shader fragment: param `{}` has conflicting role markers", pd.name)));
+                        return Err(err(
+                            span,
+                            format!(
+                                "shader fragment: param `{}` has conflicting role markers",
+                                pd.name
+                            ),
+                        ));
                     }
                     // The group's fields are validated where they become the
                     // interface's members (`uniform_group_members`), which is
@@ -4827,7 +5474,13 @@ fn classify_pipeline_fragment(ws: &Workspace, f: &Function, vert_varyings_ty: Ty
                     engine_params.push(i);
                 } else {
                     if !has_anno(&pd.annotations, "uniform") {
-                        return Err(err(span, format!("shader fragment: value-struct param `{}` needs @uniform (this shader's block) or @engine (the engine-owned frame/pass block)", pd.name)));
+                        return Err(err(
+                            span,
+                            format!(
+                                "shader fragment: value-struct param `{}` needs @uniform (this shader's block) or @engine (the engine-owned frame/pass block)",
+                                pd.name
+                            ),
+                        ));
                     }
                     uniform_group = nominal_name(ws, pd.ty);
                     uniform_params.push(i);
@@ -4836,10 +5489,16 @@ fn classify_pipeline_fragment(ws: &Workspace, f: &Function, vert_varyings_ty: Ty
         }
     }
     if uniform_params.len() > 1 {
-        return Err(err(span, "shader fragment: at most one @uniform struct param is allowed"));
+        return Err(err(
+            span,
+            "shader fragment: at most one @uniform struct param is allowed",
+        ));
     }
     if engine_params.len() > 1 {
-        return Err(err(span, "shader fragment: at most one @engine struct param is allowed -- it is one engine-owned block"));
+        return Err(err(
+            span,
+            "shader fragment: at most one @engine struct param is allowed -- it is one engine-owned block",
+        ));
     }
     // Return: a single Vec4 (implicit FragColor), a single int (an R32I-only
     // target, e.g. the silhouette mask), OR a value struct of Vec4/int fields
@@ -4848,7 +5507,10 @@ fn classify_pipeline_fragment(ws: &Workspace, f: &Function, vert_varyings_ty: Ty
     // A `FragDepth: float` field is gl_FragDepth, not an MRT output: it takes
     // no location, so the colour fields keep theirs.
     let mut frag_depth = false;
-    let output = match f.return_ty.map(|rt| (rt, glsl_ty(ws, &SpecSubst::default(), rt, span, "return"))) {
+    let output = match f
+        .return_ty
+        .map(|rt| (rt, glsl_ty(ws, &SpecSubst::default(), rt, span, "return")))
+    {
         Some((_, Ok(GlslTy::Vec4))) => FragmentOutput::Single(WireKind::F32x4),
         Some((_, Ok(GlslTy::Int))) => FragmentOutput::Single(WireKind::I32),
         Some((rt, Err(_))) => {
@@ -4857,31 +5519,52 @@ fn classify_pipeline_fragment(ws: &Workspace, f: &Function, vert_varyings_ty: Ty
             })?;
             let mut outs = Vec::new();
             for fd in &sd.fields {
-                let fty = glsl_ty(ws, &SpecSubst::default(), fd.ty, span, &format!("MRT output `{}`", fd.name))?;
+                let fty = glsl_ty(
+                    ws,
+                    &SpecSubst::default(),
+                    fd.ty,
+                    span,
+                    &format!("MRT output `{}`", fd.name),
+                )?;
                 if fd.name.as_str() == FRAG_DEPTH_FIELD {
                     if fty != GlslTy::Float {
-                        return Err(err(span, format!(
-                            "shader fragment: `{FRAG_DEPTH_FIELD}` must be float (window-space depth in [0,1], written to gl_FragDepth), found {}",
-                            fty.name()
-                        )));
+                        return Err(err(
+                            span,
+                            format!(
+                                "shader fragment: `{FRAG_DEPTH_FIELD}` must be float (window-space depth in [0,1], written to gl_FragDepth), found {}",
+                                fty.name()
+                            ),
+                        ));
                     }
                     frag_depth = true;
                     continue;
                 }
                 if fty != GlslTy::Vec4 && fty != GlslTy::Int {
-                    return Err(err(span, format!(
-                        "shader fragment: MRT output `{}` ({}) must be Vec4 or int (each output is a `layout(location=N) out <ty>`)",
-                        fd.name, fty.name()
-                    )));
+                    return Err(err(
+                        span,
+                        format!(
+                            "shader fragment: MRT output `{}` ({}) must be Vec4 or int (each output is a `layout(location=N) out <ty>`)",
+                            fd.name,
+                            fty.name()
+                        ),
+                    ));
                 }
                 outs.push((fd.name, wire_kind_of(fty)));
             }
             if outs.is_empty() {
-                return Err(err(span, "shader fragment: the MRT output struct must have at least one colour (Vec4/int) field besides `FragDepth`"));
+                return Err(err(
+                    span,
+                    "shader fragment: the MRT output struct must have at least one colour (Vec4/int) field besides `FragDepth`",
+                ));
             }
             FragmentOutput::Mrt(outs)
         }
-        _ => return Err(err(span, "shader fragment: the return type must be Vec4 (FragColor), int (an integer id target), or a value struct of Vec4/int fields (MRT outputs)")),
+        _ => {
+            return Err(err(
+                span,
+                "shader fragment: the return type must be Vec4 (FragColor), int (an integer id target), or a value struct of Vec4/int fields (MRT outputs)",
+            ));
+        }
     };
     Ok(FragShape {
         uniform_group,
@@ -4900,12 +5583,22 @@ fn classify_pipeline_fragment(ws: &Workspace, f: &Function, vert_varyings_ty: Ty
 
 /// Reject a fragment-stage read of the varyings `position` field: it is
 /// gl_Position (vertex-only), not a fragment input.
-fn reject_position_read(ws: &Workspace, mf: &MirFunc, varyings_cell: Idx<Cell>, span: Span) -> Result<(), CompilerError> {
+fn reject_position_read(
+    ws: &Workspace,
+    mf: &MirFunc,
+    varyings_cell: Idx<Cell>,
+    span: Span,
+) -> Result<(), CompilerError> {
     let _ = ws;
     for (_, inst) in mf.insts.iter() {
         if let Inst::Field { base, field } = inst {
-            if field.as_str() == "position" && matches!(mf.insts[*base], Inst::Load(c) if c == varyings_cell) {
-                return Err(err(span, "shader fragment: `position` is gl_Position (vertex-only) and is not emitted as a varying -- it cannot be read in the fragment stage"));
+            if field.as_str() == "position"
+                && matches!(mf.insts[*base], Inst::Load(c) if c == varyings_cell)
+            {
+                return Err(err(
+                    span,
+                    "shader fragment: `position` is gl_Position (vertex-only) and is not emitted as a varying -- it cannot be read in the fragment stage",
+                ));
             }
         }
     }
@@ -4921,8 +5614,11 @@ fn emit_vertex_stage(
     program: &ProgramAbi<'_>,
 ) -> Result<(String, Vec<FuncRef>), CompilerError> {
     let resolved = program.stage(IrStage::Vertex)?;
-    let (vert_block, engine_block, array_block) =
-        (resolved.uniform_block, resolved.engine_block, resolved.array_block);
+    let (vert_block, engine_block, array_block) = (
+        resolved.uniform_block,
+        resolved.engine_block,
+        resolved.array_block,
+    );
     let shape = EntryShape {
         global_params: v
             .attr_params
@@ -4944,17 +5640,28 @@ fn emit_vertex_stage(
         sampler_params: v.samplers.iter().map(|&(i, _, _)| i).collect(),
         arrays: v.arrays.iter().map(|a| a.param).collect(),
         main_out: Some(MainOut {
-            fields: iface.varyings.iter().map(|v| (v.name, wire_glsl(v.kind))).collect(),
+            fields: iface
+                .varyings
+                .iter()
+                .map(|v| (v.name, wire_glsl(v.kind)))
+                .collect(),
             builtin: Some(("position", "gl_Position", GlslTy::Vec4)),
         }),
         reserved: entry_reserved_names(iface),
     };
-    let (mf, helpers, dependencies) =
-        (&stage.ir.body, stage.render_helpers(ws, interner)?, stage.dependencies());
+    let (mf, helpers, dependencies) = (
+        &stage.ir.body,
+        stage.render_helpers(ws, interner)?,
+        stage.dependencies(),
+    );
 
     let mut out = String::new();
     for (n, t, loc) in &program.attributes {
-        out.push_str(&format!("layout (location = {loc}) in {} {};\n", t.name(), n));
+        out.push_str(&format!(
+            "layout (location = {loc}) in {} {};\n",
+            t.name(),
+            n
+        ));
     }
     out.push('\n');
     // The engine block first: it binds at index 0 and both stages declare the
@@ -4979,7 +5686,11 @@ fn emit_vertex_stage(
     // an identifier the driver has never seen.
     for (n, t) in &resolved.samplers {
         let (n, t) = (n, *t);
-        out.push_str(&format!("uniform {} {};\n", sampler_glsl_ty(t).uniform_decl(), n));
+        out.push_str(&format!(
+            "uniform {} {};\n",
+            sampler_glsl_ty(t).uniform_decl(),
+            n
+        ));
     }
     if vert_block.is_some() || engine_block.is_some() || array_block.is_some() {
         out.push('\n');
@@ -5017,17 +5728,23 @@ fn emit_fragment_stage(
     iface: &ShaderInterfacePlan,
     program: &ProgramAbi<'_>,
 ) -> Result<(String, Vec<FuncRef>), CompilerError> {
-    let span = ws.module(stage.ir.entry.fref().module).functions[stage.ir.entry.fref().func].name_span;
+    let span =
+        ws.module(stage.ir.entry.fref().module).functions[stage.ir.entry.fref().func].name_span;
     let resolved = program.stage(IrStage::Fragment)?;
-    let (frag_block, engine_block, array_block) =
-        (resolved.uniform_block, resolved.engine_block, resolved.array_block);
+    let (frag_block, engine_block, array_block) = (
+        resolved.uniform_block,
+        resolved.engine_block,
+        resolved.array_block,
+    );
     let fref = stage.ir.entry.fref();
     // MRT: the entry is emitted as `void main()` destructuring its returned
     // output struct into the `layout(location=N) out` globals (like the vertex
     // varyings path). Single-output keeps the `vec4 <fn>()` + wrapper form.
     let main_out = interface_mrt_outputs(iface).as_ref().map(|outs| MainOut {
         fields: outs.iter().copied().collect(),
-        builtin: iface.frag_depth.then_some((FRAG_DEPTH_FIELD, "gl_FragDepth", GlslTy::Float)),
+        builtin: iface
+            .frag_depth
+            .then_some((FRAG_DEPTH_FIELD, "gl_FragDepth", GlslTy::Float)),
     });
     let shape = EntryShape {
         global_params: std::iter::once(fs.varyings_param)
@@ -5046,7 +5763,11 @@ fn emit_fragment_stage(
         main_out,
         reserved: entry_reserved_names(iface),
     };
-    let (mf, helpers, dependencies) = (&stage.ir.body, stage.render_helpers(ws, interner)?, stage.dependencies());
+    let (mf, helpers, dependencies) = (
+        &stage.ir.body,
+        stage.render_helpers(ws, interner)?,
+        stage.dependencies(),
+    );
 
     let mut out = String::new();
     for (n, t, flat) in interface_varyings(iface) {
@@ -5060,7 +5781,10 @@ fn emit_fragment_stage(
             // FRAGMENT stage is being emitted -- an inconsistent plan, not a
             // shape to guess a `vec4` for.
             let FragmentOutput::Single(k) = iface.fragment_output else {
-                return Err(err(span, "internal: the interface declares no fragment output, but a fragment stage is being emitted"));
+                return Err(err(
+                    span,
+                    "internal: the interface declares no fragment output, but a fragment stage is being emitted",
+                ));
             };
             out.push_str(&format!("out {} FragColor;\n\n", wire_glsl(k).name()))
         }
@@ -5083,7 +5807,11 @@ fn emit_fragment_stage(
         out.push_str(&uniform_array_block_decl(plan));
     }
     for (n, t) in &resolved.samplers {
-        out.push_str(&format!("uniform {} {};\n", sampler_glsl_ty(*t).uniform_decl(), n));
+        out.push_str(&format!(
+            "uniform {} {};\n",
+            sampler_glsl_ty(*t).uniform_decl(),
+            n
+        ));
     }
     out.push('\n');
     out.push_str(&helpers);
@@ -5122,10 +5850,25 @@ fn interface_global_names(iface: &ShaderInterfacePlan) -> Vec<Ustr> {
         .vertex_inputs
         .iter()
         .flat_map(|i| i.attrs.iter().map(|(n, _)| *n))
-        .chain(iface.uniform_groups.iter().flat_map(|g| g.members.iter().map(|(n, _)| *n)))
-        .chain(iface.array_groups.iter().flat_map(|g| g.members.iter().map(|m| m.name)))
+        .chain(
+            iface
+                .uniform_groups
+                .iter()
+                .flat_map(|g| g.members.iter().map(|(n, _)| *n)),
+        )
+        .chain(
+            iface
+                .array_groups
+                .iter()
+                .flat_map(|g| g.members.iter().map(|m| m.name)),
+        )
         .chain(iface.varyings.iter().map(|v| v.name))
-        .chain(iface.textures.iter().flat_map(|t| t.samplers.iter().map(|(n, _)| *n)))
+        .chain(
+            iface
+                .textures
+                .iter()
+                .flat_map(|t| t.samplers.iter().map(|(n, _)| *n)),
+        )
         .chain(iface.bare_samplers.iter().map(|s| s.name))
         .chain(match &iface.fragment_output {
             FragmentOutput::Mrt(outs) => outs.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
@@ -5181,10 +5924,7 @@ fn entry_reserved_names(iface: &ShaderInterfacePlan) -> Vec<Ustr> {
 /// construction: every name a program declares is in there exactly once, so a
 /// role added to the interface joins this check by existing rather than by
 /// someone remembering to chain it.
-fn check_pipeline_collisions(
-    iface: &ShaderInterfacePlan,
-    span: Span,
-) -> Result<(), CompilerError> {
+fn check_pipeline_collisions(iface: &ShaderInterfacePlan, span: Span) -> Result<(), CompilerError> {
     // gl_Position is always reserved. `FragColor` is reserved only for the
     // single-output form -- with MRT the outputs are explicit named fields (one
     // of which may itself be `FragColor`), so they go through the collision check
@@ -5195,7 +5935,12 @@ fn check_pipeline_collisions(
     }
     for n in interface_global_names(iface) {
         if !seen.insert(n) {
-            return Err(err(span, format!("shader pipeline: name `{n}` would collide (attributes, uniforms, engine-block members, varyings, samplers and reserved names share one GLSL namespace across both stages)")));
+            return Err(err(
+                span,
+                format!(
+                    "shader pipeline: name `{n}` would collide (attributes, uniforms, engine-block members, varyings, samplers and reserved names share one GLSL namespace across both stages)"
+                ),
+            ));
         }
     }
     Ok(())
@@ -5227,9 +5972,12 @@ fn check_block_name_collisions<'a>(
         .chain(arrays.map(|p| (p.block_name, p.block_name)));
     for (logical, physical) in names {
         if !seen.insert(physical) {
-            return Err(err(span, format!(
-                "shader pipeline: uniform block name `{logical}` is declared twice -- a stage's array block is named `<entry>_Arrays`, so a @uniform group of that name collides with it"
-            )));
+            return Err(err(
+                span,
+                format!(
+                    "shader pipeline: uniform block name `{logical}` is declared twice -- a stage's array block is named `<entry>_Arrays`, so a @uniform group of that name collides with it"
+                ),
+            ));
         }
     }
     Ok(())
@@ -5249,10 +5997,7 @@ pub fn emit_shader_pipeline(
     frag_root: &str,
     profile: GlslProfile,
 ) -> Result<String, CompilerError> {
-    Ok(emit_shader_pipeline_with_dependencies(
-        ws, mid, vert_root, frag_root, profile,
-    )?
-    .source)
+    Ok(emit_shader_pipeline_with_dependencies(ws, mid, vert_root, frag_root, profile)?.source)
 }
 
 /// **The one validated plan for an A2 `(vertex, fragment)` program.**
@@ -5325,13 +6070,19 @@ fn plan_shader_pipeline_inner(
     if shader_stage(vf) != Some("vertex") {
         return Err(err(
             vf.name_span,
-            format!("shader pipeline: the vertex root `{}` must carry @shader(vertex)", vf.name),
+            format!(
+                "shader pipeline: the vertex root `{}` must carry @shader(vertex)",
+                vf.name
+            ),
         ));
     }
     if shader_stage(ff) != Some("fragment") {
         return Err(err(
             ff.name_span,
-            format!("shader pipeline: the fragment root `{}` must carry @shader(fragment)", ff.name),
+            format!(
+                "shader pipeline: the fragment root `{}` must carry @shader(fragment)",
+                ff.name
+            ),
         ));
     }
 
@@ -5370,9 +6121,12 @@ fn plan_shader_pipeline_inner(
     // that check belongs there rather than here.
     let engine_group = match (vshape.engine_group, fshape.engine_group) {
         (Some(v), Some(f)) if v != f => {
-            return Err(err(vf.name_span, format!(
-                "shader pipeline: the stages declare different @engine groups (`{v}` and `{f}`) -- the engine block is one per program"
-            )));
+            return Err(err(
+                vf.name_span,
+                format!(
+                    "shader pipeline: the stages declare different @engine groups (`{v}` and `{f}`) -- the engine block is one per program"
+                ),
+            ));
         }
         (v, f) => v.or(f),
     };
@@ -5391,9 +6145,12 @@ fn plan_shader_pipeline_inner(
     // unlike `@uniform`, which is one block per STAGE.
     let group = match (vshape.texture_group, fshape.texture_group) {
         (Some(v), Some(f)) if v != f => {
-            return Err(err(vf.name_span, format!(
-                "shader pipeline: the stages declare different @textures groups (`{v}` and `{f}`) -- texture units are program-scoped, so one program has one group"
-            )));
+            return Err(err(
+                vf.name_span,
+                format!(
+                    "shader pipeline: the stages declare different @textures groups (`{v}` and `{f}`) -- texture units are program-scoped, so one program has one group"
+                ),
+            ));
         }
         (v, f) => v.or(f),
     };
@@ -5419,16 +6176,23 @@ fn plan_shader_pipeline_inner(
         varyings: varyings.varyings.clone(),
         fragment_output: fshape.output.clone(),
         frag_depth: fshape.frag_depth,
-        bare_samplers: bare_sampler_list(
-            &vshape.samplers,
-            &vshape.texture_params,
-            IrStage::Vertex,
-        )
-        .into_iter()
-        .chain(bare_sampler_list(&fshape.samplers, &fshape.texture_params, IrStage::Fragment))
-        .collect(),
-        uniform_groups: engine_logical.into_iter().chain(vert_group).chain(frag_group).collect(),
-        array_groups: vert_array_group.into_iter().chain(frag_array_group).collect(),
+        bare_samplers: bare_sampler_list(&vshape.samplers, &vshape.texture_params, IrStage::Vertex)
+            .into_iter()
+            .chain(bare_sampler_list(
+                &fshape.samplers,
+                &fshape.texture_params,
+                IrStage::Fragment,
+            ))
+            .collect(),
+        uniform_groups: engine_logical
+            .into_iter()
+            .chain(vert_group)
+            .chain(frag_group)
+            .collect(),
+        array_groups: vert_array_group
+            .into_iter()
+            .chain(frag_array_group)
+            .collect(),
         textures,
         compute: None,
     };
@@ -5445,9 +6209,21 @@ fn plan_shader_pipeline_inner(
 
     let vert = plan_stage_from_view(ws, scx, stage_views.0, Stage::Vertex, concrete_plans)?;
     let frag = plan_stage_from_view(ws, scx, stage_views.1, Stage::Fragment, concrete_plans)?;
-    reject_position_read(ws, &frag.ir.body, frag.ir.body.params[fshape.varyings_param], ff.name_span)?;
+    reject_position_read(
+        ws,
+        &frag.ir.body,
+        frag.ir.body.params[fshape.varyings_param],
+        ff.name_span,
+    )?;
 
-    Ok(PipelinePlan { vshape, fshape, vert, frag, interface, abi })
+    Ok(PipelinePlan {
+        vshape,
+        fshape,
+        vert,
+        frag,
+        interface,
+        abi,
+    })
 }
 
 /// The PIPELINE counterpart of [`check_entry_profile`]: emission's own
@@ -5463,7 +6239,10 @@ pub fn check_pipeline_profile(
 ) -> Result<(), CompilerError> {
     let session = shader_program_session(
         ws,
-        ShaderProgram { vert: Some(vfref), frag: ffref },
+        ShaderProgram {
+            vert: Some(vfref),
+            frag: ffref,
+        },
     )?;
     check_pipeline_profile_with_view(ws, &session.scx, &session.view)
 }
@@ -5493,7 +6272,10 @@ pub fn emit_shader_pipeline_with_dependencies(
     let ffref = resolve_root(ws, mid, frag_root)?;
     let session = shader_program_session(
         ws,
-        ShaderProgram { vert: Some(vfref), frag: ffref },
+        ShaderProgram {
+            vert: Some(vfref),
+            frag: ffref,
+        },
     )?;
     emit_shader_pipeline_with_view(ws, &session.scx, &session.view, profile)
 }
@@ -5522,7 +6304,8 @@ fn render_shader_pipeline(
 ) -> Result<ShaderEmission, CompilerError> {
     // Validated ONCE for the program: an unknown binding belongs to no stage,
     // so re-running the check per stage says nothing the first run did not.
-    let vspan = ws.module(plan.vert.ir.entry.fref().module).functions[plan.vert.ir.entry.fref().func]
+    let vspan = ws.module(plan.vert.ir.entry.fref().module).functions
+        [plan.vert.ir.entry.fref().func]
         .name_span;
     let program = ProgramAbi::of(
         &plan.interface,
@@ -5587,9 +6370,9 @@ pub fn emit_shader(
     let annotated = roots
         .iter()
         .filter(|r| {
-            resolve_root(ws, mid, r)
-                .ok()
-                .is_some_and(|fref| shader_stage(&ws.module(fref.module).functions[fref.func]).is_some())
+            resolve_root(ws, mid, r).ok().is_some_and(|fref| {
+                shader_stage(&ws.module(fref.module).functions[fref.func]).is_some()
+            })
         })
         .count();
     match annotated {
@@ -5639,7 +6422,10 @@ pub struct ValueTestShaders {
 fn profile_header(profile: GlslProfile) -> (&'static str, &'static str) {
     match profile {
         GlslProfile::Core330 => ("#version 330 core", ""),
-        GlslProfile::Es300 => ("#version 300 es", "precision highp float;\nprecision highp int;\n"),
+        GlslProfile::Es300 => (
+            "#version 300 es",
+            "precision highp float;\nprecision highp int;\n",
+        ),
     }
 }
 
@@ -5663,7 +6449,10 @@ pub fn emit_value_test(
             "value test: the root fn must take no parameters (a @test fn)",
         ));
     }
-    let ret = match f.return_ty.map(|rt| glsl_ty(ws, &SpecSubst::default(), rt, f.name_span, "return")) {
+    let ret = match f
+        .return_ty
+        .map(|rt| glsl_ty(ws, &SpecSubst::default(), rt, f.name_span, "return"))
+    {
         Some(Ok(GlslTy::Int)) => ValueTestRet::Int,
         Some(Ok(GlslTy::Float)) => ValueTestRet::Float,
         Some(Ok(GlslTy::Bool)) => ValueTestRet::Bool,
@@ -5675,13 +6464,13 @@ pub fn emit_value_test(
                      values are read back today)",
                     other.name()
                 ),
-            ))
+            ));
         }
         _ => {
             return Err(err(
                 f.name_span,
                 "value test: the root fn must return int/float/bool",
-            ))
+            ));
         }
     };
 
@@ -5707,29 +6496,36 @@ pub fn emit_value_test(
          vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));\n  \
          gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\n}}\n"
     );
-    Ok(ValueTestShaders { vertex, fragment, ret })
+    Ok(ValueTestShaders {
+        vertex,
+        fragment,
+        ret,
+    })
 }
 
 /// True iff `root` resolves to a `@shader(vertex)` fn -- the CLI routes to the
 /// two-root vertex+fragment pipeline form when any root is a vertex entry.
 pub fn is_vertex_shader_root(ws: &Workspace, mid: ModuleId, root: &str) -> bool {
-    resolve_root(ws, mid, root)
-        .ok()
-        .is_some_and(|fref| shader_stage(&ws.module(fref.module).functions[fref.func]) == Some("vertex"))
+    resolve_root(ws, mid, root).ok().is_some_and(|fref| {
+        shader_stage(&ws.module(fref.module).functions[fref.func]) == Some("vertex")
+    })
 }
 
 /// True iff `root` resolves to a `@shader(fragment)` fn -- the CLI uses this to
 /// admit `--profile` for the single-root fullscreen form while still rejecting
 /// it for the route-B fn library (which emits no `#version` line to switch).
 pub fn is_fragment_shader_root(ws: &Workspace, mid: ModuleId, root: &str) -> bool {
-    resolve_root(ws, mid, root)
-        .ok()
-        .is_some_and(|fref| shader_stage(&ws.module(fref.module).functions[fref.func]) == Some("fragment"))
+    resolve_root(ws, mid, root).ok().is_some_and(|fref| {
+        shader_stage(&ws.module(fref.module).functions[fref.func]) == Some("fragment")
+    })
 }
 
 /// The `@shader(<stage>)` annotation's stage argument, if the fn carries one.
 pub fn shader_stage(f: &Function) -> Option<&'static str> {
-    let ann = f.annotations.iter().find(|a| a.name.name.as_str() == "shader")?;
+    let ann = f
+        .annotations
+        .iter()
+        .find(|a| a.name.name.as_str() == "shader")?;
     match ann.args.first().map(|a| &a.value) {
         Some(AnnoValue::Ident(id)) if id.name.as_str() == "fragment" => Some("fragment"),
         Some(AnnoValue::Ident(id)) if id.name.as_str() == "vertex" => Some("vertex"),
@@ -5751,19 +6547,16 @@ mod assertion_flip_tests {
             })
             .collect();
         modules.push(skull_parser::parse_module(src, Ustr::from("<test>")).expect("parse"));
-        let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+        let ws =
+            bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
         let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("mid");
         (ws, mid)
     }
 
     fn lower_test_instance(ws: &Workspace, fref: FuncRef) -> (ScalarCtx, MirFunc) {
         let interner = Arc::new(MonoInterner::new());
-        let graph = skull_graph::instance_graph::build_in(
-            ws,
-            vec![fref],
-            false,
-            Arc::clone(&interner),
-        );
+        let graph =
+            skull_graph::instance_graph::build_in(ws, vec![fref], false, Arc::clone(&interner));
         let concrete = skull_graph::concrete_body::build(ws, &graph);
         let scx = ScalarCtx::new_values_first_class(ws).sharing(Arc::clone(&interner));
         let plan = concrete
@@ -5801,7 +6594,9 @@ mod assertion_flip_tests {
 
         // The coercion is present today (regression pin for the return sink).
         assert!(
-            mf.insts.iter().any(|(_, i)| matches!(i, Inst::IntToFloat(_))),
+            mf.insts
+                .iter()
+                .any(|(_, i)| matches!(i, Inst::IntToFloat(_))),
             "expected an IntToFloat coercion at the return sink"
         );
 
@@ -5821,8 +6616,13 @@ mod assertion_flip_tests {
         }
 
         let r = emit_fn_def(&ws, scx.interner(), &ShaderInstance::plain(fref), &mf);
-        let msg = r.expect_err("a missed int->float sink must be a hard emit error").message;
-        assert!(msg.contains("missed lowering sink"), "unexpected error: {msg}");
+        let msg = r
+            .expect_err("a missed int->float sink must be a hard emit error")
+            .message;
+        assert!(
+            msg.contains("missed lowering sink"),
+            "unexpected error: {msg}"
+        );
     }
 
     /// **A generic callee with no recorded instantiation is a REJECTION.**
@@ -5845,7 +6645,11 @@ mod assertion_flip_tests {
         let (scx, mut mf) = lower_test_instance(&ws, fref);
 
         // CONTROL: the record exists and the body emits against it.
-        assert_eq!(mf.spec_bindings.len(), 1, "the fixture recorded no instantiation to remove");
+        assert_eq!(
+            mf.spec_bindings.len(),
+            1,
+            "the fixture recorded no instantiation to remove"
+        );
         let ok = emit_fn_def(&ws, scx.interner(), &ShaderInstance::plain(fref), &mf)
             .expect("the body emits with its instantiation recorded");
         assert!(ok.contains("passthrough_T_spec_p_float("), "{ok}");
@@ -5878,7 +6682,10 @@ mod assertion_flip_tests {
             mf.insts.iter().any(|(_, i)| matches!(i, Inst::Call { .. })),
             "the fixture has no call to admit"
         );
-        assert!(mf.spec_bindings.is_empty(), "a non-generic callee recorded an instantiation");
+        assert!(
+            mf.spec_bindings.is_empty(),
+            "a non-generic callee recorded an instantiation"
+        );
 
         let out = emit_fn_def(&ws, scx.interner(), &ShaderInstance::plain(fref), &mf)
             .expect("a non-generic callee must be admitted with no record");
@@ -5887,7 +6694,10 @@ mod assertion_flip_tests {
 
     /// A legacy-spelled type: its key is already its symbol.
     fn nominal(name: &str) -> NominalType {
-        NominalType { key: Ustr::from(name), symbol: Ustr::from(name) }
+        NominalType {
+            key: Ustr::from(name),
+            symbol: Ustr::from(name),
+        }
     }
 
     /// A fragment-only interface with an engine group, a stage group, an array
@@ -5948,7 +6758,9 @@ mod assertion_flip_tests {
         validate_abi(&iface, &abi, Span::default()).expect("the unperturbed plan must validate");
         let program = ProgramAbi::of(&iface, &abi, &[IrStage::Fragment], Span::default())
             .expect("the unperturbed plan must resolve");
-        let ok = program.stage(IrStage::Fragment).expect("the fragment projection");
+        let ok = program
+            .stage(IrStage::Fragment)
+            .expect("the fragment projection");
         assert!(ok.uniform_block.is_some() && ok.engine_block.is_some());
         assert!(ok.array_block.is_some());
         assert_eq!(ok.samplers.len(), 2);
@@ -5962,12 +6774,14 @@ mod assertion_flip_tests {
 
         // MISSING stage block.
         let mut m = abi.clone();
-        m.uniform_blocks.retain(|(b, _)| *b != UNIFORM_BLOCK_BINDING_FRAGMENT);
+        m.uniform_blocks
+            .retain(|(b, _)| *b != UNIFORM_BLOCK_BINDING_FRAGMENT);
         assert!(reject(&m, "a missing stage block").contains("has no block for"));
 
         // MISSING @engine block -- silently omitted before.
         let mut m = abi.clone();
-        m.uniform_blocks.retain(|(b, _)| *b != UNIFORM_BLOCK_BINDING_ENGINE);
+        m.uniform_blocks
+            .retain(|(b, _)| *b != UNIFORM_BLOCK_BINDING_ENGINE);
         assert!(reject(&m, "a missing @engine block").contains("EngineU"));
 
         // MISSING array block, over an interface that DOES declare one -- the
@@ -6069,10 +6883,14 @@ mod assertion_flip_tests {
                 .unwrap_or_else(|| panic!("{what} must reject"))
                 .message
         };
-        assert!(reject(vec![Ustr::from("a"), Ustr::from("a")], "a duplicated unit")
-            .contains("more than one unit"));
-        assert!(reject(vec![Ustr::from("a"), Ustr::from("zzz")], "an alien unit")
-            .contains("does not name"));
+        assert!(
+            reject(vec![Ustr::from("a"), Ustr::from("a")], "a duplicated unit")
+                .contains("more than one unit")
+        );
+        assert!(
+            reject(vec![Ustr::from("a"), Ustr::from("zzz")], "an alien unit")
+                .contains("does not name")
+        );
         // The MISSING branch: fewer units than the group names.
         assert!(reject(vec![Ustr::from("a")], "a sampler with no unit").contains("gives no unit"));
     }
@@ -6098,7 +6916,10 @@ mod assertion_flip_tests {
         };
         let abi = ShaderAbiPlan::glsl(&iface, Span::default()).expect("lay out");
         // CONTROL: distinct locations validate.
-        assert_eq!(abi.attribute_locations, vec![(Ustr::from("a"), 0), (Ustr::from("b"), 1)]);
+        assert_eq!(
+            abi.attribute_locations,
+            vec![(Ustr::from("a"), 0), (Ustr::from("b"), 1)]
+        );
         validate_abi(&iface, &abi, Span::default()).expect("distinct locations must validate");
 
         let mut overlap = abi.clone();
@@ -6146,7 +6967,10 @@ mod assertion_flip_tests {
             .err()
             .expect("an undeclared stage must reject")
             .message;
-        assert!(msg.contains("vertex") && msg.contains("does not declare"), "{msg}");
+        assert!(
+            msg.contains("vertex") && msg.contains("does not declare"),
+            "{msg}"
+        );
 
         // ...and once the interface declares it, the same request succeeds --
         // so the rejection is about the census and not about Vertex.
@@ -6218,24 +7042,25 @@ mod assertion_flip_tests {
         let ff = resolve_root(&ws, mid, "of").expect("root");
         let session = shader_program_session(
             &ws,
-            ShaderProgram { vert: Some(vf), frag: ff },
+            ShaderProgram {
+                vert: Some(vf),
+                frag: ff,
+            },
         )
         .expect("the fixture must realize");
         let mut plan = plan_shader_pipeline_from_view(&ws, &session.scx, &session.view)
             .expect("the fixture must plan");
 
         // CONTROL: it renders with the output declared.
-        assert!(matches!(plan.interface.fragment_output, FragmentOutput::Single(_)));
+        assert!(matches!(
+            plan.interface.fragment_output,
+            FragmentOutput::Single(_)
+        ));
         render_shader_pipeline(&ws, session.scx.interner(), &plan, GlslProfile::Core330)
             .expect("the control must render");
 
         plan.interface.fragment_output = FragmentOutput::None;
-        let msg = render_shader_pipeline(
-            &ws,
-            session.scx.interner(),
-            &plan,
-            GlslProfile::Core330,
-        )
+        let msg = render_shader_pipeline(&ws, session.scx.interner(), &plan, GlslProfile::Core330)
             .err()
             .expect("a fragment stage with no output must reject")
             .message;
@@ -6265,7 +7090,11 @@ mod assertion_flip_tests {
         let (scx, base) = lower_test_instance(&ws, fref);
 
         // CONTROL: the recorded key has the declared arity, and the body emits.
-        let iid = *base.spec_bindings.keys().next().expect("a recorded instantiation");
+        let iid = *base
+            .spec_bindings
+            .keys()
+            .next()
+            .expect("a recorded instantiation");
         assert_eq!(
             base.spec_bindings[&iid].args.len(),
             2,
@@ -6281,7 +7110,8 @@ mod assertion_flip_tests {
         ] {
             let mut mf = base.clone();
             let callee = base.spec_bindings[&iid].func;
-            mf.spec_bindings.insert(iid, Instance::intern(scx.interner(), callee, key));
+            mf.spec_bindings
+                .insert(iid, Instance::intern(scx.interner(), callee, key));
             let msg = emit_fn_def(&ws, scx.interner(), &ShaderInstance::plain(fref), &mf)
                 .err()
                 .unwrap_or_else(|| panic!("a {label} key must reject"))
@@ -6305,7 +7135,9 @@ mod assertion_flip_tests {
         let passthrough = view
             .order
             .iter()
-            .find(|inst| ws.module(inst.func.module).functions[inst.func.func].name == "passthrough")
+            .find(|inst| {
+                ws.module(inst.func.module).functions[inst.func.func].name == "passthrough"
+            })
             .cloned()
             .expect("generic helper is retained");
         let plan = Arc::make_mut(&mut view.concrete_plans)
@@ -6316,7 +7148,11 @@ mod assertion_flip_tests {
 
         let err = emit_shader_library_with_view(&ws, &session.scx, &view)
             .expect_err("a concrete result plan disagreement must reject GLSL emission");
-        assert!(err.message.contains("return type `string`"), "unexpected error: {}", err.message);
+        assert!(
+            err.message.contains("return type `string`"),
+            "unexpected error: {}",
+            err.message
+        );
     }
 
     #[test]
@@ -6333,7 +7169,10 @@ mod assertion_flip_tests {
             .concrete_plans
             .get(&caller_inst)
             .expect("caller has a concrete plan");
-        assert!(!caller_plan.callee_signatures.is_empty(), "call signature population is empty");
+        assert!(
+            !caller_plan.callee_signatures.is_empty(),
+            "call signature population is empty"
+        );
 
         let scx = &session.scx;
         let mut body = skull_mir::lower::lower_instance_with_plans(
@@ -6348,7 +7187,10 @@ mod assertion_flip_tests {
             .iter()
             .find_map(|(iid, inst)| matches!(inst, Inst::Call { .. }).then_some(iid))
             .expect("caller has a direct call");
-        assert!(body.callee_instances.contains_key(&call), "concrete call has no instance record");
+        assert!(
+            body.callee_instances.contains_key(&call),
+            "concrete call has no instance record"
+        );
         body.callee_instances.clear();
         let missing_owner = emit_fn_def_with(
             &ws,
@@ -6359,7 +7201,10 @@ mod assertion_flip_tests {
             Some(caller_plan),
         )
         .expect_err("a concrete call without its instance record must reject");
-        assert!(missing_owner.message.contains("no recorded instantiation"), "{missing_owner}");
+        assert!(
+            missing_owner.message.contains("no recorded instantiation"),
+            "{missing_owner}"
+        );
 
         let mut view = session.view.clone();
         let caller_plan = Arc::make_mut(&mut view.concrete_plans)
@@ -6404,7 +7249,8 @@ mod value_test_shader {
             })
             .collect();
         modules.push(skull_parser::parse_module(src, Ustr::from("<test>")).expect("parse"));
-        let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+        let ws =
+            bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
         let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("mid");
         (ws, mid)
     }
@@ -6414,10 +7260,27 @@ mod value_test_shader {
         let (ws, mid) = build_ws("fn t() -> int { return min(3, 5) }");
         let s = emit_value_test(&ws, mid, "t", GlslProfile::Core330).expect("emit");
         assert_eq!(s.ret, ValueTestRet::Int);
-        assert!(s.fragment.starts_with("#version 330 core\n"), "{}", s.fragment);
-        assert!(s.fragment.contains("layout(location = 0) out int _rock_value_out;"), "{}", s.fragment);
-        assert!(s.fragment.contains("_rock_value_out = t_0();"), "{}", s.fragment);
-        assert!(s.fragment.contains("int t_0()"), "callee def present: {}", s.fragment);
+        assert!(
+            s.fragment.starts_with("#version 330 core\n"),
+            "{}",
+            s.fragment
+        );
+        assert!(
+            s.fragment
+                .contains("layout(location = 0) out int _rock_value_out;"),
+            "{}",
+            s.fragment
+        );
+        assert!(
+            s.fragment.contains("_rock_value_out = t_0();"),
+            "{}",
+            s.fragment
+        );
+        assert!(
+            s.fragment.contains("int t_0()"),
+            "callee def present: {}",
+            s.fragment
+        );
         assert!(s.vertex.contains("gl_VertexID"), "{}", s.vertex);
     }
 
@@ -6426,8 +7289,16 @@ mod value_test_shader {
         let (ws, mid) = build_ws("fn t() -> float { return clamp(9.0, 0.0, 5.0) }");
         let s = emit_value_test(&ws, mid, "t", GlslProfile::Core330).expect("emit");
         assert_eq!(s.ret, ValueTestRet::Float);
-        assert!(s.fragment.contains("out float _rock_value_out;"), "{}", s.fragment);
-        assert!(s.fragment.contains("_rock_value_out = t_0();"), "{}", s.fragment);
+        assert!(
+            s.fragment.contains("out float _rock_value_out;"),
+            "{}",
+            s.fragment
+        );
+        assert!(
+            s.fragment.contains("_rock_value_out = t_0();"),
+            "{}",
+            s.fragment
+        );
     }
 
     #[test]
@@ -6435,16 +7306,32 @@ mod value_test_shader {
         let (ws, mid) = build_ws("fn t() -> bool { return 3.0 == 3.0 }");
         let s = emit_value_test(&ws, mid, "t", GlslProfile::Core330).expect("emit");
         assert_eq!(s.ret, ValueTestRet::Bool);
-        assert!(s.fragment.contains("out int _rock_value_out;"), "{}", s.fragment);
-        assert!(s.fragment.contains("_rock_value_out = (t_0() ? 1 : 0);"), "{}", s.fragment);
+        assert!(
+            s.fragment.contains("out int _rock_value_out;"),
+            "{}",
+            s.fragment
+        );
+        assert!(
+            s.fragment.contains("_rock_value_out = (t_0() ? 1 : 0);"),
+            "{}",
+            s.fragment
+        );
     }
 
     #[test]
     fn es_profile_carries_version_and_precision() {
         let (ws, mid) = build_ws("fn t() -> float { return abs(-6.5) }");
         let s = emit_value_test(&ws, mid, "t", GlslProfile::Es300).expect("emit");
-        assert!(s.fragment.starts_with("#version 300 es\n"), "{}", s.fragment);
-        assert!(s.fragment.contains("precision highp float;"), "{}", s.fragment);
+        assert!(
+            s.fragment.starts_with("#version 300 es\n"),
+            "{}",
+            s.fragment
+        );
+        assert!(
+            s.fragment.contains("precision highp float;"),
+            "{}",
+            s.fragment
+        );
         assert!(s.vertex.starts_with("#version 300 es\n"), "{}", s.vertex);
     }
 

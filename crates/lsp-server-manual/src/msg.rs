@@ -160,16 +160,27 @@ impl<'de> serde::Deserialize<'de> for Request {
             fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
                 write!(f, "struct Request")
             }
-            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Request, A::Error> {
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Request, A::Error> {
                 let mut id: Option<RequestId> = None;
                 let mut method: Option<String> = None;
                 let mut params = serde_json::Value::Null;
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
-                        "id" => { id = Some(map.next_value()?); }
-                        "method" => { method = Some(map.next_value()?); }
-                        "params" => { params = map.next_value()?; }
-                        _ => { let _ = map.next_value::<serde_json::Value>()?; }
+                        "id" => {
+                            id = Some(map.next_value()?);
+                        }
+                        "method" => {
+                            method = Some(map.next_value()?);
+                        }
+                        "params" => {
+                            params = map.next_value()?;
+                        }
+                        _ => {
+                            let _ = map.next_value::<serde_json::Value>()?;
+                        }
                     }
                 }
                 Ok(Request {
@@ -213,16 +224,27 @@ impl<'de> serde::Deserialize<'de> for ResponseError {
             fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
                 write!(f, "struct ResponseError")
             }
-            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<ResponseError, A::Error> {
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<ResponseError, A::Error> {
                 let mut code: Option<i32> = None;
                 let mut message: Option<String> = None;
                 let mut data: Option<serde_json::Value> = None;
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
-                        "code" => { code = Some(map.next_value()?); }
-                        "message" => { message = Some(map.next_value()?); }
-                        "data" => { data = map.next_value()?; }
-                        _ => { let _ = map.next_value::<serde_json::Value>()?; }
+                        "code" => {
+                            code = Some(map.next_value()?);
+                        }
+                        "message" => {
+                            message = Some(map.next_value()?);
+                        }
+                        "data" => {
+                            data = map.next_value()?;
+                        }
+                        _ => {
+                            let _ = map.next_value::<serde_json::Value>()?;
+                        }
                     }
                 }
                 Ok(ResponseError {
@@ -249,8 +271,12 @@ impl serde::Serialize for Response {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;
         let mut n = 1;
-        if self.result.is_some() { n += 1; }
-        if self.error.is_some() { n += 1; }
+        if self.result.is_some() {
+            n += 1;
+        }
+        if self.error.is_some() {
+            n += 1;
+        }
         let mut m = s.serialize_map(Some(n))?;
         m.serialize_entry("id", &self.id)?;
         if let Some(ref r) = self.result {
@@ -270,16 +296,27 @@ impl<'de> serde::Deserialize<'de> for Response {
             fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
                 write!(f, "struct Response")
             }
-            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Response, A::Error> {
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Response, A::Error> {
                 let mut id: Option<RequestId> = None;
                 let mut result: Option<serde_json::Value> = None;
                 let mut error: Option<ResponseError> = None;
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
-                        "id" => { id = Some(map.next_value()?); }
-                        "result" => { result = map.next_value()?; }
-                        "error" => { error = map.next_value()?; }
-                        _ => { let _ = map.next_value::<serde_json::Value>()?; }
+                        "id" => {
+                            id = Some(map.next_value()?);
+                        }
+                        "result" => {
+                            result = map.next_value()?;
+                        }
+                        "error" => {
+                            error = map.next_value()?;
+                        }
+                        _ => {
+                            let _ = map.next_value::<serde_json::Value>()?;
+                        }
                     }
                 }
                 Ok(Response {
@@ -321,14 +358,23 @@ impl<'de> serde::Deserialize<'de> for Notification {
             fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
                 write!(f, "struct Notification")
             }
-            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Notification, A::Error> {
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Notification, A::Error> {
                 let mut method: Option<String> = None;
                 let mut params = serde_json::Value::Null;
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
-                        "method" => { method = Some(map.next_value()?); }
-                        "params" => { params = map.next_value()?; }
-                        _ => { let _ = map.next_value::<serde_json::Value>()?; }
+                        "method" => {
+                            method = Some(map.next_value()?);
+                        }
+                        "params" => {
+                            params = map.next_value()?;
+                        }
+                        _ => {
+                            let _ = map.next_value::<serde_json::Value>()?;
+                        }
                     }
                 }
                 Ok(Notification {
@@ -356,7 +402,9 @@ impl serde::Serialize for Message {
 impl<'de> serde::Deserialize<'de> for Message {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let v = serde_json::Value::deserialize(d)?;
-        let obj = v.as_object().ok_or_else(|| serde::de::Error::custom("expected JSON object for LSP message"))?;
+        let obj = v
+            .as_object()
+            .ok_or_else(|| serde::de::Error::custom("expected JSON object for LSP message"))?;
         let has_id = obj.contains_key("id");
         let has_method = obj.contains_key("method");
         match (has_id, has_method) {
@@ -426,7 +474,10 @@ impl Message {
         // Serialize as {"jsonrpc":"2.0", ...message fields...}
         let inner = serde_json::to_value(self).map_err(invalid_data)?;
         let mut map = serde_json::Map::new();
-        map.insert("jsonrpc".to_string(), serde_json::Value::String("2.0".to_string()));
+        map.insert(
+            "jsonrpc".to_string(),
+            serde_json::Value::String("2.0".to_string()),
+        );
         if let serde_json::Value::Object(inner_map) = inner {
             map.extend(inner_map);
         }
@@ -437,17 +488,33 @@ impl Message {
 
 impl Response {
     pub fn new_ok<R: serde::Serialize>(id: RequestId, result: R) -> Response {
-        Response { id, result: Some(serde_json::to_value(result).unwrap()), error: None }
+        Response {
+            id,
+            result: Some(serde_json::to_value(result).unwrap()),
+            error: None,
+        }
     }
     pub fn new_err(id: RequestId, code: i32, message: String) -> Response {
-        let error = ResponseError { code, message, data: None };
-        Response { id, result: None, error: Some(error) }
+        let error = ResponseError {
+            code,
+            message,
+            data: None,
+        };
+        Response {
+            id,
+            result: None,
+            error: Some(error),
+        }
     }
 }
 
 impl Request {
     pub fn new<P: serde::Serialize>(id: RequestId, method: String, params: P) -> Request {
-        Request { id, method, params: serde_json::to_value(params).unwrap() }
+        Request {
+            id,
+            method,
+            params: serde_json::to_value(params).unwrap(),
+        }
     }
     pub fn extract<P: DeserializeOwned>(
         self,
@@ -458,7 +525,10 @@ impl Request {
         }
         match serde_json::from_value(self.params) {
             Ok(params) => Ok((self.id, params)),
-            Err(error) => Err(ExtractError::JsonError { method: self.method, error }),
+            Err(error) => Err(ExtractError::JsonError {
+                method: self.method,
+                error,
+            }),
         }
     }
     pub(crate) fn is_shutdown(&self) -> bool {
@@ -471,7 +541,10 @@ impl Request {
 
 impl Notification {
     pub fn new(method: String, params: impl serde::Serialize) -> Notification {
-        Notification { method, params: serde_json::to_value(params).unwrap() }
+        Notification {
+            method,
+            params: serde_json::to_value(params).unwrap(),
+        }
     }
     pub fn extract<P: DeserializeOwned>(
         self,
@@ -482,7 +555,10 @@ impl Notification {
         }
         match serde_json::from_value(self.params) {
             Ok(params) => Ok(params),
-            Err(error) => Err(ExtractError::JsonError { method: self.method, error }),
+            Err(error) => Err(ExtractError::JsonError {
+                method: self.method,
+                error,
+            }),
         }
     }
     pub(crate) fn is_exit(&self) -> bool {
@@ -510,8 +586,9 @@ fn read_msg_text(inp: &mut dyn BufRead) -> io::Result<Option<String>> {
         }
         let mut parts = buf.splitn(2, ": ");
         let header_name = parts.next().unwrap();
-        let header_value =
-            parts.next().ok_or_else(|| invalid_data!("malformed header: {:?}", buf))?;
+        let header_value = parts
+            .next()
+            .ok_or_else(|| invalid_data!("malformed header: {:?}", buf))?;
         if header_name.eq_ignore_ascii_case("Content-Length") {
             size = Some(header_value.parse::<usize>().map_err(invalid_data)?);
         }

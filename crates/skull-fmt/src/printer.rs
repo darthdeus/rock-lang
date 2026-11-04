@@ -8,9 +8,9 @@
 
 use std::collections::HashSet;
 
-use crate::doc::{hardline, line, nil, softline, Doc};
-use crate::trivia::Trivia;
 use crate::FormatConfig;
+use crate::doc::{Doc, hardline, line, nil, softline};
+use crate::trivia::Trivia;
 use rock_core::Span;
 use rock_tokenizer::{TokenKind, Tokenizer};
 use skull_parser::ast::*;
@@ -135,8 +135,7 @@ impl<'a> Printer<'a> {
             // At the top level the parser captures a trailing comment as its own
             // `Comment` item; trivia already re-emits it as a trailing comment on
             // the preceding item, so skip it here to avoid double output.
-            if matches!(item.kind, ItemKind::Comment(_))
-                && prev_end == Some(item.span.line_range.0)
+            if matches!(item.kind, ItemKind::Comment(_)) && prev_end == Some(item.span.line_range.0)
             {
                 continue;
             }
@@ -149,7 +148,9 @@ impl<'a> Printer<'a> {
                 // separated from its neighbour by a blank line; runs of one-line
                 // decls (globals, operators, inline/extern fns, newtypes) stay
                 // adjacent. A leading comment stays attached to its item.
-                let source_blanks = self.trivia.blank_count_between(prev, self.item_top_line(item));
+                let source_blanks = self
+                    .trivia
+                    .blank_count_between(prev, self.item_top_line(item));
                 let force = !prev_was_comment && (prev_multiline || cur_multiline);
                 let min_blanks = if force { 1 } else { 0 };
                 for _ in 0..source_blanks.max(min_blanks) {
@@ -277,9 +278,17 @@ impl<'a> Printer<'a> {
         // here. Raw-sliced kinds already carry it in `item.span`.
         let structural = matches!(
             item.kind,
-            ItemKind::Function(_) | ItemKind::Global(_) | ItemKind::Struct(_) | ItemKind::Enum(_) | ItemKind::Newtype(_)
+            ItemKind::Function(_)
+                | ItemKind::Global(_)
+                | ItemKind::Struct(_)
+                | ItemKind::Enum(_)
+                | ItemKind::Newtype(_)
         );
-        let mut parts = if structural { item_visibility(item.vis.as_ref()) } else { Vec::new() };
+        let mut parts = if structural {
+            item_visibility(item.vis.as_ref())
+        } else {
+            Vec::new()
+        };
         let decl_line = self.item_decl_line(item);
         let annos = &item.annotations;
         for (i, anno) in annos.iter().enumerate() {
@@ -296,7 +305,10 @@ impl<'a> Printer<'a> {
                 parts.push(hardline());
                 // Standalone comments between annotation lines (the parser
                 // attaches none of them to the item, so recover from trivia).
-                for (_, t) in self.trivia.standalone_comments_between(anno.span.line_range.1, next_line) {
+                for (_, t) in self
+                    .trivia
+                    .standalone_comments_between(anno.span.line_range.1, next_line)
+                {
                     parts.push(self.comment_line(t));
                     parts.push(hardline());
                 }
@@ -306,14 +318,11 @@ impl<'a> Printer<'a> {
         // width is where the signature actually starts, so the params-wrap
         // decision must account for it. It's the width of the last rendered
         // annotation line (0 when every annotation is on its own line).
-        let head_col = crate::doc::render(
-            &Doc::concat(parts.clone()),
-            1_000_000,
-            self.cfg.indent_size,
-        )
-        .rsplit('\n')
-        .next()
-        .map_or(0, |l| l.chars().count());
+        let head_col =
+            crate::doc::render(&Doc::concat(parts.clone()), 1_000_000, self.cfg.indent_size)
+                .rsplit('\n')
+                .next()
+                .map_or(0, |l| l.chars().count());
         let body = match &item.kind {
             ItemKind::Function(f) => self.function(f, head_col),
             ItemKind::Global(g) => self.global(g),
@@ -376,7 +385,9 @@ impl<'a> Printer<'a> {
         let sig_start = f.keyword_span.unwrap_or(f.span);
         let body_open = self.ast.b(&block).span.offset_range.0;
         if sig_start.line_range.0 == self.ast.b(&block).span.line_range.0
-            && self.trivia.has_block_comment_in(sig_start.offset_range.0, body_open)
+            && self
+                .trivia
+                .has_block_comment_in(sig_start.offset_range.0, body_open)
         {
             let sig = self.slice_range(sig_start.offset_range.0, body_open);
             return Doc::concat([
@@ -541,8 +552,7 @@ impl<'a> Printer<'a> {
                 // inline (`Bandage { duration: float, heal_amount: float }`);
                 // multi-line expands. Same preserve rule as struct defs.
                 if v.span.line_range.0 == v.span.line_range.1 {
-                    let inner =
-                        Doc::join(Doc::text(", "), fields.iter().map(|f| self.field(f)));
+                    let inner = Doc::join(Doc::text(", "), fields.iter().map(|f| self.field(f)));
                     return Doc::concat([name, Doc::text(" { "), inner, Doc::text(" }")]);
                 }
                 let fs = fields
@@ -550,7 +560,11 @@ impl<'a> Printer<'a> {
                     .map(|f| (self.field(f), f.span.line_range.0, f.span))
                     .collect();
                 let span = (v.span.line_range.0, v.span.line_range.1);
-                Doc::concat([name, Doc::text(" "), self.comma_block(fs, Some(span), "{", "}")])
+                Doc::concat([
+                    name,
+                    Doc::text(" "),
+                    self.comma_block(fs, Some(span), "{", "}"),
+                ])
             }
         }
     }
@@ -633,7 +647,11 @@ impl<'a> Printer<'a> {
             }
             Doc::concat(parts)
         });
-        Doc::concat([Doc::text("<"), Doc::join(Doc::text(", "), items), Doc::text(">")])
+        Doc::concat([
+            Doc::text("<"),
+            Doc::join(Doc::text(", "), items),
+            Doc::text(">"),
+        ])
     }
 
     fn params(&self, params: &[Param]) -> Doc {
@@ -674,16 +692,22 @@ impl<'a> Printer<'a> {
             .is_empty();
         if has_standalone_comments
             || params
-            .iter()
-            .any(|p| self.claimed_trailing_comment(p.span).is_some())
+                .iter()
+                .any(|p| self.claimed_trailing_comment(p.span).is_some())
         {
             let entries = params
                 .iter()
                 .enumerate()
-                .map(|(i, p)| (param_doc(p, bare_first && i == 0), p.span.line_range.0, p.span))
+                .map(|(i, p)| {
+                    (
+                        param_doc(p, bare_first && i == 0),
+                        p.span.line_range.0,
+                        p.span,
+                    )
+                })
                 .collect();
-            let body_span = has_standalone_comments
-                .then_some((first_line.saturating_sub(1), last_line + 1));
+            let body_span =
+                has_standalone_comments.then_some((first_line.saturating_sub(1), last_line + 1));
             return self.comma_block(entries, body_span, "(", ")");
         }
         let items = params
@@ -809,10 +833,9 @@ impl<'a> Printer<'a> {
         // (`a; b; c`) so they stay on that line -- a Comment statement stands
         // alone. Only when the block spans multiple lines: a whole body minified
         // onto one line (`fn f(){a;b;c}`) is still expanded one-per-line.
-        let multi_line_block = stmts
-            .first()
-            .zip(stmts.last())
-            .is_some_and(|(f, l)| self.ast.s(f).span.line_range.0 != self.ast.s(l).span.line_range.1);
+        let multi_line_block = stmts.first().zip(stmts.last()).is_some_and(|(f, l)| {
+            self.ast.s(f).span.line_range.0 != self.ast.s(l).span.line_range.1
+        });
         let mut groups: Vec<Vec<usize>> = Vec::new();
         for i in 0..stmts.len() {
             let merge = multi_line_block
@@ -1035,7 +1058,10 @@ impl<'a> Printer<'a> {
         for (gi, group) in groups.into_iter().enumerate() {
             if let Some(prev) = prev_end {
                 body.push(hardline());
-                for _ in 0..self.trivia.blank_count_between(prev, group[0].0.line_range.0) {
+                for _ in 0..self
+                    .trivia
+                    .blank_count_between(prev, group[0].0.line_range.0)
+                {
                     body.push(hardline());
                 }
             }
@@ -1167,7 +1193,10 @@ impl<'a> Printer<'a> {
                     break;
                 }
                 let (sj, pj) = cols(j);
-                if !ps.intersection(&sj).any(|c| pp.contains(c) || pj.contains(c)) {
+                if !ps
+                    .intersection(&sj)
+                    .any(|c| pp.contains(c) || pj.contains(c))
+                {
                     break;
                 }
                 members.push(j);
@@ -1201,11 +1230,17 @@ impl<'a> Printer<'a> {
         while end < b.len() && b[end] != b'\n' {
             end += 1;
         }
-        Doc::text(self.slice_range(span.offset_range.0, end).trim_end().to_string())
+        Doc::text(
+            self.slice_range(span.offset_range.0, end)
+                .trim_end()
+                .to_string(),
+        )
     }
 
     fn block_has_braces(&self, b: Idx<BlockData>) -> bool {
-        self.slice(self.ast.b(&b).span).trim_start().starts_with('{')
+        self.slice(self.ast.b(&b).span)
+            .trim_start()
+            .starts_with('{')
     }
 
     /// A single statement that pins its enclosing `block` (fn/lambda body) to the
@@ -1320,7 +1355,11 @@ impl<'a> Printer<'a> {
     }
 
     fn nested_fn_stmt(&self, f: &NestedFn) -> Doc {
-        let mut sig = vec![Doc::text("fn "), Doc::text(kw(f.name.name)), self.params(&f.params)];
+        let mut sig = vec![
+            Doc::text("fn "),
+            Doc::text(kw(f.name.name)),
+            self.params(&f.params),
+        ];
         if let Some(ret) = f.return_ty {
             sig.push(Doc::text(" -> "));
             sig.push(self.type_expr(ret));
@@ -1330,7 +1369,10 @@ impl<'a> Printer<'a> {
     }
 
     fn static_stmt(&self, st: &Static) -> Doc {
-        let mut parts = vec![Doc::text("static "), Doc::text(st.name.name.as_str().to_string())];
+        let mut parts = vec![
+            Doc::text("static "),
+            Doc::text(st.name.name.as_str().to_string()),
+        ];
         if let Some(ty) = st.ty {
             parts.push(Doc::text(": "));
             parts.push(self.type_expr(ty));
@@ -1490,7 +1532,9 @@ impl<'a> Printer<'a> {
                 }
             }
 
-            ExprKind::FunctionCall { func, args, syntax, .. } => match syntax {
+            ExprKind::FunctionCall {
+                func, args, syntax, ..
+            } => match syntax {
                 // Overloadable operators (`+ - * / %` ...) are parsed as calls
                 // with binary syntax -- render them infix. A multi-line binary is
                 // kept verbatim (see ExprKind::BinOp above).
@@ -1519,7 +1563,11 @@ impl<'a> Printer<'a> {
             ExprKind::ArrayLiteral(items) => self.list("[", "]", items, data.span),
             ExprKind::Tuple(items) => self.tuple(items, data.span),
 
-            ExprKind::StructLiteral { name, bases, fields } => {
+            ExprKind::StructLiteral {
+                name,
+                bases,
+                fields,
+            } => {
                 // Functional-update literals (`Foo { ..base, x: 1 }`) slice
                 // verbatim -- the structural struct_literal path doesn't carry
                 // bases yet, and passthrough guarantees round-trip.
@@ -1566,7 +1614,11 @@ impl<'a> Printer<'a> {
                     Some(o) => binop_str(o),
                     None => "=".to_string(),
                 };
-                Doc::concat([self.expr(*target), Doc::text(format!(" {sym} ")), self.expr(*value)])
+                Doc::concat([
+                    self.expr(*target),
+                    Doc::text(format!(" {sym} ")),
+                    self.expr(*value),
+                ])
             }
 
             ExprKind::Match { scrutinee, arms } => self.match_expr(*scrutinee, arms, data.span),
@@ -1676,7 +1728,10 @@ impl<'a> Printer<'a> {
                 }
             })
             .collect();
-        let eligible: Vec<bool> = bodies.iter().map(|b| b.line_range.0 == b.line_range.1).collect();
+        let eligible: Vec<bool> = bodies
+            .iter()
+            .map(|b| b.line_range.0 == b.line_range.1)
+            .collect();
         let mut docs: Vec<Doc> = arms.iter().map(|a| self.match_arm(a)).collect();
         // Preserve a hand-aligned run of arms (`Variant   => 0` columns); the
         // trailing comment is added by comma_block, not folded into `docs`.
@@ -1707,7 +1762,12 @@ impl<'a> Printer<'a> {
             Doc::text("match "),
             self.expr(scrutinee),
             Doc::text(" "),
-            self.comma_block(entries, Some((span.line_range.0, span.line_range.1)), "{", "}"),
+            self.comma_block(
+                entries,
+                Some((span.line_range.0, span.line_range.1)),
+                "{",
+                "}",
+            ),
         ])
     }
 
@@ -1861,7 +1921,9 @@ impl<'a> Printer<'a> {
                 .trivia
                 .standalone_comments_between(span.line_range.0, span.line_range.1)
                 .is_empty()
-            || self.trivia.has_block_comment_in(span.offset_range.0, span.offset_range.1);
+            || self
+                .trivia
+                .has_block_comment_in(span.offset_range.0, span.offset_range.1);
         // Preserve the author's layout: a call written across multiple source
         // lines expands one arg per line; one on a single line stays inline --
         // even past the width limit, so a hand-compacted call (e.g. inside a
@@ -1971,16 +2033,15 @@ impl<'a> Printer<'a> {
         // A single `.method(..)` the author broke onto its own line still lays
         // out as a chain (`recv(..)\n    .method(..)`), preserving that break --
         // the regular call path would join them and explode the method's args.
-        let broken_single = segs.len() == 1
-            && segs[0].2.line_range.0 > self.ast.e(&base).span.line_range.1;
+        let broken_single =
+            segs.len() == 1 && segs[0].2.line_range.0 > self.ast.e(&base).span.line_range.1;
         if segs.len() < 2 && !broken_single {
             return None;
         }
         segs.reverse();
-        let seg_doc =
-            |(m, a, s): &(Ustr, &[FunctionCallArg], Span)| {
-                Doc::concat([Doc::text(format!(".{}", kw(*m))), self.call_args(a, *s)])
-            };
+        let seg_doc = |(m, a, s): &(Ustr, &[FunctionCallArg], Span)| {
+            Doc::concat([Doc::text(format!(".{}", kw(*m))), self.call_args(a, *s)])
+        };
         // A call receiver (`factory().a().b()`) -- or a single broken `.method` --
         // keeps the base alone on the first line; a plain receiver (`r.a().b()`)
         // keeps its first call with it.
@@ -1988,7 +2049,10 @@ impl<'a> Printer<'a> {
         let (head, tail) = if base_is_call || broken_single {
             (self.expr(base), &segs[..])
         } else {
-            (Doc::concat([self.expr(base), seg_doc(&segs[0])]), &segs[1..])
+            (
+                Doc::concat([self.expr(base), seg_doc(&segs[0])]),
+                &segs[1..],
+            )
         };
         // Preserve the author's layout: a chain written across multiple source
         // lines breaks one call per line; one on a single line stays inline.
@@ -2025,8 +2089,13 @@ impl<'a> Printer<'a> {
     /// args must be single-line so they sit inline before the hug. Source-aware,
     /// so it preserves both a hugged call and a deliberately-broken one.
     fn hugs_trailing_arg(&self, args: &[FunctionCallArg], span: Span) -> bool {
-        let Some(last) = args.last() else { return false };
-        if last.name.is_some() || last.is_splat || last.is_spread || !self.is_huggable_arg(last.value)
+        let Some(last) = args.last() else {
+            return false;
+        };
+        if last.name.is_some()
+            || last.is_splat
+            || last.is_spread
+            || !self.is_huggable_arg(last.value)
         {
             return false;
         }
@@ -2161,7 +2230,9 @@ impl<'a> Printer<'a> {
                 .trivia
                 .standalone_comments_between(span.line_range.0, span.line_range.1)
                 .is_empty()
-            || self.trivia.has_block_comment_in(span.offset_range.0, span.offset_range.1);
+            || self
+                .trivia
+                .has_block_comment_in(span.offset_range.0, span.offset_range.1);
         if !has_comments {
             let rows = items
                 .iter()
@@ -2185,7 +2256,12 @@ impl<'a> Printer<'a> {
                 (doc, s.line_range.0, s)
             })
             .collect();
-        self.comma_block(entries, Some((span.line_range.0, span.line_range.1)), open, close)
+        self.comma_block(
+            entries,
+            Some((span.line_range.0, span.line_range.1)),
+            open,
+            close,
+        )
     }
 
     fn struct_literal(
@@ -2211,8 +2287,10 @@ impl<'a> Printer<'a> {
                     }
                 }
             }
-            let key =
-                Doc::join(Doc::text(" + "), names.iter().map(|n| Doc::text(kw(n.name))));
+            let key = Doc::join(
+                Doc::text(" + "),
+                names.iter().map(|n| Doc::text(kw(n.name))),
+            );
             Doc::concat([key, Doc::text(": "), self.expr(*value)])
         };
         let field_line = |names: &[Ident]| names.first().map(|n| n.span.line_range.0).unwrap_or(0);
@@ -2237,7 +2315,9 @@ impl<'a> Printer<'a> {
                 .trivia
                 .standalone_comments_between(span.line_range.0, span.line_range.1)
                 .is_empty()
-            || self.trivia.has_block_comment_in(span.offset_range.0, span.offset_range.1);
+            || self
+                .trivia
+                .has_block_comment_in(span.offset_range.0, span.offset_range.1);
         // Preserve the author's layout: a struct literal written across multiple
         // source lines expands one-field-per-line; one written on a single line
         // stays inline -- even past the width limit (a hand-compacted data-table
@@ -2285,7 +2365,12 @@ impl<'a> Printer<'a> {
                 .collect();
             return Doc::concat([
                 Doc::text(format!("{name} ")),
-                self.comma_block(entries, Some((span.line_range.0, span.line_range.1)), "{", "}"),
+                self.comma_block(
+                    entries,
+                    Some((span.line_range.0, span.line_range.1)),
+                    "{",
+                    "}",
+                ),
             ]);
         }
         let entries = fields.iter().map(|(names, value)| field_doc(names, value));
@@ -2320,8 +2405,7 @@ impl<'a> Printer<'a> {
                         .trivia
                         .has_block_comment_in(if_span.offset_range.0, body_span.offset_range.0)
                 {
-                    let header =
-                        self.slice_range(if_span.offset_range.0, body_span.offset_range.0);
+                    let header = self.slice_range(if_span.offset_range.0, body_span.offset_range.0);
                     parts.push(Doc::text(header.trim_end().to_string()));
                     parts.push(Doc::text(" "));
                     parts.push(self.branch_body(*body));
@@ -2452,11 +2536,10 @@ impl<'a> Printer<'a> {
             // (`Map<.., () -> Foo<Bar>>`), so a verbatim slice grabs an extra `>`.
             TypeExprKind::Function { params, ret } => {
                 let source = self.slice(data.span).trim_start();
-                let starts_fn = source.starts_with("fn")
-                    && source[2..].trim_start().starts_with('(');
-                let starts_parenthesized_fn = source.starts_with('(')
-                    && source[1..].trim_start().starts_with("fn")
-                    && {
+                let starts_fn =
+                    source.starts_with("fn") && source[2..].trim_start().starts_with('(');
+                let starts_parenthesized_fn =
+                    source.starts_with('(') && source[1..].trim_start().starts_with("fn") && {
                         let inner = source[1..].trim_start();
                         inner[2..].trim_start().starts_with('(')
                     };
@@ -2467,7 +2550,11 @@ impl<'a> Printer<'a> {
                 } else {
                     "("
                 };
-                let suffix = if starts_parenthesized_fn && !data.is_nullable { ")" } else { "" };
+                let suffix = if starts_parenthesized_fn && !data.is_nullable {
+                    ")"
+                } else {
+                    ""
+                };
                 Doc::concat([
                     Doc::text(prefix),
                     Doc::join(Doc::text(", "), params.iter().map(|p| self.type_expr(*p))),
@@ -2616,9 +2703,7 @@ impl<'a> Printer<'a> {
                     end.map(|e| self.expr(e)).unwrap_or_else(nil),
                 ])
             }
-            Pattern::Or(ps) => {
-                Doc::join(Doc::text(" | "), ps.iter().map(|p| self.pattern(p)))
-            }
+            Pattern::Or(ps) => Doc::join(Doc::text(" | "), ps.iter().map(|p| self.pattern(p))),
         }
     }
 
@@ -2729,8 +2814,14 @@ mod span_tests {
         let cfg = FormatConfig::default();
         let trivia = Trivia::harvest(src, "<span>".into()).unwrap();
         let printer = Printer::new(&ast, src, &cfg, &trivia);
-        for (lo, hi) in [(0, src.len()+1), (4, 5), (5, 2)] {
-            assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| printer.slice_range(lo, hi))).is_err(), "{lo}..{hi}");
+        for (lo, hi) in [(0, src.len() + 1), (4, 5), (5, 2)] {
+            assert!(
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                    || printer.slice_range(lo, hi)
+                ))
+                .is_err(),
+                "{lo}..{hi}"
+            );
         }
     }
 }

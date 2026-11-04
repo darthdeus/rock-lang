@@ -26,11 +26,17 @@ fn methods(src: &str) -> Vec<String> {
 }
 
 fn methods_ignoring(src: &str, ignore: impl IntoIterator<Item = Ustr>) -> Vec<String> {
-    messages(src, &LintOptions::only(["method_syntax".to_string()]).ignoring_types(ignore))
+    messages(
+        src,
+        &LintOptions::only(["method_syntax".to_string()]).ignoring_types(ignore),
+    )
 }
 
 fn messages(src: &str, opts: &LintOptions) -> Vec<String> {
-    findings_with(src, opts).iter().map(|f| f.error.message.clone()).collect()
+    findings_with(src, opts)
+        .iter()
+        .map(|f| f.error.message.clone())
+        .collect()
 }
 
 const MOB: &str = "struct Mob { hp: int }\n";
@@ -68,7 +74,11 @@ fn skips_a_first_param_that_cannot_be_a_receiver_path() {
         "fn f()",
     ] {
         let src = format!("{MOB}{sig} {{ }}\nfn main() {{ }}\n");
-        assert!(methods(&src).is_empty(), "{sig} must not be flagged: {:?}", methods(&src));
+        assert!(
+            methods(&src).is_empty(),
+            "{sig} must not be flagged: {:?}",
+            methods(&src)
+        );
     }
 }
 
@@ -116,11 +126,19 @@ fn an_enum_or_newtype_receiver_is_a_candidate_too() {
     // `Type.name` spells any nominal decl, so the candidate set is
     // structs + enums + newtypes, not structs alone.
     for decl in ["enum Phase { Idle, Busy }", "newtype Hp(int)"] {
-        let ty = if decl.starts_with("enum") { "Phase" } else { "Hp" };
+        let ty = if decl.starts_with("enum") {
+            "Phase"
+        } else {
+            "Hp"
+        };
         let src = format!("{decl}\nfn describe(p: {ty}, n: int) -> int {{ n }}\nfn main() {{ }}\n");
         let msgs = methods(&src);
         assert_eq!(msgs.len(), 1, "{decl}: {msgs:?}");
-        assert!(msgs[0].contains(&format!("fn {ty}.describe(p, n: int)")), "{}", msgs[0]);
+        assert!(
+            msgs[0].contains(&format!("fn {ty}.describe(p, n: int)")),
+            "{}",
+            msgs[0]
+        );
     }
 }
 
@@ -150,7 +168,11 @@ fn a_receiver_declared_in_a_warm_module_is_not_the_authors_to_convert() {
     sources.insert(Ustr::from(FILE), game);
     let sel = LintOptions::only(["method_syntax".to_string()]);
     let cold = lint_workspace(&ws, &FxHashSet::default(), true, &sources, &sel);
-    assert_eq!(cold.len(), 1, "both modules cold: Sprite is a user type -- {cold:?}");
+    assert_eq!(
+        cold.len(),
+        1,
+        "both modules cold: Sprite is a user type -- {cold:?}"
+    );
 
     let warm: FxHashSet<ModuleId> = ws
         .modules
@@ -171,7 +193,11 @@ fn an_ignored_receiver_type_drops_out_of_the_sweep() {
         "{MOB}struct Color {{ r: int }}\n{DAMAGE}fn tint(c: Color, n: int) -> int {{ n }}\n{CALL_MAIN}"
     );
     let all = methods_ignoring(&src, []);
-    assert_eq!(all.len(), 2, "both candidates without an ignore list: {all:?}");
+    assert_eq!(
+        all.len(),
+        2,
+        "both candidates without an ignore list: {all:?}"
+    );
 
     let kept = methods_ignoring(&src, [Ustr::from("Color")]);
     assert_eq!(kept.len(), 1, "{kept:?}");
@@ -186,8 +212,7 @@ fn only_types_is_the_whitelist_form_of_the_same_knob() {
     let src = format!(
         "{MOB}struct Color {{ r: int }}\n{DAMAGE}fn tint(c: Color, n: int) -> int {{ n }}\n{CALL_MAIN}"
     );
-    let opts = LintOptions::only(["method_syntax".to_string()])
-        .over_types([Ustr::from("Color")]);
+    let opts = LintOptions::only(["method_syntax".to_string()]).over_types([Ustr::from("Color")]);
     let msgs = messages(&src, &opts);
     assert_eq!(msgs.len(), 1, "{msgs:?}");
     assert!(msgs[0].contains("fn Color.tint"), "{}", msgs[0]);

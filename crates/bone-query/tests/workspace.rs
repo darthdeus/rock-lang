@@ -5,8 +5,8 @@
 //! rest are gap stubs that must return empty (never panic) until bone grows the
 //! query API. See query facade contract.
 
-use lsp_types::Position;
 use bone_query::BoneWorkspace;
+use lsp_types::Position;
 
 const PATH: &str = "/tmp/rock_lsp_bone_test_main.rock";
 
@@ -44,8 +44,14 @@ fn hover_reports_uint_without_erasing_its_signedness() {
         lsp_types::HoverContents::Markup(m) => m.value,
         other => panic!("expected markup hover, got {other:?}"),
     };
-    assert!(text.contains("uint"), "uint hover must keep the unsigned spelling: {text:?}");
-    assert!(!text.contains("Type: int"), "uint hover must not erase to int: {text:?}");
+    assert!(
+        text.contains("uint"),
+        "uint hover must keep the unsigned spelling: {text:?}"
+    );
+    assert!(
+        !text.contains("Type: int"),
+        "uint hover must not erase to int: {text:?}"
+    );
 }
 
 #[test]
@@ -109,7 +115,10 @@ fn hover_on_a_global_declaration_reports_its_type() {
         lsp_types::HoverContents::Markup(m) => m.value,
         other => panic!("expected markup hover, got {other:?}"),
     };
-    assert!(text.contains("int"), "global decl hover names its type: {text:?}");
+    assert!(
+        text.contains("int"),
+        "global decl hover names its type: {text:?}"
+    );
 }
 
 #[test]
@@ -126,7 +135,10 @@ fn hover_on_a_type_annotation_shows_the_definition() {
         lsp_types::HoverContents::Markup(m) => m.value,
         other => panic!("expected markup hover, got {other:?}"),
     };
-    assert!(text.contains("struct Mob"), "shows the struct def: {text:?}");
+    assert!(
+        text.contains("struct Mob"),
+        "shows the struct def: {text:?}"
+    );
     assert!(text.contains("hp: int"), "shows the field: {text:?}");
 }
 
@@ -144,14 +156,21 @@ fn hover_on_signature_types_shows_the_definition() {
         other => panic!("expected markup hover, got {other:?}"),
     };
     let param = hover_text(Position::new(1, 14));
-    assert!(param.contains("struct Mob") && param.contains("hp: int"), "param type: {param:?}");
+    assert!(
+        param.contains("struct Mob") && param.contains("hp: int"),
+        "param type: {param:?}"
+    );
     let ret = hover_text(Position::new(1, 22));
-    assert!(ret.contains("struct Mob") && ret.contains("hp: int"), "return type: {ret:?}");
+    assert!(
+        ret.contains("struct Mob") && ret.contains("hp: int"),
+        "return type: {ret:?}"
+    );
 }
 
 #[test]
 fn hover_on_a_struct_field_declaration_shows_field_of() {
-    let src = "struct FixVec2 { x: float, y: float }\nstruct Mob {\n  pos: FixVec2,\n  dir: int,\n}\n";
+    let src =
+        "struct FixVec2 { x: float, y: float }\nstruct Mob {\n  pos: FixVec2,\n  dir: int,\n}\n";
     let bone = fresh(src);
     // `pos` on line 2 at col 2.
     let hover = bone
@@ -161,7 +180,10 @@ fn hover_on_a_struct_field_declaration_shows_field_of() {
         lsp_types::HoverContents::Markup(m) => m.value,
         other => panic!("expected markup hover, got {other:?}"),
     };
-    assert!(text.contains("pos: FixVec2 (field of Mob)"), "field-of hover: {text:?}");
+    assert!(
+        text.contains("pos: FixVec2 (field of Mob)"),
+        "field-of hover: {text:?}"
+    );
 }
 
 #[test]
@@ -177,13 +199,20 @@ fn hover_on_a_newtype_declaration_names_it_not_an_op() {
         lsp_types::HoverContents::Markup(m) => m.value,
         other => panic!("expected markup hover, got {other:?}"),
     };
-    assert!(text.contains("newtype Health(int)"), "newtype hover: {text:?}");
-    assert!(!text.contains("__op"), "must not resolve to the auto-gen op: {text:?}");
+    assert!(
+        text.contains("newtype Health(int)"),
+        "newtype hover: {text:?}"
+    );
+    assert!(
+        !text.contains("__op"),
+        "must not resolve to the auto-gen op: {text:?}"
+    );
 }
 
 #[test]
 fn hover_on_a_struct_record_pattern_head_shows_the_struct() {
-    let src = "struct Mob { hp: int }\nfn f(m: Mob) {\n  match m {\n    Mob { hp: _h } => {}\n  }\n}\n";
+    let src =
+        "struct Mob { hp: int }\nfn f(m: Mob) {\n  match m {\n    Mob { hp: _h } => {}\n  }\n}\n";
     let bone = fresh(src);
     // `Mob` head on line 3 at col 4.
     let hover = bone
@@ -193,7 +222,10 @@ fn hover_on_a_struct_record_pattern_head_shows_the_struct() {
         lsp_types::HoverContents::Markup(m) => m.value,
         other => panic!("expected markup hover, got {other:?}"),
     };
-    assert!(text.contains("struct Mob"), "record-pat head -> struct: {text:?}");
+    assert!(
+        text.contains("struct Mob"),
+        "record-pat head -> struct: {text:?}"
+    );
 }
 
 #[test]
@@ -209,11 +241,23 @@ fn hover_on_an_enum_variant_pattern_resolves_variant_and_qualifier() {
     };
     // line 3: `    MobKind::Skeleton => "s"` -- qualifier col 4, variant col 13.
     let variant = text(Position::new(3, 16));
-    assert!(variant.contains("MobKind::Skeleton"), "variant -> variant: {variant:?}");
-    assert!(!variant.contains("string"), "must not be the match result type: {variant:?}");
+    assert!(
+        variant.contains("MobKind::Skeleton"),
+        "variant -> variant: {variant:?}"
+    );
+    assert!(
+        !variant.contains("string"),
+        "must not be the match result type: {variant:?}"
+    );
     let qualifier = text(Position::new(3, 5));
-    assert!(qualifier.contains("enum MobKind"), "enum qualifier -> enum: {qualifier:?}");
-    assert!(qualifier.contains("Skeleton") && qualifier.contains("Zombie"), "qualifier -> full body: {qualifier:?}");
+    assert!(
+        qualifier.contains("enum MobKind"),
+        "enum qualifier -> enum: {qualifier:?}"
+    );
+    assert!(
+        qualifier.contains("Skeleton") && qualifier.contains("Zombie"),
+        "qualifier -> full body: {qualifier:?}"
+    );
 }
 
 #[test]
@@ -230,7 +274,10 @@ fn hover_on_a_global_type_annotation_shows_the_definition() {
         lsp_types::HoverContents::Markup(m) => m.value,
         other => panic!("expected markup hover, got {other:?}"),
     };
-    assert!(text.contains("struct Mob"), "shows the struct def: {text:?}");
+    assert!(
+        text.contains("struct Mob"),
+        "shows the struct def: {text:?}"
+    );
     assert!(text.contains("hp: int"), "shows the field: {text:?}");
 }
 
@@ -245,7 +292,10 @@ fn hover_on_an_enum_declaration_names_it() {
         lsp_types::HoverContents::Markup(m) => m.value,
         other => panic!("expected markup hover, got {other:?}"),
     };
-    assert!(text.contains("Color"), "enum decl hover names the enum: {text:?}");
+    assert!(
+        text.contains("Color"),
+        "enum decl hover names the enum: {text:?}"
+    );
 }
 
 #[test]
@@ -307,7 +357,9 @@ fn empty_match_reports_all_variants_missing() {
     let bone = fresh(src);
     let diags = bone.diagnostics_for(PATH);
     assert!(
-        diags.iter().any(|d| d.message.contains("Missing patterns: A, B, C")),
+        diags
+            .iter()
+            .any(|d| d.message.contains("Missing patterns: A, B, C")),
         "empty match misses every variant: {diags:?}"
     );
 }
@@ -319,7 +371,10 @@ fn exhaustive_and_catch_all_matches_have_no_diagnostic() {
     for src in [exhaustive, catch_all] {
         let bone = fresh(src);
         assert!(
-            !bone.diagnostics_for(PATH).iter().any(|d| d.message.contains("Non-exhaustive")),
+            !bone
+                .diagnostics_for(PATH)
+                .iter()
+                .any(|d| d.message.contains("Non-exhaustive")),
             "covered match must not warn: {src:?} -> {:?}",
             bone.diagnostics_for(PATH)
         );
@@ -334,7 +389,9 @@ fn guarded_variant_arm_does_not_cover_its_variant() {
     let src = "enum E { A, B }\n\nfn f(e: E, x: bool) {\n    match e {\n        E::A if x => {}\n        E::B => {}\n    }\n}\n";
     let bone = fresh(src);
     assert!(
-        bone.diagnostics_for(PATH).iter().any(|d| d.message.contains("Missing patterns: A")),
+        bone.diagnostics_for(PATH)
+            .iter()
+            .any(|d| d.message.contains("Missing patterns: A")),
         "guarded A is not covered: {:?}",
         bone.diagnostics_for(PATH)
     );
@@ -353,7 +410,11 @@ fn unfilled_expression_hole_is_a_warning() {
         .find(|d| d.message.contains("expression hole"))
         .unwrap_or_else(|| panic!("expr hole should warn, got: {diags:?}"));
     assert_eq!(hole.severity, Some(lsp_types::DiagnosticSeverity::WARNING));
-    assert!(hole.message.contains("expecting int"), "msg: {}", hole.message);
+    assert!(
+        hole.message.contains("expecting int"),
+        "msg: {}",
+        hole.message
+    );
     assert_eq!(hole.source.as_deref(), Some("bone"));
     // `?` is at line 1, char 15.
     assert_eq!(hole.range.start, Position::new(1, 15), "ranged on the `?`");
@@ -371,7 +432,11 @@ fn resolved_type_hole_is_a_hint() {
         .find(|d| d.message.contains("type hole"))
         .unwrap_or_else(|| panic!("type hole should hint, got: {diags:?}"));
     assert_eq!(hole.severity, Some(lsp_types::DiagnosticSeverity::HINT));
-    assert!(hole.message.contains("inferred as int"), "msg: {}", hole.message);
+    assert!(
+        hole.message.contains("inferred as int"),
+        "msg: {}",
+        hole.message
+    );
 }
 
 #[test]
@@ -420,7 +485,9 @@ fn non_exhaustive_match_reaches_the_interactive_update_path() {
         .map(|(_, d)| d)
         .unwrap_or_default();
     assert!(
-        diags.iter().any(|d| d.message.contains("Non-exhaustive match")),
+        diags
+            .iter()
+            .any(|d| d.message.contains("Non-exhaustive match")),
         "update path surfaces the non-exhaustive error: {diags:?}"
     );
 }
@@ -486,10 +553,19 @@ fn stdlib_using_program_type_checks() {
 #[test]
 fn edit_then_requery_updates_diagnostics() {
     let mut bone = BoneWorkspace::new();
-    bone.update(PATH, "fn f() -> int {\n  let x: int = \"bad\"\n  x\n}\n".to_string());
-    assert!(!bone.diagnostics_for(PATH).is_empty(), "broken edit -> errors");
+    bone.update(
+        PATH,
+        "fn f() -> int {\n  let x: int = \"bad\"\n  x\n}\n".to_string(),
+    );
+    assert!(
+        !bone.diagnostics_for(PATH).is_empty(),
+        "broken edit -> errors"
+    );
 
-    bone.update(PATH, "fn f() -> int {\n  let x: int = 1\n  x\n}\n".to_string());
+    bone.update(
+        PATH,
+        "fn f() -> int {\n  let x: int = 1\n  x\n}\n".to_string(),
+    );
     assert!(
         bone.diagnostics_for(PATH).is_empty(),
         "fixed edit -> clean: {:?}",
@@ -503,15 +579,20 @@ fn edit_then_requery_updates_diagnostics() {
 #[test]
 fn update_publishes_unused_var_warning() {
     let mut bone = BoneWorkspace::new();
-    let per_file = bone.update(PATH, "fn f() -> int {\n  let dead = 1\n  2\n}\n".to_string());
+    let per_file = bone.update(
+        PATH,
+        "fn f() -> int {\n  let dead = 1\n  2\n}\n".to_string(),
+    );
     let diags: Vec<_> = per_file
         .into_iter()
         .filter(|(p, _)| p == PATH)
         .flat_map(|(_, d)| d)
         .collect();
     assert!(
-        diags.iter().any(|d| d.message.contains("unused variable `dead`")
-            && d.severity == Some(lsp_types::DiagnosticSeverity::WARNING)),
+        diags
+            .iter()
+            .any(|d| d.message.contains("unused variable `dead`")
+                && d.severity == Some(lsp_types::DiagnosticSeverity::WARNING)),
         "update() must return the unused_var warning for the edited file: {diags:?}"
     );
 }
@@ -531,11 +612,15 @@ fn f() { let dead = 1 }
         .flat_map(|(_, d)| d)
         .collect();
     assert!(
-        diags.iter().any(|d| d.message.contains("unused variable `dead`")),
+        diags
+            .iter()
+            .any(|d| d.message.contains("unused variable `dead`")),
         "fixture must exercise the live unused-var diagnostic path: {diags:?}"
     );
     assert!(
-        !diags.iter().any(|d| d.message.contains("unused variable `key`")),
+        !diags
+            .iter()
+            .any(|d| d.message.contains("unused variable `key`")),
         "artifact-definition metadata consumes `key`: {diags:?}"
     );
 }
@@ -545,7 +630,11 @@ fn f() { let dead = 1 }
 #[test]
 fn update_publishes_unused_fn_warning_for_bin() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("stick.toml"), "[package]\nname = \"g\"\ntype = \"bin\"\n").unwrap();
+    std::fs::write(
+        dir.path().join("stick.toml"),
+        "[package]\nname = \"g\"\ntype = \"bin\"\n",
+    )
+    .unwrap();
     std::fs::write(dir.path().join("m.rock"), "fn main() {}\nfn dead() {}\n").unwrap();
     let m = bone_query::canonicalize_lenient(&dir.path().join("m.rock").to_string_lossy());
     let mut bone = BoneWorkspace::new();
@@ -556,8 +645,10 @@ fn update_publishes_unused_fn_warning_for_bin() {
         .flat_map(|(_, d)| d)
         .collect();
     assert!(
-        diags.iter().any(|d| d.message.contains("unused function `dead`")
-            && d.severity == Some(lsp_types::DiagnosticSeverity::WARNING)),
+        diags
+            .iter()
+            .any(|d| d.message.contains("unused function `dead`")
+                && d.severity == Some(lsp_types::DiagnosticSeverity::WARNING)),
         "bin project must publish the unused_fn warning: {diags:?}"
     );
 }
@@ -567,7 +658,11 @@ fn update_publishes_unused_fn_warning_for_bin() {
 #[test]
 fn unused_fn_is_silent_for_lib() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("stick.toml"), "[package]\nname = \"l\"\ntype = \"lib\"\n").unwrap();
+    std::fs::write(
+        dir.path().join("stick.toml"),
+        "[package]\nname = \"l\"\ntype = \"lib\"\n",
+    )
+    .unwrap();
     std::fs::write(dir.path().join("m.rock"), "fn public_api() {}\n").unwrap();
     let m = bone_query::canonicalize_lenient(&dir.path().join("m.rock").to_string_lossy());
     let mut bone = BoneWorkspace::new();
@@ -596,8 +691,11 @@ fn unused_fn_is_silent_for_a_dependency_of_a_bin() {
     let dir = tempfile::tempdir().unwrap();
     let dep = dir.path().join("engine");
     std::fs::create_dir_all(&dep).unwrap();
-    std::fs::write(dep.join("stick.toml"), "[package]\nname = \"engine\"\ntype = \"lib\"\n")
-        .unwrap();
+    std::fs::write(
+        dep.join("stick.toml"),
+        "[package]\nname = \"engine\"\ntype = \"lib\"\n",
+    )
+    .unwrap();
     std::fs::write(dep.join("e.rock"), "fn engine_helper() {}\n").unwrap();
 
     let game = dir.path().join("game");
@@ -614,10 +712,15 @@ fn unused_fn_is_silent_for_a_dependency_of_a_bin() {
     let mut bone = BoneWorkspace::new();
     let per_file = bone.update(&m, std::fs::read_to_string(&m).unwrap());
 
-    let dep_diags: Vec<_> =
-        per_file.into_iter().filter(|(p, _)| p == &e).flat_map(|(_, d)| d).collect();
+    let dep_diags: Vec<_> = per_file
+        .into_iter()
+        .filter(|(p, _)| p == &e)
+        .flat_map(|(_, d)| d)
+        .collect();
     assert!(
-        !dep_diags.iter().any(|d| d.message.contains("unused function")),
+        !dep_diags
+            .iter()
+            .any(|d| d.message.contains("unused function")),
         "a dependency's reachability is not the consumer's to judge: {dep_diags:?}"
     );
 }
@@ -641,9 +744,11 @@ fn update_publishes_transmute_of_nullable_error() {
         .flat_map(|(_, d)| d)
         .collect();
     assert!(
-        diags.iter().any(|d| d.message.contains("strips nullability")
-            && d.message.contains("int?")
-            && d.severity == Some(lsp_types::DiagnosticSeverity::ERROR)),
+        diags
+            .iter()
+            .any(|d| d.message.contains("strips nullability")
+                && d.message.contains("int?")
+                && d.severity == Some(lsp_types::DiagnosticSeverity::ERROR)),
         "update() must publish the transmute_of_nullable error: {diags:?}"
     );
 }
@@ -705,7 +810,11 @@ fn completion_offers_global_namespace_by_prefix() {
     assert!(
         items.iter().all(|c| subseq_ci(&c.label, b"vec")),
         "every completion is a subsequence match of `vec`; leaked: {:?}",
-        items.iter().map(|c| &c.label).filter(|l| !subseq_ci(l, b"vec")).collect::<Vec<_>>()
+        items
+            .iter()
+            .map(|c| &c.label)
+            .filter(|l| !subseq_ci(l, b"vec"))
+            .collect::<Vec<_>>()
     );
 }
 
@@ -734,7 +843,11 @@ fn signature_help_renders_callee_and_active_param() {
         .signature_help(PATH, Position::new(4, 17))
         .expect("signature help should resolve the add(...) call");
     assert_eq!(sh.signatures[0].label, "fn add(a: int, b: int) -> int");
-    assert_eq!(sh.active_parameter, Some(1), "cursor is in the 2nd argument");
+    assert_eq!(
+        sh.active_parameter,
+        Some(1),
+        "cursor is in the 2nd argument"
+    );
 }
 
 #[test]
@@ -784,7 +897,10 @@ fn signature_help_active_param_shifts_past_the_ufcs_receiver() {
     let sh = bone
         .signature_help(PATH, Position::new(3, 20))
         .expect("signature help resolves the screen.rect_outline(...) call");
-    assert_eq!(sh.signatures[0].label, "fn rect_outline(dl: DrawList, pos: int, size: int)");
+    assert_eq!(
+        sh.signatures[0].label,
+        "fn rect_outline(dl: DrawList, pos: int, size: int)"
+    );
     assert_eq!(
         sh.active_parameter,
         Some(1),
@@ -796,16 +912,26 @@ fn signature_help_active_param_shifts_past_the_ufcs_receiver() {
 fn signature_help_shows_param_defaults() {
     // Optional params render `name: T = <default>` (value sliced from source), so
     // the popup doesn't make defaulted params look required.
-    let src = "fn plot(x: int, y: int = 0, label: string = \"pt\") {\n}\nfn main() {\n  plot(1)\n}\n";
+    let src =
+        "fn plot(x: int, y: int = 0, label: string = \"pt\") {\n}\nfn main() {\n  plot(1)\n}\n";
     let bone = fresh(src);
     // cursor inside `plot(1)` args.
     let sh = bone
         .signature_help(PATH, Position::new(3, 7))
         .expect("signature help resolves plot(...)");
     let label = &sh.signatures[0].label;
-    assert!(label.contains("y: int = 0"), "default value missing: {label:?}");
-    assert!(label.contains("label: string = \"pt\""), "string default missing: {label:?}");
-    assert!(!label.contains("y: int,"), "optional param rendered as required: {label:?}");
+    assert!(
+        label.contains("y: int = 0"),
+        "default value missing: {label:?}"
+    );
+    assert!(
+        label.contains("label: string = \"pt\""),
+        "string default missing: {label:?}"
+    );
+    assert!(
+        !label.contains("y: int,"),
+        "optional param rendered as required: {label:?}"
+    );
 }
 
 #[test]
@@ -817,7 +943,10 @@ fn hover_on_call_shows_param_defaults() {
         Some(lsp_types::HoverContents::Markup(m)) => m.value,
         _ => String::new(),
     };
-    assert!(h.contains("y: int = 0"), "hover default value missing: {h:?}");
+    assert!(
+        h.contains("y: int = 0"),
+        "hover default value missing: {h:?}"
+    );
 }
 
 #[test]
@@ -845,7 +974,10 @@ fn references_finds_local_decl_and_uses() {
     // declaration (1,6) + two uses (2,14) and (2,22).
     assert_eq!(locs.len(), 3, "got {starts:?}");
     for expected in [(1, 6), (2, 14), (2, 22)] {
-        assert!(starts.contains(&expected), "missing {expected:?} in {starts:?}");
+        assert!(
+            starts.contains(&expected),
+            "missing {expected:?} in {starts:?}"
+        );
     }
 }
 
@@ -864,9 +996,18 @@ fn references_on_an_overload_are_specific_to_that_overload() {
         .map(|l| (l.range.start.line, l.range.start.character))
         .collect();
     assert!(starts.contains(&(2, 3)), "overload-1 decl: {starts:?}");
-    assert!(starts.contains(&(7, 10)), "foo(x) resolves to overload 1: {starts:?}");
-    assert!(!starts.contains(&(3, 3)), "must NOT include overload-2 decl: {starts:?}");
-    assert!(!starts.contains(&(7, 19)), "must NOT include foo(y) (overload 2): {starts:?}");
+    assert!(
+        starts.contains(&(7, 10)),
+        "foo(x) resolves to overload 1: {starts:?}"
+    );
+    assert!(
+        !starts.contains(&(3, 3)),
+        "must NOT include overload-2 decl: {starts:?}"
+    );
+    assert!(
+        !starts.contains(&(7, 19)),
+        "must NOT include foo(y) (overload 2): {starts:?}"
+    );
 }
 
 #[test]
@@ -929,7 +1070,11 @@ fn main() {
     let lines = rename_lines(&bone, Position::new(0, 16), "fullName", "name".len());
     // Person decl (0), Person literal field (3), `p.name` access (5) -- and
     // none of Company's lines 1/4/6.
-    assert_eq!(lines, vec![0, 3, 5], "only Person.name sites, not Company.name");
+    assert_eq!(
+        lines,
+        vec![0, 3, 5],
+        "only Person.name sites, not Company.name"
+    );
 }
 
 #[test]
@@ -945,7 +1090,11 @@ fn main() {
     // Cursor on the struct decl name `Point` (line 0, char 7).
     let lines = rename_lines(&bone, Position::new(0, 7), "P2", "Point".len());
     // decl (0), param + return annotations (1, 1), let annotation + literal (3, 3).
-    assert_eq!(lines, vec![0, 1, 1, 3, 3], "decl + annotations + literal head");
+    assert_eq!(
+        lines,
+        vec![0, 1, 1, 3, 3],
+        "decl + annotations + literal head"
+    );
 }
 
 #[test]
@@ -974,7 +1123,9 @@ fn rename_newtype_edits_decl_and_ctor_in_file_only() {
     // every `__op_add` across the warm stdlib -- 80+ destructive edits.)
     let src = "newtype Health(int)\nfn main() {\n  let h = Health(5)\n}\n";
     let bone = fresh(src);
-    let edit = bone.rename(PATH, Position::new(0, 9), "Hp").expect("newtype rename resolves");
+    let edit = bone
+        .rename(PATH, Position::new(0, 9), "Hp")
+        .expect("newtype rename resolves");
     let changes = edit.changes.expect("changes");
     assert_eq!(changes.len(), 1, "edits stay in the user file: {changes:?}");
     let lines = rename_lines(&bone, Position::new(0, 9), "Hp", "Health".len());
@@ -993,7 +1144,11 @@ fn prepare_rename_on_a_function_definition_name_returns_the_name_range() {
         .prepare_rename(PATH, Position::new(0, 10))
         .expect("prepare_rename on a function decl name must offer a rename");
     assert_eq!(range.start, Position::new(0, 3), "range starts at the name");
-    assert_eq!(range.end, Position::new(0, 19), "range ends at the name (16 chars)");
+    assert_eq!(
+        range.end,
+        Position::new(0, 19),
+        "range ends at the name (16 chars)"
+    );
 }
 
 #[test]
@@ -1008,7 +1163,11 @@ fn prepare_rename_on_a_call_site_ranges_just_the_name_not_the_whole_call() {
     let range = bone
         .prepare_rename(PATH, Position::new(4, 14))
         .expect("prepare_rename on a call site must offer a rename");
-    assert_eq!(range.start, Position::new(4, 12), "range starts at the name");
+    assert_eq!(
+        range.start,
+        Position::new(4, 12),
+        "range starts at the name"
+    );
     assert_eq!(
         range.end,
         Position::new(4, 28),
@@ -1036,10 +1195,16 @@ fn document_symbols_lists_top_level_items() {
     let names: Vec<&str> = syms.iter().map(|s| s.name.as_str()).collect();
 
     for expected in ["Point", "Color", "MAX", "main"] {
-        assert!(names.contains(&expected), "document symbols missing {expected:?}: {names:?}");
+        assert!(
+            names.contains(&expected),
+            "document symbols missing {expected:?}: {names:?}"
+        );
     }
     // Locals are NOT top-level symbols.
-    assert!(!names.contains(&"q"), "locals must not appear as document symbols: {names:?}");
+    assert!(
+        !names.contains(&"q"),
+        "locals must not appear as document symbols: {names:?}"
+    );
 
     // The `main` symbol's range must cover its declaration line (line 3).
     let main = syms.iter().find(|s| s.name == "main").unwrap();
@@ -1053,7 +1218,10 @@ fn inlay_hints_annotate_unannotated_let_bindings() {
     // already annotated -> no hint.
     let src = "fn main() {\n  let n = 1\n  let s: int = 2\n}\n";
     let bone = fresh(src);
-    let hints = bone.inlay_hints(PATH, lsp_types::Range::new(Position::new(0, 0), Position::new(4, 0)));
+    let hints = bone.inlay_hints(
+        PATH,
+        lsp_types::Range::new(Position::new(0, 0), Position::new(4, 0)),
+    );
 
     let labels: Vec<String> = hints
         .iter()
@@ -1063,8 +1231,15 @@ fn inlay_hints_annotate_unannotated_let_bindings() {
         })
         .collect();
 
-    assert_eq!(hints.len(), 1, "exactly one unannotated binding (`n`), got {labels:?}");
-    assert!(labels[0].contains("int"), "hint should render the inferred type, got {labels:?}");
+    assert_eq!(
+        hints.len(),
+        1,
+        "exactly one unannotated binding (`n`), got {labels:?}"
+    );
+    assert!(
+        labels[0].contains("int"),
+        "hint should render the inferred type, got {labels:?}"
+    );
 }
 
 #[test]
@@ -1072,8 +1247,15 @@ fn inlay_hints_respect_the_requested_range() {
     // A range covering only line 1 must not surface the binding on line 2.
     let src = "fn main() {\n  let n = 1\n  let m = 2\n}\n";
     let bone = fresh(src);
-    let only_line1 = bone.inlay_hints(PATH, lsp_types::Range::new(Position::new(1, 0), Position::new(2, 0)));
-    assert_eq!(only_line1.len(), 1, "range over line 1 should yield exactly the `n` hint");
+    let only_line1 = bone.inlay_hints(
+        PATH,
+        lsp_types::Range::new(Position::new(1, 0), Position::new(2, 0)),
+    );
+    assert_eq!(
+        only_line1.len(),
+        1,
+        "range over line 1 should yield exactly the `n` hint"
+    );
 }
 
 #[test]
@@ -1086,7 +1268,10 @@ fn named_call_args_get_no_positional_param_hint() {
     let src = "fn make(a: int, b: int, c: int, d: int) -> int { return a }\n\
                fn r() -> int {\n    return make(1, b: 2, d: 4)\n}\n";
     let bone = fresh(src);
-    let hints = bone.inlay_hints(PATH, lsp_types::Range::new(Position::new(0, 0), Position::new(4, 0)));
+    let hints = bone.inlay_hints(
+        PATH,
+        lsp_types::Range::new(Position::new(0, 0), Position::new(4, 0)),
+    );
     let labels: Vec<String> = hints
         .iter()
         .map(|h| match &h.label {
@@ -1112,7 +1297,10 @@ fn completion_includes_in_scope_locals_and_params() {
         .into_iter()
         .map(|i| i.label)
         .collect();
-    assert!(labels.iter().any(|l| l == "total"), "local `total` (prefix `t`): {labels:?}");
+    assert!(
+        labels.iter().any(|l| l == "total"),
+        "local `total` (prefix `t`): {labels:?}"
+    );
 
     // param `count` is in scope throughout the body -> offered on prefix `c`.
     let src2 = "fn f(count: int) -> int {\n  let total = 5\n  c\n}\n";
@@ -1123,7 +1311,10 @@ fn completion_includes_in_scope_locals_and_params() {
         .into_iter()
         .map(|i| i.label)
         .collect();
-    assert!(labels2.iter().any(|l| l == "count"), "param `count` (prefix `c`): {labels2:?}");
+    assert!(
+        labels2.iter().any(|l| l == "count"),
+        "param `count` (prefix `c`): {labels2:?}"
+    );
 }
 
 #[test]
@@ -1136,7 +1327,10 @@ fn completion_excludes_locals_declared_after_the_cursor() {
         .into_iter()
         .map(|i| i.label)
         .collect();
-    assert!(!labels.iter().any(|l| l == "later"), "`later` is declared after the cursor: {labels:?}");
+    assert!(
+        !labels.iter().any(|l| l == "later"),
+        "`later` is declared after the cursor: {labels:?}"
+    );
 }
 
 #[test]
@@ -1150,8 +1344,14 @@ fn completion_offers_struct_fields_on_broken_dot() {
         .into_iter()
         .map(|i| i.label)
         .collect();
-    assert!(labels.iter().any(|l| l == "x: int"), "field `x: int`: {labels:?}");
-    assert!(labels.iter().any(|l| l == "y: int"), "field `y: int`: {labels:?}");
+    assert!(
+        labels.iter().any(|l| l == "x: int"),
+        "field `x: int`: {labels:?}"
+    );
+    assert!(
+        labels.iter().any(|l| l == "y: int"),
+        "field `y: int`: {labels:?}"
+    );
 }
 
 #[test]
@@ -1164,7 +1364,10 @@ fn completion_member_on_struct_literal_let_and_chain() {
         .into_iter()
         .map(|i| i.label)
         .collect();
-    assert!(labels.iter().any(|l| l == "x: float"), "chained field `x: float`: {labels:?}");
+    assert!(
+        labels.iter().any(|l| l == "x: float"),
+        "chained field `x: float`: {labels:?}"
+    );
 }
 
 #[test]
@@ -1176,8 +1379,14 @@ fn completion_member_filters_by_field_prefix() {
         .into_iter()
         .map(|i| i.label)
         .collect();
-    assert!(labels.iter().any(|l| l == "position_x: float"), "prefix `pos`: {labels:?}");
-    assert!(!labels.iter().any(|l| l == "health: float"), "`health` excluded by prefix `pos`: {labels:?}");
+    assert!(
+        labels.iter().any(|l| l == "position_x: float"),
+        "prefix `pos`: {labels:?}"
+    );
+    assert!(
+        !labels.iter().any(|l| l == "health: float"),
+        "`health` excluded by prefix `pos`: {labels:?}"
+    );
 }
 
 #[test]
@@ -1191,8 +1400,14 @@ fn completion_member_on_for_loop_var() {
         .into_iter()
         .map(|i| i.label)
         .collect();
-    assert!(labels.iter().any(|l| l == "name: string"), "loop-var field `name`: {labels:?}");
-    assert!(labels.iter().any(|l| l == "count: int"), "loop-var field `count`: {labels:?}");
+    assert!(
+        labels.iter().any(|l| l == "name: string"),
+        "loop-var field `name`: {labels:?}"
+    );
+    assert!(
+        labels.iter().any(|l| l == "count: int"),
+        "loop-var field `count`: {labels:?}"
+    );
 }
 
 #[test]
@@ -1205,7 +1420,10 @@ fn completion_enum_qualified_lists_variants() {
         .map(|i| i.label)
         .collect();
     for v in ["Up", "Down", "Left", "Right"] {
-        assert!(labels.iter().any(|l| l == v), "enum variant {v}: {labels:?}");
+        assert!(
+            labels.iter().any(|l| l == v),
+            "enum variant {v}: {labels:?}"
+        );
     }
 }
 
@@ -1219,8 +1437,14 @@ fn completion_member_on_match_pattern_binding() {
         .into_iter()
         .map(|i| i.label)
         .collect();
-    assert!(labels.iter().any(|l| l == "x: int"), "pattern-bound field `x`: {labels:?}");
-    assert!(labels.iter().any(|l| l == "y: int"), "pattern-bound field `y`: {labels:?}");
+    assert!(
+        labels.iter().any(|l| l == "x: int"),
+        "pattern-bound field `x`: {labels:?}"
+    );
+    assert!(
+        labels.iter().any(|l| l == "y: int"),
+        "pattern-bound field `y`: {labels:?}"
+    );
 }
 
 #[test]
@@ -1232,15 +1456,24 @@ fn completion_enum_record_variant_fields() {
         .into_iter()
         .map(|i| i.label)
         .collect();
-    assert!(labels.iter().any(|l| l == "duration: float"), "record field `duration`: {labels:?}");
-    assert!(labels.iter().any(|l| l == "heal_amount: int"), "record field `heal_amount`: {labels:?}");
+    assert!(
+        labels.iter().any(|l| l == "duration: float"),
+        "record field `duration`: {labels:?}"
+    );
+    assert!(
+        labels.iter().any(|l| l == "heal_amount: int"),
+        "record field `heal_amount`: {labels:?}"
+    );
 }
 
 #[test]
 fn unknown_file_degrades_to_empty() {
     let bone = BoneWorkspace::new();
     // Never updated -> no session for this path.
-    assert!(bone.hover("/tmp/never_opened.rock", Position::new(0, 0)).is_none());
+    assert!(
+        bone.hover("/tmp/never_opened.rock", Position::new(0, 0))
+            .is_none()
+    );
     assert!(bone.diagnostics_for("/tmp/never_opened.rock").is_empty());
 }
 
@@ -1298,7 +1531,11 @@ fn definition_of_stdlib_type_resolves_to_a_real_file() {
 #[test]
 fn update_omits_backend_sibling_mismatch_without_explicit_selection() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("stick.toml"), "[package]\nname = \"l\"\ntype = \"lib\"\n").unwrap();
+    std::fs::write(
+        dir.path().join("stick.toml"),
+        "[package]\nname = \"l\"\ntype = \"lib\"\n",
+    )
+    .unwrap();
     std::fs::write(
         dir.path().join("m.rock"),
         "inline(lua) fn probe(x: int) -> int = \"return x\"\n\
@@ -1308,12 +1545,16 @@ fn update_omits_backend_sibling_mismatch_without_explicit_selection() {
     let m = bone_query::canonicalize_lenient(&dir.path().join("m.rock").to_string_lossy());
     let mut bone = BoneWorkspace::new();
     let per_file = bone.update(&m, std::fs::read_to_string(&m).unwrap());
-    let diags: Vec<_> =
-        per_file.into_iter().filter(|(p, _)| p == &m).flat_map(|(_, d)| d).collect();
+    let diags: Vec<_> = per_file
+        .into_iter()
+        .filter(|(p, _)| p == &m)
+        .flat_map(|(_, d)| d)
+        .collect();
     assert!(
-        diags.iter().all(|d| d.code != Some(lsp_types::NumberOrString::String(
-            "backend_sibling_mismatch".to_string()
-        ))),
+        diags.iter().all(|d| d.code
+            != Some(lsp_types::NumberOrString::String(
+                "backend_sibling_mismatch".to_string()
+            ))),
         "bare LSP lint must omit backend_sibling_mismatch: {diags:?}"
     );
 }
@@ -1323,7 +1564,11 @@ fn update_omits_backend_sibling_mismatch_without_explicit_selection() {
 #[test]
 fn matching_backend_siblings_publish_nothing() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("stick.toml"), "[package]\nname = \"l\"\ntype = \"lib\"\n").unwrap();
+    std::fs::write(
+        dir.path().join("stick.toml"),
+        "[package]\nname = \"l\"\ntype = \"lib\"\n",
+    )
+    .unwrap();
     std::fs::write(
         dir.path().join("m.rock"),
         "inline(lua) fn probe(x: int) -> int = \"return x\"\n\
@@ -1333,10 +1578,15 @@ fn matching_backend_siblings_publish_nothing() {
     let m = bone_query::canonicalize_lenient(&dir.path().join("m.rock").to_string_lossy());
     let mut bone = BoneWorkspace::new();
     let per_file = bone.update(&m, std::fs::read_to_string(&m).unwrap());
-    let diags: Vec<_> =
-        per_file.into_iter().filter(|(p, _)| p == &m).flat_map(|(_, d)| d).collect();
+    let diags: Vec<_> = per_file
+        .into_iter()
+        .filter(|(p, _)| p == &m)
+        .flat_map(|(_, d)| d)
+        .collect();
     assert!(
-        !diags.iter().any(|d| d.message.contains("backend sibling mismatch")),
+        !diags
+            .iter()
+            .any(|d| d.message.contains("backend sibling mismatch")),
         "identical siblings must not warn: {diags:?}"
     );
 }
@@ -1361,7 +1611,10 @@ fn signature_help_active_param_shifts_past_a_ufcs_receiver_that_is_itself_a_call
     let sh = bone
         .signature_help(PATH, Position::new(4, 26))
         .expect("signature help resolves the get_screen().rect_outline(...) call");
-    assert_eq!(sh.signatures[0].label, "fn rect_outline(dl: DrawList, pos: int, size: int)");
+    assert_eq!(
+        sh.signatures[0].label,
+        "fn rect_outline(dl: DrawList, pos: int, size: int)"
+    );
     assert_eq!(
         sh.active_parameter,
         Some(1),

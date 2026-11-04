@@ -1,8 +1,8 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
+use bone_core::prelude::Instant;
 use colored::Colorize;
 use fs_err as fs;
 use std::path::{Path, PathBuf};
-use bone_core::prelude::Instant;
 use walkdir::WalkDir;
 
 #[derive(Debug)]
@@ -76,12 +76,16 @@ fn parse_error_test_cases(content: &str) -> Result<Vec<ErrorTestCase>> {
 
         // Look for test case start: //=== TEST CASE: name_ExpectedErrorKind{params} ===
         if line.starts_with("//=== TEST CASE:") && line.ends_with(" ===") {
-            let case_header = line.strip_prefix("//=== TEST CASE:").unwrap()
-                .strip_suffix(" ===").unwrap()
+            let case_header = line
+                .strip_prefix("//=== TEST CASE:")
+                .unwrap()
+                .strip_suffix(" ===")
+                .unwrap()
                 .trim();
 
             // Parse the expected error from the test case name
-            let (case_name, expected_error_kind, expected_params) = parse_test_case_name(case_header)?;
+            let (case_name, expected_error_kind, expected_params) =
+                parse_test_case_name(case_header)?;
 
             // Collect the input code until we find the next test case or end of file
             i += 1;
@@ -156,7 +160,10 @@ fn parse_test_case_name(case_header: &str) -> Result<(String, String, Option<Str
             let params = if params_part.ends_with('}') {
                 Some(params_part[..params_part.len() - 1].to_string())
             } else {
-                return Err(anyhow!("Invalid parameter format in test case: {}", case_header));
+                return Err(anyhow!(
+                    "Invalid parameter format in test case: {}",
+                    case_header
+                ));
             };
 
             Ok((case_name, error_kind, params))
@@ -237,7 +244,11 @@ fn bone_check_case(
             // anyhow error: an unknown `//! modules:` value is a load error.
             Err(e) => return Err(e.to_string()),
         };
-        match skull_parser::parse_module_with_dialect(code, ustr::Ustr::from(name.as_str()), dialect) {
+        match skull_parser::parse_module_with_dialect(
+            code,
+            ustr::Ustr::from(name.as_str()),
+            dialect,
+        ) {
             Ok(m) => user.push(m),
             Err(e) => return Err(error_text(&[e])), // hard tokenizer failure
         }
@@ -301,8 +312,10 @@ fn lint_rejects(
     ws: &bone_semantic::inference::Workspace,
     files: &[(String, String)],
 ) -> Option<String> {
-    let sources: rustc_hash::FxHashMap<ustr::Ustr, &str> =
-        files.iter().map(|(n, c)| (ustr::Ustr::from(n.as_str()), c.as_str())).collect();
+    let sources: rustc_hash::FxHashMap<ustr::Ustr, &str> = files
+        .iter()
+        .map(|(n, c)| (ustr::Ustr::from(n.as_str()), c.as_str()))
+        .collect();
     // Same rule as the build pass (`lint_pass::warm_module_ids`): everything the
     // case did not author is stdlib, and stdlib is scanned but never reported on.
     let warm: rustc_hash::FxHashSet<bone_core::prelude::ModuleId> = ws
@@ -365,7 +378,10 @@ pub fn run_error_suite(
     let Some(dir) = find_error_test_dir(path) else {
         return Ok((0, 0, 0, 0));
     };
-    println!("\nRunning error tests in {} (bone front end)...", dir.display());
+    println!(
+        "\nRunning error tests in {} (bone front end)...",
+        dir.display()
+    );
 
     let start = Instant::now();
     let (mut total, mut passed, mut failed, mut todos) = (0usize, 0usize, 0usize, 0usize);
@@ -403,12 +419,17 @@ pub fn run_error_suite(
                 // of the three may be the rejecting stage.
                 let rejection = match bone_check_case(&tc.files) {
                     Err(msg) => Some(msg),
-                    Ok(ws) => skull_emit_rejects(&ws, &tc.files)
-                        .or_else(|| lint_rejects(&ws, &tc.files)),
+                    Ok(ws) => {
+                        skull_emit_rejects(&ws, &tc.files).or_else(|| lint_rejects(&ws, &tc.files))
+                    }
                 };
                 match rejection {
                     Some(msg) => {
-                        match tc.expected_reasons.iter().find(|w| !msg.contains(w.as_str())) {
+                        match tc
+                            .expected_reasons
+                            .iter()
+                            .find(|w| !msg.contains(w.as_str()))
+                        {
                             // Rejected, but the rule that fired is not the rule
                             // the case claims to pin.
                             Some(missing) => ErrorTestResult::Fail(format!(
@@ -492,17 +513,16 @@ pub fn has_error_tests(path: &Path) -> bool {
 
     // Check for any error test files
     if path.is_file() {
-        let name = path.file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("");
+        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
         return name.ends_with(".rock.err");
     }
 
     // For directories, check if they contain error test files
     if path.is_dir() {
-        for entry in fs::read_dir(path).unwrap_or_else(|_| {
-            panic!("Failed to read directory: {:?}", path)
-        }).flatten() {
+        for entry in fs::read_dir(path)
+            .unwrap_or_else(|_| panic!("Failed to read directory: {:?}", path))
+            .flatten()
+        {
             if has_error_tests(&entry.path()) {
                 return true;
             }
@@ -533,9 +553,7 @@ pub fn find_error_test_dir(path: &Path) -> Option<PathBuf> {
 
     // If this is an error test file, use its parent directory
     if path.is_file() {
-        let name = path.file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("");
+        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
         if name.ends_with(".rock.err") {
             return path.parent().map(|p| p.to_path_buf());
         }

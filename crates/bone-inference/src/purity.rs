@@ -40,7 +40,10 @@ pub(crate) fn stmt_contains_cf(c: BodyCtx, s: Idx<Statement>) -> bool {
 /// tuple-literal element of a destructure (`let (..)` / newtype) RHS: the
 /// cond-false path can't materialise a value to destructure. Port of rock's
 /// `ControlFlowInSubexpression` rule.
-pub(crate) fn reject_cf_in_destructure_rhs(c: BodyCtx, value: Idx<Expr>) -> Result<(), CompilerError> {
+pub(crate) fn reject_cf_in_destructure_rhs(
+    c: BodyCtx,
+    value: Idx<Expr>,
+) -> Result<(), CompilerError> {
     if let Expr::Tuple(elems) = c.body.expr_arena[value] {
         for elem in elems {
             if matches!(c.body.expr_arena[elem], Expr::If { .. }) && expr_contains_cf(c, elem) {
@@ -192,8 +195,15 @@ pub(crate) fn reject_captures_expr(
         Expr::Index { base: a, index: b }
         | Expr::Range { low: a, high: b }
         | Expr::BinOp { lhs: a, rhs: b, .. }
-        | Expr::Assign { target: a, value: b }
-        | Expr::CompoundAssign { target: a, value: b, .. } => {
+        | Expr::Assign {
+            target: a,
+            value: b,
+        }
+        | Expr::CompoundAssign {
+            target: a,
+            value: b,
+            ..
+        } => {
             go!(a);
             go!(b);
         }
@@ -508,7 +518,11 @@ pub(crate) fn verify_pure_expr(
         }
         // A `value` struct literal is byte-value (pure); a heap struct literal
         // has observable identity.
-        Expr::StructLiteral { name, fields, bases } => {
+        Expr::StructLiteral {
+            name,
+            fields,
+            bases,
+        } => {
             let is_value = ws
                 .struct_by_name
                 .get(&name)
@@ -598,7 +612,8 @@ pub(crate) fn verify_pure_stmt(
         Statement::Fn { .. } => {
             errors.push(CompilerError::new_with_label(
                 c.body.statement_spans[s],
-                "`@pure` function declares a nested `fn` (its body is not vetted for purity)".to_string(),
+                "`@pure` function declares a nested `fn` (its body is not vetted for purity)"
+                    .to_string(),
             ));
         }
         Statement::Return(None)

@@ -17,7 +17,9 @@ use crate::common::*;
 use lsp_types::*;
 
 fn gen_action(actions: &[CodeAction]) -> Option<&CodeAction> {
-    actions.iter().find(|a| a.title.contains("Generate function"))
+    actions
+        .iter()
+        .find(|a| a.title.contains("Generate function"))
 }
 
 /// Type-check `src` on a fresh bone workspace; returns its diagnostics.
@@ -54,7 +56,10 @@ fn main() {
     assert!(action.title.contains("do_thing"), "title: {}", action.title);
 
     let out = apply(src, action);
-    assert!(out.contains("fn do_thing(arg0: int)"), "param from literal: {out:?}");
+    assert!(
+        out.contains("fn do_thing(arg0: int)"),
+        "param from literal: {out:?}"
+    );
     assert!(out.contains("?"), "body is a hole: {out:?}");
     assert!(
         bone_errors(&out).is_empty(),
@@ -87,7 +92,11 @@ fn main() {
         out.contains("fn tally(count: int)"),
         "param name reuses the identifier arg: {out:?}"
     );
-    assert!(bone_errors(&out).is_empty(), "should type-check: {:?}", bone_diags(&out));
+    assert!(
+        bone_errors(&out).is_empty(),
+        "should type-check: {:?}",
+        bone_diags(&out)
+    );
 }
 
 #[test]
@@ -105,7 +114,11 @@ fn main() {
         out.contains("fn place(count: int, arg1: int)"),
         "named first, positional second: {out:?}"
     );
-    assert!(bone_errors(&out).is_empty(), "should type-check: {:?}", bone_diags(&out));
+    assert!(
+        bone_errors(&out).is_empty(),
+        "should type-check: {:?}",
+        bone_diags(&out)
+    );
 }
 
 #[test]
@@ -122,7 +135,11 @@ fn main() {
         out.contains("fn label(arg0: int) -> string"),
         "return type taken from the `let s: string` context: {out:?}"
     );
-    assert!(bone_errors(&out).is_empty(), "should type-check: {:?}", bone_diags(&out));
+    assert!(
+        bone_errors(&out).is_empty(),
+        "should type-check: {:?}",
+        bone_diags(&out)
+    );
 }
 
 #[test]

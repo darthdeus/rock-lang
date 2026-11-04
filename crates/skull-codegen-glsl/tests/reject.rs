@@ -26,8 +26,8 @@ fn emit(src: &str, roots: &[&str]) -> Result<String, String> {
         .map(|root| skull_codegen_glsl::resolve_root(&ws, mid, root))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.message)?;
-    let session = skull_codegen_glsl::shader_library_session(&ws, root_refs)
-        .map_err(|e| e.message)?;
+    let session =
+        skull_codegen_glsl::shader_library_session(&ws, root_refs).map_err(|e| e.message)?;
     skull_codegen_glsl::emit_shader_library_with_view(&ws, &session.scx, &session.view)
         .map_err(|e| e.message)
 }
@@ -96,7 +96,10 @@ fn stdlib_log2_is_available_in_shader_forms() {
     "#;
     let glsl = emit(src, &["shader_log2"])
         .unwrap_or_else(|msg| panic!("stdlib log2 should have a GLSL form: {msg}"));
-    assert!(glsl.contains("log2(x)"), "GLSL should use the log2 intrinsic: {glsl}");
+    assert!(
+        glsl.contains("log2(x)"),
+        "GLSL should use the log2 intrinsic: {glsl}"
+    );
 }
 
 #[test]
@@ -123,9 +126,12 @@ fn omitted_default_argument_is_available_in_shader_forms() {
 }
 
 fn shader_body<'a>(glsl: &'a str, root: &str) -> &'a str {
-    glsl.split(&format!("vec3 {root}_float(float x) {{")).nth(1)
+    glsl.split(&format!("vec3 {root}_float(float x) {{"))
+        .nth(1)
         .unwrap_or_else(|| panic!("missing shader root {root}: {glsl}"))
-        .split('}').next().expect("shader body")
+        .split('}')
+        .next()
+        .expect("shader body")
 }
 
 fn vector_argument(glsl: &str, root: &str) -> Vec<f64> {
@@ -133,10 +139,19 @@ fn vector_argument(glsl: &str, root: &str) -> Vec<f64> {
     let call = "vector_default_float_Vec3_float(";
     assert_eq!(caller.matches(call).count(), 1, "one direct call: {caller}");
     let args = caller.split(call).nth(1).expect("call arguments");
-    assert!(args.starts_with("x, vec3("), "vector must be the tint argument: {caller}");
-    args.split("vec3(").nth(1).expect("vector argument")
-        .split(')').next().expect("vector components")
-        .split(',').map(|v| v.trim().parse().expect("constant component")).collect()
+    assert!(
+        args.starts_with("x, vec3("),
+        "vector must be the tint argument: {caller}"
+    );
+    args.split("vec3(")
+        .nth(1)
+        .expect("vector argument")
+        .split(')')
+        .next()
+        .expect("vector components")
+        .split(',')
+        .map(|v| v.trim().parse().expect("constant component"))
+        .collect()
 }
 
 #[test]
@@ -150,7 +165,8 @@ fn omitted_vector_default_argument_is_available_in_shader_forms() {
         format!("Vec3 {{ z: {z}, x: {x}, y: {y} }}"),
     ] {
         let [ox, oy, oz] = override_value;
-        let src = format!(r#"
+        let src = format!(
+            r#"
             @pure fn vector_default(x: float, tint: Vec3 = {default}, gain: float = 0.875) -> Vec3 {{
                 return tint * (x + gain)
             }}
@@ -171,21 +187,46 @@ fn omitted_vector_default_argument_is_available_in_shader_forms() {
             @pure fn shader_vector_evaluated(x: float) -> Vec3 {{
                 return vector_default(x, supplied_vector(x))
             }}
-        "#);
-        let glsl = emit(&src, &[
-            "shader_vector_default", "shader_vector_named", "shader_vector_explicit",
-            "shader_vector_override", "shader_vector_evaluated",
-        ]).unwrap_or_else(|msg| panic!("omitted vector default {default} should lower for GLSL: {msg}"));
+        "#
+        );
+        let glsl = emit(
+            &src,
+            &[
+                "shader_vector_default",
+                "shader_vector_named",
+                "shader_vector_explicit",
+                "shader_vector_override",
+                "shader_vector_evaluated",
+            ],
+        )
+        .unwrap_or_else(|msg| {
+            panic!("omitted vector default {default} should lower for GLSL: {msg}")
+        });
         let explicit = vector_argument(&glsl, "shader_vector_explicit");
-        assert_eq!(explicit, declared, "explicit control must use the declared components");
+        assert_eq!(
+            explicit, declared,
+            "explicit control must use the declared components"
+        );
         assert_eq!(vector_argument(&glsl, "shader_vector_default"), explicit);
         assert_eq!(vector_argument(&glsl, "shader_vector_named"), explicit);
-        assert!(shader_body(&glsl, "shader_vector_named").contains(", 0.5)"), "named gain must retain its slot: {glsl}");
-        assert_eq!(vector_argument(&glsl, "shader_vector_override"), override_value);
+        assert!(
+            shader_body(&glsl, "shader_vector_named").contains(", 0.5)"),
+            "named gain must retain its slot: {glsl}"
+        );
+        assert_eq!(
+            vector_argument(&glsl, "shader_vector_override"),
+            override_value
+        );
         let evaluated = shader_body(&glsl, "shader_vector_evaluated");
-        assert_eq!(evaluated.matches("supplied_vector_float(x)").count(), 1,
-            "an explicit expression is evaluated exactly once: {evaluated}");
-        assert!(!evaluated.contains("vec3("), "explicit expressions must not acquire default components: {evaluated}");
+        assert_eq!(
+            evaluated.matches("supplied_vector_float(x)").count(),
+            1,
+            "an explicit expression is evaluated exactly once: {evaluated}"
+        );
+        assert!(
+            !evaluated.contains("vec3("),
+            "explicit expressions must not acquire default components: {evaluated}"
+        );
     }
 }
 
@@ -195,10 +236,12 @@ fn reject_omitted_nonconstant_vector_default_argument() {
         ("v(x, 0.375, 0.625)", "no concrete plan"),
         ("v(0.125 + 0.25, 0.375, 0.625)", "null literal"),
     ] {
-        let src = format!(r#"
+        let src = format!(
+            r#"
             @pure fn vector_default(x: float, tint: Vec3 = {default}) -> Vec3 {{ return tint * x }}
             @pure fn shader_vector_default(x: float) -> Vec3 {{ return vector_default(x) }}
-        "#);
+        "#
+        );
         reject(&src, &["shader_vector_default"], diagnostic);
     }
 }
@@ -257,9 +300,17 @@ fn reject_entry(src: &str, root: &str, needle: &str) {
     let mut modules = STDLIB.clone();
     modules.push(skull_parser::parse_module_clean(src, ustr::Ustr::from("<test>")).expect("parse"));
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
-    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("module id");
-    let err = skull_codegen_glsl::emit_shader_entry(&ws, mid, root, skull_codegen_glsl::GlslProfile::Core330)
-        .expect_err("must reject");
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("module id");
+    let err = skull_codegen_glsl::emit_shader_entry(
+        &ws,
+        mid,
+        root,
+        skull_codegen_glsl::GlslProfile::Core330,
+    )
+    .expect_err("must reject");
     assert!(
         err.message.contains(needle),
         "error `{}` should contain `{needle}`",

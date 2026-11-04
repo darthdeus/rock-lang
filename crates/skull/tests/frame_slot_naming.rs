@@ -13,12 +13,16 @@ use crate::common::{emit_module, mangled_name};
 fn layout_stamp(lua: &str, ctor: &str) -> i64 {
     let ctor = mangled_name(lua, ctor);
     let marker = format!("function {ctor}(");
-    let start = lua.find(&marker).unwrap_or_else(|| panic!("no ctor `{ctor}` in:\n{lua}"));
+    let start = lua
+        .find(&marker)
+        .unwrap_or_else(|| panic!("no ctor `{ctor}` in:\n{lua}"));
     let tail = &lua[start..];
     let key = "__layout = ";
     let lpos = tail.find(key).expect("ctor has no __layout stamp");
     let after = &tail[lpos + key.len()..];
-    let end = after.find(|c: char| !c.is_ascii_digit() && c != '-').unwrap_or(after.len());
+    let end = after
+        .find(|c: char| !c.is_ascii_digit() && c != '-')
+        .unwrap_or(after.len());
     after[..end].parse().expect("parse __layout stamp")
 }
 
@@ -28,7 +32,9 @@ fn layout_stamp(lua: &str, ctor: &str) -> i64 {
 fn frame_slots_in_step(lua: &str, ctor: &str) -> Vec<u32> {
     let ctor = mangled_name(lua, ctor);
     let head = format!("function {ctor}__step(");
-    let start = lua.find(&head).unwrap_or_else(|| panic!("no `{head}` in:\n{lua}"));
+    let start = lua
+        .find(&head)
+        .unwrap_or_else(|| panic!("no `{head}` in:\n{lua}"));
     let after = &lua[start + head.len()..];
     // First param name (the state table), up to `,` or `)`.
     let pend = after.find([',', ')']).expect("step has a param list");
@@ -169,5 +175,8 @@ fn main() { let c = gen(); let _ = c.resume() }
     let step_head = format!("function {}__step(", mangled_name(&b, "gen"));
     let s = &b[b.find(&step_head).unwrap()..];
     let step = &s[..s.find("\nend\n").map(|e| e + 5).unwrap_or(s.len())];
-    assert!(!step.contains("= (7)"), "the ghost's dead store must be DCE'd:\n{step}");
+    assert!(
+        !step.contains("= (7)"),
+        "the ghost's dead store must be DCE'd:\n{step}"
+    );
 }

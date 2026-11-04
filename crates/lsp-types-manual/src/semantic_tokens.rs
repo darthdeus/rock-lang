@@ -215,7 +215,6 @@ impl SemanticToken {
                 .collect(),
         )
     }
-
 }
 
 /// @since 3.16.0
@@ -234,11 +233,23 @@ pub struct SemanticTokens {
 impl serde::Serialize for SemanticTokens {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let flat: Vec<u32> = self.data.iter().flat_map(|t| [
-            t.delta_line, t.delta_start, t.length, t.token_type, t.token_modifiers_bitset,
-        ]).collect();
+        let flat: Vec<u32> = self
+            .data
+            .iter()
+            .flat_map(|t| {
+                [
+                    t.delta_line,
+                    t.delta_start,
+                    t.length,
+                    t.token_type,
+                    t.token_modifiers_bitset,
+                ]
+            })
+            .collect();
         let mut st = s.serialize_struct("SemanticTokens", 2)?;
-        if let Some(ref v) = self.result_id { st.serialize_field("resultId", v)?; }
+        if let Some(ref v) = self.result_id {
+            st.serialize_field("resultId", v)?;
+        }
         st.serialize_field("data", &flat)?;
         st.end()
     }
@@ -248,7 +259,9 @@ impl<'de> serde::Deserialize<'de> for SemanticTokens {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let mut map = serde_json::Map::<String, serde_json::Value>::deserialize(d)?;
         let result_id = crate::deserialize_optional(map.remove("resultId"))?;
-        let data_val = map.remove("data").ok_or_else(|| serde::de::Error::missing_field("data"))?;
+        let data_val = map
+            .remove("data")
+            .ok_or_else(|| serde::de::Error::missing_field("data"))?;
         let data = SemanticToken::deserialize_tokens(data_val).map_err(serde::de::Error::custom)?;
         Ok(SemanticTokens { result_id, data })
     }
@@ -263,9 +276,19 @@ pub struct SemanticTokensPartialResult {
 impl serde::Serialize for SemanticTokensPartialResult {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let flat: Vec<u32> = self.data.iter().flat_map(|t| [
-            t.delta_line, t.delta_start, t.length, t.token_type, t.token_modifiers_bitset,
-        ]).collect();
+        let flat: Vec<u32> = self
+            .data
+            .iter()
+            .flat_map(|t| {
+                [
+                    t.delta_line,
+                    t.delta_start,
+                    t.length,
+                    t.token_type,
+                    t.token_modifiers_bitset,
+                ]
+            })
+            .collect();
         let mut st = s.serialize_struct("SemanticTokensPartialResult", 1)?;
         st.serialize_field("data", &flat)?;
         st.end()
@@ -275,7 +298,9 @@ impl serde::Serialize for SemanticTokensPartialResult {
 impl<'de> serde::Deserialize<'de> for SemanticTokensPartialResult {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let mut map = serde_json::Map::<String, serde_json::Value>::deserialize(d)?;
-        let data_val = map.remove("data").ok_or_else(|| serde::de::Error::missing_field("data"))?;
+        let data_val = map
+            .remove("data")
+            .ok_or_else(|| serde::de::Error::missing_field("data"))?;
         let data = SemanticToken::deserialize_tokens(data_val).map_err(serde::de::Error::custom)?;
         Ok(SemanticTokensPartialResult { data })
     }
@@ -320,9 +345,18 @@ impl serde::Serialize for SemanticTokensEdit {
         st.serialize_field("start", &self.start)?;
         st.serialize_field("deleteCount", &self.delete_count)?;
         if let Some(ref tokens) = self.data {
-            let flat: Vec<u32> = tokens.iter().flat_map(|t| [
-                t.delta_line, t.delta_start, t.length, t.token_type, t.token_modifiers_bitset,
-            ]).collect();
+            let flat: Vec<u32> = tokens
+                .iter()
+                .flat_map(|t| {
+                    [
+                        t.delta_line,
+                        t.delta_start,
+                        t.length,
+                        t.token_type,
+                        t.token_modifiers_bitset,
+                    ]
+                })
+                .collect();
             st.serialize_field("data", &flat)?;
         }
         st.end()
@@ -332,17 +366,25 @@ impl serde::Serialize for SemanticTokensEdit {
 impl<'de> serde::Deserialize<'de> for SemanticTokensEdit {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let mut map = serde_json::Map::<String, serde_json::Value>::deserialize(d)?;
-        let start = map.remove("start")
+        let start = map
+            .remove("start")
             .ok_or_else(|| serde::de::Error::missing_field("start"))
             .and_then(|v| serde_json::from_value::<u32>(v).map_err(serde::de::Error::custom))?;
-        let delete_count = map.remove("deleteCount")
+        let delete_count = map
+            .remove("deleteCount")
             .ok_or_else(|| serde::de::Error::missing_field("deleteCount"))
             .and_then(|v| serde_json::from_value::<u32>(v).map_err(serde::de::Error::custom))?;
         let data = match map.remove("data") {
             None => None,
-            Some(v) => Some(SemanticToken::deserialize_tokens(v).map_err(serde::de::Error::custom)?),
+            Some(v) => {
+                Some(SemanticToken::deserialize_tokens(v).map_err(serde::de::Error::custom)?)
+            }
         };
-        Ok(SemanticTokensEdit { start, delete_count, data })
+        Ok(SemanticTokensEdit {
+            start,
+            delete_count,
+            data,
+        })
     }
 }
 
@@ -364,7 +406,10 @@ impl serde::Serialize for SemanticTokensFullDeltaResult {
             Self::TokensDelta(v) => v.serialize(s),
             Self::PartialTokensDelta { edits } => {
                 let mut map = serde_json::Map::new();
-                map.insert("edits".to_string(), serde_json::to_value(edits).map_err(S::Error::custom)?);
+                map.insert(
+                    "edits".to_string(),
+                    serde_json::to_value(edits).map_err(S::Error::custom)?,
+                );
                 serde_json::Value::Object(map).serialize(s)
             }
         }
@@ -388,7 +433,9 @@ impl<'de> serde::Deserialize<'de> for SemanticTokensFullDeltaResult {
                 return Ok(Self::PartialTokensDelta { edits });
             }
         }
-        Err(serde::de::Error::custom("data did not match any variant of SemanticTokensFullDeltaResult"))
+        Err(serde::de::Error::custom(
+            "data did not match any variant of SemanticTokensFullDeltaResult",
+        ))
     }
 }
 
@@ -458,7 +505,8 @@ pub struct SemanticTokensClientCapabilitiesRequests {
     pub full: Option<SemanticTokensFullOptions>,
 }
 
-impl_lsp_struct!(SemanticTokensClientCapabilitiesRequests,
+impl_lsp_struct!(
+    SemanticTokensClientCapabilitiesRequests,
     required {},
     optional {
         range: bool = "range",
@@ -507,7 +555,9 @@ impl<'de> serde::Deserialize<'de> for SemanticTokensFullOptions {
             let delta = val.get("delta").and_then(|v| v.as_bool());
             return Ok(Self::Delta { delta });
         }
-        Err(serde::de::Error::custom("invalid SemanticTokensFullOptions"))
+        Err(serde::de::Error::custom(
+            "invalid SemanticTokensFullOptions",
+        ))
     }
 }
 
@@ -527,13 +577,18 @@ pub struct SemanticTokensOptions {
     pub full: Option<SemanticTokensFullOptions>,
 }
 
-impl_lsp_struct!(SemanticTokensOptions,
-    required { legend: SemanticTokensLegend = "legend" },
+impl_lsp_struct!(
+    SemanticTokensOptions,
+    required {
+        legend: SemanticTokensLegend = "legend"
+    },
     optional {
         range: bool = "range",
         full: SemanticTokensFullOptions = "full",
     },
-    flatten { work_done_progress_options: WorkDoneProgressOptions }
+    flatten {
+        work_done_progress_options: WorkDoneProgressOptions
+    }
 );
 
 #[derive(Debug, Eq, PartialEq, Clone)]
@@ -543,7 +598,8 @@ pub struct SemanticTokensRegistrationOptions {
     pub static_registration_options: StaticRegistrationOptions,
 }
 
-impl_lsp_struct!(SemanticTokensRegistrationOptions,
+impl_lsp_struct!(
+    SemanticTokensRegistrationOptions,
     flatten {
         text_document_registration_options: TextDocumentRegistrationOptions,
         semantic_tokens_options: SemanticTokensOptions,
@@ -581,9 +637,12 @@ pub struct SemanticTokensWorkspaceClientCapabilities {
     pub refresh_support: Option<bool>,
 }
 
-impl_lsp_struct!(SemanticTokensWorkspaceClientCapabilities,
+impl_lsp_struct!(
+    SemanticTokensWorkspaceClientCapabilities,
     required {},
-    optional { refresh_support: bool = "refreshSupport" }
+    optional {
+        refresh_support: bool = "refreshSupport"
+    }
 );
 
 #[derive(Debug, Eq, PartialEq, Clone)]
@@ -595,8 +654,11 @@ pub struct SemanticTokensParams {
     pub text_document: TextDocumentIdentifier,
 }
 
-impl_lsp_struct!(SemanticTokensParams,
-    required { text_document: TextDocumentIdentifier = "textDocument" },
+impl_lsp_struct!(
+    SemanticTokensParams,
+    required {
+        text_document: TextDocumentIdentifier = "textDocument"
+    },
     optional {},
     flatten {
         work_done_progress_params: WorkDoneProgressParams,
@@ -616,7 +678,8 @@ pub struct SemanticTokensDeltaParams {
     pub previous_result_id: String,
 }
 
-impl_lsp_struct!(SemanticTokensDeltaParams,
+impl_lsp_struct!(
+    SemanticTokensDeltaParams,
     required {
         text_document: TextDocumentIdentifier = "textDocument",
         previous_result_id: String = "previousResultId",
@@ -640,7 +703,8 @@ pub struct SemanticTokensRangeParams {
     pub range: Range,
 }
 
-impl_lsp_struct!(SemanticTokensRangeParams,
+impl_lsp_struct!(
+    SemanticTokensRangeParams,
     required {
         text_document: TextDocumentIdentifier = "textDocument",
         range: Range = "range",

@@ -12,7 +12,9 @@ const PATH: &str = "/tmp/rock_lsp_ranking.rock";
 
 /// Split a `$0`-marked source into (source, cursor Position).
 fn marked(src: &str) -> (String, Position) {
-    let off = src.find("$0").expect("fixture must contain the `$0` cursor marker");
+    let off = src
+        .find("$0")
+        .expect("fixture must contain the `$0` cursor marker");
     let before = &src[..off];
     let line = before.matches('\n').count() as u32;
     let col = (before.len() - before.rfind('\n').map(|i| i + 1).unwrap_or(0)) as u32;
@@ -39,7 +41,9 @@ fn labels_at(src: &str) -> Vec<String> {
 /// The raw identifier prefix directly before the `$0` cursor marker (what the
 /// user typed).
 fn typed_prefix(marked_src: &str) -> String {
-    let off = marked_src.find("$0").expect("fixture must contain the `$0` cursor marker");
+    let off = marked_src
+        .find("$0")
+        .expect("fixture must contain the `$0` cursor marker");
     let head = &marked_src.as_bytes()[..off];
     let start = head
         .iter()
@@ -70,8 +74,14 @@ fn prefix_match_on_pascal_name_beats_boundary_match_on_snake_name() {
     );
     let s = rank_of(&labels, "SpellBindingX");
     let b = rank_of(&labels, "spell_bank");
-    assert!(s.is_some(), "SpellBindingX must appear for `spellb`: {labels:?}");
-    assert!(s < b, "SpellBindingX (prefix match) must rank above spell_bank (boundary match): {labels:?}");
+    assert!(
+        s.is_some(),
+        "SpellBindingX must appear for `spellb`: {labels:?}"
+    );
+    assert!(
+        s < b,
+        "SpellBindingX (prefix match) must rank above spell_bank (boundary match): {labels:?}"
+    );
 }
 
 #[test]
@@ -89,7 +99,10 @@ fn strong_const_match_beats_weaker_snake_match() {
     let c = rank_of(&labels, "FONT_SMALL");
     let d = rank_of(&labels, "format_new");
     assert!(c.is_some(), "FONT_SMALL must appear for `fon`: {labels:?}");
-    assert!(c < d || d.is_none(), "FONT_SMALL (prefix match) must rank above format_new: {labels:?}");
+    assert!(
+        c < d || d.is_none(),
+        "FONT_SMALL (prefix match) must rank above format_new: {labels:?}"
+    );
 }
 
 #[test]
@@ -107,8 +120,14 @@ fn contiguous_prefix_run_beats_scattered_all_boundary_match() {
     );
     let loot = rank_of(&labels, "LOOT_PANEL");
     let later = rank_of(&labels, "LATER_OUT_OF_TOWN_PERSON_ASTEROID");
-    assert!(loot.is_some(), "LOOT_PANEL must appear for `LOOTPA`: {labels:?}");
-    assert!(loot < later, "LOOT_PANEL (contiguous prefix run) must outrank the scattered match: {labels:?}");
+    assert!(
+        loot.is_some(),
+        "LOOT_PANEL must appear for `LOOTPA`: {labels:?}"
+    );
+    assert!(
+        loot < later,
+        "LOOT_PANEL (contiguous prefix run) must outrank the scattered match: {labels:?}"
+    );
 }
 
 #[test]
@@ -128,8 +147,14 @@ fn contiguous_run_beats_interior_word_boundary_hop() {
     );
     let plain = rank_of(&labels, "pixel_readback_new");
     let depth = rank_of(&labels, "pixel_readback_depth_new");
-    assert!(plain.is_some(), "pixel_readback_new must appear for `pixelreadnew`: {labels:?}");
-    assert!(plain < depth, "pixel_readback_new (shorter, no interior-word hop) must outrank pixel_readback_depth_new: {labels:?}");
+    assert!(
+        plain.is_some(),
+        "pixel_readback_new must appear for `pixelreadnew`: {labels:?}"
+    );
+    assert!(
+        plain < depth,
+        "pixel_readback_new (shorter, no interior-word hop) must outrank pixel_readback_depth_new: {labels:?}"
+    );
 }
 
 #[test]
@@ -152,7 +177,10 @@ fn match_arm_return_ranks_constructor_over_recursive_self_call() {
     );
     let ps = rank_of(&labels, "PartitionStyle");
     let call = rank_of(&labels, "partition_style(k)");
-    assert!(ps.is_some(), "PartitionStyle must appear for `PartSty`: {labels:?}");
+    assert!(
+        ps.is_some(),
+        "PartitionStyle must appear for `PartSty`: {labels:?}"
+    );
     assert!(
         ps < call || call.is_none(),
         "PartitionStyle (constructor) must outrank the recursive partition_style(k): {labels:?}"
@@ -218,12 +246,17 @@ fn ufcs_arg_completion_uses_the_correct_param_type() {
     // be gone -- no dotted / method reach paths in a Color slot. (A bare
     // `WHITE_PIXEL` global still fuzzy-matches `whi` and is fine.)
     assert!(
-        !labels.iter().any(|l| l.contains("image_dims") || l.contains("->") || l.contains('.')),
+        !labels
+            .iter()
+            .any(|l| l.contains("image_dims") || l.contains("->") || l.contains('.')),
         "float-typed reach paths must not appear in a Color slot: {labels:?}"
     );
     // The Color value ranks above the Image global in a Color slot.
     let pixel = rank_of(&labels, "WHITE_PIXEL");
-    assert!(white < pixel || pixel.is_none(), "WHITE (Color) must rank above WHITE_PIXEL (Image): {labels:?}");
+    assert!(
+        white < pixel || pixel.is_none(),
+        "WHITE (Color) must rank above WHITE_PIXEL (Image): {labels:?}"
+    );
 }
 
 #[test]
@@ -245,9 +278,14 @@ fn ufcs_chain_receiver_overload_filter_uses_last_method_return_type() {
          fn text(d: Image, s: string, alpha: float) -> Image { d }\n\
          fn draw(ui: UiRect) {\n  ui.fill().text(\"x\", WHI$0)\n}\n",
     );
-    assert!(rank_of(&labels, "WHITE").is_some(), "WHITE offered for a chain receiver: {labels:?}");
     assert!(
-        !labels.iter().any(|l| l.contains("image_dims") || l.contains('.') || l.contains("->")),
+        rank_of(&labels, "WHITE").is_some(),
+        "WHITE offered for a chain receiver: {labels:?}"
+    );
+    assert!(
+        !labels
+            .iter()
+            .any(|l| l.contains("image_dims") || l.contains('.') || l.contains("->")),
         "chain receiver must resolve to UiRect (no float reach paths): {labels:?}"
     );
 }
@@ -264,7 +302,10 @@ fn completion_recovers_in_lambda_body_inside_struct_literal_in_array() {
          global SPELL_OPEN: bool = false\n\
          global PANELS: [PanelReg] = [\n  PanelReg { is_open: () => SPE$0 }\n]\n",
     );
-    assert!(rank_of(&labels, "SPELL_OPEN").is_some(), "recovery in a nested lambda body: {labels:?}");
+    assert!(
+        rank_of(&labels, "SPELL_OPEN").is_some(),
+        "recovery in a nested lambda body: {labels:?}"
+    );
 }
 
 // -- Struct field VALUE position is a value slot, not a field-name slot. -------
@@ -281,7 +322,10 @@ fn struct_field_value_position_is_not_eaten_by_field_name_completion() {
          struct SpellBindingX { key: string, kind: SpellKind }\n\
          global BINDS: [SpellBindingX] = [\n  SpellBindingX { key: \"k\", kind: Spell$0 }\n]\n",
     );
-    assert!(!labels.is_empty(), "field-value position must not return empty completion");
+    assert!(
+        !labels.is_empty(),
+        "field-value position must not return empty completion"
+    );
     assert!(
         rank_of(&labels, "SpellKind").is_some() || labels.iter().any(|l| l.contains("SpellKind")),
         "the field's type SpellKind (or its variants) must be offered: {labels:?}"
@@ -302,8 +346,14 @@ fn confident_unique_local_arg_autofills_call_through() {
          fn can_cast(s: SpellX) -> bool { true }\n\
          fn probe(s: SpellX) {\n  let a = can$0\n}\n",
     );
-    assert!(rank_of(&labels, "can_cast").is_some(), "bare can_cast present: {labels:?}");
-    assert!(rank_of(&labels, "can_cast(s)").is_some(), "unique-arg autofill can_cast(s): {labels:?}");
+    assert!(
+        rank_of(&labels, "can_cast").is_some(),
+        "bare can_cast present: {labels:?}"
+    );
+    assert!(
+        rank_of(&labels, "can_cast(s)").is_some(),
+        "unique-arg autofill can_cast(s): {labels:?}"
+    );
 }
 
 #[test]
@@ -332,7 +382,10 @@ fn confident_autofill_suppressed_when_arg_is_ambiguous() {
          fn can_cast(s: SpellX) -> bool { true }\n\
          fn probe(s1: SpellX, s2: SpellX) {\n  let a = can$0\n}\n",
     );
-    assert!(rank_of(&labels, "can_cast").is_some(), "bare can_cast present: {labels:?}");
+    assert!(
+        rank_of(&labels, "can_cast").is_some(),
+        "bare can_cast present: {labels:?}"
+    );
     assert!(
         !labels.iter().any(|l| l.starts_with("can_cast(")),
         "ambiguous arg must not autofill: {labels:?}"
@@ -354,7 +407,10 @@ fn lambda_body_type_directs_on_field_return_type() {
     let b = rank_of(&labels, "SPELL_IS_OPEN");
     let i = rank_of(&labels, "SPELL_ID");
     assert!(b.is_some() && i.is_some(), "both offered: {labels:?}");
-    assert!(b < i, "bool candidate must type-direct above the int in a `-> bool` lambda body: {labels:?}");
+    assert!(
+        b < i,
+        "bool candidate must type-direct above the int in a `-> bool` lambda body: {labels:?}"
+    );
 }
 
 #[test]
@@ -390,8 +446,14 @@ fn struct_field_value_type_directs_even_when_the_literal_is_a_call_arg() {
     );
     let variant = rank_of(&labels, "BlendModeX::Replace");
     let decoy = rank_of(&labels, "replace");
-    assert!(variant.is_some(), "BlendModeX::Replace must be offered: {labels:?}");
-    assert!(decoy.is_some(), "decoy `replace` fn must be offered: {labels:?}");
+    assert!(
+        variant.is_some(),
+        "BlendModeX::Replace must be offered: {labels:?}"
+    );
+    assert!(
+        decoy.is_some(),
+        "decoy `replace` fn must be offered: {labels:?}"
+    );
     assert!(
         variant < decoy,
         "expected enum variant must type-direct above the unrelated same-named fn \
@@ -434,7 +496,10 @@ fn yield_operand_ranks_coroutine_fn_first() {
     let co = rank_of(&labels, "frame_co");
     let plain = rank_of(&labels, "frame");
     assert!(co.is_some() && plain.is_some(), "both offered: {labels:?}");
-    assert!(co < plain, "coroutine fn must rank first after `await`: {labels:?}");
+    assert!(
+        co < plain,
+        "coroutine fn must rank first after `await`: {labels:?}"
+    );
 }
 
 #[test]
@@ -493,7 +558,10 @@ fn ufcs_arg_completion_on_local_receiver_does_not_panic() {
         "fn add_all<T>(xs: [T], ys: [T]) {}\n\
          fn r() {\n  let nums = [1, 2]\n  nums.add_all($0)\n}\n",
     );
-    assert!(!labels.is_empty(), "completion must survive a local UFCS receiver");
+    assert!(
+        !labels.is_empty(),
+        "completion must survive a local UFCS receiver"
+    );
 }
 
 // -- Compatible types, different renders. -------------------------------------
@@ -602,8 +670,14 @@ fn expr_position_local_beats_boundary_richer_fn() {
     );
     let local = rank_of(&labels, "target_grid");
     let func = rank_of(&labels, "target_ref_grid");
-    assert!(local.is_some() && func.is_some(), "both offered: {labels:?}");
-    assert!(local < func, "local var must beat boundary-richer fn for `targrid`: {labels:?}");
+    assert!(
+        local.is_some() && func.is_some(),
+        "both offered: {labels:?}"
+    );
+    assert!(
+        local < func,
+        "local var must beat boundary-richer fn for `targrid`: {labels:?}"
+    );
 }
 
 #[test]
@@ -623,7 +697,10 @@ fn local_seeded_call_through_ranks_above_unrelated_global() {
     let global = rank_of(&labels, "attention_span");
     assert!(ct.is_some(), "attack(mob) call-through offered: {labels:?}");
     assert!(global.is_some(), "attention_span offered: {labels:?}");
-    assert!(ct < global, "local-seeded call-through must outrank unrelated global: {labels:?}");
+    assert!(
+        ct < global,
+        "local-seeded call-through must outrank unrelated global: {labels:?}"
+    );
 }
 
 #[test]
@@ -691,7 +768,9 @@ fn underscore_prefixed_symbols_hidden_from_general_list() {
     );
     assert!(labels.iter().any(|l| l == "visible_helper"), "{labels:?}");
     assert!(
-        !labels.iter().any(|l| l == "_helper" || l == "_PRIV" || l == "_loc"),
+        !labels
+            .iter()
+            .any(|l| l == "_helper" || l == "_PRIV" || l == "_loc"),
         "soft-private symbols must not surface on a plain prefix: {labels:?}"
     );
 }
@@ -720,7 +799,10 @@ fn reach_path_flood_is_kept_and_ranked_not_dropped() {
          fn r(s: S) {\n  feed($0)\n}\n",
     );
     let paths_total = labels.iter().filter(|l| l.contains('.')).count();
-    assert!(paths_total >= 15, "all reach paths offered: {paths_total} paths total");
+    assert!(
+        paths_total >= 15,
+        "all reach paths offered: {paths_total} paths total"
+    );
 }
 
 #[test]
@@ -736,8 +818,14 @@ fn exact_name_match_outranks_type_directed_candidate() {
     );
     let exact = rank_of(&labels, "xs");
     let typed = rank_of(&labels, "xsize");
-    assert!(exact.is_some() && typed.is_some(), "both offered: {labels:?}");
-    assert!(exact < typed, "exact name `xs` must outrank type-directed `xsize`: {labels:?}");
+    assert!(
+        exact.is_some() && typed.is_some(),
+        "both offered: {labels:?}"
+    );
+    assert!(
+        exact < typed,
+        "exact name `xs` must outrank type-directed `xsize`: {labels:?}"
+    );
 }
 
 #[test]
@@ -752,7 +840,9 @@ fn assignment_rhs_prioritizes_expected_enum_variant() {
          fn combat_target_grid(mob: Mob) -> int { return 0 }\n\
          fn use_it(mob: Mob) {\n  mob.ai_state = combat$0\n}\n",
     );
-    let variant = labels.iter().position(|l| l.contains("MobAiState") && l.contains("Combat"));
+    let variant = labels
+        .iter()
+        .position(|l| l.contains("MobAiState") && l.contains("Combat"));
     let func = rank_of(&labels, "combat_target_grid");
     assert!(variant.is_some(), "MobAiState::Combat offered: {labels:?}");
     assert!(
@@ -771,7 +861,9 @@ fn return_value_prioritizes_expected_enum_variant() {
          fn combat_target_grid(x: int) -> int { return 0 }\n\
          fn pick() -> MobAiState {\n  return combat$0\n}\n",
     );
-    let variant = labels.iter().position(|l| l.contains("MobAiState") && l.contains("Combat"));
+    let variant = labels
+        .iter()
+        .position(|l| l.contains("MobAiState") && l.contains("Combat"));
     let func = rank_of(&labels, "combat_target_grid");
     assert!(variant.is_some(), "MobAiState::Combat offered: {labels:?}");
     assert!(
@@ -789,7 +881,9 @@ fn typed_let_init_prioritizes_expected_enum_variant() {
          fn combat_target_grid(x: int) -> int { return 0 }\n\
          fn r() {\n  let s: MobAiState = combat$0\n}\n",
     );
-    let variant = labels.iter().position(|l| l.contains("MobAiState") && l.contains("Combat"));
+    let variant = labels
+        .iter()
+        .position(|l| l.contains("MobAiState") && l.contains("Combat"));
     let func = rank_of(&labels, "combat_target_grid");
     assert!(variant.is_some(), "MobAiState::Combat offered: {labels:?}");
     assert!(
@@ -808,7 +902,9 @@ fn comparison_rhs_prioritizes_expected_enum_variant() {
          fn combat_target_grid(mob: Mob) -> int { return 0 }\n\
          fn use_it(mob: Mob) {\n  if mob.ai_state == combat$0 {\n  }\n}\n",
     );
-    let variant = labels.iter().position(|l| l.contains("MobAiState") && l.contains("Combat"));
+    let variant = labels
+        .iter()
+        .position(|l| l.contains("MobAiState") && l.contains("Combat"));
     let func = rank_of(&labels, "combat_target_grid");
     assert!(variant.is_some(), "MobAiState::Combat offered: {labels:?}");
     assert!(
@@ -827,7 +923,9 @@ fn null_coalesce_rhs_prioritizes_expected_enum_variant() {
          fn combat_target_grid(x: int) -> int { return 0 }\n\
          fn r(state: MobAiState?) {\n  let s = state ?? combat$0\n}\n",
     );
-    let variant = labels.iter().position(|l| l.contains("MobAiState") && l.contains("Combat"));
+    let variant = labels
+        .iter()
+        .position(|l| l.contains("MobAiState") && l.contains("Combat"));
     let func = rank_of(&labels, "combat_target_grid");
     assert!(variant.is_some(), "MobAiState::Combat offered: {labels:?}");
     assert!(
@@ -851,7 +949,10 @@ fn typed_slot_local_beats_global_of_same_type() {
     );
     let local = rank_of(&labels, "nx_offset_mad");
     let global = rank_of(&labels, "nomad_x");
-    assert!(local.is_some() && global.is_some(), "both offered: {labels:?}");
+    assert!(
+        local.is_some() && global.is_some(),
+        "both offered: {labels:?}"
+    );
     assert!(
         global < local,
         "case-exact-prefix global still beats a scattered local (band before kind): {labels:?}"
@@ -869,7 +970,10 @@ fn typed_slot_kind_breaks_same_band_ties() {
     );
     let local = rank_of(&labels, "target_grid");
     let global = rank_of(&labels, "target_ref_grid_max");
-    assert!(local.is_some() && global.is_some(), "both offered: {labels:?}");
+    assert!(
+        local.is_some() && global.is_some(),
+        "both offered: {labels:?}"
+    );
     assert!(
         local < global,
         "same-band right-type local must outrank the global on the kind rung: {labels:?}"
@@ -887,8 +991,13 @@ fn member_completion_prefix_field_beats_boundary_richer_field() {
          fn r(s: S) {\n  let x = s.co$0\n}\n",
     );
     let pfx = labels.iter().position(|l| l.starts_with("cost"));
-    let boundary = labels.iter().position(|l| l.starts_with("charge_over_time"));
-    assert!(pfx.is_some() && boundary.is_some(), "both fields offered: {labels:?}");
+    let boundary = labels
+        .iter()
+        .position(|l| l.starts_with("charge_over_time"));
+    assert!(
+        pfx.is_some() && boundary.is_some(),
+        "both fields offered: {labels:?}"
+    );
     assert!(
         pfx < boundary,
         "prefix-band field must outrank a boundary-richer higher-scoring one: {labels:?}"
@@ -910,8 +1019,13 @@ fn direct_global_beats_global_rooted_reach_chain() {
          fn r() {\n  feed(gr$0)\n}\n",
     );
     let direct = rank_of(&labels, "grip_count");
-    let chain = labels.iter().position(|l| l.starts_with("grid_holder.grid_size"));
-    assert!(direct.is_some() && chain.is_some(), "both offered: {labels:?}");
+    let chain = labels
+        .iter()
+        .position(|l| l.starts_with("grid_holder.grid_size"));
+    assert!(
+        direct.is_some() && chain.is_some(),
+        "both offered: {labels:?}"
+    );
     assert!(
         direct < chain,
         "direct right-type global must outrank a global-rooted reach chain: {labels:?}"
@@ -933,7 +1047,10 @@ fn local_rooted_reach_path_beats_right_type_global() {
     );
     let path = labels.iter().position(|l| l.starts_with("h.grid_size"));
     let global = rank_of(&labels, "h_count");
-    assert!(path.is_some() && global.is_some(), "both offered: {labels:?}");
+    assert!(
+        path.is_some() && global.is_some(),
+        "both offered: {labels:?}"
+    );
     assert!(
         path < global,
         "same-band local-rooted right-type path must outrank the right-type global: {labels:?}"
@@ -961,8 +1078,13 @@ fn direct_fn_beats_ufcs_method_reach_synths_of_itself() {
          fn r() {\n  if DRAG == null {\n    DRAG = wisptrailn$0\n  }\n}\n",
     );
     let direct = rank_of(&labels, "wisp_trail_new");
-    let synth = labels.iter().position(|l| l.starts_with("RED.wisp_trail_new()"));
-    assert!(direct.is_some() && synth.is_some(), "both offered: {labels:?}");
+    let synth = labels
+        .iter()
+        .position(|l| l.starts_with("RED.wisp_trail_new()"));
+    assert!(
+        direct.is_some() && synth.is_some(),
+        "both offered: {labels:?}"
+    );
     assert!(
         direct < synth,
         "direct free fn must outrank its own UFCS-method reach synths: {labels:?}"
@@ -983,7 +1105,10 @@ fn member_completion_type_directs_from_assignment_lhs() {
     );
     let right = labels.iter().position(|l| l.starts_with("zz_state"));
     let wrong = labels.iter().position(|l| l.starts_with("aa_count"));
-    assert!(right.is_some() && wrong.is_some(), "both fields offered: {labels:?}");
+    assert!(
+        right.is_some() && wrong.is_some(),
+        "both fields offered: {labels:?}"
+    );
     assert!(
         right < wrong,
         "slot-typed field must type-direct in member completion: {labels:?}"
@@ -1001,7 +1126,10 @@ fn member_completion_type_directs_from_return_slot() {
     );
     let right = labels.iter().position(|l| l.starts_with("zz_state"));
     let wrong = labels.iter().position(|l| l.starts_with("aa_count"));
-    assert!(right.is_some() && wrong.is_some(), "both fields offered: {labels:?}");
+    assert!(
+        right.is_some() && wrong.is_some(),
+        "both fields offered: {labels:?}"
+    );
     assert!(
         right < wrong,
         "return-slot type must type-direct in member completion: {labels:?}"
@@ -1023,7 +1151,10 @@ fn member_arg_slot_field_beats_boundary_richer_method() {
     );
     let field = labels.iter().position(|l| l.starts_with("target_grid"));
     let method = labels.iter().position(|l| l.starts_with("target_ref_grid"));
-    assert!(field.is_some() && method.is_some(), "both members offered: {labels:?}");
+    assert!(
+        field.is_some() && method.is_some(),
+        "both members offered: {labels:?}"
+    );
     assert!(
         field < method,
         "same-band type-matching field must outrank the boundary-richer method: {labels:?}"
@@ -1042,7 +1173,9 @@ fn wrong_type_call_through_synth_defers_to_expected_type_variant() {
          fn compare(mob: Mob) -> int { return 0 }\n\
          fn use_it(mob: Mob) {\n  mob.ai_state = com$0\n}\n",
     );
-    let variant = labels.iter().position(|l| l.contains("MobAiState") && l.contains("Combat"));
+    let variant = labels
+        .iter()
+        .position(|l| l.contains("MobAiState") && l.contains("Combat"));
     let synth = rank_of(&labels, "compare(mob)");
     assert!(variant.is_some(), "MobAiState::Combat offered: {labels:?}");
     assert!(
@@ -1086,8 +1219,14 @@ fn member_field_coercing_to_nullable_slot_ranks_first() {
     );
     let z = rank_of(&labels, "zog: int");
     let a = rank_of(&labels, "aaa: string");
-    assert!(z.is_some() && a.is_some(), "both fields offered: {labels:?}");
-    assert!(z < a, "int field must type-direct above string in an int? slot: {labels:?}");
+    assert!(
+        z.is_some() && a.is_some(),
+        "both fields offered: {labels:?}"
+    );
+    assert!(
+        z < a,
+        "int field must type-direct above string in an int? slot: {labels:?}"
+    );
 }
 
 // -- test_* / tests-dir demotion outside test files ---------------------------
@@ -1181,7 +1320,10 @@ fn tests_dir_project() -> (tempfile::TempDir, String, String) {
     .unwrap();
     let main = bone_query::canonicalize_lenient(&dir.path().join("main.rock").to_string_lossy());
     let helper = bone_query::canonicalize_lenient(
-        &dir.path().join("tests").join("helpers.rock").to_string_lossy(),
+        &dir.path()
+            .join("tests")
+            .join("helpers.rock")
+            .to_string_lossy(),
     );
     (dir, main, helper)
 }
@@ -1261,8 +1403,16 @@ fn same_file_fn_outranks_stdlib_fns_at_empty_prefix() {
 #[test]
 fn prox_digits_same_file_vs_stdlib() {
     let src = "fn zzz_mine() {}\nfn r() {\n  $0\n}\n";
-    assert_eq!(key_digit(PATH, src, "zzz_mine", PROX_DIGIT), '0', "same-file fn is prox 0");
-    assert_eq!(key_digit(PATH, src, "abs", PROX_DIGIT), '3', "stdlib fn is prox 3");
+    assert_eq!(
+        key_digit(PATH, src, "zzz_mine", PROX_DIGIT),
+        '0',
+        "same-file fn is prox 0"
+    );
+    assert_eq!(
+        key_digit(PATH, src, "abs", PROX_DIGIT),
+        '3',
+        "stdlib fn is prox 3"
+    );
 }
 
 #[test]
@@ -1272,7 +1422,10 @@ fn sibling_project_file_is_prox_one() {
     bone.update(&main, std::fs::read_to_string(&main).unwrap());
     // `aaa_helper` is defined in tests/helpers.rock -- same project root.
     let items = bone.completion(&main, Position::new(2, 7));
-    let it = items.iter().find(|c| c.label == "aaa_helper").expect("offered");
+    let it = items
+        .iter()
+        .find(|c| c.label == "aaa_helper")
+        .expect("offered");
     assert_eq!(
         it.sort_text.as_deref().expect("sort_text").as_bytes()[PROX_DIGIT] as char,
         '1',
@@ -1332,9 +1485,21 @@ fn freq_digits_bucket_by_reference_count() {
     let src = format!(
         "fn zz_hot() {{}}\nfn mm_warm() {{}}\nfn aa_cold() {{}}\nfn r() {{\n{body}  $0\n}}\n"
     );
-    assert_eq!(key_digit(PATH, &src, "zz_hot", FREQ_DIGIT), '0', "16 refs = hot bucket");
-    assert_eq!(key_digit(PATH, &src, "mm_warm", FREQ_DIGIT), '1', "3 refs = warm bucket");
-    assert_eq!(key_digit(PATH, &src, "aa_cold", FREQ_DIGIT), '2', "0 refs = rare bucket");
+    assert_eq!(
+        key_digit(PATH, &src, "zz_hot", FREQ_DIGIT),
+        '0',
+        "16 refs = hot bucket"
+    );
+    assert_eq!(
+        key_digit(PATH, &src, "mm_warm", FREQ_DIGIT),
+        '1',
+        "3 refs = warm bucket"
+    );
+    assert_eq!(
+        key_digit(PATH, &src, "aa_cold", FREQ_DIGIT),
+        '2',
+        "0 refs = rare bucket"
+    );
 }
 
 #[test]
@@ -1354,6 +1519,12 @@ fn assignment_rhs_to_a_local_type_directs_like_typed_let() {
     let sure = rank_of(&labels, "sure_w").expect("sure_w offered");
     let maybe = rank_of(&labels, "maybe_w").expect("maybe_w offered");
     let num = rank_of(&labels, "num").expect("num offered");
-    assert!(sure < maybe, "Widget must outrank Widget? at assign RHS: {labels:?}");
-    assert!(sure < num, "Widget must outrank int at assign RHS: {labels:?}");
+    assert!(
+        sure < maybe,
+        "Widget must outrank Widget? at assign RHS: {labels:?}"
+    );
+    assert!(
+        sure < num,
+        "Widget must outrank int at assign RHS: {labels:?}"
+    );
 }

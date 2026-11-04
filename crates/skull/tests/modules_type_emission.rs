@@ -12,7 +12,7 @@
 //! So a v1 package holding a value struct or an enum compiled clean and then
 //! died in LuaJIT. These controls execute the chunk.
 
-use crate::common::{emit_v1_package, run_luajit, InlineOffGuard, V1Fragment};
+use crate::common::{InlineOffGuard, V1Fragment, emit_v1_package, run_luajit};
 
 const MAIN: &str = r#"
 fn main() {
@@ -61,8 +61,14 @@ fn package() -> skull::mir_emit::MirEmit {
     emit_v1_package(
         "v1ty",
         &[
-            V1Fragment { file: "main.rock", src: MAIN },
-            V1Fragment { file: "a.rock", src: MOD_A },
+            V1Fragment {
+                file: "main.rock",
+                src: MAIN,
+            },
+            V1Fragment {
+                file: "a.rock",
+                src: MOD_A,
+            },
         ],
     )
 }
@@ -109,11 +115,15 @@ fn v1_type_table_key_matches_the_emitted_constructor() {
     let digest = skull_mir::mangle::prefix_digest("v1ty::a");
     let key = format!("V2_{digest}");
     assert!(
-        emitted.lua.contains(&format!("_G.__ROCK_TYPE_TABLE[\"{key}\"]")),
+        emitted
+            .lua
+            .contains(&format!("_G.__ROCK_TYPE_TABLE[\"{key}\"]")),
         "the type table is keyed on the emitted symbol"
     );
     assert!(
-        emitted.lua.contains(&format!("{key}_ct = ffi.typeof(\"{key}\")")),
+        emitted
+            .lua
+            .contains(&format!("{key}_ct = ffi.typeof(\"{key}\")")),
         "`_G[<key> .. \"_ct\"]` must resolve to the constructor the cdef declared"
     );
 }
@@ -168,11 +178,20 @@ fn v1_mixed_enum_variants_construct_and_match() {
     let emitted = emit_v1_package(
         "v1enum",
         &[
-            V1Fragment { file: "main.rock", src: PAYLOAD_MAIN },
-            V1Fragment { file: "a.rock", src: PAYLOAD_MOD },
+            V1Fragment {
+                file: "main.rock",
+                src: PAYLOAD_MAIN,
+            },
+            V1Fragment {
+                file: "a.rock",
+                src: PAYLOAD_MOD,
+            },
         ],
     );
-    let out = run_luajit(&format!("{}\nmain()\n", emitted.lua), "modules_v1_enum_payload");
+    let out = run_luajit(
+        &format!("{}\nmain()\n", emitted.lua),
+        "modules_v1_enum_payload",
+    );
     assert_eq!(out, "step2 jump13 pass 4");
 }
 
@@ -216,8 +235,14 @@ fn a_generic_specialized_at_a_v1_nominal_emits_runnable_lua() {
     let emitted = emit_v1_package(
         "v1spec",
         &[
-            V1Fragment { file: "main.rock", src: SPEC_MAIN },
-            V1Fragment { file: "a.rock", src: SPEC_MOD_A },
+            V1Fragment {
+                file: "main.rock",
+                src: SPEC_MAIN,
+            },
+            V1Fragment {
+                file: "a.rock",
+                src: SPEC_MOD_A,
+            },
         ],
     );
     let digest = skull_mir::mangle::prefix_digest("v1spec::a");
@@ -228,7 +253,9 @@ fn a_generic_specialized_at_a_v1_nominal_emits_runnable_lua() {
         "a specialized body's SYMBOL must not carry a DefKey"
     );
     assert!(
-        emitted.lua.contains(&format!("function vec_len_arr_T_{encoded}(")),
+        emitted
+            .lua
+            .contains(&format!("function vec_len_arr_T_{encoded}(")),
         "the specialized definition takes the nominal's identifier form"
     );
     let out = run_luajit(&format!("{}\nmain()\n", emitted.lua), "modules_v1_spec");

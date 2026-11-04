@@ -1,6 +1,10 @@
 use super::*;
 
-pub(crate) fn for_elem_ty(gamma: &mut Gamma, iter_ty: TyId, span: Span) -> Result<TyId, CompilerError> {
+pub(crate) fn for_elem_ty(
+    gamma: &mut Gamma,
+    iter_ty: TyId,
+    span: Span,
+) -> Result<TyId, CompilerError> {
     Ok(match *gamma.get(iter_ty) {
         // [T]
         TypeExpr::App {
@@ -85,10 +89,18 @@ pub(crate) fn for_elem_ty(gamma: &mut Gamma, iter_ty: TyId, span: Span) -> Resul
 /// the stdlib `EnumIter` combinator.
 pub(crate) fn builtin_enumerable(gamma: &Gamma, ty: TyId) -> bool {
     match *gamma.get(ty) {
-        TypeExpr::App { ctor: TypeCtor::Array, .. } | TypeExpr::App { ctor: TypeCtor::Map, .. } => {
-            true
+        TypeExpr::App {
+            ctor: TypeCtor::Array,
+            ..
         }
-        TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => bone_core::modules::is_intrinsic_key_in(
+        | TypeExpr::App {
+            ctor: TypeCtor::Map,
+            ..
+        } => true,
+        TypeExpr::App {
+            ctor: TypeCtor::Nominal(n),
+            ..
+        } => bone_core::modules::is_intrinsic_key_in(
             n,
             &[
                 "NativeBuffer",
@@ -111,9 +123,7 @@ pub(crate) fn infer_for_elem(
     span: Span,
 ) -> Result<TyId, CompilerError> {
     match c.body.expr_arena[iter] {
-        Expr::Range { low, high } => {
-            infer_range_bounds(c, gamma, low, high)
-        }
+        Expr::Range { low, high } => infer_range_bounds(c, gamma, low, high),
 
         // Builtin-collection `enumerate(coll)` keeps its template lowering
         // (Map has no protocol iterator; the counted paths are co-fn safe).
@@ -125,13 +135,11 @@ pub(crate) fn infer_for_elem(
             callee: Callee::Unresolved { name, .. },
             args,
             ..
-        } if name.as_str() == "enumerate"
-            && args.len() == 1
-            && {
-                let coll_ty = infer_expr(c, gamma, args.start())?;
-                let coll_ty = resolve(gamma, coll_ty, span);
-                builtin_enumerable(gamma, coll_ty)
-            } =>
+        } if name.as_str() == "enumerate" && args.len() == 1 && {
+            let coll_ty = infer_expr(c, gamma, args.start())?;
+            let coll_ty = resolve(gamma, coll_ty, span);
+            builtin_enumerable(gamma, coll_ty)
+        } =>
         {
             let coll_ty = infer_expr(c, gamma, args.start())?;
             let coll_ty = resolve(gamma, coll_ty, span);
@@ -154,10 +162,14 @@ pub(crate) fn infer_for_elem(
             // `for_elem_ty` keeps its Array arm for builtin `enumerate(..)`;
             // Arena enumeration resolves the ordinary EnumIter combinator.
             let is_protocol_builtin = match *gamma.get(iter_ty) {
-                TypeExpr::App { ctor: TypeCtor::Array, .. } => true,
-                TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => {
-                    bone_core::modules::is_intrinsic_key(n, "Arena")
-                }
+                TypeExpr::App {
+                    ctor: TypeCtor::Array,
+                    ..
+                } => true,
+                TypeExpr::App {
+                    ctor: TypeCtor::Nominal(n),
+                    ..
+                } => bone_core::modules::is_intrinsic_key(n, "Arena"),
                 _ => false,
             };
             if is_protocol_builtin {
@@ -205,49 +217,68 @@ pub(crate) fn resolve_for_iter_protocol(
         };
         gamma.out.for_iter_protocol.insert(
             iter_expr,
-            ForIterInfo { iter: None, next: BoundNext::CallerGeneric(idx) },
+            ForIterInfo {
+                iter: None,
+                next: BoundNext::CallerGeneric(idx),
+            },
         );
         return Ok(elem);
     }
 
-    let (iter_witness, it_ty) =
-        match resolve_unary_by_recv(c, gamma, Ustr::from("iter"), coll_ty, span) {
-            Ok((f, ret, subs)) => {
-                let (fm, ff) = f;
-                if gamma.workspace.module(fm).functions[ff]
-                    .generic_bounds
-                    .iter()
-                    .any(Option::is_some)
-                {
-                    comp_error!(
-                        span,
-                        "`iter({})` resolves to a fn with `Iterator` bounds; bounded `iter` fns are not supported",
-                        gamma.render(coll_ty)
-                    );
-                }
-                (Some(IterWitness { func: f, generics: subs }), ret)
+    let (iter_witness, it_ty) = match resolve_unary_by_recv(
+        c,
+        gamma,
+        Ustr::from("iter"),
+        coll_ty,
+        span,
+    ) {
+        Ok((f, ret, subs)) => {
+            let (fm, ff) = f;
+            if gamma.workspace.module(fm).functions[ff]
+                .generic_bounds
+                .iter()
+                .any(Option::is_some)
+            {
+                comp_error!(
+                    span,
+                    "`iter({})` resolves to a fn with `Iterator` bounds; bounded `iter` fns are not supported",
+                    gamma.render(coll_ty)
+                );
             }
-            // Identity: the collection IS the iterator if `next` resolves on it.
-            Err(_) => (None, coll_ty),
-        };
+            (
+                Some(IterWitness {
+                    func: f,
+                    generics: subs,
+                }),
+                ret,
+            )
+        }
+        // Identity: the collection IS the iterator if `next` resolves on it.
+        Err(_) => (None, coll_ty),
+    };
 
-    let (next_fn, next_ret, next_subs) =
-        match resolve_unary_by_recv(c, gamma, Ustr::from("next"), it_ty, span) {
-            Ok(x) => x,
-            Err(_) if iter_witness.is_some() => comp_error!(
-                span,
-                "`iter` yields `{}`, but there is no `next({}) -> (bool, E)` function to drive the loop",
-                gamma.render(it_ty),
-                gamma.render(it_ty)
-            ),
-            Err(_) => comp_error!(
-                span,
-                "type `{}` is not iterable: not a builtin collection, and neither `iter({})` nor `next({}) -> (bool, E)` is in scope",
-                gamma.render(coll_ty),
-                gamma.render(coll_ty),
-                gamma.render(coll_ty)
-            ),
-        };
+    let (next_fn, next_ret, next_subs) = match resolve_unary_by_recv(
+        c,
+        gamma,
+        Ustr::from("next"),
+        it_ty,
+        span,
+    ) {
+        Ok(x) => x,
+        Err(_) if iter_witness.is_some() => comp_error!(
+            span,
+            "`iter` yields `{}`, but there is no `next({}) -> (bool, E)` function to drive the loop",
+            gamma.render(it_ty),
+            gamma.render(it_ty)
+        ),
+        Err(_) => comp_error!(
+            span,
+            "type `{}` is not iterable: not a builtin collection, and neither `iter({})` nor `next({}) -> (bool, E)` is in scope",
+            gamma.render(coll_ty),
+            gamma.render(coll_ty),
+            gamma.render(coll_ty)
+        ),
+    };
 
     let elem = for_iter_next_elem(gamma, next_ret, span)?;
 
@@ -259,7 +290,15 @@ pub(crate) fn resolve_for_iter_protocol(
     if next_callee.generic_bounds.iter().any(Option::is_some) {
         let mut done = FxHashSet::default();
         check_iterator_bounds(
-            c, gamma, &next_callee, &next_subs, &mut sub, &mut done, true, 0, span,
+            c,
+            gamma,
+            &next_callee,
+            &next_subs,
+            &mut sub,
+            &mut done,
+            true,
+            0,
+            span,
         )?;
     }
 
@@ -267,7 +306,11 @@ pub(crate) fn resolve_for_iter_protocol(
         iter_expr,
         ForIterInfo {
             iter: iter_witness,
-            next: BoundNext::Concrete { func: next_fn, sub, next_generics: next_subs },
+            next: BoundNext::Concrete {
+                func: next_fn,
+                sub,
+                next_generics: next_subs,
+            },
         },
     );
     Ok(elem)
@@ -297,7 +340,10 @@ pub(crate) fn check_iterator_bounds(
     span: Span,
 ) -> Result<(), CompilerError> {
     if depth > 64 {
-        comp_error!(span, "`Iterator` bound resolution exceeded depth 64 (recursive iterator type?)");
+        comp_error!(
+            span,
+            "`Iterator` bound resolution exceeded depth 64 (recursive iterator type?)"
+        );
     }
 
     for (idx, b) in function.generic_bounds.iter().enumerate() {
@@ -351,17 +397,22 @@ pub(crate) fn check_iterator_bounds(
             }
 
             _ => {
-                let (next_fn, next_ret, next_subs) =
-                    match resolve_unary_by_recv(c, gamma, Ustr::from("next"), inst, span) {
-                        Ok(x) => x,
-                        Err(_) => comp_error!(
-                            span,
-                            "`{}` does not satisfy `Iterator<{}>`: no `next({}) -> (bool, E)` function in scope",
-                            gamma.render(inst),
-                            gamma.render(elem_decl),
-                            gamma.render(inst)
-                        ),
-                    };
+                let (next_fn, next_ret, next_subs) = match resolve_unary_by_recv(
+                    c,
+                    gamma,
+                    Ustr::from("next"),
+                    inst,
+                    span,
+                ) {
+                    Ok(x) => x,
+                    Err(_) => comp_error!(
+                        span,
+                        "`{}` does not satisfy `Iterator<{}>`: no `next({}) -> (bool, E)` function in scope",
+                        gamma.render(inst),
+                        gamma.render(elem_decl),
+                        gamma.render(inst)
+                    ),
+                };
                 let elem_actual = bound_next_elem(gamma, next_ret, inst, span)?;
                 let elem_expected = substitute(gamma, elem_decl, subs, span)?;
                 if unify(gamma, elem_actual, elem_expected, span).is_err() {
@@ -374,19 +425,29 @@ pub(crate) fn check_iterator_bounds(
                     );
                 }
 
-                let next_callee =
-                    gamma.workspace.module(next_fn.0).functions[next_fn.1].clone();
+                let next_callee = gamma.workspace.module(next_fn.0).functions[next_fn.1].clone();
                 let mut sub = BoundTree::default();
                 if next_callee.generic_bounds.iter().any(Option::is_some) {
                     let mut sub_done = FxHashSet::default();
                     check_iterator_bounds(
-                        c, gamma, &next_callee, &next_subs, &mut sub, &mut sub_done,
-                        true, depth + 1, span,
+                        c,
+                        gamma,
+                        &next_callee,
+                        &next_subs,
+                        &mut sub,
+                        &mut sub_done,
+                        true,
+                        depth + 1,
+                        span,
                     )?;
                 }
                 tree.next.insert(
                     idx,
-                    BoundNext::Concrete { func: next_fn, sub, next_generics: next_subs },
+                    BoundNext::Concrete {
+                        func: next_fn,
+                        sub,
+                        next_generics: next_subs,
+                    },
                 );
                 done.insert(idx);
             }
@@ -480,7 +541,13 @@ pub(crate) fn implicit_iter_target(
                 gamma.out.rollback_to(snap);
                 return None;
             }
-            Some((IterWitness { func: f, generics: subs }, ret))
+            Some((
+                IterWitness {
+                    func: f,
+                    generics: subs,
+                },
+                ret,
+            ))
         }
         Err(_) => {
             gamma.out.rollback_to(snap);
@@ -505,7 +572,11 @@ pub(crate) fn bounded_generic_vars(gamma: &Gamma, f: &Function) -> SmallVec<[Var
 
 /// Whether a declared (pre-substitution) param type is one of the fn's
 /// bounded generics.
-pub(crate) fn declared_is_bounded_generic(gamma: &Gamma, declared: TyId, bounded: &[VarId]) -> bool {
+pub(crate) fn declared_is_bounded_generic(
+    gamma: &Gamma,
+    declared: TyId,
+    bounded: &[VarId],
+) -> bool {
     matches!(*gamma.get(declared), TypeExpr::Generic(v, _) if bounded.contains(&v))
 }
 
@@ -568,7 +639,11 @@ pub(crate) fn resolve_unary_by_recv(
 
     // The protocol is unary: exactly one required receiver parameter.
     if n_params != 1 || num_required != 1 {
-        comp_error!(span, "`{}` must take exactly one argument to drive a `for` loop", name);
+        comp_error!(
+            span,
+            "`{}` must take exactly one argument to drive a `for` loop",
+            name
+        );
     }
     let Some(p0) = param0 else {
         comp_error!(span, "`{}` has no receiver parameter", name);
@@ -587,10 +662,18 @@ pub(crate) fn resolve_unary_by_recv(
 /// Element type of a `next() -> (bool, E)` return: the tuple tail. `(bool, E)`
 /// yields `E`; `(bool, A, B, ...)` yields the tuple `(A, B, ...)`. The first
 /// element must be `bool` (the done flag) and there must be at least one element.
-pub(crate) fn for_iter_next_elem(gamma: &mut Gamma, next_ret: TyId, span: Span) -> Result<TyId, CompilerError> {
+pub(crate) fn for_iter_next_elem(
+    gamma: &mut Gamma,
+    next_ret: TyId,
+    span: Span,
+) -> Result<TyId, CompilerError> {
     let next_ret = resolve(gamma, next_ret, span);
     let TypeExpr::Tuple { elements } = *gamma.get(next_ret) else {
-        comp_error!(span, "`next` must return `(bool, E)`, got `{}`", gamma.render(next_ret));
+        comp_error!(
+            span,
+            "`next` must return `(bool, E)`, got `{}`",
+            gamma.render(next_ret)
+        );
     };
     let elems: Vec<_> = elements.into_iter().collect();
     if elems.len() < 2 {

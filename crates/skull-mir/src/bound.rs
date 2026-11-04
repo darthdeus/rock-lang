@@ -31,7 +31,10 @@ pub enum ResolvedBoundNext {
     /// A concrete `next` witness and how its own bounded generics resolve in
     /// turn. The non-generic case is `Instance::base`, so every consumer reads
     /// one identity rather than re-pairing a declaration with an optional key.
-    Concrete { instance: Instance, sub: ResolvedBoundTree },
+    Concrete {
+        instance: Instance,
+        sub: ResolvedBoundTree,
+    },
     /// Still the enclosing body's own bounded generic. Resolvable only where
     /// that body's incoming tree is known -- at its splice, or at its
     /// standalone instantiation.
@@ -165,7 +168,10 @@ pub fn resolve_bound_tree(
 ) -> Result<ResolvedBoundTree, CompilerError> {
     let mut out = ResolvedBoundTree::default();
     for (&g, bn) in &raw.next {
-        out.next.insert(g, resolve_bound_next(ws, interner, inf, subst, bn, incoming)?);
+        out.next.insert(
+            g,
+            resolve_bound_next(ws, interner, inf, subst, bn, incoming)?,
+        );
     }
     Ok(out)
 }
@@ -179,21 +185,24 @@ pub fn resolve_bound_next(
     incoming: &ResolvedBoundTree,
 ) -> Result<ResolvedBoundNext, CompilerError> {
     match bn {
-        BoundNext::Concrete { func: (m, f), sub, next_generics } => {
-            let func = FuncRef { module: *m, func: *f };
+        BoundNext::Concrete {
+            func: (m, f),
+            sub,
+            next_generics,
+        } => {
+            let func = FuncRef {
+                module: *m,
+                func: *f,
+            };
             // No inference for this body means no arena to read the witness
             // instantiation out of; the shared witness is what the splice path
             // has always used in that case.
             let instance = match inf {
-                Some(inf) => crate::lower::spec_key_from_next_generics(
-                    ws,
-                    inf,
-                    func,
-                    next_generics,
-                    subst,
-                )?
-                .map(|key| Instance::intern(interner, func, key))
-                .unwrap_or_else(|| Instance::base(func)),
+                Some(inf) => {
+                    crate::lower::spec_key_from_next_generics(ws, inf, func, next_generics, subst)?
+                        .map(|key| Instance::intern(interner, func, key))
+                        .unwrap_or_else(|| Instance::base(func))
+                }
                 None => Instance::base(func),
             };
             Ok(ResolvedBoundNext::Concrete {

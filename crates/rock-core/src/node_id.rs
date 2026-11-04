@@ -77,7 +77,9 @@ impl AstBuilder {
     }
 
     pub fn current_id(&self) -> u32 {
-        self.id_gen.next_id.load(std::sync::atomic::Ordering::SeqCst)
+        self.id_gen
+            .next_id
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     pub fn gen_hole_id(&self) -> u32 {

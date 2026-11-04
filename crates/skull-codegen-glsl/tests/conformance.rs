@@ -17,7 +17,7 @@ use ustr::Ustr;
 
 use skull_codegen_glsl::GlslIntrinsics;
 use skull_mir::intrinsics::{
-    declared_intrinsics, is_intrinsic, is_native_required, unbacked_entries, IntrinsicTable,
+    IntrinsicTable, declared_intrinsics, is_intrinsic, is_native_required, unbacked_entries,
 };
 
 static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
@@ -32,7 +32,9 @@ static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
 
 fn stdlib_ws() -> bone_semantic::inference::Workspace {
     let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module_clean("fn main() {}", Ustr::from("<test>")).expect("parse"));
+    modules.push(
+        skull_parser::parse_module_clean("fn main() {}", Ustr::from("<test>")).expect("parse"),
+    );
     bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass")
 }
 

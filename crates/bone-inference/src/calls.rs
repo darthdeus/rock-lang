@@ -19,18 +19,26 @@ pub(crate) fn resolve_callee(gamma: &Gamma, family: &CallFamily) -> FnList {
                 .module_ids
                 .get(&file)
                 .and_then(|mid| ws.module(*mid).call_families.get(&name))
-                .unwrap_or_else(|| panic!("merged family `{name}` of `{file}` was not recorded at lowering"));
+                .unwrap_or_else(|| {
+                    panic!("merged family `{name}` of `{file}` was not recorded at lowering")
+                });
             let mut out = FnList::default();
             let mut inaccessible = FnList::default();
             for &member in members {
-                gamma.inaccessible_overloads.borrow_mut().remove(&member.key);
+                gamma
+                    .inaccessible_overloads
+                    .borrow_mut()
+                    .remove(&member.key);
                 out.extend(member_overloads(gamma, member.key, member.owner));
                 if let Some(hidden) = gamma.inaccessible_overloads.borrow().get(&member.key) {
                     inaccessible.extend(hidden.iter().copied());
                 }
             }
             if !inaccessible.is_empty() {
-                gamma.inaccessible_overloads.borrow_mut().insert(name, inaccessible);
+                gamma
+                    .inaccessible_overloads
+                    .borrow_mut()
+                    .insert(name, inaccessible);
             }
             out
         }
@@ -55,7 +63,9 @@ pub(crate) fn fn_value_family(c: BodyCtx, e: Idx<Expr>, name: Ustr) -> CallFamil
 fn member_overloads(gamma: &Gamma, key: Ustr, owner: Option<PackageId>) -> FnList {
     gamma.dep_acc.borrow_mut().insert(key);
     let ws = gamma.workspace;
-    let Some(fns) = ws.functions_by_name.get(&key) else { return FnList::default() };
+    let Some(fns) = ws.functions_by_name.get(&key) else {
+        return FnList::default();
+    };
     let site = gamma.access_site();
     let mut visible = FnList::with_capacity(fns.len());
     let mut inaccessible = FnList::default();
@@ -87,15 +97,28 @@ fn owned_by_view(ws: &Workspace, owner: Option<PackageId>, mid: ModuleId) -> boo
 /// The nearest lookup tier among the members of a merged v1 family that
 /// contribute the overload `(mid, fid)` (spec 8.3); `None` outside a merged
 /// family, where no tier orders the candidates.
-fn candidate_tier(gamma: &Gamma, family: CallFamily, mid: ModuleId, fid: Idx<Function>) -> Option<FamilyTier> {
-    let CallFamily::Merged { name, file } = family else { return None };
+fn candidate_tier(
+    gamma: &Gamma,
+    family: CallFamily,
+    mid: ModuleId,
+    fid: Idx<Function>,
+) -> Option<FamilyTier> {
+    let CallFamily::Merged { name, file } = family else {
+        return None;
+    };
     let ws = gamma.workspace;
-    let members = ws.module_ids.get(&file).and_then(|m| ws.module(*m).call_families.get(&name))?;
+    let members = ws
+        .module_ids
+        .get(&file)
+        .and_then(|m| ws.module(*m).call_families.get(&name))?;
     members
         .iter()
         .filter(|member| {
             owned_by_view(ws, member.owner, mid)
-                && ws.functions_by_name.get(&member.key).is_some_and(|fns| fns.contains(&(mid, fid)))
+                && ws
+                    .functions_by_name
+                    .get(&member.key)
+                    .is_some_and(|fns| fns.contains(&(mid, fid)))
         })
         .map(|member| member.tier)
         .min()
@@ -105,13 +128,23 @@ fn candidate_tier(gamma: &Gamma, family: CallFamily, mid: ModuleId, fid: Idx<Fun
 /// tiers goes to the nearest tier, so a module can override a std or
 /// imported function of the same signature. Candidates of one tier stay
 /// tied.
-fn keep_nearest_tier(gamma: &Gamma, family: CallFamily, tied: &mut SmallVec<[(ModuleId, Idx<Function>); 4]>) {
-    let tiers: SmallVec<[Option<FamilyTier>; 4]> =
-        tied.iter().map(|&(mid, fid)| candidate_tier(gamma, family, mid, fid)).collect();
+fn keep_nearest_tier(
+    gamma: &Gamma,
+    family: CallFamily,
+    tied: &mut SmallVec<[(ModuleId, Idx<Function>); 4]>,
+) {
+    let tiers: SmallVec<[Option<FamilyTier>; 4]> = tied
+        .iter()
+        .map(|&(mid, fid)| candidate_tier(gamma, family, mid, fid))
+        .collect();
     // Every candidate of a merged family comes from a recorded member; a
     // candidate without a tier would mean it does not, so nothing is dropped
     // and the tie is reported as it stands.
-    let Some(nearest) = tiers.iter().copied().collect::<Option<SmallVec<[FamilyTier; 4]>>>().and_then(|t| t.into_iter().min())
+    let Some(nearest) = tiers
+        .iter()
+        .copied()
+        .collect::<Option<SmallVec<[FamilyTier; 4]>>>()
+        .and_then(|t| t.into_iter().min())
     else {
         return;
     };
@@ -211,8 +244,14 @@ pub(crate) fn fit_cost(gamma: &mut Gamma, arg: TyId, param: TyId, span: Span) ->
             // `field_get(o, f: FieldRef<..>)` a no-fit.
             let p_is_single_cap_from_fieldref = match (*gamma.get(a), *gamma.get(p)) {
                 (
-                    TypeExpr::App { ctor: TypeCtor::Nominal(an), .. },
-                    TypeExpr::App { ctor: TypeCtor::Nominal(pn), .. },
+                    TypeExpr::App {
+                        ctor: TypeCtor::Nominal(an),
+                        ..
+                    },
+                    TypeExpr::App {
+                        ctor: TypeCtor::Nominal(pn),
+                        ..
+                    },
                 ) => {
                     bone_core::modules::is_intrinsic_key(an, "FieldRef")
                         && bone_core::modules::is_intrinsic_key_in(
@@ -334,7 +373,8 @@ pub(crate) fn collapse_backend_variants<'c>(
             out.push(candidates[idxs[0]]);
             continue;
         }
-        let backend_of = |i: usize| gamma.workspace.module(candidates[i].0).functions[candidates[i].1].backend;
+        let backend_of =
+            |i: usize| gamma.workspace.module(candidates[i].0).functions[candidates[i].1].backend;
         let all_distinct = {
             let mut seen: SmallVec<[skull_parser::FnBackend; 3]> = SmallVec::new();
             idxs.iter().all(|&i| {
@@ -435,8 +475,7 @@ pub(crate) fn select_overload_with_generics(
             generic_args,
             span,
             &mut bound_fail,
-        )
-        {
+        ) {
             match best_cost {
                 None => {
                     best_cost = Some(cost);
@@ -463,7 +502,9 @@ pub(crate) fn select_overload_with_generics(
     match best_set.len() {
         1 => Ok(best_set[0]),
         n if n > 1 => {
-            let fn_name = |&(mid, fid): &(ModuleId, Idx<Function>)| gamma.workspace.module(mid).functions[fid].name;
+            let fn_name = |&(mid, fid): &(ModuleId, Idx<Function>)| {
+                gamma.workspace.module(mid).functions[fid].name
+            };
             let spans_families = best_set.iter().any(|c| fn_name(c) != fn_name(&best_set[0]));
             let tied = best_set
                 .iter()
@@ -517,7 +558,8 @@ pub(crate) fn select_overload_with_generics(
             });
             if !hidden_fit && bound_fail.is_none() && recv_ty.is_none() && generic_args.is_empty() {
                 if let Some((symbol, true)) = bone_core::hir::operator_entry(name.as_str()) {
-                    let actuals: SmallVec<[TyId; 2]> = args.iter()
+                    let actuals: SmallVec<[TyId; 2]> = args
+                        .iter()
                         .map(|arg| resolve(gamma, arg_ty[arg], span))
                         .collect();
                     // Exact shapes only: widening or generic guesses must not
@@ -528,7 +570,8 @@ pub(crate) fn select_overload_with_generics(
                             return None;
                         }
                         let mut nullable_args = SmallVec::<[Idx<Expr>; 2]>::new();
-                        for ((&actual, param), &arg) in actuals.iter().zip(&f.param_decls).zip(args) {
+                        for ((&actual, param), &arg) in actuals.iter().zip(&f.param_decls).zip(args)
+                        {
                             let expected = resolve(gamma, param.ty, span);
                             if types_equal(gamma, actual, expected) {
                                 continue;
@@ -541,19 +584,30 @@ pub(crate) fn select_overload_with_generics(
                             }
                             nullable_args.push(arg);
                         }
-                        if nullable_args.is_empty() { None } else { Some((mid, fid, nullable_args)) }
+                        if nullable_args.is_empty() {
+                            None
+                        } else {
+                            Some((mid, fid, nullable_args))
+                        }
                     });
-                    if let (Some((mid, fid, nullable_args)), None) = (near_misses.next(), near_misses.next()) {
-                        let expected = gamma.workspace.module(mid).functions[fid].param_decls.iter()
+                    if let (Some((mid, fid, nullable_args)), None) =
+                        (near_misses.next(), near_misses.next())
+                    {
+                        let expected = gamma.workspace.module(mid).functions[fid]
+                            .param_decls
+                            .iter()
                             .map(|p| gamma.workspace.render(None, p.ty))
                             .join(", ");
                         let mut error = CompilerError::new_with_label(
                             c.body.expr_spans[nullable_args[0]],
-                            format!("operator `{symbol}` expects operands ({expected}), got ({args_msg})"),
+                            format!(
+                                "operator `{symbol}` expects operands ({expected}), got ({args_msg})"
+                            ),
                         );
                         error.labels[0].message = "nullable operand".to_string();
                         for &arg in &nullable_args[1..] {
-                            error = error.with_label(c.body.expr_spans[arg], "nullable operand".to_string());
+                            error = error
+                                .with_label(c.body.expr_spans[arg], "nullable operand".to_string());
                         }
                         return Err(SelectError::NoFit(error));
                     }
@@ -571,13 +625,13 @@ pub(crate) fn select_overload_with_generics(
                     )
                 } else {
                     match bound_fail {
-                    Some(be) => format!(
-                        "No overload for `{name}` with argument types ({args_msg}); the `Iterator`-bounded candidate was rejected: {}\navailable overloads:\n{overloads}",
-                        be.message
-                    ),
-                    None => format!(
-                        "No overload for `{name}` with argument types ({args_msg})\navailable overloads:\n{overloads}"
-                    ),
+                        Some(be) => format!(
+                            "No overload for `{name}` with argument types ({args_msg}); the `Iterator`-bounded candidate was rejected: {}\navailable overloads:\n{overloads}",
+                            be.message
+                        ),
+                        None => format!(
+                            "No overload for `{name}` with argument types ({args_msg})\navailable overloads:\n{overloads}"
+                        ),
                     }
                 },
             )))
@@ -799,8 +853,7 @@ pub(crate) fn score_candidate_with_generics(
                     SlotFill::SpreadField(_, fty) => *fty,
                 };
 
-                let db =
-                    declared_is_bounded_generic(gamma, declared[offset + i], &bounded_vars);
+                let db = declared_is_bounded_generic(gamma, declared[offset + i], &bounded_vars);
                 let pty_r = resolve(gamma, pty, span);
                 let contextual_uint = matches!(fill, SlotFill::Direct(arg)
                     if matches!(c.body.expr_arena[*arg], Expr::Int(value)
@@ -903,7 +956,10 @@ fn instantiate_call_generics(
         let TypeExpr::Generic(var_id, _) = *gamma.get(generic) else {
             return Err(CompilerError::new_with_label(
                 span,
-                format!("function `{}` has a malformed generic declaration", function.name),
+                format!(
+                    "function `{}` has a malformed generic declaration",
+                    function.name
+                ),
             ));
         };
         let ty = TyId::Local(explicit);
@@ -967,7 +1023,10 @@ pub(crate) fn spread_struct_fields(
             params,
         } => {
             let sid = resolve_struct(gamma, name).ok_or_else(|| {
-                CompilerError::new_with_label(span, format!("cannot spread `{}`: not a struct", name))
+                CompilerError::new_with_label(
+                    span,
+                    format!("cannot spread `{}`: not a struct", name),
+                )
             })?;
 
             let def = gamma.workspace.module(sid.module).structs[sid.def].clone();
@@ -1019,12 +1078,22 @@ pub(crate) fn reorder_call_args(
             let aspan = c.body.expr_spans[arg];
             for (fname, fty) in spread_struct_fields(gamma, op_ty, aspan)? {
                 let Some(pi) = param_names.iter().position(|p| *p == fname) else {
-                    slot_fail!(report, span, "spread field `{}` names no parameter of the callee", fname)
+                    slot_fail!(
+                        report,
+                        span,
+                        "spread field `{}` names no parameter of the callee",
+                        fname
+                    )
                 };
                 match slots[pi] {
                     // rule 5: two spreads supplying the same param.
                     Some(SlotFill::SpreadField(..)) => {
-                        slot_fail!(report, span, "two spreads both supply parameter `{}`", fname)
+                        slot_fail!(
+                            report,
+                            span,
+                            "two spreads both supply parameter `{}`",
+                            fname
+                        )
                     }
                     // rule 4: a named/positional arg written BEFORE the spread.
                     Some(SlotFill::Direct(_)) => slot_fail!(
@@ -1052,7 +1121,12 @@ pub(crate) fn reorder_call_args(
                 }
 
                 if slots[pos].is_some() {
-                    slot_fail!(report, span, "Multiple values provided for parameter `{}`", param_names[pos]);
+                    slot_fail!(
+                        report,
+                        span,
+                        "Multiple values provided for parameter `{}`",
+                        param_names[pos]
+                    );
                 }
                 slots[pos] = Some(SlotFill::Direct(arg));
                 pos += 1;
@@ -1069,7 +1143,12 @@ pub(crate) fn reorder_call_args(
                         slots[pi] = Some(SlotFill::Direct(arg))
                     }
                     Some(SlotFill::Direct(_)) => {
-                        slot_fail!(report, span, "Multiple values provided for parameter `{}`", nm)
+                        slot_fail!(
+                            report,
+                            span,
+                            "Multiple values provided for parameter `{}`",
+                            nm
+                        )
                     }
                 }
             }
@@ -1195,7 +1274,10 @@ pub(crate) fn resolve_named_call_with_generics(
         Some(r) => (resolve(gamma, r, span), None),
         None if !args.is_empty() && c.body.method_call_recvs.contains(&args.start()) => {
             match infer_expr(c, gamma, args.start()) {
-                Ok(t) => (resolve(gamma, t, span), Some(c.body.expr_spans[args.start()])),
+                Ok(t) => (
+                    resolve(gamma, t, span),
+                    Some(c.body.expr_spans[args.start()]),
+                ),
                 Err(_) => return Err(e),
             }
         }
@@ -1272,7 +1354,10 @@ pub(crate) fn eq_compared_generic_indices(
         let TypeExpr::Generic(var_id, _) = peek_ty(ws, body, decl) else {
             return None;
         };
-        gen_index.iter().find(|(v, _)| *v == var_id).map(|(_, idx)| *idx)
+        gen_index
+            .iter()
+            .find(|(v, _)| *v == var_id)
+            .map(|(_, idx)| *idx)
     };
 
     for e in body.expr_arena.values() {
@@ -1305,7 +1390,9 @@ fn written_method_name(
 ) -> Option<Ustr> {
     let receiver = match (recv_override, &c.body.expr_arena[call_expr]) {
         (Some(_), Expr::SafeNavCall { receiver, .. }) => *receiver,
-        (None, _) if !args.is_empty() && c.body.method_call_recvs.contains(&args.start()) => args.start(),
+        (None, _) if !args.is_empty() && c.body.method_call_recvs.contains(&args.start()) => {
+            args.start()
+        }
         _ => return None,
     };
     c.body.method_names.get(&receiver).copied()
@@ -1332,7 +1419,10 @@ fn unary_operator_error(
             gamma.workspace.render(Some(&gamma.out), t)
         })
         .unwrap_or_else(|| "<no operand>".to_string());
-    CompilerError::new_with_label(span, format!("operator `{symbol}` is not defined for `{operand}`"))
+    CompilerError::new_with_label(
+        span,
+        format!("operator `{symbol}` is not defined for `{operand}`"),
+    )
 }
 
 pub(crate) fn resolve_named_call_inner(
@@ -1353,7 +1443,9 @@ pub(crate) fn resolve_named_call_inner(
     } else {
         all_candidates
             .into_iter()
-            .filter(|(mid, fid)| gamma.workspace.module(*mid).functions[*fid].generics.len() == generic_args.len())
+            .filter(|(mid, fid)| {
+                gamma.workspace.module(*mid).functions[*fid].generics.len() == generic_args.len()
+            })
             .collect()
     };
 
@@ -1469,7 +1561,11 @@ pub(crate) fn resolve_named_call_inner(
         // applicable overload read as operator errors naming the operand type,
         // not as a missing internal function.
         if unary_operator_symbol(name).is_some() {
-            let operand = args.into_iter().next().map(|a| infer_expr(c, gamma, a)).transpose()?;
+            let operand = args
+                .into_iter()
+                .next()
+                .map(|a| infer_expr(c, gamma, a))
+                .transpose()?;
             return Err(unary_operator_error(gamma, name, operand, span));
         }
 
@@ -1480,14 +1576,18 @@ pub(crate) fn resolve_named_call_inner(
         let meta = gamma.workspace.defs.get(&name);
         let shown = meta.map(|m| m.name).unwrap_or(name);
         let message = match meta.map(|m| m.kind) {
-            Some(kind @ (DefKind::Global | DefKind::Type | DefKind::Decorator | DefKind::Module)) => {
+            Some(
+                kind @ (DefKind::Global | DefKind::Type | DefKind::Decorator | DefKind::Module),
+            ) => {
                 let what = match kind {
                     DefKind::Global => "global",
                     DefKind::Type => "type",
                     DefKind::Decorator => "decorator",
                     _ => "module",
                 };
-                format!("Function `{shown}` doesn't exist -- `{shown}` binds to {what} `{name}` here")
+                format!(
+                    "Function `{shown}` doesn't exist -- `{shown}` binds to {what} `{name}` here"
+                )
             }
             _ => format!("Function `{shown}` doesn't exist"),
         };
@@ -1508,7 +1608,9 @@ pub(crate) fn resolve_named_call_inner(
         .borrow()
         .get(&name)
         .is_some_and(|hidden| !hidden.is_empty());
-    let single = candidates.len() == 1 && !has_inaccessible_overloads && unary_operator_symbol(name).is_none();
+    let single = candidates.len() == 1
+        && !has_inaccessible_overloads
+        && unary_operator_symbol(name).is_none();
     let (callee_mid, callee_fn) = if single {
         candidates[0]
     } else {
@@ -1559,7 +1661,12 @@ pub(crate) fn resolve_named_call_inner(
 
             Err(e) => {
                 if matches!(&e, SelectError::NoFit(_)) && unary_operator_symbol(name).is_some() {
-                    return Err(unary_operator_error(gamma, name, arg_tys.first().copied(), span));
+                    return Err(unary_operator_error(
+                        gamma,
+                        name,
+                        arg_tys.first().copied(),
+                        span,
+                    ));
                 }
 
                 // Defer-to-use: a cost tie whose operand is an unpinned
@@ -1752,7 +1859,15 @@ pub(crate) fn commit_selected_call(
     for (fill, pty_decl) in pairs {
         if has_bounds {
             check_iterator_bounds(
-                c, gamma, function, &subs, &mut bound_tree, &mut bounds_done, false, 0, span,
+                c,
+                gamma,
+                function,
+                &subs,
+                &mut bound_tree,
+                &mut bounds_done,
+                false,
+                0,
+                span,
             )?;
         }
         let pty = substitute(gamma, pty_decl, &subs, span)?;
@@ -1778,8 +1893,7 @@ pub(crate) fn commit_selected_call(
                             resolve(gamma, t, span)
                         }
                     };
-                    if let Some((witness, it_ty)) = implicit_iter_target(c, gamma, aty, span)
-                    {
+                    if let Some((witness, it_ty)) = implicit_iter_target(c, gamma, aty, span) {
                         coerce(gamma, it_ty, pty, c.body.expr_spans[arg])?;
                         gamma.out.implicit_iter_args.insert(arg, witness);
                         coerced = true;
@@ -1796,9 +1910,7 @@ pub(crate) fn commit_selected_call(
                 }
             }
             // A spread-supplied field: check the field's type against the param.
-            SlotFill::SpreadField(op, fty) => {
-                coerce(gamma, fty, pty, c.body.expr_spans[op])?
-            }
+            SlotFill::SpreadField(op, fty) => coerce(gamma, fty, pty, c.body.expr_spans[op])?,
         }
     }
 
@@ -1808,7 +1920,15 @@ pub(crate) fn commit_selected_call(
 
     if has_bounds {
         check_iterator_bounds(
-            c, gamma, function, &subs, &mut bound_tree, &mut bounds_done, true, 0, span,
+            c,
+            gamma,
+            function,
+            &subs,
+            &mut bound_tree,
+            &mut bounds_done,
+            true,
+            0,
+            span,
         )?;
         gamma.out.bound_call_trees.insert(call_expr, bound_tree);
     }

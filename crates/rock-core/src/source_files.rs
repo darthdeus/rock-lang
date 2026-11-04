@@ -1,8 +1,8 @@
-use crate::prelude::*;
 use crate::errors::CompilerError;
+use crate::prelude::*;
+use atomic_refcell::AtomicRefCell;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use atomic_refcell::AtomicRefCell;
 
 /// The set of files one compilation sees, with the package layout they came
 /// from.
@@ -210,7 +210,10 @@ mod tests {
         sources.add_or_update_file(updated);
         assert_eq!(sources.files.len(), 2);
         assert_eq!(sources.files[0].borrow().file.to_id_path(), "main.rock");
-        assert_eq!(sources.files[0].borrow().contents, "fn main() { changed(); }\n");
+        assert_eq!(
+            sources.files[0].borrow().contents,
+            "fn main() { changed(); }\n"
+        );
     }
 
     #[test]
@@ -220,9 +223,18 @@ mod tests {
         file.contents = "first\nsecond\nthird".to_string();
         sources.add_or_update_file(file);
 
-        assert_eq!(sources.get_line(&line_col("main.rock", 0)).as_deref(), Some("first"));
-        assert_eq!(sources.get_line(&line_col("main.rock", 1)).as_deref(), Some("second"));
-        assert_eq!(sources.get_line(&line_col("main.rock", 2)).as_deref(), Some("third"));
+        assert_eq!(
+            sources.get_line(&line_col("main.rock", 0)).as_deref(),
+            Some("first")
+        );
+        assert_eq!(
+            sources.get_line(&line_col("main.rock", 1)).as_deref(),
+            Some("second")
+        );
+        assert_eq!(
+            sources.get_line(&line_col("main.rock", 2)).as_deref(),
+            Some("third")
+        );
         assert_eq!(sources.get_line(&line_col("main.rock", 3)), None);
         assert_eq!(sources.get_line(&line_col("absent.rock", 0)), None);
     }
@@ -234,8 +246,14 @@ mod tests {
         file.contents = "one\r\ntwo\r\n".to_string();
         sources.add_or_update_file(file);
 
-        assert_eq!(sources.get_line(&line_col("crlf.rock", 0)).as_deref(), Some("one"));
-        assert_eq!(sources.get_line(&line_col("crlf.rock", 1)).as_deref(), Some("two"));
+        assert_eq!(
+            sources.get_line(&line_col("crlf.rock", 0)).as_deref(),
+            Some("one")
+        );
+        assert_eq!(
+            sources.get_line(&line_col("crlf.rock", 1)).as_deref(),
+            Some("two")
+        );
         assert_eq!(sources.get_line(&line_col("crlf.rock", 2)), None);
     }
 
@@ -245,9 +263,15 @@ mod tests {
         sources.add_or_update_file(source("main.rock"));
         sources.add_or_update_file(source("other.rock"));
 
-        let found = sources.file_for_linecol(&line_col("other.rock", 0)).unwrap();
+        let found = sources
+            .file_for_linecol(&line_col("other.rock", 0))
+            .unwrap();
         assert_eq!(found.borrow().file.to_id_path(), "other.rock");
-        assert!(sources.file_for_linecol(&line_col("absent.rock", 0)).is_none());
+        assert!(
+            sources
+                .file_for_linecol(&line_col("absent.rock", 0))
+                .is_none()
+        );
     }
 
     #[test]
@@ -260,19 +284,25 @@ mod tests {
 
     #[test]
     fn a_tests_component_anywhere_below_the_root_marks_a_relative_path_test_only() {
-        assert!(SourceFiles::is_test_only_relative_path(Path::new("tests/main.rock")));
-        assert!(SourceFiles::is_test_only_relative_path(Path::new("sims/tests/a.rock")));
+        assert!(SourceFiles::is_test_only_relative_path(Path::new(
+            "tests/main.rock"
+        )));
+        assert!(SourceFiles::is_test_only_relative_path(Path::new(
+            "sims/tests/a.rock"
+        )));
         assert!(SourceFiles::is_test_only_relative_path(Path::new("tests")));
-        assert!(!SourceFiles::is_test_only_relative_path(Path::new("src/main.rock")));
-        assert!(!SourceFiles::is_test_only_relative_path(Path::new("src/testing.rock")));
+        assert!(!SourceFiles::is_test_only_relative_path(Path::new(
+            "src/main.rock"
+        )));
+        assert!(!SourceFiles::is_test_only_relative_path(Path::new(
+            "src/testing.rock"
+        )));
     }
 
     #[test]
     fn production_only_keeps_files_when_project_root_is_under_tests() {
-        let temp_root = std::env::temp_dir().join(format!(
-            "rock_core_source_files_{}",
-            std::process::id()
-        ));
+        let temp_root =
+            std::env::temp_dir().join(format!("rock_core_source_files_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp_root);
         let project_root = temp_root.join("tests/project");
         std::fs::create_dir_all(project_root.join("tests")).unwrap();
@@ -284,12 +314,8 @@ mod tests {
         let broken_path = broken_path.to_string_lossy().into_owned();
         let sources = SourceFiles {
             files: vec![
-                std::sync::Arc::new(atomic_refcell::AtomicRefCell::new(source(
-                    &main_path,
-                ))),
-                std::sync::Arc::new(atomic_refcell::AtomicRefCell::new(source(
-                    &broken_path,
-                ))),
+                std::sync::Arc::new(atomic_refcell::AtomicRefCell::new(source(&main_path))),
+                std::sync::Arc::new(atomic_refcell::AtomicRefCell::new(source(&broken_path))),
             ],
             package_roots: Vec::new(),
         };

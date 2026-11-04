@@ -32,8 +32,12 @@ fn item(src: &str, line: u32, ch: u32, label: &str) -> CompletionItem {
 /// (completion pipeline contract M4): the position-blind response invariants
 /// must hold in every completion context this file exercises.
 fn check_invariants(src: &str, line: u32, ch: u32, items: &[CompletionItem]) {
-    let off: usize =
-        src.lines().take(line as usize).map(|l| l.len() + 1).sum::<usize>() + ch as usize;
+    let off: usize = src
+        .lines()
+        .take(line as usize)
+        .map(|l| l.len() + 1)
+        .sum::<usize>()
+        + ch as usize;
     let head = &src.as_bytes()[..off.min(src.len())];
     let start = head
         .iter()
@@ -63,20 +67,32 @@ fn struct_literal_required_fields_rank_above_defaulted() {
     let pos = |l: &str| ordered.iter().position(|x| x == l);
     let (name, id) = (pos("name: string"), pos("id: int"));
     let (scale, volume) = (pos("scale: float"), pos("volume: float"));
-    assert!(name.is_some() && id.is_some() && scale.is_some() && volume.is_some(), "{ordered:?}");
+    assert!(
+        name.is_some() && id.is_some() && scale.is_some() && volume.is_some(),
+        "{ordered:?}"
+    );
     assert!(
         name < scale && name < volume && id < scale && id < volume,
         "required fields must rank above defaulted ones: {ordered:?}"
     );
-    assert!(name < id, "declaration order within the required tier: {ordered:?}");
-    assert!(scale < volume, "declaration order within the defaulted tier: {ordered:?}");
+    assert!(
+        name < id,
+        "declaration order within the required tier: {ordered:?}"
+    );
+    assert!(
+        scale < volume,
+        "declaration order within the defaulted tier: {ordered:?}"
+    );
 }
 
 #[test]
 fn type_completion_offers_uint_with_its_source_spelling() {
     let src = "fn r(x: u) {}\n";
     let l = labels(src, 0, 9);
-    assert!(l.contains(&"uint".to_string()), "uint type completion missing: {l:?}");
+    assert!(
+        l.contains(&"uint".to_string()),
+        "uint type completion missing: {l:?}"
+    );
 }
 
 #[test]
@@ -89,7 +105,11 @@ fn member_ufcs_overloads_dedup_to_one_item() {
                fn rotate(v: FixVec2, rhs: FixVec2) -> FixVec2 { v }\n\
                fn r(p: FixVec2) {\n  p.\n}\n";
     let l = labels(src, 4, 4);
-    assert_eq!(l.iter().filter(|s| s.as_str() == "rotate").count(), 1, "{l:?}");
+    assert_eq!(
+        l.iter().filter(|s| s.as_str() == "rotate").count(),
+        1,
+        "{l:?}"
+    );
 }
 
 #[test]
@@ -99,7 +119,10 @@ fn struct_literal_offers_remaining_fields() {
     let l = labels(src, 2, 19);
     assert!(l.contains(&"x: float".to_string()), "{l:?}");
     assert!(l.contains(&"y: float".to_string()), "{l:?}");
-    assert!(!l.iter().any(|s| s == "Arena"), "must not leak global types: {l:?}");
+    assert!(
+        !l.iter().any(|s| s == "Arena"),
+        "must not leak global types: {l:?}"
+    );
 }
 
 #[test]
@@ -108,7 +131,10 @@ fn struct_literal_skips_already_written_fields() {
     // cursor after `x: 1.0, ` -> only `y` remains.
     let l = labels(src, 2, 27);
     assert!(l.contains(&"y: float".to_string()), "{l:?}");
-    assert!(!l.contains(&"x: float".to_string()), "x already written: {l:?}");
+    assert!(
+        !l.contains(&"x: float".to_string()),
+        "x already written: {l:?}"
+    );
 }
 
 #[test]
@@ -141,7 +167,11 @@ fn member_completion_offers_mixed_field_then_method_path_in_arg_position() {
                fn r(player: Player) {\n  tile_center(player.)\n}\n";
     // cursor right after `player.`
     let it = item(src, 6, 21, "movable.to_ivec() -> IVec2");
-    assert_eq!(it.insert_text.as_deref(), Some("movable.to_ivec()"), "{it:?}");
+    assert_eq!(
+        it.insert_text.as_deref(),
+        Some("movable.to_ivec()"),
+        "{it:?}"
+    );
 }
 
 #[test]
@@ -162,12 +192,21 @@ fn decorator_position_offers_declared_decorators() {
     let src = "deco init late_draw {}\ndeco init late_update {}\ndeco init update {}\n@late_dra\nfn my_ui() {}\n";
     // cursor at end of `@late_dra` (line 3, char 9).
     let l = labels(src, 3, 9);
-    assert!(l.contains(&"late_draw".to_string()), "decorator completion: {l:?}");
+    assert!(
+        l.contains(&"late_draw".to_string()),
+        "decorator completion: {l:?}"
+    );
     // Prefix filters: `late_update` also matches `late_`? no -- prefix is
     // `late_dra`, so only `late_draw` survives; `update` must not appear.
-    assert!(!l.contains(&"update".to_string()), "prefix must filter out `update`: {l:?}");
+    assert!(
+        !l.contains(&"update".to_string()),
+        "prefix must filter out `update`: {l:?}"
+    );
     // Must not leak the global fn namespace into decorator position.
-    assert!(!l.contains(&"my_ui".to_string()), "must not offer fns in decorator position: {l:?}");
+    assert!(
+        !l.contains(&"my_ui".to_string()),
+        "must not offer fns in decorator position: {l:?}"
+    );
 }
 
 #[test]
@@ -206,9 +245,18 @@ fn member_completion_on_a_vec_receiver() {
     let l = labels(src, 4, 5); // after `xs.`
     assert!(l.contains(&"len: int".to_string()), "vec .len field: {l:?}");
     assert!(l.contains(&"push".to_string()), "generic Vec UFCS: {l:?}");
-    assert!(l.contains(&"takes_ints".to_string()), "[int] UFCS matches element: {l:?}");
-    assert!(!l.iter().any(|s| s.starts_with("_data")), "internal Vec `_data` hidden: {l:?}");
-    assert!(!l.contains(&"takes_foos".to_string()), "[Foo] UFCS excluded by element: {l:?}");
+    assert!(
+        l.contains(&"takes_ints".to_string()),
+        "[int] UFCS matches element: {l:?}"
+    );
+    assert!(
+        !l.iter().any(|s| s.starts_with("_data")),
+        "internal Vec `_data` hidden: {l:?}"
+    );
+    assert!(
+        !l.contains(&"takes_foos".to_string()),
+        "[Foo] UFCS excluded by element: {l:?}"
+    );
 }
 
 #[test]
@@ -222,8 +270,14 @@ fn member_completion_on_a_plain_call_receiver() {
                fn find_spell() -> SpellDef { SpellDef { cast_time: 1.0, mana: 2 } }\n\
                fn r() {\n  find_spell().\n}\n";
     let l = labels(src, 3, 15); // after `find_spell().`
-    assert!(l.contains(&"cast_time: float".to_string()), "call-receiver fields: {l:?}");
-    assert!(l.contains(&"mana: int".to_string()), "call-receiver fields: {l:?}");
+    assert!(
+        l.contains(&"cast_time: float".to_string()),
+        "call-receiver fields: {l:?}"
+    );
+    assert!(
+        l.contains(&"mana: int".to_string()),
+        "call-receiver fields: {l:?}"
+    );
 }
 
 #[test]
@@ -235,8 +289,14 @@ fn member_completion_on_a_ufcs_call_receiver() {
                fn find_spell(kind: int) -> SpellDef { SpellDef { cast_time: 1.0, mana: 2 } }\n\
                fn r(spell: int) {\n  spell.find_spell().\n}\n";
     let l = labels(src, 3, 21); // after `spell.find_spell().`
-    assert!(l.contains(&"cast_time: float".to_string()), "ufcs-call-receiver fields: {l:?}");
-    assert!(l.contains(&"mana: int".to_string()), "ufcs-call-receiver fields: {l:?}");
+    assert!(
+        l.contains(&"cast_time: float".to_string()),
+        "ufcs-call-receiver fields: {l:?}"
+    );
+    assert!(
+        l.contains(&"mana: int".to_string()),
+        "ufcs-call-receiver fields: {l:?}"
+    );
 }
 
 #[test]
@@ -250,11 +310,23 @@ fn member_completion_offers_iterator_combinators() {
     // 1784133159-wisp_intent.rock (`m.trail.iter().enu()`).
     let src = "fn r(xs: [int]) {\n  let it = xs.iter()\n  it.\n  let _n = 0\n}\n";
     let l = labels(src, 2, 5); // after `it.`
-    assert!(l.contains(&"enumerate".to_string()), "iterator combinator: {l:?}");
+    assert!(
+        l.contains(&"enumerate".to_string()),
+        "iterator combinator: {l:?}"
+    );
     assert!(l.contains(&"map".to_string()), "iterator combinator: {l:?}");
-    assert!(l.contains(&"filter".to_string()), "iterator combinator: {l:?}");
-    assert!(l.contains(&"collect".to_string()), "iterator terminal: {l:?}");
-    assert!(l.contains(&"next".to_string()), "direct struct method: {l:?}");
+    assert!(
+        l.contains(&"filter".to_string()),
+        "iterator combinator: {l:?}"
+    );
+    assert!(
+        l.contains(&"collect".to_string()),
+        "iterator terminal: {l:?}"
+    );
+    assert!(
+        l.contains(&"next".to_string()),
+        "direct struct method: {l:?}"
+    );
 }
 
 #[test]
@@ -267,8 +339,14 @@ fn iterator_combinators_offered_on_user_defined_iterator() {
                fn r() {\n  let c = Counter { n: 3 }\n  c.\n  let _x = 0\n}\n";
     let l = labels(src, 4, 4); // after `c.`
     assert!(l.contains(&"next".to_string()), "own method: {l:?}");
-    assert!(l.contains(&"enumerate".to_string()), "combinator on user iterator: {l:?}");
-    assert!(l.contains(&"map".to_string()), "combinator on user iterator: {l:?}");
+    assert!(
+        l.contains(&"enumerate".to_string()),
+        "combinator on user iterator: {l:?}"
+    );
+    assert!(
+        l.contains(&"map".to_string()),
+        "combinator on user iterator: {l:?}"
+    );
 }
 
 #[test]
@@ -280,8 +358,14 @@ fn iterator_combinators_not_offered_when_next_is_nonconforming() {
                fn r() {\n  let f = Fake { n: 3 }\n  f.\n  let _x = 0\n}\n";
     let l = labels(src, 4, 4); // after `f.`
     assert!(l.contains(&"next".to_string()), "own method: {l:?}");
-    assert!(!l.contains(&"enumerate".to_string()), "no combinator on non-iterator next: {l:?}");
-    assert!(!l.contains(&"map".to_string()), "no combinator on non-iterator next: {l:?}");
+    assert!(
+        !l.contains(&"enumerate".to_string()),
+        "no combinator on non-iterator next: {l:?}"
+    );
+    assert!(
+        !l.contains(&"map".to_string()),
+        "no combinator on non-iterator next: {l:?}"
+    );
 }
 
 #[test]
@@ -293,9 +377,18 @@ fn iterator_combinators_not_offered_on_non_iterator() {
                fn r() {\n  let p = Plain { a: 1 }\n  p.\n  let _n = 0\n}\n";
     let l = labels(src, 3, 4); // after `p.`
     assert!(l.contains(&"a: int".to_string()), "field present: {l:?}");
-    assert!(!l.contains(&"enumerate".to_string()), "no combinator on non-iterator: {l:?}");
-    assert!(!l.contains(&"map".to_string()), "no combinator on non-iterator: {l:?}");
-    assert!(!l.contains(&"collect".to_string()), "no combinator on non-iterator: {l:?}");
+    assert!(
+        !l.contains(&"enumerate".to_string()),
+        "no combinator on non-iterator: {l:?}"
+    );
+    assert!(
+        !l.contains(&"map".to_string()),
+        "no combinator on non-iterator: {l:?}"
+    );
+    assert!(
+        !l.contains(&"collect".to_string()),
+        "no combinator on non-iterator: {l:?}"
+    );
 }
 
 #[test]
@@ -304,7 +397,10 @@ fn member_in_fn_returning_a_struct_is_not_a_struct_literal() {
     // brace must NOT be read as a `Result { }` literal; `res.` is member access.
     let src = "struct Result { value: int, ok: bool }\nfn c() -> Result {\n  let res = Result { value: 1, ok: true }\n  return res.\n}\n";
     let l = labels(src, 3, 13);
-    assert!(l.contains(&"value: int".to_string()), "member fields: {l:?}");
+    assert!(
+        l.contains(&"value: int".to_string()),
+        "member fields: {l:?}"
+    );
     assert!(l.contains(&"ok: bool".to_string()), "member fields: {l:?}");
 }
 
@@ -330,7 +426,10 @@ fn function_completion_carries_an_inline_signature() {
     );
     // Accepts as a snippet that inserts `separation()` with the cursor inside.
     assert_eq!(item.insert_text.as_deref(), Some("separation($0)"));
-    assert_eq!(item.insert_text_format, Some(lsp_types::InsertTextFormat::SNIPPET));
+    assert_eq!(
+        item.insert_text_format,
+        Some(lsp_types::InsertTextFormat::SNIPPET)
+    );
     let inline = item.label_details.and_then(|d| d.detail);
     assert_eq!(
         inline.as_deref(),
@@ -387,7 +486,11 @@ fn ufcs_method_completion_reuses_existing_open_paren() {
         "UFCS method must not add parens when a `(` follows: {:?}",
         it.insert_text
     );
-    assert_ne!(it.insert_text_format, Some(lsp_types::InsertTextFormat::SNIPPET), "{it:?}");
+    assert_ne!(
+        it.insert_text_format,
+        Some(lsp_types::InsertTextFormat::SNIPPET),
+        "{it:?}"
+    );
 }
 
 // -- One-shot field-ref method pre-fill.
@@ -404,8 +507,16 @@ fn field_ref_method_prefills_single_field() {
                fn kill_co<T>(o: T, f: FieldRef<T, int?>) {}\n\
                fn r(mob: Mob) {\n  mob.kil\n}\n";
     let it = item(src, 3, 9, "kill_co");
-    assert_eq!(it.insert_text.as_deref(), Some("kill_co(.attack_co)"), "{it:?}");
-    assert_eq!(it.insert_text_format, Some(lsp_types::InsertTextFormat::SNIPPET), "{it:?}");
+    assert_eq!(
+        it.insert_text.as_deref(),
+        Some("kill_co(.attack_co)"),
+        "{it:?}"
+    );
+    assert_eq!(
+        it.insert_text_format,
+        Some(lsp_types::InsertTextFormat::SNIPPET),
+        "{it:?}"
+    );
 }
 
 #[test]
@@ -415,8 +526,16 @@ fn field_ref_method_prefills_choice_on_multiple_fields() {
                fn kill_co<T>(o: T, f: FieldRef<T, int?>) {}\n\
                fn r(mob: Mob) {\n  mob.kil\n}\n";
     let it = item(src, 3, 9, "kill_co");
-    assert_eq!(it.insert_text.as_deref(), Some("kill_co(${1|.attack_co,.cast_co|})"), "{it:?}");
-    assert_eq!(it.insert_text_format, Some(lsp_types::InsertTextFormat::SNIPPET), "{it:?}");
+    assert_eq!(
+        it.insert_text.as_deref(),
+        Some("kill_co(${1|.attack_co,.cast_co|})"),
+        "{it:?}"
+    );
+    assert_eq!(
+        it.insert_text_format,
+        Some(lsp_types::InsertTextFormat::SNIPPET),
+        "{it:?}"
+    );
 }
 
 #[test]
@@ -428,7 +547,10 @@ fn field_ref_method_absent_when_no_matching_field() {
                fn kill_co<T>(o: T, f: FieldRef<T, int?>) {}\n\
                fn r(mob: Mob) {\n  mob.kil\n}\n";
     let l = labels(src, 3, 9);
-    assert!(!l.iter().any(|s| s == "kill_co"), "kill_co must not surface without a matching field: {l:?}");
+    assert!(
+        !l.iter().any(|s| s == "kill_co"),
+        "kill_co must not surface without a matching field: {l:?}"
+    );
 }
 
 #[test]
@@ -440,7 +562,11 @@ fn field_ref_method_reuses_existing_open_paren() {
                fn r(mob: Mob) {\n  mob.kil()\n}\n";
     let it = item(src, 3, 9, "kill_co");
     assert_eq!(it.insert_text.as_deref(), Some("kill_co"), "{it:?}");
-    assert_ne!(it.insert_text_format, Some(lsp_types::InsertTextFormat::SNIPPET), "{it:?}");
+    assert_ne!(
+        it.insert_text_format,
+        Some(lsp_types::InsertTextFormat::SNIPPET),
+        "{it:?}"
+    );
 }
 
 #[test]
@@ -451,8 +577,16 @@ fn field_ref_method_prefills_nontrailing_fieldref_arg() {
                fn set_co<T>(o: T, f: FieldRef<T, int?>, next: int?) {}\n\
                fn r(mob: Mob) {\n  mob.se\n}\n";
     let it = item(src, 3, 8, "set_co");
-    assert_eq!(it.insert_text.as_deref(), Some("set_co(.attack_co, ${1:next})"), "{it:?}");
-    assert_eq!(it.insert_text_format, Some(lsp_types::InsertTextFormat::SNIPPET), "{it:?}");
+    assert_eq!(
+        it.insert_text.as_deref(),
+        Some("set_co(.attack_co, ${1:next})"),
+        "{it:?}"
+    );
+    assert_eq!(
+        it.insert_text_format,
+        Some(lsp_types::InsertTextFormat::SNIPPET),
+        "{it:?}"
+    );
 }
 
 // An `Entity<T>`-receiver FieldRef method resolves the owner struct through the
@@ -467,8 +601,16 @@ fn field_ref_method_entity_receiver_prefills_single_field() {
                fn run_into<T>(e: Entity<T>, f: FieldRef<T, int?>, co: int) {}\n\
                fn r(e: Entity<Mob>) {\n  e.run\n}\n";
     let it = item(src, 3, 7, "run_into");
-    assert_eq!(it.insert_text.as_deref(), Some("run_into(.attack_co, ${1:co})"), "{it:?}");
-    assert_eq!(it.insert_text_format, Some(lsp_types::InsertTextFormat::SNIPPET), "{it:?}");
+    assert_eq!(
+        it.insert_text.as_deref(),
+        Some("run_into(.attack_co, ${1:co})"),
+        "{it:?}"
+    );
+    assert_eq!(
+        it.insert_text_format,
+        Some(lsp_types::InsertTextFormat::SNIPPET),
+        "{it:?}"
+    );
 }
 
 #[test]
@@ -477,8 +619,16 @@ fn field_ref_method_entity_receiver_prefills_choice_on_multiple_fields() {
                fn run_into<T>(e: Entity<T>, f: FieldRef<T, int?>, co: int) {}\n\
                fn r(e: Entity<Mob>) {\n  e.run\n}\n";
     let it = item(src, 3, 7, "run_into");
-    assert_eq!(it.insert_text.as_deref(), Some("run_into(${1|.attack_co,.cast_co|}, ${2:co})"), "{it:?}");
-    assert_eq!(it.insert_text_format, Some(lsp_types::InsertTextFormat::SNIPPET), "{it:?}");
+    assert_eq!(
+        it.insert_text.as_deref(),
+        Some("run_into(${1|.attack_co,.cast_co|}, ${2:co})"),
+        "{it:?}"
+    );
+    assert_eq!(
+        it.insert_text_format,
+        Some(lsp_types::InsertTextFormat::SNIPPET),
+        "{it:?}"
+    );
 }
 
 #[test]
@@ -489,7 +639,11 @@ fn field_ref_method_entity_receiver_no_duplicate_item() {
                fn run_into<T>(e: Entity<T>, f: FieldRef<T, int?>, co: int) {}\n\
                fn r(e: Entity<Mob>) {\n  e.run\n}\n";
     let l = labels(src, 3, 7);
-    assert_eq!(l.iter().filter(|s| s.as_str() == "run_into").count(), 1, "exactly one run_into item: {l:?}");
+    assert_eq!(
+        l.iter().filter(|s| s.as_str() == "run_into").count(),
+        1,
+        "exactly one run_into item: {l:?}"
+    );
 }
 
 #[test]
@@ -499,7 +653,11 @@ fn member_completion_resolves_a_cross_file_receiver_type() {
     // includes the whole project, not just the edited file (was: empty).
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("stick.toml"), "[package]\nname = \"xp\"\n").unwrap();
-    std::fs::write(dir.path().join("a.rock"), "struct IVec2 { x: int, y: int }\n").unwrap();
+    std::fs::write(
+        dir.path().join("a.rock"),
+        "struct IVec2 { x: int, y: int }\n",
+    )
+    .unwrap();
     let bpath = dir.path().join("b.rock");
     let bsrc = "fn f(g: IVec2) {\n  g.\n}\n";
     std::fs::write(&bpath, bsrc).unwrap();
@@ -513,8 +671,14 @@ fn member_completion_resolves_a_cross_file_receiver_type() {
         .into_iter()
         .map(|c| c.label)
         .collect();
-    assert!(labels.contains(&"x: int".to_string()), "cross-file field x: {labels:?}");
-    assert!(labels.contains(&"y: int".to_string()), "cross-file field y: {labels:?}");
+    assert!(
+        labels.contains(&"x: int".to_string()),
+        "cross-file field x: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"y: int".to_string()),
+        "cross-file field y: {labels:?}"
+    );
 }
 
 #[test]
@@ -538,7 +702,10 @@ fn block_after_enum_variant_condition_is_not_a_record_literal() {
     let src = "enum SpellKind { Fire, Dispel }\nfn spell_clear() {}\nfn fire(kind: SpellKind) {\n  if kind == SpellKind::Dispel {\n    spell_c\n  }\n}\n";
     // cursor after `spell_c` on the bare-statement line inside the block.
     let l = labels(src, 4, 11);
-    assert!(l.contains(&"spell_clear".to_string()), "block-head variant must not eat completion: {l:?}");
+    assert!(
+        l.contains(&"spell_clear".to_string()),
+        "block-head variant must not eat completion: {l:?}"
+    );
 }
 
 #[test]
@@ -550,7 +717,10 @@ fn enum_record_literal_offers_variant_fields() {
     let l = labels(src, 3, 2);
     assert!(l.contains(&"duration: float".to_string()), "{l:?}");
     assert!(l.contains(&"potency: int".to_string()), "{l:?}");
-    assert!(!l.iter().any(|s| s == "Arena"), "must not leak globals: {l:?}");
+    assert!(
+        !l.iter().any(|s| s == "Arena"),
+        "must not leak globals: {l:?}"
+    );
 }
 
 #[test]
@@ -618,12 +788,14 @@ fn arg_position_ranks_matching_type_then_returning_fn() {
     assert!(
         st(&var) < st(&mk),
         "variable of the expected type ranks before a fn returning it: {:?} vs {:?}",
-        var.sort_text, mk.sort_text
+        var.sort_text,
+        mk.sort_text
     );
     assert!(
         st(&mk) < st(&dps),
         "fn returning the expected type ranks before an unrelated fn: {:?} vs {:?}",
-        mk.sort_text, dps.sort_text
+        mk.sort_text,
+        dps.sort_text
     );
 }
 
@@ -650,16 +822,37 @@ fn non_arg_ranks_variables_before_functions_and_enum_members() {
     let variant1 = st("AggressorRef::PlayerRef");
     let variant2 = st("ClickTarget::Player");
 
-    assert!(player < player_dead, "player before player_dead: {player} vs {player_dead}");
+    assert!(
+        player < player_dead,
+        "player before player_dead: {player} vs {player_dead}"
+    );
     // variables outrank functions and structs.
-    assert!(player_dead < play_sound, "variables before functions: {player_dead} vs {play_sound}");
-    assert!(player_dead < struct_p, "variables before structs: {player_dead} vs {struct_p}");
+    assert!(
+        player_dead < play_sound,
+        "variables before functions: {player_dead} vs {play_sound}"
+    );
+    assert!(
+        player_dead < struct_p,
+        "variables before structs: {player_dead} vs {struct_p}"
+    );
     // the reported bug: enum-member variants must rank LAST -- below variables,
     // functions, and structs alike.
-    assert!(player < variant1, "global var before enum member: {player} vs {variant1}");
-    assert!(player < variant2, "global var before enum member: {player} vs {variant2}");
-    assert!(play_sound < variant1, "function before enum member: {play_sound} vs {variant1}");
-    assert!(struct_p < variant1, "struct before enum member: {struct_p} vs {variant1}");
+    assert!(
+        player < variant1,
+        "global var before enum member: {player} vs {variant1}"
+    );
+    assert!(
+        player < variant2,
+        "global var before enum member: {player} vs {variant2}"
+    );
+    assert!(
+        play_sound < variant1,
+        "function before enum member: {play_sound} vs {variant1}"
+    );
+    assert!(
+        struct_p < variant1,
+        "struct before enum member: {struct_p} vs {variant1}"
+    );
 }
 
 // Regression: on an EMPTY prefix the MAX_COMPLETION_ITEMS cap must not truncate
@@ -672,7 +865,10 @@ fn empty_prefix_still_offers_struct_types() {
                fn r() {\n  \n}\n";
     // cursor in the empty body, no prefix typed.
     let l = labels(src, 3, 2);
-    assert!(l.contains(&"Point".to_string()), "struct type offered on empty prefix: {l:?}");
+    assert!(
+        l.contains(&"Point".to_string()),
+        "struct type offered on empty prefix: {l:?}"
+    );
 }
 
 #[test]
@@ -701,7 +897,11 @@ fn arg_position_offers_recursive_field_path() {
                fn r(player: Player) {\n  sfx(plgr)\n}\n";
     // cursor after `plgr` inside `sfx(...)`.
     let it = item(src, 5, 10, "player.movable.grid: IVec2");
-    assert_eq!(it.insert_text.as_deref(), Some("player.movable.grid"), "{it:?}");
+    assert_eq!(
+        it.insert_text.as_deref(),
+        Some("player.movable.grid"),
+        "{it:?}"
+    );
 }
 
 #[test]
@@ -715,7 +915,11 @@ fn arg_position_offers_ufcs_method_path_of_matching_type() {
                fn r() {\n  let spell: SpellDef = SpellDef { kind: 0 }\n  need_dps(spell_d)\n}\n";
     // cursor after `spell_d` inside `need_dps(...)`.
     let it = item(src, 5, 18, "spell.spell_dps() -> float");
-    assert_eq!(it.insert_text.as_deref(), Some("spell.spell_dps()"), "{it:?}");
+    assert_eq!(
+        it.insert_text.as_deref(),
+        Some("spell.spell_dps()"),
+        "{it:?}"
+    );
 }
 
 #[test]
@@ -734,7 +938,11 @@ fn arg_position_offers_mixed_field_then_method_path() {
                fn r(player: Player) {\n  sfx(plmoiv)\n}\n";
     // cursor after `plmoiv` inside `sfx(...)`.
     let it = item(src, 6, 12, "player.movable.to_ivec() -> IVec2");
-    assert_eq!(it.insert_text.as_deref(), Some("player.movable.to_ivec()"), "{it:?}");
+    assert_eq!(
+        it.insert_text.as_deref(),
+        Some("player.movable.to_ivec()"),
+        "{it:?}"
+    );
 }
 
 #[test]
@@ -743,9 +951,11 @@ fn reachability_index_rebuilds_on_an_interface_edit() {
     // field that reaches the expected type is an Interface edit, so a path that
     // didn't exist before must appear after the edit (stale index = miss).
     let path = "/tmp/rock_lsp_bone_reach_invalidate.rock";
-    let before = "struct V { y: int }\nstruct W { a: int }\nfn need(v: V) {}\nfn r(w: W) {\n  need(wv)\n}\n";
+    let before =
+        "struct V { y: int }\nstruct W { a: int }\nfn need(v: V) {}\nfn r(w: W) {\n  need(wv)\n}\n";
     // W gains a `v: V` field -> `w.v` now reaches V.
-    let after = "struct V { y: int }\nstruct W { v: V }\nfn need(v: V) {}\nfn r(w: W) {\n  need(wv)\n}\n";
+    let after =
+        "struct V { y: int }\nstruct W { v: V }\nfn need(v: V) {}\nfn r(w: W) {\n  need(wv)\n}\n";
 
     let mut bone = BoneWorkspace::new();
     bone.update(path, before.to_string());
@@ -757,7 +967,10 @@ fn reachability_index_rebuilds_on_an_interface_edit() {
     assert!(!has_wv(&mut bone), "no `w.v` path before W has a V field");
 
     bone.update(path, after.to_string());
-    assert!(has_wv(&mut bone), "`w.v` path appears after the interface edit (index rebuilt)");
+    assert!(
+        has_wv(&mut bone),
+        "`w.v` path appears after the interface edit (index rebuilt)"
+    );
 }
 
 #[test]
@@ -840,7 +1053,11 @@ fn call_through_param_with_more_params_snippets_to_next_arg() {
         Some("reject_target(TargetError::NotGround, $0)"),
         "{it:?}"
     );
-    assert_eq!(it.insert_text_format, Some(lsp_types::InsertTextFormat::SNIPPET), "{it:?}");
+    assert_eq!(
+        it.insert_text_format,
+        Some(lsp_types::InsertTextFormat::SNIPPET),
+        "{it:?}"
+    );
 }
 
 #[test]
@@ -850,7 +1067,11 @@ fn call_through_param_fills_an_in_scope_value() {
     let src = "fn apply_damage(amount: float) {}\n\
                fn r() {\n  let dt: float = 1.0\n  apdt\n}\n";
     let it = item(src, 3, 6, "apply_damage(dt)");
-    assert_eq!(it.insert_text.as_deref(), Some("apply_damage(dt)"), "{it:?}");
+    assert_eq!(
+        it.insert_text.as_deref(),
+        Some("apply_damage(dt)"),
+        "{it:?}"
+    );
 }
 
 #[test]
@@ -865,7 +1086,10 @@ fn fuzzy_bare_fn_matches_across_underscore_with_no_call_through_noise() {
                fn table_new_with_size(n: int) {}\n\
                fn r() {\n  tilecen\n}\n";
     let bare = item(src, 4, 9, "tile_center");
-    assert!(bare.sort_text.is_some(), "fuzzy bare fn offered + ranked: {bare:?}");
+    assert!(
+        bare.sort_text.is_some(),
+        "fuzzy bare fn offered + ranked: {bare:?}"
+    );
     let all = labels(src, 4, 9);
     assert!(
         !all.iter().any(|l| l.contains('(')),
@@ -883,7 +1107,10 @@ fn call_through_suppressed_when_query_is_just_the_fn_name() {
                global N: int\n\
                fn r() {\n  spawn\n}\n";
     let l = labels(src, 3, 7);
-    assert!(l.iter().any(|x| x == "spawn_thing"), "bare fn offered: {l:?}");
+    assert!(
+        l.iter().any(|x| x == "spawn_thing"),
+        "bare fn offered: {l:?}"
+    );
     assert!(
         !l.iter().any(|x| x.starts_with("spawn_thing(")),
         "no per-arg call-through flood: {l:?}"
@@ -900,8 +1127,15 @@ fn call_through_fills_arg_from_a_tuple_variant() {
                fn deal(d: Damage) {}\n\
                fn r() {\n  dealfir\n}\n";
     let it = item(src, 3, 9, "deal(Damage::Fire(...))");
-    assert_eq!(it.insert_text.as_deref(), Some("deal(Damage::Fire($0))"), "{it:?}");
-    assert_eq!(it.insert_text_format, Some(lsp_types::InsertTextFormat::SNIPPET));
+    assert_eq!(
+        it.insert_text.as_deref(),
+        Some("deal(Damage::Fire($0))"),
+        "{it:?}"
+    );
+    assert_eq!(
+        it.insert_text_format,
+        Some(lsp_types::InsertTextFormat::SNIPPET)
+    );
 }
 
 #[test]
@@ -911,8 +1145,15 @@ fn call_through_fills_arg_from_a_record_variant() {
                fn apply(c: Cfg) {}\n\
                fn r() {\n  applyopt\n}\n";
     let it = item(src, 3, 10, "apply(Cfg::Opts { ... })");
-    assert_eq!(it.insert_text.as_deref(), Some("apply(Cfg::Opts { $0 })"), "{it:?}");
-    assert_eq!(it.insert_text_format, Some(lsp_types::InsertTextFormat::SNIPPET));
+    assert_eq!(
+        it.insert_text.as_deref(),
+        Some("apply(Cfg::Opts { $0 })"),
+        "{it:?}"
+    );
+    assert_eq!(
+        it.insert_text_format,
+        Some(lsp_types::InsertTextFormat::SNIPPET)
+    );
 }
 
 #[test]
@@ -923,7 +1164,11 @@ fn call_through_tuple_variant_arg_with_more_params_uses_two_slots() {
                fn deal(d: Damage, n: int) {}\n\
                fn r() {\n  dealfir\n}\n";
     let it = item(src, 3, 9, "deal(Damage::Fire(...))");
-    assert_eq!(it.insert_text.as_deref(), Some("deal(Damage::Fire($1), $0)"), "{it:?}");
+    assert_eq!(
+        it.insert_text.as_deref(),
+        Some("deal(Damage::Fire($1), $0)"),
+        "{it:?}"
+    );
 }
 
 #[test]
@@ -939,7 +1184,9 @@ fn arg_position_ranks_expected_enum_variant_first() {
     // Arg layout is `{exact}{type_rank}..`; `nog` is not an exact name, so the
     // expected-type bucket is the second digit.
     assert!(
-        it.sort_text.as_deref().is_some_and(|s| s.starts_with("00") || s.starts_with("10")),
+        it.sort_text
+            .as_deref()
+            .is_some_and(|s| s.starts_with("00") || s.starts_with("10")),
         "expected-type variant should rank in type bucket 0: {:?}",
         it.sort_text
     );
@@ -966,7 +1213,10 @@ fn plain_completion_demotes_midword_scatter_below_clean_and_camelcase() {
     );
     // The same function is still found by a clean (word-boundary) query.
     let l2 = labels("fn event_log() {}\nfn r() {\n  evlog\n}\n", 2, 7);
-    assert!(l2.iter().any(|x| x == "event_log"), "clean query finds the fn: {l2:?}");
+    assert!(
+        l2.iter().any(|x| x == "event_log"),
+        "clean query finds the fn: {l2:?}"
+    );
 }
 
 #[test]
@@ -982,7 +1232,9 @@ fn arg_position_ranks_expected_type_global_first() {
     // Arg layout is `{exact}{type_rank}..`; `gam` is not an exact name, so the
     // expected-type bucket is the second digit.
     assert!(
-        it.sort_text.as_deref().is_some_and(|s| s.starts_with("00") || s.starts_with("10")),
+        it.sort_text
+            .as_deref()
+            .is_some_and(|s| s.starts_with("00") || s.starts_with("10")),
         "expected-type global should rank in type bucket 0: {:?}",
         it.sort_text
     );
@@ -1000,7 +1252,11 @@ fn call_through_fills_arg_from_a_reach_path() {
                fn tile_center(g: IVec2) {}\n\
                fn r(player: Player) {\n  tilecpmg\n}\n";
     let it = item(src, 5, 10, "tile_center(player.movable.grid)");
-    assert_eq!(it.insert_text.as_deref(), Some("tile_center(player.movable.grid)"), "{it:?}");
+    assert_eq!(
+        it.insert_text.as_deref(),
+        Some("tile_center(player.movable.grid)"),
+        "{it:?}"
+    );
 }
 
 // -- qualified enum variants in value position ----------------------------
@@ -1015,7 +1271,10 @@ fn value_position_offers_qualified_variants_not_bare_enum() {
     let l = labels(src, 2, 13);
     assert!(l.contains(&"SpellState::Idle".to_string()), "{l:?}");
     assert!(l.contains(&"SpellState::Loaded".to_string()), "{l:?}");
-    assert!(!l.contains(&"SpellState".to_string()), "bare enum hidden in value position: {l:?}");
+    assert!(
+        !l.contains(&"SpellState".to_string()),
+        "bare enum hidden in value position: {l:?}"
+    );
 }
 
 #[test]
@@ -1029,7 +1288,10 @@ fn type_position_offers_bare_enum_not_qualified_variants() {
     // cursor at the end of `SpellState`.
     let l = labels(src, 1, 33);
     assert!(l.contains(&"SpellState".to_string()), "{l:?}");
-    assert!(!l.iter().any(|s| s.starts_with("SpellState::")), "no qualified in type position: {l:?}");
+    assert!(
+        !l.iter().any(|s| s.starts_with("SpellState::")),
+        "no qualified in type position: {l:?}"
+    );
 }
 
 #[test]
@@ -1037,7 +1299,10 @@ fn value_position_qualified_variant_matches_variant_name() {
     // typing the variant name (not the enum) still surfaces the qualified form.
     let src = "enum SpellState { Idle, Loaded(int) }\nfn r() {\n  let s = idl\n}\n";
     let l = labels(src, 2, 13);
-    assert!(l.contains(&"SpellState::Idle".to_string()), "variant-name-led match: {l:?}");
+    assert!(
+        l.contains(&"SpellState::Idle".to_string()),
+        "variant-name-led match: {l:?}"
+    );
 }
 
 #[test]
@@ -1045,8 +1310,15 @@ fn value_position_qualified_tuple_variant_inserts_parens() {
     // the payload template applies to the qualified form too.
     let src = "enum SpellState { Idle, Loaded(int) }\nfn r() {\n  let s = Load\n}\n";
     let it = item(src, 2, 14, "SpellState::Loaded");
-    assert_eq!(it.insert_text.as_deref(), Some("SpellState::Loaded($0)"), "{it:?}");
-    assert_eq!(it.insert_text_format, Some(lsp_types::InsertTextFormat::SNIPPET));
+    assert_eq!(
+        it.insert_text.as_deref(),
+        Some("SpellState::Loaded($0)"),
+        "{it:?}"
+    );
+    assert_eq!(
+        it.insert_text_format,
+        Some(lsp_types::InsertTextFormat::SNIPPET)
+    );
 }
 
 #[test]
@@ -1073,7 +1345,10 @@ fn no_arg_ufcs_method_completion_parks_cursor_after_parens() {
     assert_eq!(reset.insert_text_format, None, "{reset:?}");
     let add = item(src, 4, 4, "add");
     assert_eq!(add.insert_text.as_deref(), Some("add($0)"), "{add:?}");
-    assert_eq!(add.insert_text_format, Some(lsp_types::InsertTextFormat::SNIPPET));
+    assert_eq!(
+        add.insert_text_format,
+        Some(lsp_types::InsertTextFormat::SNIPPET)
+    );
 }
 
 // -- enum-variant payload templates (literal positions only) --------------
@@ -1089,23 +1364,33 @@ fn tuple_variant_in_value_position_inserts_parens() {
     // cursor right after `SpellState::`.
     let it = item(src, 2, 22, "Loaded");
     assert_eq!(it.insert_text.as_deref(), Some("Loaded($0)"), "{it:?}");
-    assert_eq!(it.insert_text_format, Some(lsp_types::InsertTextFormat::SNIPPET));
+    assert_eq!(
+        it.insert_text_format,
+        Some(lsp_types::InsertTextFormat::SNIPPET)
+    );
 }
 
 #[test]
 fn record_variant_in_value_position_inserts_braces() {
-    let src = "enum Effect { None, Bandage { duration: float } }\nfn r() {\n  let e = Effect::\n}\n";
+    let src =
+        "enum Effect { None, Bandage { duration: float } }\nfn r() {\n  let e = Effect::\n}\n";
     // cursor right after `Effect::`.
     let it = item(src, 2, 18, "Bandage");
     assert_eq!(it.insert_text.as_deref(), Some("Bandage { $0 }"), "{it:?}");
-    assert_eq!(it.insert_text_format, Some(lsp_types::InsertTextFormat::SNIPPET));
+    assert_eq!(
+        it.insert_text_format,
+        Some(lsp_types::InsertTextFormat::SNIPPET)
+    );
 }
 
 #[test]
 fn unit_variant_in_value_position_has_no_template() {
     let src = "enum SpellState { Idle, Loaded(int) }\nfn r() {\n  let s = SpellState::\n}\n";
     let it = item(src, 2, 22, "Idle");
-    assert_eq!(it.insert_text, None, "unit variant inserts the bare name: {it:?}");
+    assert_eq!(
+        it.insert_text, None,
+        "unit variant inserts the bare name: {it:?}"
+    );
     assert_eq!(it.insert_text_format, None);
 }
 
@@ -1115,7 +1400,10 @@ fn tuple_variant_in_pattern_position_has_no_template() {
     let src = "enum SpellState { Idle, Loaded(int) }\nfn r(s: SpellState) {\n  match s {\n    SpellState:: => {}\n  }\n}\n";
     // cursor right after `SpellState::` in the arm pattern.
     let it = item(src, 3, 16, "Loaded");
-    assert_eq!(it.insert_text, None, "pattern position: no payload template: {it:?}");
+    assert_eq!(
+        it.insert_text, None,
+        "pattern position: no payload template: {it:?}"
+    );
     assert_eq!(it.insert_text_format, None);
 }
 
@@ -1127,7 +1415,10 @@ fn tuple_variant_in_fresh_match_arm_has_no_template() {
     let src = "enum SpellState { Idle, Loaded(int) }\nfn r(s: SpellState) {\n  match s {\n    SpellState::\n  }\n}\n";
     // cursor right after `SpellState::` in the fresh arm (no `=>`).
     let it = item(src, 3, 16, "Loaded");
-    assert_eq!(it.insert_text, None, "fresh pattern position: no payload template: {it:?}");
+    assert_eq!(
+        it.insert_text, None,
+        "fresh pattern position: no payload template: {it:?}"
+    );
     assert_eq!(it.insert_text_format, None);
 }
 
@@ -1137,7 +1428,10 @@ fn partial_variant_in_fresh_match_arm_has_no_template() {
     let src = "enum SpellState { Idle, Loaded(int) }\nfn r(s: SpellState) {\n  match s {\n    SpellState::Loa\n  }\n}\n";
     // cursor right after `SpellState::Loa`.
     let it = item(src, 3, 19, "Loaded");
-    assert_eq!(it.insert_text, None, "fresh partial pattern position: no template: {it:?}");
+    assert_eq!(
+        it.insert_text, None,
+        "fresh partial pattern position: no template: {it:?}"
+    );
     assert_eq!(it.insert_text_format, None);
 }
 
@@ -1153,7 +1447,10 @@ fn variant_in_arm_body_after_fat_arrow_still_templates() {
         Some("Loaded($0)"),
         "arm-body value position still templates: {it:?}"
     );
-    assert_eq!(it.insert_text_format, Some(lsp_types::InsertTextFormat::SNIPPET));
+    assert_eq!(
+        it.insert_text_format,
+        Some(lsp_types::InsertTextFormat::SNIPPET)
+    );
 }
 
 #[test]
@@ -1169,7 +1466,10 @@ fn variant_at_block_start_outside_match_still_templates() {
         Some("Loaded($0)"),
         "block-start value position still templates: {it:?}"
     );
-    assert_eq!(it.insert_text_format, Some(lsp_types::InsertTextFormat::SNIPPET));
+    assert_eq!(
+        it.insert_text_format,
+        Some(lsp_types::InsertTextFormat::SNIPPET)
+    );
 }
 
 #[test]
@@ -1181,7 +1481,11 @@ fn enum_qualifier_unmatched_prefix_offers_all_variants() {
     let src = "enum TextAlign { Left, Center, Right }\nfn r() {\n  let a = TextAlign::top\n}\n";
     // cursor at end of `top` (line 2, col 24).
     let ls = labels(src, 2, 24);
-    assert_eq!(ls, vec!["Center", "Left", "Right"], "all variants shown: {ls:?}");
+    assert_eq!(
+        ls,
+        vec!["Center", "Left", "Right"],
+        "all variants shown: {ls:?}"
+    );
 }
 
 #[test]
@@ -1207,7 +1511,10 @@ fn enum_qualifier_matching_prefix_still_narrows() {
     let ls = labels(src, 2, 23);
     assert_eq!(ls, vec!["Center"], "matching prefix narrows: {ls:?}");
     let it = item(src, 2, 23, "Center");
-    assert_eq!(it.filter_text, None, "narrowed item keeps default filter_text");
+    assert_eq!(
+        it.filter_text, None,
+        "narrowed item keeps default filter_text"
+    );
 }
 
 // -- builtin types in a type slot ------------------------------------------
@@ -1224,7 +1531,10 @@ fn type_slot_offers_coroutine_builtin() {
     let src = "co fn f() -> Co {\n}\n";
     let l = labels(src, 0, 15);
     assert!(l.contains(&"Coroutine<>".to_string()), "{l:?}");
-    assert!(!l.contains(&"Coroutine".to_string()), "bare Coroutine replaced by the snippet: {l:?}");
+    assert!(
+        !l.contains(&"Coroutine".to_string()),
+        "bare Coroutine replaced by the snippet: {l:?}"
+    );
 }
 
 #[test]
@@ -1248,7 +1558,11 @@ fn type_slot_offers_primitive_builtins() {
     assert!(
         matches!(
             it.kind,
-            Some(lsp_types::CompletionItemKind::CLASS | lsp_types::CompletionItemKind::KEYWORD | lsp_types::CompletionItemKind::STRUCT)
+            Some(
+                lsp_types::CompletionItemKind::CLASS
+                    | lsp_types::CompletionItemKind::KEYWORD
+                    | lsp_types::CompletionItemKind::STRUCT
+            )
         ),
         "bool should be a type-kind completion: {it:?}"
     );
@@ -1260,7 +1574,10 @@ fn expr_slot_does_not_offer_coroutine_builtin() {
     // must not be offered. `let x = Co|`.
     let src = "fn r() {\n  let x = Co\n}\n";
     let l = labels(src, 1, 12);
-    assert!(!l.contains(&"Coroutine".to_string()), "type builtin leaked into expr slot: {l:?}");
+    assert!(
+        !l.contains(&"Coroutine".to_string()),
+        "type builtin leaked into expr slot: {l:?}"
+    );
 }
 
 // -- yield / await inside a coroutine body ---------------------------------
@@ -1286,8 +1603,14 @@ fn co_fn_body_offers_await_keyword() {
 fn plain_fn_body_does_not_offer_yield_keyword() {
     let src = "fn f() -> int {\n  yi\n}\n";
     let l = labels(src, 1, 4);
-    assert!(!l.contains(&"yield".to_string()), "yield leaked into plain fn: {l:?}");
-    assert!(!l.contains(&"await".to_string()), "await leaked into plain fn: {l:?}");
+    assert!(
+        !l.contains(&"yield".to_string()),
+        "yield leaked into plain fn: {l:?}"
+    );
+    assert!(
+        !l.contains(&"await".to_string()),
+        "await leaked into plain fn: {l:?}"
+    );
 }
 
 #[test]
@@ -1307,8 +1630,14 @@ fn await_ranks_coroutine_fn_first() {
         .collect();
     let pframe = items.iter().position(|s| s == "frame");
     let pfrag = items.iter().position(|s| s == "fragment");
-    assert!(pframe.is_some() && pfrag.is_some(), "both fns present: {items:?}");
-    assert!(pframe < pfrag, "coroutine `frame` must rank above `fragment`: {items:?}");
+    assert!(
+        pframe.is_some() && pfrag.is_some(),
+        "both fns present: {items:?}"
+    );
+    assert!(
+        pframe < pfrag,
+        "coroutine `frame` must rank above `fragment`: {items:?}"
+    );
 }
 
 // -- Coroutine<Wait> ergonomics -----------------------------------------
@@ -1328,9 +1657,17 @@ fn coframe_ranks_first_in_empty_coroutine_generic_slot() {
     let col = "co fn f() -> Coroutine<".len() as u32;
     let mut bone = BoneWorkspace::new();
     bone.update(PATH, src);
-    let items: Vec<String> = bone.completion(PATH, Position::new(1, col)).into_iter().map(|c| c.label).collect();
-    assert_eq!(items.first().map(String::as_str), Some("Wait"),
-        "Wait must rank first in Coroutine<|>: {:?}", &items[..items.len().min(8)]);
+    let items: Vec<String> = bone
+        .completion(PATH, Position::new(1, col))
+        .into_iter()
+        .map(|c| c.label)
+        .collect();
+    assert_eq!(
+        items.first().map(String::as_str),
+        Some("Wait"),
+        "Wait must rank first in Coroutine<|>: {:?}",
+        &items[..items.len().min(8)]
+    );
 }
 
 #[test]
@@ -1340,8 +1677,15 @@ fn coframe_not_synthesized_without_a_cofframe_struct() {
     let col = "co fn f() -> Coroutine<".len() as u32;
     let mut bone = BoneWorkspace::new();
     bone.update(PATH, src.to_string());
-    let items: Vec<String> = bone.completion(PATH, Position::new(0, col)).into_iter().map(|c| c.label).collect();
-    assert!(items.first().map(String::as_str) != Some("Wait"), "no Wait boost without the struct: {items:?}");
+    let items: Vec<String> = bone
+        .completion(PATH, Position::new(0, col))
+        .into_iter()
+        .map(|c| c.label)
+        .collect();
+    assert!(
+        items.first().map(String::as_str) != Some("Wait"),
+        "no Wait boost without the struct: {items:?}"
+    );
 }
 
 #[test]
@@ -1352,12 +1696,27 @@ fn coroutine_name_expands_to_cofframe_and_generic_snippets() {
     bone.update(PATH, src);
     let items = bone.completion(PATH, Position::new(1, col));
     let labels: Vec<&str> = items.iter().map(|c| c.label.as_str()).collect();
-    assert_eq!(labels.first(), Some(&"Coroutine<Wait>"), "first: {labels:?}");
+    assert_eq!(
+        labels.first(),
+        Some(&"Coroutine<Wait>"),
+        "first: {labels:?}"
+    );
     assert_eq!(labels.get(1), Some(&"Coroutine<>"), "second: {labels:?}");
-    assert!(!labels.contains(&"Coroutine"), "bare Coroutine must be suppressed: {labels:?}");
+    assert!(
+        !labels.contains(&"Coroutine"),
+        "bare Coroutine must be suppressed: {labels:?}"
+    );
     let snip = items.iter().find(|c| c.label == "Coroutine<>").unwrap();
-    assert_eq!(snip.insert_text.as_deref(), Some("Coroutine<$0>"), "{snip:?}");
-    assert_eq!(snip.insert_text_format, Some(lsp_types::InsertTextFormat::SNIPPET), "{snip:?}");
+    assert_eq!(
+        snip.insert_text.as_deref(),
+        Some("Coroutine<$0>"),
+        "{snip:?}"
+    );
+    assert_eq!(
+        snip.insert_text_format,
+        Some(lsp_types::InsertTextFormat::SNIPPET),
+        "{snip:?}"
+    );
     let cf = items.iter().find(|c| c.label == "Coroutine<Wait>").unwrap();
     assert_eq!(cf.insert_text.as_deref(), Some("Coroutine<Wait>"), "{cf:?}");
 }
@@ -1368,10 +1727,23 @@ fn coroutine_name_without_cofframe_offers_only_generic_snippet() {
     let col = "co fn f() -> Cor".len() as u32;
     let mut bone = BoneWorkspace::new();
     bone.update(PATH, src.to_string());
-    let labels: Vec<String> = bone.completion(PATH, Position::new(0, col)).into_iter().map(|c| c.label).collect();
-    assert!(labels.iter().any(|s| s == "Coroutine<>"), "generic snippet present: {labels:?}");
-    assert!(!labels.iter().any(|s| s == "Coroutine<Wait>"), "no Wait snippet without the struct: {labels:?}");
-    assert!(!labels.iter().any(|s| s == "Coroutine"), "bare Coroutine suppressed: {labels:?}");
+    let labels: Vec<String> = bone
+        .completion(PATH, Position::new(0, col))
+        .into_iter()
+        .map(|c| c.label)
+        .collect();
+    assert!(
+        labels.iter().any(|s| s == "Coroutine<>"),
+        "generic snippet present: {labels:?}"
+    );
+    assert!(
+        !labels.iter().any(|s| s == "Coroutine<Wait>"),
+        "no Wait snippet without the struct: {labels:?}"
+    );
+    assert!(
+        !labels.iter().any(|s| s == "Coroutine"),
+        "bare Coroutine suppressed: {labels:?}"
+    );
 }
 
 #[test]
@@ -1383,9 +1755,20 @@ fn co_fn_signature_offers_coroutine_return_type() {
     bone.update(PATH, src);
     let items = bone.completion(PATH, Position::new(1, col));
     let labels: Vec<&str> = items.iter().map(|c| c.label.as_str()).collect();
-    assert_eq!(labels.first(), Some(&"-> Coroutine<Wait>"), "return-type snippet must rank first: {labels:?}");
-    let it = items.iter().find(|c| c.label == "-> Coroutine<Wait>").unwrap();
-    assert_eq!(it.insert_text.as_deref(), Some("-> Coroutine<Wait>"), "{it:?}");
+    assert_eq!(
+        labels.first(),
+        Some(&"-> Coroutine<Wait>"),
+        "return-type snippet must rank first: {labels:?}"
+    );
+    let it = items
+        .iter()
+        .find(|c| c.label == "-> Coroutine<Wait>")
+        .unwrap();
+    assert_eq!(
+        it.insert_text.as_deref(),
+        Some("-> Coroutine<Wait>"),
+        "{it:?}"
+    );
 }
 
 #[test]
@@ -1395,8 +1778,15 @@ fn plain_fn_signature_does_not_offer_coroutine_return_type() {
     let col = "fn spawn() ".len() as u32;
     let mut bone = BoneWorkspace::new();
     bone.update(PATH, src);
-    let labels: Vec<String> = bone.completion(PATH, Position::new(1, col)).into_iter().map(|c| c.label).collect();
-    assert!(!labels.iter().any(|s| s.starts_with("-> Coroutine")), "plain fn must not offer the return type: {labels:?}");
+    let labels: Vec<String> = bone
+        .completion(PATH, Position::new(1, col))
+        .into_iter()
+        .map(|c| c.label)
+        .collect();
+    assert!(
+        !labels.iter().any(|s| s.starts_with("-> Coroutine")),
+        "plain fn must not offer the return type: {labels:?}"
+    );
 }
 
 // A host's `Wait` is an ENUM, not a struct -- the ergonomics must fire
@@ -1412,9 +1802,16 @@ fn wait_ergonomics_fire_for_an_enum_wait() {
     let col = "co fn f() -> Cor".len() as u32;
     let mut bone = BoneWorkspace::new();
     bone.update(PATH, src);
-    let labels: Vec<String> = bone.completion(PATH, Position::new(1, col)).into_iter().map(|c| c.label).collect();
-    assert_eq!(labels.first().map(String::as_str), Some("Coroutine<Wait>"),
-        "Coroutine<Wait> snippet must synth for an enum Wait: {labels:?}");
+    let labels: Vec<String> = bone
+        .completion(PATH, Position::new(1, col))
+        .into_iter()
+        .map(|c| c.label)
+        .collect();
+    assert_eq!(
+        labels.first().map(String::as_str),
+        Some("Coroutine<Wait>"),
+        "Coroutine<Wait> snippet must synth for an enum Wait: {labels:?}"
+    );
 }
 
 // -- param-name + fn-prefix type heuristics --------------------------------
@@ -1425,22 +1822,37 @@ fn wait_ergonomics_fire_for_an_enum_wait() {
 
 #[test]
 fn param_entity_hint_synthesizes_entity_of_fn_prefix_struct() {
-    let src = "struct Mob { health: int }\nco fn mob_attack_co(e: ) -> Coroutine<int> {\n  yield 1\n}\n";
+    let src =
+        "struct Mob { health: int }\nco fn mob_attack_co(e: ) -> Coroutine<int> {\n  yield 1\n}\n";
     let col = "co fn mob_attack_co(e: ".len() as u32;
     let mut bone = BoneWorkspace::new();
     bone.update(PATH, src.to_string());
-    let items: Vec<String> = bone.completion(PATH, Position::new(1, col)).into_iter().map(|c| c.label).collect();
-    assert!(items.contains(&"Entity<Mob>".to_string()), "missing Entity<Mob>: {items:?}");
-    assert!(items.contains(&"Entity".to_string()), "missing bare Entity: {items:?}");
+    let items: Vec<String> = bone
+        .completion(PATH, Position::new(1, col))
+        .into_iter()
+        .map(|c| c.label)
+        .collect();
+    assert!(
+        items.contains(&"Entity<Mob>".to_string()),
+        "missing Entity<Mob>: {items:?}"
+    );
+    assert!(
+        items.contains(&"Entity".to_string()),
+        "missing bare Entity: {items:?}"
+    );
     let p_em = items.iter().position(|s| s == "Entity<Mob>").unwrap();
     let p_e = items.iter().position(|s| s == "Entity").unwrap();
-    assert!(p_em < p_e, "Entity<Mob> must rank above bare Entity: {items:?}");
+    assert!(
+        p_em < p_e,
+        "Entity<Mob> must rank above bare Entity: {items:?}"
+    );
     assert_eq!(p_em, 0, "Entity<Mob> must be the top suggestion: {items:?}");
 }
 
 #[test]
 fn entity_synth_inserts_the_generic_type() {
-    let src = "struct Mob { health: int }\nco fn mob_attack_co(e: ) -> Coroutine<int> {\n  yield 1\n}\n";
+    let src =
+        "struct Mob { health: int }\nco fn mob_attack_co(e: ) -> Coroutine<int> {\n  yield 1\n}\n";
     let col = "co fn mob_attack_co(e: ".len() as u32;
     let it = item(src, 1, col, "Entity<Mob>");
     let inserted = it.insert_text.as_deref().unwrap_or("Entity<Mob>");
@@ -1455,9 +1867,16 @@ fn param_entity_hint_without_payload_offers_generic_snippet() {
     let col = "co fn render_thing(e: ".len() as u32;
     let it = item(src, 0, col, "Entity<>");
     assert_eq!(it.insert_text.as_deref(), Some("Entity<$0>"), "{it:?}");
-    assert_eq!(it.insert_text_format, Some(lsp_types::InsertTextFormat::SNIPPET), "{it:?}");
+    assert_eq!(
+        it.insert_text_format,
+        Some(lsp_types::InsertTextFormat::SNIPPET),
+        "{it:?}"
+    );
     let items: Vec<String> = labels(src, 0, col);
-    assert!(!items.iter().any(|s| s == "Entity<Mob>"), "no concrete payload: {items:?}");
+    assert!(
+        !items.iter().any(|s| s == "Entity<Mob>"),
+        "no concrete payload: {items:?}"
+    );
 }
 
 #[test]
@@ -1467,7 +1886,11 @@ fn entity_hint_works_in_a_plain_fn_at_the_colon_and_on_the_space() {
     let src = "fn clear_attack(e: ) {\n}\n";
     for col in ["fn clear_attack(e:".len(), "fn clear_attack(e: ".len()] {
         let it = item(src, 0, col as u32, "Entity<>");
-        assert_eq!(it.insert_text.as_deref(), Some("Entity<$0>"), "at col {col}: {it:?}");
+        assert_eq!(
+            it.insert_text.as_deref(),
+            Some("Entity<$0>"),
+            "at col {col}: {it:?}"
+        );
     }
 }
 
@@ -1477,8 +1900,15 @@ fn non_entity_param_name_does_not_synthesize() {
     let col = "co fn mob_attack_co(count: ".len() as u32;
     let mut bone = BoneWorkspace::new();
     bone.update(PATH, src.to_string());
-    let items: Vec<String> = bone.completion(PATH, Position::new(1, col)).into_iter().map(|c| c.label).collect();
-    assert!(!items.iter().any(|s| s == "Entity<Mob>"), "no synth for a non-entity param name: {items:?}");
+    let items: Vec<String> = bone
+        .completion(PATH, Position::new(1, col))
+        .into_iter()
+        .map(|c| c.label)
+        .collect();
+    assert!(
+        !items.iter().any(|s| s == "Entity<Mob>"),
+        "no synth for a non-entity param name: {items:?}"
+    );
 }
 
 #[test]
@@ -1486,13 +1916,25 @@ fn entity_payload_from_a_non_leading_fn_segment() {
     // `<verb>_<type>` naming (`spawn_mob`) is as common as `<type>_<verb>`:
     // the payload struct is the trailing noun, not the leading segment. Each
     // `_`-segment is tried, leading-first, so `spawn_mob(e:` -> `Entity<Mob>`.
-    let src = "struct Mob { health: int }\nco fn spawn_mob(e: ) -> Coroutine<int> {\n  yield 1\n}\n";
+    let src =
+        "struct Mob { health: int }\nco fn spawn_mob(e: ) -> Coroutine<int> {\n  yield 1\n}\n";
     let col = "co fn spawn_mob(e: ".len() as u32;
     let mut bone = BoneWorkspace::new();
     bone.update(PATH, src.to_string());
-    let items: Vec<String> = bone.completion(PATH, Position::new(1, col)).into_iter().map(|c| c.label).collect();
-    assert!(items.contains(&"Entity<Mob>".to_string()), "missing Entity<Mob>: {items:?}");
-    assert_eq!(items.iter().position(|s| s == "Entity<Mob>"), Some(0), "Entity<Mob> must rank first: {items:?}");
+    let items: Vec<String> = bone
+        .completion(PATH, Position::new(1, col))
+        .into_iter()
+        .map(|c| c.label)
+        .collect();
+    assert!(
+        items.contains(&"Entity<Mob>".to_string()),
+        "missing Entity<Mob>: {items:?}"
+    );
+    assert_eq!(
+        items.iter().position(|s| s == "Entity<Mob>"),
+        Some(0),
+        "Entity<Mob> must rank first: {items:?}"
+    );
 }
 
 #[test]
@@ -1503,9 +1945,19 @@ fn leading_fn_segment_wins_over_a_later_match() {
     let col = "co fn mob_to_tile(e: ".len() as u32;
     let mut bone = BoneWorkspace::new();
     bone.update(PATH, src.to_string());
-    let items: Vec<String> = bone.completion(PATH, Position::new(2, col)).into_iter().map(|c| c.label).collect();
-    assert!(items.contains(&"Entity<Mob>".to_string()), "missing Entity<Mob>: {items:?}");
-    assert!(!items.contains(&"Entity<Tile>".to_string()), "leading segment must win: {items:?}");
+    let items: Vec<String> = bone
+        .completion(PATH, Position::new(2, col))
+        .into_iter()
+        .map(|c| c.label)
+        .collect();
+    assert!(
+        items.contains(&"Entity<Mob>".to_string()),
+        "missing Entity<Mob>: {items:?}"
+    );
+    assert!(
+        !items.contains(&"Entity<Tile>".to_string()),
+        "leading segment must win: {items:?}"
+    );
 }
 
 #[test]
@@ -1515,8 +1967,15 @@ fn let_binding_named_e_is_not_treated_as_a_param() {
     let col = "  let e: ".len() as u32;
     let mut bone = BoneWorkspace::new();
     bone.update(PATH, src.to_string());
-    let items: Vec<String> = bone.completion(PATH, Position::new(2, col)).into_iter().map(|c| c.label).collect();
-    assert!(!items.iter().any(|s| s == "Entity<Mob>"), "let binding must not trigger param heuristic: {items:?}");
+    let items: Vec<String> = bone
+        .completion(PATH, Position::new(2, col))
+        .into_iter()
+        .map(|c| c.label)
+        .collect();
+    assert!(
+        !items.iter().any(|s| s == "Entity<Mob>"),
+        "let binding must not trigger param heuristic: {items:?}"
+    );
 }
 
 #[test]
@@ -1529,9 +1988,19 @@ fn let_binding_is_not_in_scope_within_its_own_initializer() {
     let col = "  let x = ".len() as u32;
     let mut bone = BoneWorkspace::new();
     bone.update(PATH, src.to_string());
-    let items: Vec<String> = bone.completion(PATH, Position::new(2, col)).into_iter().map(|c| c.label).collect();
-    assert!(!items.iter().any(|s| s == "x"), "the just-declared `x` must not be in scope in its own init: {items:?}");
-    assert!(items.iter().any(|s| s == "speed"), "an earlier local must still complete: {items:?}");
+    let items: Vec<String> = bone
+        .completion(PATH, Position::new(2, col))
+        .into_iter()
+        .map(|c| c.label)
+        .collect();
+    assert!(
+        !items.iter().any(|s| s == "x"),
+        "the just-declared `x` must not be in scope in its own init: {items:?}"
+    );
+    assert!(
+        items.iter().any(|s| s == "speed"),
+        "an earlier local must still complete: {items:?}"
+    );
 }
 
 #[test]
@@ -1542,8 +2011,15 @@ fn let_binding_is_in_scope_after_its_statement() {
     let col = "  let y = my".len() as u32;
     let mut bone = BoneWorkspace::new();
     bone.update(PATH, src.to_string());
-    let items: Vec<String> = bone.completion(PATH, Position::new(2, col)).into_iter().map(|c| c.label).collect();
-    assert!(items.iter().any(|s| s == "myvar"), "a completed local must be in scope on a later line: {items:?}");
+    let items: Vec<String> = bone
+        .completion(PATH, Position::new(2, col))
+        .into_iter()
+        .map(|c| c.label)
+        .collect();
+    assert!(
+        items.iter().any(|s| s == "myvar"),
+        "a completed local must be in scope on a later line: {items:?}"
+    );
 }
 
 // -- lifecycle-hook keywords complete as a block ---------------------------
@@ -1556,12 +2032,24 @@ fn let_binding_is_in_scope_after_its_statement() {
 fn lifecycle_hooks_complete_as_a_block() {
     let src = "co fn f() -> Coroutine<int> {\n  on_kil\n  yield 1\n}\n";
     let it = item(src, 1, "  on_kil".len() as u32, "on_killed");
-    assert_eq!(it.insert_text.as_deref(), Some("on_killed { $0 }"), "{it:?}");
-    assert_eq!(it.insert_text_format, Some(lsp_types::InsertTextFormat::SNIPPET), "{it:?}");
+    assert_eq!(
+        it.insert_text.as_deref(),
+        Some("on_killed { $0 }"),
+        "{it:?}"
+    );
+    assert_eq!(
+        it.insert_text_format,
+        Some(lsp_types::InsertTextFormat::SNIPPET),
+        "{it:?}"
+    );
 
     let src2 = "co fn f() -> Coroutine<int> {\n  on_hot\n  yield 1\n}\n";
     let it2 = item(src2, 1, "  on_hot".len() as u32, "on_hot_reload");
-    assert_eq!(it2.insert_text.as_deref(), Some("on_hot_reload { $0 }"), "{it2:?}");
+    assert_eq!(
+        it2.insert_text.as_deref(),
+        Some("on_hot_reload { $0 }"),
+        "{it2:?}"
+    );
 }
 
 // -- Entity receiver: get() first + get().unwrap() chain --------------------
@@ -1577,7 +2065,11 @@ fn entity_member_get_ranks_first() {
     let mut items = bone.completion(PATH, Position::new(2, 4));
     items.sort_by(|a, b| a.sort_text.cmp(&b.sort_text));
     let labels: Vec<&str> = items.iter().map(|c| c.label.as_str()).collect();
-    assert_eq!(labels.first(), Some(&"get"), "get must rank first on an Entity receiver: {labels:?}");
+    assert_eq!(
+        labels.first(),
+        Some(&"get"),
+        "get must rank first on an Entity receiver: {labels:?}"
+    );
 }
 
 #[test]
@@ -1599,7 +2091,11 @@ fn entity_payload_offered_at_colon_and_through_trailing_spaces() {
         "co fn mob_attack_co(e:  ".len(),
     ] {
         let it = item(src, 1, col as u32, "Entity<Mob>");
-        assert_eq!(it.insert_text.as_deref(), Some("Entity<Mob>"), "at col {col}: {it:?}");
+        assert_eq!(
+            it.insert_text.as_deref(),
+            Some("Entity<Mob>"),
+            "at col {col}: {it:?}"
+        );
     }
 }
 
@@ -1613,15 +2109,24 @@ fn entity_payload_offered_at_colon_and_through_trailing_spaces() {
 fn member_completion_hides_underscore_fields_by_default() {
     let src = "struct Widget { value: int, _internal: int }\nfn f(w: Widget) {\n  w.\n}\n";
     let l = labels(src, 2, 4);
-    assert!(l.iter().any(|s| s.starts_with("value")), "public field shown: {l:?}");
-    assert!(!l.iter().any(|s| s.starts_with("_internal")), "underscore field hidden: {l:?}");
+    assert!(
+        l.iter().any(|s| s.starts_with("value")),
+        "public field shown: {l:?}"
+    );
+    assert!(
+        !l.iter().any(|s| s.starts_with("_internal")),
+        "underscore field hidden: {l:?}"
+    );
 }
 
 #[test]
 fn member_completion_shows_underscore_fields_when_typing_underscore() {
     let src = "struct Widget { value: int, _internal: int }\nfn f(w: Widget) {\n  w._\n}\n";
     let l = labels(src, 2, 5);
-    assert!(l.iter().any(|s| s.starts_with("_internal")), "underscore field shown when typing `_`: {l:?}");
+    assert!(
+        l.iter().any(|s| s.starts_with("_internal")),
+        "underscore field shown when typing `_`: {l:?}"
+    );
 }
 
 // -- UFCS methods on an inferred-type receiver ------------------------------
@@ -1638,8 +2143,14 @@ fn ufcs_methods_resolve_on_an_inferred_local() {
                fn resolve_strike(mob: Mob) {}\n\
                fn r() {\n  let m = make_mob()\n  m.\n}\n";
     let l = labels(src, 5, 4);
-    assert!(l.contains(&"resolve_strike".to_string()), "UFCS method on inferred local: {l:?}");
-    assert!(l.iter().any(|s| s.starts_with("hp")), "fields still present: {l:?}");
+    assert!(
+        l.contains(&"resolve_strike".to_string()),
+        "UFCS method on inferred local: {l:?}"
+    );
+    assert!(
+        l.iter().any(|s| s.starts_with("hp")),
+        "fields still present: {l:?}"
+    );
 }
 
 #[test]
@@ -1649,7 +2160,10 @@ fn ufcs_methods_resolve_on_a_chained_inferred_local() {
                fn resolve_strike(mob: Mob) {}\n\
                fn r(e: Entity<Mob>) {\n  let m = e.get().unwrap()\n  m.resol\n}\n";
     let l = labels(src, 4, "  m.resol".len() as u32);
-    assert!(l.contains(&"resolve_strike".to_string()), "UFCS method on chained inferred local: {l:?}");
+    assert!(
+        l.contains(&"resolve_strike".to_string()),
+        "UFCS method on chained inferred local: {l:?}"
+    );
 }
 
 // -- shorter prefix match ranks first --------------------------------------
@@ -1668,8 +2182,14 @@ fn member_field_completion_ranks_shorter_prefix_match_first() {
     let labels: Vec<&str> = items.iter().map(|c| c.label.as_str()).collect();
     let p_ing = labels.iter().position(|s| s.starts_with("attacking"));
     let p_timer = labels.iter().position(|s| s.starts_with("attack_timer"));
-    assert!(p_ing.is_some() && p_timer.is_some(), "both fields present: {labels:?}");
-    assert!(p_ing < p_timer, "attacking (shorter) must rank above attack_timer: {labels:?}");
+    assert!(
+        p_ing.is_some() && p_timer.is_some(),
+        "both fields present: {labels:?}"
+    );
+    assert!(
+        p_ing < p_timer,
+        "attacking (shorter) must rank above attack_timer: {labels:?}"
+    );
 }
 
 // -- bool-context soft boost: investigation battery -------------------------
@@ -1690,16 +2210,27 @@ const DOOR: &str = "struct Door { ajar: float, accessible: bool }\n";
 #[test]
 fn bool_ctx_boosts_bool_field_over_a_shorter_nonbool() {
     // bool field is LONGER -- the boost must beat the length tiebreak in an if.
-    let l = member_labels(&format!("{DOOR}fn f(door: Door) {{\n  if door.a\n}}\n"), 2, "  if door.a".len() as u32);
+    let l = member_labels(
+        &format!("{DOOR}fn f(door: Door) {{\n  if door.a\n}}\n"),
+        2,
+        "  if door.a".len() as u32,
+    );
     let pa = l.iter().position(|s| s.starts_with("accessible"));
     let pj = l.iter().position(|s| s.starts_with("ajar"));
-    assert!(pa < pj, "in `if door.a`, bool `accessible` should beat float `ajar`: {l:?}");
+    assert!(
+        pa < pj,
+        "in `if door.a`, bool `accessible` should beat float `ajar`: {l:?}"
+    );
 }
 
 #[test]
 fn non_bool_ctx_keeps_shorter_first() {
     // NOT a condition -> no boost; the shorter `ajar` wins (length tiebreak).
-    let l = member_labels(&format!("{DOOR}fn f(door: Door) {{\n  let x = door.a\n}}\n"), 2, "  let x = door.a".len() as u32);
+    let l = member_labels(
+        &format!("{DOOR}fn f(door: Door) {{\n  let x = door.a\n}}\n"),
+        2,
+        "  let x = door.a".len() as u32,
+    );
     let pa = l.iter().position(|s| s.starts_with("accessible"));
     let pj = l.iter().position(|s| s.starts_with("ajar"));
     assert!(pj < pa, "outside a condition, shorter `ajar` wins: {l:?}");
@@ -1719,13 +2250,25 @@ fn operator_before_chain_is_not_a_bool_ctx() {
 fn better_textual_match_beats_the_bool_boost() {
     // `if door.aj` -- `ajar` is a far better match for `aj` than `accessible`
     // (which has no `aj`), so score dominates and the boost doesn't override it.
-    let l = member_labels(&format!("{DOOR}fn f(door: Door) {{\n  if door.aj\n}}\n"), 2, "  if door.aj".len() as u32);
-    assert_eq!(l.first().map(|s| s.as_str()), Some("ajar: float"), "score beats the soft boost: {l:?}");
+    let l = member_labels(
+        &format!("{DOOR}fn f(door: Door) {{\n  if door.aj\n}}\n"),
+        2,
+        "  if door.aj".len() as u32,
+    );
+    assert_eq!(
+        l.first().map(|s| s.as_str()),
+        Some("ajar: float"),
+        "score beats the soft boost: {l:?}"
+    );
 }
 
 #[test]
 fn while_condition_is_a_bool_ctx() {
-    let l = member_labels(&format!("{DOOR}fn f(door: Door) {{\n  while door.a\n}}\n"), 2, "  while door.a".len() as u32);
+    let l = member_labels(
+        &format!("{DOOR}fn f(door: Door) {{\n  while door.a\n}}\n"),
+        2,
+        "  while door.a".len() as u32,
+    );
     let pa = l.iter().position(|s| s.starts_with("accessible"));
     let pj = l.iter().position(|s| s.starts_with("ajar"));
     assert!(pa < pj, "`while door.a` is a bool context: {l:?}");
@@ -1739,7 +2282,9 @@ fn entity_internal_fields_are_hidden_on_member_access() {
     let src = "struct Mob { hp: int }\nfn f(e: Entity<Mob>) {\n  e.\n}\n";
     let l = labels(src, 2, 4);
     assert!(
-        !l.iter().any(|s| s.starts_with("arena:") || s.starts_with("index:") || s.starts_with("generation:")),
+        !l.iter().any(|s| s.starts_with("arena:")
+            || s.starts_with("index:")
+            || s.starts_with("generation:")),
         "Entity internal fields must not leak on `e.`: {l:?}"
     );
     assert!(l.contains(&"get".to_string()), "methods still shown: {l:?}");
@@ -1753,10 +2298,17 @@ fn empty_prefix_orders_alphabetically_not_by_length() {
     // workspace-level effect (short stdlib names burying longer user symbols
     // past the cap) is guarded end-to-end by `partial_compilation`'s
     // `completion_after_valid_then_broken`.
-    let l = member_labels("struct S { aaa_long: int, z: int }\nfn f(s: S) {\n  s.\n}\n", 2, 4);
+    let l = member_labels(
+        "struct S { aaa_long: int, z: int }\nfn f(s: S) {\n  s.\n}\n",
+        2,
+        4,
+    );
     let pa = l.iter().position(|s| s.starts_with("aaa_long"));
     let pz = l.iter().position(|s| s.starts_with("z:"));
-    assert!(pa < pz, "empty-prefix member order is alphabetical, not length: {l:?}");
+    assert!(
+        pa < pz,
+        "empty-prefix member order is alphabetical, not length: {l:?}"
+    );
 }
 
 // -- arg-position type-directed boost for direct member fields --------------
@@ -1777,7 +2329,10 @@ fn arg_position_boosts_member_field_matching_expected_type() {
     let pco = l.iter().position(|s| s.starts_with("attack_co"));
     let pt = l.iter().position(|s| s.starts_with("attack_timer"));
     assert!(pco.is_some() && pt.is_some(), "both fields present: {l:?}");
-    assert!(pco < pt, "type-matching `attack_co` must rank first in the Coroutine arg slot: {l:?}");
+    assert!(
+        pco < pt,
+        "type-matching `attack_co` must rank first in the Coroutine arg slot: {l:?}"
+    );
 }
 
 // -- field-reference key paths (`FieldRef<Struct, V>`) ------------------------
@@ -1795,10 +2350,22 @@ fn field_ref_arg_completes_only_fields_matching_v() {
     let col = "  poll_slot(.".len() as u32;
     let l = labels(src, 3, col);
     // Labels carry the leading `.` (the field ref IS `.attack_co`).
-    assert!(l.contains(&".attack_co: int?".to_string()), "int? field offered: {l:?}");
-    assert!(!l.iter().any(|s| s.starts_with(".health")), "int field excluded (invariant): {l:?}");
-    assert!(!l.iter().any(|s| s.starts_with(".name")), "string field excluded: {l:?}");
-    assert!(!l.iter().any(|s| s == "Arena" || s == "poll_slot"), "no global dump: {l:?}");
+    assert!(
+        l.contains(&".attack_co: int?".to_string()),
+        "int? field offered: {l:?}"
+    );
+    assert!(
+        !l.iter().any(|s| s.starts_with(".health")),
+        "int field excluded (invariant): {l:?}"
+    );
+    assert!(
+        !l.iter().any(|s| s.starts_with(".name")),
+        "string field excluded: {l:?}"
+    );
+    assert!(
+        !l.iter().any(|s| s == "Arena" || s == "poll_slot"),
+        "no global dump: {l:?}"
+    );
 }
 
 #[test]
@@ -1808,8 +2375,14 @@ fn field_ref_arg_v_int_offers_the_int_field() {
                fn main() {\n  want_int(.)\n}\n";
     let col = "  want_int(.".len() as u32;
     let l = labels(src, 3, col);
-    assert!(l.contains(&".health: int".to_string()), "int field offered: {l:?}");
-    assert!(!l.iter().any(|s| s.starts_with(".attack_co")), "int? field excluded: {l:?}");
+    assert!(
+        l.contains(&".health: int".to_string()),
+        "int field offered: {l:?}"
+    );
+    assert!(
+        !l.iter().any(|s| s.starts_with(".attack_co")),
+        "int? field excluded: {l:?}"
+    );
 }
 
 // generic T resolved from a sibling arg: poll_slot<T>(e: Entity<T>, f:
@@ -1822,8 +2395,14 @@ fn field_ref_generic_t_resolved_from_sibling_arg() {
                fn r() {\n  let e: Entity<Mob> = Entity { i: 0 }\n  poll_slot(e, .co)\n}\n";
     let col = "  poll_slot(e, .co".len() as u32;
     let l = labels(src, 5, col);
-    assert!(l.contains(&".co: int?".to_string()), "T=Mob resolved, co offered: {l:?}");
-    assert!(!l.iter().any(|s| s.starts_with(".hp")), "hp (int) excluded by invariance: {l:?}");
+    assert!(
+        l.contains(&".co: int?".to_string()),
+        "T=Mob resolved, co offered: {l:?}"
+    );
+    assert!(
+        !l.iter().any(|s| s.starts_with(".hp")),
+        "hp (int) excluded by invariance: {l:?}"
+    );
 }
 
 // empty-arg slot (no `.` typed yet): the FieldRef fields are offered proactively,
@@ -1836,10 +2415,20 @@ fn field_ref_empty_arg_offers_fields_and_inserts_dot() {
     // cursor right inside `poll_slot(|)`
     let col = "  poll_slot(".len() as u32;
     let it = item(src, 3, col, ".co: int?");
-    assert_eq!(it.insert_text.as_deref(), Some(".co"), "empty-arg insert adds the dot: {it:?}");
+    assert_eq!(
+        it.insert_text.as_deref(),
+        Some(".co"),
+        "empty-arg insert adds the dot: {it:?}"
+    );
     let l = labels(src, 3, col);
-    assert!(!l.iter().any(|s| s.starts_with(".hp")), "hp (int) excluded: {l:?}");
-    assert!(!l.iter().any(|s| s == "poll_slot"), "no global dump in a FieldRef slot: {l:?}");
+    assert!(
+        !l.iter().any(|s| s.starts_with(".hp")),
+        "hp (int) excluded: {l:?}"
+    );
+    assert!(
+        !l.iter().any(|s| s == "poll_slot"),
+        "no global dump in a FieldRef slot: {l:?}"
+    );
 }
 
 // UFCS field-ref args: typing `.field` INSIDE a UFCS call's parens must offer
@@ -1855,9 +2444,18 @@ fn field_ref_ufcs_generic_receiver_offers_fields() {
                fn r() {\n  let p: Player = Player { hp: 0, cast_co: null }\n  p.stop(.)\n}\n";
     let col = "  p.stop(.".len() as u32;
     let l = labels(src, 4, col);
-    assert!(l.contains(&".cast_co: int?".to_string()), "cast_co offered: {l:?}");
-    assert!(!l.iter().any(|s| s.starts_with(".hp")), "hp (int) excluded by invariance: {l:?}");
-    assert!(!l.iter().any(|s| s == "stop" || s == "Player"), "no global dump in a FieldRef slot: {l:?}");
+    assert!(
+        l.contains(&".cast_co: int?".to_string()),
+        "cast_co offered: {l:?}"
+    );
+    assert!(
+        !l.iter().any(|s| s.starts_with(".hp")),
+        "hp (int) excluded by invariance: {l:?}"
+    );
+    assert!(
+        !l.iter().any(|s| s == "stop" || s == "Player"),
+        "no global dump in a FieldRef slot: {l:?}"
+    );
 }
 
 #[test]
@@ -1871,7 +2469,10 @@ fn field_ref_ufcs_second_overload_supplies_the_fieldref_slot() {
                fn r() {\n  let p: Player = Player { hp: 0, cast_co: null }\n  p.stop(.)\n}\n";
     let col = "  p.stop(.".len() as u32;
     let l = labels(src, 5, col);
-    assert!(l.contains(&".cast_co: int?".to_string()), "second-overload FieldRef resolved: {l:?}");
+    assert!(
+        l.contains(&".cast_co: int?".to_string()),
+        "second-overload FieldRef resolved: {l:?}"
+    );
     assert!(!l.iter().any(|s| s == "stop"), "no global dump: {l:?}");
 }
 
@@ -1887,8 +2488,14 @@ fn field_ref_ufcs_entity_receiver_offers_fields() {
                fn r() {\n  let e: Entity<Glyph> = Entity { i: 0 }\n  e.run_into(.)\n}\n";
     let col = "  e.run_into(.".len() as u32;
     let l = labels(src, 6, col);
-    assert!(l.contains(&".co: int?".to_string()), "co offered via Entity<Glyph> element: {l:?}");
-    assert!(!l.iter().any(|s| s.starts_with(".life")), "life (int) excluded by invariance: {l:?}");
+    assert!(
+        l.contains(&".co: int?".to_string()),
+        "co offered via Entity<Glyph> element: {l:?}"
+    );
+    assert!(
+        !l.iter().any(|s| s.starts_with(".life")),
+        "life (int) excluded by invariance: {l:?}"
+    );
     assert!(!l.iter().any(|s| s == "run_into"), "no global dump: {l:?}");
 }
 
@@ -1902,7 +2509,10 @@ fn field_ref_ufcs_non_fieldref_arg_falls_through() {
                fn r() {\n  let p: Player = Player { hp: 0 }\n  p.take(hel)\n}\n";
     let col = "  p.take(hel".len() as u32;
     let l = labels(src, 5, col);
-    assert!(l.iter().any(|s| s == "helper_val"), "normal completion still fires: {l:?}");
+    assert!(
+        l.iter().any(|s| s == "helper_val"),
+        "normal completion still fires: {l:?}"
+    );
 }
 
 // -- locality outranks case: a lowercase query still surfaces globals ---------
@@ -1989,7 +2599,10 @@ fn member_field_filter_is_fuzzy() {
     // `atco`: a@0 + t run + c/o at the `_` boundary -> `attack_co`.
     let src = "struct Mob { attack_co: int, health: int }\nfn r(m: Mob) {\n  m.atco\n}\n";
     let l = labels(src, 2, "  m.atco".len() as u32);
-    assert!(l.contains(&"attack_co: int".to_string()), "fuzzy member field: {l:?}");
+    assert!(
+        l.contains(&"attack_co: int".to_string()),
+        "fuzzy member field: {l:?}"
+    );
 }
 
 #[test]
@@ -2003,10 +2616,14 @@ fn member_method_filter_is_fuzzy() {
 #[test]
 fn enum_qualified_variant_filter_is_fuzzy() {
     // `nogr`: n@0 + o run + g at the camel boundary + r run -> `NotGround`.
-    let src = "enum TargetError { NotGround, OutOfRange }\nfn r() {\n  let e = TargetError::nogr\n}\n";
+    let src =
+        "enum TargetError { NotGround, OutOfRange }\nfn r() {\n  let e = TargetError::nogr\n}\n";
     let l = labels(src, 2, "  let e = TargetError::nogr".len() as u32);
     assert!(l.iter().any(|s| s == "NotGround"), "fuzzy variant: {l:?}");
-    assert!(!l.iter().any(|s| s == "OutOfRange"), "non-matching variant filtered: {l:?}");
+    assert!(
+        !l.iter().any(|s| s == "OutOfRange"),
+        "non-matching variant filtered: {l:?}"
+    );
 }
 
 #[test]
@@ -2014,7 +2631,10 @@ fn struct_literal_field_filter_is_fuzzy() {
     // `mosp`: m@0 + o run + s at the `_` boundary + p run -> `move_speed`.
     let src = "struct Cfg { move_speed: int, other: int }\nfn r() {\n  let c = Cfg { mosp }\n}\n";
     let l = labels(src, 2, "  let c = Cfg { mosp".len() as u32);
-    assert!(l.contains(&"move_speed: int".to_string()), "fuzzy struct-literal field: {l:?}");
+    assert!(
+        l.contains(&"move_speed: int".to_string()),
+        "fuzzy struct-literal field: {l:?}"
+    );
 }
 
 #[test]
@@ -2022,7 +2642,10 @@ fn enum_record_field_filter_is_fuzzy() {
     // `alb`: a@0 + l run + b at the `_` boundary -> `alpha_beta`.
     let src = "enum E { V { alpha_beta: int, other: int } }\nfn r() {\n  let v = E::V { alb }\n}\n";
     let l = labels(src, 2, "  let v = E::V { alb".len() as u32);
-    assert!(l.contains(&"alpha_beta: int".to_string()), "fuzzy enum-record field: {l:?}");
+    assert!(
+        l.contains(&"alpha_beta: int".to_string()),
+        "fuzzy enum-record field: {l:?}"
+    );
 }
 
 #[test]
@@ -2244,7 +2867,10 @@ fn chained_member_on_inferred_local_offers_vec_methods() {
                fn mk() -> Corpse { return Corpse { items: [], name: \"\" } }\n\
                fn r() {\n  let c = mk()\n  let n = c.items.le\n}\n";
     let l = labels(src, 5, 18);
-    assert!(l.contains(&"len".to_string()), "Vec methods on chained inferred-local member: {l:?}");
+    assert!(
+        l.contains(&"len".to_string()),
+        "Vec methods on chained inferred-local member: {l:?}"
+    );
 }
 
 #[test]
@@ -2255,14 +2881,22 @@ fn method_completion_omits_parens_when_they_already_follow() {
                struct Corpse { items: [Item], name: string }\n\
                fn r(c: Corpse) {\n  let n = c.items.le()\n}\n";
     let it = item(src, 3, 20, "len");
-    assert_eq!(it.insert_text.as_deref(), Some("len"), "no doubled parens: {it:?}");
+    assert_eq!(
+        it.insert_text.as_deref(),
+        Some("len"),
+        "no doubled parens: {it:?}"
+    );
 
     // Control: no trailing paren -> the method DOES bring its own `()`.
     let src2 = "struct Item { kind: int }\n\
                 struct Corpse { items: [Item], name: string }\n\
                 fn r(c: Corpse) {\n  let n = c.items.le\n}\n";
     let it2 = item(src2, 3, 20, "len");
-    assert_eq!(it2.insert_text.as_deref(), Some("len()"), "brings its own parens: {it2:?}");
+    assert_eq!(
+        it2.insert_text.as_deref(),
+        Some("len()"),
+        "brings its own parens: {it2:?}"
+    );
 }
 
 #[test]
@@ -2276,14 +2910,20 @@ fn chained_member_through_generic_struct_field() {
                struct Pair<A, B> { first: A, second: B }\n\
                fn r(p: Pair<Corpse, int>) {\n  let n = p.first.na\n}\n";
     let l = labels(src, 3, 18);
-    assert!(l.contains(&"name: string".to_string()), "generic field chain (param): {l:?}");
+    assert!(
+        l.contains(&"name: string".to_string()),
+        "generic field chain (param): {l:?}"
+    );
 
     let src2 = "struct Corpse { items: int, name: string }\n\
                 struct Pair<A, B> { first: A, second: B }\n\
                 fn mk() -> Pair<Corpse, int> { return Pair { first: Corpse { items: 0, name: \"\" }, second: 1 } }\n\
                 fn r() {\n  let p = mk()\n  let n = p.first.na\n}\n";
     let l2 = labels(src2, 5, 18);
-    assert!(l2.contains(&"name: string".to_string()), "generic field chain (inferred local): {l2:?}");
+    assert!(
+        l2.contains(&"name: string".to_string()),
+        "generic field chain (inferred local): {l2:?}"
+    );
 }
 
 #[test]
@@ -2296,7 +2936,10 @@ fn chained_member_through_newtype_field_in_fallback() {
                newtype Wrap(Corpse)\n\
                fn r(w: Wrap) {\n  foo(w.0.na\n}\n";
     let l = labels(src, 3, 12);
-    assert!(l.contains(&"name: string".to_string()), "newtype .0 in fallback: {l:?}");
+    assert!(
+        l.contains(&"name: string".to_string()),
+        "newtype .0 in fallback: {l:?}"
+    );
 }
 
 #[test]
@@ -2307,7 +2950,10 @@ fn chained_member_through_tuple_projection() {
     let src = "struct Corpse { items: int, name: string }\n\
                fn r(t: (Corpse, int)) {\n  let n = t.0.na\n}\n";
     let l = labels(src, 2, 16);
-    assert!(l.contains(&"name: string".to_string()), "tuple projection chain: {l:?}");
+    assert!(
+        l.contains(&"name: string".to_string()),
+        "tuple projection chain: {l:?}"
+    );
 }
 
 #[test]
@@ -2319,7 +2965,10 @@ fn chained_member_through_tuple_projection_in_fallback() {
     let src = "struct Corpse { items: int, name: string }\n\
                fn r(t: (Corpse, int)) {\n  foo(t.0.na\n}\n";
     let l = labels(src, 2, 12);
-    assert!(l.contains(&"name: string".to_string()), "tuple projection in fallback: {l:?}");
+    assert!(
+        l.contains(&"name: string".to_string()),
+        "tuple projection in fallback: {l:?}"
+    );
 }
 
 #[test]
@@ -2332,7 +2981,10 @@ fn chained_member_through_inferred_local_tuple_head_in_fallback() {
                fn mk() -> (Corpse, int) { return (Corpse { items: 0, name: \"\" }, 1) }\n\
                fn r() {\n  let t = mk()\n  foo(t.0.na\n}\n";
     let l = labels(src, 4, 12);
-    assert!(l.contains(&"name: string".to_string()), "inferred-local tuple head in fallback: {l:?}");
+    assert!(
+        l.contains(&"name: string".to_string()),
+        "inferred-local tuple head in fallback: {l:?}"
+    );
 }
 
 #[test]
@@ -2345,7 +2997,10 @@ fn chained_member_through_inferred_local_newtype_head_in_fallback() {
                fn mk() -> Wrap { return Wrap(Corpse { items: 0, name: \"\" }) }\n\
                fn r() {\n  let w = mk()\n  foo(w.0.na\n}\n";
     let l = labels(src, 5, 12);
-    assert!(l.contains(&"name: string".to_string()), "inferred-local newtype head in fallback: {l:?}");
+    assert!(
+        l.contains(&"name: string".to_string()),
+        "inferred-local newtype head in fallback: {l:?}"
+    );
 }
 
 #[test]
@@ -2361,8 +3016,14 @@ fn call_receiver_suppresses_globals_when_no_member_matches() {
                fn getitems() -> [Item] { return [] }\n\
                fn r() {\n  let n = getitems().ce\n}\n";
     let leak = labels(src, 5, 23);
-    assert!(!leak.contains(&"centroid".to_string()), "leaked [FixVec2] global as UFCS: {leak:?}");
-    assert!(!leak.contains(&"ceil".to_string()), "leaked a global after member `.`: {leak:?}");
+    assert!(
+        !leak.contains(&"centroid".to_string()),
+        "leaked [FixVec2] global as UFCS: {leak:?}"
+    );
+    assert!(
+        !leak.contains(&"ceil".to_string()),
+        "leaked a global after member `.`: {leak:?}"
+    );
 
     // Non-vacuous: the same receiver DOES offer its Vec members for a real
     // prefix, so the suppression above isn't just an unresolved receiver.
@@ -2370,7 +3031,10 @@ fn call_receiver_suppresses_globals_when_no_member_matches() {
                fn getitems() -> [Item] { return [] }\n\
                fn r() {\n  let n = getitems().cl\n}\n";
     let l = labels(hit, 3, 23);
-    assert!(l.contains(&"clear".to_string()), "Vec members must resolve on a call receiver: {l:?}");
+    assert!(
+        l.contains(&"clear".to_string()),
+        "Vec members must resolve on a call receiver: {l:?}"
+    );
 }
 
 #[test]
@@ -2403,8 +3067,14 @@ fn member_completion_recovers_a_missing_comma_in_a_struct_literal() {
                }\n";
     // line 5 (0-indexed) = `        z: st.`, cursor right after the `.` (char 14).
     let l = labels(src, 5, 14);
-    assert!(l.iter().any(|x| x.starts_with("hp")), "St.hp must be offered: {l:?}");
-    assert!(l.iter().any(|x| x.starts_with("mp")), "St.mp must be offered: {l:?}");
+    assert!(
+        l.iter().any(|x| x.starts_with("hp")),
+        "St.hp must be offered: {l:?}"
+    );
+    assert!(
+        l.iter().any(|x| x.starts_with("mp")),
+        "St.mp must be offered: {l:?}"
+    );
 }
 
 #[test]

@@ -30,7 +30,9 @@ impl Builder<'_> {
         e: Idx<Expr>,
         family: ContainerFamily,
     ) -> Result<Option<ContainerPlan>, CompilerError> {
-        let Some(ty) = self.concrete_ty(e)? else { return Ok(None) };
+        let Some(ty) = self.concrete_ty(e)? else {
+            return Ok(None);
+        };
         if !ContainerPlan::matches_type(family, &ty) {
             return Ok(None);
         }
@@ -56,10 +58,13 @@ impl Builder<'_> {
     /// plain `NativeBuffer` (matching the alloc intrinsic, which also requires a
     /// concrete element).
     pub(crate) fn nb_value_elem(&self, e: Idx<Expr>) -> Result<Option<Ustr>, CompilerError> {
-        let Some(concrete) = self.concrete_expr_ty(e) else { return Ok(None) };
+        let Some(concrete) = self.concrete_expr_ty(e) else {
+            return Ok(None);
+        };
         let family = match concrete.peel_nullable().0 {
             MonoTy::App {
-                ctor: crate::monoty::MonoCtor::Nominal(name), ..
+                ctor: crate::monoty::MonoCtor::Nominal(name),
+                ..
             } => {
                 if bone_semantic::prelude::is_intrinsic_key(*name, "NativeBuffer") {
                     ContainerFamily::NativeBuffer
@@ -87,7 +92,9 @@ impl Builder<'_> {
     /// element's C leaf layout whether the container stores rows, columns, or
     /// leaf views.
     pub(crate) fn nb_type_value_elem(&self, e: Idx<Expr>) -> Result<Option<Ustr>, CompilerError> {
-        let Some(concrete) = self.concrete_expr_ty(e) else { return Ok(None) };
+        let Some(concrete) = self.concrete_expr_ty(e) else {
+            return Ok(None);
+        };
         let element = match concrete.peel_nullable().0 {
             MonoTy::App {
                 ctor: crate::monoty::MonoCtor::Nominal(name),
@@ -95,7 +102,9 @@ impl Builder<'_> {
             } if matches!(name.as_str(), "NativeBuffer" | "FlatVec") => params.first(),
             _ => return Ok(None),
         };
-        let Some(element) = element else { return Ok(None) };
+        let Some(element) = element else {
+            return Ok(None);
+        };
         let (payload, nullable) = element.peel_nullable();
         if nullable {
             return Ok(None);
@@ -134,11 +143,17 @@ impl Builder<'_> {
 
     /// [`Self::flat_stored_container`] for a container type.
     pub(crate) fn flat_stored_container_type(&self, ty: &MonoTy) -> Result<bool, CompilerError> {
-        for family in [ContainerFamily::Vec, ContainerFamily::Map, ContainerFamily::Arena] {
+        for family in [
+            ContainerFamily::Vec,
+            ContainerFamily::Map,
+            ContainerFamily::Arena,
+        ] {
             if ContainerPlan::matches_type(family, ty) {
                 let plan = self.container_plan_for_type(ty, family)?;
                 let arena = self.scx.rep_arena();
-                return Ok(plan.column_elem(&arena).is_some() || plan.strided_elem(&arena).is_some());
+                return Ok(
+                    plan.column_elem(&arena).is_some() || plan.strided_elem(&arena).is_some()
+                );
             }
         }
         Ok(false)
@@ -292,7 +307,10 @@ impl Builder<'_> {
     /// `m.data`, the column Vec a column-stored Map's values live in. Every
     /// leaf read/write goes through the ordinary Vec column machinery on this.
     pub(crate) fn map_col_data(&mut self, m: Idx<Inst>) -> Idx<Inst> {
-        self.emit_cur(Inst::Field { base: m, field: Ustr::from("data") })
+        self.emit_cur(Inst::Field {
+            base: m,
+            field: Ustr::from("data"),
+        })
     }
 
     /// The NativeBuffer container kind for base expr `e`: value-struct elements
@@ -317,7 +335,10 @@ impl Builder<'_> {
         if self.expr_is_flat_vec(base) {
             let kind = self.nb_kind(base)?;
             let b = self.lower_expr(base)?;
-            let buf = self.emit_cur(Inst::Field { base: b, field: Ustr::from("buf") });
+            let buf = self.emit_cur(Inst::Field {
+                base: b,
+                field: Ustr::from("buf"),
+            });
             return Ok((buf, kind));
         }
         let kind = self.coll_kind(base)?;
@@ -333,8 +354,14 @@ impl Builder<'_> {
         if let Some(ty) = self.concrete_expr_ty(base) {
             let (payload, _) = ty.peel_nullable();
             return match payload {
-                MonoTy::App { ctor: crate::monoty::MonoCtor::Array, .. } => self.vec_kind(base),
-                MonoTy::App { ctor: crate::monoty::MonoCtor::Map, .. } => Ok(ContainerKind::Map),
+                MonoTy::App {
+                    ctor: crate::monoty::MonoCtor::Array,
+                    ..
+                } => self.vec_kind(base),
+                MonoTy::App {
+                    ctor: crate::monoty::MonoCtor::Map,
+                    ..
+                } => Ok(ContainerKind::Map),
                 MonoTy::App {
                     ctor: crate::monoty::MonoCtor::Nominal(name),
                     ..
@@ -342,7 +369,9 @@ impl Builder<'_> {
                 _ => Err(self.gap_here("concrete type is not an indexable container")),
             };
         }
-        if self.concrete_expr_is_untyped(base) && matches!(self.body.expr_arena[base], Expr::Array(..)) {
+        if self.concrete_expr_is_untyped(base)
+            && matches!(self.body.expr_arena[base], Expr::Array(..))
+        {
             return Ok(ContainerKind::Vec);
         }
         Err(self.gap_here("container expression is missing from the concrete type plan"))
@@ -364,9 +393,10 @@ impl Builder<'_> {
             MonoTy::Uint => Some(ArithTy::Uint),
             MonoTy::Float => Some(ArithTy::Float),
             MonoTy::String => Some(ArithTy::Str),
-            MonoTy::App { ctor: crate::monoty::MonoCtor::Nominal(name), .. }
-                if self.ws.newtypes_by_name.contains_key(name) =>
-            {
+            MonoTy::App {
+                ctor: crate::monoty::MonoCtor::Nominal(name),
+                ..
+            } if self.ws.newtypes_by_name.contains_key(name) => {
                 let nid = self.ws.newtypes_by_name.get(name)?;
                 let wrapped = self.ws.modules[nid.module.index()].newtypes[nid.def].wrapped;
                 self.arith_ty_of(self.resolve_ty(wrapped)?)
@@ -383,7 +413,12 @@ impl Builder<'_> {
     /// operands, int==int stay untouched -- the counted-loop latch recognition
     /// keeps matching `Const(Lit::Int(1))`). Identity on luajit; materialized by
     /// non-Lua backends.
-    pub(crate) fn coerced(&mut self, value: Idx<Inst>, value_expr: Idx<Expr>, expected: TyId) -> Idx<Inst> {
+    pub(crate) fn coerced(
+        &mut self,
+        value: Idx<Inst>,
+        value_expr: Idx<Expr>,
+        expected: TyId,
+    ) -> Idx<Inst> {
         let to_float = self
             .concrete_ty_id(expected)
             .as_ref()
@@ -421,11 +456,24 @@ impl Builder<'_> {
     pub(crate) fn binding_is_ref(&self, name: Idx<BindingInfo>) -> bool {
         self.binding_ty(name)
             .and_then(|ty| self.concrete_ty_id(ty))
-            .is_some_and(|ty| matches!(ty.as_ref(), MonoTy::App { ctor: MonoCtor::Ref, .. }))
+            .is_some_and(|ty| {
+                matches!(
+                    ty.as_ref(),
+                    MonoTy::App {
+                        ctor: MonoCtor::Ref,
+                        ..
+                    }
+                )
+            })
     }
 
     /// [`Self::coerced`] against a `let`/assignment target binding's type.
-    pub(crate) fn coerced_to_binding(&mut self, value: Idx<Inst>, value_expr: Idx<Expr>, name: Idx<BindingInfo>) -> Idx<Inst> {
+    pub(crate) fn coerced_to_binding(
+        &mut self,
+        value: Idx<Inst>,
+        value_expr: Idx<Expr>,
+        name: Idx<BindingInfo>,
+    ) -> Idx<Inst> {
         match self.binding_ty(name) {
             Some(t) => self.coerced(value, value_expr, t),
             None => value,
@@ -447,5 +495,4 @@ impl Builder<'_> {
             _ => value,
         }
     }
-
 }

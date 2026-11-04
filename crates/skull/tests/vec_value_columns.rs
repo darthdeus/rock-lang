@@ -328,7 +328,10 @@ fn column_vec_iterated_in_a_global_initializer() {
         "global initializer called the UNSPECIALIZED VecIter `next` over column \
          storage:\n{body}"
     );
-    assert_eq!(crate::common::run_luajit(&format!("{lua}\nmain()\n"), "col_ginit"), "4");
+    assert_eq!(
+        crate::common::run_luajit(&format!("{lua}\nmain()\n"), "col_ginit"),
+        "4"
+    );
 }
 
 const VEC_STDLIB_SURFACE: &str = r#"
@@ -368,7 +371,8 @@ fn main() {
 /// column-shaped code.
 #[test]
 fn stdlib_vec_surface_works_over_column_storage() {
-    let lua = crate::common::try_emit_module(VEC_STDLIB_SURFACE).expect("stdlib Vec surface must emit");
+    let lua =
+        crate::common::try_emit_module(VEC_STDLIB_SURFACE).expect("stdlib Vec surface must emit");
     // The values below are correct under BOXED storage too, so pin the mechanism
     // this test is named for: each plain-generic entry point reaches a standalone
     // The encoded `a_n2_V2_0_z` key is the parameterless nominal `V2`.
@@ -418,7 +422,10 @@ fn main() {
 fn unspliceable_iteration_of_boxed_elements_still_emits() {
     let lua = crate::common::try_emit_module(VEC_BOXED_ELEMS_UNSPLICED)
         .expect("boxed element types must still emit in unspliceable contexts");
-    assert_eq!(crate::common::run_luajit(&format!("{lua}\nmain()\n"), "boxed_unspliced"), "4");
+    assert_eq!(
+        crate::common::run_luajit(&format!("{lua}\nmain()\n"), "boxed_unspliced"),
+        "4"
+    );
 }
 
 const VEC_CONTROLS: &str = r#"
@@ -551,7 +558,8 @@ fn nobox_column_sort_never_materializes_an_element() {
 
 #[test]
 fn nobox_reference_elements_use_columns() {
-    let lua = emit_module(r#"
+    let lua = emit_module(
+        r#"
 nobox value ReferenceRow { payload: [int]?, position: int }
 fn fill_reference_rows(payload: [int]) -> int {
     let rows: [ReferenceRow] = []
@@ -559,7 +567,8 @@ fn fill_reference_rows(payload: [int]) -> int {
     return rows[0].position
 }
 fn main() { print(fill_reference_rows([3])) }
-"#);
+"#,
+    );
     let body = function_body(&lua, "fill_reference_rows");
     assert!(body.contains(r#"["payload"] = {}"#), "{body}");
     assert!(body.contains(r#"["position"] = {}"#), "{body}");

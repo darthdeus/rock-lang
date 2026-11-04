@@ -977,10 +977,7 @@ impl Ast {
     }
 
     pub fn stmt(&mut self, span: Span, kind: StatementKind) -> Idx<StatementData> {
-        self.stmts.alloc(StatementData {
-            span,
-            kind,
-        })
+        self.stmts.alloc(StatementData { span, kind })
     }
 
     pub fn block(
@@ -989,7 +986,11 @@ impl Ast {
         braces: Option<(Span, Span)>,
         statements: Vec<Idx<StatementData>>,
     ) -> Idx<BlockData> {
-        self.blocks.alloc(BlockData { span, braces, statements })
+        self.blocks.alloc(BlockData {
+            span,
+            braces,
+            statements,
+        })
     }
 
     pub fn ty(&mut self, span: Span, kind: TypeExprKind, is_nullable: bool) -> Idx<TypeExprData> {

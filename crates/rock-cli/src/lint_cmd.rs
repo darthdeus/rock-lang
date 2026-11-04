@@ -25,7 +25,10 @@ pub fn do_lint(
         // rejection, not a silent no-op.
         Some(list) => {
             let sel = bone_lints::LintOptions::only(
-                list.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_string),
+                list.split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string),
             );
             let unknown = sel.unknown();
             if !unknown.is_empty() {
@@ -41,7 +44,9 @@ pub fn do_lint(
     };
     let only = type_names(only_types);
     let ignored = type_names(ignore_types);
-    let mut sel = sel.with_action_policy(crate::registry::registered().action_layer_policy).ignoring_types(ignored.iter().copied());
+    let mut sel = sel
+        .with_action_policy(crate::registry::registered().action_layer_policy)
+        .ignoring_types(ignored.iter().copied());
     if only_types.is_some() {
         sel = sel.over_types(only.iter().copied());
     }
@@ -82,7 +87,10 @@ pub fn do_lint(
         let warm = lint_pass::warm_modules(&ws, &sources);
         let unknown_only = bone_lints::unknown_type_names(&ws, &warm, &only);
         if !unknown_only.is_empty() {
-            anyhow::bail!("--only-types names no type in this project: {}", join(&unknown_only));
+            anyhow::bail!(
+                "--only-types names no type in this project: {}",
+                join(&unknown_only)
+            );
         }
         let unknown_ignored = bone_lints::unknown_type_names(&ws, &warm, &ignored);
         if !unknown_ignored.is_empty() {
@@ -145,7 +153,11 @@ fn type_names(list: Option<&str>) -> Vec<ustr::Ustr> {
 }
 
 fn join(names: &[ustr::Ustr]) -> String {
-    names.iter().map(|u| u.as_str()).collect::<Vec<_>>().join(", ")
+    names
+        .iter()
+        .map(|u| u.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// `8 unused_var, 4 unused_fn`, most frequent first.
@@ -158,7 +170,11 @@ fn tally(findings: &[bone_lints::Finding]) -> String {
         }
     }
     counts.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
-    counts.iter().map(|(name, n)| format!("{n} {name}")).collect::<Vec<_>>().join(", ")
+    counts
+        .iter()
+        .map(|(name, n)| format!("{n} {name}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// A program that doesn't type-check can't be linted: its HIR is missing or

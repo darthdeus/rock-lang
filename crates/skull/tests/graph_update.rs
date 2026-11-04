@@ -63,7 +63,10 @@ impl Case {
     fn new(main: &str, lib: &str) -> Self {
         let session = Session::new(
             STDLIB.clone(),
-            vec![SessionFile::legacy(MAIN, main), SessionFile::legacy(LIB, lib)],
+            vec![
+                SessionFile::legacy(MAIN, main),
+                SessionFile::legacy(LIB, lib),
+            ],
             &NsAliases::default(),
         )
         .expect("session");
@@ -80,7 +83,10 @@ impl Case {
     ///
     /// Each arm compares the incremental result with a fresh whole-graph build.
     fn edit(&mut self, path: &str, text: &str) -> UpdateStats {
-        let res = self.session.update_file(path, text).expect("incremental update");
+        let res = self
+            .session
+            .update_file(path, text)
+            .expect("incremental update");
         assert_eq!(
             res.tier,
             UpdateTier::BodyOnly,
@@ -88,7 +94,10 @@ impl Case {
              set and the manglings, which `update_bodies` does not claim to handle",
             res.tier
         );
-        assert!(!res.reinferred.is_empty(), "a body-only edit reinferred nothing");
+        assert!(
+            !res.reinferred.is_empty(),
+            "a body-only edit reinferred nothing"
+        );
         let ws = self.session.workspace();
         let roots = skull::mir_emit::emission_roots(ws, Some(PROJ));
         let edits = res
@@ -120,7 +129,10 @@ impl Case {
     }
 
     fn has_instance_named(&self, name: &str) -> bool {
-        self.graph.instances.iter().any(|i| self.identity(i).contains(name))
+        self.graph
+            .instances
+            .iter()
+            .any(|i| self.identity(i).contains(name))
     }
 
     fn identity(&self, i: &Instance) -> String {
@@ -128,7 +140,11 @@ impl Case {
     }
 
     fn instance_names(&self) -> BTreeSet<String> {
-        self.graph.instances.iter().map(|i| self.identity(i)).collect()
+        self.graph
+            .instances
+            .iter()
+            .map(|i| self.identity(i))
+            .collect()
     }
 }
 
@@ -161,7 +177,10 @@ fn assert_scoped(stats: &UpdateStats, label: &str) {
             + stats.reverse_predecessor_edges_examined,
         "{label}: prune denominator omitted pruning work: {stats:?}"
     );
-    assert_eq!(stats.broad_scans, 0, "{label}: a broad prune scan ran: {stats:?}");
+    assert_eq!(
+        stats.broad_scans, 0,
+        "{label}: a broad prune scan ran: {stats:?}"
+    );
     assert!(
         stats.prune_search_population < stats.instances,
         "{label}: prune search examined the whole instance population: {stats:?}"
@@ -211,11 +230,19 @@ fn deleting_the_only_edge_into_a_subtree_removes_the_whole_subtree() {
     let stats = case.edit(MAIN, "fn main() { print(\"{other()}\") }\n");
 
     for name in ["chain_a", "chain_b", "chain_c"] {
-        assert!(case.has_instance_named(name).eq(&false), "`{name}` survived the deletion");
+        assert!(
+            case.has_instance_named(name).eq(&false),
+            "`{name}` survived the deletion"
+        );
     }
-    assert!(case.has_instance_named("other"), "an untouched sibling was pruned too");
-    let removed: Vec<String> =
-        before.difference(&case.instance_names()).map(short).collect();
+    assert!(
+        case.has_instance_named("other"),
+        "an untouched sibling was pruned too"
+    );
+    let removed: Vec<String> = before
+        .difference(&case.instance_names())
+        .map(short)
+        .collect();
     assert_eq!(
         removed,
         vec!["chain_a_0", "chain_b_0", "chain_c_0"],
@@ -235,17 +262,25 @@ fn explicit_root_delta_adds_and_removes_a_library_subtree() {
     let base_roots = skull::mir_emit::emission_roots(ws, Some(PROJ));
     assert!(!base_roots.contains(&chain_a));
     for name in ["chain_a", "chain_b", "chain_c"] {
-        assert!(!case.has_instance_named(name), "v1 already reached `{name}`");
+        assert!(
+            !case.has_instance_named(name),
+            "v1 already reached `{name}`"
+        );
     }
 
-    let added = case.graph.update_bodies_with_root_delta(ws, &[chain_a], &[], &[], &[]);
+    let added = case
+        .graph
+        .update_bodies_with_root_delta(ws, &[chain_a], &[], &[], &[]);
     let subtree = BTreeSet::from([
         "chain_a_0".to_string(),
         "chain_b_0".to_string(),
         "chain_c_0".to_string(),
     ]);
-    let added_names: BTreeSet<String> =
-        added.added.iter().map(|i| short(&case.identity(i))).collect();
+    let added_names: BTreeSet<String> = added
+        .added
+        .iter()
+        .map(|i| short(&case.identity(i)))
+        .collect();
     assert_eq!(added.newly_reached, 3);
     assert_eq!(added_names, subtree);
     let mut roots = base_roots.clone();
@@ -254,9 +289,14 @@ fn explicit_root_delta_adds_and_removes_a_library_subtree() {
     let diff = canonical(ws, &case.graph).diff(&canonical(ws, &fresh));
     assert!(diff.is_empty(), "root added: {}", diff.join("\n"));
 
-    let removed = case.graph.update_bodies_with_root_delta(ws, &[], &[chain_a], &[], &[]);
-    let removed_names: BTreeSet<String> =
-        removed.removed.iter().map(|i| short(&case.identity(i))).collect();
+    let removed = case
+        .graph
+        .update_bodies_with_root_delta(ws, &[], &[chain_a], &[], &[]);
+    let removed_names: BTreeSet<String> = removed
+        .removed
+        .iter()
+        .map(|i| short(&case.identity(i)))
+        .collect();
     assert_eq!(removed.pruned, 3);
     assert_eq!(removed_names, subtree);
     case.assert_matches_fresh("root removed");
@@ -273,14 +313,21 @@ fn a_replaced_root_can_be_restored_by_an_earlier_install_in_its_wave() {
     let old_root = crate::common::fn_ref(&ws, "old_root");
     let new_root = crate::common::fn_ref(&ws, "new_root");
     let mut graph = instance_graph::build(&ws, vec![old_root], false);
-    let old_instance = Instance { func: old_root, args: Vec::new() };
+    let old_instance = Instance {
+        func: old_root,
+        args: Vec::new(),
+    };
     assert!(graph.substitution(&old_instance).is_some());
     assert!(!graph.instances.iter().any(|i| i.func == new_root));
 
     // Root removal makes old_root unwalkable at the wave snapshot. new_root
     // installs first in reverse declaration order and restores its demand.
     let stats = graph.update_bodies_with_root_delta(
-        &ws, &[new_root], &[old_root], &[body_of(&ws, "old_root")], &[],
+        &ws,
+        &[new_root],
+        &[old_root],
+        &[body_of(&ws, "old_root")],
+        &[],
     );
     assert!(stats.expanded >= 2);
     assert!(graph.substitution(&old_instance).is_some());
@@ -304,10 +351,7 @@ fn other() -> int { return 7 }
 
 #[test]
 fn deleting_the_only_external_edge_prunes_a_mutually_reachable_cycle() {
-    let mut case = Case::new(
-        "fn main() { print(\"{cyc_a(4)} {other()}\") }\n",
-        CYCLE_LIB,
-    );
+    let mut case = Case::new("fn main() { print(\"{cyc_a(4)} {other()}\") }\n", CYCLE_LIB);
     assert!(case.has_instance_named("cyc_a") && case.has_instance_named("cyc_b"));
     // The cycle is real: each member has an incoming edge from the other, so a
     // "nothing points at it" rule would keep both alive forever.
@@ -317,17 +361,28 @@ fn deleting_the_only_external_edge_prunes_a_mutually_reachable_cycle() {
             .filter(|e| case.identity(&e.to).contains(name))
             .count()
     };
-    assert!(incoming("cyc_a") > 0 && incoming("cyc_b") > 0, "the fixture is not a cycle");
+    assert!(
+        incoming("cyc_a") > 0 && incoming("cyc_b") > 0,
+        "the fixture is not a cycle"
+    );
     let before = case.instance_names();
 
     let stats = case.edit(MAIN, "fn main() { print(\"{other()}\") }\n");
 
-    assert!(!case.has_instance_named("cyc_a"), "`cyc_a` survived: the cycle kept itself alive");
-    assert!(!case.has_instance_named("cyc_b"), "`cyc_b` survived: the cycle kept itself alive");
+    assert!(
+        !case.has_instance_named("cyc_a"),
+        "`cyc_a` survived: the cycle kept itself alive"
+    );
+    assert!(
+        !case.has_instance_named("cyc_b"),
+        "`cyc_b` survived: the cycle kept itself alive"
+    );
     // BY NAME, not by count: the third is `__op_sub_int_int`, whose
     // only caller was the cycle, and a count would hide a swap.
-    let removed: Vec<String> =
-        before.difference(&case.instance_names()).map(short).collect();
+    let removed: Vec<String> = before
+        .difference(&case.instance_names())
+        .map(short)
+        .collect();
     assert_eq!(removed, vec!["__op_sub_int_int", "cyc_a_int", "cyc_b_int"]);
     assert_eq!(stats.pruned, removed.len());
     case.assert_matches_fresh("cycle pruning");
@@ -389,7 +444,9 @@ fn assert_generated_cycle(length: usize, rooted: bool) {
     );
     if rooted {
         assert!(
-            incoming.iter().any(|pred| case.identity(pred).starts_with("root_anchor")),
+            incoming
+                .iter()
+                .any(|pred| case.identity(pred).starts_with("root_anchor")),
             "the rooted cycle has no root boundary at length {length}: {incoming:?}"
         );
     }
@@ -491,9 +548,8 @@ fn generated_support_sources(depth: usize) -> (String, String, String, Vec<Strin
         "fn main() {{ print(\"{{shared(1)}}\") }}\n\
          fn independent_root() -> int {{ return support_0() }}\n"
     );
-    let v2 =
-        "fn main() { print(\"0\") }\nfn independent_root() -> int { return support_0() }\n"
-            .to_string();
+    let v2 = "fn main() { print(\"0\") }\nfn independent_root() -> int { return support_0() }\n"
+        .to_string();
     let subtree = [
         "shared",
         "shared_left",
@@ -539,16 +595,21 @@ fn assert_support_depth(depth: usize) {
         })
         .cloned()
         .expect("shared generic seed");
-    let incoming = case.graph.index.preds.get(&shared).expect("shared seed row");
+    let incoming = case
+        .graph
+        .index
+        .preds
+        .get(&shared)
+        .expect("shared seed row");
     assert_eq!(
         incoming.len(),
         2,
         "the support-depth fixture has an unexpected seed population at depth {depth}: {incoming:?}"
     );
     assert!(
-        incoming
-            .iter()
-            .any(|pred| case.identity(pred).starts_with(&format!("support_{}", depth - 1))),
+        incoming.iter().any(|pred| case
+            .identity(pred)
+            .starts_with(&format!("support_{}", depth - 1))),
         "the support chain does not directly block shared at depth {depth}: {incoming:?}"
     );
 
@@ -566,13 +627,11 @@ fn assert_support_depth(depth: usize) {
         "shared was not the exact lost seed at support depth {depth}: {stats:?}"
     );
     assert_eq!(
-        stats.support_component_nodes_examined,
-        depth,
+        stats.support_component_nodes_examined, depth,
         "the support component did not cover the full live chain at depth {depth}: {stats:?}"
     );
     assert_eq!(
-        stats.support_component_edges_examined,
-        depth,
+        stats.support_component_edges_examined, depth,
         "the support component did not inspect the full live chain at depth {depth}: {stats:?}"
     );
     for name in &population {
@@ -606,8 +665,7 @@ fn a_live_non_root_support_chain_of_depth_eight_stays_local() {
 
 const INTERSECTING_SUPPORT_MAIN_V1: &str =
     "fn main() { print(\"{lost_a()} {lost_b()} {independent_root()}\") }\n";
-const INTERSECTING_SUPPORT_MAIN_V2: &str =
-    "fn main() { print(\"{independent_root()}\") }\n";
+const INTERSECTING_SUPPORT_MAIN_V2: &str = "fn main() { print(\"{independent_root()}\") }\n";
 const INTERSECTING_SUPPORT_LIB: &str = r#"
 fn lost_a() -> int { return shared() + support_a() }
 fn lost_b() -> int { return shared() + support_b() }
@@ -660,10 +718,24 @@ fn intersecting_tentative_support_components_release_together() {
     let support_join = find("support_join", &case);
     let preds_a = case.graph.index.preds.get(&lost_a).expect("lost_a row");
     let preds_b = case.graph.index.preds.get(&lost_b).expect("lost_b row");
-    assert_eq!(preds_a.len(), 2, "lost_a has an unexpected blocker population");
-    assert_eq!(preds_b.len(), 2, "lost_b has an unexpected blocker population");
-    assert!(preds_a.contains(&support_a), "support_a does not block lost_a");
-    assert!(preds_b.contains(&support_b), "support_b does not block lost_b");
+    assert_eq!(
+        preds_a.len(),
+        2,
+        "lost_a has an unexpected blocker population"
+    );
+    assert_eq!(
+        preds_b.len(),
+        2,
+        "lost_b has an unexpected blocker population"
+    );
+    assert!(
+        preds_a.contains(&support_a),
+        "support_a does not block lost_a"
+    );
+    assert!(
+        preds_b.contains(&support_b),
+        "support_b does not block lost_b"
+    );
     assert!(
         case.graph
             .index
@@ -703,8 +775,7 @@ fn intersecting_tentative_support_components_release_together() {
         );
     }
     assert!(
-        stats.support_component_nodes_examined > 0
-            && stats.support_component_edges_examined > 0,
+        stats.support_component_nodes_examined > 0 && stats.support_component_edges_examined > 0,
         "the intersecting support components had no measured population: {stats:?}"
     );
     for name in [
@@ -724,7 +795,10 @@ fn intersecting_tentative_support_components_release_together() {
         "shared_right_b_0",
         "shared_right_b_1",
     ] {
-        assert!(case.has_instance_named(name), "{name} lost its external root");
+        assert!(
+            case.has_instance_named(name),
+            "{name} lost its external root"
+        );
     }
     case.assert_matches_fresh("intersecting support components");
     assert!(
@@ -764,7 +838,14 @@ fn independent_root() -> int { return root_branch() }\n"
 fn assert_branching_support_fixture(dead_first: bool) {
     let (v1, v2, lib) = branching_support_sources(dead_first);
     let mut case = Case::new(&v1, &lib);
-    for name in ["target", "lost_b", "dead_c", "dead_a", "dead_branch", "root_branch"] {
+    for name in [
+        "target",
+        "lost_b",
+        "dead_c",
+        "dead_a",
+        "dead_branch",
+        "root_branch",
+    ] {
         assert!(case.has_instance_named(name), "v1 never reached {name}");
     }
     let find = |name: &str, case: &Case| {
@@ -784,17 +865,33 @@ fn assert_branching_support_fixture(dead_first: bool) {
         2,
         "target has an unexpected predecessor population: {target_preds:?}"
     );
-    assert!(target_preds.contains(&root_branch), "rooted target branch is absent");
-    assert!(target_preds.contains(&dead_branch), "dead target branch is absent");
+    assert!(
+        target_preds.contains(&root_branch),
+        "rooted target branch is absent"
+    );
+    assert!(
+        target_preds.contains(&dead_branch),
+        "dead target branch is absent"
+    );
     let dead_c = find("dead_c", &case);
     let lost_b = find("lost_b", &case);
     assert_eq!(
-        case.graph.index.preds.get(&dead_c).expect("dead_c row").len(),
+        case.graph
+            .index
+            .preds
+            .get(&dead_c)
+            .expect("dead_c row")
+            .len(),
         2,
         "dead cycle seed has an unexpected predecessor population"
     );
     assert_eq!(
-        case.graph.index.preds.get(&lost_b).expect("lost_b row").len(),
+        case.graph
+            .index
+            .preds
+            .get(&lost_b)
+            .expect("lost_b row")
+            .len(),
         2,
         "second lost seed has an unexpected predecessor population"
     );
@@ -819,19 +916,42 @@ fn assert_branching_support_fixture(dead_first: bool) {
             .any(|instance| case.identity(instance).starts_with("lost_b")),
         "lost_b was not an initial lost seed: {stats:?}"
     );
-    assert_eq!(stats.suspect_region, 4, "unexpected branching forward population: {stats:?}");
-    assert_eq!(stats.boundary_predecessor_edges_examined, 8, "unexpected branching boundary population: {stats:?}");
-    assert_eq!(stats.support_component_nodes_examined, 4, "unexpected branching support-node population: {stats:?}");
-    assert_eq!(stats.support_component_edges_examined, 5, "unexpected branching support-edge population: {stats:?}");
-    assert_eq!(stats.prune_search_population, 21, "unexpected branching prune denominator: {stats:?}");
-    assert_eq!(stats.pruned, 3, "unexpected branching pruned population: {stats:?}");
-    assert!(case.has_instance_named("target"), "the rooted target was pruned: {stats:?}");
+    assert_eq!(
+        stats.suspect_region, 4,
+        "unexpected branching forward population: {stats:?}"
+    );
+    assert_eq!(
+        stats.boundary_predecessor_edges_examined, 8,
+        "unexpected branching boundary population: {stats:?}"
+    );
+    assert_eq!(
+        stats.support_component_nodes_examined, 4,
+        "unexpected branching support-node population: {stats:?}"
+    );
+    assert_eq!(
+        stats.support_component_edges_examined, 5,
+        "unexpected branching support-edge population: {stats:?}"
+    );
+    assert_eq!(
+        stats.prune_search_population, 21,
+        "unexpected branching prune denominator: {stats:?}"
+    );
+    assert_eq!(
+        stats.pruned, 3,
+        "unexpected branching pruned population: {stats:?}"
+    );
+    assert!(
+        case.has_instance_named("target"),
+        "the rooted target was pruned: {stats:?}"
+    );
     for name in ["dead_c", "dead_a", "dead_branch"] {
-        assert!(!case.has_instance_named(name), "dead branch member {name} survived: {stats:?}");
+        assert!(
+            !case.has_instance_named(name),
+            "dead branch member {name} survived: {stats:?}"
+        );
     }
     assert!(
-        stats.support_component_nodes_examined > 0
-            && stats.support_component_edges_examined > 0,
+        stats.support_component_nodes_examined > 0 && stats.support_component_edges_examined > 0,
         "the branching support search had no measured population: {stats:?}"
     );
     case.assert_matches_fresh("branching support component");
@@ -868,10 +988,12 @@ fn adding_a_call_records_a_new_specialization() {
     };
     assert!(!has_string_ident(&case), "v1 already had `ident<string>`");
 
-    let stats =
-        case.edit(MAIN, "fn main() { print(\"{ident(1)} {ident(\"s\")}\") }\n");
+    let stats = case.edit(MAIN, "fn main() { print(\"{ident(1)} {ident(\"s\")}\") }\n");
 
-    assert!(has_string_ident(&case), "the added call reached no new specialization");
+    assert!(
+        has_string_ident(&case),
+        "the added call reached no new specialization"
+    );
     assert!(
         stats.newly_reached >= 2,
         "`ident<string>` and the `passthru<string>` it reaches are two new instances, got {}",
@@ -911,8 +1033,15 @@ fn removing_polymorphic_recursion_clears_the_whole_graph_rejection() {
             .filter(|r| r.kind == RejectionKind::ChangingInstanceRecursion)
             .count()
     };
-    assert_eq!(recursion_rejections(&case), 1, "the fixture produced no recursion rejection");
-    assert!(case.graph.depth_capped().next().is_some(), "the fixture capped no expansion");
+    assert_eq!(
+        recursion_rejections(&case),
+        1,
+        "the fixture produced no recursion rejection"
+    );
+    assert!(
+        case.graph.depth_capped().next().is_some(),
+        "the fixture capped no expansion"
+    );
 
     let stats = case.edit(LIB, FLAT_LIB);
 
@@ -926,7 +1055,10 @@ fn removing_polymorphic_recursion_clears_the_whole_graph_rejection() {
         "capped instances survived: {:?}",
         case.graph.depth_capped().count()
     );
-    assert!(stats.pruned > 0, "the deep instantiation chain was not pruned");
+    assert!(
+        stats.pruned > 0,
+        "the deep instantiation chain was not pruned"
+    );
     case.assert_matches_fresh("recursion removed");
 }
 
@@ -946,17 +1078,29 @@ fn a_sequential_edit_chain_agrees_with_a_fresh_build_at_every_step() {
     case.assert_matches_fresh("v1");
 
     let s1 = case.edit(MAIN, "fn main() { print(\"{other()}\") }\n");
-    assert!(s1.pruned == 3 && s1.newly_reached == 0, "step 1 is a deletion: {s1:?}");
+    assert!(
+        s1.pruned == 3 && s1.newly_reached == 0,
+        "step 1 is a deletion: {s1:?}"
+    );
     case.assert_matches_fresh("after delete");
 
     let s2 = case.edit(MAIN, "fn main() { print(\"{chain_a()} {other()}\") }\n");
-    assert!(s2.newly_reached == 3 && s2.pruned == 0, "step 2 is an addition: {s2:?}");
+    assert!(
+        s2.newly_reached == 3 && s2.pruned == 0,
+        "step 2 is an addition: {s2:?}"
+    );
     case.assert_matches_fresh("after re-add");
 
     let s3 = case.edit(MAIN, "fn main() { print(\"{chain_b()}\") }\n");
     assert!(s3.pruned > 0, "step 3 strands `chain_a`: {s3:?}");
-    assert!(!case.has_instance_named("chain_a"), "`chain_a` survived the third edit");
-    assert!(case.has_instance_named("chain_c"), "`chain_c` is still reached through `chain_b`");
+    assert!(
+        !case.has_instance_named("chain_a"),
+        "`chain_a` survived the third edit"
+    );
+    assert!(
+        case.has_instance_named("chain_c"),
+        "`chain_c` is still reached through `chain_b`"
+    );
     case.assert_matches_fresh("after second delete");
 }
 
@@ -978,7 +1122,10 @@ fn a_sequential_edit_chain_agrees_with_a_fresh_build_at_every_step() {
 struct Perturbed {
     v1: Workspace,
     v2: Workspace,
-    changed: Vec<(bone_semantic::prelude::ModuleId, bone_semantic::hir::BodyOwner)>,
+    changed: Vec<(
+        bone_semantic::prelude::ModuleId,
+        bone_semantic::hir::BodyOwner,
+    )>,
 }
 
 fn check_two_files(main: &str, lib: &str) -> Workspace {
@@ -991,7 +1138,10 @@ fn check_two_files(main: &str, lib: &str) -> Workspace {
 fn body_of(
     ws: &Workspace,
     fn_name: &str,
-) -> (bone_semantic::prelude::ModuleId, bone_semantic::hir::BodyOwner) {
+) -> (
+    bone_semantic::prelude::ModuleId,
+    bone_semantic::hir::BodyOwner,
+) {
     for module in ws.modules.iter() {
         for (fid, f) in module.functions.iter() {
             if f.name.as_str() == fn_name {
@@ -1017,7 +1167,12 @@ impl Perturbed {
         let v2 = check_two_files(main, lib);
         let mut v1 = v2.clone();
         let (mid, owner) = body_of(&v1, fn_name);
-        let body = v1.module(mid).bodies.get(&owner).expect("the fn has a body").clone();
+        let body = v1
+            .module(mid)
+            .bodies
+            .get(&owner)
+            .expect("the fn has a body")
+            .clone();
         let inf = v1.inferences[mid.raw() as usize]
             .as_mut()
             .expect("the module has an inference result")
@@ -1025,8 +1180,15 @@ impl Perturbed {
             .get_mut(&owner)
             .expect("the body has an inference record");
         let removed = perturb(&body, inf);
-        assert!(removed > 0, "the perturbation removed nothing from `{fn_name}`");
-        Perturbed { v1, v2, changed: vec![(mid, owner)] }
+        assert!(
+            removed > 0,
+            "the perturbation removed nothing from `{fn_name}`"
+        );
+        Perturbed {
+            v1,
+            v2,
+            changed: vec![(mid, owner)],
+        }
     }
 
     /// Build against v1, update to v2, and compare with a fresh v2 build.
@@ -1040,7 +1202,11 @@ impl Perturbed {
     fn assert_matches_fresh(&self, g: &InstanceGraph, label: &str) {
         let fresh = graph_of(&self.v2);
         let d = canonical(&self.v2, g).diff(&canonical(&self.v2, &fresh));
-        assert!(d.is_empty(), "{label}: updated and fresh disagree:\n{}", d.join("\n"));
+        assert!(
+            d.is_empty(),
+            "{label}: updated and fresh disagree:\n{}",
+            d.join("\n")
+        );
     }
 }
 
@@ -1063,8 +1229,11 @@ fn resolving_a_call_removes_its_stale_unresolved_record() {
         },
     );
     let before = graph_of(&p.v1);
-    let stale: Vec<&str> =
-        before.unresolved().filter(|u| u.reason == "no-bindings").map(|u| u.reason).collect();
+    let stale: Vec<&str> = before
+        .unresolved()
+        .filter(|u| u.reason == "no-bindings")
+        .map(|u| u.reason)
+        .collect();
     assert_eq!(
         stale.len(),
         1,
@@ -1078,7 +1247,10 @@ fn resolving_a_call_removes_its_stale_unresolved_record() {
         "an unresolved record survived the call resolving: {:?}",
         g.unresolved().map(|u| u.reason).collect::<Vec<_>>()
     );
-    assert!(stats.newly_reached > 0, "the resolved call reached no instance");
+    assert!(
+        stats.newly_reached > 0,
+        "the resolved call reached no instance"
+    );
     p.assert_matches_fresh(&g, "unresolved cleared");
 }
 
@@ -1102,7 +1274,12 @@ fn a_resolvable_conversion_removes_its_stale_storage_failure() {
             use bone_semantic::hir::{Callee, Expr as E};
             let mut n = 0;
             for (_, expr) in body.expr_arena.iter() {
-                let E::Call { callee: Callee::Unresolved { name, .. }, args, .. } = expr else {
+                let E::Call {
+                    callee: Callee::Unresolved { name, .. },
+                    args,
+                    ..
+                } = expr
+                else {
                     continue;
                 };
                 if name.as_str() != "len" {
@@ -1184,17 +1361,29 @@ fn editing_a_const_initializer_replaces_its_always_emitted_owner() {
         "const C: int = pick_a()\nfn main() { print(\"{C}\") }\n",
         PICK_LIB,
     );
-    assert!(case.has_instance_named("pick_a"), "v1 never reached `pick_a`");
+    assert!(
+        case.has_instance_named("pick_a"),
+        "v1 never reached `pick_a`"
+    );
     assert!(!case.has_instance_named("pick_b"));
     assert!(
         case.graph.always_emitted_targets().next().is_some(),
         "the const's callee must be recorded as a root, not as an edge target"
     );
 
-    let stats = case.edit(MAIN, "const C: int = pick_b()\nfn main() { print(\"{C}\") }\n");
+    let stats = case.edit(
+        MAIN,
+        "const C: int = pick_b()\nfn main() { print(\"{C}\") }\n",
+    );
 
-    assert!(!case.has_instance_named("pick_a"), "the old always-emitted root survived");
-    assert!(case.has_instance_named("pick_b"), "the new always-emitted root was not reached");
+    assert!(
+        !case.has_instance_named("pick_a"),
+        "the old always-emitted root survived"
+    );
+    assert!(
+        case.has_instance_named("pick_b"),
+        "the new always-emitted root was not reached"
+    );
     assert_eq!(stats.pruned, 1);
     assert_eq!(stats.newly_reached, 1);
     case.assert_matches_fresh("const initializer");
@@ -1220,15 +1409,30 @@ fn a_struct_enum_newtype_or_decorator_edit_is_interface_tier() {
         "fn use_all() -> int { let s = S {}\n return s.v }\n",
     );
     let edits = [
-        ("struct defaults", base.replace("struct S { v: int = 1 }", "struct S { v: int = 2 }")),
-        ("enum", base.replace("enum E { A, B }", "enum E { A, B, C }")),
-        ("newtype", base.replace("newtype N(int)", "newtype N(float)")),
-        ("decorator body", base.replace("print(target.name)", "print(\"x\")")),
+        (
+            "struct defaults",
+            base.replace("struct S { v: int = 1 }", "struct S { v: int = 2 }"),
+        ),
+        (
+            "enum",
+            base.replace("enum E { A, B }", "enum E { A, B, C }"),
+        ),
+        (
+            "newtype",
+            base.replace("newtype N(int)", "newtype N(float)"),
+        ),
+        (
+            "decorator body",
+            base.replace("print(target.name)", "print(\"x\")"),
+        ),
     ];
     for (what, edited) in edits {
         let mut s = Session::new(
             STDLIB.clone(),
-            vec![SessionFile::legacy(MAIN, main), SessionFile::legacy(LIB, base)],
+            vec![
+                SessionFile::legacy(MAIN, main),
+                SessionFile::legacy(LIB, base),
+            ],
             &NsAliases::default(),
         )
         .expect("session");
@@ -1249,12 +1453,18 @@ fn editing_a_mutable_global_initializer_is_interface_tier() {
     let main = "global g: int = pick_a()\nfn main() { print(\"{g}\") }\n";
     let mut s = Session::new(
         STDLIB.clone(),
-        vec![SessionFile::legacy(MAIN, main), SessionFile::legacy(LIB, PICK_LIB)],
+        vec![
+            SessionFile::legacy(MAIN, main),
+            SessionFile::legacy(LIB, PICK_LIB),
+        ],
         &NsAliases::default(),
     )
     .expect("session");
     let r = s
-        .update_file(MAIN, "global g: int = pick_b()\nfn main() { print(\"{g}\") }\n")
+        .update_file(
+            MAIN,
+            "global g: int = pick_b()\nfn main() { print(\"{g}\") }\n",
+        )
         .expect("update");
     assert_ne!(r.tier, UpdateTier::BodyOnly);
 }
@@ -1278,11 +1488,22 @@ fn fixing_an_always_emitted_call_clears_its_root_hole() {
         FNVALUE_LIB,
     );
     let holes = |c: &Case| -> usize {
-        c.graph.uninstantiated_roots.values().map(|h| h.always_emitted_sites.len()).sum()
+        c.graph
+            .uninstantiated_roots
+            .values()
+            .map(|h| h.always_emitted_sites.len())
+            .sum()
     };
-    assert_eq!(holes(&case), 1, "the fixture recorded no always-emitted failure");
+    assert_eq!(
+        holes(&case),
+        1,
+        "the fixture recorded no always-emitted failure"
+    );
 
-    let stats = case.edit(MAIN, "const C: int = takes(mono_id)\nfn main() { print(\"{C}\") }\n");
+    let stats = case.edit(
+        MAIN,
+        "const C: int = takes(mono_id)\nfn main() { print(\"{C}\") }\n",
+    );
 
     assert_eq!(
         holes(&case),
@@ -1302,7 +1523,10 @@ fn fixing_an_always_emitted_call_clears_its_root_hole() {
         stats.census.root_hole_rows_examined > 0,
         "root-hole refresh had no failure-row denominator: {stats:?}"
     );
-    assert!(stats.newly_reached > 0, "`mono_id` was not reached as a new root");
+    assert!(
+        stats.newly_reached > 0,
+        "`mono_id` was not reached as a new root"
+    );
     case.assert_matches_fresh("always-emitted hole cleared");
 }
 
@@ -1322,15 +1546,27 @@ fn a_body_with_no_facts_that_gains_a_call_is_still_re_walked() {
         .graph
         .contributions
         .iter()
-        .find(|(o, _)| o.instance().is_some_and(|i| case.identity(i).starts_with("leaf")))
+        .find(|(o, _)| {
+            o.instance()
+                .is_some_and(|i| case.identity(i).starts_with("leaf"))
+        })
         .map(|(_, c)| c.span_files.len())
         .expect("`leaf` owns a contribution");
-    assert_eq!(leaf_owner, 0, "`leaf` must record no span, or the arm is not separated");
+    assert_eq!(
+        leaf_owner, 0,
+        "`leaf` must record no span, or the arm is not separated"
+    );
     assert!(!case.has_instance_named("added"));
 
-    let stats = case.edit(LIB, "fn leaf() -> int { return added() }\nfn added() -> int { return 2 }\n");
+    let stats = case.edit(
+        LIB,
+        "fn leaf() -> int { return added() }\nfn added() -> int { return 2 }\n",
+    );
 
-    assert!(case.has_instance_named("added"), "the call added to an empty body was not seen");
+    assert!(
+        case.has_instance_named("added"),
+        "the call added to an empty body was not seen"
+    );
     assert_eq!(stats.newly_reached, 1);
     case.assert_matches_fresh("empty body gains a call");
 }
@@ -1345,7 +1581,11 @@ fn a_semantic_edit_shifts_unedited_owner_spans_without_rewalking_that_owner() {
         .graph
         .contributions
         .iter()
-        .find(|(owner, _)| owner.instance().is_some_and(|i| case.identity(i).starts_with("other")))
+        .find(|(owner, _)| {
+            owner
+                .instance()
+                .is_some_and(|i| case.identity(i).starts_with("other"))
+        })
         .and_then(|(_, contribution)| contribution.call_sites.values().next())
         .map(|site| site.span.offset_range)
         .expect("the unedited owner must have a call span");
@@ -1354,17 +1594,31 @@ fn a_semantic_edit_shifts_unedited_owner_spans_without_rewalking_that_owner() {
         LIB,
         "fn leaf() -> int {\n  return 2\n}\nfn other() -> int { return leaf() }\n",
     );
-    assert_eq!(stats.affected, 1, "the edit should rewalk only `leaf`: {stats:?}");
+    assert_eq!(
+        stats.affected, 1,
+        "the edit should rewalk only `leaf`: {stats:?}"
+    );
     let span_after = case
         .graph
         .contributions
         .iter()
-        .find(|(owner, _)| owner.instance().is_some_and(|i| case.identity(i).starts_with("other")))
+        .find(|(owner, _)| {
+            owner
+                .instance()
+                .is_some_and(|i| case.identity(i).starts_with("other"))
+        })
         .and_then(|(_, contribution)| contribution.call_sites.values().next())
         .map(|site| site.span.offset_range)
         .expect("the unedited owner must retain its call span");
-    assert!(span_after.0 > span_before.0, "the unedited call span did not relocate");
-    assert_eq!(stats.revisited_owners.len(), 1, "span relocation widened the semantic delta");
+    assert!(
+        span_after.0 > span_before.0,
+        "the unedited call span did not relocate"
+    );
+    assert_eq!(
+        stats.revisited_owners.len(),
+        1,
+        "span relocation widened the semantic delta"
+    );
     case.assert_matches_fresh("semantic edit with span relocation");
 }
 
@@ -1375,9 +1629,15 @@ fn a_const_initializer_with_no_facts_that_gains_a_call_is_still_re_walked() {
     let mut case = Case::new("const C: int = 1\nfn main() { print(\"{C}\") }\n", PICK_LIB);
     assert!(!case.has_instance_named("pick_a"));
 
-    let stats = case.edit(MAIN, "const C: int = pick_a()\nfn main() { print(\"{C}\") }\n");
+    let stats = case.edit(
+        MAIN,
+        "const C: int = pick_a()\nfn main() { print(\"{C}\") }\n",
+    );
 
-    assert!(case.has_instance_named("pick_a"), "the call added to a const initializer was lost");
+    assert!(
+        case.has_instance_named("pick_a"),
+        "the call added to a const initializer was lost"
+    );
     assert_eq!(stats.newly_reached, 1);
     case.assert_matches_fresh("const initializer gains a call");
 }
@@ -1428,9 +1688,15 @@ fn an_always_emitted_target_anchors_what_the_edit_stranded() {
         "fn main() { print(\"{shared()} {other()} {C}\") }\n",
         ANCHOR_LIB,
     );
-    assert!(case.has_instance_named("shared"), "v1 never reached `shared`");
-    let anchored: Vec<String> =
-        case.graph.always_emitted_targets().map(|i| case.identity(i)).collect();
+    assert!(
+        case.has_instance_named("shared"),
+        "v1 never reached `shared`"
+    );
+    let anchored: Vec<String> = case
+        .graph
+        .always_emitted_targets()
+        .map(|i| case.identity(i))
+        .collect();
     assert!(
         anchored.iter().any(|k| k.contains("shared")),
         "the fixture's anchor is not an always-emitted target: {anchored:?}"
@@ -1487,19 +1753,51 @@ fn an_external_anchor_stops_a_branched_strand_search() {
         .find(|instance| case.identity(instance).starts_with("shared_root"))
         .cloned()
         .expect("the shared branch instance");
-    let incoming = case.graph.index.preds.get(&shared).expect("shared predecessor index row");
-    assert!(incoming.len() >= 2, "the fixture has no external anchor: {incoming:?}");
+    let incoming = case
+        .graph
+        .index
+        .preds
+        .get(&shared)
+        .expect("shared predecessor index row");
+    assert!(
+        incoming.len() >= 2,
+        "the fixture has no external anchor: {incoming:?}"
+    );
 
     let stats = case.edit(MAIN, "fn main() { print(\"{anchor()}\") }\n");
 
-    assert!(case.has_instance_named("shared_root"), "the external anchor was pruned");
-    assert!(!case.has_instance_named("dead_root"), "the stranded branch survived");
-    assert!(!case.has_instance_named("dead_leaf"), "the stranded leaf survived");
-    assert_eq!(stats.pruned, 3, "the fixture must remove the caller, root, and leaf: {stats:?}");
-    assert_eq!(stats.affected, 1, "one caller body should be affected: {stats:?}");
-    assert!(stats.expanded > 0, "the update expanded no owner: {stats:?}");
-    assert!(stats.suspect_region > 0, "the prune search had no population: {stats:?}");
-    assert!(stats.census.index_preds_updates > 0, "the predecessor index had no population");
+    assert!(
+        case.has_instance_named("shared_root"),
+        "the external anchor was pruned"
+    );
+    assert!(
+        !case.has_instance_named("dead_root"),
+        "the stranded branch survived"
+    );
+    assert!(
+        !case.has_instance_named("dead_leaf"),
+        "the stranded leaf survived"
+    );
+    assert_eq!(
+        stats.pruned, 3,
+        "the fixture must remove the caller, root, and leaf: {stats:?}"
+    );
+    assert_eq!(
+        stats.affected, 1,
+        "one caller body should be affected: {stats:?}"
+    );
+    assert!(
+        stats.expanded > 0,
+        "the update expanded no owner: {stats:?}"
+    );
+    assert!(
+        stats.suspect_region > 0,
+        "the prune search had no population: {stats:?}"
+    );
+    assert!(
+        stats.census.index_preds_updates > 0,
+        "the predecessor index had no population"
+    );
     assert!(
         stats.suspect_region <= stats.expanded * 4,
         "the forward anchor boundary was not local: {stats:?}"
@@ -1566,18 +1864,47 @@ fn a_long_anchor_path_is_included_in_prune_locality() {
         .find(|instance| case.identity(instance).starts_with("shared_root"))
         .cloned()
         .expect("the shared branch instance");
-    let incoming = case.graph.index.preds.get(&shared).expect("shared predecessor index row");
-    assert!(incoming.len() >= 2, "the fixture has no shared external anchor: {incoming:?}");
+    let incoming = case
+        .graph
+        .index
+        .preds
+        .get(&shared)
+        .expect("shared predecessor index row");
+    assert!(
+        incoming.len() >= 2,
+        "the fixture has no shared external anchor: {incoming:?}"
+    );
 
     let stats = case.edit(MAIN, "fn main() { print(\"{anchor()}\") }\n");
 
-    assert!(case.has_instance_named("shared_root"), "the external anchor was pruned");
-    assert!(!case.has_instance_named("dead_root"), "the stranded branch survived");
-    assert!(!case.has_instance_named("dead_leaf"), "the stranded leaf survived");
-    assert_eq!(stats.pruned, 3, "only entry and the dead branch should be pruned: {stats:?}");
-    assert_eq!(stats.affected, 1, "one caller body should be affected: {stats:?}");
-    assert!(stats.expanded > 0, "the update expanded no owner: {stats:?}");
-    assert!(stats.suspect_region > 0, "the forward prune population is empty: {stats:?}");
+    assert!(
+        case.has_instance_named("shared_root"),
+        "the external anchor was pruned"
+    );
+    assert!(
+        !case.has_instance_named("dead_root"),
+        "the stranded branch survived"
+    );
+    assert!(
+        !case.has_instance_named("dead_leaf"),
+        "the stranded leaf survived"
+    );
+    assert_eq!(
+        stats.pruned, 3,
+        "only entry and the dead branch should be pruned: {stats:?}"
+    );
+    assert_eq!(
+        stats.affected, 1,
+        "one caller body should be affected: {stats:?}"
+    );
+    assert!(
+        stats.expanded > 0,
+        "the update expanded no owner: {stats:?}"
+    );
+    assert!(
+        stats.suspect_region > 0,
+        "the forward prune population is empty: {stats:?}"
+    );
     assert_eq!(
         stats.reverse_instances_examined, 0,
         "the affected-region search still performed a reverse reachability walk: {stats:?}"
@@ -1616,8 +1943,7 @@ fn a_long_anchor_path_is_included_in_prune_locality() {
     assert_scoped(&stats, "long external anchor path");
 }
 
-const DIRECT_SEED_MAIN_V1: &str =
-    "fn main() { print(\"{shared_root()}\") }\nfn independent_root() -> int { return shared_root() }\n";
+const DIRECT_SEED_MAIN_V1: &str = "fn main() { print(\"{shared_root()}\") }\nfn independent_root() -> int { return shared_root() }\n";
 const DIRECT_SEED_MAIN_V2: &str =
     "fn main() { print(\"0\") }\nfn independent_root() -> int { return shared_root() }\n";
 const DIRECT_SEED_LIB: &str = r#"
@@ -1675,9 +2001,16 @@ fn an_externally_supported_lost_seed_stops_before_its_subtree() {
         .find(|instance| case.identity(instance).starts_with("shared_root"))
         .cloned()
         .expect("the direct shared seed");
-    let incoming = case.graph.index.preds.get(&shared).expect("shared predecessor row");
+    let incoming = case
+        .graph
+        .index
+        .preds
+        .get(&shared)
+        .expect("shared predecessor row");
     assert!(
-        incoming.iter().any(|pred| case.identity(pred).starts_with("independent_root")),
+        incoming
+            .iter()
+            .any(|pred| case.identity(pred).starts_with("independent_root")),
         "the direct seed has no independent external predecessor: {incoming:?}"
     );
 
@@ -1691,11 +2024,20 @@ fn an_externally_supported_lost_seed_stops_before_its_subtree() {
         "shared_root was not an initial lost seed: {stats:?}"
     );
     for name in DIRECT_SEED_SUBTREE {
-        assert!(case.has_instance_named(name), "shared subtree `{name}` was pruned");
+        assert!(
+            case.has_instance_named(name),
+            "shared subtree `{name}` was pruned"
+        );
     }
-    assert_eq!(stats.pruned, 0, "the externally supported subtree was pruned: {stats:?}");
+    assert_eq!(
+        stats.pruned, 0,
+        "the externally supported subtree was pruned: {stats:?}"
+    );
     case.assert_matches_fresh("direct externally supported seed");
-    assert!(stats.suspect_region > 0, "the direct seed had no forward population: {stats:?}");
+    assert!(
+        stats.suspect_region > 0,
+        "the direct seed had no forward population: {stats:?}"
+    );
     assert!(
         stats.boundary_predecessor_edges_examined > 0,
         "the direct seed classified no external predecessor edge: {stats:?}"
@@ -1818,21 +2160,39 @@ fn a_root_reachable_non_root_seed_predecessor_stops_before_its_subtree() {
         .find(|instance| case.identity(instance).starts_with("shared"))
         .cloned()
         .expect("the shared generic seed after the edit");
-    let incoming = case.graph.index.preds.get(&shared).expect("shared predecessor row");
+    let incoming = case
+        .graph
+        .index
+        .preds
+        .get(&shared)
+        .expect("shared predecessor row");
     assert!(
-        incoming.iter().any(|pred| case.identity(pred).starts_with("outer")),
+        incoming
+            .iter()
+            .any(|pred| case.identity(pred).starts_with("outer")),
         "the shared seed lost its nested predecessor: {incoming:?}"
     );
     assert!(
-        incoming.iter().any(|pred| !case.graph.root_instances.contains(pred)),
+        incoming
+            .iter()
+            .any(|pred| !case.graph.root_instances.contains(pred)),
         "the shared seed's predecessor row has no non-root instance: {incoming:?}"
     );
     for name in NESTED_SEED_SUBTREE {
-        assert!(case.has_instance_named(name), "shared subtree `{name}` was pruned");
+        assert!(
+            case.has_instance_named(name),
+            "shared subtree `{name}` was pruned"
+        );
     }
-    assert_eq!(stats.pruned, 0, "the rooted nested subtree was pruned: {stats:?}");
+    assert_eq!(
+        stats.pruned, 0,
+        "the rooted nested subtree was pruned: {stats:?}"
+    );
     case.assert_matches_fresh("root-reachable nested seed");
-    assert!(stats.suspect_region > 0, "the nested seed had no forward population: {stats:?}");
+    assert!(
+        stats.suspect_region > 0,
+        "the nested seed had no forward population: {stats:?}"
+    );
     assert!(
         stats.boundary_predecessor_edges_examined > 0,
         "the nested seed classified no boundary predecessor edge: {stats:?}"
@@ -1888,9 +2248,15 @@ fn a_later_lost_predecessor_releases_a_tentative_boundary() {
     let stats = case.edit(MAIN, "fn main() { print(\"{other()}\") }\n");
 
     for name in ["entry", "branch", "apparent", "shared", "dead"] {
-        assert!(!case.has_instance_named(name), "`{name}` survived the lost-seed closure");
+        assert!(
+            !case.has_instance_named(name),
+            "`{name}` survived the lost-seed closure"
+        );
     }
-    assert!(stats.pruned >= 5, "the deferred boundary had no population: {stats:?}");
+    assert!(
+        stats.pruned >= 5,
+        "the deferred boundary had no population: {stats:?}"
+    );
     assert!(stats.suspect_region >= stats.pruned);
     assert!(stats.prune_search_population > 0);
     case.assert_matches_fresh("deferred boundary release");
@@ -1928,12 +2294,21 @@ fn a_rooted_cycle_survives_while_the_lost_branch_is_pruned() {
         "the rooted cycle member was not an initial lost seed: {stats:?}"
     );
     for name in ["rooted_a", "rooted_b"] {
-        assert!(case.has_instance_named(name), "rooted cycle member `{name}` was pruned");
+        assert!(
+            case.has_instance_named(name),
+            "rooted cycle member `{name}` was pruned"
+        );
     }
     for name in ["entry", "dead", "dead_leaf"] {
-        assert!(!case.has_instance_named(name), "lost branch `{name}` survived");
+        assert!(
+            !case.has_instance_named(name),
+            "lost branch `{name}` survived"
+        );
     }
-    assert!(stats.pruned >= 3, "the rooted-cycle fixture had no stranded branch: {stats:?}");
+    assert!(
+        stats.pruned >= 3,
+        "the rooted-cycle fixture had no stranded branch: {stats:?}"
+    );
     case.assert_matches_fresh("rooted cycle");
     assert_scoped(&stats, "rooted cycle");
 }
@@ -1964,11 +2339,17 @@ fn pruning_an_instance_retracts_its_bound_tree() {
         BOUNDED_LIB,
     );
     let before = case.graph.bound_trees().count();
-    assert!(before > 0, "the fixture recorded no bound tree, so the arm has no population");
+    assert!(
+        before > 0,
+        "the fixture recorded no bound tree, so the arm has no population"
+    );
 
     let stats = case.edit(MAIN, "fn main() { print(\"{other()}\") }\n");
 
-    assert!(stats.pruned > 0, "the deletion stranded nothing, so nothing was retracted");
+    assert!(
+        stats.pruned > 0,
+        "the deletion stranded nothing, so nothing was retracted"
+    );
     assert!(
         case.graph.bound_trees().count() < before,
         "every one of the {before} bound trees outlived the instances that owned them"
@@ -2042,11 +2423,18 @@ fn relay<T>(x: [T]) -> int { return 0 }
 "#;
     let recursive = flat.replace("return 0", "return descend(x)");
     let mut case = Case::new("fn main() { print(\"{descend(1)}\") }\n", flat);
-    let count = |case: &Case| case.graph.rejections()
-        .filter(|r| r.kind == RejectionKind::ChangingInstanceRecursion).count();
+    let count = |case: &Case| {
+        case.graph
+            .rejections()
+            .filter(|r| r.kind == RejectionKind::ChangingInstanceRecursion)
+            .count()
+    };
     assert_eq!(count(&case), 0);
     case.edit(LIB, &recursive);
-    assert!(count(&case) > 0, "helper edit produced no changing recursion");
+    assert!(
+        count(&case) > 0,
+        "helper edit produced no changing recursion"
+    );
     case.assert_matches_fresh("recursion added through a helper");
 
     let stats = case.edit(LIB, flat);

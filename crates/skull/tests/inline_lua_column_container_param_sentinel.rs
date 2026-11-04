@@ -32,7 +32,6 @@
 //! The bounding controls stay: `[int]` is boxed, keeps `_data`, and still passes
 //! through the very same body; and an `any` param still admits a column vec.
 
-
 /// Guarded: the body probes for `_data` before touching it, so the column case
 /// is a silent wrong ANSWER rather than a death.
 const GUARDED_GENERIC: &str = r#"

@@ -4,7 +4,9 @@
 //! Behavior: `tests/descriptor_value_copy.rock`. Recognition is by stdlib
 //! DefKey, so a user `value` with the same name keeps ordinary scalarization.
 
-use crate::common::{emit_module, emit_v1_package, function_body, mangled_name, run_luajit, V1Fragment};
+use crate::common::{
+    V1Fragment, emit_module, emit_v1_package, function_body, mangled_name, run_luajit,
+};
 
 const HOLDER: &str = r#"
 value V2 { x: float, y: float }
@@ -49,14 +51,29 @@ pub fn probe() -> float {
 
 #[test]
 fn user_value_named_like_a_descriptor_keeps_scalarization() {
-    let emitted = emit_v1_package("userdesc", &[V1Fragment { file: "main.rock", src: USER_NAMED }]);
+    let emitted = emit_v1_package(
+        "userdesc",
+        &[V1Fragment {
+            file: "main.rock",
+            src: USER_NAMED,
+        }],
+    );
     let take = mangled_name(&emitted.lua, "take");
     let header = emitted
         .lua
         .lines()
         .find(|l| l.starts_with(&format!("function {take}(")))
         .expect("take is emitted");
-    assert!(header.contains(", "), "a user value must scalarize to its leaves: {header}");
+    assert!(
+        header.contains(", "),
+        "a user value must scalarize to its leaves: {header}"
+    );
     let probe = mangled_name(&emitted.lua, "probe");
-    assert_eq!(run_luajit(&format!("{}\nprint({probe}())\n", emitted.lua), "user_named_descriptor"), "3");
+    assert_eq!(
+        run_luajit(
+            &format!("{}\nprint({probe}())\n", emitted.lua),
+            "user_named_descriptor"
+        ),
+        "3"
+    );
 }

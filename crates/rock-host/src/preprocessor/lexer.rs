@@ -93,7 +93,7 @@ impl<'a> PreprocessorLexer<'a> {
             "test" => (DirectiveType::Test, false),
             "test-util" => (DirectiveType::TestUtil, false),
             "use" => (DirectiveType::Use, true), // Use needs a package name
-            _ => return None, // Unknown directive
+            _ => return None,                    // Unknown directive
         };
 
         let condition = if needs_condition {

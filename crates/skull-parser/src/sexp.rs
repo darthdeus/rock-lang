@@ -103,7 +103,13 @@ impl Ast {
                     .map(|f| self.field_sexp(f))
                     .collect::<Vec<_>>()
                     .join(" ");
-                format!("({} {}{} {})", tag, s.name.name, self.generics_sexp(&s.generics), fields)
+                format!(
+                    "({} {}{} {})",
+                    tag,
+                    s.name.name,
+                    self.generics_sexp(&s.generics),
+                    fields
+                )
             }
             ItemKind::Enum(e) => {
                 let variants = e
@@ -114,17 +120,28 @@ impl Ast {
                         EnumVariantKind::Tuple(tys) => format!(
                             "(variant {} (tuple {}))",
                             v.name.name,
-                            tys.iter().map(|&t| self.type_sexp(t)).collect::<Vec<_>>().join(" ")
+                            tys.iter()
+                                .map(|&t| self.type_sexp(t))
+                                .collect::<Vec<_>>()
+                                .join(" ")
                         ),
                         EnumVariantKind::Record(fs) => format!(
                             "(variant {} (record {}))",
                             v.name.name,
-                            fs.iter().map(|f| self.field_sexp(f)).collect::<Vec<_>>().join(" ")
+                            fs.iter()
+                                .map(|f| self.field_sexp(f))
+                                .collect::<Vec<_>>()
+                                .join(" ")
                         ),
                     })
                     .collect::<Vec<_>>()
                     .join(" ");
-                format!("(enum {}{} {})", e.name.name, self.generics_sexp(&e.generics), variants)
+                format!(
+                    "(enum {}{} {})",
+                    e.name.name,
+                    self.generics_sexp(&e.generics),
+                    variants
+                )
             }
             ItemKind::Newtype(n) => format!(
                 "(newtype {}{} {})",
@@ -140,8 +157,13 @@ impl Ast {
             ),
             ItemKind::Global(g) => {
                 let tag = if g.is_const { "const" } else { "global" };
-                let ty = g.ty.map(|t| self.type_sexp(t)).unwrap_or_else(|| "()".to_string());
-                let val = g.value.map(|v| self.expr_sexp(v)).unwrap_or_else(|| "null".to_string());
+                let ty =
+                    g.ty.map(|t| self.type_sexp(t))
+                        .unwrap_or_else(|| "()".to_string());
+                let val = g
+                    .value
+                    .map(|v| self.expr_sexp(v))
+                    .unwrap_or_else(|| "null".to_string());
                 format!("({} {} {} {})", tag, g.name.name, ty, val)
             }
             ItemKind::CompilerDirective(d) => match d {
@@ -156,7 +178,10 @@ impl Ast {
                 "(macro-call {}{} {})",
                 name.name,
                 if *sigil { "!" } else { "" },
-                args.iter().map(|&a| self.expr_sexp(a)).collect::<Vec<_>>().join(" "),
+                args.iter()
+                    .map(|&a| self.expr_sexp(a))
+                    .collect::<Vec<_>>()
+                    .join(" "),
             ),
         };
         format!("{}{}", prefix, body)
@@ -204,7 +229,12 @@ impl Ast {
 
     fn field_sexp(&self, f: &Field) -> String {
         match f.default {
-            Some(d) => format!("(field {} {} {})", f.name.name, self.type_sexp(f.ty), self.expr_sexp(d)),
+            Some(d) => format!(
+                "(field {} {} {})",
+                f.name.name,
+                self.type_sexp(f.ty),
+                self.expr_sexp(d)
+            ),
             None => format!("(field {} {})", f.name.name, self.type_sexp(f.ty)),
         }
     }
@@ -236,7 +266,11 @@ impl Ast {
 
     fn use_tree_sexp(&self, t: &UseTree) -> String {
         match t {
-            UseTree::Path { from_root, segments, kind } => {
+            UseTree::Path {
+                from_root,
+                segments,
+                kind,
+            } => {
                 let root = if *from_root { "::" } else { "" };
                 let segs = segments
                     .iter()
@@ -248,7 +282,9 @@ impl Ast {
                     UseSuffix::BindAs(a) => format!(" as {}", a.name),
                     UseSuffix::Glob => "::*".to_string(),
                     UseSuffix::Operator { op, alias: None } => format!("::operator({})", op.name),
-                    UseSuffix::Operator { op, alias: Some(a) } => format!("::operator({}) as {}", op.name, a.name),
+                    UseSuffix::Operator { op, alias: Some(a) } => {
+                        format!("::operator({}) as {}", op.name, a.name)
+                    }
                     UseSuffix::Nested(trees) => {
                         let inner = trees
                             .iter()
@@ -269,13 +305,14 @@ impl Ast {
             StatementKind::Use(u) => self.use_sexp(u),
             StatementKind::Return { value, .. } => format!(
                 "(return {})",
-                value.map(|e| self.expr_sexp(e)).unwrap_or_else(|| "()".to_string())
+                value
+                    .map(|e| self.expr_sexp(e))
+                    .unwrap_or_else(|| "()".to_string())
             ),
             StatementKind::Let(l) => format!(
                 "(let {} {} {})",
                 binding_sexp(&l.binding),
-                l.ty
-                    .map(|t| self.type_sexp(t))
+                l.ty.map(|t| self.type_sexp(t))
                     .unwrap_or_else(|| "()".to_string()),
                 l.value
                     .map(|e| self.expr_sexp(e))
@@ -284,14 +321,17 @@ impl Ast {
             StatementKind::Static(s) => format!(
                 "(static {} {} {})",
                 s.name.name,
-                s.ty.map(|t| self.type_sexp(t)).unwrap_or_else(|| "()".to_string()),
+                s.ty.map(|t| self.type_sexp(t))
+                    .unwrap_or_else(|| "()".to_string()),
                 self.expr_sexp(s.value),
             ),
             StatementKind::NestedFn(f) => format!(
                 "(fn {} {} {} {})",
                 f.name.name,
                 self.params_sexp(&f.params),
-                f.return_ty.map(|t| self.type_sexp(t)).unwrap_or_else(|| "()".to_string()),
+                f.return_ty
+                    .map(|t| self.type_sexp(t))
+                    .unwrap_or_else(|| "()".to_string()),
                 self.block_sexp(f.body),
             ),
             StatementKind::Break { .. } => "(break)".to_string(),
@@ -303,7 +343,11 @@ impl Ast {
                 self.block_sexp(f.body)
             ),
             StatementKind::While(w) => {
-                format!("(while {} {})", self.expr_sexp(w.condition), self.block_sexp(w.body))
+                format!(
+                    "(while {} {})",
+                    self.expr_sexp(w.condition),
+                    self.block_sexp(w.body)
+                )
             }
             StatementKind::WhileLet(w) => format!(
                 "(while-let {} {} {})",
@@ -396,15 +440,25 @@ impl Ast {
             ExprKind::BitNot(inner) => format!("(~ {})", self.expr_sexp(*inner)),
             ExprKind::UnaryMinus(inner) => format!("(- {})", self.expr_sexp(*inner)),
             ExprKind::Paren(inner) => format!("(paren {})", self.expr_sexp(*inner)),
-            ExprKind::As(inner, ty) => format!("(as {} {})", self.expr_sexp(*inner), self.type_sexp(*ty)),
+            ExprKind::As(inner, ty) => {
+                format!("(as {} {})", self.expr_sexp(*inner), self.type_sexp(*ty))
+            }
             ExprKind::Bitcast(inner, ty) => {
-                format!("(bitcast {} {})", self.type_sexp(*ty), self.expr_sexp(*inner))
+                format!(
+                    "(bitcast {} {})",
+                    self.type_sexp(*ty),
+                    self.expr_sexp(*inner)
+                )
             }
             ExprKind::TypeAscription(inner, ty) => {
                 format!("(:: {} {})", self.expr_sexp(*inner), self.type_sexp(*ty))
             }
             ExprKind::ParenAscription(inner, ty) => {
-                format!("(ascribe {} {})", self.expr_sexp(*inner), self.type_sexp(*ty))
+                format!(
+                    "(ascribe {} {})",
+                    self.expr_sexp(*inner),
+                    self.type_sexp(*ty)
+                )
             }
 
             ExprKind::Block(b) => {
@@ -432,7 +486,9 @@ impl Ast {
             ExprKind::SafeNavigation(obj, field) => {
                 format!("(?. {} {})", self.expr_sexp(*obj), field.name)
             }
-            ExprKind::SafeNavigationLet { receiver, binding, .. } => {
+            ExprKind::SafeNavigationLet {
+                receiver, binding, ..
+            } => {
                 format!("(?.let {} {})", self.expr_sexp(*receiver), binding.name)
             }
             ExprKind::QuestionMark(e) => format!("(? {})", self.expr_sexp(*e)),
@@ -445,7 +501,12 @@ impl Ast {
                 format!("(index {} {})", self.expr_sexp(*obj), self.expr_sexp(*idx))
             }
 
-            ExprKind::FunctionCall { func, generic_args, args, syntax } => {
+            ExprKind::FunctionCall {
+                func,
+                generic_args,
+                args,
+                syntax,
+            } => {
                 // Operator-origin calls render in infix form: `a + b` is
                 // `__op_add(a, b)` but shows as `(+ a b)`.
                 if let CallSyntax::Binary(op) = syntax {
@@ -481,7 +542,9 @@ impl Ast {
                                 return format!("..{}", self.expr_sexp(arg.value));
                             }
                             match &arg.name {
-                                Some(name) => format!("{}: {}", name.name, self.expr_sexp(arg.value)),
+                                Some(name) => {
+                                    format!("{}: {}", name.name, self.expr_sexp(arg.value))
+                                }
                                 None => self.expr_sexp(arg.value),
                             }
                         })
@@ -511,7 +574,11 @@ impl Ast {
             ExprKind::SiblingFieldRef(id) => format!(".{}", id.name),
             ExprKind::FunctionRef(id) => format!("&{}", id.name),
             ExprKind::AnaphoricIdent(id) => id.name.to_string(),
-            ExprKind::Lambda { params, return_ty, body } => {
+            ExprKind::Lambda {
+                params,
+                return_ty,
+                body,
+            } => {
                 // Clean, id-free type rendering to match rock's lambda to_sexp.
                 let opt_ty = |ty: &Option<Idx<TypeExprData>>| match ty {
                     Some(t) => format!("Some({})", self.type_sexp(*t)),
@@ -522,19 +589,36 @@ impl Ast {
                     .map(|p| opt_ty(&p.ty))
                     .collect::<Vec<_>>()
                     .join(" ");
-                format!("(lambda ({}) {} {})", params_str, opt_ty(return_ty), self.block_sexp(*body))
+                format!(
+                    "(lambda ({}) {} {})",
+                    params_str,
+                    opt_ty(return_ty),
+                    self.block_sexp(*body)
+                )
             }
 
             ExprKind::Tuple(items) => {
                 format!(
                     "(tuple {})",
-                    items.iter().map(|&i| self.expr_sexp(i)).collect::<Vec<_>>().join(" ")
+                    items
+                        .iter()
+                        .map(|&i| self.expr_sexp(i))
+                        .collect::<Vec<_>>()
+                        .join(" ")
                 )
             }
 
-            ExprKind::StructLiteral { name, bases, fields } => {
+            ExprKind::StructLiteral {
+                name,
+                bases,
+                fields,
+            } => {
                 if bases.is_empty() {
-                    format!("(struct {} (data {}))", name.name, self.flat_fields_sexp(fields))
+                    format!(
+                        "(struct {} (data {}))",
+                        name.name,
+                        self.flat_fields_sexp(fields)
+                    )
                 } else {
                     let bases_str = bases
                         .iter()
@@ -550,9 +634,16 @@ impl Ast {
                 }
             }
 
-            ExprKind::EnumVariantRecord { enum_name, variant_name, fields } => {
+            ExprKind::EnumVariantRecord {
+                enum_name,
+                variant_name,
+                fields,
+            } => {
                 let fields_str = self.flat_fields_sexp(fields);
-                format!("(enum-variant {}::{} {{ {} }})", enum_name.name, variant_name.name, fields_str)
+                format!(
+                    "(enum-variant {}::{} {{ {} }})",
+                    enum_name.name, variant_name.name, fields_str
+                )
             }
 
             ExprKind::Match { scrutinee, arms } => {
@@ -564,11 +655,18 @@ impl Ast {
                 format!("(match {} {})", self.expr_sexp(*scrutinee), arms_str)
             }
 
-            ExprKind::If { branches, else_branch } => {
+            ExprKind::If {
+                branches,
+                else_branch,
+            } => {
                 let branches_str = branches
                     .iter()
                     .map(|(cond, body)| {
-                        format!("(cond {} {})", self.expr_sexp(*cond), self.block_sexp(*body))
+                        format!(
+                            "(cond {} {})",
+                            self.expr_sexp(*cond),
+                            self.block_sexp(*body)
+                        )
                     })
                     .collect::<Vec<_>>()
                     .join(" ");
@@ -579,7 +677,12 @@ impl Ast {
                 format!("(if {} {})", branches_str, else_str)
             }
 
-            ExprKind::IfLet { pattern, value, then_block, else_block } => {
+            ExprKind::IfLet {
+                pattern,
+                value,
+                then_block,
+                else_block,
+            } => {
                 let else_str = match else_block {
                     Some(b) => format!(" (else {})", self.block_sexp(*b)),
                     None => String::new(),
@@ -593,7 +696,11 @@ impl Ast {
                 )
             }
 
-            ExprKind::IfLetChain { clauses, then_block, else_block } => {
+            ExprKind::IfLetChain {
+                clauses,
+                then_block,
+                else_block,
+            } => {
                 let clauses_str = clauses
                     .iter()
                     .map(|c| match c {
@@ -610,7 +717,12 @@ impl Ast {
                     Some(b) => format!(" (else {})", self.block_sexp(*b)),
                     None => String::new(),
                 };
-                format!("(if-let-chain [{}] {}{})", clauses_str, self.block_sexp(*then_block), else_str)
+                format!(
+                    "(if-let-chain [{}] {}{})",
+                    clauses_str,
+                    self.block_sexp(*then_block),
+                    else_str
+                )
             }
         }
     }
@@ -666,7 +778,11 @@ impl Ast {
                 let root = if path.from_root { "::" } else { "" };
                 format!(
                     "{root}{}",
-                    path.segments.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join("::")
+                    path.segments
+                        .iter()
+                        .map(|s| s.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join("::")
                 )
             }
             TypeExprKind::Array(inner) => format!("[{}]", self.type_sexp(*inner)),
@@ -675,8 +791,15 @@ impl Ast {
                 format!(
                     "({}{} {})",
                     root,
-                    ctor.segments.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join("::"),
-                    args.iter().map(|&a| self.type_sexp(a)).collect::<Vec<_>>().join(" ")
+                    ctor.segments
+                        .iter()
+                        .map(|s| s.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join("::"),
+                    args.iter()
+                        .map(|&a| self.type_sexp(a))
+                        .collect::<Vec<_>>()
+                        .join(" ")
                 )
             }
             TypeExprKind::App { ctor, args } => {
@@ -684,16 +807,26 @@ impl Ast {
                 format!(
                     "({} {})",
                     ctor.name,
-                    args.iter().map(|&a| self.type_sexp(a)).collect::<Vec<_>>().join(" ")
+                    args.iter()
+                        .map(|&a| self.type_sexp(a))
+                        .collect::<Vec<_>>()
+                        .join(" ")
                 )
             }
             TypeExprKind::Tuple(ts) => format!(
                 "(tuple {})",
-                ts.iter().map(|&t| self.type_sexp(t)).collect::<Vec<_>>().join(" ")
+                ts.iter()
+                    .map(|&t| self.type_sexp(t))
+                    .collect::<Vec<_>>()
+                    .join(" ")
             ),
             TypeExprKind::Function { params, ret } => format!(
                 "(fn ({}) {})",
-                params.iter().map(|&p| self.type_sexp(p)).collect::<Vec<_>>().join(" "),
+                params
+                    .iter()
+                    .map(|&p| self.type_sexp(p))
+                    .collect::<Vec<_>>()
+                    .join(" "),
                 self.type_sexp(*ret)
             ),
             TypeExprKind::Hole(..) => "?".to_string(),
@@ -729,7 +862,11 @@ impl Ast {
                 let root = if path.from_root { "::" } else { "" };
                 format!(
                     "{root}{}",
-                    path.segments.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join("::")
+                    path.segments
+                        .iter()
+                        .map(|s| s.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join("::")
                 )
             }
             TypeExprKind::Array(inner) => format!("[{}]", self.type_surface(*inner)),
@@ -738,23 +875,40 @@ impl Ast {
                 format!(
                     "{}{}<{}>",
                     root,
-                    ctor.segments.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join("::"),
-                    args.iter().map(|&a| self.type_surface(a)).collect::<Vec<_>>().join(", ")
+                    ctor.segments
+                        .iter()
+                        .map(|s| s.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join("::"),
+                    args.iter()
+                        .map(|&a| self.type_surface(a))
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 )
             }
             TypeExprKind::Tuple(ts) => format!(
                 "({})",
-                ts.iter().map(|&t| self.type_surface(t)).collect::<Vec<_>>().join(", ")
+                ts.iter()
+                    .map(|&t| self.type_surface(t))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
             TypeExprKind::App { ctor, args } if args.is_empty() => ctor.name.to_string(),
             TypeExprKind::App { ctor, args } => format!(
                 "{}<{}>",
                 ctor.name,
-                args.iter().map(|&a| self.type_surface(a)).collect::<Vec<_>>().join(", ")
+                args.iter()
+                    .map(|&a| self.type_surface(a))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
             TypeExprKind::Function { params, ret } => format!(
                 "({}) -> {}",
-                params.iter().map(|&p| self.type_surface(p)).collect::<Vec<_>>().join(", "),
+                params
+                    .iter()
+                    .map(|&p| self.type_surface(p))
+                    .collect::<Vec<_>>()
+                    .join(", "),
                 self.type_surface(*ret)
             ),
         };
@@ -774,7 +928,12 @@ impl Ast {
             Some(g) => format!(" (if {})", self.expr_sexp(g)),
             None => String::new(),
         };
-        format!("(arm {}{} {})", self.pattern_sexp(&arm.pattern), guard_str, self.block_sexp(arm.body))
+        format!(
+            "(arm {}{} {})",
+            self.pattern_sexp(&arm.pattern),
+            guard_str,
+            self.block_sexp(arm.body)
+        )
     }
 
     fn pattern_sexp(&self, p: &Pattern) -> String {
@@ -783,9 +942,19 @@ impl Ast {
             Pattern::Ident(id) => id.name.to_string(),
             Pattern::Literal(e) => format!("(lit {})", self.expr_sexp(*e)),
             Pattern::Tuple(ps) => {
-                format!("({})", ps.iter().map(|p| self.pattern_sexp(p)).collect::<Vec<_>>().join(" "))
+                format!(
+                    "({})",
+                    ps.iter()
+                        .map(|p| self.pattern_sexp(p))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                )
             }
-            Pattern::EnumVariant { enum_name, variant_name, args } => {
+            Pattern::EnumVariant {
+                enum_name,
+                variant_name,
+                args,
+            } => {
                 let name_str = match enum_name {
                     Some(e) => format!("{}::{}", e.name, variant_name.name),
                     None => variant_name.name.to_string(),
@@ -794,7 +963,10 @@ impl Ast {
                     Some(args) => format!(
                         "({} {})",
                         name_str,
-                        args.iter().map(|p| self.pattern_sexp(p)).collect::<Vec<_>>().join(" ")
+                        args.iter()
+                            .map(|p| self.pattern_sexp(p))
+                            .collect::<Vec<_>>()
+                            .join(" ")
                     ),
                     None => name_str,
                 }
@@ -803,13 +975,20 @@ impl Ast {
                 let root = if path.from_root { "::" } else { "" };
                 let name_str = format!(
                     "{root}{}",
-                    path.segments.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join("::")
+                    path.segments
+                        .iter()
+                        .map(|s| s.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join("::")
                 );
                 match args {
                     Some(args) => format!(
                         "({} {})",
                         name_str,
-                        args.iter().map(|p| self.pattern_sexp(p)).collect::<Vec<_>>().join(" ")
+                        args.iter()
+                            .map(|p| self.pattern_sexp(p))
+                            .collect::<Vec<_>>()
+                            .join(" ")
                     ),
                     None => name_str,
                 }
@@ -818,7 +997,11 @@ impl Ast {
                 let root = if path.from_root { "::" } else { "" };
                 let name_str = format!(
                     "{root}{}",
-                    path.segments.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join("::")
+                    path.segments
+                        .iter()
+                        .map(|s| s.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join("::")
                 );
                 let fields_str = fields
                     .iter()
@@ -828,7 +1011,12 @@ impl Ast {
                 let rest_str = if *rest { ", .." } else { "" };
                 format!("({} {{ {fields_str}{rest_str} }})", name_str)
             }
-            Pattern::Record { enum_name, name, fields, rest } => {
+            Pattern::Record {
+                enum_name,
+                name,
+                fields,
+                rest,
+            } => {
                 let name_str = match (enum_name, name) {
                     (Some(e), Some(n)) => format!("{}::{}", e.name, n.name),
                     (None, Some(n)) => n.name.to_string(),
@@ -842,14 +1030,24 @@ impl Ast {
                 let rest_str = if *rest { ", .." } else { "" };
                 format!("{} {{ {}{} }}", name_str, fields_str, rest_str)
             }
-            Pattern::Range { start, end, inclusive } => {
+            Pattern::Range {
+                start,
+                end,
+                inclusive,
+            } => {
                 let s = start.map(|e| self.expr_sexp(e)).unwrap_or_default();
                 let en = end.map(|e| self.expr_sexp(e)).unwrap_or_default();
                 let op = if *inclusive { "..=" } else { ".." };
                 format!("(range {} {} {})", s, op, en)
             }
             Pattern::Or(alts) => {
-                format!("(or {})", alts.iter().map(|p| self.pattern_sexp(p)).collect::<Vec<_>>().join(" | "))
+                format!(
+                    "(or {})",
+                    alts.iter()
+                        .map(|p| self.pattern_sexp(p))
+                        .collect::<Vec<_>>()
+                        .join(" | ")
+                )
             }
         }
     }
@@ -860,7 +1058,10 @@ pub fn binding_sexp(b: &Binding) -> String {
     match b {
         Binding::Ident(id) => id.name.to_string(),
         Binding::Tuple(parts) => {
-            format!("(tuple {})", parts.iter().map(binding_sexp).collect::<Vec<_>>().join(" "))
+            format!(
+                "(tuple {})",
+                parts.iter().map(binding_sexp).collect::<Vec<_>>().join(" ")
+            )
         }
         Binding::Newtype { name, binding } => format!("(newtype {} {})", name.name, binding.name),
     }

@@ -108,7 +108,11 @@ pub fn do_backend_stats(input: &str, iters: usize, warmup: usize) -> Result<()> 
 
     print_report(input, iters, warmup, &bone, &skull);
     if skull.setup_failed || skull.emit_failed {
-        let stage = if skull.setup_failed { "workspace setup" } else { "emit" };
+        let stage = if skull.setup_failed {
+            "workspace setup"
+        } else {
+            "emit"
+        };
         if let Some(error) = &skull.failure {
             anyhow::bail!("backend-stats skull {stage} failed: {error}");
         }
@@ -151,7 +155,12 @@ fn run_bone(sources: &SourceFiles, iters: usize, warmup: usize) -> BoneStats {
 /// untimed + `iters` timed runs, accumulating per-stage timing (parse + semantic
 /// shared with bone, plus skull's emit) only for the timed runs; `ok` is the
 /// final run's emit verdict.
-fn run_skull(sources: &SourceFiles, project_path: &std::path::Path, iters: usize, warmup: usize) -> SkullStats {
+fn run_skull(
+    sources: &SourceFiles,
+    project_path: &std::path::Path,
+    iters: usize,
+    warmup: usize,
+) -> SkullStats {
     let mut stats = SkullStats::default();
     for i in 0..(warmup + iters) {
         let (ok, times) = skull_backend::skull_workspace_timed(sources, project_path);
@@ -219,7 +228,9 @@ fn print_attribution(attribution: &skull::mir_emit::EmitAttribution) {
         attribution.lower.concrete_mono_interner_miss_cloned_nodes,
         attribution.lower.concrete_mono_cache_insertion_cloned_nodes,
         attribution.lower.concrete_mono_cache_hit_cloned_nodes,
-        attribution.lower.concrete_mono_explicit_owned_escape_cloned_nodes,
+        attribution
+            .lower
+            .concrete_mono_explicit_owned_escape_cloned_nodes,
         attribution.lower.concrete_mono_explicit_owned_escapes,
         attribution.lower.concrete_mono_lookup_ns as f64 / 1_000_000.0,
         attribution.lower.concrete_mono_cache_lookup_ns as f64 / 1_000_000.0,
@@ -261,7 +272,10 @@ fn print_attribution(attribution: &skull::mir_emit::EmitAttribution) {
         }
         println!(
             "      {:20} requests {}, cloned nodes {}, owned escapes {}",
-            consumer.label(), stats.requests, stats.cloned_nodes, stats.explicit_owned_escapes
+            consumer.label(),
+            stats.requests,
+            stats.cloned_nodes,
+            stats.explicit_owned_escapes
         );
     }
     println!(
@@ -387,13 +401,21 @@ fn print_attribution(attribution: &skull::mir_emit::EmitAttribution) {
             population.candidate_requested_never_spliced,
             population.candidate_requested_not_published,
         );
-        if !attribution.inline.candidate_setup_worker_derivations.is_empty() {
+        if !attribution
+            .inline
+            .candidate_setup_worker_derivations
+            .is_empty()
+        {
             println!(
                 "        candidate table derivations by worker: {:?}",
                 attribution.inline.candidate_setup_worker_derivations
             );
         }
-        if !attribution.inline.candidate_setup_rejection_reasons.is_empty() {
+        if !attribution
+            .inline
+            .candidate_setup_rejection_reasons
+            .is_empty()
+        {
             println!(
                 "        candidate table rejection reasons: {:?}",
                 attribution.inline.candidate_setup_rejection_reasons
@@ -494,10 +516,16 @@ fn print_attribution(attribution: &skull::mir_emit::EmitAttribution) {
         side!("call_site_owners", call_site_owners);
         side!("iterator_headers", iterator_headers);
         if !census.candidate_worker_derivations.is_empty() {
-            println!("      candidate derivations by worker: {:?}", census.candidate_worker_derivations);
+            println!(
+                "      candidate derivations by worker: {:?}",
+                census.candidate_worker_derivations
+            );
         }
         if !census.rejection_reasons.is_empty() {
-            println!("      candidate rejection reasons: {:?}", census.rejection_reasons);
+            println!(
+                "      candidate rejection reasons: {:?}",
+                census.rejection_reasons
+            );
         }
     }
     if !attribution.inline.top_owners.is_empty() {
@@ -533,7 +561,11 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
     let per = iters as f64;
     let ms = |d: Duration| d.as_secs_f64() * 1000.0 / per;
     let verdict = |ok: bool, yes: &str, no: &str| {
-        if ok { yes.to_string().green() } else { no.to_string().red() }
+        if ok {
+            yes.to_string().green()
+        } else {
+            no.to_string().red()
+        }
     };
 
     println!("\n{}", format!("=== backend-stats: {} ===", input).bold());
@@ -548,10 +580,22 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
     let skull_postparse = skull.times.semantic + skull.times.workspace_setup + skull.times.emit;
 
     // --- bone (parse + semantic_pass over the whole workspace) ---
-    println!("\n{}", "BONE (parse + semantic[lower+check], whole workspace)".bold());
-    println!("  stdlib clone   : {:>9.3} ms  (in semantic; per-run harness cost)", ms(bone.times.stdlib_clone));
-    println!("  stdlib extend  : {:>9.3} ms  (in semantic)", ms(bone.times.stdlib_extend));
-    println!("  parse          : {:>9.3} ms  (excluded from A/B)", ms(bone.times.parse));
+    println!(
+        "\n{}",
+        "BONE (parse + semantic[lower+check], whole workspace)".bold()
+    );
+    println!(
+        "  stdlib clone   : {:>9.3} ms  (in semantic; per-run harness cost)",
+        ms(bone.times.stdlib_clone)
+    );
+    println!(
+        "  stdlib extend  : {:>9.3} ms  (in semantic)",
+        ms(bone.times.stdlib_extend)
+    );
+    println!(
+        "  parse          : {:>9.3} ms  (excluded from A/B)",
+        ms(bone.times.parse)
+    );
     println!("  semantic       : {:>9.3} ms", ms(bone.times.semantic));
     println!("  post-parse     : {:>9.3} ms", ms(bone_postparse));
     // bone's own per-phase split of the semantic column, in run order.
@@ -565,8 +609,16 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
         // Caller-measured call captures bone's input-AST teardown at fn return,
         // which no internal phase timer can see: call = phase_sum + teardown.
         let teardown = bone.times.semantic_call.saturating_sub(phase_sum);
-        println!("    {:28} {:>9.3} ms  (input-AST drop at return)", "teardown", ms(teardown));
-        println!("    {:28} {:>9.3} ms  (call, incl teardown)", "= semantic_pass total", ms(bone.times.semantic_call));
+        println!(
+            "    {:28} {:>9.3} ms  (input-AST drop at return)",
+            "teardown",
+            ms(teardown)
+        );
+        println!(
+            "    {:28} {:>9.3} ms  (call, incl teardown)",
+            "= semantic_pass total",
+            ms(bone.times.semantic_call)
+        );
     }
     println!(
         "  type-check     : {}  ({} file workspace)",
@@ -575,14 +627,26 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
     );
 
     // --- skull (bone front-half + Lua codegen) ---
-    println!("\n{}", "SKULL (parse + semantic[bone] + emit[codegen], whole workspace)".bold());
-    println!("  parse          : {:>9.3} ms  (excluded from A/B)", ms(skull.times.parse));
-    println!("  semantic       : {:>9.3} ms  (bone front-half)", ms(skull.times.semantic));
+    println!(
+        "\n{}",
+        "SKULL (parse + semantic[bone] + emit[codegen], whole workspace)".bold()
+    );
+    println!(
+        "  parse          : {:>9.3} ms  (excluded from A/B)",
+        ms(skull.times.parse)
+    );
+    println!(
+        "  semantic       : {:>9.3} ms  (bone front-half)",
+        ms(skull.times.semantic)
+    );
     println!(
         "  workspace setup: {:>9.3} ms  (comptime/build-var preparation; separate from emit)",
         ms(skull.times.workspace_setup)
     );
-    println!("  emit           : {:>9.3} ms  (skull codegen delta)", ms(skull.times.emit));
+    println!(
+        "  emit           : {:>9.3} ms  (skull codegen delta)",
+        ms(skull.times.emit)
+    );
     if !skull.emit_phases.is_empty() {
         let setup_sum: Duration = skull
             .emit_phases
@@ -631,10 +695,23 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
             let total = ms(phase_sum);
             let wall = ms(emit_body);
             for (name, dur) in &emit_phases {
-                let share = if total > 0.0 { ms(*dur) / total * wall } else { 0.0 };
-                println!("    {:28} {:>9.3} ms  (elapsed {:>8.3} ms)", name, share, ms(*dur));
+                let share = if total > 0.0 {
+                    ms(*dur) / total * wall
+                } else {
+                    0.0
+                };
+                println!(
+                    "    {:28} {:>9.3} ms  (elapsed {:>8.3} ms)",
+                    name,
+                    share,
+                    ms(*dur)
+                );
             }
-            let ratio = if emit_body.is_zero() { 0.0 } else { total / wall };
+            let ratio = if emit_body.is_zero() {
+                0.0
+            } else {
+                total / wall
+            };
             println!("    {:28} {:>8.2}x", "elapsed overlap factor", ratio);
         } else {
             println!("  emit phases:");
@@ -644,7 +721,11 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
             // Wall-clock around the emit call captures alloc/setup the phase timers
             // don't bracket: overhead = emit remainder - sum(phases).
             let overhead = emit_body.saturating_sub(phase_sum);
-            println!("    {:28} {:>9.3} ms  (timer overhead / unbracketed)", "overhead", ms(overhead));
+            println!(
+                "    {:28} {:>9.3} ms  (timer overhead / unbracketed)",
+                "overhead",
+                ms(overhead)
+            );
         }
     }
     print_attribution(&skull.attribution);
@@ -786,9 +867,7 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
         let asked = per_run(memo.requests());
         let hit = per_run(memo.hits());
         let rate = hit as f64 / asked as f64 * 100.0;
-        println!(
-            "  abi-plan memo  : {asked} asked, {hit} hit per run ({rate:.1}% hit rate)"
-        );
+        println!("  abi-plan memo  : {asked} asked, {hit} hit per run ({rate:.1}% hit rate)");
         println!(
             "                   owner {}/{} hit, callee {}/{} hit ({} worker-local) per run",
             per_run(memo.owner_hits),
@@ -894,7 +973,10 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
     } else if let Some(error) = &skull.failure {
         println!("  emit           : {} ({})", "SKIPPED".red(), error);
     } else {
-        println!("  emit           : {}", "skipped (bone rejected workspace)".red());
+        println!(
+            "  emit           : {}",
+            "skipped (bone rejected workspace)".red()
+        );
     }
 
     // --- A/B (post-parse only) ---
@@ -905,9 +987,18 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
     let skull_sem_ms = ms(skull.times.semantic);
     let skull_emit_ms = ms(skull.times.emit);
     println!("\n{}", "A/B (post-parse work; parsing excluded)".bold());
-    println!("  bone  : {:>9.3} ms  (semantic only — typecheck floor)", bone_ms);
-    println!("  skull : {:>9.3} ms  (semantic + workspace setup + codegen)", skull_ms);
-    println!("  skull emit (codegen delta over bone) : {:>9.3} ms", skull_emit_ms);
+    println!(
+        "  bone  : {:>9.3} ms  (semantic only — typecheck floor)",
+        bone_ms
+    );
+    println!(
+        "  skull : {:>9.3} ms  (semantic + workspace setup + codegen)",
+        skull_ms
+    );
+    println!(
+        "  skull emit (codegen delta over bone) : {:>9.3} ms",
+        skull_emit_ms
+    );
     if skull_sem_ms > 0.0 {
         println!(
             "  skull emit / semantic : {:.2}x  (codegen vs typecheck)",

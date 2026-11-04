@@ -119,9 +119,13 @@ pub(crate) fn drain_ready_pendings(gamma: &mut Gamma) -> Result<(), CompilerErro
             return Ok(());
         }
         for v in ready {
-            let Some(ids) = gamma.pending_by_var.remove(&v) else { continue };
+            let Some(ids) = gamma.pending_by_var.remove(&v) else {
+                continue;
+            };
             for id in ids {
-                let Some(p) = gamma.pending[id].take() else { continue };
+                let Some(p) = gamma.pending[id].take() else {
+                    continue;
+                };
                 retry_pending(gamma, p)?;
             }
         }
@@ -152,7 +156,16 @@ fn retry_pending(gamma: &mut Gamma, p: Pending) -> Result<(), CompilerError> {
             }
             let candidates = resolve_callee(gamma, &family);
             match select_overload(
-                c, gamma, family, &candidates, recv_override, &args, &arg_ty, &arg_tys, name, span,
+                c,
+                gamma,
+                family,
+                &candidates,
+                recv_override,
+                &args,
+                &arg_ty,
+                &arg_tys,
+                name,
+                span,
             ) {
                 Ok((mid, fid)) => {
                     let ret = commit_selected_call(
@@ -208,7 +221,17 @@ fn retry_pending(gamma: &mut Gamma, p: Pending) -> Result<(), CompilerError> {
         } => {
             let base_r = resolve(gamma, base, span);
             if let TypeExpr::Infer(v, _) = *gamma.get(base_r) {
-                queue_pending(gamma, v, Pending::Field { base, field, origin, span, result });
+                queue_pending(
+                    gamma,
+                    v,
+                    Pending::Field {
+                        base,
+                        field,
+                        origin,
+                        span,
+                        result,
+                    },
+                );
                 return Ok(());
             }
             let fty = struct_field_ty(gamma, base_r, field, span)?;
@@ -234,7 +257,13 @@ pub(crate) fn field_ty_or_defer(
                     queue_pending(
                         gamma,
                         v,
-                        Pending::Field { base: base_ty, field, origin, span, result },
+                        Pending::Field {
+                            base: base_ty,
+                            field,
+                            origin,
+                            span,
+                            result,
+                        },
                     );
                     return Ok(result);
                 }

@@ -23,7 +23,13 @@ fn pos_to_off(src: &str, p: Position) -> usize {
 fn apply(src: &str, edits: Vec<TextEdit>) -> String {
     let mut spans: Vec<(usize, usize, String)> = edits
         .into_iter()
-        .map(|e| (pos_to_off(src, e.range.start), pos_to_off(src, e.range.end), e.new_text))
+        .map(|e| {
+            (
+                pos_to_off(src, e.range.start),
+                pos_to_off(src, e.range.end),
+                e.new_text,
+            )
+        })
         .collect();
     spans.sort_by(|a, b| b.0.cmp(&a.0));
     let mut s = src.to_string();
@@ -36,7 +42,9 @@ fn apply(src: &str, edits: Vec<TextEdit>) -> String {
 fn inlined(src: &str, pos: Position) -> String {
     let mut bone = BoneWorkspace::new();
     bone.update(PATH, src.to_string());
-    let il = bone.inline_local(PATH, pos).expect("inline should be offered");
+    let il = bone
+        .inline_local(PATH, pos)
+        .expect("inline should be offered");
     apply(src, il.edits)
 }
 
@@ -58,7 +66,8 @@ fn offered_on_a_use_not_only_the_binding() {
 
 #[test]
 fn atomic_initializer_is_not_parenthesized() {
-    let src = "fn f(v: int) -> int {\n    let y = g(v)\n    return y + y\n}\nfn g(a: int) -> int { a }\n";
+    let src =
+        "fn f(v: int) -> int {\n    let y = g(v)\n    return y + y\n}\nfn g(a: int) -> int { a }\n";
     let out = inlined(src, Position::new(1, 8));
     assert_eq!(
         out,

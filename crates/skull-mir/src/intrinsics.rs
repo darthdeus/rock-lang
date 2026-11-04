@@ -19,8 +19,8 @@
 use bone_semantic::hir::Function;
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;
-use std::collections::HashSet;
 use skull_parser::CompilerError;
+use std::collections::HashSet;
 use ustr::Ustr;
 
 /// How a backend renders a call to an `@intrinsic` fn.
@@ -210,7 +210,10 @@ pub fn declared_intrinsics(ws: &Workspace) -> HashSet<(Ustr, usize)> {
         for (_, f) in module.functions.iter() {
             if is_intrinsic(f) {
                 out.insert((f.name, f.param_decls.len()));
-                out.insert((Ustr::from(&crate::mangle::mangle_fn(ws, f)), f.param_decls.len()));
+                out.insert((
+                    Ustr::from(&crate::mangle::mangle_fn(ws, f)),
+                    f.param_decls.len(),
+                ));
             }
         }
     }

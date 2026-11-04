@@ -33,7 +33,10 @@ pub enum ExtractError<T> {
     /// The extracted message was of a different method than expected.
     MethodMismatch(T),
     /// Failed to deserialize the message.
-    JsonError { method: String, error: serde_json::Error },
+    JsonError {
+        method: String,
+        error: serde_json::Error,
+    },
 }
 
 impl std::error::Error for ExtractError<Request> {}

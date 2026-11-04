@@ -7,7 +7,7 @@
 //! it gets tested here against a call graph shaped to expose it.
 
 use bone_semantic::prelude::CompilerError;
-use skull_mir::reach::{walk, ReachPolicy};
+use skull_mir::reach::{ReachPolicy, walk};
 
 /// A call graph over integer nodes, with the traversal recorded.
 struct Graph {

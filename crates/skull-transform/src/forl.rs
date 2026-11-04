@@ -151,7 +151,9 @@ fn chase(func: &MirFunc, mut b: Idx<Block>, hops: &mut Vec<Idx<Block>>) -> Idx<B
 fn targets(term: &Term, mut f: impl FnMut(Idx<Block>)) {
     match term {
         Term::Goto(t) => f(*t),
-        Term::Branch { then_bb, else_bb, .. } => {
+        Term::Branch {
+            then_bb, else_bb, ..
+        } => {
             f(*then_bb);
             f(*else_bb);
         }
@@ -173,7 +175,9 @@ fn retarget(term: &mut Term, from: Idx<Block>, to: Idx<Block>) {
                 *t = to;
             }
         }
-        Term::Branch { then_bb, else_bb, .. } => {
+        Term::Branch {
+            then_bb, else_bb, ..
+        } => {
             if *then_bb == from {
                 *then_bb = to;
             }
@@ -210,13 +214,11 @@ fn cell_written_in(func: &MirFunc, c: Idx<Cell>, blocks: &HashSet<Idx<Block>>) -
                 Inst::CallMulti { dests, .. } | Inst::CallValueMulti { dests, .. }
                     if dests.contains(&c) =>
                 {
-                    return true
+                    return true;
                 }
-                Inst::MapNext { key_cell, val_cell, .. }
-                    if *key_cell == c || *val_cell == c =>
-                {
-                    return true
-                }
+                Inst::MapNext {
+                    key_cell, val_cell, ..
+                } if *key_cell == c || *val_cell == c => return true,
                 Inst::Lambda { params, .. } if params.contains(&c) => return true,
                 _ => {}
             }
@@ -240,7 +242,12 @@ fn try_match(ws: &Workspace, func: &MirFunc, h: Idx<Block>) -> Option<LoopMatch>
     let mut cur = h;
     let (t, cond, then_bb, else_bb) = loop {
         let c = chase(func, cur, &mut head_chain);
-        let Term::Branch { cond, then_bb, else_bb } = func.blocks[c].term else {
+        let Term::Branch {
+            cond,
+            then_bb,
+            else_bb,
+        } = func.blocks[c].term
+        else {
             return None;
         };
         if matches!(
@@ -265,9 +272,20 @@ fn try_match(ws: &Workspace, func: &MirFunc, h: Idx<Block>) -> Option<LoopMatch>
             }
             _ => return None,
         };
-        let done_arm = if cont_arm == then_bb { else_bb } else { then_bb };
-        let Inst::Load(gcell) = func.insts[gload] else { return None };
-        guards.push(GuardInfo { b: c, gload, cell: gcell, done_arm });
+        let done_arm = if cont_arm == then_bb {
+            else_bb
+        } else {
+            then_bb
+        };
+        let Inst::Load(gcell) = func.insts[gload] else {
+            return None;
+        };
+        guards.push(GuardInfo {
+            b: c,
+            gload,
+            cell: gcell,
+            done_arm,
+        });
         head_chain.push(c);
         cur = cont_arm;
     };
@@ -294,7 +312,9 @@ fn try_match(ws: &Workspace, func: &MirFunc, h: Idx<Block>) -> Option<LoopMatch>
     };
     let mut pick: Option<(Idx<Inst>, Idx<Inst>, bool, bool)> = None; // (slot_load, bound, slot_is_lhs, yield_is_then)
     for (s, o, s_is_lhs) in [(a, b, true), (b, a, false)] {
-        let Inst::Load(c) = &func.insts[s] else { continue };
+        let Inst::Load(c) = &func.insts[s] else {
+            continue;
+        };
         for (yc, dc, yield_is_then) in [(ca, cb, true), (cb, ca, false)] {
             if stores_cell(yc, *c) && !stores_cell(dc, *c) {
                 if pick.is_some() {
@@ -305,7 +325,9 @@ fn try_match(ws: &Workspace, func: &MirFunc, h: Idx<Block>) -> Option<LoopMatch>
         }
     }
     let (slot_load, bound, slot_is_lhs, yield_is_then) = pick?;
-    let Inst::Load(slot) = func.insts[slot_load] else { return None };
+    let Inst::Load(slot) = func.insts[slot_load] else {
+        return None;
+    };
     let (y, y_arm, d, d_chain) = if yield_is_then {
         (ca, then_bb, cb, else_chain)
     } else {
@@ -343,8 +365,12 @@ fn try_match(ws: &Workspace, func: &MirFunc, h: Idx<Block>) -> Option<LoopMatch>
     };
 
     // Both paths must converge on the flag-join block J.
-    let Term::Goto(jy) = func.blocks[y].term else { return None };
-    let Term::Goto(jd) = func.blocks[d].term else { return None };
+    let Term::Goto(jy) = func.blocks[y].term else {
+        return None;
+    };
+    let Term::Goto(jd) = func.blocks[d].term else {
+        return None;
+    };
     let mut y_join_chain = Vec::new();
     let j = chase(func, jy, &mut y_join_chain);
     let mut d_join_chain = Vec::new();
@@ -354,14 +380,19 @@ fn try_match(ws: &Workspace, func: &MirFunc, h: Idx<Block>) -> Option<LoopMatch>
 
     // D must be droppable: consts, stores to non-slot cells, or `phantom()`.
     let d_droppable = |blk: Idx<Block>| -> bool {
-        func.blocks[blk].insts.iter().all(|&i| match &func.insts[i] {
-            Inst::Const(_) => true,
-            Inst::Store { cell, .. } if *cell != slot => true,
-            Inst::Call { func: fr, args } if args.is_empty() && fn_name(ws, *fr) == "phantom" => {
-                true
-            }
-            _ => false,
-        })
+        func.blocks[blk]
+            .insts
+            .iter()
+            .all(|&i| match &func.insts[i] {
+                Inst::Const(_) => true,
+                Inst::Store { cell, .. } if *cell != slot => true,
+                Inst::Call { func: fr, args }
+                    if args.is_empty() && fn_name(ws, *fr) == "phantom" =>
+                {
+                    true
+                }
+                _ => false,
+            })
     };
     // Flag is stored as literal `want` in `blk`, exactly once.
     let flag_const = |blk: Idx<Block>, flag: Idx<Cell>, want: bool| -> bool {
@@ -431,7 +462,12 @@ fn try_match(ws: &Workspace, func: &MirFunc, h: Idx<Block>) -> Option<LoopMatch>
         // flag cell itself is an elem copy REUSING the cell (SROA coalesces a
         // level's ok flag onto the for-desugar's dest cells) -- allowed only
         // AFTER the flag load, so the branch still tests the entry value.
-        let Term::Branch { cond: jc, then_bb, else_bb } = func.blocks[cur_j].term else {
+        let Term::Branch {
+            cond: jc,
+            then_bb,
+            else_bb,
+        } = func.blocks[cur_j].term
+        else {
             return None;
         };
         let jinsts: HashSet<Idx<Inst>> = func.blocks[cur_j].insts.iter().copied().collect();
@@ -448,7 +484,9 @@ fn try_match(ws: &Workspace, func: &MirFunc, h: Idx<Block>) -> Option<LoopMatch>
         if !jinsts.contains(&fload) {
             return None;
         }
-        let Inst::Load(flag) = func.insts[fload] else { return None };
+        let Inst::Load(flag) = func.insts[fload] else {
+            return None;
+        };
         if flag == slot || then_bb == else_bb {
             return None;
         }
@@ -483,7 +521,11 @@ fn try_match(ws: &Workspace, func: &MirFunc, h: Idx<Block>) -> Option<LoopMatch>
         }
         // `flag == true` is the yield side (stored true by this level's yield
         // sources, false by its done block).
-        let (cont_arm, done_arm) = if flag_is_then { (then_bb, else_bb) } else { (else_bb, then_bb) };
+        let (cont_arm, done_arm) = if flag_is_then {
+            (then_bb, else_bb)
+        } else {
+            (else_bb, then_bb)
+        };
         if !flag_const(cur_d, flag, false) {
             return None;
         }
@@ -495,7 +537,12 @@ fn try_match(ws: &Workspace, func: &MirFunc, h: Idx<Block>) -> Option<LoopMatch>
         {
             return None;
         }
-        joins.push(Join { j: cur_j, drop, cont: cont_arm, flag });
+        joins.push(Join {
+            j: cur_j,
+            drop,
+            cont: cont_arm,
+            flag,
+        });
 
         // Probe the done arm: another done-propagation block means one more
         // level; anything else is the real EXIT.
@@ -518,37 +565,38 @@ fn try_match(ws: &Workspace, func: &MirFunc, h: Idx<Block>) -> Option<LoopMatch>
         // have exactly one reject arm -- a skip (chases to the fetch head: T
         // or a guard) or a stop (chases to a droppable done block converging
         // at the next join) -- and the walk continues on the other arm.
-        let Term::Goto(dgoto) = func.blocks[dn].term else { return None };
+        let Term::Goto(dgoto) = func.blocks[dn].term else {
+            return None;
+        };
         let mut next_chain = Vec::new();
         let next_j = chase(func, dgoto, &mut next_chain);
         done_chains.extend(next_chain);
         // `Some((target, is_skip))` = reject arm; `None` = not one.
-        let classify = |arm: Idx<Block>,
-                            chains: &mut Vec<Idx<Block>>|
-         -> Option<(Idx<Block>, bool)> {
-            let mut hops = Vec::new();
-            let x = chase(func, arm, &mut hops);
-            if x == t || guards.iter().any(|g| g.b == x) {
-                chains.extend(hops);
-                return Some((x, true));
-            }
-            if let Term::Goto(g) = func.blocks[x].term {
-                let mut h2 = Vec::new();
-                if chase(func, g, &mut h2) == next_j
-                    && d_droppable(x)
-                    && func.blocks[x].insts.iter().any(|&i| {
-                        matches!(&func.insts[i], Inst::Store { value, .. }
-                            if matches!(&func.insts[*value], Inst::Const(Lit::Bool(false))))
-                    })
-                {
+        let classify =
+            |arm: Idx<Block>, chains: &mut Vec<Idx<Block>>| -> Option<(Idx<Block>, bool)> {
+                let mut hops = Vec::new();
+                let x = chase(func, arm, &mut hops);
+                if x == t || guards.iter().any(|g| g.b == x) {
                     chains.extend(hops);
-                    chains.push(x);
-                    chains.extend(h2);
-                    return Some((x, false));
+                    return Some((x, true));
                 }
-            }
-            None
-        };
+                if let Term::Goto(g) = func.blocks[x].term {
+                    let mut h2 = Vec::new();
+                    if chase(func, g, &mut h2) == next_j
+                        && d_droppable(x)
+                        && func.blocks[x].insts.iter().any(|&i| {
+                            matches!(&func.insts[i], Inst::Store { value, .. }
+                            if matches!(&func.insts[*value], Inst::Const(Lit::Bool(false))))
+                        })
+                    {
+                        chains.extend(hops);
+                        chains.push(x);
+                        chains.extend(h2);
+                        return Some((x, false));
+                    }
+                }
+                None
+            };
         let mut ysrc = Vec::new();
         let mut yb = cont_arm;
         let mut steps = 0;
@@ -564,7 +612,11 @@ fn try_match(ws: &Workspace, func: &MirFunc, h: Idx<Block>) -> Option<LoopMatch>
             ysrc.push(c);
             match func.blocks[c].term {
                 Term::Goto(nxt) => yb = nxt,
-                Term::Branch { then_bb: tb, else_bb: eb, .. } => {
+                Term::Branch {
+                    then_bb: tb,
+                    else_bb: eb,
+                    ..
+                } => {
                     if tb == eb {
                         return None;
                     }
@@ -606,12 +658,12 @@ fn try_match(ws: &Workspace, func: &MirFunc, h: Idx<Block>) -> Option<LoopMatch>
                 if incr_pos.is_some() {
                     return None;
                 }
-                let Inst::IntAdd(x, yv) = &func.insts[*value] else { return None };
-                let is_slot = |ii: Idx<Inst>| {
-                    matches!(&func.insts[ii], Inst::Load(c) if *c == slot)
+                let Inst::IntAdd(x, yv) = &func.insts[*value] else {
+                    return None;
                 };
-                let is_one =
-                    |ii: Idx<Inst>| matches!(&func.insts[ii], Inst::Const(Lit::Int(1)));
+                let is_slot =
+                    |ii: Idx<Inst>| matches!(&func.insts[ii], Inst::Load(c) if *c == slot);
+                let is_one = |ii: Idx<Inst>| matches!(&func.insts[ii], Inst::Const(Lit::Int(1)));
                 if !((is_slot(*x) && is_one(*yv)) || (is_slot(*yv) && is_one(*x))) {
                     return None;
                 }
@@ -675,8 +727,7 @@ fn try_match(ws: &Workspace, func: &MirFunc, h: Idx<Block>) -> Option<LoopMatch>
             }
         }
     }
-    let in_loop: HashSet<Idx<Block>> =
-        region.iter().copied().chain([h, t]).collect();
+    let in_loop: HashSet<Idx<Block>> = region.iter().copied().chain([h, t]).collect();
 
     // Slot soundness, fn-wide (all arena blocks, incl. closures/unreachable):
     // exactly one init store outside the loop, no other in-loop store than the
@@ -704,13 +755,11 @@ fn try_match(ws: &Workspace, func: &MirFunc, h: Idx<Block>) -> Option<LoopMatch>
                 Inst::CallMulti { dests, .. } | Inst::CallValueMulti { dests, .. }
                     if dests.contains(&slot) =>
                 {
-                    return None
+                    return None;
                 }
-                Inst::MapNext { key_cell, val_cell, .. }
-                    if *key_cell == slot || *val_cell == slot =>
-                {
-                    return None
-                }
+                Inst::MapNext {
+                    key_cell, val_cell, ..
+                } if *key_cell == slot || *val_cell == slot => return None,
                 Inst::Lambda { params, .. } if params.contains(&slot) => return None,
                 _ => {}
             }
@@ -732,10 +781,14 @@ fn try_match(ws: &Workspace, func: &MirFunc, h: Idx<Block>) -> Option<LoopMatch>
     for g in &guards {
         let mut hops = Vec::new();
         let dg = chase(func, g.done_arm, &mut hops);
-        let Term::Goto(gg) = func.blocks[dg].term else { return None };
+        let Term::Goto(gg) = func.blocks[dg].term else {
+            return None;
+        };
         let mut h2 = Vec::new();
         let tgt = chase(func, gg, &mut h2);
-        let Some(jn) = joins.iter().find(|jn| jn.j == tgt) else { return None };
+        let Some(jn) = joins.iter().find(|jn| jn.j == tgt) else {
+            return None;
+        };
         if !d_droppable(dg) || !flag_const(dg, jn.flag, false) {
             return None;
         }
@@ -779,13 +832,11 @@ fn try_match(ws: &Workspace, func: &MirFunc, h: Idx<Block>) -> Option<LoopMatch>
                     Inst::CallMulti { dests, .. } | Inst::CallValueMulti { dests, .. }
                         if dests.contains(&g.cell) =>
                     {
-                        return None
+                        return None;
                     }
-                    Inst::MapNext { key_cell, val_cell, .. }
-                        if *key_cell == g.cell || *val_cell == g.cell =>
-                    {
-                        return None
-                    }
+                    Inst::MapNext {
+                        key_cell, val_cell, ..
+                    } if *key_cell == g.cell || *val_cell == g.cell => return None,
                     Inst::Lambda { params, .. } if params.contains(&g.cell) => return None,
                     _ => {}
                 }
@@ -826,7 +877,11 @@ fn try_match(ws: &Workspace, func: &MirFunc, h: Idx<Block>) -> Option<LoopMatch>
     // stores are never read outside the loop (an outside reader would
     // observe the dropped write).
     let join_set: HashSet<Idx<Block>> = joins.iter().map(|jn| jn.j).collect();
-    for &dk in done_blocks.iter().chain(stop_dones.iter()).chain(guard_clear.iter()) {
+    for &dk in done_blocks
+        .iter()
+        .chain(stop_dones.iter())
+        .chain(guard_clear.iter())
+    {
         for &i in &func.blocks[dk].insts {
             if let Inst::Store { cell, .. } = &func.insts[i] {
                 for (bid, blk) in func.blocks.iter() {
@@ -898,8 +953,10 @@ fn try_match(ws: &Workspace, func: &MirFunc, h: Idx<Block>) -> Option<LoopMatch>
         bk != t && bk != y && bk != y_arm && !join_set.contains(&bk) && !live_set.contains(&bk)
     });
 
-    let join_rewrites: Vec<(Idx<Block>, Vec<Idx<Inst>>, Idx<Block>)> =
-        joins.iter().map(|jn| (jn.j, jn.drop.clone(), jn.cont)).collect();
+    let join_rewrites: Vec<(Idx<Block>, Vec<Idx<Inst>>, Idx<Block>)> = joins
+        .iter()
+        .map(|jn| (jn.j, jn.drop.clone(), jn.cont))
+        .collect();
 
     Some(LoopMatch {
         t,
@@ -959,7 +1016,10 @@ fn rewrite(func: &mut MirFunc, h: Idx<Block>, m: LoopMatch) {
     let ll = func.alloc_inst(Inst::Load(m.slot));
     let lc = func.alloc_inst(Inst::Const(Lit::Int(1)));
     let la = func.alloc_inst(Inst::IntAdd(ll, lc));
-    let ls = func.alloc_inst(Inst::Store { cell: m.slot, value: la });
+    let ls = func.alloc_inst(Inst::Store {
+        cell: m.slot,
+        value: la,
+    });
     func.blocks[l].insts = vec![ll, lc, la, ls];
     func.blocks[l].term = Term::Goto(m.t);
     for &bp in &m.back {

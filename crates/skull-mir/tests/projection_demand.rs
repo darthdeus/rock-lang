@@ -1,21 +1,28 @@
 use std::sync::Arc;
 
 use skull_mir::instance::Instance;
-use skull_mir::lower::{lower_instance_with_plans, ScalarCtx};
+use skull_mir::lower::{ScalarCtx, lower_instance_with_plans};
 use skull_mir::mir::{FuncRef, Inst, MirFunc};
 use skull_mir::monoty::MonoInterner;
 
 fn lower(source: &str, name: &str) -> MirFunc {
-    let ast = skull_parser::parse_module_clean(source, ustr::Ustr::from("<test>"))
-        .expect("parse");
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut vec![ast])
-        .expect("semantic pass");
+    let ast = skull_parser::parse_module_clean(source, ustr::Ustr::from("<test>")).expect("parse");
+    let ws = bone_semantic::semantic_passes::semantic_pass(&mut vec![ast]).expect("semantic pass");
     let mid = ws.module_ids[&ustr::Ustr::from("<test>")];
-    let fid = ws.module(mid).functions.iter()
-        .find(|(_, f)| f.name.as_str() == name).expect("function").0;
-    let root = FuncRef { module: mid, func: fid };
+    let fid = ws
+        .module(mid)
+        .functions
+        .iter()
+        .find(|(_, f)| f.name.as_str() == name)
+        .expect("function")
+        .0;
+    let root = FuncRef {
+        module: mid,
+        func: fid,
+    };
     let interner = Arc::new(MonoInterner::new());
-    let graph = skull_graph::instance_graph::build_in(&ws, vec![root], false, Arc::clone(&interner));
+    let graph =
+        skull_graph::instance_graph::build_in(&ws, vec![root], false, Arc::clone(&interner));
     let concrete = skull_graph::concrete_body::build(&ws, &graph);
     let scx = ScalarCtx::new(&ws).sharing(interner);
     let plan = &concrete.plans[&Instance::base(root)];
@@ -23,13 +30,23 @@ fn lower(source: &str, name: &str) -> MirFunc {
 }
 
 fn loads(body: &MirFunc) -> usize {
-    body.insts.iter().filter(|(_, inst)| matches!(inst, Inst::Load(_))).count()
+    body.insts
+        .iter()
+        .filter(|(_, inst)| matches!(inst, Inst::Load(_)))
+        .count()
 }
 
 #[test]
 fn immediate_scalar_projection_reads_only_its_parameter_leaf() {
-    let body = lower("value Pair { x: int, y: int }\nfn pick(v: Pair) -> int { v.x }", "pick");
-    assert_eq!(loads(&body), 1, "raw MIR must not expand unread fields: {body}");
+    let body = lower(
+        "value Pair { x: int, y: int }\nfn pick(v: Pair) -> int { v.x }",
+        "pick",
+    );
+    assert_eq!(
+        loads(&body),
+        1,
+        "raw MIR must not expand unread fields: {body}"
+    );
 }
 
 #[test]
@@ -42,58 +59,103 @@ fn nested_projection_reads_only_its_parameter_subtree() {
     let leaf = lower(source, "leaf");
     assert_eq!(loads(&leaf), 1, "nested scalar projection: {leaf}");
     let subtree = lower(source, "subtree");
-    assert_eq!(loads(&subtree), 2, "whole selected child needs both leaves: {subtree}");
+    assert_eq!(
+        loads(&subtree),
+        2,
+        "whole selected child needs both leaves: {subtree}"
+    );
     let whole = lower(source, "whole");
-    assert_eq!(loads(&whole), 5, "whole value still snapshots all leaves: {whole}");
+    assert_eq!(
+        loads(&whole),
+        5,
+        "whole value still snapshots all leaves: {whole}"
+    );
 }
 
 #[test]
 fn nullable_selected_subtree_keeps_its_presence_leaf() {
-    let body = lower("nobox value Pair { x: int, y: int }\n\
+    let body = lower(
+        "nobox value Pair { x: int, y: int }\n\
         nobox value Branch { spare: int, child: Pair? }\n\
-        fn pick(v: Branch) -> Pair? { v.child }", "pick");
-    assert_eq!(loads(&body), 3, "selected nullable child needs presence and payload: {body}");
+        fn pick(v: Branch) -> Pair? { v.child }",
+        "pick",
+    );
+    assert_eq!(
+        loads(&body),
+        3,
+        "selected nullable child needs presence and payload: {body}"
+    );
 }
 
 fn wide_fields() -> String {
-    (0..50).map(|i| format!("f{i}: int")).collect::<Vec<_>>().join(", ")
+    (0..50)
+        .map(|i| format!("f{i}: int"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn fields(body: &MirFunc) -> usize {
-    body.insts.iter().filter(|(_, inst)| matches!(inst, Inst::Field { .. })).count()
+    body.insts
+        .iter()
+        .filter(|(_, inst)| matches!(inst, Inst::Field { .. }))
+        .count()
 }
 
 #[test]
 fn boxed_wide_parameter_projects_one_leaf_before_copy_expansion() {
-    let source = format!("value Wide {{ {} }}\nfn pick(v: Wide) -> int {{ v.f1 }}", wide_fields());
+    let source = format!(
+        "value Wide {{ {} }}\nfn pick(v: Wide) -> int {{ v.f1 }}",
+        wide_fields()
+    );
     let body = lower(&source, "pick");
     assert_eq!(fields(&body), 1, "wide parameter primitive demand: {body}");
 }
 
 #[test]
 fn boxed_wide_immutable_local_reads_only_demanded_fields() {
-    let source = format!("value Wide {{ {} }}\n\
-        fn pick(v: Wide) -> (int, int, int) {{ let w = v; (w.f0, w.f1, w.f2) }}", wide_fields());
+    let source = format!(
+        "value Wide {{ {} }}\n\
+        fn pick(v: Wide) -> (int, int, int) {{ let w = v; (w.f0, w.f1, w.f2) }}",
+        wide_fields()
+    );
     let body = lower(&source, "pick");
-    assert_eq!(fields(&body), 3, "immutable parameter box may be shared: {body}");
+    assert_eq!(
+        fields(&body),
+        3,
+        "immutable parameter box may be shared: {body}"
+    );
 }
 
 #[test]
 fn boxed_wide_mutable_place_keeps_initial_snapshot_then_projects() {
-    let source = format!("value Wide {{ {} }}\n\
+    let source = format!(
+        "value Wide {{ {} }}\n\
         struct Owner {{ row: Wide }}\n\
-        fn pick(owner: Owner) -> (int, int, int) {{ let w = owner.row; (w.f0, w.f1, w.f2) }}", wide_fields());
+        fn pick(owner: Owner) -> (int, int, int) {{ let w = owner.row; (w.f0, w.f1, w.f2) }}",
+        wide_fields()
+    );
     let body = lower(&source, "pick");
-    assert_eq!(fields(&body), 54, "owner field, full snapshot and three primitive reads: {body}");
+    assert_eq!(
+        fields(&body),
+        54,
+        "owner field, full snapshot and three primitive reads: {body}"
+    );
 }
 
 #[test]
 fn boxed_nullable_subtree_reads_its_presence_and_payload_only() {
-    let source = format!("nobox value Point {{ x: int, y: int }}\n\
+    let source = format!(
+        "nobox value Point {{ x: int, y: int }}\n\
         value Wide {{ {}, child: Point? }}\n\
-        fn pick(v: Wide) -> Point? {{ v.child }}", wide_fields());
+        fn pick(v: Wide) -> Point? {{ v.child }}",
+        wide_fields()
+    );
     let body = lower(&source, "pick");
-    assert_eq!(fields(&body), 3, "nullable subtree demand retains presence: {body}");
+    assert_eq!(
+        fields(&body),
+        3,
+        "nullable subtree demand retains presence: {body}"
+    );
 }
 
 #[test]
@@ -105,11 +167,23 @@ fn boxed_global_projects_before_copy_expansion() {
         fn subtree() -> Point { CONFIG.child }\n\
         fn whole() -> Config { CONFIG }";
     let leaf = lower(source, "leaf");
-    assert_eq!(fields(&leaf), 1, "only the selected native leaf alias: {leaf}");
+    assert_eq!(
+        fields(&leaf),
+        1,
+        "only the selected native leaf alias: {leaf}"
+    );
     let subtree = lower(source, "subtree");
-    assert_eq!(fields(&subtree), 2, "selected child snapshots both native leaves: {subtree}");
+    assert_eq!(
+        fields(&subtree),
+        2,
+        "selected child snapshots both native leaves: {subtree}"
+    );
     let whole = lower(source, "whole");
-    assert_eq!(fields(&whole), 3, "whole global still snapshots every native leaf: {whole}");
+    assert_eq!(
+        fields(&whole),
+        3,
+        "whole global still snapshots every native leaf: {whole}"
+    );
 }
 
 #[test]
@@ -120,11 +194,23 @@ fn leaf_table_reference_projects_before_expanding_siblings() {
         fn point(p: ref State) -> Point { p.point }\n\
         fn anchor(p: ref State) -> Point? { p.anchor }";
     let flag = lower(source, "flag");
-    assert_eq!(fields(&flag), 1, "scalar ref projection must not expand siblings: {flag}");
+    assert_eq!(
+        fields(&flag),
+        1,
+        "scalar ref projection must not expand siblings: {flag}"
+    );
     let point = lower(source, "point");
-    assert_eq!(fields(&point), 2, "selected ref subtree snapshots both leaves: {point}");
+    assert_eq!(
+        fields(&point),
+        2,
+        "selected ref subtree snapshots both leaves: {point}"
+    );
     let anchor = lower(source, "anchor");
-    assert_eq!(fields(&anchor), 3, "nullable ref subtree keeps presence and payload: {anchor}");
+    assert_eq!(
+        fields(&anchor),
+        3,
+        "nullable ref subtree keeps presence and payload: {anchor}"
+    );
 }
 
 #[test]
@@ -136,7 +222,11 @@ fn nullable_reference_owned_value_projects_only_the_selected_scalar() {
         fn text(h: Holder) -> string? { h.label?.text }";
     for name in ["width", "text"] {
         let body = lower(source, name);
-        assert_eq!(fields(&body), 2, "only the owner slot and selected scalar are read: {body}");
+        assert_eq!(
+            fields(&body),
+            2,
+            "only the owner slot and selected scalar are read: {body}"
+        );
     }
 }
 
@@ -147,7 +237,11 @@ fn nullable_scalar_projection_uses_the_embedded_owner_slot() {
         struct Root { embed inner: Inner }\n\
         fn width(r: Root) -> int? { r.inner.label?.width }";
     let body = lower(source, "width");
-    assert_eq!(fields(&body), 2, "embedded owner must not materialize unrelated fields: {body}");
+    assert_eq!(
+        fields(&body),
+        2,
+        "embedded owner must not materialize unrelated fields: {body}"
+    );
 }
 
 #[test]
@@ -162,9 +256,15 @@ fn nullable_native_field_snapshot_reads_scalar_aliases() {
     let intermediate: Vec<_> = body.insts.iter().filter(|(_, inst)| {
         matches!(inst, Inst::Field { field, .. } if matches!(field.as_str(), "a" | "b"))
     }).collect();
-    assert!(intermediate.is_empty(), "native snapshot must not create child cdata views: {body}");
+    assert!(
+        intermediate.is_empty(),
+        "native snapshot must not create child cdata views: {body}"
+    );
     let aliases = body.insts.iter().filter(|(_, inst)| {
         matches!(inst, Inst::Field { field, .. } if field.as_str().starts_with("__rock_leaf_"))
     }).count();
-    assert_eq!(aliases, 4, "the present payload still reads every scalar leaf: {body}");
+    assert_eq!(
+        aliases, 4,
+        "the present payload still reads every scalar leaf: {body}"
+    );
 }

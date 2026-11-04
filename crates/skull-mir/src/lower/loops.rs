@@ -5,7 +5,10 @@ use super::*;
 
 impl Builder<'_> {
     /// The innermost `(continue_target, break_target, defer depth)`.
-    pub(crate) fn loop_target(&self, what: &str) -> Result<(Idx<Block>, Idx<Block>, usize), CompilerError> {
+    pub(crate) fn loop_target(
+        &self,
+        what: &str,
+    ) -> Result<(Idx<Block>, Idx<Block>, usize), CompilerError> {
         self.loop_targets
             .last()
             .copied()
@@ -18,7 +21,11 @@ impl Builder<'_> {
     /// `while true` (constant cond) whose exit no `break` ever targeted -- its
     /// fall-through is unreachable, so the caller must not lower trailing
     /// statements into it (and a co fn body ending in one is not a fall-off).
-    pub(crate) fn lower_while(&mut self, cond: Idx<Expr>, body: Idx<Expr>) -> Result<bool, CompilerError> {
+    pub(crate) fn lower_while(
+        &mut self,
+        cond: Idx<Expr>,
+        body: Idx<Expr>,
+    ) -> Result<bool, CompilerError> {
         let header = self.f.new_block();
         let body_bb = self.f.new_block();
         let exit = self.f.new_block();
@@ -65,12 +72,18 @@ impl Builder<'_> {
             };
         }
         let enumerated_collection = match self.body.expr_arena[iter].clone() {
-            Expr::Call { callee: Callee::Unresolved { name, .. }, args, .. }
-                if name.as_str() == "enumerate" && args.len() == 1 => Some(args.start()),
+            Expr::Call {
+                callee: Callee::Unresolved { name, .. },
+                args,
+                ..
+            } if name.as_str() == "enumerate" && args.len() == 1 => Some(args.start()),
             _ => None,
         };
         // User iterator protocol (bone recorded the resolution for this For).
-        if let Some(info) = self.inf.and_then(|i| i.for_iter_protocol.get(&iter).cloned()) {
+        if let Some(info) = self
+            .inf
+            .and_then(|i| i.for_iter_protocol.get(&iter).cloned())
+        {
             // Lua keeps its counted arena walk; native rows use the recorded iterator.
             if !self.scx.row_value_containers
                 && let Some(collection) = enumerated_collection.filter(|&c| self.iter_is_arena(c))
@@ -120,7 +133,9 @@ impl Builder<'_> {
             // `for` head.
             ContainerKind::VecColumn => Err(gap("for over a synthetic Vec leaf column")),
             ContainerKind::VecStrideSlot => Err(gap("for over a synthetic Vec strided slot")),
-            ContainerKind::NativeBufferLeaf => Err(gap("for over a synthetic NativeBuffer leaf view")),
+            ContainerKind::NativeBufferLeaf => {
+                Err(gap("for over a synthetic NativeBuffer leaf view"))
+            }
         }
     }
 
@@ -185,7 +200,10 @@ impl Builder<'_> {
                 // own call: both live at one expression and share one span, so
                 // the operation is what keeps them distinguishable.
                 let call = self.with_site_op(crate::site::SiteOp::ForIter, |b| {
-                    b.emit_cur(Inst::Call { func: iter_ref, args })
+                    b.emit_cur(Inst::Call {
+                        func: iter_ref,
+                        args,
+                    })
                 });
                 // DELIVERY, from the same `IterWitness::generics` the identity
                 // record below reads. The witness is an ordinary call to a
@@ -195,11 +213,7 @@ impl Builder<'_> {
                     self.f.spec_bindings.insert(call, delivery);
                 }
                 if self.ws.module(m).functions[f].generics.is_empty() || !witness.args.is_empty() {
-                    crate::site::record_call_owner(
-                        &mut self.f,
-                        call,
-                        &witness,
-                    );
+                    crate::site::record_call_owner(&mut self.f, call, &witness);
                 }
                 self.f
                     .call_abi_plans
@@ -209,7 +223,10 @@ impl Builder<'_> {
             None => self.lower_expr(iter_expr)?,
         };
         let it_cell = self.f.new_cell(Some(Ustr::from("__it")));
-        self.emit_cur(Inst::Store { cell: it_cell, value: it_val });
+        self.emit_cur(Inst::Store {
+            cell: it_cell,
+            value: it_val,
+        });
 
         // next returns `(bool, E)` / `(bool, A, B, ...)`. The shape is read under
         // the concrete callee the emitted call will carry, not the caller's own:
@@ -258,11 +275,16 @@ impl Builder<'_> {
         let it_load = self.emit_cur(Inst::Load(it_cell));
         let dests: Vec<Idx<Cell>> = (0..n).map(|_| self.f.new_cell(None)).collect();
         match &info.next {
-            BoundNext::Concrete { func: (m, f), sub, .. } => {
+            BoundNext::Concrete {
+                func: (m, f), sub, ..
+            } => {
                 let func = concrete_next
                     .as_ref()
                     .map(|owner| owner.func)
-                    .unwrap_or(FuncRef { module: *m, func: *f });
+                    .unwrap_or(FuncRef {
+                        module: *m,
+                        func: *f,
+                    });
                 // The synthesized `next` call has no expr to key
                 // `call_generic_bindings` by, so its instantiation comes from
                 // bone's recorded `next_generics`. Without this the inliner
@@ -313,18 +335,30 @@ impl Builder<'_> {
             }
         }
         let ok = self.emit_cur(Inst::Load(dests[0]));
-        self.f.set_term(self.cur, Term::Branch { cond: ok, then_bb: body_bb, else_bb: exit });
+        self.f.set_term(
+            self.cur,
+            Term::Branch {
+                cond: ok,
+                then_bb: body_bb,
+                else_bb: exit,
+            },
+        );
 
         // body: bind the pattern to the element slots. One element binds
         // directly (its leaves, if it splats); multiple (`next -> (bool, A, B)`)
         // are a tuple `bind_pattern_slot` destructures against a matching tuple
         // pattern (no alloc).
         self.cur = body_bb;
-        let loads: Vec<Idx<Inst>> =
-            dests[1..].iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
+        let loads: Vec<Idx<Inst>> = dests[1..]
+            .iter()
+            .map(|c| self.emit_cur(Inst::Load(*c)))
+            .collect();
         let elem_slot = match &ret_shape.slots[1..] {
             [one] => one.clone(),
-            rest => RetSlot::Nested(TupleRetShape { slots: rest.to_vec(), nullable: false }),
+            rest => RetSlot::Nested(TupleRetShape {
+                slots: rest.to_vec(),
+                nullable: false,
+            }),
         };
         let mut idx = 0;
         self.bind_pattern_slot(vars, &elem_slot, &loads, &mut idx)?;
@@ -342,7 +376,9 @@ impl Builder<'_> {
     /// to recognize an unqualified nullary-variant pattern at a match root.
     pub(crate) fn scrut_variants(&self, e: Idx<Expr>) -> HashSet<Ustr> {
         if let Some(ty) = self.concrete_expr_ty(e) {
-            let Some(name) = ty.peel_nullable().0.nominal() else { return HashSet::new() };
+            let Some(name) = ty.peel_nullable().0.nominal() else {
+                return HashSet::new();
+            };
             if let Some(&eid) = self.ws.enums_by_name.get(&name) {
                 let ed = &self.ws.modules[eid.module.index()].enums[eid.def];
                 return ed.variants.iter().map(|v| v.name).collect();
@@ -416,7 +452,11 @@ impl Builder<'_> {
         let leaves = match &pat {
             BindingPattern::Tuple(subs) if subs.len() == 2 => None,
             BindingPattern::Leaf(_) => Some(()),
-            _ => return Err(gap("for-over-Arena binds one (item) or two (entity, value)")),
+            _ => {
+                return Err(gap(
+                    "for-over-Arena binds one (item) or two (entity, value)",
+                ));
+            }
         };
         let _ = leaves;
 
@@ -431,17 +471,38 @@ impl Builder<'_> {
         // to an empty store, which the `i < n` header exits immediately.
         // This counted template consumes the collection, not its inferred iter(arg) wrapper.
         let arena = self.lower_iterable_collection(iter)?;
-        let scene_id = self.emit_cur(Inst::Field { base: arena, field: Ustr::from("_scene_id") });
-        let arena_id = self.emit_cur(Inst::Field { base: arena, field: Ustr::from("_arena_id") });
+        let scene_id = self.emit_cur(Inst::Field {
+            base: arena,
+            field: Ustr::from("_scene_id"),
+        });
+        let arena_id = self.emit_cur(Inst::Field {
+            base: arena,
+            field: Ustr::from("_arena_id"),
+        });
         let store = self.call_spine("__arena_store_or_empty", vec![scene_id, arena_id])?;
-        let occupied = self.emit_cur(Inst::Field { base: store, field: Ustr::from("occupied") });
-        let generations = self.emit_cur(Inst::Field { base: store, field: Ustr::from("generations") });
-        let data = self.emit_cur(Inst::Field { base: store, field: Ustr::from("data") });
-        let n = self.emit_cur(Inst::Len { base: occupied, kind: ContainerKind::Vec });
+        let occupied = self.emit_cur(Inst::Field {
+            base: store,
+            field: Ustr::from("occupied"),
+        });
+        let generations = self.emit_cur(Inst::Field {
+            base: store,
+            field: Ustr::from("generations"),
+        });
+        let data = self.emit_cur(Inst::Field {
+            base: store,
+            field: Ustr::from("data"),
+        });
+        let n = self.emit_cur(Inst::Len {
+            base: occupied,
+            kind: ContainerKind::Vec,
+        });
         let i_cell = self.f.new_cell(None);
         self.f.mark_loop_binding(i_cell);
         let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
-        self.emit_cur(Inst::Store { cell: i_cell, value: zero });
+        self.emit_cur(Inst::Store {
+            cell: i_cell,
+            value: zero,
+        });
         let enum_cell = enum_var.map(|_| {
             let c = self.f.new_cell(None);
             let z = self.emit_cur(Inst::Const(Lit::Int(0)));
@@ -461,7 +522,14 @@ impl Builder<'_> {
         self.cur = header;
         let i = self.emit_cur(Inst::Load(i_cell));
         let c = self.emit_cur(Inst::IntLt(i, n));
-        self.f.set_term(self.cur, Term::Branch { cond: c, then_bb: body_bb, else_bb: exit });
+        self.f.set_term(
+            self.cur,
+            Term::Branch {
+                cond: c,
+                then_bb: body_bb,
+                else_bb: exit,
+            },
+        );
 
         // body: nothing to skip before the occupancy read -- the walk is bounded
         // by the occupancy column's own length, and a `[bool]` column has no
@@ -472,8 +540,19 @@ impl Builder<'_> {
 
         // occ: skip unoccupied.
         self.cur = occ_bb;
-        let occ = self.emit_cur(Inst::Index { base: occupied, index: idx, kind: ContainerKind::Vec });
-        self.f.set_term(self.cur, Term::Branch { cond: occ, then_bb: do_bb, else_bb: latch });
+        let occ = self.emit_cur(Inst::Index {
+            base: occupied,
+            index: idx,
+            kind: ContainerKind::Vec,
+        });
+        self.f.set_term(
+            self.cur,
+            Term::Branch {
+                cond: occ,
+                then_bb: do_bb,
+                else_bb: latch,
+            },
+        );
 
         // do: build Entity, bind, run body.
         self.cur = do_bb;
@@ -487,8 +566,11 @@ impl Builder<'_> {
         // A raw `MakeStruct` here would leak an un-tagged, metatable-less table
         // whose `==` silently mis-compares (arena-scan entities not equal to
         // pairs-scan entities).
-        let e_gen =
-            self.emit_cur(Inst::Index { base: generations, index: idx, kind: ContainerKind::Vec });
+        let e_gen = self.emit_cur(Inst::Index {
+            base: generations,
+            index: idx,
+            kind: ContainerKind::Vec,
+        });
         let entity_representation = self.nominal_value_representation(Ustr::from("Entity"))?;
         let entity = self.emit_cur(Inst::MakeValueStruct {
             name: Ustr::from("Entity"),
@@ -513,9 +595,15 @@ impl Builder<'_> {
             None => {
                 // The stored element stays the entry's; the binder gets its own
                 // copy, as `ArenaPairIter.next` gives the plain loop.
-                let stored = self.emit_cur(Inst::Index { base: data, index: idx, kind: ContainerKind::Vec });
+                let stored = self.emit_cur(Inst::Index {
+                    base: data,
+                    index: idx,
+                    kind: ContainerKind::Vec,
+                });
                 let ty = match &pat {
-                    BindingPattern::Tuple(subs) if subs.len() == 2 => self.loop_binder_ty(&subs[1], None),
+                    BindingPattern::Tuple(subs) if subs.len() == 2 => {
+                        self.loop_binder_ty(&subs[1], None)
+                    }
                     _ => self.loop_binder_ty(&pat, Some(1)),
                 };
                 match ty {
@@ -533,7 +621,11 @@ impl Builder<'_> {
                 let tup = self.emit_cur(Inst::MakeTuple(vec![entity, data]));
                 self.bind_for_pattern(&pat, tup);
             }
-            _ => return Err(gap("for-over-Arena binds one (item) or two (entity, value)")),
+            _ => {
+                return Err(gap(
+                    "for-over-Arena binds one (item) or two (entity, value)",
+                ));
+            }
         }
         // enumerate counter: bind to the current count, then bump (occupied only).
         if let (Some(ev), Some(ec)) = (enum_var, enum_cell) {
@@ -545,10 +637,16 @@ impl Builder<'_> {
                 Ustr::from(""),
             );
             self.binds.insert(raw(ev), bind_cell);
-            self.emit_cur(Inst::Store { cell: bind_cell, value: cur });
+            self.emit_cur(Inst::Store {
+                cell: bind_cell,
+                value: cur,
+            });
             let one = self.emit_cur(Inst::Const(Lit::Int(1)));
             let inc = self.emit_cur(Inst::IntAdd(cur, one));
-            self.emit_cur(Inst::Store { cell: ec, value: inc });
+            self.emit_cur(Inst::Store {
+                cell: ec,
+                value: inc,
+            });
         }
         self.loop_targets.push((latch, exit, self.defers.len()));
         self.lower_stmt_expr(body)?;
@@ -562,7 +660,10 @@ impl Builder<'_> {
         let i2 = self.emit_cur(Inst::Load(i_cell));
         let one = self.emit_cur(Inst::Const(Lit::Int(1)));
         let inc = self.emit_cur(Inst::IntAdd(i2, one));
-        self.emit_cur(Inst::Store { cell: i_cell, value: inc });
+        self.emit_cur(Inst::Store {
+            cell: i_cell,
+            value: inc,
+        });
         self.f.set_term(self.cur, Term::Goto(header));
 
         self.cur = exit;
@@ -583,7 +684,10 @@ impl Builder<'_> {
         let col = self.map_column_value_of(iter)?;
         let m = self.lower_expr(iter)?;
         let table = match col {
-            Some(_) => self.emit_cur(Inst::Field { base: m, field: Ustr::from("spine") }),
+            Some(_) => self.emit_cur(Inst::Field {
+                base: m,
+                field: Ustr::from("spine"),
+            }),
             None => m,
         };
         let key_cell = self.f.new_cell(None);
@@ -657,7 +761,10 @@ impl Builder<'_> {
         self.f.mark_loop_binding(key_cell);
         self.f.mark_loop_binding(val_cell);
         let nil = self.emit_cur(Inst::Const(Lit::Nil));
-        self.emit_cur(Inst::Store { cell: key_cell, value: nil });
+        self.emit_cur(Inst::Store {
+            cell: key_cell,
+            value: nil,
+        });
         let i_cell = self.new_binding_cell(
             ib,
             self.body.binding_arena[ib].name,
@@ -667,7 +774,10 @@ impl Builder<'_> {
         self.binds.insert(raw(ib), i_cell);
         self.f.mark_loop_binding(i_cell);
         let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
-        self.emit_cur(Inst::Store { cell: i_cell, value: zero });
+        self.emit_cur(Inst::Store {
+            cell: i_cell,
+            value: zero,
+        });
 
         let header = self.f.new_block();
         let body_bb = self.f.new_block();
@@ -676,11 +786,22 @@ impl Builder<'_> {
         self.f.set_term(self.cur, Term::Goto(header));
 
         self.cur = header;
-        self.emit_cur(Inst::MapNext { key_cell, val_cell, table: m });
+        self.emit_cur(Inst::MapNext {
+            key_cell,
+            val_cell,
+            table: m,
+        });
         let k = self.emit_cur(Inst::Load(key_cell));
         let nil2 = self.emit_cur(Inst::Const(Lit::Nil));
         let done = self.emit_cur(Inst::Eq(k, nil2));
-        self.f.set_term(self.cur, Term::Branch { cond: done, then_bb: exit, else_bb: body_bb });
+        self.f.set_term(
+            self.cur,
+            Term::Branch {
+                cond: done,
+                then_bb: exit,
+                else_bb: body_bb,
+            },
+        );
 
         self.cur = body_bb;
         self.bind_map_entry(xpat, key_cell, val_cell, None)?;
@@ -695,7 +816,10 @@ impl Builder<'_> {
         let i2 = self.emit_cur(Inst::Load(i_cell));
         let one = self.emit_cur(Inst::Const(Lit::Int(1)));
         let inc = self.emit_cur(Inst::IntAdd(i2, one));
-        self.emit_cur(Inst::Store { cell: i_cell, value: inc });
+        self.emit_cur(Inst::Store {
+            cell: i_cell,
+            value: inc,
+        });
         self.f.set_term(self.cur, Term::Goto(header));
 
         self.cur = exit;
@@ -743,7 +867,9 @@ impl Builder<'_> {
                 self.bind_for_pattern(vars, pair);
                 Ok(())
             }
-            _ => Err(gap("for-over-Map binds one (item) or two (key, value) vars")),
+            _ => Err(gap(
+                "for-over-Map binds one (item) or two (key, value) vars",
+            )),
         }
     }
 
@@ -766,7 +892,8 @@ impl Builder<'_> {
         };
         let kind = self.coll_kind(coll)?;
         if kind == ContainerKind::Map {
-            let (ib, xpat) = split.ok_or_else(|| gap("enumerate over Map with a single binding"))?;
+            let (ib, xpat) =
+                split.ok_or_else(|| gap("enumerate over Map with a single binding"))?;
             return self.lower_for_map_enumerate(ib, &xpat, coll, body);
         }
         let arr_v = self.lower_expr(coll)?;
@@ -864,8 +991,14 @@ impl Builder<'_> {
         let (kind, arr_v, len_v) = if self.expr_is_flat_vec(iter) {
             let kind = self.nb_kind(iter)?;
             let fv = self.lower_expr(iter)?;
-            let buf = self.emit_cur(Inst::Field { base: fv, field: Ustr::from("buf") });
-            let len = self.emit_cur(Inst::Field { base: fv, field: Ustr::from("len") });
+            let buf = self.emit_cur(Inst::Field {
+                base: fv,
+                field: Ustr::from("buf"),
+            });
+            let len = self.emit_cur(Inst::Field {
+                base: fv,
+                field: Ustr::from("len"),
+            });
             (kind, buf, len)
         } else {
             let kind = self.coll_kind(iter)?;
@@ -947,8 +1080,14 @@ impl Builder<'_> {
     /// The type a loop pattern binds an element as: a plain binder's own type,
     /// or part `component` of a single binder's tuple (`for pair in
     /// xs.enumerate()`). A destructuring pattern or a `ref` binder has none.
-    fn loop_binder_ty(&self, vars: &BindingPattern, component: Option<usize>) -> Option<Rc<MonoTy>> {
-        let BindingPattern::Leaf(b) = vars else { return None };
+    fn loop_binder_ty(
+        &self,
+        vars: &BindingPattern,
+        component: Option<usize>,
+    ) -> Option<Rc<MonoTy>> {
+        let BindingPattern::Leaf(b) = vars else {
+            return None;
+        };
         if self.binding_is_ref(*b) {
             return None;
         }
@@ -987,12 +1126,7 @@ impl Builder<'_> {
                     .binding_ty(*b)
                     .and_then(|ty| self.concrete_ty_id(ty))
                     .ok_or_else(|| self.gap_here("loop binding has no concrete representation"))?;
-                let representation = self.concrete_rep_id(
-                    &mono,
-                    RepUse::Value,
-                    false,
-                    true,
-                )?;
+                let representation = self.concrete_rep_id(&mono, RepUse::Value, false, true)?;
                 let bundle = ValueBundle::new(representation, repr);
                 let leaves = self.repr_to_leaves_bundle_for_shape(&bundle, &shape)?;
                 self.bind_leaves(*b, &leaves, shape)?;
@@ -1036,7 +1170,10 @@ impl Builder<'_> {
                     }
                 }
                 for (i, sub) in subs.iter().enumerate() {
-                    let elem = self.emit_cur(Inst::TupleIndex { base: value, index: i });
+                    let elem = self.emit_cur(Inst::TupleIndex {
+                        base: value,
+                        index: i,
+                    });
                     self.bind_for_pattern(sub, elem);
                 }
             }
@@ -1101,9 +1238,7 @@ impl Builder<'_> {
         shape: ValueShape,
     ) -> Result<(), CompilerError> {
         let bname = self.body.binding_arena[b].name;
-        let owner = self
-            .binding_ty(b)
-            .and_then(|ty| self.concrete_ty_id(ty));
+        let owner = self.binding_ty(b).and_then(|ty| self.concrete_ty_id(ty));
         if let Some(cells) = self.new_flat_enum_cells(b, bname, &shape, owner.as_deref())? {
             if cells.len() != leaves.len() {
                 return Err(self.gap_here(format!(
@@ -1160,7 +1295,10 @@ impl Builder<'_> {
                 FieldShape::Prim => out.push(
                     self.concrete_ty_id(field_ty)
                         .map(|ty| ty.as_ref().clone())
-                        .or_else(|| crate::monoty::convert_decl(self.ws, field_ty, &SpecSubst::default()).ok())?,
+                        .or_else(|| {
+                            crate::monoty::convert_decl(self.ws, field_ty, &SpecSubst::default())
+                                .ok()
+                        })?,
                 ),
                 FieldShape::Nested(child) => out.extend(self.value_shape_leaf_monos(child)?),
             }

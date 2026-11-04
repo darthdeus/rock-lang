@@ -28,14 +28,14 @@
 //! `--skip-gpu` option. Without it, every profile requires a display and GL
 //! driver. A GL error mid-run is a loud FAIL, never a silent skip.
 
+use crate::Result;
 use crate::bone_backend::{categorize, short_path};
 use crate::test_protocol::{compare_value, parse_skull_markers, reason_histogram};
-use crate::Result;
+use bone_core::prelude::Instant;
 use colored::Colorize;
 use skull::ValueExpect;
-use skull_codegen_glsl::{emit_value_test, GlslProfile, ValueTestShaders};
+use skull_codegen_glsl::{GlslProfile, ValueTestShaders, emit_value_test};
 use skull_mir::mir::FuncRef;
-use bone_core::prelude::Instant;
 
 /// GLSL is validated widely enough that f32 arithmetic and the R32F round-trip
 /// introduce error well above the 1e-12 luajit/node tolerance -- ~1e-6 is f32
@@ -43,8 +43,10 @@ use bone_core::prelude::Instant;
 const GLSL_FLOAT_REL_TOL: f64 = 1e-6;
 
 /// The two emission profiles run by default.
-const PROFILES: [(&str, GlslProfile); 2] =
-    [("330core", GlslProfile::Core330), ("300es", GlslProfile::Es300)];
+const PROFILES: [(&str, GlslProfile); 2] = [
+    ("330core", GlslProfile::Core330),
+    ("300es", GlslProfile::Es300),
+];
 
 /// One profile's tallies over the whole run.
 pub struct GlslProfileSummary {
@@ -121,7 +123,11 @@ pub fn glsl_test(paths: &[String], skip_gpu: bool) -> Result<()> {
         if !p.skip_reasons.is_empty() {
             println!(
                 "    {}",
-                format!("=== [{}] skip reasons (glsl) -- the A1 fn-emission work list ===", p.profile).bold()
+                format!(
+                    "=== [{}] skip reasons (glsl) -- the A1 fn-emission work list ===",
+                    p.profile
+                )
+                .bold()
             );
             for (reason, count) in p.skip_reasons.iter().take(50) {
                 println!("      {:>5}  {}", count.to_string().yellow(), reason);
@@ -193,19 +199,26 @@ pub fn glsl_test_run(paths: &[String], print: bool, skip_gpu: bool) -> Result<Gl
     for (label, outcome) in outcomes {
         summary.files += 1;
         match outcome {
-            Ok(UnitOutcome::Ran { outside_value_class, profiles }) => {
+            Ok(UnitOutcome::Ran {
+                outside_value_class,
+                profiles,
+            }) => {
                 summary.outside_value_class += outside_value_class;
                 for (i, pr) in profiles.into_iter().enumerate() {
                     summary.per_profile[i].passed += pr.passed;
                     let any = pr.passed + pr.failed.len() + pr.skips.len();
-                    summary.per_profile[i].failed.extend(
-                        pr.failed.iter().map(|d| format!("{d} [{}]", PROFILES[i].0)),
-                    );
+                    summary.per_profile[i]
+                        .failed
+                        .extend(pr.failed.iter().map(|d| format!("{d} [{}]", PROFILES[i].0)));
                     for (_, reason) in &pr.skips {
                         skip_reasons[i].push(reason.clone());
                     }
                     if print && gl_available[i] && any > 0 {
-                        let status = if pr.failed.is_empty() { "ok".green() } else { "FAILED".red() };
+                        let status = if pr.failed.is_empty() {
+                            "ok".green()
+                        } else {
+                            "FAILED".red()
+                        };
                         println!(
                             "{:.<52} [{}] {}  ({} pass, {} fail, {} skip)",
                             label,
@@ -242,8 +255,7 @@ pub fn glsl_test_run(paths: &[String], print: bool, skip_gpu: bool) -> Result<Gl
     }
 
     for (i, reasons) in skip_reasons.into_iter().enumerate() {
-        summary.per_profile[i].skip_reasons =
-            reason_histogram(reasons.iter().map(|s| s.as_str()));
+        summary.per_profile[i].skip_reasons = reason_histogram(reasons.iter().map(|s| s.as_str()));
     }
     Ok(summary)
 }
@@ -273,7 +285,12 @@ enum UnitOutcome {
 fn build_file(file: &str, runner: &std::path::Path, gl_available: &[bool; 2]) -> UnitOutcome {
     let src = match fs_err::read_to_string(file) {
         Ok(s) => s,
-        Err(e) => return UnitOutcome::UnitFail { reason: e.to_string(), rendered: e.to_string() },
+        Err(e) => {
+            return UnitOutcome::UnitFail {
+                reason: e.to_string(),
+                rendered: e.to_string(),
+            };
+        }
     };
     let user = match skull_parser::parse_module(&src, ustr::Ustr::from(file)) {
         Ok(u) => u,
@@ -285,16 +302,25 @@ fn build_file(file: &str, runner: &std::path::Path, gl_available: &[bool; 2]) ->
         Err(errs) => return compile_failure(file, &src, &errs),
     };
     let user_mid = crate::bone_backend::entry_module_id(&ws, user_file);
-    let tests: Vec<(FuncRef, skull::SkullTest)> = match skull::module_tests_with_ids(&ws, user_mid) {
+    let tests: Vec<(FuncRef, skull::SkullTest)> = match skull::module_tests_with_ids(&ws, user_mid)
+    {
         Ok(tests) => tests
             .into_iter()
-            .map(|(fid, t)| (FuncRef { module: user_mid, func: fid }, t))
+            .map(|(fid, t)| {
+                (
+                    FuncRef {
+                        module: user_mid,
+                        func: fid,
+                    },
+                    t,
+                )
+            })
             .collect(),
         Err(e) => {
             return UnitOutcome::UnitFail {
                 reason: categorize(&e.message),
                 rendered: crate::skull_backend::render_file_errs(file, &src, &[e]),
-            }
+            };
         }
     };
     run_tests(&ws, &tests, runner, gl_available)
@@ -308,7 +334,10 @@ fn build_package(dir: &str, runner: &std::path::Path, gl_available: &[bool; 2]) 
     let _slot = match crate::compile_slots::acquire(dir) {
         Ok(slot) => slot,
         Err(error) => {
-            return UnitOutcome::UnitFail { reason: "no compile slot".to_string(), rendered: format!("{error:#}") };
+            return UnitOutcome::UnitFail {
+                reason: "no compile slot".to_string(),
+                rendered: format!("{error:#}"),
+            };
         }
     };
     let spec = crate::unified_compile::SourceSpec::Directory(std::path::PathBuf::from(dir));
@@ -318,7 +347,7 @@ fn build_package(dir: &str, runner: &std::path::Path, gl_available: &[bool; 2]) 
             return UnitOutcome::UnitFail {
                 reason: "cannot load project".to_string(),
                 rendered: e.to_string(),
-            }
+            };
         }
     };
     let (mut modules, _entry) = match crate::skull_backend::skull_assemble_project(&sources) {
@@ -327,7 +356,7 @@ fn build_package(dir: &str, runner: &std::path::Path, gl_available: &[bool; 2]) 
             return UnitOutcome::UnitFail {
                 reason: categorize(&errs[0].message),
                 rendered: crate::skull_backend::render_project_errs(&sources, &errs),
-            }
+            };
         }
     };
     let ws = match crate::bone_backend::check_modules(&mut modules) {
@@ -336,13 +365,18 @@ fn build_package(dir: &str, runner: &std::path::Path, gl_available: &[bool; 2]) 
             return UnitOutcome::UnitFail {
                 reason: categorize(&errs[0].message),
                 rendered: crate::skull_backend::render_project_errs(&sources, &errs),
-            }
+            };
         }
     };
     drop(modules);
     let tests = match crate::skull_backend::collect_package_test_fns(&ws, dir) {
         Ok(tests) => tests,
-        Err(e) => return UnitOutcome::UnitFail { reason: categorize(&e.message), rendered: e.message },
+        Err(e) => {
+            return UnitOutcome::UnitFail {
+                reason: categorize(&e.message),
+                rendered: e.message,
+            };
+        }
     };
     run_tests(&ws, &tests, runner, gl_available)
 }
@@ -356,7 +390,11 @@ fn compile_failure(file: &str, src: &str, errs: &[rock_core::CompilerError]) -> 
             outside_value_class: 0,
             profiles: PROFILES
                 .iter()
-                .map(|_| ProfileRun { passed: 0, failed: Vec::new(), skips: Vec::new() })
+                .map(|_| ProfileRun {
+                    passed: 0,
+                    failed: Vec::new(),
+                    skips: Vec::new(),
+                })
                 .collect(),
         };
     }
@@ -402,7 +440,8 @@ fn run_tests(
                 if *i < i32::MIN as i64 || *i > i32::MAX as i64 {
                     skips.push((
                         t.name.clone(),
-                        "value test: returns literal exceeds i32 range (GLSL has no int64)".to_string(),
+                        "value test: returns literal exceeds i32 range (GLSL has no int64)"
+                            .to_string(),
                     ));
                     continue;
                 }
@@ -424,7 +463,9 @@ fn run_tests(
                         runnable.iter().map(|(n, e, _)| (n.as_str(), e)).collect();
                     for (name, val) in &markers.values {
                         let Some(expect) = expects.get(name.as_str()) else {
-                            failed.push(format!("harness breach: VALUE for `{name}` without an expectation"));
+                            failed.push(format!(
+                                "harness breach: VALUE for `{name}` without an expectation"
+                            ));
                             continue;
                         };
                         match compare_value(expect, val, GLSL_FLOAT_REL_TOL) {
@@ -442,10 +483,17 @@ fn run_tests(
                 }
             }
         }
-        profiles.push(ProfileRun { passed, failed, skips });
+        profiles.push(ProfileRun {
+            passed,
+            failed,
+            skips,
+        });
     }
 
-    UnitOutcome::Ran { outside_value_class, profiles }
+    UnitOutcome::Ran {
+        outside_value_class,
+        profiles,
+    }
 }
 
 /// Parsed marker lines from one runner invocation. Reuses the shared parser so
@@ -479,10 +527,14 @@ fn run_batch(
                 runnable.len(),
                 stdout.trim(),
                 stderr.trim()
-            ))
+            ));
         }
     };
-    Ok(RunnerMarkers { passed: markers.passed, fails: markers.fails, values: markers.values })
+    Ok(RunnerMarkers {
+        passed: markers.passed,
+        fails: markers.fails,
+        values: markers.values,
+    })
 }
 
 /// Serialize the runnable shaders to the runner's JSON job protocol.
@@ -543,8 +595,13 @@ fn spawn_runner(
     let mut cmd = Command::new(runner);
     rock_host::compiler_thp::configure_runtime_command(&mut cmd);
     cmd.arg("--profile").arg(profile);
-    cmd = (crate::registry::RuntimeServices::registered().runtime_command)(cmd, crate::registry::RuntimeProcess::Native);
-    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd = (crate::registry::RuntimeServices::registered().runtime_command)(
+        cmd,
+        crate::registry::RuntimeProcess::Native,
+    );
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     let mut child = cmd.spawn().map_err(|e| format!("spawn: {e}"))?;
     child
         .stdin
@@ -586,7 +643,9 @@ pub struct ValidateSummary {
 /// FAIL; missing GL profiles require the explicit GPU opt-out.
 pub fn shader_validate(dirs: &[String], skip_gpu: bool) -> Result<()> {
     if dirs.is_empty() {
-        crate::bail!("rock shader-validate: usage: rock shader-validate <project-dir> [project-dir...]");
+        crate::bail!(
+            "rock shader-validate: usage: rock shader-validate <project-dir> [project-dir...]"
+        );
     }
     let start = Instant::now();
     let summary = shader_validate_run(dirs, true, skip_gpu)?;
@@ -629,7 +688,11 @@ pub fn shader_validate(dirs: &[String], skip_gpu: bool) -> Result<()> {
 /// (missing runner, a project that fails to build, a pair that fails to EMIT)
 /// are `Err` -- the same pairs emit inside every game build, so an emit failure
 /// here is a regression or a profile-specific emitter gap, never a skip.
-pub fn shader_validate_run(dirs: &[String], print: bool, skip_gpu: bool) -> Result<ValidateSummary> {
+pub fn shader_validate_run(
+    dirs: &[String],
+    print: bool,
+    skip_gpu: bool,
+) -> Result<ValidateSummary> {
     let runner = locate_runner()?;
     let mut gl_available: [bool; 2] = [false, false];
     for (i, (pname, _)) in PROFILES.iter().enumerate() {
@@ -715,7 +778,11 @@ pub fn shader_validate_run(dirs: &[String], print: bool, skip_gpu: bool) -> Resu
                     ),
                 }
                 .map_err(|e| {
-                    anyhow::anyhow!("{dir}: `{}` failed to emit for {pname}: {}", pair.key, e.message)
+                    anyhow::anyhow!(
+                        "{dir}: `{}` failed to emit for {pname}: {}",
+                        pair.key,
+                        e.message
+                    )
                 })?;
                 let (vertex, fragment) = split_stages(&emission.source);
                 jobs.push((format!("{dir}:{}", pair.key), vertex, fragment));
@@ -725,7 +792,11 @@ pub fn shader_validate_run(dirs: &[String], print: bool, skip_gpu: bool) -> Resu
             }
             let (passed, failed) = compile_batch(&runner, pname, &jobs)?;
             if print {
-                let status = if failed.is_empty() { "ok".green() } else { "FAILED".red() };
+                let status = if failed.is_empty() {
+                    "ok".green()
+                } else {
+                    "FAILED".red()
+                };
                 println!(
                     "{:.<52} [{}] {}  ({} pass, {} fail)",
                     dir,
@@ -751,11 +822,22 @@ pub fn validate_workspace(dir: &str) -> Result<bone_semantic::inference::Workspa
     validate_sources(sources)
 }
 
-fn validate_sources(sources: rock_core::SourceFiles) -> Result<bone_semantic::inference::Workspace> {
-    let (mut modules, _entry) = crate::skull_backend::skull_assemble_project(&sources)
-        .map_err(|errs| anyhow::anyhow!("{}", crate::skull_backend::render_project_errs(&sources, &errs)))?;
-    crate::bone_backend::check_modules(&mut modules)
-        .map_err(|errs| anyhow::anyhow!("{}", crate::skull_backend::render_project_errs(&sources, &errs)))
+fn validate_sources(
+    sources: rock_core::SourceFiles,
+) -> Result<bone_semantic::inference::Workspace> {
+    let (mut modules, _entry) =
+        crate::skull_backend::skull_assemble_project(&sources).map_err(|errs| {
+            anyhow::anyhow!(
+                "{}",
+                crate::skull_backend::render_project_errs(&sources, &errs)
+            )
+        })?;
+    crate::bone_backend::check_modules(&mut modules).map_err(|errs| {
+        anyhow::anyhow!(
+            "{}",
+            crate::skull_backend::render_project_errs(&sources, &errs)
+        )
+    })
 }
 
 /// Split a single-file `#ifdef VERTEX` / `#ifdef PIXEL` shader into the two
@@ -793,7 +875,10 @@ fn compile_batch(
     let (code, stdout, stderr) = spawn_runner(runner, profile, &payload)
         .map_err(|e| anyhow::anyhow!("runner [{profile}]: {e}"))?;
     if code != Some(0) {
-        crate::bail!("runner [{profile}] exited {code:?} mid-run: {}", stderr.trim());
+        crate::bail!(
+            "runner [{profile}] exited {code:?} mid-run: {}",
+            stderr.trim()
+        );
     }
     let markers = parse_skull_markers(&stdout)
         .filter(|m| m.passed + m.fails.len() + m.values.len() == jobs.len())
@@ -815,7 +900,9 @@ fn compile_batch(
         if val == "compiled" {
             passed += 1;
         } else {
-            failed.push(format!("harness breach: `{name}` returned `{val}`, expected `compiled` [{profile}]"));
+            failed.push(format!(
+                "harness breach: `{name}` returned `{val}`, expected `compiled` [{profile}]"
+            ));
         }
     }
     Ok((passed, failed))
@@ -837,10 +924,19 @@ fn locate_runner() -> Result<std::path::PathBuf> {
         }
         return Ok(p);
     }
-    let name = if cfg!(windows) { "stone-glsl-runner.exe" } else { "stone-glsl-runner" };
+    let name = if cfg!(windows) {
+        "stone-glsl-runner.exe"
+    } else {
+        "stone-glsl-runner"
+    };
     let exe = std::env::current_exe().map_err(|e| anyhow::anyhow!("current_exe: {e}"))?;
-    let dir = exe.parent().ok_or_else(|| anyhow::anyhow!("exe has no parent dir"))?;
-    for cand in [dir.join(name), dir.parent().map(|d| d.join(name)).unwrap_or_default()] {
+    let dir = exe
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("exe has no parent dir"))?;
+    for cand in [
+        dir.join(name),
+        dir.parent().map(|d| d.join(name)).unwrap_or_default(),
+    ] {
         if cand.exists() {
             return Ok(cand);
         }
@@ -856,9 +952,16 @@ mod tests {
     #[test]
     fn package_tests_wait_for_a_compile_slot() {
         let package = tempfile::tempdir().expect("package");
-        std::fs::write(package.path().join("stick.toml"),
-            "[package]\nname = \"slot-probe\"\ntype = \"lib\"\n").unwrap();
-        std::fs::write(package.path().join("probe.rock"), "@test fn probe() -> Int = 1\n").unwrap();
+        std::fs::write(
+            package.path().join("stick.toml"),
+            "[package]\nname = \"slot-probe\"\ntype = \"lib\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            package.path().join("probe.rock"),
+            "@test fn probe() -> Int = 1\n",
+        )
+        .unwrap();
         let dir = package.path().to_str().unwrap().to_owned();
         // No GL profile is available, so no runner is spawned.
         crate::compile_slots::assert_compile_waits_for_slot(move || {

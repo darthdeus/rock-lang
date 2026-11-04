@@ -15,7 +15,10 @@ use crate::common::ws_with;
 
 fn program_result(src: &str) -> Result<String, String> {
     let ws = ws_with(src);
-    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("test module");
     match skull_codegen_js::emit::emit_program(&ws, mid) {
         Ok(p) => Ok(p.program),
         Err(e) => Err(e.message),

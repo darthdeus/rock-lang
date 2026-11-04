@@ -6,7 +6,7 @@
 //! tree against whatever representation the value arrived in; the instance
 //! walk reads the same tree's [`FmtNode::obligations`].
 use super::*;
-use crate::monoty::{convert_decl, MonoSubst};
+use crate::monoty::{MonoSubst, convert_decl};
 use bone_semantic::hir::VariantPayload;
 
 /// How an absent nullable payload prints: Rock's spelling, not the backend's.
@@ -15,15 +15,31 @@ const NULL_TEXT: &str = "null";
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum FmtNode {
     /// A scalar, a string or a payload-free enum, with its logical type.
-    Leaf { route: StringifyRoute, ty: MonoTy },
+    Leaf {
+        route: StringifyRoute,
+        ty: MonoTy,
+    },
     Nullable(Box<FmtNode>),
-    Enum { name: Ustr, variants: Vec<FmtVariant> },
+    Enum {
+        name: Ustr,
+        variants: Vec<FmtVariant>,
+    },
     /// `Name { field: <..>, .. }`.
-    Record { name: Ustr, fields: Vec<(Ustr, FmtNode)> },
+    Record {
+        name: Ustr,
+        fields: Vec<(Ustr, FmtNode)>,
+    },
     /// `Entity<T>(scene=.., ..)`: the handle's identity integers, unresolved.
-    Handle { name: Ustr, label: String, fields: Vec<(&'static str, Ustr)> },
+    Handle {
+        name: Ustr,
+        label: String,
+        fields: Vec<(&'static str, Ustr)>,
+    },
     /// `Name(<inner>)` for a transparent newtype.
-    Newtype { name: Ustr, inner: Box<FmtNode> },
+    Newtype {
+        name: Ustr,
+        inner: Box<FmtNode>,
+    },
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -44,7 +60,9 @@ impl FmtNode {
     /// lowering passes to `dispatched_call` for it.
     pub fn obligations(&self, path: &mut Vec<u32>, out: &mut Vec<(Vec<u32>, &'static str)>) {
         match self {
-            Self::Leaf { route, .. } => out.extend(route.synthesized_callee().map(|n| (path.clone(), n))),
+            Self::Leaf { route, .. } => {
+                out.extend(route.synthesized_callee().map(|n| (path.clone(), n)))
+            }
             Self::Nullable(inner) => inner.obligations(path, out),
             Self::Enum { variants, .. } => {
                 for (vi, v) in variants.iter().enumerate() {
@@ -93,7 +111,12 @@ pub fn formats_structurally(ws: &Workspace, name: Ustr) -> bool {
 fn handle_fields(name: Ustr) -> Option<&'static [(&'static str, &'static str)]> {
     use bone_semantic::prelude::is_intrinsic_key;
     if is_intrinsic_key(name, "Entity") {
-        Some(&[("scene", "_scene_id"), ("arena", "_arena_id"), ("slot", "_slot"), ("generation", "_generation")])
+        Some(&[
+            ("scene", "_scene_id"),
+            ("arena", "_arena_id"),
+            ("slot", "_slot"),
+            ("generation", "_generation"),
+        ])
     } else if is_intrinsic_key(name, "Arena") {
         Some(&[("scene", "_scene_id"), ("arena", "_arena_id")])
     } else if is_intrinsic_key(name, "Scene") {
@@ -116,15 +139,25 @@ fn type_label(ty: &MonoTy) -> String {
         MonoTy::Never => "never".into(),
         MonoTy::Nullable(inner) => format!("{}?", type_label(inner)),
         MonoTy::Tuple(parts) => {
-            format!("({})", parts.iter().map(type_label).collect::<Vec<_>>().join(", "))
+            format!(
+                "({})",
+                parts.iter().map(type_label).collect::<Vec<_>>().join(", ")
+            )
         }
-        MonoTy::App { ctor: MonoCtor::Array, params } if params.len() == 1 => {
+        MonoTy::App {
+            ctor: MonoCtor::Array,
+            params,
+        } if params.len() == 1 => {
             format!("[{}]", type_label(&params[0]))
         }
-        MonoTy::App { ctor: MonoCtor::Nominal(n), params } if params.is_empty() => {
-            n.to_string()
-        }
-        MonoTy::App { ctor: MonoCtor::Nominal(n), params } => format!(
+        MonoTy::App {
+            ctor: MonoCtor::Nominal(n),
+            params,
+        } if params.is_empty() => n.to_string(),
+        MonoTy::App {
+            ctor: MonoCtor::Nominal(n),
+            params,
+        } => format!(
             "{}<{}>",
             n,
             params.iter().map(type_label).collect::<Vec<_>>().join(", ")
@@ -139,7 +172,8 @@ fn nominal_subst(ws: &Workspace, generics: &[TyId], params: &[MonoTy]) -> Option
     }
     let mut subst = MonoSubst::default();
     for (generic, param) in generics.iter().zip(params) {
-        let TypeExpr::Generic(var, _) = crate::monoty::TyEnv::Decl.decl_node(ws, *generic).ok()? else {
+        let TypeExpr::Generic(var, _) = crate::monoty::TyEnv::Decl.decl_node(ws, *generic).ok()?
+        else {
             return None;
         };
         subst.insert(var, param.clone());
@@ -153,15 +187,31 @@ pub fn format_tree(ws: &Workspace, ty: &MonoTy) -> Result<FmtNode, String> {
     format_tree_in(ws, ty, &mut Vec::new())
 }
 
-fn format_tree_in(ws: &Workspace, ty: &MonoTy, visiting: &mut Vec<Ustr>) -> Result<FmtNode, String> {
+fn format_tree_in(
+    ws: &Workspace,
+    ty: &MonoTy,
+    visiting: &mut Vec<Ustr>,
+) -> Result<FmtNode, String> {
     Ok(match ty {
-        MonoTy::Int | MonoTy::Uint | MonoTy::Bool => {
-            FmtNode::Leaf { route: StringifyRoute::ToString, ty: ty.clone() }
+        MonoTy::Int | MonoTy::Uint | MonoTy::Bool => FmtNode::Leaf {
+            route: StringifyRoute::ToString,
+            ty: ty.clone(),
+        },
+        MonoTy::Float => FmtNode::Leaf {
+            route: StringifyRoute::FormatFloat,
+            ty: ty.clone(),
+        },
+        MonoTy::String => FmtNode::Leaf {
+            route: StringifyRoute::EscapedString,
+            ty: ty.clone(),
+        },
+        MonoTy::Nullable(inner) => {
+            FmtNode::Nullable(Box::new(format_tree_in(ws, inner, visiting)?))
         }
-        MonoTy::Float => FmtNode::Leaf { route: StringifyRoute::FormatFloat, ty: ty.clone() },
-        MonoTy::String => FmtNode::Leaf { route: StringifyRoute::EscapedString, ty: ty.clone() },
-        MonoTy::Nullable(inner) => FmtNode::Nullable(Box::new(format_tree_in(ws, inner, visiting)?)),
-        MonoTy::App { ctor: MonoCtor::Nominal(name), params } => {
+        MonoTy::App {
+            ctor: MonoCtor::Nominal(name),
+            params,
+        } => {
             let name = *name;
             if let Some(fields) = handle_fields(name) {
                 let label = type_label(ty);
@@ -179,14 +229,26 @@ fn format_tree_in(ws: &Workspace, ty: &MonoTy, visiting: &mut Vec<Ustr>) -> Resu
             visiting.pop();
             node?
         }
-        MonoTy::App { ctor: MonoCtor::Array | MonoCtor::Map, .. } | MonoTy::Tuple(_) => {
+        MonoTy::App {
+            ctor: MonoCtor::Array | MonoCtor::Map,
+            ..
+        }
+        | MonoTy::Tuple(_) => {
             return Err(format!("`{}` is a container", type_label(ty)));
         }
-        MonoTy::App { ctor: MonoCtor::Ref, .. } => {
+        MonoTy::App {
+            ctor: MonoCtor::Ref,
+            ..
+        } => {
             return Err(format!("`{}` is a raw reference", type_label(ty)));
         }
         MonoTy::Function { .. } => return Err(format!("`{}` is a callback", type_label(ty))),
-        other => return Err(format!("`{}` has no structural rendering", type_label(other))),
+        other => {
+            return Err(format!(
+                "`{}` has no structural rendering",
+                type_label(other)
+            ));
+        }
     })
 }
 
@@ -197,27 +259,41 @@ fn nominal_tree(
     visiting: &mut Vec<Ustr>,
 ) -> Result<FmtNode, String> {
     let field_tree = |ty: TyId, subst: &MonoSubst, visiting: &mut Vec<Ustr>| {
-        let ty = convert_decl(ws, ty, subst).map_err(|r| format!("a field of `{name}` has no type ({r:?})"))?;
+        let ty = convert_decl(ws, ty, subst)
+            .map_err(|r| format!("a field of `{name}` has no type ({r:?})"))?;
         format_tree_in(ws, &ty, visiting)
     };
     if let Some(nid) = ws.newtypes_by_name.get(&name) {
         let def = &ws.module(nid.module).newtypes[nid.def];
-        let subst = nominal_subst(ws, &def.generics, params).ok_or_else(|| format!("`{name}` arity"))?;
-        return Ok(FmtNode::Newtype { name, inner: Box::new(field_tree(def.wrapped, &subst, visiting)?) });
+        let subst =
+            nominal_subst(ws, &def.generics, params).ok_or_else(|| format!("`{name}` arity"))?;
+        return Ok(FmtNode::Newtype {
+            name,
+            inner: Box::new(field_tree(def.wrapped, &subst, visiting)?),
+        });
     }
     if let Some(eid) = ws.enums_by_name.get(&name) {
         if payload_free_enum_variants(ws, name).is_some() {
-            let ty = MonoTy::App { ctor: MonoCtor::Nominal(name), params: params.to_vec() };
-            return Ok(FmtNode::Leaf { route: StringifyRoute::EnumNames(name), ty });
+            let ty = MonoTy::App {
+                ctor: MonoCtor::Nominal(name),
+                params: params.to_vec(),
+            };
+            return Ok(FmtNode::Leaf {
+                route: StringifyRoute::EnumNames(name),
+                ty,
+            });
         }
         let def = &ws.module(eid.module).enums[eid.def];
-        let subst = nominal_subst(ws, &def.generics, params).ok_or_else(|| format!("`{name}` arity"))?;
+        let subst =
+            nominal_subst(ws, &def.generics, params).ok_or_else(|| format!("`{name}` arity"))?;
         let mut variants = Vec::with_capacity(def.variants.len());
         for v in &def.variants {
             let payload = match &v.payload {
                 VariantPayload::Unit => FmtPayload::Unit,
                 VariantPayload::Tuple(tys) => FmtPayload::Tuple(
-                    tys.iter().map(|ty| field_tree(*ty, &subst, visiting)).collect::<Result<_, _>>()?,
+                    tys.iter()
+                        .map(|ty| field_tree(*ty, &subst, visiting))
+                        .collect::<Result<_, _>>()?,
                 ),
                 VariantPayload::Record(fields) => FmtPayload::Record(
                     fields
@@ -226,7 +302,10 @@ fn nominal_tree(
                         .collect::<Result<_, String>>()?,
                 ),
             };
-            variants.push(FmtVariant { name: v.name, payload });
+            variants.push(FmtVariant {
+                name: v.name,
+                payload,
+            });
         }
         return Ok(FmtNode::Enum { name, variants });
     }
@@ -235,7 +314,8 @@ fn nominal_tree(
         if !def.is_value {
             return Err(format!("`{name}` is an identity struct"));
         }
-        let subst = nominal_subst(ws, &def.generics, params).ok_or_else(|| format!("`{name}` arity"))?;
+        let subst =
+            nominal_subst(ws, &def.generics, params).ok_or_else(|| format!("`{name}` arity"))?;
         let fields = def
             .fields
             .iter()
@@ -261,9 +341,19 @@ impl Builder<'_> {
                 self.render_stringify(route, path, v)
             }
             FmtNode::Nullable(inner) => match repr {
-                ValueRepr::Group { name, parts, present: Some(present) } => {
-                    let group = ValueRepr::Group { name, parts, present: None };
-                    self.render_present_or_null(present, true, NULL_TEXT, |s| s.render_fmt(inner, path, group))
+                ValueRepr::Group {
+                    name,
+                    parts,
+                    present: Some(present),
+                } => {
+                    let group = ValueRepr::Group {
+                        name,
+                        parts,
+                        present: None,
+                    };
+                    self.render_present_or_null(present, true, NULL_TEXT, |s| {
+                        s.render_fmt(inner, path, group)
+                    })
                 }
                 ValueRepr::Scalar(v) => {
                     let nil = self.emit_cur(Inst::Const(Lit::Nil));
@@ -288,11 +378,17 @@ impl Builder<'_> {
                     pieces.push((format!("{field}: "), rendered));
                 }
                 if pieces.is_empty() {
-                    return Ok(self.emit_cur(Inst::Const(Lit::Str(Ustr::from(format!("{name} {{}}").as_str())))));
+                    return Ok(self.emit_cur(Inst::Const(Lit::Str(Ustr::from(
+                        format!("{name} {{}}").as_str(),
+                    )))));
                 }
                 Ok(self.join_pieces(&format!("{name} {{ "), pieces, " }"))
             }
-            FmtNode::Handle { name, label, fields } => {
+            FmtNode::Handle {
+                name,
+                label,
+                fields,
+            } => {
                 let parts = self.record_parts(*name, fields.iter().map(|(_, f)| *f), repr)?;
                 let mut pieces = Vec::with_capacity(fields.len());
                 for ((l, _), part) in fields.iter().zip(parts) {
@@ -325,7 +421,12 @@ impl Builder<'_> {
     }
 
     /// `open` + `label_i .. piece_i` joined by ", " + `close`, one flat concat run.
-    fn join_pieces(&mut self, open: &str, pieces: Vec<(String, Idx<Inst>)>, close: &str) -> Idx<Inst> {
+    fn join_pieces(
+        &mut self,
+        open: &str,
+        pieces: Vec<(String, Idx<Inst>)>,
+        close: &str,
+    ) -> Idx<Inst> {
         let mut out = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(open))));
         for (i, (label, piece)) in pieces.into_iter().enumerate() {
             let sep = if i > 0 { format!(", {label}") } else { label };
@@ -351,8 +452,19 @@ impl Builder<'_> {
         let value_bb = self.f.new_block();
         let null_bb = self.f.new_block();
         let join = self.f.new_block();
-        let (then_bb, else_bb) = if cond_is_present { (value_bb, null_bb) } else { (null_bb, value_bb) };
-        self.f.set_term(self.cur, Term::Branch { cond, then_bb, else_bb });
+        let (then_bb, else_bb) = if cond_is_present {
+            (value_bb, null_bb)
+        } else {
+            (null_bb, value_bb)
+        };
+        self.f.set_term(
+            self.cur,
+            Term::Branch {
+                cond,
+                then_bb,
+                else_bb,
+            },
+        );
 
         self.cur = null_bb;
         let null = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(null_text))));
@@ -380,12 +492,21 @@ impl Builder<'_> {
             .struct_by_name
             .get(&name)
             .ok_or_else(|| gap(format!("formatted record `{name}` has no definition")))?;
-        let declared: Vec<Ustr> =
-            self.ws.module(sid.module).structs[sid.def].fields.iter().map(|f| f.name).collect();
+        let declared: Vec<Ustr> = self.ws.module(sid.module).structs[sid.def]
+            .fields
+            .iter()
+            .map(|f| f.name)
+            .collect();
         match repr {
-            ValueRepr::Group { parts, present: None, .. } => {
+            ValueRepr::Group {
+                parts,
+                present: None,
+                ..
+            } => {
                 if parts.len() != declared.len() {
-                    return Err(gap(format!("formatted record `{name}` has a mismatched group")));
+                    return Err(gap(format!(
+                        "formatted record `{name}` has a mismatched group"
+                    )));
                 }
                 wanted
                     .map(|w| {
@@ -448,12 +569,15 @@ impl Builder<'_> {
                     for (i, child) in nodes.iter().enumerate() {
                         let child_path = [path.as_slice(), &[vi as u32, i as u32]].concat();
                         let slot = flat_shape.as_ref().map_or(i, |s| s.slot_offset(i));
-                        let piece = match self.flat_payload_leaf_shape(Some(name), variant.name, i) {
+                        let piece = match self.flat_payload_leaf_shape(Some(name), variant.name, i)
+                        {
                             Some(vs) => {
-                                let shape = flat_shape
-                                    .as_ref()
-                                    .ok_or_else(|| gap("flat enum payload lost its compiler-owned shape"))?;
-                                if let Some(mut inner) = self.nested_flat_enum_scrut(scrut, slot, &vs)? {
+                                let shape = flat_shape.as_ref().ok_or_else(|| {
+                                    gap("flat enum payload lost its compiler-owned shape")
+                                })?;
+                                if let Some(mut inner) =
+                                    self.nested_flat_enum_scrut(scrut, slot, &vs)?
+                                {
                                     // The nested tag shares its slot with other
                                     // variants' payloads, like any leaf.
                                     if let Scrut::Cells { tag, .. } = &mut inner {
@@ -480,7 +604,8 @@ impl Builder<'_> {
                     for (i, (field, child)) in fields.iter().enumerate() {
                         let child_path = [path.as_slice(), &[vi as u32, i as u32]].concat();
                         let payload = self.scrut_named(scrut, *field, cdata)?;
-                        let piece = self.render_fmt(child, child_path, ValueRepr::Scalar(payload))?;
+                        let piece =
+                            self.render_fmt(child, child_path, ValueRepr::Scalar(payload))?;
                         pieces.push((format!("{field}: "), piece));
                     }
                     self.join_pieces(&format!("{head} {{ "), pieces, " }")
@@ -503,16 +628,25 @@ fn leaves_to_repr(
     leaves: &mut impl Iterator<Item = Idx<Inst>>,
 ) -> Result<ValueRepr, CompilerError> {
     if shape.nullable {
-        return Err(gap(format!("nullable widened payload `{}` cannot be formatted", shape.name)));
+        return Err(gap(format!(
+            "nullable widened payload `{}` cannot be formatted",
+            shape.name
+        )));
     }
     let mut parts = Vec::with_capacity(shape.fields.len());
     for (_, field) in &shape.fields {
         parts.push(match field {
             FieldShape::Prim => ValueRepr::Scalar(
-                leaves.next().ok_or_else(|| gap(format!("`{}` ran out of leaves", shape.name)))?,
+                leaves
+                    .next()
+                    .ok_or_else(|| gap(format!("`{}` ran out of leaves", shape.name)))?,
             ),
             FieldShape::Nested(inner) => leaves_to_repr(inner, leaves)?,
         });
     }
-    Ok(ValueRepr::Group { name: shape.name, parts, present: None })
+    Ok(ValueRepr::Group {
+        name: shape.name,
+        parts,
+        present: None,
+    })
 }

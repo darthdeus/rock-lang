@@ -16,7 +16,9 @@ pub fn successors(term: &Term, mut f: impl FnMut(Idx<Block>)) {
     match term {
         Term::Return(_) | Term::Unreachable => {}
         Term::Goto(b) => f(*b),
-        Term::Branch { then_bb, else_bb, .. } => {
+        Term::Branch {
+            then_bb, else_bb, ..
+        } => {
             f(*then_bb);
             f(*else_bb);
         }
@@ -260,17 +262,18 @@ pub mod dense {
         let mut idom = vec![None; n];
         idom[entry] = Some(entry);
 
-        let intersect = |mut a: usize, mut b: usize, idom: &[Option<usize>], ri: &[usize]| -> usize {
-            while a != b {
-                while ri[a] > ri[b] {
-                    a = idom[a].unwrap();
+        let intersect =
+            |mut a: usize, mut b: usize, idom: &[Option<usize>], ri: &[usize]| -> usize {
+                while a != b {
+                    while ri[a] > ri[b] {
+                        a = idom[a].unwrap();
+                    }
+                    while ri[b] > ri[a] {
+                        b = idom[b].unwrap();
+                    }
                 }
-                while ri[b] > ri[a] {
-                    b = idom[b].unwrap();
-                }
-            }
-            a
-        };
+                a
+            };
 
         let mut changed = true;
         while changed {

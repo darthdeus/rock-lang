@@ -7,9 +7,11 @@
 //! - a lua-only non-host-mapped fn reached from JS still rejects.
 use crate::common::{node, ws_with};
 
-
 fn emit_program_js(ws: &bone_semantic::inference::Workspace) -> Result<String, String> {
-    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("test module");
     skull_codegen_js::emit::emit_program(ws, mid)
         .map(|p| p.program)
         .map_err(|e| e.message)
@@ -29,8 +31,14 @@ fn main() {
 "#,
     );
     let prog = emit_program_js(&ws).expect("emit js program");
-    assert!(prog.contains("return x + x"), "js body must emit verbatim:\n{prog}");
-    assert!(!prog.contains("return x * 2"), "lua body must NOT leak into js:\n{prog}");
+    assert!(
+        prog.contains("return x + x"),
+        "js body must emit verbatim:\n{prog}"
+    );
+    assert!(
+        !prog.contains("return x * 2"),
+        "lua body must NOT leak into js:\n{prog}"
+    );
 }
 
 #[test]
@@ -50,8 +58,14 @@ fn main() {
 "#,
     );
     let prog = emit_program_js(&ws).expect("emit js program");
-    assert!(prog.contains("return x * 3"), "js sibling body must win over the Any rep:\n{prog}");
-    assert!(!prog.contains("x + x"), "portable Any body must NOT emit under js:\n{prog}");
+    assert!(
+        prog.contains("return x * 3"),
+        "js sibling body must win over the Any rep:\n{prog}"
+    );
+    assert!(
+        !prog.contains("x + x"),
+        "portable Any body must NOT emit under js:\n{prog}"
+    );
 }
 
 #[test]
@@ -67,7 +81,10 @@ fn main() {
 "#,
     );
     let prog = emit_program_js(&ws).expect("emit js program");
-    assert!(prog.contains("js_now("), "extern(js) must emit a bare call:\n{prog}");
+    assert!(
+        prog.contains("js_now("),
+        "extern(js) must emit a bare call:\n{prog}"
+    );
     assert!(
         !prog.contains("function js_now"),
         "extern(js) must NOT emit a definition (driver/runtime provides it):\n{prog}"
@@ -224,7 +241,10 @@ fn main() { let g = rawequal; print("{g(7, 7)}") }
 "#,
     );
     let err = emit_program_js(&ws).expect_err("must reject a bare extern as a value");
-    assert!(err.contains("rawequal"), "rejection should name the fn, got: {err}");
+    assert!(
+        err.contains("rawequal"),
+        "rejection should name the fn, got: {err}"
+    );
 }
 
 #[test]
@@ -236,7 +256,10 @@ fn main() { let g = twice; print("{g(3)}") }
 "#,
     );
     let err = emit_program_js(&ws).expect_err("must reject an inline(lua) body as a value");
-    assert!(err.contains("twice"), "rejection should name the fn, got: {err}");
+    assert!(
+        err.contains("twice"),
+        "rejection should name the fn, got: {err}"
+    );
 }
 
 #[test]
@@ -252,7 +275,10 @@ fn main() { print("{apply(dbl)}") }
 "#,
     );
     let prog = emit_program_js(&ws).expect("a portable fn must remain usable as a value");
-    assert!(prog.contains("dbl"), "the portable body should be emitted:\n{prog}");
+    assert!(
+        prog.contains("dbl"),
+        "the portable body should be emitted:\n{prog}"
+    );
 }
 
 #[test]
@@ -270,5 +296,8 @@ fn main() { print("{apply(twice)}") }
 "#,
     );
     let prog = emit_program_js(&ws).expect("an inline(js) sibling must admit the value");
-    assert!(prog.contains("return a + a"), "js sibling body must emit:\n{prog}");
+    assert!(
+        prog.contains("return a + a"),
+        "js sibling body must emit:\n{prog}"
+    );
 }

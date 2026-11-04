@@ -129,7 +129,10 @@ pub struct CpuTargetSpec {
 
 impl TargetSpec {
     pub fn cpu(self) -> CpuTargetSpec {
-        CpuTargetSpec { platform: self.platform, execution: self.execution }
+        CpuTargetSpec {
+            platform: self.platform,
+            execution: self.execution,
+        }
     }
 }
 
@@ -141,7 +144,9 @@ pub const DESKTOP: PlatformSpec = PlatformSpec {
 };
 pub const WEB: PlatformSpec = PlatformSpec {
     kind: PlatformKind::Web,
-    caps: PlatformCapabilities { host_symbols: false },
+    caps: PlatformCapabilities {
+        host_symbols: false,
+    },
 };
 pub const IOS: PlatformSpec = PlatformSpec {
     kind: PlatformKind::Ios,
@@ -149,7 +154,9 @@ pub const IOS: PlatformSpec = PlatformSpec {
 };
 pub const WASI: PlatformSpec = PlatformSpec {
     kind: PlatformKind::Wasi,
-    caps: PlatformCapabilities { host_symbols: false },
+    caps: PlatformCapabilities {
+        host_symbols: false,
+    },
 };
 
 pub const GLSL_330: ShaderTargetSpec =
@@ -252,11 +259,20 @@ pub const NATIVE_C64_DESKTOP: TargetSpec = TargetSpec {
     shader: Some(GLSL_330),
 };
 
-pub const WASM32_WASI: TargetSpec =
-    TargetSpec { name: "wasm32-wasi", platform: WASI, execution: WASM32, shader: None };
+pub const WASM32_WASI: TargetSpec = TargetSpec {
+    name: "wasm32-wasi",
+    platform: WASI,
+    execution: WASM32,
+    shader: None,
+};
 
-pub const ALL: &[TargetSpec] =
-    &[LUAJIT_DESKTOP, LUAJIT_IOS, JAVASCRIPT_WEB, NATIVE_C64_DESKTOP, WASM32_WASI];
+pub const ALL: &[TargetSpec] = &[
+    LUAJIT_DESKTOP,
+    LUAJIT_IOS,
+    JAVASCRIPT_WEB,
+    NATIVE_C64_DESKTOP,
+    WASM32_WASI,
+];
 
 /// Can `target` supply this boundary class?
 ///

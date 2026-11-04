@@ -38,7 +38,10 @@ impl Instance {
     /// declaration is generic is a question about the DECLARATION
     /// ([`Self::is_generic`]), never about how many arguments happen to be here.
     pub fn base(func: FuncRef) -> Self {
-        Self { func, args: Vec::new() }
+        Self {
+            func,
+            args: Vec::new(),
+        }
     }
 
     /// Whether the DECLARATION this instantiates is generic.
@@ -48,7 +51,9 @@ impl Instance {
     /// that an argument list that disagreed would be a defect rather than a
     /// different answer.
     pub fn is_generic(&self, ws: &Workspace) -> bool {
-        !ws.module(self.func.module).functions[self.func.func].generics.is_empty()
+        !ws.module(self.func.module).functions[self.func.func]
+            .generics
+            .is_empty()
     }
 
     /// The instance's type arguments as the types they are, in declaration
@@ -67,7 +72,10 @@ impl Instance {
     /// THE only way an instance is minted outside the graph's own walk, and it
     /// takes the interner precisely so it cannot be done without one.
     pub fn intern(interner: &MonoInterner, func: FuncRef, args: Vec<MonoTy>) -> Self {
-        Self { func, args: interner.intern_all(args) }
+        Self {
+            func,
+            args: interner.intern_all(args),
+        }
     }
 
     /// The substitution this instance's body lowers under: each declared
@@ -134,7 +142,11 @@ impl PartialOrd for DeclKey {
 /// a build, and only ever used to make iteration order deterministic; the
 /// MANIFEST is sorted by rendered symbol, which is stable across builds.
 fn ord_key(i: &Instance) -> (u32, u32, &[MonoTyId]) {
-    (i.func.module.raw(), i.func.func.into_raw().into_u32(), &i.args)
+    (
+        i.func.module.raw(),
+        i.func.func.into_raw().into_u32(),
+        &i.args,
+    )
 }
 
 impl Ord for Instance {

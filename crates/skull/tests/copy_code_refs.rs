@@ -53,15 +53,22 @@ fn check_reload(use_overlay: bool) {
     let mid = skull::user_module_id(&before).unwrap();
     let (full, mut cache) = emit_full(&before, mid).unwrap();
     let after = ws_with_stdlib(
-        &SOURCE.replace("return 1 }", "return 2 }").replace("n + 100", "n + 200"),
+        &SOURCE
+            .replace("return 1 }", "return 2 }")
+            .replace("n + 100", "n + 200"),
     );
     let edits = ["named_value", "make_callbacks"].map(|name| {
         let f = fn_ref(&after, name);
         (f.module, bone_semantic::hir::BodyOwner::Function(f.func))
     });
-    let overlay = emit_overlay(&after, &mut cache, &edits).expect("compatible callback body overlay");
+    let overlay =
+        emit_overlay(&after, &mut cache, &edits).expect("compatible callback body overlay");
     let fresh = emit_full(&after, mid).unwrap().0;
-    let (mode, reload) = if use_overlay { ("overlay", overlay.lua) } else { ("full", fresh.lua) };
+    let (mode, reload) = if use_overlay {
+        ("overlay", overlay.lua)
+    } else {
+        ("full", fresh.lua)
+    };
     let program = format!(
         "{}\ninitialize()\nprint(report())\nHOT_RELOAD = true\n{}\n\
          HOT_RELOAD = false\nprint(report())\nbump_copies()\nprint(report())\n",
@@ -117,5 +124,8 @@ fn check_copy(original: Graph, copy: Graph) {
 }
 "#;
     let lua = crate::common::emit_module(source);
-    assert_eq!(run_luajit(&format!("{lua}\ncheck_graph()"), "copy_code_refs_graph"), "owned graph");
+    assert_eq!(
+        run_luajit(&format!("{lua}\ncheck_graph()"), "copy_code_refs_graph"),
+        "owned graph"
+    );
 }

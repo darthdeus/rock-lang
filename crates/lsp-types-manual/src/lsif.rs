@@ -25,7 +25,8 @@ pub struct Entry {
     pub data: Element,
 }
 
-impl_lsp_struct!(Entry,
+impl_lsp_struct!(
+    Entry,
     required { id: Id = "id" },
     optional {},
     flatten { data: Element }
@@ -55,8 +56,12 @@ impl serde::Serialize for ToolInfo {
         let n = 1 + (!self.args.is_empty()) as usize + self.version.is_some() as usize;
         let mut st = s.serialize_struct("ToolInfo", n)?;
         st.serialize_field("name", &self.name)?;
-        if !self.args.is_empty() { st.serialize_field("args", &self.args)?; }
-        if let Some(ref v) = self.version { st.serialize_field("version", v)?; }
+        if !self.args.is_empty() {
+            st.serialize_field("args", &self.args)?;
+        }
+        if let Some(ref v) = self.version {
+            st.serialize_field("version", v)?;
+        }
         st.end()
     }
 }
@@ -64,15 +69,21 @@ impl serde::Serialize for ToolInfo {
 impl<'de> serde::Deserialize<'de> for ToolInfo {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let mut map = serde_json::Map::<String, serde_json::Value>::deserialize(d)?;
-        let name = map.remove("name")
+        let name = map
+            .remove("name")
             .ok_or_else(|| serde::de::Error::missing_field("name"))
             .and_then(|v| serde_json::from_value::<String>(v).map_err(serde::de::Error::custom))?;
-        let args = map.remove("args")
+        let args = map
+            .remove("args")
             .map(|v| serde_json::from_value::<Vec<String>>(v).map_err(serde::de::Error::custom))
             .transpose()?
             .unwrap_or_default();
         let version = crate::deserialize_optional(map.remove("version"))?;
-        Ok(ToolInfo { name, args, version })
+        Ok(ToolInfo {
+            name,
+            args,
+            version,
+        })
     }
 }
 
@@ -96,7 +107,9 @@ impl serde::Serialize for RangeBasedDocumentSymbol {
         let n = 1 + (!self.children.is_empty()) as usize;
         let mut st = s.serialize_struct("RangeBasedDocumentSymbol", n)?;
         st.serialize_field("id", &self.id)?;
-        if !self.children.is_empty() { st.serialize_field("children", &self.children)?; }
+        if !self.children.is_empty() {
+            st.serialize_field("children", &self.children)?;
+        }
         st.end()
     }
 }
@@ -104,11 +117,16 @@ impl serde::Serialize for RangeBasedDocumentSymbol {
 impl<'de> serde::Deserialize<'de> for RangeBasedDocumentSymbol {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let mut map = serde_json::Map::<String, serde_json::Value>::deserialize(d)?;
-        let id = map.remove("id")
+        let id = map
+            .remove("id")
             .ok_or_else(|| serde::de::Error::missing_field("id"))
             .and_then(|v| serde_json::from_value::<Id>(v).map_err(serde::de::Error::custom))?;
-        let children = map.remove("children")
-            .map(|v| serde_json::from_value::<Vec<RangeBasedDocumentSymbol>>(v).map_err(serde::de::Error::custom))
+        let children = map
+            .remove("children")
+            .map(|v| {
+                serde_json::from_value::<Vec<RangeBasedDocumentSymbol>>(v)
+                    .map_err(serde::de::Error::custom)
+            })
             .transpose()?
             .unwrap_or_default();
         Ok(RangeBasedDocumentSymbol { id, children })
@@ -142,9 +160,13 @@ impl serde::Serialize for DefinitionTag {
         let mut st = s.serialize_struct("DefinitionTag", n)?;
         st.serialize_field("text", &self.text)?;
         st.serialize_field("kind", &self.kind)?;
-        if self.deprecated { st.serialize_field("deprecated", &self.deprecated)?; }
+        if self.deprecated {
+            st.serialize_field("deprecated", &self.deprecated)?;
+        }
         st.serialize_field("fullRange", &self.full_range)?;
-        if let Some(ref v) = self.detail { st.serialize_field("detail", v)?; }
+        if let Some(ref v) = self.detail {
+            st.serialize_field("detail", v)?;
+        }
         st.end()
     }
 }
@@ -152,21 +174,32 @@ impl serde::Serialize for DefinitionTag {
 impl<'de> serde::Deserialize<'de> for DefinitionTag {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let mut map = serde_json::Map::<String, serde_json::Value>::deserialize(d)?;
-        let text = map.remove("text")
+        let text = map
+            .remove("text")
             .ok_or_else(|| serde::de::Error::missing_field("text"))
             .and_then(|v| serde_json::from_value::<String>(v).map_err(serde::de::Error::custom))?;
-        let kind = map.remove("kind")
+        let kind = map
+            .remove("kind")
             .ok_or_else(|| serde::de::Error::missing_field("kind"))
-            .and_then(|v| serde_json::from_value::<crate::SymbolKind>(v).map_err(serde::de::Error::custom))?;
+            .and_then(|v| {
+                serde_json::from_value::<crate::SymbolKind>(v).map_err(serde::de::Error::custom)
+            })?;
         let deprecated = match map.remove("deprecated") {
             Some(value) => serde_json::from_value(value).map_err(serde::de::Error::custom)?,
             None => false,
         };
-        let full_range = map.remove("fullRange")
+        let full_range = map
+            .remove("fullRange")
             .ok_or_else(|| serde::de::Error::missing_field("fullRange"))
             .and_then(|v| serde_json::from_value::<Range>(v).map_err(serde::de::Error::custom))?;
         let detail = crate::deserialize_optional(map.remove("detail"))?;
-        Ok(DefinitionTag { text, kind, deprecated, full_range, detail })
+        Ok(DefinitionTag {
+            text,
+            kind,
+            deprecated,
+            full_range,
+            detail,
+        })
     }
 }
 
@@ -188,7 +221,9 @@ impl serde::Serialize for DeclarationTag {
         st.serialize_field("kind", &self.kind)?;
         st.serialize_field("deprecated", &self.deprecated)?;
         st.serialize_field("fullRange", &self.full_range)?;
-        if let Some(ref v) = self.detail { st.serialize_field("detail", v)?; }
+        if let Some(ref v) = self.detail {
+            st.serialize_field("detail", v)?;
+        }
         st.end()
     }
 }
@@ -196,21 +231,32 @@ impl serde::Serialize for DeclarationTag {
 impl<'de> serde::Deserialize<'de> for DeclarationTag {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let mut map = serde_json::Map::<String, serde_json::Value>::deserialize(d)?;
-        let text = map.remove("text")
+        let text = map
+            .remove("text")
             .ok_or_else(|| serde::de::Error::missing_field("text"))
             .and_then(|v| serde_json::from_value::<String>(v).map_err(serde::de::Error::custom))?;
-        let kind = map.remove("kind")
+        let kind = map
+            .remove("kind")
             .ok_or_else(|| serde::de::Error::missing_field("kind"))
-            .and_then(|v| serde_json::from_value::<crate::SymbolKind>(v).map_err(serde::de::Error::custom))?;
+            .and_then(|v| {
+                serde_json::from_value::<crate::SymbolKind>(v).map_err(serde::de::Error::custom)
+            })?;
         let deprecated = match map.remove("deprecated") {
             Some(value) => serde_json::from_value(value).map_err(serde::de::Error::custom)?,
             None => false,
         };
-        let full_range = map.remove("fullRange")
+        let full_range = map
+            .remove("fullRange")
             .ok_or_else(|| serde::de::Error::missing_field("fullRange"))
             .and_then(|v| serde_json::from_value::<Range>(v).map_err(serde::de::Error::custom))?;
         let detail = crate::deserialize_optional(map.remove("detail"))?;
-        Ok(DeclarationTag { text, kind, deprecated, full_range, detail })
+        Ok(DeclarationTag {
+            text,
+            kind,
+            deprecated,
+            full_range,
+            detail,
+        })
     }
 }
 
@@ -219,8 +265,11 @@ pub struct ReferenceTag {
     text: String,
 }
 
-impl_lsp_struct!(ReferenceTag,
-    required { text: String = "text" },
+impl_lsp_struct!(
+    ReferenceTag,
+    required {
+        text: String = "text"
+    },
     optional {}
 );
 
@@ -229,8 +278,11 @@ pub struct UnknownTag {
     text: String,
 }
 
-impl_lsp_struct!(UnknownTag,
-    required { text: String = "text" },
+impl_lsp_struct!(
+    UnknownTag,
+    required {
+        text: String = "text"
+    },
     optional {}
 );
 
@@ -296,7 +348,10 @@ impl serde::Serialize for Vertex {
         let mut map = serde_json::Map::new();
         macro_rules! label {
             ($lbl:expr) => {
-                map.insert("label".to_string(), serde_json::Value::String($lbl.to_string()));
+                map.insert(
+                    "label".to_string(),
+                    serde_json::Value::String($lbl.to_string()),
+                );
             };
         }
         macro_rules! merge {
@@ -309,44 +364,93 @@ impl serde::Serialize for Vertex {
             };
         }
         match self {
-            Vertex::MetaData(v) => { label!("metaData"); merge!(v); }
-            Vertex::Project(v) => { label!("project"); merge!(v); }
-            Vertex::Document(v) => { label!("document"); merge!(v); }
+            Vertex::MetaData(v) => {
+                label!("metaData");
+                merge!(v);
+            }
+            Vertex::Project(v) => {
+                label!("project");
+                merge!(v);
+            }
+            Vertex::Document(v) => {
+                label!("document");
+                merge!(v);
+            }
             Vertex::Range { range, tag } => {
                 label!("range");
                 merge!(range);
                 if let Some(t) = tag {
-                    map.insert("tag".to_string(), serde_json::to_value(t).map_err(S::Error::custom)?);
+                    map.insert(
+                        "tag".to_string(),
+                        serde_json::to_value(t).map_err(S::Error::custom)?,
+                    );
                 }
             }
-            Vertex::ResultSet(v) => { label!("resultSet"); merge!(v); }
-            Vertex::Moniker(v) => { label!("moniker"); merge!(v); }
-            Vertex::PackageInformation(v) => { label!("packageInformation"); merge!(v); }
-            Vertex::Event(v) => { label!("$event"); merge!(v); }
-            Vertex::DefinitionResult => { label!("definitionResult"); }
-            Vertex::DeclarationResult => { label!("declarationResult"); }
-            Vertex::TypeDefinitionResult => { label!("typeDefinitionResult"); }
-            Vertex::ReferenceResult => { label!("referenceResult"); }
-            Vertex::ImplementationResult => { label!("implementationResult"); }
+            Vertex::ResultSet(v) => {
+                label!("resultSet");
+                merge!(v);
+            }
+            Vertex::Moniker(v) => {
+                label!("moniker");
+                merge!(v);
+            }
+            Vertex::PackageInformation(v) => {
+                label!("packageInformation");
+                merge!(v);
+            }
+            Vertex::Event(v) => {
+                label!("$event");
+                merge!(v);
+            }
+            Vertex::DefinitionResult => {
+                label!("definitionResult");
+            }
+            Vertex::DeclarationResult => {
+                label!("declarationResult");
+            }
+            Vertex::TypeDefinitionResult => {
+                label!("typeDefinitionResult");
+            }
+            Vertex::ReferenceResult => {
+                label!("referenceResult");
+            }
+            Vertex::ImplementationResult => {
+                label!("implementationResult");
+            }
             Vertex::FoldingRangeResult { result } => {
                 label!("foldingRangeResult");
-                map.insert("result".to_string(), serde_json::to_value(result).map_err(S::Error::custom)?);
+                map.insert(
+                    "result".to_string(),
+                    serde_json::to_value(result).map_err(S::Error::custom)?,
+                );
             }
             Vertex::HoverResult { result } => {
                 label!("hoverResult");
-                map.insert("result".to_string(), serde_json::to_value(result).map_err(S::Error::custom)?);
+                map.insert(
+                    "result".to_string(),
+                    serde_json::to_value(result).map_err(S::Error::custom)?,
+                );
             }
             Vertex::DocumentSymbolResult { result } => {
                 label!("documentSymbolResult");
-                map.insert("result".to_string(), serde_json::to_value(result).map_err(S::Error::custom)?);
+                map.insert(
+                    "result".to_string(),
+                    serde_json::to_value(result).map_err(S::Error::custom)?,
+                );
             }
             Vertex::DocumentLinkResult { result } => {
                 label!("documentLinkResult");
-                map.insert("result".to_string(), serde_json::to_value(result).map_err(S::Error::custom)?);
+                map.insert(
+                    "result".to_string(),
+                    serde_json::to_value(result).map_err(S::Error::custom)?,
+                );
             }
             Vertex::DiagnosticResult { result } => {
                 label!("diagnosticResult");
-                map.insert("result".to_string(), serde_json::to_value(result).map_err(S::Error::custom)?);
+                map.insert(
+                    "result".to_string(),
+                    serde_json::to_value(result).map_err(S::Error::custom)?,
+                );
             }
         }
         serde_json::Value::Object(map).serialize(s)
@@ -367,51 +471,103 @@ impl<'de> serde::Deserialize<'de> for Vertex {
             .to_owned();
         let val = serde_json::Value::Object(map);
         match label.as_str() {
-            "metaData" => Ok(Vertex::MetaData(serde_json::from_value(val).map_err(D::Error::custom)?)),
-            "project" => Ok(Vertex::Project(serde_json::from_value(val).map_err(D::Error::custom)?)),
-            "document" => Ok(Vertex::Document(serde_json::from_value(val).map_err(D::Error::custom)?)),
+            "metaData" => Ok(Vertex::MetaData(
+                serde_json::from_value(val).map_err(D::Error::custom)?,
+            )),
+            "project" => Ok(Vertex::Project(
+                serde_json::from_value(val).map_err(D::Error::custom)?,
+            )),
+            "document" => Ok(Vertex::Document(
+                serde_json::from_value(val).map_err(D::Error::custom)?,
+            )),
             "range" => {
                 let range: Range = serde_json::from_value(val.clone()).map_err(D::Error::custom)?;
                 let tag = crate::deserialize_optional(val.get("tag").cloned())?;
                 Ok(Vertex::Range { range, tag })
             }
-            "resultSet" => Ok(Vertex::ResultSet(serde_json::from_value(val).map_err(D::Error::custom)?)),
-            "moniker" => Ok(Vertex::Moniker(serde_json::from_value(val).map_err(D::Error::custom)?)),
-            "packageInformation" => Ok(Vertex::PackageInformation(serde_json::from_value(val).map_err(D::Error::custom)?)),
-            "$event" => Ok(Vertex::Event(serde_json::from_value(val).map_err(D::Error::custom)?)),
+            "resultSet" => Ok(Vertex::ResultSet(
+                serde_json::from_value(val).map_err(D::Error::custom)?,
+            )),
+            "moniker" => Ok(Vertex::Moniker(
+                serde_json::from_value(val).map_err(D::Error::custom)?,
+            )),
+            "packageInformation" => Ok(Vertex::PackageInformation(
+                serde_json::from_value(val).map_err(D::Error::custom)?,
+            )),
+            "$event" => Ok(Vertex::Event(
+                serde_json::from_value(val).map_err(D::Error::custom)?,
+            )),
             "definitionResult" => Ok(Vertex::DefinitionResult),
             "declarationResult" => Ok(Vertex::DeclarationResult),
             "typeDefinitionResult" => Ok(Vertex::TypeDefinitionResult),
             "referenceResult" => Ok(Vertex::ReferenceResult),
             "implementationResult" => Ok(Vertex::ImplementationResult),
             "foldingRangeResult" => {
-                let result = val.get("result").ok_or_else(|| D::Error::missing_field("result"))?.clone();
-                Ok(Vertex::FoldingRangeResult { result: serde_json::from_value(result).map_err(D::Error::custom)? })
+                let result = val
+                    .get("result")
+                    .ok_or_else(|| D::Error::missing_field("result"))?
+                    .clone();
+                Ok(Vertex::FoldingRangeResult {
+                    result: serde_json::from_value(result).map_err(D::Error::custom)?,
+                })
             }
             "hoverResult" => {
-                let result = val.get("result").ok_or_else(|| D::Error::missing_field("result"))?.clone();
-                Ok(Vertex::HoverResult { result: serde_json::from_value(result).map_err(D::Error::custom)? })
+                let result = val
+                    .get("result")
+                    .ok_or_else(|| D::Error::missing_field("result"))?
+                    .clone();
+                Ok(Vertex::HoverResult {
+                    result: serde_json::from_value(result).map_err(D::Error::custom)?,
+                })
             }
             "documentSymbolResult" => {
-                let result = val.get("result").ok_or_else(|| D::Error::missing_field("result"))?.clone();
-                Ok(Vertex::DocumentSymbolResult { result: serde_json::from_value(result).map_err(D::Error::custom)? })
+                let result = val
+                    .get("result")
+                    .ok_or_else(|| D::Error::missing_field("result"))?
+                    .clone();
+                Ok(Vertex::DocumentSymbolResult {
+                    result: serde_json::from_value(result).map_err(D::Error::custom)?,
+                })
             }
             "documentLinkResult" => {
-                let result = val.get("result").ok_or_else(|| D::Error::missing_field("result"))?.clone();
-                Ok(Vertex::DocumentLinkResult { result: serde_json::from_value(result).map_err(D::Error::custom)? })
+                let result = val
+                    .get("result")
+                    .ok_or_else(|| D::Error::missing_field("result"))?
+                    .clone();
+                Ok(Vertex::DocumentLinkResult {
+                    result: serde_json::from_value(result).map_err(D::Error::custom)?,
+                })
             }
             "diagnosticResult" => {
-                let result = val.get("result").ok_or_else(|| D::Error::missing_field("result"))?.clone();
-                Ok(Vertex::DiagnosticResult { result: serde_json::from_value(result).map_err(D::Error::custom)? })
+                let result = val
+                    .get("result")
+                    .ok_or_else(|| D::Error::missing_field("result"))?
+                    .clone();
+                Ok(Vertex::DiagnosticResult {
+                    result: serde_json::from_value(result).map_err(D::Error::custom)?,
+                })
             }
             _ => Err(D::Error::unknown_variant(
                 &label,
                 &[
-                    "metaData", "project", "document", "range", "resultSet", "moniker",
-                    "packageInformation", "$event", "definitionResult", "declarationResult",
-                    "typeDefinitionResult", "referenceResult", "implementationResult",
-                    "foldingRangeResult", "hoverResult", "documentSymbolResult",
-                    "documentLinkResult", "diagnosticResult",
+                    "metaData",
+                    "project",
+                    "document",
+                    "range",
+                    "resultSet",
+                    "moniker",
+                    "packageInformation",
+                    "$event",
+                    "definitionResult",
+                    "declarationResult",
+                    "typeDefinitionResult",
+                    "referenceResult",
+                    "implementationResult",
+                    "foldingRangeResult",
+                    "hoverResult",
+                    "documentSymbolResult",
+                    "documentLinkResult",
+                    "diagnosticResult",
                 ],
             )),
         }
@@ -441,7 +597,8 @@ pub struct Event {
     pub data: Id,
 }
 
-impl_lsp_struct!(Event,
+impl_lsp_struct!(
+    Event,
     required {
         kind: EventKind = "kind",
         scope: EventScope = "scope",
@@ -495,7 +652,8 @@ pub struct EdgeData {
     pub out_v: Id,
 }
 
-impl_lsp_struct!(EdgeData,
+impl_lsp_struct!(
+    EdgeData,
     required {
         in_v: Id = "inV",
         out_v: Id = "outV",
@@ -552,10 +710,17 @@ pub struct Item {
     pub edge_data: EdgeDataMultiIn,
 }
 
-impl_lsp_struct!(Item,
-    required { document: Id = "document" },
-    optional { property: ItemKind = "property" },
-    flatten { edge_data: EdgeDataMultiIn }
+impl_lsp_struct!(
+    Item,
+    required {
+        document: Id = "document"
+    },
+    optional {
+        property: ItemKind = "property"
+    },
+    flatten {
+        edge_data: EdgeDataMultiIn
+    }
 );
 
 #[derive(Debug, PartialEq)]
@@ -564,7 +729,8 @@ pub struct Document {
     pub language_id: String,
 }
 
-impl_lsp_struct!(Document,
+impl_lsp_struct!(
+    Document,
     required {
         uri: Uri = "uri",
         language_id: String = "languageId",
@@ -577,9 +743,12 @@ pub struct ResultSet {
     pub key: Option<String>,
 }
 
-impl_lsp_struct!(ResultSet,
+impl_lsp_struct!(
+    ResultSet,
     required {},
-    optional { key: String = "key" }
+    optional {
+        key: String = "key"
+    }
 );
 
 #[derive(Debug, PartialEq)]
@@ -589,8 +758,11 @@ pub struct Project {
     pub kind: String,
 }
 
-impl_lsp_struct!(Project,
-    required { kind: String = "kind" },
+impl_lsp_struct!(
+    Project,
+    required {
+        kind: String = "kind"
+    },
     optional {
         resource: Uri = "resource",
         content: String = "content",
@@ -605,13 +777,16 @@ pub struct MetaData {
     pub tool_info: Option<ToolInfo>,
 }
 
-impl_lsp_struct!(MetaData,
+impl_lsp_struct!(
+    MetaData,
     required {
         version: String = "version",
         project_root: Uri = "projectRoot",
         position_encoding: Encoding = "positionEncoding",
     },
-    optional { tool_info: ToolInfo = "toolInfo" }
+    optional {
+        tool_info: ToolInfo = "toolInfo"
+    }
 );
 
 #[derive(Debug, PartialEq)]
@@ -621,12 +796,15 @@ pub struct Repository {
     pub commit_id: Option<String>,
 }
 
-impl_lsp_struct!(Repository,
+impl_lsp_struct!(
+    Repository,
     required {
         r#type: String = "type",
         url: String = "url",
     },
-    optional { commit_id: String = "commitId" }
+    optional {
+        commit_id: String = "commitId"
+    }
 );
 
 #[derive(Debug, PartialEq)]
@@ -639,7 +817,8 @@ pub struct PackageInformation {
     pub version: Option<String>,
 }
 
-impl_lsp_struct!(PackageInformation,
+impl_lsp_struct!(
+    PackageInformation,
     required {
         name: String = "name",
         manager: String = "manager",

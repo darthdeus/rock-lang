@@ -83,10 +83,18 @@ const VALUE_CASES: &[(&str, Tok)] = &[
     ("test_nb_wrap_int_neg", Tok::Num(2147483642.0)),
 ];
 
-const ERROR_CASES: &[&str] = &["test_nb_oob_read", "test_nb_oob_read_neg", "test_nb_oob_write"];
+const ERROR_CASES: &[&str] = &[
+    "test_nb_oob_read",
+    "test_nb_oob_read_neg",
+    "test_nb_oob_write",
+];
 
 fn tool_available(tool: &str, arg: &str) -> bool {
-    crate::common::tool(tool).arg(arg).output().map(|o| o.status.success()).unwrap_or(false)
+    crate::common::tool(tool)
+        .arg(arg)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 fn both_backends_available(test: &str) -> bool {
@@ -108,7 +116,8 @@ fn fixture_ws() -> Workspace {
         })
         .collect();
     modules.push(
-        skull_parser::parse_module_clean(FIXTURE, ustr::Ustr::from(FIXTURE_MOD)).expect("fixture parse"),
+        skull_parser::parse_module_clean(FIXTURE, ustr::Ustr::from(FIXTURE_MOD))
+            .expect("fixture parse"),
     );
     bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass")
 }
@@ -119,7 +128,10 @@ fn find_fn(ws: &Workspace, name: &str) -> FuncRef {
         for (fid, f) in ws.module(mid).functions.iter() {
             if f.name.as_str() == name && f.inline_body.is_none() {
                 assert!(found.is_none(), "ambiguous fn `{name}`");
-                found = Some(FuncRef { module: mid, func: fid });
+                found = Some(FuncRef {
+                    module: mid,
+                    func: fid,
+                });
             }
         }
     }
@@ -127,8 +139,10 @@ fn find_fn(ws: &Workspace, name: &str) -> FuncRef {
 }
 
 fn emit_js_program(ws: &Workspace, names: &[&str]) -> String {
-    let roots: Vec<(FuncRef, String)> =
-        names.iter().map(|&n| (find_fn(ws, n), n.to_string())).collect();
+    let roots: Vec<(FuncRef, String)> = names
+        .iter()
+        .map(|&n| (find_fn(ws, n), n.to_string()))
+        .collect();
     let mut out = String::new();
     out.push_str(JS_NB_CHECK_SHIMS);
     out.push('\n');
@@ -144,11 +158,16 @@ fn emit_lua_program(ws: &Workspace) -> String {
         .module_ids
         .get(&ustr::Ustr::from(FIXTURE_MOD))
         .expect("fixture module id");
-    skull::mir_emit::emit_workspace_mir(ws, mid).expect("lua emit").lua
+    skull::mir_emit::emit_workspace_mir(ws, mid)
+        .expect("lua emit")
+        .lua
 }
 
 fn run_tool(tool: &str, path: &std::path::Path) -> std::process::Output {
-    crate::common::tool(tool).arg(path).output().unwrap_or_else(|e| panic!("spawn {tool}: {e}"))
+    crate::common::tool(tool)
+        .arg(path)
+        .output()
+        .unwrap_or_else(|e| panic!("spawn {tool}: {e}"))
 }
 
 fn write_temp(tag: &str, ext: &str, contents: &str) -> std::path::PathBuf {

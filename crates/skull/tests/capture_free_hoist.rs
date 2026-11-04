@@ -6,7 +6,8 @@ use crate::common::{emit_module, function_body, mangled_name, run_luajit};
 
 #[test]
 fn defer_retains_an_existing_cleanup_without_a_forwarding_capture() {
-    let lua = emit_module(r#"
+    let lua = emit_module(
+        r#"
 struct Owner { borrowed: bool = false, release: (fn())? = null }
 fn owner_new() -> Owner {
     let owner = Owner {}
@@ -22,12 +23,17 @@ fn borrow(owner: Owner, fail: bool, other: Owner? = null) {
     if fail { error("body failure") }
 }
 fn main() { let _ = owner_new() }
-"#);
+"#,
+    );
     let body = function_body(&lua, "borrow");
-    assert!(!body.contains("setmetatable("), "defer must reuse its immutable cleanup value:\n{body}");
+    assert!(
+        !body.contains("setmetatable("),
+        "defer must reuse its immutable cleanup value:\n{body}"
+    );
     let make = mangled_name(&lua, "owner_new");
     let borrow = mangled_name(&lua, "borrow");
-    let driver = format!(r#"
+    let driver = format!(
+        r#"
 local a, b = {make}(), {make}()
 {borrow}(a, false, nil)
 assert(not a.borrowed)
@@ -40,13 +46,18 @@ assert(not ok and tostring(err):find("body failure", 1, true))
 assert(not a.borrowed and not b.borrowed)
 assert(__rock_defer_top == 0)
 print("released")
-"#);
-    assert_eq!(run_luajit(&format!("{lua}{driver}"), "retained_cleanup"), "released");
+"#
+    );
+    assert_eq!(
+        run_luajit(&format!("{lua}{driver}"), "retained_cleanup"),
+        "released"
+    );
 }
 
 #[test]
 fn defer_keeps_late_binding_for_reassigned_cleanup() {
-    let lua = emit_module(r#"
+    let lua = emit_module(
+        r#"
 inline(lua) fn first() = "print('first')"
 inline(lua) fn second() = "print('second')"
 fn choose() {
@@ -56,9 +67,13 @@ fn choose() {
     error("fail")
 }
 fn main() {}
-"#);
+"#,
+    );
     let choose = mangled_name(&lua, "choose");
-    assert_eq!(run_luajit(&format!("{lua}\npcall({choose})\n"), "late_cleanup"), "second");
+    assert_eq!(
+        run_luajit(&format!("{lua}\npcall({choose})\n"), "late_cleanup"),
+        "second"
+    );
 }
 
 // `free_loop` creates a capture-free lambda (`() => { sink(42) }` closes over
@@ -147,7 +162,10 @@ fn main() { let _ = mk() }
     let mk = mangled_name(&lua, "mk");
     let driver = format!("\nlocal a = {mk}()\nlocal b = {mk}()\nprint(rawequal(a, b))\n");
     let out = run_luajit(&format!("{lua}{driver}"), "shared");
-    assert_eq!(out, "true", "two creations of a capture-free lambda must share one hoisted fn value; got: {out}");
+    assert_eq!(
+        out, "true",
+        "two creations of a capture-free lambda must share one hoisted fn value; got: {out}"
+    );
 }
 
 /// RUNTIME (behavior preserved): a hoisted lambda is still callable through a
@@ -167,7 +185,10 @@ fn main() {
 "#;
     let lua = emit_module(src);
     let out = run_luajit(&format!("{lua}\nmain()\n"), "percall");
-    assert_eq!(out, "6\n6", "a hoisted lambda's local must be per-call (not shared); got: {out}");
+    assert_eq!(
+        out, "6\n6",
+        "a hoisted lambda's local must be per-call (not shared); got: {out}"
+    );
 }
 
 /// A definition whose name equals a hoisted lambda's `<enclosing>__lambda<k>`
@@ -184,9 +205,12 @@ fn hoist_name_collision_with_user_fn_rejected() {
 fn foo() -> fn() { return () => { sink(1) } }
 fn main() {}
 "#;
-    let err = crate::common::try_emit_module(src).err().expect("the collision must be rejected");
+    let err = crate::common::try_emit_module(src)
+        .err()
+        .expect("the collision must be rejected");
     assert!(
-        err.message.contains("foo_0__lambda0") && err.message.contains("compiler-reserved synthetic name"),
+        err.message.contains("foo_0__lambda0")
+            && err.message.contains("compiler-reserved synthetic name"),
         "rejection names the colliding synthetic name; got: {}",
         err.message
     );
@@ -211,12 +235,16 @@ fn main() { let g = transitive(7) print("{g()}") }
     // (a colored `c<N>` env param, not the old magic `__rock_env` local).
     let m = mangled_name(&lua, "transitive");
     assert!(
-        lua.contains(&format!("function {m}__lambda0(c")) && lua.contains(&format!("function {m}__lambda1(c")),
+        lua.contains(&format!("function {m}__lambda0(c"))
+            && lua.contains(&format!("function {m}__lambda1(c")),
         "both lambdas hoist to env bodies (both capture the root param `x`):\n{lua}"
     );
     // and it still behaves (the inner reads x threaded through both envs).
     let out = run_luajit(&format!("{lua}\nmain()\n"), "transitive");
-    assert_eq!(out, "7", "transitive capture must still read the enclosing param; got: {out}");
+    assert_eq!(
+        out, "7",
+        "transitive capture must still read the enclosing param; got: {out}"
+    );
 }
 
 /// DECLARATION SPLIT: a hoisted body's own cells are declared as `local`s in the

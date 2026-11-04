@@ -26,7 +26,9 @@ use bone_semantic::prelude::Idx;
 use std::rc::Rc;
 use ustr::Ustr;
 
-use super::{EnumPlan, RepArena, RepGuarantees, RepUse, RepUseFacts, shape::payload_free_enum_variants};
+use super::{
+    EnumPlan, RepArena, RepGuarantees, RepUse, RepUseFacts, shape::payload_free_enum_variants,
+};
 use crate::concrete::{ConcreteBodyPlan, ConcreteTypeTables};
 use crate::monoty::MonoSubst;
 
@@ -106,7 +108,11 @@ impl StringifyRoute {
                 tree.obligations(&mut Vec::new(), &mut out);
                 out
             }
-            route => route.synthesized_callee().map(|n| (Vec::new(), n)).into_iter().collect(),
+            route => route
+                .synthesized_callee()
+                .map(|n| (Vec::new(), n))
+                .into_iter()
+                .collect(),
         }
     }
 }
@@ -131,9 +137,11 @@ impl EqRoute {
     /// The stdlib entry this route CALLS, if any.
     pub fn synthesized_callee(&self, op: BinOp) -> Option<&'static str> {
         match self {
-            Self::Structural => {
-                Some(if matches!(op, BinOp::Eq) { "__op_eq" } else { "__op_ne" })
-            }
+            Self::Structural => Some(if matches!(op, BinOp::Eq) {
+                "__op_eq"
+            } else {
+                "__op_ne"
+            }),
             Self::Primitive => None,
         }
     }
@@ -181,8 +189,9 @@ pub fn dispatched_callee_decls(ws: &Workspace, name: &str) -> Vec<crate::mir::Fu
 /// detect, and it would report as a callee mismatch rather than as a resolver
 /// bug.
 pub fn dispatched_callee_decl(ws: &Workspace, name: &str) -> Option<crate::mir::FuncRef> {
-    let mut reps =
-        dispatched_callee_decls(ws, name).into_iter().map(|r| super::canonical_variant(ws, r));
+    let mut reps = dispatched_callee_decls(ws, name)
+        .into_iter()
+        .map(|r| super::canonical_variant(ws, r));
     let first = reps.next()?;
     reps.all(|r| r == first).then_some(first)
 }
@@ -343,7 +352,9 @@ impl<'a> DispatchCtx<'a> {
             let lookup_ns = lookup_start
                 .map(|start| start.elapsed().as_nanos() as u64)
                 .unwrap_or_default();
-            let nodes = interner_cold.then(|| super::mono_ty_node_count(&ty)).unwrap_or_default();
+            let nodes = interner_cold
+                .then(|| super::mono_ty_node_count(&ty))
+                .unwrap_or_default();
             cache.borrow_mut().insert(id, Rc::clone(&ty));
             if let Some(stats) = self.lower_attribution {
                 let mut stats = stats.borrow_mut();
@@ -375,7 +386,9 @@ impl<'a> DispatchCtx<'a> {
         if let Some(stats) = self.lower_attribution {
             let mut stats = stats.borrow_mut();
             stats.concrete_mono_shared_handle_requests += 1;
-            let nodes = interner_cold.then(|| super::mono_ty_node_count(&ty)).unwrap_or_default();
+            let nodes = interner_cold
+                .then(|| super::mono_ty_node_count(&ty))
+                .unwrap_or_default();
             stats.record_concrete_mono_derivation(
                 super::ConcreteMonoConsumer::Dispatch,
                 nodes,
@@ -473,7 +486,10 @@ impl<'a> DispatchCtx<'a> {
                 &ty,
                 RepUse::Value,
                 &RepUseFacts::default(),
-                RepGuarantees { nobox: true, allow_opaque: true },
+                RepGuarantees {
+                    nobox: true,
+                    allow_opaque: true,
+                },
             )
             .map(|id| self.rep_arena.get(id).nobox())
             .unwrap_or(false)
@@ -487,7 +503,8 @@ impl<'a> DispatchCtx<'a> {
             }
             return match payload {
                 crate::monoty::MonoTy::App {
-                    ctor: crate::monoty::MonoCtor::Nominal(name), ..
+                    ctor: crate::monoty::MonoCtor::Nominal(name),
+                    ..
                 } => self.is_nobox_struct(*name).then_some(*name),
                 _ => None,
             };
@@ -495,7 +512,11 @@ impl<'a> DispatchCtx<'a> {
         if self.concrete_plan.is_some() {
             return None;
         }
-        let TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } = self.expr_ty(e)? else {
+        let TypeExpr::App {
+            ctor: TypeCtor::Nominal(name),
+            ..
+        } = self.expr_ty(e)?
+        else {
             return None;
         };
         self.is_nobox_struct(name).then_some(name)
@@ -512,10 +533,9 @@ impl<'a> DispatchCtx<'a> {
     /// "cdata value structs ... hit the primitive `==` fast path", and its
     /// GC-carrying branch documents the per-type metatable as authoritative).
     pub fn is_value_struct(&self, name: Ustr) -> bool {
-        self.ws
-            .struct_by_name
-            .get(&name)
-            .is_some_and(|sid| crate::lower::has_value_plan(&self.ws.modules[sid.module.index()].structs[sid.def]))
+        self.ws.struct_by_name.get(&name).is_some_and(|sid| {
+            crate::lower::has_value_plan(&self.ws.modules[sid.module.index()].structs[sid.def])
+        })
     }
 
     /// The declared `value` struct name of `e`'s (nullable-peeled) static
@@ -529,7 +549,8 @@ impl<'a> DispatchCtx<'a> {
             let (payload, _) = ty.peel_nullable();
             return match payload {
                 crate::monoty::MonoTy::App {
-                    ctor: crate::monoty::MonoCtor::Nominal(name), ..
+                    ctor: crate::monoty::MonoCtor::Nominal(name),
+                    ..
                 } => self.is_value_struct(*name).then_some(*name),
                 _ => None,
             };
@@ -537,7 +558,11 @@ impl<'a> DispatchCtx<'a> {
         if self.concrete_plan.is_some() {
             return None;
         }
-        let TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } = self.expr_ty(e)? else {
+        let TypeExpr::App {
+            ctor: TypeCtor::Nominal(name),
+            ..
+        } = self.expr_ty(e)?
+        else {
             return None;
         };
         self.is_value_struct(name).then_some(name)
@@ -551,25 +576,38 @@ impl<'a> DispatchCtx<'a> {
         if let Some(ty) = self.concrete_expr_ty(e) {
             let (payload, _) = ty.peel_nullable();
             let crate::monoty::MonoTy::App {
-                ctor: crate::monoty::MonoCtor::Nominal(name), ..
-            } = payload else {
+                ctor: crate::monoty::MonoCtor::Nominal(name),
+                ..
+            } = payload
+            else {
                 return false;
             };
-            let Some(eid) = self.ws.enums_by_name.get(name) else { return false };
+            let Some(eid) = self.ws.enums_by_name.get(name) else {
+                return false;
+            };
             let ed = &self.ws.modules[eid.module.index()].enums[eid.def];
-            return ed.variants.iter().all(|v| matches!(v.payload, bone_semantic::hir::VariantPayload::Unit));
+            return ed
+                .variants
+                .iter()
+                .all(|v| matches!(v.payload, bone_semantic::hir::VariantPayload::Unit));
         }
         if self.concrete_plan.is_some() {
             return false;
         }
-        let Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }) = self.expr_ty(e) else {
+        let Some(TypeExpr::App {
+            ctor: TypeCtor::Nominal(name),
+            ..
+        }) = self.expr_ty(e)
+        else {
             return false;
         };
         let Some(eid) = self.ws.enums_by_name.get(&name) else {
             return false;
         };
         let ed = &self.ws.modules[eid.module.index()].enums[eid.def];
-        ed.variants.iter().all(|v| matches!(v.payload, bone_semantic::hir::VariantPayload::Unit))
+        ed.variants
+            .iter()
+            .all(|v| matches!(v.payload, bone_semantic::hir::VariantPayload::Unit))
     }
 
     pub fn eq_is_scalar(&self, e: Idx<Expr>) -> bool {
@@ -578,8 +616,8 @@ impl<'a> DispatchCtx<'a> {
             return matches!(
                 payload,
                 crate::monoty::MonoTy::Int
-                | crate::monoty::MonoTy::Uint
-                | crate::monoty::MonoTy::Float
+                    | crate::monoty::MonoTy::Uint
+                    | crate::monoty::MonoTy::Float
                     | crate::monoty::MonoTy::Bool
                     | crate::monoty::MonoTy::String
             ) || self.is_payloadless_enum(e);
@@ -590,7 +628,11 @@ impl<'a> DispatchCtx<'a> {
         matches!(
             self.expr_ty(e),
             Some(TypeExpr::Builtin(
-                BuiltinTy::Int | BuiltinTy::Uint | BuiltinTy::Float | BuiltinTy::Bool | BuiltinTy::String
+                BuiltinTy::Int
+                    | BuiltinTy::Uint
+                    | BuiltinTy::Float
+                    | BuiltinTy::Bool
+                    | BuiltinTy::String
             ))
         ) || self.is_payloadless_enum(e)
     }
@@ -642,17 +684,23 @@ impl<'a> DispatchCtx<'a> {
                     ..
                 } => StringifyRoute::Inspect,
                 crate::monoty::MonoTy::App {
-                    ctor: crate::monoty::MonoCtor::Nominal(name), ..
+                    ctor: crate::monoty::MonoCtor::Nominal(name),
+                    ..
                 } if self.ws.newtypes_by_name.contains_key(name) => StringifyRoute::Newtype(*name),
                 crate::monoty::MonoTy::App {
-                    ctor: crate::monoty::MonoCtor::Nominal(name), ..
+                    ctor: crate::monoty::MonoCtor::Nominal(name),
+                    ..
                 } if payload_free_enum_variants(self.ws, *name).is_some() => {
                     StringifyRoute::EnumNames(*name)
                 }
                 crate::monoty::MonoTy::App {
-                    ctor: crate::monoty::MonoCtor::Nominal(name), ..
+                    ctor: crate::monoty::MonoCtor::Nominal(name),
+                    ..
                 } if self.ws.struct_by_name.contains_key(name)
-                    || self.ws.enums_by_name.contains_key(name) => StringifyRoute::Inspect,
+                    || self.ws.enums_by_name.contains_key(name) =>
+                {
+                    StringifyRoute::Inspect
+                }
                 _ => StringifyRoute::Unsupported,
             };
         }
@@ -660,27 +708,30 @@ impl<'a> DispatchCtx<'a> {
             return StringifyRoute::Unsupported;
         }
         match self.expr_ty(expr) {
-            Some(TypeExpr::Builtin(BuiltinTy::Int | BuiltinTy::Uint | BuiltinTy::Bool | BuiltinTy::String)) => {
-                StringifyRoute::ToString
-            }
+            Some(TypeExpr::Builtin(
+                BuiltinTy::Int | BuiltinTy::Uint | BuiltinTy::Bool | BuiltinTy::String,
+            )) => StringifyRoute::ToString,
             Some(TypeExpr::Builtin(BuiltinTy::Float)) => StringifyRoute::FormatFloat,
-            Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. })
-                if self.ws.newtypes_by_name.contains_key(&name) =>
-            {
-                StringifyRoute::Newtype(name)
-            }
+            Some(TypeExpr::App {
+                ctor: TypeCtor::Nominal(name),
+                ..
+            }) if self.ws.newtypes_by_name.contains_key(&name) => StringifyRoute::Newtype(name),
             Some(TypeExpr::Tuple { .. })
-            | Some(TypeExpr::App { ctor: TypeCtor::Array | TypeCtor::Map, .. }) => {
-                StringifyRoute::Inspect
-            }
-            Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. })
-                if payload_free_enum_variants(self.ws, name).is_some() =>
-            {
+            | Some(TypeExpr::App {
+                ctor: TypeCtor::Array | TypeCtor::Map,
+                ..
+            }) => StringifyRoute::Inspect,
+            Some(TypeExpr::App {
+                ctor: TypeCtor::Nominal(name),
+                ..
+            }) if payload_free_enum_variants(self.ws, name).is_some() => {
                 StringifyRoute::EnumNames(name)
             }
-            Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. })
-                if self.ws.struct_by_name.contains_key(&name)
-                    || self.ws.enums_by_name.contains_key(&name) =>
+            Some(TypeExpr::App {
+                ctor: TypeCtor::Nominal(name),
+                ..
+            }) if self.ws.struct_by_name.contains_key(&name)
+                || self.ws.enums_by_name.contains_key(&name) =>
             {
                 StringifyRoute::Inspect
             }
@@ -709,8 +760,11 @@ impl<'a> DispatchCtx<'a> {
     /// `to_string(any)` fallback qualify -- a user function or a typed overload
     /// of either name is an ordinary call.
     pub fn tostring_route(&self, call: Idx<Expr>) -> Option<(Idx<Expr>, StringifyRoute)> {
-        let Expr::Call { callee: bone_semantic::hir::Callee::Unresolved { name, .. }, args, .. } =
-            &self.body.expr_arena[call]
+        let Expr::Call {
+            callee: bone_semantic::hir::Callee::Unresolved { name, .. },
+            args,
+            ..
+        } = &self.body.expr_arena[call]
         else {
             return None;
         };
@@ -718,15 +772,22 @@ impl<'a> DispatchCtx<'a> {
             return None;
         }
         let mut args = args.clone();
-        let (Some(arg), None) = (args.next(), args.next()) else { return None };
+        let (Some(arg), None) = (args.next(), args.next()) else {
+            return None;
+        };
         let resolved = match self.inf.and_then(|i| i.resolved_overload_calls.get(&call)) {
             Some(&(module, func)) => vec![(module, func)],
             None => self.ws.functions_by_name.get(name)?.to_vec(),
         };
-        let [(module, func)] = resolved[..] else { return None };
+        let [(module, func)] = resolved[..] else {
+            return None;
+        };
         let def = &self.ws.module(module).functions[func];
         let takes_any = match def.param_decls.as_slice() {
-            [param] => matches!(self.raw_ty_node(param.ty), Some(TypeExpr::Builtin(BuiltinTy::Any))),
+            [param] => matches!(
+                self.raw_ty_node(param.ty),
+                Some(TypeExpr::Builtin(BuiltinTy::Any))
+            ),
             _ => false,
         };
         if !takes_any || (name.as_str() == "tostring" && !def.is_extern) {
@@ -761,9 +822,12 @@ impl<'a> DispatchCtx<'a> {
                     ..
                 } => true,
                 crate::monoty::MonoTy::App {
-                    ctor: crate::monoty::MonoCtor::Nominal(name), ..
-                } => self.ws.struct_by_name.contains_key(name)
-                    || self.ws.enums_by_name.contains_key(name),
+                    ctor: crate::monoty::MonoCtor::Nominal(name),
+                    ..
+                } => {
+                    self.ws.struct_by_name.contains_key(name)
+                        || self.ws.enums_by_name.contains_key(name)
+                }
                 _ => false,
             };
         }
@@ -772,8 +836,14 @@ impl<'a> DispatchCtx<'a> {
         }
         match self.expr_ty(e) {
             Some(TypeExpr::Tuple { .. }) => true,
-            Some(TypeExpr::App { ctor: TypeCtor::Array | TypeCtor::Map, .. }) => true,
-            Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }) => {
+            Some(TypeExpr::App {
+                ctor: TypeCtor::Array | TypeCtor::Map,
+                ..
+            }) => true,
+            Some(TypeExpr::App {
+                ctor: TypeCtor::Nominal(name),
+                ..
+            }) => {
                 self.ws.struct_by_name.contains_key(&name)
                     || self.ws.enums_by_name.contains_key(&name)
             }
@@ -844,7 +914,10 @@ impl<'a> DispatchCtx<'a> {
                 Some(crate::monoty::MonoTy::Float)
             )
         } else {
-            matches!(self.expr_ty(hole), Some(TypeExpr::Builtin(BuiltinTy::Float)))
+            matches!(
+                self.expr_ty(hole),
+                Some(TypeExpr::Builtin(BuiltinTy::Float))
+            )
         };
         let needs_pad = spec.fill.is_some()
             || matches!(spec.alignment, Some('^'))

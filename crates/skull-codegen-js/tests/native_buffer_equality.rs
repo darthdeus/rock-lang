@@ -72,11 +72,23 @@ fn flat_vec_equality_checks_live_bytes() -> bool {
 fn check(root: &str) {
     let ws = crate::common::ws_with(SRC);
     let mid = ws.module_ids[&ustr::Ustr::from("<test>")];
-    let (fid, _) = ws.module(mid).functions.iter()
-        .find(|(_, f)| f.name.as_str() == root).expect("root");
+    let (fid, _) = ws
+        .module(mid)
+        .functions
+        .iter()
+        .find(|(_, f)| f.name.as_str() == root)
+        .expect("root");
     let js = skull_codegen_js::emit::emit_with_closure(
-        &ws, &[(FuncRef { module: mid, func: fid }, root.to_string())],
-    ).expect("buffer equality emits");
+        &ws,
+        &[(
+            FuncRef {
+                module: mid,
+                func: fid,
+            },
+            root.to_string(),
+        )],
+    )
+    .expect("buffer equality emits");
     let program = format!(
         "{}{}{}{}\n{js}\nconsole.log({root}());",
         skull_codegen_js::JS_NB_CHECK_SHIMS,
@@ -84,25 +96,53 @@ fn check(root: &str) {
         skull_codegen_js::JS_CALL_HELPER,
         skull_codegen_js::JS_STRUCTURAL_EQ,
     );
-    let out = crate::common::node().arg("-e").arg(&program).output().expect("node");
-    assert!(out.status.success(), "{root}: {}\n{program}", String::from_utf8_lossy(&out.stderr));
-    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "true", "{root}");
+    let out = crate::common::node()
+        .arg("-e")
+        .arg(&program)
+        .output()
+        .expect("node");
+    assert!(
+        out.status.success(),
+        "{root}: {}\n{program}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "true",
+        "{root}"
+    );
 }
 
 #[test]
-fn flat_vec_equality_ignores_capacity() { check("flat_vec_equality_ignores_capacity"); }
+fn flat_vec_equality_ignores_capacity() {
+    check("flat_vec_equality_ignores_capacity");
+}
 #[test]
-fn flat_vec_equality_reads_only_live_elements() { check("flat_vec_equality_reads_only_live_elements"); }
+fn flat_vec_equality_reads_only_live_elements() {
+    check("flat_vec_equality_reads_only_live_elements");
+}
 #[test]
-fn flat_vec_empty_vectors_are_equal() { check("flat_vec_empty_vectors_are_equal"); }
+fn flat_vec_empty_vectors_are_equal() {
+    check("flat_vec_empty_vectors_are_equal");
+}
 #[test]
-fn scalar_flat_vec_equality() { check("scalar_flat_vec_equality"); }
+fn scalar_flat_vec_equality() {
+    check("scalar_flat_vec_equality");
+}
 #[test]
-fn empty_scalar_native_buffers_are_equal() { check("empty_scalar_native_buffers_are_equal"); }
+fn empty_scalar_native_buffers_are_equal() {
+    check("empty_scalar_native_buffers_are_equal");
+}
 #[test]
-fn native_buffer_equality_checks_live_bytes() { check("native_buffer_equality_checks_live_bytes"); }
+fn native_buffer_equality_checks_live_bytes() {
+    check("native_buffer_equality_checks_live_bytes");
+}
 #[test]
-fn flat_vec_equality_checks_live_bytes() { check("flat_vec_equality_checks_live_bytes"); }
+fn flat_vec_equality_checks_live_bytes() {
+    check("flat_vec_equality_checks_live_bytes");
+}
 
 #[test]
-fn zero_sized_native_buffer_elements_are_equal() { check("zero_sized_native_buffer_elements_are_equal"); }
+fn zero_sized_native_buffer_elements_are_equal() {
+    check("zero_sized_native_buffer_elements_are_equal");
+}

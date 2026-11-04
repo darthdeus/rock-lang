@@ -51,9 +51,8 @@ pub(crate) fn is_identity_struct_type(gamma: &Gamma, ty: TyId) -> bool {
             TypeExpr::App {
                 ctor: TypeCtor::Nominal(name),
                 ..
-            } => resolve_struct(gamma, name).is_some_and(|sid| {
-                !gamma.workspace.module(sid.module).structs[sid.def].is_value
-            }),
+            } => resolve_struct(gamma, name)
+                .is_some_and(|sid| !gamma.workspace.module(sid.module).structs[sid.def].is_value),
             _ => false,
         }
     }
@@ -73,7 +72,10 @@ pub(crate) fn frame_ref_target(gamma: &Gamma, ty: TyId) -> Option<TyId> {
                 TypeExpr::App {
                     ctor: TypeCtor::Ref,
                     params,
-                } => params.into_iter().next().map(|target| inner_ty.with_idx(target)),
+                } => params
+                    .into_iter()
+                    .next()
+                    .map(|target| inner_ty.with_idx(target)),
                 _ => None,
             }
         }
@@ -696,10 +698,12 @@ fn coerce_impl(
         if let TypeExpr::Nullable(inner) = *gamma.get(to_ret) {
             let to_inner = resolve(gamma, to_ret.with_idx(inner), span);
             if !matches!(gamma.get(from_ret), TypeExpr::Nullable(_))
-                && let TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } = *gamma.get(to_inner)
-                && resolve_struct(gamma, name).is_some_and(|sid| {
-                    gamma.workspace.module(sid.module).structs[sid.def].is_nobox
-                })
+                && let TypeExpr::App {
+                    ctor: TypeCtor::Nominal(name),
+                    ..
+                } = *gamma.get(to_inner)
+                && resolve_struct(gamma, name)
+                    .is_some_and(|sid| gamma.workspace.module(sid.module).structs[sid.def].is_nobox)
                 && gamma.trial(|g| unify(g, from_ret, to_inner, span).is_ok())
             {
                 return Err(CompilerError::new_with_label(
@@ -800,20 +804,29 @@ fn coerce_impl(
     // INCOMPARABLE: `WriteFieldRef -> ReadFieldRef` is the whole-value extraction
     // an embedded field must not offer.
     if let (
-        TypeExpr::App { ctor: TypeCtor::Nominal(fname), params: fp },
-        TypeExpr::App { ctor: TypeCtor::Nominal(tname), params: tp },
+        TypeExpr::App {
+            ctor: TypeCtor::Nominal(fname),
+            params: fp,
+        },
+        TypeExpr::App {
+            ctor: TypeCtor::Nominal(tname),
+            params: tp,
+        },
     ) = (*gamma.get(from_r), *gamma.get(to_r))
     {
         if bone_core::modules::is_intrinsic_key(fname, "FieldRef")
-            && bone_core::modules::is_intrinsic_key_in(
-                tname,
-                &["ReadFieldRef", "WriteFieldRef"],
-            )
+            && bone_core::modules::is_intrinsic_key_in(tname, &["ReadFieldRef", "WriteFieldRef"])
         {
             let mut fi = fp.into_iter();
             let mut ti = tp.into_iter();
-            let (ft, fv) = (from_r.with_idx(fi.next().unwrap()), from_r.with_idx(fi.next().unwrap()));
-            let (tt, tv) = (to_r.with_idx(ti.next().unwrap()), to_r.with_idx(ti.next().unwrap()));
+            let (ft, fv) = (
+                from_r.with_idx(fi.next().unwrap()),
+                from_r.with_idx(fi.next().unwrap()),
+            );
+            let (tt, tv) = (
+                to_r.with_idx(ti.next().unwrap()),
+                to_r.with_idx(ti.next().unwrap()),
+            );
             unify(gamma, ft, tt, span)?;
             return match bone_core::modules::is_intrinsic_key(tname, "WriteFieldRef") {
                 true => unify(gamma, fv, tv, span),
@@ -883,9 +896,7 @@ pub fn join(gamma: &mut Gamma, a: TyId, b: TyId, span: Span) -> Result<TyId, Com
         | (
             TypeExpr::Builtin(BuiltinTy::Float),
             TypeExpr::Builtin(BuiltinTy::Int | BuiltinTy::Uint),
-        ) => {
-            Ok(gamma.workspace.builtins.float())
-        }
+        ) => Ok(gamma.workspace.builtins.float()),
 
         _ => {
             let snap = gamma.out.checkpoint();
@@ -1007,7 +1018,8 @@ pub fn coerce_to_interface(
         CompilerError::new_with_label(span, format!("unknown interface `{iname}`"))
     })?;
 
-    let ifields: Vec<(Ustr, TyId, NsVisibility)> = gamma.workspace.module(isid.module).structs[isid.def]
+    let ifields: Vec<(Ustr, TyId, NsVisibility)> = gamma.workspace.module(isid.module).structs
+        [isid.def]
         .fields
         .iter()
         .map(|f| (f.name, f.ty, f.write_vis.clone()))
@@ -1036,23 +1048,21 @@ pub fn coerce_to_interface(
     };
 
     for (fname, fty, fwrite_vis) in ifields {
-        let actual = struct_field_ty(gamma, from, fname, span).map_err(|e| {
-            match e {
-                StructFieldError::MissingField { .. }
-                | StructFieldError::AccessDenied {
-                    denied: AccessDenied::NoSuchField { .. },
-                    ..
-                } => CompilerError::new_with_label(
-                    span,
-                    format!(
-                        "type {} does not have required field `{}` of interface `{}`",
-                        gamma.workspace.render(Some(&gamma.out), from),
-                        fname,
-                        iname
-                    ),
+        let actual = struct_field_ty(gamma, from, fname, span).map_err(|e| match e {
+            StructFieldError::MissingField { .. }
+            | StructFieldError::AccessDenied {
+                denied: AccessDenied::NoSuchField { .. },
+                ..
+            } => CompilerError::new_with_label(
+                span,
+                format!(
+                    "type {} does not have required field `{}` of interface `{}`",
+                    gamma.workspace.render(Some(&gamma.out), from),
+                    fname,
+                    iname
                 ),
-                other => other.into(),
-            }
+            ),
+            other => other.into(),
         })?;
 
         // Structural interface conformance capability check (spec 10.6):
@@ -1110,12 +1120,25 @@ pub(crate) fn bound_var(gamma: &Gamma, ty: TyId) -> Option<VarId> {
     }
 }
 
-pub fn instantiate_param(gamma: &mut Gamma, generics: &[TyId], param: TyId, span: Span) -> Result<TyId, CompilerError> {
+pub fn instantiate_param(
+    gamma: &mut Gamma,
+    generics: &[TyId],
+    param: TyId,
+    span: Span,
+) -> Result<TyId, CompilerError> {
     let (subs, _fresh) = gamma.instantiate_generics(generics, span)?;
     substitute(gamma, param, &subs, span)
 }
 
-pub fn instantiate_params(gamma: &mut Gamma, generics: &[TyId], params: &[TyId], span: Span) -> Result<Vec<TyId>, CompilerError> {
+pub fn instantiate_params(
+    gamma: &mut Gamma,
+    generics: &[TyId],
+    params: &[TyId],
+    span: Span,
+) -> Result<Vec<TyId>, CompilerError> {
     let (subs, _fresh) = gamma.instantiate_generics(generics, span)?;
-    params.iter().map(|&p| substitute(gamma, p, &subs, span)).collect()
+    params
+        .iter()
+        .map(|&p| substitute(gamma, p, &subs, span))
+        .collect()
 }

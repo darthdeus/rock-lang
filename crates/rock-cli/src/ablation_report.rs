@@ -79,8 +79,7 @@ pub fn report(label: &str) -> bool {
     println!("generic Rock calls examined: {examined}");
     println!();
 
-    let mut by_cat: std::collections::BTreeMap<FatalCategory, (usize, usize)> =
-        Default::default();
+    let mut by_cat: std::collections::BTreeMap<FatalCategory, (usize, usize)> = Default::default();
     for (c, _, _, n, _) in &distinct {
         let e = by_cat.entry(*c).or_insert((0, 0));
         e.0 += 1;
@@ -93,14 +92,22 @@ pub fn report(label: &str) -> bool {
     println!("| category | distinct (callee x caller) | call sites | unique callees |");
     println!("|---|---:|---:|---:|");
     for (c, (d, n)) in &by_cat {
-        println!("| `{}` | {d} | {n} | {} |", c.name(), callees.get(c).copied().unwrap_or(0));
+        println!(
+            "| `{}` | {d} | {n} | {} |",
+            c.name(),
+            callees.get(c).copied().unwrap_or(0)
+        );
     }
     println!();
     println!(
         "total: {} distinct pairs, {} call sites, {} unique callees ({} raw records)",
         distinct.len(),
         ablation::distinct_sites(&fatals),
-        fatals.iter().map(|f| f.callee.as_str()).collect::<std::collections::BTreeSet<_>>().len(),
+        fatals
+            .iter()
+            .map(|f| f.callee.as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
         fatals.len(),
     );
     println!();
@@ -143,14 +150,25 @@ pub fn report(label: &str) -> bool {
         println!("| mechanism | pairs | sites | callees |");
         println!("|---|---:|---:|---:|");
         for (head, (pairs, sites, callees)) in &mech {
-            println!("| {head} | {} | {} | {} |", pairs.len(), sites.len(), callees.len());
+            println!(
+                "| {head} | {} | {} | {} |",
+                pairs.len(),
+                sites.len(),
+                callees.len()
+            );
         }
         println!();
         for (head, (_, _, callees)) in &mech {
             println!("- {head}");
-            println!("  callees: {}", callees.iter().copied().collect::<Vec<_>>().join(", "));
+            println!(
+                "  callees: {}",
+                callees.iter().copied().collect::<Vec<_>>().join(", ")
+            );
             if let Some(ps) = payloads.get(head) {
-                println!("  payloads: {}", ps.iter().copied().collect::<Vec<_>>().join(", "));
+                println!(
+                    "  payloads: {}",
+                    ps.iter().copied().collect::<Vec<_>>().join(", ")
+                );
             }
         }
         println!();
@@ -166,11 +184,21 @@ pub fn report(label: &str) -> bool {
         // `ROCK_MONO_ABLATION_FULL=1` prints every row. The default cap hides
         // whether a category has members beyond its widest ones, which is
         // exactly the question "is this category ONLY the iter witness?" asks.
-        let cap = if std::env::var("ROCK_MONO_ABLATION_FULL").is_ok() { usize::MAX } else { 15 };
+        let cap = if std::env::var("ROCK_MONO_ABLATION_FULL").is_ok() {
+            usize::MAX
+        } else {
+            15
+        };
         for (_, callee, caller, n, span) in rows.iter().take(cap) {
             let file = span.file.as_str();
-            let file = file.rsplit_once("rock-mono/").map(|(_, r)| r).unwrap_or(file);
-            println!("| `{callee}` | `{caller}` | {n} | {file}:{} |", span.line_range.0 + 1);
+            let file = file
+                .rsplit_once("rock-mono/")
+                .map(|(_, r)| r)
+                .unwrap_or(file);
+            println!(
+                "| `{callee}` | `{caller}` | {n} | {file}:{} |",
+                span.line_range.0 + 1
+            );
         }
         if rows.len() > cap {
             println!();
@@ -223,9 +251,25 @@ mod tests {
     /// exit code and lose which failure it was.
     #[test]
     fn every_other_combination_passes_the_requested_status_through() {
-        assert_eq!(census_exit_code(0, false), 0, "a clean run keeps its success");
-        assert_eq!(census_exit_code(1, true), 1, "an already-failing run is unchanged");
-        assert_eq!(census_exit_code(2, true), 2, "a fatal must not relabel a status");
-        assert_eq!(census_exit_code(2, false), 2, "no fatals must not relabel a status");
+        assert_eq!(
+            census_exit_code(0, false),
+            0,
+            "a clean run keeps its success"
+        );
+        assert_eq!(
+            census_exit_code(1, true),
+            1,
+            "an already-failing run is unchanged"
+        );
+        assert_eq!(
+            census_exit_code(2, true),
+            2,
+            "a fatal must not relabel a status"
+        );
+        assert_eq!(
+            census_exit_code(2, false),
+            2,
+            "no fatals must not relabel a status"
+        );
     }
 }

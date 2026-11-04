@@ -20,7 +20,10 @@ use crate::common::ws_with;
 
 fn emit_res(src: &str, root: &str) -> Result<String, String> {
     let ws = ws_with(src);
-    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("test module");
     let fid = ws
         .module(mid)
         .functions
@@ -30,7 +33,13 @@ fn emit_res(src: &str, root: &str) -> Result<String, String> {
         .expect("root fn");
     skull_codegen_js::emit::emit_with_closure(
         &ws,
-        &[(FuncRef { module: mid, func: fid }, root.to_string())],
+        &[(
+            FuncRef {
+                module: mid,
+                func: fid,
+            },
+            root.to_string(),
+        )],
     )
     .map_err(|e| e.message)
 }
@@ -42,7 +51,10 @@ fn emit(src: &str, root: &str) -> String {
 fn reject(src: &str, root: &str, needle: &str) {
     match emit_res(src, root) {
         Ok(js) => panic!("expected a rejection mentioning `{needle}`, emitted:\n{js}"),
-        Err(m) => assert!(m.contains(needle), "rejection should mention `{needle}`, got: {m}"),
+        Err(m) => assert!(
+            m.contains(needle),
+            "rejection should mention `{needle}`, got: {m}"
+        ),
     }
 }
 
@@ -51,7 +63,10 @@ fn reject(src: &str, root: &str, needle: &str) {
 fn lanes(src: &str, name: &str) -> usize {
     let ws = ws_with(src);
     let scx = ScalarCtx::new(&ws).with_target(bone_semantic::hir::FnBackend::Js);
-    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("test module");
     let fid = ws
         .module(mid)
         .functions
@@ -62,7 +77,10 @@ fn lanes(src: &str, name: &str) -> usize {
     skull_mir::lower::BackendFnAbiPlan::for_boundary_declaration(
         &ws,
         &scx,
-        FuncRef { module: mid, func: fid },
+        FuncRef {
+            module: mid,
+            func: fid,
+        },
     )
     .result_lanes()
 }
@@ -111,7 +129,11 @@ fn abi_lanes_equal_the_legacy_hand_published_width() {
         // `-> (bool, float)`: `__rock_ret1 = value; return false;`
         ("pub_pair", "__rock_ret1 = value; return false;", 2),
         // `@scalar_abi -> (bool, Vec2)`: two published lanes.
-        ("pub_pair_value", "__rock_ret1 = v__x; __rock_ret2 = v__y; return false;", 3),
+        (
+            "pub_pair_value",
+            "__rock_ret1 = v__x; __rock_ret2 = v__y; return false;",
+            3,
+        ),
         // A scalar result publishes nothing at all.
         ("pub_scalar", "return v;", 1),
     ] {
@@ -176,8 +198,16 @@ fn main() {{ let (a, b) = probe(1.0) }}
         )
     };
     // Too few lanes, too many lanes.
-    reject(&with("return __rock_publish(false);"), "main", "2 result lanes");
-    reject(&with("return __rock_publish(false, v, v);"), "main", "2 result lanes");
+    reject(
+        &with("return __rock_publish(false);"),
+        "main",
+        "2 result lanes",
+    );
+    reject(
+        &with("return __rock_publish(false, v, v);"),
+        "main",
+        "2 result lanes",
+    );
     // No publisher at all in a multi-lane body.
     reject(&with("return false;"), "main", "__rock_publish");
     // A second return.
@@ -187,7 +217,11 @@ fn main() {{ let (a, b) = probe(1.0) }}
         "one final",
     );
     // Direct bank access -- the legacy mechanism, now refused.
-    reject(&with("__rock_ret1 = v; return false;"), "main", "scratch bank");
+    reject(
+        &with("__rock_ret1 = v; return false;"),
+        "main",
+        "scratch bank",
+    );
 }
 
 /// A single-lane body uses an ordinary `return`, and may use neither the
@@ -202,7 +236,10 @@ fn main() { let x = scalar_probe(1.0) }
 "#,
         "main",
     );
-    assert!(js.contains("return v * 2;"), "the body was rewritten:\n{js}");
+    assert!(
+        js.contains("return v * 2;"),
+        "the body was rewritten:\n{js}"
+    );
 
     reject(
         r#"
@@ -259,7 +296,10 @@ fn main() { let (a, b) = ordered(1.0) }
          argument leaves a published lane behind:\n{body}"
     );
     let return_at = body.rfind("return ").expect("return");
-    assert!(lane_at < return_at, "the lane write must precede the return:\n{body}");
+    assert!(
+        lane_at < return_at,
+        "the lane write must precede the return:\n{body}"
+    );
 }
 
 /// The temps are compiler-owned, so a body naming one rejects rather than
@@ -296,13 +336,18 @@ fn main() {
         .lines()
         .filter(|line| line.starts_with("function probe_"))
         .collect();
-    assert_eq!(definitions.len(), 1, "the fixture needs one selected JS body:\n{js}");
+    assert_eq!(
+        definitions.len(),
+        1,
+        "the fixture needs one selected JS body:\n{js}"
+    );
     assert!(
         definitions[0].contains("value__x, value__y"),
         "the selected @scalar_abi JS sibling did not own its concrete parameter ABI:\n{js}"
     );
     assert!(
-        js.lines().any(|line| line.contains("probe_") && line.contains("1, 2")),
+        js.lines()
+            .any(|line| line.contains("probe_") && line.contains("1, 2")),
         "the call site did not use the selected sibling's scalar parameter ABI:\n{js}"
     );
 }

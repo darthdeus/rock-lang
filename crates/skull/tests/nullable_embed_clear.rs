@@ -56,16 +56,26 @@ fn nullable_embed_clear_skips_absent_hash_slots_without_materializing() {
     let lua = emit_module(SRC);
     for name in ["clear", "clear_nested", "assign"] {
         let body = function_body(&lua, name);
-        let prefix = if name == "clear_nested" { "snapshot.lock" } else { "resolution" };
+        let prefix = if name == "clear_nested" {
+            "snapshot.lock"
+        } else {
+            "resolution"
+        };
         let read = format!(" = c0.{prefix}");
         let read_nested = format!(" = c0[\"{prefix}\"]");
         assert!(
             (body.contains(&read) || body.contains(&read_nested)) && body.contains("if "),
             "{name} must test stored presence before clearing missing hash slots:\n{body}"
         );
-        assert!(body.contains(&format!("[\"{prefix}.target.__tag\"] = ")), "{body}");
+        assert!(
+            body.contains(&format!("[\"{prefix}.target.__tag\"] = ")),
+            "{body}"
+        );
         for ctor in ["({", "_ct(", "_lct(", "_vt("] {
-            assert!(!body.contains(ctor), "{name} materializes `{ctor}`:\n{body}");
+            assert!(
+                !body.contains(ctor),
+                "{name} materializes `{ctor}`:\n{body}"
+            );
         }
     }
 }
@@ -95,12 +105,16 @@ end
 assert(writes == 0, 'absent clears inserted ' .. writes .. ' hash keys')
 io.write('ok')
 "#;
-    assert_eq!(run_luajit(&format!("{lua}\n{driver}"), "absent_embed_clear"), "ok");
+    assert_eq!(
+        run_luajit(&format!("{lua}\n{driver}"), "absent_embed_clear"),
+        "ok"
+    );
 }
 
 #[test]
 fn nullable_embed_clear_normalizes_dynamic_absence_before_boxed_read() {
-    let lua = emit_module(r#"
+    let lua = emit_module(
+        r#"
 struct Payload { n: int }
 struct State { embed payload: Payload? }
 fn absent() -> Payload? { return null }
@@ -112,6 +126,10 @@ fn main() {
     clear_payload(s)
     print("{take(s.payload)}")
 }
-"#);
-    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "embed_dynamic_absence"), "-1");
+"#,
+    );
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "embed_dynamic_absence"),
+        "-1"
+    );
 }

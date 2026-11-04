@@ -3,8 +3,8 @@
 //! The emit-shape test needs no node; the shim behavior pins run the ACTUAL
 //! prelude const under node, node-gated with a skip-log.
 
-use skull_codegen_js::JS_MAP_ITER_RUNTIME;
 use crate::common::{emit_user, ws_with};
+use skull_codegen_js::JS_MAP_ITER_RUNTIME;
 
 #[test]
 fn map_iter_emits_map_next_and_get() {
@@ -73,7 +73,9 @@ fn empty_map_yields_nothing() {
         eprintln!("SKIP empty_map_yields_nothing: node not found");
         return;
     }
-    let got = node_run(&format!("{DRAIN} var m=new Map(); console.log('['+drain(m).join(',')+']');"));
+    let got = node_run(&format!(
+        "{DRAIN} var m=new Map(); console.log('['+drain(m).join(',')+']');"
+    ));
     assert_eq!(got, "[]");
 }
 

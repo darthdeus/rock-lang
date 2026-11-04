@@ -9,12 +9,15 @@
 //! (`macro_refs::macro_invocation_def`), arity-selected exactly like expansion.
 //! Semantic-tokens twin of the same erasure root: `macro_call_site_sentinel.rs`.
 
-use bone_query::{canonicalize_lenient, BoneWorkspace};
+use bone_query::{BoneWorkspace, canonicalize_lenient};
 use lsp_types::{Position, Uri};
 
 /// (line, char) of `src[find(marker) + into]`, 0-based.
 fn pos(src: &str, marker: &str, into: usize) -> Position {
-    let idx = src.find(marker).unwrap_or_else(|| panic!("marker not found: {marker:?}")) + into;
+    let idx = src
+        .find(marker)
+        .unwrap_or_else(|| panic!("marker not found: {marker:?}"))
+        + into;
     let before = &src[..idx];
     let line = before.matches('\n').count() as u32;
     let col = (idx - before.rfind('\n').map(|i| i + 1).unwrap_or(0)) as u32;
@@ -65,9 +68,9 @@ fn public_macro_navigation_survives_namespace_construction() {
         std::fs::write(&use_path, invocation).expect("consumer source");
         let mut bone = BoneWorkspace::new();
         bone.update(use_path.to_str().unwrap(), invocation.to_string());
-        let location = bone.definition(
-            use_path.to_str().unwrap(), pos(invocation, "twice(21)", 2),
-        ).expect("public macro invocation definition");
+        let location = bone
+            .definition(use_path.to_str().unwrap(), pos(invocation, "twice(21)", 2))
+            .expect("public macro invocation definition");
         assert_eq!(
             location.uri,
             Uri::from_file_path(&canonicalize_lenient(def_path.to_str().unwrap())).unwrap(),

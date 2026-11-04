@@ -12,9 +12,12 @@ pub struct SelectionRangeClientCapabilities {
     pub dynamic_registration: Option<bool>,
 }
 
-impl_lsp_struct!(SelectionRangeClientCapabilities,
+impl_lsp_struct!(
+    SelectionRangeClientCapabilities,
     required {},
-    optional { dynamic_registration: bool = "dynamicRegistration" }
+    optional {
+        dynamic_registration: bool = "dynamicRegistration"
+    }
 );
 
 #[derive(Debug, Eq, PartialEq, Clone, Default)]
@@ -22,8 +25,11 @@ pub struct SelectionRangeOptions {
     pub work_done_progress_options: WorkDoneProgressOptions,
 }
 
-impl_lsp_struct!(SelectionRangeOptions,
-    flatten { work_done_progress_options: WorkDoneProgressOptions }
+impl_lsp_struct!(
+    SelectionRangeOptions,
+    flatten {
+        work_done_progress_options: WorkDoneProgressOptions
+    }
 );
 
 #[derive(Debug, Eq, PartialEq, Clone)]
@@ -32,7 +38,8 @@ pub struct SelectionRangeRegistrationOptions {
     pub registration_options: StaticTextDocumentRegistrationOptions,
 }
 
-impl_lsp_struct!(SelectionRangeRegistrationOptions,
+impl_lsp_struct!(
+    SelectionRangeRegistrationOptions,
     flatten {
         selection_range_options: SelectionRangeOptions,
         registration_options: StaticTextDocumentRegistrationOptions,

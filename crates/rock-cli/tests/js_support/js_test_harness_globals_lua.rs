@@ -19,7 +19,9 @@ fn second_global() { print(sentinel_g2) }
 "#;
 
 fn workspace_root() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("workspace root")
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace root")
 }
 
 #[test]
@@ -37,6 +39,9 @@ fn luajit_executor_keeps_shared_global_state() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     ));
-    assert!(output.status.success(), "luajit must evaluate the shared counter once:\n{text}");
+    assert!(
+        output.status.success(),
+        "luajit must evaluate the shared counter once:\n{text}"
+    );
     assert!(text.contains("2/2"), "both Lua tests must run:\n{text}");
 }

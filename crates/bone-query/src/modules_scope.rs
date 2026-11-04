@@ -24,7 +24,12 @@ pub fn callable_member_admitted(
     mid: ModuleId,
     fid: Idx<bone_semantic::hir::Function>,
 ) -> bool {
-    ws.callable_member_admits(key, mid, fid, AccessSite::new(Some(frag.package), &frag.module_path))
+    ws.callable_member_admits(
+        key,
+        mid,
+        fid,
+        AccessSite::new(Some(frag.package), &frag.module_path),
+    )
 }
 
 /// Every name some tier of `frag` offers (spec 8.3), bound cleanly or not:
@@ -34,13 +39,16 @@ fn tier_names(ws: &Workspace, frag: &FragmentScope) -> Vec<Ustr> {
     let viewers = [Viewer::Fragment(frag)];
     // Broken export paths are source diagnostics; omit that tier while offering other names.
     let mut names: Vec<Ustr> =
-        resolve::module_member_names(ws, &viewers, frag.package, &frag.module_path).unwrap_or_default();
+        resolve::module_member_names(ws, &viewers, frag.package, &frag.module_path)
+            .unwrap_or_default();
     names.extend(frag.named.keys().copied());
     for glob in &frag.globs {
         // Unresolved/inaccessible glob imports are source errors, not query failures.
         if let Ok((package, path)) = resolve::resolve_path_to_module(ws, frag, glob) {
             // A broken re-export contributes no names; other import tiers remain usable.
-            names.extend(resolve::module_member_names(ws, &viewers, package, &path).unwrap_or_default());
+            names.extend(
+                resolve::module_member_names(ws, &viewers, package, &path).unwrap_or_default(),
+            );
         }
     }
     if let Some(root) = ws.ns.std_root() {
@@ -67,7 +75,9 @@ pub fn spellings_by_key(
     for name in tier_names(ws, frag) {
         if kind == DefKind::Callable {
             // A tier name need not resolve as a callable (or may have a diagnosed broken import).
-            let Ok(family) = resolve::resolve_v1_callee(ws, frag, name) else { continue };
+            let Ok(family) = resolve::resolve_v1_callee(ws, frag, name) else {
+                continue;
+            };
             match family {
                 CalleeFamily::Single(resolved) if resolved.kind == ResolvedKind::Callable => {
                     out.entry(resolved.key).or_default().push(name);
@@ -82,7 +92,9 @@ pub fn spellings_by_key(
             continue;
         }
         // Ambiguous or broken bindings cannot supply a usable spelling.
-        let Ok(resolved) = resolve::resolve_bare(ws, Some(frag), name) else { continue };
+        let Ok(resolved) = resolve::resolve_bare(ws, Some(frag), name) else {
+            continue;
+        };
         let matches = matches!(
             (kind, resolved.kind),
             (DefKind::Type, ResolvedKind::Type)
@@ -94,7 +106,12 @@ pub fn spellings_by_key(
         }
     }
     for names in out.values_mut() {
-        names.sort_by(|a, b| a.as_str().len().cmp(&b.as_str().len()).then_with(|| a.as_str().cmp(b.as_str())));
+        names.sort_by(|a, b| {
+            a.as_str()
+                .len()
+                .cmp(&b.as_str().len())
+                .then_with(|| a.as_str().cmp(b.as_str()))
+        });
         names.dedup();
     }
     out
@@ -116,11 +133,11 @@ pub fn visible_globals(ws: &Workspace, frag: &FragmentScope) -> Vec<GlobalBindin
     let names = spellings_by_key(ws, frag, DefKind::Global);
     let mut out = Vec::new();
     for (key, spellings) in names {
-        let Some(global) = ws.modules.iter().find_map(|m| {
-            m.global_by_name
-                .get(&key)
-                .map(|idx| m.globals[*idx])
-        }) else {
+        let Some(global) = ws
+            .modules
+            .iter()
+            .find_map(|m| m.global_by_name.get(&key).map(|idx| m.globals[*idx]))
+        else {
             continue;
         };
         for name in spellings {
@@ -131,7 +148,12 @@ pub fn visible_globals(ws: &Workspace, frag: &FragmentScope) -> Vec<GlobalBindin
             });
         }
     }
-    out.sort_by(|a, b| a.name.as_str().cmp(b.name.as_str()).then_with(|| a.key.as_str().cmp(b.key.as_str())));
+    out.sort_by(|a, b| {
+        a.name
+            .as_str()
+            .cmp(b.name.as_str())
+            .then_with(|| a.key.as_str().cmp(b.key.as_str()))
+    });
     out.dedup_by(|a, b| a.name == b.name && a.key == b.key);
     out
 }
@@ -229,7 +251,11 @@ pub(crate) fn display_method_suffix_with_names(
 /// definition the resolver binds it to. A name whose binding is broken (an
 /// ambiguous glob, imports that do not compose) is left out; a composed
 /// callable family is offered once, by its first member. Sorted by name.
-pub fn bound_names(ws: &Workspace, frag: &FragmentScope, admit: impl Fn(&str) -> bool) -> Vec<(Ustr, Ustr)> {
+pub fn bound_names(
+    ws: &Workspace,
+    frag: &FragmentScope,
+    admit: impl Fn(&str) -> bool,
+) -> Vec<(Ustr, Ustr)> {
     tier_names(ws, frag)
         .into_iter()
         .filter(|name| admit(name.as_str()))
@@ -270,7 +296,10 @@ pub fn path_members(
     from_root: bool,
     segments: &[Ustr],
 ) -> Option<Vec<(Ustr, Member)>> {
-    let prefix = UsePathRef { from_root, segments: segments.to_vec() };
+    let prefix = UsePathRef {
+        from_root,
+        segments: segments.to_vec(),
+    };
     // A prefix may name an enum instead of a module; probe that below on a module miss.
     if let Ok((package, path)) = resolve::resolve_path_to_module(ws, frag, &prefix) {
         let viewers = [Viewer::Fragment(frag)];
@@ -294,7 +323,10 @@ pub fn path_members(
         for child in children {
             let mut child_path = segments.to_vec();
             child_path.push(child);
-            let child_path = UsePathRef { from_root, segments: child_path };
+            let child_path = UsePathRef {
+                from_root,
+                segments: child_path,
+            };
             if resolve::resolve_path_to_module(ws, frag, &child_path).is_ok() {
                 out.push((child, Member::Module));
             }
@@ -307,7 +339,9 @@ pub fn path_members(
     // a bare name, a longer one a path.
     let enum_key = match segments {
         // An unresolved bare prefix offers neither enum variants nor module members.
-        [only] if !from_root => resolve::resolve_bare(ws, Some(frag), *only).ok().map(|r| r.key),
+        [only] if !from_root => resolve::resolve_bare(ws, Some(frag), *only)
+            .ok()
+            .map(|r| r.key),
         // An unresolved qualified prefix is an ordinary completion non-match.
         _ => resolve::resolve_path(ws, frag, &prefix).ok().map(|r| r.key),
     }?;
@@ -343,19 +377,33 @@ pub struct ImportCandidate {
 /// dependency, or in the view of an `allow_legacy` dependency (spec 3.2),
 /// through a path the resolver resolves from `frag` to that very
 /// definition, which is also the access check. Sorted by name, then path.
-pub fn import_candidates(ws: &Workspace, frag: &FragmentScope, admit: impl Fn(&str) -> bool) -> Vec<ImportCandidate> {
+pub fn import_candidates(
+    ws: &Workspace,
+    frag: &FragmentScope,
+    admit: impl Fn(&str) -> bool,
+) -> Vec<ImportCandidate> {
     let mut out = Vec::new();
     let mut bound: Option<std::collections::HashSet<Ustr>> = None;
     let mut unbound = |name: Ustr| {
         admit(name.as_str())
-            && !bound.get_or_insert_with(|| tier_names(ws, frag).into_iter().collect()).contains(&name)
+            && !bound
+                .get_or_insert_with(|| tier_names(ws, frag).into_iter().collect())
+                .contains(&name)
     };
     let mut offer = |name: Ustr, key: Ustr, package: u32, from_root: bool, segments: Vec<Ustr>| {
-        let path = UsePathRef { from_root, segments };
+        let path = UsePathRef {
+            from_root,
+            segments,
+        };
         if !matches!(resolve::resolve_path(ws, frag, &path), Ok(r) if r.key == key) {
             return;
         }
-        let spelled = path.segments.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
+        let spelled = path
+            .segments
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join("::");
         let module_path = path.segments[..path.segments.len() - 1].to_vec();
         out.push(ImportCandidate {
             name,
@@ -363,40 +411,64 @@ pub fn import_candidates(ws: &Workspace, frag: &FragmentScope, admit: impl Fn(&s
             package,
             module_path,
             from_root,
-            path: if from_root { format!("::{spelled}") } else { spelled },
+            path: if from_root {
+                format!("::{spelled}")
+            } else {
+                spelled
+            },
         });
     };
     for (key, meta) in ws.defs.iter() {
-        if !matches!(meta.kind, DefKind::Type | DefKind::Global | DefKind::Callable)
-            || (meta.package == frag.package && meta.module == frag.module_path)
+        if !matches!(
+            meta.kind,
+            DefKind::Type | DefKind::Global | DefKind::Callable
+        ) || (meta.package == frag.package && meta.module == frag.module_path)
             || !unbound(meta.name)
         {
             continue;
         }
-        let Some((from_root, segments)) = import_path(ws, frag, meta) else { continue };
+        let Some((from_root, segments)) = import_path(ws, frag, meta) else {
+            continue;
+        };
         offer(meta.name, *key, meta.package, from_root, segments);
     }
     // A legacy provider's view: its root owns bare legacy keys with no
     // `DefMeta`, reached through the fragment package's alias for it.
     for (target, alias) in dependency_aliases(ws, frag) {
-        let Some(root) = ws.ns.package(target).filter(|p| !p.legacy_files.is_empty()).and_then(|p| p.node(Ustr::from(""))) else {
+        let Some(root) = ws
+            .ns
+            .package(target)
+            .filter(|p| !p.legacy_files.is_empty())
+            .and_then(|p| p.node(Ustr::from("")))
+        else {
             continue;
         };
-        let owned = root.owned_types.iter().chain(root.owned_globals.iter()).chain(root.owned_callables.iter());
+        let owned = root
+            .owned_types
+            .iter()
+            .chain(root.owned_globals.iter())
+            .chain(root.owned_callables.iter());
         for (&name, &key) in owned {
             if unbound(name) {
                 offer(name, key, target, false, vec![alias, name]);
             }
         }
     }
-    out.sort_by(|a, b| a.name.as_str().cmp(b.name.as_str()).then(a.path.cmp(&b.path)));
+    out.sort_by(|a, b| {
+        a.name
+            .as_str()
+            .cmp(b.name.as_str())
+            .then(a.path.cmp(&b.path))
+    });
     out
 }
 
 /// Each package the fragment's package names as a dependency, with the
 /// alphabetically first alias it uses for it.
 fn dependency_aliases(ws: &Workspace, frag: &FragmentScope) -> Vec<(u32, Ustr)> {
-    let Some(pkg) = ws.ns.package(frag.package) else { return Vec::new() };
+    let Some(pkg) = ws.ns.package(frag.package) else {
+        return Vec::new();
+    };
     let mut by_target: std::collections::BTreeMap<u32, Ustr> = std::collections::BTreeMap::new();
     for (&alias, &target) in &pkg.aliases {
         let slot = by_target.entry(target).or_insert(alias);
@@ -413,7 +485,11 @@ fn dependency_aliases(ws: &Workspace, frag: &FragmentScope) -> Vec<(u32, Ustr)> 
 /// else on the line after the last `use` item, else after the `mod` header,
 /// else at the top. Deterministic for a given file, so a second run inserts
 /// nothing new in a new place.
-pub fn use_insertion(contribution: &FragmentContribution, src: &str, path: &str) -> (usize, String) {
+pub fn use_insertion(
+    contribution: &FragmentContribution,
+    src: &str,
+    path: &str,
+) -> (usize, String) {
     let line = format!("use {path};");
     let line_start = |at: usize| src[..at.min(src.len())].rfind('\n').map_or(0, |nl| nl + 1);
     let uses: Vec<(usize, usize)> = contribution
@@ -424,8 +500,15 @@ pub fn use_insertion(contribution: &FragmentContribution, src: &str, path: &str)
             _ => None,
         })
         .collect();
-    let later = uses.iter().find(|(start, end)| src[line_start(*start)..(*end).min(src.len())] > *line.as_str());
-    let at = match (later, uses.last().map(|u| u.1).or_else(|| contribution.header.as_ref().map(|h| h.span.offset_range.1))) {
+    let later = uses
+        .iter()
+        .find(|(start, end)| src[line_start(*start)..(*end).min(src.len())] > *line.as_str());
+    let at = match (
+        later,
+        uses.last()
+            .map(|u| u.1)
+            .or_else(|| contribution.header.as_ref().map(|h| h.span.offset_range.1)),
+    ) {
         (Some(&(start, _)), _) => line_start(start),
         (None, Some(end)) => {
             let end = end.min(src.len());
@@ -433,7 +516,11 @@ pub fn use_insertion(contribution: &FragmentContribution, src: &str, path: &str)
         }
         (None, None) => 0,
     };
-    let lead = if at == src.len() && !src.is_empty() && !src.ends_with('\n') { "\n" } else { "" };
+    let lead = if at == src.len() && !src.is_empty() && !src.ends_with('\n') {
+        "\n"
+    } else {
+        ""
+    };
     (at, format!("{lead}{line}\n"))
 }
 

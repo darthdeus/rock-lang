@@ -3,8 +3,8 @@
 //! `--backend js` test executor. node is resolved from PATH; its absence is a
 //! hard `CompilerError` (the caller asked for the JS backend explicitly).
 
-use rock_host::process_management::{register_child_process, unregister_child_process};
 use rock_core::CompilerError;
+use rock_host::process_management::{register_child_process, unregister_child_process};
 use std::time::Duration;
 use wait_timeout::ChildExt;
 
@@ -57,10 +57,14 @@ pub fn run_node_code_with_timeout(
             .wait_timeout(timeout_duration)
             .expect("failed to wait for node process")
         {
-            Some(_status) => child.wait_with_output().expect("failed to read node output"),
+            Some(_status) => child
+                .wait_with_output()
+                .expect("failed to read node output"),
             None => {
                 child.kill().expect("failed to kill timed-out node process");
-                child.wait().expect("failed to wait for killed node process");
+                child
+                    .wait()
+                    .expect("failed to wait for killed node process");
                 unregister_child_process(pid);
                 return Err(CompilerError::new_no_location(format!(
                     "node process timed out after {} seconds",
@@ -69,7 +73,9 @@ pub fn run_node_code_with_timeout(
             }
         }
     } else {
-        child.wait_with_output().expect("failed to read node output")
+        child
+            .wait_with_output()
+            .expect("failed to read node output")
     };
 
     unregister_child_process(pid);

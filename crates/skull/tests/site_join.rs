@@ -78,14 +78,17 @@ fn prepared_body(ws: &Workspace, name: &str) -> MirFunc {
         .iter()
         .find(|(_, f)| f.name.as_str() == name)
         .expect("fn not found");
-    let fref = skull_mir::mir::FuncRef { module: mid, func: fid };
+    let fref = skull_mir::mir::FuncRef {
+        module: mid,
+        func: fid,
+    };
     let graph = graph_of_ws(ws);
     let bodies = skull::concrete_body::build(ws, &graph);
     let scx = ScalarCtx::new(ws).sharing(graph.interner().clone());
     let instance = skull_mir::instance::Instance::base(fref);
     let plan = bodies.plans.get(&instance).expect("concrete plan");
-    let mut mf = skull_mir::lower::lower_instance_with_plans(ws, &scx, plan, &bodies.plans)
-        .expect("lower");
+    let mut mf =
+        skull_mir::lower::lower_instance_with_plans(ws, &scx, plan, &bodies.plans).expect("lower");
     let mangled = skull_mir::mangle::mangle_fn(ws, f);
     let mut cache = skull_transform::InlineCache::default();
     skull::mir_emit::prepare_instance_body_with_plans(
@@ -112,7 +115,10 @@ fn sites(mf: &MirFunc) -> Vec<Site> {
 
 /// Reachable `CallBoundMulti`s -- the call form `emit_cur` does not stamp.
 fn count_bound_multi(mf: &MirFunc) -> usize {
-    mf.insts.iter().filter(|(_, i)| matches!(i, Inst::CallBoundMulti { .. })).count()
+    mf.insts
+        .iter()
+        .filter(|(_, i)| matches!(i, Inst::CallBoundMulti { .. }))
+        .count()
         + mf.nested_fns.iter().map(count_bound_multi).sum::<usize>()
 }
 
@@ -175,7 +181,10 @@ fn sum_all<I: Iterator<int>>(it: I) -> int {
 fn main() { print("{sum_all(Counter { n: 0 })}") }
 "#,
     );
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("test module");
+    let mid = *ws
+        .module_ids
+        .get(&Ustr::from("<test>"))
+        .expect("test module");
     let (sum_fid, _) = ws
         .module(mid)
         .functions
@@ -185,7 +194,10 @@ fn main() { print("{sum_all(Counter { n: 0 })}") }
     let graph = graph_of_ws(&ws);
     let bodies = skull::concrete_body::build(&ws, &graph);
     let scx = ScalarCtx::new(&ws).sharing(graph.interner().clone());
-    let sum_ref = skull_mir::mir::FuncRef { module: mid, func: sum_fid };
+    let sum_ref = skull_mir::mir::FuncRef {
+        module: mid,
+        func: sum_fid,
+    };
     let inst = bodies
         .plans
         .keys()
@@ -219,7 +231,11 @@ fn main() { print("{sum_all(Counter { n: 0 })}") }
     // And it is the `for` HEAD's expression -- the same one an `iter` witness
     // would key on -- rather than an expression of its own.
     let heads: std::collections::BTreeSet<_> = witnesses.iter().map(|w| w.expr).collect();
-    assert_eq!(heads.len(), 1, "one bounded loop, one head expression: {witnesses:?}");
+    assert_eq!(
+        heads.len(),
+        1,
+        "one bounded loop, one head expression: {witnesses:?}"
+    );
 }
 
 /// The same expression reached under different operations stays distinct even
@@ -231,30 +247,87 @@ fn main() { print("{sum_all(Counter { n: 0 })}") }
 fn one_expression_under_different_operations_stays_distinct() {
     let ws = check("fn main() { print(\"x\") }");
     let mf = prepared_body(&ws, "main");
-    let e = mf.call_sites.values().next().expect("main calls something").site.expr;
+    let e = mf
+        .call_sites
+        .values()
+        .next()
+        .expect("main calls something")
+        .site
+        .expr;
     let variants = [
-        Site { domain: SiteDomain::Own, expr: e, op: SiteOp::DirectCall },
-        Site { domain: SiteDomain::Own, expr: e, op: SiteOp::FnValue },
-        Site { domain: SiteDomain::Own, expr: e, op: SiteOp::ForIter },
-        Site { domain: SiteDomain::Own, expr: e, op: SiteOp::ForNext(vec![]) },
-        Site { domain: SiteDomain::Own, expr: e, op: SiteOp::ForNext(vec![0]) },
-        Site { domain: SiteDomain::Own, expr: e, op: SiteOp::BoundNext(vec![]) },
-        Site { domain: SiteDomain::Own, expr: e, op: SiteOp::BoundNext(vec![0]) },
-        Site { domain: SiteDomain::Own, expr: e, op: SiteOp::ImplicitIter },
-        Site { domain: SiteDomain::Own, expr: e, op: SiteOp::Synthesized("__map_col_slot") },
-        Site { domain: SiteDomain::Own, expr: e, op: SiteOp::Synthesized("__map_col_free") },
+        Site {
+            domain: SiteDomain::Own,
+            expr: e,
+            op: SiteOp::DirectCall,
+        },
+        Site {
+            domain: SiteDomain::Own,
+            expr: e,
+            op: SiteOp::FnValue,
+        },
+        Site {
+            domain: SiteDomain::Own,
+            expr: e,
+            op: SiteOp::ForIter,
+        },
+        Site {
+            domain: SiteDomain::Own,
+            expr: e,
+            op: SiteOp::ForNext(vec![]),
+        },
+        Site {
+            domain: SiteDomain::Own,
+            expr: e,
+            op: SiteOp::ForNext(vec![0]),
+        },
+        Site {
+            domain: SiteDomain::Own,
+            expr: e,
+            op: SiteOp::BoundNext(vec![]),
+        },
+        Site {
+            domain: SiteDomain::Own,
+            expr: e,
+            op: SiteOp::BoundNext(vec![0]),
+        },
+        Site {
+            domain: SiteDomain::Own,
+            expr: e,
+            op: SiteOp::ImplicitIter,
+        },
+        Site {
+            domain: SiteDomain::Own,
+            expr: e,
+            op: SiteOp::Synthesized("__map_col_slot"),
+        },
+        Site {
+            domain: SiteDomain::Own,
+            expr: e,
+            op: SiteOp::Synthesized("__map_col_free"),
+        },
     ];
     let mut set: std::collections::BTreeSet<&Site> = std::collections::BTreeSet::new();
     for v in &variants {
-        assert!(set.insert(v), "two operations at one expression collapsed: {v:?}");
+        assert!(
+            set.insert(v),
+            "two operations at one expression collapsed: {v:?}"
+        );
     }
     assert_eq!(set.len(), variants.len());
     // `ForNext` and `BoundNext` at the same path are deliberately different
     // arms: a `for` over a bounded call carries both, at one expression and
     // with the same path.
     assert_ne!(
-        Site { domain: SiteDomain::Own, expr: e, op: SiteOp::ForNext(vec![0]) },
-        Site { domain: SiteDomain::Own, expr: e, op: SiteOp::BoundNext(vec![0]) },
+        Site {
+            domain: SiteDomain::Own,
+            expr: e,
+            op: SiteOp::ForNext(vec![0])
+        },
+        Site {
+            domain: SiteDomain::Own,
+            expr: e,
+            op: SiteOp::BoundNext(vec![0])
+        },
     );
 }
 
@@ -285,7 +358,9 @@ fn main() { print("{top(3)}") }
         .values()
         .map(|cs| {
             let o = &mf.site_owners[cs.owner.0 as usize];
-            ws.module(o.func.module).functions[o.func.func].name.as_str()
+            ws.module(o.func.module).functions[o.func.func]
+                .name
+                .as_str()
         })
         .collect();
     assert!(
@@ -354,7 +429,10 @@ fn main() {
 }
         "#,
     );
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("test module");
+    let mid = *ws
+        .module_ids
+        .get(&Ustr::from("<test>"))
+        .expect("test module");
     let (sum_fid, _) = ws
         .module(mid)
         .functions
@@ -364,7 +442,10 @@ fn main() {
     let graph = graph_of_ws(&ws);
     let bodies = skull::concrete_body::build(&ws, &graph);
     let scx = ScalarCtx::new(&ws).sharing(graph.interner().clone());
-    let sum_ref = skull_mir::mir::FuncRef { module: mid, func: sum_fid };
+    let sum_ref = skull_mir::mir::FuncRef {
+        module: mid,
+        func: sum_fid,
+    };
     let inst = bodies
         .plans
         .keys()
@@ -378,11 +459,20 @@ fn main() {
         &bodies.plans,
     )
     .expect("lower sum_all");
-    assert!(count_bound_multi(&raw) > 0, "fixture has no bounded placeholder");
-    assert!(!raw.bound_next_split.is_empty(), "fixture has no split placeholder");
+    assert!(
+        count_bound_multi(&raw) > 0,
+        "fixture has no bounded placeholder"
+    );
+    assert!(
+        !raw.bound_next_split.is_empty(),
+        "fixture has no split placeholder"
+    );
     let mf = prepared_body(&ws, "main");
     let bound_calls = count_bound_multi(&mf);
-    assert_eq!(bound_calls, 0, "a concrete bounded call survived splicing: {mf:?}");
+    assert_eq!(
+        bound_calls, 0,
+        "a concrete bounded call survived splicing: {mf:?}"
+    );
     assert_eq!(
         count_bound_splits(&mf),
         0,
@@ -409,22 +499,35 @@ fn main() { print("{sum_all([1, 2, 3].iter())}") }
         .iter()
         .find(|(inst, _)| {
             inst.args.is_empty()
-                && ws.module(inst.func.module).functions[inst.func.func].name.as_str() == "main"
+                && ws.module(inst.func.module).functions[inst.func.func]
+                    .name
+                    .as_str()
+                    == "main"
         })
         .expect("main has no concrete plan");
     let callee_plan = main
         .1
         .callees
         .values()
-        .find_map(|inst| bodies.plans.get(inst).filter(|plan| !plan.bound_tree.is_empty()))
+        .find_map(|inst| {
+            bodies
+                .plans
+                .get(inst)
+                .filter(|plan| !plan.bound_tree.is_empty())
+        })
         .expect("main does not retain a bounded callee plan");
     let bodies = skull::concrete_body::build(&ws, &g);
     let scx = ScalarCtx::new(&ws).sharing(g.interner().clone());
     let mf = skull_mir::lower::lower_instance_with_plans(&ws, &scx, main.1, &bodies.plans)
         .expect("lower main with concrete plans");
-    assert!(!mf.resolved_bound_trees.is_empty(), "the concrete call lost its bound plan");
     assert!(
-        mf.resolved_bound_trees.values().any(|tree| tree == &callee_plan.bound_tree),
+        !mf.resolved_bound_trees.is_empty(),
+        "the concrete call lost its bound plan"
+    );
+    assert!(
+        mf.resolved_bound_trees
+            .values()
+            .any(|tree| tree == &callee_plan.bound_tree),
         "the call carried a different resolved tree than its concrete callee"
     );
 }
@@ -454,13 +557,13 @@ fn main() {
         {
             continue;
         }
-        let Some(plan) = bodies.plans.get(candidate) else { continue };
-        let Ok(mf) = skull_mir::lower::lower_instance_with_plans(
-            &ws,
-            &scx,
-            plan,
-            &bodies.plans,
-        ) else { continue };
+        let Some(plan) = bodies.plans.get(candidate) else {
+            continue;
+        };
+        let Ok(mf) = skull_mir::lower::lower_instance_with_plans(&ws, &scx, plan, &bodies.plans)
+        else {
+            continue;
+        };
         if count_bound_multi(&mf) > 0 {
             picked = Some((candidate.clone(), candidate_tree.to_resolved()));
             break;
@@ -474,13 +577,19 @@ fn main() {
         &bodies.plans,
     )
     .expect("lower bounded instance");
-    assert!(!tree.is_empty(), "the prepared bounded fixture has no incoming tree");
+    assert!(
+        !tree.is_empty(),
+        "the prepared bounded fixture has no incoming tree"
+    );
     let placeholder_ids: Vec<_> = mf
         .insts
         .iter()
         .filter_map(|(id, inst)| matches!(inst, Inst::CallBoundMulti { .. }).then_some(id))
         .collect();
-    assert!(!placeholder_ids.is_empty(), "the standalone fixture has no placeholder");
+    assert!(
+        !placeholder_ids.is_empty(),
+        "the standalone fixture has no placeholder"
+    );
     skull_transform::bound::resolve_standalone_bound_calls(
         &ws,
         &scx,
@@ -520,17 +629,31 @@ fn main() { print("{top(2)}") }
 "#,
     );
     let mf = prepared_body(&ws, "top");
-    assert!(!mf.nested_fns.is_empty(), "the spliced named nested body was dropped");
+    assert!(
+        !mf.nested_fns.is_empty(),
+        "the spliced named nested body was dropped"
+    );
     let names: Vec<_> = mf.nested_fns.iter().map(|nf| nf.name).collect();
-    assert_eq!(names.len(), names.iter().collect::<std::collections::BTreeSet<_>>().len());
-    assert!(!mf.nested_fns[0].nested_fns.is_empty(), "nested child body was dropped");
+    assert_eq!(
+        names.len(),
+        names
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+    );
+    assert!(
+        !mf.nested_fns[0].nested_fns.is_empty(),
+        "nested child body was dropped"
+    );
     let child_name = mf.nested_fns[0].nested_fns[0].name;
     assert!(
         mf.nested_fns[0].hoisted_fn_globals.contains(&child_name),
         "the nested parent kept no reference to its preserved child"
     );
     assert!(
-        mf.hoisted_fn_globals.iter().any(|name| names.contains(name)),
+        mf.hoisted_fn_globals
+            .iter()
+            .any(|name| names.contains(name)),
         "the spliced body kept no reference to its preserved nested symbol"
     );
     let lua = crate::common::try_emit_module(
@@ -583,7 +706,11 @@ fn build() -> int {
 fn main() { print("{build()}") }
 "#,
     );
-    assert!(c.accounts(), "accounting broken: {:?}", c.accounting_failures());
+    assert!(
+        c.accounts(),
+        "accounting broken: {:?}",
+        c.accounting_failures()
+    );
     // THE DENOMINATOR: the fixture must actually produce synthesized sites, and
     // they must actually JOIN. Without both, `mismatches == 0` below is
     // satisfied by a body with no column operation in it at all.
@@ -600,7 +727,11 @@ fn main() { print("{build()}") }
     // No call may resolve to a callee it does not target. That is the exact
     // symptom of the operation being dropped: a runtime entry stamped
     // `DirectCall` matches its source expression's callee instead.
-    let decl_mismatch = c.unjoined.get(&Unjoined::CalleeMismatch).copied().unwrap_or(0);
+    let decl_mismatch = c
+        .unjoined
+        .get(&Unjoined::CalleeMismatch)
+        .copied()
+        .unwrap_or(0);
     assert_eq!(
         decl_mismatch, 0,
         "a call resolved to a callee it does not target -- the site operation is not \
@@ -644,16 +775,26 @@ fn a_call_filed_under_the_wrong_operation_fails_accounting() {
     let mut bad = c.clone();
     bad.joined_by_op.clear();
     bad.joined_by_op.insert("synthesized", 1);
-    assert_eq!(bad.examined_by_op.values().sum::<usize>(), bad.obligations_examined);
+    assert_eq!(
+        bad.examined_by_op.values().sum::<usize>(),
+        bad.obligations_examined
+    );
     assert_eq!(bad.joined_by_op.values().sum::<usize>(), bad.joined);
-    assert_eq!(bad.unjoined_by_op.values().sum::<usize>(), bad.unjoined_total());
+    assert_eq!(
+        bad.unjoined_by_op.values().sum::<usize>(),
+        bad.unjoined_total()
+    );
     let failures = bad.accounting_failures();
     assert!(
-        failures.iter().any(|f| f.contains("operation `direct-call`")),
+        failures
+            .iter()
+            .any(|f| f.contains("operation `direct-call`")),
         "a call filed under the wrong operation passed accounting: {failures:?}"
     );
     assert!(
-        failures.iter().any(|f| f.contains("operation `synthesized`")),
+        failures
+            .iter()
+            .any(|f| f.contains("operation `synthesized`")),
         "only one side of the misfiling was reported: {failures:?}"
     );
 
@@ -713,11 +854,23 @@ fn main() {
     let insts: Vec<&skull::instance_graph::Instance> = g
         .substitutions()
         .map(|(i, _)| i)
-        .filter(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == "ident")
+        .filter(|i| {
+            ws.module(i.func.module).functions[i.func.func]
+                .name
+                .as_str()
+                == "ident"
+        })
         .collect();
-    assert_eq!(insts.len(), 2, "fixture must produce TWO instances of one declaration: {insts:?}");
+    assert_eq!(
+        insts.len(),
+        2,
+        "fixture must produce TWO instances of one declaration: {insts:?}"
+    );
     let fref = insts[0].func;
-    assert_eq!(insts[1].func, fref, "the two instances must share a FuncRef to be a control");
+    assert_eq!(
+        insts[1].func, fref,
+        "the two instances must share a FuncRef to be a control"
+    );
 
     // Each claim comes from its instance's OWN recorded substitution, never from
     // asking the oracle under test which candidate it likes.
@@ -725,7 +878,10 @@ fn main() {
     let c1 = instance_claim(&g, insts[1]);
     assert_eq!(c0.args.len(), 1, "fixture has one generic: {c0:?}");
     assert_eq!(c1.args.len(), 1, "fixture has one generic: {c1:?}");
-    assert_ne!(c0.args, c1.args, "the two claims must differ, or the swap below is a no-op");
+    assert_ne!(
+        c0.args, c1.args,
+        "the two claims must differ, or the swap below is a no-op"
+    );
 
     // Matched: the instance and its OWN claim.
     assert_eq!(
@@ -766,7 +922,12 @@ fn main() { print("{one(1)} {two(2)}") }
     let find = |name: &str| -> skull::instance_graph::Instance {
         g.substitutions()
             .map(|(i, _)| i)
-            .find(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == name)
+            .find(|i| {
+                ws.module(i.func.module).functions[i.func.func]
+                    .name
+                    .as_str()
+                    == name
+            })
             .expect("instance")
             .clone()
     };
@@ -803,7 +964,12 @@ fn main() { print("{pair(1, 2.0)} {other(1, 2.0)}") }
     let find = |n: &str| {
         g.substitutions()
             .map(|(i, _)| i)
-            .find(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == n)
+            .find(|i| {
+                ws.module(i.func.module).functions[i.func.func]
+                    .name
+                    .as_str()
+                    == n
+            })
             .unwrap_or_else(|| panic!("no `{n}` instance"))
             .clone()
     };
@@ -811,7 +977,9 @@ fn main() { print("{pair(1, 2.0)} {other(1, 2.0)}") }
     let alien = find("other");
     assert_ne!(inst.func, alien.func, "the two declarations must differ");
     assert_eq!(
-        ws.module(inst.func.module).functions[inst.func.func].generics.len(),
+        ws.module(inst.func.module).functions[inst.func.func]
+            .generics
+            .len(),
         2,
         "fixture must declare two generics"
     );
@@ -840,12 +1008,18 @@ fn main() { print("{pair(1, 2.0)} {other(1, 2.0)}") }
         func: alien.func,
         args: good.args.clone(),
     };
-    assert_eq!(check(Some(&wrong_decl)), skull::site_join::CalleeCheck::ClaimDeclMismatch);
+    assert_eq!(
+        check(Some(&wrong_decl)),
+        skull::site_join::CalleeCheck::ClaimDeclMismatch
+    );
 
     // Right declaration, WRONG substitution: a partial one names no instance.
     let mut partial = good.clone();
     partial.args.pop();
-    assert_eq!(check(Some(&partial)), skull::site_join::CalleeCheck::InstanceMismatch);
+    assert_eq!(
+        check(Some(&partial)),
+        skull::site_join::CalleeCheck::InstanceMismatch
+    );
 }
 
 /// A BOUNDARY callee is verified as a boundary, not by reconstructing a Rock
@@ -878,7 +1052,9 @@ fn main() {
         .flat_map(|b| b.callees())
         .find_map(|(_, c)| match c {
             skull::concrete_body::Callee::Boundary(i, cl)
-                if !ws.module(i.func.module).functions[i.func.func].generics.is_empty() =>
+                if !ws.module(i.func.module).functions[i.func.func]
+                    .generics
+                    .is_empty() =>
             {
                 Some((i.clone(), *cl))
             }
@@ -917,7 +1093,12 @@ fn main() { print("{ident(1)}") }
     let inst = g
         .substitutions()
         .map(|(i, _)| i)
-        .find(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == "ident")
+        .find(|i| {
+            ws.module(i.func.module).functions[i.func.func]
+                .name
+                .as_str()
+                == "ident"
+        })
         .expect("instance")
         .clone();
     let claim = instance_claim(&g, &inst);
@@ -932,7 +1113,10 @@ fn main() { print("{ident(1)}") }
     // instance's entry is removing every owner's opinion of it.
     let removed = g.index.subst.remove(&inst);
     g.root_instances.remove(&inst);
-    assert!(removed.is_some(), "nothing was removed, so the arm below is untested");
+    assert!(
+        removed.is_some(),
+        "nothing was removed, so the arm below is untested"
+    );
     assert_eq!(
         skull::site_join::check_callee(&ws, &g, &rock(&inst), inst.func, Some(&claim), LUA),
         skull::site_join::CalleeCheck::ResolvedUnrecorded,
@@ -957,7 +1141,12 @@ fn main() { print("{top()}") }
     let (ws, g) = graph_of(src);
     let wraps: Vec<_> = g
         .substitutions()
-        .filter(|(i, _)| ws.module(i.func.module).functions[i.func.func].name.as_str() == "wrap")
+        .filter(|(i, _)| {
+            ws.module(i.func.module).functions[i.func.func]
+                .name
+                .as_str()
+                == "wrap"
+        })
         .collect();
     assert_eq!(
         wraps.len(),
@@ -998,26 +1187,27 @@ fn top() -> float {
 fn main() { print("{top()}") }
 "#,
     );
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("test module");
+    let mid = *ws
+        .module_ids
+        .get(&Ustr::from("<test>"))
+        .expect("test module");
     let (fid, f) = ws
         .module(mid)
         .functions
         .iter()
         .find(|(_, f)| f.name.as_str() == "top")
         .expect("top");
-    let fref = skull_mir::mir::FuncRef { module: mid, func: fid };
+    let fref = skull_mir::mir::FuncRef {
+        module: mid,
+        func: fid,
+    };
     let graph = graph_of_ws(&ws);
     let bodies = skull::concrete_body::build(&ws, &graph);
     let scx = ScalarCtx::new(&ws).sharing(graph.interner().clone());
     let top = skull_mir::instance::Instance::base(fref);
     let top_plan = bodies.plans.get(&top).expect("top concrete plan");
-    let mut mf = skull_mir::lower::lower_instance_with_plans(
-        &ws,
-        &scx,
-        top_plan,
-        &bodies.plans,
-    )
-    .expect("lower top");
+    let mut mf = skull_mir::lower::lower_instance_with_plans(&ws, &scx, top_plan, &bodies.plans)
+        .expect("lower top");
     let (call, owner): (_, skull::instance_graph::Instance) = mf
         .insts
         .iter()
@@ -1025,13 +1215,22 @@ fn main() { print("{top()}") }
             Inst::Call { func, .. } | Inst::CallMulti { func, .. }
                 if ws.module(func.module).functions[func.func].name.as_str() == "wrap" =>
             {
-                Some((id, mf.callee_instances.get(&id).cloned().expect("wrap owner")))
+                Some((
+                    id,
+                    mf.callee_instances.get(&id).cloned().expect("wrap owner"),
+                ))
             }
             _ => None,
         })
         .expect("concrete wrap call");
-    assert!(!owner.args.is_empty(), "the fixture must have a concrete wrap owner: {owner:?}");
-    assert!(mf.spec_bindings.remove(&call).is_some(), "the fixture must have delivery to remove");
+    assert!(
+        !owner.args.is_empty(),
+        "the fixture must have a concrete wrap owner: {owner:?}"
+    );
+    assert!(
+        mf.spec_bindings.remove(&call).is_some(),
+        "the fixture must have delivery to remove"
+    );
 
     let mangled = skull_mir::mangle::mangle_fn(&ws, f);
     let mut cache = skull_transform::InlineCache::default();
@@ -1046,15 +1245,26 @@ fn main() { print("{top()}") }
     )
     .expect("prepare");
 
-    let residual_wrap = mf.blocks.iter().flat_map(|(_, block)| block.insts.iter()).filter(|id| {
-        matches!(&mf.insts[**id], Inst::Call { func, .. } | Inst::CallMulti { func, .. }
+    let residual_wrap = mf
+        .blocks
+        .iter()
+        .flat_map(|(_, block)| block.insts.iter())
+        .filter(|id| {
+            matches!(&mf.insts[**id], Inst::Call { func, .. } | Inst::CallMulti { func, .. }
             if ws.module(func.module).functions[func.func].name.as_str() == "wrap")
-    }).count();
-    assert_eq!(residual_wrap, 0, "the concrete owner did not admit the splice");
+        })
+        .count();
+    assert_eq!(
+        residual_wrap, 0,
+        "the concrete owner did not admit the splice"
+    );
     assert!(
         mf.call_sites.values().any(|cs| {
             let owner = &mf.site_owners[cs.owner.0 as usize];
-            ws.module(owner.func.module).functions[owner.func.func].name.as_str() == "wrap"
+            ws.module(owner.func.module).functions[owner.func.func]
+                .name
+                .as_str()
+                == "wrap"
         }),
         "the spliced body lost its concrete callee owner"
     );
@@ -1078,26 +1288,27 @@ fn top() -> float {
 fn main() { print("{top()}") }
 "#,
     );
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("test module");
+    let mid = *ws
+        .module_ids
+        .get(&Ustr::from("<test>"))
+        .expect("test module");
     let (fid, f) = ws
         .module(mid)
         .functions
         .iter()
         .find(|(_, f)| f.name.as_str() == "top")
         .expect("top");
-    let fref = skull_mir::mir::FuncRef { module: mid, func: fid };
+    let fref = skull_mir::mir::FuncRef {
+        module: mid,
+        func: fid,
+    };
     let graph = graph_of_ws(&ws);
     let bodies = skull::concrete_body::build(&ws, &graph);
     let scx = ScalarCtx::new(&ws).sharing(graph.interner().clone());
     let top = skull_mir::instance::Instance::base(fref);
     let top_plan = bodies.plans.get(&top).expect("top concrete plan");
-    let mut mf = skull_mir::lower::lower_instance_with_plans(
-        &ws,
-        &scx,
-        top_plan,
-        &bodies.plans,
-    )
-    .expect("lower top");
+    let mut mf = skull_mir::lower::lower_instance_with_plans(&ws, &scx, top_plan, &bodies.plans)
+        .expect("lower top");
     let call = mf
         .insts
         .iter()
@@ -1114,10 +1325,16 @@ fn main() { print("{top()}") }
     let pair = skull_mir::instance::Instance::intern(
         scx.interner(),
         wrap,
-        vec![MonoTy::App { ctor: MonoCtor::Nominal(Ustr::from("Pair")), params: Vec::new() }],
+        vec![MonoTy::App {
+            ctor: MonoCtor::Nominal(Ustr::from("Pair")),
+            params: Vec::new(),
+        }],
     );
     mf.callee_instances.insert(call, pair);
-    assert!(mf.spec_bindings.remove(&call).is_some(), "the negative arm must remove delivery");
+    assert!(
+        mf.spec_bindings.remove(&call).is_some(),
+        "the negative arm must remove delivery"
+    );
 
     let mangled = skull_mir::mangle::mangle_fn(&ws, f);
     let mut cache = skull_transform::InlineCache::default();
@@ -1131,11 +1348,19 @@ fn main() { print("{top()}") }
         &bodies.plans,
     )
     .expect("an ABI mismatch declines rather than corrupting MIR");
-    let residual_wrap = mf.blocks.iter().flat_map(|(_, block)| block.insts.iter()).filter(|id| {
-        matches!(&mf.insts[**id], Inst::CallMulti { func, .. }
+    let residual_wrap = mf
+        .blocks
+        .iter()
+        .flat_map(|(_, block)| block.insts.iter())
+        .filter(|id| {
+            matches!(&mf.insts[**id], Inst::CallMulti { func, .. }
             if ws.module(func.module).functions[func.func].name.as_str() == "wrap")
-    }).count();
-    assert_eq!(residual_wrap, 1, "an incompatible same-width owner was spliced");
+        })
+        .count();
+    assert_eq!(
+        residual_wrap, 1,
+        "an incompatible same-width owner was spliced"
+    );
 }
 
 /// Every call instruction that survives to the emitted body carries a site.
@@ -1154,7 +1379,11 @@ fn main() { print("{b(2)}") }
     let mf = prepared_body(&ws, "b");
     let calls = call_count(&mf);
     assert!(calls > 0, "fixture emitted no calls at all");
-    assert_eq!(sites(&mf).len(), calls, "a call in this body carries no site");
+    assert_eq!(
+        sites(&mf).len(),
+        calls,
+        "a call in this body carries no site"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1242,11 +1471,20 @@ fn main() { print("{top()}") }
     // the claim is about the DELTA, measured on one instance, not about the
     // total.
     let before = site_join::census(&ws, &scx, &g, &bodies);
-    assert!(before.joined > 0, "the control fixture joined nothing: {before:?}");
-    let refused_before =
-        before.unjoined.get(&Unjoined::OwnerNotAnInstance).copied().unwrap_or(0);
+    assert!(
+        before.joined > 0,
+        "the control fixture joined nothing: {before:?}"
+    );
+    let refused_before = before
+        .unjoined
+        .get(&Unjoined::OwnerNotAnInstance)
+        .copied()
+        .unwrap_or(0);
 
-    assert!(before.joined_spliced > 0, "nothing spliced, so no owner is at stake: {before:?}");
+    assert!(
+        before.joined_spliced > 0,
+        "nothing spliced, so no owner is at stake: {before:?}"
+    );
 
     // Remove the SPLICED CALLEE's substitution -- one side only. `top`'s body is
     // still lowered under its own unchanged substitution and still stamps the
@@ -1258,34 +1496,55 @@ fn main() { print("{top()}") }
         .substitutions()
         .map(|(i, _)| i)
         .find(|i| {
-            ws.module(i.func.module).functions[i.func.func].name.as_str() == "wrap"
+            ws.module(i.func.module).functions[i.func.func]
+                .name
+                .as_str()
+                == "wrap"
                 && g.substitution(i).is_some_and(|s| !s.is_empty())
         })
         .expect("`wrap` instance with a concrete substitution")
         .clone();
     let removed = g.index.subst.remove(&victim);
     g.root_instances.remove(&victim);
-    assert!(removed.is_some(), "nothing was removed, so the arm below is untested");
+    assert!(
+        removed.is_some(),
+        "nothing was removed, so the arm below is untested"
+    );
     let after = site_join::census(&ws, &scx, &g, &bodies);
-    let refused_after =
-        after.unjoined.get(&Unjoined::OwnerNotAnInstance).copied().unwrap_or(0);
+    let refused_after = after
+        .unjoined
+        .get(&Unjoined::OwnerNotAnInstance)
+        .copied()
+        .unwrap_or(0);
     assert!(
         refused_after > refused_before,
         "removing the spliced callee's substitution refused nothing new ({refused_before} -> \
          {refused_after}), so its calls were matched to something the graph cannot name"
     );
-    assert!(after.joined < before.joined, "nothing stopped joining: {after:?}");
+    assert!(
+        after.joined < before.joined,
+        "nothing stopped joining: {after:?}"
+    );
     // The denominator DOES shrink -- the victim's own body can no longer be
     // lowered -- and that shrink is REPORTED rather than silent, which is the
     // property that keeps a falling denominator from flattering the ratio.
     assert!(
-        after.bodies_skipped.contains_key(&skull::site_join::BodySkip::NoSubstitution),
+        after
+            .bodies_skipped
+            .contains_key(&skull::site_join::BodySkip::NoSubstitution),
         "the victim's body vanished from the space without a recorded cause: {after:?}"
     );
-    assert!(after.accounts(), "accounting identity broken under the mutation: {after:?}");
+    assert!(
+        after.accounts(),
+        "accounting identity broken under the mutation: {after:?}"
+    );
     // And it REFUSED rather than reaching past the owner table.
     assert_eq!(
-        after.unjoined.get(&Unjoined::OwnerNotInTable).copied().unwrap_or(0),
+        after
+            .unjoined
+            .get(&Unjoined::OwnerNotInTable)
+            .copied()
+            .unwrap_or(0),
         0,
         "an owner index escaped its table: {after:?}"
     );
@@ -1305,10 +1564,22 @@ fn main() { print("{use_both()}") }
     let (ws, g) = graph_of(src);
     let idents: Vec<_> = g
         .substitutions()
-        .filter(|(i, _)| ws.module(i.func.module).functions[i.func.func].name.as_str() == "ident")
+        .filter(|(i, _)| {
+            ws.module(i.func.module).functions[i.func.func]
+                .name
+                .as_str()
+                == "ident"
+        })
         .collect();
-    assert_eq!(idents.len(), 2, "expected two `ident` instances: {idents:?}");
-    assert!(idents.iter().all(|(_, subst)| !subst.is_empty()), "{idents:?}");
+    assert_eq!(
+        idents.len(),
+        2,
+        "expected two `ident` instances: {idents:?}"
+    );
+    assert!(
+        idents.iter().all(|(_, subst)| !subst.is_empty()),
+        "{idents:?}"
+    );
 
     let c = {
         let mut graph = g;
@@ -1316,7 +1587,10 @@ fn main() { print("{use_both()}") }
         let scx = ScalarCtx::new(&ws).sharing(graph.interner().clone());
         site_join::census(&ws, &scx, &graph, &bodies)
     };
-    assert!(c.obligations_examined > 0, "fixture examined no calls: {c:?}");
+    assert!(
+        c.obligations_examined > 0,
+        "fixture examined no calls: {c:?}"
+    );
     assert!(
         c.joined_instance_verified >= 2,
         "the two generic calls did not verify concrete instances: {c:?}"
@@ -1360,7 +1634,10 @@ fn main() {
     // Both calls exist and both joined: `pt` must not be filed under `len2`'s
     // expression, nor the reverse.
     assert_eq!(
-        c.unjoined.get(&Unjoined::CalleeMismatch).copied().unwrap_or(0),
+        c.unjoined
+            .get(&Unjoined::CalleeMismatch)
+            .copied()
+            .unwrap_or(0),
         0,
         "a nested call selected the enclosing expression's callee: {c:?}"
     );
@@ -1390,11 +1667,17 @@ fn main() {
     );
     assert!(c.accounts(), "accounting identity broken: {c:?}");
     assert_eq!(
-        c.unjoined.get(&Unjoined::CalleeMismatch).copied().unwrap_or(0),
+        c.unjoined
+            .get(&Unjoined::CalleeMismatch)
+            .copied()
+            .unwrap_or(0),
         0,
         "a nested call selected the enclosing expression's callee: {c:?}"
     );
-    assert!(c.joined >= 2, "too few joined calls to have exercised nesting: {c:?}");
+    assert!(
+        c.joined >= 2,
+        "too few joined calls to have exercised nesting: {c:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1427,7 +1710,10 @@ fn main() { print("{apply(add_one, 3)}") }
         .get(&skull::site_join::IndirectProducer::RuntimeValue)
         .copied()
         .unwrap_or(0);
-    assert!(runtime > 0, "no indirect call through a value was examined: {c:?}");
+    assert!(
+        runtime > 0,
+        "no indirect call through a value was examined: {c:?}"
+    );
     assert_eq!(
         c.indirect_unrecorded_symbol, 0,
         "an admitted indirect operand spells a workspace function symbol: {c:?}"
@@ -1514,7 +1800,12 @@ fn main() { print("{apply(add_one, 1)}") }
     let bodies = skull::concrete_body::build(&ws, &mut g);
     let main_inst = g
         .expanded()
-        .find(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == "main")
+        .find(|i| {
+            ws.module(i.func.module).functions[i.func.func]
+                .name
+                .as_str()
+                == "main"
+        })
         .expect("`main` instance")
         .clone();
 
@@ -1526,7 +1817,9 @@ fn main() { print("{apply(add_one, 1)}") }
         .expect("`add_one` used as a value minted no recorded symbol");
     let recorded = mf.fn_value_symbols[&mint];
     assert_eq!(
-        ws.module(recorded.module).functions[recorded.func].name.as_str(),
+        ws.module(recorded.module).functions[recorded.func]
+            .name
+            .as_str(),
         "add_one",
         "the fixture recorded the wrong function before any mutation"
     );
@@ -1534,14 +1827,21 @@ fn main() { print("{apply(add_one, 1)}") }
     // CONTROL: unmodified, the mint is in the denominator and it JOINS.
     let scx = ScalarCtx::new(&ws).sharing(g.interner().clone());
     let before = skull::site_join::measure_prepared_body(&ws, &scx, &g, &bodies, &main_inst, &mf);
-    assert_eq!(before.symbol_mints, 1, "the mint left the denominator: {before:?}");
+    assert_eq!(
+        before.symbol_mints, 1,
+        "the mint left the denominator: {before:?}"
+    );
     assert_eq!(
         before.joined_by_op.get("fn-value").copied().unwrap_or(0),
         1,
         "the correct record did not join, so the mismatch below proves nothing: {before:?}"
     );
     assert_eq!(
-        before.unjoined.get(&Unjoined::CalleeMismatch).copied().unwrap_or(0),
+        before
+            .unjoined
+            .get(&Unjoined::CalleeMismatch)
+            .copied()
+            .unwrap_or(0),
         0,
         "the control already mismatches: {before:?}"
     );
@@ -1554,8 +1854,14 @@ fn main() { print("{apply(add_one, 1)}") }
         .iter()
         .find(|(_, f)| f.name.as_str() == "add_two")
         .expect("`add_two`");
-    let alien = skull_mir::mir::FuncRef { module: mid, func: fid };
-    assert_ne!(alien, recorded, "the alien must differ, or the swap is a no-op");
+    let alien = skull_mir::mir::FuncRef {
+        module: mid,
+        func: fid,
+    };
+    assert_ne!(
+        alien, recorded,
+        "the alien must differ, or the swap is a no-op"
+    );
     mf.fn_value_symbols.insert(mint, alien);
 
     let after = skull::site_join::measure_prepared_body(&ws, &scx, &g, &bodies, &main_inst, &mf);
@@ -1571,7 +1877,11 @@ fn main() { print("{apply(add_one, 1)}") }
         "the corrupted mint was examined under another operation: {after:?}"
     );
     assert_eq!(
-        after.unjoined.get(&Unjoined::CalleeMismatch).copied().unwrap_or(0),
+        after
+            .unjoined
+            .get(&Unjoined::CalleeMismatch)
+            .copied()
+            .unwrap_or(0),
         1,
         "a mint recording another function was accepted by the census: {after:?}"
     );
@@ -1626,7 +1936,10 @@ fn main() {
         "a call under an index write carries no site: {c:?}"
     );
     assert_eq!(
-        c.unjoined.get(&Unjoined::SiteNotInBody).copied().unwrap_or(0),
+        c.unjoined
+            .get(&Unjoined::SiteNotInBody)
+            .copied()
+            .unwrap_or(0),
         0,
         "a call under an index write was stamped with an expression the body has no \
          obligation at -- the enclosing assignment rather than the index: {c:?}"
@@ -1667,7 +1980,10 @@ fn main() {
     );
     assert!(c.accounts(), "accounting identity broken: {c:?}");
     assert_eq!(
-        c.unjoined.get(&Unjoined::SiteNotInBody).copied().unwrap_or(0),
+        c.unjoined
+            .get(&Unjoined::SiteNotInBody)
+            .copied()
+            .unwrap_or(0),
         0,
         "the struct-default call reached MIR with no obligation recorded: {c:?}"
     );
@@ -1677,5 +1993,8 @@ fn main() {
         "the struct-default call carries no site at all: {c:?}"
     );
     // CONTROL: the enclosing body's own calls are unaffected.
-    assert!(c.joined > 0, "the domain leaked to the enclosing body: {c:?}");
+    assert!(
+        c.joined > 0,
+        "the domain leaked to the enclosing body: {c:?}"
+    );
 }

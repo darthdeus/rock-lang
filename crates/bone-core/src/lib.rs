@@ -10,11 +10,11 @@
 #[macro_use]
 pub mod prelude;
 pub mod annotations;
-pub mod hir;
-pub mod escape;
-pub mod identity_storage;
-pub mod suspension;
-pub mod workspace;
 pub mod comptime_files;
+pub mod escape;
+pub mod hir;
+pub mod identity_storage;
 pub mod modules;
+pub mod suspension;
 pub mod type_sources;
+pub mod workspace;

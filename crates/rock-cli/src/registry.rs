@@ -8,8 +8,8 @@
 //! runtime table allocation are needed. Reading the default does not install it or block a later host.
 
 use crate::{Args, Backend, CommandContext};
-pub use bone_lints::ActionLayerPolicy;
 use anyhow::Result;
+pub use bone_lints::ActionLayerPolicy;
 
 /// Static host tables; uninstalled library callers use `plain::REGISTRATIONS`.
 pub struct Registrations {
@@ -35,10 +35,9 @@ pub struct Registrations {
     /// Process-only environment policy, called after parsing and before worker threads.
     pub initialize_process: fn(&Args),
     /// Optional batch environment enrichment for checked sim declarations.
-    pub sim_environment: Option<fn(
-        &bone_semantic::inference::Workspace,
-        &mut [crate::skull_backend::SimDescriptor],
-    )>,
+    pub sim_environment: Option<
+        fn(&bone_semantic::inference::Workspace, &mut [crate::skull_backend::SimDescriptor]),
+    >,
     pub runtime_services: &'static RuntimeServices,
 }
 
@@ -58,12 +57,20 @@ pub fn extend_arguments(mut command: clap::Command, groups: Vec<ArgumentGroup>) 
         order.push(arg.get_id().clone());
     }
     for group in groups {
-        assert!(command.get_arguments().any(|arg| arg.get_id() == group.before),
-            "host argument anchor {} is absent", group.before);
+        assert!(
+            command
+                .get_arguments()
+                .any(|arg| arg.get_id() == group.before),
+            "host argument anchor {} is absent",
+            group.before
+        );
         command = command.args(group.arguments);
     }
     command.mut_args(|arg| {
-        let index = order.iter().position(|id| id == arg.get_id()).expect("argument ordered");
+        let index = order
+            .iter()
+            .position(|id| id == arg.get_id())
+            .expect("argument ordered");
         arg.display_order(index)
     })
 }
@@ -87,11 +94,17 @@ static REGISTRATIONS: std::sync::OnceLock<&'static Registrations> = std::sync::O
 
 /// Install one explicit host table before parsing or dispatching its commands.
 pub fn install(registrations: &'static Registrations) {
-    assert!(REGISTRATIONS.set(registrations).is_ok(), "CLI registrations already installed");
+    assert!(
+        REGISTRATIONS.set(registrations).is_ok(),
+        "CLI registrations already installed"
+    );
 }
 
 pub fn registered() -> &'static Registrations {
-    REGISTRATIONS.get().copied().unwrap_or(&crate::plain::REGISTRATIONS)
+    REGISTRATIONS
+        .get()
+        .copied()
+        .unwrap_or(&crate::plain::REGISTRATIONS)
 }
 
 /// Default lint tier with the installed host's action-layer conventions.
@@ -106,7 +119,10 @@ pub struct TestProgramFacts {
 
 pub enum TestUnit<'a> {
     File(&'a std::path::Path),
-    Package { dir: &'a str, facts: &'a TestProgramFacts },
+    Package {
+        dir: &'a str,
+        facts: &'a TestProgramFacts,
+    },
 }
 
 /// Runtime text surrounding the emitted definitions. Native staging is done
@@ -134,13 +150,19 @@ pub enum ProgramKind {
 /// different LuaJIT and wrap final launches for process placement.
 #[derive(Clone, Debug)]
 pub enum RuntimeProcess {
-    LuaRun { headless: bool },
+    LuaRun {
+        headless: bool,
+    },
     LuaStdin,
     LuaTest,
     LuaBytecode,
     Native,
-    NativeTest { runtime_dir: Option<std::path::PathBuf> },
-    NativeFrame { headless: bool },
+    NativeTest {
+        runtime_dir: Option<std::path::PathBuf>,
+    },
+    NativeFrame {
+        headless: bool,
+    },
 }
 
 /// The binary's runtime policy for public compile, cache and run callers.
@@ -217,7 +239,8 @@ pub enum Operation {
 impl Operation {
     /// The command registered for this operation.
     pub fn command(self) -> &'static CliCommand {
-        registered().commands
+        registered()
+            .commands
             .iter()
             .copied()
             .find(|c| c.operation() == Some(self))
@@ -258,7 +281,11 @@ impl CliCommand {
     }
 
     pub fn named(name: &str) -> Option<&'static CliCommand> {
-        registered().commands.iter().copied().find(|c| c.name == name)
+        registered()
+            .commands
+            .iter()
+            .copied()
+            .find(|c| c.name == name)
     }
 
     pub fn all() -> &'static [&'static CliCommand] {
@@ -266,12 +293,17 @@ impl CliCommand {
     }
 
     /// The clap parser for the positional `command` argument.
-    pub(crate) fn value_parser() -> impl clap::builder::TypedValueParser<Value = &'static CliCommand> {
+    pub(crate) fn value_parser() -> impl clap::builder::TypedValueParser<Value = &'static CliCommand>
+    {
         use clap::builder::TypedValueParser;
         clap::builder::PossibleValuesParser::new(
-            Self::all().iter().map(|c| clap::builder::PossibleValue::new(c.name)),
+            Self::all()
+                .iter()
+                .map(|c| clap::builder::PossibleValue::new(c.name)),
         )
-        .map(|name| Self::named(&name).expect("the possible-values parser admits only registered names"))
+        .map(|name| {
+            Self::named(&name).expect("the possible-values parser admits only registered names")
+        })
     }
 }
 
@@ -294,7 +326,10 @@ impl std::fmt::Debug for CliCommand {
 pub enum OmittedBackend {
     /// Not compiled into this binary at all.
     Build,
-    Feature { feature: &'static str, hint: &'static str },
+    Feature {
+        feature: &'static str,
+        hint: &'static str,
+    },
 }
 
 /// One `--backend` registration.
@@ -322,16 +357,25 @@ impl BackendSpec {
     }
 
     pub fn handler(&self, op: Operation) -> Option<Handler> {
-        self.operations.iter().find(|(o, _)| *o == op).map(|(_, h)| *h)
+        self.operations
+            .iter()
+            .find(|(o, _)| *o == op)
+            .map(|(_, h)| *h)
     }
 
     /// The clap parser for `--backend`.
     pub(crate) fn value_parser() -> impl clap::builder::TypedValueParser<Value = Backend> {
         use clap::builder::TypedValueParser;
         clap::builder::PossibleValuesParser::new(
-            Self::all().iter().map(|b| clap::builder::PossibleValue::new(b.name)),
+            Self::all()
+                .iter()
+                .map(|b| clap::builder::PossibleValue::new(b.name)),
         )
-        .map(|name| Self::named(&name).expect("the possible-values parser admits only registered names").backend)
+        .map(|name| {
+            Self::named(&name)
+                .expect("the possible-values parser admits only registered names")
+                .backend
+        })
     }
 }
 
@@ -351,19 +395,26 @@ impl Backend {
     /// The commands a backend serves through the backend switch, in the order
     /// the reject message lists them.
     pub fn supported_commands(self) -> Vec<&'static CliCommand> {
-        self.spec().operations.iter().map(|(op, _)| op.command()).collect()
+        self.spec()
+            .operations
+            .iter()
+            .map(|(op, _)| op.command())
+            .collect()
     }
 
     /// Whether this backend can serve `cmd` through the backend switch.
     pub fn serves(self, cmd: &CliCommand) -> bool {
-        cmd.operation().is_some_and(|op| self.spec().handler(op).is_some())
+        cmd.operation()
+            .is_some_and(|op| self.spec().handler(op).is_some())
     }
 
     pub(crate) fn omitted_reason(self) -> Option<String> {
         let spec = self.spec();
         let omitted = spec.omitted.as_ref()?;
         Some(match omitted {
-            OmittedBackend::Build => format!("the `{}` backend is not included in this build", spec.name),
+            OmittedBackend::Build => {
+                format!("the `{}` backend is not included in this build", spec.name)
+            }
             OmittedBackend::Feature { feature, hint } => format!(
                 "the `{}` backend was omitted from this build; enable the `{}` feature ({})",
                 spec.name, feature, hint,
@@ -380,7 +431,11 @@ impl Backend {
         if self.serves(cmd) {
             return None;
         }
-        let names: Vec<&str> = self.supported_commands().iter().map(|c| c.cli_name()).collect();
+        let names: Vec<&str> = self
+            .supported_commands()
+            .iter()
+            .map(|c| c.cli_name())
+            .collect();
         Some(format!(
             "the `{}` backend cannot serve `{}` \u{2014} {}. Supported commands: {}.",
             self.name(),
@@ -425,9 +480,15 @@ pub struct EarlyEntry {
 
 /// Run the early entry named by the first argument, if one is registered,
 /// calling `prepare` first. `args` excludes argv[0].
-pub fn run_early_entry(mut args: impl Iterator<Item = String>, prepare: impl FnOnce()) -> Option<i32> {
+pub fn run_early_entry(
+    mut args: impl Iterator<Item = String>,
+    prepare: impl FnOnce(),
+) -> Option<i32> {
     let first = args.next()?;
-    let entry = registered().early_entries.iter().find(|e| e.name == first)?;
+    let entry = registered()
+        .early_entries
+        .iter()
+        .find(|e| e.name == first)?;
     prepare();
     Some((entry.run)(args.collect()))
 }
@@ -440,7 +501,11 @@ pub const fn extend<T: Copy, const N: usize>(base: &[T], extra: &[T]) -> [T; N] 
     let mut result = [first; N];
     let mut i = 0;
     while i < N {
-        result[i] = if i < base.len() { base[i] } else { extra[i - base.len()] };
+        result[i] = if i < base.len() {
+            base[i]
+        } else {
+            extra[i - base.len()]
+        };
         i += 1;
     }
     result

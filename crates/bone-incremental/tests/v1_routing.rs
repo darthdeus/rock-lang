@@ -15,13 +15,21 @@ fn v1(path: &str, text: &str) -> SessionFile {
         path: path.into(),
         text: text.into(),
         dialect: Dialect::V1,
-        package: Some(PackageTag { id: 1, self_name: "livev1".into(), identity_storage: Default::default() }),
+        package: Some(PackageTag {
+            id: 1,
+            self_name: "livev1".into(),
+            identity_storage: Default::default(),
+        }),
         global_policy: GlobalPolicy::Any,
     }
 }
 
 fn diagnostics(session: &Session) -> Vec<String> {
-    let mut out: Vec<String> = session.diagnostics().iter().map(|d| d.message.clone()).collect();
+    let mut out: Vec<String> = session
+        .diagnostics()
+        .iter()
+        .map(|d| d.message.clone())
+        .collect();
     out.sort();
     out
 }
@@ -29,7 +37,11 @@ fn diagnostics(session: &Session) -> Vec<String> {
 /// Apply `edit` to `path` in a session over `files`, check the session's
 /// diagnostics against a fresh session over the edited texts, and return the
 /// tier and those diagnostics.
-fn edit_with_diagnostics(files: Vec<SessionFile>, path: &str, edit: &str) -> (UpdateTier, Vec<String>) {
+fn edit_with_diagnostics(
+    files: Vec<SessionFile>,
+    path: &str,
+    edit: &str,
+) -> (UpdateTier, Vec<String>) {
     edit_with_aliases(files, path, edit, &NsAliases::default())
 }
 
@@ -41,7 +53,10 @@ fn edit_with_aliases(
     aliases: &NsAliases,
 ) -> (UpdateTier, Vec<String>) {
     let mut session = Session::new(vec![], files.clone(), aliases).expect("baseline builds");
-    let tier = session.update_file(path, edit).expect("the edit is accepted").tier;
+    let tier = session
+        .update_file(path, edit)
+        .expect("the edit is accepted")
+        .tier;
 
     let edited: Vec<SessionFile> = files
         .into_iter()
@@ -62,7 +77,8 @@ fn edit_matches_fresh(files: Vec<SessionFile>, path: &str, edit: &str) -> Update
     edit_with_diagnostics(files, path, edit).0
 }
 
-const A: &str = "mod a;\n\npub fn bump(n: int) -> int {\n    n\n}\n\npub struct P {\n    pub x: int,\n}\n";
+const A: &str =
+    "mod a;\n\npub fn bump(n: int) -> int {\n    n\n}\n\npub struct P {\n    pub x: int,\n}\n";
 const ROOT: &str = "fn f() -> int {\n    a::bump(1)\n}\n\nfn g(p: a::P) -> int {\n    p.x\n}\n";
 
 fn package() -> Vec<SessionFile> {
@@ -72,13 +88,19 @@ fn package() -> Vec<SessionFile> {
 #[test]
 fn a_signature_edit_stays_on_the_interface_path() {
     let edit = "mod a;\n\npub fn bump(n: int, m: int) -> int {\n    n\n}\n\npub struct P {\n    pub x: int,\n}\n";
-    assert_eq!(edit_matches_fresh(package(), "a.rock", edit), UpdateTier::Interface);
+    assert_eq!(
+        edit_matches_fresh(package(), "a.rock", edit),
+        UpdateTier::Interface
+    );
 }
 
 #[test]
 fn a_field_edit_stays_on_the_interface_path() {
     let edit = "mod a;\n\npub fn bump(n: int) -> int {\n    n\n}\n\npub struct P {\n    pub x: int,\n    pub y: int,\n}\n";
-    assert_eq!(edit_matches_fresh(package(), "a.rock", edit), UpdateTier::Interface);
+    assert_eq!(
+        edit_matches_fresh(package(), "a.rock", edit),
+        UpdateTier::Interface
+    );
 }
 
 #[test]
@@ -86,21 +108,33 @@ fn a_field_visibility_edit_stays_on_the_interface_path() {
     let root = "fn set(p: a::P) {\n    p.x = 2\n}\n";
     let edit = "mod a;\n\npub fn bump(n: int) -> int {\n    n\n}\n\npub struct P {\n    pub private(set) x: int,\n}\n";
     let files = vec![v1("a.rock", A), v1("root.rock", root)];
-    assert_eq!(edit_matches_fresh(files, "a.rock", edit), UpdateTier::Interface);
+    assert_eq!(
+        edit_matches_fresh(files, "a.rock", edit),
+        UpdateTier::Interface
+    );
 }
 
 #[test]
 fn an_item_visibility_edit_rebuilds_the_tree() {
-    let edit = "mod a;\n\nfn bump(n: int) -> int {\n    n\n}\n\npub struct P {\n    pub x: int,\n}\n";
+    let edit =
+        "mod a;\n\nfn bump(n: int) -> int {\n    n\n}\n\npub struct P {\n    pub x: int,\n}\n";
     let (tier, diags) = edit_with_diagnostics(package(), "a.rock", edit);
     assert_eq!(tier, UpdateTier::Scope);
-    assert!(diags.iter().any(|d| d.contains("`bump` is not accessible from this module")), "{diags:?}");
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.contains("`bump` is not accessible from this module")),
+        "{diags:?}"
+    );
 }
 
 #[test]
 fn an_added_definition_rebuilds_the_tree() {
     let edit = format!("{A}\npub fn twice(n: int) -> int {{\n    n\n}}\n");
-    assert_eq!(edit_matches_fresh(package(), "a.rock", &edit), UpdateTier::Scope);
+    assert_eq!(
+        edit_matches_fresh(package(), "a.rock", &edit),
+        UpdateTier::Scope
+    );
 }
 
 /// The public-API closure (spec 11) is a whole-program check that the full
@@ -114,11 +148,16 @@ fn a_signature_edit_that_exports_a_private_type_is_refused() {
     let files = |s: &str| vec![v1("s.rock", s), v1("root.rock", root)];
     let expected = "type `Hidden` in public API is not accessible";
 
-    let fresh = Session::new(vec![], files(s1), &NsAliases::default()).err().expect("a fresh build refuses it");
+    let fresh = Session::new(vec![], files(s1), &NsAliases::default())
+        .err()
+        .expect("a fresh build refuses it");
     assert!(fresh.message.contains(expected), "{}", fresh.message);
 
-    let mut session = Session::new(vec![], files(s0), &NsAliases::default()).expect("baseline builds");
-    let err = session.update_file("s.rock", s1).expect_err("the session refuses it too");
+    let mut session =
+        Session::new(vec![], files(s0), &NsAliases::default()).expect("baseline builds");
+    let err = session
+        .update_file("s.rock", s1)
+        .expect_err("the session refuses it too");
     assert!(err.message.contains(expected), "{}", err.message);
 }
 
@@ -202,7 +241,9 @@ fn a_legacy_definer_kind_edit_relowers_its_callers() {
 
     let (_, diags) = edit_with_diagnostics(files(function), "legacy_def.rock", global);
     assert!(
-        diags.iter().any(|d| d.contains("ambiguous legacy reference to `bump`")),
+        diags
+            .iter()
+            .any(|d| d.contains("ambiguous legacy reference to `bump`")),
         "{diags:?}"
     );
 }
@@ -239,9 +280,15 @@ fn a_v1_member_signature_edit_reinfers_a_merged_family_caller() {
 #[test]
 fn a_private_definition_added_to_a_globbed_module_changes_no_globber() {
     let files = vec![
-        v1("a.rock", "mod a;\n\npub fn width() -> string {\n    \"wide\"\n}\n"),
+        v1(
+            "a.rock",
+            "mod a;\n\npub fn width() -> string {\n    \"wide\"\n}\n",
+        ),
         v1("b.rock", "mod b;\n\npub fn depth() -> int {\n    1\n}\n"),
-        v1("c.rock", "mod c;\n\nuse super::a::*;\nuse super::b::*;\n\nfn pick() -> string {\n    width()\n}\n"),
+        v1(
+            "c.rock",
+            "mod c;\n\nuse super::a::*;\nuse super::b::*;\n\nfn pick() -> string {\n    width()\n}\n",
+        ),
     ];
     let edit = "mod b;\n\npub fn depth() -> int {\n    1\n}\n\nfn width() -> int {\n    2\n}\n";
     let (tier, diags) = edit_with_diagnostics(files, "b.rock", edit);
@@ -258,7 +305,10 @@ fn a_legacy_added_definition_stays_on_the_interface_path() {
         SessionFile::legacy("b.rock", "fn f() -> int {\n    bump(1)\n}\n"),
     ];
     let edit = "fn bump(n: int) -> int {\n    n\n}\n\nfn twice(n: int) -> int {\n    n\n}\n";
-    assert_eq!(edit_matches_fresh(files, "a.rock", edit), UpdateTier::Interface);
+    assert_eq!(
+        edit_matches_fresh(files, "a.rock", edit),
+        UpdateTier::Interface
+    );
 }
 
 fn v1_in(package: u32, name: &str, path: &str, text: &str) -> SessionFile {
@@ -266,7 +316,11 @@ fn v1_in(package: u32, name: &str, path: &str, text: &str) -> SessionFile {
         path: path.into(),
         text: text.into(),
         dialect: Dialect::V1,
-        package: Some(PackageTag { id: package, self_name: name.into(), identity_storage: Default::default() }),
+        package: Some(PackageTag {
+            id: package,
+            self_name: name.into(),
+            identity_storage: Default::default(),
+        }),
         global_policy: GlobalPolicy::Any,
     }
 }
@@ -324,7 +378,10 @@ fn a_second_projected_callable_added_or_removed_relowers_its_callers() {
 
     let (tier, diags) = edit_with_diagnostics(files(PICK_STRING), "b.rock", other);
     assert_eq!(tier, UpdateTier::Scope);
-    assert!(diags.iter().any(|d| d.contains("type mismatch")), "{diags:?}");
+    assert!(
+        diags.iter().any(|d| d.contains("type mismatch")),
+        "{diags:?}"
+    );
 }
 
 /// A legacy definer adding a `pick` to a family that had no legacy member,
@@ -346,9 +403,11 @@ fn a_legacy_member_added_to_an_ownerless_family_relowers_its_callers() {
 
     let (_, diags) = edit_with_diagnostics(files(without), "legacy_def.rock", with);
     assert!(
-        diags.iter().any(|d| d.contains("Ambiguous overload for `pick` with argument types (int)")
-            && d.contains("(legacy definition in legacy_def.rock)")
-            && d.contains("(v1 definition lib_a::pick)")),
+        diags.iter().any(
+            |d| d.contains("Ambiguous overload for `pick` with argument types (int)")
+                && d.contains("(legacy definition in legacy_def.rock)")
+                && d.contains("(v1 definition lib_a::pick)")
+        ),
         "{diags:?}"
     );
 
@@ -362,11 +421,13 @@ fn a_legacy_member_added_to_an_ownerless_family_relowers_its_callers() {
 /// session does.
 #[test]
 fn legacy_operator_syntax_merges_a_projected_operator_across_edits() {
-    let geo = "pub struct Pt {\n    pub x: int,\n}\n\npub operator +(a: Pt, b: Pt) -> Pt {\n    a\n}\n";
+    let geo =
+        "pub struct Pt {\n    pub x: int,\n}\n\npub operator +(a: Pt, b: Pt) -> Pt {\n    a\n}\n";
     let caller = "fn use_it() -> int {\n    let p = Pt { x: 1 } + Pt { x: 2 }\n    p.x\n}\n";
     let edit = "fn use_it() -> int {\n    let p = Pt { x: 1 }\n    p += Pt { x: 2 }\n    p.x\n}\n";
     let without = "fn other(n: int) -> int {\n    n\n}\n";
-    let with = "fn other(n: int) -> int {\n    n\n}\n\noperator +(a: Pt, b: Pt) -> Pt {\n    b\n}\n";
+    let with =
+        "fn other(n: int) -> int {\n    n\n}\n\noperator +(a: Pt, b: Pt) -> Pt {\n    b\n}\n";
     let files = |def: &str, use_text: &str| {
         vec![
             v1_in(1, "geo", "geo.rock", geo),
@@ -381,9 +442,11 @@ fn legacy_operator_syntax_merges_a_projected_operator_across_edits() {
 
     let (_, diags) = edit_with_diagnostics(files(without, edit), "legacy_def.rock", with);
     assert!(
-        diags.iter().any(|d| d.contains("Ambiguous overload for `__op_add`")
-            && d.contains("(legacy definition in legacy_def.rock)")
-            && d.contains("(v1 definition geo::__op_add)")),
+        diags
+            .iter()
+            .any(|d| d.contains("Ambiguous overload for `__op_add`")
+                && d.contains("(legacy definition in legacy_def.rock)")
+                && d.contains("(v1 definition geo::__op_add)")),
         "{diags:?}"
     );
 
@@ -393,8 +456,10 @@ fn legacy_operator_syntax_merges_a_projected_operator_across_edits() {
 
 /// Every package of `files` names every other by its self name.
 fn aliases_of(files: &[SessionFile]) -> NsAliases {
-    let mut packages: Vec<(u32, String)> =
-        files.iter().filter_map(|f| f.package.as_ref().map(|p| (p.id, p.self_name.clone()))).collect();
+    let mut packages: Vec<(u32, String)> = files
+        .iter()
+        .filter_map(|f| f.package.as_ref().map(|p| (p.id, p.self_name.clone())))
+        .collect();
     packages.sort();
     packages.dedup();
     NsAliases {
@@ -418,7 +483,11 @@ fn in_package(dialect: Dialect, package: u32, name: &str, path: &str, text: &str
         path: path.into(),
         text: text.into(),
         dialect,
-        package: Some(PackageTag { id: package, self_name: name.into(), identity_storage: Default::default() }),
+        package: Some(PackageTag {
+            id: package,
+            self_name: name.into(),
+            identity_storage: Default::default(),
+        }),
         global_policy: GlobalPolicy::Any,
     }
 }
@@ -438,7 +507,13 @@ fn a_second_explicit_import_composes_and_removing_it_splits_the_family() {
             vec![
                 v1_in(1, "lib_a", "a.rock", PICK_INT),
                 v1_in(2, "lib_b", "b.rock", PICK_STRING),
-                in_package(dialect, 3, "game", "use.rock", &format!("{imports}{PICK_USE}")),
+                in_package(
+                    dialect,
+                    3,
+                    "game",
+                    "use.rock",
+                    &format!("{imports}{PICK_USE}"),
+                ),
             ]
         };
         let aliases = aliases_of(&files(""));
@@ -451,7 +526,10 @@ fn a_second_explicit_import_composes_and_removing_it_splits_the_family() {
 
         let (tier, diags) = edit_with_aliases(files(IMPORT_BOTH), "use.rock", &one, &aliases);
         assert_eq!(tier, UpdateTier::Scope, "{dialect:?}");
-        assert!(diags.iter().any(|d| d.contains("type mismatch")), "{dialect:?}: {diags:?}");
+        assert!(
+            diags.iter().any(|d| d.contains("type mismatch")),
+            "{dialect:?}: {diags:?}"
+        );
     }
 }
 
@@ -469,14 +547,23 @@ fn a_member_signature_edit_ties_a_composed_import_family() {
             vec![
                 v1_in(1, "lib_a", "a.rock", PICK_STRING),
                 v1_in(2, "lib_b", "b.rock", b),
-                in_package(dialect, 3, "game", "use.rock", &format!("{IMPORT_BOTH}{PICK_USE}")),
+                in_package(
+                    dialect,
+                    3,
+                    "game",
+                    "use.rock",
+                    &format!("{IMPORT_BOTH}{PICK_USE}"),
+                ),
             ]
         };
         let aliases = aliases_of(&files(PICK_INT));
 
         let (tier, diags) = edit_with_aliases(files(PICK_INT), "b.rock", PICK_STRING, &aliases);
         assert_eq!(tier, UpdateTier::Interface, "{dialect:?}");
-        assert!(diags.iter().any(|d| d.contains(TIED_PICK)), "{dialect:?}: {diags:?}");
+        assert!(
+            diags.iter().any(|d| d.contains(TIED_PICK)),
+            "{dialect:?}: {diags:?}"
+        );
 
         let (tier, diags) = edit_with_aliases(files(PICK_STRING), "b.rock", PICK_INT, &aliases);
         assert_eq!(tier, UpdateTier::Interface, "{dialect:?}");
@@ -511,7 +598,10 @@ fn a_second_glob_composes_and_removing_it_splits_the_family() {
 
     let (tier, diags) = edit_with_aliases(files(GLOB_BOTH), "use.rock", &one, &aliases);
     assert_eq!(tier, UpdateTier::Scope);
-    assert!(diags.iter().any(|d| d.contains("type mismatch")), "{diags:?}");
+    assert!(
+        diags.iter().any(|d| d.contains("type mismatch")),
+        "{diags:?}"
+    );
 }
 
 /// A globbed module gaining or losing a `pick` is an edit to ANOTHER file:
@@ -532,15 +622,23 @@ fn a_member_added_to_a_second_globbed_module_relowers_the_globber() {
     let relowers_the_globber = |b0: &str, b1: &str| {
         let mut session = Session::new(vec![], files(b0), &aliases).expect("baseline builds");
         let before = diagnostics(&session);
-        let tier = session.update_file("b.rock", b1).expect("the edit is accepted").tier;
-        let relowered =
-            session.workspace().relowered_body_count.load(std::sync::atomic::Ordering::Relaxed);
+        let tier = session
+            .update_file("b.rock", b1)
+            .expect("the edit is accepted")
+            .tier;
+        let relowered = session
+            .workspace()
+            .relowered_body_count
+            .load(std::sync::atomic::Ordering::Relaxed);
         (tier, before, relowered)
     };
 
     let (tier, before, relowered) = relowers_the_globber(other, PICK_STRING);
     assert_eq!(tier, UpdateTier::Scope);
-    assert!(before.iter().any(|d| d.contains("type mismatch")), "{before:?}");
+    assert!(
+        before.iter().any(|d| d.contains("type mismatch")),
+        "{before:?}"
+    );
     // b.rock's `pick` and use.rock's `use_it`.
     assert_eq!(relowered, 2);
     let (_, diags) = edit_with_aliases(files(other), "b.rock", PICK_STRING, &aliases);
@@ -551,7 +649,10 @@ fn a_member_added_to_a_second_globbed_module_relowers_the_globber() {
     assert!(before.is_empty(), "{before:?}");
     assert_eq!(relowered, 2);
     let (_, diags) = edit_with_aliases(files(PICK_STRING), "b.rock", other, &aliases);
-    assert!(diags.iter().any(|d| d.contains("type mismatch")), "{diags:?}");
+    assert!(
+        diags.iter().any(|d| d.contains("type mismatch")),
+        "{diags:?}"
+    );
 }
 
 /// Unary `-x` reads a family lowering decided, so a globbed module gaining
@@ -562,7 +663,12 @@ fn a_unary_operator_added_to_a_globbed_module_relowers_the_caller() {
     let without = "pub struct Pt {\n    pub x: int,\n}\n";
     let with = "pub struct Pt {\n    pub x: int,\n}\n\npub fn __unm(a: Pt) -> Pt {\n    a\n}\n";
     let caller = "use geo::*;\n\nfn neg() -> int {\n    let p = -Pt { x: 1 }\n    let negative = -p\n    negative.x\n}\n";
-    let files = |geo: &str| vec![v1_in(1, "geo", "geo.rock", geo), v1_in(2, "app", "app.rock", caller)];
+    let files = |geo: &str| {
+        vec![
+            v1_in(1, "geo", "geo.rock", geo),
+            v1_in(2, "app", "app.rock", caller),
+        ]
+    };
     let aliases = aliases_of(&files(without));
 
     let (tier, diags) = edit_with_aliases(files(without), "geo.rock", with, &aliases);
@@ -571,7 +677,12 @@ fn a_unary_operator_added_to_a_globbed_module_relowers_the_caller() {
 
     let (tier, diags) = edit_with_aliases(files(with), "geo.rock", without, &aliases);
     assert_eq!(tier, UpdateTier::Scope);
-    assert!(diags.iter().any(|d| d.contains("operator `-` is not defined for `geo::Pt`")), "{diags:?}");
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.contains("operator `-` is not defined for `geo::Pt`")),
+        "{diags:?}"
+    );
 }
 
 /// A file that enters after `Session::new` reads with the facts its host
@@ -580,11 +691,23 @@ fn a_unary_operator_added_to_a_globbed_module_relowers_the_caller() {
 #[test]
 fn a_file_entering_after_new_reads_with_its_declared_facts() {
     let extra = "mod extra;\n\npub fn more() -> int {\n    super::a::bump(2)\n}\n";
-    let mut session = Session::new(vec![], package(), &NsAliases::default()).expect("baseline builds");
+    let mut session =
+        Session::new(vec![], package(), &NsAliases::default()).expect("baseline builds");
     session
-        .declare_file_facts("extra.rock", Dialect::V1, Some(PackageTag { id: 1, self_name: "livev1".into(), identity_storage: Default::default() }), GlobalPolicy::Any)
+        .declare_file_facts(
+            "extra.rock",
+            Dialect::V1,
+            Some(PackageTag {
+                id: 1,
+                self_name: "livev1".into(),
+                identity_storage: Default::default(),
+            }),
+            GlobalPolicy::Any,
+        )
         .expect("an unheld file takes declared facts");
-    session.update_file("extra.rock", extra).expect("a v1 fragment enters as v1");
+    session
+        .update_file("extra.rock", extra)
+        .expect("a v1 fragment enters as v1");
 
     let mut files = package();
     files.push(v1("extra.rock", extra));
@@ -596,11 +719,27 @@ fn a_file_entering_after_new_reads_with_its_declared_facts() {
 /// A held file's facts come from its manifest and cannot change under it.
 #[test]
 fn a_held_file_refuses_different_facts() {
-    let mut session = Session::new(vec![], package(), &NsAliases::default()).expect("baseline builds");
-    assert!(session.declare_file_facts("a.rock", Dialect::Legacy, None, GlobalPolicy::Any).is_err());
-    assert!(session
-        .declare_file_facts("a.rock", Dialect::V1, Some(PackageTag { id: 1, self_name: "livev1".into(), identity_storage: Default::default() }), GlobalPolicy::Any)
-        .is_ok());
+    let mut session =
+        Session::new(vec![], package(), &NsAliases::default()).expect("baseline builds");
+    assert!(
+        session
+            .declare_file_facts("a.rock", Dialect::Legacy, None, GlobalPolicy::Any)
+            .is_err()
+    );
+    assert!(
+        session
+            .declare_file_facts(
+                "a.rock",
+                Dialect::V1,
+                Some(PackageTag {
+                    id: 1,
+                    self_name: "livev1".into(),
+                    identity_storage: Default::default()
+                }),
+                GlobalPolicy::Any
+            )
+            .is_ok()
+    );
 }
 
 /// The incremental session re-parses from `SessionFile` facts rather than the
@@ -627,7 +766,8 @@ fn globals_none_fact_reaches_incremental_reparse_and_update() {
         "const COUNT: int = 0\n\nfn tick() { print(\"{COUNT}\") }\n",
     );
     valid_file.global_policy = GlobalPolicy::None;
-    let mut session = Session::new(vec![], vec![valid_file], &NsAliases::default()).expect("const session builds");
+    let mut session = Session::new(vec![], vec![valid_file], &NsAliases::default())
+        .expect("const session builds");
     let update_error = session
         .update_file(
             "sim.rock",
@@ -703,7 +843,10 @@ fn a_dependency_module_alias_added_or_removed_takes_the_scope_path() {
 
     let (tier, diags) = edit_with_aliases(files(with), "use.rock", without, &aliases);
     assert_eq!(tier, UpdateTier::Scope);
-    assert!(diags.iter().any(|d| d.contains("did not resolve")), "{diags:?}");
+    assert!(
+        diags.iter().any(|d| d.contains("did not resolve")),
+        "{diags:?}"
+    );
 }
 
 /// A v1 package reaches a legacy dependency through the view of what the
@@ -718,7 +861,10 @@ fn a_legacy_definition_added_or_removed_relowers_its_v1_users() {
     let by_glob = "use x_lib::*;\n\nfn use_it() -> int {\n    pick(1)\n}\n";
     for user in [by_path, by_glob] {
         let files = |lib: &str| {
-            vec![in_package(Dialect::Legacy, 1, "x_lib", "xlib.rock", lib), v1_in(2, "app", "use.rock", user)]
+            vec![
+                in_package(Dialect::Legacy, 1, "x_lib", "xlib.rock", lib),
+                v1_in(2, "app", "use.rock", user),
+            ]
         };
         let aliases = aliases_of(&files(without));
 
@@ -728,7 +874,10 @@ fn a_legacy_definition_added_or_removed_relowers_its_v1_users() {
 
         let (tier, diags) = edit_with_aliases(files(with), "xlib.rock", without, &aliases);
         assert_eq!(tier, UpdateTier::Scope, "{user}");
-        assert!(diags.iter().any(|d| d.contains("did not resolve")), "{user}: {diags:?}");
+        assert!(
+            diags.iter().any(|d| d.contains("did not resolve")),
+            "{user}: {diags:?}"
+        );
     }
 }
 

@@ -33,7 +33,9 @@ fn main() { print("{hot(1.0, 2.0, 8)}") }
 "#;
     let lua = emit_module(src);
     let body = function_body(&lua, "hot");
-    let for_pos = body.find(" for ").unwrap_or_else(|| panic!("no for loop in:\n{body}"));
+    let for_pos = body
+        .find(" for ")
+        .unwrap_or_else(|| panic!("no for loop in:\n{body}"));
     let after_for = &body[for_pos..];
     let decl = after_for
         .lines()
@@ -110,7 +112,10 @@ fn main() {
 }
 "#;
     let lua = emit_module(src);
-    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "compound_while_loop_carried"), "2\n2\n0\n0");
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "compound_while_loop_carried"),
+        "2\n2\n0\n0"
+    );
 }
 
 #[test]
@@ -148,5 +153,8 @@ fn main() {
 }
 "#;
     let lua = emit_module(src);
-    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "compound_while_effects"), "0 0\n2 4\n6 6");
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "compound_while_effects"),
+        "0 0\n2 4\n6 6"
+    );
 }

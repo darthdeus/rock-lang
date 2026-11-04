@@ -12,9 +12,9 @@
 //! silently dropped. The end-of-run skip-reason histogram is the emitter work
 //! list.
 
+use crate::Result;
 use crate::bone_backend::{categorize, short_path};
 use crate::test_protocol::{parse_skull_markers, reason_histogram};
-use crate::Result;
 use bone_core::prelude::Instant;
 use colored::Colorize;
 use skull_mir::mir::FuncRef;
@@ -85,7 +85,10 @@ pub fn js_test(paths: &[String]) -> Result<()> {
         );
     }
     if !summary.skip_reasons.is_empty() {
-        println!("\n{}", "=== skip reasons (js) -- the emitter work list ===".bold());
+        println!(
+            "\n{}",
+            "=== skip reasons (js) -- the emitter work list ===".bold()
+        );
         let shown = summary.skip_reasons.len().min(50);
         for (reason, count) in summary.skip_reasons.iter().take(shown) {
             println!("  {:>5}  {}", count.to_string().yellow(), reason);
@@ -131,15 +134,13 @@ pub fn js_test_run(paths: &[String], print: bool) -> Result<JsSuiteSummary> {
 
     let mut outcomes: Vec<(String, std::thread::Result<JsUnitOutcome>)> = Vec::new();
     for file in &files {
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            js_build_file(file)
-        }));
+        let outcome =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| js_build_file(file)));
         outcomes.push((short_path(file), outcome));
     }
     for dir in &package_dirs {
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            js_build_package(dir)
-        }));
+        let outcome =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| js_build_package(dir)));
         outcomes.push((short_path(dir), outcome));
     }
 
@@ -148,7 +149,11 @@ pub fn js_test_run(paths: &[String], print: bool) -> Result<JsSuiteSummary> {
     for (label, outcome) in outcomes {
         summary.files += 1;
         match outcome {
-            Ok(JsUnitOutcome::Ran { passed, fails, skips }) => {
+            Ok(JsUnitOutcome::Ran {
+                passed,
+                fails,
+                skips,
+            }) => {
                 summary.tests_passed += passed;
                 summary.tests_failed += fails.len();
                 summary.tests_skipped += skips.len();
@@ -156,7 +161,11 @@ pub fn js_test_run(paths: &[String], print: bool) -> Result<JsSuiteSummary> {
                     all_skip_reasons.extend(reasons.iter().cloned());
                 }
                 if print && (passed + fails.len() + skips.len() > 0) {
-                    let status = if fails.is_empty() { "ok".green() } else { "FAILED".red() };
+                    let status = if fails.is_empty() {
+                        "ok".green()
+                    } else {
+                        "FAILED".red()
+                    };
                     println!(
                         "{:.<60} {}  ({} pass, {} fail, {} skip)",
                         label,
@@ -220,7 +229,10 @@ fn js_build_file(file: &str) -> JsUnitOutcome {
     let src = match fs_err::read_to_string(file) {
         Ok(s) => s,
         Err(e) => {
-            return JsUnitOutcome::UnitFail { reason: e.to_string(), rendered: e.to_string() }
+            return JsUnitOutcome::UnitFail {
+                reason: e.to_string(),
+                rendered: e.to_string(),
+            };
         }
     };
     let user = match skull_parser::parse_module(&src, ustr::Ustr::from(file)) {
@@ -246,13 +258,21 @@ fn js_build_file(file: &str) -> JsUnitOutcome {
     {
         Ok(tests) => tests
             .into_iter()
-            .map(|(fid, t)| (FuncRef { module: user_mid, func: fid }, t))
+            .map(|(fid, t)| {
+                (
+                    FuncRef {
+                        module: user_mid,
+                        func: fid,
+                    },
+                    t,
+                )
+            })
             .collect(),
         Err(e) => {
             return JsUnitOutcome::UnitFail {
                 reason: categorize(&e.message),
                 rendered: crate::skull_backend::render_file_errs(file, &src, &[e]),
-            }
+            };
         }
     };
     js_run_tests(&ws, &tests)
@@ -274,7 +294,7 @@ fn js_build_package(dir: &str) -> JsUnitOutcome {
             return JsUnitOutcome::UnitFail {
                 reason: "cannot load project".to_string(),
                 rendered: e.to_string(),
-            }
+            };
         }
     };
     let (mut modules, _entry) = match crate::skull_backend::skull_assemble_project(&sources) {
@@ -283,7 +303,7 @@ fn js_build_package(dir: &str) -> JsUnitOutcome {
             return JsUnitOutcome::UnitFail {
                 reason: categorize(&errs[0].message),
                 rendered: crate::skull_backend::render_project_errs(&sources, &errs),
-            }
+            };
         }
     };
     let mut ws = match crate::bone_backend::check_modules(&mut modules) {
@@ -292,7 +312,7 @@ fn js_build_package(dir: &str) -> JsUnitOutcome {
             return JsUnitOutcome::UnitFail {
                 reason: categorize(&errs[0].message),
                 rendered: crate::skull_backend::render_project_errs(&sources, &errs),
-            }
+            };
         }
     };
     drop(modules);
@@ -308,7 +328,7 @@ fn js_build_package(dir: &str) -> JsUnitOutcome {
             return JsUnitOutcome::UnitFail {
                 reason: categorize(&e.message),
                 rendered: e.message,
-            }
+            };
         }
     };
     js_run_tests(&ws, &tests)
@@ -317,11 +337,7 @@ fn js_build_package(dir: &str) -> JsUnitOutcome {
 /// The luajit driver's compile-failure rule, shared verbatim: a bone rejection
 /// where every discovered `@test` carries `expect_failure`/`@ignore` is the
 /// expected (passing) outcome; anything else is a unit failure.
-fn js_compile_failure(
-    file: &str,
-    src: &str,
-    errs: &[rock_core::CompilerError],
-) -> JsUnitOutcome {
+fn js_compile_failure(file: &str, src: &str, errs: &[rock_core::CompilerError]) -> JsUnitOutcome {
     if let Some(tests) = crate::skull_backend::all_tests_expect_compile_failure(file, src) {
         return JsUnitOutcome::ExpectFailPass { tests };
     }
@@ -362,7 +378,10 @@ fn js_run_tests(
                     .map(|s| s.to_string())
                     .or_else(|| panic.downcast_ref::<String>().cloned())
                     .unwrap_or_else(|| "unknown panic".to_string());
-                skips.push((t.name.clone(), vec![format!("panic during JS emission: {msg}")]));
+                skips.push((
+                    t.name.clone(),
+                    vec![format!("panic during JS emission: {msg}")],
+                ));
             }
         }
     }
@@ -384,8 +403,10 @@ fn js_run_tests(
     let (shared_defs, shared_has_code_refs) = if run_idxs.is_empty() {
         (String::new(), false)
     } else {
-        let roots: Vec<(FuncRef, String)> =
-            run_idxs.iter().map(|&i| (tests[i].0, format!("__t{i}"))).collect();
+        let roots: Vec<(FuncRef, String)> = run_idxs
+            .iter()
+            .map(|&i| (tests[i].0, format!("__t{i}")))
+            .collect();
         match skull_codegen_js::emit::emit_program_with_roots_artifact(ws, &roots) {
             Ok((blob, artifact)) => {
                 let has_code_refs = artifact.entries.values().any(|entry| entry.escaping);
@@ -401,7 +422,10 @@ fn js_run_tests(
                     skips.push((tests[i].1.name.clone(), all_reasons(&e)));
                 }
                 run_idxs = supported.iter().map(|(i, _)| *i).collect();
-                let blob = supported.iter().map(|(_, d)| d.as_str()).collect::<String>();
+                let blob = supported
+                    .iter()
+                    .map(|(_, d)| d.as_str())
+                    .collect::<String>();
                 let has_code_refs = blob.contains("__rock_code_slot_ref(");
                 (blob, has_code_refs)
             }
@@ -409,7 +433,11 @@ fn js_run_tests(
     };
 
     if run_idxs.is_empty() {
-        return JsUnitOutcome::Ran { passed: 0, fails, skips };
+        return JsUnitOutcome::Ran {
+            passed: 0,
+            fails,
+            skips,
+        };
     }
 
     // (display name, root JS name, expected output, value test?) per runnable test.
@@ -417,7 +445,12 @@ fn js_run_tests(
         .iter()
         .map(|&i| {
             let t = &tests[i].1;
-            (t.name.clone(), format!("__t{i}"), t.output.clone(), t.returns.is_some())
+            (
+                t.name.clone(),
+                format!("__t{i}"),
+                t.output.clone(),
+                t.returns.is_some(),
+            )
         })
         .collect();
 
@@ -429,7 +462,7 @@ fn js_run_tests(
             return JsUnitOutcome::UnitFail {
                 reason: "node run failed".to_string(),
                 rendered: e.message,
-            }
+            };
         }
     };
 
@@ -447,7 +480,7 @@ fn js_run_tests(
                     run.stderr,
                     truncate_js(&program)
                 ),
-            }
+            };
         }
     };
     fails.extend(markers.fails);
@@ -473,7 +506,11 @@ fn js_run_tests(
             Err(detail) => fails.push(format!("{name}: {detail}")),
         }
     }
-    JsUnitOutcome::Ran { passed, fails, skips }
+    JsUnitOutcome::Ran {
+        passed,
+        fails,
+        skips,
+    }
 }
 
 /// `rock run <file> --backend js`: emit the whole file (+ stdlib) as ONE node
@@ -513,7 +550,10 @@ fn emit_js_program_single(path: &str) -> skull_codegen_js::emit::JsProgram {
     let user = match skull_parser::parse_module(&src, ustr::Ustr::from(path)) {
         Ok(u) => u,
         Err(e) => {
-            eprintln!("{}", crate::skull_backend::render_file_errs(path, &src, &[e]));
+            eprintln!(
+                "{}",
+                crate::skull_backend::render_file_errs(path, &src, &[e])
+            );
             crate::ablation_report::exit_with_census(1);
         }
     };
@@ -521,7 +561,10 @@ fn emit_js_program_single(path: &str) -> skull_codegen_js::emit::JsProgram {
     let mut ws = match crate::bone_backend::check_with_stdlib([user]) {
         Ok(ws) => ws,
         Err(errs) => {
-            eprintln!("{}", crate::skull_backend::render_file_errs(path, &src, &errs));
+            eprintln!(
+                "{}",
+                crate::skull_backend::render_file_errs(path, &src, &errs)
+            );
             crate::ablation_report::exit_with_census(1);
         }
     };
@@ -535,7 +578,10 @@ fn emit_js_program_single(path: &str) -> skull_codegen_js::emit::JsProgram {
     match skull_codegen_js::emit::emit_program(&ws, user_mid) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("{}", crate::skull_backend::render_file_errs(path, &src, &[e]));
+            eprintln!(
+                "{}",
+                crate::skull_backend::render_file_errs(path, &src, &[e])
+            );
             crate::ablation_report::exit_with_census(1);
         }
     }
@@ -550,7 +596,10 @@ fn emit_js_program_single(path: &str) -> skull_codegen_js::emit::JsProgram {
 /// workspace -- the web assembler collects `rock_shader` pairs from it.
 pub(crate) fn emit_js_program_project(
     dir: &str,
-) -> (skull_codegen_js::emit::JsProgram, bone_semantic::inference::Workspace) {
+) -> (
+    skull_codegen_js::emit::JsProgram,
+    bone_semantic::inference::Workspace,
+) {
     match try_emit_js_program_project(dir) {
         Ok(emitted) => emitted,
         Err(e) => {
@@ -562,7 +611,10 @@ pub(crate) fn emit_js_program_project(
 
 pub(crate) fn try_emit_js_program_project(
     dir: &str,
-) -> Result<(skull_codegen_js::emit::JsProgram, bone_semantic::inference::Workspace)> {
+) -> Result<(
+    skull_codegen_js::emit::JsProgram,
+    bone_semantic::inference::Workspace,
+)> {
     let (program, _cache, ws) = try_emit_js_program_project_cached(dir)?;
     Ok((program, ws))
 }
@@ -578,36 +630,45 @@ pub(crate) fn try_emit_js_program_project_cached(
     let spec = crate::unified_compile::SourceSpec::Directory(PathBuf::from(dir));
     let sources = crate::unified_compile::discover_sources(&spec)
         .map_err(|e| anyhow::anyhow!("cannot load project {dir}: {e}"))?;
-    let sources = if (crate::registry::RuntimeServices::registered().is_game_project)(&PathBuf::from(dir)).unwrap_or(false) {
-        sources
-            .production_only(std::path::Path::new(dir))
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?
-    } else {
-        sources
-    };
+    let sources =
+        if (crate::registry::RuntimeServices::registered().is_game_project)(&PathBuf::from(dir))
+            .unwrap_or(false)
+        {
+            sources
+                .production_only(std::path::Path::new(dir))
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?
+        } else {
+            sources
+        };
     let (mut modules, entry_file) = match crate::skull_backend::skull_assemble_project(&sources) {
         Ok(v) => v,
-        Err(errs) => return Err(anyhow::anyhow!(
-            "{}",
-            crate::skull_backend::render_project_errs(&sources, &errs)
-        )),
+        Err(errs) => {
+            return Err(anyhow::anyhow!(
+                "{}",
+                crate::skull_backend::render_project_errs(&sources, &errs)
+            ));
+        }
     };
     let mut ws = match crate::bone_backend::check_modules(&mut modules) {
         Ok(ws) => ws,
-        Err(errs) => return Err(anyhow::anyhow!(
-            "{}",
-            crate::skull_backend::render_project_errs(&sources, &errs)
-        )),
+        Err(errs) => {
+            return Err(anyhow::anyhow!(
+                "{}",
+                crate::skull_backend::render_project_errs(&sources, &errs)
+            ));
+        }
     };
     drop(modules);
     crate::comptime::stamp_workspace(&mut ws, std::path::Path::new(dir))?;
     let user_mid = crate::bone_backend::entry_module_id(&ws, entry_file);
     let (prog, cache) = match skull_codegen_js::emit::emit_program_cached(&ws, user_mid) {
         Ok(p) => p,
-        Err(e) => return Err(anyhow::anyhow!(
-            "{}",
-            crate::skull_backend::render_project_err(&sources, &e)
-        )),
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "{}",
+                crate::skull_backend::render_project_err(&sources, &e)
+            ));
+        }
     };
     Ok((prog, cache, ws))
 }
@@ -795,9 +856,8 @@ pub(crate) fn append_call_runtime(
 }
 
 fn append_call_runtime_with_flag(program: &mut String, emitted: &str, has_code_refs: bool) {
-    let needs_call = has_code_refs
-        || emitted.contains("__rock_call(")
-        || emitted.contains("__try_call(");
+    let needs_call =
+        has_code_refs || emitted.contains("__rock_call(") || emitted.contains("__try_call(");
     if has_code_refs {
         program.push_str(skull_codegen_js::JS_CALL_HELPER);
     } else if needs_call {

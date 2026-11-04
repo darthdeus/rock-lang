@@ -20,31 +20,28 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use lsp_types::{
-    CompletionItem, CompletionItemKind, Diagnostic, DiagnosticSeverity,
-    DocumentHighlight, NumberOrString,
-    DocumentSymbol, Hover,
-    HoverContents, InlayHint, InlayHintKind, InlayHintLabel, Location, MarkupContent, MarkupKind,
-    ParameterInformation, ParameterLabel, Position, Range, SemanticToken, SemanticTokenModifier,
-    SemanticTokenType,
-    SemanticTokens, SignatureHelp, SignatureInformation, SymbolInformation, SymbolKind, TextEdit,
-    Uri, WorkspaceEdit,
+    CompletionItem, CompletionItemKind, Diagnostic, DiagnosticSeverity, DocumentHighlight,
+    DocumentSymbol, Hover, HoverContents, InlayHint, InlayHintKind, InlayHintLabel, Location,
+    MarkupContent, MarkupKind, NumberOrString, ParameterInformation, ParameterLabel, Position,
+    Range, SemanticToken, SemanticTokenModifier, SemanticTokenType, SemanticTokens, SignatureHelp,
+    SignatureInformation, SymbolInformation, SymbolKind, TextEdit, Uri, WorkspaceEdit,
 };
 
+use bone_incremental::session::{Session, SessionFile, UpdateTier};
 use bone_semantic::inference::{self, Gamma};
 use bone_semantic::prelude::{
-    is_intrinsic_key_in, BodyInference, FxHashMap, FxHashSet, InferenceResult, ModuleId, Span,
-    TyId, Workspace,
+    BodyInference, FxHashMap, FxHashSet, InferenceResult, ModuleId, Span, TyId, Workspace,
+    is_intrinsic_key_in,
 };
-use bone_incremental::session::{Session, SessionFile, UpdateTier};
 use skull_parser::CompilerError;
 use ustr::Ustr;
 
 use crate::completion::classify::*;
+use crate::completion::match_policy::admit;
 use crate::completion::rank::*;
 use crate::completion::select::*;
 use crate::completion::sources::*;
-use crate::completion::match_policy::admit;
-use crate::query::{clean_match, SymCat};
+use crate::query::{SymCat, clean_match};
 use crate::rank_key::RankKey;
 
 /// A fallback is reported once per request, file and stage until project text
@@ -63,7 +60,10 @@ impl FallbackReports {
         reason: &str,
         fallback: &str,
     ) {
-        if self.reported.lock().expect("LSP fallback reports lock")
+        if self
+            .reported
+            .lock()
+            .expect("LSP fallback reports lock")
             .insert((request, path.to_string(), stage))
         {
             log::warn!(target: "LSP",
@@ -89,7 +89,10 @@ impl FallbackReports {
     }
 
     fn clear(&mut self) {
-        self.reported.get_mut().expect("LSP fallback reports lock").clear();
+        self.reported
+            .get_mut()
+            .expect("LSP fallback reports lock")
+            .clear();
     }
 }
 
@@ -106,7 +109,12 @@ fn stdlib_paths() -> &'static [(String, String)] {
     PATHS.get_or_init(|| {
         rock_stdlib::stdlib_files()
             .iter()
-            .map(|f| (rock_stdlib::stdlib_file_id(f.name), canonicalize_lenient(f.display_path)))
+            .map(|f| {
+                (
+                    rock_stdlib::stdlib_file_id(f.name),
+                    canonicalize_lenient(f.display_path),
+                )
+            })
             .collect()
     })
 }
@@ -256,7 +264,10 @@ impl BoneProject {
         let uf = self.session.files.get(path)?;
         self.fallbacks.result(
             skull_parser::parse_module(&uf.text, Ustr::from(path)),
-            request, path, "parse stored source", "omit surface-syntax details; use live inference",
+            request,
+            path,
+            "parse stored source",
+            "omit surface-syntax details; use live inference",
         )
     }
 }
@@ -306,14 +317,22 @@ fn qualified_prefix_before(src: &str, at: usize) -> Option<(bool, Vec<Ustr>)> {
 /// (`modules_scope::path_members`). `None` for a legacy file or a prefix
 /// that names neither a module nor an enum, which leaves the legacy
 /// `Enum::` route to try.
-fn v1_path_completions(ws: &Workspace, path: &str, src: &str, at: usize, prefix: &str) -> Option<Vec<CompletionItem>> {
+fn v1_path_completions(
+    ws: &Workspace,
+    path: &str,
+    src: &str,
+    at: usize,
+    prefix: &str,
+) -> Option<Vec<CompletionItem>> {
     let frag = crate::modules_scope::fragment(ws, Ustr::from(path))?;
     let (from_root, segments) = qualified_prefix_before(src, at)?;
     let members = crate::modules_scope::path_members(ws, frag, from_root, &segments)?;
     let pfx = prefix.as_bytes();
     let mut items: Vec<CompletionItem> = members
         .into_iter()
-        .filter(|(name, _)| prefix.is_empty() || crate::completion::match_policy::admit(name.as_bytes(), pfx))
+        .filter(|(name, _)| {
+            prefix.is_empty() || crate::completion::match_policy::admit(name.as_bytes(), pfx)
+        })
         .enumerate()
         .map(|(i, (name, member))| {
             let kind = match member {
@@ -364,9 +383,19 @@ fn ident_around(src: &str, offset: usize) -> &str {
 /// naming it, else an inline `mod` block. `None` for a package root, which
 /// no item declares.
 fn module_declaration(session: &Session, package: u32, node: Ustr) -> Option<Span> {
-    fn inline_block(items: &[bone_semantic::semantic_passes::ScopeItem], path: &mut Vec<Ustr>, node: Ustr) -> Option<Span> {
+    fn inline_block(
+        items: &[bone_semantic::semantic_passes::ScopeItem],
+        path: &mut Vec<Ustr>,
+        node: Ustr,
+    ) -> Option<Span> {
         for item in items {
-            if let bone_semantic::semantic_passes::ScopeItem::Module { name, item_span, items, .. } = item {
+            if let bone_semantic::semantic_passes::ScopeItem::Module {
+                name,
+                item_span,
+                items,
+                ..
+            } = item
+            {
                 path.push(*name);
                 if bone_core::modules::NsPackage::path_key(path) == node {
                     return Some(*item_span);
@@ -390,7 +419,11 @@ fn module_declaration(session: &Session, package: u32, node: Ustr) -> Option<Spa
         .filter(|c| c.package.as_ref().is_some_and(|p| p.id == package));
     let mut block = None;
     for c in ours {
-        let mut path: Vec<Ustr> = c.header.iter().flat_map(|h| h.path.iter().map(|i| i.name)).collect();
+        let mut path: Vec<Ustr> = c
+            .header
+            .iter()
+            .flat_map(|h| h.path.iter().map(|i| i.name))
+            .collect();
         if let Some(h) = &c.header
             && bone_core::modules::NsPackage::path_key(&path) == node
         {
@@ -497,7 +530,7 @@ fn text_has_top_level_operator(s: &str) -> bool {
             b'+' | b'-' | b'*' | b'/' | b'%' | b'=' | b'!' | b'<' | b'>' | b'&' | b'|' | b'^'
                 if depth == 0 =>
             {
-                return true
+                return true;
             }
             _ => {}
         }
@@ -543,7 +576,10 @@ pub fn canonicalize_lenient(path: &str) -> String {
 impl BoneWorkspace {
     /// Set host lint policy before loading any project.
     pub fn with_lint_options(mut self, options: bone_lints::LintOptions) -> Self {
-        assert!(self.projects.is_empty(), "lint options must precede project loading");
+        assert!(
+            self.projects.is_empty(),
+            "lint options must precede project loading"
+        );
         self.lint_options = options;
         self
     }
@@ -576,7 +612,10 @@ impl BoneWorkspace {
     /// (no syscall on the hot path), falling back to a syscall only for a path
     /// never passed to a mutator.
     fn canon(&self, path: &str) -> String {
-        self.path_canon.get(path).cloned().unwrap_or_else(|| Self::canon_str(path))
+        self.path_canon
+            .get(path)
+            .cloned()
+            .unwrap_or_else(|| Self::canon_str(path))
     }
 
     /// The deepest enclosing `stick.toml` directory for `path`, or None for a
@@ -606,10 +645,7 @@ impl BoneWorkspace {
         let on_disk = editor_path(path);
         let p = Path::new(on_disk.as_ref());
         let canon = fs_err::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-        canon
-            .parent()
-            .map(|d| d.to_path_buf())
-            .unwrap_or(canon)
+        canon.parent().map(|d| d.to_path_buf()).unwrap_or(canon)
     }
 
     fn project_mut(&mut self, root: &Path) -> &mut BoneProject {
@@ -629,7 +665,9 @@ impl BoneWorkspace {
                 session: Session::new(warm_stdlib(), Vec::new(), &aliases)
                     .expect("bone session warm-init (stdlib) must succeed"),
                 texts: stdlib_texts().into_iter().collect(),
-                freq: None, hole_cache: HashMap::new(), lint_cache: Default::default(),
+                freq: None,
+                hole_cache: HashMap::new(),
+                lint_cache: Default::default(),
                 reach: None,
                 fn_sigs: None,
                 call_through: None,
@@ -712,8 +750,10 @@ impl BoneWorkspace {
         self.source_load_errors.remove(&root);
         self.loaded_roots.insert(root.clone());
         let is_bin = stick_is_bin(&root);
-        let file_texts: Vec<(String, String)> =
-            files.iter().map(|f| (f.path.clone(), f.text.clone())).collect();
+        let file_texts: Vec<(String, String)> = files
+            .iter()
+            .map(|f| (f.path.clone(), f.text.clone()))
+            .collect();
         // The alias table the resolver needs comes from the same graph that
         // selected these files, so a v1 package in the editor resolves its
         // dependencies exactly as a compile does.
@@ -753,10 +793,7 @@ impl BoneWorkspace {
                     graph,
                 };
                 prime_lint_cache(&mut project);
-                self.projects.insert(
-                    root,
-                    project,
-                );
+                self.projects.insert(root, project);
             }
             Err(e) => {
                 log::warn!(
@@ -765,13 +802,20 @@ impl BoneWorkspace {
                 );
                 for (p, src) in file_texts {
                     for (file, diagnostics) in self.update(&p, src) {
-                        let errors: Vec<_> = diagnostics.iter()
+                        let errors: Vec<_> = diagnostics
+                            .iter()
                             .filter(|d| d.severity == Some(DiagnosticSeverity::ERROR))
-                            .map(|d| d.message.as_str()).collect();
+                            .map(|d| d.message.as_str())
+                            .collect();
                         if !errors.is_empty() {
                             if let Some(proj) = self.project(&file) {
-                                proj.fallbacks.report("load_project", &file, "per-file update",
-                                    &errors.join("; "), "retain last good session; continue indexing other files");
+                                proj.fallbacks.report(
+                                    "load_project",
+                                    &file,
+                                    "per-file update",
+                                    &errors.join("; "),
+                                    "retain last good session; continue indexing other files",
+                                );
                             }
                         }
                     }
@@ -801,13 +845,15 @@ impl BoneWorkspace {
     }
 
     fn source_load_diagnostic(&self, path: &str) -> Option<Diagnostic> {
-        self.source_load_errors.get(&Self::root_for(path)).map(|message| {
-            bone_diagnostic(
-                Range::new(Position::new(0, 0), Position::new(0, 1)),
-                message.clone(),
-                rock_core::errors::CompilerErrorLevel::Error,
-            )
-        })
+        self.source_load_errors
+            .get(&Self::root_for(path))
+            .map(|message| {
+                bone_diagnostic(
+                    Range::new(Position::new(0, 0), Position::new(0, 1)),
+                    message.clone(),
+                    rock_core::errors::CompilerErrorLevel::Error,
+                )
+            })
     }
 
     /// Apply an editor edit (didOpen/didChange) for `path`. Returns diagnostics
@@ -846,7 +892,8 @@ impl BoneWorkspace {
         let root = Self::root_for(path);
         let proj = self.project_mut(&root);
         if proj.graph.as_ref().is_some_and(|graph| {
-            graph.package_of_file(Path::new(path))
+            graph
+                .package_of_file(Path::new(path))
                 .is_some_and(|owner| !graph.includes_file(owner, Path::new(path)))
         }) {
             return vec![(editor_path(path).into_owned(), Vec::new())];
@@ -885,7 +932,11 @@ impl BoneWorkspace {
                 .and_then(|g| rock_host::compilation_units::source_package(g, Path::new(path)));
             let (package, dialect, global_policy) = match node {
                 Some(node) => (Some(node.tag()), node.dialect, node.global_policy),
-                None => (None, skull_parser::Dialect::Legacy, skull_parser::GlobalPolicy::Any),
+                None => (
+                    None,
+                    skull_parser::Dialect::Legacy,
+                    skull_parser::GlobalPolicy::Any,
+                ),
             };
             if let Err(e) = proj
                 .session
@@ -924,7 +975,9 @@ impl BoneWorkspace {
                             });
                         }
                     }
-                    UpdateTier::Interface | UpdateTier::Scope | UpdateTier::FullUser => lint_full = true,
+                    UpdateTier::Interface | UpdateTier::Scope | UpdateTier::FullUser => {
+                        lint_full = true
+                    }
                     UpdateTier::NoChange => {}
                 }
             }
@@ -1145,7 +1198,11 @@ impl BoneWorkspace {
         // render their value for their keyword/braces -- would be a catch-all
         // hover over the whitespace inside them. ASCII-only (whitespace is ASCII;
         // a multi-byte char's lead byte isn't whitespace, so it proceeds).
-        if src.as_bytes().get(offset).is_none_or(|b| b.is_ascii_whitespace()) {
+        if src
+            .as_bytes()
+            .get(offset)
+            .is_none_or(|b| b.is_ascii_whitespace())
+        {
             return None;
         }
 
@@ -1159,7 +1216,8 @@ impl BoneWorkspace {
         // `Type: ...`. Fenced so the multi-line "In scope:" block keeps its
         // formatting in a Markdown editor.
         let raw_ast = proj.reparse_user_file(path, "hover");
-        if let Some(hi) = raw_ast.as_ref()
+        if let Some(hi) = raw_ast
+            .as_ref()
             .and_then(|ast| crate::query::hole_info(ws, mid, inf, ast, offset))
         {
             return Some(Hover {
@@ -1188,13 +1246,19 @@ impl BoneWorkspace {
         // so body keywords (`let`/`for`) past the brace aren't swallowed.
         let (contents, span) = pat_hover
             .or_else(|| crate::query::hover_at(ws, mid, inf, offset, Some(&proj.texts)))
-            .or_else(|| crate::query::fn_signature_hover(ws, mid, src, offset, Some(&proj.texts)))?;
+            .or_else(|| {
+                crate::query::fn_signature_hover(ws, mid, src, offset, Some(&proj.texts))
+            })?;
         Some(Hover {
             contents: HoverContents::Markup(MarkupContent {
                 kind: MarkupKind::Markdown,
                 value: contents,
             }),
-            range: Some(range_from_offsets(src, span.offset_range.0, span.offset_range.1)),
+            range: Some(range_from_offsets(
+                src,
+                span.offset_range.0,
+                span.offset_range.1,
+            )),
         })
     }
 
@@ -1315,10 +1379,16 @@ impl BoneWorkspace {
         let offset = offset_at_line_col(src, pos.line, pos.character);
         let mut idx_cache: HashMap<String, LineIndex> = HashMap::new();
         // Find-usages scopes to the specific overload under the cursor.
-        self.all_reference_spans(proj, path, offset, crate::query::FnRefScope::ThisOverload, "references")
-            .into_iter()
-            .filter_map(|s| self.location_from_span_indexed(proj, &s.span, &mut idx_cache))
-            .collect()
+        self.all_reference_spans(
+            proj,
+            path,
+            offset,
+            crate::query::FnRefScope::ThisOverload,
+            "references",
+        )
+        .into_iter()
+        .filter_map(|s| self.location_from_span_indexed(proj, &s.span, &mut idx_cache))
+        .collect()
     }
 
     /// Occurrences of the symbol under the cursor WITHIN `path` (the LSP
@@ -1337,7 +1407,10 @@ impl BoneWorkspace {
         self.references(path, pos)
             .into_iter()
             .filter(|loc| loc.uri == want)
-            .map(|loc| DocumentHighlight { range: loc.range, kind: None })
+            .map(|loc| DocumentHighlight {
+                range: loc.range,
+                kind: None,
+            })
             .collect()
     }
 
@@ -1500,8 +1573,11 @@ impl BoneWorkspace {
         // but its SOURCE still has a top-level operator, so back it with a text
         // scan; either signal means splicing needs parens to keep precedence.
         let parenthesize = sites.parenthesize || text_has_top_level_operator(init_text);
-        let replacement =
-            if parenthesize { format!("({init_text})") } else { init_text.to_string() };
+        let replacement = if parenthesize {
+            format!("({init_text})")
+        } else {
+            init_text.to_string()
+        };
 
         let mut edits = Vec::with_capacity(sites.uses.len() + 1);
         for u in &sites.uses {
@@ -1517,7 +1593,11 @@ impl BoneWorkspace {
         // Delete the whole `let` line: leading indent through the trailing newline.
         let (ls, le) = sites.let_span.offset_range;
         let line_start = src.get(..ls)?.rfind('\n').map(|i| i + 1).unwrap_or(0);
-        let line_end = src.get(le..)?.find('\n').map(|i| le + i + 1).unwrap_or(src.len());
+        let line_end = src
+            .get(le..)?
+            .find('\n')
+            .map(|i| le + i + 1)
+            .unwrap_or(src.len());
         edits.push(TextEdit {
             range: Range {
                 start: offset_to_position(src, line_start),
@@ -1526,7 +1606,10 @@ impl BoneWorkspace {
             new_text: String::new(),
         });
 
-        Some(InlineLocalEdits { var: sites.var.to_string(), edits })
+        Some(InlineLocalEdits {
+            var: sites.var.to_string(),
+            edits,
+        })
     }
 
     /// A "Generate function" edit when the cursor is on a call to an undeclared
@@ -1608,9 +1691,20 @@ impl BoneWorkspace {
     /// The sites a rename at `offset` rewrites: [`Self::v1_rename_sites`]
     /// for a modules-v1 definition or import alias, else every reference of
     /// the symbol, all overloads of a function included.
-    fn rename_sites(&self, proj: &BoneProject, path: &str, offset: usize) -> Vec<crate::query::RefSite> {
+    fn rename_sites(
+        &self,
+        proj: &BoneProject,
+        path: &str,
+        offset: usize,
+    ) -> Vec<crate::query::RefSite> {
         self.v1_rename_sites(proj, path, offset).unwrap_or_else(|| {
-            self.all_reference_spans(proj, path, offset, crate::query::FnRefScope::AllOverloads, "rename")
+            self.all_reference_spans(
+                proj,
+                path,
+                offset,
+                crate::query::FnRefScope::AllOverloads,
+                "rename",
+            )
         })
     }
 
@@ -1621,7 +1715,12 @@ impl BoneWorkspace {
     /// Renaming an alias (`use a::f as g`, at the `g` or at a use of it)
     /// rewrites that alias and the uses of `g` in its own file. `None` when
     /// the cursor is on neither.
-    fn v1_rename_sites(&self, proj: &BoneProject, path: &str, offset: usize) -> Option<Vec<crate::query::RefSite>> {
+    fn v1_rename_sites(
+        &self,
+        proj: &BoneProject,
+        path: &str,
+        offset: usize,
+    ) -> Option<Vec<crate::query::RefSite>> {
         use bone_semantic::hir::{PathSegmentRef, SegmentTarget};
         let ws = proj.session.workspace();
         let mid = user_module_for_path(ws, path)?;
@@ -1631,16 +1730,22 @@ impl BoneWorkspace {
                 .and_then(|t| t.get(span.offset_range.0..span.offset_range.1))
         };
         let (key, alias) = match crate::query::path_segment_at(ws, mid, offset) {
-            Some(PathSegmentRef { target: SegmentTarget::Def(key), alias: true, span }) => {
-                (key, Some(text_at(&span)?.to_string()))
-            }
-            Some(PathSegmentRef { target: SegmentTarget::Def(key), .. }) => (key, None),
+            Some(PathSegmentRef {
+                target: SegmentTarget::Def(key),
+                alias: true,
+                span,
+            }) => (key, Some(text_at(&span)?.to_string())),
+            Some(PathSegmentRef {
+                target: SegmentTarget::Def(key),
+                ..
+            }) => (key, None),
             Some(_) => return None,
             None => {
-                let key = crate::query::v1_def_named_at(ws, Ustr::from(path), offset).or_else(|| {
-                    let def = gaps::definition(ws, mid, ws.inference(mid)?, offset)?;
-                    crate::query::v1_def_declared_at(ws, &def)
-                })?;
+                let key =
+                    crate::query::v1_def_named_at(ws, Ustr::from(path), offset).or_else(|| {
+                        let def = gaps::definition(ws, mid, ws.inference(mid)?, offset)?;
+                        crate::query::v1_def_declared_at(ws, &def)
+                    })?;
                 let src = proj.texts.get(path)?;
                 let word = ident_around(src, offset);
                 let is_alias = word != ws.defs.get(&key)?.name.as_str()
@@ -1656,7 +1761,13 @@ impl BoneWorkspace {
         // reports a qualified call by the whole path's span, which no site
         // spelling check below keeps).
         let mut sites: Vec<Span> = self
-            .all_reference_spans(proj, decl.file.as_str(), decl.offset_range.0, crate::query::FnRefScope::AllOverloads, "rename")
+            .all_reference_spans(
+                proj,
+                decl.file.as_str(),
+                decl.offset_range.0,
+                crate::query::FnRefScope::AllOverloads,
+                "rename",
+            )
             .into_iter()
             .map(|site| site.span)
             .collect();
@@ -1672,7 +1783,15 @@ impl BoneWorkspace {
         });
         sites.sort_by_key(|span| (span.file.as_str().to_string(), span.offset_range));
         sites.dedup_by_key(|span| (span.file, span.offset_range));
-        Some(sites.into_iter().map(|span| crate::query::RefSite { span, shorthand: None }).collect())
+        Some(
+            sites
+                .into_iter()
+                .map(|span| crate::query::RefSite {
+                    span,
+                    shorthand: None,
+                })
+                .collect(),
+        )
     }
 
     // -- Feature: completion (stubbed: crate::query::completion) ---------------------
@@ -1750,7 +1869,11 @@ impl BoneWorkspace {
         // A token starting with a digit is a numeric literal, never an identifier
         // being typed (Rock idents are `[A-Za-z_][A-Za-z0-9_]*`) -- don't
         // subsequence-match it against symbols (`0` -> `remap_to_01`).
-        if prefix_raw.as_bytes().first().is_some_and(u8::is_ascii_digit) {
+        if prefix_raw
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_digit)
+        {
             return Vec::new();
         }
         let prefix = prefix_raw.to_lowercase();
@@ -1792,14 +1915,25 @@ impl BoneWorkspace {
         // typed session is built INSIDE the variant (member TyIds live in that
         // workspace), so here we just pass the enclosing (callee, arg index).
         if let Some(recv_end) = cx.member_recv_end {
-            let arg_slot = cx.arg_call.as_ref().map(|(callee, idx, _)| (callee.clone(), *idx as usize));
+            let arg_slot = cx
+                .arg_call
+                .as_ref()
+                .map(|(callee, idx, _)| (callee.clone(), *idx as usize));
             // PRIMARY: resolve the receiver's type via inference (`type_at`).
             // Handles generic-substituted fields, tuple/newtype projections, and
             // call/index receivers the structural name-walk can't express. `None`
             // means the receiver isn't a members-bearing type (`scale(x)` -> int).
             let by_recv = member_completions_by_receiver(
-                &mut proj.session, path, src, offset, recv_end, &prefix, arg_slot.clone(), cx.anchor,
-                proj.reach.as_ref(), cx.bool_chain,
+                &mut proj.session,
+                path,
+                src,
+                offset,
+                recv_end,
+                &prefix,
+                arg_slot.clone(),
+                cx.anchor,
+                proj.reach.as_ref(),
+                cx.bool_chain,
             );
             let resolved = by_recv.is_some();
             // An unresolved/non-member receiver starts empty before the name-walk fallback.
@@ -1811,8 +1945,16 @@ impl BoneWorkspace {
             if items.is_empty() {
                 if let Some(segments) = cx.member.clone() {
                     items = member_completions(
-                        &mut proj.session, path, src, offset, &segments, &prefix, arg_slot,
-                        cx.anchor, proj.reach.as_ref(), cx.bool_chain,
+                        &mut proj.session,
+                        path,
+                        src,
+                        offset,
+                        &segments,
+                        &prefix,
+                        arg_slot,
+                        cx.anchor,
+                        proj.reach.as_ref(),
+                        cx.bool_chain,
                     );
                 }
             }
@@ -1861,7 +2003,14 @@ impl BoneWorkspace {
                 for munged in completion_munges(src, offset) {
                     let attempt = analyze_variant(&mut proj.session, path, &munged, |ws| {
                         field_ref_arg_completions(
-                            ws, path, src, offset, &callee, arg_idx as usize, &prefix, lead_dot,
+                            ws,
+                            path,
+                            src,
+                            offset,
+                            &callee,
+                            arg_idx as usize,
+                            &prefix,
+                            lead_dot,
                             recv_end,
                         )
                     });
@@ -1877,7 +2026,13 @@ impl BoneWorkspace {
             // tuple variant as a block head (`if x == Enum::Variant { .. }`) is NOT
             // a record literal, so the block still gets global completion.
             if let Some(items) = enum_record_field_completions(
-                &mut proj.session, path, src, offset, &enum_name, &variant, &prefix,
+                &mut proj.session,
+                path,
+                src,
+                offset,
+                &enum_name,
+                &variant,
+                &prefix,
             ) {
                 path_ms("enum-record path", items.len());
                 return items;
@@ -1899,7 +2054,12 @@ impl BoneWorkspace {
         }
         if let Some(enum_name) = cx.qualified.clone() {
             let mut items = enum_qualified_completions(
-                &mut proj.session, path, src, offset, &enum_name, &prefix,
+                &mut proj.session,
+                path,
+                src,
+                offset,
+                &enum_name,
+                &prefix,
             );
             if next_is_open_paren {
                 strip_call_template(&mut items);
@@ -1911,7 +2071,13 @@ impl BoneWorkspace {
             // Falls through (None) when the head isn't actually a struct, so a
             // `match X {` / `if Cond {` block still gets global completion.
             if let Some(items) = struct_literal_field_completions(
-                &mut proj.session, path, src, offset, &struct_name, brace_open, &prefix,
+                &mut proj.session,
+                path,
+                src,
+                offset,
+                &struct_name,
+                brace_open,
+                &prefix,
             ) {
                 path_ms("struct-literal path", items.len());
                 return items;
@@ -1939,9 +2105,9 @@ impl BoneWorkspace {
         // reach/call-through synths (not valid patterns) stay out. Fails open:
         // an unresolved scrutinee or a non-enum match changes nothing.
         let pattern_pos = cx.pattern_scrutinee.is_some();
-        let pattern_enum: Option<String> = cx.pattern_scrutinee.and_then(|a| {
-            pattern_scrutinee_enum(&mut proj.session, path, src, offset, a)
-        });
+        let pattern_enum: Option<String> = cx
+            .pattern_scrutinee
+            .and_then(|a| pattern_scrutinee_enum(&mut proj.session, path, src, offset, a));
         let live = proj.session.workspace();
         let fallback_ws: Option<Workspace> = if user_module_for_path(live, path).is_none() {
             let t = bone_core::prelude::Instant::now();
@@ -2035,37 +2201,38 @@ impl BoneWorkspace {
         // The prefix filter happens inside the completion query before per-candidate
         // detail rendering -- so typing narrows the work, not just the result.
         let t_cands = bone_core::prelude::Instant::now();
-        let visible_bindings = crate::modules_scope::fragment(ws, ws.module(mid).file).map(|frag| {
-            let file = ws.module(mid).file;
-            proj.visible_bindings
-                .entry(file)
-                .or_insert_with(|| {
-                    // Preserve the public query's first-module owner choice, but
-                    // carry it with the cached binding so every global candidate
-                    // does not rescan all modules to recover its def_file.
-                    let mut global_def_files = HashMap::new();
-                    for module in &ws.modules {
-                        for key in module.global_by_name.keys() {
-                            global_def_files.entry(*key).or_insert(module.file);
+        let visible_bindings =
+            crate::modules_scope::fragment(ws, ws.module(mid).file).map(|frag| {
+                let file = ws.module(mid).file;
+                proj.visible_bindings
+                    .entry(file)
+                    .or_insert_with(|| {
+                        // Preserve the public query's first-module owner choice, but
+                        // carry it with the cached binding so every global candidate
+                        // does not rescan all modules to recover its def_file.
+                        let mut global_def_files = HashMap::new();
+                        for module in &ws.modules {
+                            for key in module.global_by_name.keys() {
+                                global_def_files.entry(*key).or_insert(module.file);
+                            }
                         }
-                    }
-                    let mut test_path_cache: FxHashMap<Ustr, bool> = FxHashMap::default();
-                    crate::modules_scope::bound_names(ws, frag, |_| true)
-                        .into_iter()
-                        .filter_map(|(name, key)| {
-                            crate::query::resolve_visible_binding(
-                                ws,
-                                Some(frag),
-                                name,
-                                key,
-                                global_def_files.get(&key).copied(),
-                                &mut test_path_cache,
-                            )
-                        })
-                        .collect()
-                })
-                .as_slice()
-        });
+                        let mut test_path_cache: FxHashMap<Ustr, bool> = FxHashMap::default();
+                        crate::modules_scope::bound_names(ws, frag, |_| true)
+                            .into_iter()
+                            .filter_map(|(name, key)| {
+                                crate::query::resolve_visible_binding(
+                                    ws,
+                                    Some(frag),
+                                    name,
+                                    key,
+                                    global_def_files.get(&key).copied(),
+                                    &mut test_path_cache,
+                                )
+                            })
+                            .collect()
+                    })
+                    .as_slice()
+            });
         let mut cands = crate::query::completion_with_visible_bindings(
             ws,
             mid,
@@ -2106,7 +2273,10 @@ impl BoneWorkspace {
                         format!("{}: {}{}", p.name, variadic, p.ty)
                     })
                     .collect();
-                let ret = md.ret.as_ref().map_or_else(String::new, |r| format!(" -> {r}"));
+                let ret = md
+                    .ret
+                    .as_ref()
+                    .map_or_else(String::new, |r| format!(" -> {r}"));
                 cands.push(crate::query::CompletionEntry {
                     name,
                     kind: SymCat::Macro,
@@ -2133,10 +2303,12 @@ impl BoneWorkspace {
                 let admit = |name: &str| {
                     (!name.starts_with('_') || show_private)
                         && (crate::completion::match_policy::admit(name.as_bytes(), pfx)
-                            || (expr_position && name.starts_with(|c: char| c.is_ascii_uppercase())))
+                            || (expr_position
+                                && name.starts_with(|c: char| c.is_ascii_uppercase())))
                 };
                 let contribution = proj.session.files.get(path).map(|uf| &uf.contribution);
-                let mut offered: std::collections::HashSet<Ustr> = cands.iter().map(|c| c.name).collect();
+                let mut offered: std::collections::HashSet<Ustr> =
+                    cands.iter().map(|c| c.name).collect();
                 let mut entries = Vec::new();
                 let mut test_path_cache: FxHashMap<Ustr, bool> = FxHashMap::default();
                 for cand in crate::modules_scope::import_candidates(ws, frag, admit) {
@@ -2161,7 +2333,13 @@ impl BoneWorkspace {
                             None => (0, format!("use {};\n", cand.path)),
                         };
                         let at = offset_to_position(src, at);
-                        import_edits.insert(entry.name.to_string(), TextEdit { range: Range::new(at, at), new_text });
+                        import_edits.insert(
+                            entry.name.to_string(),
+                            TextEdit {
+                                range: Range::new(at, at),
+                                new_text,
+                            },
+                        );
                         cands.push(entry);
                     }
                 }
@@ -2186,8 +2364,9 @@ impl BoneWorkspace {
         // overload). Empty when no typed session built -- then there is no
         // type-directed ranking or reach (kind-based only), never a
         // rendered-string type compare.
-        let expected_types: Vec<String> =
-            expected.as_ref().map_or_else(Vec::new, |exp| exp.rendered.clone());
+        let expected_types: Vec<String> = expected
+            .as_ref()
+            .map_or_else(Vec::new, |exp| exp.rendered.clone());
         let has_expected = expected.is_some();
         // The fn whose body holds the cursor. Inside its own body it must not be
         // PROMOTED as a way to produce a value -- a call-through autofill, a reach
@@ -2195,12 +2374,15 @@ impl BoneWorkspace {
         // self-call, which buries the direct constructor the user is naming
         // (a struct fill inside its own function body). It stays offered (plain candidate) for genuine
         // recursion, just not lifted above type-directed candidates.
-        let enclosing_fn: Option<Ustr> = ws.modules.get(mid.index()).and_then(|m| {
-            match m.body_at(offset) {
-                Some(bone_semantic::hir::BodyOwner::Function(fid)) => Some(m.functions[fid].name),
-                _ => None,
-            }
-        });
+        let enclosing_fn: Option<Ustr> =
+            ws.modules
+                .get(mid.index())
+                .and_then(|m| match m.body_at(offset) {
+                    Some(bone_semantic::hir::BodyOwner::Function(fid)) => {
+                        Some(m.functions[fid].name)
+                    }
+                    _ => None,
+                });
         let t_build = bone_core::prelude::Instant::now();
         // The signature cache (rebuilt only on non-`BodyOnly` edits) supplies fn
         // `detail` for the survivors below. The one-shot CLI path has no cached
@@ -2271,8 +2453,10 @@ impl BoneWorkspace {
                     // After `yield`/`await`, a coroutine fn is the expected
                     // operand -- promote it above plain fns/types.
                     SymCat::Function
-                        if after_yield
-                            && fn_is_coroutine_in_scope(ws, c.name.as_str(), frag) => 0,
+                        if after_yield && fn_is_coroutine_in_scope(ws, c.name.as_str(), frag) =>
+                    {
+                        0
+                    }
                     SymCat::Global => 1,
                     SymCat::Variant => 3,
                     _ => 2,
@@ -2304,7 +2488,7 @@ impl BoneWorkspace {
                                 c.name.as_str(),
                                 crate::modules_scope::fragment(ws, ws.module(mid).file),
                             )
-                                .is_some_and(|t| is_iterable_ty(ws, None, t)) =>
+                            .is_some_and(|t| is_iterable_ty(ws, None, t)) =>
                         {
                             1
                         }
@@ -2349,8 +2533,11 @@ impl BoneWorkspace {
                 // the expected-TYPE bucket must stay dominant over case, so
                 // leave case neutral (0) there.
                 let case_rank = if !has_expected && pattern_enum.is_none() && !for_in {
-                    let case_target =
-                        if c.kind == SymCat::Variant { name.rsplit("::").next().unwrap_or(name) } else { name };
+                    let case_target = if c.kind == SymCat::Variant {
+                        name.rsplit("::").next().unwrap_or(name)
+                    } else {
+                        name
+                    };
                     case_mismatch_rank(case_target.as_bytes(), q_raw)
                 } else {
                     0
@@ -2361,10 +2548,14 @@ impl BoneWorkspace {
                     // `tarnog` (Enum + variant) query still ranks.
                     let vname = name.rsplit("::").next().unwrap_or(name);
                     let s = fuzzy_score(vname.as_bytes(), q).max(fuzzy_score(name.as_bytes(), q));
-                    let l = leading_run_len(vname.as_bytes(), q).max(leading_run_len(name.as_bytes(), q));
+                    let l = leading_run_len(vname.as_bytes(), q)
+                        .max(leading_run_len(name.as_bytes(), q));
                     (s, l)
                 } else {
-                    (fuzzy_score(name.as_bytes(), q), leading_run_len(name.as_bytes(), q))
+                    (
+                        fuzzy_score(name.as_bytes(), q),
+                        leading_run_len(name.as_bytes(), q),
+                    )
                 };
                 // A leading contiguous run (you typed the start of the name)
                 // beats a scattered all-boundary match on a longer name -- the
@@ -2428,7 +2619,9 @@ impl BoneWorkspace {
                 sink.push(Cand::new(
                     key,
                     CandName::Owned(label),
-                    CandShape::EntitySynth { payload: entity_payload },
+                    CandShape::EntitySynth {
+                        payload: entity_payload,
+                    },
                 ));
             }
         }
@@ -2445,7 +2638,10 @@ impl BoneWorkspace {
                 .flat_map(|&p| crate::query::struct_field_names_at(ws, mid, inf, p))
                 .collect();
             let frag = crate::modules_scope::fragment(ws, Ustr::from(path));
-            for (i, (pname, pty)) in callee_param_names_in_scope(ws, &nargs.callee, frag).into_iter().enumerate() {
+            for (i, (pname, pty)) in callee_param_names_in_scope(ws, &nargs.callee, frag)
+                .into_iter()
+                .enumerate()
+            {
                 if i < nargs.positional
                     || nargs.named.iter().any(|n| n.as_str() == pname.as_str())
                     || spread_covered.contains(&pname)
@@ -2456,7 +2652,8 @@ impl BoneWorkspace {
                     continue;
                 }
                 let score = fuzzy_score(pname.as_str().as_bytes(), prefix.as_bytes());
-                let (ex, bd) = match_band_exact(pname.as_str(), prefix.as_bytes(), prefix_raw.as_bytes());
+                let (ex, bd) =
+                    match_band_exact(pname.as_str(), prefix.as_bytes(), prefix_raw.as_bytes());
                 let key = RankKey {
                     exact: ex,
                     band: bd,
@@ -2521,7 +2718,11 @@ impl BoneWorkspace {
         // (c) `co fn NAME()|` with no return type -> offer the `-> Coroutine<..>`
         // return type to the right of `)`.
         if prefix.is_empty() && co_fn_return_slot(src.as_bytes(), offset) {
-            let label = if has_wait { "-> Coroutine<Wait>" } else { "-> Coroutine<>" };
+            let label = if has_wait {
+                "-> Coroutine<Wait>"
+            } else {
+                "-> Coroutine<>"
+            };
             let key = RankKey {
                 len: RankKey::len_key(9999, label.len()),
                 ..Default::default()
@@ -2558,7 +2759,11 @@ impl BoneWorkspace {
             };
             let pfx = prefix.as_bytes();
             let callable_spellings = frag.map(|frag| {
-                crate::modules_scope::spellings_by_key(ws, frag, bone_core::modules::DefKind::Callable)
+                crate::modules_scope::spellings_by_key(
+                    ws,
+                    frag,
+                    bone_core::modules::DefKind::Callable,
+                )
             });
             let type_spellings = frag.map(|frag| {
                 crate::modules_scope::spellings_by_key(ws, frag, bone_core::modules::DefKind::Type)
@@ -2572,10 +2777,11 @@ impl BoneWorkspace {
             // top-tier candidate), a global-rooted path with globals -- so a
             // deep chain off some global can't outrank a direct right-type
             // global (completion ranking contract, principle 3).
-            let mut roots: Vec<(String, String, u8)> = crate::query::locals_in_scope(ws, mid, inf, offset)
-                .into_iter()
-                .map(|(n, _k, ty, _ty_id, _decl)| (n.to_string(), ty, 0))
-                .collect();
+            let mut roots: Vec<(String, String, u8)> =
+                crate::query::locals_in_scope(ws, mid, inf, offset)
+                    .into_iter()
+                    .map(|(n, _k, ty, _ty_id, _decl)| (n.to_string(), ty, 0))
+                    .collect();
             if let Some(frag) = frag {
                 roots.extend(
                     crate::modules_scope::visible_globals(ws, frag)
@@ -2591,11 +2797,15 @@ impl BoneWorkspace {
             }
             for (vname, vty, root_kind) in roots {
                 let res = match frag {
-                    Some(frag) => reach.paths_to_in_scope(ws, frag, &vty, &expected_types, REACH_CAP),
+                    Some(frag) => {
+                        reach.paths_to_in_scope(ws, frag, &vty, &expected_types, REACH_CAP)
+                    }
                     None => reach.paths_to(&vty, &expected_types, REACH_CAP),
                 };
                 if res.truncated && lsp_profile_enabled() {
-                    eprintln!("[bone completion] reach paths from `{vname}: {vty}` clipped at {REACH_CAP}");
+                    eprintln!(
+                        "[bone completion] reach paths from `{vname}: {vty}` clipped at {REACH_CAP}"
+                    );
                 }
                 for p in res.paths {
                     // A path that CALLS the enclosing fn (`k.partition_style()`
@@ -2607,19 +2817,23 @@ impl BoneWorkspace {
                     // Dedup / fuzzy-match / sort on the bare access form; the
                     // final hop's parens/snippet are rendered from the flags.
                     let suffix = match (frag, callable_spellings.as_ref()) {
-                        (Some(_), Some(names)) => match crate::modules_scope::display_method_suffix_with_names(
-                            &p.suffix,
-                            p.is_method,
-                            &p.method_members,
-                            names,
-                        ) {
-                            Some(suffix) => suffix,
-                            None => continue,
-                        },
+                        (Some(_), Some(names)) => {
+                            match crate::modules_scope::display_method_suffix_with_names(
+                                &p.suffix,
+                                p.is_method,
+                                &p.method_members,
+                                names,
+                            ) {
+                                Some(suffix) => suffix,
+                                None => continue,
+                            }
+                        }
                         _ => p.suffix.clone(),
                     };
                     let final_ty = match (frag, type_spellings.as_ref()) {
-                        (Some(_), Some(names)) => crate::modules_scope::display_type_with_names(ws, &p.final_ty, names),
+                        (Some(_), Some(names)) => {
+                            crate::modules_scope::display_type_with_names(ws, &p.final_ty, names)
+                        }
                         _ => p.final_ty.clone(),
                     };
                     let key = format!("{vname}.{suffix}");
@@ -2641,7 +2855,8 @@ impl BoneWorkspace {
                     // hop-distance rung instead). The shared key still folds in
                     // match quality, the hop distance, and field-before-method.
                     let (type_rank, kind) = if p.is_method { (1, 2) } else { (0, root_kind) };
-                    let rk = arg_rank_key(type_rank, kind, &key, pfx, p.dist, u8::from(p.is_method), 0);
+                    let rk =
+                        arg_rank_key(type_rank, kind, &key, pfx, p.dist, u8::from(p.is_method), 0);
                     sink.push(Cand::new(
                         rk,
                         CandName::Owned(key),
@@ -2747,14 +2962,23 @@ impl BoneWorkspace {
                 sink.cands.len()
             );
         }
-        let fragment_file = crate::modules_scope::fragment(ws, ws.module(mid).file)
-            .map(|_| ws.module(mid).file);
+        let fragment_file =
+            crate::modules_scope::fragment(ws, ws.module(mid).file).map(|_| ws.module(mid).file);
         sink.cands.sort_by(cand_cmp);
         sink.cands.truncate(max_items);
         let mut items: Vec<CompletionItem> = sink
             .cands
             .into_iter()
-            .map(|c| materialize_cand(c, ws, fragment_file, fn_sigs, next_is_open_paren, pattern_pos))
+            .map(|c| {
+                materialize_cand(
+                    c,
+                    ws,
+                    fragment_file,
+                    fn_sigs,
+                    next_is_open_paren,
+                    pattern_pos,
+                )
+            })
             .collect();
         if !import_edits.is_empty() {
             for item in &mut items {
@@ -2785,11 +3009,13 @@ impl BoneWorkspace {
             .into_iter()
             .map(|s| s.span)
             .find(|s| {
-                s.file.as_str() == path
-                    && s.offset_range.0 <= offset
-                    && offset < s.offset_range.1
+                s.file.as_str() == path && s.offset_range.0 <= offset && offset < s.offset_range.1
             })?;
-        Some(range_from_offsets(src, here.offset_range.0, here.offset_range.1))
+        Some(range_from_offsets(
+            src,
+            here.offset_range.0,
+            here.offset_range.1,
+        ))
     }
 
     pub fn rename(&self, path: &str, pos: Position, new_name: &str) -> Option<WorkspaceEdit> {
@@ -2895,8 +3121,13 @@ impl BoneWorkspace {
                 let uri = match Uri::from_file_path(&editor_path(file)) {
                     Ok(uri) => uri,
                     Err(error) => {
-                        proj.fallbacks.report("workspace symbols", file, "construct URI",
-                            &error.to_string(), "omit symbols from this file; keep other files");
+                        proj.fallbacks.report(
+                            "workspace symbols",
+                            file,
+                            "construct URI",
+                            &error.to_string(),
+                            "omit symbols from this file; keep other files",
+                        );
                         continue;
                     }
                 };
@@ -2904,7 +3135,9 @@ impl BoneWorkspace {
                 // skips most files, so don't index a file with no hit. Without it
                 // every matched symbol re-scanned from the file start (O(offset)).
                 let mut line_index: Option<LineIndex> = None;
-                let test_spans: FxHashSet<_> = ws.modules[mid.index()].functions.iter()
+                let test_spans: FxHashSet<_> = ws.modules[mid.index()]
+                    .functions
+                    .iter()
                     .filter(|(_, f)| f.annotations.iter().any(|a| a.is_builtin("test")))
                     .map(|(_, f)| f.span.offset_range)
                     .collect();
@@ -2912,7 +3145,9 @@ impl BoneWorkspace {
                     let name = if qualified {
                         s.name.as_str()
                     } else {
-                        s.name.rsplit_once("::").map_or(s.name.as_str(), |(_, name)| name)
+                        s.name
+                            .rsplit_once("::")
+                            .map_or(s.name.as_str(), |(_, name)| name)
                     };
                     if !needle.is_empty() && !name.to_lowercase().contains(&needle) {
                         continue;
@@ -2932,7 +3167,10 @@ impl BoneWorkspace {
                         kind: symbol_kind(s.kind),
                         tags: None,
                         deprecated: None,
-                        location: Location { uri: uri.clone(), range },
+                        location: Location {
+                            uri: uri.clone(),
+                            range,
+                        },
                         container_name: None,
                     });
                 }
@@ -3128,7 +3366,8 @@ impl BoneWorkspace {
         // Inference is optional: tiers 2/3 (by-name overload list, struct ctor)
         // serve a signature even when the file doesn't fully type-check.
         let inf = ws.inference(mid);
-        let (sigs, call_span) = crate::query::signature_help(ws, mid, inf, offset, Some(&proj.texts))?;
+        let (sigs, call_span) =
+            crate::query::signature_help(ws, mid, inf, offset, Some(&proj.texts))?;
         let call_start = call_span.offset_range.0;
         let paren_start = active_call_paren_start(src, call_start, offset);
         // Active argument = top-level commas between the call's OWN `(` (not
@@ -3204,15 +3443,24 @@ impl BoneWorkspace {
         // D-form receiver hints come off the surface AST (bone drops the
         // `receiver_surface` marker at lowering), so reparse the buffer here and
         // fold them into the bone-native hint stream as ordinary type hints.
-        let recv_hints = proj.fallbacks.result(
-            skull_parser::parse_module(src, Ustr::from(path)),
-            "inlay", path, "parse receiver hints", "omit receiver hints; keep inferred hints",
-        )
+        let recv_hints = proj
+            .fallbacks
+            .result(
+                skull_parser::parse_module(src, Ustr::from(path)),
+                "inlay",
+                path,
+                "parse receiver hints",
+                "omit receiver hints; keep inferred hints",
+            )
             .map(|ast| crate::query::receiver_param_hints(&ast, start, end))
             // The parse refusal above was logged; retain other inferred hints.
             .unwrap_or_default()
             .into_iter()
-            .map(|(span, label)| gaps::HintEntry { span, label, leading: false });
+            .map(|(span, label)| gaps::HintEntry {
+                span,
+                label,
+                leading: false,
+            });
         gaps::inlay_hints(ws, mid, inf, start, end)
             .into_iter()
             .chain(recv_hints)
@@ -3220,7 +3468,12 @@ impl BoneWorkspace {
                 // A leading (parameter-name) hint renders before its span with
                 // trailing padding; a type hint renders after with leading padding.
                 let (offset, kind, pad_left, pad_right) = if h.leading {
-                    (h.span.offset_range.0, InlayHintKind::PARAMETER, None, Some(true))
+                    (
+                        h.span.offset_range.0,
+                        InlayHintKind::PARAMETER,
+                        None,
+                        Some(true),
+                    )
                 } else {
                     (h.span.offset_range.1, InlayHintKind::TYPE, Some(true), None)
                 };
@@ -3253,8 +3506,13 @@ impl BoneWorkspace {
         let uri = match Uri::from_file_path(&editor_path(file)) {
             Ok(uri) => uri,
             Err(error) => {
-                proj.fallbacks.report("span location", file, "construct URI",
-                    &error.to_string(), "omit location");
+                proj.fallbacks.report(
+                    "span location",
+                    file,
+                    "construct URI",
+                    &error.to_string(),
+                    "omit location",
+                );
                 return None;
             }
         };
@@ -3263,8 +3521,13 @@ impl BoneWorkspace {
             None => match fs_err::read_to_string(file) {
                 Ok(text) => Cow::Owned(text),
                 Err(error) => {
-                    proj.fallbacks.report("span location", file, "read source",
-                        &error.to_string(), "omit location");
+                    proj.fallbacks.report(
+                        "span location",
+                        file,
+                        "read source",
+                        &error.to_string(),
+                        "omit location",
+                    );
                     return None;
                 }
             },
@@ -3342,7 +3605,10 @@ impl BoneWorkspace {
         let t = bone_core::prelude::Instant::now();
         let Some(toks) = proj.fallbacks.result(
             rock_tokenizer::Tokenizer::new(src, Ustr::from(path)).tokenize(),
-            "semantic tokens", path, "tokenize source", "empty token response",
+            "semantic tokens",
+            path,
+            "tokenize source",
+            "empty token response",
         ) else {
             return SemanticTokens::default();
         };
@@ -3426,7 +3692,9 @@ impl BoneWorkspace {
             // A `// rock: ...` directive comment colors as MACRO so themes set
             // it apart from a plain comment.
             let token_type = match &tok.kind {
-                rock_tokenizer::TokenKind::Comment(body) if is_magic_rock_directive(body.as_str()) => {
+                rock_tokenizer::TokenKind::Comment(body)
+                    if is_magic_rock_directive(body.as_str()) =>
+                {
                     TT_MACRO
                 }
                 _ => token_type,
@@ -3499,21 +3767,21 @@ impl BoneWorkspace {
 /// advertises this in its `SemanticTokensLegend`.
 pub fn semantic_tokens_legend() -> Vec<SemanticTokenType> {
     vec![
-        SemanticTokenType::KEYWORD,  // 0
-        SemanticTokenType::VARIABLE, // 1
-        SemanticTokenType::FUNCTION, // 2
-        SemanticTokenType::STRUCT,   // 3
-        SemanticTokenType::ENUM,     // 4
-        SemanticTokenType::TYPE,     // 5
-        SemanticTokenType::NUMBER,   // 6
-        SemanticTokenType::STRING,   // 7
-        SemanticTokenType::COMMENT,  // 8
-        SemanticTokenType::PROPERTY, // 9
-        SemanticTokenType::PARAMETER, // 10
-        SemanticTokenType::ENUM_MEMBER, // 11
+        SemanticTokenType::KEYWORD,        // 0
+        SemanticTokenType::VARIABLE,       // 1
+        SemanticTokenType::FUNCTION,       // 2
+        SemanticTokenType::STRUCT,         // 3
+        SemanticTokenType::ENUM,           // 4
+        SemanticTokenType::TYPE,           // 5
+        SemanticTokenType::NUMBER,         // 6
+        SemanticTokenType::STRING,         // 7
+        SemanticTokenType::COMMENT,        // 8
+        SemanticTokenType::PROPERTY,       // 9
+        SemanticTokenType::PARAMETER,      // 10
+        SemanticTokenType::ENUM_MEMBER,    // 11
         SemanticTokenType::TYPE_PARAMETER, // 12
-        SemanticTokenType::DECORATOR, // 13
-        SemanticTokenType::MACRO, // 14
+        SemanticTokenType::DECORATOR,      // 13
+        SemanticTokenType::MACRO,          // 14
     ]
 }
 
@@ -3579,9 +3847,7 @@ fn classify_token(
         // binding name (`static n = ..`). Only a `static <ident>` in non-member
         // position is the keyword; a value named `static` (`static + 1`) is not.
         T::Ident(n)
-            if !is_member
-                && n.as_str() == "static"
-                && matches!(next_kind, Some(T::Ident(_))) =>
+            if !is_member && n.as_str() == "static" && matches!(next_kind, Some(T::Ident(_))) =>
         {
             (TT_KEYWORD, 0)
         }
@@ -3600,11 +3866,40 @@ fn classify_token(
         {
             (TT_MACRO, 0)
         }
-        T::Fn | T::Operator | T::Table | T::Let | T::Return | T::Defer | T::Yield | T::Await
-        | T::Struct | T::Newtype | T::If | T::Else | T::For | T::Loop | T::In | T::While
-        | T::Break | T::Continue | T::Null | T::Enum | T::Match | T::Extern | T::Global
-        | T::Const | T::Type | T::As | T::Deco | T::Macro | T::True | T::False
-        | T::DirectiveIf | T::DirectiveElseIf | T::DirectiveElse | T::DirectiveEnd => (TT_KEYWORD, 0),
+        T::Fn
+        | T::Operator
+        | T::Table
+        | T::Let
+        | T::Return
+        | T::Defer
+        | T::Yield
+        | T::Await
+        | T::Struct
+        | T::Newtype
+        | T::If
+        | T::Else
+        | T::For
+        | T::Loop
+        | T::In
+        | T::While
+        | T::Break
+        | T::Continue
+        | T::Null
+        | T::Enum
+        | T::Match
+        | T::Extern
+        | T::Global
+        | T::Const
+        | T::Type
+        | T::As
+        | T::Deco
+        | T::Macro
+        | T::True
+        | T::False
+        | T::DirectiveIf
+        | T::DirectiveElseIf
+        | T::DirectiveElse
+        | T::DirectiveEnd => (TT_KEYWORD, 0),
         T::Comment(_) => (TT_COMMENT, 0),
         T::Int(..) | T::Float(_) => (TT_NUMBER, 0),
         T::String(_) | T::RawString(_) => (TT_STRING, 0),
@@ -3856,7 +4151,10 @@ fn semantic_classifications(
         }
     }
     holes.sort_by_key(|h| h.offset_range.0);
-    SemanticClassifications { by_offset: map, interp_holes: holes }
+    SemanticClassifications {
+        by_offset: map,
+        interp_holes: holes,
+    }
 }
 
 /// Output of [`semantic_classifications`]: per-offset identifier
@@ -4022,14 +4320,20 @@ impl LineIndex {
 }
 
 fn range_from_offsets(src: &str, start: usize, stop: usize) -> Range {
-    Range::new(offset_to_position(src, start), offset_to_position(src, stop))
+    Range::new(
+        offset_to_position(src, start),
+        offset_to_position(src, stop),
+    )
 }
 
 /// Leading whitespace of the line containing byte `pos`. Used to indent
 /// generated code (fill-struct-fields) to match the surrounding source.
 fn line_indent_at(src: &str, pos: usize) -> String {
     let pos = pos.min(src.len());
-    let line_start = src.get(..pos).and_then(|s| s.rfind('\n')).map_or(0, |i| i + 1);
+    let line_start = src
+        .get(..pos)
+        .and_then(|s| s.rfind('\n'))
+        .map_or(0, |i| i + 1);
     src.get(line_start..)
         .unwrap_or("")
         .chars()
@@ -4135,7 +4439,9 @@ pub(crate) fn callee_slot_is_field_of_in_scope(
     let mut any = false;
     let mut found = false;
     for m in ws.modules.iter() {
-        let Some(fns) = m.functions_by_name.get(&name) else { continue };
+        let Some(fns) = m.functions_by_name.get(&name) else {
+            continue;
+        };
         for (fmid, fid) in fns {
             if frag.is_some_and(|frag| {
                 !crate::modules_scope::callable_member_admitted(ws, frag, name, *fmid, *fid)
@@ -4143,7 +4449,9 @@ pub(crate) fn callee_slot_is_field_of_in_scope(
                 continue;
             }
             let f = &ws.modules[fmid.index()].functions[*fid];
-            let Some(p) = f.param_decls.get(arg_index) else { continue };
+            let Some(p) = f.param_decls.get(arg_index) else {
+                continue;
+            };
             any = true;
             let te = match p.ty {
                 TyId::Static(pmid, idx) => ws.module(pmid).ty_arena[idx],
@@ -4221,7 +4529,9 @@ impl<'a> ExpectedArg<'a> {
         let mut slots = Vec::new();
         let mut rendered: Vec<String> = Vec::new();
         for m in ws.modules.iter() {
-            let Some(fns) = m.functions_by_name.get(&name) else { continue };
+            let Some(fns) = m.functions_by_name.get(&name) else {
+                continue;
+            };
             for (fmid, fid) in fns {
                 if frag.is_some_and(|frag| {
                     !crate::modules_scope::callable_member_admitted(ws, frag, name, *fmid, *fid)
@@ -4302,7 +4612,9 @@ impl<'a> ExpectedArg<'a> {
         for i in 0..self.slots.len() {
             let slot = self.slots[i];
             let cp = self.gamma.out.checkpoint();
-            let hit = self.gamma.trial(|g| inference::coerce(g, ty, slot, span).is_ok());
+            let hit = self
+                .gamma
+                .trial(|g| inference::coerce(g, ty, slot, span).is_ok());
             self.gamma.out.rollback_to(cp);
             if hit {
                 ok = true;
@@ -4322,7 +4634,9 @@ impl<'a> ExpectedArg<'a> {
         let slots = self.slots.clone();
         let frag = crate::modules_scope::fragment(ws, ws.module(self.gamma.current_module_id).file);
         for m in ws.modules.iter() {
-            let Some(fns) = m.functions_by_name.get(&n) else { continue };
+            let Some(fns) = m.functions_by_name.get(&n) else {
+                continue;
+            };
             for (fmid, fid) in fns {
                 if frag.is_some_and(|frag| {
                     !crate::modules_scope::callable_member_admitted(ws, frag, n, *fmid, *fid)
@@ -4391,7 +4705,9 @@ pub(crate) fn fn_unique_return_ty_in_scope(
     let n = Ustr::from(name);
     let mut ret: Option<(TyId, String)> = None;
     for m in ws.modules.iter() {
-        let Some(fns) = m.functions_by_name.get(&n) else { continue };
+        let Some(fns) = m.functions_by_name.get(&n) else {
+            continue;
+        };
         for (fmid, fid) in fns {
             if frag.is_some_and(|frag| {
                 !crate::modules_scope::callable_member_admitted(ws, frag, n, *fmid, *fid)
@@ -4465,7 +4781,11 @@ pub(crate) fn preceding_arg_starts(src: &str, offset: usize) -> Vec<usize> {
 
 /// Fetch a `TypeExpr` for a `TyId` from the right arena, following `Infer`
 /// substitutions so a solved inference var reads as its concrete type.
-pub(crate) fn ty_of(ws: &Workspace, body: Option<&BodyInference>, ty: TyId) -> bone_semantic::hir::TypeExpr {
+pub(crate) fn ty_of(
+    ws: &Workspace,
+    body: Option<&BodyInference>,
+    ty: TyId,
+) -> bone_semantic::hir::TypeExpr {
     use bone_semantic::hir::{BuiltinTy, TypeExpr};
     let te = match ty {
         TyId::Static(mid, idx) => ws.module(mid).ty_arena[idx],
@@ -4521,16 +4841,28 @@ pub(crate) fn bind_generic(
             if let TypeExpr::App { params: ap, .. } = ty_of(ws, a_body, arg) {
                 if pp.len() == ap.len() {
                     return pp.into_iter().zip(ap.into_iter()).find_map(|(pi, ai)| {
-                        bind_generic(ws, target, p_body, param.with_idx(pi), a_body, arg.with_idx(ai))
+                        bind_generic(
+                            ws,
+                            target,
+                            p_body,
+                            param.with_idx(pi),
+                            a_body,
+                            arg.with_idx(ai),
+                        )
                     });
                 }
             }
             None
         }
         TypeExpr::Nullable(pi) => match ty_of(ws, a_body, arg) {
-            TypeExpr::Nullable(ai) => {
-                bind_generic(ws, target, p_body, param.with_idx(pi), a_body, arg.with_idx(ai))
-            }
+            TypeExpr::Nullable(ai) => bind_generic(
+                ws,
+                target,
+                p_body,
+                param.with_idx(pi),
+                a_body,
+                arg.with_idx(ai),
+            ),
             _ => None,
         },
         _ => None,
@@ -4543,9 +4875,18 @@ pub(crate) fn bind_generic(
 pub(crate) fn is_iterable_ty(ws: &Workspace, body: Option<&BodyInference>, ty: TyId) -> bool {
     use bone_semantic::hir::{TypeCtor, TypeExpr};
     match ty_of(ws, body, ty) {
-        TypeExpr::App { ctor: TypeCtor::Array, .. }
-        | TypeExpr::App { ctor: TypeCtor::Map, .. } => true,
-        TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => is_intrinsic_key_in(
+        TypeExpr::App {
+            ctor: TypeCtor::Array,
+            ..
+        }
+        | TypeExpr::App {
+            ctor: TypeCtor::Map,
+            ..
+        } => true,
+        TypeExpr::App {
+            ctor: TypeCtor::Nominal(n),
+            ..
+        } => is_intrinsic_key_in(
             n,
             &[
                 "Arena",
@@ -4566,7 +4907,10 @@ pub(crate) fn is_iterable_ty(ws: &Workspace, body: Option<&BodyInference>, ty: T
 pub(crate) fn nominal_base(ws: &Workspace, body: Option<&BodyInference>, ty: TyId) -> Option<Ustr> {
     use bone_semantic::hir::{TypeCtor, TypeExpr};
     match ty_of(ws, body, ty) {
-        TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } => Some(name),
+        TypeExpr::App {
+            ctor: TypeCtor::Nominal(name),
+            ..
+        } => Some(name),
         _ => None,
     }
 }
@@ -4638,7 +4982,10 @@ pub fn ident_prefix_at(src: &str, pos: Position) -> &str {
 /// spaces/tabs -- a bare/indented newline, where a space trigger is `<CR>`
 /// auto-indent rather than a token-following space.
 fn line_prefix_is_blank(src: &str, offset: usize) -> bool {
-    let line_start = src.get(..offset).and_then(|s| s.rfind('\n')).map_or(0, |i| i + 1);
+    let line_start = src
+        .get(..offset)
+        .and_then(|s| s.rfind('\n'))
+        .map_or(0, |i| i + 1);
     src.get(line_start..offset)
         .is_some_and(|p| p.chars().all(|c| c == ' ' || c == '\t'))
 }
@@ -4652,8 +4999,13 @@ fn reparse_with_project(
     munged: &str,
     request: &'static str,
 ) -> Option<Workspace> {
-    let combined = proj.fallbacks.result(proj.session.combined_unexpanded(),
-        request, path, "combined-module parse", "use live workspace")?;
+    let combined = proj.fallbacks.result(
+        proj.session.combined_unexpanded(),
+        request,
+        path,
+        "combined-module parse",
+        "use live workspace",
+    )?;
     let t = bone_core::prelude::Instant::now();
     let out = reparse_with_project_inner(&combined, path, munged, &proj.fallbacks, request);
     if lsp_profile_enabled() {
@@ -4700,7 +5052,8 @@ pub(crate) fn analyze_variant<R>(
                 Err(error) => {
                     log::warn!(
                         "completion: single-file fallback also failed for `{path}`: {}; \
-                         this munge yields no completions", error.message
+                         this munge yields no completions",
+                        error.message
                     );
                     None
                 }
@@ -4718,24 +5071,40 @@ fn reparse_with_project_inner(
 ) -> Option<Workspace> {
     // Project-wide pass: every module except the current file, plus the munge.
     // Resolves cross-file / dependency types (an `IVec2` engine param, etc.).
-    let mut modules: Vec<skull_parser::Ast> =
-        combined.iter().filter(|a| a.file.as_str() != path).cloned().collect();
+    let mut modules: Vec<skull_parser::Ast> = combined
+        .iter()
+        .filter(|a| a.file.as_str() != path)
+        .cloned()
+        .collect();
     // The munge is a half-typed buffer (missing bracket, `recv.` mid-edit). The
     // parse is total -- skull-parser drops the broken statement and keeps the rest
     // (the recovery error stays on `recovery_errors`, which the LSP path never
     // gates on) -- so completion still resolves from the best-effort tree (backlog
     // #21). Only a hard tokenizer failure is `Err`/`None` here.
-    let parsed = reports.result(skull_parser::parse_module(munged, Ustr::from(path)),
-        request, path, "parse recovery source", "use live workspace")?;
+    let parsed = reports.result(
+        skull_parser::parse_module(munged, Ustr::from(path)),
+        request,
+        path,
+        "parse recovery source",
+        "use live workspace",
+    )?;
     modules.push(parsed.clone());
     if let Some(ws) = reports.result(
         bone_semantic::semantic_passes::semantic_pass(&mut modules),
-        request, path, "project semantic recovery", "try single-file semantic recovery",
+        request,
+        path,
+        "project semantic recovery",
+        "try single-file semantic recovery",
     ) {
         return Some(ws);
     }
-    reports.result(bone_semantic::semantic_passes::semantic_pass(&mut [parsed]),
-        request, path, "single-file semantic recovery", "use live workspace")
+    reports.result(
+        bone_semantic::semantic_passes::semantic_pass(&mut [parsed]),
+        request,
+        path,
+        "single-file semantic recovery",
+        "use live workspace",
+    )
 }
 
 /// Whether a reach-path suffix (`a().b().c`, UFCS-chained) has a CALL hop to
@@ -4743,7 +5112,9 @@ fn reparse_with_project_inner(
 /// separated hop's identifier is the text before its `(`; compared exactly, so
 /// `my_style()` does not match `style`.
 pub(crate) fn reach_suffix_calls(suffix: &str, fname: &str) -> bool {
-    suffix.split('.').any(|hop| hop.split('(').next().unwrap_or(hop) == fname)
+    suffix
+        .split('.')
+        .any(|hop| hop.split('(').next().unwrap_or(hop) == fname)
 }
 
 /// Resolve a `SlotAnchor` to a typed expected-slot session against `ws` --
@@ -4781,7 +5152,11 @@ fn severity_from_level(level: rock_core::errors::CompilerErrorLevel) -> Diagnost
     }
 }
 
-fn bone_diagnostic(range: Range, message: String, level: rock_core::errors::CompilerErrorLevel) -> Diagnostic {
+fn bone_diagnostic(
+    range: Range,
+    message: String,
+    level: rock_core::errors::CompilerErrorLevel,
+) -> Diagnostic {
     Diagnostic {
         range,
         severity: Some(severity_from_level(level)),
@@ -4836,7 +5211,11 @@ pub fn compiler_error_to_diagnostics(e: &CompilerError) -> Vec<(Ustr, Diagnostic
             );
             // label[0].message == the error message (new_with_label); a stray
             // empty label message falls back to it too.
-            let msg = if l.message.is_empty() { e.message.clone() } else { l.message.clone() };
+            let msg = if l.message.is_empty() {
+                e.message.clone()
+            } else {
+                l.message.clone()
+            };
             (s.file, bone_diagnostic(range, msg, e.level))
         })
         .collect()
@@ -4889,7 +5268,9 @@ fn allow_open_args(body: &str) -> Option<&str> {
 /// the last comma, leading identifier chars only.
 fn current_lint_token(args: &str) -> &str {
     let tail = args.rsplit(',').next().unwrap_or(args).trim_start();
-    let end = tail.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).unwrap_or(tail.len());
+    let end = tail
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .unwrap_or(tail.len());
     &tail[..end]
 }
 
@@ -4934,7 +5315,8 @@ fn update_lint_cache(
     let sources: FxHashMap<Ustr, &str> = texts
         .iter()
         .filter_map(|(path, text)| {
-            Path::new(path).starts_with(root)
+            Path::new(path)
+                .starts_with(root)
                 .then_some((Ustr::from(path.as_str()), text.as_str()))
         })
         .collect();
@@ -4952,7 +5334,10 @@ fn update_lint_cache(
 
 fn prime_lint_cache(proj: &mut BoneProject) {
     // Findings remain in the cache for lint_diagnostics; loading has no response.
-    drop(update_lint_cache(proj, &bone_lints::LintCacheUpdate::full()));
+    drop(update_lint_cache(
+        proj,
+        &bone_lints::LintCacheUpdate::full(),
+    ));
 }
 
 /// Render a typed-hole report (kind line + `In scope:` block) as plain text.
@@ -5071,7 +5456,11 @@ pub(crate) fn user_module_for_path(ws: &Workspace, path: &str) -> Option<ModuleI
     // diverge (separators / prefix / not-loaded). Gated; remove once fixed.
     if found.is_none() && std::env::var("ROCK_LSP_DEBUG").is_ok() {
         eprintln!("[lsp-debug] user_module_for_path MISS want={want:?}");
-        for m in ws.modules.iter().filter(|m| !m.file.as_str().contains("stdlib")) {
+        for m in ws
+            .modules
+            .iter()
+            .filter(|m| !m.file.as_str().contains("stdlib"))
+        {
             eprintln!("[lsp-debug]   have non-stdlib module file={:?}", m.file);
         }
         eprintln!("[lsp-debug]   ({} total modules)", ws.modules.len());
@@ -5128,7 +5517,11 @@ mod tests {
         let capture = super::failure_log::Recording::start();
         let dir = tempfile::tempdir().unwrap();
         let main = dir.path().join("main.rock").to_string_lossy().into_owned();
-        let target = dir.path().join("target.rock").to_string_lossy().into_owned();
+        let target = dir
+            .path()
+            .join("target.rock")
+            .to_string_lossy()
+            .into_owned();
         let mut bone = span_test_workspace(&main);
         let mut span = Span::unknown();
         span.file = Ustr::from(target.as_str());
@@ -5138,7 +5531,15 @@ mod tests {
         // Both a disappearing target and unreadable source must keep the cause.
         for unreadable in [false, true] {
             let proj = bone.projects.get(&BoneWorkspace::root_for(&main)).unwrap();
-            fs_err::write(&target, if unreadable { &b"\xff"[..] } else { &b"target"[..] }).unwrap();
+            fs_err::write(
+                &target,
+                if unreadable {
+                    &b"\xff"[..]
+                } else {
+                    &b"target"[..]
+                },
+            )
+            .unwrap();
             if !unreadable {
                 fs_err::remove_file(&target).unwrap();
             }
@@ -5146,17 +5547,36 @@ mod tests {
             assert!(bone.location_from_span(proj, &span).is_none());
             let records = capture.take();
             assert_eq!(records.len(), 1, "missing source failure: {records:?}");
-            assert!(records[0].contains("LSP") && records[0].contains("span location")
-                && records[0].contains(&target) && records[0].contains("read source")
-                && records[0].contains(&cause) && records[0].contains("omit location"),
-                "source failure lost context: {records:?}");
-            assert!(bone.location_from_span_indexed(proj, &span, &mut HashMap::new()).is_none());
-            assert!(capture.take().is_empty(), "unchanged failure must not repeat");
+            assert!(
+                records[0].contains("LSP")
+                    && records[0].contains("span location")
+                    && records[0].contains(&target)
+                    && records[0].contains("read source")
+                    && records[0].contains(&cause)
+                    && records[0].contains("omit location"),
+                "source failure lost context: {records:?}"
+            );
+            assert!(
+                bone.location_from_span_indexed(proj, &span, &mut HashMap::new())
+                    .is_none()
+            );
+            assert!(
+                capture.take().is_empty(),
+                "unchanged failure must not repeat"
+            );
             fs_err::write(&target, "target").unwrap();
             assert!(bone.location_from_span(proj, &span).is_some());
             assert!(capture.take().is_empty());
             // Text changes release the existing project-scoped report keys.
-            bone.update(&main, if unreadable { "fn main() {}" } else { "fn main() { let x = 1 }" }.into());
+            bone.update(
+                &main,
+                if unreadable {
+                    "fn main() {}"
+                } else {
+                    "fn main() { let x = 1 }"
+                }
+                .into(),
+            );
             capture.take();
         }
     }
@@ -5176,10 +5596,18 @@ mod tests {
         assert!(bone.location_from_span(proj, &span).is_none());
         let records = capture.take();
         assert_eq!(records.len(), 1, "missing URI failure: {records:?}");
-        assert!(records[0].contains("span location") && records[0].contains(target)
-            && records[0].contains("construct URI") && records[0].contains(&cause)
-            && records[0].contains("omit location"), "URI failure lost context: {records:?}");
-        assert!(bone.location_from_span_indexed(proj, &span, &mut HashMap::new()).is_none());
+        assert!(
+            records[0].contains("span location")
+                && records[0].contains(target)
+                && records[0].contains("construct URI")
+                && records[0].contains(&cause)
+                && records[0].contains("omit location"),
+            "URI failure lost context: {records:?}"
+        );
+        assert!(
+            bone.location_from_span_indexed(proj, &span, &mut HashMap::new())
+                .is_none()
+        );
         assert!(capture.take().is_empty());
     }
 
@@ -5208,9 +5636,18 @@ mod tests {
             assert!(matches!(text, Cow::Borrowed(_)));
             assert_eq!(text, source);
             let location = bone.location_from_span(proj, &span).unwrap();
-            assert_eq!(location.uri, Uri::from_file_path(&editor_path(&file_id)).unwrap());
-            assert_eq!(location.range, Range::new(Position::new(1, 3), Position::new(1, 7)));
-            assert_eq!(bone.location_from_span_indexed(proj, &span, &mut HashMap::new()), Some(location));
+            assert_eq!(
+                location.uri,
+                Uri::from_file_path(&editor_path(&file_id)).unwrap()
+            );
+            assert_eq!(
+                location.range,
+                Range::new(Position::new(1, 3), Position::new(1, 7))
+            );
+            assert_eq!(
+                bone.location_from_span_indexed(proj, &span, &mut HashMap::new()),
+                Some(location)
+            );
         }
         assert!(capture.take().is_empty());
     }
@@ -5235,8 +5672,14 @@ mod tests {
             assert!(false, "intentional assertion failure to verify cleanup");
         }));
         assert!(result.is_err());
-        assert!(reached_assertion, "cleanup probe failed before its intentional assertion");
-        assert!(!target.parent().unwrap().exists(), "temporary directory survived unwind");
+        assert!(
+            reached_assertion,
+            "cleanup probe failed before its intentional assertion"
+        );
+        assert!(
+            !target.parent().unwrap().exists(),
+            "temporary directory survived unwind"
+        );
         let capture = super::failure_log::Recording::start();
         assert!(capture.take().is_empty(), "recording survived unwind");
         log::warn!(target: "LSP", "fresh recording after unwind");
@@ -5247,7 +5690,11 @@ mod tests {
     fn combined_parse_failure_reports_cause_and_repaired_request_succeeds() {
         let capture = super::failure_log::Recording::start();
         let dir = tempfile::tempdir().unwrap();
-        let sibling = dir.path().join("sibling.rock").to_string_lossy().into_owned();
+        let sibling = dir
+            .path()
+            .join("sibling.rock")
+            .to_string_lossy()
+            .into_owned();
         let path = dir.path().join("main.rock").to_string_lossy().into_owned();
         let good = "fn sibling() { let count = 1 }";
         let broken = "fn sibling() { let text = \"unterminated";
@@ -5259,32 +5706,62 @@ mod tests {
         // Session normally rejects hard parses before storing text. Corrupt
         // one stored sibling to exercise the defensive combined-parse edge.
         let root = BoneWorkspace::root_for(&sibling);
-        bone.projects.get_mut(&root).unwrap().session.files.get_mut(&sibling).unwrap()
+        bone.projects
+            .get_mut(&root)
+            .unwrap()
+            .session
+            .files
+            .get_mut(&sibling)
+            .unwrap()
             .text = broken.into();
         let check = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let cause = skull_parser::parse_module(broken, Ustr::from(sibling.as_str()))
-                .err().expect("hard parse fixture").message;
-            let hints = bone.inlay_hints(&path, Range::new(Position::new(0, 0), Position::new(100, 0)));
+                .err()
+                .expect("hard parse fixture")
+                .message;
+            let hints = bone.inlay_hints(
+                &path,
+                Range::new(Position::new(0, 0), Position::new(100, 0)),
+            );
             assert!(hints.is_empty());
             let records = capture.take();
-            assert!(records.iter().any(|record| record.contains("inlay")
-                && record.contains(&path) && record.contains("combined-module")
-                && record.contains(&cause) && record.contains("live workspace")),
-                "combined parse cause was lost: {records:?}");
+            assert!(
+                records.iter().any(|record| record.contains("inlay")
+                    && record.contains(&path)
+                    && record.contains("combined-module")
+                    && record.contains(&cause)
+                    && record.contains("live workspace")),
+                "combined parse cause was lost: {records:?}"
+            );
             let proj = bone.projects.get(&root).unwrap();
             assert!(proj.reparse_user_file(&sibling, "hover").is_none());
-            assert!(capture.take().iter().any(|record| record.contains("hover")
-                && record.contains(&sibling) && record.contains(&cause)),
-                "stored source parse cause was lost");
+            assert!(
+                capture.take().iter().any(|record| record.contains("hover")
+                    && record.contains(&sibling)
+                    && record.contains(&cause)),
+                "stored source parse cause was lost"
+            );
         }));
-        bone.projects.get_mut(&root).unwrap().session.files.get_mut(&sibling).unwrap()
+        bone.projects
+            .get_mut(&root)
+            .unwrap()
+            .session
+            .files
+            .get_mut(&sibling)
+            .unwrap()
             .text = good.into();
         if let Err(panic) = check {
             std::panic::resume_unwind(panic);
         }
         bone.update(&path, "fn main() { let count = 1 }".into());
-        assert!(!bone.inlay_hints(&path,
-            Range::new(Position::new(0, 0), Position::new(100, 0))).is_empty());
+        assert!(
+            !bone
+                .inlay_hints(
+                    &path,
+                    Range::new(Position::new(0, 0), Position::new(100, 0))
+                )
+                .is_empty()
+        );
         assert!(capture.take().is_empty());
     }
 
@@ -5312,10 +5789,22 @@ mod tests {
         let cases = [
             ("set_blend_mode", "alpha_threshold", "set_w"),
             ("draw_text_ex", "BANK_PANEL.title", "draw_re"),
-            ("scene_get_text_baseline", "outline_detect_shader", "scene_draw_r"),
-            ("scene_canvas_save_png", "tile_floor_atlas.full_image_rect().w", "scene_draw_r"),
+            (
+                "scene_get_text_baseline",
+                "outline_detect_shader",
+                "scene_draw_r",
+            ),
+            (
+                "scene_canvas_save_png",
+                "tile_floor_atlas.full_image_rect().w",
+                "scene_draw_r",
+            ),
             ("set_x", "p.pos.x", "set_w"),
-            ("scene_measure_text_vec2", "outline_detect_shader", "scene_draw_r"),
+            (
+                "scene_measure_text_vec2",
+                "outline_detect_shader",
+                "scene_draw_r",
+            ),
             ("draw_circle", "world.rect", "draw_t"),
             ("get_tile_at", "world.grid().origin", "get_tx"),
         ];
@@ -5324,7 +5813,10 @@ mod tests {
             // fewer than |q| chars (else the noise guard rejects the fn and the
             // +1000 prefix bonus, which the decomposition omits, would apply).
             let k = prefix_subseq_len(q.as_bytes(), &name.to_lowercase());
-            assert!(k < q.len(), "test case not a passing pair: name={name:?} q={q:?} k={k}");
+            assert!(
+                k < q.len(),
+                "test case not a passing pair: name={name:?} q={q:?} k={k}"
+            );
             assert_eq!(
                 decomposed(name, arg, q),
                 full(name, arg, q),
@@ -5376,15 +5868,20 @@ mod tests {
         use_site.col_range = (35, 50);
         use_site.offset_range = (400, 415);
 
-        let e = CompilerError::new_with_label(cause, "use `./`".to_string())
-            .with_label(use_site, "this `float` is used where `int` is required".to_string());
+        let e = CompilerError::new_with_label(cause, "use `./`".to_string()).with_label(
+            use_site,
+            "this `float` is used where `int` is required".to_string(),
+        );
         let diags = compiler_error_to_diagnostics(&e);
 
         assert_eq!(diags.len(), 2, "one diagnostic per label");
         assert_eq!(diags[0].1.range.start.line, 118);
         assert_eq!(diags[0].1.message, "use `./`");
         assert_eq!(diags[1].1.range.start.line, 123);
-        assert_eq!(diags[1].1.message, "this `float` is used where `int` is required");
+        assert_eq!(
+            diags[1].1.message,
+            "this `float` is used where `int` is required"
+        );
         assert!(diags.iter().all(|(f, _)| f.as_str() == "a.rock"));
     }
 
@@ -5422,7 +5919,10 @@ mod tests {
 
     #[test]
     fn balance_appends_missing_closers() {
-        assert_eq!(balance_delimiters("fn f() { g(".to_string()), "fn f() { g()}");
+        assert_eq!(
+            balance_delimiters("fn f() { g(".to_string()),
+            "fn f() { g()}"
+        );
         assert_eq!(balance_delimiters("a[0".to_string()), "a[0]");
     }
 
@@ -5437,13 +5937,25 @@ mod tests {
     #[test]
     fn balance_closes_strings_and_interpolations() {
         // `{{` is a literal brace -- no nesting; a complete interp is closed.
-        assert_eq!(balance_delimiters("let s = \"a {{ b\"".to_string()), "let s = \"a {{ b\"");
-        assert_eq!(balance_delimiters("let s = \"a {x} b\"".to_string()), "let s = \"a {x} b\"");
+        assert_eq!(
+            balance_delimiters("let s = \"a {{ b\"".to_string()),
+            "let s = \"a {{ b\""
+        );
+        assert_eq!(
+            balance_delimiters("let s = \"a {x} b\"".to_string()),
+            "let s = \"a {x} b\""
+        );
         // A bare `{` in a string OPENS an interpolation (tokenizer rule): an
         // unterminated `"foo {` must close as `}"` or tokenize still fatals.
-        assert_eq!(balance_delimiters("let s = \"foo {".to_string()), "let s = \"foo {}\"");
+        assert_eq!(
+            balance_delimiters("let s = \"foo {".to_string()),
+            "let s = \"foo {}\""
+        );
         // An unterminated string is closed before any brace closers.
-        assert_eq!(balance_delimiters("fn f() { let s = \"hi".to_string()), "fn f() { let s = \"hi\"}");
+        assert_eq!(
+            balance_delimiters("fn f() { let s = \"hi".to_string()),
+            "fn f() { let s = \"hi\"}"
+        );
         // Unterminated triple-quoted block.
         assert_eq!(
             balance_delimiters("let s = \"\"\"block\ntext".to_string()),
@@ -5466,7 +5978,7 @@ mod tests {
 #[cfg(test)]
 mod action_policy_tests {
     use super::BoneWorkspace;
-    use bone_lints::{ActionLayerPolicy, LintOptions, ACTION_CALLERS};
+    use bone_lints::{ACTION_CALLERS, ActionLayerPolicy, LintOptions};
 
     static POLICY: ActionLayerPolicy = ActionLayerPolicy {
         production_root: "game",
@@ -5482,7 +5994,11 @@ mod action_policy_tests {
         let root = tempfile::tempdir().unwrap();
         let project = root.path().join("game");
         std::fs::create_dir(&project).unwrap();
-        std::fs::write(project.join("stick.toml"), "[package]\nname = \"policy-fixture\"\n").unwrap();
+        std::fs::write(
+            project.join("stick.toml"),
+            "[package]\nname = \"policy-fixture\"\n",
+        )
+        .unwrap();
         let file = project.join("main.rock");
         let source = "global DO_MOVE: int = 1\nfn main() {}\n";
         std::fs::write(&file, source).unwrap();
@@ -5493,8 +6009,14 @@ mod action_policy_tests {
         workspace.load_project(file);
         let diagnostics = workspace.lint_diagnostics(file);
         assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
-        assert_eq!(diagnostics[0].message, "production Example action `DO_MOVE` has no production caller");
-        workspace.update(file, source.replace("fn main() {}", "fn main() { let value = DO_MOVE }"));
+        assert_eq!(
+            diagnostics[0].message,
+            "production Example action `DO_MOVE` has no production caller"
+        );
+        workspace.update(
+            file,
+            source.replace("fn main() {}", "fn main() { let value = DO_MOVE }"),
+        );
         assert!(workspace.lint_diagnostics(file).is_empty());
     }
 }

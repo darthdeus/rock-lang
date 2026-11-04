@@ -2,7 +2,11 @@ use crate::common::{node, ws_with};
 use skull_mir::mir::FuncRef;
 
 fn node_available() -> bool {
-    node().arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+    node()
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 fn emit_root(src: &str, root: &str) -> String {
@@ -29,7 +33,11 @@ fn eval(src: &str, expr: &str, expected: &str) {
         "node failed:\n--- program ---\n{program}\n--- stderr ---\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), expected, "{program}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        expected,
+        "{program}"
+    );
 }
 
 fn eval_closure(src: &str, expr: &str, expected: &str) {
@@ -38,7 +46,10 @@ fn eval_closure(src: &str, expr: &str, expected: &str) {
         return;
     }
     let ws = ws_with(src);
-    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("test module");
     let fid = ws
         .module(mid)
         .functions
@@ -48,7 +59,13 @@ fn eval_closure(src: &str, expr: &str, expected: &str) {
         .expect("root");
     let js = skull_codegen_js::emit::emit_with_closure(
         &ws,
-        &[(FuncRef { module: mid, func: fid }, "root".to_string())],
+        &[(
+            FuncRef {
+                module: mid,
+                func: fid,
+            },
+            "root".to_string(),
+        )],
     )
     .unwrap_or_else(|e| panic!("closure emit: {}", e.message));
     let program = format!(
@@ -64,7 +81,11 @@ fn eval_closure(src: &str, expr: &str, expected: &str) {
         "node failed:\n--- program ---\n{program}\n--- stderr ---\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), expected, "{program}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        expected,
+        "{program}"
+    );
 }
 
 #[test]
@@ -169,6 +190,9 @@ fn root() -> uint {
     b[0]
 }";
     let js = emit_root(src, "root");
-    assert!(js.contains("new Uint32Array"), "uint buffer lost its physical type:\n{js}");
+    assert!(
+        js.contains("new Uint32Array"),
+        "uint buffer lost its physical type:\n{js}"
+    );
     eval(src, "root()", "4294967295");
 }

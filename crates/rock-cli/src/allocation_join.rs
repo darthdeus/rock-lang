@@ -230,18 +230,24 @@ fn parse_manifest(manifest: &str) -> Result<BTreeMap<&str, Site<'_>>> {
                     .get(5)
                     .map(|depth| depth.parse::<u32>())
                     .transpose()
-                    .map_err(|error| anyhow::anyhow!(
-                        "allocation manifest site {} has invalid local loop depth: {error}", fields[0]
-                    ))?
+                    .map_err(|error| {
+                        anyhow::anyhow!(
+                            "allocation manifest site {} has invalid local loop depth: {error}",
+                            fields[0]
+                        )
+                    })?
                     .unwrap_or(0);
                 let result_use = fields.get(6).copied().unwrap_or("unknown");
                 let result_uses = fields
                     .get(7)
                     .map(|uses| uses.parse::<u32>())
                     .transpose()
-                    .map_err(|error| anyhow::anyhow!(
-                        "allocation manifest site {} has invalid result use count: {error}", fields[0]
-                    ))?
+                    .map_err(|error| {
+                        anyhow::anyhow!(
+                            "allocation manifest site {} has invalid result use count: {error}",
+                            fields[0]
+                        )
+                    })?
                     .unwrap_or(0);
                 let aggregate_type = fields.get(8).copied().unwrap_or("-");
                 let aggregate_fields = fields
@@ -297,9 +303,12 @@ fn parse_manifest(manifest: &str) -> Result<BTreeMap<&str, Site<'_>>> {
             .split_once("\tcallers\t")
             .map_or((route_detail, ""), |(route, callers)| (route, callers));
         let (chain, loop_depth) = match route_and_depth.split_once("\tloop_depth\t") {
-            Some((chain, depth)) => (chain, depth.parse::<u32>().map_err(|error| anyhow::anyhow!(
-                "allocation route site {id} has invalid loop depth: {error}"
-            ))?),
+            Some((chain, depth)) => (
+                chain,
+                depth.parse::<u32>().map_err(|error| {
+                    anyhow::anyhow!("allocation route site {id} has invalid loop depth: {error}")
+                })?,
+            ),
             None => (route_and_depth, 0),
         };
         let site = sites
@@ -392,7 +401,12 @@ fn parse_activation(activation: &str) -> Result<Activation<'_>> {
                     "allocation activation site {id} has invalid maximum {max_frame_hits} for {frame_hits} frame hits"
                 );
             }
-            (frame_hits, Some(active_frames), Some(max_frame_hits), Some(outside_hits))
+            (
+                frame_hits,
+                Some(active_frames),
+                Some(max_frame_hits),
+                Some(outside_hits),
+            )
         } else {
             (total_hits, None, None, None)
         };
@@ -411,7 +425,11 @@ fn parse_activation(activation: &str) -> Result<Activation<'_>> {
             hits.len()
         );
     }
-    Ok(Activation { frames, frame_aware, hits })
+    Ok(Activation {
+        frames,
+        frame_aware,
+        hits,
+    })
 }
 
 #[cfg(test)]
@@ -439,7 +457,10 @@ pub fn render_joined_report_with_jit(
     let mut hits = activation.hits;
     for hit in &hits {
         if !sites.contains_key(hit.id) {
-            anyhow::bail!("active site {} is absent from the allocation manifest", hit.id);
+            anyhow::bail!(
+                "active site {} is absent from the allocation manifest",
+                hit.id
+            );
         }
     }
     hits.retain(|hit| {
@@ -521,7 +542,11 @@ pub fn render_joined_report_with_jit(
         let route = if routes.is_empty() {
             "outside".to_string()
         } else {
-            routes.iter().map(|(name, _)| *name).collect::<Vec<_>>().join("+")
+            routes
+                .iter()
+                .map(|(name, _)| *name)
+                .collect::<Vec<_>>()
+                .join("+")
         };
         let chain = if routes.len() == 1 {
             routes[0].1.to_string()
@@ -532,12 +557,16 @@ pub fn render_joined_report_with_jit(
                 .collect::<Vec<_>>()
                 .join(" | ")
         };
-        let callers = [site.update_callers, site.draw_callers, site.coroutine_callers]
-            .into_iter()
-            .flatten()
-            .flat_map(|callers| callers.split(" | "))
-            .filter(|caller| !caller.is_empty())
-            .collect::<BTreeSet<_>>();
+        let callers = [
+            site.update_callers,
+            site.draw_callers,
+            site.coroutine_callers,
+        ]
+        .into_iter()
+        .flatten()
+        .flat_map(|callers| callers.split(" | "))
+        .filter(|caller| !caller.is_empty())
+        .collect::<BTreeSet<_>>();
         let caller_count = callers.len();
         let callers = callers.into_iter().collect::<Vec<_>>().join(" | ");
         let structural_loop_depth = [site.local_loop_depth]
@@ -570,7 +599,9 @@ pub fn render_joined_report_with_jit(
         if frame_aware {
             let active_frames = hit.active_frames.unwrap_or(0);
             let coverage = active_frames as f64 / frames as f64;
-            let per_active = if active_frames == 0 { 0.0 } else {
+            let per_active = if active_frames == 0 {
+                0.0
+            } else {
                 hit.frame_hits as f64 / active_frames as f64
             };
             write!(
@@ -586,7 +617,12 @@ pub fn render_joined_report_with_jit(
                 hit.outside_hits.unwrap_or(0),
             )?;
         } else {
-            write!(out, "{:.4}\t{}\t", hit.frame_hits as f64 / frames as f64, hit.total_hits)?;
+            write!(
+                out,
+                "{:.4}\t{}\t",
+                hit.frame_hits as f64 / frames as f64,
+                hit.total_hits
+            )?;
         }
         write!(
             out,
@@ -727,7 +763,6 @@ bbbbbbbbbbbbbbbb	20	18	3	9	2
 cccccccccccccccc	2	1	1	1	1
 "#;
 
-
     const CLASSIFIED_MANIFEST: &str = r#"emitted allocation-capable Lua report: 1 bodies, 1 direct sites
 
 emitted site manifest: 1 sites
@@ -753,10 +788,20 @@ bbbbbbbbbbbbbbbb	20	18	3	9	2
         )
         .expect("joined classified allocation report");
         let mut lines = report.lines().skip(4);
-        let header = lines.next().expect("joined header").split('\t').collect::<Vec<_>>();
-        let row = lines.next().expect("joined row").split('\t').collect::<Vec<_>>();
+        let header = lines
+            .next()
+            .expect("joined header")
+            .split('\t')
+            .collect::<Vec<_>>();
+        let row = lines
+            .next()
+            .expect("joined row")
+            .split('\t')
+            .collect::<Vec<_>>();
         let value = |name: &str| {
-            let index = header.iter().position(|column| *column == name)
+            let index = header
+                .iter()
+                .position(|column| *column == name)
                 .unwrap_or_else(|| panic!("missing {name} column: {report}"));
             row[index]
         };
@@ -766,8 +811,6 @@ bbbbbbbbbbbbbbbb	20	18	3	9	2
         assert_eq!(value("aggregate_type"), "Carrier");
         assert_eq!(value("aggregate_fields"), "3");
     }
-
-
 
     #[test]
     fn join_can_isolate_coroutine_resume_routes() {
@@ -801,10 +844,20 @@ bbbbbbbbbbbbbbbb	20	18	3	9	2
         let report = render_joined_report(MANIFEST, FRAME_ACTIVATION, Some("draw"), None)
             .expect("joined frame-aware activation report");
         let mut lines = report.lines().skip(4);
-        let header = lines.next().expect("joined header").split('\t').collect::<Vec<_>>();
-        let row = lines.next().expect("joined row").split('\t').collect::<Vec<_>>();
+        let header = lines
+            .next()
+            .expect("joined header")
+            .split('\t')
+            .collect::<Vec<_>>();
+        let row = lines
+            .next()
+            .expect("joined row")
+            .split('\t')
+            .collect::<Vec<_>>();
         let value = |name: &str| {
-            let index = header.iter().position(|column| *column == name)
+            let index = header
+                .iter()
+                .position(|column| *column == name)
                 .unwrap_or_else(|| panic!("missing {name} column: {report}"));
             row[index]
         };
@@ -827,9 +880,19 @@ bbbbbbbbbbbbbbbb	20	18	3	9	2
         let report = render_joined_report(&manifest, FRAME_ACTIVATION, Some("draw"), None)
             .expect("joined loop-aware allocation report");
         let mut lines = report.lines().skip(4);
-        let header = lines.next().expect("joined header").split('\t').collect::<Vec<_>>();
-        let row = lines.next().expect("joined row").split('\t').collect::<Vec<_>>();
-        let depth = header.iter().position(|column| *column == "structural_loop_depth")
+        let header = lines
+            .next()
+            .expect("joined header")
+            .split('\t')
+            .collect::<Vec<_>>();
+        let row = lines
+            .next()
+            .expect("joined row")
+            .split('\t')
+            .collect::<Vec<_>>();
+        let depth = header
+            .iter()
+            .position(|column| *column == "structural_loop_depth")
             .expect("structural loop depth column");
 
         assert_eq!(row[depth], "2", "{report}");
@@ -882,9 +945,17 @@ end
         let lua = "-- runtime preamble\n__rock_mk_draw_leaf = function(callee) return function()\n  local v = __rock_alloc_hit(\"bbbbbbbbbbbbbbbb\", callee())\nend end\ndraw_leaf = __rock_mk_draw_leaf(callee)\n";
         let trace = "rock.jit-allocation-trace.v1\nartifact\t/generated/main.lua\ntrace\tir\tstate\top\tbody_start\tlua_line\n1\t4\tsunk\tTNEW\t2\t3\n";
         let report = render_joined_report_with_jit(
-            MANIFEST, ACTIVATION, Some("draw"), Some(lua), Some(trace),
-        ).expect("callee-bound allocation join");
-        assert!(report.contains("draw_leaf\t2\t3\tdraw_root -> draw_leaf"), "{report}");
+            MANIFEST,
+            ACTIVATION,
+            Some("draw"),
+            Some(lua),
+            Some(trace),
+        )
+        .expect("callee-bound allocation join");
+        assert!(
+            report.contains("draw_leaf\t2\t3\tdraw_root -> draw_leaf"),
+            "{report}"
+        );
         assert!(report.contains("sunk\tnone\t1\t1\tTNEW"), "{report}");
     }
 
@@ -962,9 +1033,11 @@ trace_generation	trace	ir	state	op	body_start	lua_line
         )
         .expect_err("JIT join needs exact body-local lines");
 
-        assert!(error
-            .to_string()
-            .contains("five-column allocation manifest"));
+        assert!(
+            error
+                .to_string()
+                .contains("five-column allocation manifest")
+        );
     }
 
     #[test]
@@ -973,9 +1046,11 @@ trace_generation	trace	ir	state	op	body_start	lua_line
         let error = render_joined_report(MANIFEST, &activation, None, None)
             .expect_err("cross-artifact site IDs must reject");
 
-        assert!(error
-            .to_string()
-            .contains("absent from the allocation manifest"));
+        assert!(
+            error
+                .to_string()
+                .contains("absent from the allocation manifest")
+        );
     }
 
     #[test]

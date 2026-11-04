@@ -1,6 +1,6 @@
+use crate::common::ws_with;
 use bone_semantic::hir::BodyOwner;
 use skull_mir::mir::FuncRef;
-use crate::common::ws_with;
 
 fn function(ws: &bone_semantic::inference::Workspace, name: &str) -> FuncRef {
     let mid = *ws
@@ -22,8 +22,10 @@ fn function(ws: &bone_semantic::inference::Workspace, name: &str) -> FuncRef {
 fn global(
     ws: &bone_semantic::inference::Workspace,
     name: &str,
-) -> (bone_semantic::prelude::ModuleId, bone_semantic::prelude::Idx<bone_semantic::hir::GlobalDef>)
-{
+) -> (
+    bone_semantic::prelude::ModuleId,
+    bone_semantic::prelude::Idx<bone_semantic::hir::GlobalDef>,
+) {
     let mid = *ws
         .module_ids
         .get(&ustr::Ustr::from("<test>"))
@@ -51,7 +53,11 @@ fn node(source: &str) -> String {
 }
 
 fn js_runtime() -> String {
-    format!("{}\n{}", skull_codegen_js::JS_GLOBALS_RUNTIME, skull_codegen_js::JS_CALL_HELPER)
+    format!(
+        "{}\n{}",
+        skull_codegen_js::JS_GLOBALS_RUNTIME,
+        skull_codegen_js::JS_CALL_HELPER
+    )
 }
 
 #[test]
@@ -118,8 +124,8 @@ fn main() {{ run_wire_systems() }}
     let direct = ws_with(&source(1, 11, 8));
     let transitive = ws_with(&source(4, 11, 8));
     let mid = function(&before, "main").module;
-    let (program, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid)
-        .expect("initial JS program");
+    let (program, mut cache) =
+        skull_codegen_js::emit::emit_program_cached(&before, mid).expect("initial JS program");
     let unrelated_fn = function(&unrelated, "unrelated");
     let direct_global = global(&direct, "DIRECT");
     let base_global = global(&transitive, "BASE");
@@ -180,7 +186,12 @@ console.log("transitive:" + state("PLAIN_RUNS") + ":" + state("DIRECT_RUNS") + "
 "#;
     let source = format!(
         "{}\nvar __G = {{}};\n{}\nvar OVERLAY_UNRELATED = {:?};\nvar OVERLAY_DIRECT = {:?};\nvar OVERLAY_TRANSITIVE = {:?};\n{}",
-        js_runtime(), program.program, overlay_unrelated, overlay_direct, overlay_transitive, driver
+        js_runtime(),
+        program.program,
+        overlay_unrelated,
+        overlay_direct,
+        overlay_transitive,
+        driver
     );
     let output = node(&source);
     assert_eq!(
@@ -217,7 +228,8 @@ fn definition_plan_publishes_and_aborts_with_the_code_slot_transaction() {
 
 #[test]
 fn failed_definition_materialization_keeps_the_old_plan_and_clears_pending() {
-    let source = format!("{}\n", js_runtime()) + r#"
+    let source = format!("{}\n", js_runtime())
+        + r#"
 var __G = {};
 __rock_code_slot_begin();
 __rock_code_slot_stage_one("probe", function() { return 1; }, "abi");
@@ -243,10 +255,19 @@ console.log(ok && __rock_definition_plan_pending === null
 #[test]
 fn programs_without_definition_roles_do_not_stage_an_empty_plan() {
     let ws = ws_with("fn main() {}\n");
-    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
-    let program = skull_codegen_js::emit::emit_program(&ws, mid).expect("emit program").program;
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("test module");
+    let program = skull_codegen_js::emit::emit_program(&ws, mid)
+        .expect("emit program")
+        .program;
     assert!(!program.contains("__rock_definition_plan_stage("));
-    let output = node(&format!("{}\nvar __G = {{}};\n{}\nconsole.log('PASS');", js_runtime(), program));
+    let output = node(&format!(
+        "{}\nvar __G = {{}};\n{}\nconsole.log('PASS');",
+        js_runtime(),
+        program
+    ));
     assert_eq!(output.trim(), "PASS");
 }
 
@@ -297,7 +318,6 @@ fn main() {{}}
     ));
 }
 
-
 #[test]
 fn const_value_overlay_redefines_users_without_reinitializing_state() {
     let before = ws_with(
@@ -313,8 +333,7 @@ fn const_value_overlay_redefines_users_without_reinitializing_state() {
          fn main() { print(hot()) }\n",
     );
     let mid = function(&before, "main").module;
-    let (program, mut cache) =
-        skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
+    let (program, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
     let (global_mid, global_id) = global(&after, "WISP_COUNT");
     let overlay = skull_codegen_js::emit::emit_overlay(
         &after,
@@ -327,7 +346,9 @@ fn const_value_overlay_redefines_users_without_reinitializing_state() {
 
     let output = node(&format!(
         "{}\nvar __G = {{}};\n{}\n__rock_globals[\"global:<test>::STATE::value\"] = 99;\n{}\nconsole.log(__rock_globals[\"global:<test>::STATE::value\"] + ':' + hot());",
-        js_runtime(), program.program, overlay
+        js_runtime(),
+        program.program,
+        overlay
     ));
     assert_eq!(output.trim(), "99:10");
 }
@@ -347,8 +368,7 @@ fn const_value_overlay_reinitializes_dependent_constants() {
          fn main() { print(hot()) }\n",
     );
     let mid = function(&before, "main").module;
-    let (program, mut cache) =
-        skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
+    let (program, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
     let (global_mid, global_id) = global(&after, "BASE");
     let overlay = skull_codegen_js::emit::emit_overlay(
         &after,
@@ -361,7 +381,9 @@ fn const_value_overlay_reinitializes_dependent_constants() {
 
     let output = node(&format!(
         "{}\nvar __G = {{}};\n{}\n{}\nconsole.log(hot());",
-        js_runtime(), program.program, overlay
+        js_runtime(),
+        program.program,
+        overlay
     ));
     assert_eq!(output.trim(), "11");
 }
@@ -379,8 +401,7 @@ fn overlay_redefines_a_function_without_reinitializing_global_state() {
          fn main() { print(hot()) }\n",
     );
     let mid = function(&before, "main").module;
-    let (program, mut cache) =
-        skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
+    let (program, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
     let hot = function(&after, "hot");
     let overlay = skull_codegen_js::emit::emit_overlay(
         &after,
@@ -394,7 +415,9 @@ fn overlay_redefines_a_function_without_reinitializing_global_state() {
     assert!(!overlay.contains("__rock_globals[\"global:<test>::STATE::value\"] = "));
     let output = node(&format!(
         "{}\n{}\n__rock_globals[\"global:<test>::STATE::value\"] = 99;\n{}\nconsole.log(__rock_globals[\"global:<test>::STATE::value\"] + ':' + hot());",
-        js_runtime(), program.program, overlay
+        js_runtime(),
+        program.program,
+        overlay
     ));
     assert_eq!(output.trim(), "99:2");
 }
@@ -439,7 +462,9 @@ fn retained_named_and_capture_free_values_refresh_through_slots() {
     .expect_overlay();
     let output = node(&format!(
         "{}\nvar __G = {{}};\n{}\nstart();\nconsole.log(invoke());\n(0, eval)({:?});\nconsole.log(invoke());",
-        js_runtime(), program.program, overlay
+        js_runtime(),
+        program.program,
+        overlay
     ));
     assert_eq!(output.trim(), "14\n25");
     assert!(overlay.contains("__rock_code_slot_stage_one"));
@@ -478,7 +503,9 @@ fn retained_capturing_value_refreshes_while_keeping_mutable_capture() {
     .expect_overlay();
     let output = node(&format!(
         "{}\nvar __G = {{}};\n{}\nstart();\nconsole.log(invoke());\n(0, eval)({:?});\nconsole.log(invoke());",
-        js_runtime(), program.program, overlay
+        js_runtime(),
+        program.program,
+        overlay
     ));
     assert_eq!(output.trim(), "1\n12");
     assert!(overlay.contains("__rock_code_slot_stage_one"));
@@ -486,7 +513,8 @@ fn retained_capturing_value_refreshes_while_keeping_mutable_capture() {
     let (fresh, _) = skull_codegen_js::emit::emit_program_cached(&after, mid).unwrap();
     let fresh_output = node(&format!(
         "{}\nvar __G = {{}};\n{}\nstart();\nconsole.log(invoke());",
-        js_runtime(), fresh.program
+        js_runtime(),
+        fresh.program
     ));
     assert_eq!(fresh_output.trim(), "11");
 }
@@ -512,12 +540,18 @@ fn wire_failure_after_publication_keeps_the_candidate_code_ref_live() {
         &after,
         mid,
         &mut cache,
-        &[(make.module, BodyOwner::Function(make.func)), (wire.module, BodyOwner::Function(wire.func))],
+        &[
+            (make.module, BodyOwner::Function(make.func)),
+            (wire.module, BodyOwner::Function(wire.func)),
+        ],
     )
     .unwrap()
     .expect_overlay();
     assert!(overlay.contains("__rock_code_slot_stage_one"));
-    assert!(overlay.contains("run_wire_systems();"), "overlay must contain the later top-level hook:\n{overlay}");
+    assert!(
+        overlay.contains("run_wire_systems();"),
+        "overlay must contain the later top-level hook:\n{overlay}"
+    );
 
     let output = node(&format!(
         "{}\nvar __G = {{}};\n{}\nstart();\ntry {{ (0, eval)({:?}); }} catch (e) {{ console.log(false); }}\nconsole.log(__rock_code_slot_stage === null);\nconsole.log(__rock_call(__rock_globals[\"global:<test>::CALLBACK::value\"]));",
@@ -568,7 +602,8 @@ fn successive_overlays_accumulate_changed_function_definitions() {
 
     let output = node(&format!(
         "{}\n{}\nconsole.log(first() + ':' + second());",
-        js_runtime(), overlay
+        js_runtime(),
+        overlay
     ));
     assert_eq!(output.trim(), "2:20");
 }
@@ -592,8 +627,7 @@ fn changed_static_initializer_resets_only_its_live_cell() {
          fn main() { print(hot()) }\n",
     );
     let mid = function(&before, "main").module;
-    let (program, mut cache) =
-        skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
+    let (program, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
     let hot = function(&after, "hot");
     let overlay = skull_codegen_js::emit::emit_overlay(
         &after,
@@ -606,7 +640,9 @@ fn changed_static_initializer_resets_only_its_live_cell() {
 
     let output = node(&format!(
         "{}\n{}\nhot(); hot();\n{}\nconsole.log(hot());",
-        js_runtime(), program.program, overlay
+        js_runtime(),
+        program.program,
+        overlay
     ));
     assert_eq!(output.trim(), "11");
 }
@@ -623,8 +659,7 @@ fn a_body_edit_that_removes_a_static_drops_its_cells() {
     );
     let after = ws_with("@nomangle fn hot() -> int { 7 }\nfn main() { print(hot()) }\n");
     let mid = function(&before, "main").module;
-    let (program, mut cache) =
-        skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
+    let (program, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
     let hot = function(&after, "hot");
     let overlay = skull_codegen_js::emit::emit_overlay(
         &after,
@@ -639,7 +674,9 @@ fn a_body_edit_that_removes_a_static_drops_its_cells() {
         "{}\n{}\nhot();\n\
          function cells() {{ return Object.keys(__rock_globals).filter(k => k.includes('::count#')).length; }}\n\
          let live = cells();\n{}\nconsole.log(live + ':' + cells() + ':' + hot());",
-        js_runtime(), program.program, overlay
+        js_runtime(),
+        program.program,
+        overlay
     ));
     assert_eq!(output.trim(), "2:0:7");
 }
@@ -661,8 +698,7 @@ fn decorated_function_overlay_refreshes_the_registered_code_ref() {
     let before = ws_with(&source("one"));
     let after = ws_with(&source("two"));
     let mid = function(&before, "main").module;
-    let (program, mut cache) =
-        skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
+    let (program, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
     let hot = function(&after, "hot");
     let overlay = skull_codegen_js::emit::emit_overlay(
         &after,
@@ -672,7 +708,10 @@ fn decorated_function_overlay_refreshes_the_registered_code_ref() {
     )
     .unwrap()
     .expect_overlay();
-    assert!(!overlay.contains("__rock_rebind_system"), "CodeRef overlays must not emit a registry repair");
+    assert!(
+        !overlay.contains("__rock_rebind_system"),
+        "CodeRef overlays must not emit a registry repair"
+    );
 
     let output = node(&format!(
         "var output = [];\n\
@@ -706,17 +745,31 @@ fn unrelated_body_overlay_restages_unchanged_generic_callback_with_concrete_abi(
     let (program, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
     let caller = function(&after, "edited");
     let overlay = skull_codegen_js::emit::emit_overlay(
-        &after, mid, &mut cache,
+        &after,
+        mid,
+        &mut cache,
         &[(caller.module, BodyOwner::Function(caller.func))],
-    ).unwrap().expect_overlay();
-    let staged: Vec<_> = overlay.lines().filter(|line|
-        line.contains("__rock_code_slot_stage_one(") && line.contains("unchanged")
-    ).collect();
-    assert_eq!(staged.len(), 1, "unchanged callback must be staged: {staged:?}");
-    assert!(!staged[0].contains("unresolved-named-value"), "stage must carry the concrete ABI");
+    )
+    .unwrap()
+    .expect_overlay();
+    let staged: Vec<_> = overlay
+        .lines()
+        .filter(|line| line.contains("__rock_code_slot_stage_one(") && line.contains("unchanged"))
+        .collect();
+    assert_eq!(
+        staged.len(),
+        1,
+        "unchanged callback must be staged: {staged:?}"
+    );
+    assert!(
+        !staged[0].contains("unresolved-named-value"),
+        "stage must carry the concrete ABI"
+    );
     let output = node(&format!(
         "{}\nvar __G = {{}};\n{}\nconsole.log(invoke(), edited());\n(0, eval)({:?});\nconsole.log(invoke(), edited());",
-        js_runtime(), program.program, overlay
+        js_runtime(),
+        program.program,
+        overlay
     ));
     assert_eq!(output.trim(), "10 1\n10 2");
 }

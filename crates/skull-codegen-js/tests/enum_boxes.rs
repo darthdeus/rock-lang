@@ -9,19 +9,29 @@
 //! an inactive (nil) slot must own the SAME keys as a direct `MakeEnum`, or
 //! `__op_eq`'s key-count walk calls the equal values unequal.
 
-use skull_mir::mir::FuncRef;
 use crate::common::ws_with;
+use skull_mir::mir::FuncRef;
 
 fn node_available() -> bool {
-    crate::common::node().arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+    crate::common::node()
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 fn emit_closure(ws: &bone_semantic::inference::Workspace, root: &str) -> Result<String, String> {
-    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("test module");
     let mut r = None;
     for (fid, f) in ws.module(mid).functions.iter() {
         if f.name.as_str() == root {
-            r = Some(FuncRef { module: mid, func: fid });
+            r = Some(FuncRef {
+                module: mid,
+                func: fid,
+            });
         }
     }
     skull_codegen_js::emit::emit_with_closure(ws, &[(r.unwrap(), root.to_string())])
@@ -46,8 +56,16 @@ fn eval(src: &str, root: &str, tail: &str) -> String {
     }
     let ws = ws_with(src);
     let js = emit_closure(&ws, root).unwrap_or_else(|e| panic!("emit `{root}`: {e}"));
-    let program = format!("{}{}\n{js}\n{tail}", preamble(), skull_codegen_js::JS_STRING_RUNTIME);
-    let out = crate::common::node().arg("-e").arg(&program).output().expect("spawn node");
+    let program = format!(
+        "{}{}\n{js}\n{tail}",
+        preamble(),
+        skull_codegen_js::JS_STRING_RUNTIME
+    );
+    let out = crate::common::node()
+        .arg("-e")
+        .arg(&program)
+        .output()
+        .expect("spawn node");
     assert!(
         out.status.success(),
         "node failed:\n--- program ---\n{program}\n--- stderr ---\n{}",
@@ -61,7 +79,9 @@ fn eval_int(src: &str, root: &str, expect: i64) {
         return;
     }
     let got = eval(src, root, &format!("console.log({root}());"));
-    let n: i64 = got.parse().unwrap_or_else(|_| panic!("not an int: {got:?}"));
+    let n: i64 = got
+        .parse()
+        .unwrap_or_else(|_| panic!("not an int: {got:?}"));
     assert_eq!(n, expect, "wrong result for `{root}`");
 }
 
@@ -75,7 +95,10 @@ fn mixed_enum_tuple_variant() {
                fn root() -> int { node_sum(Node::Pair(1, Node::Pair(2, Node::Leaf(3)))) }";
     let ws = ws_with(src);
     let js = emit_closure(&ws, "root").expect("mixed enum emits");
-    assert!(js.contains("__rock_make_enum("), "boxes via the nil-dropping ctor:\n{js}");
+    assert!(
+        js.contains("__rock_make_enum("),
+        "boxes via the nil-dropping ctor:\n{js}"
+    );
     eval_int(src, "root", 6);
 }
 
@@ -145,9 +168,18 @@ fn inspect_byte_matches_luajit() {
                fn pair() -> string { inspect(Node::Pair(1, Node::Nil)) }\n\
                fn rec() -> string { inspect(Msg::At { x: 1, y: 2 }) }\n\
                fn unit() -> string { inspect(Msg::Ping) }";
-    assert_eq!(eval(src, "leaf", "console.log(leaf());"), "Node::Leaf { [1] = 5 }");
-    assert_eq!(eval(src, "pair", "console.log(pair());"), "Node::Pair { [1] = 1, [2] = Node::Nil }");
-    assert_eq!(eval(src, "rec", "console.log(rec());"), "Msg::At { x = 1, y = 2 }");
+    assert_eq!(
+        eval(src, "leaf", "console.log(leaf());"),
+        "Node::Leaf { [1] = 5 }"
+    );
+    assert_eq!(
+        eval(src, "pair", "console.log(pair());"),
+        "Node::Pair { [1] = 1, [2] = Node::Nil }"
+    );
+    assert_eq!(
+        eval(src, "rec", "console.log(rec());"),
+        "Msg::At { x = 1, y = 2 }"
+    );
     assert_eq!(eval(src, "unit", "console.log(unit());"), "Msg::Ping");
 }
 
@@ -239,7 +271,11 @@ fn inspect_flat_enum_payload_names_require_exact_leaf_count() {
         eprintln!("SKIP: node not found");
         return;
     }
-    let out = crate::common::node().arg("-e").arg(&program).output().expect("spawn node");
+    let out = crate::common::node()
+        .arg("-e")
+        .arg(&program)
+        .output()
+        .expect("spawn node");
     assert!(
         out.status.success(),
         "node failed:\n--- program ---\n{program}\n--- stderr ---\n{}",

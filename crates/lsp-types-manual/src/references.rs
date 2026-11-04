@@ -11,8 +11,11 @@ pub struct ReferenceContext {
     pub include_declaration: bool,
 }
 
-impl_lsp_struct!(ReferenceContext,
-    required { include_declaration: bool = "includeDeclaration" },
+impl_lsp_struct!(
+    ReferenceContext,
+    required {
+        include_declaration: bool = "includeDeclaration"
+    },
     optional {}
 );
 
@@ -24,8 +27,11 @@ pub struct ReferenceParams {
     pub context: ReferenceContext,
 }
 
-impl_lsp_struct!(ReferenceParams,
-    required { context: ReferenceContext = "context" },
+impl_lsp_struct!(
+    ReferenceParams,
+    required {
+        context: ReferenceContext = "context"
+    },
     optional {},
     flatten {
         text_document_position: TextDocumentPositionParams,

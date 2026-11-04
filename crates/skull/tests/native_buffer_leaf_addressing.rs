@@ -199,8 +199,14 @@ fn main() {
 fn an_inlined_f32_ctor_store_rounds_only_in_the_float_view() {
     let lua = emit_module(F32_CTOR_STORE);
     let body = function_body(&lua, "fill_f32");
-    assert!(!body.contains("fvert("), "precondition: the constructor call is inlined:\n{body}");
-    assert!(body.contains(".__vf"), "precondition: the leaves store through the float view:\n{body}");
+    assert!(
+        !body.contains("fvert("),
+        "precondition: the constructor call is inlined:\n{body}"
+    );
+    assert!(
+        body.contains(".__vf"),
+        "precondition: the leaves store through the float view:\n{body}"
+    );
     assert!(
         !body.contains("__rock_f32("),
         "a float-view store already rounds; the inlined ctor's rounding is redundant:\n{body}"

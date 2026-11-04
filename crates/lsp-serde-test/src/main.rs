@@ -2,41 +2,119 @@ mod generators;
 mod harness;
 
 use clap::{Arg, Command};
-use harness::{TypeTest, print_results};
 use generators::*;
+use harness::{print_results, TypeTest};
 
 type OrigTagSupport = lsp_types::TagSupport<lsp_types::CompletionItemTag>;
 type ForkTagSupport = lsp_types_manual::TagSupport<lsp_types_manual::CompletionItemTag>;
 
-type_test!(NotebookCellKindTest, NotebookCellKind, gen_notebook_cell_kind);
-type_test!(HoverClientCapabilitiesTest, HoverClientCapabilities, gen_hover_client_capabilities);
+type_test!(
+    NotebookCellKindTest,
+    NotebookCellKind,
+    gen_notebook_cell_kind
+);
+type_test!(
+    HoverClientCapabilitiesTest,
+    HoverClientCapabilities,
+    gen_hover_client_capabilities
+);
 type_test!(HoverTest, Hover, gen_hover);
-type_test!(SemanticTokensFullOptionsTest, SemanticTokensFullOptions, gen_semantic_tokens_full_options);
-type_test!(SemanticTokensOptionsTest, SemanticTokensOptions, gen_semantic_tokens_options);
-type_test!(SemanticTokensServerCapabilitiesTest, SemanticTokensServerCapabilities, gen_semantic_tokens_server_capabilities);
-type_test!(CompletionOptionsTest, CompletionOptions, gen_completion_options);
-type_test!(InitializeParamsTest, InitializeParams, gen_initialize_params);
-type_test!(CompletionItemCapabilityTest, CompletionItemCapability, gen_completion_item_capability);
-type_test!(DocumentSymbolClientCapabilitiesTest, DocumentSymbolClientCapabilities, gen_document_symbol_client_capabilities);
-type_test!(WorkspaceSymbolClientCapabilitiesTest, WorkspaceSymbolClientCapabilities, gen_workspace_symbol_client_capabilities);
+type_test!(
+    SemanticTokensFullOptionsTest,
+    SemanticTokensFullOptions,
+    gen_semantic_tokens_full_options
+);
+type_test!(
+    SemanticTokensOptionsTest,
+    SemanticTokensOptions,
+    gen_semantic_tokens_options
+);
+type_test!(
+    SemanticTokensServerCapabilitiesTest,
+    SemanticTokensServerCapabilities,
+    gen_semantic_tokens_server_capabilities
+);
+type_test!(
+    CompletionOptionsTest,
+    CompletionOptions,
+    gen_completion_options
+);
+type_test!(
+    InitializeParamsTest,
+    InitializeParams,
+    gen_initialize_params
+);
+type_test!(
+    CompletionItemCapabilityTest,
+    CompletionItemCapability,
+    gen_completion_item_capability
+);
+type_test!(
+    DocumentSymbolClientCapabilitiesTest,
+    DocumentSymbolClientCapabilities,
+    gen_document_symbol_client_capabilities
+);
+type_test!(
+    WorkspaceSymbolClientCapabilitiesTest,
+    WorkspaceSymbolClientCapabilities,
+    gen_workspace_symbol_client_capabilities
+);
 type_test!(DiagnosticTest, Diagnostic, gen_diagnostic);
 type_test!(InlayHintTest, InlayHint, gen_inlay_hint);
 type_test!(WorkspaceSymbolTest, WorkspaceSymbol, gen_workspace_symbol);
-type_test!(InitializeResultTest, InitializeResult, gen_initialize_result);
-type_test!(CodeActionOrCommandTest, CodeActionOrCommand, gen_code_action_or_command);
+type_test!(
+    InitializeResultTest,
+    InitializeResult,
+    gen_initialize_result
+);
+type_test!(
+    CodeActionOrCommandTest,
+    CodeActionOrCommand,
+    gen_code_action_or_command
+);
 type_test!(SymbolKindTest, SymbolKind, gen_int_newtype);
 type_test!(DiagnosticSeverityTest, DiagnosticSeverity, gen_int_newtype);
 type_test!(CompletionItemKindTest, CompletionItemKind, gen_int_newtype);
-type_test!(FormattingOptionsTest, FormattingOptions, gen_formatting_options);
-type_test!(DocumentOnTypeFormattingRegistrationOptionsTest, DocumentOnTypeFormattingRegistrationOptions, gen_document_on_type_formatting_registration_options);
-type_test!(MessageActionItemTest, MessageActionItem, gen_message_action_item);
-type_test!(PrepareRenameResponseTest, PrepareRenameResponse, gen_prepare_rename_response);
+type_test!(
+    FormattingOptionsTest,
+    FormattingOptions,
+    gen_formatting_options
+);
+type_test!(
+    DocumentOnTypeFormattingRegistrationOptionsTest,
+    DocumentOnTypeFormattingRegistrationOptions,
+    gen_document_on_type_formatting_registration_options
+);
+type_test!(
+    MessageActionItemTest,
+    MessageActionItem,
+    gen_message_action_item
+);
+type_test!(
+    PrepareRenameResponseTest,
+    PrepareRenameResponse,
+    gen_prepare_rename_response
+);
 type_test!(WatchKindTest, WatchKind, gen_watch_kind);
-type_test!(PositionEncodingKindTest, PositionEncodingKind, gen_position_encoding_kind);
-type_test!(NotebookDocumentFilterTest, NotebookDocumentFilter, gen_notebook_document_filter);
-type_test!(NotebookSelectorTest, NotebookSelector, gen_notebook_selector);
+type_test!(
+    PositionEncodingKindTest,
+    PositionEncodingKind,
+    gen_position_encoding_kind
+);
+type_test!(
+    NotebookDocumentFilterTest,
+    NotebookDocumentFilter,
+    gen_notebook_document_filter
+);
+type_test!(
+    NotebookSelectorTest,
+    NotebookSelector,
+    gen_notebook_selector
+);
 type_test!(SemanticTokensTest, SemanticTokens, gen_semantic_tokens);
-type_test!(TagSupportTest, TagSupport,
+type_test!(
+    TagSupportTest,
+    TagSupport,
     OrigTagSupport,
     ForkTagSupport,
     gen_tag_support
@@ -48,29 +126,77 @@ type_test!(
     lsp_types_manual::lsif::Vertex,
     gen_lsif_vertex
 );
-type_test!(LsifToolInfoTest, LsifToolInfo, lsp_types::lsif::ToolInfo, lsp_types_manual::lsif::ToolInfo, gen_lsif_tool_info);
-type_test!(LsifRangeBasedDocumentSymbolTest, LsifRangeBasedDocumentSymbol,
+type_test!(
+    LsifToolInfoTest,
+    LsifToolInfo,
+    lsp_types::lsif::ToolInfo,
+    lsp_types_manual::lsif::ToolInfo,
+    gen_lsif_tool_info
+);
+type_test!(
+    LsifRangeBasedDocumentSymbolTest,
+    LsifRangeBasedDocumentSymbol,
     lsp_types::lsif::RangeBasedDocumentSymbol,
     lsp_types_manual::lsif::RangeBasedDocumentSymbol,
     gen_lsif_range_based_symbol
 );
-type_test!(LsifDefinitionTagTest, LsifDefinitionTag,
+type_test!(
+    LsifDefinitionTagTest,
+    LsifDefinitionTag,
     lsp_types::lsif::DefinitionTag,
     lsp_types_manual::lsif::DefinitionTag,
     gen_lsif_definition_tag
 );
-type_test!(LsifDeclarationTagTest, LsifDeclarationTag,
+type_test!(
+    LsifDeclarationTagTest,
+    LsifDeclarationTag,
     lsp_types::lsif::DeclarationTag,
     lsp_types_manual::lsif::DeclarationTag,
     gen_lsif_declaration_tag
 );
 
-type_test!(RequestIdTest, RequestId, lsp_server_orig::RequestId, lsp_server_fork::RequestId, gen_request_id);
-type_test!(ResponseErrorTest, ResponseError, lsp_server_orig::ResponseError, lsp_server_fork::ResponseError, gen_response_error);
-type_test!(LspRequestTest, Request, lsp_server_orig::Request, lsp_server_fork::Request, gen_lsp_request);
-type_test!(LspResponseTest, Response, lsp_server_orig::Response, lsp_server_fork::Response, gen_lsp_response);
-type_test!(LspNotificationTest, Notification, lsp_server_orig::Notification, lsp_server_fork::Notification, gen_lsp_notification);
-type_test!(LspMessageTest, Message, lsp_server_orig::Message, lsp_server_fork::Message, gen_lsp_message);
+type_test!(
+    RequestIdTest,
+    RequestId,
+    lsp_server_orig::RequestId,
+    lsp_server_fork::RequestId,
+    gen_request_id
+);
+type_test!(
+    ResponseErrorTest,
+    ResponseError,
+    lsp_server_orig::ResponseError,
+    lsp_server_fork::ResponseError,
+    gen_response_error
+);
+type_test!(
+    LspRequestTest,
+    Request,
+    lsp_server_orig::Request,
+    lsp_server_fork::Request,
+    gen_lsp_request
+);
+type_test!(
+    LspResponseTest,
+    Response,
+    lsp_server_orig::Response,
+    lsp_server_fork::Response,
+    gen_lsp_response
+);
+type_test!(
+    LspNotificationTest,
+    Notification,
+    lsp_server_orig::Notification,
+    lsp_server_fork::Notification,
+    gen_lsp_notification
+);
+type_test!(
+    LspMessageTest,
+    Message,
+    lsp_server_orig::Message,
+    lsp_server_fork::Message,
+    gen_lsp_message
+);
 
 fn all_tests() -> Vec<Box<dyn TypeTest>> {
     vec![
@@ -123,10 +249,31 @@ fn main() {
         .subcommand(
             Command::new("run")
                 .about("Run compatibility tests")
-                .arg(Arg::new("type").long("type").short('t').help("Run only this type (partial match)"))
-                .arg(Arg::new("count").long("count").short('n').default_value("100").help("Iterations per type"))
-                .arg(Arg::new("seed").long("seed").default_value("42").help("RNG seed"))
-                .arg(Arg::new("verbose").long("verbose").short('v').action(clap::ArgAction::SetTrue)),
+                .arg(
+                    Arg::new("type")
+                        .long("type")
+                        .short('t')
+                        .help("Run only this type (partial match)"),
+                )
+                .arg(
+                    Arg::new("count")
+                        .long("count")
+                        .short('n')
+                        .default_value("100")
+                        .help("Iterations per type"),
+                )
+                .arg(
+                    Arg::new("seed")
+                        .long("seed")
+                        .default_value("42")
+                        .help("RNG seed"),
+                )
+                .arg(
+                    Arg::new("verbose")
+                        .long("verbose")
+                        .short('v')
+                        .action(clap::ArgAction::SetTrue),
+                ),
         )
         .subcommand(Command::new("list").about("List available type tests"))
         .get_matches();
@@ -138,14 +285,24 @@ fn main() {
             }
         }
         Some(("run", m)) => {
-            let count: usize = m.get_one::<String>("count").unwrap().parse().expect("count must be a number");
-            let seed: u64 = m.get_one::<String>("seed").unwrap().parse().expect("seed must be a number");
+            let count: usize = m
+                .get_one::<String>("count")
+                .unwrap()
+                .parse()
+                .expect("count must be a number");
+            let seed: u64 = m
+                .get_one::<String>("seed")
+                .unwrap()
+                .parse()
+                .expect("seed must be a number");
             let verbose = m.get_flag("verbose");
             let filter = m.get_one::<String>("type").map(|s| s.as_str());
 
             let tests: Vec<Box<dyn TypeTest>> = all_tests()
                 .into_iter()
-                .filter(|t| filter.is_none_or(|f| t.type_name().to_lowercase().contains(&f.to_lowercase())))
+                .filter(|t| {
+                    filter.is_none_or(|f| t.type_name().to_lowercase().contains(&f.to_lowercase()))
+                })
                 .collect();
 
             if tests.is_empty() {

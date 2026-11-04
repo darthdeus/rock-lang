@@ -64,7 +64,9 @@ fn arity_grow_relowers_dependent_signature() {
         "incremental diagnostics must match a fresh workspace after arity grew"
     );
     assert!(
-        incremental.iter().any(|m| m.contains("requires 1 type argument")),
+        incremental
+            .iter()
+            .any(|m| m.contains("requires 1 type argument")),
         "the proper arity diagnostic should appear: {incremental:?}"
     );
 }
@@ -83,5 +85,8 @@ fn arity_shrink_clears_dependent_error() {
         incremental, restart,
         "incremental diagnostics must match a fresh workspace after arity shrank"
     );
-    assert!(incremental.is_empty(), "arity error should clear: {incremental:?}");
+    assert!(
+        incremental.is_empty(),
+        "arity error should clear: {incremental:?}"
+    );
 }

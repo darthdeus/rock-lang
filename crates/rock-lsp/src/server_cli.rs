@@ -17,7 +17,10 @@ fn build_cli() -> Command {
             .action(ArgAction::SetTrue)
             .help("Enable trace file generation (trace.folded and trace.perfetto) for profiling")
     };
-    let pos_subcmd = |name: &'static str, about: &'static str, pos_name: &'static str, pos_help: &'static str| {
+    let pos_subcmd = |name: &'static str,
+                      about: &'static str,
+                      pos_name: &'static str,
+                      pos_help: &'static str| {
         Command::new(name)
             .about(about)
             .arg(Arg::new(pos_name).required(true).help(pos_help))
@@ -27,7 +30,12 @@ fn build_cli() -> Command {
         pos_subcmd(name, about, "file", "The Rock file to analyze")
     };
     let position_subcmd = |name: &'static str, about: &'static str| {
-        pos_subcmd(name, about, "position", "The position in format file:line:column (1-indexed)")
+        pos_subcmd(
+            name,
+            about,
+            "position",
+            "The position in format file:line:column (1-indexed)",
+        )
     };
 
     Command::new("rock lsp")
@@ -170,7 +178,10 @@ fn stderr_log_filter(rust_log: Option<&str>, timing: bool) -> Result<rock_log::F
     let timing_override = [("lsp_timing", log::LevelFilter::Info)];
     let overrides: &[_] = if timing { &timing_override } else { &[] };
     rock_log::Filter::parse(log::LevelFilter::Warn, rust_log, overrides).map_err(|e| {
-        anyhow::anyhow!("RUST_LOG={:?} is not a valid log filter: {e}", rust_log.unwrap_or_default())
+        anyhow::anyhow!(
+            "RUST_LOG={:?} is not a valid log filter: {e}",
+            rust_log.unwrap_or_default()
+        )
     })
 }
 
@@ -204,7 +215,10 @@ pub fn run_cli_with_policy(args: Vec<String>, policy: crate::CompilerPolicy) -> 
         }
         Err(_) => {
             let rust_log = std::env::var("RUST_LOG").ok();
-            let filter = stderr_log_filter(rust_log.as_deref(), std::env::var_os("ROCK_LSP_TIMING").is_some())?;
+            let filter = stderr_log_filter(
+                rust_log.as_deref(),
+                std::env::var_os("ROCK_LSP_TIMING").is_some(),
+            )?;
             rock_log::init_filtered(filter, rock_log::Sink::Stderr);
         }
     }
@@ -213,7 +227,9 @@ pub fn run_cli_with_policy(args: Vec<String>, policy: crate::CompilerPolicy) -> 
 
     match matches.subcommand() {
         None | Some(("serve", _)) => crate::run_lsp_server_with_policy(policy),
-        Some(("diagnostics", m)) => cli::bone_lsp::diagnostics_with_policy(arg_str(m, "file"), policy),
+        Some(("diagnostics", m)) => {
+            cli::bone_lsp::diagnostics_with_policy(arg_str(m, "file"), policy)
+        }
         Some(("lint", m)) => cli::bone_lsp::lint_with_policy(arg_str(m, "file"), policy),
         Some(("inline-lua-census", m)) => {
             let paths: Vec<String> = m
@@ -245,8 +261,9 @@ pub fn run_cli_with_policy(args: Vec<String>, policy: crate::CompilerPolicy) -> 
                     Some(s) => s
                         .split(',')
                         .map(|p| {
-                            bone_query::MatchPolicy::parse(p)
-                                .ok_or_else(|| anyhow::anyhow!("unknown policy `{p}` (clean|subseq|subseq3)"))
+                            bone_query::MatchPolicy::parse(p).ok_or_else(|| {
+                                anyhow::anyhow!("unknown policy `{p}` (clean|subseq|subseq3)")
+                            })
                         })
                         .collect::<Result<Vec<_>>>()?,
                     None => vec![
@@ -259,7 +276,9 @@ pub fn run_cli_with_policy(args: Vec<String>, policy: crate::CompilerPolicy) -> 
                 if repl {
                     cli::bone_lsp::completion_repl(&file, line, col, &policies, top, policy)
                 } else {
-                    cli::bone_lsp::completion_matrix(&file, line, col, &prefixes, &policies, top, policy)
+                    cli::bone_lsp::completion_matrix(
+                        &file, line, col, &prefixes, &policies, top, policy,
+                    )
                 }
             }
         }
@@ -292,7 +311,9 @@ pub fn run_cli_with_policy(args: Vec<String>, policy: crate::CompilerPolicy) -> 
             let (file, line, col) = bone_position(m)?;
             cli::bone_lsp::signature_help(&file, line, col, policy)
         }
-        Some(("document-symbols", m)) => cli::bone_lsp::document_symbols(arg_str(m, "file"), policy),
+        Some(("document-symbols", m)) => {
+            cli::bone_lsp::document_symbols(arg_str(m, "file"), policy)
+        }
         Some(("workspace-symbols", m)) => {
             cli::bone_lsp::workspace_symbols(arg_str(m, "file"), arg_str(m, "query"), policy)
         }
@@ -309,24 +330,48 @@ mod tests {
     /// Which of `(target, level)` the filter built from these settings enables.
     fn enabled(rust_log: Option<&str>, timing: bool, probes: &[(&str, Level)]) -> Vec<bool> {
         let filter = stderr_log_filter(rust_log, timing).unwrap();
-        probes.iter().map(|(target, level)| filter.enabled(target, *level)).collect()
+        probes
+            .iter()
+            .map(|(target, level)| filter.enabled(target, *level))
+            .collect()
     }
 
     #[test]
     fn rust_log_accepts_standard_directives() {
         use Level::*;
-        assert_eq!(enabled(Some("rock_lsp=debug"), false,
-            &[("rock_lsp", Debug), ("other", Warn), ("other", Info)]), [true, true, false]);
-        assert_eq!(enabled(Some("info,bone_query=trace"), false,
-            &[("x", Info), ("x", Debug), ("bone_query", Trace)]), [true, false, true]);
-        assert_eq!(enabled(None, true,
-            &[("x", Warn), ("x", Info), ("lsp_timing", Info)]), [true, false, true]);
+        assert_eq!(
+            enabled(
+                Some("rock_lsp=debug"),
+                false,
+                &[("rock_lsp", Debug), ("other", Warn), ("other", Info)]
+            ),
+            [true, true, false]
+        );
+        assert_eq!(
+            enabled(
+                Some("info,bone_query=trace"),
+                false,
+                &[("x", Info), ("x", Debug), ("bone_query", Trace)]
+            ),
+            [true, false, true]
+        );
+        assert_eq!(
+            enabled(
+                None,
+                true,
+                &[("x", Warn), ("x", Info), ("lsp_timing", Info)]
+            ),
+            [true, false, true]
+        );
     }
 
     #[test]
     fn rust_log_rejects_unparsable_directives() {
         for bad in ["rock_lsp=loud", "a=b=c"] {
-            let err = stderr_log_filter(Some(bad), false).err().expect(bad).to_string();
+            let err = stderr_log_filter(Some(bad), false)
+                .err()
+                .expect(bad)
+                .to_string();
             assert!(err.contains("RUST_LOG") && err.contains(bad), "{err}");
         }
     }
@@ -346,7 +391,13 @@ mod tests {
     fn unopenable_debug_log_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("missing-dir").join("lsp.log");
-        let err = open_debug_log(path.to_str().unwrap()).err().expect("open must fail").to_string();
-        assert!(err.contains("ROCK_LSP_DEBUG") && err.contains("missing-dir"), "{err}");
+        let err = open_debug_log(path.to_str().unwrap())
+            .err()
+            .expect("open must fail")
+            .to_string();
+        assert!(
+            err.contains("ROCK_LSP_DEBUG") && err.contains("missing-dir"),
+            "{err}"
+        );
     }
 }

@@ -66,7 +66,11 @@ pub fn check_types(src: &str) -> Result<(), String> {
     let mut body_errs: Vec<&CompilerError> = ws
         .inferences_iter()
         .flat_map(|(_, inf)| inf.errors.values().flatten())
-        .chain(ws.modules.iter().flat_map(|m| m.lowering_errors.values().flatten()))
+        .chain(
+            ws.modules
+                .iter()
+                .flat_map(|m| m.lowering_errors.values().flatten()),
+        )
         .chain(ws.modules.iter().flat_map(|m| m.interface_errors.iter()))
         .collect();
     body_errs.sort_by_key(|e| e.location.offset);
@@ -285,13 +289,13 @@ fn check_types_packages_inner(
         if let Some(e) = module.recovery_errors.first() {
             return Err(render_err(&srcs, &e.clone()));
         }
-        module.package = f.package.map(|(name, id)| {
-            rock_core::source_code::PackageTag {
+        module.package = f
+            .package
+            .map(|(name, id)| rock_core::source_code::PackageTag {
                 id,
                 self_name: name.to_string(),
                 identity_storage: Default::default(),
-            }
-        });
+            });
         modules.push(module);
     }
 
@@ -319,15 +323,22 @@ fn check_types_packages_inner(
         aliases.packages.push(entry);
     }
 
-    let ws = crate::semantic_passes::semantic_pass_enforcing_identity_storage_with_aliases(&mut modules, &aliases)
-        .map_err(|e| render_err(&srcs, &e))?;
+    let ws = crate::semantic_passes::semantic_pass_enforcing_identity_storage_with_aliases(
+        &mut modules,
+        &aliases,
+    )
+    .map_err(|e| render_err(&srcs, &e))?;
 
     // Body / lowering / interface errors fail the fixture (an `@fail` caller
     // treats any Err as the expected outcome).
     let mut body_errs: Vec<&CompilerError> = ws
         .inferences_iter()
         .flat_map(|(_, inf)| inf.errors.values().flatten())
-        .chain(ws.modules.iter().flat_map(|m| m.lowering_errors.values().flatten()))
+        .chain(
+            ws.modules
+                .iter()
+                .flat_map(|m| m.lowering_errors.values().flatten()),
+        )
         .chain(ws.modules.iter().flat_map(|m| m.interface_errors.iter()))
         .collect();
     body_errs.sort_by_key(|e| e.location.offset);
@@ -352,7 +363,9 @@ fn check_types_packages_inner(
             .ok_or_else(|| format!("no inference for {}", f.file))?;
         for ((start, _end), expected) in &annotations {
             if expected == "?" {
-                return Err(format!("`?` dump markers are not supported in package fixtures"));
+                return Err(format!(
+                    "`?` dump markers are not supported in package fixtures"
+                ));
             }
             let actual = crate::query::type_at(&ws, mid, inf, *start).ok_or_else(|| {
                 format!("no type at marker (expected `{expected}`) in {}", f.file)
@@ -386,7 +399,12 @@ pub fn parse_embedded_files(body: &str) -> Vec<EmbeddedFile<'_>> {
     for (idx, line) in body.lines().enumerate() {
         if let Some(rest) = line.trim_start().strip_prefix("//--") {
             if let Some(prev) = current.take() {
-                let src = body.lines().skip(prev.3 + 1).take(idx - prev.3 - 1).collect::<Vec<_>>().join("\n");
+                let src = body
+                    .lines()
+                    .skip(prev.3 + 1)
+                    .take(idx - prev.3 - 1)
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 files.push(EmbeddedFile {
                     file: prev.0,
                     package: prev.1,
@@ -402,7 +420,10 @@ pub fn parse_embedded_files(body: &str) -> Vec<EmbeddedFile<'_>> {
                 if let Some(spec) = token.strip_prefix("@pkg=") {
                     let mut parts = spec.split(',');
                     let name: &str = parts.next().unwrap_or("pkg");
-                    let id = parts.next().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
+                    let id = parts
+                        .next()
+                        .and_then(|v| v.parse::<u32>().ok())
+                        .unwrap_or(0);
                     let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
                     package = Some((leaked, id));
                 } else if token == "@v1" {

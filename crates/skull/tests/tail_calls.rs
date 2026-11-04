@@ -6,7 +6,8 @@ fn body<'a>(lua: &'a str, name: &str) -> &'a str {
 
 #[test]
 fn direct_tail_calls_preserve_results_and_effect_order() {
-    let lua = emit_module(r#"
+    let lua = emit_module(
+        r#"
 struct Output { value: int }
 fn write(out: Output, x: int) { out.value = x }
 fn value(x: int) -> int { return x + 1 }
@@ -37,23 +38,38 @@ fn main() {
     print("{out.value}")
     discard_scalar(41)
 }
-"#);
+"#,
+    );
     for name in ["forward_unit", "forward_scalar"] {
-        assert!(body(&lua, name).lines().any(|line| {
-            line.trim_start().starts_with("do return ") && line.contains('(')
-        }), "{name} retains an unnecessary caller frame:\n{}", body(&lua, name));
+        assert!(
+            body(&lua, name)
+                .lines()
+                .any(|line| { line.trim_start().starts_with("do return ") && line.contains('(') }),
+            "{name} retains an unnecessary caller frame:\n{}",
+            body(&lua, name)
+        );
     }
     for name in ["discard_scalar", "work_after_call", "inspect_result"] {
-        assert!(!body(&lua, name).lines().any(|line| {
-            line.trim_start().starts_with("do return ")
-                && (line.contains("write_") || line.contains("value_"))
-        }), "{name} changed return arity or skipped subsequent work");
+        assert!(
+            !body(&lua, name).lines().any(|line| {
+                line.trim_start().starts_with("do return ")
+                    && (line.contains("write_") || line.contains("value_"))
+            }),
+            "{name} changed return arity or skipped subsequent work"
+        );
     }
     let discard = mangled_name(&lua, "discard_scalar");
     let foreign_scalar = mangled_name(&lua, "foreign_scalar");
     let foreign_unit = mangled_name(&lua, "foreign_unit");
-    assert_eq!(run_luajit(&format!("{lua}\nmain()\nprint(select('#', {discard}(1)))\nprint(select('#', {foreign_scalar}(1)))\nprint(select('#', {foreign_unit}(1)))\n"), "direct_tail_calls"),
-        "41\n42\n42\n43\n12244\n0\n1\n0");
+    assert_eq!(
+        run_luajit(
+            &format!(
+                "{lua}\nmain()\nprint(select('#', {discard}(1)))\nprint(select('#', {foreign_scalar}(1)))\nprint(select('#', {foreign_unit}(1)))\n"
+            ),
+            "direct_tail_calls"
+        ),
+        "41\n42\n42\n43\n12244\n0\n1\n0"
+    );
 }
 
 #[test]
@@ -61,10 +77,12 @@ fn finite_sibling_cache_queries_do_not_exhaust_tailcall_budget() {
     let lua = emit_module(include_str!("fixtures/finite_cache_siblings.rock"));
     let bench = mangled_name(&lua, "bench");
     let controls = mangled_name(&lua, "cache_controls");
-    let getter = crate::common::definition_names(&lua).into_iter()
+    let getter = crate::common::definition_names(&lua)
+        .into_iter()
         .find(|name| name.starts_with("__weak_cache_entity_get_"))
         .expect("the typed cache getter must be emitted");
-    let driver = format!(r#"
+    let driver = format!(
+        r#"
 local jit = require("jit")
 local util = require("jit.util")
 local vm = require("jit.vmdef")
@@ -88,7 +106,14 @@ for pc = 1, util.funcinfo({getter}).bytecodes - 1 do
     local op = vm.bcnames:sub(index + 1, index + 6)
     assert(op ~= "CALLT " and op ~= "CALLMT", "cache lookup must not tail-forward")
 end
-"#);
-    assert_eq!(run_luajit(&format!("{lua}\n{driver}"), "finite_cache_siblings"), "32000:0");
-    assert!(!lua.contains("function __weak_cache_read("), "the single-use forwarding helper must be removed");
+"#
+    );
+    assert_eq!(
+        run_luajit(&format!("{lua}\n{driver}"), "finite_cache_siblings"),
+        "32000:0"
+    );
+    assert!(
+        !lua.contains("function __weak_cache_read("),
+        "the single-use forwarding helper must be removed"
+    );
 }

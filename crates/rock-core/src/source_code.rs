@@ -354,8 +354,8 @@ impl LineCol {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use test_utils::strip_ansi_sgr;
     use crate::utils::{LineColError, line_col_to_offset};
+    use test_utils::strip_ansi_sgr;
 
     const FILE: &str = "main.rock";
 
@@ -368,7 +368,11 @@ mod tests {
         }
     }
 
-    fn span(line_range: (usize, usize), col_range: (usize, usize), offset_range: (usize, usize)) -> Span {
+    fn span(
+        line_range: (usize, usize),
+        col_range: (usize, usize),
+        offset_range: (usize, usize),
+    ) -> Span {
         Span {
             file: ustr::ustr(FILE),
             line_range,
@@ -392,7 +396,11 @@ mod tests {
         assert_eq!(Span::default(), Span::unknown());
         assert_eq!(LineCol::unknown().file, Span::unknown().file);
         assert_eq!(
-            (LineCol::unknown().line, LineCol::unknown().col, LineCol::unknown().offset),
+            (
+                LineCol::unknown().line,
+                LineCol::unknown().col,
+                LineCol::unknown().offset
+            ),
             (0, 0, 0)
         );
     }
@@ -476,7 +484,10 @@ mod tests {
 
     #[test]
     fn debug_names_the_file_but_not_the_ranges() {
-        assert_eq!(format!("{:?}", span((1, 2), (3, 4), (5, 6))), "Span(main.rock)");
+        assert_eq!(
+            format!("{:?}", span((1, 2), (3, 4), (5, 6))),
+            "Span(main.rock)"
+        );
         assert_eq!(format!("{:?}", Span::unknown()), "Span(unknown)");
     }
 

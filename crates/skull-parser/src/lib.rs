@@ -14,10 +14,10 @@ pub mod sexp;
 pub use ast::*;
 pub use parser::Parser;
 
+pub use ordered_float::OrderedFloat;
 pub use rock_core::errors::CompilerErrorKind;
 pub use rock_core::source_code::{Dialect, GlobalPolicy, IdentityStorage, PackageTag};
 pub use rock_core::{CompilerError, SourceFiles, Span, source_file_from_path_and_contents};
-pub use ordered_float::OrderedFloat;
 pub use rock_tokenizer::TokenKind;
 use rock_tokenizer::Tokenizer;
 use ustr::Ustr;
@@ -41,7 +41,11 @@ pub fn parse_module(source: &str, file: Ustr) -> Result<Ast, CompilerError> {
 /// [`parse_module`] with the source dialect selected. V1 files enable the
 /// modules-v1 grammar (`(expr : Type)` ascription, `::` paths, module
 /// items) and reject the legacy infix `expr :: Type` ascription.
-pub fn parse_module_with_dialect(source: &str, file: Ustr, dialect: Dialect) -> Result<Ast, CompilerError> {
+pub fn parse_module_with_dialect(
+    source: &str,
+    file: Ustr,
+    dialect: Dialect,
+) -> Result<Ast, CompilerError> {
     let tokens = Tokenizer::new(source, file).tokenize()?;
     let mut ast = Parser::new_with_dialect(tokens, source, 0, dialect).parse_module()?;
     ast.file = file;
@@ -131,7 +135,8 @@ pub fn cook_one(ast: &mut Ast, registry: &macro_expand::MacroRegistry) {
 }
 
 pub use macro_expand::{
-    check_macro_call_labels, check_macro_call_labels_in, check_macro_name_uniqueness, collect_registry, MacroRegistry,
+    MacroRegistry, check_macro_call_labels, check_macro_call_labels_in,
+    check_macro_name_uniqueness, collect_registry,
 };
 
 #[cfg(test)]
@@ -189,13 +194,22 @@ mod tests {
         let (s, e) = item.span.offset_range;
         let sub = &src[s..e];
 
-        let mini =
-            parse_one_item(sub, file, s, item.span.line_range.0, item.span.col_range.0, Dialect::Legacy)
-                .expect("parse_one_item");
+        let mini = parse_one_item(
+            sub,
+            file,
+            s,
+            item.span.line_range.0,
+            item.span.col_range.0,
+            Dialect::Legacy,
+        )
+        .expect("parse_one_item");
         assert_eq!(mini.items.len(), 1, "exactly one item parsed");
         let m = &mini.items[0];
 
-        assert_eq!(m.span.offset_range, item.span.offset_range, "item offset span");
+        assert_eq!(
+            m.span.offset_range, item.span.offset_range,
+            "item offset span"
+        );
         assert_eq!(m.span.line_range, item.span.line_range, "item line range");
 
         let body_block = |it: &Item| match &it.kind {
@@ -205,7 +219,11 @@ mod tests {
         let mb = body_block(m);
         let fb = body_block(item);
         // A nested node's absolute span: wrong base offset would shift it.
-        assert_eq!(mini.b(&mb).span.offset_range, full.b(&fb).span.offset_range, "body block span");
+        assert_eq!(
+            mini.b(&mb).span.offset_range,
+            full.b(&fb).span.offset_range,
+            "body block span"
+        );
         assert_eq!(mini.block_sexp(mb), full.block_sexp(fb), "body s-expr");
     }
 
@@ -226,7 +244,10 @@ mod tests {
             Dialect::Legacy,
         )
         .expect("parse_one_item");
-        assert_eq!(mini.items[0].span.offset_range, item.span.offset_range, "annotated item span");
+        assert_eq!(
+            mini.items[0].span.offset_range, item.span.offset_range,
+            "annotated item span"
+        );
         assert_eq!(mini.items[0].annotations.len(), 1, "annotation preserved");
     }
 
@@ -238,12 +259,21 @@ mod tests {
         let src = "inline(lua) fn f(x: int) -> int \"\"\" return x \"\"\"\n";
         let file = Ustr::from("<clean>");
         let lenient = parse_module(src, file).expect("recovering parse still returns a tree");
-        assert!(!lenient.recovery_errors.is_empty(), "the dropped item is recorded");
         assert!(
-            !lenient.items.iter().any(|i| matches!(&i.kind, ItemKind::Function(_))),
+            !lenient.recovery_errors.is_empty(),
+            "the dropped item is recorded"
+        );
+        assert!(
+            !lenient
+                .items
+                .iter()
+                .any(|i| matches!(&i.kind, ItemKind::Function(_))),
             "the malformed fn is absent from the lenient tree, which is the trap"
         );
-        assert!(parse_module_clean(src, file).is_err(), "strict parse rejects it");
+        assert!(
+            parse_module_clean(src, file).is_err(),
+            "strict parse rejects it"
+        );
         // Both sides: clean source must still come back Ok.
         assert!(parse_module_clean("fn f(x: int) -> int { return x }\n", file).is_ok());
     }
@@ -251,7 +281,11 @@ mod tests {
     #[test]
     fn nesting_beyond_the_limit_drops_only_its_item() {
         let depth = rock_core::nesting::MAX_NESTING_DEPTH as usize;
-        let deep = format!("fn deep() {{\n{}{}}}\n", "if true {\n".repeat(depth), "}\n".repeat(depth));
+        let deep = format!(
+            "fn deep() {{\n{}{}}}\n",
+            "if true {\n".repeat(depth),
+            "}\n".repeat(depth)
+        );
         let src = format!("{deep}fn after() {{\n    let broken =\n    let kept = 1\n}}\n");
         // The parser recurses to the limit, so it needs the stack compiler threads get.
         let ast = std::thread::Builder::new()
@@ -260,8 +294,16 @@ mod tests {
             .unwrap()
             .join()
             .unwrap();
-        let messages: Vec<&str> = ast.recovery_errors.iter().map(|e| e.message.as_str()).collect();
-        assert_eq!(messages.len(), 2, "one error for the deep item, one for the broken let: {messages:?}");
+        let messages: Vec<&str> = ast
+            .recovery_errors
+            .iter()
+            .map(|e| e.message.as_str())
+            .collect();
+        assert_eq!(
+            messages.len(),
+            2,
+            "one error for the deep item, one for the broken let: {messages:?}"
+        );
         assert!(messages[0].contains("nested too deeply"), "{messages:?}");
         let names: Vec<_> = ast
             .items
@@ -271,7 +313,11 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(names, ["after"], "the deep fn is dropped and statement recovery still works after it");
+        assert_eq!(
+            names,
+            ["after"],
+            "the deep fn is dropped and statement recovery still works after it"
+        );
     }
 
     #[test]
@@ -304,7 +350,11 @@ mod tests {
         // value, and the annotation's own span must all survive.
         let src = "fn f(@size(4) a: int, b: float) {}";
         let ast = parse_module(src, Ustr::from("test.rock")).expect("parse failed");
-        assert!(ast.recovery_errors.is_empty(), "clean parse: {:?}", ast.recovery_errors);
+        assert!(
+            ast.recovery_errors.is_empty(),
+            "clean parse: {:?}",
+            ast.recovery_errors
+        );
         let f = first_fn(&ast);
         assert_eq!(f.params[0].annotations.len(), 1, "param 0 annotated");
         assert_eq!(f.params[1].annotations.len(), 0, "param 1 unannotated");
@@ -319,15 +369,25 @@ mod tests {
         );
         // The annotation span is a real, non-empty source range distinct from
         // the param name's.
-        assert!(a.span.offset_range.0 < a.span.offset_range.1, "anno span non-empty");
-        assert_ne!(a.span.offset_range, f.params[0].name.span.offset_range, "anno span != name span");
+        assert!(
+            a.span.offset_range.0 < a.span.offset_range.1,
+            "anno span non-empty"
+        );
+        assert_ne!(
+            a.span.offset_range, f.params[0].name.span.offset_range,
+            "anno span != name span"
+        );
     }
 
     #[test]
     fn multiple_annotations_on_one_param() {
         let src = "fn f(@instance @size(2) x: int) {}";
         let ast = parse_module(src, Ustr::from("test.rock")).expect("parse failed");
-        assert!(ast.recovery_errors.is_empty(), "clean parse: {:?}", ast.recovery_errors);
+        assert!(
+            ast.recovery_errors.is_empty(),
+            "clean parse: {:?}",
+            ast.recovery_errors
+        );
         let anns = &first_fn(&ast).params[0].annotations;
         assert_eq!(anns.len(), 2, "two annotations");
         assert_eq!(anns[0].name.name, "instance");
@@ -341,7 +401,11 @@ mod tests {
         // `@flat` bare and `@w(3)` with an arg on struct fields.
         let src = "struct S { @flat a: int, @w(3) b: float, c: bool }";
         let ast = parse_module(src, Ustr::from("test.rock")).expect("parse failed");
-        assert!(ast.recovery_errors.is_empty(), "clean parse: {:?}", ast.recovery_errors);
+        assert!(
+            ast.recovery_errors.is_empty(),
+            "clean parse: {:?}",
+            ast.recovery_errors
+        );
         let s = first_struct(&ast);
         assert_eq!(s.fields[0].annotations.len(), 1, "field 0 annotated");
         assert_eq!(s.fields[0].annotations[0].name.name, "flat");
@@ -356,7 +420,11 @@ mod tests {
     fn multiple_annotations_on_value_field() {
         let src = "value V { @flat @w c: int }";
         let ast = parse_module(src, Ustr::from("test.rock")).expect("parse failed");
-        assert!(ast.recovery_errors.is_empty(), "clean parse: {:?}", ast.recovery_errors);
+        assert!(
+            ast.recovery_errors.is_empty(),
+            "clean parse: {:?}",
+            ast.recovery_errors
+        );
         let s = first_struct(&ast);
         assert!(s.is_value, "value struct");
         let anns = &s.fields[0].annotations;
@@ -369,7 +437,11 @@ mod tests {
     fn nobox_value_marks_the_value_type() {
         let src = "nobox value V { x: int }";
         let ast = parse_module(src, Ustr::from("test.rock")).expect("parse failed");
-        assert!(ast.recovery_errors.is_empty(), "clean parse: {:?}", ast.recovery_errors);
+        assert!(
+            ast.recovery_errors.is_empty(),
+            "clean parse: {:?}",
+            ast.recovery_errors
+        );
         let s = first_struct(&ast);
         assert!(s.is_value);
         assert!(s.is_nobox);
@@ -380,7 +452,9 @@ mod tests {
         let ast = parse_module("nobox struct S { x: int }", Ustr::from("test.rock"))
             .expect("parser recovers the invalid item");
         assert!(
-            ast.recovery_errors.iter().any(|err| err.message.contains("`nobox` requires `value`")),
+            ast.recovery_errors
+                .iter()
+                .any(|err| err.message.contains("`nobox` requires `value`")),
             "{:?}",
             ast.recovery_errors
         );
@@ -392,10 +466,22 @@ mod tests {
         // land -- existing item-annotation parsing is untouched.
         let src = "@pure fn f(@size(1) a: int) {}";
         let ast = parse_module(src, Ustr::from("test.rock")).expect("parse failed");
-        assert!(ast.recovery_errors.is_empty(), "clean parse: {:?}", ast.recovery_errors);
-        assert_eq!(ast.items[0].annotations.len(), 1, "item annotation preserved");
+        assert!(
+            ast.recovery_errors.is_empty(),
+            "clean parse: {:?}",
+            ast.recovery_errors
+        );
+        assert_eq!(
+            ast.items[0].annotations.len(),
+            1,
+            "item annotation preserved"
+        );
         assert_eq!(ast.items[0].annotations[0].name.name, "pure");
-        assert_eq!(first_fn(&ast).params[0].annotations.len(), 1, "param annotation preserved");
+        assert_eq!(
+            first_fn(&ast).params[0].annotations.len(),
+            1,
+            "param annotation preserved"
+        );
     }
 
     #[test]
@@ -403,12 +489,22 @@ mod tests {
         // Regression guard: the new slots default empty for ordinary decls.
         let src = "fn f(a: int, b: float) {} struct S { x: int } value V { y: float }";
         let ast = parse_module(src, Ustr::from("test.rock")).expect("parse failed");
-        assert!(ast.recovery_errors.is_empty(), "clean parse: {:?}", ast.recovery_errors);
+        assert!(
+            ast.recovery_errors.is_empty(),
+            "clean parse: {:?}",
+            ast.recovery_errors
+        );
         let f = first_fn(&ast);
-        assert!(f.params.iter().all(|p| p.annotations.is_empty()), "no param annotations");
+        assert!(
+            f.params.iter().all(|p| p.annotations.is_empty()),
+            "no param annotations"
+        );
         for it in &ast.items[1..] {
             if let ItemKind::Struct(s) = &it.kind {
-                assert!(s.fields.iter().all(|fl| fl.annotations.is_empty()), "no field annotations");
+                assert!(
+                    s.fields.iter().all(|fl| fl.annotations.is_empty()),
+                    "no field annotations"
+                );
             }
         }
     }
@@ -454,14 +550,16 @@ mod tests {
         // whole match (recovered to a stray `E::B {}`).
         let s = body_sexp("fn f(e: E, x: bool) { match e { E::A if x => {} E::B => {} } }");
         assert_eq!(
-            s,
-            "(block (match e (arm E::A (if x) (block )) (arm E::B (block ))))",
+            s, "(block (match e (arm E::A (if x) (block )) (arm E::B (block ))))",
             "guarded arm must parse as a guard, not a lambda"
         );
         // Paren-form guard `(x)` and binop guards stay guards too (the arm's `=>`
         // survives, the match isn't collapsed).
         let p = body_sexp("fn f(e: E, x: bool) { match e { E::A if (x) => {} _ => {} } }");
-        assert!(p.contains("(arm E::A (if") && p.contains("(arm _"), "paren-form guard: {p}");
+        assert!(
+            p.contains("(arm E::A (if") && p.contains("(arm _"),
+            "paren-form guard: {p}"
+        );
         let b = body_sexp("fn f(e: E, x: bool) { match e { E::A if x && x => {} _ => {} } }");
         assert!(b.contains("(arm E::A (if (and x x))"), "binop guard: {b}");
     }
@@ -472,7 +570,8 @@ mod tests {
         // ident `S` then a block. Pre-fix `with_allow_literals(false)` on the arm
         // body stopped the expr at `S`, leaving `{ x: 1.0 }` to mis-parse as a new
         // arm pattern ("unsupported pattern: OpenCurly").
-        let s = body_sexp("fn f(k: K) -> S { match k { K::A => S { x: 1.0 } K::B => S { x: 2.0 } } }");
+        let s =
+            body_sexp("fn f(k: K) -> S { match k { K::A => S { x: 1.0 } K::B => S { x: 2.0 } } }");
         assert!(
             s.contains("(arm K::A (block (struct S"),
             "arm body must parse as a struct literal, not stop at the ident: {s}"
@@ -503,7 +602,10 @@ mod tests {
 
     #[test]
     fn parse_static_local_annotated() {
-        check("static scratch: [FixVec2] = []", "(block (static scratch [FixVec2] []))");
+        check(
+            "static scratch: [FixVec2] = []",
+            "(block (static scratch [FixVec2] []))",
+        );
     }
 
     #[test]
@@ -511,14 +613,20 @@ mod tests {
         // `static` used as an ordinary ident (a call arg) stays an ident -- the
         // contextual keyword only fires at statement start followed by an ident.
         let s = body_sexp(r#"fn f() { load_audio("a.wav", static) }"#);
-        assert!(s.contains("static"), "static usable as an ordinary ident: {s}");
+        assert!(
+            s.contains("static"),
+            "static usable as an ordinary ident: {s}"
+        );
     }
 
     #[test]
     fn lambda_still_parses_outside_a_guard() {
         // The block must not leak into normal lambda parsing.
         let s = body_sexp("fn f() { let g = x => x + 1 }");
-        assert!(s.contains("lambda") || s.contains("=>"), "bare-ident lambda still parses: {s}");
+        assert!(
+            s.contains("lambda") || s.contains("=>"),
+            "bare-ident lambda still parses: {s}"
+        );
     }
 
     #[test]
@@ -532,7 +640,11 @@ mod tests {
                    fn incomplete(x: int) -> int\n\
                    fn survivor() -> int { return 7 }\n";
         let ast = parse_module(src, Ustr::from("<recovery>")).expect("total parse");
-        assert_eq!(ast.recovery_errors.len(), 1, "exactly the one malformed item");
+        assert_eq!(
+            ast.recovery_errors.len(),
+            1,
+            "exactly the one malformed item"
+        );
         let fns: Vec<&str> = ast
             .items
             .iter()
@@ -542,8 +654,14 @@ mod tests {
             })
             .collect();
         assert!(fns.contains(&"helper"), "the item before survives: {fns:?}");
-        assert!(fns.contains(&"survivor"), "the item AFTER survives: {fns:?}");
-        assert!(!fns.contains(&"incomplete"), "the malformed item is the only one dropped: {fns:?}");
+        assert!(
+            fns.contains(&"survivor"),
+            "the item AFTER survives: {fns:?}"
+        );
+        assert!(
+            !fns.contains(&"incomplete"),
+            "the malformed item is the only one dropped: {fns:?}"
+        );
     }
 
     #[test]
@@ -563,7 +681,9 @@ mod tests {
             _ => unreachable!(),
         };
         let stmt = ast.blocks[block].statements[0];
-        let StatementKind::Let(l) = &ast.stmts[stmt].kind else { panic!("expected let") };
+        let StatementKind::Let(l) = &ast.stmts[stmt].kind else {
+            panic!("expected let")
+        };
         let ty = l.ty.expect("no type annotation");
         assert!(matches!(&ast.types[ty].kind, TypeExprKind::Hole(_, Some(n)) if n == "foo"));
     }
@@ -679,7 +799,10 @@ mod tests {
         let InterpolatedPart::Expr(e, spec) = &parts[0] else {
             panic!("expected embedded expr part");
         };
-        assert!(matches!(&ast.exprs[*e].kind, ExprKind::Index(..)), "expr is the index, not truncated");
+        assert!(
+            matches!(&ast.exprs[*e].kind, ExprKind::Index(..)),
+            "expr is the index, not truncated"
+        );
         assert_eq!(spec.as_ref().expect("width spec dropped").width, Some(3));
     }
 
@@ -688,15 +811,15 @@ mod tests {
         // A hole whose expression genuinely fails to parse must surface a
         // spanned error, never silently fall back to literal brace text
         // ("reject, don't fall back"). `add2(2,` is an unterminated call.
-        let ast = parse_module(
-            r#"fn f() { let x = "{add2(2,}" }"#,
-            Ustr::from("test.rock"),
-        );
+        let ast = parse_module(r#"fn f() { let x = "{add2(2,}" }"#, Ustr::from("test.rock"));
         let rejected = match ast {
             Err(_) => true,
             Ok(a) => !a.recovery_errors.is_empty(),
         };
-        assert!(rejected, "malformed hole must be rejected, not emitted as literal text");
+        assert!(
+            rejected,
+            "malformed hole must be rejected, not emitted as literal text"
+        );
     }
 
     /// Every `Ident` span in `ast`, as (name, the source text it covers).
@@ -706,7 +829,10 @@ mod tests {
             .filter_map(|(_, x)| match &x.kind {
                 ExprKind::Ident(id) => {
                     let (s, e) = x.span.offset_range;
-                    Some((id.name.to_string(), src.get(s..e).unwrap_or("<out of range>").to_string()))
+                    Some((
+                        id.name.to_string(),
+                        src.get(s..e).unwrap_or("<out of range>").to_string(),
+                    ))
                 }
                 _ => None,
             })
@@ -734,9 +860,15 @@ mod tests {
         // left relative to that slice lands `offset` bytes short.
         let item = &full.items[1];
         let (s, e) = item.span.offset_range;
-        let mini =
-            parse_one_item(&src[s..e], file, s, item.span.line_range.0, item.span.col_range.0, Dialect::Legacy)
-                .expect("parse_one_item");
+        let mini = parse_one_item(
+            &src[s..e],
+            file,
+            s,
+            item.span.line_range.0,
+            item.span.col_range.0,
+            Dialect::Legacy,
+        )
+        .expect("parse_one_item");
         for (name, text) in ident_spans(&mini, src) {
             assert_eq!(text, name, "reparsed ident span does not cover its source");
         }
@@ -746,7 +878,10 @@ mod tests {
     fn expr_hole_sexp_matches_rock_numbering() {
         // Bare anonymous hole renders `?0`; a named one renders `?name`.
         assert_eq!(body_sexp("fn f() { let x = ? }"), "(block (let x () ?0))");
-        assert_eq!(body_sexp("fn f() { let x = ?foo }"), "(block (let x () ?foo))");
+        assert_eq!(
+            body_sexp("fn f() { let x = ?foo }"),
+            "(block (let x () ?foo))"
+        );
         // A type hole bumps the shared counter, so the following expr hole is ?1.
         assert_eq!(
             body_sexp("fn f() { let a: ? = 1\nlet b = ? }"),
@@ -776,15 +911,21 @@ mod tests {
         )
         .expect("parse failed");
 
-        let ItemKind::Global(g) = &ast.items[0].kind else { panic!("expected global") };
+        let ItemKind::Global(g) = &ast.items[0].kind else {
+            panic!("expected global")
+        };
         assert!(g.keyword_span.is_some(), "global keyword_span dropped");
 
         // fn keyword_span, the `for x: T in` element type, and `return` keyword_span.
-        let ItemKind::Function(func) = &ast.items[1].kind else { panic!("expected fn") };
+        let ItemKind::Function(func) = &ast.items[1].kind else {
+            panic!("expected fn")
+        };
         assert!(func.keyword_span.is_some(), "fn keyword_span dropped");
         let body = func.body.rock_block().unwrap();
         let for_stmt = ast.blocks[body].statements[0];
-        let StatementKind::For(f) = &ast.stmts[for_stmt].kind else { panic!("expected for") };
+        let StatementKind::For(f) = &ast.stmts[for_stmt].kind else {
+            panic!("expected for")
+        };
         assert!(f.keyword_span.is_some(), "for keyword_span dropped");
         let ty = f.ty.expect("for element type `: int` dropped");
         assert!(matches!(ast.types[ty].kind, TypeExprKind::Int));
@@ -802,11 +943,16 @@ mod tests {
             Ustr::from("t.rock"),
         )
         .expect("ref types parse");
-        let ItemKind::Function(f) = &ast.items[0].kind else { panic!("expected fn") };
+        let ItemKind::Function(f) = &ast.items[0].kind else {
+            panic!("expected fn")
+        };
 
         assert_eq!(ast.type_surface(f.params[0].ty), "ref Player");
         assert_eq!(ast.type_surface(f.params[1].ty), "(ref Player)?");
-        assert_eq!(ast.type_surface(f.return_ty.expect("return type")), "ref Player");
+        assert_eq!(
+            ast.type_surface(f.return_ty.expect("return type")),
+            "ref Player"
+        );
     }
 
     #[test]
@@ -819,7 +965,9 @@ mod tests {
             Ustr::from("t.rock"),
         )
         .expect("parse failed");
-        let ItemKind::Struct(s) = &ast.items[0].kind else { panic!("expected struct") };
+        let ItemKind::Struct(s) = &ast.items[0].kind else {
+            panic!("expected struct")
+        };
         let def = s.fields[1].default.expect("current has a default");
         assert!(matches!(&ast.exprs[def].kind, ExprKind::SiblingFieldRef(id) if id.name == "max"));
         assert_eq!(ast.expr_sexp(def), ".max");
@@ -982,7 +1130,10 @@ mod tests {
         let ItemKind::Function(f) = &ast.items[0].kind else {
             panic!()
         };
-        assert_eq!(ast.block_sexp(f.body.rock_block().unwrap()), "(block (call foo (+ (+ a b) c)))");
+        assert_eq!(
+            ast.block_sexp(f.body.rock_block().unwrap()),
+            "(block (call foo (+ (+ a b) c)))"
+        );
 
         let src = "fn f() {\n    let x = 10.0\n        - 1.0\n    return x\n        - 2.0\n}";
         let ast = parse_module_clean(src, Ustr::from("test.rock")).unwrap();
@@ -1009,7 +1160,10 @@ mod tests {
     fn item0(src: &str) -> (String, String) {
         let ast = parse_module(src, Ustr::from("test.rock")).expect("parse failed");
         match &ast.items[0].kind {
-            ItemKind::Function(f) => (f.name.name.to_string(), ast.block_sexp(f.body.rock_block().unwrap())),
+            ItemKind::Function(f) => (
+                f.name.name.to_string(),
+                ast.block_sexp(f.body.rock_block().unwrap()),
+            ),
             other => panic!("expected function item, got {:?}", other),
         }
     }
@@ -1043,7 +1197,10 @@ mod tests {
 
     #[test]
     fn parse_nested_fn_no_return_type() {
-        check("fn bump() { n = n + 1 }", "(block (fn bump () () (block (= n (+ n 1)))))");
+        check(
+            "fn bump() { n = n + 1 }",
+            "(block (fn bump () () (block (= n (+ n 1)))))",
+        );
     }
 
     #[test]
@@ -1077,7 +1234,9 @@ mod tests {
         // Sigil `!(...)` lets `Box<int>` / `[int]` pass as `ty` fragments;
         // `ident` fragment renames the emitted struct.
         assert_eq!(
-            cooked_items("macro mk(N: ident, E: ty) { struct N { v: E } }\nmk!(WrapBox, Box<int>)\nmk!(WrapArr, [int])"),
+            cooked_items(
+                "macro mk(N: ident, E: ty) { struct N { v: E } }\nmk!(WrapBox, Box<int>)\nmk!(WrapArr, [int])"
+            ),
             "(struct WrapBox (field v (Box int))) (struct WrapArr (field v [int]))"
         );
     }
@@ -1182,18 +1341,9 @@ mod tests {
             item0("operator(lua) ==(a: int, b: int) -> bool { a == b }").0,
             "__op_eq"
         );
-        assert_eq!(
-            item0("operator -(a: int) -> int { -a }").0,
-            "__unm"
-        );
-        assert_eq!(
-            item0("operator !(a: bool) -> bool { !a }").0,
-            "__not"
-        );
-        assert_eq!(
-            item0("operator ~(a: int) -> int { ~a }").0,
-            "__op_bitnot"
-        );
+        assert_eq!(item0("operator -(a: int) -> int { -a }").0, "__unm");
+        assert_eq!(item0("operator !(a: bool) -> bool { !a }").0, "__not");
+        assert_eq!(item0("operator ~(a: int) -> int { ~a }").0, "__op_bitnot");
     }
 
     #[test]
@@ -1297,20 +1447,25 @@ mod tests {
         let ItemKind::Function(f) = &ast.items[0].kind else {
             panic!("expected fn");
         };
-        assert!(matches!(&f.body, FunctionBody::Inline(FnBackend::Lua, _)), "got {:?}", f.body);
+        assert!(
+            matches!(&f.body, FunctionBody::Inline(FnBackend::Lua, _)),
+            "got {:?}",
+            f.body
+        );
     }
 
     #[test]
     fn extern_js_is_its_own_variant() {
-        let ast = parse_module(
-            "extern(js) fn now() -> float",
-            Ustr::from("test.rock"),
-        )
-        .expect("parse failed");
+        let ast = parse_module("extern(js) fn now() -> float", Ustr::from("test.rock"))
+            .expect("parse failed");
         let ItemKind::Function(f) = &ast.items[0].kind else {
             panic!("expected fn");
         };
-        assert!(matches!(&f.body, FunctionBody::ExternJs), "got {:?}", f.body);
+        assert!(
+            matches!(&f.body, FunctionBody::ExternJs),
+            "got {:?}",
+            f.body
+        );
     }
 
     #[test]
@@ -1321,7 +1476,9 @@ mod tests {
         )
         .expect("parse recovers");
         assert!(
-            ast.recovery_errors.iter().any(|e| e.message.contains("unknown inline backend")),
+            ast.recovery_errors
+                .iter()
+                .any(|e| e.message.contains("unknown inline backend")),
             "unknown inline backend must surface a recovery error, got {:?}",
             ast.recovery_errors
         );
@@ -1329,13 +1486,12 @@ mod tests {
 
     #[test]
     fn unknown_extern_backend_rejects() {
-        let ast = parse_module(
-            "extern(wasm) fn now() -> float",
-            Ustr::from("test.rock"),
-        )
-        .expect("parse recovers");
+        let ast = parse_module("extern(wasm) fn now() -> float", Ustr::from("test.rock"))
+            .expect("parse recovers");
         assert!(
-            ast.recovery_errors.iter().any(|e| e.message.contains("unknown extern backend")),
+            ast.recovery_errors
+                .iter()
+                .any(|e| e.message.contains("unknown extern backend")),
             "unknown extern backend must surface a recovery error, got {:?}",
             ast.recovery_errors
         );
@@ -1362,7 +1518,10 @@ mod tests {
                 None => braceless += 1,
             }
         }
-        assert_eq!(braceless, expected_braceless, "synthetic braceless block count");
+        assert_eq!(
+            braceless, expected_braceless,
+            "synthetic braceless block count"
+        );
     }
 
     #[test]
@@ -1406,7 +1565,12 @@ mod tests {
         assert!(ast.b(&body).braces.is_some(), "fn body braces survive cook");
         // ...but every block spanned to the call site (the retagged expansion,
         // incl. the template's nested braced block) has none.
-        let call_span = ast.b(&body).statements.first().map(|&s| ast.stmts[s].span).unwrap();
+        let call_span = ast
+            .b(&body)
+            .statements
+            .first()
+            .map(|&s| ast.stmts[s].span)
+            .unwrap();
         let retagged: Vec<_> = ast
             .blocks
             .iter()
@@ -1428,10 +1592,14 @@ mod modules_grammar_tests {
     }
 
     fn body_first_expr(src: &str, dialect: Dialect) -> String {
-        let ast = parse_module_with_dialect(src, Ustr::from("test.rock"), dialect)
-            .expect("parse failed");
+        let ast =
+            parse_module_with_dialect(src, Ustr::from("test.rock"), dialect).expect("parse failed");
         let err_count = ast.recovery_errors.len();
-        assert_eq!(err_count, 0, "clean fixture must not recover: {:?}", ast.recovery_errors);
+        assert_eq!(
+            err_count, 0,
+            "clean fixture must not recover: {:?}",
+            ast.recovery_errors
+        );
         match &ast.items[0].kind {
             ItemKind::Function(f) => {
                 let block = f.body.rock_block().unwrap();
@@ -1483,7 +1651,11 @@ mod modules_grammar_tests {
             Dialect::V1,
         )
         .expect("parses");
-        assert!(ast.recovery_errors.is_empty(), "no recovery: {:?}", ast.recovery_errors);
+        assert!(
+            ast.recovery_errors.is_empty(),
+            "no recovery: {:?}",
+            ast.recovery_errors
+        );
         let ItemKind::Function(f) = &ast.items[0].kind else {
             panic!("expected fn");
         };
@@ -1504,17 +1676,18 @@ mod modules_grammar_tests {
     fn v1_rejects_infix_ascription_after_calls() {
         let err = parse_v1("fn f(x: int) { let y = g(x) :: int }")
             .expect_err("v1 must reject infix ascription after a call");
-        assert!(err.message.contains("(expr : Type)"), "got: {}", err.message);
+        assert!(
+            err.message.contains("(expr : Type)"),
+            "got: {}",
+            err.message
+        );
     }
 
     #[test]
     fn typed_lambda_is_not_an_ascription_in_v1() {
         // `(x : int) => x` — the lambda lookahead wins; `(x : int)` ascription
         // requires the paren group to END the expression.
-        let sexp = body_first_expr(
-            "fn f() { let g = (x : int) => x }",
-            Dialect::V1,
-        );
+        let sexp = body_first_expr("fn f() { let g = (x : int) => x }", Dialect::V1);
         assert!(sexp.starts_with("(lambda"), "got: {sexp}");
     }
 
@@ -1524,7 +1697,10 @@ mod modules_grammar_tests {
             "fn f() { let cb = ((x => x + 1) : fn(int) -> int) }",
             Dialect::V1,
         );
-        assert_eq!(sexp, "(ascribe (paren (lambda (None) None (block (return (+ x 1))))) (fn (int) int))");
+        assert_eq!(
+            sexp,
+            "(ascribe (paren (lambda (None) None (block (return (+ x 1))))) (fn (int) int))"
+        );
     }
 
     #[test]
@@ -1532,7 +1708,11 @@ mod modules_grammar_tests {
         // `(a : int, b : int)` is not a new typed-tuple literal (spec 7).
         let err = parse_v1("fn f() { let t = (a : int, b : int) }")
             .expect_err("multi-colon paren group must reject");
-        assert!(err.message.contains("one expression"), "got: {}", err.message);
+        assert!(
+            err.message.contains("one expression"),
+            "got: {}",
+            err.message
+        );
     }
 
     #[test]
@@ -1579,7 +1759,9 @@ mod modules_path_tests {
     fn let_type(src: &str) -> String {
         let ast = parse_v1(src).expect("parse failed");
         assert!(ast.recovery_errors.is_empty(), "{:?}", ast.recovery_errors);
-        let ItemKind::Function(f) = &ast.items[0].kind else { panic!("expected fn") };
+        let ItemKind::Function(f) = &ast.items[0].kind else {
+            panic!("expected fn")
+        };
         let block = f.body.rock_block().unwrap();
         let StatementKind::Let(l) = &ast.stmts[ast.blocks[block].statements[0]].kind else {
             panic!("expected let");
@@ -1591,7 +1773,9 @@ mod modules_path_tests {
     fn let_value(src: &str) -> String {
         let ast = parse_v1(src).expect("parse failed");
         assert!(ast.recovery_errors.is_empty(), "{:?}", ast.recovery_errors);
-        let ItemKind::Function(f) = &ast.items[0].kind else { panic!("expected fn") };
+        let ItemKind::Function(f) = &ast.items[0].kind else {
+            panic!("expected fn")
+        };
         let block = f.body.rock_block().unwrap();
         let StatementKind::Let(l) = &ast.stmts[ast.blocks[block].statements[0]].kind else {
             panic!("expected let");
@@ -1617,10 +1801,19 @@ mod modules_path_tests {
 
     #[test]
     fn root_anchored_and_self_super_type_paths_parse_in_v1() {
-        assert_eq!(let_type("fn f() { let x: ::app::Actor = x }"), "::app::Actor");
+        assert_eq!(
+            let_type("fn f() { let x: ::app::Actor = x }"),
+            "::app::Actor"
+        );
         assert_eq!(let_type("fn f() { let x: self::Actor = x }"), "self::Actor");
-        assert_eq!(let_type("fn f() { let x: super::shared::T = x }"), "super::shared::T");
-        assert_eq!(let_type("fn f() { let x: super::super::T = x }"), "super::super::T");
+        assert_eq!(
+            let_type("fn f() { let x: super::shared::T = x }"),
+            "super::shared::T"
+        );
+        assert_eq!(
+            let_type("fn f() { let x: super::super::T = x }"),
+            "super::super::T"
+        );
     }
 
     #[test]
@@ -1635,17 +1828,20 @@ mod modules_path_tests {
     fn lowercase_member_is_a_path_in_v1_no_case_guess() {
         // Legacy requires the member to be uppercase for a qualified ident;
         // v1 has no case rule (the resolver decides).
-        assert_eq!(let_value("fn f() { let v = mod_u::helper }"), "mod_u::helper");
+        assert_eq!(
+            let_value("fn f() { let v = mod_u::helper }"),
+            "mod_u::helper"
+        );
     }
 
     #[test]
     fn qualified_call_parses_in_v1() {
-        let ast = parse_v1(
-            "fn f() { let v = sample::combat::heal(actor, 5)\nprint(v) }",
-        )
-        .expect("parse failed");
+        let ast = parse_v1("fn f() { let v = sample::combat::heal(actor, 5)\nprint(v) }")
+            .expect("parse failed");
         assert!(ast.recovery_errors.is_empty(), "{:?}", ast.recovery_errors);
-        let ItemKind::Function(f) = &ast.items[0].kind else { panic!("expected fn") };
+        let ItemKind::Function(f) = &ast.items[0].kind else {
+            panic!("expected fn")
+        };
         let block = f.body.rock_block().unwrap();
         let StatementKind::Let(l) = &ast.stmts[ast.blocks[block].statements[0]].kind else {
             panic!("expected let");
@@ -1661,7 +1857,9 @@ mod modules_path_tests {
     fn qualified_generic_call_parses_in_v1() {
         let ast = parse_v1("fn f() { let v = p::make<int>(3)\nprint(v) }").expect("parse failed");
         assert!(ast.recovery_errors.is_empty(), "{:?}", ast.recovery_errors);
-        let ItemKind::Function(f) = &ast.items[0].kind else { panic!("expected fn") };
+        let ItemKind::Function(f) = &ast.items[0].kind else {
+            panic!("expected fn")
+        };
         let block = f.body.rock_block().unwrap();
         let StatementKind::Let(l) = &ast.stmts[ast.blocks[block].statements[0]].kind else {
             panic!("expected let");
@@ -1678,15 +1876,20 @@ mod modules_path_tests {
         // In v1 `Enum::Variant` is a plain path: the case of the second
         // segment must not decide anything at parse time.
         assert_eq!(let_value("fn f() { let c = Color::Red }"), "Color::Red");
-        assert_eq!(let_value("fn f() { let c = colors::Color::Red }"), "colors::Color::Red");
+        assert_eq!(
+            let_value("fn f() { let c = colors::Color::Red }"),
+            "colors::Color::Red"
+        );
     }
 
     #[test]
     fn qualified_struct_literal_parses_in_v1() {
-        let ast = parse_v1("fn f() { let a = lib::Actor { hp: 100 }\nprint(a) }")
-            .expect("parse failed");
+        let ast =
+            parse_v1("fn f() { let a = lib::Actor { hp: 100 }\nprint(a) }").expect("parse failed");
         assert!(ast.recovery_errors.is_empty(), "{:?}", ast.recovery_errors);
-        let ItemKind::Function(f) = &ast.items[0].kind else { panic!("expected fn") };
+        let ItemKind::Function(f) = &ast.items[0].kind else {
+            panic!("expected fn")
+        };
         let block = f.body.rock_block().unwrap();
         let StatementKind::Let(l) = &ast.stmts[ast.blocks[block].statements[0]].kind else {
             panic!("expected let");
@@ -1710,10 +1913,15 @@ mod modules_path_tests {
         let found = ast.blocks.iter().any(|_| true);
         assert!(found);
         // Depth-check via sexp: match arms render patterns.
-        let ItemKind::Function(f) = &ast.items[0].kind else { panic!("expected fn") };
+        let ItemKind::Function(f) = &ast.items[0].kind else {
+            panic!("expected fn")
+        };
         let block = f.body.rock_block().unwrap();
         let sexp = ast.block_sexp(block);
-        assert!(sexp.contains("msg_kind::Ping"), "pattern should render as a path: {sexp}");
+        assert!(
+            sexp.contains("msg_kind::Ping"),
+            "pattern should render as a path: {sexp}"
+        );
     }
 
     #[test]
@@ -1727,8 +1935,14 @@ mod modules_path_tests {
     fn legacy_qualified_ident_case_rule_unchanged() {
         // Legacy: `Color::Red` is a QualifiedIdent; `mod_u::helper` is NOT
         // (lowercase member falls through to ascription/ident handling).
-        let ast = parse_module("fn f() { let c = Color::Red\nprint(c) }", Ustr::from("test.rock")).expect("parse");
-        let ItemKind::Function(f) = &ast.items[0].kind else { panic!("expected fn") };
+        let ast = parse_module(
+            "fn f() { let c = Color::Red\nprint(c) }",
+            Ustr::from("test.rock"),
+        )
+        .expect("parse");
+        let ItemKind::Function(f) = &ast.items[0].kind else {
+            panic!("expected fn")
+        };
         let block = f.body.rock_block().unwrap();
         let StatementKind::Let(l) = &ast.stmts[ast.blocks[block].statements[0]].kind else {
             panic!("expected let");
@@ -1750,12 +1964,12 @@ mod modules_item_tests {
 
     #[test]
     fn qualified_d_form_receiver_parses_in_v1() {
-        let ast = parse_v1(
-            "fn lib::Actor.heal(a, amount: int) { a.hp = a.hp + amount }",
-        )
-        .expect("parse failed");
+        let ast = parse_v1("fn lib::Actor.heal(a, amount: int) { a.hp = a.hp + amount }")
+            .expect("parse failed");
         assert!(ast.recovery_errors.is_empty(), "{:?}", ast.recovery_errors);
-        let ItemKind::Function(f) = &ast.items[0].kind else { panic!("expected fn") };
+        let ItemKind::Function(f) = &ast.items[0].kind else {
+            panic!("expected fn")
+        };
         assert_eq!(f.name.name, "heal");
         assert!(f.receiver_surface.is_some(), "receiver surface recorded");
     }
@@ -1771,7 +1985,7 @@ mod modules_items_tests {
 
     #[test]
     fn file_header_parses_in_v1() {
-        let ast = parse_v1("mod combat::casting;\n\nfn f() {}") .expect("parse");
+        let ast = parse_v1("mod combat::casting;\n\nfn f() {}").expect("parse");
         let h = ast.module_header.as_ref().expect("header recorded");
         let names: Vec<_> = h.path.iter().map(|i| i.name.as_str()).collect();
         assert_eq!(names, vec!["combat", "casting"]);
@@ -1800,12 +2014,18 @@ mod modules_items_tests {
     /// block may follow any item, including another block.
     #[test]
     fn inline_module_blocks_follow_items_in_v1() {
-        for src in ["mod a {}\nmod b {}", "fn f() {}\npub mod b { fn g() {} }", "mod a { mod b {} mod c {} }"] {
+        for src in [
+            "mod a {}\nmod b {}",
+            "fn f() {}\npub mod b { fn g() {} }",
+            "mod a { mod b {} mod c {} }",
+        ] {
             let ast = parse_v1(src).unwrap_or_else(|e| panic!("{src:?}: {}", e.message));
             assert!(ast.module_header.is_none(), "{src:?}");
             assert!(
-                ast.items.iter().all(|i| matches!(i.kind, ItemKind::Module(_))
-                    || matches!(i.kind, ItemKind::Function(_))),
+                ast.items
+                    .iter()
+                    .all(|i| matches!(i.kind, ItemKind::Module(_))
+                        || matches!(i.kind, ItemKind::Function(_))),
                 "{src:?}"
             );
         }
@@ -1823,13 +2043,20 @@ mod modules_items_tests {
             "mod a { mod b::c; }",
         ] {
             let err = parse_v1(src).expect_err(src);
-            assert!(err.message.contains("first item"), "{src:?} got: {}", err.message);
+            assert!(
+                err.message.contains("first item"),
+                "{src:?} got: {}",
+                err.message
+            );
         }
     }
 
     #[test]
     fn a_second_file_header_rejects_in_v1() {
-        for src in ["mod a;\nmod b;\n\nfn f() {}", "mod a;\n// between\npub mod a;\n"] {
+        for src in [
+            "mod a;\nmod b;\n\nfn f() {}",
+            "mod a;\n// between\npub mod a;\n",
+        ] {
             let err = parse_v1(src).expect_err("a file has one header");
             assert!(
                 err.message.contains("a file has one `mod path;` header"),
@@ -1853,14 +2080,27 @@ mod modules_items_tests {
         };
         for (src, want) in [
             ("pub @inline fn f() -> int { 1 }", "Some(Pub)"),
-            ("pub(package) @pure @inline\nfn f() -> int { 1 }", "Some(PubPackage)"),
-            ("private @nomangle inline(lua) fn f() -> int = \"\"\"return 1\"\"\"", "Some(Private)"),
+            (
+                "pub(package) @pure @inline\nfn f() -> int { 1 }",
+                "Some(PubPackage)",
+            ),
+            (
+                "private @nomangle inline(lua) fn f() -> int = \"\"\"return 1\"\"\"",
+                "Some(Private)",
+            ),
             ("pub deco traced(f: fn()) { }", "Some(Pub)"),
             // `in` is a keyword token, so this form never parsed at item level.
-            ("pub(in combat::casting) fn f() -> int { 1 }", "pub(in combat::casting)"),
+            (
+                "pub(in combat::casting) fn f() -> int { 1 }",
+                "pub(in combat::casting)",
+            ),
         ] {
             let ast = parse_v1(src).expect(src);
-            assert!(ast.recovery_errors.is_empty(), "{src}: {:?}", ast.recovery_errors);
+            assert!(
+                ast.recovery_errors.is_empty(),
+                "{src}: {:?}",
+                ast.recovery_errors
+            );
             assert_eq!(spelled(&ast.items[0].vis), want, "{src}");
         }
         let ast = parse_v1("pub @inline fn f() -> int { 1 }").expect("parse");
@@ -1871,7 +2111,9 @@ mod modules_items_tests {
     fn inline_mod_block_parses_in_v1() {
         let ast = parse_v1("pub mod combat {\n    pub fn heal() {}\n}\n").expect("parse");
         assert!(ast.recovery_errors.is_empty(), "{:?}", ast.recovery_errors);
-        let ItemKind::Module(m) = &ast.items[0].kind else { panic!("expected mod item") };
+        let ItemKind::Module(m) = &ast.items[0].kind else {
+            panic!("expected mod item")
+        };
         assert_eq!(m.name.name, "combat");
         assert_eq!(m.vis, Some(Visibility::Pub));
         assert_eq!(m.items.len(), 1);
@@ -1910,11 +2152,19 @@ mod modules_items_tests {
         ];
         for src in cases {
             let ast = parse_v1(src).expect(src);
-            assert!(ast.recovery_errors.is_empty(), "{src}: {:?}", ast.recovery_errors);
+            assert!(
+                ast.recovery_errors.is_empty(),
+                "{src}: {:?}",
+                ast.recovery_errors
+            );
             assert!(matches!(ast.items[0].kind, ItemKind::Use(_)), "{src}");
             if legacy_cases.contains(&src) {
                 let ast = parse_module(src, Ustr::from("legacy.rock")).expect(src);
-                assert!(ast.recovery_errors.is_empty(), "{src}: {:?}", ast.recovery_errors);
+                assert!(
+                    ast.recovery_errors.is_empty(),
+                    "{src}: {:?}",
+                    ast.recovery_errors
+                );
             }
         }
     }
@@ -1928,17 +2178,33 @@ mod modules_items_tests {
     #[test]
     fn an_operator_selector_takes_an_alias() {
         let ast = parse_v1("use geo::operator(+) as add_pt;").expect("parse");
-        let ItemKind::Use(u) = &ast.items[0].kind else { panic!("expected use") };
-        let UseTree::Path { kind: UseSuffix::Operator { op, alias }, segments, .. } = &u.tree else {
+        let ItemKind::Use(u) = &ast.items[0].kind else {
+            panic!("expected use")
+        };
+        let UseTree::Path {
+            kind: UseSuffix::Operator { op, alias },
+            segments,
+            ..
+        } = &u.tree
+        else {
             panic!("expected an operator selector, got {:?}", u.tree);
         };
-        assert_eq!(segments.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["geo"]);
+        assert_eq!(
+            segments.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            ["geo"]
+        );
         assert_eq!(op.name, "__op_add");
         assert_eq!(alias.as_ref().map(|a| a.name.as_str()), Some("add_pt"));
 
         let ast = parse_v1("use geo::operator(!);").expect("parse unary selector");
-        let ItemKind::Use(u) = &ast.items[0].kind else { panic!("expected use") };
-        let UseTree::Path { kind: UseSuffix::Operator { op, alias }, .. } = &u.tree else {
+        let ItemKind::Use(u) = &ast.items[0].kind else {
+            panic!("expected use")
+        };
+        let UseTree::Path {
+            kind: UseSuffix::Operator { op, alias },
+            ..
+        } = &u.tree
+        else {
             panic!("expected an operator selector, got {:?}", u.tree);
         };
         assert_eq!(op.name, "__not");
@@ -1951,8 +2217,14 @@ mod modules_items_tests {
     #[test]
     fn nested_use_trees_parse() {
         let ast = parse_v1("use a::b::{c::{d, e}, f::g as h};").expect("parse");
-        let ItemKind::Use(u) = &ast.items[0].kind else { panic!("expected use") };
-        let UseTree::Path { kind: UseSuffix::Nested(trees), .. } = &u.tree else {
+        let ItemKind::Use(u) = &ast.items[0].kind else {
+            panic!("expected use")
+        };
+        let UseTree::Path {
+            kind: UseSuffix::Nested(trees),
+            ..
+        } = &u.tree
+        else {
             panic!("expected nested");
         };
         assert_eq!(trees.len(), 2);
@@ -1964,7 +2236,9 @@ mod modules_items_tests {
             "pub struct Actor {\n    name: string,\n    private(set) health: float = 100,\n    pub(package) private(set) counter: int,\n}",
         )
         .expect("parse");
-        let ItemKind::Struct(s) = &ast.items[0].kind else { panic!("expected struct") };
+        let ItemKind::Struct(s) = &ast.items[0].kind else {
+            panic!("expected struct")
+        };
         assert!(s.fields[0].vis.is_none());
         assert!(s.fields[1].set_private);
         assert!(s.fields[2].set_private);
@@ -1984,7 +2258,8 @@ mod modules_items_tests {
 
     #[test]
     fn vis_on_items_parses_in_v1() {
-        let ast = parse_v1("pub fn f() {}\nprivate struct S {}\npub(package) global G: int = 0").expect("parse");
+        let ast = parse_v1("pub fn f() {}\nprivate struct S {}\npub(package) global G: int = 0")
+            .expect("parse");
         assert_eq!(ast.items[0].vis, Some(Visibility::Pub));
         assert_eq!(ast.items[1].vis, Some(Visibility::Private));
         assert_eq!(ast.items[2].vis, Some(Visibility::PubPackage));
@@ -2000,7 +2275,9 @@ mod modules_items_tests {
     fn block_level_use_parses() {
         let ast = parse_v1("fn f() {\n    use a::b::c\n    let x = 1\n}").expect("parse");
         assert!(ast.recovery_errors.is_empty(), "{:?}", ast.recovery_errors);
-        let ItemKind::Function(f) = &ast.items[0].kind else { panic!("expected fn") };
+        let ItemKind::Function(f) = &ast.items[0].kind else {
+            panic!("expected fn")
+        };
         let block = f.body.rock_block().unwrap();
         assert!(matches!(
             ast.stmts[ast.blocks[block].statements[0]].kind,

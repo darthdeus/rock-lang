@@ -18,7 +18,10 @@ fn main() { let f = make(1) print("{f()}") }
 "#;
     let lua = emit_module(src);
     let out = run_luajit(&format!("{lua}\nmain()\n"), "env_shadow_direct");
-    assert_eq!(out, "6", "global `e` must read the user global, not the env record; got: {out}");
+    assert_eq!(
+        out, "6",
+        "global `e` must read the user global, not the env record; got: {out}"
+    );
 }
 
 /// A NESTED (transitive) capture body also reads the global `e`: the inner lambda
@@ -38,7 +41,10 @@ fn main() { let f = make(2) let g = f() print("{g()}") }
 "#;
     let lua = emit_module(src);
     let out = run_luajit(&format!("{lua}\nmain()\n"), "env_shadow_nested");
-    assert_eq!(out, "7", "global `e` in a nested capture body must not resolve to an env record; got: {out}");
+    assert_eq!(
+        out, "7",
+        "global `e` in a nested capture body must not resolve to an env record; got: {out}"
+    );
 }
 
 /// Control: a LOCAL named `e` captured normally still works (it becomes an env
@@ -55,5 +61,8 @@ fn main() { let f = make(3) print("{f()}") }
 "#;
     let lua = emit_module(src);
     let out = run_luajit(&format!("{lua}\nmain()\n"), "env_shadow_local");
-    assert_eq!(out, "3", "a captured local `e` reads its own value; got: {out}");
+    assert_eq!(
+        out, "3",
+        "a captured local `e` reads its own value; got: {out}"
+    );
 }

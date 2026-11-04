@@ -95,21 +95,24 @@ fn literal_opens_at(src: &str, i: usize) -> bool {
 /// Emit the regions of the literal opening at `src[start]`: its text pieces as
 /// `StringText`, its interpolation holes as `Code`, and (recursively) any
 /// literal nested inside a hole. Returns the index just past the literal.
-fn string_regions(
-    src: &str,
-    start: usize,
-    emit: &mut dyn FnMut(usize, usize, LexRegion),
-) -> usize {
+fn string_regions(src: &str, start: usize, emit: &mut dyn FnMut(usize, usize, LexRegion)) -> usize {
     let scan = crate::interp::scan_string(src, start);
     // The whole literal is text; the holes carve `Code` back out of it, and
     // `region_at` takes the innermost match.
-    let last = if scan.terminated { scan.end - 1 } else { scan.end };
+    let last = if scan.terminated {
+        scan.end - 1
+    } else {
+        scan.end
+    };
     emit(start, last, LexRegion::StringText);
     for piece in &scan.pieces {
         if let crate::interp::Piece::Hole { range, closed, .. } = piece {
             // An unclosed hole that ran to end of input has no `}` to exclude.
-            let hole_last =
-                if !closed && range.1 == src.len() { range.1 } else { range.1 - 1 };
+            let hole_last = if !closed && range.1 == src.len() {
+                range.1
+            } else {
+                range.1 - 1
+            };
             emit(range.0, hole_last, LexRegion::Code);
             let mut j = range.0 + 1;
             while j < range.1 {
@@ -129,12 +132,17 @@ fn line_end(b: &[u8], from: usize) -> usize {
 }
 
 fn memchr(b: &[u8], from: usize, needle: u8) -> Option<usize> {
-    b.get(from..)?.iter().position(|&c| c == needle).map(|p| p + from)
+    b.get(from..)?
+        .iter()
+        .position(|&c| c == needle)
+        .map(|p| p + from)
 }
 
 fn find(b: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
     let hay = b.get(from..)?;
-    hay.windows(needle.len()).position(|w| w == needle).map(|p| p + from)
+    hay.windows(needle.len())
+        .position(|w| w == needle)
+        .map(|p| p + from)
 }
 
 #[cfg(test)]

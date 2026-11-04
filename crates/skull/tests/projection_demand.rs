@@ -46,8 +46,12 @@ fn main() {
 
 #[test]
 fn boxed_wide_projection_preserves_selected_snapshots_and_opaque_children() {
-    let fields = (0..50).map(|i| format!("f{i}: int = {i}")).collect::<Vec<_>>().join(", ");
-    let source = format!(r#"
+    let fields = (0..50)
+        .map(|i| format!("f{i}: int = {i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let source = format!(
+        r#"
 value Plain {{ x: int, y: int }}
 value Child {{ point: Plain, opaque: Plain? }}
 nobox value Flat {{ x: int, y: int }}
@@ -92,7 +96,8 @@ fn main() {{
     print(narrowed(o.wide))
     print(local.f2)
 }}
-"#);
+"#
+    );
     let lua = emit_module(&source);
     assert_eq!(
         run_luajit(&format!("{lua}\nmain()\n"), "boxed_projection_demand"),
@@ -142,31 +147,55 @@ fn main() {
 }
 "#;
     let lua = emit_module(source);
-    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "global_projection_demand"),
-        "17\n5\n5\n5\n99\n5\n5\n5\n11\ntrue\ntrue\n5\n-1\n11\n-1");
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "global_projection_demand"),
+        "17\n5\n5\n5\n99\n5\n5\n5\n11\ntrue\ntrue\n5\n-1\n11\n-1"
+    );
 }
 
 #[test]
 fn reference_owned_value_projection_reads_only_the_selected_field() {
     let _inline = crate::common::InlineOffGuard::on();
-    let fields = (0..50).map(|i| format!("unused_sibling{i}: int = {i}")).collect::<Vec<_>>().join(", ");
-    let lua = emit_module(&format!(r#"
+    let fields = (0..50)
+        .map(|i| format!("unused_sibling{i}: int = {i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let lua = emit_module(&format!(
+        r#"
 enum Choice {{ Empty, Number(int) }}
 value Config {{ chosen: int, choice: Choice, items: [string], {fields} }}
 struct Owner {{ config: Config }}
 @nomangle fn probe(owner: Owner) -> int {{ owner.config.chosen }}
 fn main() {{ print(probe(Owner {{ config: Config {{ chosen: 7, choice: Choice::Empty, items: [] }} }})) }}
-"#));
-    let probe = lua.split("\nfunction probe(").nth(1).unwrap().split("\nend").next().unwrap();
-    assert!(!probe.contains(".unused_sibling"), "an immediate projection must not expand its siblings: {probe}");
-    assert_eq!(run_luajit(&format!("{lua}\nmain(); local a = pcall(probe, nil); local b = pcall(probe, {{config=nil}}); print(a, b)\n"),
-        "reference_owned_projection"), "7\nfalse\tfalse");
+"#
+    ));
+    let probe = lua
+        .split("\nfunction probe(")
+        .nth(1)
+        .unwrap()
+        .split("\nend")
+        .next()
+        .unwrap();
+    assert!(
+        !probe.contains(".unused_sibling"),
+        "an immediate projection must not expand its siblings: {probe}"
+    );
+    assert_eq!(
+        run_luajit(
+            &format!(
+                "{lua}\nmain(); local a = pcall(probe, nil); local b = pcall(probe, {{config=nil}}); print(a, b)\n"
+            ),
+            "reference_owned_projection"
+        ),
+        "7\nfalse\tfalse"
+    );
 }
 
 #[test]
 fn enum_projection_does_not_expand_sibling_fields() {
     let _inline = crate::common::InlineOffGuard::on();
-    let lua = emit_module(r#"
+    let lua = emit_module(
+        r#"
 enum Choice { Empty, Number(int), Text(string) }
 value Config { choice: Choice, unused_sibling: int, items: [string] }
 struct Owner { config: Config }
@@ -178,17 +207,35 @@ fn main() {
     print(match saved { Choice::Number(n) => n, _ => -1 })
     print(match selected(owner) { Choice::Text(s) => s, _ => "bad" })
 }
-"#);
-    let body = lua.split("\nfunction selected(").nth(1).unwrap().split("\nend").next().unwrap();
-    assert!(!body.contains(".unused_sibling"), "selected enum must not read siblings: {body}");
-    assert_eq!(run_luajit(&format!("{lua}\nmain(); local a = pcall(selected, nil); local b = pcall(selected, {{config=nil}}); print(a, b)\n"),
-        "selected_enum_projection"), "7\nnew\nfalse\tfalse");
+"#,
+    );
+    let body = lua
+        .split("\nfunction selected(")
+        .nth(1)
+        .unwrap()
+        .split("\nend")
+        .next()
+        .unwrap();
+    assert!(
+        !body.contains(".unused_sibling"),
+        "selected enum must not read siblings: {body}"
+    );
+    assert_eq!(
+        run_luajit(
+            &format!(
+                "{lua}\nmain(); local a = pcall(selected, nil); local b = pcall(selected, {{config=nil}}); print(a, b)\n"
+            ),
+            "selected_enum_projection"
+        ),
+        "7\nnew\nfalse\tfalse"
+    );
 }
 
 #[test]
 fn enum_projections_preserve_nullable_children_and_argument_snapshots() {
     let _inline = crate::common::InlineOffGuard::on();
-    let lua = emit_module(r#"
+    let lua = emit_module(
+        r#"
 enum Choice { Empty, Number(int), Text(string) }
 value Child { choice: Choice, marker: int }
 value Config { child: Child, optional: Choice?, spare: int }
@@ -219,33 +266,66 @@ fn main() {
     print(global_child.marker)
     print(CONFIG.optional == null)
 }
-"#);
-    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "enum_projection_snapshots"),
-        "7\n1\n13\n7\n17\ntrue\n5\ntrue");
+"#,
+    );
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "enum_projection_snapshots"),
+        "7\n1\n13\n7\n17\ntrue\n5\ntrue"
+    );
 }
 
 #[test]
 fn indexed_strided_projection_lowers_only_selected_lanes() {
     use skull_mir::mir::{ContainerKind, Inst};
-    let ws = crate::common::ws_with_stdlib(r#"
+    let ws = crate::common::ws_with_stdlib(
+        r#"
 nobox value Row { a: int, b: int, c: int, d: int, e: int, f: int }
 fn selected(rows: [Row], index: int) -> int { rows[index].b }
 fn main() { print(selected([Row { a: 1, b: 2, c: 3, d: 4, e: 5, f: 6 }], 0)) }
-"#);
+"#,
+    );
     let roots = skull::mir_emit::emission_roots(&ws, None);
     let mut graph = skull::instance_graph::build(&ws, roots, false);
     let bodies = skull::concrete_body::build(&ws, &mut graph);
-    let plan = bodies.plans.iter().find(|(inst, _)| {
-        ws.module(inst.func.module).functions[inst.func.func].name.as_str() == "selected"
-    }).expect("selected has no plan").1;
+    let plan = bodies
+        .plans
+        .iter()
+        .find(|(inst, _)| {
+            ws.module(inst.func.module).functions[inst.func.func]
+                .name
+                .as_str()
+                == "selected"
+        })
+        .expect("selected has no plan")
+        .1;
     let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(graph.interner().clone());
     let mir = skull_mir::lower::lower_instance_with_plans(&ws, &scx, plan, &bodies.plans)
         .expect("lower selected");
-    let reads = mir.insts.iter().filter(|(_, inst)| matches!(inst,
-        Inst::Index { kind: ContainerKind::VecStrideSlot, .. })).count();
-    assert_eq!(reads, 1, "scalar field projection expanded sibling lanes before cleanup");
-    assert_eq!(mir.insts.iter().filter(|(_, inst)| matches!(inst, Inst::VecCheckedIndex { .. })).count(),
-        1, "projection must retain exactly one element bounds check");
+    let reads = mir
+        .insts
+        .iter()
+        .filter(|(_, inst)| {
+            matches!(
+                inst,
+                Inst::Index {
+                    kind: ContainerKind::VecStrideSlot,
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(
+        reads, 1,
+        "scalar field projection expanded sibling lanes before cleanup"
+    );
+    assert_eq!(
+        mir.insts
+            .iter()
+            .filter(|(_, inst)| matches!(inst, Inst::VecCheckedIndex { .. }))
+            .count(),
+        1,
+        "projection must retain exactly one element bounds check"
+    );
 }
 
 #[test]
@@ -293,13 +373,20 @@ fn main() {
 }
 "#;
     let lua = emit_module(source);
-    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "indexed_projection_semantics"),
-        "5\n12\n3\n90\n11\n13\n19\ntrue\nfalse\nhello");
-    let checks = run_luajit(&format!(r#"{lua}
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "indexed_projection_semantics"),
+        "5\n12\n3\n90\n11\n13\n19\ntrue\nfalse\nhello"
+    );
+    let checks = run_luajit(
+        &format!(
+            r#"{lua}
 for _, i in ipairs({{-1, 0}}) do
     local ok, err = pcall(invalid, i)
     print(ok, tostring(err):find("Vec index out of bounds", 1, true) ~= nil)
 end
-"#), "indexed_projection_bounds");
+"#
+        ),
+        "indexed_projection_bounds",
+    );
     assert_eq!(checks, "false\ttrue\nfalse\ttrue");
 }

@@ -15,8 +15,8 @@ use std::sync::LazyLock;
 
 use bone_semantic::hir::{BodyOwner, FnBackend};
 use bone_semantic::inference::Workspace;
-use skull::artifact::{self, ArtifactMappings, ArtifactRequest, Exclusion, Unrealizable};
 use skull::artifact::RealizedCallee;
+use skull::artifact::{self, ArtifactMappings, ArtifactRequest, Exclusion, Unrealizable};
 use skull::instance_graph::{self, Instance, InstanceGraph};
 use skull::target_projection::{JAVASCRIPT_WEB, LUAJIT_DESKTOP, NATIVE_C64_DESKTOP, WASM32_WASI};
 use skull_mir::intrinsics::BackendRealization;
@@ -78,7 +78,9 @@ impl artifact::SymbolPlanner for MainRightCollision {
         i: &Instance,
         _realized: artifact::Realized,
     ) -> String {
-        let name = ws.module(i.func.module).functions[i.func.func].name.as_str();
+        let name = ws.module(i.func.module).functions[i.func.func]
+            .name
+            .as_str();
         if matches!(name, "main" | "right") {
             "shared".to_string()
         } else {
@@ -122,7 +124,9 @@ fn premise_the_shared_graph_keeps_one_representative_per_sibling_group() {
         .instances
         .iter()
         .filter(|i| {
-            ws.module(i.func.module).functions[i.func.func].name.as_str()
+            ws.module(i.func.module).functions[i.func.func]
+                .name
+                .as_str()
                 == "__nb_checked_index"
         })
         .map(|i| i.func)
@@ -166,28 +170,63 @@ fn an_artifact_realizes_the_shared_instance_to_the_sibling_that_serves_it() {
         view.realization
             .iter()
             .filter(|(i, _)| {
-                ws.module(i.func.module).functions[i.func.func].name.as_str()
+                ws.module(i.func.module).functions[i.func.func]
+                    .name
+                    .as_str()
                     == "__nb_checked_index"
             })
             .map(|(i, r)| {
-                (i.clone(), ws.module(r.decl.module).functions[r.decl.func].backend)
+                (
+                    i.clone(),
+                    ws.module(r.decl.module).functions[r.decl.func].backend,
+                )
             })
             .collect()
     };
     let (l, j) = (selected(&lua), selected(&js));
-    assert_eq!(l.len(), 1, "luajit retained {} instances of the entry", l.len());
-    assert_eq!(j.len(), 1, "javascript retained {} instances of the entry", j.len());
-    assert_eq!(l[0].0, j[0].0, "the two artifacts realized DIFFERENT instances");
-    assert_eq!(l[0].1, FnBackend::Lua, "luajit did not select the Lua sibling");
-    assert_eq!(j[0].1, FnBackend::Js, "javascript did not select the JS sibling");
+    assert_eq!(
+        l.len(),
+        1,
+        "luajit retained {} instances of the entry",
+        l.len()
+    );
+    assert_eq!(
+        j.len(),
+        1,
+        "javascript retained {} instances of the entry",
+        j.len()
+    );
+    assert_eq!(
+        l[0].0, j[0].0,
+        "the two artifacts realized DIFFERENT instances"
+    );
+    assert_eq!(
+        l[0].1,
+        FnBackend::Lua,
+        "luajit did not select the Lua sibling"
+    );
+    assert_eq!(
+        j[0].1,
+        FnBackend::Js,
+        "javascript did not select the JS sibling"
+    );
 
     // And each artifact SPELLS it through the one boundary-id helper, so the
     // two contracts are distinguishable even though `@nomangle` makes the
     // symbol identical.
     let (lid, jid) = (&lua.boundaries[&l[0].0], &js.boundaries[&j[0].0]);
-    assert_eq!(lid.symbol, jid.symbol, "the fixture no longer shares an emitted symbol");
-    assert_ne!(lid.declaration, jid.declaration, "one declaration served both artifacts");
-    assert_ne!(lid, jid, "target-distinct boundary contracts collapsed to one id");
+    assert_eq!(
+        lid.symbol, jid.symbol,
+        "the fixture no longer shares an emitted symbol"
+    );
+    assert_ne!(
+        lid.declaration, jid.declaration,
+        "one declaration served both artifacts"
+    );
+    assert_ne!(
+        lid, jid,
+        "target-distinct boundary contracts collapsed to one id"
+    );
 }
 
 #[test]
@@ -209,11 +248,17 @@ fn main() { let x = sibling_probe(1) }
         .realization
         .iter()
         .find(|(i, r)| {
-            ws.module(i.func.module).functions[i.func.func].name.as_str() == "sibling_probe"
+            ws.module(i.func.module).functions[i.func.func]
+                .name
+                .as_str()
+                == "sibling_probe"
                 && r.decl != i.func
         })
         .expect("the fixture did not select a JS sibling");
-    let selected = Instance { func: realized.decl, args: instance.args.clone() };
+    let selected = Instance {
+        func: realized.decl,
+        args: instance.args.clone(),
+    };
     assert_eq!(
         js.symbols[instance],
         selected.symbol(&ws, g.interner()),
@@ -249,7 +294,10 @@ fn premise_a_compatible_backend_and_a_rock_fallback_both_say_available() {
         instance_graph::serves(f.backend, FnBackend::Lua),
         "the FnBackend test already rejects it"
     );
-    assert!(f.inline_body.is_none(), "the fixture has a native mapping after all");
+    assert!(
+        f.inline_body.is_none(),
+        "the fixture has a native mapping after all"
+    );
     assert!(
         skull_mir::intrinsics::is_native_required(f),
         "the fixture is not `@native_required`"
@@ -268,7 +316,9 @@ fn native_required_availability_comes_from_the_artifact_mapping() {
         view.excluded
             .iter()
             .find(|e| {
-                ws.module(e.instance.func.module).functions[e.instance.func.func].name.as_str()
+                ws.module(e.instance.func.module).functions[e.instance.func.func]
+                    .name
+                    .as_str()
                     == "fast_op"
             })
             .map(|e| e.cause)
@@ -287,9 +337,8 @@ fn native_required_availability_comes_from_the_artifact_mapping() {
     let mapped = artifact::realize(
         &ws,
         &g,
-        &ArtifactRequest::new(LUAJIT_DESKTOP, &roots).with_mappings(
-            ArtifactMappings::for_backend(FnBackend::Lua).with_supply(&table),
-        ),
+        &ArtifactRequest::new(LUAJIT_DESKTOP, &roots)
+            .with_mappings(ArtifactMappings::for_backend(FnBackend::Lua).with_supply(&table)),
     );
     assert_eq!(
         named(&mapped),
@@ -314,14 +363,19 @@ fn main() { let a = portable_op(1) }
     let view = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
     assert!(
         view.retained().any(|i| {
-            ws.module(i.func.module).functions[i.func.func].name.as_str() == "portable_op"
+            ws.module(i.func.module).functions[i.func.func]
+                .name
+                .as_str()
+                == "portable_op"
         }),
         "a portable intrinsic was dropped: {:?}",
         view.census().excluded_by_cause
     );
     assert!(
         view.excluded.iter().all(|e| {
-            ws.module(e.instance.func.module).functions[e.instance.func.func].name.as_str()
+            ws.module(e.instance.func.module).functions[e.instance.func.func]
+                .name
+                .as_str()
                 != "portable_op"
         }),
         "the portable rung did not fire"
@@ -346,7 +400,10 @@ fn premise_inline_body_dependencies_are_unresolved_names() {
         .flat_map(|s| s.iter())
         .copied()
         .collect();
-    assert!(!deps.is_empty(), "the fixture records no inline-body dependency at all");
+    assert!(
+        !deps.is_empty(),
+        "the fixture records no inline-body dependency at all"
+    );
     // A NAME, and nothing that names a declaration: no `FuncRef`, no instance.
     assert!(
         deps.iter().all(|d| d.starts_with("__")),
@@ -362,16 +419,23 @@ fn inline_body_dependencies_resolve_to_targets_in_the_artifact() {
     let (g, roots) = graph_for(&ws);
     let view = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
     let c = view.census();
-    assert!(c.inline_deps_examined > 0, "no dependency was examined: {c:?}");
+    assert!(
+        c.inline_deps_examined > 0,
+        "no dependency was examined: {c:?}"
+    );
     assert_eq!(
-        c.inline_deps_unresolved, 0,
+        c.inline_deps_unresolved,
+        0,
         "unresolved inline-body dependencies: {:?}",
         view.render_unresolved_inline_deps(&ws)
     );
     // Each dependency terminates in a CALLEE, not a bare declaration: a
     // runtime entry is a `Callee::Boundary` carrying its class and the symbol
     // emission must produce, and anything else names a concrete instance.
-    assert!(c.inline_deps_boundary > 0, "no dependency resolved to a boundary: {c:?}");
+    assert!(
+        c.inline_deps_boundary > 0,
+        "no dependency resolved to a boundary: {c:?}"
+    );
     for dep in &view.inline_deps {
         match &dep.callee {
             RealizedCallee::Boundary(b) => {
@@ -423,7 +487,9 @@ fn main() { let n = selected_dep_probe(1) }
         view.realization
             .values()
             .find(|r| {
-                ws.module(r.decl.module).functions[r.decl.func].name.as_str()
+                ws.module(r.decl.module).functions[r.decl.func]
+                    .name
+                    .as_str()
                     == "selected_dep_probe"
             })
             .copied()
@@ -496,9 +562,13 @@ fn main() {
         c.instances + c.boundaries,
         "the Rock/boundary split does not partition the retained set: {c:?}"
     );
-    assert!(c.boundaries > 0, "the fixture retained no boundary at all: {c:?}");
+    assert!(
+        c.boundaries > 0,
+        "the fixture retained no boundary at all: {c:?}"
+    );
     assert_eq!(
-        c.symbol_collisions, 0,
+        c.symbol_collisions,
+        0,
         "two retained instances share one symbol: {:?}",
         view.render_symbol_collisions(&ws)
     );
@@ -508,16 +578,26 @@ fn main() {
         .symbols
         .iter()
         .filter(|(i, _)| {
-            ws.module(i.func.module).functions[i.func.func].name.as_str() == "ident"
+            ws.module(i.func.module).functions[i.func.func]
+                .name
+                .as_str()
+                == "ident"
         })
         .map(|(_, s)| s)
         .collect();
-    assert_eq!(idents.len(), 2, "the fixture has no two-instance generic: {idents:?}");
+    assert_eq!(
+        idents.len(),
+        2,
+        "the fixture has no two-instance generic: {idents:?}"
+    );
     assert_ne!(idents[0], idents[1], "two instantiations spell alike");
 
     // Deterministic: realizing the same graph twice gives the same table.
     let again = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
-    assert_eq!(view.symbols, again.symbols, "the symbol assignment is not deterministic");
+    assert_eq!(
+        view.symbols, again.symbols,
+        "the symbol assignment is not deterministic"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -594,10 +674,7 @@ fn retention_is_reachability_not_a_declaration_filter() {
     let expected: std::collections::BTreeSet<&Instance> = g
         .instances
         .iter()
-        .filter(|i| {
-            (i.func == main_only[0] && i.args.is_empty())
-                || g.is_always_emitted_target(i)
-        })
+        .filter(|i| (i.func == main_only[0] && i.args.is_empty()) || g.is_always_emitted_target(i))
         .collect();
     assert_eq!(
         view.roots.iter().collect::<std::collections::BTreeSet<_>>(),
@@ -612,7 +689,11 @@ fn retention_is_reachability_not_a_declaration_filter() {
         c.excluded_by_cause
     );
     assert!(
-        c.excluded_by_cause.get("foreign-to-artifact").copied().unwrap_or(0) > 0,
+        c.excluded_by_cause
+            .get("foreign-to-artifact")
+            .copied()
+            .unwrap_or(0)
+            > 0,
         "nothing was excluded as unrealizable: {:?}",
         c.excluded_by_cause
     );
@@ -620,7 +701,9 @@ fn retention_is_reachability_not_a_declaration_filter() {
     // REALIZABLE here, which is what makes its exclusion a reachability fact
     // and not a realization one.
     let uncalled = view.excluded.iter().find(|e| {
-        ws.module(e.instance.func.module).functions[e.instance.func.func].name.as_str()
+        ws.module(e.instance.func.module).functions[e.instance.func.func]
+            .name
+            .as_str()
             == "never_called_from_main"
     });
     assert_eq!(
@@ -633,7 +716,9 @@ fn retention_is_reachability_not_a_declaration_filter() {
     let wide = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &all_roots));
     assert!(
         wide.retained().any(|i| {
-            ws.module(i.func.module).functions[i.func.func].name.as_str()
+            ws.module(i.func.module).functions[i.func.func]
+                .name
+                .as_str()
                 == "never_called_from_main"
         }),
         "the uncalled declaration is unreachable even as a root, so the fixture \
@@ -646,7 +731,10 @@ fn retention_is_reachability_not_a_declaration_filter() {
     );
     assert!(
         view.retained().any(|i| {
-            ws.module(i.func.module).functions[i.func.func].name.as_str() == "ident"
+            ws.module(i.func.module).functions[i.func.func]
+                .name
+                .as_str()
+                == "ident"
         }),
         "the walk did not reach a called generic"
     );
@@ -676,13 +764,19 @@ fn main() { let a = caller(1) }
     let (g, roots) = graph_for(&ws);
     let view = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
     let c = view.census();
-    assert!(c.sites_walked > 0, "no site was walked, so 0 severed says nothing: {c:?}");
+    assert!(
+        c.sites_walked > 0,
+        "no site was walked, so 0 severed says nothing: {c:?}"
+    );
     let named: Vec<String> = view.render_severed(&ws, &g);
     assert_eq!(
         c.severed, 1,
         "expected exactly the `fast_op` call to be severed, got {named:?}"
     );
-    assert!(named[0].contains("fast_op"), "the severed call is not the one expected: {named:?}");
+    assert!(
+        named[0].contains("fast_op"),
+        "the severed call is not the one expected: {named:?}"
+    );
     assert_eq!(
         c.severed_by_cause.get("native-mapping-missing").copied(),
         Some(1),
@@ -693,7 +787,10 @@ fn main() { let a = caller(1) }
     // emission would emit a call to a body that is not in the artifact.
     assert!(
         view.instances.iter().any(|i| {
-            ws.module(i.func.module).functions[i.func.func].name.as_str() == "caller"
+            ws.module(i.func.module).functions[i.func.func]
+                .name
+                .as_str()
+                == "caller"
         }),
         "the caller was dropped, so nothing would have emitted the call anyway"
     );
@@ -703,11 +800,14 @@ fn main() { let a = caller(1) }
     let mapped = artifact::realize(
         &ws,
         &g,
-        &ArtifactRequest::new(LUAJIT_DESKTOP, &roots).with_mappings(
-            ArtifactMappings::for_backend(FnBackend::Lua).with_supply(&table),
-        ),
+        &ArtifactRequest::new(LUAJIT_DESKTOP, &roots)
+            .with_mappings(ArtifactMappings::for_backend(FnBackend::Lua).with_supply(&table)),
     );
-    assert_eq!(mapped.census().severed, 0, "mapping the callee left the call severed");
+    assert_eq!(
+        mapped.census().severed,
+        0,
+        "mapping the callee left the call severed"
+    );
 }
 
 /// ONE graph, realized by every artifact. What differs is the DECLARATION each
@@ -729,9 +829,11 @@ fn one_shared_instance_realizes_to_a_different_declaration_per_artifact() {
     );
 
     // The population that can witness it: instances BOTH artifacts retain.
-    let both: Vec<&Instance> =
-        lua.realization.keys().filter(|i| js.retains(i)).collect();
-    assert!(!both.is_empty(), "no instance is retained by both artifacts");
+    let both: Vec<&Instance> = lua.realization.keys().filter(|i| js.retains(i)).collect();
+    assert!(
+        !both.is_empty(),
+        "no instance is retained by both artifacts"
+    );
 
     // Sibling selection HAPPENED -- otherwise every agreement below is vacuous.
     let diverged: Vec<&Instance> = both
@@ -787,8 +889,11 @@ fn cross_artifact_identity_is_the_instance_and_not_the_spelling() {
     let (g, roots) = graph_for(&ws);
     let lua_p = Prefixed("lua");
     let js_p = Prefixed("js");
-    let lua =
-        artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots).with_symbols(&lua_p));
+    let lua = artifact::realize(
+        &ws,
+        &g,
+        &ArtifactRequest::new(LUAJIT_DESKTOP, &roots).with_symbols(&lua_p),
+    );
     let js = artifact::realize(
         &ws,
         &g,
@@ -799,14 +904,18 @@ fn cross_artifact_identity_is_the_instance_and_not_the_spelling() {
     // a `MonoTyId` means the same type in both views and there is nothing to
     // key around.
     let shared: Vec<&Instance> = lua.retained().filter(|i| js.retains(i)).collect();
-    assert!(!shared.is_empty(), "the two artifacts share no logical instance at all");
+    assert!(
+        !shared.is_empty(),
+        "the two artifacts share no logical instance at all"
+    );
 
     // The hostile planners spell every shared instance DIFFERENTLY, and that is
     // legal. If this test asserted equality it would be asserting the opposite
     // of the signed decision (plan S 0h: the ARTIFACT owns the spelling).
     for i in &shared {
         assert_ne!(
-            lua.symbols[*i], js.symbols[*i],
+            lua.symbols[*i],
+            js.symbols[*i],
             "the hostile planners agree on `{}`, so the fixture cannot distinguish",
             g.identity(&ws, i)
         );
@@ -815,8 +924,11 @@ fn cross_artifact_identity_is_the_instance_and_not_the_spelling() {
     // A BOUNDARY is spelled by the same planner. Boundary admission that
     // reached for `mangle_fn` instead would silently ignore the request's
     // planner, and every id below would come out target-neutral.
-    let boundaries: Vec<&Instance> =
-        shared.iter().copied().filter(|i| lua.boundaries.contains_key(*i)).collect();
+    let boundaries: Vec<&Instance> = shared
+        .iter()
+        .copied()
+        .filter(|i| lua.boundaries.contains_key(*i))
+        .collect();
     assert!(
         !boundaries.is_empty(),
         "no shared instance is a boundary, so the planner claim below is zero over zero"
@@ -827,8 +939,7 @@ fn cross_artifact_identity_is_the_instance_and_not_the_spelling() {
             "a boundary id was spelled by something other than the artifact's planner"
         );
         assert_ne!(
-            lua.boundaries[i].symbol,
-            js.boundaries[i].symbol,
+            lua.boundaries[i].symbol, js.boundaries[i].symbol,
             "the two planners spelled one boundary alike"
         );
     }
@@ -838,7 +949,10 @@ fn cross_artifact_identity_is_the_instance_and_not_the_spelling() {
     // because the two views share nothing meaningful.
     let d_lua = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
     let d_js = artifact::realize(&ws, &g, &ArtifactRequest::new(JAVASCRIPT_WEB, &roots));
-    let agreed = shared.iter().filter(|i| d_lua.symbols.get(**i) == d_js.symbols.get(**i)).count();
+    let agreed = shared
+        .iter()
+        .filter(|i| d_lua.symbols.get(**i) == d_js.symbols.get(**i))
+        .count();
     assert_eq!(
         agreed,
         shared.len(),
@@ -880,7 +994,10 @@ fn a_target_with_no_backend_keeps_only_portable_bodies() {
     let view = artifact::realize(&ws, &g, &ArtifactRequest::new(NATIVE_C64_DESKTOP, &roots));
     let c = view.census();
     assert!(c.excluded > 0, "the hostile target excluded nothing: {c:?}");
-    assert!(c.instances > 0, "the hostile target excluded everything: {c:?}");
+    assert!(
+        c.instances > 0,
+        "the hostile target excluded everything: {c:?}"
+    );
     for (i, r) in &view.realization {
         // Asked of the DECLARATION the artifact selected, not of the shared
         // representative: selection is what a portable-only target must not be
@@ -903,7 +1020,10 @@ fn main() { let x = 1; host_tick(x) }
 "#,
     );
     let (g, roots) = graph_for(&ws);
-    assert!(g.instances.len() > 1, "the synthetic-target graph has no nonzero population");
+    assert!(
+        g.instances.len() > 1,
+        "the synthetic-target graph has no nonzero population"
+    );
 
     let c64 = artifact::realize(&ws, &g, &ArtifactRequest::new(NATIVE_C64_DESKTOP, &roots));
     let wasm = artifact::realize(&ws, &g, &ArtifactRequest::new(WASM32_WASI, &roots));
@@ -912,17 +1032,29 @@ fn main() { let x = 1; host_tick(x) }
     let wasm_only = wasm.retained().filter(|i| !c64.retains(i)).count();
 
     assert!(shared > 0, "the two projections share no logical instances");
-    assert_eq!(c64_only, 0, "C64 changed the shared logical realization population");
-    assert_eq!(wasm_only, 0, "Wasm32 changed the shared logical realization population");
+    assert_eq!(
+        c64_only, 0,
+        "C64 changed the shared logical realization population"
+    );
+    assert_eq!(
+        wasm_only, 0,
+        "Wasm32 changed the shared logical realization population"
+    );
     assert_eq!(c64.realization, wasm.realization);
     assert_eq!(c64.excluded, wasm.excluded);
     assert_eq!(c64.severed, wasm.severed);
-    assert_ne!(c64.deferred, wasm.deferred, "the physical target obligations are identical");
+    assert_ne!(
+        c64.deferred, wasm.deferred,
+        "the physical target obligations are identical"
+    );
     assert!(
         c64.deferred.iter().any(|d| d.contains("pointer width")),
         "C64 has no target-specific physical obligation"
     );
-    assert!(c64.deferred.iter().any(|d| d.contains("64-bit")), "C64 float width is not projected");
+    assert!(
+        c64.deferred.iter().any(|d| d.contains("64-bit")),
+        "C64 float width is not projected"
+    );
     assert!(
         wasm.deferred.iter().any(|d| d.contains("import entry")),
         "Wasm32 has no target-specific boundary obligation"
@@ -987,7 +1119,10 @@ fn main() {
         .instances
         .iter()
         .filter(|i| {
-            ws.module(i.func.module).functions[i.func.func].name.as_str() == "__rock_col_sort"
+            ws.module(i.func.module).functions[i.func.func]
+                .name
+                .as_str()
+                == "__rock_col_sort"
         })
         .count();
     assert_eq!(
@@ -1025,13 +1160,22 @@ fn main() { let a = only_lua(1) }
         view.boundaries
             .keys()
             .filter(|i| {
-                ws.module(i.func.module).functions[i.func.func].name.as_str() == "only_lua"
+                ws.module(i.func.module).functions[i.func.func]
+                    .name
+                    .as_str()
+                    == "only_lua"
             })
             .collect()
     }
-    assert_eq!(mine(&ws, &lua).len(), 1, "luajit did not retain `only_lua` as a boundary");
+    assert_eq!(
+        mine(&ws, &lua).len(),
+        1,
+        "luajit did not retain `only_lua` as a boundary"
+    );
     assert!(
-        !lua.render_severed(&ws, &g).iter().any(|s| s.contains("only_lua")),
+        !lua.render_severed(&ws, &g)
+            .iter()
+            .any(|s| s.contains("only_lua")),
         "luajit severed its own boundary: {:?}",
         lua.render_severed(&ws, &g)
     );
@@ -1044,7 +1188,9 @@ fn main() { let a = only_lua(1) }
         .severed
         .iter()
         .filter(|s| {
-            ws.module(s.callee.func.module).functions[s.callee.func.func].name.as_str()
+            ws.module(s.callee.func.module).functions[s.callee.func.func]
+                .name
+                .as_str()
                 == "only_lua"
         })
         .collect();
@@ -1057,13 +1203,17 @@ fn main() { let a = only_lua(1) }
     assert_eq!(severed[0].cause, Unrealizable::ForeignToArtifact);
     // Located: a rejection with no span cannot become a compile error at the
     // Stage-3 cutover. The span is the walk's, read back at the severed SITE.
-    let span = g.sites_of(&severed[0].caller).expect("the caller's sites")
-        [&severed[0].site]
-        .span;
-    assert!(!instance_graph::is_spanless(&span), "the severed call carries no source span");
+    let span = g.sites_of(&severed[0].caller).expect("the caller's sites")[&severed[0].site].span;
+    assert!(
+        !instance_graph::is_spanless(&span),
+        "the severed call carries no source span"
+    );
     // And it is NOT retained: a consumer must not be able to read a callable
     // entry for it.
-    assert!(mine(&ws, &js).is_empty(), "the severed boundary is still retained on JS");
+    assert!(
+        mine(&ws, &js).is_empty(),
+        "the severed boundary is still retained on JS"
+    );
 }
 
 #[test]
@@ -1082,25 +1232,22 @@ fn main() { let n = host_tick(1) }
         platform,
         ..tp::LUAJIT_DESKTOP
     };
-    let desktop = artifact::realize(
-        &ws,
-        &g,
-        &ArtifactRequest::new(target(tp::DESKTOP), &roots),
-    );
-    let web = artifact::realize(
-        &ws,
-        &g,
-        &ArtifactRequest::new(target(tp::WEB), &roots),
-    );
+    let desktop = artifact::realize(&ws, &g, &ArtifactRequest::new(target(tp::DESKTOP), &roots));
+    let web = artifact::realize(&ws, &g, &ArtifactRequest::new(target(tp::WEB), &roots));
     let host_tick_severed = |view: &artifact::ArtifactView| {
         view.severed.iter().find_map(|s| {
-            (ws.module(s.callee.func.module).functions[s.callee.func.func].name.as_str()
+            (ws.module(s.callee.func.module).functions[s.callee.func.func]
+                .name
+                .as_str()
                 == "host_tick")
                 .then_some(s.cause)
         })
     };
 
-    assert!(host_tick_severed(&desktop).is_none(), "desktop rejected a host symbol");
+    assert!(
+        host_tick_severed(&desktop).is_none(),
+        "desktop rejected a host symbol"
+    );
     assert_eq!(
         host_tick_severed(&web),
         Some(Unrealizable::ClassUnsupported(
@@ -1121,21 +1268,16 @@ fn main() { let n = host_tick(1) }
 "#,
     );
     let (g, roots) = graph_for(&ws);
-    let desktop = artifact::realize(
-        &ws,
-        &g,
-        &ArtifactRequest::new(tp::LUAJIT_DESKTOP, &roots),
-    );
-    let ios = artifact::realize(
-        &ws,
-        &g,
-        &ArtifactRequest::new(tp::LUAJIT_IOS, &roots),
-    );
+    let desktop = artifact::realize(&ws, &g, &ArtifactRequest::new(tp::LUAJIT_DESKTOP, &roots));
+    let ios = artifact::realize(&ws, &g, &ArtifactRequest::new(tp::LUAJIT_IOS, &roots));
     let host_tick = |view: &artifact::ArtifactView| {
         view.boundaries
             .iter()
             .find(|(i, _)| {
-                ws.module(i.func.module).functions[i.func.func].name.as_str() == "host_tick"
+                ws.module(i.func.module).functions[i.func.func]
+                    .name
+                    .as_str()
+                    == "host_tick"
             })
             .map(|(_, id)| id.clone())
             .expect("host_tick boundary")
@@ -1217,15 +1359,25 @@ fn shader_packaging_does_not_decide_cpu_realization() {
     use skull::target_projection as tp;
     let ws = check(AXES);
     let (g, roots) = graph_for(&ws);
-    let view = |spec: tp::TargetSpec| artifact::realize(&ws, &g, &ArtifactRequest::new(spec, &roots));
+    let view =
+        |spec: tp::TargetSpec| artifact::realize(&ws, &g, &ArtifactRequest::new(spec, &roots));
 
     let base = view(tp::LUAJIT_DESKTOP);
 
     // NON-VACUITY, first: the thing being compared has to be able to differ.
     // A view that decided nothing would satisfy every equality below.
-    assert!(!base.instances.is_empty(), "the fixture retained no Rock instance");
-    assert!(!base.boundaries.is_empty(), "the fixture retained no boundary");
-    assert!(!base.inline_deps.is_empty(), "the fixture resolved no opaque dependency");
+    assert!(
+        !base.instances.is_empty(),
+        "the fixture retained no Rock instance"
+    );
+    assert!(
+        !base.boundaries.is_empty(),
+        "the fixture retained no boundary"
+    );
+    assert!(
+        !base.inline_deps.is_empty(),
+        "the fixture resolved no opaque dependency"
+    );
     assert!(
         base.realization.iter().any(|(i, r)| r.decl != i.func),
         "no instance selected a backend sibling, so declaration equality is vacuous"
@@ -1248,7 +1400,11 @@ fn shader_packaging_does_not_decide_cpu_realization() {
 
     // Composed here rather than declared as a fixture: a packaging variation is
     // a field change, not a new target variant.
-    let shader_only = tp::TargetSpec { name: "luajit-desktop-no-shader", shader: None, ..tp::LUAJIT_DESKTOP };
+    let shader_only = tp::TargetSpec {
+        name: "luajit-desktop-no-shader",
+        shader: None,
+        ..tp::LUAJIT_DESKTOP
+    };
     assert!(
         base.same_cpu_decisions(&view(shader_only)),
         "dropping the shader axis entirely changed a CPU decision"
@@ -1267,7 +1423,8 @@ fn an_artifact_name_decides_nothing() {
     use skull::target_projection as tp;
     let ws = check(AXES);
     let (g, roots) = graph_for(&ws);
-    let view = |spec: tp::TargetSpec| artifact::realize(&ws, &g, &ArtifactRequest::new(spec, &roots));
+    let view =
+        |spec: tp::TargetSpec| artifact::realize(&ws, &g, &ArtifactRequest::new(spec, &roots));
 
     let renamed = tp::TargetSpec {
         name: "\u{0}not-a-target",
@@ -1291,16 +1448,21 @@ fn an_artifact_name_decides_nothing() {
 fn target_fixtures_are_combinations_of_shared_axes() {
     use skull::target_projection as tp;
 
-    let pairs = tp::ALL.iter().enumerate().flat_map(|(i, a)| {
-        tp::ALL.iter().skip(i + 1).map(move |b| (a, b))
-    });
+    let pairs = tp::ALL
+        .iter()
+        .enumerate()
+        .flat_map(|(i, a)| tp::ALL.iter().skip(i + 1).map(move |b| (a, b)));
     let pairs: Vec<_> = pairs.collect();
     assert!(
-        pairs.iter().any(|(a, b)| a.execution == b.execution && a.platform != b.platform),
+        pairs
+            .iter()
+            .any(|(a, b)| a.execution == b.execution && a.platform != b.platform),
         "no complete execution axis is packaged for two platforms"
     );
     assert!(
-        pairs.iter().any(|(a, b)| a.platform == b.platform && a.execution != b.execution),
+        pairs
+            .iter()
+            .any(|(a, b)| a.platform == b.platform && a.execution != b.execution),
         "no complete platform axis hosts two execution axes"
     );
     assert!(
@@ -1334,7 +1496,10 @@ fn main() { let n = a(1) + b(2) }
     let (g, roots) = graph_for(&ws);
     let js = artifact::realize(&ws, &g, &ArtifactRequest::new(JAVASCRIPT_WEB, &roots));
     let named = |fr: skull_mir::mir::FuncRef| {
-        ws.module(fr.module).functions[fr.func].name.as_str().to_string()
+        ws.module(fr.module).functions[fr.func]
+            .name
+            .as_str()
+            .to_string()
     };
     let groups = js.severed_groups();
     let mine: Vec<&artifact::SeveredGroup> = groups
@@ -1342,19 +1507,36 @@ fn main() { let n = a(1) + b(2) }
         .filter(|grp| matches!(named(grp.callee).as_str(), "only_lua" | "fast_op"))
         .collect();
 
-    let only_lua = mine.iter().find(|grp| named(grp.callee) == "only_lua").expect("only_lua group");
+    let only_lua = mine
+        .iter()
+        .find(|grp| named(grp.callee) == "only_lua")
+        .expect("only_lua group");
     assert_eq!(only_lua.cause, Unrealizable::ForeignToArtifact);
-    assert_eq!(only_lua.sites, 2, "two call sites collapsed to one, or split into three");
-    assert_eq!(only_lua.callers.len(), 2, "the two callers were not both recorded");
+    assert_eq!(
+        only_lua.sites, 2,
+        "two call sites collapsed to one, or split into three"
+    );
+    assert_eq!(
+        only_lua.callers.len(),
+        2,
+        "the two callers were not both recorded"
+    );
 
-    let fast_op = mine.iter().find(|grp| named(grp.callee) == "fast_op").expect("fast_op group");
+    let fast_op = mine
+        .iter()
+        .find(|grp| named(grp.callee) == "fast_op")
+        .expect("fast_op group");
     assert_eq!(fast_op.cause, Unrealizable::NativeMappingMissing);
     assert_eq!(fast_op.sites, 1);
 
     // The grouping is a PARTITION of the per-site population: nothing is
     // dropped and nothing is counted twice.
     let grouped: usize = groups.iter().map(|grp| grp.sites).sum();
-    assert_eq!(grouped, js.severed.len(), "grouping lost or duplicated severed sites");
+    assert_eq!(
+        grouped,
+        js.severed.len(),
+        "grouping lost or duplicated severed sites"
+    );
     // ...and the two denominators are different numbers here, which is the
     // whole reason both are reported.
     assert!(
@@ -1384,7 +1566,10 @@ fn main() { let n = mapped_probe(1) }
         view.realization
             .iter()
             .find(|(i, _)| {
-                ws.module(i.func.module).functions[i.func.func].name.as_str() == "mapped_probe"
+                ws.module(i.func.module).functions[i.func.func]
+                    .name
+                    .as_str()
+                    == "mapped_probe"
             })
             .map(|(_, r)| r.kind)
     };
@@ -1392,7 +1577,9 @@ fn main() { let n = mapped_probe(1) }
         view.severed_groups()
             .into_iter()
             .find(|grp| {
-                ws.module(grp.callee.module).functions[grp.callee.func].name.as_str()
+                ws.module(grp.callee.module).functions[grp.callee.func]
+                    .name
+                    .as_str()
                     == "mapped_probe"
             })
             .map(|grp| grp.cause)
@@ -1401,8 +1588,15 @@ fn main() { let n = mapped_probe(1) }
     // CONTROL: with no table, JS has neither a body nor a mapping, so the call
     // stays severed. The reorder alone must not admit it.
     let unmapped = artifact::realize(&ws, &g, &ArtifactRequest::new(JAVASCRIPT_WEB, &roots));
-    assert_eq!(severed_here(&unmapped), Some(Unrealizable::ForeignToArtifact));
-    assert_eq!(named(&unmapped), None, "an unmapped Lua-only body was realized on JS");
+    assert_eq!(
+        severed_here(&unmapped),
+        Some(Unrealizable::ForeignToArtifact)
+    );
+    assert_eq!(
+        named(&unmapped),
+        None,
+        "an unmapped Lua-only body was realized on JS"
+    );
 
     let table = Supplies(&["mapped_probe"]);
     let mapped = artifact::realize(
@@ -1416,7 +1610,11 @@ fn main() { let n = mapped_probe(1) }
         Some(artifact::Realization::NativeMapping),
         "the JS artifact refused an intrinsic its own table maps"
     );
-    assert_eq!(severed_here(&mapped), None, "a mapped intrinsic is still a severed call");
+    assert_eq!(
+        severed_here(&mapped),
+        None,
+        "a mapped intrinsic is still a severed call"
+    );
 
     // The luajit artifact is unmoved: its mapping IS the `inline(lua)` body.
     let lua = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
@@ -1440,7 +1638,10 @@ fn main() { let n = expand_probe(1) }
         view.realization
             .iter()
             .find(|(i, _)| {
-                ws.module(i.func.module).functions[i.func.func].name.as_str() == "expand_probe"
+                ws.module(i.func.module).functions[i.func.func]
+                    .name
+                    .as_str()
+                    == "expand_probe"
             })
             .map(|(_, r)| r.kind)
     };
@@ -1448,7 +1649,10 @@ fn main() { let n = expand_probe(1) }
     // CONTROL: the luajit artifact already answers this, so the JS answer below
     // is a divergence between two artifacts over ONE declaration.
     let lua = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
-    assert_eq!(kind(&lua), Some(artifact::Realization::CompileTimeExpansion));
+    assert_eq!(
+        kind(&lua),
+        Some(artifact::Realization::CompileTimeExpansion)
+    );
 
     let js = artifact::realize(&ws, &g, &ArtifactRequest::new(JAVASCRIPT_WEB, &roots));
     assert_eq!(
@@ -1458,7 +1662,9 @@ fn main() { let n = expand_probe(1) }
     );
     assert!(
         !js.severed_groups().iter().any(|grp| {
-            ws.module(grp.callee.module).functions[grp.callee.func].name.as_str()
+            ws.module(grp.callee.module).functions[grp.callee.func]
+                .name
+                .as_str()
                 == "expand_probe"
         }),
         "an expansion the artifact performs is still a severed call"
@@ -1487,14 +1693,22 @@ fn main() { let n = bound_probe(1) + host_probe(2) }
     let kind = |view: &artifact::ArtifactView, name: &str| {
         view.realization
             .iter()
-            .find(|(i, _)| ws.module(i.func.module).functions[i.func.func].name.as_str() == name)
+            .find(|(i, _)| {
+                ws.module(i.func.module).functions[i.func.func]
+                    .name
+                    .as_str()
+                    == name
+            })
             .map(|(_, r)| r.kind)
     };
     let severed = |view: &artifact::ArtifactView, name: &str| {
         view.severed_groups()
             .into_iter()
             .find(|grp| {
-                ws.module(grp.callee.module).functions[grp.callee.func].name.as_str() == name
+                ws.module(grp.callee.module).functions[grp.callee.func]
+                    .name
+                    .as_str()
+                    == name
             })
             .map(|grp| grp.cause)
     };
@@ -1502,21 +1716,32 @@ fn main() { let n = bound_probe(1) + host_probe(2) }
     // CONTROL: unbound, the two calls are severed under their own causes -- a
     // Lua-only body and a host symbol the web platform has none of.
     let plain = artifact::realize(&ws, &g, &ArtifactRequest::new(JAVASCRIPT_WEB, &roots));
-    assert_eq!(severed(&plain, "bound_probe"), Some(Unrealizable::ForeignToArtifact));
+    assert_eq!(
+        severed(&plain, "bound_probe"),
+        Some(Unrealizable::ForeignToArtifact)
+    );
     // An `extern(ffi)` is a Lua-backend declaration, so JS fails to select a
     // sibling before the class question is ever reached.
-    assert_eq!(severed(&plain, "host_probe"), Some(Unrealizable::ForeignToArtifact));
+    assert_eq!(
+        severed(&plain, "host_probe"),
+        Some(Unrealizable::ForeignToArtifact)
+    );
 
     let bindings = Supplies(&["bound_probe", "host_probe"]);
     let bound = artifact::realize(
         &ws,
         &g,
-        &ArtifactRequest::new(JAVASCRIPT_WEB, &roots).with_mappings(
-            ArtifactMappings::for_backend(FnBackend::Js).with_supply(&bindings),
-        ),
+        &ArtifactRequest::new(JAVASCRIPT_WEB, &roots)
+            .with_mappings(ArtifactMappings::for_backend(FnBackend::Js).with_supply(&bindings)),
     );
-    assert_eq!(kind(&bound, "bound_probe"), Some(artifact::Realization::HostBinding));
-    assert_eq!(kind(&bound, "host_probe"), Some(artifact::Realization::HostBinding));
+    assert_eq!(
+        kind(&bound, "bound_probe"),
+        Some(artifact::Realization::HostBinding)
+    );
+    assert_eq!(
+        kind(&bound, "host_probe"),
+        Some(artifact::Realization::HostBinding)
+    );
     assert_eq!(severed(&bound, "bound_probe"), None);
     assert_eq!(severed(&bound, "host_probe"), None);
     // A host binding has no Rock body here, so it is a BOUNDARY the artifact
@@ -1525,7 +1750,10 @@ fn main() { let n = bound_probe(1) + host_probe(2) }
         .realization
         .keys()
         .find(|i| {
-            ws.module(i.func.module).functions[i.func.func].name.as_str() == "bound_probe"
+            ws.module(i.func.module).functions[i.func.func]
+                .name
+                .as_str()
+                == "bound_probe"
         })
         .expect("bound_probe retained")
         .clone();
@@ -1540,9 +1768,8 @@ fn main() { let n = bound_probe(1) + host_probe(2) }
     let lua = artifact::realize(
         &ws,
         &g,
-        &ArtifactRequest::new(LUAJIT_DESKTOP, &roots).with_mappings(
-            ArtifactMappings::for_backend(FnBackend::Lua).with_supply(&bindings),
-        ),
+        &ArtifactRequest::new(LUAJIT_DESKTOP, &roots)
+            .with_mappings(ArtifactMappings::for_backend(FnBackend::Lua).with_supply(&bindings)),
     );
     assert_eq!(
         kind(&lua, "bound_probe"),
@@ -1582,24 +1809,37 @@ fn main() { let n = rock_bound(1) }
     let named = |view: &artifact::ArtifactView, name: &str| {
         view.realization
             .iter()
-            .find(|(i, _)| ws.module(i.func.module).functions[i.func.func].name.as_str() == name)
+            .find(|(i, _)| {
+                ws.module(i.func.module).functions[i.func.func]
+                    .name
+                    .as_str()
+                    == name
+            })
             .map(|(_, r)| r.kind)
     };
 
     // CONTROL first: unbound, it is a Rock body and its callee is reached.
     let plain = artifact::realize(&ws, &g, &ArtifactRequest::new(JAVASCRIPT_WEB, &roots));
-    assert_eq!(named(&plain, "rock_bound"), Some(artifact::Realization::RockBody));
-    assert_eq!(named(&plain, "rock_bound_callee"), Some(artifact::Realization::RockBody));
+    assert_eq!(
+        named(&plain, "rock_bound"),
+        Some(artifact::Realization::RockBody)
+    );
+    assert_eq!(
+        named(&plain, "rock_bound_callee"),
+        Some(artifact::Realization::RockBody)
+    );
 
     let bindings = Supplies(&["rock_bound"]);
     let bound = artifact::realize(
         &ws,
         &g,
-        &ArtifactRequest::new(JAVASCRIPT_WEB, &roots).with_mappings(
-            ArtifactMappings::for_backend(FnBackend::Js).with_supply(&bindings),
-        ),
+        &ArtifactRequest::new(JAVASCRIPT_WEB, &roots)
+            .with_mappings(ArtifactMappings::for_backend(FnBackend::Js).with_supply(&bindings)),
     );
-    assert_eq!(named(&bound, "rock_bound"), Some(artifact::Realization::HostBinding));
+    assert_eq!(
+        named(&bound, "rock_bound"),
+        Some(artifact::Realization::HostBinding)
+    );
     assert_eq!(
         named(&bound, "rock_bound_callee"),
         None,
@@ -1637,7 +1877,12 @@ fn main() {
     let named = |v: &artifact::ArtifactView, name: &str| {
         v.publisher_lanes
             .iter()
-            .find(|(i, _)| ws.module(i.func.module).functions[i.func.func].name.as_str() == name)
+            .find(|(i, _)| {
+                ws.module(i.func.module).functions[i.func.func]
+                    .name
+                    .as_str()
+                    == name
+            })
             .map(|(_, n)| *n)
     };
 
@@ -1651,7 +1896,12 @@ fn main() {
     let inst = before
         .publisher_lanes
         .keys()
-        .find(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == "wired_pair")
+        .find(|i| {
+            ws.module(i.func.module).functions[i.func.func]
+                .name
+                .as_str()
+                == "wired_pair"
+        })
         .expect("the publisher instance")
         .clone();
     let removed = g.index.subst.remove(&inst).is_some() | g.root_instances.remove(&inst);
@@ -1671,7 +1921,10 @@ fn main() {
     // `foreign_bodies` counts what was answered, so the instance leaves it --
     // and the ONLY thing that can take it out is the missing record, which is
     // the finding asserted above.
-    assert_eq!(after.census().foreign_bodies + 1, before.census().foreign_bodies);
+    assert_eq!(
+        after.census().foreign_bodies + 1,
+        before.census().foreign_bodies
+    );
 }
 
 /// **The JS view's reachable `inline(js)` population, with its publisher
@@ -1707,20 +1960,33 @@ fn main() {
         js.publisher_lanes
             .iter()
             .find(|(i, _)| {
-                ws.module(i.func.module).functions[i.func.func].name.as_str() == name
+                ws.module(i.func.module).functions[i.func.func]
+                    .name
+                    .as_str()
+                    == name
             })
             .map(|(_, n)| *n)
     };
 
-    assert_eq!(lanes("reached_pair"), Some(2), "a reachable 2-lane publisher lost its width");
+    assert_eq!(
+        lanes("reached_pair"),
+        Some(2),
+        "a reachable 2-lane publisher lost its width"
+    );
     assert_eq!(lanes("reached_scalar"), Some(1));
     // The UNREACHABLE control: retention is a walk, so a body no root reaches
     // carries no obligation -- and its absence here is what says the two lane
     // counts above are a property of reachability rather than of declaration.
-    assert_eq!(lanes("never_reached"), None, "an unreachable body was given a lane count");
+    assert_eq!(
+        lanes("never_reached"),
+        None,
+        "an unreachable body was given a lane count"
+    );
     assert!(
         js.excluded.iter().any(|e| {
-            ws.module(e.instance.func.module).functions[e.instance.func.func].name.as_str()
+            ws.module(e.instance.func.module).functions[e.instance.func.func]
+                .name
+                .as_str()
                 == "never_reached"
                 && e.cause == Exclusion::Unreachable
         }),
@@ -1729,7 +1995,10 @@ fn main() {
 
     let c = js.census();
     assert!(c.foreign_bodies >= 2, "no foreign body population: {c:?}");
-    assert_eq!(c.widest_result_lanes, 2, "the artifact's widest result wire is wrong: {c:?}");
+    assert_eq!(
+        c.widest_result_lanes, 2,
+        "the artifact's widest result wire is wrong: {c:?}"
+    );
     assert!(c.multi_lane_publishers >= 1);
 
     // The LUAJIT artifact over the same graph selects Lua bodies, so these JS
@@ -1738,7 +2007,10 @@ fn main() {
     let lua = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
     assert!(
         !lua.publisher_lanes.keys().any(|i| {
-            ws.module(i.func.module).functions[i.func.func].name.as_str() == "reached_pair"
+            ws.module(i.func.module).functions[i.func.func]
+                .name
+                .as_str()
+                == "reached_pair"
         }),
         "the luajit artifact claimed a JS-only body's result wire"
     );
@@ -1781,7 +2053,10 @@ fn main() {
         .publisher_lanes
         .iter()
         .filter(|(i, _)| {
-            ws.module(i.func.module).functions[i.func.func].name.as_str() == "wired"
+            ws.module(i.func.module).functions[i.func.func]
+                .name
+                .as_str()
+                == "wired"
         })
         .map(|(i, n)| (g.interner().render(i.args[0]), *n))
         .collect();
@@ -1792,16 +2067,25 @@ fn main() {
         .realization
         .keys()
         .filter(|i| {
-            ws.module(i.func.module).functions[i.func.func].name.as_str() == "wired"
+            ws.module(i.func.module).functions[i.func.func]
+                .name
+                .as_str()
+                == "wired"
         })
         .count();
-    assert_eq!(generic_instances, 2, "the fixture lost one of its two instantiations");
+    assert_eq!(
+        generic_instances, 2,
+        "the fixture lost one of its two instantiations"
+    );
 
     assert_eq!(
         widths,
-        [("(bool, float)".to_string(), 2usize), ("int".to_string(), 1usize)]
-            .into_iter()
-            .collect::<std::collections::BTreeMap<_, _>>(),
+        [
+            ("(bool, float)".to_string(), 2usize),
+            ("int".to_string(), 1usize)
+        ]
+        .into_iter()
+        .collect::<std::collections::BTreeMap<_, _>>(),
         "the two instances of one generic foreign body did not state their own widths"
     );
     assert!(
@@ -1842,7 +2126,10 @@ fn a_nomangle_root_publishes_its_own_body_beside_the_calls_sibling_serves() {
     let lua = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
 
     // Nonzero ordinary-call population: the artifact retains real Rock work.
-    assert!(!lua.instances.is_empty(), "the fixture retained no ordinary Rock instances at all");
+    assert!(
+        !lua.instances.is_empty(),
+        "the fixture retained no ordinary Rock instances at all"
+    );
     // Nonzero exact-publication population: the `@nomangle` root's promise is
     // modeled at all.
     assert!(
@@ -1855,10 +2142,9 @@ fn a_nomangle_root_publishes_its_own_body_beside_the_calls_sibling_serves() {
     // separate, expected member of `unrepresented_publications` and not what
     // this fixture is testing).
     assert!(
-        !lua.unrepresented_publications.iter().any(|r| ws.module(r.module).functions[r.func]
-            .name
-            .as_str()
-            == "portable"),
+        !lua.unrepresented_publications
+            .iter()
+            .any(|r| ws.module(r.module).functions[r.func].name.as_str() == "portable"),
         "portable's own declaration should be its group's representative (Any \
          is the lowest backend rank): {:?}",
         lua.unrepresented_publications
@@ -1874,7 +2160,9 @@ fn a_nomangle_root_publishes_its_own_body_beside_the_calls_sibling_serves() {
                 .iter()
                 .find(|(_, f)| {
                     f.name.as_str() == "portable"
-                        && f.annotations.iter().any(|a| a.name.name.as_str() == "nomangle")
+                        && f.annotations
+                            .iter()
+                            .any(|a| a.name.name.as_str() == "nomangle")
                 })
                 .map(|(fid, _)| (m.id, fid))
         })
@@ -1882,13 +2170,18 @@ fn a_nomangle_root_publishes_its_own_body_beside_the_calls_sibling_serves() {
     let portable_canonical = lua
         .realization
         .keys()
-        .find(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == "portable")
+        .find(|i| {
+            ws.module(i.func.module).functions[i.func.func]
+                .name
+                .as_str()
+                == "portable"
+        })
         .cloned()
         .expect("the canonical `portable` instance is retained");
-    let served_backend =
-        ws.module(lua.realization[&portable_canonical].decl.module).functions
-            [lua.realization[&portable_canonical].decl.func]
-            .backend;
+    let served_backend = ws
+        .module(lua.realization[&portable_canonical].decl.module)
+        .functions[lua.realization[&portable_canonical].decl.func]
+        .backend;
     assert_eq!(
         served_backend,
         FnBackend::Lua,
@@ -1897,7 +2190,10 @@ fn a_nomangle_root_publishes_its_own_body_beside_the_calls_sibling_serves() {
     );
     assert_ne!(
         lua.realization[&portable_canonical].decl,
-        skull_mir::mir::FuncRef { module: nomangle_fid.0, func: nomangle_fid.1 },
+        skull_mir::mir::FuncRef {
+            module: nomangle_fid.0,
+            func: nomangle_fid.1
+        },
         "call-serving realization selected the @nomangle declaration itself, not its sibling"
     );
 
@@ -1907,7 +2203,9 @@ fn a_nomangle_root_publishes_its_own_body_beside_the_calls_sibling_serves() {
     // `portable_canonical` above, naming a DIFFERENT thing (its own body, not
     // whichever declaration serves calls).
     assert_eq!(
-        lua.publications.get(&portable_canonical).map(String::as_str),
+        lua.publications
+            .get(&portable_canonical)
+            .map(String::as_str),
         Some("portable"),
         "the @nomangle root's own bare-name publication is missing or misnamed: {:?}",
         lua.publications
@@ -1919,7 +2217,12 @@ fn a_nomangle_root_publishes_its_own_body_beside_the_calls_sibling_serves() {
     let plain_canonical = lua
         .realization
         .keys()
-        .find(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == "plain")
+        .find(|i| {
+            ws.module(i.func.module).functions[i.func.func]
+                .name
+                .as_str()
+                == "plain"
+        })
         .cloned()
         .expect("the canonical `plain` instance is retained");
     assert!(
@@ -1957,7 +2260,11 @@ fn two_nomangle_roots_sharing_a_bare_name_collide_rather_than_overwrite() {
     );
     let collision = &lua.publication_collisions[0];
     assert_eq!(collision.symbol, "dup");
-    assert_eq!(collision.instances.len(), 2, "the collision did not name both instances");
+    assert_eq!(
+        collision.instances.len(),
+        2,
+        "the collision did not name both instances"
+    );
     // Neither colliding instance is silently admitted as a resolved publication
     // -- a reject beats a last-writer-wins guess.
     for i in &collision.instances {
@@ -1973,18 +2280,28 @@ fn local_publication_and_collision_retraction_matches_fresh_view() {
     let ws = check(PUBLICATION_COLLISION_FIXTURE);
     let (g, roots) = graph_for(&ws);
     let mut local = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
-    assert_eq!(local.publication_collisions.len(), 1, "fixture did not populate a collision");
+    assert_eq!(
+        local.publication_collisions.len(),
+        1,
+        "fixture did not populate a collision"
+    );
     let removed_root = roots
         .iter()
         .copied()
         .find(|root| {
             let f = &ws.module(root.module).functions[root.func];
             f.name.as_str() == "dup"
-                && f.annotations.iter().any(|a| a.name.name.as_str() == "nomangle")
+                && f.annotations
+                    .iter()
+                    .any(|a| a.name.name.as_str() == "nomangle")
                 && f.generics.is_empty()
         })
         .expect("fixture's @nomangle root");
-    let narrowed: Vec<_> = roots.iter().copied().filter(|root| *root != removed_root).collect();
+    let narrowed: Vec<_> = roots
+        .iter()
+        .copied()
+        .filter(|root| *root != removed_root)
+        .collect();
     let fresh = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &narrowed));
     let stats = local.update_local(
         &ws,
@@ -1994,11 +2311,26 @@ fn local_publication_and_collision_retraction_matches_fresh_view() {
         &Default::default(),
         &Default::default(),
     );
-    assert!(stats.root_entries_examined > 0, "root-delta fixture did no indexed root work: {stats:?}");
-    assert_eq!(local.publications, fresh.publications, "publication rows were not retracted locally");
-    assert_eq!(local.publication_collisions, fresh.publication_collisions, "collision rows went stale");
-    assert_eq!(local.unrepresented_publications, fresh.unrepresented_publications);
-    assert_eq!(local.symbol_collisions, fresh.symbol_collisions, "symbol rows changed under a publication delta");
+    assert!(
+        stats.root_entries_examined > 0,
+        "root-delta fixture did no indexed root work: {stats:?}"
+    );
+    assert_eq!(
+        local.publications, fresh.publications,
+        "publication rows were not retracted locally"
+    );
+    assert_eq!(
+        local.publication_collisions, fresh.publication_collisions,
+        "collision rows went stale"
+    );
+    assert_eq!(
+        local.unrepresented_publications,
+        fresh.unrepresented_publications
+    );
+    assert_eq!(
+        local.symbol_collisions, fresh.symbol_collisions,
+        "symbol rows changed under a publication delta"
+    );
     let restored = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
     let install_stats = local.update_local(
         &ws,
@@ -2008,9 +2340,18 @@ fn local_publication_and_collision_retraction_matches_fresh_view() {
         &Default::default(),
         &Default::default(),
     );
-    assert!(install_stats.root_entries_examined > 0, "root-addition fixture did no indexed root work: {install_stats:?}");
-    assert_eq!(local.publications, restored.publications, "publication installation was lost");
-    assert_eq!(local.publication_collisions, restored.publication_collisions, "collision installation was lost");
+    assert!(
+        install_stats.root_entries_examined > 0,
+        "root-addition fixture did no indexed root work: {install_stats:?}"
+    );
+    assert_eq!(
+        local.publications, restored.publications,
+        "publication installation was lost"
+    );
+    assert_eq!(
+        local.publication_collisions, restored.publication_collisions,
+        "collision installation was lost"
+    );
 }
 
 #[test]
@@ -2024,10 +2365,17 @@ fn main() { let a = left()\n print(\"{a}\") }";
     let mut graph = instance_graph::build(&ws1, roots.clone(), false);
     let request = ArtifactRequest::new(LUAJIT_DESKTOP, &roots).with_symbols(&MAIN_RIGHT_COLLISION);
     let mut local = artifact::realize(&ws1, &graph, &request);
-    assert_eq!(local.symbol_collisions.len(), 1, "fixture did not populate a symbol collision");
+    assert_eq!(
+        local.symbol_collisions.len(),
+        1,
+        "fixture did not populate a symbol collision"
+    );
 
     let ws2 = check(source_v2);
-    let module = *ws2.module_ids.get(&Ustr::from("<test>")).expect("test module");
+    let module = *ws2
+        .module_ids
+        .get(&Ustr::from("<test>"))
+        .expect("test module");
     let main = ws2
         .module(module)
         .functions
@@ -2038,7 +2386,8 @@ fn main() { let a = left()\n print(\"{a}\") }";
     let update = graph.update_bodies_with_root_delta(&ws2, &[], &[], &[main], &[]);
     let fresh_roots = skull::mir_emit::emission_roots(&ws2, Some("/project"));
     let fresh_graph = instance_graph::build(&ws2, fresh_roots, false);
-    let fresh_request = ArtifactRequest::new(LUAJIT_DESKTOP, &roots).with_symbols(&MAIN_RIGHT_COLLISION);
+    let fresh_request =
+        ArtifactRequest::new(LUAJIT_DESKTOP, &roots).with_symbols(&MAIN_RIGHT_COLLISION);
     let fresh = artifact::realize(&ws2, &fresh_graph, &fresh_request);
     let stats = local.update_local(
         &ws2,
@@ -2048,9 +2397,18 @@ fn main() { let a = left()\n print(\"{a}\") }";
         &update.added,
         &update.removed,
     );
-    assert!(stats.iterations > 0, "symbol-delta fixture did no local artifact work: {stats:?}");
-    assert_eq!(local.symbol_collisions, fresh.symbol_collisions, "symbol collision rows went stale");
-    assert!(local.symbol_collisions.is_empty(), "the removed owner kept a collision row");
+    assert!(
+        stats.iterations > 0,
+        "symbol-delta fixture did no local artifact work: {stats:?}"
+    );
+    assert_eq!(
+        local.symbol_collisions, fresh.symbol_collisions,
+        "symbol collision rows went stale"
+    );
+    assert!(
+        local.symbol_collisions.is_empty(),
+        "the removed owner kept a collision row"
+    );
 }
 
 #[test]
@@ -2082,7 +2440,10 @@ fn main() { let x = caller() }
                 .functions
                 .iter()
                 .find(|(_, f)| f.name.as_str() == "main")
-                .map(|(fid, _)| skull_mir::mir::FuncRef { module: module.id, func: fid })
+                .map(|(fid, _)| skull_mir::mir::FuncRef {
+                    module: module.id,
+                    func: fid,
+                })
         })
         .expect("main root");
     let request_roots = vec![main];
@@ -2126,11 +2487,16 @@ fn main() { let x = caller() }
         &update.added,
         &update.removed,
     );
-    assert!(stats.iterations > 0, "inline-delta fixture did no local artifact work: {stats:?}");
-    assert_eq!(local.inline_deps, fresh.inline_deps, "inline dependency rows went stale");
+    assert!(
+        stats.iterations > 0,
+        "inline-delta fixture did no local artifact work: {stats:?}"
+    );
     assert_eq!(
-        local.unresolved_inline_deps,
-        fresh.unresolved_inline_deps,
+        local.inline_deps, fresh.inline_deps,
+        "inline dependency rows went stale"
+    );
+    assert_eq!(
+        local.unresolved_inline_deps, fresh.unresolved_inline_deps,
         "inline unresolved rows went stale"
     );
 }
@@ -2140,10 +2506,19 @@ fn fresh_artifact_indexes_each_graph_site_once() {
     let ws = check("fn leaf(x: int) -> int { x + 1 }\nfn main() { let x = leaf(1) }");
     let (g, roots) = graph_for(&ws);
     let expected: usize = g.call_sites().map(|(_, sites)| sites.len()).sum();
-    assert!(expected > 0, "artifact-index fixture has no graph-site population");
+    assert!(
+        expected > 0,
+        "artifact-index fixture has no graph-site population"
+    );
     let before = artifact::fresh_index_site_rows();
     let view = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
     let indexed = artifact::fresh_index_site_rows().saturating_sub(before) as usize;
-    assert_eq!(indexed, expected, "fresh ArtifactIndex installed graph sites more than once");
-    assert!(view.census().sites_walked > 0, "the fixture did not retain a site-bearing body");
+    assert_eq!(
+        indexed, expected,
+        "fresh ArtifactIndex installed graph sites more than once"
+    );
+    assert!(
+        view.census().sites_walked > 0,
+        "the fixture did not retain a site-bearing body"
+    );
 }

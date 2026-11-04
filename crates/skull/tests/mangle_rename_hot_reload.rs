@@ -49,10 +49,16 @@ fn run_luajit(test: &str, prog: &str) -> String {
     use std::process::Command;
     // Keyed per TEST, not per process: `cargo test` runs both tests
     // concurrently in one process, so a pid-only name races.
-    let path =
-        std::env::temp_dir().join(format!("skull_mangle_reload_{}_{}.lua", test, std::process::id()));
+    let path = std::env::temp_dir().join(format!(
+        "skull_mangle_reload_{}_{}.lua",
+        test,
+        std::process::id()
+    ));
     std::fs::write(&path, prog).expect("write program");
-    let out = Command::new("luajit").arg(&path).output().expect("spawn luajit");
+    let out = Command::new("luajit")
+        .arg(&path)
+        .output()
+        .expect("spawn luajit");
     let _ = std::fs::remove_file(&path);
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     assert!(
@@ -142,7 +148,10 @@ fn overload_add_orphans_running_global_sentinel() {
     let out = run_luajit("overload", &script);
     let fresh = out.lines().find(|l| l.starts_with("fresh=")).unwrap();
     let canon = out.lines().find(|l| l.starts_with("canonical=")).unwrap();
-    let bare = out.lines().find(|l| l.starts_with("bare_foo_present=")).unwrap();
+    let bare = out
+        .lines()
+        .find(|l| l.starts_with("bare_foo_present="))
+        .unwrap();
 
     // FIXED: surviving GETGLOBAL-foo_int code sees the edited body.
     assert_eq!(
@@ -151,7 +160,13 @@ fn overload_add_orphans_running_global_sentinel() {
          edited body. If this is 51 the mangle stopped being decl-set-independent. got: {out}"
     );
     // The reloaded chunk's authoritative int fn carries the edit, at the SAME name.
-    assert_eq!(canon, "canonical=52", "foo_int must carry the edit; got: {out}");
+    assert_eq!(
+        canon, "canonical=52",
+        "foo_int must carry the edit; got: {out}"
+    );
     // No bare `foo` global exists under always-mangle -- there is nothing to orphan.
-    assert_eq!(bare, "bare_foo_present=false", "no bare foo global should be emitted; got: {out}");
+    assert_eq!(
+        bare, "bare_foo_present=false",
+        "no bare foo global should be emitted; got: {out}"
+    );
 }

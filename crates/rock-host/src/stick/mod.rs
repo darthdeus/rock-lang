@@ -45,7 +45,10 @@ impl<'de> serde::Deserialize<'de> for IdentityStorageDeclaration {
         impl<'de> serde::de::Visitor<'de> for Vis {
             type Value = IdentityStorageDeclaration;
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                write!(f, "\"enforced\", \"exempt\" or a table with an exempt_modules list")
+                write!(
+                    f,
+                    "\"enforced\", \"exempt\" or a table with an exempt_modules list"
+                )
             }
             fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
                 IdentityStorage::parse(value).map(IdentityStorageDeclaration).ok_or_else(|| {
@@ -55,7 +58,10 @@ impl<'de> serde::Deserialize<'de> for IdentityStorageDeclaration {
                     ))
                 })
             }
-            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Self::Value, A::Error> {
                 let mut modules = None;
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
@@ -68,14 +74,21 @@ impl<'de> serde::Deserialize<'de> for IdentityStorageDeclaration {
                     }
                 }
                 let modules = modules.ok_or_else(|| {
-                    serde::de::Error::custom("`[language] identity_storage` table needs `exempt_modules`")
+                    serde::de::Error::custom(
+                        "`[language] identity_storage` table needs `exempt_modules`",
+                    )
                 })?;
-                if let Some(bad) = modules.iter().find(|m| m.is_empty() || m.split("::").any(str::is_empty)) {
+                if let Some(bad) = modules
+                    .iter()
+                    .find(|m| m.is_empty() || m.split("::").any(str::is_empty))
+                {
                     return Err(serde::de::Error::custom(format!(
                         "`[language] identity_storage` exempt module `{bad}` is not a `::`-joined module path"
                     )));
                 }
-                Ok(IdentityStorageDeclaration(IdentityStorage::ExemptModules(modules)))
+                Ok(IdentityStorageDeclaration(IdentityStorage::ExemptModules(
+                    modules,
+                )))
             }
         }
         d.deserialize_any(Vis)
@@ -88,9 +101,15 @@ impl<'de> serde::Deserialize<'de> for LanguageConfig {
         impl<'de> serde::de::Visitor<'de> for Vis {
             type Value = LanguageConfig;
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                write!(f, "a table with modules, globals and/or identity_storage keys")
+                write!(
+                    f,
+                    "a table with modules, globals and/or identity_storage keys"
+                )
             }
-            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<LanguageConfig, A::Error> {
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<LanguageConfig, A::Error> {
                 let mut modules = rock_core::source_code::Dialect::Legacy;
                 let mut globals = rock_core::source_code::GlobalPolicy::Any;
                 let mut identity_storage = rock_core::source_code::IdentityStorage::Enforced;
@@ -132,7 +151,11 @@ impl<'de> serde::Deserialize<'de> for LanguageConfig {
                         }
                     }
                 }
-                Ok(LanguageConfig { modules, globals, identity_storage })
+                Ok(LanguageConfig {
+                    modules,
+                    globals,
+                    identity_storage,
+                })
             }
         }
         d.deserialize_map(Vis)
@@ -189,7 +212,10 @@ impl StickConfig {
     /// This package's identity-storage migration state. Missing `[language]`
     /// or missing `identity_storage` is enforced.
     pub fn identity_storage(&self) -> rock_core::source_code::IdentityStorage {
-        self.language.as_ref().map(|l| l.identity_storage.clone()).unwrap_or_default()
+        self.language
+            .as_ref()
+            .map(|l| l.identity_storage.clone())
+            .unwrap_or_default()
     }
 
     /// This package's source dialect. Missing `[language]` is legacy.
@@ -299,12 +325,16 @@ pub struct RendererOverrideGuard {
 
 impl Drop for RendererOverrideGuard {
     fn drop(&mut self) {
-        *renderer_override_slot().lock().expect("renderer override lock") = self.previous;
+        *renderer_override_slot()
+            .lock()
+            .expect("renderer override lock") = self.previous;
     }
 }
 
 pub fn install_renderer_override(backend: Option<RendererBackend>) -> RendererOverrideGuard {
-    let mut slot = renderer_override_slot().lock().expect("renderer override lock");
+    let mut slot = renderer_override_slot()
+        .lock()
+        .expect("renderer override lock");
     let previous = *slot;
     *slot = backend;
     RendererOverrideGuard { previous }
@@ -312,7 +342,9 @@ pub fn install_renderer_override(backend: Option<RendererBackend>) -> RendererOv
 
 /// The renderer the current invocation selected with `--renderer`, if any.
 pub fn renderer_override() -> Option<RendererBackend> {
-    *renderer_override_slot().lock().expect("renderer override lock")
+    *renderer_override_slot()
+        .lock()
+        .expect("renderer override lock")
 }
 
 /// The invocation's channel selection, recorded once by the CLI before
@@ -327,7 +359,9 @@ fn invocation_channels_slot() -> &'static Mutex<(Option<String>, Option<String>)
 }
 
 pub fn set_invocation_channel(explicit: Option<String>, implied: Option<String>) {
-    *invocation_channels_slot().lock().expect("invocation channel lock") = (explicit, implied);
+    *invocation_channels_slot()
+        .lock()
+        .expect("invocation channel lock") = (explicit, implied);
 }
 
 /// Resolve the channel a manifest's channel-scoped selections evaluate
@@ -383,11 +417,16 @@ impl<'de> serde::Deserialize<'de> for IosConfig {
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
                 write!(f, "IosConfig struct")
             }
-            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<IosConfig, A::Error> {
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<IosConfig, A::Error> {
                 let mut orientation: Option<String> = None;
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
-                        "orientation" => { orientation = Some(map.next_value()?); }
+                        "orientation" => {
+                            orientation = Some(map.next_value()?);
+                        }
                         other => {
                             // Fail closed: a misspelled key here would silently
                             // ship the default orientation, and the only symptom
@@ -508,7 +547,10 @@ impl<'de> serde::Deserialize<'de> for DetailedDependency {
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
                 write!(f, "a table with exactly one path or package key")
             }
-            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<DetailedDependency, A::Error> {
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<DetailedDependency, A::Error> {
                 let mut source = None;
                 let mut channels: Vec<String> = Vec::new();
                 let mut allow_legacy = false;
@@ -516,7 +558,9 @@ impl<'de> serde::Deserialize<'de> for DetailedDependency {
                     match key.as_str() {
                         "path" | "package" => {
                             if source.is_some() {
-                                return Err(serde::de::Error::custom("dependency requires exactly one path or package key"));
+                                return Err(serde::de::Error::custom(
+                                    "dependency requires exactly one path or package key",
+                                ));
                             }
                             let value: String = map.next_value()?;
                             source = Some(if key == "path" {
@@ -525,8 +569,12 @@ impl<'de> serde::Deserialize<'de> for DetailedDependency {
                                 DependencySource::Package(value)
                             });
                         }
-                        "channels" => { channels = map.next_value()?; }
-                        "allow_legacy" => { allow_legacy = map.next_value()?; }
+                        "channels" => {
+                            channels = map.next_value()?;
+                        }
+                        "allow_legacy" => {
+                            allow_legacy = map.next_value()?;
+                        }
                         other => {
                             return Err(serde::de::Error::custom(format!(
                                 "unknown key `{other}` in dependency; known keys: path, package, channels, allow_legacy"
@@ -534,8 +582,14 @@ impl<'de> serde::Deserialize<'de> for DetailedDependency {
                         }
                     }
                 }
-                let source = source.ok_or_else(|| serde::de::Error::custom("dependency requires exactly one path or package key"))?;
-                Ok(DetailedDependency { source, channels, allow_legacy })
+                let source = source.ok_or_else(|| {
+                    serde::de::Error::custom("dependency requires exactly one path or package key")
+                })?;
+                Ok(DetailedDependency {
+                    source,
+                    channels,
+                    allow_legacy,
+                })
             }
         }
         d.deserialize_map(Vis)
@@ -548,7 +602,10 @@ impl<'de> serde::Deserialize<'de> for Dependency {
         impl<'de> serde::de::Visitor<'de> for Vis {
             type Value = Dependency;
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                write!(f, "a path string or table with exactly one path or package key")
+                write!(
+                    f,
+                    "a path string or table with exactly one path or package key"
+                )
             }
             fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<Dependency, E> {
                 Ok(Dependency::Path(s.to_string()))
@@ -556,9 +613,14 @@ impl<'de> serde::Deserialize<'de> for Dependency {
             fn visit_string<E: serde::de::Error>(self, s: String) -> Result<Dependency, E> {
                 Ok(Dependency::Path(s))
             }
-            fn visit_map<A: serde::de::MapAccess<'de>>(self, map: A) -> Result<Dependency, A::Error> {
-                <DetailedDependency as serde::Deserialize>::deserialize(serde::de::value::MapAccessDeserializer::new(map))
-                    .map(Dependency::Detailed)
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                map: A,
+            ) -> Result<Dependency, A::Error> {
+                <DetailedDependency as serde::Deserialize>::deserialize(
+                    serde::de::value::MapAccessDeserializer::new(map),
+                )
+                .map(Dependency::Detailed)
             }
         }
         d.deserialize_any(Vis)
@@ -573,11 +635,16 @@ impl<'de> serde::Deserialize<'de> for EngineConfig {
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
                 write!(f, "EngineConfig struct")
             }
-            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<EngineConfig, A::Error> {
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<EngineConfig, A::Error> {
                 let mut needs: Vec<String> = Vec::new();
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
-                        "needs" => { needs = map.next_value()?; }
+                        "needs" => {
+                            needs = map.next_value()?;
+                        }
                         other => {
                             return Err(serde::de::Error::custom(format!(
                                 "unknown key `{other}` in [engine]; known keys: needs"
@@ -598,24 +665,51 @@ impl<'de> serde::Deserialize<'de> for BuildVar {
         impl<'de> serde::de::Visitor<'de> for Vis {
             type Value = BuildVar;
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                write!(f, "a literal string or a table with cmd/builtin/value/source_fingerprint/channels/optional_channels/default/secret/volatile")
+                write!(
+                    f,
+                    "a literal string or a table with cmd/builtin/value/source_fingerprint/channels/optional_channels/default/secret/volatile"
+                )
             }
             fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<BuildVar, E> {
-                Ok(BuildVar { value: Some(s.to_string()), ..BuildVar::default() })
+                Ok(BuildVar {
+                    value: Some(s.to_string()),
+                    ..BuildVar::default()
+                })
             }
-            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<BuildVar, A::Error> {
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<BuildVar, A::Error> {
                 let mut var = BuildVar::default();
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
-                        "cmd" => { var.cmd = Some(map.next_value()?); }
-                        "builtin" => { var.builtin = Some(map.next_value()?); }
-                        "value" => { var.value = Some(map.next_value()?); }
-                        "source_fingerprint" => { var.source_fingerprint = Some(map.next_value()?); }
-                        "channels" => { var.channels = Some(map.next_value()?); }
-                        "optional_channels" => { var.optional_channels = Some(map.next_value()?); }
-                        "default" => { var.default = Some(map.next_value()?); }
-                        "secret" => { var.secret = map.next_value()?; }
-                        "volatile" => { var.volatile = map.next_value()?; }
+                        "cmd" => {
+                            var.cmd = Some(map.next_value()?);
+                        }
+                        "builtin" => {
+                            var.builtin = Some(map.next_value()?);
+                        }
+                        "value" => {
+                            var.value = Some(map.next_value()?);
+                        }
+                        "source_fingerprint" => {
+                            var.source_fingerprint = Some(map.next_value()?);
+                        }
+                        "channels" => {
+                            var.channels = Some(map.next_value()?);
+                        }
+                        "optional_channels" => {
+                            var.optional_channels = Some(map.next_value()?);
+                        }
+                        "default" => {
+                            var.default = Some(map.next_value()?);
+                        }
+                        "secret" => {
+                            var.secret = map.next_value()?;
+                        }
+                        "volatile" => {
+                            var.volatile = map.next_value()?;
+                        }
                         other => {
                             // Fail closed: a misspelled source key would leave the
                             // var sourceless and every build_var() reading it stale.
@@ -641,13 +735,22 @@ impl<'de> serde::Deserialize<'de> for BuildConfig {
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
                 write!(f, "BuildConfig struct")
             }
-            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<BuildConfig, A::Error> {
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<BuildConfig, A::Error> {
                 let mut build = BuildConfig::default();
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
-                        "channels" => { build.channels = map.next_value()?; }
-                        "default_channel" => { build.default_channel = Some(map.next_value()?); }
-                        "vars" => { build.vars = map.next_value()?; }
+                        "channels" => {
+                            build.channels = map.next_value()?;
+                        }
+                        "default_channel" => {
+                            build.default_channel = Some(map.next_value()?);
+                        }
+                        "vars" => {
+                            build.vars = map.next_value()?;
+                        }
                         other => {
                             // Fail closed: a misspelled key here would silently drop
                             // every declared var and channel.
@@ -673,13 +776,22 @@ impl<'de> serde::Deserialize<'de> for ReleaseConfig {
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
                 write!(f, "ReleaseConfig struct")
             }
-            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<ReleaseConfig, A::Error> {
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<ReleaseConfig, A::Error> {
                 let mut release = ReleaseConfig::default();
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
-                        "assets" => { release.assets = Some(map.next_value()?); }
-                        "predefined_levels" => { release.predefined_levels = Some(map.next_value()?); }
-                        "overlay_assets" => { release.overlay_assets = Some(map.next_value()?); }
+                        "assets" => {
+                            release.assets = Some(map.next_value()?);
+                        }
+                        "predefined_levels" => {
+                            release.predefined_levels = Some(map.next_value()?);
+                        }
+                        "overlay_assets" => {
+                            release.overlay_assets = Some(map.next_value()?);
+                        }
                         other => {
                             return Err(serde::de::Error::custom(format!(
                                 "unknown key `{other}` in [release]; known keys: assets, predefined_levels, overlay_assets"
@@ -702,11 +814,16 @@ impl<'de> serde::Deserialize<'de> for AssetsConfig {
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
                 write!(f, "AssetsConfig struct")
             }
-            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<AssetsConfig, A::Error> {
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<AssetsConfig, A::Error> {
                 let mut assets = AssetsConfig::default();
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
-                        "overlays" => { assets.overlays = map.next_value()?; }
+                        "overlays" => {
+                            assets.overlays = map.next_value()?;
+                        }
                         other => {
                             return Err(serde::de::Error::custom(format!(
                                 "unknown key `{other}` in [assets]; known keys: overlays"
@@ -729,11 +846,16 @@ impl<'de> serde::Deserialize<'de> for SoundConfig {
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
                 write!(f, "SoundConfig struct")
             }
-            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<SoundConfig, A::Error> {
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<SoundConfig, A::Error> {
                 let mut project: Option<String> = None;
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
-                        "project" => { project = Some(map.next_value()?); }
+                        "project" => {
+                            project = Some(map.next_value()?);
+                        }
                         other => {
                             return Err(serde::de::Error::custom(format!(
                                 "unknown key `{other}` in [sound]; known keys: project"
@@ -757,11 +879,16 @@ impl<'de> serde::Deserialize<'de> for RendererConfig {
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
                 write!(f, "RendererConfig struct")
             }
-            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<RendererConfig, A::Error> {
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<RendererConfig, A::Error> {
                 let mut backend: Option<String> = None;
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
-                        "backend" => { backend = Some(map.next_value()?); }
+                        "backend" => {
+                            backend = Some(map.next_value()?);
+                        }
                         other => {
                             return Err(serde::de::Error::custom(format!(
                                 "unknown key `{other}` in [renderer]; known keys: backend"
@@ -784,15 +911,24 @@ impl<'de> serde::Deserialize<'de> for Package {
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
                 write!(f, "Package struct")
             }
-            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Package, A::Error> {
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Package, A::Error> {
                 let mut name: Option<String> = None;
                 let mut version: Option<String> = None;
                 let mut package_type: Option<PackageType> = None;
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
-                        "name" => { name = Some(map.next_value()?); }
-                        "version" => { version = map.next_value()?; }
-                        "type" => { package_type = map.next_value()?; }
+                        "name" => {
+                            name = Some(map.next_value()?);
+                        }
+                        "version" => {
+                            version = map.next_value()?;
+                        }
+                        "type" => {
+                            package_type = map.next_value()?;
+                        }
                         other => {
                             return Err(serde::de::Error::custom(format!(
                                 "unknown key `{other}` in [package]; known keys: name, version, type"
@@ -801,7 +937,11 @@ impl<'de> serde::Deserialize<'de> for Package {
                     }
                 }
                 let name = name.ok_or_else(|| serde::de::Error::missing_field("name"))?;
-                Ok(Package { name, version, package_type })
+                Ok(Package {
+                    name,
+                    version,
+                    package_type,
+                })
             }
         }
         d.deserialize_map(Vis)
@@ -816,7 +956,10 @@ impl<'de> serde::Deserialize<'de> for StickConfig {
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
                 write!(f, "StickConfig struct")
             }
-            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<StickConfig, A::Error> {
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<StickConfig, A::Error> {
                 let mut package: Option<Package> = None;
                 let mut engine: Option<EngineConfig> = None;
                 let mut renderer: Option<RendererConfig> = None;
@@ -830,17 +973,39 @@ impl<'de> serde::Deserialize<'de> for StickConfig {
                 let mut source_groups: HashMap<String, SourceGroupConfig> = HashMap::new();
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
-                        "package" => { package = Some(map.next_value()?); }
-                        "build" => { build = Some(map.next_value()?); }
-                        "release" => { release = Some(map.next_value()?); }
-                        "assets" => { assets = Some(map.next_value()?); }
-                        "sound" => { sound = Some(map.next_value()?); }
-                        "engine" => { engine = map.next_value()?; }
-                        "renderer" => { renderer = map.next_value()?; }
-                        "ios" => { ios = map.next_value()?; }
-                        "language" => { language = map.next_value()?; }
-                        "dependencies" => { dependencies = map.next_value()?; }
-                        "source_groups" => { source_groups = map.next_value()?; }
+                        "package" => {
+                            package = Some(map.next_value()?);
+                        }
+                        "build" => {
+                            build = Some(map.next_value()?);
+                        }
+                        "release" => {
+                            release = Some(map.next_value()?);
+                        }
+                        "assets" => {
+                            assets = Some(map.next_value()?);
+                        }
+                        "sound" => {
+                            sound = Some(map.next_value()?);
+                        }
+                        "engine" => {
+                            engine = map.next_value()?;
+                        }
+                        "renderer" => {
+                            renderer = map.next_value()?;
+                        }
+                        "ios" => {
+                            ios = map.next_value()?;
+                        }
+                        "language" => {
+                            language = map.next_value()?;
+                        }
+                        "dependencies" => {
+                            dependencies = map.next_value()?;
+                        }
+                        "source_groups" => {
+                            source_groups = map.next_value()?;
+                        }
                         other => {
                             return Err(serde::de::Error::custom(format!(
                                 "unknown key `{other}` at top level; known keys: package, build, release, \
@@ -850,7 +1015,19 @@ impl<'de> serde::Deserialize<'de> for StickConfig {
                     }
                 }
                 let package = package.ok_or_else(|| serde::de::Error::missing_field("package"))?;
-                Ok(StickConfig { package, engine, renderer, ios, build, release, assets, sound, language, dependencies, source_groups })
+                Ok(StickConfig {
+                    package,
+                    engine,
+                    renderer,
+                    ios,
+                    build,
+                    release,
+                    assets,
+                    sound,
+                    language,
+                    dependencies,
+                    source_groups,
+                })
             }
         }
         d.deserialize_map(Vis)
@@ -865,7 +1042,10 @@ impl<'de> serde::Deserialize<'de> for StickLockDependency {
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
                 write!(f, "StickLockDependency struct")
             }
-            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<StickLockDependency, A::Error> {
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<StickLockDependency, A::Error> {
                 let mut name: Option<String> = None;
                 let mut version: Option<String> = None;
                 let mut source: Option<String> = None;
@@ -873,18 +1053,36 @@ impl<'de> serde::Deserialize<'de> for StickLockDependency {
                 let mut dependencies: Vec<String> = Vec::new();
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
-                        "name" => { name = Some(map.next_value()?); }
-                        "version" => { version = Some(map.next_value()?); }
-                        "source" => { source = Some(map.next_value()?); }
-                        "checksum" => { checksum = map.next_value()?; }
-                        "dependencies" => { dependencies = map.next_value()?; }
-                        _ => { let _ = map.next_value::<serde::de::IgnoredAny>()?; }
+                        "name" => {
+                            name = Some(map.next_value()?);
+                        }
+                        "version" => {
+                            version = Some(map.next_value()?);
+                        }
+                        "source" => {
+                            source = Some(map.next_value()?);
+                        }
+                        "checksum" => {
+                            checksum = map.next_value()?;
+                        }
+                        "dependencies" => {
+                            dependencies = map.next_value()?;
+                        }
+                        _ => {
+                            let _ = map.next_value::<serde::de::IgnoredAny>()?;
+                        }
                     }
                 }
                 let name = name.ok_or_else(|| serde::de::Error::missing_field("name"))?;
                 let version = version.ok_or_else(|| serde::de::Error::missing_field("version"))?;
                 let source = source.ok_or_else(|| serde::de::Error::missing_field("source"))?;
-                Ok(StickLockDependency { name, version, source, checksum, dependencies })
+                Ok(StickLockDependency {
+                    name,
+                    version,
+                    source,
+                    checksum,
+                    dependencies,
+                })
             }
         }
         d.deserialize_map(Vis)
@@ -899,21 +1097,37 @@ impl<'de> serde::Deserialize<'de> for StickLock {
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
                 write!(f, "StickLock struct")
             }
-            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<StickLock, A::Error> {
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<StickLock, A::Error> {
                 let mut version: Option<u32> = None;
                 let mut compiler_sha1: Option<String> = None;
                 let mut dependencies: Vec<StickLockDependency> = Vec::new();
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
-                        "version" => { version = Some(map.next_value()?); }
-                        "compiler_sha1" => { compiler_sha1 = Some(map.next_value()?); }
-                        "dependencies" => { dependencies = map.next_value()?; }
-                        _ => { let _ = map.next_value::<serde::de::IgnoredAny>()?; }
+                        "version" => {
+                            version = Some(map.next_value()?);
+                        }
+                        "compiler_sha1" => {
+                            compiler_sha1 = Some(map.next_value()?);
+                        }
+                        "dependencies" => {
+                            dependencies = map.next_value()?;
+                        }
+                        _ => {
+                            let _ = map.next_value::<serde::de::IgnoredAny>()?;
+                        }
                     }
                 }
                 let version = version.ok_or_else(|| serde::de::Error::missing_field("version"))?;
-                let compiler_sha1 = compiler_sha1.ok_or_else(|| serde::de::Error::missing_field("compiler_sha1"))?;
-                Ok(StickLock { version, compiler_sha1, dependencies })
+                let compiler_sha1 = compiler_sha1
+                    .ok_or_else(|| serde::de::Error::missing_field("compiler_sha1"))?;
+                Ok(StickLock {
+                    version,
+                    compiler_sha1,
+                    dependencies,
+                })
             }
         }
         d.deserialize_map(Vis)
@@ -945,12 +1159,19 @@ impl StickConfig {
             .map_err(|e| anyhow::anyhow!("Failed to parse stick.toml: {}", e))
     }
 
-
     pub fn renderer_backend(&self) -> Result<RendererBackend> {
-        if let Some(backend) = *renderer_override_slot().lock().expect("renderer override lock") {
+        if let Some(backend) = *renderer_override_slot()
+            .lock()
+            .expect("renderer override lock")
+        {
             return Ok(backend);
         }
-        match self.renderer.as_ref().and_then(|r| r.backend.as_deref()).unwrap_or("gl") {
+        match self
+            .renderer
+            .as_ref()
+            .and_then(|r| r.backend.as_deref())
+            .unwrap_or("gl")
+        {
             "gl" => Ok(RendererBackend::Gl),
             "wgpu" => Ok(RendererBackend::Wgpu),
             backend => anyhow::bail!(
@@ -963,7 +1184,6 @@ impl StickConfig {
     pub fn validate_renderer(&self) -> Result<()> {
         self.renderer_backend().map(|_| ())
     }
-
 
     /// Recognised values for `[ios] orientation` in bundle generation.
     pub const KNOWN_IOS_ORIENTATIONS: [&'static str; 3] = ["landscape", "portrait", "all"];
@@ -992,7 +1212,6 @@ impl StickConfig {
         Ok(())
     }
 
-
     /// Reject a malformed `[build]` section at load time: a var with zero or
     /// two sources, an unknown builtin, or a channel name nothing declares
     /// would otherwise surface as a confusing resolution failure (or silently
@@ -1005,7 +1224,8 @@ impl StickConfig {
             if !build.channels.iter().any(|c| c == default) {
                 anyhow::bail!(
                     "stick.toml: [build] default_channel {:?} is not in channels {:?}",
-                    default, build.channels
+                    default,
+                    build.channels
                 );
             }
         }
@@ -1030,7 +1250,8 @@ impl StickConfig {
                 if !KNOWN_BUILD_BUILTINS.contains(&builtin) {
                     anyhow::bail!(
                         "stick.toml: [build.vars] {name} names unknown builtin {:?}. Known: {:?}",
-                        builtin, KNOWN_BUILD_BUILTINS
+                        builtin,
+                        KNOWN_BUILD_BUILTINS
                     );
                 }
             }
@@ -1040,7 +1261,8 @@ impl StickConfig {
                         anyhow::bail!(
                             "stick.toml: [build.vars] {name} restricts to channel {:?}, \
                              which is not in [build] channels {:?}",
-                            chan, build.channels
+                            chan,
+                            build.channels
                         );
                     }
                 }
@@ -1057,14 +1279,10 @@ impl StickConfig {
                     );
                 }
                 if fingerprint.roots.iter().any(|root| root.trim().is_empty()) {
-                    anyhow::bail!(
-                        "[build.vars] {name} source_fingerprint roots must be nonempty"
-                    );
+                    anyhow::bail!("[build.vars] {name} source_fingerprint roots must be nonempty");
                 }
                 if fingerprint.files.iter().any(|file| file.trim().is_empty()) {
-                    anyhow::bail!(
-                        "[build.vars] {name} source_fingerprint files must be nonempty"
-                    );
+                    anyhow::bail!("[build.vars] {name} source_fingerprint files must be nonempty");
                 }
                 for dependency in &fingerprint.vars {
                     if dependency.trim().is_empty() {
@@ -1185,7 +1403,10 @@ impl StickLock {
         // toml_edit (~6s of compile time). Schema is fixed and tiny.
         let mut out = String::new();
         out.push_str(&format!("version = {}\n", self.version));
-        out.push_str(&format!("compiler_sha1 = {}\n", toml_str(&self.compiler_sha1)));
+        out.push_str(&format!(
+            "compiler_sha1 = {}\n",
+            toml_str(&self.compiler_sha1)
+        ));
         for dep in &self.dependencies {
             out.push_str("\n[[dependencies]]\n");
             out.push_str(&format!("name = {}\n", toml_str(&dep.name)));
@@ -1287,8 +1508,7 @@ pub fn get_compiler_sha1() -> Result<String> {
         .context("Failed to get current executable path")?;
 
     // Read the executable file
-    let mut file = fs::File::open(&exe_path)
-        .context("Failed to open compiler executable")?;
+    let mut file = fs::File::open(&exe_path).context("Failed to open compiler executable")?;
     let mut buffer = Vec::new();
     file.read_to_end(&mut buffer)
         .context("Failed to read compiler executable")?;
@@ -1317,36 +1537,64 @@ mod tests {
             "[package]\nname = \"consumer\"\n[language]\nmodules = \"v1\"\n[dependencies]\nprobe = { package = \"package-probe\" }\n"
         ).unwrap();
         let graph = graph::PackageGraph::build_with_channel(temp.path(), &cfg, "dev").unwrap();
-        let provider = graph.packages().iter().find(|p| p.manifest_name == "package-probe").unwrap();
-        assert_eq!(provider.root, std::fs::canonicalize(rock_stdlib::package_dir("package-probe").unwrap()).unwrap());
+        let provider = graph
+            .packages()
+            .iter()
+            .find(|p| p.manifest_name == "package-probe")
+            .unwrap();
+        assert_eq!(
+            provider.root,
+            std::fs::canonicalize(rock_stdlib::package_dir("package-probe").unwrap()).unwrap()
+        );
     }
 
     #[test]
     fn the_language_memory_key_is_a_removal_error() {
-        let err = StickConfig::new_from_str("[package]\nname = \"x\"\n[language]\nmemory = \"game\"\n")
-            .expect_err("`[language] memory` must not load");
+        let err =
+            StickConfig::new_from_str("[package]\nname = \"x\"\n[language]\nmemory = \"game\"\n")
+                .expect_err("`[language] memory` must not load");
         let text = format!("{err:#}");
-        assert!(text.contains("`[language] memory` was removed; delete it"), "{text}");
+        assert!(
+            text.contains("`[language] memory` was removed; delete it"),
+            "{text}"
+        );
     }
 
     #[test]
     fn the_language_identity_storage_key_declares_the_migration_state() {
         use rock_core::source_code::IdentityStorage;
         let state = |language: &str| {
-            StickConfig::new_from_str(&format!("[package]\nname = \"x\"\n{language}")).map(|c| c.identity_storage())
+            StickConfig::new_from_str(&format!("[package]\nname = \"x\"\n{language}"))
+                .map(|c| c.identity_storage())
         };
         assert_eq!(state("").unwrap(), IdentityStorage::Enforced);
-        assert_eq!(state("[language]\nidentity_storage = \"enforced\"\n").unwrap(), IdentityStorage::Enforced);
-        assert_eq!(state("[language]\nidentity_storage = \"exempt\"\n").unwrap(), IdentityStorage::Exempt);
         assert_eq!(
-            state("[language]\nidentity_storage = { exempt_modules = [\"nav\", \"ui::old\"] }\n").unwrap(),
+            state("[language]\nidentity_storage = \"enforced\"\n").unwrap(),
+            IdentityStorage::Enforced
+        );
+        assert_eq!(
+            state("[language]\nidentity_storage = \"exempt\"\n").unwrap(),
+            IdentityStorage::Exempt
+        );
+        assert_eq!(
+            state("[language]\nidentity_storage = { exempt_modules = [\"nav\", \"ui::old\"] }\n")
+                .unwrap(),
             IdentityStorage::ExemptModules(vec!["nav".into(), "ui::old".into()])
         );
         for (bad, want) in [
-            ("\"unchecked\"", "unknown `[language] identity_storage` value `unchecked`"),
-            ("{ modules = [\"nav\"] }", "unknown key `modules` in `[language] identity_storage`"),
+            (
+                "\"unchecked\"",
+                "unknown `[language] identity_storage` value `unchecked`",
+            ),
+            (
+                "{ modules = [\"nav\"] }",
+                "unknown key `modules` in `[language] identity_storage`",
+            ),
             ("{}", "table needs `exempt_modules`"),
-            ("{ exempt_modules = [\"nav::\"] }", "exempt module `nav::` is not a `::`-joined module path"),
+            (
+                "{ exempt_modules = [\"nav::\"] }",
+                "exempt module `nav::` is not a `::`-joined module path",
+            ),
         ] {
             let err = state(&format!("[language]\nidentity_storage = {bad}\n")).expect_err(bad);
             let text = format!("{err:#}");
@@ -1356,8 +1604,13 @@ mod tests {
 
     #[test]
     fn dependency_tables_require_exactly_one_source() {
-        for source in ["", "path = \"../x\", package = \"x\"", "package = \"x\", package = \"y\""] {
-            let text = format!("[package]\nname = \"consumer\"\n[dependencies]\nx = {{ {source} }}\n");
+        for source in [
+            "",
+            "path = \"../x\", package = \"x\"",
+            "package = \"x\", package = \"y\"",
+        ] {
+            let text =
+                format!("[package]\nname = \"consumer\"\n[dependencies]\nx = {{ {source} }}\n");
             assert!(StickConfig::new_from_str(&text).is_err(), "{text}");
         }
     }
@@ -1403,8 +1656,8 @@ mod tests {
         .unwrap();
 
         let cfg = StickConfig::from_path(&consumer.join("stick.toml")).unwrap();
-        let dev = graph::PackageGraph::build_with_channel(&consumer, &cfg, "dev")
-            .expect("dev resolve");
+        let dev =
+            graph::PackageGraph::build_with_channel(&consumer, &cfg, "dev").expect("dev resolve");
         assert_eq!(
             dev.package(dev.root()).dependencies.len(),
             1,
@@ -1440,8 +1693,7 @@ mod tests {
         let cfg = StickConfig::from_path(&consumer.join("stick.toml")).unwrap();
         for channel in ["dev", "steam", "itch"] {
             let resolved =
-                graph::PackageGraph::build_with_channel(&consumer, &cfg, channel)
-                    .expect("resolve");
+                graph::PackageGraph::build_with_channel(&consumer, &cfg, channel).expect("resolve");
             assert_eq!(
                 resolved.package(resolved.root()).dependencies.len(),
                 1,
@@ -1481,7 +1733,8 @@ mod tests {
         .unwrap();
 
         let cfg = StickConfig::from_path(&consumer.join("stick.toml")).unwrap();
-        let graph = graph::PackageGraph::build_with_channel(&consumer, &cfg, "dev").expect("resolve");
+        let graph =
+            graph::PackageGraph::build_with_channel(&consumer, &cfg, "dev").expect("resolve");
         let names: Vec<&str> = graph
             .load_order()
             .iter()
@@ -1526,7 +1779,8 @@ mod tests {
         .unwrap();
 
         let cfg = StickConfig::from_path(&consumer.join("stick.toml")).unwrap();
-        let graph = graph::PackageGraph::build_with_channel(&consumer, &cfg, "dev").expect("resolve");
+        let graph =
+            graph::PackageGraph::build_with_channel(&consumer, &cfg, "dev").expect("resolve");
         let found = graph
             .packages()
             .iter()
@@ -1568,18 +1822,29 @@ mod tests {
 
         let cfg = StickConfig::from_path(&consumer.join("stick.toml")).unwrap();
         let names_on = |channel: &str| -> Vec<String> {
-            let graph = graph::PackageGraph::build_with_channel(&consumer, &cfg, channel).expect("resolve");
-            graph.packages().iter().map(|p| p.manifest_name.clone()).collect()
+            let graph =
+                graph::PackageGraph::build_with_channel(&consumer, &cfg, channel).expect("resolve");
+            graph
+                .packages()
+                .iter()
+                .map(|p| p.manifest_name.clone())
+                .collect()
         };
         let dev_names = names_on("dev");
-        assert!(dev_names.contains(&"leaf".to_string()), "dev keeps the scoped leaf");
+        assert!(
+            dev_names.contains(&"leaf".to_string()),
+            "dev keeps the scoped leaf"
+        );
 
         let steam_names = names_on("steam");
         assert!(
             !steam_names.contains(&"leaf".to_string()),
             "a dev-only package reached through a library stays out of a release build"
         );
-        assert!(steam_names.contains(&"mid".to_string()), "the library itself still resolves");
+        assert!(
+            steam_names.contains(&"mid".to_string()),
+            "the library itself still resolves"
+        );
     }
 
     /// A cycle through a transitive edge must be reported, not looped on.
@@ -1632,9 +1897,8 @@ mod tests {
 
     #[test]
     fn package_version_preserved_when_set() {
-        let cfg = StickConfig::new_from_str(
-            "[package]\nname = \"x\"\nversion = \"1.2.3\"\n",
-        ).unwrap();
+        let cfg =
+            StickConfig::new_from_str("[package]\nname = \"x\"\nversion = \"1.2.3\"\n").unwrap();
         assert_eq!(cfg.package.version(), "1.2.3");
     }
 
@@ -1642,7 +1906,8 @@ mod tests {
     fn ios_orientation_round_trips() {
         let cfg = StickConfig::new_from_str(
             "[package]\nname = \"x\"\n[ios]\norientation = \"portrait\"\n",
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(cfg.ios_orientation(), Some("portrait"));
         cfg.validate_ios().expect("portrait is a known orientation");
     }
@@ -1661,22 +1926,46 @@ mod tests {
         // canvas re-init hard enough to look like a hang.
         let cfg = StickConfig::new_from_str(
             "[package]\nname = \"x\"\n[ios]\norientation = \"sideways\"\n",
-        ).unwrap();
-        let err = cfg.validate_ios().expect_err("bad orientation must be rejected");
+        )
+        .unwrap();
+        let err = cfg
+            .validate_ios()
+            .expect_err("bad orientation must be rejected");
         let msg = format!("{}", err);
-        assert!(msg.contains("sideways"), "error mentions the bad value: {msg}");
-        assert!(msg.contains("portrait"), "error suggests the known list: {msg}");
+        assert!(
+            msg.contains("sideways"),
+            "error mentions the bad value: {msg}"
+        );
+        assert!(
+            msg.contains("portrait"),
+            "error suggests the known list: {msg}"
+        );
     }
 
     #[test]
     fn top_package_and_engine_reject_unknown_keys() {
         for (toml, key, table) in [
-            ("[package]\nname = \"x\"\n[dependecies]\n", "dependecies", "top level"),
-            ("[package]\nname = \"x\"\nverison = \"1\"\n", "verison", "[package]"),
-            ("[package]\nname = \"x\"\n[engine]\nneed = []\n", "need", "[engine]"),
+            (
+                "[package]\nname = \"x\"\n[dependecies]\n",
+                "dependecies",
+                "top level",
+            ),
+            (
+                "[package]\nname = \"x\"\nverison = \"1\"\n",
+                "verison",
+                "[package]",
+            ),
+            (
+                "[package]\nname = \"x\"\n[engine]\nneed = []\n",
+                "need",
+                "[engine]",
+            ),
         ] {
             let msg = format!("{}", StickConfig::new_from_str(toml).expect_err(toml));
-            assert!(msg.contains(&format!("`{key}`")) && msg.contains(table), "{msg}");
+            assert!(
+                msg.contains(&format!("`{key}`")) && msg.contains(table),
+                "{msg}"
+            );
         }
     }
 
@@ -1685,20 +1974,20 @@ mod tests {
         // A misspelled key would ship the default orientation silently.
         let err = StickConfig::new_from_str(
             "[package]\nname = \"x\"\n[ios]\norientaton = \"portrait\"\n",
-        ).expect_err("unknown [ios] key must be rejected");
+        )
+        .expect_err("unknown [ios] key must be rejected");
         let msg = format!("{}", err);
         assert!(msg.contains("orientaton"), "error names the bad key: {msg}");
     }
-
 
     #[test]
     fn renderer_defaults_to_gl_and_accepts_wgpu() {
         let gl = StickConfig::new_from_str("[package]\nname = \"x\"\n").unwrap();
         assert_eq!(gl.renderer_backend().unwrap(), RendererBackend::Gl);
 
-        let wgpu = StickConfig::new_from_str(
-            "[package]\nname = \"x\"\n[renderer]\nbackend = \"wgpu\"\n",
-        ).unwrap();
+        let wgpu =
+            StickConfig::new_from_str("[package]\nname = \"x\"\n[renderer]\nbackend = \"wgpu\"\n")
+                .unwrap();
         assert_eq!(wgpu.renderer_backend().unwrap(), RendererBackend::Wgpu);
         wgpu.validate_renderer().expect("wgpu is a known renderer");
     }
@@ -1707,8 +1996,11 @@ mod tests {
     fn renderer_rejects_unknown_backend() {
         let cfg = StickConfig::new_from_str(
             "[package]\nname = \"x\"\n[renderer]\nbackend = \"vulkan\"\n",
-        ).unwrap();
-        let err = cfg.validate_renderer().expect_err("unknown renderer must reject");
+        )
+        .unwrap();
+        let err = cfg
+            .validate_renderer()
+            .expect_err("unknown renderer must reject");
         assert!(format!("{err}").contains("vulkan"));
     }
 
@@ -1721,8 +2013,8 @@ mod tests {
     fn from_path_optional_returns_none_when_missing() {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("does-not-exist.toml");
-        let result = StickConfig::from_path_optional(&missing)
-            .expect("missing file must not be an error");
+        let result =
+            StickConfig::from_path_optional(&missing).expect("missing file must not be an error");
         assert!(result.is_none());
     }
 
@@ -1764,17 +2056,20 @@ mod tests {
         assert_eq!(token.channels.as_deref(), Some(&["steam".to_string()][..]));
         assert_eq!(token.default.as_deref(), Some(""));
         assert!(token.secret);
-        cfg.validate_build().expect("well-formed build section validates");
+        cfg.validate_build()
+            .expect("well-formed build section validates");
     }
 
     #[test]
     fn build_section_rejects_unknown_key() {
-        let err = StickConfig::new_from_str(
-            "[package]\nname = \"x\"\n[build]\nchanels = [\"dev\"]\n",
-        ).expect_err("unknown [build] key must be rejected");
-        assert!(format!("{err}").contains("chanels"), "error names the bad key: {err}");
+        let err =
+            StickConfig::new_from_str("[package]\nname = \"x\"\n[build]\nchanels = [\"dev\"]\n")
+                .expect_err("unknown [build] key must be rejected");
+        assert!(
+            format!("{err}").contains("chanels"),
+            "error names the bad key: {err}"
+        );
     }
-
 
     #[test]
     fn sound_section_declares_a_project_path() {
@@ -1797,10 +2092,8 @@ mod tests {
         .expect_err("unknown sound key must reject");
         assert!(format!("{unknown}").contains("path"));
 
-        let missing = StickConfig::new_from_str(
-            "[package]\nname = \"x\"\n[sound]\n",
-        )
-        .expect_err("sound project is required");
+        let missing = StickConfig::new_from_str("[package]\nname = \"x\"\n[sound]\n")
+            .expect_err("sound project is required");
         assert!(format!("{missing}").contains("project"));
     }
 
@@ -1817,8 +2110,12 @@ mod tests {
     fn build_var_rejects_unknown_key() {
         let err = StickConfig::new_from_str(
             "[package]\nname = \"x\"\n[build.vars]\nX = { comand = \"echo hi\" }\n",
-        ).expect_err("unknown var key must be rejected");
-        assert!(format!("{err}").contains("comand"), "error names the bad key: {err}");
+        )
+        .expect_err("unknown var key must be rejected");
+        assert!(
+            format!("{err}").contains("comand"),
+            "error names the bad key: {err}"
+        );
     }
 
     #[test]
@@ -1830,19 +2127,25 @@ mod tests {
             "TREE = { source_fingerprint = { roots = [\"src\"], files = [\"lock.json\"], vars = [\"REV\"] } }\n",
         )).expect("source fingerprint declaration must parse");
         let fingerprint = cfg.build.as_ref().unwrap().vars["TREE"]
-            .source_fingerprint.as_ref().expect("source fingerprint is retained");
+            .source_fingerprint
+            .as_ref()
+            .expect("source fingerprint is retained");
         assert_eq!(fingerprint.roots, vec!["src"]);
         assert_eq!(fingerprint.files, vec!["lock.json"]);
         assert_eq!(fingerprint.vars, vec!["REV"]);
-        cfg.validate_build().expect("source fingerprint declaration validates");
+        cfg.validate_build()
+            .expect("source fingerprint declaration validates");
 
         let defaults = StickConfig::new_from_str(concat!(
             "[package]\nname = \"x\"\n",
             "[build.vars]\n",
             "TREE = { source_fingerprint = {} }\n",
-        )).expect("omitted source fingerprint fields default to empty lists");
+        ))
+        .expect("omitted source fingerprint fields default to empty lists");
         let fingerprint = defaults.build.as_ref().unwrap().vars["TREE"]
-            .source_fingerprint.as_ref().expect("source fingerprint is retained");
+            .source_fingerprint
+            .as_ref()
+            .expect("source fingerprint is retained");
         assert!(fingerprint.roots.is_empty());
         assert!(fingerprint.files.is_empty());
         assert!(fingerprint.vars.is_empty());
@@ -1851,8 +2154,12 @@ mod tests {
             "[package]\nname = \"x\"\n",
             "[build.vars]\n",
             "TREE = { source_fingerprint = { roots = [\"src\"], unknown = [\"x\"] } }\n",
-        )).expect_err("unknown source fingerprint key must reject");
-        assert!(format!("{err}").contains("unknown"), "error names the nested key: {err}");
+        ))
+        .expect_err("unknown source fingerprint key must reject");
+        assert!(
+            format!("{err}").contains("unknown"),
+            "error names the nested key: {err}"
+        );
     }
 
     #[test]
@@ -1861,9 +2168,13 @@ mod tests {
             "[package]\nname = \"x\"\n",
             "[build.vars]\n",
             "TREE = { source_fingerprint = { roots = [\"src\"] }, value = \"literal\" }\n",
-        )).expect("both source declarations parse");
+        ))
+        .expect("both source declarations parse");
         let err = cfg.validate_build().expect_err("two sources must reject");
-        assert!(format!("{err}").contains("TREE"), "error names the var: {err}");
+        assert!(
+            format!("{err}").contains("TREE"),
+            "error names the var: {err}"
+        );
     }
 
     #[test]
@@ -1878,8 +2189,13 @@ mod tests {
                 "[package]\nname = \"x\"\n[build.vars]\nTREE = {{ source_fingerprint = {{ {source} }} }}\n"
             );
             let cfg = StickConfig::new_from_str(&manifest).expect("declaration parses");
-            let err = cfg.validate_build().expect_err("empty source fingerprint entries must reject");
-            assert!(format!("{err}").contains("TREE"), "error names the var: {err}");
+            let err = cfg
+                .validate_build()
+                .expect_err("empty source fingerprint entries must reject");
+            assert!(
+                format!("{err}").contains("TREE"),
+                "error names the var: {err}"
+            );
         }
     }
 
@@ -1889,31 +2205,46 @@ mod tests {
             "[package]\nname = \"x\"\n",
             "[build.vars]\n",
             "TREE = { source_fingerprint = { roots = [\"src\"], vars = [\"MISSING\"] } }\n",
-        )).unwrap();
-        let err = missing.validate_build().expect_err("undeclared fingerprint var must reject");
-        assert!(format!("{err}").contains("MISSING"), "error names the missing var: {err}");
+        ))
+        .unwrap();
+        let err = missing
+            .validate_build()
+            .expect_err("undeclared fingerprint var must reject");
+        assert!(
+            format!("{err}").contains("MISSING"),
+            "error names the missing var: {err}"
+        );
 
         let self_ref = StickConfig::new_from_str(concat!(
             "[package]\nname = \"x\"\n",
             "[build.vars]\n",
             "TREE = { source_fingerprint = { roots = [\"src\"], vars = [\"TREE\"] } }\n",
-        )).unwrap();
-        self_ref.validate_build().expect_err("self-reference must reject");
+        ))
+        .unwrap();
+        self_ref
+            .validate_build()
+            .expect_err("self-reference must reject");
 
         let deferred_ref = StickConfig::new_from_str(concat!(
             "[package]\nname = \"x\"\n",
             "[build.vars]\n",
             "TREE = { source_fingerprint = { roots = [\"src\"], vars = [\"OTHER\"] } }\n",
             "OTHER = { source_fingerprint = { roots = [\"other\"] } }\n",
-        )).unwrap();
-        deferred_ref.validate_build().expect_err("deferred dependency must reject");
+        ))
+        .unwrap();
+        deferred_ref
+            .validate_build()
+            .expect_err("deferred dependency must reject");
 
         let volatile = StickConfig::new_from_str(concat!(
             "[package]\nname = \"x\"\n",
             "[build.vars]\n",
             "TREE = { source_fingerprint = { roots = [\"src\"] }, volatile = true }\n",
-        )).unwrap();
-        volatile.validate_build().expect_err("source fingerprint cannot be volatile");
+        ))
+        .unwrap();
+        volatile
+            .validate_build()
+            .expect_err("source fingerprint cannot be volatile");
     }
 
     #[test]
@@ -1924,30 +2255,44 @@ mod tests {
             "[build.vars]\n",
             "TREE = { source_fingerprint = { roots = [\"src\"] }, optional_channels = [\"dev\"], default = \"\" }\n",
         )).unwrap();
-        let err = cfg.validate_build().expect_err("optional_channels remains cmd-only");
-        assert!(format!("{err}").contains("cmd"), "error explains the cmd requirement: {err}");
+        let err = cfg
+            .validate_build()
+            .expect_err("optional_channels remains cmd-only");
+        assert!(
+            format!("{err}").contains("cmd"),
+            "error explains the cmd requirement: {err}"
+        );
     }
 
     #[test]
     fn build_var_volatile_metadata_is_explicit_and_typed() {
         let cfg = StickConfig::new_from_str(
             "[package]\nname = \"x\"\n[build.vars]\nCLOCK = { value = \"now\", volatile = true }\n",
-        ).expect("volatile declaration must parse");
+        )
+        .expect("volatile declaration must parse");
         assert!(cfg.build.as_ref().unwrap().vars["CLOCK"].volatile);
-        cfg.validate_build().expect("volatile declaration must validate");
+        cfg.validate_build()
+            .expect("volatile declaration must validate");
 
         let err = StickConfig::new_from_str(
             "[package]\nname = \"x\"\n[build.vars]\nCLOCK = { value = \"now\", volatile = \"yes\" }\n",
         ).expect_err("malformed volatile declaration must reject");
-        assert!(format!("{err}").contains("boolean"), "error explains the volatile type: {err}");
+        assert!(
+            format!("{err}").contains("boolean"),
+            "error explains the volatile type: {err}"
+        );
     }
 
     #[test]
     fn build_var_unknown_metadata_cannot_disappear() {
         let err = StickConfig::new_from_str(
             "[package]\nname = \"x\"\n[build.vars]\nCLOCK = { value = \"now\", volatlie = true }\n",
-        ).expect_err("misspelled volatile declaration must reject");
-        assert!(format!("{err}").contains("volatlie"), "error names the bad key: {err}");
+        )
+        .expect_err("misspelled volatile declaration must reject");
+        assert!(
+            format!("{err}").contains("volatlie"),
+            "error names the bad key: {err}"
+        );
     }
 
     #[test]
@@ -1963,17 +2308,25 @@ mod tests {
     fn validate_build_rejects_sourceless_var() {
         let cfg = StickConfig::new_from_str(
             "[package]\nname = \"x\"\n[build.vars]\nX = { secret = true }\n",
-        ).unwrap();
-        cfg.validate_build().expect_err("a var with no source must reject");
+        )
+        .unwrap();
+        cfg.validate_build()
+            .expect_err("a var with no source must reject");
     }
 
     #[test]
     fn validate_build_rejects_unknown_builtin() {
         let cfg = StickConfig::new_from_str(
             "[package]\nname = \"x\"\n[build.vars]\nX = { builtin = \"hostname\" }\n",
-        ).unwrap();
-        let err = cfg.validate_build().expect_err("unknown builtin must reject");
-        assert!(format!("{err}").contains("hostname"), "error names the builtin: {err}");
+        )
+        .unwrap();
+        let err = cfg
+            .validate_build()
+            .expect_err("unknown builtin must reject");
+        assert!(
+            format!("{err}").contains("hostname"),
+            "error names the builtin: {err}"
+        );
     }
 
     #[test]
@@ -1982,17 +2335,25 @@ mod tests {
             "[package]\nname = \"x\"\n",
             "[build]\nchannels = [\"dev\"]\n",
             "[build.vars]\nX = { cmd = \"echo hi\", channels = [\"steam\"] }\n",
-        )).unwrap();
-        let err = cfg.validate_build().expect_err("var channel outside [build] channels must reject");
-        assert!(format!("{err}").contains("steam"), "error names the channel: {err}");
+        ))
+        .unwrap();
+        let err = cfg
+            .validate_build()
+            .expect_err("var channel outside [build] channels must reject");
+        assert!(
+            format!("{err}").contains("steam"),
+            "error names the channel: {err}"
+        );
     }
 
     #[test]
     fn validate_build_rejects_default_channel_outside_channels() {
         let cfg = StickConfig::new_from_str(
             "[package]\nname = \"x\"\n[build]\nchannels = [\"dev\"]\ndefault_channel = \"steam\"\n",
-        ).unwrap();
-        cfg.validate_build().expect_err("default_channel must be a declared channel");
+        )
+        .unwrap();
+        cfg.validate_build()
+            .expect_err("default_channel must be a declared channel");
     }
 
     #[test]

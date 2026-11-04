@@ -88,7 +88,9 @@ fn synth_newtype_operators(ast: &mut Ast) {
     // can't hold an `items` borrow while building.
     let mut targets: Vec<(Ustr, Span, &[(&str, &str, bool)])> = Vec::new();
     for item in &ast.items {
-        let ItemKind::Newtype(nt) = &item.kind else { continue };
+        let ItemKind::Newtype(nt) = &item.kind else {
+            continue;
+        };
         if !nt.generics.is_empty() {
             continue;
         }
@@ -104,16 +106,40 @@ fn synth_newtype_operators(ast: &mut Ast) {
 
     for (nt_name, sp, specs) in targets {
         for &(stem, inner, ret_self) in specs {
-            let pa_ty = ast.ty(sp, TypeExprKind::Ident(Ident { span: sp, name: nt_name }), false);
-            let pb_ty = ast.ty(sp, TypeExprKind::Ident(Ident { span: sp, name: nt_name }), false);
+            let pa_ty = ast.ty(
+                sp,
+                TypeExprKind::Ident(Ident {
+                    span: sp,
+                    name: nt_name,
+                }),
+                false,
+            );
+            let pb_ty = ast.ty(
+                sp,
+                TypeExprKind::Ident(Ident {
+                    span: sp,
+                    name: nt_name,
+                }),
+                false,
+            );
             let return_ty = if ret_self {
-                ast.ty(sp, TypeExprKind::Ident(Ident { span: sp, name: nt_name }), false)
+                ast.ty(
+                    sp,
+                    TypeExprKind::Ident(Ident {
+                        span: sp,
+                        name: nt_name,
+                    }),
+                    false,
+                )
             } else {
                 ast.ty(sp, TypeExprKind::Bool, false)
             };
             let mk_param = |ty, nm: &str| Param {
                 span: sp,
-                name: Ident { span: sp, name: Ustr::from(nm) },
+                name: Ident {
+                    span: sp,
+                    name: Ustr::from(nm),
+                },
                 ty,
                 default: None,
                 is_variadic: false,
@@ -121,7 +147,10 @@ fn synth_newtype_operators(ast: &mut Ast) {
             };
             let mk_anno = |nm: &str| Annotation {
                 span: sp,
-                name: Ident { span: sp, name: Ustr::from(nm) },
+                name: Ident {
+                    span: sp,
+                    name: Ustr::from(nm),
+                },
                 args: Vec::new(),
             };
             ast.items.push(Item {
@@ -131,11 +160,17 @@ fn synth_newtype_operators(ast: &mut Ast) {
                 kind: ItemKind::Function(FunctionDef {
                     span: sp,
                     keyword_span: None,
-                    name: Ident { span: sp, name: Ustr::from(stem) },
+                    name: Ident {
+                        span: sp,
+                        name: Ustr::from(stem),
+                    },
                     generics: Vec::new(),
                     params: vec![mk_param(pa_ty, "a"), mk_param(pb_ty, "b")],
                     return_ty: Some(return_ty),
-                    body: FunctionBody::Inline(FnBackend::Lua, Ustr::from(format!("return {inner}").as_str())),
+                    body: FunctionBody::Inline(
+                        FnBackend::Lua,
+                        Ustr::from(format!("return {inner}").as_str()),
+                    ),
                     is_macro: false,
                     is_coroutine: false,
                     is_synthetic: true,
@@ -261,12 +296,23 @@ pub(crate) fn child_blocks(ast: &Ast, e: Idx<ExprData>) -> BlockEdges {
     match &ast.exprs[e].kind {
         ExprKind::Block(b) => out.push(*b),
         ExprKind::Lambda { body, .. } => out.push(*body),
-        ExprKind::If { branches, else_branch } => {
+        ExprKind::If {
+            branches,
+            else_branch,
+        } => {
             out.extend(branches.iter().map(|(_, b)| *b));
             out.extend(else_branch.iter().copied());
         }
-        ExprKind::IfLet { then_block, else_block, .. }
-        | ExprKind::IfLetChain { then_block, else_block, .. } => {
+        ExprKind::IfLet {
+            then_block,
+            else_block,
+            ..
+        }
+        | ExprKind::IfLetChain {
+            then_block,
+            else_block,
+            ..
+        } => {
             out.push(*then_block);
             out.extend(else_block.iter().copied());
         }
@@ -321,6 +367,9 @@ mod tests {
         // skull parses `=> expr` lambda bodies as a `return` block (same shape
         // the placeholder path builds), so an explicit lambda is byte-identical
         // before and after cook — proof the driver doesn't touch it.
-        check("xs.map(y => y.health)", "(block (call (. xs map) (lambda (None) None (block (return (. y health))))))");
+        check(
+            "xs.map(y => y.health)",
+            "(block (call (. xs map) (lambda (None) None (block (return (. y health))))))",
+        );
     }
 }

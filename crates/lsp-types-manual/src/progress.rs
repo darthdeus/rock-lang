@@ -12,7 +12,8 @@ pub struct ProgressParams {
     pub value: ProgressParamsValue,
 }
 
-impl_lsp_struct!(ProgressParams,
+impl_lsp_struct!(
+    ProgressParams,
     required {
         token: ProgressToken = "token",
         value: ProgressParamsValue = "value",
@@ -37,8 +38,11 @@ pub struct WorkDoneProgressCreateParams {
     pub token: ProgressToken,
 }
 
-impl_lsp_struct!(WorkDoneProgressCreateParams,
-    required { token: ProgressToken = "token" },
+impl_lsp_struct!(
+    WorkDoneProgressCreateParams,
+    required {
+        token: ProgressToken = "token"
+    },
     optional {}
 );
 
@@ -51,8 +55,11 @@ pub struct WorkDoneProgressCancelParams {
     pub token: ProgressToken,
 }
 
-impl_lsp_struct!(WorkDoneProgressCancelParams,
-    required { token: ProgressToken = "token" },
+impl_lsp_struct!(
+    WorkDoneProgressCancelParams,
+    required {
+        token: ProgressToken = "token"
+    },
     optional {}
 );
 
@@ -63,9 +70,12 @@ pub struct WorkDoneProgressOptions {
     pub work_done_progress: Option<bool>,
 }
 
-impl_lsp_struct!(WorkDoneProgressOptions,
+impl_lsp_struct!(
+    WorkDoneProgressOptions,
     required {},
-    optional { work_done_progress: bool = "workDoneProgress" }
+    optional {
+        work_done_progress: bool = "workDoneProgress"
+    }
 );
 
 /// An optional token that a server can use to report work done progress.
@@ -74,9 +84,12 @@ pub struct WorkDoneProgressParams {
     pub work_done_token: Option<ProgressToken>,
 }
 
-impl_lsp_struct!(WorkDoneProgressParams,
+impl_lsp_struct!(
+    WorkDoneProgressParams,
     required {},
-    optional { work_done_token: ProgressToken = "workDoneToken" }
+    optional {
+        work_done_token: ProgressToken = "workDoneToken"
+    }
 );
 
 #[derive(Debug, PartialEq, Default, Clone)]
@@ -107,8 +120,11 @@ pub struct WorkDoneProgressBegin {
     pub percentage: Option<u32>,
 }
 
-impl_lsp_struct!(WorkDoneProgressBegin,
-    required { title: String = "title" },
+impl_lsp_struct!(
+    WorkDoneProgressBegin,
+    required {
+        title: String = "title"
+    },
     optional {
         cancellable: bool = "cancellable",
         message: String = "message",
@@ -138,7 +154,8 @@ pub struct WorkDoneProgressReport {
     pub percentage: Option<u32>,
 }
 
-impl_lsp_struct!(WorkDoneProgressReport,
+impl_lsp_struct!(
+    WorkDoneProgressReport,
     required {},
     optional {
         cancellable: bool = "cancellable",
@@ -156,9 +173,12 @@ pub struct WorkDoneProgressEnd {
     pub message: Option<String>,
 }
 
-impl_lsp_struct!(WorkDoneProgressEnd,
+impl_lsp_struct!(
+    WorkDoneProgressEnd,
     required {},
-    optional { message: String = "message" }
+    optional {
+        message: String = "message"
+    }
 );
 
 #[derive(Debug, PartialEq, Clone)]

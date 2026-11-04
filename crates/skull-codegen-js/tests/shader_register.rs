@@ -9,9 +9,11 @@
 //! resolve), or reject loudly if none is reachable.
 use crate::common::ws_with;
 
-
 fn emit_program_js(ws: &bone_semantic::inference::Workspace) -> Result<String, String> {
-    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("test module");
     skull_codegen_js::emit::emit_program(ws, mid)
         .map(|p| p.program)
         .map_err(|e| e.message)
@@ -45,7 +47,8 @@ fn rock_shader_pair_without_js_register_sibling_rejects() {
     // No `__rock_shader_register` sibling reachable -> the shader would never be
     // registered on web. Emit must reject loudly rather than silently drop it.
     let ws = ws_with(SHADER_SRC);
-    let err = emit_program_js(&ws).expect_err("rock_shader without a js register sibling must reject");
+    let err =
+        emit_program_js(&ws).expect_err("rock_shader without a js register sibling must reject");
     assert!(
         err.contains("__rock_shader_register"),
         "reject must name the missing register sibling:\n{err}"
@@ -101,24 +104,41 @@ fn rock_shader_pair_with_inline_js_register_sibling_emits() {
 }
 
 fn qualified_register_workspace(registrations: &[&str]) -> bone_semantic::inference::Workspace {
-    let mut modules = skull::pipeline::with_stdlib([
-        skull_parser::parse_module_clean(SHADER_SRC, ustr::Ustr::from("<test>"))
-            .expect("shader source"),
-    ]);
+    let mut modules = skull::pipeline::with_stdlib([skull_parser::parse_module_clean(
+        SHADER_SRC,
+        ustr::Ustr::from("<test>"),
+    )
+    .expect("shader source")]);
     for (index, registration) in registrations.iter().enumerate() {
         let mut module = skull_parser::parse_module_clean_with_dialect(
             &format!("mod registry{index};\n{registration}"),
             ustr::Ustr::from(&format!("<registry{index}>")),
             skull_parser::Dialect::V1,
-        ).expect("v1 registration source");
-        module.package = Some(skull_parser::PackageTag { id: 0, self_name: "shaders".into(), identity_storage: Default::default() });
+        )
+        .expect("v1 registration source");
+        module.package = Some(skull_parser::PackageTag {
+            id: 0,
+            self_name: "shaders".into(),
+            identity_storage: Default::default(),
+        });
         modules.push(module);
     }
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("workspace");
-    let errors: Vec<_> = ws.inferences.iter().flatten()
+    let errors: Vec<_> = ws
+        .inferences
+        .iter()
+        .flatten()
         .flat_map(|inference| inference.errors.values().flatten())
-        .chain(ws.modules.iter().flat_map(|module| module.lowering_errors.values().flatten()))
-        .chain(ws.modules.iter().flat_map(|module| module.interface_errors.iter()))
+        .chain(
+            ws.modules
+                .iter()
+                .flat_map(|module| module.lowering_errors.values().flatten()),
+        )
+        .chain(
+            ws.modules
+                .iter()
+                .flat_map(|module| module.interface_errors.iter()),
+        )
         .collect();
     assert!(errors.is_empty(), "{errors:?}");
     ws
@@ -132,9 +152,15 @@ fn qualified_register_is_rooted_under_the_driver_symbol() {
         "pub @nomangle inline(js) fn __rock_shader_register(key: string, src: string) = \"console.log(key);\"",
     ] {
         let ws = qualified_register_workspace(&[registration]);
-        assert!(!ws.functions_by_name.contains_key(&ustr::Ustr::from("__rock_shader_register")));
+        assert!(
+            !ws.functions_by_name
+                .contains_key(&ustr::Ustr::from("__rock_shader_register"))
+        );
         let program = emit_program_js(&ws).expect("qualified registration must emit");
-        assert!(program.contains("function __rock_shader_register("), "{program}");
+        assert!(
+            program.contains("function __rock_shader_register("),
+            "{program}"
+        );
     }
 }
 
@@ -144,13 +170,20 @@ fn qualified_lua_only_register_is_a_named_rejection() {
         "pub @nomangle inline(lua) fn __rock_shader_register(key: string, src: string) = \"print(key)\"",
     ]);
     let error = emit_program_js(&ws).expect_err("Lua-only registration cannot serve JS");
-    assert!(error.contains("no JS-servable `__rock_shader_register`"), "{error}");
+    assert!(
+        error.contains("no JS-servable `__rock_shader_register`"),
+        "{error}"
+    );
 }
 
 #[test]
 fn ambiguous_qualified_registers_are_a_named_rejection() {
-    let registration = "pub @nomangle fn __rock_shader_register(key: string, src: string) { print(key) }";
+    let registration =
+        "pub @nomangle fn __rock_shader_register(key: string, src: string) { print(key) }";
     let ws = qualified_register_workspace(&[registration, registration]);
     let error = emit_program_js(&ws).expect_err("two registration bodies cannot own one symbol");
-    assert!(error.contains("ambiguous") && error.contains("__rock_shader_register"), "{error}");
+    assert!(
+        error.contains("ambiguous") && error.contains("__rock_shader_register"),
+        "{error}"
+    );
 }

@@ -2,12 +2,12 @@
 //! compiler-owned internal timers are separate because parallel unit timers
 //! overlap and public APIs do not expose internal memory sample boundaries.
 
+use bone_core::prelude::Instant;
 use serde_json::{Value, json};
 use std::cell::RefCell;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use bone_core::prelude::Instant;
 
 static COMMAND: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
 
@@ -43,8 +43,9 @@ impl Scope {
         if PENDING.with(|pending| pending.borrow().is_some()) {
             return Self(false);
         }
-        let Some(path) = std::env::var_os("ROCK_COMPILE_STATS").filter(|path| !path.is_empty()) else {
-            return Self(false)
+        let Some(path) = std::env::var_os("ROCK_COMPILE_STATS").filter(|path| !path.is_empty())
+        else {
+            return Self(false);
         };
         let command = command();
         let kind = if std::env::var_os("ROCK_SIM_COMPILE_RECEIPT_PREPARE").is_some() {
@@ -62,7 +63,9 @@ impl Scope {
         let threads = 1;
         let now = Instant::now();
         let mut pending = Pending {
-            path: PathBuf::from(path), started: now, boundary: now,
+            path: PathBuf::from(path),
+            started: now,
+            boundary: now,
             record: json!({
                 "schema": 1,
                 "timestamp_unix_ms": SystemTime::now().duration_since(UNIX_EPOCH)
@@ -72,7 +75,8 @@ impl Scope {
                 "rayon_threads": threads,
                 "compile_slot": null,
             }),
-            phases: Vec::new(), timings: Vec::new(),
+            phases: Vec::new(),
+            timings: Vec::new(),
             totals: json!({"source_files": null, "source_bytes": null,
                 "production": null, "tests": null, "sims": null,
                 "concrete_plans": null, "chunks": null, "dependency_edges": null,
@@ -88,26 +92,35 @@ impl Scope {
     }
 
     pub(crate) fn for_sources(sources: &crate::SourceFiles) -> Self {
-        let entry = sources.files.first().map(|file| file.borrow().file.to_id_path())
+        let entry = sources
+            .files
+            .first()
+            .map(|file| file.borrow().file.to_id_path())
             .unwrap_or_else(|| "<empty>".to_string());
         Self::begin(&entry)
     }
 
     pub(crate) fn success(self) {
-        if self.0 { finish("ok"); }
+        if self.0 {
+            finish("ok");
+        }
     }
 }
 
 impl Drop for Scope {
     fn drop(&mut self) {
-        if self.0 { finish("error"); }
+        if self.0 {
+            finish("error");
+        }
     }
 }
 
 pub(crate) fn phase(name: &str) {
     PENDING.with(|state| {
         let mut state = state.borrow_mut();
-        let Some(pending) = state.as_mut() else { return };
+        let Some(pending) = state.as_mut() else {
+            return;
+        };
         let now = Instant::now();
         let mut sample = crate::allocator::process_memory();
         sample["name"] = json!(name);
@@ -135,7 +148,9 @@ pub(crate) fn slot(acquisition: &crate::compile_slots::SlotAcquisition) {
 pub(crate) fn source(path: &str, bytes: usize) {
     PENDING.with(|state| {
         let mut state = state.borrow_mut();
-        let Some(pending) = state.as_mut() else { return };
+        let Some(pending) = state.as_mut() else {
+            return;
+        };
         if pending.totals["source_bytes"].is_null() {
             pending.totals["source_files"] = json!(0);
             pending.totals["source_bytes"] = json!(0);
@@ -145,13 +160,20 @@ pub(crate) fn source(path: &str, bytes: usize) {
         }
         let mut components = path.split(['/', '\\']);
         let category = if components.any(|component| component == "tests") {
-            if components.next() == Some("sims") { "sims" } else { "tests" }
-        } else { "production" };
+            if components.next() == Some("sims") {
+                "sims"
+            } else {
+                "tests"
+            }
+        } else {
+            "production"
+        };
         for (key, count) in [("source_files", 1), ("source_bytes", bytes)] {
             pending.totals[key] = json!(pending.totals[key].as_u64().unwrap() + count as u64);
         }
         for (key, count) in [("files", 1), ("bytes", bytes)] {
-            pending.totals[category][key] = json!(pending.totals[category][key].as_u64().unwrap() + count as u64);
+            pending.totals[category][key] =
+                json!(pending.totals[category][key].as_u64().unwrap() + count as u64);
         }
     });
 }
@@ -187,7 +209,9 @@ pub(crate) fn emission(emit: &skull::mir_emit::MirEmit) {
     timings("skull", &emit.phases);
     PENDING.with(|state| {
         let mut state = state.borrow_mut();
-        let Some(pending) = state.as_mut() else { return };
+        let Some(pending) = state.as_mut() else {
+            return;
+        };
         pending.record["released"] = json!({
             "graph_instances": emit.release_stats.graph_instances,
             "chunks": emit.release_stats.chunks,
@@ -203,7 +227,10 @@ pub(crate) fn emission(emit: &skull::mir_emit::MirEmit) {
 }
 
 pub(crate) fn finish(status: &str) {
-    let pending = PENDING.try_with(|state| state.borrow_mut().take()).ok().flatten();
+    let pending = PENDING
+        .try_with(|state| state.borrow_mut().take())
+        .ok()
+        .flatten();
     let Some(mut pending) = pending else { return };
     pending.record["status"] = json!(status);
     pending.record["wall_ms"] = json!(pending.started.elapsed().as_secs_f64() * 1000.0);
@@ -217,21 +244,31 @@ pub(crate) fn finish(status: &str) {
 }
 
 fn append(path: &Path, record: &Value) -> std::io::Result<()> {
-    if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
         std::fs::create_dir_all(parent)?;
     }
     let mut line = serde_json::to_vec(record)?;
     line.push(b'\n');
-    let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
     // O_APPEND assigns each write an end offset; the advisory lock also keeps
     // a short write/retry from splitting a line around another process's line.
     #[cfg(unix)]
     {
         use std::os::fd::AsRawFd;
         loop {
-            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 { break }
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
+                break;
+            }
             let error = std::io::Error::last_os_error();
-            if error.kind() != std::io::ErrorKind::Interrupted { return Err(error) }
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                return Err(error);
+            }
         }
     }
     file.write_all(&line)

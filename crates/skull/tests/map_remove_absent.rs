@@ -34,7 +34,9 @@ fn main() {}
 /// one present key twice.
 fn absent_key_stores(build: &str, remove: &str, keyed: &str) -> String {
     let lua = emit_module(SOURCE);
-    run_luajit(&format!(r#"{lua}
+    run_luajit(
+        &format!(
+            r#"{lua}
 local m = {build}(511)
 local stores = 0
 setmetatable({keyed}, {{ __newindex = function(t, k, v)
@@ -45,7 +47,12 @@ for i = 1, 100 do assert(not {remove}(m, "absent" .. i)) end
 assert({remove}(m, "k0") and not {remove}(m, "k0"))
 assert({remove}(m, "k1"))
 print(stores)
-"#), remove).trim().to_string()
+"#
+        ),
+        remove,
+    )
+    .trim()
+    .to_string()
 }
 
 #[test]
@@ -60,5 +67,8 @@ fn scalar_map_absent_remove_does_not_store() {
 
 #[test]
 fn column_map_absent_remove_does_not_store() {
-    assert_eq!(absent_key_stores("column_map", "column_remove", "m.spine"), "0");
+    assert_eq!(
+        absent_key_stores("column_map", "column_remove", "m.spine"),
+        "0"
+    );
 }

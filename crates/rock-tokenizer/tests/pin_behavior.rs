@@ -113,7 +113,12 @@ fn pin_tokenkind_to_code_table() {
     ];
     for (kind, text) in &cases {
         assert_eq!(kind.to_code(), text.to_string(), "to_code for {:?}", kind);
-        assert_eq!(format!("{}", kind), text.to_string(), "Display for {:?}", kind);
+        assert_eq!(
+            format!("{}", kind),
+            text.to_string(),
+            "Display for {:?}",
+            kind
+        );
     }
     assert_eq!(
         TokenKind::Comment(" hi".into()).to_code(),
@@ -401,8 +406,10 @@ fn pin_numbers_malformed_errors() {
     assert!(kinds_err("1E+").contains("expected digits after exponent"));
     assert!(kinds_err("1.5e").contains("expected digits after exponent"));
     assert!(kinds_err("9999999999999999999999").contains("Invalid integer literal"));
-    assert!(kinds_err("0b1111111111111111111111111111111111111111111111111111111111111111")
-        .contains("Invalid binary literal"));
+    assert!(
+        kinds_err("0b1111111111111111111111111111111111111111111111111111111111111111")
+            .contains("Invalid binary literal")
+    );
     assert!(kinds_err("let mut x = 5").contains("let mut"));
 }
 
@@ -450,15 +457,15 @@ fn pin_minus_and_dot_context() {
             TokenKind::Int(1, "1".into()),
         ]
     );
-    assert_eq!(kinds("--5"), vec![TokenKind::MinusMinus, TokenKind::Int(5, "5".into())]);
+    assert_eq!(
+        kinds("--5"),
+        vec![TokenKind::MinusMinus, TokenKind::Int(5, "5".into())]
+    );
     assert_eq!(
         kinds("- 5"),
         vec![TokenKind::Minus, TokenKind::Int(5, "5".into())]
     );
-    assert_eq!(
-        kinds(".35"),
-        vec![TokenKind::Float(OrderedFloat(0.35))]
-    );
+    assert_eq!(kinds(".35"), vec![TokenKind::Float(OrderedFloat(0.35))]);
     assert_eq!(
         kinds("restitution: .35"),
         vec![
@@ -612,24 +619,123 @@ fn pin_every_operator_and_multi_char_operator() {
         ("??.", vec![TokenKind::DoubleQuestionMark, TokenKind::Dot]),
         ("???.", vec![TokenKind::TripleQuestionMark, TokenKind::Dot]),
         ("?.?", vec![TokenKind::QuestionDot, TokenKind::QuestionMark]),
-        ("a+b", vec![TokenKind::Ident("a".into()), TokenKind::Plus, TokenKind::Ident("b".into())]),
-        ("a++", vec![TokenKind::Ident("a".into()), TokenKind::PlusPlus]),
-        ("a--", vec![TokenKind::Ident("a".into()), TokenKind::MinusMinus]),
-        ("a:b", vec![TokenKind::Ident("a".into()), TokenKind::Colon, TokenKind::Ident("b".into())]),
-        ("a::b", vec![TokenKind::Ident("a".into()), TokenKind::DoubleColon, TokenKind::Ident("b".into())]),
-        ("a;b", vec![TokenKind::Ident("a".into()), TokenKind::Semicolon, TokenKind::Ident("b".into())]),
-        ("a,b", vec![TokenKind::Ident("a".into()), TokenKind::Comma, TokenKind::Ident("b".into())]),
-        ("x?.y", vec![TokenKind::Ident("x".into()), TokenKind::QuestionDot, TokenKind::Ident("y".into())]),
-        ("x??y", vec![TokenKind::Ident("x".into()), TokenKind::DoubleQuestionMark, TokenKind::Ident("y".into())]),
-        ("x???y", vec![TokenKind::Ident("x".into()), TokenKind::TripleQuestionMark, TokenKind::Ident("y".into())]),
-        ("a ./ b", vec![TokenKind::Ident("a".into()), TokenKind::IntDiv, TokenKind::Ident("b".into())]),
-        ("a./b", vec![TokenKind::Ident("a".into()), TokenKind::IntDiv, TokenKind::Ident("b".into())]),
+        (
+            "a+b",
+            vec![
+                TokenKind::Ident("a".into()),
+                TokenKind::Plus,
+                TokenKind::Ident("b".into()),
+            ],
+        ),
+        (
+            "a++",
+            vec![TokenKind::Ident("a".into()), TokenKind::PlusPlus],
+        ),
+        (
+            "a--",
+            vec![TokenKind::Ident("a".into()), TokenKind::MinusMinus],
+        ),
+        (
+            "a:b",
+            vec![
+                TokenKind::Ident("a".into()),
+                TokenKind::Colon,
+                TokenKind::Ident("b".into()),
+            ],
+        ),
+        (
+            "a::b",
+            vec![
+                TokenKind::Ident("a".into()),
+                TokenKind::DoubleColon,
+                TokenKind::Ident("b".into()),
+            ],
+        ),
+        (
+            "a;b",
+            vec![
+                TokenKind::Ident("a".into()),
+                TokenKind::Semicolon,
+                TokenKind::Ident("b".into()),
+            ],
+        ),
+        (
+            "a,b",
+            vec![
+                TokenKind::Ident("a".into()),
+                TokenKind::Comma,
+                TokenKind::Ident("b".into()),
+            ],
+        ),
+        (
+            "x?.y",
+            vec![
+                TokenKind::Ident("x".into()),
+                TokenKind::QuestionDot,
+                TokenKind::Ident("y".into()),
+            ],
+        ),
+        (
+            "x??y",
+            vec![
+                TokenKind::Ident("x".into()),
+                TokenKind::DoubleQuestionMark,
+                TokenKind::Ident("y".into()),
+            ],
+        ),
+        (
+            "x???y",
+            vec![
+                TokenKind::Ident("x".into()),
+                TokenKind::TripleQuestionMark,
+                TokenKind::Ident("y".into()),
+            ],
+        ),
+        (
+            "a ./ b",
+            vec![
+                TokenKind::Ident("a".into()),
+                TokenKind::IntDiv,
+                TokenKind::Ident("b".into()),
+            ],
+        ),
+        (
+            "a./b",
+            vec![
+                TokenKind::Ident("a".into()),
+                TokenKind::IntDiv,
+                TokenKind::Ident("b".into()),
+            ],
+        ),
         ("$x", vec![TokenKind::Dollar, TokenKind::Ident("x".into())]),
         ("@x", vec![TokenKind::At, TokenKind::Ident("x".into())]),
         ("!a", vec![TokenKind::Bang, TokenKind::Ident("a".into())]),
-        ("a!=b", vec![TokenKind::Ident("a".into()), TokenKind::NotEquals, TokenKind::Ident("b".into())]),
-        ("a==b", vec![TokenKind::Ident("a".into()), TokenKind::Equals, TokenKind::Ident("b".into())]),
-        ("a?b:c", vec![TokenKind::Ident("a".into()), TokenKind::QuestionMark, TokenKind::Ident("b".into()), TokenKind::Colon, TokenKind::Ident("c".into())]),
+        (
+            "a!=b",
+            vec![
+                TokenKind::Ident("a".into()),
+                TokenKind::NotEquals,
+                TokenKind::Ident("b".into()),
+            ],
+        ),
+        (
+            "a==b",
+            vec![
+                TokenKind::Ident("a".into()),
+                TokenKind::Equals,
+                TokenKind::Ident("b".into()),
+            ],
+        ),
+        (
+            "a?b:c",
+            vec![
+                TokenKind::Ident("a".into()),
+                TokenKind::QuestionMark,
+                TokenKind::Ident("b".into()),
+                TokenKind::Colon,
+                TokenKind::Ident("c".into()),
+            ],
+        ),
     ];
     for (src, expected) in &cases {
         assert_eq!(&kinds(src), expected, "operators {:?}", src);
@@ -655,7 +761,10 @@ fn pin_comments_and_directives() {
     assert_eq!(kinds("// line"), vec![TokenKind::Comment(" line".into())]);
     assert_eq!(kinds("//"), vec![TokenKind::Comment("".into())]);
     assert_eq!(kinds("///"), vec![TokenKind::Comment("/".into())]);
-    assert_eq!(kinds("/* block */"), vec![TokenKind::Comment(" block ".into())]);
+    assert_eq!(
+        kinds("/* block */"),
+        vec![TokenKind::Comment(" block ".into())]
+    );
     assert_eq!(kinds("/**/"), vec![TokenKind::Comment("".into())]);
     assert_eq!(kinds("/*/"), vec![TokenKind::Comment("/".into())]);
     assert_eq!(
@@ -672,7 +781,10 @@ fn pin_comments_and_directives() {
         kinds("#if x"),
         vec![TokenKind::DirectiveIf, TokenKind::Ident("x".into())]
     );
-    assert_eq!(kinds("#foo bar"), vec![TokenKind::Comment("foo bar".into())]);
+    assert_eq!(
+        kinds("#foo bar"),
+        vec![TokenKind::Comment("foo bar".into())]
+    );
     assert_eq!(kinds("#endif"), vec![TokenKind::Comment("endif".into())]);
     assert_eq!(kinds("#ELSE"), vec![TokenKind::Comment("ELSE".into())]);
     assert_eq!(kinds("/"), vec![TokenKind::Div]);
@@ -693,7 +805,10 @@ fn pin_strings_and_interpolation_boundaries() {
     assert_eq!(kinds("''"), vec![TokenKind::String("".into())]);
     assert_eq!(kinds("r\"raw\""), vec![TokenKind::RawString("raw".into())]);
     assert_eq!(kinds("r\"\""), vec![TokenKind::RawString("".into())]);
-    assert_eq!(kinds("\"\"\"tri\"\"\""), vec![TokenKind::String("tri".into())]);
+    assert_eq!(
+        kinds("\"\"\"tri\"\"\""),
+        vec![TokenKind::String("tri".into())]
+    );
     assert_eq!(
         kinds("r\"\"\"rawtri\"\"\""),
         vec![TokenKind::RawString("rawtri".into())]
@@ -702,10 +817,7 @@ fn pin_strings_and_interpolation_boundaries() {
     assert_eq!(kinds("\"a\\tb\""), vec![TokenKind::String("a\tb".into())]);
     assert_eq!(kinds("\"\\\\\""), vec![TokenKind::String("\\".into())]);
     assert_eq!(kinds("\"\\u{41}\""), vec![TokenKind::String("A".into())]);
-    assert_eq!(
-        kinds("\"a\\\n  b\""),
-        vec![TokenKind::String("ab".into())]
-    );
+    assert_eq!(kinds("\"a\\\n  b\""), vec![TokenKind::String("ab".into())]);
     assert_eq!(kinds("\"x={y}\""), vec![TokenKind::String("x={y}".into())]);
     assert_eq!(kinds("\"a{b}c\""), vec![TokenKind::String("a{b}c".into())]);
     assert_eq!(
@@ -721,10 +833,7 @@ fn pin_strings_and_interpolation_boundaries() {
         kinds("r\"a{b}c\""),
         vec![TokenKind::RawString("a{b}c".into())]
     );
-    assert_eq!(
-        kinds("'a{b}c'"),
-        vec![TokenKind::String("a{b}c".into())]
-    );
+    assert_eq!(kinds("'a{b}c'"), vec![TokenKind::String("a{b}c".into())]);
     assert_eq!(
         kinds("\"\"\"a{b}c\"\"\""),
         vec![TokenKind::String("a{b}c".into())]

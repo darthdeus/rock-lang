@@ -122,8 +122,12 @@ pub fn run_lua_code_with_command(
         {
             Some(status) => status,
             None => {
-                child.kill().map_err(|error| process_error("kill timed out", error))?;
-                child.wait().map_err(|error| process_error("wait for killed", error))?;
+                child
+                    .kill()
+                    .map_err(|error| process_error("kill timed out", error))?;
+                child
+                    .wait()
+                    .map_err(|error| process_error("wait for killed", error))?;
                 unregister_child_process(pid);
                 let _ = stdout_thread.join();
                 let _ = stderr_thread.join();
@@ -134,7 +138,9 @@ pub fn run_lua_code_with_command(
             }
         }
     } else {
-        child.wait().map_err(|error| process_error("wait for", error))?
+        child
+            .wait()
+            .map_err(|error| process_error("wait for", error))?
     };
 
     unregister_child_process(pid);
@@ -181,7 +187,11 @@ mod tests {
         let run = run_lua_code_with_timeout(&code, Some(test_utils::HANG_BACKSTOP))
             .expect("LuaJIT load errors are child results, not runner failures");
 
-        assert!(!run.success, "invalid Lua unexpectedly loaded: {}", run.combined());
+        assert!(
+            !run.success,
+            "invalid Lua unexpectedly loaded: {}",
+            run.combined()
+        );
         assert!(
             run.stderr.contains("expected near") || run.stderr.contains("unexpected symbol"),
             "LuaJIT's parse error was not reported: {}",
@@ -201,8 +211,7 @@ mod tests {
 
         let dir = tempfile::tempdir().expect("tempdir");
         let child_path = dir.path().join("close_stdin");
-        std::fs::write(&child_path, "#!/bin/sh\nexec </dev/null\nsleep 1\n")
-            .expect("child script");
+        std::fs::write(&child_path, "#!/bin/sh\nexec </dev/null\nsleep 1\n").expect("child script");
         let mut permissions = std::fs::metadata(&child_path)
             .expect("child metadata")
             .permissions();
@@ -212,8 +221,12 @@ mod tests {
         let mut code = "ignored by child\n".to_string();
         code.push_str(&"-- valid filler\n".repeat(1_000_000));
 
-        let error = run_lua_code_with_command(std::process::Command::new(&child_path), &code, Some(test_utils::HANG_BACKSTOP))
-            .expect_err("a child with no diagnostic must not swallow the broken pipe");
+        let error = run_lua_code_with_command(
+            std::process::Command::new(&child_path),
+            &code,
+            Some(test_utils::HANG_BACKSTOP),
+        )
+        .expect_err("a child with no diagnostic must not swallow the broken pipe");
 
         assert!(
             error.message.contains("Broken pipe"),

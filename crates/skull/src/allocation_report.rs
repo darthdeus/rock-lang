@@ -1,6 +1,8 @@
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::{Idx, Span};
-use skull_mir::cfg::{dominators, dominates, predecessors, reachable_blocks_from, reverse_postorder, successors};
+use skull_mir::cfg::{
+    dominates, dominators, predecessors, reachable_blocks_from, reverse_postorder, successors,
+};
 use skull_mir::mir::{Block, FuncRef, Inst, MirFunc};
 use skull_mir::monoty::MonoInterner;
 use std::cell::Cell;
@@ -571,11 +573,21 @@ fn allocation_aggregate(inst: &Inst) -> (Option<String>, u32) {
         | Inst::MaterializeValueStruct { name, fields, .. } => {
             (Some(name.to_string()), fields.len() as u32)
         }
-        Inst::MakeEnum { ty, positional, named, .. } => (
+        Inst::MakeEnum {
+            ty,
+            positional,
+            named,
+            ..
+        } => (
             Some(ty.to_string()),
             (positional.len() + named.len()) as u32,
         ),
-        Inst::MakeEnumDyn { ty, positional, named, .. } => (
+        Inst::MakeEnumDyn {
+            ty,
+            positional,
+            named,
+            ..
+        } => (
             Some(ty.to_string()),
             (1 + positional.len() + named.len()) as u32,
         ),
@@ -585,9 +597,10 @@ fn allocation_aggregate(inst: &Inst) -> (Option<String>, u32) {
             (Some(format!("Vec<{elem}>")), columns.len() as u32)
         }
         Inst::MakeVecColumnHeader { elem, .. } => (Some(format!("Vec<{elem}>")), 0),
-        Inst::MakeEnv { fields, .. } => {
-            (Some("<closure-environment>".to_string()), fields.len() as u32)
-        }
+        Inst::MakeEnv { fields, .. } => (
+            Some("<closure-environment>".to_string()),
+            fields.len() as u32,
+        ),
         _ => (None, 0),
     }
 }
@@ -708,8 +721,7 @@ fn allocation_inst_use(inst: &Inst, target: Idx<Inst>, facts: &mut AllocationUse
         {
             facts.record(AllocationResultUse::DirectCall);
         }
-        Inst::CallValue { callee, args }
-        | Inst::CallValueMulti { callee, args, .. }
+        Inst::CallValue { callee, args } | Inst::CallValueMulti { callee, args, .. }
             if *callee == target || args.contains(&target) =>
         {
             facts.record(AllocationResultUse::IndirectCall);
@@ -728,7 +740,10 @@ fn allocation_inst_use(inst: &Inst, target: Idx<Inst>, facts: &mut AllocationUse
                 facts.record(AllocationResultUse::FieldStore);
             }
         }
-        Inst::StoreIndex { base, value, .. } | Inst::ArrayPush { arr: base, value, .. } => {
+        Inst::StoreIndex { base, value, .. }
+        | Inst::ArrayPush {
+            arr: base, value, ..
+        } => {
             if *base == target {
                 facts.record(AllocationResultUse::Mutated);
             }
@@ -750,15 +765,19 @@ fn allocation_inst_use(inst: &Inst, target: Idx<Inst>, facts: &mut AllocationUse
         {
             facts.record(AllocationResultUse::NestedAggregate);
         }
-        Inst::MakeEnum { positional, named, .. }
-            if positional.contains(&target) || named.iter().any(|(_, value)| *value == target) =>
-        {
+        Inst::MakeEnum {
+            positional, named, ..
+        } if positional.contains(&target) || named.iter().any(|(_, value)| *value == target) => {
             facts.record(AllocationResultUse::NestedAggregate);
         }
-        Inst::MakeEnumDyn { tag, positional, named, .. }
-            if *tag == target
-                || positional.contains(&target)
-                || named.iter().any(|(_, value)| *value == target) =>
+        Inst::MakeEnumDyn {
+            tag,
+            positional,
+            named,
+            ..
+        } if *tag == target
+            || positional.contains(&target)
+            || named.iter().any(|(_, value)| *value == target) =>
         {
             facts.record(AllocationResultUse::NestedAggregate);
         }
@@ -776,14 +795,18 @@ fn natural_loop_depths(func: &MirFunc) -> HashMap<Idx<Block>, u32> {
 
     for &latch in &rpo {
         successors(&func.blocks[latch].term, |header| {
-            if !dominates(&idom, header, latch) { return }
+            if !dominates(&idom, header, latch) {
+                return;
+            }
             let body = loops.entry(header).or_default();
             body.insert(header);
             if body.insert(latch) {
                 let mut stack = vec![latch];
                 while let Some(block) = stack.pop() {
                     for &pred in all_preds.get(&block).map_or(&[][..], Vec::as_slice) {
-                        if pred != header && body.insert(pred) { stack.push(pred) }
+                        if pred != header && body.insert(pred) {
+                            stack.push(pred)
+                        }
                     }
                 }
             }
@@ -792,7 +815,9 @@ fn natural_loop_depths(func: &MirFunc) -> HashMap<Idx<Block>, u32> {
 
     let mut depths = HashMap::new();
     for body in loops.values() {
-        for &block in body { *depths.entry(block).or_default() += 1 }
+        for &block in body {
+            *depths.entry(block).or_default() += 1
+        }
     }
     depths
 }

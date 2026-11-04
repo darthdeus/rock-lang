@@ -18,7 +18,13 @@ fn remap_bone_token_types(tokens: &mut lsp_types::SemanticTokens) {
     let bone_legend = bone_query::semantic_tokens_legend();
     let type_map: Vec<u32> = bone_legend
         .iter()
-        .map(|t| advertised.token_types.iter().position(|a| a == t).unwrap_or(0) as u32)
+        .map(|t| {
+            advertised
+                .token_types
+                .iter()
+                .position(|a| a == t)
+                .unwrap_or(0) as u32
+        })
         .collect();
     let bone_mods = bone_query::semantic_tokens_modifiers_legend();
     let mod_map: Vec<u32> = bone_mods
@@ -156,7 +162,9 @@ pub fn compute_semantic_tokens_range_workspace(
     params: SemanticTokensRangeParams,
 ) -> anyhow::Result<Option<SemanticTokensRangeResult>> {
     let file_path = params.text_document.uri.to_file_path()?;
-    let mut tokens = workspace.bone.semantic_tokens_range(&file_path, params.range);
+    let mut tokens = workspace
+        .bone
+        .semantic_tokens_range(&file_path, params.range);
     remap_bone_token_types(&mut tokens);
     Ok(Some(SemanticTokensRangeResult::Tokens(tokens)))
 }

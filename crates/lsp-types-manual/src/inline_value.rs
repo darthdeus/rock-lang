@@ -25,8 +25,11 @@ pub struct InlineValueOptions {
     pub work_done_progress_options: WorkDoneProgressOptions,
 }
 
-impl_lsp_struct!(InlineValueOptions,
-    flatten { work_done_progress_options: WorkDoneProgressOptions }
+impl_lsp_struct!(
+    InlineValueOptions,
+    flatten {
+        work_done_progress_options: WorkDoneProgressOptions
+    }
 );
 
 /// Inline value options used during static or dynamic registration.
@@ -39,7 +42,8 @@ pub struct InlineValueRegistrationOptions {
     pub static_registration_options: StaticRegistrationOptions,
 }
 
-impl_lsp_struct!(InlineValueRegistrationOptions,
+impl_lsp_struct!(
+    InlineValueRegistrationOptions,
     flatten {
         inline_value_options: InlineValueOptions,
         text_document_registration_options: TextDocumentRegistrationOptions,
@@ -65,14 +69,17 @@ pub struct InlineValueParams {
     pub context: InlineValueContext,
 }
 
-impl_lsp_struct!(InlineValueParams,
+impl_lsp_struct!(
+    InlineValueParams,
     required {
         text_document: TextDocumentIdentifier = "textDocument",
         range: Range = "range",
         context: InlineValueContext = "context",
     },
     optional {},
-    flatten { work_done_progress_params: WorkDoneProgressParams }
+    flatten {
+        work_done_progress_params: WorkDoneProgressParams
+    }
 );
 
 /// @since 3.17.0
@@ -82,7 +89,8 @@ pub struct InlineValueContext {
     pub stopped_location: Range,
 }
 
-impl_lsp_struct!(InlineValueContext,
+impl_lsp_struct!(
+    InlineValueContext,
     required {
         frame_id: i32 = "frameId",
         stopped_location: Range = "stoppedLocation",
@@ -99,7 +107,8 @@ pub struct InlineValueText {
     pub text: String,
 }
 
-impl_lsp_struct!(InlineValueText,
+impl_lsp_struct!(
+    InlineValueText,
     required {
         range: Range = "range",
         text: String = "text",
@@ -117,12 +126,15 @@ pub struct InlineValueVariableLookup {
     pub case_sensitive_lookup: bool,
 }
 
-impl_lsp_struct!(InlineValueVariableLookup,
+impl_lsp_struct!(
+    InlineValueVariableLookup,
     required {
         range: Range = "range",
         case_sensitive_lookup: bool = "caseSensitiveLookup",
     },
-    optional { variable_name: String = "variableName" }
+    optional {
+        variable_name: String = "variableName"
+    }
 );
 
 /// Provide an inline value through an expression evaluation.
@@ -134,9 +146,14 @@ pub struct InlineValueEvaluatableExpression {
     pub expression: Option<String>,
 }
 
-impl_lsp_struct!(InlineValueEvaluatableExpression,
-    required { range: Range = "range" },
-    optional { expression: String = "expression" }
+impl_lsp_struct!(
+    InlineValueEvaluatableExpression,
+    required {
+        range: Range = "range"
+    },
+    optional {
+        expression: String = "expression"
+    }
 );
 
 /// The InlineValue types combines all inline value types into one type.
@@ -184,9 +201,12 @@ pub struct InlineValueWorkspaceClientCapabilities {
     pub refresh_support: Option<bool>,
 }
 
-impl_lsp_struct!(InlineValueWorkspaceClientCapabilities,
+impl_lsp_struct!(
+    InlineValueWorkspaceClientCapabilities,
     required {},
-    optional { refresh_support: bool = "refreshSupport" }
+    optional {
+        refresh_support: bool = "refreshSupport"
+    }
 );
 
 #[cfg(test)]

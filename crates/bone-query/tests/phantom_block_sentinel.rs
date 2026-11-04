@@ -87,7 +87,10 @@ fn phantom_block_markers_break_first_and_last_char() {
 
         // Mid-identifier is unaffected by the phantom -- normal assertions.
         assert_eq!(p.refs[1], *mid_refs, "[{name}] mid-identifier references");
-        assert_eq!(p.renames[1], *mid_refs, "[{name}] mid-identifier rename edits");
+        assert_eq!(
+            p.renames[1], *mid_refs,
+            "[{name}] mid-identifier rename edits"
+        );
         assert!(p.type_defs[1], "[{name}] mid-identifier type-definition");
 
         // First/last char must resolve exactly like mid-identifier -- these
@@ -100,9 +103,7 @@ fn phantom_block_markers_break_first_and_last_char() {
 
     // The lambda body's synthetic-`return` block types as `never`, so the
     // phantom ALSO broke type-definition at the ends; now offset-stable.
-    let lambda = format!(
-        "{PREAMBLE}fn f(handle: MarkerS) {{\n  let g = () => handle\n}}\n"
-    );
+    let lambda = format!("{PREAMBLE}fn f(handle: MarkerS) {{\n  let g = () => handle\n}}\n");
     let p = probe(&lambda, "handle");
     assert!(
         p.type_defs[0] && p.type_defs[2],
@@ -111,11 +112,17 @@ fn phantom_block_markers_break_first_and_last_char() {
 
     // Control: a REAL braced body -- markers land on the braces, every
     // identifier offset resolves. Normal assertion; must never regress.
-    let braced = format!(
-        "{PREAMBLE}fn f(handle: MarkerS) {{\n  let g = () => {{ handle }}\n}}\n"
-    );
+    let braced = format!("{PREAMBLE}fn f(handle: MarkerS) {{\n  let g = () => {{ handle }}\n}}\n");
     let p = probe(&braced, "handle");
-    assert_eq!(p.refs, [2, 2, 2], "braced control: references offset-stable");
+    assert_eq!(
+        p.refs,
+        [2, 2, 2],
+        "braced control: references offset-stable"
+    );
     assert_eq!(p.renames, [2, 2, 2], "braced control: rename offset-stable");
-    assert_eq!(p.type_defs, [true, true, true], "braced control: type-def offset-stable");
+    assert_eq!(
+        p.type_defs,
+        [true, true, true],
+        "braced control: type-def offset-stable"
+    );
 }

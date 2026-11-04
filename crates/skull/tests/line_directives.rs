@@ -21,24 +21,38 @@ fn main() {
 ";
 
 fn numbered() -> String {
-    common::emit_module_shaped(SRC, FILE, ShapeOverrides { line_directives: Some(true), ..Default::default() })
+    common::emit_module_shaped(
+        SRC,
+        FILE,
+        ShapeOverrides {
+            line_directives: Some(true),
+            ..Default::default()
+        },
+    )
 }
 
 #[test]
 fn generated_code_after_a_numbered_definition_is_numbered_by_its_place_in_main_lua() {
     let lua = numbered();
     assert!(
-        lua.lines().any(|line| line.starts_with('#') && line.contains(FILE)),
+        lua.lines()
+            .any(|line| line.starts_with('#') && line.contains(FILE)),
         "no directive names the Rock file:\n{lua}"
     );
-    let resets: Vec<(usize, &str)> =
-        lua.lines().enumerate().filter(|(_, line)| line.ends_with("\"main.lua\"")).collect();
+    let resets: Vec<(usize, &str)> = lua
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| line.ends_with("\"main.lua\""))
+        .collect();
     assert!(!resets.is_empty(), "no reset to main.lua:\n{lua}");
     for (index, line) in resets {
         // `index` is zero-based; the directive numbers the line after it.
         assert_eq!(line, format!("# {} \"main.lua\"", index + 2), "{lua}");
     }
-    assert!(!lua.contains(skull_codegen_lua::LINE_DIRECTIVE_RESET), "unresolved reset:\n{lua}");
+    assert!(
+        !lua.contains(skull_codegen_lua::LINE_DIRECTIVE_RESET),
+        "unresolved reset:\n{lua}"
+    );
 }
 
 /// Needs a LuaJIT that reads line directives (LuaJIT 2.1 commit c41d727d or
@@ -65,17 +79,28 @@ print("source=" .. info.source)
 print("linedefined=" .. info.linedefined)
 "#
     );
-    let out = std::process::Command::new(&luajit).arg("-e").arg(driver).output().expect("spawn luajit");
+    let out = std::process::Command::new(&luajit)
+        .arg("-e")
+        .arg(driver)
+        .output()
+        .expect("spawn luajit");
     let _ = std::fs::remove_dir_all(&dir);
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-    assert!(out.status.success(), "{stdout}\n{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let field = |name: &str| -> &str {
         stdout
             .lines()
             .find_map(|line| line.strip_prefix(name)?.strip_prefix('='))
             .unwrap_or_else(|| panic!("no {name} in {stdout}"))
     };
-    assert!(field("error").starts_with(&format!("{FILE}:4: boom")), "{stdout}");
+    assert!(
+        field("error").starts_with(&format!("{FILE}:4: boom")),
+        "{stdout}"
+    );
     assert!(field("trace").contains(&format!("{FILE}:4:")), "{stdout}");
     assert_eq!(field("source"), format!("@{FILE}"), "{stdout}");
     let linedefined: u32 = field("linedefined").parse().expect("linedefined");

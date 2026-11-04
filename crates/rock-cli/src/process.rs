@@ -1,6 +1,6 @@
 //! Shared process lifecycle for the plain and private CLI hosts.
-use crate::*;
 use crate as rock_cli;
+use crate::*;
 
 /// Run a CLI process with a static host table, including parsing, logging and cleanup.
 /// Call once, before spawning application threads.
@@ -38,7 +38,8 @@ pub fn main_with(registrations: &'static crate::registry::Registrations) {
 /// elsewhere is kept.
 #[cfg(not(feature = "sequential"))]
 fn install_compiler_pool(threads: Option<usize>) {
-    let mut pool = rayon::ThreadPoolBuilder::new().stack_size(rock_core::nesting::COMPILER_STACK_BYTES);
+    let mut pool =
+        rayon::ThreadPoolBuilder::new().stack_size(rock_core::nesting::COMPILER_STACK_BYTES);
     if let Some(threads) = threads {
         pool = pool.num_threads(threads);
     }
@@ -101,7 +102,9 @@ fn run_process(registrations: &'static crate::registry::Registrations) {
     // does not promise; a release build keeps them off.
     if skull::line_directives_mode() {
         if let Some(channel) = args.channel.as_deref().filter(|channel| *channel != "dev") {
-            eprintln!("Error: Lua line directives are a development option; channel `{channel}` is a release channel");
+            eprintln!(
+                "Error: Lua line directives are a development option; channel `{channel}` is a release channel"
+            );
             rock_cli::invocation_log::exit(1);
         }
     }
@@ -133,7 +136,9 @@ fn run_process(registrations: &'static crate::registry::Registrations) {
     // pipeline's `setup_environment`; rock-cli no longer links it. Reject
     // rather than silently ignore so a profiling invocation fails loudly.
     if args.trace {
-        eprintln!("Error: --trace is not supported (the perfetto tracing path lived in the removed rock pipeline)");
+        eprintln!(
+            "Error: --trace is not supported (the perfetto tracing path lived in the removed rock pipeline)"
+        );
         rock_cli::invocation_log::exit(1);
     }
 

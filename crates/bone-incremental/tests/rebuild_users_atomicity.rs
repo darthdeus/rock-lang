@@ -31,7 +31,8 @@ fn failed_rebuild_users_keeps_workspace_consistent() {
         SessionFile::legacy("a.rock", "struct S { v: int }\n"),
         SessionFile::legacy("b.rock", "fn use_s(s: S) -> int { s.v }\n"),
     ];
-    let mut session = Session::new(warm(), files, &bone_core::modules::NsAliases::default()).expect("clean program builds");
+    let mut session = Session::new(warm(), files, &bone_core::modules::NsAliases::default())
+        .expect("clean program builds");
 
     assert_eq!(
         session.ws.modules.len(),
@@ -51,7 +52,10 @@ fn failed_rebuild_users_keeps_workspace_consistent() {
         "global dup: int = 1\nglobal dup: int = 2\n".to_string();
 
     let result = session.rebuild_users();
-    assert!(result.is_err(), "a duplicate global must fail rebuild_users");
+    assert!(
+        result.is_err(),
+        "a duplicate global must fail rebuild_users"
+    );
 
     assert_eq!(
         session.ws.modules.len(),
@@ -80,11 +84,14 @@ fn failed_rebuild_users_keeps_workspace_consistent() {
 #[test]
 fn rebuild_users_keeps_the_comptime_inputs() {
     let files = vec![SessionFile::legacy("a.rock", "fn f() -> int { 1 }\n")];
-    let mut session = Session::new(warm(), files, &bone_core::modules::NsAliases::default()).expect("clean program builds");
+    let mut session = Session::new(warm(), files, &bone_core::modules::NsAliases::default())
+        .expect("clean program builds");
     session.ws.comptime_inputs.channel = "dev".to_string();
     session.ws.comptime_inputs.modules_mode = "v1".to_string();
 
-    session.rebuild_users().expect("an unchanged program rebuilds");
+    session
+        .rebuild_users()
+        .expect("an unchanged program rebuilds");
 
     assert_eq!(session.ws.comptime_inputs.channel, "dev");
     assert_eq!(session.ws.comptime_inputs.modules_mode, "v1");

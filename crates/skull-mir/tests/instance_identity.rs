@@ -46,7 +46,10 @@ fn main() {
 "#;
 
 fn decl(ws: &bone_semantic::inference::Workspace, name: &str) -> FuncRef {
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("test module");
+    let mid = *ws
+        .module_ids
+        .get(&Ustr::from("<test>"))
+        .expect("test module");
     let fid = ws
         .module(mid)
         .functions
@@ -54,11 +57,17 @@ fn decl(ws: &bone_semantic::inference::Workspace, name: &str) -> FuncRef {
         .find(|(_, f)| f.name.as_str() == name)
         .map(|(fid, _)| fid)
         .unwrap_or_else(|| panic!("no fn `{name}`"));
-    FuncRef { module: mid, func: fid }
+    FuncRef {
+        module: mid,
+        func: fid,
+    }
 }
 
 fn v2() -> MonoTy {
-    MonoTy::App { ctor: MonoCtor::Nominal(Ustr::from("V2")), params: vec![] }
+    MonoTy::App {
+        ctor: MonoCtor::Nominal(Ustr::from("V2")),
+        params: vec![],
+    }
 }
 
 /// The same shape table `spec_key_subst_roundtrip.rs` uses, so the two halves of
@@ -73,7 +82,13 @@ fn arg_shapes() -> Vec<(&'static str, MonoTy)> {
         ("nullable", MonoTy::Nullable(Box::new(MonoTy::Int))),
         ("unit", MonoTy::Unit),
         ("any", MonoTy::Any),
-        ("function", MonoTy::Function { params: vec![MonoTy::Int], ret: Box::new(MonoTy::Bool) }),
+        (
+            "function",
+            MonoTy::Function {
+                params: vec![MonoTy::Int],
+                ret: Box::new(MonoTy::Bool),
+            },
+        ),
         ("nested app", MonoTy::Nullable(Box::new(v2()))),
     ]
 }
@@ -91,12 +106,20 @@ fn interning_an_argument_list_round_trips_and_shares_ids_by_type() {
     let ident = decl(&ws, "ident");
     let interner = MonoInterner::new();
     let shapes = arg_shapes();
-    assert_eq!(shapes.len(), 9, "the shape table is the population under test");
+    assert_eq!(
+        shapes.len(),
+        9,
+        "the shape table is the population under test"
+    );
 
     for (what, ty) in &shapes {
         let inst = Instance::intern(&interner, ident, vec![ty.clone()]);
         assert_eq!(inst.args.len(), 1, "{what}: one argument in, one id out");
-        assert_eq!(&inst.arg_types(&interner), &vec![ty.clone()], "{what}: read back unchanged");
+        assert_eq!(
+            &inst.arg_types(&interner),
+            &vec![ty.clone()],
+            "{what}: read back unchanged"
+        );
     }
 
     for (what, ty) in &shapes {
@@ -127,8 +150,14 @@ fn equal_abi_arguments_are_distinct_instances_with_distinct_symbols() {
     let i = Instance::intern(&interner, ident, vec![MonoTy::Int]);
     let u = Instance::intern(&interner, ident, vec![MonoTy::Uint]);
     let s = Instance::intern(&interner, ident, vec![MonoTy::String]);
-    assert_ne!(i, s, "two concrete types are two instances whatever they splat to");
-    assert_ne!(i, u, "signed and unsigned scalars are distinct concrete instances");
+    assert_ne!(
+        i, s,
+        "two concrete types are two instances whatever they splat to"
+    );
+    assert_ne!(
+        i, u,
+        "signed and unsigned scalars are distinct concrete instances"
+    );
     assert_ne!(
         i.symbol(&ws, &interner),
         s.symbol(&ws, &interner),
@@ -183,7 +212,10 @@ fn a_non_generic_instance_is_the_declarations_own_symbol() {
         skull_mir::mangle::mangle_fn(&ws, f),
         "a non-generic instance IS the base mangling, not a suffixed derivation of it"
     );
-    assert!(inst.subst(&ws, &interner).is_empty(), "nothing to substitute");
+    assert!(
+        inst.subst(&ws, &interner).is_empty(),
+        "nothing to substitute"
+    );
 }
 
 /// An instance's substitution binds the declaration's own generic `VarId`s, in
@@ -206,15 +238,21 @@ fn an_instance_substitution_binds_each_declared_generic_to_its_own_argument() {
     let vars: Vec<_> = f
         .generics
         .iter()
-        .map(|g| match ws.module(pair.module).ty_arena[match g {
-            bone_semantic::prelude::TyId::Static(_, idx) => *idx,
-            other => panic!("declared generic is not static: {other:?}"),
-        }] {
-            bone_semantic::hir::TypeExpr::Generic(var, _) => var,
-            ref other => panic!("declared generic is not a Generic: {other:?}"),
+        .map(|g| {
+            match ws.module(pair.module).ty_arena[match g {
+                bone_semantic::prelude::TyId::Static(_, idx) => *idx,
+                other => panic!("declared generic is not static: {other:?}"),
+            }] {
+                bone_semantic::hir::TypeExpr::Generic(var, _) => var,
+                ref other => panic!("declared generic is not a Generic: {other:?}"),
+            }
         })
         .collect();
     assert_eq!(vars.len(), 2);
-    assert_eq!(subst.get(&vars[0]), Some(&MonoTy::Int), "`A` takes the first argument");
+    assert_eq!(
+        subst.get(&vars[0]),
+        Some(&MonoTy::Int),
+        "`A` takes the first argument"
+    );
     assert_eq!(subst.get(&vars[1]), Some(&v2()), "`B` takes the second");
 }

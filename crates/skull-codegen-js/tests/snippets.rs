@@ -3,14 +3,17 @@
 //! fail-closed end-to-end check that every JS entry is backed by a stdlib
 //! `@intrinsic` declaration (stdlib or the real test-local host fixtures).
 
-use skull_codegen_js::{fill_template, JsIntrinsics, JS_INTRINSICS};
+use skull_codegen_js::{JS_INTRINSICS, JsIntrinsics, fill_template};
 use skull_mir::intrinsics::{declared_intrinsics, unbacked_entries};
 
 fn template(name: &str, arity: usize) -> &'static str {
     JS_INTRINSICS
         .iter()
         .find(|(n, a, _)| *n == name && *a == arity)
-        .and_then(|(_, _, t)| match t { skull_mir::intrinsics::Emission::Template(t) => Some(*t), _ => None })
+        .and_then(|(_, _, t)| match t {
+            skull_mir::intrinsics::Emission::Template(t) => Some(*t),
+            _ => None,
+        })
         .unwrap_or_else(|| panic!("no JS entry {name}/{arity}"))
 }
 
@@ -19,15 +22,30 @@ fn template(name: &str, arity: usize) -> &'static str {
 #[test]
 fn math_snippets_render() {
     assert_eq!(fill_template(template("sin", 1), &["x"]), "Math.sin(x)");
-    assert_eq!(fill_template(template("cos", 1), &["theta"]), "Math.cos(theta)");
+    assert_eq!(
+        fill_template(template("cos", 1), &["theta"]),
+        "Math.cos(theta)"
+    );
     assert_eq!(fill_template(template("sqrt", 1), &["n"]), "Math.sqrt(n)");
     assert_eq!(fill_template(template("abs", 1), &["d"]), "Math.abs(d)");
     assert_eq!(fill_template(template("floor", 1), &["v"]), "Math.floor(v)");
     assert_eq!(fill_template(template("ceil", 1), &["v"]), "Math.ceil(v)");
-    assert_eq!(fill_template(template("pow", 2), &["b", "e"]), "Math.pow(b, e)");
-    assert_eq!(fill_template(template("min", 2), &["p", "q"]), "Math.min(p, q)");
-    assert_eq!(fill_template(template("max", 2), &["p", "q"]), "Math.max(p, q)");
-    assert_eq!(fill_template(template("atan2", 2), &["y", "x"]), "Math.atan2(y, x)");
+    assert_eq!(
+        fill_template(template("pow", 2), &["b", "e"]),
+        "Math.pow(b, e)"
+    );
+    assert_eq!(
+        fill_template(template("min", 2), &["p", "q"]),
+        "Math.min(p, q)"
+    );
+    assert_eq!(
+        fill_template(template("max", 2), &["p", "q"]),
+        "Math.max(p, q)"
+    );
+    assert_eq!(
+        fill_template(template("atan2", 2), &["y", "x"]),
+        "Math.atan2(y, x)"
+    );
 }
 
 // The conformance differential set: mappings
@@ -44,9 +62,15 @@ fn differential_set_snippets_render() {
         fill_template(template("lerp", 3), &["a", "b", "t"]),
         "(a * (1 - t) + b * t)"
     );
-    assert_eq!(fill_template(template("round", 1), &["x"]), "Math.floor(x + 0.5)");
+    assert_eq!(
+        fill_template(template("round", 1), &["x"]),
+        "Math.floor(x + 0.5)"
+    );
     assert_eq!(fill_template(template("sign", 1), &["n"]), "Math.sign(n)");
-    assert_eq!(fill_template(template("fract", 1), &["x"]), "(x - Math.floor(x))");
+    assert_eq!(
+        fill_template(template("fract", 1), &["x"]),
+        "(x - Math.floor(x))"
+    );
     // smoothstep has no builtin; an IIFE binds the clamped t once.
     assert_eq!(
         fill_template(template("smoothstep", 3), &["e0", "e1", "v"]),
@@ -69,10 +93,19 @@ fn native_buffer_snippets_render() {
         ("__nb_alloc_i16", "Int16Array"),
         ("__nb_alloc_u32", "Uint32Array"),
     ] {
-        assert_eq!(fill_template(template(name, 1), &["n"]), format!("new {ctor}(n)"));
+        assert_eq!(
+            fill_template(template(name, 1), &["n"]),
+            format!("new {ctor}(n)")
+        );
     }
-    assert_eq!(fill_template(template("nb_get", 2), &["b", "i"]), "b.ptr[i]");
-    assert_eq!(fill_template(template("nb_set", 3), &["b", "i", "v"]), "(b.ptr[i] = v)");
+    assert_eq!(
+        fill_template(template("nb_get", 2), &["b", "i"]),
+        "b.ptr[i]"
+    );
+    assert_eq!(
+        fill_template(template("nb_set", 3), &["b", "i", "v"]),
+        "(b.ptr[i] = v)"
+    );
     assert_eq!(
         fill_template(template("get", 2), &["buf", "k"]),
         "(function(b, i) { return (i >= 0 && i < b.len) ? b.ptr[i] : null; })(buf, k)"
@@ -89,7 +122,16 @@ fn table_entries_are_distinct_keys() {
     keys.dedup();
     assert_eq!(keys.len(), total, "duplicate (name, arity) in JS table");
     // the eight fallback+mapping intrinsics must all be present.
-    for name in ["min", "max", "clamp", "lerp", "smoothstep", "round", "sign", "fract"] {
+    for name in [
+        "min",
+        "max",
+        "clamp",
+        "lerp",
+        "smoothstep",
+        "round",
+        "sign",
+        "fract",
+    ] {
         assert!(
             JS_INTRINSICS.iter().any(|(n, _, _)| *n == name),
             "differential intrinsic `{name}` missing from JS table"
@@ -109,10 +151,20 @@ fn every_js_entry_is_backed_by_a_declared_intrinsic() {
         })
         .collect();
     let mut modules = modules;
-    modules.push(skull_parser::parse_module_clean(include_str!("fixtures/js_put.rock"), ustr::Ustr::from("<test>")).expect("parse"));
-    modules.push(skull_parser::parse_module_clean(
-        include_str!("fixtures/js_try_call.rock"), ustr::Ustr::from("<try-call>"),
-    ).expect("parse try_call fixture"));
+    modules.push(
+        skull_parser::parse_module_clean(
+            include_str!("fixtures/js_put.rock"),
+            ustr::Ustr::from("<test>"),
+        )
+        .expect("parse"),
+    );
+    modules.push(
+        skull_parser::parse_module_clean(
+            include_str!("fixtures/js_try_call.rock"),
+            ustr::Ustr::from("<try-call>"),
+        )
+        .expect("parse try_call fixture"),
+    );
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
 
     let declared = declared_intrinsics(&ws);

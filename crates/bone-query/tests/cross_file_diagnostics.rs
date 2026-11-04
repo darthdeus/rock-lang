@@ -27,9 +27,9 @@ fn two_file_project() -> (tempfile::TempDir, String) {
 }
 
 fn mentions_unknown_foo(diags: &[lsp_types::Diagnostic]) -> bool {
-    diags
-        .iter()
-        .any(|d| d.severity == Some(lsp_types::DiagnosticSeverity::ERROR) && d.message.contains("Foo"))
+    diags.iter().any(|d| {
+        d.severity == Some(lsp_types::DiagnosticSeverity::ERROR) && d.message.contains("Foo")
+    })
 }
 
 #[test]
@@ -86,7 +86,10 @@ fn hole_diagnostics_survive_unrelated_edits_and_clear_on_fix() {
     let b = bone_query::canonicalize_lenient(&dir.path().join("b.rock").to_string_lossy());
 
     let diags_for = |per: Vec<(String, Vec<lsp_types::Diagnostic>)>, file: &str| {
-        per.into_iter().find(|(p, _)| p == file).map(|(_, d)| d).unwrap_or_default()
+        per.into_iter()
+            .find(|(p, _)| p == file)
+            .map(|(_, d)| d)
+            .unwrap_or_default()
     };
     let has_hole = |d: &[lsp_types::Diagnostic]| d.iter().any(|x| x.message.contains("hole"));
 
@@ -96,7 +99,10 @@ fn hole_diagnostics_survive_unrelated_edits_and_clear_on_fix() {
     // Initial edit of a: its hole is reported.
     let a_src = std::fs::read_to_string(&a).unwrap();
     let d0 = bone.update(&a, a_src);
-    assert!(has_hole(&diags_for(d0, &a)), "a.rock's `?` must report a hole");
+    assert!(
+        has_hole(&diags_for(d0, &a)),
+        "a.rock's `?` must report a hole"
+    );
 
     // Unrelated edit of b: a.rock's hole must STILL be present (cache served).
     let d1 = bone.update(&b, "fn b() -> int { 2 }\n".to_string());
@@ -123,7 +129,11 @@ fn dependent_hole_message_refreshes_after_interface_edit() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("stick.toml"), "[package]\nname = \"xp\"\n").unwrap();
     std::fs::write(dir.path().join("b.rock"), "fn give() -> int { 1 }\n").unwrap();
-    std::fs::write(dir.path().join("a.rock"), "fn use_it() {\n  let x: ? = give()\n}\n").unwrap();
+    std::fs::write(
+        dir.path().join("a.rock"),
+        "fn use_it() {\n  let x: ? = give()\n}\n",
+    )
+    .unwrap();
     // Canonicalize as the server/CLI do before calling `update` -- the session
     // keys modules by `canonicalize_lenient`, so the changed-set match needs the
     // same (its Windows form drops the `\\?\` prefix `std::fs::canonicalize` adds).
@@ -132,10 +142,15 @@ fn dependent_hole_message_refreshes_after_interface_edit() {
     let b = canon("b.rock");
 
     let diags_for = |per: Vec<(String, Vec<lsp_types::Diagnostic>)>, file: &str| {
-        per.into_iter().find(|(p, _)| p == file).map(|(_, d)| d).unwrap_or_default()
+        per.into_iter()
+            .find(|(p, _)| p == file)
+            .map(|(_, d)| d)
+            .unwrap_or_default()
     };
     let hole_msg = |d: &[lsp_types::Diagnostic]| {
-        d.iter().find(|x| x.message.contains("hole")).map(|x| x.message.clone())
+        d.iter()
+            .find(|x| x.message.contains("hole"))
+            .map(|x| x.message.clone())
     };
 
     let mut bone = BoneWorkspace::new();
@@ -189,7 +204,10 @@ fn multi_label_hint_publishes_a_diagnostic_per_line() {
     assert!(
         hint_lines.contains(&1) && hint_lines.contains(&2),
         "expected a squiggle on both the `/` line (1) and the use line (2), got: {:?}",
-        diags.iter().map(|d| (d.range.start.line, d.message.as_str())).collect::<Vec<_>>()
+        diags
+            .iter()
+            .map(|d| (d.range.start.line, d.message.as_str()))
+            .collect::<Vec<_>>()
     );
 }
 
@@ -202,25 +220,44 @@ fn multi_label_hint_publishes_a_diagnostic_per_line() {
 fn duplicate_struct_across_modules_surfaces_in_lsp() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("stick.toml"), "[package]\nname = \"xp\"\n").unwrap();
-    std::fs::write(dir.path().join("a.rock"), "struct Foo { x: int }\nfn main() -> int { 0 }\n").unwrap();
-    std::fs::write(dir.path().join("b.rock"), "struct Foo { y: int }\nfn helper() -> int { 1 }\n").unwrap();
+    std::fs::write(
+        dir.path().join("a.rock"),
+        "struct Foo { x: int }\nfn main() -> int { 0 }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("b.rock"),
+        "struct Foo { y: int }\nfn helper() -> int { 1 }\n",
+    )
+    .unwrap();
     let a = bone_query::canonicalize_lenient(&dir.path().join("a.rock").to_string_lossy());
 
     let has_dup = |per: &[(String, Vec<lsp_types::Diagnostic>)]| {
-        per.iter().flat_map(|(_, d)| d).any(|d| d.message.contains("duplicate struct `Foo`"))
+        per.iter()
+            .flat_map(|(_, d)| d)
+            .any(|d| d.message.contains("duplicate struct `Foo`"))
     };
 
     let b = bone_query::canonicalize_lenient(&dir.path().join("b.rock").to_string_lossy());
     let mut bone = BoneWorkspace::new();
     let d0 = bone.update(&a, std::fs::read_to_string(&a).unwrap());
-    assert!(has_dup(&d0), "duplicate struct across modules must surface: {d0:?}");
+    assert!(
+        has_dup(&d0),
+        "duplicate struct across modules must surface: {d0:?}"
+    );
     // `diagnostics_for` (the one-shot CLI path) must agree with `update`. The
     // "duplicate across modules" error is symmetric; which file carries it depends
     // on module order, and with deterministic sorted discovery it attaches to the
     // second-declared struct (b.rock) -- so require it on either file rather than
     // pin one to the (now-changed) discovery order.
-    let a_dup = bone.diagnostics_for(&a).iter().any(|d| d.message.contains("duplicate struct `Foo`"));
-    let b_dup = bone.diagnostics_for(&b).iter().any(|d| d.message.contains("duplicate struct `Foo`"));
+    let a_dup = bone
+        .diagnostics_for(&a)
+        .iter()
+        .any(|d| d.message.contains("duplicate struct `Foo`"));
+    let b_dup = bone
+        .diagnostics_for(&b)
+        .iter()
+        .any(|d| d.message.contains("duplicate struct `Foo`"));
     assert!(
         a_dup || b_dup,
         "diagnostics_for must also surface the duplicate: a={:?} b={:?}",
@@ -229,10 +266,19 @@ fn duplicate_struct_across_modules_surfaces_in_lsp() {
     );
 
     // Fix b.rock (rename its Foo): the duplicate must CLEAR, not stick stale.
-    let d1 = bone.update(&b, "struct Bar { y: int }\nfn helper() -> int { 1 }\n".to_string());
-    assert!(!has_dup(&d1), "renaming b.rock's struct must clear the duplicate: {d1:?}");
+    let d1 = bone.update(
+        &b,
+        "struct Bar { y: int }\nfn helper() -> int { 1 }\n".to_string(),
+    );
     assert!(
-        !bone.diagnostics_for(&a).iter().any(|d| d.message.contains("duplicate struct")),
+        !has_dup(&d1),
+        "renaming b.rock's struct must clear the duplicate: {d1:?}"
+    );
+    assert!(
+        !bone
+            .diagnostics_for(&a)
+            .iter()
+            .any(|d| d.message.contains("duplicate struct")),
         "duplicate must be gone from diagnostics_for after the fix"
     );
 }
@@ -246,12 +292,17 @@ fn source_load_failure_recovers(broken_manifest: bool) {
     std::fs::write(
         app.join("stick.toml"),
         "[package]\nname = \"app\"\n[dependencies]\ndep = { path = \"../dep\" }\n",
-    ).unwrap();
+    )
+    .unwrap();
     let manifest = "[package]\nname = \"dep\"\ntype = \"lib\"\n";
     let dependency = "struct Dependency { value: int }\n";
     std::fs::write(dep.join("stick.toml"), manifest).unwrap();
     std::fs::write(dep.join("types.rock"), dependency).unwrap();
-    let broken = if broken_manifest { dep.join("stick.toml") } else { dep.join("types.rock") };
+    let broken = if broken_manifest {
+        dep.join("stick.toml")
+    } else {
+        dep.join("types.rock")
+    };
     if broken_manifest {
         std::fs::write(&broken, "[package").unwrap();
     } else {
@@ -263,35 +314,65 @@ fn source_load_failure_recovers(broken_manifest: bool) {
     let sibling = "fn sibling() -> int { let d = Dependency { value: 1 }; d.value }\n";
     std::fs::write(app.join("sibling.rock"), sibling).unwrap();
     let main = bone_query::canonicalize_lenient(&app.join("main.rock").to_string_lossy());
-    let sibling_path = bone_query::canonicalize_lenient(&app.join("sibling.rock").to_string_lossy());
+    let sibling_path =
+        bone_query::canonicalize_lenient(&app.join("sibling.rock").to_string_lossy());
     let dep_path = bone_query::canonicalize_lenient(&dep.join("types.rock").to_string_lossy());
-    let reports_cause = |diags: &[lsp_types::Diagnostic]| diags.iter().any(|d| {
-        d.severity == Some(lsp_types::DiagnosticSeverity::ERROR)
-            && d.source.as_deref() == Some("bone")
-            && d.message.contains(broken.file_name().unwrap().to_str().unwrap())
-    });
+    let reports_cause = |diags: &[lsp_types::Diagnostic]| {
+        diags.iter().any(|d| {
+            d.severity == Some(lsp_types::DiagnosticSeverity::ERROR)
+                && d.source.as_deref() == Some("bone")
+                && d.message
+                    .contains(broken.file_name().unwrap().to_str().unwrap())
+        })
+    };
 
     let mut bone = BoneWorkspace::new();
     bone.load_project(&main);
     let diags = bone.diagnostics_for(&main);
-    assert!(reports_cause(&diags), "CLI diagnostics must identify the broken source/manifest: {diags:?}");
+    assert!(
+        reports_cause(&diags),
+        "CLI diagnostics must identify the broken source/manifest: {diags:?}"
+    );
     for _ in 0..2 {
         let per = bone.update(&main, src.to_string());
-        let diags = &per.iter().find(|(p, _)| p == &main).expect("edited-file diagnostics").1;
-        assert!(reports_cause(diags), "live updates must retain the load failure: {diags:?}");
+        let diags = &per
+            .iter()
+            .find(|(p, _)| p == &main)
+            .expect("edited-file diagnostics")
+            .1;
+        assert!(
+            reports_cause(diags),
+            "live updates must retain the load failure: {diags:?}"
+        );
     }
 
     std::fs::write(dep.join("stick.toml"), manifest).unwrap();
     std::fs::write(dep.join("types.rock"), dependency).unwrap();
     let per = bone.update(&main, src.to_string());
     for (path, diags) in &per {
-        assert!(!diags.iter().any(|d| d.severity == Some(lsp_types::DiagnosticSeverity::ERROR)),
-            "repair must clear errors and resolve unopened siblings/dependencies in {path}: {diags:?}");
+        assert!(
+            !diags
+                .iter()
+                .any(|d| d.severity == Some(lsp_types::DiagnosticSeverity::ERROR)),
+            "repair must clear errors and resolve unopened siblings/dependencies in {path}: {diags:?}"
+        );
     }
-    assert_eq!(bone.file_text(&sibling_path), Some(sibling), "unopened sibling indexed after repair");
-    assert!(bone.projects_summary().iter().flat_map(|(_, modules)| modules).any(|m| m.id == dep_path),
-        "dependency indexed in the consuming project after repair");
-    assert!(!reports_cause(&bone.diagnostics_for(&main)), "CLI load error cleared after repair");
+    assert_eq!(
+        bone.file_text(&sibling_path),
+        Some(sibling),
+        "unopened sibling indexed after repair"
+    );
+    assert!(
+        bone.projects_summary()
+            .iter()
+            .flat_map(|(_, modules)| modules)
+            .any(|m| m.id == dep_path),
+        "dependency indexed in the consuming project after repair"
+    );
+    assert!(
+        !reports_cause(&bone.diagnostics_for(&main)),
+        "CLI load error cleared after repair"
+    );
 }
 
 #[test]
@@ -314,9 +395,13 @@ fn malformed_project_manifest_reports_source_discovery_error() {
     let file = file.to_str().unwrap();
     let mut bone = BoneWorkspace::new();
     let per = bone.update(file, src.to_string());
-    assert!(per.iter().flat_map(|(_, ds)| ds).any(|d| {
-        d.severity == Some(lsp_types::DiagnosticSeverity::ERROR) && d.message.contains("stick.toml")
-    }), "discovery must report the manifest cause: {per:?}");
+    assert!(
+        per.iter().flat_map(|(_, ds)| ds).any(|d| {
+            d.severity == Some(lsp_types::DiagnosticSeverity::ERROR)
+                && d.message.contains("stick.toml")
+        }),
+        "discovery must report the manifest cause: {per:?}"
+    );
 }
 
 #[test]
@@ -326,8 +411,11 @@ fn standalone_buffer_without_disk_file_needs_no_project() {
     let src = "fn scratch() -> int { 1 }\n";
     let mut bone = BoneWorkspace::new();
     let per = bone.update(file.to_str().unwrap(), src.to_string());
-    assert!(!per.iter().flat_map(|(_, ds)| ds).any(|d| {
-        d.severity == Some(lsp_types::DiagnosticSeverity::ERROR)
-    }), "standalone buffer must work without a project or disk source: {per:?}");
+    assert!(
+        !per.iter()
+            .flat_map(|(_, ds)| ds)
+            .any(|d| { d.severity == Some(lsp_types::DiagnosticSeverity::ERROR) }),
+        "standalone buffer must work without a project or disk source: {per:?}"
+    );
     assert_eq!(bone.file_text(file.to_str().unwrap()), Some(src));
 }

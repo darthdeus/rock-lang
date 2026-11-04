@@ -63,8 +63,10 @@ fn main() {
 #[test]
 fn frame_stores_evaluate_rhs_once_clear_payloads_and_preserve_user_writes() {
     let lua = common::try_emit_module(FRAME_WRITES).expect("frame writes emit");
-    assert_eq!(common::run_luajit(&format!("{lua}\nmain()\n"), "frame_nil_writes"),
-        "true\ntrue\ntrue\ntrue\ntrue\ntrue\n4\n2");
+    assert_eq!(
+        common::run_luajit(&format!("{lua}\nmain()\n"), "frame_nil_writes"),
+        "true\ntrue\ntrue\ntrue\ntrue\ntrue\n4\n2"
+    );
 }
 
 /// An `int as float` alias inside a coroutine step still reads a valid slot:
@@ -129,9 +131,21 @@ fn spilled_int_to_float_alias_reads_a_valid_slot_after_resume() {
     let qb = func.new_cell(Some(Ustr::from("qb")));
     func.emit(entry, Inst::Store { cell: qa, value: q });
     func.emit(entry, Inst::Store { cell: qb, value: q });
-    func.set_term(entry, Term::Yield { values: vec![conv], resume });
+    func.set_term(
+        entry,
+        Term::Yield {
+            values: vec![conv],
+            resume,
+        },
+    );
     let s = func.emit(resume, Inst::FloatAdd(conv, m));
-    func.set_term(resume, Term::Yield { values: vec![s], resume: done });
+    func.set_term(
+        resume,
+        Term::Yield {
+            values: vec![s],
+            resume: done,
+        },
+    );
     func.set_term(done, Term::Return(vec![]));
 
     let lowered = skull_transform::transform_coroutine(&func, None, false);
@@ -141,13 +155,24 @@ fn spilled_int_to_float_alias_reads_a_valid_slot_after_resume() {
         slots: lowered.frame_plan.slots().clone(),
     };
     let lua = skull_codegen_lua::emit_named_framed(
-        &ws, &ctx, &interner, "spill_alias__step", &lowered.step, Some(&frame), None,
+        &ws,
+        &ctx,
+        &interner,
+        "spill_alias__step",
+        &lowered.step,
+        Some(&frame),
+        None,
     );
     assert!(
         lowered.frame_plan.spill_values().contains(&conv),
         "the conversion must cross the yield through the value spill: {lua}"
     );
-    let n_slot = lowered.frame_plan.slots().get(&n).copied().expect("param is a frame field");
+    let n_slot = lowered
+        .frame_plan
+        .slots()
+        .get(&n)
+        .copied()
+        .expect("param is a frame field");
     let layout = lowered.frame_plan.layout_hash();
     let driver = format!(
         "{lua}\nlocal s = {{__state = 0, __layout = {layout}, c{n_slot} = 5}}\nprint(spill_alias__step(s))\nprint(spill_alias__step(s))\n"
@@ -178,10 +203,19 @@ fn main() {}
         }],
     );
     let probe = common::mangled_name(&emitted.lua, "probe");
-    let out = common::run_luajit(&format!("{}\nprint({probe}())\n", emitted.lua), "v1_resume_tag");
+    let out = common::run_luajit(
+        &format!("{}\nprint({probe}())\n", emitted.lua),
+        "v1_resume_tag",
+    );
     let (resumed, built) = out.split_once(' ').expect("two tags");
-    assert_eq!(resumed, built, "the erased resume box and a constructed value disagree on the tag");
-    assert!(!resumed.contains("::"), "a runtime tag is the minted symbol, not the DefKey: {resumed}");
+    assert_eq!(
+        resumed, built,
+        "the erased resume box and a constructed value disagree on the tag"
+    );
+    assert!(
+        !resumed.contains("::"),
+        "a runtime tag is the minted symbol, not the DefKey: {resumed}"
+    );
 }
 
 #[test]
@@ -200,7 +234,13 @@ fn coroutine_step_colors_sequential_locals_below_luajit_limit() {
     }
     let saved = func.new_cell(Some(Ustr::from("saved")));
     let saved_value = func.emit(entry, Inst::Const(Lit::Int(7)));
-    func.emit(entry, Inst::Store { cell: saved, value: saved_value });
+    func.emit(
+        entry,
+        Inst::Store {
+            cell: saved,
+            value: saved_value,
+        },
+    );
     let saved_load = func.emit(entry, Inst::Load(saved));
     func.set_term(entry, Term::Return(vec![saved_load]));
 
@@ -210,10 +250,19 @@ fn coroutine_step_colors_sequential_locals_below_luajit_limit() {
         slots: FxHashMap::from_iter([(saved, 0)]),
     };
     let lua = skull_codegen_lua::emit_named_framed(
-        &ws, &ctx, &interner, "wide_step", &func, Some(&frame), None,
+        &ws,
+        &ctx,
+        &interner,
+        "wide_step",
+        &func,
+        Some(&frame),
+        None,
     );
     assert_eq!(
-        common::run_luajit(&format!("{lua}\nprint(wide_step({{}}))\n"), "coroutine_cell_colors"),
+        common::run_luajit(
+            &format!("{lua}\nprint(wide_step({{}}))\n"),
+            "coroutine_cell_colors"
+        ),
         "7",
         "sequential step locals must not overwrite the implicit frame-state parameter"
     );

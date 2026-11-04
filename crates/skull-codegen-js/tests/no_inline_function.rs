@@ -23,15 +23,21 @@
 //! driver, never returned by `emit_with_closure`, so it is naturally out of
 //! scope here.
 
-use skull_mir::mir::FuncRef;
 use crate::common::ws_with;
+use skull_mir::mir::FuncRef;
 
 fn emit(ws: &bone_semantic::inference::Workspace, root: &str) -> String {
-    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("test module");
     let mut r = None;
     for (fid, f) in ws.module(mid).functions.iter() {
         if f.name.as_str() == root {
-            r = Some(FuncRef { module: mid, func: fid });
+            r = Some(FuncRef {
+                module: mid,
+                func: fid,
+            });
         }
     }
     skull_codegen_js::emit::emit_with_closure(ws, &[(r.expect(root), root.to_string())])
@@ -117,7 +123,10 @@ fn discipline_shapes_emit_no_inline_function() {
              --- emitted ---\n{js}",
         );
         // Every emitted fn is a named declaration.
-        assert!(js.contains("function "), "{label}: expected a hoisted `function <name>(`");
+        assert!(
+            js.contains("function "),
+            "{label}: expected a hoisted `function <name>(`"
+        );
     }
 }
 
@@ -127,9 +136,18 @@ fn discipline_shapes_emit_no_inline_function() {
 fn coroutine_body_is_a_named_trampoline() {
     let ws = ws_with(CO_FN);
     let js = emit(&ws, "gen_from");
-    assert!(js.contains("__step("), "co fn should emit a named __step fn:\n{js}");
-    assert!(js.contains("for (;;)"), "co fn step should be a block trampoline:\n{js}");
-    assert!(anon_function_hits(&js).is_empty(), "co fn body must not inline `function(`:\n{js}");
+    assert!(
+        js.contains("__step("),
+        "co fn should emit a named __step fn:\n{js}"
+    );
+    assert!(
+        js.contains("for (;;)"),
+        "co fn step should be a block trampoline:\n{js}"
+    );
+    assert!(
+        anon_function_hits(&js).is_empty(),
+        "co fn body must not inline `function(`:\n{js}"
+    );
 }
 
 const GC_EQ: &str = "\

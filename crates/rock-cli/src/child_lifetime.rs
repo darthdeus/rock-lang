@@ -11,9 +11,9 @@
 use std::io;
 use std::process::{Child, Command};
 #[cfg(unix)]
-use std::sync::atomic::{AtomicI32, Ordering};
-#[cfg(unix)]
 use std::sync::Once;
+#[cfg(unix)]
+use std::sync::atomic::{AtomicI32, Ordering};
 
 #[cfg(unix)]
 const SLOTS: usize = 256;
@@ -47,7 +47,10 @@ fn install_forwarding() {
     INSTALL.call_once(|| {
         for signal in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
             unsafe {
-                libc::signal(signal, forward_and_die as extern "C" fn(libc::c_int) as libc::sighandler_t);
+                libc::signal(
+                    signal,
+                    forward_and_die as extern "C" fn(libc::c_int) as libc::sighandler_t,
+                );
             }
         }
     });
@@ -84,7 +87,10 @@ impl ParentDeathSignal {
         if unsafe { libc::prctl(libc::PR_GET_PDEATHSIG, &mut signal) } != 0 {
             return Err(io::Error::last_os_error());
         }
-        Ok(Self { parent: unsafe { libc::getppid() }, signal })
+        Ok(Self {
+            parent: unsafe { libc::getppid() },
+            signal,
+        })
     }
 
     pub(crate) fn arm(self) -> io::Result<()> {
@@ -93,7 +99,9 @@ impl ParentDeathSignal {
         }
         // Arming after the original parent exits would miss its death.
         if self.signal != 0 && unsafe { libc::getppid() } != self.parent {
-            unsafe { libc::raise(self.signal); }
+            unsafe {
+                libc::raise(self.signal);
+            }
         }
         Ok(())
     }

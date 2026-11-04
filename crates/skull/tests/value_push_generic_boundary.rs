@@ -15,7 +15,10 @@ use crate::common::emit_module;
 fn run_prog(lua: &str, tag: &str) -> String {
     let path = std::env::temp_dir().join(format!("skull_{tag}_{}.lua", std::process::id()));
     std::fs::write(&path, format!("{lua}\nmain()\n")).expect("write");
-    let out = std::process::Command::new("luajit").arg(&path).output().expect("run luajit");
+    let out = std::process::Command::new("luajit")
+        .arg(&path)
+        .output()
+        .expect("run luajit");
     let _ = std::fs::remove_file(&path);
     assert!(
         out.status.success(),

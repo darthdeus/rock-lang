@@ -136,15 +136,26 @@ fn the_edge_closure_and_the_reach_record_name_the_same_instances() {
     // where an updater gets reachability wrong in the first place. Verified by
     // mutation: dropping the `GenericCall` reach fails both arms below.
     let kinds: BTreeSet<&str> = g.edges().map(|e| e.kind.name()).collect();
-    for required in ["direct-call", "generic-call", "fn-value", "bound-next-witness"] {
-        assert!(kinds.contains(required), "the fixture has no `{required}` edge: {kinds:?}");
+    for required in [
+        "direct-call",
+        "generic-call",
+        "fn-value",
+        "bound-next-witness",
+    ] {
+        assert!(
+            kinds.contains(required),
+            "the fixture has no `{required}` edge: {kinds:?}"
+        );
     }
     assert_eq!(
         reached.len(),
         g.instances.len(),
         "the reach record and the edge closure disagree on the instance population"
     );
-    assert_eq!(reached, g.instances, "the two views name different instances");
+    assert_eq!(
+        reached, g.instances,
+        "the two views name different instances"
+    );
 }
 
 /// Every live instance owns a contribution, so the derivation has a record for
@@ -159,7 +170,10 @@ fn every_live_instance_owns_a_contribution() {
         .filter(|i| !g.contributions.contains_key(&Owner::Instance((*i).clone())))
         .map(|i| g.identity(&ws, i))
         .collect();
-    assert!(missing.is_empty(), "live instances with no primary record: {missing:?}");
+    assert!(
+        missing.is_empty(),
+        "live instances with no primary record: {missing:?}"
+    );
     assert!(
         g.contributions.len() > g.instances.len(),
         "the always-emitted bodies own contributions too: {} owners vs {} instances",
@@ -182,9 +196,15 @@ fn the_operational_censuses_are_sums_of_the_primary_records() {
     assert_eq!(g.sites_attempted, sum(|c| c.sites_attempted));
     assert_eq!(g.always_emitted_seeds, sum(|c| c.always_emitted_seeds));
     assert_eq!(g.synthesized_examined, sum(|c| c.synthesized_examined));
-    assert_eq!(g.synthesized_approximated, sum(|c| c.synthesized_approximated));
+    assert_eq!(
+        g.synthesized_approximated,
+        sum(|c| c.synthesized_approximated)
+    );
     assert_eq!(census.body_exprs_scanned, sum(|c| c.body_exprs_scanned));
-    assert_eq!(census.resolved_overload_rows, sum(|c| c.resolved_overload_rows));
+    assert_eq!(
+        census.resolved_overload_rows,
+        sum(|c| c.resolved_overload_rows)
+    );
     assert_eq!(census.fn_value_rows, sum(|c| c.fn_value_rows));
     assert_eq!(census.generated_rows, sum(|c| c.generated_rows));
     assert_eq!(census.dispatched_rows, sum(|c| c.dispatched_rows));
@@ -194,11 +214,17 @@ fn the_operational_censuses_are_sums_of_the_primary_records() {
     assert_eq!(census.iterator_rows, sum(|c| c.iterator_rows));
     assert_eq!(g.edges().count(), sum(|c| c.edges.len()));
     assert_eq!(
-        g.call_sites().map(|(_, m)| m).map(|s| s.len()).sum::<usize>(),
+        g.call_sites()
+            .map(|(_, m)| m)
+            .map(|s| s.len())
+            .sum::<usize>(),
         sum(|c| c.call_sites.len())
     );
     assert!(census.owner_visits > 0 && census.first_owner_visits > 0);
-    assert!(census.census_enabled, "the graph fixture did not enable its census");
+    assert!(
+        census.census_enabled,
+        "the graph fixture did not enable its census"
+    );
     assert!(
         census.body_exprs_scanned > 0
             && census.resolved_overload_rows > 0
@@ -212,7 +238,10 @@ fn the_operational_censuses_are_sums_of_the_primary_records() {
         census.first_owner_visits > 1 && census.body_exprs_scanned > census.first_owner_visits,
         "the fixture did not expose repeated source-body materialization: {census:?}"
     );
-    assert!(census.frontier_count > 1, "the fixture exposed no wavefront expansion: {census:?}");
+    assert!(
+        census.frontier_count > 1,
+        "the fixture exposed no wavefront expansion: {census:?}"
+    );
     assert_eq!(
         census.frontier_ready_owners + census.frontier_same_frontier_dependency_owners,
         census.expanded,
@@ -313,13 +342,25 @@ fn the_graph_population_gate_reaches_every_contribution_family() {
     let g = build_population();
     let c = &g.run_stats;
     assert!(c.ordinary_owner_visits > 0, "no ordinary owners: {c:?}");
-    assert!(c.always_emitted_owner_visits > 0, "no always-emitted owners: {c:?}");
+    assert!(
+        c.always_emitted_owner_visits > 0,
+        "no always-emitted owners: {c:?}"
+    );
     assert!(c.resolved_overload_rows > 0, "no ordinary call rows: {c:?}");
     assert!(c.bound_tree_rows > 0, "no bound-tree rows: {c:?}");
     assert!(c.iterator_rows > 0, "no iterator rows: {c:?}");
     assert!(c.fn_value_rows > 0, "no function-value rows: {c:?}");
     assert!(c.generated_rows > 0, "no synthesized/generated rows: {c:?}");
-    assert!(c.contribution_synthesized_examined > 0, "no synthesized-call census: {c:?}");
-    assert!(c.contribution_rejections > 0, "no rejection population: {c:?}");
-    assert!(c.contribution_struct_default_domains > 0, "no struct-default domains: {c:?}");
+    assert!(
+        c.contribution_synthesized_examined > 0,
+        "no synthesized-call census: {c:?}"
+    );
+    assert!(
+        c.contribution_rejections > 0,
+        "no rejection population: {c:?}"
+    );
+    assert!(
+        c.contribution_struct_default_domains > 0,
+        "no struct-default domains: {c:?}"
+    );
 }

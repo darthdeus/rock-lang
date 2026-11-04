@@ -15,7 +15,10 @@ use ustr::Ustr;
 #[test]
 fn the_stdlib_js_sibling_file_is_loaded() {
     let names: Vec<&str> = rock_stdlib::stdlib_files().iter().map(|f| f.name).collect();
-    assert!(names.contains(&"js.rock"), "stdlib/js.rock is not in the load list: {names:?}");
+    assert!(
+        names.contains(&"js.rock"),
+        "stdlib/js.rock is not in the load list: {names:?}"
+    );
     assert_eq!(
         names.last(),
         Some(&"js.rock"),
@@ -39,12 +42,19 @@ fn a_stdlib_sibling_pair_agrees_on_arity() {
     let mut lua: HashMap<String, usize> = HashMap::new();
     let mut js: HashMap<String, usize> = HashMap::new();
     for f in rock_stdlib::stdlib_files() {
-        let ast = skull_parser::parse_module_clean(f.contents, Ustr::from(f.name)).expect("stdlib parse");
+        let ast =
+            skull_parser::parse_module_clean(f.contents, Ustr::from(f.name)).expect("stdlib parse");
         for item in &ast.items {
-            let ItemKind::Function(fun) = &item.kind else { continue };
+            let ItemKind::Function(fun) = &item.kind else {
+                continue;
+            };
             // `@scalar_abi` params explode into leaves on the JS side, so the two
             // declared arities are legitimately incomparable.
-            if item.annotations.iter().any(|a| a.name.name.as_str() == "scalar_abi") {
+            if item
+                .annotations
+                .iter()
+                .any(|a| a.name.name.as_str() == "scalar_abi")
+            {
                 continue;
             }
             let name = fun.name.name.to_string();
@@ -52,7 +62,8 @@ fn a_stdlib_sibling_pair_agrees_on_arity() {
                 FunctionBody::Inline(bone_semantic::hir::FnBackend::Lua, _) => {
                     lua.insert(name, fun.params.len());
                 }
-                FunctionBody::ExternJs | FunctionBody::Inline(bone_semantic::hir::FnBackend::Js, _) => {
+                FunctionBody::ExternJs
+                | FunctionBody::Inline(bone_semantic::hir::FnBackend::Js, _) => {
                     js.insert(name, fun.params.len());
                 }
                 _ => {}
@@ -87,13 +98,17 @@ fn sibling_facts_with(
     assert!(ast.recovery_errors.is_empty(), "{id} must parse cleanly");
     let mut out = std::collections::HashMap::new();
     for item in &ast.items {
-        let ItemKind::Function(f) = &item.kind else { continue };
+        let ItemKind::Function(f) = &item.kind else {
+            continue;
+        };
         let is_js = matches!(
             f.body,
             FunctionBody::ExternJs | FunctionBody::Inline(bone_semantic::hir::FnBackend::Js, _)
         );
-        let is_lua = matches!(f.body, FunctionBody::Inline(bone_semantic::hir::FnBackend::Lua, _))
-            || (native_side && matches!(f.body, FunctionBody::Ffi(..)));
+        let is_lua = matches!(
+            f.body,
+            FunctionBody::Inline(bone_semantic::hir::FnBackend::Lua, _)
+        ) || (native_side && matches!(f.body, FunctionBody::Ffi(..)));
         if is_js != want_js || (!is_js && !is_lua) {
             continue;
         }
@@ -131,9 +146,7 @@ fn a_sibling_pair_agrees_on_arity_and_annotations() {
         stdlib_lua.extend(sibling_facts(f.contents, f.name, false));
         stdlib_js.extend(sibling_facts(f.contents, f.name, true));
     }
-    let pairs: Vec<(&str, _, _, &[&str])> = vec![
-        ("stdlib", stdlib_lua, stdlib_js, &[][..]),
-    ];
+    let pairs: Vec<(&str, _, _, &[&str])> = vec![("stdlib", stdlib_lua, stdlib_js, &[][..])];
 
     let mut drifted: Vec<String> = Vec::new();
     for (label, lua, js, ignored) in &pairs {
@@ -149,14 +162,20 @@ fn a_sibling_pair_agrees_on_arity_and_annotations() {
             if la != ja {
                 drifted.push(format!("{label}::{n} arity lua={la} js={ja}"));
             }
-            let keep = |s: &std::collections::BTreeSet<String>| -> std::collections::BTreeSet<String> {
-                s.iter().filter(|a| !ignored.contains(&a.as_str())).cloned().collect()
-            };
+            let keep =
+                |s: &std::collections::BTreeSet<String>| -> std::collections::BTreeSet<String> {
+                    s.iter()
+                        .filter(|a| !ignored.contains(&a.as_str()))
+                        .cloned()
+                        .collect()
+                };
             let (laa, jaa) = (keep(laa), keep(jaa));
             if laa != jaa {
                 let lua_only: Vec<&String> = laa.difference(&jaa).collect();
                 let js_only: Vec<&String> = jaa.difference(&laa).collect();
-                drifted.push(format!("{label}::{n} lua-only={lua_only:?} js-only={js_only:?}"));
+                drifted.push(format!(
+                    "{label}::{n} lua-only={lua_only:?} js-only={js_only:?}"
+                ));
             }
         }
     }

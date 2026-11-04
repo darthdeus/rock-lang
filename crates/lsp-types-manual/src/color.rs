@@ -8,10 +8,7 @@ pub type DocumentColorClientCapabilities = DynamicRegistrationClientCapabilities
 #[derive(Debug, Eq, PartialEq, Clone, Default)]
 pub struct ColorProviderOptions {}
 
-impl_lsp_struct!(ColorProviderOptions,
-    required {},
-    optional {}
-);
+impl_lsp_struct!(ColorProviderOptions, required {}, optional {});
 
 #[derive(Debug, Eq, PartialEq, Clone, Default)]
 pub struct StaticTextDocumentColorProviderOptions {
@@ -19,9 +16,12 @@ pub struct StaticTextDocumentColorProviderOptions {
     pub id: Option<String>,
 }
 
-impl_lsp_struct!(StaticTextDocumentColorProviderOptions,
+impl_lsp_struct!(
+    StaticTextDocumentColorProviderOptions,
     required {},
-    nullable { document_selector: DocumentSelector = "documentSelector" },
+    nullable {
+        document_selector: DocumentSelector = "documentSelector"
+    },
     optional { id: String = "id" }
 );
 
@@ -65,8 +65,11 @@ pub struct DocumentColorParams {
     pub partial_result_params: PartialResultParams,
 }
 
-impl_lsp_struct!(DocumentColorParams,
-    required { text_document: TextDocumentIdentifier = "textDocument" },
+impl_lsp_struct!(
+    DocumentColorParams,
+    required {
+        text_document: TextDocumentIdentifier = "textDocument"
+    },
     optional {},
     flatten {
         work_done_progress_params: WorkDoneProgressParams,
@@ -80,7 +83,8 @@ pub struct ColorInformation {
     pub color: Color,
 }
 
-impl_lsp_struct!(ColorInformation,
+impl_lsp_struct!(
+    ColorInformation,
     required {
         range: Range = "range",
         color: Color = "color",
@@ -96,7 +100,8 @@ pub struct Color {
     pub alpha: f32,
 }
 
-impl_lsp_struct!(Color,
+impl_lsp_struct!(
+    Color,
     required {
         red: f32 = "red",
         green: f32 = "green",
@@ -121,7 +126,8 @@ pub struct ColorPresentationParams {
     pub partial_result_params: PartialResultParams,
 }
 
-impl_lsp_struct!(ColorPresentationParams,
+impl_lsp_struct!(
+    ColorPresentationParams,
     required {
         text_document: TextDocumentIdentifier = "textDocument",
         color: Color = "color",

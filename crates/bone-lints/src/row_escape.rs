@@ -8,13 +8,12 @@
 //! This opt-in `Advice` census measures escapes. Its intraprocedural analysis
 //! cannot prove their absence and does not enforce a lifetime boundary.
 
-use crate::{head_type, EscapeKind, RowEscape};
+use crate::{EscapeKind, RowEscape, head_type};
 use bone_core::hir::{
-    BinOp, BindingInfo, BuiltinTy, Expr, Function, Statement, TyId, TypeCtor,
-    TypeExpr, VarId,
+    BinOp, BindingInfo, BuiltinTy, Expr, Function, Statement, TyId, TypeCtor, TypeExpr, VarId,
 };
 use bone_core::prelude::*;
-use bone_core::suspension::{uses_after_suspension, SuspensionPolicy};
+use bone_core::suspension::{SuspensionPolicy, uses_after_suspension};
 use bone_core::workspace::BodyInference;
 
 /// Handle types whose element/root `T` is a row. Each is a WEAK scalar identity
@@ -82,9 +81,13 @@ pub fn row_population(
         if !report.is_empty() && !report.contains(&module.file) {
             continue;
         }
-        let Some(inf) = ws.inference(module.id) else { continue };
+        let Some(inf) = ws.inference(module.id) else {
+            continue;
+        };
         for (owner, body) in module.bodies.iter() {
-            let Some(bi) = inf.per_fn.get(owner) else { continue };
+            let Some(bi) = inf.per_fn.get(owner) else {
+                continue;
+            };
             let rows = Rows::resolve(ws, bi, body);
             if rows.seeds == 0 && rows.bindings.is_empty() {
                 continue;
@@ -121,7 +124,9 @@ impl Rows {
         };
         for (idx, expr) in body.expr_arena.iter() {
             let Expr::Call { .. } = expr else { continue };
-            let Some(f) = callee_fn(ws, bi, idx) else { continue };
+            let Some(f) = callee_fn(ws, bi, idx) else {
+                continue;
+            };
             match row_shape(ws, f) {
                 Some(RowShape::Direct) => {
                     r.exprs.insert(idx);
@@ -145,7 +150,9 @@ impl Rows {
     /// one rule -- an `Entity<T>` leaf is the handle, never the row.
     fn seed_loops(&mut self, ws: &Workspace, bi: &BodyInference, body: &Body) {
         for (_, stmt) in body.statement_arena.iter() {
-            let Statement::For { vars, iter, .. } = stmt else { continue };
+            let Statement::For { vars, iter, .. } = stmt else {
+                continue;
+            };
             if !iterates_an_arena(ws, bi, body, *iter) {
                 continue;
             }
@@ -168,7 +175,11 @@ impl Rows {
                 }
                 // `e.get() ?? return` / `?? fallback`: the value that flows on
                 // is the row whenever the left side produced one.
-                Expr::BinOp { op: BinOp::NullCoalesce, lhs, .. } if self.exprs.contains(lhs) => {
+                Expr::BinOp {
+                    op: BinOp::NullCoalesce,
+                    lhs,
+                    ..
+                } if self.exprs.contains(lhs) => {
                     self.exprs.insert(idx);
                 }
                 // A cast does not change what the value IS. `as any` is an
@@ -223,7 +234,9 @@ impl Rows {
                         self.bindings.insert(b);
                     }
                 }
-                Expr::SafeNavLet { receiver, binding, .. } if self.exprs.contains(receiver) => {
+                Expr::SafeNavLet {
+                    receiver, binding, ..
+                } if self.exprs.contains(receiver) => {
                     self.bindings.insert(*binding);
                 }
                 // `m = e.get()` into an ordinary local makes that local a row;
@@ -251,7 +264,11 @@ impl Rows {
         out: &mut Vec<RowEscape>,
     ) {
         let mut push = |kind, e: Idx<Expr>| {
-            out.push(RowEscape { kind, row_type: self.render(ws, bi, e), span: body.expr_spans[e] })
+            out.push(RowEscape {
+                kind,
+                row_type: self.render(ws, bi, e),
+                span: body.expr_spans[e],
+            })
         };
 
         for (idx, expr) in body.expr_arena.iter() {
@@ -319,10 +336,16 @@ impl Rows {
     /// (no interprocedural retain summary -- see the doc).
     fn calls(&self, ws: &Workspace, bi: &BodyInference, body: &Body, out: &mut Vec<RowEscape>) {
         for (idx, expr) in body.expr_arena.iter() {
-            let Expr::Call { args, .. } = expr else { continue };
+            let Expr::Call { args, .. } = expr else {
+                continue;
+            };
             let args: Vec<Idx<Expr>> = (*args).into_iter().collect();
-            let row_args: Vec<(usize, Idx<Expr>)> =
-                args.iter().copied().enumerate().filter(|(_, a)| self.exprs.contains(a)).collect();
+            let row_args: Vec<(usize, Idx<Expr>)> = args
+                .iter()
+                .copied()
+                .enumerate()
+                .filter(|(_, a)| self.exprs.contains(a))
+                .collect();
             if row_args.is_empty() {
                 continue;
             }
@@ -393,7 +416,13 @@ impl Rows {
     /// nothing suspended since) and `crossed` (fetched, then suspended). A read
     /// of a `crossed` binding is the finding. Liveness, not scope -- a row
     /// finished with before the `yield` stays quiet.
-    fn suspensions(&self, ws: &Workspace, bi: &BodyInference, body: &Body, out: &mut Vec<RowEscape>) {
+    fn suspensions(
+        &self,
+        ws: &Workspace,
+        bi: &BodyInference,
+        body: &Body,
+        out: &mut Vec<RowEscape>,
+    ) {
         let policy = RowSuspensionPolicy { rows: self, ws, bi };
         for at in uses_after_suspension(body, &policy) {
             let row_type = match bi.expr_types.get(at).copied() {
@@ -494,7 +523,11 @@ fn row_shape(ws: &Workspace, f: &Function) -> Option<RowShape> {
 /// generic `G`.
 fn handle_generic(ws: &Workspace, ty: TyId) -> Option<VarId> {
     let (mid, _) = static_parts(ty)?;
-    let TypeExpr::App { ctor: TypeCtor::Nominal(name), params } = static_te(ws, ty)? else {
+    let TypeExpr::App {
+        ctor: TypeCtor::Nominal(name),
+        params,
+    } = static_te(ws, ty)?
+    else {
         return None;
     };
     if !HANDLES.contains(&name.as_str()) || params.len() != 1 {
@@ -511,10 +544,18 @@ fn handle_generic(ws: &Workspace, ty: TyId) -> Option<VarId> {
 /// the same `X`. `unwrap`, `expect`, and any project-local sibling: the value
 /// that comes out is the value that went in, so row-ness passes through.
 fn is_unwrapper(ws: &Workspace, f: &Function) -> bool {
-    let Some(p0) = f.param_decls.first() else { return false };
-    let (Some(ret), Some((mid, _))) = (f.return_ty, static_parts(p0.ty)) else { return false };
-    let (Some(pte), Some(rte)) = (static_te(ws, p0.ty), static_te(ws, ret)) else { return false };
-    let TypeExpr::Nullable(inner) = pte else { return false };
+    let Some(p0) = f.param_decls.first() else {
+        return false;
+    };
+    let (Some(ret), Some((mid, _))) = (f.return_ty, static_parts(p0.ty)) else {
+        return false;
+    };
+    let (Some(pte), Some(rte)) = (static_te(ws, p0.ty), static_te(ws, ret)) else {
+        return false;
+    };
+    let TypeExpr::Nullable(inner) = pte else {
+        return false;
+    };
     ws.module(mid).ty_arena[inner] == rte
 }
 
@@ -560,24 +601,25 @@ fn is_handle(ws: &Workspace, bi: &BodyInference, ty: Option<TyId>) -> bool {
 fn is_container(ws: &Workspace, bi: &BodyInference, ty: Option<TyId>) -> bool {
     matches!(
         ty.map(|t| head_type(ws, bi, t)),
-        Some(TypeExpr::App { ctor: TypeCtor::Array | TypeCtor::Map, .. })
+        Some(TypeExpr::App {
+            ctor: TypeCtor::Array | TypeCtor::Map,
+            ..
+        })
     )
 }
 
 fn is_any(ws: &Workspace, bi: &BodyInference, ty: Option<TyId>) -> bool {
-    matches!(ty.map(|t| head_type(ws, bi, t)), Some(TypeExpr::Builtin(BuiltinTy::Any)))
+    matches!(
+        ty.map(|t| head_type(ws, bi, t)),
+        Some(TypeExpr::Builtin(BuiltinTy::Any))
+    )
 }
 
 /// Whether a `for`'s iterable is an Arena, directly (`for m in mobs`) or
 /// through one of its iterator constructors (`mobs.values()`, `mobs.pairs()`).
 /// A combinator chain between the two is not followed -- see the doc's
 /// not-covered list.
-fn iterates_an_arena(
-    ws: &Workspace,
-    bi: &BodyInference,
-    body: &Body,
-    iter: Idx<Expr>,
-) -> bool {
+fn iterates_an_arena(ws: &Workspace, bi: &BodyInference, body: &Body, iter: Idx<Expr>) -> bool {
     let is_arena = |e: Idx<Expr>| {
         matches!(
             bi.expr_types.get(e).copied().map(|t| head_type(ws, bi, t)),

@@ -33,11 +33,7 @@ fn emit(src: &str, roots: &[&str]) -> Result<String, String> {
     emit_with(&STDLIB, src, roots)
 }
 
-fn emit_with(
-    stdlib: &[skull_parser::Ast],
-    src: &str,
-    roots: &[&str],
-) -> Result<String, String> {
+fn emit_with(stdlib: &[skull_parser::Ast], src: &str, roots: &[&str]) -> Result<String, String> {
     let mut modules = stdlib.to_vec();
     modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
@@ -46,7 +42,11 @@ fn emit_with(
     // pin emission for sources the real pipeline rejects (backlog #67).
     let errs = skull_mir::verdict::body_errors(&ws);
     if !errs.is_empty() {
-        return Err(errs.iter().map(|e| e.message.clone()).collect::<Vec<_>>().join("; "));
+        return Err(errs
+            .iter()
+            .map(|e| e.message.clone())
+            .collect::<Vec<_>>()
+            .join("; "));
     }
     let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
     let roots: Vec<String> = roots.iter().map(|s| s.to_string()).collect();
@@ -55,8 +55,8 @@ fn emit_with(
         .map(|root| skull_codegen_glsl::resolve_root(&ws, mid, root))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.message)?;
-    let session = skull_codegen_glsl::shader_library_session(&ws, root_refs)
-        .map_err(|e| e.message)?;
+    let session =
+        skull_codegen_glsl::shader_library_session(&ws, root_refs).map_err(|e| e.message)?;
     skull_codegen_glsl::emit_shader_library_with_view(&ws, &session.scx, &session.view)
         .map_err(|e| e.message)
 }
@@ -81,17 +81,24 @@ fn function_library_requires_concrete_body_plans() {
         @pure fn root(value: float) -> float { return identity(value) }
     "#;
     let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>" )).expect("parse"));
+    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
     let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
     let root = skull_codegen_glsl::resolve_root(&ws, mid, "root").expect("root");
     let session = skull_codegen_glsl::shader_library_session(&ws, vec![root]).expect("session");
     let mut poisoned = session.view.clone();
-    assert!(!poisoned.concrete_plans.is_empty(), "fixture must retain a concrete plan population");
+    assert!(
+        !poisoned.concrete_plans.is_empty(),
+        "fixture must retain a concrete plan population"
+    );
     std::sync::Arc::make_mut(&mut poisoned.concrete_plans).clear();
     let error = skull_codegen_glsl::emit_shader_library_with_view(&ws, &session.scx, &poisoned)
         .expect_err("emission must consume the concrete plan population");
-    assert!(error.message.contains("concrete plan"), "unexpected error: {}", error.message);
+    assert!(
+        error.message.contains("concrete plan"),
+        "unexpected error: {}",
+        error.message
+    );
 }
 
 #[test]
@@ -121,10 +128,17 @@ fn callee_before_caller() {
     "#;
     let glsl = emit(src, &["map01"]).expect("emit");
     // remap must appear before map01 (topological: callees first).
-    let ri = glsl.find("float remap_float_float_float_float_float(").expect("remap emitted");
-    let mi = glsl.find("float map01_float_float_float(").expect("map01 emitted");
+    let ri = glsl
+        .find("float remap_float_float_float_float_float(")
+        .expect("remap emitted");
+    let mi = glsl
+        .find("float map01_float_float_float(")
+        .expect("map01 emitted");
     assert!(ri < mi, "remap should precede map01:\n{glsl}");
-    assert!(glsl.contains("return remap_float_float_float_float_float(value, min1, max1, 0.0, 1.0);"), "got:\n{glsl}");
+    assert!(
+        glsl.contains("return remap_float_float_float_float_float(value, min1, max1, 0.0, 1.0);"),
+        "got:\n{glsl}"
+    );
 }
 
 #[test]
@@ -137,9 +151,15 @@ fn vec_returning_and_intrinsics() {
         }
     "#;
     let glsl = emit(src, &["random2"]).expect("emit");
-    assert!(glsl.starts_with("vec2 random2_Vec2(vec2 p) {"), "got:\n{glsl}");
+    assert!(
+        glsl.starts_with("vec2 random2_Vec2(vec2 p) {"),
+        "got:\n{glsl}"
+    );
     assert!(glsl.contains("dot(p, vec2(127.32, 231.4))"), "got:\n{glsl}");
-    assert!(glsl.contains("return vec2(fract(sin(da)), fract(sin(db)));"), "got:\n{glsl}");
+    assert!(
+        glsl.contains("return vec2(fract(sin(da)), fract(sin(db)));"),
+        "got:\n{glsl}"
+    );
 }
 
 #[test]
@@ -153,11 +173,20 @@ fn vec3_vec4_constructors() {
         }
     "#;
     let glsl = emit(src, &["tint"]).expect("emit");
-    assert!(glsl.starts_with("vec4 tint_float(float t) {"), "got:\n{glsl}");
+    assert!(
+        glsl.starts_with("vec4 tint_float(float t) {"),
+        "got:\n{glsl}"
+    );
     // v(...) maps to native vecN construction, not a helper fn.
     assert!(glsl.contains("vec3(sin(t), cos(t), 0.5)"), "got:\n{glsl}");
-    assert!(glsl.contains("return vec4(rgb.x, rgb.y, rgb.z, 1.0);"), "got:\n{glsl}");
-    assert!(!glsl.contains("v_float"), "v() should inline, not emit a helper fn:\n{glsl}");
+    assert!(
+        glsl.contains("return vec4(rgb.x, rgb.y, rgb.z, 1.0);"),
+        "got:\n{glsl}"
+    );
+    assert!(
+        !glsl.contains("v_float"),
+        "v() should inline, not emit a helper fn:\n{glsl}"
+    );
 }
 
 #[test]
@@ -169,9 +198,16 @@ fn call_swizzle_texture_evaluates_once() {
                 return {result}
             }}"
         );
-        for profile in [skull_codegen_glsl::GlslProfile::Core330, skull_codegen_glsl::GlslProfile::Es300] {
+        for profile in [
+            skull_codegen_glsl::GlslProfile::Core330,
+            skull_codegen_glsl::GlslProfile::Es300,
+        ] {
             let glsl = emit_entry_profile(&src, "sampled", profile).expect("emit");
-            assert_eq!(glsl.matches("texture(scene, tc)").count(), 1, "{selection}:\n{glsl}");
+            assert_eq!(
+                glsl.matches("texture(scene, tc)").count(),
+                1,
+                "{selection}:\n{glsl}"
+            );
         }
     }
 }
@@ -187,9 +223,17 @@ fn fragment_call_swizzles_evaluate_each_call_once() {
             let warp = shade(uv).yx
             return v(base * tint, offset.x + offset.y + warp.x * warp.y)
         }";
-    for profile in [skull_codegen_glsl::GlslProfile::Core330, skull_codegen_glsl::GlslProfile::Es300] {
+    for profile in [
+        skull_codegen_glsl::GlslProfile::Core330,
+        skull_codegen_glsl::GlslProfile::Es300,
+    ] {
         let glsl = emit_entry_profile(src, "sampled", profile).expect("emit");
-        for call in ["texture(scene, tc)", "texture(scene, uv)", "shade_Vec2(tc)", "shade_Vec2(uv)"] {
+        for call in [
+            "texture(scene, tc)",
+            "texture(scene, uv)",
+            "shade_Vec2(tc)",
+            "shade_Vec2(uv)",
+        ] {
             assert_eq!(glsl.matches(call).count(), 1, "{call}:\n{glsl}");
         }
     }
@@ -201,11 +245,21 @@ fn call_swizzle_nested_constructor_keeps_one_source_call() {
         "fn source(p: Vec2) -> Vec3 { return v(sin(p.x), cos(p.y), p.x * p.y) }
          fn selected(p: Vec2) -> Vec2 { return v(source(p), 1.0).wzyx.yx }",
         &["selected"],
-    ).expect("emit");
+    )
+    .expect("emit");
     assert_eq!(glsl.matches("source_Vec2(p)").count(), 1, "{glsl}");
-    let binding = glsl.lines().find(|line| line.contains("= vec4(source_Vec2(p), 1.0);")).expect(&glsl);
-    let temp = binding.split_whitespace().nth(1).expect("typed vector binding");
-    assert!(glsl.contains(&format!("return vec2({temp}.z, {temp}.w);")), "{glsl}");
+    let binding = glsl
+        .lines()
+        .find(|line| line.contains("= vec4(source_Vec2(p), 1.0);"))
+        .expect(&glsl);
+    let temp = binding
+        .split_whitespace()
+        .nth(1)
+        .expect("typed vector binding");
+    assert!(
+        glsl.contains(&format!("return vec2({temp}.z, {temp}.w);")),
+        "{glsl}"
+    );
 }
 
 #[test]
@@ -216,7 +270,8 @@ fn call_swizzle_constructor_with_folded_call_evaluates_once() {
              return v(if flag { source(t) } else { 0.0 }, 1.0).xx
          }",
         &["selected"],
-    ).expect("emit");
+    )
+    .expect("emit");
     assert_eq!(glsl.matches("source_float(t)").count(), 1, "{glsl}");
     assert!(glsl.contains("flag ? source_float(t) : 0.0"), "{glsl}");
 }
@@ -227,9 +282,13 @@ fn call_swizzle_shared_component_keeps_one_vector_source() {
         "fn source(p: Vec2) -> Vec4 { return v(sin(p.x), cos(p.y), p.x * p.y, 1.0) }
          fn selected(p: Vec2) -> Vec2 { return Vec2 { x: source(p).x, y: 1.0 }.xx }",
         &["selected"],
-    ).expect("emit");
+    )
+    .expect("emit");
     assert_eq!(glsl.matches("source_Vec2(p)").count(), 1, "{glsl}");
-    assert!(glsl.contains("return vec2(call_result.x, call_result.x);"), "{glsl}");
+    assert!(
+        glsl.contains("return vec2(call_result.x, call_result.x);"),
+        "{glsl}"
+    );
 }
 
 #[test]
@@ -251,20 +310,39 @@ fn call_swizzle_binding_stays_in_its_branch_and_loop() {
              return left
          }",
         &["selected", "repeated", "conditioned"],
-    ).expect("emit");
+    )
+    .expect("emit");
     let branch = glsl.split("vec2 selected_bool_Vec2(").nth(1).expect(&glsl);
     let branch_call = branch.find("= source_Vec2(p);").expect(&glsl);
-    assert!(branch.find("if (flag) {").expect(&glsl) < branch_call, "{glsl}");
-    assert!(branch_call < branch.find("} else {").expect(&glsl), "{glsl}");
+    assert!(
+        branch.find("if (flag) {").expect(&glsl) < branch_call,
+        "{glsl}"
+    );
+    assert!(
+        branch_call < branch.find("} else {").expect(&glsl),
+        "{glsl}"
+    );
     let loop_fn = glsl.split("vec2 repeated_int_Vec2(").nth(1).expect(&glsl);
     let loop_call = loop_fn.find("= source_Vec2(p);").expect(&glsl);
     assert!(loop_fn.find("for (;").expect(&glsl) < loop_call, "{glsl}");
-    assert!(loop_call < loop_fn.find("result = (result +").expect(&glsl), "{glsl}");
+    assert!(
+        loop_call < loop_fn.find("result = (result +").expect(&glsl),
+        "{glsl}"
+    );
     let condition = glsl.split("int conditioned_Vec2_int(").nth(1).expect(&glsl);
     let condition_call = condition.find("= source_Vec2(p);").expect(&glsl);
-    assert!(condition.find("while (true) {").expect(&glsl) < condition_call, "{glsl}");
-    assert!(condition.find("if ((left > 0)) {").expect(&glsl) < condition_call, "{glsl}");
-    assert!(condition_call < condition.find("length(").expect(&glsl), "{glsl}");
+    assert!(
+        condition.find("while (true) {").expect(&glsl) < condition_call,
+        "{glsl}"
+    );
+    assert!(
+        condition.find("if ((left > 0)) {").expect(&glsl) < condition_call,
+        "{glsl}"
+    );
+    assert!(
+        condition_call < condition.find("length(").expect(&glsl),
+        "{glsl}"
+    );
 }
 
 #[test]
@@ -277,11 +355,18 @@ fn call_swizzle_trivial_and_scalar_values_stay_inline() {
          fn source(p: Vec2) -> Vec4 { return v(p.x, p.y, 0.0, 1.0) }
          fn single(p: Vec2) -> float { return source(p).x }",
         &["selected", "scalar", "constant", "folded", "single"],
-    ).expect("emit");
-    assert!(!glsl.contains("call_result"), "trivial expressions must stay inline:\n{glsl}");
+    )
+    .expect("emit");
+    assert!(
+        !glsl.contains("call_result"),
+        "trivial expressions must stay inline:\n{glsl}"
+    );
     assert!(glsl.contains("return sin(p.x);"), "{glsl}");
     assert!(glsl.contains("return source_Vec2(p).x;"), "{glsl}");
-    assert!(glsl.contains("return vec2(vec2((t + 1.0), 2.0).y, vec2((t + 1.0), 2.0).x);"), "{glsl}");
+    assert!(
+        glsl.contains("return vec2(vec2((t + 1.0), 2.0).y, vec2((t + 1.0), 2.0).x);"),
+        "{glsl}"
+    );
 }
 
 #[test]
@@ -290,9 +375,16 @@ fn call_swizzle_temporary_does_not_shadow_a_local() {
         "fn source(p: Vec2) -> Vec4 { return v(p.x, p.y, 0.0, 1.0) }
          fn selected(call_result: Vec2) -> Vec2 { return source(call_result).yx }",
         &["selected"],
-    ).expect("emit");
-    assert!(glsl.contains("vec4 call_result_1 = source_Vec2(call_result);"), "{glsl}");
-    assert!(glsl.contains("return vec2(call_result_1.y, call_result_1.x);"), "{glsl}");
+    )
+    .expect("emit");
+    assert!(
+        glsl.contains("vec4 call_result_1 = source_Vec2(call_result);"),
+        "{glsl}"
+    );
+    assert!(
+        glsl.contains("return vec2(call_result_1.y, call_result_1.x);"),
+        "{glsl}"
+    );
 }
 
 #[test]
@@ -300,10 +392,21 @@ fn call_swizzle_bool_conversion_preserves_component_types() {
     let glsl = emit(
         "fn selected(p: Vec3) -> Vec2 { return to_vec3(greater_than(p, v(0.0, 1.0, 2.0))).yx }",
         &["selected"],
-    ).expect("emit");
-    assert_eq!(glsl.matches("greaterThan(p, vec3(0.0, 1.0, 2.0))").count(), 1, "{glsl}");
-    assert!(glsl.contains("vec3 call_result = vec3(greaterThan(p, vec3(0.0, 1.0, 2.0)));"), "{glsl}");
-    assert!(glsl.contains("return vec2(call_result.y, call_result.x);"), "{glsl}");
+    )
+    .expect("emit");
+    assert_eq!(
+        glsl.matches("greaterThan(p, vec3(0.0, 1.0, 2.0))").count(),
+        1,
+        "{glsl}"
+    );
+    assert!(
+        glsl.contains("vec3 call_result = vec3(greaterThan(p, vec3(0.0, 1.0, 2.0)));"),
+        "{glsl}"
+    );
+    assert!(
+        glsl.contains("return vec2(call_result.y, call_result.x);"),
+        "{glsl}"
+    );
 }
 
 #[test]
@@ -319,12 +422,29 @@ fn call_swizzle_helper_preserves_components() {
             if ty == "vec3" { "Vec3" } else { "Vec2" }
         );
         let glsl = emit(&src, &["selected"]).expect("emit");
-        assert_eq!(glsl.matches("source_Vec2(p)").count(), 1, "{selection}:\n{glsl}");
-        let binding = glsl.lines().find(|line| line.contains("= source_Vec2(p);")).expect(&glsl);
-        let temp = binding.split_whitespace().nth(1).expect("typed vector binding");
+        assert_eq!(
+            glsl.matches("source_Vec2(p)").count(),
+            1,
+            "{selection}:\n{glsl}"
+        );
+        let binding = glsl
+            .lines()
+            .find(|line| line.contains("= source_Vec2(p);"))
+            .expect(&glsl);
+        let temp = binding
+            .split_whitespace()
+            .nth(1)
+            .expect("typed vector binding");
         assert!(binding.trim_start().starts_with("vec4 "), "{glsl}");
-        let args = components.iter().map(|c| format!("{temp}.{c}")).collect::<Vec<_>>().join(", ");
-        assert!(glsl.contains(&format!("return {ty}({args});")), "{selection}:\n{glsl}");
+        let args = components
+            .iter()
+            .map(|c| format!("{temp}.{c}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        assert!(
+            glsl.contains(&format!("return {ty}({args});")),
+            "{selection}:\n{glsl}"
+        );
     }
 }
 
@@ -351,12 +471,21 @@ fn nested_counted_loops() {
     let glsl = emit(src, &["worley2"]).expect("emit");
     assert!(glsl.contains("for (; y < "), "got:\n{glsl}");
     assert!(glsl.contains("for (; x < "), "got:\n{glsl}");
-    assert!(glsl.contains("dist = min(dist, length(diff));"), "got:\n{glsl}");
+    assert!(
+        glsl.contains("dist = min(dist, length(diff));"),
+        "got:\n{glsl}"
+    );
     assert!(glsl.contains("return dist;"), "got:\n{glsl}");
     // Vec operators render inline (native infix) and are NOT emitted as GLSL fn
     // definitions (they are reachability leaves, like intrinsics).
-    assert!(!glsl.contains("__op_add"), "vec operators must not emit fn defs:\n{glsl}");
-    assert!(!glsl.contains("__op_sub"), "vec operators must not emit fn defs:\n{glsl}");
+    assert!(
+        !glsl.contains("__op_add"),
+        "vec operators must not emit fn defs:\n{glsl}"
+    );
+    assert!(
+        !glsl.contains("__op_sub"),
+        "vec operators must not emit fn defs:\n{glsl}"
+    );
 }
 
 /// A counted loop over a RUNTIME invariant bound folds the bound expression into
@@ -379,10 +508,16 @@ fn counted_loop_invariant_bound_folds() {
     "#;
     let glsl = emit(src, &["scan"]).expect("emit");
     // The bound is inlined into the header, not read from a hoisted temp.
-    assert!(glsl.contains("for (; y < (r + 1);"), "invariant bound must inline:\n{glsl}");
+    assert!(
+        glsl.contains("for (; y < (r + 1);"),
+        "invariant bound must inline:\n{glsl}"
+    );
     // No hoisted bound-temp assignment survives (it would read `= (r + 1);` on its
     // own line, distinct from the loop init `y = (0 - r);` and step `y = y + 1`).
-    assert!(!glsl.contains("= (r + 1);"), "bound temp must be dropped:\n{glsl}");
+    assert!(
+        !glsl.contains("= (r + 1);"),
+        "bound temp must be dropped:\n{glsl}"
+    );
 }
 
 // --- relooper: structured control flow ---------
@@ -391,7 +526,8 @@ fn counted_loop_invariant_bound_folds() {
 /// emits an if/else (both arms diverge; ipdom collapses to the virtual exit).
 #[test]
 fn if_branch_pick() {
-    let src = r#"@pure fn pick(a: float, b: float) -> float { if a > b { return a } else { return b } }"#;
+    let src =
+        r#"@pure fn pick(a: float, b: float) -> float { if a > b { return a } else { return b } }"#;
     let glsl = emit(src, &["pick"]).expect("emit");
     assert_eq!(
         glsl.trim(),
@@ -427,7 +563,10 @@ fn vec2_normalize_body() {
         "got:\n{glsl}"
     );
     // The native GLSL builtin must NOT be used (undefined at 0).
-    assert!(!glsl.contains("= normalize(v)"), "must not use native normalize:\n{glsl}");
+    assert!(
+        !glsl.contains("= normalize(v)"),
+        "must not use native normalize:\n{glsl}"
+    );
 }
 
 /// Statement `if` with no else: the empty else block is suppressed.
@@ -737,7 +876,10 @@ fn param_loop_bound_not_folded() {
         return acc
     }"#;
     let glsl = emit(src, &["f"]).expect("emit");
-    assert!(glsl.contains("t3 = n;"), "param bound must stay a temp:\n{glsl}");
+    assert!(
+        glsl.contains("t3 = n;"),
+        "param bound must stay a temp:\n{glsl}"
+    );
     assert!(glsl.contains("for (; i < t3; i = i + 1) {"), "got:\n{glsl}");
 }
 
@@ -792,7 +934,11 @@ fn exhaustive_bool_match_expression_structures() {
         t < arm10 && arm10 < f && f < arm20 && arm20 < ret,
         "each pattern must guard its own arm ahead of the join; got:\n{glsl}"
     );
-    assert_eq!(glsl.matches("return").count(), 1, "the join must be walked once; got:\n{glsl}");
+    assert_eq!(
+        glsl.matches("return").count(),
+        1,
+        "the join must be walked once; got:\n{glsl}"
+    );
 }
 
 /// A `match` EXPRESSION ladder: the inner diamond stores the same single-use
@@ -808,7 +954,10 @@ fn match_expression_ladder_is_not_folded() {
         return x + 1
     }"#;
     let glsl = emit(src, &["f"]).expect("emit");
-    assert!(glsl.contains("t1 = 10;"), "n == 1 arm must survive; got:\n{glsl}");
+    assert!(
+        glsl.contains("t1 = 10;"),
+        "n == 1 arm must survive; got:\n{glsl}"
+    );
     assert!(
         !glsl.contains("(n == 2) ? 20 : 30"),
         "inner diamond must not fold past the outer arm's store; got:\n{glsl}"
@@ -824,7 +973,10 @@ fn two_store_diamond_still_folds() {
         return y
     }"#;
     let glsl = emit(src, &["f"]).expect("emit");
-    assert!(glsl.contains('?'), "single diamond should still fold to a ternary; got:\n{glsl}");
+    assert!(
+        glsl.contains('?'),
+        "single diamond should still fold to a ternary; got:\n{glsl}"
+    );
 }
 
 /// Nested general `while` loops with an inner `break` (the inner loop's exit
@@ -927,7 +1079,10 @@ fn int_arg_at_float_param() {
         @pure fn f(i: int) -> float { return takes_float(i) }
     "#;
     let glsl = emit(src, &["f"]).expect("emit");
-    assert!(glsl.contains("return takes_float_float(float(i));"), "got:\n{glsl}");
+    assert!(
+        glsl.contains("return takes_float_float(float(i));"),
+        "got:\n{glsl}"
+    );
 }
 
 /// An int (non-literal) mixed into float arithmetic gets a `float(...)` wrap.
@@ -935,7 +1090,10 @@ fn int_arg_at_float_param() {
 fn int_in_mixed_arithmetic() {
     let src = r#"@pure fn f(x: float, i: int) -> float { return x + i }"#;
     let glsl = emit(src, &["f"]).expect("emit");
-    assert_eq!(glsl.trim(), "float f_float_int(float x, int i) {\n  return (x + float(i));\n}");
+    assert_eq!(
+        glsl.trim(),
+        "float f_float_int(float x, int i) {\n  return (x + float(i));\n}"
+    );
 }
 
 /// Cell typing: a `let y: float = 0` binding declares `float y;` (from the
@@ -973,7 +1131,11 @@ fn emit_entry_profile(
     // pin emission for sources the real pipeline rejects (backlog #67).
     let errs = skull_mir::verdict::body_errors(&ws);
     if !errs.is_empty() {
-        return Err(errs.iter().map(|e| e.message.clone()).collect::<Vec<_>>().join("; "));
+        return Err(errs
+            .iter()
+            .map(|e| e.message.clone())
+            .collect::<Vec<_>>()
+            .join("; "));
     }
     let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
     skull_codegen_glsl::emit_shader_entry(&ws, mid, root, profile).map_err(|e| e.message)
@@ -1007,17 +1169,28 @@ fn fragment_entry_scaffold() {
     // Uniforms: one std140 block in field order, then the loose samplers.
     assert!(glsl.contains("layout(std140) uniform GlowU {\n    float strength;\n    vec2 center;\n    float radius;\n};\nuniform sampler2D scene;"), "got:\n{glsl}");
     // Helper before entry; entry drops uniform/sampler params.
-    let fi = glsl.find("float falloff_float_float(float d, float r)").expect("helper emitted");
+    let fi = glsl
+        .find("float falloff_float_float(float d, float r)")
+        .expect("helper emitted");
     let gi = glsl.find("vec4 glow(vec2 tc)").expect("entry emitted");
     assert!(fi < gi, "helper must precede entry:\n{glsl}");
     // Uniform-struct reads render as bare uniform names.
     assert!(glsl.contains("distance(tc, center)"), "got:\n{glsl}");
     assert!(glsl.contains("texture(scene, tc)"), "got:\n{glsl}");
-    assert!(!glsl.contains("u."), "uniform struct must not survive as a param:\n{glsl}");
-    assert!(glsl.contains("void main() {\n  FragColor = glow(TexCoord);\n}"), "got:\n{glsl}");
+    assert!(
+        !glsl.contains("u."),
+        "uniform struct must not survive as a param:\n{glsl}"
+    );
+    assert!(
+        glsl.contains("void main() {\n  FragColor = glow(TexCoord);\n}"),
+        "got:\n{glsl}"
+    );
     // Default fullscreen vertex stage.
     assert!(glsl.contains("#ifdef VERTEX"), "got:\n{glsl}");
-    assert!(glsl.contains("gl_Position = vec4(aPos, 0.0, 1.0);"), "got:\n{glsl}");
+    assert!(
+        glsl.contains("gl_Position = vec4(aPos, 0.0, 1.0);"),
+        "got:\n{glsl}"
+    );
     assert!(glsl.contains("TexCoord = aTexCoord;"), "got:\n{glsl}");
 }
 
@@ -1049,10 +1222,16 @@ fn fragment_entry_uniforms_are_one_std140_block() {
         "got:\n{glsl}"
     );
     assert!(glsl.contains("uniform sampler2D scene;"), "got:\n{glsl}");
-    assert!(!glsl.contains("uniform float strength;"), "no loose member survives:\n{glsl}");
+    assert!(
+        !glsl.contains("uniform float strength;"),
+        "no loose member survives:\n{glsl}"
+    );
     // The block is UNNAMED-instance, so reads are bare globals exactly as before.
     assert!(glsl.contains("distance(tc, center)"), "got:\n{glsl}");
-    assert!(!glsl.contains("u."), "uniform struct must not survive as a param:\n{glsl}");
+    assert!(
+        !glsl.contains("u."),
+        "uniform struct must not survive as a param:\n{glsl}"
+    );
 }
 
 /// ES300 fullscreen entry: the profile header replaces the hardcoded 330
@@ -1067,14 +1246,21 @@ fn fragment_entry_es300_profile() {
             return texture(scene, tc)
         }
     "#;
-    let glsl = emit_entry_profile(src, "blit", skull_codegen_glsl::GlslProfile::Es300).expect("emit");
+    let glsl =
+        emit_entry_profile(src, "blit", skull_codegen_glsl::GlslProfile::Es300).expect("emit");
     assert!(glsl.starts_with("#version 300 es\n"), "got:\n{glsl}");
     let px = glsl.find("#ifdef PIXEL").expect("pixel block");
     let vx = glsl.find("#ifdef VERTEX").expect("vertex block");
     let pixel_block = &glsl[px..vx];
     let vertex_block = &glsl[vx..];
-    assert!(pixel_block.contains("precision highp float;"), "got:\n{glsl}");
-    assert!(vertex_block.contains("precision highp float;"), "got:\n{glsl}");
+    assert!(
+        pixel_block.contains("precision highp float;"),
+        "got:\n{glsl}"
+    );
+    assert!(
+        vertex_block.contains("precision highp float;"),
+        "got:\n{glsl}"
+    );
     assert!(!glsl.contains("330"), "no desktop version residue:\n{glsl}");
 }
 
@@ -1102,9 +1288,15 @@ fn mat4_native_multiply() {
         @pure fn compose(a: Mat4, b: Mat4) -> Mat4 { return a * b }
     "#;
     let glsl = emit(src, &["xform", "compose"]).expect("emit");
-    assert!(glsl.contains("vec4 xform_Mat4_Vec4(mat4 m, vec4 p) {"), "got:\n{glsl}");
+    assert!(
+        glsl.contains("vec4 xform_Mat4_Vec4(mat4 m, vec4 p) {"),
+        "got:\n{glsl}"
+    );
     assert!(glsl.contains("return (m * p);"), "got:\n{glsl}");
-    assert!(glsl.contains("mat4 compose_Mat4_Mat4(mat4 a, mat4 b) {"), "got:\n{glsl}");
+    assert!(
+        glsl.contains("mat4 compose_Mat4_Mat4(mat4 a, mat4 b) {"),
+        "got:\n{glsl}"
+    );
     assert!(glsl.contains("return (a * b);"), "got:\n{glsl}");
 }
 
@@ -1199,10 +1391,19 @@ fn log2_float_on_both_pinned_profiles() {
             return v(log2(t.r + 1.0), log2(t.g + 1.0), log2(t.b + 1.0), t.a)
         }
     "#;
-    for profile in [skull_codegen_glsl::GlslProfile::Core330, skull_codegen_glsl::GlslProfile::Es300] {
+    for profile in [
+        skull_codegen_glsl::GlslProfile::Core330,
+        skull_codegen_glsl::GlslProfile::Es300,
+    ] {
         let glsl = emit_entry_profile(src, "logfrag", profile).expect("emit");
-        assert!(glsl.contains("log2("), "{profile:?} must use the log2 builtin:\n{glsl}");
-        assert!(!glsl.contains("null"), "{profile:?} must not mention null:\n{glsl}");
+        assert!(
+            glsl.contains("log2("),
+            "{profile:?} must use the log2 builtin:\n{glsl}"
+        );
+        assert!(
+            !glsl.contains("null"),
+            "{profile:?} must not mention null:\n{glsl}"
+        );
     }
 }
 
@@ -1223,7 +1424,10 @@ fn log2_vector_components_on_both_pinned_profiles() {
             return v(l, t.a)
         }
     "#;
-    for profile in [skull_codegen_glsl::GlslProfile::Core330, skull_codegen_glsl::GlslProfile::Es300] {
+    for profile in [
+        skull_codegen_glsl::GlslProfile::Core330,
+        skull_codegen_glsl::GlslProfile::Es300,
+    ] {
         let glsl = emit_entry_profile(src, "logfrag", profile).expect("emit");
         assert!(
             glsl.contains("vec3 log2v_Vec3(vec3 c) {"),
@@ -1255,7 +1459,10 @@ fn helper_float_default_is_carried_on_both_pinned_profiles() {
             return shade(texture(scene, tc), 2.0)
         }
     "#;
-    for profile in [skull_codegen_glsl::GlslProfile::Core330, skull_codegen_glsl::GlslProfile::Es300] {
+    for profile in [
+        skull_codegen_glsl::GlslProfile::Core330,
+        skull_codegen_glsl::GlslProfile::Es300,
+    ] {
         let omitted = emit_entry_profile(src, "shadefrag", profile).expect("emit");
         assert!(
             omitted.contains("shade_Vec4_float(texture(scene, tc), 1.0)"),
@@ -1267,7 +1474,10 @@ fn helper_float_default_is_carried_on_both_pinned_profiles() {
             "{profile:?} explicit call must keep its argument:\n{explicit}"
         );
         for glsl in [&omitted, &explicit] {
-            assert!(!glsl.contains("null"), "{profile:?} must not mention null:\n{glsl}");
+            assert!(
+                !glsl.contains("null"),
+                "{profile:?} must not mention null:\n{glsl}"
+            );
         }
     }
 }

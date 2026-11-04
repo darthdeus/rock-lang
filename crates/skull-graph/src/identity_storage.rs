@@ -7,7 +7,8 @@
 use bone_semantic::hir::{Body, Function};
 use bone_semantic::identity_storage::{
     identity_body_sites, identity_body_sites_with, identity_violation_in, BodySlotTypes,
-    IdentityNode, IdentityPosition, IdentityStorageKind, IdentityStorageSite, IdentityStorageViolation, IdentityTypes,
+    IdentityNode, IdentityPosition, IdentityStorageKind, IdentityStorageSite,
+    IdentityStorageViolation, IdentityTypes,
 };
 use bone_semantic::inference::{BodyInference, Workspace};
 use bone_semantic::prelude::TyId;
@@ -20,7 +21,10 @@ struct MonoTypes<'a>(std::marker::PhantomData<&'a MonoTy>);
 impl<'a> IdentityTypes for MonoTypes<'a> {
     type Ty = &'a MonoTy;
     type Children = std::slice::Iter<'a, MonoTy>;
-    fn node(self, ty: &'a MonoTy) -> Option<IdentityNode<&'a MonoTy, std::slice::Iter<'a, MonoTy>>> {
+    fn node(
+        self,
+        ty: &'a MonoTy,
+    ) -> Option<IdentityNode<&'a MonoTy, std::slice::Iter<'a, MonoTy>>> {
         Some(match ty {
             MonoTy::Nullable(inner) => IdentityNode::Nullable(inner),
             MonoTy::Tuple(parts) => IdentityNode::Tuple(parts.iter()),
@@ -41,7 +45,13 @@ impl<'a> IdentityTypes for MonoTypes<'a> {
 /// which this is false cannot make any position of the body store one, so it
 /// is the cheap gate before a body is re-read under its substitution.
 pub fn stores_identity(ws: &Workspace, ty: &MonoTy) -> bool {
-    identity_violation_in(ws, MonoTypes(std::marker::PhantomData), ty, IdentityPosition::Stored).is_some()
+    identity_violation_in(
+        ws,
+        MonoTypes(std::marker::PhantomData),
+        ty,
+        IdentityPosition::Stored,
+    )
+    .is_some()
 }
 
 struct SubstitutedSlotTypes<'a> {
@@ -55,7 +65,12 @@ impl SubstitutedSlotTypes<'_> {
     // reports it as a `FreeType` or plan failure.
     fn check(&self, ty: TyId, position: IdentityPosition) -> Option<IdentityStorageViolation> {
         let mono = skull_mir::monoty::convert(self.ws, self.bi, ty, self.subst).ok()?;
-        identity_violation_in(self.ws, MonoTypes(std::marker::PhantomData), &mono, position)
+        identity_violation_in(
+            self.ws,
+            MonoTypes(std::marker::PhantomData),
+            &mono,
+            position,
+        )
     }
 }
 
@@ -89,12 +104,19 @@ pub fn substitution_only_sites(
         return substituted;
     }
     let key = |site: &IdentityStorageSite| (site.kind, site.span.file, site.span.offset_range);
-    let mut skip: FxHashSet<_> = identity_body_sites(ws, function, body, bi).iter().map(key).collect();
+    let mut skip: FxHashSet<_> = identity_body_sites(ws, function, body, bi)
+        .iter()
+        .map(key)
+        .collect();
     // A parameter holds what its caller already stored, and that storage is
     // reported where it was made. A `co fn` parameter is the frame's own.
     skip.extend(body.param_bindings.into_iter().map(|binding| {
         let span = body.binding_spans[binding];
-        (IdentityStorageKind::LocalStorage, span.file, span.offset_range)
+        (
+            IdentityStorageKind::LocalStorage,
+            span.file,
+            span.offset_range,
+        )
     }));
     substituted
         .into_iter()

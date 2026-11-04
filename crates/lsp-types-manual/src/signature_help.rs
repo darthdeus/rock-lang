@@ -24,9 +24,12 @@ pub struct ParameterInformationSettings {
     pub label_offset_support: Option<bool>,
 }
 
-impl_lsp_struct!(ParameterInformationSettings,
+impl_lsp_struct!(
+    ParameterInformationSettings,
     required {},
-    optional { label_offset_support: bool = "labelOffsetSupport" }
+    optional {
+        label_offset_support: bool = "labelOffsetSupport"
+    }
 );
 
 #[derive(Debug, Eq, PartialEq, Clone, Default)]
@@ -36,7 +39,8 @@ pub struct SignatureHelpClientCapabilities {
     pub context_support: Option<bool>,
 }
 
-impl_lsp_struct!(SignatureHelpClientCapabilities,
+impl_lsp_struct!(
+    SignatureHelpClientCapabilities,
     required {},
     optional {
         dynamic_registration: bool = "dynamicRegistration",
@@ -71,8 +75,11 @@ pub struct SignatureHelpRegistrationOptions {
     pub text_document_registration_options: TextDocumentRegistrationOptions,
 }
 
-impl_lsp_struct!(SignatureHelpRegistrationOptions,
-    flatten { text_document_registration_options: TextDocumentRegistrationOptions }
+impl_lsp_struct!(
+    SignatureHelpRegistrationOptions,
+    flatten {
+        text_document_registration_options: TextDocumentRegistrationOptions
+    }
 );
 
 /// Signature help options.
@@ -99,8 +106,11 @@ pub struct SignatureHelpParams {
     pub work_done_progress_params: WorkDoneProgressParams,
 }
 
-impl_lsp_struct!(SignatureHelpParams,
-    optional { context: SignatureHelpContext = "context" },
+impl_lsp_struct!(
+    SignatureHelpParams,
+    optional {
+        context: SignatureHelpContext = "context"
+    },
     flatten {
         text_document_position_params: TextDocumentPositionParams,
         work_done_progress_params: WorkDoneProgressParams,
@@ -115,7 +125,8 @@ pub struct SignatureHelpContext {
     pub active_signature_help: Option<SignatureHelp>,
 }
 
-impl_lsp_struct!(SignatureHelpContext,
+impl_lsp_struct!(
+    SignatureHelpContext,
     required {
         trigger_kind: SignatureHelpTriggerKind = "triggerKind",
         is_retrigger: bool = "isRetrigger",
@@ -164,9 +175,14 @@ pub struct ParameterInformation {
     pub documentation: Option<Documentation>,
 }
 
-impl_lsp_struct!(ParameterInformation,
-    required { label: ParameterLabel = "label" },
-    optional { documentation: Documentation = "documentation" }
+impl_lsp_struct!(
+    ParameterInformation,
+    required {
+        label: ParameterLabel = "label"
+    },
+    optional {
+        documentation: Documentation = "documentation"
+    }
 );
 
 #[derive(Debug, Eq, PartialEq, Clone)]

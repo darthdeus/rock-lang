@@ -42,12 +42,20 @@ static ALLOCATOR: CountingAllocator = CountingAllocator;
 fn workspace() -> (Workspace, Vec<Ustr>) {
     let mut ws = Workspace::new();
     let path = vec![Ustr::from("outer"), Ustr::from("inner")];
-    let mut pkg = NsPackage { id: 1, ..Default::default() };
+    let mut pkg = NsPackage {
+        id: 1,
+        ..Default::default()
+    };
     for len in 0..=path.len() {
         let key = NsPackage::path_key(&path[..len]);
-        let mut node = NsNode { path_key: key, segments: path[..len].to_vec(), ..Default::default() };
+        let mut node = NsNode {
+            path_key: key,
+            segments: path[..len].to_vec(),
+            ..Default::default()
+        };
         if len < path.len() {
-            node.children.insert(path[len], NsPackage::path_key(&path[..=len]));
+            node.children
+                .insert(path[len], NsPackage::path_key(&path[..=len]));
         }
         pkg.nodes.insert(key, node);
     }
@@ -77,8 +85,19 @@ fn namespace_probes_keep_existing_and_missing_path_keys() {
     for package in [1, 2] {
         for _ in 0..2 {
             let key = NsPackage::path_key(&path);
-            let (_, probes) = with_probes(|| module_members(&ws, &[], package, &path, name).unwrap());
-            assert_eq!(probes, vec![ScopeProbe::Member { package, node: key, name }; 2]);
+            let (_, probes) =
+                with_probes(|| module_members(&ws, &[], package, &path, name).unwrap());
+            assert_eq!(
+                probes,
+                vec![
+                    ScopeProbe::Member {
+                        package,
+                        node: key,
+                        name
+                    };
+                    2
+                ]
+            );
             path.push(Ustr::from("missing"));
         }
     }

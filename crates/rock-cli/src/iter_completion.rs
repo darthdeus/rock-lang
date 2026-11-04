@@ -18,15 +18,17 @@
 //!   ITER_COMPL_FILE    substring of the target file to host the scratch fn.
 
 use anyhow::Result;
-use bone_query::{last_completion_phase_timings, offset_to_position, BoneWorkspace};
-use std::path::{Path, PathBuf};
 use bone_core::prelude::Instant;
+use bone_query::{BoneWorkspace, last_completion_phase_timings, offset_to_position};
+use std::path::{Path, PathBuf};
 
 pub(crate) fn collect_rock_files(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
-        let Ok(rd) = fs_err::read_dir(&d) else { continue };
+        let Ok(rd) = fs_err::read_dir(&d) else {
+            continue;
+        };
         for entry in rd.flatten() {
             let p = entry.path();
             if p.is_dir() {
@@ -45,7 +47,12 @@ pub(crate) fn collect_rock_files(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
-pub fn iter_completion(path: &str, iters: usize, warmup: usize, budget_ms: Option<f64>) -> Result<()> {
+pub fn iter_completion(
+    path: &str,
+    iters: usize,
+    warmup: usize,
+    budget_ms: Option<f64>,
+) -> Result<()> {
     let dir = Path::new(path);
     if !dir.is_dir() {
         anyhow::bail!("iter-completion expects a project directory, got `{path}`");
@@ -65,7 +72,11 @@ pub fn iter_completion(path: &str, iters: usize, warmup: usize, budget_ms: Optio
                 .map(|w| p.to_string_lossy().contains(w.as_str()))
                 .unwrap_or(true)
         })
-        .find(|p| fs_err::read_to_string(p).map(|t| t.contains("fn ")).unwrap_or(false))
+        .find(|p| {
+            fs_err::read_to_string(p)
+                .map(|t| t.contains("fn "))
+                .unwrap_or(false)
+        })
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("no .rock file with a `fn ` under `{path}`"))?;
 
@@ -91,7 +102,9 @@ pub fn iter_completion(path: &str, iters: usize, warmup: usize, budget_ms: Optio
     // drives the expected-type / reach query); else expected_types is empty and
     // reach stays inert, same as bare position.
     let word = std::env::var("ITER_COMPL_WORD").unwrap_or_else(|_| "spawn_mob".to_string());
-    let callee = std::env::var("ITER_COMPL_CALLEE").ok().filter(|s| !s.is_empty());
+    let callee = std::env::var("ITER_COMPL_CALLEE")
+        .ok()
+        .filter(|s| !s.is_empty());
     let orig = fs_err::read_to_string(&target_path)?;
     let body = match &callee {
         Some(c) => format!("{c}({word}"),
@@ -204,7 +217,17 @@ pub fn iter_completion(path: &str, iters: usize, warmup: usize, budget_ms: Optio
     eprintln!("  per-prefix-length median by phase (which keystroke + which pipeline):");
     eprintln!(
         "    {:>5}  {:>8}  {:>8}  {:>8}  {:>8}  {:>9}   {:>6} {:>5}   {:>5} {:>9} {:>5}",
-        "chars", "total", "cands", "rank", "reach", "call-thru", "ncand", "nout", "ctfns", "argiters", "surv"
+        "chars",
+        "total",
+        "cands",
+        "rank",
+        "reach",
+        "call-thru",
+        "ncand",
+        "nout",
+        "ctfns",
+        "argiters",
+        "surv"
     );
     let med = |v: &[f64]| -> f64 {
         if v.is_empty() {
@@ -231,8 +254,12 @@ pub fn iter_completion(path: &str, iters: usize, warmup: usize, budget_ms: Optio
             &word[..s.len],
         );
     }
-    eprintln!("  (gaps=general gather; rank=rank+materialize; reach=type-path; call-thru=fused-query)");
-    eprintln!("  (ctfns=fns past noise guard; argiters=(fn,arg) pairs tested; surv=pairs matched+scored)");
+    eprintln!(
+        "  (gaps=general gather; rank=rank+materialize; reach=type-path; call-thru=fused-query)"
+    );
+    eprintln!(
+        "  (ctfns=fns past noise guard; argiters=(fn,arg) pairs tested; surv=pairs matched+scored)"
+    );
     // The perf gate (the compiler contract M0): fail loudly when the
     // WORST per-keystroke median walks past the budget. Medians, not maxes --
     // a single scheduler hiccup must not flake the gate.

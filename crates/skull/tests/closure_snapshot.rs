@@ -16,7 +16,8 @@ fn declares_box(body: &str) -> bool {
         t.strip_prefix(['c', 'r'])
             .and_then(|r| r.split_once(" = "))
             .is_some_and(|(n, rhs)| {
-                !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())
+                !n.is_empty()
+                    && n.bytes().all(|b| b.is_ascii_digit())
                     && (rhs == "{}" || (rhs.starts_with("{v = ") && rhs.ends_with('}')))
             })
     })
@@ -46,7 +47,10 @@ fn nonloop_capture_hoists_to_by_value_record() {
         body.contains("setmetatable({ __slot = __rock_code_slot_ref("),
         "the capture hoists to an env record, not an inline closure:\n{body}"
     );
-    assert!(!body.contains("__fn"), "a Rock closure stores a CodeRef, not a frozen body:\n{body}");
+    assert!(
+        !body.contains("__fn"),
+        "a Rock closure stores a CodeRef, not a frozen body:\n{body}"
+    );
     assert!(
         !body.contains("function("),
         "no inline closure at the creation site:\n{body}"
@@ -56,7 +60,10 @@ fn nonloop_capture_hoists_to_by_value_record() {
         "no by-value snapshot IIFE (deleted in P2.6):\n{body}"
     );
     // The single-assignment captures are by-value fields -- no box declared.
-    assert!(!declares_box(&body), "single-assignment captures are by value, not boxed:\n{body}");
+    assert!(
+        !declares_box(&body),
+        "single-assignment captures are by value, not boxed:\n{body}"
+    );
 }
 
 // A closure created INSIDE a loop, capturing a cell assigned inside the loop --
@@ -88,10 +95,19 @@ fn loop_capture_snapshots_per_iteration_via_record() {
         body.contains("setmetatable({ __slot = __rock_code_slot_ref("),
         "a loop-created capture hoists to a per-iteration env record:\n{body}"
     );
-    assert!(!body.contains("__fn"), "a Rock closure stores a CodeRef, not a frozen body:\n{body}");
-    assert!(!body.contains("return function"), "no by-value snapshot IIFE (deleted in P2.6):\n{body}");
+    assert!(
+        !body.contains("__fn"),
+        "a Rock closure stores a CodeRef, not a frozen body:\n{body}"
+    );
+    assert!(
+        !body.contains("return function"),
+        "no by-value snapshot IIFE (deleted in P2.6):\n{body}"
+    );
     let out = run_luajit(&format!("{lua}\nmain()\n"), "loopcap");
-    assert_eq!(out, "1\n2\n3", "each record must snapshot its iteration's value; got:\n{out}");
+    assert_eq!(
+        out, "1\n2\n3",
+        "each record must snapshot its iteration's value; got:\n{out}"
+    );
 }
 
 // A captured cell mutated after capture (multi-store) lowers to a BOX
@@ -115,14 +131,26 @@ fn main() { let h = capture_box() h() }
 fn mutated_capture_lowers_to_box_threaded_into_record() {
     let lua = emit_module(MUTATED_CAPTURE);
     let body = function_body(&lua, "capture_box");
-    assert!(declares_box(&body), "a mutable capture must declare a shared box:\n{body}");
-    assert!(body.contains(".v = "), "a mutable capture stores through `.v`:\n{body}");
+    assert!(
+        declares_box(&body),
+        "a mutable capture must declare a shared box:\n{body}"
+    );
+    assert!(
+        body.contains(".v = "),
+        "a mutable capture stores through `.v`:\n{body}"
+    );
     assert!(
         body.contains("setmetatable({ __slot = __rock_code_slot_ref("),
         "the box is threaded into an env record:\n{body}"
     );
-    assert!(!body.contains("__fn"), "a Rock closure stores a CodeRef, not a frozen body:\n{body}");
-    assert!(!body.contains("return function"), "a boxed capture gets no by-value snapshot IIFE:\n{body}");
+    assert!(
+        !body.contains("__fn"),
+        "a Rock closure stores a CodeRef, not a frozen body:\n{body}"
+    );
+    assert!(
+        !body.contains("return function"),
+        "a boxed capture gets no by-value snapshot IIFE:\n{body}"
+    );
 }
 
 // A VALUE struct bound per iteration by a `for` and captured. Scalarization
@@ -146,15 +174,27 @@ fn main() {
 fn per_iteration_value_capture_snapshots_flat_leaves() {
     let lua = emit_module(PER_ITER_VALUE_CAPTURE);
     let body = function_body(&lua, "main");
-    assert!(!declares_box(&body), "a per-iteration value capture must not box its leaves:\n{body}");
-    assert!(!body.contains(".v = "), "no leaf is stored through a box:\n{body}");
+    assert!(
+        !declares_box(&body),
+        "a per-iteration value capture must not box its leaves:\n{body}"
+    );
+    assert!(
+        !body.contains(".v = "),
+        "no leaf is stored through a box:\n{body}"
+    );
     assert!(
         body.contains("setmetatable({ __slot = __rock_code_slot_ref("),
         "the leaves snapshot into a per-iteration env record:\n{body}"
     );
-    assert!(!body.contains("__fn"), "a Rock closure stores a CodeRef, not a frozen body:\n{body}");
+    assert!(
+        !body.contains("__fn"),
+        "a Rock closure stores a CodeRef, not a frozen body:\n{body}"
+    );
     let out = run_luajit(&format!("{lua}\nmain()\n"), "perit");
-    assert_eq!(out, "3\n5\n7", "each closure reads ITS iteration's leaves; got:\n{out}");
+    assert_eq!(
+        out, "3\n5\n7",
+        "each closure reads ITS iteration's leaves; got:\n{out}"
+    );
 }
 
 const PER_ITER_ENUM_CAPTURE: &str = r#"
@@ -186,12 +226,21 @@ fn main() {
 fn per_iteration_enum_capture_snapshots_flat_leaves() {
     let lua = emit_module(PER_ITER_ENUM_CAPTURE);
     let body = function_body(&lua, "capture_choices");
-    assert!(!declares_box(&body), "a per-iteration enum capture must not box its leaves:\n{body}");
-    assert!(!body.contains(".v = "), "no enum leaf is stored through a box:\n{body}");
+    assert!(
+        !declares_box(&body),
+        "a per-iteration enum capture must not box its leaves:\n{body}"
+    );
+    assert!(
+        !body.contains(".v = "),
+        "no enum leaf is stored through a box:\n{body}"
+    );
     assert!(
         body.contains("setmetatable({ __slot = __rock_code_slot_ref("),
         "the enum leaves snapshot into a per-iteration env record:\n{body}"
     );
     let out = run_luajit(&format!("{lua}\nmain()\n"), "perit-enum");
-    assert_eq!(out, "1\n2\n3", "each closure reads its own enum value; got:\n{out}");
+    assert_eq!(
+        out, "1\n2\n3",
+        "each closure reads its own enum value; got:\n{out}"
+    );
 }

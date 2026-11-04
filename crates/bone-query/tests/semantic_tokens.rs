@@ -1,7 +1,7 @@
 //! Semantic-token classification richness: cross-file type names color as
 //! types, field accesses as `property` (not bare `variable`).
 
-use bone_query::{semantic_tokens_legend, semantic_tokens_modifiers_legend, BoneWorkspace};
+use bone_query::{BoneWorkspace, semantic_tokens_legend, semantic_tokens_modifiers_legend};
 use lsp_types::{Position, Range, SemanticToken, SemanticTokenModifier, SemanticTokenType};
 
 /// `semantic_tokens_range` must agree with `semantic_tokens` over the whole file
@@ -13,16 +13,28 @@ fn range_matches_full_over_whole_file_and_subsets_for_a_viewport() {
     let mut bone = BoneWorkspace::new();
     bone.update(PATH, src.to_string());
     let full = bone.semantic_tokens(PATH).data;
-    let whole = Range { start: Position::new(0, 0), end: Position::new(100, 0) };
+    let whole = Range {
+        start: Position::new(0, 0),
+        end: Position::new(100, 0),
+    };
     assert_eq!(
         bone.semantic_tokens_range(PATH, whole).data,
         full,
         "range over the whole file must be byte-identical to full"
     );
-    let top = Range { start: Position::new(0, 0), end: Position::new(2, 0) };
+    let top = Range {
+        start: Position::new(0, 0),
+        end: Position::new(2, 0),
+    };
     let rng_top = bone.semantic_tokens_range(PATH, top).data;
-    assert!(!rng_top.is_empty(), "a non-empty viewport must still produce tokens");
-    assert!(rng_top.len() < full.len(), "a 2-line viewport must emit fewer tokens than the whole file");
+    assert!(
+        !rng_top.is_empty(),
+        "a non-empty viewport must still produce tokens"
+    );
+    assert!(
+        rng_top.len() < full.len(),
+        "a 2-line viewport must emit fewer tokens than the whole file"
+    );
 }
 
 const PATH: &str = "/tmp/rock_lsp_bone_semtok.rock";
@@ -87,7 +99,8 @@ fn type_at(toks: &[(u32, u32, SemanticTokenType)], pos: Position) -> Option<Sema
 
 #[test]
 fn struct_reference_colors_as_struct_not_variable() {
-    let src = "struct FixVec2 { x: int, y: int }\nfn run() {\n  let v = FixVec2 { x: 1, y: 2 }\n}\n";
+    let src =
+        "struct FixVec2 { x: int, y: int }\nfn run() {\n  let v = FixVec2 { x: 1, y: 2 }\n}\n";
     let toks = decode(src);
     // `FixVec2` in the literal head, line 2 col 10.
     assert_eq!(
@@ -132,7 +145,8 @@ fn parameter_colors_as_parameter_at_decl_and_use() {
 
 #[test]
 fn struct_field_names_color_as_property_at_decl_and_literal() {
-    let src = "struct FixVec2 { x: int, y: int }\nfn run() {\n  let v = FixVec2 { x: 1, y: 2 }\n}\n";
+    let src =
+        "struct FixVec2 { x: int, y: int }\nfn run() {\n  let v = FixVec2 { x: 1, y: 2 }\n}\n";
     let toks = decode(src);
     // field DECL `x` (line 0 col 17) and literal field name `x` (line 2 col 20).
     assert_eq!(
@@ -376,8 +390,16 @@ fn global_decl_and_use_carry_static_locals_do_not() {
         "global use stays VARIABLE (the modifier is the distinguisher)"
     );
     // local decl + use carry no modifiers.
-    assert_eq!(mods_at(&toks, Position::new(2, 6)), Some(vec![]), "local decl unmodified");
-    assert_eq!(mods_at(&toks, Position::new(3, 9)), Some(vec![]), "local use unmodified");
+    assert_eq!(
+        mods_at(&toks, Position::new(2, 6)),
+        Some(vec![]),
+        "local decl unmodified"
+    );
+    assert_eq!(
+        mods_at(&toks, Position::new(3, 9)),
+        Some(vec![]),
+        "local use unmodified"
+    );
 }
 
 #[test]
@@ -455,7 +477,10 @@ fn enum_variant_decl_and_expr_use_color_enum_member() {
         type_at(&toks, Position::new(0, 13))
     );
     // qualified use: `Color::Red` on line 2 -- `Color` col 9 (ENUM), `Red` col 16.
-    assert_eq!(type_at(&toks, Position::new(2, 9)), Some(SemanticTokenType::ENUM));
+    assert_eq!(
+        type_at(&toks, Position::new(2, 9)),
+        Some(SemanticTokenType::ENUM)
+    );
     assert_eq!(
         type_at(&toks, Position::new(2, 16)),
         Some(SemanticTokenType::ENUM_MEMBER),

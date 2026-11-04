@@ -52,7 +52,12 @@ pub fn set_invocation_selection(
     // loading) cannot read SELECTION; mirror the same values into rock-host.
     rock_host::stick::set_invocation_channel(channel.clone(), implied_channel.clone());
     SELECTION
-        .set(CliSelection { channel, implied_channel, target_os, overrides: parsed })
+        .set(CliSelection {
+            channel,
+            implied_channel,
+            target_os,
+            overrides: parsed,
+        })
         .map_err(|_| anyhow::anyhow!("CLI invocation selection was already initialized"))?;
     Ok(())
 }
@@ -86,7 +91,8 @@ mod tests {
     #[test]
     fn repeated_invocation_selection_is_rejected() {
         assert!(set_invocation_selection(None, None, None, &[]).is_ok());
-        let err = set_invocation_selection(None, None, None, &[]).expect_err("second set must fail");
+        let err =
+            set_invocation_selection(None, None, None, &[]).expect_err("second set must fail");
         assert!(err.to_string().contains("already initialized"));
     }
 }
@@ -97,10 +103,7 @@ mod tests {
 /// `rock watch` and the profiling tools shipped broken (each new entry point
 /// silently forgot the obligation). Type-check-only paths never need values
 /// and the LSP never runs commands, so neither reaches this.
-pub fn stamp_workspace(
-    ws: &mut bone_semantic::inference::Workspace,
-    anchor: &Path,
-) -> Result<()> {
+pub fn stamp_workspace(ws: &mut bone_semantic::inference::Workspace, anchor: &Path) -> Result<()> {
     ws.comptime_inputs = resolve_checked_inputs(ws, inputs_for_entry_path(anchor)?, |_| None)?;
     Ok(())
 }
@@ -136,7 +139,10 @@ pub fn inputs_for_project_dir(dir: &Path) -> Result<ComptimeInputs> {
 
 /// [`inputs_for_project_dir`] as resolved by a `build_command` invocation
 /// (`ROCK_BUILD_COMMAND`), whatever command this process is.
-pub fn inputs_for_project_dir_as(dir: &Path, build_command: Option<&str>) -> Result<ComptimeInputs> {
+pub fn inputs_for_project_dir_as(
+    dir: &Path,
+    build_command: Option<&str>,
+) -> Result<ComptimeInputs> {
     let selection = SELECTION.get();
     let stick = rock_host::stick::StickConfig::find_from_dir(dir)?;
     let Some((stick_path, cfg)) = stick else {
@@ -156,11 +162,17 @@ pub fn inputs_for_project_dir_as(dir: &Path, build_command: Option<&str>) -> Res
         let no_overrides = std::collections::HashMap::new();
         let overrides = selection.map(|s| &s.overrides).unwrap_or(&no_overrides);
         if let Some(name) = overrides.keys().next() {
-            anyhow::bail!("--var {name} given but no stick.toml found at or above {}", dir.display());
+            anyhow::bail!(
+                "--var {name} given but no stick.toml found at or above {}",
+                dir.display()
+            );
         }
         return Ok(ComptimeInputs::default());
     };
-    let project_dir = stick_path.parent().expect("stick.toml has a parent dir").to_path_buf();
+    let project_dir = stick_path
+        .parent()
+        .expect("stick.toml has a parent dir")
+        .to_path_buf();
     inputs_for_project_with_config(&project_dir, &cfg, build_command)
 }
 
@@ -199,12 +211,27 @@ pub fn inputs_for_project_with_config(
 
     let mut inputs = ComptimeInputs::default();
     for (name, declaration) in resolved.source_fingerprints {
-        inputs.source_fingerprints.insert(ustr::Ustr::from(&name), bone_core::workspace::SourceFingerprint {
-            secret: cfg.build.as_ref().and_then(|build| build.vars.get(&name)).is_some_and(|var| var.secret),
-            roots: declaration.roots.iter().map(|name| ustr::Ustr::from(name)).collect(),
-            files: declaration.files,
-            vars: declaration.vars.iter().map(|name| ustr::Ustr::from(name)).collect(),
-        });
+        inputs.source_fingerprints.insert(
+            ustr::Ustr::from(&name),
+            bone_core::workspace::SourceFingerprint {
+                secret: cfg
+                    .build
+                    .as_ref()
+                    .and_then(|build| build.vars.get(&name))
+                    .is_some_and(|var| var.secret),
+                roots: declaration
+                    .roots
+                    .iter()
+                    .map(|name| ustr::Ustr::from(name))
+                    .collect(),
+                files: declaration.files,
+                vars: declaration
+                    .vars
+                    .iter()
+                    .map(|name| ustr::Ustr::from(name))
+                    .collect(),
+            },
+        );
     }
     inputs.channel = resolved.channel;
     inputs.modules_mode = match cfg.dialect() {
@@ -222,7 +249,10 @@ pub fn inputs_for_project_with_config(
     for (name, var) in resolved.vars {
         inputs.vars.insert(
             ustr::Ustr::from(&name),
-            ComptimeVarValue { value: var.value, secret: var.secret },
+            ComptimeVarValue {
+                value: var.value,
+                secret: var.secret,
+            },
         );
     }
     Ok(inputs)
@@ -230,17 +260,29 @@ pub fn inputs_for_project_with_config(
 
 fn source_file_identity(file: &str, root: Option<&Path>) -> String {
     let path = Path::new(file);
-    let Some(root) = root.filter(|_| path.is_absolute()) else { return file.to_string() };
+    let Some(root) = root.filter(|_| path.is_absolute()) else {
+        return file.to_string();
+    };
     let root = root.canonicalize().unwrap_or_else(|_| {
-        if root.is_absolute() { root.to_path_buf() } else {
+        if root.is_absolute() {
+            root.to_path_buf()
+        } else {
             std::env::current_dir().unwrap_or_default().join(root)
         }
     });
     let source = path.components().collect::<Vec<_>>();
     let anchor = root.components().collect::<Vec<_>>();
-    let shared = source.iter().zip(&anchor).take_while(|(a, b)| a == b).count();
+    let shared = source
+        .iter()
+        .zip(&anchor)
+        .take_while(|(a, b)| a == b)
+        .count();
     let mut parts = vec!["..".to_string(); anchor.len() - shared];
-    parts.extend(source[shared..].iter().map(|part| part.as_os_str().to_string_lossy().into_owned()));
+    parts.extend(
+        source[shared..]
+            .iter()
+            .map(|part| part.as_os_str().to_string_lossy().into_owned()),
+    );
     parts.join("/")
 }
 
@@ -270,16 +312,23 @@ fn resolve_source_fingerprints(
         for root in &roots {
             field(&mut hash, root.as_str());
         }
-        let owners = bone_core::type_sources::declaration_sources(ws, &roots)
-            .map_err(anyhow::Error::msg)?;
+        let owners =
+            bone_core::type_sources::declaration_sources(ws, &roots).map_err(anyhow::Error::msg)?;
         hash.update((owners.len() as u64).to_le_bytes());
         for owner in owners {
             // Canonical declaration identity is stable across worktree roots.
             // Hash all defining bytes, including defaults and helper bodies.
             field(&mut hash, owner.name.as_str());
-            field(&mut hash, &source_file_identity(owner.file.as_str(), inputs.embed_root.as_deref()));
-            let text = source_text(owner.file.as_str())
-                .ok_or_else(|| anyhow::anyhow!("source fingerprint {name}: missing checked source {}", owner.file))?;
+            field(
+                &mut hash,
+                &source_file_identity(owner.file.as_str(), inputs.embed_root.as_deref()),
+            );
+            let text = source_text(owner.file.as_str()).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "source fingerprint {name}: missing checked source {}",
+                    owner.file
+                )
+            })?;
             field(&mut hash, &text);
         }
         let mut files = declaration.files.clone();
@@ -288,8 +337,9 @@ fn resolve_source_fingerprints(
         hash.update((files.len() as u64).to_le_bytes());
         for file in files {
             field(&mut hash, &file);
-            let text = source_text(&file)
-                .ok_or_else(|| anyhow::anyhow!("source fingerprint {name}: missing support source {file}"))?;
+            let text = source_text(&file).ok_or_else(|| {
+                anyhow::anyhow!("source fingerprint {name}: missing support source {file}")
+            })?;
             field(&mut hash, &text);
         }
         let mut vars = declaration.vars.clone();
@@ -298,16 +348,27 @@ fn resolve_source_fingerprints(
         hash.update((vars.len() as u64).to_le_bytes());
         let mut secret = declaration.secret;
         for dependency in vars {
-            let value = inputs.vars.get(&dependency)
-                .ok_or_else(|| anyhow::anyhow!("source fingerprint {name}: missing input {dependency}"))?;
-            if inputs.source_fingerprints.contains_key(&dependency) || inputs.volatile_vars.contains(&dependency) {
-                anyhow::bail!("source fingerprint {name}: dependency {dependency} must be a stable resolved input");
+            let value = inputs.vars.get(&dependency).ok_or_else(|| {
+                anyhow::anyhow!("source fingerprint {name}: missing input {dependency}")
+            })?;
+            if inputs.source_fingerprints.contains_key(&dependency)
+                || inputs.volatile_vars.contains(&dependency)
+            {
+                anyhow::bail!(
+                    "source fingerprint {name}: dependency {dependency} must be a stable resolved input"
+                );
             }
             secret |= value.secret;
             field(&mut hash, dependency.as_str());
             field(&mut hash, &value.value);
         }
-        resolved.push((*name, ComptimeVarValue { value: format!("source-v1:{:x}", hash.finalize()), secret }));
+        resolved.push((
+            *name,
+            ComptimeVarValue {
+                value: format!("source-v1:{:x}", hash.finalize()),
+                secret,
+            },
+        ));
     }
     for (name, value) in resolved {
         inputs.vars.insert(name, value);
@@ -331,22 +392,40 @@ pub(crate) fn resolve_checked_inputs(
     let started = Instant::now();
     let root = inputs.embed_root.clone();
     let mut watch_files = rustc_hash::FxHashMap::default();
-    resolve_source_fingerprints(ws, &mut inputs, |file| {
-        if let Some(name) = file.strip_prefix("<stdlib>/").or_else(|| file.strip_prefix("stdlib/")) {
-            return rock_stdlib::stdlib_files().iter().find(|f| f.name == name).map(|f| f.contents.to_string());
-        }
-        let path = Path::new(file);
-        let path = if path.is_absolute() { Some(path.to_path_buf()) } else { root.as_ref().map(|root| root.join(path)) };
-        let path = path.and_then(|path| path.canonicalize().ok());
-        let text = source_text(file).or_else(|| {
-            let path = path.as_ref()?;
-            source_text(path.to_str()?).or_else(|| std::fs::read_to_string(path).ok())
-        })?;
-        if let Some(path) = path {
-            watch_files.insert(ustr::Ustr::from(path.to_str()?), skull_mir::mir::comptime_value_hash(&text));
-        }
-        Some(text)
-    }, &compiler_identity()?)?;
+    resolve_source_fingerprints(
+        ws,
+        &mut inputs,
+        |file| {
+            if let Some(name) = file
+                .strip_prefix("<stdlib>/")
+                .or_else(|| file.strip_prefix("stdlib/"))
+            {
+                return rock_stdlib::stdlib_files()
+                    .iter()
+                    .find(|f| f.name == name)
+                    .map(|f| f.contents.to_string());
+            }
+            let path = Path::new(file);
+            let path = if path.is_absolute() {
+                Some(path.to_path_buf())
+            } else {
+                root.as_ref().map(|root| root.join(path))
+            };
+            let path = path.and_then(|path| path.canonicalize().ok());
+            let text = source_text(file).or_else(|| {
+                let path = path.as_ref()?;
+                source_text(path.to_str()?).or_else(|| std::fs::read_to_string(path).ok())
+            })?;
+            if let Some(path) = path {
+                watch_files.insert(
+                    ustr::Ustr::from(path.to_str()?),
+                    skull_mir::mir::comptime_value_hash(&text),
+                );
+            }
+            Some(text)
+        },
+        &compiler_identity()?,
+    )?;
     inputs.source_fingerprint_files = watch_files;
     crate::compile_measurements::timings("comptime", &[("source-fingerprint", started.elapsed())]);
     Ok(inputs)
@@ -356,21 +435,25 @@ pub(crate) fn resolve_checked_inputs(
 /// and hosts' pre-compile cache keys. Never substitutes a checkout revision.
 pub fn compiler_identity() -> Result<String> {
     static IDENTITY: OnceLock<Result<String, String>> = OnceLock::new();
-    IDENTITY.get_or_init(|| {
-        let image = rock_host::process_management::current_executable_image().map_err(|e| e.to_string())?;
-        let mut file = std::fs::File::open(image).map_err(|e| e.to_string())?;
-        let before = file.metadata().map_err(|e| e.to_string())?;
-        #[cfg(target_os = "macos")]
-        if before.modified().map_err(|e| e.to_string())? > compiler_process_started()? {
-            return Err("compiler image changed after process start".into());
-        }
-        let identity = hash_compiler_image(&mut file).map_err(|e| e.to_string())?;
-        let after = file.metadata().map_err(|e| e.to_string())?;
-        if before.len() != after.len() || before.modified().ok() != after.modified().ok() {
-            return Err("compiler image changed while hashing".into());
-        }
-        Ok(identity)
-    }).clone().map_err(anyhow::Error::msg)
+    IDENTITY
+        .get_or_init(|| {
+            let image = rock_host::process_management::current_executable_image()
+                .map_err(|e| e.to_string())?;
+            let mut file = std::fs::File::open(image).map_err(|e| e.to_string())?;
+            let before = file.metadata().map_err(|e| e.to_string())?;
+            #[cfg(target_os = "macos")]
+            if before.modified().map_err(|e| e.to_string())? > compiler_process_started()? {
+                return Err("compiler image changed after process start".into());
+            }
+            let identity = hash_compiler_image(&mut file).map_err(|e| e.to_string())?;
+            let after = file.metadata().map_err(|e| e.to_string())?;
+            if before.len() != after.len() || before.modified().ok() != after.modified().ok() {
+                return Err("compiler image changed while hashing".into());
+            }
+            Ok(identity)
+        })
+        .clone()
+        .map_err(anyhow::Error::msg)
 }
 
 /// Content identity of a compiler image at `image`, using the same
@@ -432,7 +515,9 @@ fn hash_compiler_image<R: std::io::Read + std::io::Seek>(image: &mut R) -> std::
             image.seek(SeekFrom::Start(0))?;
             loop {
                 let count = image.read(&mut buffer)?;
-                if count == 0 { break; }
+                if count == 0 {
+                    break;
+                }
                 hash.update(&buffer[..count]);
             }
         }
@@ -450,7 +535,9 @@ struct ElfLoadSegment {
 
 /// `PT_LOAD` segments of an ELF image in file order, or `None` for a
 /// non-ELF or inconsistent image (the caller then hashes the whole file).
-fn elf_load_segments<R: std::io::Read + std::io::Seek>(image: &mut R) -> std::io::Result<Option<Vec<ElfLoadSegment>>> {
+fn elf_load_segments<R: std::io::Read + std::io::Seek>(
+    image: &mut R,
+) -> std::io::Result<Option<Vec<ElfLoadSegment>>> {
     use std::io::SeekFrom;
     let file_len = image.seek(SeekFrom::End(0))?;
     image.seek(SeekFrom::Start(0))?;
@@ -460,20 +547,40 @@ fn elf_load_segments<R: std::io::Read + std::io::Seek>(image: &mut R) -> std::io
     if read < 16 || ident[..4] != *b"\x7fELF" {
         return Ok(None);
     }
-    let is64 = match ident[4] { 1 => false, 2 => true, _ => return Ok(None) };
-    let little = match ident[5] { 1 => true, 2 => false, _ => return Ok(None) };
+    let is64 = match ident[4] {
+        1 => false,
+        2 => true,
+        _ => return Ok(None),
+    };
+    let little = match ident[5] {
+        1 => true,
+        2 => false,
+        _ => return Ok(None),
+    };
     let u16_at = |b: &[u8], at: usize| -> Option<u64> {
         let v = b.get(at..at + 2)?;
-        Some(if little { u16::from_le_bytes([v[0], v[1]]) } else { u16::from_be_bytes([v[0], v[1]]) } as u64)
+        Some(if little {
+            u16::from_le_bytes([v[0], v[1]])
+        } else {
+            u16::from_be_bytes([v[0], v[1]])
+        } as u64)
     };
     let u32_at = |b: &[u8], at: usize| -> Option<u64> {
         let v = b.get(at..at + 4)?;
-        Some(if little { u32::from_le_bytes([v[0], v[1], v[2], v[3]]) } else { u32::from_be_bytes([v[0], v[1], v[2], v[3]]) } as u64)
+        Some(if little {
+            u32::from_le_bytes([v[0], v[1], v[2], v[3]])
+        } else {
+            u32::from_be_bytes([v[0], v[1], v[2], v[3]])
+        } as u64)
     };
     let u64_at = |b: &[u8], at: usize| -> Option<u64> {
         if is64 {
             let v = b.get(at..at + 8)?;
-            Some(if little { u64::from_le_bytes(v.try_into().ok()?) } else { u64::from_be_bytes(v.try_into().ok()?) })
+            Some(if little {
+                u64::from_le_bytes(v.try_into().ok()?)
+            } else {
+                u64::from_be_bytes(v.try_into().ok()?)
+            })
         } else {
             u32_at(b, at)
         }
@@ -495,7 +602,10 @@ fn elf_load_segments<R: std::io::Read + std::io::Seek>(image: &mut R) -> std::io
     if phnum == 0 || phnum == 0xffff || phentsize < min_phdr {
         return Ok(None);
     }
-    let Some(ph_end) = phnum.checked_mul(phentsize).and_then(|span| phoff.checked_add(span)) else {
+    let Some(ph_end) = phnum
+        .checked_mul(phentsize)
+        .and_then(|span| phoff.checked_add(span))
+    else {
         return Ok(None);
     };
     if ph_end > file_len {
@@ -510,15 +620,37 @@ fn elf_load_segments<R: std::io::Read + std::io::Seek>(image: &mut R) -> std::io
             continue; // not PT_LOAD
         }
         let fields = if is64 {
-            (u32_at(&phdr, 4), u64_at(&phdr, 8), u64_at(&phdr, 16), u64_at(&phdr, 32), u64_at(&phdr, 40))
+            (
+                u32_at(&phdr, 4),
+                u64_at(&phdr, 8),
+                u64_at(&phdr, 16),
+                u64_at(&phdr, 32),
+                u64_at(&phdr, 40),
+            )
         } else {
-            (u32_at(&phdr, 24), u64_at(&phdr, 4), u64_at(&phdr, 8), u64_at(&phdr, 16), u64_at(&phdr, 20))
+            (
+                u32_at(&phdr, 24),
+                u64_at(&phdr, 4),
+                u64_at(&phdr, 8),
+                u64_at(&phdr, 16),
+                u64_at(&phdr, 20),
+            )
         };
         let (Some(flags), Some(offset), Some(vaddr), Some(filesz), Some(memsz)) = fields else {
             return Ok(None);
         };
-        let segment = ElfLoadSegment { flags: flags as u32, vaddr, offset, filesz, memsz };
-        if segment.offset.checked_add(segment.filesz).is_none_or(|end| end > file_len) {
+        let segment = ElfLoadSegment {
+            flags: flags as u32,
+            vaddr,
+            offset,
+            filesz,
+            memsz,
+        };
+        if segment
+            .offset
+            .checked_add(segment.filesz)
+            .is_none_or(|end| end > file_len)
+        {
             return Ok(None);
         }
         segments.push(segment);
@@ -604,11 +736,19 @@ fn compiler_process_started() -> std::result::Result<std::time::SystemTime, Stri
     let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
     // SAFETY: info is a writable proc_bsdinfo of exactly size bytes.
     let written = unsafe {
-        libc::proc_pidinfo(std::process::id() as libc::c_int, libc::PROC_PIDTBSDINFO,
-            0, (&mut info as *mut libc::proc_bsdinfo).cast(), size)
+        libc::proc_pidinfo(
+            std::process::id() as libc::c_int,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            (&mut info as *mut libc::proc_bsdinfo).cast(),
+            size,
+        )
     };
-    if written != size { return Err(std::io::Error::last_os_error().to_string()); }
-    Ok(std::time::UNIX_EPOCH + std::time::Duration::from_secs(info.pbi_start_tvsec)
+    if written != size {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    Ok(std::time::UNIX_EPOCH
+        + std::time::Duration::from_secs(info.pbi_start_tvsec)
         + std::time::Duration::from_micros(info.pbi_start_tvusec))
 }
 
@@ -621,33 +761,64 @@ mod source_fingerprint_tests {
 
     fn fixture() -> (Workspace, ComptimeInputs) {
         let mut modules = [
-            ("root.rock", "struct Root { child: Child }") ,
+            ("root.rock", "struct Root { child: Child }"),
             ("child.rock", "value Child { count: int = 4 }"),
             ("other.rock", "struct Other { count: int }"),
-        ].iter().map(|(file, text)| skull_parser::parse_module(text, Ustr::from(file)).unwrap()).collect::<Vec<_>>();
+        ]
+        .iter()
+        .map(|(file, text)| skull_parser::parse_module(text, Ustr::from(file)).unwrap())
+        .collect::<Vec<_>>();
         let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).unwrap();
         let mut inputs = ComptimeInputs::default();
-        inputs.source_fingerprints.insert(Ustr::from("REV"), SourceFingerprint {
-            secret: false,
-            roots: vec![Ustr::from("Root")],
-            files: vec!["decoder.rock".into()],
-            vars: vec![Ustr::from("ABI")],
-        });
-        inputs.vars.insert(Ustr::from("ABI"), ComptimeVarValue { value: "runtime-1".into(), secret: false });
+        inputs.source_fingerprints.insert(
+            Ustr::from("REV"),
+            SourceFingerprint {
+                secret: false,
+                roots: vec![Ustr::from("Root")],
+                files: vec!["decoder.rock".into()],
+                vars: vec![Ustr::from("ABI")],
+            },
+        );
+        inputs.vars.insert(
+            Ustr::from("ABI"),
+            ComptimeVarValue {
+                value: "runtime-1".into(),
+                secret: false,
+            },
+        );
         (ws, inputs)
     }
 
-    fn revision(ws: &Workspace, inputs: &ComptimeInputs, changed: &str, replacement: &str, compiler: &str) -> String {
+    fn revision(
+        ws: &Workspace,
+        inputs: &ComptimeInputs,
+        changed: &str,
+        replacement: &str,
+        compiler: &str,
+    ) -> String {
         let mut inputs = inputs.clone();
-        resolve_source_fingerprints(ws, &mut inputs, |file| Some(if file == changed { replacement } else {
-            match file {
-                "root.rock" => "struct Root { child: Child }",
-                "child.rock" => "value Child { count: int = 4 }",
-                "decoder.rock" => "fn decode() { 1 }",
-                "other.rock" => "struct Other { count: int }",
-                _ => return None,
-            }
-        }.to_string()), compiler).unwrap();
+        resolve_source_fingerprints(
+            ws,
+            &mut inputs,
+            |file| {
+                Some(
+                    if file == changed {
+                        replacement
+                    } else {
+                        match file {
+                            "root.rock" => "struct Root { child: Child }",
+                            "child.rock" => "value Child { count: int = 4 }",
+                            "decoder.rock" => "fn decode() { 1 }",
+                            "other.rock" => "struct Other { count: int }",
+                            _ => return None,
+                        }
+                    }
+                    .to_string(),
+                )
+            },
+            compiler,
+        )
+        .unwrap();
         inputs.vars[&Ustr::from("REV")].value.clone()
     }
 
@@ -657,12 +828,22 @@ mod source_fingerprint_tests {
         let baseline = revision(&ws, &inputs, "", "", "compiler-1");
         for (file, text) in [
             ("child.rock", "value Child { count: int = 5 }"),
-            ("root.rock", "struct Root { child: Child }\nfn helper() { 2 }"),
+            (
+                "root.rock",
+                "struct Root { child: Child }\nfn helper() { 2 }",
+            ),
             ("decoder.rock", "fn decode() { 2 }"),
         ] {
-            assert_ne!(baseline, revision(&ws, &inputs, file, text, "compiler-1"), "{file}");
+            assert_ne!(
+                baseline,
+                revision(&ws, &inputs, file, text, "compiler-1"),
+                "{file}"
+            );
         }
-        assert_eq!(baseline, revision(&ws, &inputs, "other.rock", "unrelated body", "compiler-1"));
+        assert_eq!(
+            baseline,
+            revision(&ws, &inputs, "other.rock", "unrelated body", "compiler-1")
+        );
         assert_ne!(baseline, revision(&ws, &inputs, "", "", "compiler-2"));
         let mut inputs = inputs;
         inputs.vars.get_mut(&Ustr::from("ABI")).unwrap().value = "runtime-2".into();
@@ -674,14 +855,20 @@ mod source_fingerprint_tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("stick.toml"),
             "[package]\nname = \"recorded\"\n[build.vars]\nREV = { source_fingerprint = { roots = [\"Root\"] } }\n").unwrap();
-        std::fs::write(dir.path().join("main.rock"),
-            "value Root { count: int = 4 }\nfn main() { print(build_var(\"REV\")) }").unwrap();
+        std::fs::write(
+            dir.path().join("main.rock"),
+            "value Root { count: int = 4 }\nfn main() { print(build_var(\"REV\")) }",
+        )
+        .unwrap();
         let inputs = inputs_for_project_dir(dir.path()).unwrap();
         assert!(!inputs.vars.contains_key(&Ustr::from("REV")));
         let output = dir.path().join("program.lua");
         let recorded = crate::skull_backend::skull_compile_project_with_recorded_inputs(
-            dir.path().to_str().unwrap(), Some(output.to_str().unwrap().into()), inputs,
-        ).unwrap();
+            dir.path().to_str().unwrap(),
+            Some(output.to_str().unwrap().into()),
+            inputs,
+        )
+        .unwrap();
         let revision = &recorded.vars[&Ustr::from("REV")].value;
         assert!(revision.starts_with("source-v1:"));
         assert!(std::fs::read_to_string(output).unwrap().contains(revision));
@@ -692,14 +879,32 @@ mod source_fingerprint_tests {
         let fingerprint = |checkout: &str, filename: &str| {
             let root = std::path::PathBuf::from(checkout).join("app");
             let file = root.join(filename);
-            let mut modules = vec![skull_parser::parse_module("struct Root { count: int }", Ustr::from(file.to_str().unwrap())).unwrap()];
+            let mut modules = vec![
+                skull_parser::parse_module(
+                    "struct Root { count: int }",
+                    Ustr::from(file.to_str().unwrap()),
+                )
+                .unwrap(),
+            ];
             let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).unwrap();
             let mut inputs = ComptimeInputs::default();
             inputs.embed_root = Some(root);
-            inputs.source_fingerprints.insert(Ustr::from("REV"), SourceFingerprint {
-                secret: false, roots: vec![Ustr::from("Root")], files: vec![], vars: vec![],
-            });
-            resolve_source_fingerprints(&ws, &mut inputs, |_| Some("struct Root { count: int }".into()), "compiler").unwrap();
+            inputs.source_fingerprints.insert(
+                Ustr::from("REV"),
+                SourceFingerprint {
+                    secret: false,
+                    roots: vec![Ustr::from("Root")],
+                    files: vec![],
+                    vars: vec![],
+                },
+            );
+            resolve_source_fingerprints(
+                &ws,
+                &mut inputs,
+                |_| Some("struct Root { count: int }".into()),
+                "compiler",
+            )
+            .unwrap();
             inputs.vars[&Ustr::from("REV")].value.clone()
         };
         let first = fingerprint("/checkout-one", "types.rock");
@@ -710,8 +915,13 @@ mod source_fingerprint_tests {
     #[test]
     fn source_fingerprint_rejects_missing_source_and_input() {
         let (ws, mut inputs) = fixture();
-        assert!(resolve_source_fingerprints(&ws, &mut inputs.clone(), |_| None, "compiler").is_err());
+        assert!(
+            resolve_source_fingerprints(&ws, &mut inputs.clone(), |_| None, "compiler").is_err()
+        );
         inputs.vars.clear();
-        assert!(resolve_source_fingerprints(&ws, &mut inputs, |_| Some("bytes".into()), "compiler").is_err());
+        assert!(
+            resolve_source_fingerprints(&ws, &mut inputs, |_| Some("bytes".into()), "compiler")
+                .is_err()
+        );
     }
 }

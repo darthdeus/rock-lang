@@ -1,9 +1,9 @@
 use crate::{Result, SourceFiles};
+use bone_core::prelude::Instant;
 use bone_semantic::hir::BodyOwner;
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;
 use std::path::{Path, PathBuf};
-use bone_core::prelude::Instant;
 
 #[derive(Debug)]
 pub enum LiveUpdate {
@@ -98,7 +98,9 @@ impl LiveProject {
         let started = self.route_profile_enabled.then(Instant::now);
         let mut previous_contents = Vec::new();
         for path in changed {
-            let Ok(canonical) = std::fs::canonicalize(path) else { continue };
+            let Ok(canonical) = std::fs::canonicalize(path) else {
+                continue;
+            };
             let id = canonical.to_string_lossy().into_owned();
             let Some(source) = self
                 .sources
@@ -144,12 +146,14 @@ impl LiveProject {
                 source.borrow_mut().contents = contents;
             }
         }
-        self.session = crate::bone_backend::bone_session(crate::bone_backend::session_files(&self.sources)).map_err(|e| {
-            anyhow::anyhow!(
-                "{}",
-                crate::skull_backend::render_project_err(&self.sources, &e)
-            )
-        })?;
+        self.session =
+            crate::bone_backend::bone_session(crate::bone_backend::session_files(&self.sources))
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "{}",
+                        crate::skull_backend::render_project_err(&self.sources, &e)
+                    )
+                })?;
         self.session.ws.comptime_inputs = snapshot.comptime_inputs;
         crate::lint_pass::rollback_build_lints_cached(
             &mut self.lint_cache,
@@ -182,7 +186,8 @@ impl LiveProject {
     }
 
     pub fn recompile(&mut self, changed: &[PathBuf]) -> Result<LiveUpdate> {
-        self.recompile_for_publication(changed).map(|(update, _snapshot)| update)
+        self.recompile_for_publication(changed)
+            .map(|(update, _snapshot)| update)
     }
 
     pub(crate) fn recompile_for_publication(
@@ -412,8 +417,10 @@ impl LiveProject {
         if let Some(started) = lint_started {
             self.last_route_timing.lint_total_ns += started.elapsed().as_nanos();
             self.last_route_timing.local_lint_derivation_ns += lint_timing.local_lint_derivation_ns;
-            self.last_route_timing.global_lint_dependency_ns += lint_timing.global_lint_dependency_ns;
-            self.last_route_timing.global_lint_derivation_ns += lint_timing.global_lint_derivation_ns;
+            self.last_route_timing.global_lint_dependency_ns +=
+                lint_timing.global_lint_dependency_ns;
+            self.last_route_timing.global_lint_derivation_ns +=
+                lint_timing.global_lint_derivation_ns;
             self.last_route_timing.suppression_filtering_ns += lint_timing.suppression_filtering_ns;
             self.last_route_timing.suppression_filter_calls += lint_timing.suppression_filter_calls;
             self.last_route_timing.report_prepare_ns += lint_timing.report_prepare_ns;
@@ -423,7 +430,10 @@ impl LiveProject {
         }
         if !lint_errs.is_empty() {
             for e in &lint_errs {
-                eprintln!("{}", crate::skull_backend::render_project_err(&self.sources, e));
+                eprintln!(
+                    "{}",
+                    crate::skull_backend::render_project_err(&self.sources, e)
+                );
             }
             anyhow::bail!("skull: {} lint error(s) {context}", lint_errs.len())
         }
@@ -506,15 +516,33 @@ impl LiveProject {
                 }
             }
         }
-        if changed && !self.session.ws.comptime_inputs.source_fingerprints.is_empty() {
+        if changed
+            && !self
+                .session
+                .ws
+                .comptime_inputs
+                .source_fingerprints
+                .is_empty()
+        {
             let inputs = crate::comptime::resolve_checked_inputs(
                 &self.session.ws,
                 self.session.ws.comptime_inputs.clone(),
-                |file| self.session.files.get(file).map(|source| source.text.clone()),
+                |file| {
+                    self.session
+                        .files
+                        .get(file)
+                        .map(|source| source.text.clone())
+                },
             )?;
             if inputs.source_fingerprints.keys().any(|name| {
                 inputs.vars.get(name).map(|value| &value.value)
-                    != self.session.ws.comptime_inputs.vars.get(name).map(|value| &value.value)
+                    != self
+                        .session
+                        .ws
+                        .comptime_inputs
+                        .vars
+                        .get(name)
+                        .map(|value| &value.value)
             }) {
                 full = true;
             }
@@ -523,11 +551,7 @@ impl LiveProject {
         let lint_change = if full {
             bone_lints::LintCacheUpdate::full()
         } else {
-            bone_lints::LintCacheUpdate::body_only(
-                lint_changed_files,
-                lint_reinferred,
-                lint_edits,
-            )
+            bone_lints::LintCacheUpdate::body_only(lint_changed_files, lint_reinferred, lint_edits)
         };
         if changed && !full {
             self.lint_cache.begin_body_transaction(&lint_change);
@@ -610,31 +634,57 @@ mod tests {
         let decoder = dir.path().join("decoder.rock");
         std::fs::write(&decoder, "fn decode() -> int { 1 }").unwrap();
         let mut project = LiveProject::init(dir.path().to_str().unwrap(), false).unwrap();
-        let revision = |project: &LiveProject| project.workspace().comptime_inputs.vars[&ustr::Ustr::from("REV")].value.clone();
+        let revision = |project: &LiveProject| {
+            project.workspace().comptime_inputs.vars[&ustr::Ustr::from("REV")]
+                .value
+                .clone()
+        };
         let before = revision(&project);
-        assert!(matches!(project.apply_edit(&decoder, "fn decode() -> int { 2 }").unwrap(), LiveUpdate::Full { .. }));
+        assert!(matches!(
+            project
+                .apply_edit(&decoder, "fn decode() -> int { 2 }")
+                .unwrap(),
+            LiveUpdate::Full { .. }
+        ));
         let decoder_changed = revision(&project);
         assert_ne!(before, decoder_changed);
-        assert!(project.apply_edit(&source, "fn main() { missing() }").is_err());
+        assert!(
+            project
+                .apply_edit(&source, "fn main() { missing() }")
+                .is_err()
+        );
         assert_eq!(decoder_changed, revision(&project));
         let default_changed = initial.replace("= 1", "= 2");
         project.apply_edit(&source, &default_changed).unwrap();
         assert_ne!(decoder_changed, revision(&project));
         // The editor text, rather than stale disk bytes, supplied both revisions.
         assert_eq!(std::fs::read_to_string(&source).unwrap(), initial);
-        assert_eq!(std::fs::read_to_string(&decoder).unwrap(), "fn decode() -> int { 1 }");
+        assert_eq!(
+            std::fs::read_to_string(&decoder).unwrap(),
+            "fn decode() -> int { 1 }"
+        );
     }
 
     #[test]
     fn failed_edit_restores_recorded_build_inputs() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("stick.toml"),
-            "[package]\nname = \"rollback\"\n[build.vars]\nREV = \"before\"\n").unwrap();
+        std::fs::write(
+            dir.path().join("stick.toml"),
+            "[package]\nname = \"rollback\"\n[build.vars]\nREV = \"before\"\n",
+        )
+        .unwrap();
         let source = dir.path().join("main.rock");
         std::fs::write(&source, "fn main() { print(build_var(\"REV\")) }").unwrap();
         let mut project = LiveProject::init(dir.path().to_str().unwrap(), false).unwrap();
-        assert!(project.apply_edit(&source, "fn main() { missing() }").is_err());
-        assert_eq!(project.workspace().comptime_inputs.vars[&ustr::Ustr::from("REV")].value, "before");
+        assert!(
+            project
+                .apply_edit(&source, "fn main() { missing() }")
+                .is_err()
+        );
+        assert_eq!(
+            project.workspace().comptime_inputs.vars[&ustr::Ustr::from("REV")].value,
+            "before"
+        );
     }
 
     #[test]
@@ -727,7 +777,11 @@ fn main() -> int { let _value: int = cast(always_int()) 3 }
             .map(|finding| format!("{}:{}", finding.lint, finding.error.message))
             .collect::<Vec<_>>();
         assert_eq!(after, before);
-        assert!(after.iter().all(|finding| !finding.starts_with("transmute_of_nullable:")));
+        assert!(
+            after
+                .iter()
+                .all(|finding| !finding.starts_with("transmute_of_nullable:"))
+        );
     }
 
     /// A session re-parses on every edit, so it has to KEEP each file's
@@ -763,7 +817,12 @@ fn main() -> int { let _value: int = cast(always_int()) 3 }
             .expect("a v1 edit must re-parse in its own dialect");
     }
 
-    fn v1_live_project() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf, LiveProject) {
+    fn v1_live_project() -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        std::path::PathBuf,
+        LiveProject,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("stick.toml"),
@@ -806,10 +865,16 @@ fn main() -> int { let _value: int = cast(always_int()) 3 }
         project
             .apply_edit_inner(&a, "mod a;\n\nfn bump(n: int) -> int {\n    n + 1\n}\n")
             .expect_err("main still calls a::bump, which is now private to `a`");
-        let messages: Vec<String> =
-            project.session.diagnostics().iter().map(|d| d.message.clone()).collect();
+        let messages: Vec<String> = project
+            .session
+            .diagnostics()
+            .iter()
+            .map(|d| d.message.clone())
+            .collect();
         assert!(
-            messages.iter().any(|m| m.contains("`bump` is not accessible from this module")),
+            messages
+                .iter()
+                .any(|m| m.contains("`bump` is not accessible from this module")),
             "{messages:?}"
         );
     }
@@ -823,10 +888,16 @@ fn main() -> int { let _value: int = cast(always_int()) 3 }
         project
             .apply_edit_inner(&a, "mod b;\n\npub fn bump(n: int) -> int {\n    n + 1\n}\n")
             .expect_err("main still calls a::bump, and `a` no longer exists");
-        let messages: Vec<String> =
-            project.session.diagnostics().iter().map(|d| d.message.clone()).collect();
+        let messages: Vec<String> = project
+            .session
+            .diagnostics()
+            .iter()
+            .map(|d| d.message.clone())
+            .collect();
         assert!(
-            messages.iter().any(|m| m.contains("`a::bump` did not resolve")),
+            messages
+                .iter()
+                .any(|m| m.contains("`a::bump` did not resolve")),
             "{messages:?}"
         );
     }

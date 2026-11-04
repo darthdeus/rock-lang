@@ -62,14 +62,31 @@ pub fn identity_body_storage_violation(
     bi: Option<&BodyInference>,
     ty: TyId,
 ) -> Option<IdentityStorageViolation> {
-    visit(ws, Types { ws, bi }, ty, Top::Stored, IdentityStorageVia::Direct, &mut ParamClasses::default())
+    visit(
+        ws,
+        Types { ws, bi },
+        ty,
+        Top::Stored,
+        IdentityStorageVia::Direct,
+        &mut ParamClasses::default(),
+    )
 }
 
 /// [`identity_storage_violation`] for a root position (a global's type): the
 /// top itself may be an identity, or a nullable identity (an optional one-row
 /// process root), but what it stores through its type arguments may not.
-pub fn identity_root_storage_violation(ws: &Workspace, ty: TyId) -> Option<IdentityStorageViolation> {
-    visit(ws, Types { ws, bi: None }, ty, Top::Root, IdentityStorageVia::Direct, &mut ParamClasses::default())
+pub fn identity_root_storage_violation(
+    ws: &Workspace,
+    ty: TyId,
+) -> Option<IdentityStorageViolation> {
+    visit(
+        ws,
+        Types { ws, bi: None },
+        ty,
+        Top::Root,
+        IdentityStorageVia::Direct,
+        &mut ParamClasses::default(),
+    )
 }
 
 /// [`identity_storage_violation`] for a body's local, parameter or temporary:
@@ -80,12 +97,22 @@ pub fn identity_local_storage_violation(
     bi: &BodyInference,
     ty: TyId,
 ) -> Option<IdentityStorageViolation> {
-    visit(ws, Types { ws, bi: Some(bi) }, ty, Top::Borrow, IdentityStorageVia::Direct, &mut ParamClasses::default())
+    visit(
+        ws,
+        Types { ws, bi: Some(bi) },
+        ty,
+        Top::Borrow,
+        IdentityStorageVia::Direct,
+        &mut ParamClasses::default(),
+    )
 }
 
 /// [`identity_storage_violation`] for an `@identity_storage` field: the Vec's
 /// direct elements are rows, and everything below them is ordinary storage.
-pub fn identity_storage_field_violation(ws: &Workspace, ty: TyId) -> Option<IdentityStorageViolation> {
+pub fn identity_storage_field_violation(
+    ws: &Workspace,
+    ty: TyId,
+) -> Option<IdentityStorageViolation> {
     let mut classes = ParamClasses::default();
     match static_expr(ws, ty) {
         Some(TypeExpr::App {
@@ -101,7 +128,14 @@ pub fn identity_storage_field_violation(ws: &Workspace, ty: TyId) -> Option<Iden
                 &mut classes,
             )
         }),
-        _ => visit(ws, Types { ws, bi: None }, ty, Top::Stored, IdentityStorageVia::Direct, &mut classes),
+        _ => visit(
+            ws,
+            Types { ws, bi: None },
+            ty,
+            Top::Stored,
+            IdentityStorageVia::Direct,
+            &mut classes,
+        ),
     }
 }
 
@@ -165,13 +199,34 @@ pub fn identity_violation_in<V: IdentityTypes>(
             let mut classes = ParamClasses::default();
             return match types.node(ty)? {
                 IdentityNode::Collection(mut params) => params.find_map(|p| {
-                    visit(ws, types, p, Top::Admitted, IdentityStorageVia::Container, &mut classes)
+                    visit(
+                        ws,
+                        types,
+                        p,
+                        Top::Admitted,
+                        IdentityStorageVia::Container,
+                        &mut classes,
+                    )
                 }),
-                _ => visit(ws, types, ty, Top::Stored, IdentityStorageVia::Direct, &mut classes),
+                _ => visit(
+                    ws,
+                    types,
+                    ty,
+                    Top::Stored,
+                    IdentityStorageVia::Direct,
+                    &mut classes,
+                ),
             };
         }
     };
-    visit(ws, types, ty, top, IdentityStorageVia::Direct, &mut ParamClasses::default())
+    visit(
+        ws,
+        types,
+        ty,
+        top,
+        IdentityStorageVia::Direct,
+        &mut ParamClasses::default(),
+    )
 }
 
 /// [`identity_violation_in`] over one body's inferred types.
@@ -186,8 +241,19 @@ pub fn identity_body_violation(
 
 /// Whether `field` of a value of `owner` (a body type) is an
 /// `@identity_storage` edge.
-pub fn is_identity_storage_edge(ws: &Workspace, bi: &BodyInference, owner: TyId, field: Ustr) -> bool {
-    let Some((_, TypeExpr::App { ctor: TypeCtor::Nominal(name), .. })) = (Types { ws, bi: Some(bi) }).resolve(owner)
+pub fn is_identity_storage_edge(
+    ws: &Workspace,
+    bi: &BodyInference,
+    owner: TyId,
+    field: Ustr,
+) -> bool {
+    let Some((
+        _,
+        TypeExpr::App {
+            ctor: TypeCtor::Nominal(name),
+            ..
+        },
+    )) = (Types { ws, bi: Some(bi) }).resolve(owner)
     else {
         return false;
     };
@@ -252,11 +318,13 @@ impl IdentityTypes for Types<'_> {
         let (base, expr) = self.resolve(ty)?;
         let children = |range| TyIdChildren { base, range };
         Some(match expr {
-            TypeExpr::Builtin(_) | TypeExpr::Generic(..) | TypeExpr::Infer(..) | TypeExpr::Function { .. } => {
-                IdentityNode::Opaque
-            }
+            TypeExpr::Builtin(_)
+            | TypeExpr::Generic(..)
+            | TypeExpr::Infer(..)
+            | TypeExpr::Function { .. } => IdentityNode::Opaque,
             TypeExpr::App {
-                ctor: TypeCtor::Ref, ..
+                ctor: TypeCtor::Ref,
+                ..
             } => IdentityNode::Opaque,
             TypeExpr::Nullable(inner) => IdentityNode::Nullable(base.with_idx(inner)),
             TypeExpr::Tuple { elements } => IdentityNode::Tuple(children(elements)),
@@ -308,7 +376,11 @@ fn visit<V: IdentityTypes>(
     match types.node(ty)? {
         IdentityNode::Opaque => None,
         IdentityNode::Nullable(inner) => {
-            let inner_top = if matches!(top, Top::Root | Top::Borrow) { top } else { Top::Stored };
+            let inner_top = if matches!(top, Top::Root | Top::Borrow) {
+                top
+            } else {
+                Top::Stored
+            };
             visit(ws, types, inner, inner_top, via, classes)
         }
         IdentityNode::Tuple(mut elements) => {
@@ -319,12 +391,22 @@ fn visit<V: IdentityTypes>(
             };
             elements.find_map(|e| visit(ws, types, e, element_top, element_via, classes))
         }
-        IdentityNode::Collection(mut params) => {
-            params.find_map(|p| visit(ws, types, p, Top::Stored, IdentityStorageVia::Container, classes))
-        }
+        IdentityNode::Collection(mut params) => params.find_map(|p| {
+            visit(
+                ws,
+                types,
+                p,
+                Top::Stored,
+                IdentityStorageVia::Container,
+                classes,
+            )
+        }),
         IdentityNode::Nominal(name, params) => {
             if top == Top::Stored && is_identity_struct(ws, name) {
-                return Some(IdentityStorageViolation { identity: name, via });
+                return Some(IdentityStorageViolation {
+                    identity: name,
+                    via,
+                });
             }
             params.enumerate().find_map(|(i, p)| {
                 let arg_top = match param_class(ws, name, i, classes).0 {
@@ -332,7 +414,14 @@ fn visit<V: IdentityTypes>(
                     ParamClass::Row => Top::Admitted,
                     ParamClass::Stored => Top::Stored,
                 };
-                visit(ws, types, p, arg_top, IdentityStorageVia::Container, classes)
+                visit(
+                    ws,
+                    types,
+                    p,
+                    arg_top,
+                    IdentityStorageVia::Container,
+                    classes,
+                )
             })
         }
     }
@@ -345,7 +434,11 @@ fn visit<V: IdentityTypes>(
 fn nominal_storage(ws: &Workspace, name: Ustr) -> Option<(Vec<TyId>, Vec<(TyId, bool)>)> {
     if let Some(sid) = ws.struct_by_name.get(&name) {
         let def = &ws.module(sid.module).structs[sid.def];
-        let fields = def.fields.iter().map(|f| (f.ty, is_identity_storage_field(f))).collect();
+        let fields = def
+            .fields
+            .iter()
+            .map(|f| (f.ty, is_identity_storage_field(f)))
+            .collect();
         return Some((def.generics.clone(), fields));
     }
     if let Some(eid) = ws.enums_by_name.get(&name) {
@@ -355,7 +448,9 @@ fn nominal_storage(ws: &Workspace, name: Ustr) -> Option<(Vec<TyId>, Vec<(TyId, 
             match &variant.payload {
                 VariantPayload::Unit => {}
                 VariantPayload::Tuple(types) => fields.extend(types.iter().map(|t| (*t, false))),
-                VariantPayload::Record(record) => fields.extend(record.iter().map(|f| (f.ty, false))),
+                VariantPayload::Record(record) => {
+                    fields.extend(record.iter().map(|f| (f.ty, false)))
+                }
             }
         }
         return Some((def.generics.clone(), fields));
@@ -370,7 +465,12 @@ fn nominal_storage(ws: &Workspace, name: Ustr) -> Option<(Vec<TyId>, Vec<(TyId, 
 /// Returns the class and whether it was computed while some constructor was
 /// still in progress (a recursive type), in which case it is not cached: the
 /// in-progress entry read as `Phantom` may have been an underestimate.
-fn param_class(ws: &Workspace, name: Ustr, index: usize, classes: &mut ParamClasses) -> (ParamClass, bool) {
+fn param_class(
+    ws: &Workspace,
+    name: Ustr,
+    index: usize,
+    classes: &mut ParamClasses,
+) -> (ParamClass, bool) {
     let key = (name, index);
     if let Some(class) = classes.done.get(&key) {
         return (*class, false);
@@ -407,7 +507,12 @@ fn generic_name(ws: &Workspace, ty: TyId) -> Option<Ustr> {
     }
 }
 
-fn row_edge_occurrence(ws: &Workspace, ty: TyId, param: Ustr, classes: &mut ParamClasses) -> (ParamClass, bool) {
+fn row_edge_occurrence(
+    ws: &Workspace,
+    ty: TyId,
+    param: Ustr,
+    classes: &mut ParamClasses,
+) -> (ParamClass, bool) {
     match static_expr(ws, ty) {
         Some(TypeExpr::App {
             ctor: TypeCtor::Array,
@@ -419,19 +524,32 @@ fn row_edge_occurrence(ws: &Workspace, ty: TyId, param: Ustr, classes: &mut Para
 
 /// How `param` occurs in a field type. `row` marks the direct element of an
 /// `@identity_storage` edge.
-fn occurrence(ws: &Workspace, ty: TyId, param: Ustr, row: bool, classes: &mut ParamClasses) -> (ParamClass, bool) {
+fn occurrence(
+    ws: &Workspace,
+    ty: TyId,
+    param: Ustr,
+    row: bool,
+    classes: &mut ParamClasses,
+) -> (ParamClass, bool) {
     let Some(expr) = static_expr(ws, ty) else {
         return (ParamClass::Phantom, false);
     };
     match expr {
-        TypeExpr::Generic(_, name) if name == param => {
-            (if row { ParamClass::Row } else { ParamClass::Stored }, false)
-        }
-        TypeExpr::Builtin(_) | TypeExpr::Generic(..) | TypeExpr::Infer(..) | TypeExpr::Function { .. } => {
-            (ParamClass::Phantom, false)
-        }
+        TypeExpr::Generic(_, name) if name == param => (
+            if row {
+                ParamClass::Row
+            } else {
+                ParamClass::Stored
+            },
+            false,
+        ),
+        TypeExpr::Builtin(_)
+        | TypeExpr::Generic(..)
+        | TypeExpr::Infer(..)
+        | TypeExpr::Function { .. } => (ParamClass::Phantom, false),
         TypeExpr::App {
-            ctor: TypeCtor::Ref, ..
+            ctor: TypeCtor::Ref,
+            ..
         } => (ParamClass::Phantom, false),
         TypeExpr::Nullable(inner) => occurrence(ws, ty.with_idx(inner), param, false, classes),
         TypeExpr::Tuple { elements } => {
@@ -457,7 +575,9 @@ fn occurrence(ws: &Workspace, ty: TyId, param: Ustr, row: bool, classes: &mut Pa
 }
 
 fn join(items: impl Iterator<Item = (ParamClass, bool)>) -> (ParamClass, bool) {
-    items.fold((ParamClass::Phantom, false), |(class, cyclic), (c, y)| (class.max(c), cyclic || y))
+    items.fold((ParamClass::Phantom, false), |(class, cyclic), (c, y)| {
+        (class.max(c), cyclic || y)
+    })
 }
 
 /// The census label for files outside any package: `tests/` programs and
@@ -497,11 +617,15 @@ pub enum IdentityStorageExemption {
 /// every package answers with its own manifest's declaration, stamped on
 /// the module. A module's path is the `mod` header of its file
 /// (`Workspace.fragment_scopes`); a file without one matches no prefix.
-pub fn identity_storage_exemption(ws: &Workspace, module: &Module) -> Option<IdentityStorageExemption> {
+pub fn identity_storage_exemption(
+    ws: &Workspace,
+    module: &Module,
+) -> Option<IdentityStorageExemption> {
     match identity_storage_package(module) {
         STDLIB_PACKAGE => return Some(IdentityStorageExemption::Builtin),
         UNPACKAGED_PROGRAMS => {
-            return (!ws.identity_storage_enforce_unpackaged).then_some(IdentityStorageExemption::Builtin);
+            return (!ws.identity_storage_enforce_unpackaged)
+                .then_some(IdentityStorageExemption::Builtin);
         }
         _ => {}
     }
@@ -520,9 +644,12 @@ pub fn identity_storage_exemption(ws: &Workspace, module: &Module) -> Option<Ide
 
 fn module_path_under(path: &[Ustr], prefix: &str) -> bool {
     let prefix: Vec<&str> = prefix.split("::").collect();
-    path.len() >= prefix.len() && path.iter().zip(&prefix).all(|(segment, want)| segment.as_str() == *want)
+    path.len() >= prefix.len()
+        && path
+            .iter()
+            .zip(&prefix)
+            .all(|(segment, want)| segment.as_str() == *want)
 }
-
 
 /// The census label of the package that owns `module`.
 pub fn identity_storage_package(module: &Module) -> &str {

@@ -9,10 +9,10 @@
 //! `ref` return that addresses a flat element returns `vec, slot`. A body that
 //! never reaches a flat element emits exactly as before, so the cost is paid
 //! only where a flat element is borrowed.
-use super::*;
 use super::call::DirectCall;
-use bone_semantic::hir::InterpPart;
+use super::*;
 use crate::instance::Instance;
+use bone_semantic::hir::InterpPart;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum FlatStorage {
@@ -108,7 +108,10 @@ pub(crate) type FlatVariantsHandle = Rc<RefCell<FlatVariants>>;
 
 impl FlatVariants {
     pub(crate) fn for_root(root: Instance) -> FlatVariantsHandle {
-        Rc::new(RefCell::new(Self { root: Some(root), ..Self::default() }))
+        Rc::new(RefCell::new(Self {
+            root: Some(root),
+            ..Self::default()
+        }))
     }
 
     pub(crate) fn take_funcs(&mut self) -> Vec<MirFunc> {
@@ -185,13 +188,29 @@ fn scan_returns(
         Expr::Index { base: a, index: b }
         | Expr::Range { low: a, high: b }
         | Expr::BinOp { lhs: a, rhs: b, .. }
-        | Expr::Assign { target: a, value: b }
-        | Expr::CompoundAssign { target: a, value: b, .. } => {
+        | Expr::Assign {
+            target: a,
+            value: b,
+        }
+        | Expr::CompoundAssign {
+            target: a,
+            value: b,
+            ..
+        } => {
             go(a, returns, lets);
             go(b, returns, lets);
         }
-        Expr::If { cond: a, then_branch: b, else_branch }
-        | Expr::IfLet { value: a, then_branch: b, else_branch, .. } => {
+        Expr::If {
+            cond: a,
+            then_branch: b,
+            else_branch,
+        }
+        | Expr::IfLet {
+            value: a,
+            then_branch: b,
+            else_branch,
+            ..
+        } => {
             go(a, returns, lets);
             go(b, returns, lets);
             if let Some(x) = else_branch {
@@ -230,7 +249,9 @@ fn scan_returns(
                 go(x, returns, lets);
             }
         }
-        Expr::SafeNavLet { receiver, body: b, .. } => {
+        Expr::SafeNavLet {
+            receiver, body: b, ..
+        } => {
             go(receiver, returns, lets);
             go(b, returns, lets);
         }
@@ -311,7 +332,9 @@ impl<'a> Builder<'a> {
         if let Some(elem) = self.vec_strided_elem_of(container)? {
             return Ok(Some((elem, FlatStorage::Strided)));
         }
-        Ok(self.map_column_value_of(container)?.map(|elem| (elem, FlatStorage::Columns)))
+        Ok(self
+            .map_column_value_of(container)?
+            .map(|elem| (elem, FlatStorage::Columns)))
     }
 
     /// The value shape a flat `ref` with `key` addresses.
@@ -327,7 +350,7 @@ impl<'a> Builder<'a> {
                     return Err(self.gap_here(format!(
                         "flat `ref` path `{}` does not name a nested value of `{}`",
                         key.prefix, key.elem.name
-                    )))
+                    )));
                 }
             };
         }
@@ -338,7 +361,10 @@ impl<'a> Builder<'a> {
     /// `ref` that can address a flat element.
     fn is_value_ref_type(&self, ty: &MonoTy) -> bool {
         match ty.peel_nullable().0 {
-            MonoTy::App { ctor: MonoCtor::Ref, params } => params
+            MonoTy::App {
+                ctor: MonoCtor::Ref,
+                params,
+            } => params
                 .first()
                 .and_then(|target| target.nominal())
                 .is_some_and(|name| self.is_value_struct(name)),
@@ -357,9 +383,15 @@ impl<'a> Builder<'a> {
             Expr::Index { base, .. } => Ok(self
                 .flat_container_elem(base)?
                 .filter(|(elem, _)| !elem.nullable)
-                .map(|(elem, storage)| FlatRefKey { elem, storage, prefix: Ustr::from("") })),
+                .map(|(elem, storage)| FlatRefKey {
+                    elem,
+                    storage,
+                    prefix: Ustr::from(""),
+                })),
             Expr::FieldAccess { base, field } => {
-                let Some(key) = self.classify_flat_ref(base)? else { return Ok(None) };
+                let Some(key) = self.classify_flat_ref(base)? else {
+                    return Ok(None);
+                };
                 let shape = self.flat_target_shape(&key)?;
                 Ok(match shape.fields.iter().find(|(name, _)| *name == field) {
                     Some((_, FieldShape::Nested(sub))) if !sub.nullable => Some(key.child(field)),
@@ -383,8 +415,15 @@ impl<'a> Builder<'a> {
     /// The flat arguments and flat result of direct call `e`, or `None` when
     /// it has neither. Cheap for an ordinary call: only `ref` arguments are
     /// classified, and only a value-`ref` result consults the callee's body.
-    pub(crate) fn flat_call_plan(&self, e: Idx<Expr>) -> Result<Option<FlatCallPlan>, CompilerError> {
-        let Expr::Call { callee: Callee::Unresolved { name, .. }, args, .. } = self.body.expr_arena[e]
+    pub(crate) fn flat_call_plan(
+        &self,
+        e: Idx<Expr>,
+    ) -> Result<Option<FlatCallPlan>, CompilerError> {
+        let Expr::Call {
+            callee: Callee::Unresolved { name, .. },
+            args,
+            ..
+        } = self.body.expr_arena[e]
         else {
             return Ok(None);
         };
@@ -396,7 +435,9 @@ impl<'a> Builder<'a> {
             }
         }
         let has_ref_arg = !ref_args.is_empty();
-        let returns_ref = self.concrete_ty(e)?.is_some_and(|ty| self.is_value_ref_type(&ty));
+        let returns_ref = self
+            .concrete_ty(e)?
+            .is_some_and(|ty| self.is_value_ref_type(&ty));
         if !has_ref_arg && !returns_ref {
             return Ok(None);
         }
@@ -405,7 +446,9 @@ impl<'a> Builder<'a> {
         }) {
             return Ok(None);
         }
-        let Ok(func) = self.resolve_funcref(e, name) else { return Ok(None) };
+        let Ok(func) = self.resolve_funcref(e, name) else {
+            return Ok(None);
+        };
         if self.fn_expand_kind(func).is_some() {
             return Ok(None);
         }
@@ -441,11 +484,20 @@ impl<'a> Builder<'a> {
         let inst = self
             .concrete_callee_for_site_op(e, crate::site::SiteOp::DirectCall)?
             .ok_or_else(|| self.gap_here("flat `ref` call has no concrete callee identity"))?;
-        let ret = if returns_ref { self.flat_return_of(&inst, &sig)? } else { None };
+        let ret = if returns_ref {
+            self.flat_return_of(&inst, &sig)?
+        } else {
+            None
+        };
         if flat_args.is_empty() && ret.is_none() {
             return Ok(None);
         }
-        Ok(Some(FlatCallPlan { inst, sig, args: flat_args, ret }))
+        Ok(Some(FlatCallPlan {
+            inst,
+            sig,
+            args: flat_args,
+            ret,
+        }))
     }
 
     /// Whether argument `a` of call `e` can carry a `ref`: one bone records
@@ -458,9 +510,12 @@ impl<'a> Builder<'a> {
         }
         Ok(match self.body.expr_arena[a] {
             Expr::Var(b) => {
-                self.flat_ref_binds.contains_key(&raw(b)) || self.flat_scan_lets.contains_key(&raw(b))
+                self.flat_ref_binds.contains_key(&raw(b))
+                    || self.flat_scan_lets.contains_key(&raw(b))
             }
-            Expr::Call { .. } => self.concrete_ty(a)?.is_some_and(|ty| self.is_value_ref_type(&ty)),
+            Expr::Call { .. } => self
+                .concrete_ty(a)?
+                .is_some_and(|ty| self.is_value_ref_type(&ty)),
             _ => false,
         })
     }
@@ -498,7 +553,9 @@ impl<'a> Builder<'a> {
                 return Ok(assumed.flatten());
             }
         }
-        let Some(plan) = self.concrete_plans.get(inst) else { return Ok(None) };
+        let Some(plan) = self.concrete_plans.get(inst) else {
+            return Ok(None);
+        };
         self.flat_return_scan(inst, plan, sig)
     }
 
@@ -509,7 +566,9 @@ impl<'a> Builder<'a> {
         sig: &[Option<FlatRefKey>],
     ) -> Result<Option<FlatRefKey>, CompilerError> {
         let returns_value_ref = plan.signature.result.is_some_and(|result| {
-            self.is_value_ref_type(&self.concrete_mono_view(result, ConcreteMonoConsumer::ReturnLowering))
+            self.is_value_ref_type(
+                &self.concrete_mono_view(result, ConcreteMonoConsumer::ReturnLowering),
+            )
         });
         if !returns_value_ref {
             return Ok(None);
@@ -555,9 +614,19 @@ impl<'a> Builder<'a> {
             scan_returns(body, root, &mut returns, &mut lets);
         }
         for (name, value) in lets {
-            if scan.binding_ty(name).and_then(|ty| scan.concrete_ty_id(ty)).is_some_and(|ty| {
-                matches!(ty.peel_nullable().0, MonoTy::App { ctor: MonoCtor::Ref, .. })
-            }) {
+            if scan
+                .binding_ty(name)
+                .and_then(|ty| scan.concrete_ty_id(ty))
+                .is_some_and(|ty| {
+                    matches!(
+                        ty.peel_nullable().0,
+                        MonoTy::App {
+                            ctor: MonoCtor::Ref,
+                            ..
+                        }
+                    )
+                })
+            {
                 scan.flat_scan_lets.insert(raw(name), value);
             }
         }
@@ -662,7 +731,7 @@ impl<'a> Builder<'a> {
                              must address the same storage",
                             decl.name
                         ),
-                    ))
+                    ));
                 }
             }
         }
@@ -714,8 +783,8 @@ impl<'a> Builder<'a> {
                     FlatStorage::Columns => self.column_index_place(e)?,
                     FlatStorage::Strided => self.strided_index_place(e)?,
                 };
-                let (vec, slot, _) = place
-                    .ok_or_else(|| self.gap_here("flat element index has no column place"))?;
+                let (vec, slot, _) =
+                    place.ok_or_else(|| self.gap_here("flat element index has no column place"))?;
                 Ok(FlatRefVal { vec, slot, key })
             }
             Expr::FieldAccess { base, .. } => {
@@ -731,7 +800,11 @@ impl<'a> Builder<'a> {
                 let slot = self.emit_cur(Inst::Load(slot));
                 Ok(FlatRefVal { vec, slot, key })
             }
-            Expr::Call { callee: Callee::Unresolved { name, .. }, args, .. } => {
+            Expr::Call {
+                callee: Callee::Unresolved { name, .. },
+                args,
+                ..
+            } => {
                 let outer = self.cur_span.replace(self.body.expr_spans[e]);
                 let outer_expr = self.cur_expr.replace(e);
                 let out = self.lower_flat_call_expr(e, name, args);
@@ -793,9 +866,15 @@ impl<'a> Builder<'a> {
         let mut slots = capture.slots;
         slots.sort_by_key(|&(pidx, _)| pidx);
         if plan.args.is_empty() {
-            let key = plan.ret.expect("a flat plan has flat arguments or a flat result");
+            let key = plan
+                .ret
+                .expect("a flat plan has flat arguments or a flat result");
             let dests = vec![self.f.new_cell(None), self.f.new_cell(None)];
-            let call = self.emit_cur(Inst::CallMulti { dests: dests.clone(), func, args });
+            let call = self.emit_cur(Inst::CallMulti {
+                dests: dests.clone(),
+                func,
+                args,
+            });
             self.record_call(call, func, dc)?;
             let vec = self.emit_cur(Inst::Load(dests[0]));
             let slot = self.emit_cur(Inst::Load(dests[1]));
@@ -812,19 +891,36 @@ impl<'a> Builder<'a> {
         argv.extend(args);
         if let Some(key) = plan.ret {
             let dests = vec![self.f.new_cell(None), self.f.new_cell(None)];
-            self.emit_cur(Inst::CallValueMulti { dests: dests.clone(), callee, args: argv });
+            self.emit_cur(Inst::CallValueMulti {
+                dests: dests.clone(),
+                callee,
+                args: argv,
+            });
             let vec = self.emit_cur(Inst::Load(dests[0]));
             let slot = self.emit_cur(Inst::Load(dests[1]));
             return Ok(FlatCallOut::Flat(FlatRefVal { vec, slot, key }));
         }
-        let ret_shape = if dc.plan.uses_scalar_abi() { dc.plan.ret_shape() } else { None };
+        let ret_shape = if dc.plan.uses_scalar_abi() {
+            dc.plan.ret_shape()
+        } else {
+            None
+        };
         if let Some(shape) = ret_shape {
-            let dests: Vec<Idx<Cell>> =
-                (0..shape.leaf_count()).map(|_| self.f.new_cell(None)).collect();
-            self.emit_cur(Inst::CallValueMulti { dests: dests.clone(), callee, args: argv });
-            let leaves: Vec<Idx<Inst>> =
-                dests.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
-            return Ok(FlatCallOut::Value(self.rebuild_from_leaves(&shape, &leaves, &mut 0)));
+            let dests: Vec<Idx<Cell>> = (0..shape.leaf_count())
+                .map(|_| self.f.new_cell(None))
+                .collect();
+            self.emit_cur(Inst::CallValueMulti {
+                dests: dests.clone(),
+                callee,
+                args: argv,
+            });
+            let leaves: Vec<Idx<Inst>> = dests
+                .iter()
+                .map(|c| self.emit_cur(Inst::Load(*c)))
+                .collect();
+            return Ok(FlatCallOut::Value(
+                self.rebuild_from_leaves(&shape, &leaves, &mut 0),
+            ));
         }
         if let Some(shape) = &ret_tuple {
             let dests: Vec<Idx<Cell>> = self
@@ -832,9 +928,15 @@ impl<'a> Builder<'a> {
                 .into_iter()
                 .map(|ty| self.f.new_cell_typed(None, ty))
                 .collect();
-            self.emit_cur(Inst::CallValueMulti { dests: dests.clone(), callee, args: argv });
-            let loads: Vec<Idx<Inst>> =
-                dests.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
+            self.emit_cur(Inst::CallValueMulti {
+                dests: dests.clone(),
+                callee,
+                args: argv,
+            });
+            let loads: Vec<Idx<Inst>> = dests
+                .iter()
+                .map(|c| self.emit_cur(Inst::Load(*c)))
+                .collect();
             return Ok(FlatCallOut::Value(self.tuple_result(shape, &loads)));
         }
         Ok(FlatCallOut::Value(ValueRepr::Scalar(
@@ -862,8 +964,10 @@ impl<'a> Builder<'a> {
             };
             let n = reg.counter;
             reg.counter += 1;
-            let name =
-                Ustr::from(&format!("__flatref_{}_{n}", root.symbol(self.ws, self.scx.interner())));
+            let name = Ustr::from(&format!(
+                "__flatref_{}_{n}",
+                root.symbol(self.ws, self.scx.interner())
+            ));
             // Generated callable machinery of the root, named by its symbol.
             let identity = crate::code_identity::CodeIdentity::Generated {
                 enclosing: crate::code_identity::CodeOwner::Instance(root),
@@ -912,18 +1016,23 @@ impl<'a> Builder<'a> {
         let mut mf = MirFunc::new(hoisted);
         mf.rep_arena = Some(self.scx.rep_arena());
         mf.flat_variant_source = Some(inst.func);
-        let flat_abi = plan.sig.iter().map(|key| match key {
-            None => "boxed".to_string(),
-            Some(key) => format!(
-                "elem={};nullable={};nobox={};storage={:?};prefix={};{}",
-                key.elem.name,
-                key.elem.nullable,
-                key.elem.is_nobox(),
-                key.storage,
-                key.prefix,
-                abi::rep_logical_fingerprint(&self.scx.rep_arena(), key.elem.representation()),
-            ),
-        }).collect::<Vec<_>>().join(",");
+        let flat_abi = plan
+            .sig
+            .iter()
+            .map(|key| match key {
+                None => "boxed".to_string(),
+                Some(key) => format!(
+                    "elem={};nullable={};nobox={};storage={:?};prefix={};{}",
+                    key.elem.name,
+                    key.elem.nullable,
+                    key.elem.is_nobox(),
+                    key.storage,
+                    key.prefix,
+                    abi::rep_logical_fingerprint(&self.scx.rep_arena(), key.elem.representation()),
+                ),
+            })
+            .collect::<Vec<_>>()
+            .join(",");
         let call_abi = format!("{}|flat [{flat_abi}]", dc.plan.logical_fingerprint());
         mf.code_identity = Some(identity.clone());
         mf.code_abi_fingerprint = Some(call_abi.clone());
@@ -1000,7 +1109,9 @@ impl<'a> Builder<'a> {
         }
         let stats = child.lower_attribution.into_inner();
         let child_f = finish_lower_attribution(child.f, stats);
-        self.lower_attribution.borrow_mut().add_assign(&child_f.lower_attribution);
+        self.lower_attribution
+            .borrow_mut()
+            .add_assign(&child_f.lower_attribution);
         Ok(child_f)
     }
 
@@ -1034,32 +1145,56 @@ impl<'a> Builder<'a> {
         name: Idx<BindingInfo>,
         value: Idx<Expr>,
     ) -> Result<bool, CompilerError> {
-        let is_ref = self.binding_ty(name).and_then(|ty| self.concrete_ty_id(ty)).is_some_and(
-            |ty| matches!(ty.peel_nullable().0, MonoTy::App { ctor: MonoCtor::Ref, .. }),
-        );
+        let is_ref = self
+            .binding_ty(name)
+            .and_then(|ty| self.concrete_ty_id(ty))
+            .is_some_and(|ty| {
+                matches!(
+                    ty.peel_nullable().0,
+                    MonoTy::App {
+                        ctor: MonoCtor::Ref,
+                        ..
+                    }
+                )
+            });
         if !is_ref {
             return Ok(false);
         }
-        let Some(key) = self.classify_flat_ref(value)? else { return Ok(false) };
+        let Some(key) = self.classify_flat_ref(value)? else {
+            return Ok(false);
+        };
         let val = self.lower_flat_ref(value)?;
         let bname = self.body.binding_arena[name].name;
-        let vec =
-            self.new_binding_cell(name, Ustr::from(&format!("{bname}__vec")), None, Ustr::from("vec"));
+        let vec = self.new_binding_cell(
+            name,
+            Ustr::from(&format!("{bname}__vec")),
+            None,
+            Ustr::from("vec"),
+        );
         let slot = self.new_binding_cell(
             name,
             Ustr::from(&format!("{bname}__slot")),
             None,
             Ustr::from("slot"),
         );
-        self.emit_cur(Inst::Store { cell: vec, value: val.vec });
-        self.emit_cur(Inst::Store { cell: slot, value: val.slot });
+        self.emit_cur(Inst::Store {
+            cell: vec,
+            value: val.vec,
+        });
+        self.emit_cur(Inst::Store {
+            cell: slot,
+            value: val.slot,
+        });
         self.flat_ref_binds.insert(raw(name), key);
         self.flat_ref_cells.insert(raw(name), (vec, slot));
         Ok(true)
     }
 
     /// The `return` wire of a body whose result is a flat `ref`.
-    pub(crate) fn flat_return_leaves(&mut self, e: Idx<Expr>) -> Result<Vec<Idx<Inst>>, CompilerError> {
+    pub(crate) fn flat_return_leaves(
+        &mut self,
+        e: Idx<Expr>,
+    ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         if matches!(self.body.expr_arena[e], Expr::Null) || is_phantom_call(self.body, e) {
             if is_phantom_call(self.body, e) {
                 self.lower_expr(e)?;
@@ -1091,7 +1226,10 @@ impl<'a> Builder<'a> {
 
     /// The leaf keys of the value a flat `ref` addresses, in leaf order.
     fn flat_leaf_keys(&self, key: &FlatRefKey, shape: &ValueShape) -> Vec<Ustr> {
-        leaf_names(shape, key.prefix.as_str(), ".").iter().map(|k| Ustr::from(k)).collect()
+        leaf_names(shape, key.prefix.as_str(), ".")
+            .iter()
+            .map(|k| Ustr::from(k))
+            .collect()
     }
 
     pub(crate) fn flat_leaf_load(
@@ -1104,13 +1242,23 @@ impl<'a> Builder<'a> {
     ) -> Result<Idx<Inst>, CompilerError> {
         match storage {
             FlatStorage::Columns => {
-                let col = self.emit_cur(Inst::Field { base: vec, field: path });
-                Ok(self.emit_cur(Inst::Index { base: col, index: slot, kind: ContainerKind::VecColumn }))
+                let col = self.emit_cur(Inst::Field {
+                    base: vec,
+                    field: path,
+                });
+                Ok(self.emit_cur(Inst::Index {
+                    base: col,
+                    index: slot,
+                    kind: ContainerKind::VecColumn,
+                }))
             }
             FlatStorage::Strided => {
                 let (at, data) = self.flat_strided_slot(vec, slot, elem, path)?;
-                let stored =
-                    self.emit_cur(Inst::Index { base: data, index: at, kind: ContainerKind::VecStrideSlot });
+                let stored = self.emit_cur(Inst::Index {
+                    base: data,
+                    index: at,
+                    kind: ContainerKind::VecStrideSlot,
+                });
                 Ok(if self.strided_stores_raw(elem) {
                     stored
                 } else {
@@ -1131,7 +1279,10 @@ impl<'a> Builder<'a> {
     ) -> Result<(), CompilerError> {
         match storage {
             FlatStorage::Columns => {
-                let col = self.emit_cur(Inst::Field { base: vec, field: path });
+                let col = self.emit_cur(Inst::Field {
+                    base: vec,
+                    field: path,
+                });
                 self.emit_cur(Inst::StoreIndex {
                     base: col,
                     index: slot,
@@ -1169,9 +1320,15 @@ impl<'a> Builder<'a> {
             .iter()
             .position(|p| *p == path)
             .ok_or_else(|| {
-                self.gap_here(format!("`{path}` does not name a slot of strided `[{}]`", elem.name))
+                self.gap_here(format!(
+                    "`{path}` does not name a slot of strided `[{}]`",
+                    elem.name
+                ))
             })?;
-        let data = self.emit_cur(Inst::Field { base: vec, field: Ustr::from("_data") });
+        let data = self.emit_cur(Inst::Field {
+            base: vec,
+            field: Ustr::from("_data"),
+        });
         let at = self.strided_slot_index(slot, shape.leaf_count(), offset);
         Ok((at, data))
     }
@@ -1205,7 +1362,9 @@ impl<'a> Builder<'a> {
         root: Idx<Expr>,
     ) -> Result<Option<FlatRefKey>, CompilerError> {
         match self.body.expr_arena[root] {
-            Expr::Var(b) if self.flat_ref_binds.contains_key(&raw(b)) => self.classify_flat_ref(root),
+            Expr::Var(b) if self.flat_ref_binds.contains_key(&raw(b)) => {
+                self.classify_flat_ref(root)
+            }
             Expr::Call { .. } => self.classify_flat_ref(root),
             _ => Ok(None),
         }
@@ -1214,10 +1373,16 @@ impl<'a> Builder<'a> {
     /// A read through a flat `ref` binding or call (`c`, `c.inner`, `c.w`,
     /// `a.borrow(e).unwrap().w`): the addressed leaves, never a table. An
     /// index-rooted read keeps its own path.
-    pub(crate) fn flat_ref_read(&mut self, e: Idx<Expr>) -> Result<Option<ValueBundle>, CompilerError> {
+    pub(crate) fn flat_ref_read(
+        &mut self,
+        e: Idx<Expr>,
+    ) -> Result<Option<ValueBundle>, CompilerError> {
         match self.body.expr_arena[e] {
             Expr::Var(b) if self.flat_ref_binds.contains_key(&raw(b)) => {
-                if self.concrete_expr_ty(e).is_some_and(|ty| ty.peel_nullable().1) {
+                if self
+                    .concrete_expr_ty(e)
+                    .is_some_and(|ty| ty.peel_nullable().1)
+                {
                     return Err(CompilerError::new_with_label(
                         self.body.expr_spans[e],
                         "a nullable `ref` to a flat-stored container element can be compared \
@@ -1230,8 +1395,13 @@ impl<'a> Builder<'a> {
                 self.flat_group_read(val).map(Some)
             }
             Expr::Call { .. } => {
-                let Some(key) = self.classify_flat_ref(e)? else { return Ok(None) };
-                if self.concrete_expr_ty(e).is_some_and(|ty| ty.peel_nullable().1) {
+                let Some(key) = self.classify_flat_ref(e)? else {
+                    return Ok(None);
+                };
+                if self
+                    .concrete_expr_ty(e)
+                    .is_some_and(|ty| ty.peel_nullable().1)
+                {
                     return Err(CompilerError::new_with_label(
                         self.body.expr_spans[e],
                         format!(
@@ -1261,11 +1431,17 @@ impl<'a> Builder<'a> {
                 match nested {
                     None => {
                         let leaf = self.flat_leaf_load(vec, slot, elem, storage, path)?;
-                        self.value_bundle_for_expr(e, ValueRepr::Scalar(leaf)).map(Some)
+                        self.value_bundle_for_expr(e, ValueRepr::Scalar(leaf))
+                            .map(Some)
                     }
                     Some(_) => {
-                        let key = FlatRefKey { elem, storage, prefix: path };
-                        self.flat_group_read(FlatRefVal { vec, slot, key }).map(Some)
+                        let key = FlatRefKey {
+                            elem,
+                            storage,
+                            prefix: path,
+                        };
+                        self.flat_group_read(FlatRefVal { vec, slot, key })
+                            .map(Some)
                     }
                 }
             }
@@ -1285,7 +1461,10 @@ impl<'a> Builder<'a> {
         } else {
             self.nominal_value_representation(shape.name)?
         };
-        Ok(ValueBundle::new(representation, self.rebuild_from_leaves(&shape, &leaves, &mut 0)))
+        Ok(ValueBundle::new(
+            representation,
+            self.rebuild_from_leaves(&shape, &leaves, &mut 0),
+        ))
     }
 
     /// The single leaf `<base>.<field>` names under a flat root, for a

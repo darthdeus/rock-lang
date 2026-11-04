@@ -20,7 +20,9 @@ pub fn current_executable_image() -> std::io::Result<std::path::PathBuf> {
 pub const SPAWN_PHASE_FILE_ENV: &str = "ROCK_SPAWN_PHASE_FILE";
 
 pub fn report_spawn_phase(phase: &str) {
-    let Some(path) = std::env::var_os(SPAWN_PHASE_FILE_ENV) else { return };
+    let Some(path) = std::env::var_os(SPAWN_PHASE_FILE_ENV) else {
+        return;
+    };
     if let Err(error) = fs_err::write(&path, phase) {
         warn!(target: "CLI", "cannot record spawn phase {phase} at {}: {error}", std::path::Path::new(&path).display());
     }

@@ -2,7 +2,10 @@ use datatest_stable::Utf8Path;
 
 fn check_rock(_path: &Utf8Path, contents: String) -> datatest_stable::Result<()> {
     // Modules-v1 multi-file fixtures: sections hold embedded `//--` files.
-    if _path.file_name().map_or(false, |n| n.starts_with("modules_")) {
+    if _path
+        .file_name()
+        .map_or(false, |n| n.starts_with("modules_"))
+    {
         if _path.file_name() == Some("modules_std.rock") {
             return check_std_fixture(&contents);
         }
@@ -22,7 +25,10 @@ fn check_rock(_path: &Utf8Path, contents: String) -> datatest_stable::Result<()>
                 Some((n, rest)) => (n, true, rest.strip_prefix('=').map(str::trim)),
                 None => (section.name, false, None),
             };
-            match (bone_semantic::test_support::check_types(section.content), expect_fail) {
+            match (
+                bone_semantic::test_support::check_types(section.content),
+                expect_fail,
+            ) {
                 (Ok(_), true) => {
                     panic!("section `{name}` was marked @fail but passed")
                 }
@@ -54,11 +60,17 @@ fn check_rock(_path: &Utf8Path, contents: String) -> datatest_stable::Result<()>
 
 /// The stdlib under its loader ids (`<stdlib>/name`), in load order.
 fn stdlib_sources() -> &'static [(&'static str, &'static str)] {
-    static SOURCES: std::sync::OnceLock<Vec<(&'static str, &'static str)>> = std::sync::OnceLock::new();
+    static SOURCES: std::sync::OnceLock<Vec<(&'static str, &'static str)>> =
+        std::sync::OnceLock::new();
     SOURCES.get_or_init(|| {
         rock_stdlib::stdlib_files()
             .iter()
-            .map(|f| (&*Box::leak(rock_stdlib::stdlib_file_id(f.name).into_boxed_str()), f.contents))
+            .map(|f| {
+                (
+                    &*Box::leak(rock_stdlib::stdlib_file_id(f.name).into_boxed_str()),
+                    f.contents,
+                )
+            })
             .collect()
     })
 }
@@ -113,7 +125,10 @@ fn check_std_fixture(contents: &str) -> datatest_stable::Result<()> {
         .find(|section| section.name == "v1_default_prelude")
         .expect("modules_std.rock needs a v1_default_prelude section");
     let user_files = bone_semantic::test_support::parse_embedded_files(prelude.content);
-    assert!(!user_files.is_empty(), "v1_default_prelude has no embedded file");
+    assert!(
+        !user_files.is_empty(),
+        "v1_default_prelude has no embedded file"
+    );
     let mut modules = Vec::new();
     for (file, source) in stdlib_sources() {
         let module = skull_parser::parse_module_clean(source, bone_core::prelude::ustr(file))
@@ -127,11 +142,13 @@ fn check_std_fixture(contents: &str) -> datatest_stable::Result<()> {
             file.dialect,
         )
         .map_err(|e| format!("{}: {e}", file.file))?;
-        module.package = file.package.map(|(name, id)| rock_core::source_code::PackageTag {
-            id,
-            self_name: name.to_owned(),
-            identity_storage: Default::default(),
-        });
+        module.package = file
+            .package
+            .map(|(name, id)| rock_core::source_code::PackageTag {
+                id,
+                self_name: name.to_owned(),
+                identity_storage: Default::default(),
+            });
         modules.push(module);
     }
     let ws = bone_semantic::semantic_passes::semantic_pass_enforcing_identity_storage(&mut modules)
@@ -178,7 +195,12 @@ fn check_modules_fixture(contents: &str) -> datatest_stable::Result<()> {
                     Some((rest, unwanted)) => (rest, Some(unwanted.trim().to_string())),
                     None => (rest, None),
                 };
-                (n.to_string(), true, rest.strip_prefix('=').map(|w| w.trim().to_string()), unwanted)
+                (
+                    n.to_string(),
+                    true,
+                    rest.strip_prefix('=').map(|w| w.trim().to_string()),
+                    unwanted,
+                )
             }
             None => (section.name.to_string(), false, None, None),
         };

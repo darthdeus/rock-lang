@@ -272,11 +272,17 @@ impl SiteJoinCensus {
         // main counters stay non-zero.
         let examined_ops: usize = self.examined_by_op.values().sum();
         if examined_ops != self.obligations_examined {
-            out.push(format!("examined-by-op {examined_ops} != obligations examined {}", self.obligations_examined));
+            out.push(format!(
+                "examined-by-op {examined_ops} != obligations examined {}",
+                self.obligations_examined
+            ));
         }
         let joined_ops: usize = self.joined_by_op.values().sum();
         if joined_ops != self.joined {
-            out.push(format!("joined-by-op {joined_ops} != joined {}", self.joined));
+            out.push(format!(
+                "joined-by-op {joined_ops} != joined {}",
+                self.joined
+            ));
         }
         let unjoined_ops: usize = self.unjoined_by_op.values().sum();
         if unjoined_ops != self.unjoined_total() {
@@ -469,7 +475,9 @@ fn unrecorded_symbol_operands(
             if mf.fn_value_symbols.contains_key(&callee) {
                 continue;
             }
-            let Inst::Global(sym) = &mf.insts[callee] else { continue };
+            let Inst::Global(sym) = &mf.insts[callee] else {
+                continue;
+            };
             if mf.hoisted_fn_globals.contains(sym) {
                 continue;
             }
@@ -641,7 +649,18 @@ pub fn measure_prepared_body(
     let mut c = SiteJoinCensus::default();
     let ix = owner_index(g);
     let mangled = mangled_symbols(ws);
-    measure_body_into(ws, scx.target(), &mut c, g, &ix, bodies, &mangled, inst, mf, true);
+    measure_body_into(
+        ws,
+        scx.target(),
+        &mut c,
+        g,
+        &ix,
+        bodies,
+        &mangled,
+        inst,
+        mf,
+        true,
+    );
     c
 }
 
@@ -723,7 +742,11 @@ fn measure_body_into(
         if let Some(cause) = cause {
             *c.unjoined.entry(cause).or_insert(0) += 1;
             *c.unjoined_by_op.entry(op).or_insert(0) += 1;
-            let per_cause = c.examples.iter().filter(|e| e.starts_with(cause.label())).count();
+            let per_cause = c
+                .examples
+                .iter()
+                .filter(|e| e.starts_with(cause.label()))
+                .count();
             if per_cause < 3 {
                 let target_name = row
                     .target
@@ -818,7 +841,8 @@ pub fn census_detailed(
             skip(&mut c, BodySkip::LowerFailed);
             continue;
         };
-        let mut mf = match skull_mir::lower::lower_instance_with_plans(ws, scx, plan, &bodies.plans) {
+        let mut mf = match skull_mir::lower::lower_instance_with_plans(ws, scx, plan, &bodies.plans)
+        {
             Ok(mf) => mf,
             Err(_) => {
                 skip(&mut c, BodySkip::LowerFailed);
@@ -841,7 +865,18 @@ pub fn census_detailed(
             skip(&mut c, BodySkip::PrepareFailed);
             continue;
         }
-        measure_body_into(ws, scx.target(), &mut c, g, &ix, bodies, mangled, inst, &mf, detail);
+        measure_body_into(
+            ws,
+            scx.target(),
+            &mut c,
+            g,
+            &ix,
+            bodies,
+            mangled,
+            inst,
+            &mf,
+            detail,
+        );
     }
     c
 }
@@ -950,7 +985,9 @@ pub fn check_callee(
     if let Callee::Boundary(_, class) = callee {
         return CalleeCheck::Boundary(*class);
     }
-    let generics = ws.module(target.module).functions[target.func].generics.len();
+    let generics = ws.module(target.module).functions[target.func]
+        .generics
+        .len();
     if generics == 0 {
         return CalleeCheck::NonGeneric;
     }
@@ -959,7 +996,9 @@ pub fn check_callee(
     // The call's OWN claim, in the graph's vocabulary. Not the delivery record:
     // delivery is an optimization artifact, while identity is recorded for the
     // concrete callee even when no splice is selected.
-    let Some(claim) = call_inst else { return CalleeCheck::NoInstance };
+    let Some(claim) = call_inst else {
+        return CalleeCheck::NoInstance;
+    };
     // A claim for another declaration is an invariant break, not a policy
     // consequence -- the record is written beside the call it belongs to.
     if claim.func != target {
@@ -1021,11 +1060,21 @@ fn classify(
     // A `named-function` operand is NOT here: it carries a `target`, so it left
     // through the direct-call path above and joins like any other spelled call.
     if row.target.is_none() {
-        let producer = row.producer.expect("a call with no target is an indirect form");
-        let op = row.site.as_ref().map(|cs| cs.site.op.name()).unwrap_or("<none>");
+        let producer = row
+            .producer
+            .expect("a call with no target is an indirect form");
+        let op = row
+            .site
+            .as_ref()
+            .map(|cs| cs.site.op.name())
+            .unwrap_or("<none>");
         c.admitted_indirect += 1;
         *c.admitted_indirect_by_op.entry(op).or_insert(0) += 1;
-        let note = if detail { format!("producer={}", producer.label()) } else { none };
+        let note = if detail {
+            format!("producer={}", producer.label())
+        } else {
+            none
+        };
         return (None, op, note);
     }
     let Some(cs) = &row.site else {
@@ -1081,9 +1130,20 @@ fn classify(
     // checking ITS instance, which is real work and is named as such rather
     // than assumed away.
     // Every remaining row is a DIRECT call: the indirect branch returned above.
-    let target = row.target.expect("indirect calls are decided before the site lookup");
+    let target = row
+        .target
+        .expect("indirect calls are decided before the site lookup");
 
-    match check_callee(ws, g, callee, target, row.callee_inst.as_ref(), target_backend).outcome() {
+    match check_callee(
+        ws,
+        g,
+        callee,
+        target,
+        row.callee_inst.as_ref(),
+        target_backend,
+    )
+    .outcome()
+    {
         Err(cause) => {
             let note = if detail {
                 format!("resolved={}", g.identity(ws, callee_inst))

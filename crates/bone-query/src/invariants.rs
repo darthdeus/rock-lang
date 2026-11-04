@@ -12,10 +12,7 @@ use lsp_types::CompletionItem;
 /// Violations of the position-blind response invariants; empty = clean.
 /// `typed_prefix` is the identifier prefix at the cursor (RAW case, as the
 /// user typed it).
-pub fn completion_response_violations(
-    items: &[CompletionItem],
-    typed_prefix: &str,
-) -> Vec<String> {
+pub fn completion_response_violations(items: &[CompletionItem], typed_prefix: &str) -> Vec<String> {
     let mut violations = Vec::new();
 
     // No duplicate labels: two items with one label are indistinguishable in
@@ -70,11 +67,15 @@ pub fn completion_response_violations(
     // is diversity-reordered (general path) or unsorted (member path); a
     // spec-following client sorts by sort_text.
     if !typed_prefix.is_empty() {
-        if let Some(exact_st) =
-            items.iter().find(|it| it.label == typed_prefix).and_then(|it| it.sort_text.as_deref())
+        if let Some(exact_st) = items
+            .iter()
+            .find(|it| it.label == typed_prefix)
+            .and_then(|it| it.sort_text.as_deref())
         {
             for it in items {
-                let Some(st) = it.sort_text.as_deref() else { continue };
+                let Some(st) = it.sort_text.as_deref() else {
+                    continue;
+                };
                 if st < exact_st && !st.starts_with('0') {
                     violations.push(format!(
                         "non-exact `{}` ranks above the exact match `{typed_prefix}` \
@@ -108,8 +109,10 @@ mod tests {
 
     #[test]
     fn clean_response_has_no_violations() {
-        let items =
-            [item("alpha", Some(&st("alpha"))), item("beta", Some(&st("beta")))];
+        let items = [
+            item("alpha", Some(&st("alpha"))),
+            item("beta", Some(&st("beta"))),
+        ];
         assert!(completion_response_violations(&items, "al").is_empty());
     }
 
@@ -124,19 +127,33 @@ mod tests {
     fn missing_and_undecodable_sort_texts_reported() {
         let items = [item("a", None), item("b", Some("not-a-rank-key"))];
         let v = completion_response_violations(&items, "");
-        assert!(v.iter().any(|m| m.contains("`a` has no sort_text")), "{v:?}");
-        assert!(v.iter().any(|m| m.contains("`b` sort_text does not decode")), "{v:?}");
+        assert!(
+            v.iter().any(|m| m.contains("`a` has no sort_text")),
+            "{v:?}"
+        );
+        assert!(
+            v.iter()
+                .any(|m| m.contains("`b` sort_text does not decode")),
+            "{v:?}"
+        );
     }
 
     #[test]
     fn array_order_disagreeing_with_sort_text_reported() {
         use crate::rank_key::RankKey;
-        let first = RankKey { band: 2, ..Default::default() }.encode("zeta");
+        let first = RankKey {
+            band: 2,
+            ..Default::default()
+        }
+        .encode("zeta");
         let second = RankKey::default().encode("alpha");
         // `zeta` (worse key) placed before `alpha` (better key) in the array.
         let items = [item("zeta", Some(&first)), item("alpha", Some(&second))];
         let v = completion_response_violations(&items, "");
-        assert!(v.iter().any(|m| m.contains("array order disagrees")), "{v:?}");
+        assert!(
+            v.iter().any(|m| m.contains("array order disagrees")),
+            "{v:?}"
+        );
         // Sorted arrays are clean.
         let ok = [item("alpha", Some(&second)), item("zeta", Some(&first))];
         assert!(completion_response_violations(&ok, "").is_empty());
@@ -148,11 +165,27 @@ mod tests {
         // The failure mode: a path fails to put the exact-label item in the
         // exact tier (its own key leads with 1), so a non-exact item can
         // sort below it -- the invariant flags the non-exact item above.
-        let above = RankKey { exact: 1, ..Default::default() }.encode("weapon");
-        let missed_exact = RankKey { exact: 1, type_rank: 2, ..Default::default() }.encode("wea");
-        let items = [item("weapon", Some(&above)), item("wea", Some(&missed_exact))];
+        let above = RankKey {
+            exact: 1,
+            ..Default::default()
+        }
+        .encode("weapon");
+        let missed_exact = RankKey {
+            exact: 1,
+            type_rank: 2,
+            ..Default::default()
+        }
+        .encode("wea");
+        let items = [
+            item("weapon", Some(&above)),
+            item("wea", Some(&missed_exact)),
+        ];
         let v = completion_response_violations(&items, "wea");
-        assert!(v.iter().any(|m| m.contains("non-exact `weapon` ranks above")), "{v:?}");
+        assert!(
+            v.iter()
+                .any(|m| m.contains("non-exact `weapon` ranks above")),
+            "{v:?}"
+        );
     }
 
     #[test]
@@ -162,7 +195,11 @@ mod tests {
         // prefix legitimately outranks the exact-label item on type_rank --
         // both are exact-tier.
         let named = RankKey::default().encode("wea");
-        let local = RankKey { type_rank: 2, ..Default::default() }.encode("wea");
+        let local = RankKey {
+            type_rank: 2,
+            ..Default::default()
+        }
+        .encode("wea");
         let items = [item("wea:", Some(&named)), item("wea", Some(&local))];
         assert!(completion_response_violations(&items, "wea").is_empty());
     }

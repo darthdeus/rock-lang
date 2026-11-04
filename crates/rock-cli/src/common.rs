@@ -46,7 +46,10 @@ impl ProcessManager {
     ) -> Result<ProcessResult<P>> {
         Self::wait_with_policy_and_tests(
             child,
-            WaitPolicy::Progress { startup, inactivity },
+            WaitPolicy::Progress {
+                startup,
+                inactivity,
+            },
             forward_stdout,
             forward_stderr,
             None,
@@ -61,16 +64,30 @@ impl ProcessManager {
         budget: Duration,
         decode: fn(&[u8]) -> Option<P>,
     ) -> Result<ProcessResult<P>> {
-        Self::wait_with_policy_and_tests(child, WaitPolicy::ProgressBudget { startup, budget }, false, false, None, Some(decode))
+        Self::wait_with_policy_and_tests(
+            child,
+            WaitPolicy::ProgressBudget { startup, budget },
+            false,
+            false,
+            None,
+            Some(decode),
+        )
     }
 
     /// Bound program loading and test progress by the child's CPU time. Valid
     /// START and TIME markers reset the CPU budget; a generous wall backstop
     /// still catches a child blocked without consuming CPU.
-    pub fn wait_with_test_watchdog(child: &mut Child, limit: Duration, watch: TestWatch) -> Result<ProcessResult> {
+    pub fn wait_with_test_watchdog(
+        child: &mut Child,
+        limit: Duration,
+        watch: TestWatch,
+    ) -> Result<ProcessResult> {
         Self::wait_with_policy_and_tests(
             child,
-            WaitPolicy::Test { cpu_limit: limit, wall_limit: test_watchdog_wall_backstop(limit) },
+            WaitPolicy::Test {
+                cpu_limit: limit,
+                wall_limit: test_watchdog_wall_backstop(limit),
+            },
             false,
             false,
             Some(watch),
@@ -100,13 +117,12 @@ impl ProcessManager {
         use std::thread;
 
         let observe_progress = !matches!(policy, WaitPolicy::Total(_));
-        let (progress_tx, progress_rx) =
-            if observe_progress {
-                let (tx, rx) = mpsc::channel::<ProgressEvent<P>>();
-                (Some(tx), Some(rx))
-            } else {
-                (None, None)
-            };
+        let (progress_tx, progress_rx) = if observe_progress {
+            let (tx, rx) = mpsc::channel::<ProgressEvent<P>>();
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
         let test_token = test_watch.as_ref().map(|watch| watch.token.clone());
         let child_pid = child.id();
 
@@ -138,7 +154,9 @@ impl ProcessManager {
                                     }
                                     if byte == b'\n' {
                                         if !line_overflow {
-                                            if let Some(ordinal) = parse_test_time_progress(&line, token) {
+                                            if let Some(ordinal) =
+                                                parse_test_time_progress(&line, token)
+                                            {
                                                 let _ = tx.send(ProgressEvent {
                                                     at: bone_core::prelude::Instant::now(),
                                                     progress: ProcessProgress::TestTime(ordinal),
@@ -183,17 +201,21 @@ impl ProcessManager {
                             }
                             if let Some(tx) = &progress_tx {
                                 let progress = match policy {
-                                    WaitPolicy::Test { .. } => test_token.as_deref()
+                                    WaitPolicy::Test { .. } => test_token
+                                        .as_deref()
                                         .and_then(|token| parse_test_start(&line, token))
                                         .map(ProcessProgress::TestStart),
-                                    _ => decode.and_then(|decode| decode(&line)).map(ProcessProgress::Observed),
+                                    _ => decode
+                                        .and_then(|decode| decode(&line))
+                                        .map(ProcessProgress::Observed),
                                 };
                                 if let Some(progress) = progress {
-                                    let child_cpu = if matches!(&progress, ProcessProgress::TestStart(_)) {
-                                        child_process_cpu_time(child_pid)
-                                    } else {
-                                        None
-                                    };
+                                    let child_cpu =
+                                        if matches!(&progress, ProcessProgress::TestStart(_)) {
+                                            child_process_cpu_time(child_pid)
+                                        } else {
+                                            None
+                                        };
                                     let _ = tx.send(ProgressEvent {
                                         at: bone_core::prelude::Instant::now(),
                                         progress,
@@ -254,7 +276,8 @@ impl ProcessManager {
                     }
                     if matches!(policy, WaitPolicy::Test { .. }) {
                         if let Some(sample) = event.child_cpu {
-                            last_test_cpu = Some(last_test_cpu.map_or(sample, |previous| previous.max(sample)));
+                            last_test_cpu =
+                                Some(last_test_cpu.map_or(sample, |previous| previous.max(sample)));
                         }
                     }
                 }
@@ -269,16 +292,27 @@ impl ProcessManager {
                 }
                 None => {
                     let (elapsed, limit, phase) = match policy {
-                        WaitPolicy::Total(timeout) =>
-                            (start_time.elapsed(), timeout, TimeoutPhase::TotalBudget),
-                        WaitPolicy::Progress { startup, inactivity } => {
+                        WaitPolicy::Total(timeout) => {
+                            (start_time.elapsed(), timeout, TimeoutPhase::TotalBudget)
+                        }
+                        WaitPolicy::Progress {
+                            startup,
+                            inactivity,
+                        } => {
                             if saw_progress {
-                                (last_progress_at.elapsed(), inactivity, TimeoutPhase::ProgressInactivity)
+                                (
+                                    last_progress_at.elapsed(),
+                                    inactivity,
+                                    TimeoutPhase::ProgressInactivity,
+                                )
                             } else {
                                 (start_time.elapsed(), startup, TimeoutPhase::Startup)
                             }
                         }
-                        WaitPolicy::Test { cpu_limit, wall_limit } => {
+                        WaitPolicy::Test {
+                            cpu_limit,
+                            wall_limit,
+                        } => {
                             let wall_elapsed = last_progress_at.elapsed();
                             let cpu_elapsed = child_process_cpu_time(child_pid)
                                 .zip(last_test_cpu)
@@ -305,18 +339,20 @@ impl ProcessManager {
                                 });
                                 break;
                             }
-                            (wall_elapsed, wall_limit, if saw_progress {
-                                TimeoutPhase::TestWall
-                            } else {
-                                TimeoutPhase::StartupWall
-                            })
+                            (
+                                wall_elapsed,
+                                wall_limit,
+                                if saw_progress {
+                                    TimeoutPhase::TestWall
+                                } else {
+                                    TimeoutPhase::StartupWall
+                                },
+                            )
                         }
-                        WaitPolicy::ProgressBudget { startup, budget } => {
-                            match first_progress_at {
-                                Some(first) => (first.elapsed(), budget, TimeoutPhase::ProgressBudget),
-                                None => (start_time.elapsed(), startup, TimeoutPhase::Startup),
-                            }
-                        }
+                        WaitPolicy::ProgressBudget { startup, budget } => match first_progress_at {
+                            Some(first) => (first.elapsed(), budget, TimeoutPhase::ProgressBudget),
+                            None => (start_time.elapsed(), startup, TimeoutPhase::Startup),
+                        },
                     };
                     if !matches!(policy, WaitPolicy::Test { .. }) && elapsed >= limit {
                         child.kill()?;
@@ -332,9 +368,14 @@ impl ProcessManager {
 
         // A pipe the caller did not capture has no output; a captured one must
         // drain completely.
-        let drained = |thread: Option<thread::JoinHandle<io::Result<Vec<u8>>>>, pipe: &str| -> Result<Vec<u8>> {
+        let drained = |thread: Option<thread::JoinHandle<io::Result<Vec<u8>>>>,
+                       pipe: &str|
+         -> Result<Vec<u8>> {
             thread
-                .map(|t| rock_host::process_management::join_drained_pipe(t, pipe).map_err(anyhow::Error::msg))
+                .map(|t| {
+                    rock_host::process_management::join_drained_pipe(t, pipe)
+                        .map_err(anyhow::Error::msg)
+                })
                 .transpose()
                 .map(Option::unwrap_or_default)
         };
@@ -367,13 +408,19 @@ impl ProcessManager {
             .map(|tests| (tests.running, tests.last_completed))
             .unwrap_or((None, None));
         Ok(ProcessResult {
-            output: std::process::Output { status, stdout, stderr },
+            output: std::process::Output {
+                status,
+                stdout,
+                stderr,
+            },
             timed_out,
             timeout_phase,
             progress: latest_progress,
             running_test,
             last_completed_test,
-            progress_stopped: matches!(policy, WaitPolicy::Progress { .. }) && saw_progress && timed_out,
+            progress_stopped: matches!(policy, WaitPolicy::Progress { .. })
+                && saw_progress
+                && timed_out,
         })
     }
 }
@@ -388,9 +435,18 @@ pub(crate) fn test_watchdog_wall_backstop(cpu_limit: Duration) -> Duration {
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum WaitPolicy {
     Total(Duration),
-    Progress { startup: Duration, inactivity: Duration },
-    ProgressBudget { startup: Duration, budget: Duration },
-    Test { cpu_limit: Duration, wall_limit: Duration },
+    Progress {
+        startup: Duration,
+        inactivity: Duration,
+    },
+    ProgressBudget {
+        startup: Duration,
+        budget: Duration,
+    },
+    Test {
+        cpu_limit: Duration,
+        wall_limit: Duration,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -508,7 +564,11 @@ fn parse_test_time_progress(line: &[u8], token: &str) -> Option<usize> {
 #[cfg(target_os = "linux")]
 fn child_process_cpu_time(pid: u32) -> Option<Duration> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let fields = stat.rsplit_once(')')?.1.split_whitespace().collect::<Vec<_>>();
+    let fields = stat
+        .rsplit_once(')')?
+        .1
+        .split_whitespace()
+        .collect::<Vec<_>>();
     let user_ticks = fields.get(11)?.parse::<u64>().ok()?;
     let system_ticks = fields.get(12)?.parse::<u64>().ok()?;
     let ticks = user_ticks.checked_add(system_ticks)?;
@@ -557,7 +617,13 @@ fn child_process_cpu_time(pid: u32) -> Option<Duration> {
 
     #[link(name = "proc")]
     unsafe extern "C" {
-        fn proc_pidinfo(pid: c_int, flavor: c_int, arg: u64, buffer: *mut c_void, buffersize: c_int) -> c_int;
+        fn proc_pidinfo(
+            pid: c_int,
+            flavor: c_int,
+            arg: u64,
+            buffer: *mut c_void,
+            buffersize: c_int,
+        ) -> c_int;
     }
 
     #[link(name = "System")]
@@ -568,14 +634,25 @@ fn child_process_cpu_time(pid: u32) -> Option<Duration> {
     const PROC_PIDTASKINFO: c_int = 4;
     let mut info = std::mem::MaybeUninit::<ProcTaskInfo>::zeroed();
     let size = std::mem::size_of::<ProcTaskInfo>() as c_int;
-    let read = unsafe { proc_pidinfo(pid as c_int, PROC_PIDTASKINFO, 0, info.as_mut_ptr().cast(), size) };
+    let read = unsafe {
+        proc_pidinfo(
+            pid as c_int,
+            PROC_PIDTASKINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
     if read != size {
         return None;
     }
     let info = unsafe { info.assume_init() };
     let ticks = info.total_user.checked_add(info.total_system)?;
     let mut timebase = MachTimebaseInfo { numer: 0, denom: 0 };
-    if unsafe { mach_timebase_info(&mut timebase) } != 0 || timebase.numer == 0 || timebase.denom == 0 {
+    if unsafe { mach_timebase_info(&mut timebase) } != 0
+        || timebase.numer == 0
+        || timebase.denom == 0
+    {
         return None;
     }
     let nanos = u128::from(ticks) * u128::from(timebase.numer) / u128::from(timebase.denom);
@@ -604,9 +681,7 @@ pub struct ProcessResult<P = ()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        parse_test_start, parse_test_time_progress, TestSequence,
-    };
+    use super::{TestSequence, parse_test_start, parse_test_time_progress};
 
     #[test]
     fn thread_count_request_rejects_a_value_that_is_not_a_count() {
@@ -616,8 +691,15 @@ mod tests {
         assert_eq!(parse(None, Some("3")), Ok(Some(3)));
         assert_eq!(parse(Some("0"), Some("3")), Ok(None));
         let error = parse(Some("eight"), Some("3")).unwrap_err();
-        assert!(error.contains("'eight'") && error.contains("ROCK_NUM_THREADS"), "got: {error}");
-        assert!(parse(None, Some("-1")).unwrap_err().contains("RAYON_NUM_THREADS"));
+        assert!(
+            error.contains("'eight'") && error.contains("ROCK_NUM_THREADS"),
+            "got: {error}"
+        );
+        assert!(
+            parse(None, Some("-1"))
+                .unwrap_err()
+                .contains("RAYON_NUM_THREADS")
+        );
     }
 
     #[test]
@@ -645,11 +727,20 @@ mod tests {
 
     #[test]
     fn test_start_requires_the_run_token() {
-        assert_eq!(parse_test_start(b"ROCK_TEST_START\tabc\t3\n", "abc"), Some(3));
-        assert_eq!(parse_test_start(b"ROCK_TEST_START\tforged\t3\n", "abc"), None);
+        assert_eq!(
+            parse_test_start(b"ROCK_TEST_START\tabc\t3\n", "abc"),
+            Some(3)
+        );
+        assert_eq!(
+            parse_test_start(b"ROCK_TEST_START\tforged\t3\n", "abc"),
+            None
+        );
         assert_eq!(parse_test_start(b"ROCK_TEST_START\tabc\t3", "abc"), None);
         assert_eq!(parse_test_start(b"ROCK_TEST_START\tabc\tx\n", "abc"), None);
-        assert_eq!(parse_test_start(b"ROCK_TEST_START\t\"a.rock\"\t\"t\"\n", "abc"), None);
+        assert_eq!(
+            parse_test_start(b"ROCK_TEST_START\t\"a.rock\"\t\"t\"\n", "abc"),
+            None
+        );
         assert_eq!(parse_test_start(b"ordinary output\n", "abc"), None);
     }
 
@@ -682,10 +773,17 @@ mod tests {
         assert!(!tests.start(1), "skipped ahead");
         assert!(tests.start(0));
         assert!(!tests.start(0), "repeated");
-        assert!(tests.start(1), "the next start may be observed before the previous TIME line");
+        assert!(
+            tests.start(1),
+            "the next start may be observed before the previous TIME line"
+        );
         assert!(!tests.complete(1), "completion cannot skip ahead");
         assert!(tests.complete(0));
-        assert_eq!(tests.running, Some(1), "TIME for the previous test keeps the current test active");
+        assert_eq!(
+            tests.running,
+            Some(1),
+            "TIME for the previous test keeps the current test active"
+        );
         assert!(!tests.complete(0), "repeated completion");
         assert!(tests.complete(1));
         assert!(!tests.start(0), "stale start");
@@ -711,14 +809,18 @@ fn parse_thread_count_request(
     rock: Option<&str>,
     rayon: Option<&str>,
 ) -> std::result::Result<Option<usize>, String> {
-    let Some((var, value)) = rock.map(|v| ("ROCK_NUM_THREADS", v)).or(rayon.map(|v| ("RAYON_NUM_THREADS", v)))
+    let Some((var, value)) = rock
+        .map(|v| ("ROCK_NUM_THREADS", v))
+        .or(rayon.map(|v| ("RAYON_NUM_THREADS", v)))
     else {
         return Ok(None);
     };
     match value.parse::<usize>() {
         Ok(0) => Ok(None),
         Ok(n) => Ok(Some(n)),
-        Err(_) => Err(format!("invalid value '{value}' for '{var}': expected a thread count")),
+        Err(_) => Err(format!(
+            "invalid value '{value}' for '{var}': expected a thread count"
+        )),
     }
 }
 

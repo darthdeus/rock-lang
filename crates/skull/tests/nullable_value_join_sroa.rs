@@ -51,11 +51,16 @@ fn main() {
     for name in ["publish", "copy_recipe"] {
         let body = function_body(&lua, name);
         for ctor in ["Pipeline_vt(", "Pipeline_ct("] {
-            assert!(!body.contains(ctor), "{name} materializes `{ctor}`:\n{body}");
+            assert!(
+                !body.contains(ctor),
+                "{name} materializes `{ctor}`:\n{body}"
+            );
         }
     }
-    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "pipeline_nullable_transfers"),
-        "empty world true true empty ui false false");
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "pipeline_nullable_transfers"),
+        "empty world true true empty ui false false"
+    );
 }
 
 const JOIN: &str = r#"
@@ -113,7 +118,10 @@ fn if_let_join_of_nullable_value_field_builds_no_box() {
     let lua = emit_module(JOIN);
     let body = function_body(&lua, "poll_in");
     for ctor in ["Tk_vt(", "Tk_ct(", "Ent_vt(", "Ent_ct("] {
-        assert!(!body.contains(ctor), "poll_in rebuilds `{ctor}` for its `if let` join:\n{body}");
+        assert!(
+            !body.contains(ctor),
+            "poll_in rebuilds `{ctor}` for its `if let` join:\n{body}"
+        );
     }
     let out = run_luajit(&format!("{lua}\nmain()\n"), "nullable_value_join");
     assert_eq!(out, "3 true 3 true false 4 true -1 false");
@@ -124,7 +132,10 @@ fn unwrap_of_nullable_value_field_builds_no_box() {
     let lua = emit_module(JOIN);
     let body = function_body(&lua, "first_a");
     for ctor in ["Tk_vt(", "Tk_ct(", "Ent_vt(", "Ent_ct("] {
-        assert!(!body.contains(ctor), "first_a rebuilds `{ctor}` to unwrap a field:\n{body}");
+        assert!(
+            !body.contains(ctor),
+            "first_a rebuilds `{ctor}` to unwrap a field:\n{body}"
+        );
     }
 }
 
@@ -133,10 +144,12 @@ fn coalesce_return_binding_of_nullable_value_field_builds_no_box() {
     let lua = emit_module(JOIN);
     let body = function_body(&lua, "reads_st");
     for ctor in ["Tk_vt(", "Tk_ct(", "Ent_vt(", "Ent_ct("] {
-        assert!(!body.contains(ctor), "reads_st rebuilds `{ctor}` for its `??` binding:\n{body}");
+        assert!(
+            !body.contains(ctor),
+            "reads_st rebuilds `{ctor}` for its `??` binding:\n{body}"
+        );
     }
 }
-
 
 // GC-tier nullable returns carry presence and leaves, so both
 // escapes must keep the coalesce binding unboxed, including its nested value.
@@ -155,8 +168,20 @@ fn escaping_coalesce_binding_returns_leaves_without_copying() {
     let lua = emit_module(&format!("{JOIN}\n{checks}"));
     let body = function_body(&lua, "first_match");
     for ctor in ["Tk_vt(", "Tk_ct(", "Ent_vt(", "Ent_ct("] {
-        assert!(!body.contains(ctor), "first_match rebuilds `{ctor}` at a nullable return:\n{body}");
+        assert!(
+            !body.contains(ctor),
+            "first_match rebuilds `{ctor}` at a nullable return:\n{body}"
+        );
     }
-    assert!(!body.contains('{'), "first_match builds a raw value box:\n{body}");
-    assert_eq!(run_luajit(&format!("{lua}\ncheck_nullable_escape()\n"), "escaping_nullable_value_join"), "held 7 9 true true");
+    assert!(
+        !body.contains('{'),
+        "first_match builds a raw value box:\n{body}"
+    );
+    assert_eq!(
+        run_luajit(
+            &format!("{lua}\ncheck_nullable_escape()\n"),
+            "escaping_nullable_value_join"
+        ),
+        "held 7 9 true true"
+    );
 }

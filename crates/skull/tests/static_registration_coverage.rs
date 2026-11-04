@@ -13,7 +13,10 @@ fn registered_statics(lua: &str) -> Vec<(String, String)> {
         .filter_map(|line| line.strip_prefix("__rock_static_prepare("))
         .map(|args| {
             let mut quoted = args.split('"').skip(1).step_by(2);
-            (quoted.next().unwrap().to_string(), quoted.next().unwrap().to_string())
+            (
+                quoted.next().unwrap().to_string(),
+                quoted.next().unwrap().to_string(),
+            )
         })
         .collect()
 }

@@ -37,7 +37,11 @@ impl Place {
                 Self::Param(index)
             }
             (Self::Runtime(left), Self::Runtime(right)) => {
-                if left == right { Self::Runtime(left) } else { Self::RuntimeAny }
+                if left == right {
+                    Self::Runtime(left)
+                } else {
+                    Self::RuntimeAny
+                }
             }
             (Self::RuntimeAny, Self::RuntimeAny)
             | (Self::RuntimeAny, Self::Runtime(_))
@@ -113,8 +117,11 @@ pub trait PlacementOracle {
 
     /// Sources of a local aggregate consumed exclusively by this construction.
     fn consumed_local_sources(
-        &self, _mir: &MirFunc, _analysis: &PlacementAnalysis,
-        _load: Idx<Inst>, _destination: Idx<Inst>,
+        &self,
+        _mir: &MirFunc,
+        _analysis: &PlacementAnalysis,
+        _load: Idx<Inst>,
+        _destination: Idx<Inst>,
     ) -> Option<Vec<Idx<Inst>>> {
         None
     }
@@ -182,9 +189,13 @@ impl FunctionPlacement {
     /// have finite height. Constraints range over finite owners and source spans.
     pub fn accumulate(&mut self, next: Self) -> bool {
         fn widen(previous: &mut Option<Place>, next: Option<Place>) -> bool {
-            let Some(next) = next.map(export_place) else { return false };
+            let Some(next) = next.map(export_place) else {
+                return false;
+            };
             let joined = previous.map_or(next, |previous| previous.join(next));
-            if *previous == Some(joined) { return false; }
+            if *previous == Some(joined) {
+                return false;
+            }
             *previous = Some(joined);
             true
         }
@@ -215,12 +226,18 @@ impl FunctionPlacement {
             }
         }
         self.constraints.sort_by(|left, right| {
-            let key = |constraint: &OutlivesConstraint| (
-                constraint.value, constraint.destination, constraint.contextual,
-                constraint.owner_equivalence,
-                constraint.span.file.as_str(), constraint.span.line_range,
-                constraint.span.col_range, constraint.span.offset_range,
-            );
+            let key = |constraint: &OutlivesConstraint| {
+                (
+                    constraint.value,
+                    constraint.destination,
+                    constraint.contextual,
+                    constraint.owner_equivalence,
+                    constraint.span.file.as_str(),
+                    constraint.span.line_range,
+                    constraint.span.col_range,
+                    constraint.span.offset_range,
+                )
+            };
             key(left).cmp(&key(right))
         });
         changed
@@ -351,31 +368,42 @@ fn merge_requirement_place(old: Option<Place>, value: Place) -> Place {
         }
         (Some(Place::Destination), param @ Place::Param(_))
         | (Some(param @ Place::Param(_)), Place::Destination) => param,
-        (Some(Place::Session), Place::Runtime(_))
-        | (Some(Place::Runtime(_)), Place::Session) => Place::Session,
+        (Some(Place::Session), Place::Runtime(_)) | (Some(Place::Runtime(_)), Place::Session) => {
+            Place::Session
+        }
         (Some(Place::RuntimeAny), Place::Session) | (Some(Place::Session), Place::RuntimeAny) => {
             Place::Unknown
         }
         (Some(Place::Frame), runtime @ Place::Runtime(_))
         | (Some(runtime @ Place::Runtime(_)), Place::Frame) => runtime,
-        (Some(Place::Frame), Place::RuntimeAny)
-        | (Some(Place::RuntimeAny), Place::Frame) => Place::RuntimeAny,
+        (Some(Place::Frame), Place::RuntimeAny) | (Some(Place::RuntimeAny), Place::Frame) => {
+            Place::RuntimeAny
+        }
         (Some(Place::Destination), Place::Runtime(_))
         | (Some(Place::Runtime(_)), Place::Destination) => Place::Unknown,
         (Some(Place::Destination), Place::RuntimeAny)
         | (Some(Place::RuntimeAny), Place::Destination) => Place::Unknown,
-        (Some(Place::RuntimeAny), Place::Param(_))
-        | (Some(Place::Param(_)), Place::RuntimeAny) => Place::Unknown,
+        (Some(Place::RuntimeAny), Place::Param(_)) | (Some(Place::Param(_)), Place::RuntimeAny) => {
+            Place::Unknown
+        }
         (Some(Place::RuntimeAny), Place::Environment)
         | (Some(Place::Environment), Place::RuntimeAny) => Place::Unknown,
         (Some(Place::Runtime(left)), Place::Runtime(right)) => {
-            if left == right { Place::Runtime(left) } else { Place::Unknown }
+            if left == right {
+                Place::Runtime(left)
+            } else {
+                Place::Unknown
+            }
         }
         (Some(Place::RuntimeAny), Place::Runtime(_))
         | (Some(Place::Runtime(_)), Place::RuntimeAny)
         | (Some(Place::RuntimeAny), Place::RuntimeAny) => Place::RuntimeAny,
         (Some(Place::Param(left)), Place::Param(right)) => {
-            if left == right { Place::Param(left) } else { Place::Unknown }
+            if left == right {
+                Place::Param(left)
+            } else {
+                Place::Unknown
+            }
         }
         (Some(Place::Runtime(_) | Place::Param(_)), Place::Runtime(_) | Place::Param(_)) => {
             Place::Unknown
@@ -575,24 +603,26 @@ fn contextual_argument_place(
     analysis: Option<&PlacementAnalysis>,
     arg: Idx<Inst>,
 ) -> Option<Place> {
-    let contextual = oracle.parameter_derived_place(mir, arg).or_else(|| match mir.insts[arg] {
-        Inst::Global(name) => Some(oracle.global_place(name)),
-        Inst::Load(cell) => mir
-            .params
-            .iter()
-            .position(|param| *param == cell)
-            .and_then(|index| u16::try_from(index).ok())
-            .map(Place::Param)
-            .or_else(|| requirements.cells.get(cell).copied()),
-        Inst::Field { base, .. }
-        | Inst::TupleIndex { base, .. }
-        | Inst::Index { base, .. }
-        | Inst::Len { base, .. }
-        | Inst::VecCheckedIndex { vec: base, .. } => {
-            contextual_argument_place(mir, requirements, oracle, analysis, base)
-        }
-        _ => requirements.values.get(arg).copied(),
-    });
+    let contextual = oracle
+        .parameter_derived_place(mir, arg)
+        .or_else(|| match mir.insts[arg] {
+            Inst::Global(name) => Some(oracle.global_place(name)),
+            Inst::Load(cell) => mir
+                .params
+                .iter()
+                .position(|param| *param == cell)
+                .and_then(|index| u16::try_from(index).ok())
+                .map(Place::Param)
+                .or_else(|| requirements.cells.get(cell).copied()),
+            Inst::Field { base, .. }
+            | Inst::TupleIndex { base, .. }
+            | Inst::Index { base, .. }
+            | Inst::Len { base, .. }
+            | Inst::VecCheckedIndex { vec: base, .. } => {
+                contextual_argument_place(mir, requirements, oracle, analysis, base)
+            }
+            _ => requirements.values.get(arg).copied(),
+        });
     let analyzed = analysis.and_then(|analysis| match mir.insts[arg] {
         Inst::Load(cell) => analysis.cells.get(cell).copied(),
         _ => analysis.values.get(arg).copied(),
@@ -682,9 +712,10 @@ fn carries_requirement(
 
 fn call_effect_consumes_argument(effect: &CallEffect, index: u16) -> bool {
     effect.stores.iter().any(|store| store.value == index)
-        || effect.constraints.iter().any(|constraint| {
-            matches!(constraint.value, Place::Param(value) if value == index)
-        })
+        || effect
+            .constraints
+            .iter()
+            .any(|constraint| matches!(constraint.value, Place::Param(value) if value == index))
         || effect.result == Some(Place::Param(index))
         || effect.opaque_retains.contains(&index)
 }
@@ -729,8 +760,9 @@ fn infer_call_requirements(
         .any(|arg| carries_requirement(mir, oracle, flow_cells, *arg));
     let flow_argument = flow_calls.contains(&id);
     let allocation = call_requirement.unwrap_or(context.default_allocation);
-    let effect = call_effects.entry((id, allocation)).or_insert_with(|| {
-        match mir.insts[id] {
+    let effect = call_effects
+        .entry((id, allocation))
+        .or_insert_with(|| match mir.insts[id] {
             Inst::Call { func, .. } | Inst::CallMulti { func, .. } => {
                 oracle.call_effect(mir, id, func, allocation)
             }
@@ -738,8 +770,7 @@ fn infer_call_requirements(
                 oracle.call_value_effect(mir, id, callee, allocation)
             }
             _ => unreachable!("call requirements requested for a non-call"),
-        }
-    });
+        });
     let unconditional_retention = !effect.opaque_retains.is_empty()
         || effect.constraints.iter().any(|constraint| {
             !constraint.contextual
@@ -769,15 +800,11 @@ fn infer_call_requirements(
         else {
             return false;
         };
-        let Some(destination) = explicit_call_argument(
-            mir,
-            raw_args,
-            destination_index,
-            &effect.omitted_args,
-        )
-        .and_then(|destination| {
-            contextual_argument_place(mir, requirements, oracle, analysis, destination)
-        })
+        let Some(destination) =
+            explicit_call_argument(mir, raw_args, destination_index, &effect.omitted_args)
+                .and_then(|destination| {
+                    contextual_argument_place(mir, requirements, oracle, analysis, destination)
+                })
         else {
             return false;
         };
@@ -821,15 +848,11 @@ fn infer_call_requirements(
     }
 
     for store in &effect.stores {
-        let Some(destination) = explicit_call_argument(
-            mir,
-            raw_args,
-            store.destination,
-            &effect.omitted_args,
-        )
-        .and_then(|destination| {
-            contextual_argument_place(mir, requirements, oracle, analysis, destination)
-        })
+        let Some(destination) =
+            explicit_call_argument(mir, raw_args, store.destination, &effect.omitted_args)
+                .and_then(|destination| {
+                    contextual_argument_place(mir, requirements, oracle, analysis, destination)
+                })
         else {
             continue;
         };
@@ -856,12 +879,14 @@ fn infer_call_requirements(
         if !constraint.contextual {
             if constraint.destination == Place::Session
                 && let Place::Param(index) = constraint.value
-                && let Some(arg) = explicit_call_argument(mir, raw_args, index, &effect.omitted_args)
+                && let Some(arg) =
+                    explicit_call_argument(mir, raw_args, index, &effect.omitted_args)
                 && !matches!(mir.insts[arg], Inst::Load(_))
                 && oracle.carries_placement(mir, arg)
                 && let Some(analysis) = analysis
                 && construction_inputs(mir, analysis, oracle, arg, id, &mut HashSet::new())
-                    .iter().all(|place| matches!(place, Place::Static | Place::Session))
+                    .iter()
+                    .all(|place| matches!(place, Place::Static | Place::Session))
             {
                 // A fresh argument may construct there without strengthening borrowed inputs.
                 changed |= merge_requirement(&mut requirements.values, arg, Place::Session);
@@ -870,27 +895,25 @@ fn infer_call_requirements(
         }
         let destination = match constraint.destination {
             Place::Destination => call_requirement,
-            Place::Param(index) => explicit_call_argument(
-                mir,
-                raw_args,
-                index,
-                &effect.omitted_args,
-            )
-            .and_then(|arg| {
-                contextual_argument_place(mir, requirements, oracle, analysis, arg)
-            })
-            .or_else(|| args.get(index as usize).copied())
-            .or(Some(Place::Unknown)),
+            Place::Param(index) => {
+                explicit_call_argument(mir, raw_args, index, &effect.omitted_args)
+                    .and_then(|arg| {
+                        contextual_argument_place(mir, requirements, oracle, analysis, arg)
+                    })
+                    .or_else(|| args.get(index as usize).copied())
+                    .or(Some(Place::Unknown))
+            }
             place => Some(place),
         };
         match constraint.value {
             Place::Param(index) => {
-                let Some(arg) =
-                    explicit_call_argument(mir, raw_args, index, &effect.omitted_args)
+                let Some(arg) = explicit_call_argument(mir, raw_args, index, &effect.omitted_args)
                 else {
                     continue;
                 };
-                if oracle.carries_placement(mir, arg) && let Some(destination) = destination {
+                if oracle.carries_placement(mir, arg)
+                    && let Some(destination) = destination
+                {
                     changed |= merge_requirement(&mut requirements.values, arg, destination);
                 }
             }
@@ -941,17 +964,14 @@ fn infer_requirements(
         };
         worklist.queued_values.remove(id);
         match &mir.insts[id] {
-            Inst::StoreGlobal { value, .. } if oracle.carries_placement(mir, *value) =>
-            {
+            Inst::StoreGlobal { value, .. } if oracle.carries_placement(mir, *value) => {
                 worklist.merge_value(&mut requirements, *value, Place::Session);
             }
             Inst::StoreField { base, value, .. } | Inst::StoreIndex { base, value, .. }
                 if oracle.carries_placement(mir, *value) =>
             {
                 let can_contextualize = match mir.insts[*value] {
-                    Inst::Load(cell) => {
-                        cell_can_contextualize(mir, oracle, blocks, cell)
-                    }
+                    Inst::Load(cell) => cell_can_contextualize(mir, oracle, blocks, cell),
                     _ => true,
                 };
                 let destination =
@@ -1003,9 +1023,7 @@ fn infer_requirements(
                     }
                 }
             }
-            Inst::Field { base, .. }
-            | Inst::TupleIndex { base, .. }
-            | Inst::Index { base, .. } => {
+            Inst::Field { base, .. } | Inst::TupleIndex { base, .. } | Inst::Index { base, .. } => {
                 if let Some(required) = requirements.values.get(id).copied()
                     && oracle.carries_placement(mir, *base)
                     && oracle.known_content_place(mir, id) != Some(Place::Static)
@@ -1381,8 +1399,11 @@ fn add_outlives_constraint(analysis: &mut PlacementAnalysis, constraint: Outlive
             value,
             destination,
             span,
-            kind: if owner_equivalence { PlacementViolationKind::MultipleOwners }
-                else { PlacementViolationKind::DoesNotOutlive },
+            kind: if owner_equivalence {
+                PlacementViolationKind::MultipleOwners
+            } else {
+                PlacementViolationKind::DoesNotOutlive
+            },
         }),
         None if matches!(value, Place::Param(_) | Place::Destination)
             || matches!(destination, Place::Param(_) | Place::Destination) =>
@@ -1500,11 +1521,7 @@ fn composite_place(
     destination
 }
 
-fn provenance_places(
-    mir: &MirFunc,
-    analysis: &PlacementAnalysis,
-    inst: Idx<Inst>,
-) -> Vec<Place> {
+fn provenance_places(mir: &MirFunc, analysis: &PlacementAnalysis, inst: Idx<Inst>) -> Vec<Place> {
     fn visit(
         mir: &MirFunc,
         analysis: &PlacementAnalysis,
@@ -1519,30 +1536,30 @@ fn provenance_places(
             return vec![place];
         }
         let operands = match &mir.insts[inst] {
-            Inst::Load(cell) => return {
-                visiting.remove(&inst);
-                let mut places = analysis
-                    .cell_origins
-                    .get(*cell)
-                    .cloned()
-                    .unwrap_or_default();
-                if places.is_empty() {
-                    places.push(place);
-                }
-                places
-            },
+            Inst::Load(cell) => {
+                return {
+                    visiting.remove(&inst);
+                    let mut places = analysis
+                        .cell_origins
+                        .get(*cell)
+                        .cloned()
+                        .unwrap_or_default();
+                    if places.is_empty() {
+                        places.push(place);
+                    }
+                    places
+                };
+            }
             Inst::Field { base, .. }
             | Inst::TupleIndex { base, .. }
             | Inst::Index { base, .. }
             | Inst::Len { base, .. }
             | Inst::VecCheckedIndex { vec: base, .. } => vec![*base],
             Inst::MakeTuple(values) | Inst::MakeVec(values) => values.clone(),
-            Inst::MakeVecColumns { columns, .. } => {
-                columns
-                    .iter()
-                    .flat_map(|(_, values)| values.iter().copied())
-                    .collect()
-            }
+            Inst::MakeVecColumns { columns, .. } => columns
+                .iter()
+                .flat_map(|(_, values)| values.iter().copied())
+                .collect(),
             Inst::MakeStruct { fields, .. }
             | Inst::MaterializeValueStruct { fields, .. }
             | Inst::MakeValueStruct { fields, .. }
@@ -1583,36 +1600,67 @@ fn construction_inputs(
     destination: Idx<Inst>,
     active: &mut HashSet<Idx<Inst>>,
 ) -> Vec<Place> {
-    if !oracle.carries_placement(mir, value) { return Vec::new(); }
-    if !active.insert(value) { return vec![Place::Unknown]; }
+    if !oracle.carries_placement(mir, value) {
+        return Vec::new();
+    }
+    if !active.insert(value) {
+        return vec![Place::Unknown];
+    }
     let inputs = match &mir.insts[value] {
-        Inst::Load(_) if let Some(sources) = oracle.consumed_local_sources(mir, analysis, value, destination) => {
-            sources.into_iter().flat_map(|source|
-                construction_inputs(mir, analysis, oracle, source, destination, active)).collect()
+        Inst::Load(_)
+            if let Some(sources) =
+                oracle.consumed_local_sources(mir, analysis, value, destination) =>
+        {
+            sources
+                .into_iter()
+                .flat_map(|source| {
+                    construction_inputs(mir, analysis, oracle, source, destination, active)
+                })
+                .collect()
         }
         Inst::StringConcat(..) | Inst::Format { .. } | Inst::FormatDyn { .. } => Vec::new(),
         instruction if is_composite_constructor(instruction) => {
             let mut inputs = Vec::new();
-            instruction.uses_each(&mut |operand| inputs.extend(
-                construction_inputs(mir, analysis, oracle, operand, destination, active)));
+            instruction.uses_each(&mut |operand| {
+                inputs.extend(construction_inputs(
+                    mir,
+                    analysis,
+                    oracle,
+                    operand,
+                    destination,
+                    active,
+                ))
+            });
             inputs
         }
-        Inst::Call { args, .. } | Inst::CallMulti { args, .. }
-        | Inst::CallValue { args, .. } | Inst::CallValueMulti { args, .. } => {
+        Inst::Call { args, .. }
+        | Inst::CallMulti { args, .. }
+        | Inst::CallValue { args, .. }
+        | Inst::CallValueMulti { args, .. } => {
             let effect = match mir.insts[value] {
-                Inst::Call { func, .. } | Inst::CallMulti { func, .. } =>
-                    oracle.call_effect(mir, value, func, Place::Destination),
-                Inst::CallValue { callee, .. } | Inst::CallValueMulti { callee, .. } =>
-                    oracle.call_value_effect(mir, value, callee, Place::Destination),
+                Inst::Call { func, .. } | Inst::CallMulti { func, .. } => {
+                    oracle.call_effect(mir, value, func, Place::Destination)
+                }
+                Inst::CallValue { callee, .. } | Inst::CallValueMulti { callee, .. } => {
+                    oracle.call_value_effect(mir, value, callee, Place::Destination)
+                }
                 _ => unreachable!("construction inputs requested for a non-call"),
             };
             if effect.result == Some(Place::Destination) {
-                effect.constraints.iter().filter_map(|constraint| {
-                    match (constraint.value, constraint.destination) {
-                        (Place::Param(index), Place::Destination) => args.get(usize::from(index)),
-                        _ => None,
-                    }
-                }).flat_map(|arg| construction_inputs(mir, analysis, oracle, *arg, destination, active))
+                effect
+                    .constraints
+                    .iter()
+                    .filter_map(
+                        |constraint| match (constraint.value, constraint.destination) {
+                            (Place::Param(index), Place::Destination) => {
+                                args.get(usize::from(index))
+                            }
+                            _ => None,
+                        },
+                    )
+                    .flat_map(|arg| {
+                        construction_inputs(mir, analysis, oracle, *arg, destination, active)
+                    })
                     .collect()
             } else if let Some(Place::Param(index)) = effect.result
                 && let Some(&arg) = args.get(usize::from(index))
@@ -1682,7 +1730,9 @@ fn value_place(
             requirements,
             id,
             allocation,
-            columns.iter().flat_map(|(_, values)| values.iter().copied()),
+            columns
+                .iter()
+                .flat_map(|(_, values)| values.iter().copied()),
         ),
         Inst::ToString(value) => inst_place(analysis, *value).join(allocation),
         Inst::Field { .. }
@@ -1710,7 +1760,9 @@ fn value_place(
                     matches!(mir.insts[*value], Inst::Const(Lit::Nil))
                         && oracle.carries_placement(mir, *value)
                 })
-                && fields.iter().all(|(_, value)| inst_place(analysis, *value) == Place::Static);
+                && fields
+                    .iter()
+                    .all(|(_, value)| inst_place(analysis, *value) == Place::Static);
             let initial = if oracle.is_allocation_site(mir, id) || mutable_owned_struct {
                 allocation
             } else {
@@ -1772,8 +1824,9 @@ fn value_place(
                 | Inst::CallValueMulti { args, .. } => args,
                 _ => unreachable!("call placement requested for a non-call"),
             };
-            let effect = call_effects.entry((id, allocation)).or_insert_with(|| {
-                match inst {
+            let effect = call_effects
+                .entry((id, allocation))
+                .or_insert_with(|| match inst {
                     Inst::Call { func, .. } | Inst::CallMulti { func, .. } => {
                         oracle.call_effect(mir, id, *func, allocation)
                     }
@@ -1781,14 +1834,18 @@ fn value_place(
                         oracle.call_value_effect(mir, id, *callee, allocation)
                     }
                     _ => unreachable!("call placement requested for a non-call"),
-                }
-            });
+                });
             if effect.result == Some(Place::Destination) {
-                let mut retained: SmallVec<[u16; 2]> = effect.constraints.iter()
-                    .filter_map(|constraint| match (constraint.value, constraint.destination) {
-                        (Place::Param(index), Place::Destination) => Some(index),
-                        _ => None,
-                    }).collect();
+                let mut retained: SmallVec<[u16; 2]> = effect
+                    .constraints
+                    .iter()
+                    .filter_map(
+                        |constraint| match (constraint.value, constraint.destination) {
+                            (Place::Param(index), Place::Destination) => Some(index),
+                            _ => None,
+                        },
+                    )
+                    .collect();
                 retained.sort_unstable();
                 retained.dedup();
                 analysis.contextual_call_arguments.insert(id, retained);
@@ -1821,10 +1878,19 @@ fn value_place(
             }
             for &(index, destination) in &effect.constructions {
                 if let Some(&payload) = raw_args.get(usize::from(index)) {
-                    for value in construction_inputs(mir, analysis, oracle, payload, id, &mut HashSet::new()) {
-                        add_outlives_constraint(analysis, OutlivesConstraint {
-                            value, destination, span, contextual: false, owner_equivalence: false,
-                        });
+                    for value in
+                        construction_inputs(mir, analysis, oracle, payload, id, &mut HashSet::new())
+                    {
+                        add_outlives_constraint(
+                            analysis,
+                            OutlivesConstraint {
+                                value,
+                                destination,
+                                span,
+                                contextual: false,
+                                owner_equivalence: false,
+                            },
+                        );
                     }
                 }
             }
@@ -1892,9 +1958,7 @@ fn value_place(
                     .copied()
                     .unwrap_or(Place::Unknown);
                 let outlives = known_outlives(value, allocation);
-                if !matches!(value, Place::Static | Place::Pending)
-                    && outlives != Some(true)
-                {
+                if !matches!(value, Place::Static | Place::Pending) && outlives != Some(true) {
                     let kind = if outlives == Some(false) {
                         PlacementViolationKind::DoesNotOutlive
                     } else {
@@ -1971,7 +2035,8 @@ pub fn analyze(
                 let Inst::Store { cell, value } = mir.insts[id] else {
                     continue;
                 };
-                if matches!(mir.insts[value], Inst::Load(source) if source_cells.contains(&source)) {
+                if matches!(mir.insts[value], Inst::Load(source) if source_cells.contains(&source))
+                {
                     changed |= source_cells.insert(cell);
                 }
             }
@@ -2017,17 +2082,18 @@ pub fn analyze(
                 _ => continue,
             };
             let allocation = context.default_allocation;
-            let effect = call_effects.entry((id, allocation)).or_insert_with(|| {
-                match mir.insts[id] {
-                    Inst::Call { func, .. } | Inst::CallMulti { func, .. } => {
-                        oracle.call_effect(mir, id, func, allocation)
-                    }
-                    Inst::CallValue { callee, .. } | Inst::CallValueMulti { callee, .. } => {
-                        oracle.call_value_effect(mir, id, callee, allocation)
-                    }
-                    _ => unreachable!("call sink requested for a non-call"),
-                }
-            });
+            let effect =
+                call_effects
+                    .entry((id, allocation))
+                    .or_insert_with(|| match mir.insts[id] {
+                        Inst::Call { func, .. } | Inst::CallMulti { func, .. } => {
+                            oracle.call_effect(mir, id, func, allocation)
+                        }
+                        Inst::CallValue { callee, .. } | Inst::CallValueMulti { callee, .. } => {
+                            oracle.call_value_effect(mir, id, callee, allocation)
+                        }
+                        _ => unreachable!("call sink requested for a non-call"),
+                    });
             for (index, arg) in raw_args.iter().enumerate() {
                 let Ok(index) = u16::try_from(index) else {
                     continue;
@@ -2106,7 +2172,8 @@ pub fn analyze(
                                 }
                             }
                             changed |= merge_cell(&mut analysis.cells, *cell, value);
-                            changed |= merge_cell_origins(&mut analysis.cell_origins, *cell, origins);
+                            changed |=
+                                merge_cell_origins(&mut analysis.cell_origins, *cell, origins);
                         }
                         Inst::StoreGlobal { value, .. } => {
                             for value in provenance_places(mir, &analysis, *value) {
@@ -2178,12 +2245,16 @@ pub fn analyze(
                 let Inst::StoreField { base, value, .. } = &mir.insts[id] else {
                     continue;
                 };
-                if matches!(mir.insts[*value], Inst::Load(_)) || !oracle.carries_placement(mir, *value)
+                if matches!(mir.insts[*value], Inst::Load(_))
+                    || !oracle.carries_placement(mir, *value)
                 {
                     continue;
                 }
                 let destination = inst_place(&analysis, *base);
-                if matches!(destination, Place::Param(_) | Place::Runtime(_) | Place::Session) {
+                if matches!(
+                    destination,
+                    Place::Param(_) | Place::Runtime(_) | Place::Session
+                ) {
                     contextualized |=
                         merge_requirement(&mut requirements.values, *value, destination);
                 }
@@ -2298,7 +2369,11 @@ pub fn analyze(
 
         for (&index, roots) in &mir.param_default_values {
             let place = roots.iter().fold(Place::Pending, |place, root| {
-                let value = analysis.values.get(*root).copied().unwrap_or(Place::Unknown);
+                let value = analysis
+                    .values
+                    .get(*root)
+                    .copied()
+                    .unwrap_or(Place::Unknown);
                 place.join(value)
             });
             if analysis.summary.default_params.len() <= index {
@@ -2329,9 +2404,17 @@ mod tests {
 
     #[test]
     fn summary_widening_has_finite_height() {
-        let places = [Place::Pending, Place::Static, Place::Destination,
-            Place::Session, Place::Frame, Place::Environment,
-            Place::Param(0), Place::Param(1), Place::Unknown];
+        let places = [
+            Place::Pending,
+            Place::Static,
+            Place::Destination,
+            Place::Session,
+            Place::Frame,
+            Place::Environment,
+            Place::Param(0),
+            Place::Param(1),
+            Place::Unknown,
+        ];
         let height = |place| match place {
             Place::Pending => 0,
             Place::Static => 1,
@@ -2345,31 +2428,51 @@ mod tests {
         };
         for previous in places {
             for next in places {
-                let mut summary = FunctionPlacement { result: Some(previous), ..Default::default() };
-                summary.accumulate(FunctionPlacement { result: Some(next), ..Default::default() });
+                let mut summary = FunctionPlacement {
+                    result: Some(previous),
+                    ..Default::default()
+                };
+                summary.accumulate(FunctionPlacement {
+                    result: Some(next),
+                    ..Default::default()
+                });
                 let widened = summary.result.unwrap();
-                assert!(widened == previous || height(widened) > height(previous),
-                    "summary owner went backward: {previous:?} + {next:?} -> {widened:?}");
+                assert!(
+                    widened == previous || height(widened) > height(previous),
+                    "summary owner went backward: {previous:?} + {next:?} -> {widened:?}"
+                );
             }
         }
     }
 
     #[test]
     fn summary_accumulation_preserves_obligations_and_ignores_their_order() {
-        let left = OutlivesConstraint { value: Place::Param(0), destination: Place::Destination,
-            span: Span::default(), contextual: false, owner_equivalence: false };
-        let right = OutlivesConstraint { value: Place::Param(1), ..left };
+        let left = OutlivesConstraint {
+            value: Place::Param(0),
+            destination: Place::Destination,
+            span: Span::default(),
+            contextual: false,
+            owner_equivalence: false,
+        };
+        let right = OutlivesConstraint {
+            value: Place::Param(1),
+            ..left
+        };
         let mut summary = FunctionPlacement::default();
         assert!(summary.accumulate(FunctionPlacement {
-            result: Some(Place::Param(0)), constraints: vec![left, right],
-            default_params: vec![Some(Place::Session)], ..Default::default()
+            result: Some(Place::Param(0)),
+            constraints: vec![left, right],
+            default_params: vec![Some(Place::Session)],
+            ..Default::default()
         }));
         assert!(!summary.accumulate(FunctionPlacement {
-            result: Some(Place::Pending), constraints: vec![right, left, left],
+            result: Some(Place::Pending),
+            constraints: vec![right, left, left],
             ..Default::default()
         }));
         assert!(summary.accumulate(FunctionPlacement {
-            result: Some(Place::Param(1)), ..Default::default()
+            result: Some(Place::Param(1)),
+            ..Default::default()
         }));
         assert_eq!(summary.result, Some(Place::Unknown));
         assert_eq!(summary.constraints, vec![left, right]);
@@ -2437,16 +2540,23 @@ mod tests {
         let parameter = mir.new_cell(Some(Ustr::from("argument")));
         mir.params.push(parameter);
         let block = mir.entry();
-        let call = mir.emit(block, Inst::Call {
-            func: FuncRef {
-                module: bone_semantic::prelude::ModuleId::builtin(),
-                func: Idx::from_raw(comfy_la_arena::RawIdx::from_u32(0)),
+        let call = mir.emit(
+            block,
+            Inst::Call {
+                func: FuncRef {
+                    module: bone_semantic::prelude::ModuleId::builtin(),
+                    func: Idx::from_raw(comfy_la_arena::RawIdx::from_u32(0)),
+                },
+                args: Vec::new(),
             },
-            args: Vec::new(),
-        });
+        );
         mir.param_default_values.insert(0, vec![call]);
         mir.set_term(block, Term::Return(vec![call]));
-        let analysis = analyze(&mir, AnalysisContext::frame(), &ResultOracle(Some(Place::Pending)));
+        let analysis = analyze(
+            &mir,
+            AnalysisContext::frame(),
+            &ResultOracle(Some(Place::Pending)),
+        );
         assert_eq!(analysis.summary.result, Some(Place::Pending));
         assert_eq!(analysis.summary.default_params, vec![Some(Place::Pending)]);
     }
@@ -2465,14 +2575,8 @@ mod tests {
         merge_requirement(&mut frame_then_param, key, Place::Frame);
         merge_requirement(&mut frame_then_param, key, Place::Param(3));
 
-        assert_eq!(
-            param_then_frame.get(key).copied(),
-            Some(Place::Param(3))
-        );
-        assert_eq!(
-            frame_then_param.get(key).copied(),
-            Some(Place::Param(3))
-        );
+        assert_eq!(param_then_frame.get(key).copied(), Some(Place::Param(3)));
+        assert_eq!(frame_then_param.get(key).copied(), Some(Place::Param(3)));
     }
 
     #[test]
@@ -2489,14 +2593,8 @@ mod tests {
         merge_requirement(&mut session_then_param, key, Place::Session);
         merge_requirement(&mut session_then_param, key, Place::Param(3));
 
-        assert_eq!(
-            param_then_session.get(key).copied(),
-            Some(Place::Session)
-        );
-        assert_eq!(
-            session_then_param.get(key).copied(),
-            Some(Place::Session)
-        );
+        assert_eq!(param_then_session.get(key).copied(), Some(Place::Session));
+        assert_eq!(session_then_param.get(key).copied(), Some(Place::Session));
     }
 
     #[test]
@@ -2508,19 +2606,11 @@ mod tests {
 
         let mut destination_then_runtime = ArenaMap::default();
         merge_requirement(&mut destination_then_runtime, key, Place::Destination);
-        merge_requirement(
-            &mut destination_then_runtime,
-            key,
-            Place::Runtime(runtime),
-        );
+        merge_requirement(&mut destination_then_runtime, key, Place::Runtime(runtime));
 
         let mut runtime_then_destination = ArenaMap::default();
         merge_requirement(&mut runtime_then_destination, key, Place::Runtime(runtime));
-        merge_requirement(
-            &mut runtime_then_destination,
-            key,
-            Place::Destination,
-        );
+        merge_requirement(&mut runtime_then_destination, key, Place::Destination);
 
         assert_eq!(
             destination_then_runtime.get(key).copied(),
@@ -2565,11 +2655,7 @@ mod tests {
 
         let mut static_then_runtime = ArenaMap::default();
         merge_requirement(&mut static_then_runtime, key, Place::Static);
-        merge_requirement(
-            &mut static_then_runtime,
-            key,
-            Place::Runtime(runtime),
-        );
+        merge_requirement(&mut static_then_runtime, key, Place::Runtime(runtime));
 
         let mut runtime_then_static = ArenaMap::default();
         merge_requirement(&mut runtime_then_static, key, Place::Runtime(runtime));
@@ -2596,10 +2682,7 @@ mod tests {
             Place::Runtime(left).join(Place::Runtime(right)),
             Place::RuntimeAny
         );
-        assert_eq!(
-            known_outlives(Place::RuntimeAny, Place::Frame),
-            Some(true)
-        );
+        assert_eq!(known_outlives(Place::RuntimeAny, Place::Frame), Some(true));
         assert_eq!(
             known_outlives(Place::RuntimeAny, Place::Session),
             Some(false)
@@ -2636,9 +2719,7 @@ mod tests {
         let mut analysis = PlacementAnalysis::default();
         analysis.values.insert(operand, Place::Static);
         let mut requirements = PlacementRequirements::default();
-        requirements
-            .values
-            .insert(aggregate, Place::Destination);
+        requirements.values.insert(aggregate, Place::Destination);
 
         assert_eq!(
             composite_place(

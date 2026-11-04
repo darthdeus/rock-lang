@@ -28,7 +28,7 @@ fn check(src: &str) -> Result<bone_semantic::inference::Workspace, CompilerError
 #[test]
 fn legacy_only_workspace_keeps_modules_v1_namespace_empty() {
     use bone_core::modules::{NsAliases, PackageAliases};
-    use skull_parser::{parse_module_with_dialect, Dialect};
+    use skull_parser::{Dialect, parse_module_with_dialect};
 
     let mut module = parse_module_with_dialect(
         "fn main() { print(1) }",
@@ -57,7 +57,7 @@ fn legacy_only_workspace_keeps_modules_v1_namespace_empty() {
 #[test]
 fn mixed_workspace_rejects_package_less_legacy_use_at_the_use_span() {
     use bone_core::modules::{NsAliases, PackageAliases};
-    use skull_parser::{parse_module_with_dialect, Dialect};
+    use skull_parser::{Dialect, parse_module_with_dialect};
 
     let mut provider = parse_module_with_dialect(
         "pub struct Provider {}",
@@ -72,12 +72,8 @@ fn mixed_workspace_rejects_package_less_legacy_use_at_the_use_span() {
     });
 
     let legacy_src = "use provider::Provider;\nfn main() {}";
-    let legacy = parse_module_with_dialect(
-        legacy_src,
-        Ustr::from("legacy.rock"),
-        Dialect::Legacy,
-    )
-    .expect("parse legacy consumer");
+    let legacy = parse_module_with_dialect(legacy_src, Ustr::from("legacy.rock"), Dialect::Legacy)
+        .expect("parse legacy consumer");
 
     let aliases = NsAliases {
         packages: vec![PackageAliases {
@@ -96,16 +92,21 @@ fn mixed_workspace_rejects_package_less_legacy_use_at_the_use_span() {
     let label = err.labels.first().expect("the rejected use is labeled");
     assert_eq!(label.span.file, Ustr::from("legacy.rock"));
     let covered = &legacy_src[label.span.offset_range.0..label.span.offset_range.1];
-    assert!(covered.starts_with("use provider::Provider"), "labeled span: {covered:?}");
+    assert!(
+        covered.starts_with("use provider::Provider"),
+        "labeled span: {covered:?}"
+    );
 }
 
 #[test]
 fn an_unresolved_v1_variant_pattern_is_labeled_at_its_path() {
     use bone_core::modules::{NsAliases, PackageAliases};
-    use skull_parser::{parse_module_with_dialect, Dialect};
+    use skull_parser::{Dialect, parse_module_with_dialect};
 
-    let src = "fn f(n: int) -> int {\n    match n {\n        Nope::A => 1,\n        _ => 0,\n    }\n}";
-    let mut module = parse_module_with_dialect(src, Ustr::from("app.rock"), Dialect::V1).expect("parse v1 module");
+    let src =
+        "fn f(n: int) -> int {\n    match n {\n        Nope::A => 1,\n        _ => 0,\n    }\n}";
+    let mut module = parse_module_with_dialect(src, Ustr::from("app.rock"), Dialect::V1)
+        .expect("parse v1 module");
     module.package = Some(rock_core::source_code::PackageTag {
         id: 1,
         self_name: "app".to_string(),
@@ -126,7 +127,10 @@ fn an_unresolved_v1_variant_pattern_is_labeled_at_its_path() {
         .flat_map(|m| m.lowering_errors.values().flatten())
         .find(|e| e.message.contains("did not resolve"))
         .expect("the unbound pattern prefix is a lowering error");
-    let label = err.labels.first().expect("the unresolved pattern is labeled");
+    let label = err
+        .labels
+        .first()
+        .expect("the unresolved pattern is labeled");
     assert_eq!(label.span.file, Ustr::from("app.rock"));
     let covered = &src[label.span.offset_range.0..label.span.offset_range.1];
     assert_eq!(covered, "Nope::A");
@@ -227,7 +231,10 @@ fn main_body_errors(src: &str) -> Vec<CompilerError> {
 }
 
 fn main_body_error_messages(src: &str) -> Vec<String> {
-    main_body_errors(src).iter().map(|e| e.message.clone()).collect()
+    main_body_errors(src)
+        .iter()
+        .map(|e| e.message.clone())
+        .collect()
 }
 
 // P1a: a leaf type mismatch reads "expected `X`, found `Y`", not the bare
@@ -236,7 +243,8 @@ fn main_body_error_messages(src: &str) -> Vec<String> {
 fn leaf_type_mismatch_says_expected_found() {
     let msgs = main_body_error_messages(r#"fn main() { let a: int = "hello" }"#);
     assert!(
-        msgs.iter().any(|m| m.contains("expected `int`, found `string`")),
+        msgs.iter()
+            .any(|m| m.contains("expected `int`, found `string`")),
         "expected an expected/found message, got: {msgs:?}"
     );
 }
@@ -250,7 +258,8 @@ fn nominal_mismatch_after_a_quiet_trial_names_both_types() {
         "struct Foo { x: int }\nstruct Bar { x: int }\nfn main() { let a: Foo? = Bar { x: 1 } }",
     );
     assert!(
-        msgs.iter().any(|m| m == "type mismatch: expected `Foo`, found `Bar`"),
+        msgs.iter()
+            .any(|m| m == "type mismatch: expected `Foo`, found `Bar`"),
         "expected the nominal mismatch message, got: {msgs:?}"
     );
 }
@@ -261,8 +270,9 @@ fn generic_constructor_mismatch_names_both_types() {
         "struct Foo { x: int }\nfn main() { let a: [int] = Foo { x: 1 } }",
     );
     assert!(
-        msgs.iter().any(|m| m
-            == "type mismatch: expected `[int]`, found `Foo` (different type constructors)"),
+        msgs.iter()
+            .any(|m| m
+                == "type mismatch: expected `[int]`, found `Foo` (different type constructors)"),
         "expected the constructor mismatch message, got: {msgs:?}"
     );
 }
@@ -285,7 +295,10 @@ fn type_mismatch_labels_the_expected_type_origin() {
     assert!(
         has_origin,
         "expected a label at the `Foo` annotation; labels: {:?}",
-        err.labels.iter().map(|l| (l.span.offset_range, l.message.clone())).collect::<Vec<_>>()
+        err.labels
+            .iter()
+            .map(|l| (l.span.offset_range, l.message.clone()))
+            .collect::<Vec<_>>()
     );
 }
 
@@ -372,7 +385,11 @@ fn main() { let x: int = 2.0 * (3 / 4) }
         .expect("hint carries a label span")
         .span
         .offset_range;
-    assert_eq!(&src[lo..hi], "(3 / 4)", "label should cover just the division");
+    assert_eq!(
+        &src[lo..hi],
+        "(3 / 4)",
+        "label should cover just the division"
+    );
 }
 
 // The walk follows a local binding back to its `let` initializer: a `float`
@@ -410,7 +427,10 @@ fn min<T>(a: T, b: T) -> T { return a }
 fn main() { let env = min(1, (3.0 / 4.0) * 1.6) }
 "#;
     let msgs = main_body_error_messages(src);
-    assert!(msgs.is_empty(), "expected no error (coerce widens), got: {msgs:?}");
+    assert!(
+        msgs.is_empty(),
+        "expected no error (coerce widens), got: {msgs:?}"
+    );
 }
 
 // Hand-builds tuple nodes in a module arena (lowering doesn't emit them yet)
@@ -474,7 +494,8 @@ fn nested_block_does_not_leak_into_outer_statements() {
     let src = "fn f() -> int {\n    let a = 1\n    let c = {\n        let b = 2\n        b\n    }\n    c\n}";
     let ws = check(src).unwrap();
 
-    let mid = ws.modules
+    let mid = ws
+        .modules
         .iter()
         .find(|m| m.id != ModuleId::builtin())
         .expect("one user module")
@@ -501,11 +522,18 @@ fn nested_block_does_not_leak_into_outer_statements() {
 #[test]
 fn lambda_param_default_does_not_leak_into_fn_params() {
     for (src, names) in [
-        ("fn f(v: int, g: fn(int) -> int = x => x, k: int = 1) -> int { g(v) + k }", ["v", "g", "k"]),
-        ("fn f(v: int, k: int = 1, g: fn(int) -> int = x => x) -> int { g(v) + k }", ["v", "k", "g"]),
+        (
+            "fn f(v: int, g: fn(int) -> int = x => x, k: int = 1) -> int { g(v) + k }",
+            ["v", "g", "k"],
+        ),
+        (
+            "fn f(v: int, k: int = 1, g: fn(int) -> int = x => x) -> int { g(v) + k }",
+            ["v", "k", "g"],
+        ),
     ] {
         let ws = check(src).unwrap_or_else(|e| panic!("{src}: {e:?}"));
-        let mid = ws.modules
+        let mid = ws
+            .modules
             .iter()
             .find(|m| m.id != ModuleId::builtin())
             .expect("one user module")
@@ -529,10 +557,12 @@ fn lambda_param_default_does_not_leak_into_fn_params() {
 #[test]
 fn nested_interpolation_does_not_leak_into_outer_parts() {
     use bone_semantic::hir::{Expr, InterpPart};
-    let src = "fn f(x: int, ok: bool) -> string {\n    \"a: {if ok { \"{x}\" } else { \"no\" }}\"\n}";
+    let src =
+        "fn f(x: int, ok: bool) -> string {\n    \"a: {if ok { \"{x}\" } else { \"no\" }}\"\n}";
     let ws = check(src).unwrap();
 
-    let mid = ws.modules
+    let mid = ws
+        .modules
         .iter()
         .find(|m| m.id != ModuleId::builtin())
         .expect("one user module")
@@ -542,16 +572,32 @@ fn nested_interpolation_does_not_leak_into_outer_parts() {
     let (f_idx, _) = hir.functions.iter().next().expect("one function");
     let fbody = &hir.bodies[&BodyOwner::Function(f_idx)];
     let body = fbody.expr_arena[fbody.root.expect("rock function has a body")];
-    let Expr::Block { tail: Some(tail), .. } = body else {
-        panic!("function body should be a block with a tail, got {:?}", body);
+    let Expr::Block {
+        tail: Some(tail), ..
+    } = body
+    else {
+        panic!(
+            "function body should be a block with a tail, got {:?}",
+            body
+        );
     };
     let Expr::InterpolatedString(parts) = fbody.expr_arena[tail] else {
-        panic!("tail should be an interpolated string, got {:?}", fbody.expr_arena[tail]);
+        panic!(
+            "tail should be an interpolated string, got {:?}",
+            fbody.expr_arena[tail]
+        );
     };
 
     let parts: Vec<_> = parts.map(|p| fbody.interp_part_arena[p].clone()).collect();
-    assert_eq!(parts.len(), 2, "inner interpolation parts leaked into the outer range: {parts:?}");
-    assert!(matches!(parts[0], InterpPart::Literal(s) if s == "a: "), "{parts:?}");
+    assert_eq!(
+        parts.len(),
+        2,
+        "inner interpolation parts leaked into the outer range: {parts:?}"
+    );
+    assert!(
+        matches!(parts[0], InterpPart::Literal(s) if s == "a: "),
+        "{parts:?}"
+    );
     assert!(
         matches!(parts[1], InterpPart::Value { expr, .. } if matches!(fbody.expr_arena[expr], Expr::If { .. })),
         "{parts:?}"
@@ -570,7 +616,8 @@ fn good() -> int { return 3 }
 fn broken_two() -> bool { return 42 }";
     let ws = check(src).expect("body-level type errors must not abort semantic_pass");
 
-    let mid = ws.modules
+    let mid = ws
+        .modules
         .iter()
         .find(|m| m.id != ModuleId::builtin())
         .expect("one user module")
@@ -690,7 +737,8 @@ fn return_mismatch_does_not_mask_genuine_body_error() {
     let ws = check(src).expect("recovered, not aborted");
     let errs = recorded_errors(&ws, "f");
     assert!(
-        errs.iter().any(|e| e.message.contains("undefined_symbol_here")),
+        errs.iter()
+            .any(|e| e.message.contains("undefined_symbol_here")),
         "the real `Undefined global` error must survive, not be masked by the \
          return-type error; got: {:?}",
         errs.iter().map(|e| &e.message).collect::<Vec<_>>()
@@ -705,7 +753,11 @@ fn interpolation_hole_rejects_a_function_value_at_the_hole() {
     let ws = check(src).expect("recovered, not aborted");
     let errs = recorded_errors(&ws, "f");
     let err = errs.first().expect("a recorded hole error");
-    assert!(err.message.contains("cannot interpolate"), "got: {:?}", err.message);
+    assert!(
+        err.message.contains("cannot interpolate"),
+        "got: {:?}",
+        err.message
+    );
     let span = err.labels.first().expect("labeled error").span;
     assert_eq!(text(src, &span), "name");
 }
@@ -716,7 +768,11 @@ fn interpolation_hole_rejects_a_unit_value_at_the_hole() {
     let ws = check(src).expect("recovered, not aborted");
     let errs = recorded_errors(&ws, "f");
     let err = errs.first().expect("a recorded hole error");
-    assert!(err.message.contains("cannot interpolate"), "got: {:?}", err.message);
+    assert!(
+        err.message.contains("cannot interpolate"),
+        "got: {:?}",
+        err.message
+    );
     let span = err.labels.first().expect("labeled error").span;
     assert_eq!(text(src, &span), "u()");
 }
@@ -739,7 +795,8 @@ fn good() -> int { return 3 }"#;
     let ws = check(src)
         .expect("global/struct-default/decorator body errors must not abort semantic_pass");
 
-    let mid = ws.modules
+    let mid = ws
+        .modules
         .iter()
         .find(|m| m.id != ModuleId::builtin())
         .expect("one user module")
@@ -826,7 +883,8 @@ fn rock_fn() -> int { return 3 }"#;
     }
 
     // per-kind pins on the user module
-    let mid = ws.modules
+    let mid = ws
+        .modules
         .iter()
         .find(|m| m.id != ModuleId::builtin())
         .expect("one user module")
@@ -925,7 +983,8 @@ fn nested() -> int {
 fn flat() -> int { return 1 }";
     let ws = check(src).unwrap();
 
-    let mid = ws.modules
+    let mid = ws
+        .modules
         .iter()
         .find(|m| m.id != ModuleId::builtin())
         .expect("one user module")
@@ -970,7 +1029,8 @@ deco init d {
 fn f() -> int { return 3 }"#;
     let ws = check(src).unwrap();
 
-    let mid = ws.modules
+    let mid = ws
+        .modules
         .iter()
         .find(|m| m.id != ModuleId::builtin())
         .expect("one user module")
@@ -1016,11 +1076,12 @@ fn f() -> int { return 3 }"#;
 fn body_annotations_do_not_touch_module_ty_arena() {
     let ty_arena_len = |src: &str| {
         let ws = check(src).unwrap();
-        let mid = ws.modules
-        .iter()
-        .find(|m| m.id != ModuleId::builtin())
-        .expect("one user module")
-        .id;
+        let mid = ws
+            .modules
+            .iter()
+            .find(|m| m.id != ModuleId::builtin())
+            .expect("one user module")
+            .id;
         ws.module(mid).ty_arena.len()
     };
 
@@ -1157,8 +1218,7 @@ fn cross_module_struct_field_resolves() {
 #[test]
 fn cross_module_struct_literal_resolves() {
     let mod_a = parse_rock_with_file("struct Point { x: int, y: int }", "mod_a").unwrap();
-    let mod_b =
-        parse_rock_with_file("fn f() -> Point { Point { x: 1, y: 2 } }", "mod_b").unwrap();
+    let mod_b = parse_rock_with_file("fn f() -> Point { Point { x: 1, y: 2 } }", "mod_b").unwrap();
 
     semantic_pass(&mut [mod_a, mod_b]).expect("cross-module struct literal should resolve");
 }
@@ -1171,14 +1231,17 @@ fn cross_module_struct_literal_resolves() {
 #[test]
 fn tyid_stays_niche_packed() {
     use std::mem::size_of;
-    assert_eq!(size_of::<ModuleId>(), 4, "ModuleId must stay 4 bytes (NonMaxU32)");
+    assert_eq!(
+        size_of::<ModuleId>(),
+        4,
+        "ModuleId must stay 4 bytes (NonMaxU32)"
+    );
     assert_eq!(
         size_of::<TyId>(),
         8,
         "TyId must stay niche-packed at 8 bytes; a non-niche ModuleId field re-inflates it to 12"
     );
 }
-
 
 // Lowered holes and fresh inference metavars must never share a `VarId`.
 // Lowering mints hole `Infer` ids from a module-scoped counter (`lower.rs`
@@ -1266,7 +1329,9 @@ fn bone_rejects(src: &str) -> bool {
         m.id != ModuleId::builtin()
             && (!m.interface_errors.is_empty()
                 || !m.lowering_errors.is_empty()
-                || ws.inference(m.id).map_or(false, |inf| !inf.errors.is_empty()))
+                || ws
+                    .inference(m.id)
+                    .map_or(false, |inf| !inf.errors.is_empty()))
     })
 }
 
@@ -1520,7 +1585,10 @@ fn pure_heap_struct_literal_rejected() {
 struct S { n: int }
 @pure
 fn f() -> S { return S { n: 0 } }";
-    assert!(bone_rejects(src), "@pure returning a heap struct literal must be rejected");
+    assert!(
+        bone_rejects(src),
+        "@pure returning a heap struct literal must be rejected"
+    );
 }
 
 #[test]
@@ -1528,7 +1596,10 @@ fn pure_array_literal_rejected() {
     let src = "\
 @pure
 fn f() -> [int] { return [0] }";
-    assert!(bone_rejects(src), "@pure building an array literal must be rejected");
+    assert!(
+        bone_rejects(src),
+        "@pure building an array literal must be rejected"
+    );
 }
 
 #[test]
@@ -1536,7 +1607,10 @@ fn pure_lambda_rejected() {
     let src = "\
 @pure
 fn f() -> (int) -> int { return x => x }";
-    assert!(bone_rejects(src), "@pure creating a lambda must be rejected");
+    assert!(
+        bone_rejects(src),
+        "@pure creating a lambda must be rejected"
+    );
 }
 
 #[test]
@@ -1544,7 +1618,10 @@ fn pure_collection_index_rejected() {
     let src = "\
 @pure
 fn f(v: [int]) -> int { return v[0] }";
-    assert!(bone_rejects(src), "@pure indexing a collection must be rejected");
+    assert!(
+        bone_rejects(src),
+        "@pure indexing a collection must be rejected"
+    );
 }
 
 #[test]
@@ -1555,7 +1632,10 @@ fn pure_match_with_binding_accepted() {
 enum E { A(int) }
 @pure
 fn f(e: E) -> int { return match e { A(x) => x } }";
-    assert!(!bone_rejects(src), "@pure with a match-binding is pure -- bone accepts (diverges from rock)");
+    assert!(
+        !bone_rejects(src),
+        "@pure with a match-binding is pure -- bone accepts (diverges from rock)"
+    );
 }
 
 #[test]
@@ -1565,7 +1645,10 @@ fn pure_self_recursion_accepted() {
     let src = "\
 @pure
 fn f(n: int) -> int { return f(n) }";
-    assert!(!bone_rejects(src), "@pure self-recursion is pure -- bone accepts (diverges from rock)");
+    assert!(
+        !bone_rejects(src),
+        "@pure self-recursion is pure -- bone accepts (diverges from rock)"
+    );
 }
 
 #[test]
@@ -1589,29 +1672,49 @@ fn ref_type_survives_lowering_and_inference() {
         "struct Player { hp: int }\nfn identity(player: ref Player) -> ref Player { player }",
     )
     .expect("ref signature type checks");
-    let module = ws.modules.iter().find(|m| m.id != ModuleId::builtin()).unwrap();
-    let (_, identity) = module.functions.iter().find(|(_, f)| f.name.as_str() == "identity").unwrap();
+    let module = ws
+        .modules
+        .iter()
+        .find(|m| m.id != ModuleId::builtin())
+        .unwrap();
+    let (_, identity) = module
+        .functions
+        .iter()
+        .find(|(_, f)| f.name.as_str() == "identity")
+        .unwrap();
     assert_eq!(ws.render(None, identity.param_decls[0].ty), "ref Player");
-    assert_eq!(ws.render(None, identity.return_ty.expect("return type")), "ref Player");
+    assert_eq!(
+        ws.render(None, identity.return_ty.expect("return type")),
+        "ref Player"
+    );
 }
 
 #[test]
 fn ref_supports_direct_field_access_and_mutation() {
     let src = "struct Player { hp: int }\nfn main(player: ref Player) { player.hp = 1 }";
     let errors = main_body_error_messages(src);
-    assert!(errors.is_empty(), "a ref must expose the target struct's fields: {errors:?}");
+    assert!(
+        errors.is_empty(),
+        "a ref must expose the target struct's fields: {errors:?}"
+    );
 }
 
 #[test]
 fn reference_struct_place_can_be_borrowed_for_a_ref_parameter() {
     let src = "struct Player { hp: int }\nfn set_hp(player: ref Player) { player.hp = 2 }\nfn main() { let player = Player { hp: 1 }  set_hp(player) }";
-    assert!(!bone_rejects(src), "a reference-struct place can form a temporary ref argument");
+    assert!(
+        !bone_rejects(src),
+        "a reference-struct place can form a temporary ref argument"
+    );
 }
 
 #[test]
 fn temporary_cannot_be_borrowed_for_a_ref_parameter() {
     let src = "struct Player { hp: int }\nfn read(player: ref Player) -> int { player.hp }\nfn main() -> int { read(Player { hp: 1 }) }";
-    assert!(bone_rejects(src), "a temporary has no stable place for a ref to address");
+    assert!(
+        bone_rejects(src),
+        "a temporary has no stable place for a ref to address"
+    );
 }
 
 #[test]
@@ -1630,7 +1733,10 @@ fn local_place_cannot_be_returned_as_a_frame_reference() {
             "struct Player { hp: int }\nfn bad() -> () -> ref Player { return () => { let player = Player { hp: 1 }  player } }",
         ),
     ] {
-        assert!(bone_rejects(src), "{label} cannot return a ref to a local place");
+        assert!(
+            bone_rejects(src),
+            "{label} cannot return a ref to a local place"
+        );
     }
 }
 
@@ -1663,7 +1769,9 @@ fn main() {
 "#;
     let errors = main_body_error_messages(src);
     assert!(
-        errors.iter().any(|message| message.contains("relocatable Vec or Map storage")),
+        errors
+            .iter()
+            .any(|message| message.contains("relocatable Vec or Map storage")),
         "a retained Vec-element ref would dangle when growth relocates the buffer: {errors:?}"
     );
 }
@@ -1683,7 +1791,9 @@ fn main() {
 "#;
     let errors = main_body_error_messages(src);
     assert!(
-        errors.iter().any(|message| message.contains("relocatable Vec or Map storage")),
+        errors
+            .iter()
+            .any(|message| message.contains("relocatable Vec or Map storage")),
         "a ref-returning helper must preserve its Vec-element argument's ephemeral origin: {errors:?}"
     );
 }
@@ -1696,7 +1806,9 @@ fn main(positions: [Position]) -> ref Position { return positions[0] }
 "#;
     let errors = main_body_error_messages(src);
     assert!(
-        errors.iter().any(|message| message.contains("relocatable Vec or Map storage")),
+        errors
+            .iter()
+            .any(|message| message.contains("relocatable Vec or Map storage")),
         "borrowing the Vec header does not pin its relocatable element buffer: {errors:?}"
     );
 }
@@ -1762,12 +1874,30 @@ fn ref_cannot_cross_opaque_or_persistent_boundaries() {
 #[test]
 fn ref_types_are_rejected_in_persistent_declarations() {
     for (label, src) in [
-        ("reference struct field", "struct Player { hp: int }\nstruct Holder { player: ref Player }"),
-        ("value field", "struct Player { hp: int }\nvalue Holder { player: ref Player }"),
-        ("enum payload", "struct Player { hp: int }\nenum Event { Player(ref Player) }"),
-        ("global", "struct Player { hp: int }\nglobal PLAYER: (ref Player)? = null"),
-        ("container element", "struct Player { hp: int }\nglobal PLAYERS: [ref Player]"),
-        ("static local", "struct Player { hp: int }\nfn keep() { static PLAYER: (ref Player)? = null }"),
+        (
+            "reference struct field",
+            "struct Player { hp: int }\nstruct Holder { player: ref Player }",
+        ),
+        (
+            "value field",
+            "struct Player { hp: int }\nvalue Holder { player: ref Player }",
+        ),
+        (
+            "enum payload",
+            "struct Player { hp: int }\nenum Event { Player(ref Player) }",
+        ),
+        (
+            "global",
+            "struct Player { hp: int }\nglobal PLAYER: (ref Player)? = null",
+        ),
+        (
+            "container element",
+            "struct Player { hp: int }\nglobal PLAYERS: [ref Player]",
+        ),
+        (
+            "static local",
+            "struct Player { hp: int }\nfn keep() { static PLAYER: (ref Player)? = null }",
+        ),
     ] {
         assert!(bone_rejects(src), "{label} must reject frame-bound storage");
     }
@@ -1776,19 +1906,28 @@ fn ref_types_are_rejected_in_persistent_declarations() {
 #[test]
 fn closure_cannot_capture_a_ref() {
     let src = "struct Player { hp: int }\nfn bad(player: ref Player) -> () -> int { return () => player.hp }";
-    assert!(bone_rejects(src), "a persistent closure environment cannot contain a ref");
+    assert!(
+        bone_rejects(src),
+        "a persistent closure environment cannot contain a ref"
+    );
 }
 
 #[test]
 fn ref_cannot_live_across_a_coroutine_suspension() {
     let src = "struct Player { hp: int }\nco fn bad(player: ref Player) -> Coroutine<int> { yield 1  player.hp = 1 }";
-    assert!(bone_rejects(src), "a coroutine frame cannot retain a ref across yield");
+    assert!(
+        bone_rejects(src),
+        "a coroutine frame cannot retain a ref across yield"
+    );
 }
 
 #[test]
 fn ref_finished_before_a_coroutine_suspension_is_allowed() {
     let src = "struct Player { hp: int }\nco fn fine(player: ref Player) -> Coroutine<int> { player.hp = 1  yield 1 }";
-    assert!(!bone_rejects(src), "last use before yield does not put the ref in the coroutine frame");
+    assert!(
+        !bone_rejects(src),
+        "last use before yield does not put the ref in the coroutine frame"
+    );
 }
 
 // IDENTITY BORROW ACROSS SUSPENSION: an
@@ -1821,7 +1960,10 @@ fn identity_local_cannot_live_across_a_coroutine_suspension() {
 #[test]
 fn identity_local_finished_before_suspension_is_allowed() {
     let src = "struct Player { hp: int }\nfn make_player() -> Player { return Player { hp: 1 } }\nco fn fine() -> Coroutine<int> { let player = make_player()  player.hp = 2  yield 1 }";
-    assert!(!bone_rejects(src), "last use before yield does not retain the identity borrow");
+    assert!(
+        !bone_rejects(src),
+        "last use before yield does not retain the identity borrow"
+    );
 }
 
 #[test]
@@ -1848,7 +1990,11 @@ fn main(player: ref Player) { damage(player) }
 #[test]
 fn nobox_marker_reaches_typed_struct() {
     let ws = check("nobox value V { x: int }").expect("nobox value type checks");
-    let module = ws.modules.iter().find(|m| m.id != ModuleId::builtin()).unwrap();
+    let module = ws
+        .modules
+        .iter()
+        .find(|m| m.id != ModuleId::builtin())
+        .unwrap();
     let struct_idx = module.struct_by_name[&Ustr::from("V")];
     assert!(module.structs[struct_idx].is_value);
     assert!(module.structs[struct_idx].is_nobox);
@@ -2021,7 +2167,8 @@ fn main() {
         "the call must reject: {msgs:?}"
     );
     assert!(
-        msgs.iter().any(|m| m.contains("draw(a: A, tag: int) -> int")),
+        msgs.iter()
+            .any(|m| m.contains("draw(a: A, tag: int) -> int")),
         "candidate 1 signature must be listed: {msgs:?}"
     );
     assert!(
@@ -2035,14 +2182,22 @@ fn nullable_operator_diagnostic_labels_operands_without_an_overload_menu() {
     let fixture = include_str!("fixtures/cw7_nullable_operator_diagnostic.rock");
     for section in test_utils::parse_sections(fixture).into_iter().take(3) {
         let ws = check(section.content).expect("body errors are collected");
-        let errors: Vec<_> = ws.inferences_iter()
+        let errors: Vec<_> = ws
+            .inferences_iter()
             .flat_map(|(_, inf)| inf.errors.values().flatten())
             .collect();
         assert_eq!(errors.len(), 1, "{}: {errors:?}", section.name);
         let error = errors[0];
-        let (_, expected) = section.name.split_once(" @fail=").expect("diagnostic contract");
+        let (_, expected) = section
+            .name
+            .split_once(" @fail=")
+            .expect("diagnostic contract");
         assert_eq!(error.message, expected, "{error:?}");
-        let operands = if section.name.starts_with("both_nullable") { 2 } else { 1 };
+        let operands = if section.name.starts_with("both_nullable") {
+            2
+        } else {
+            1
+        };
         assert_eq!(error.labels.len(), operands, "{error:?}");
         for label in &error.labels {
             assert_eq!(label.message, "nullable operand");
@@ -2050,7 +2205,14 @@ fn nullable_operator_diagnostic_labels_operands_without_an_overload_menu() {
             let operand = &section.content[start..end];
             assert!(matches!(operand, "x" | "y"), "{operand:?}");
             if operands == 1 {
-                assert_eq!(operand, if section.name.starts_with("nullable_right") { "y" } else { "x" });
+                assert_eq!(
+                    operand,
+                    if section.name.starts_with("nullable_right") {
+                        "y"
+                    } else {
+                        "x"
+                    }
+                );
             }
         }
     }
@@ -2058,7 +2220,8 @@ fn nullable_operator_diagnostic_labels_operands_without_an_overload_menu() {
 
 #[test]
 fn nullable_operator_diagnostic_preserves_accessibility_precedence() {
-    let files = bone_semantic::test_support::parse_embedded_files(r#"
+    let files = bone_semantic::test_support::parse_embedded_files(
+        r#"
 //-- lib.rock @pkg=lib,1 @v1
 pub value Number { pub n: int }
 pub operator *(a: Number, b: int) -> int { b }
@@ -2066,12 +2229,20 @@ operator *(a: Number?, b: int) -> int { b }
 //-- app.rock @pkg=app,2 @v1
 use lib::{Number, operator(*)};
 fn multiply(x: Number?, y: int) -> int { x * y }
-"#);
+"#,
+    );
     let error = bone_semantic::test_support::check_types_embedded_with_stdlib(
         &files,
-        &[("<stdlib>/operators.rock", "operator *(a: float, b: float) -> float { a }")],
-    ).unwrap_err();
-    assert!(error.contains("matching overload is not accessible"), "{error}");
+        &[(
+            "<stdlib>/operators.rock",
+            "operator *(a: float, b: float) -> float { a }",
+        )],
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("matching overload is not accessible"),
+        "{error}"
+    );
 }
 
 /// A cost TIE (the ambiguous case) must list the tied candidate signatures,
@@ -2107,15 +2278,18 @@ fn main() {
         .map(|e| e.message.as_str())
         .collect();
     assert!(
-        msgs.iter().any(|m| m.contains("Ambiguous overload for `two`")),
+        msgs.iter()
+            .any(|m| m.contains("Ambiguous overload for `two`")),
         "the call must be ambiguous: {msgs:?}"
     );
     assert!(
-        msgs.iter().any(|m| m.contains("two(a: T, b: int) -> string")),
+        msgs.iter()
+            .any(|m| m.contains("two(a: T, b: int) -> string")),
         "tied candidate 1 must be listed: {msgs:?}"
     );
     assert!(
-        msgs.iter().any(|m| m.contains("two(a: int, b: T) -> string")),
+        msgs.iter()
+            .any(|m| m.contains("two(a: int, b: T) -> string")),
         "tied candidate 2 must be listed: {msgs:?}"
     );
 }
@@ -2138,7 +2312,8 @@ fn main() {
 }
 "#;
     let ws = check(src).expect("body errors are collected, not aborted");
-    let mid = ws.modules
+    let mid = ws
+        .modules
         .iter()
         .find(|m| m.id != ModuleId::builtin())
         .expect("one user module")
@@ -2167,7 +2342,8 @@ fn main() {
 fn operator_miss_reads_as_operator_error() {
     let msgs = main_body_error_messages("fn main() { let xs = [1, 2]\n let y = !xs }");
     assert!(
-        msgs.iter().any(|m| m.contains("operator `!` is not defined for")),
+        msgs.iter()
+            .any(|m| m.contains("operator `!` is not defined for")),
         "expected an operator-shaped message, got: {msgs:?}"
     );
     assert!(
@@ -2182,7 +2358,8 @@ fn unary_minus_miss_reads_as_operator_error() {
         "struct P { x: int }\nfn main() { let p = P { x: 1 }\n let q = -p }",
     );
     assert!(
-        msgs.iter().any(|m| m.contains("operator `-` is not defined for")),
+        msgs.iter()
+            .any(|m| m.contains("operator `-` is not defined for")),
         "expected an operator-shaped message, got: {msgs:?}"
     );
 }
@@ -2215,7 +2392,11 @@ fn annotation_float_args_lower_as_float() {
         }
     }
     got.sort();
-    assert_eq!(got, vec!["Float(-2.5)", "Float(1.5)"], "float annotation args must not lower to Other");
+    assert_eq!(
+        got,
+        vec!["Float(-2.5)", "Float(1.5)"],
+        "float annotation args must not lower to Other"
+    );
 }
 
 // Lossless lowering of param/field annotations: skull-side consumers (@size/@instance/@flat) read
@@ -2237,14 +2418,24 @@ fn param_annotations_survive_lowering() {
         .find(|(_, f)| f.name.as_str() == "f")
         .expect("fn f");
     let annotated = &f.param_decls[0];
-    assert_eq!(annotated.annotations.len(), 1, "param annotation must survive lowering");
+    assert_eq!(
+        annotated.annotations.len(),
+        1,
+        "param annotation must survive lowering"
+    );
     assert_eq!(annotated.annotations[0].name.name.as_str(), "size");
     assert!(
-        matches!(annotated.annotations[0].args[0].value, bone_semantic::hir::AnnoValue::Int(32)),
+        matches!(
+            annotated.annotations[0].args[0].value,
+            bone_semantic::hir::AnnoValue::Int(32)
+        ),
         "annotation arg must lower with its value, got {:?}",
         annotated.annotations[0].args[0].value
     );
-    assert!(f.param_decls[1].annotations.is_empty(), "unannotated param stays empty");
+    assert!(
+        f.param_decls[1].annotations.is_empty(),
+        "unannotated param stays empty"
+    );
 }
 
 #[test]
@@ -2264,10 +2455,17 @@ fn field_annotations_survive_lowering() {
         .find(|s| s.name.as_str() == "V")
         .expect("struct V");
     let annotated = &s.fields[0];
-    assert_eq!(annotated.annotations.len(), 1, "field annotation must survive lowering");
+    assert_eq!(
+        annotated.annotations.len(),
+        1,
+        "field annotation must survive lowering"
+    );
     assert_eq!(annotated.annotations[0].name.name.as_str(), "flat");
     assert!(annotated.annotations[0].args.is_empty());
-    assert!(s.fields[1].annotations.is_empty(), "unannotated field stays empty");
+    assert!(
+        s.fields[1].annotations.is_empty(),
+        "unannotated field stays empty"
+    );
 }
 
 // A resolved call to a generic fn persists the winning candidate's
@@ -2342,7 +2540,8 @@ fn use_it() -> int {
         .map(|e| e.message)
         .collect::<Vec<_>>();
     assert!(
-        msgs.iter().any(|m| m.contains("ambiguous fn-value reference `pick`")),
+        msgs.iter()
+            .any(|m| m.contains("ambiguous fn-value reference `pick`")),
         "a real overload as a value must stay ambiguous, got: {msgs:?}"
     );
 }
@@ -2375,9 +2574,11 @@ fn main() {
 
 #[test]
 fn legacy_caller_field_access_enforces_v1_visibility_and_allows_legacy() {
-    use bone_semantic::inference::{field_access, AccessDenied, AccessSite, FieldAccessNeed, Gamma};
+    use bone_semantic::inference::{
+        AccessDenied, AccessSite, FieldAccessNeed, Gamma, field_access,
+    };
     use bone_semantic::semantic_passes::semantic_pass_with_aliases;
-    use skull_parser::{parse_module_with_dialect, Dialect};
+    use skull_parser::{Dialect, parse_module_with_dialect};
 
     let v1_src = r#"
 pub struct Actor {
@@ -2386,8 +2587,8 @@ pub struct Actor {
     private secret: int,
 }
 "#;
-    let mut v1_mod = parse_module_with_dialect(v1_src, ustr("lib.rock"), Dialect::V1)
-        .expect("parse v1");
+    let mut v1_mod =
+        parse_module_with_dialect(v1_src, ustr("lib.rock"), Dialect::V1).expect("parse v1");
     v1_mod.package = Some(rock_core::source_code::PackageTag {
         id: 1,
         self_name: "game".to_string(),
@@ -2412,7 +2613,12 @@ struct LegacyActor {
     let mut modules = vec![v1_mod, legacy_mod];
     let ws = semantic_pass_with_aliases(&mut modules, &aliases).expect("semantic pass");
 
-    let mid = ws.modules.iter().find(|m| m.file == ustr("lib.rock")).unwrap().id;
+    let mid = ws
+        .modules
+        .iter()
+        .find(|m| m.file == ustr("lib.rock"))
+        .unwrap()
+        .id;
     let body = bone_core::hir::Body::default();
     let gamma = Gamma::new(&ws, &body, mid);
 
@@ -2423,51 +2629,159 @@ struct LegacyActor {
     };
 
     // Public field: legacy can read and write
-    assert!(field_access(&gamma, v1_key, ustr("health"), legacy_site, FieldAccessNeed::Read).is_ok());
-    assert!(field_access(&gamma, v1_key, ustr("health"), legacy_site, FieldAccessNeed::Write).is_ok());
+    assert!(
+        field_access(
+            &gamma,
+            v1_key,
+            ustr("health"),
+            legacy_site,
+            FieldAccessNeed::Read
+        )
+        .is_ok()
+    );
+    assert!(
+        field_access(
+            &gamma,
+            v1_key,
+            ustr("health"),
+            legacy_site,
+            FieldAccessNeed::Write
+        )
+        .is_ok()
+    );
 
     // private(set) field: legacy can read
-    assert!(field_access(&gamma, v1_key, ustr("mana"), legacy_site, FieldAccessNeed::Read).is_ok());
+    assert!(
+        field_access(
+            &gamma,
+            v1_key,
+            ustr("mana"),
+            legacy_site,
+            FieldAccessNeed::Read
+        )
+        .is_ok()
+    );
 
     // private(set) field: legacy write is denied
-    let write_mana = field_access(&gamma, v1_key, ustr("mana"), legacy_site, FieldAccessNeed::Write);
+    let write_mana = field_access(
+        &gamma,
+        v1_key,
+        ustr("mana"),
+        legacy_site,
+        FieldAccessNeed::Write,
+    );
     assert!(
-        matches!(write_mana, Err(AccessDenied::Privilege { need: FieldAccessNeed::Write, .. })),
+        matches!(
+            write_mana,
+            Err(AccessDenied::Privilege {
+                need: FieldAccessNeed::Write,
+                ..
+            })
+        ),
         "legacy caller writing private(set) field must be denied"
     );
 
     // private field: legacy read and write are both denied
-    let read_secret = field_access(&gamma, v1_key, ustr("secret"), legacy_site, FieldAccessNeed::Read);
+    let read_secret = field_access(
+        &gamma,
+        v1_key,
+        ustr("secret"),
+        legacy_site,
+        FieldAccessNeed::Read,
+    );
     assert!(
-        matches!(read_secret, Err(AccessDenied::Privilege { need: FieldAccessNeed::Read, .. })),
+        matches!(
+            read_secret,
+            Err(AccessDenied::Privilege {
+                need: FieldAccessNeed::Read,
+                ..
+            })
+        ),
         "legacy caller reading private field must be denied"
     );
-    let write_secret = field_access(&gamma, v1_key, ustr("secret"), legacy_site, FieldAccessNeed::Write);
+    let write_secret = field_access(
+        &gamma,
+        v1_key,
+        ustr("secret"),
+        legacy_site,
+        FieldAccessNeed::Write,
+    );
     assert!(
-        matches!(write_secret, Err(AccessDenied::Privilege { need: FieldAccessNeed::Write, .. })),
+        matches!(
+            write_secret,
+            Err(AccessDenied::Privilege {
+                need: FieldAccessNeed::Write,
+                ..
+            })
+        ),
         "legacy caller writing private field must be denied"
     );
 
     // Legacy-owned struct: legacy caller has unrestricted read/write
     let legacy_key = ustr("LegacyActor");
-    assert!(field_access(&gamma, legacy_key, ustr("health"), legacy_site, FieldAccessNeed::Read).is_ok());
-    assert!(field_access(&gamma, legacy_key, ustr("health"), legacy_site, FieldAccessNeed::Write).is_ok());
+    assert!(
+        field_access(
+            &gamma,
+            legacy_key,
+            ustr("health"),
+            legacy_site,
+            FieldAccessNeed::Read
+        )
+        .is_ok()
+    );
+    assert!(
+        field_access(
+            &gamma,
+            legacy_key,
+            ustr("health"),
+            legacy_site,
+            FieldAccessNeed::Write
+        )
+        .is_ok()
+    );
 
     // v1 caller within game package: can access private and private(set) fields
     let v1_site = AccessSite {
         package: Some(1),
         module_path: &[],
     };
-    assert!(field_access(&gamma, v1_key, ustr("mana"), v1_site, FieldAccessNeed::Write).is_ok());
-    assert!(field_access(&gamma, v1_key, ustr("secret"), v1_site, FieldAccessNeed::Read).is_ok());
-    assert!(field_access(&gamma, v1_key, ustr("secret"), v1_site, FieldAccessNeed::Write).is_ok());
+    assert!(
+        field_access(
+            &gamma,
+            v1_key,
+            ustr("mana"),
+            v1_site,
+            FieldAccessNeed::Write
+        )
+        .is_ok()
+    );
+    assert!(
+        field_access(
+            &gamma,
+            v1_key,
+            ustr("secret"),
+            v1_site,
+            FieldAccessNeed::Read
+        )
+        .is_ok()
+    );
+    assert!(
+        field_access(
+            &gamma,
+            v1_key,
+            ustr("secret"),
+            v1_site,
+            FieldAccessNeed::Write
+        )
+        .is_ok()
+    );
 }
 
 #[test]
 fn structural_interface_conformance_rejects_private_set_field_for_writable_interface() {
-    use bone_semantic::inference::{coerce_to_interface, Gamma};
+    use bone_semantic::inference::{Gamma, coerce_to_interface};
     use bone_semantic::semantic_passes::semantic_pass_with_aliases;
-    use skull_parser::{parse_module_with_dialect, Dialect};
+    use skull_parser::{Dialect, parse_module_with_dialect};
 
     let lib_src = r#"
 pub struct Actor {
@@ -2476,8 +2790,8 @@ pub struct Actor {
     private secret: int,
 }
 "#;
-    let mut lib_mod = parse_module_with_dialect(lib_src, ustr("lib.rock"), Dialect::V1)
-        .expect("parse lib");
+    let mut lib_mod =
+        parse_module_with_dialect(lib_src, ustr("lib.rock"), Dialect::V1).expect("parse lib");
     lib_mod.package = Some(rock_core::source_code::PackageTag {
         id: 1,
         self_name: "game".to_string(),
@@ -2498,8 +2812,9 @@ pub struct ReadableSecret {
     pub secret: int,
 }
 "#;
-    let mut consumer_mod = parse_module_with_dialect(consumer_src, ustr("consumer.rock"), Dialect::V1)
-        .expect("parse consumer");
+    let mut consumer_mod =
+        parse_module_with_dialect(consumer_src, ustr("consumer.rock"), Dialect::V1)
+            .expect("parse consumer");
     consumer_mod.package = Some(rock_core::source_code::PackageTag {
         id: 2,
         self_name: "consumer".to_string(),
@@ -2530,7 +2845,12 @@ pub struct ReadableSecret {
     ws.interface_names.insert(iface_missing);
     ws.interface_names.insert(iface_secret);
 
-    let consumer_mid = ws.modules.iter().find(|m| m.file == ustr("consumer.rock")).unwrap().id;
+    let consumer_mid = ws
+        .modules
+        .iter()
+        .find(|m| m.file == ustr("consumer.rock"))
+        .unwrap()
+        .id;
     let body = bone_core::hir::Body::default();
     let mut gamma = Gamma::new(&ws, &body, consumer_mid);
 
@@ -2538,7 +2858,10 @@ pub struct ReadableSecret {
 
     // Coercing Actor to WritableHealth is allowed: `health` is pub read/write
     let ok_res = coerce_to_interface(&mut gamma, actor_ty, iface_health, Span::unknown());
-    assert!(ok_res.is_ok(), "coercing to interface with pub read/write field must succeed");
+    assert!(
+        ok_res.is_ok(),
+        "coercing to interface with pub read/write field must succeed"
+    );
 
     // Coercing Actor to WritableMana must fail: `mana` is pub private(set), not writable from consumer
     let err_res = coerce_to_interface(&mut gamma, actor_ty, iface_mana, Span::unknown());
@@ -2609,11 +2932,19 @@ fn argument_matching_errors_name_the_parameter() {
     ];
     for (src, want) in cases {
         let msgs = all_err_msgs(src);
-        assert!(msgs.iter().any(|m| m == want), "expected `{want}` for\n{src}\ngot: {msgs:?}");
+        assert!(
+            msgs.iter().any(|m| m == want),
+            "expected `{want}` for\n{src}\ngot: {msgs:?}"
+        );
     }
 }
 
-fn identity_storage_errors(std_file: &str, std_src: &str, package: Option<&str>, user_src: &str) -> Vec<String> {
+fn identity_storage_errors(
+    std_file: &str,
+    std_src: &str,
+    package: Option<&str>,
+    user_src: &str,
+) -> Vec<String> {
     let std_module = parse_rock_with_file(std_src, std_file).expect("parse stdlib module");
     let mut user_module = parse_rock_with_file(user_src, "main.rock").expect("parse user module");
     user_module.package = package.map(|name| rock_core::source_code::PackageTag {
@@ -2632,7 +2963,11 @@ fn module_error_messages(ws: &bone_semantic::inference::Workspace) -> Vec<String
         .flat_map(|m| {
             m.interface_errors
                 .iter()
-                .chain(ws.inference(m.id).into_iter().flat_map(|inf| inf.errors.values().flatten()))
+                .chain(
+                    ws.inference(m.id)
+                        .into_iter()
+                        .flat_map(|inf| inf.errors.values().flatten()),
+                )
                 .map(|e| e.to_string())
         })
         .collect()
@@ -2657,7 +2992,10 @@ fn identity_storage_edge_admits_only_direct_rows() {
         Some("game"),
         "struct Mob { hp: int }\nglobal MOBS: ArenaStore<Mob> = ArenaStore { generations: [], data: [] }",
     );
-    assert!(admitted.is_empty(), "the annotated edge stores Arena rows: {admitted:?}");
+    assert!(
+        admitted.is_empty(),
+        "the annotated edge stores Arena rows: {admitted:?}"
+    );
 
     for (label, user) in [
         (
@@ -2671,7 +3009,9 @@ fn identity_storage_edge_admits_only_direct_rows() {
     ] {
         let errors = identity_storage_errors(arena, MINI_ARENA_STORE, Some("game"), user);
         assert!(
-            errors.iter().any(|e| e.contains("cannot store identity struct `Mob`")),
+            errors
+                .iter()
+                .any(|e| e.contains("cannot store identity struct `Mob`")),
             "{label} must reject: {errors:?}"
         );
     }
@@ -2679,9 +3019,16 @@ fn identity_storage_edge_admits_only_direct_rows() {
 
 #[test]
 fn identity_storage_capability_is_the_arena_files_alone() {
-    let forged = identity_storage_errors("<stdlib>/scene.rock", MINI_ARENA_STORE, Some("game"), "fn main() {}");
+    let forged = identity_storage_errors(
+        "<stdlib>/scene.rock",
+        MINI_ARENA_STORE,
+        Some("game"),
+        "fn main() {}",
+    );
     assert!(
-        forged.iter().any(|e| e.contains("`@identity_storage` is reserved")),
+        forged
+            .iter()
+            .any(|e| e.contains("`@identity_storage` is reserved")),
         "another stdlib file cannot claim the Arena row store: {forged:?}"
     );
     let not_vec = identity_storage_errors(
@@ -2703,29 +3050,50 @@ fn identity_storage_capability_is_the_arena_files_alone() {
 fn identity_storage_exemption_follows_the_package_declaration() {
     use rock_core::source_code::IdentityStorage;
     let user = "struct Mob { hp: int }\nstruct Room { mobs: [Mob] }\nfn count(held: [Mob]) -> int { return 0 }";
-    let enforced = identity_storage_errors("<stdlib>/fixture.rock", "fn print() {}", Some("game"), user);
+    let enforced =
+        identity_storage_errors("<stdlib>/fixture.rock", "fn print() {}", Some("game"), user);
     assert!(
-        enforced.iter().any(|e| e.contains("field `mobs` cannot store identity struct `Mob`")),
+        enforced
+            .iter()
+            .any(|e| e.contains("field `mobs` cannot store identity struct `Mob`")),
         "a package that declares nothing is enforced: {enforced:?}"
     );
     assert!(
-        enforced.iter().any(|e| e.contains("parameter `held` cannot store identity struct `Mob`")),
+        enforced
+            .iter()
+            .any(|e| e.contains("parameter `held` cannot store identity struct `Mob`")),
         "the body check follows the same declaration: {enforced:?}"
     );
     let unpackaged = identity_storage_errors("<stdlib>/fixture.rock", "fn print() {}", None, user);
-    assert!(unpackaged.is_empty(), "unpackaged programs are exempt outside bone fixtures: {unpackaged:?}");
+    assert!(
+        unpackaged.is_empty(),
+        "unpackaged programs are exempt outside bone fixtures: {unpackaged:?}"
+    );
     let check = |identity_storage: IdentityStorage| {
         let mut module = parse_rock_with_file(user, "main.rock").expect("parse user module");
-        module.package = Some(rock_core::source_code::PackageTag { id: 1, self_name: "migrating".into(), identity_storage });
-        let ws = bone_semantic::semantic_passes::semantic_pass_into(Default::default(), &mut [module], &Default::default())
-            .expect("semantic pass");
+        module.package = Some(rock_core::source_code::PackageTag {
+            id: 1,
+            self_name: "migrating".into(),
+            identity_storage,
+        });
+        let ws = bone_semantic::semantic_passes::semantic_pass_into(
+            Default::default(),
+            &mut [module],
+            &Default::default(),
+        )
+        .expect("semantic pass");
         module_error_messages(&ws)
     };
     let exempt = check(IdentityStorage::Exempt);
-    assert!(exempt.is_empty(), "a package declared exempt gets no diagnostics: {exempt:?}");
+    assert!(
+        exempt.is_empty(),
+        "a package declared exempt gets no diagnostics: {exempt:?}"
+    );
     let declared = check(IdentityStorage::Enforced);
     assert!(
-        declared.iter().any(|e| e.contains("field `mobs` cannot store identity struct `Mob`")),
+        declared
+            .iter()
+            .any(|e| e.contains("field `mobs` cannot store identity struct `Mob`")),
         "a package declared enforced is enforced: {declared:?}"
     );
 }
@@ -2737,10 +3105,10 @@ fn identity_storage_exemption_follows_the_package_declaration() {
 #[test]
 fn identity_storage_module_exemption_follows_the_module_path() {
     use bone_core::modules::{NsAliases, PackageAliases};
-    use bone_semantic::identity_storage::{identity_storage_exemption, IdentityStorageExemption};
+    use bone_semantic::identity_storage::{IdentityStorageExemption, identity_storage_exemption};
     use bone_semantic::semantic_passes::semantic_pass_with_aliases;
     use rock_core::source_code::{IdentityStorage, PackageTag};
-    use skull_parser::{parse_module_with_dialect, Dialect};
+    use skull_parser::{Dialect, parse_module_with_dialect};
 
     let files = [
         ("nav.rock", "pub mod nav;", "NavMob"),
@@ -2782,8 +3150,16 @@ fn identity_storage_module_exemption_follows_the_module_path() {
         modules.push(other);
         let aliases = NsAliases {
             packages: vec![
-                PackageAliases { id: 1, self_name: ustr("game"), aliases: vec![] },
-                PackageAliases { id: 2, self_name: ustr("other"), aliases: vec![] },
+                PackageAliases {
+                    id: 1,
+                    self_name: ustr("game"),
+                    aliases: vec![],
+                },
+                PackageAliases {
+                    id: 2,
+                    self_name: ustr("other"),
+                    aliases: vec![],
+                },
             ],
         };
         semantic_pass_with_aliases(&mut modules, &aliases).expect("semantic pass")
@@ -2793,46 +3169,88 @@ fn identity_storage_module_exemption_follows_the_module_path() {
     let errors = module_error_messages(&ws);
     for (_, _, mob) in files {
         assert!(
-            errors.iter().any(|e| e.contains("cannot store identity struct") && e.contains(&format!("{mob}`;"))),
+            errors
+                .iter()
+                .any(|e| e.contains("cannot store identity struct")
+                    && e.contains(&format!("{mob}`;"))),
             "every module holds the same violation while `game` is enforced: {errors:?}"
         );
     }
 
-    let ws = build(IdentityStorage::ExemptModules(vec!["nav".to_string(), "world".to_string()]));
+    let ws = build(IdentityStorage::ExemptModules(vec![
+        "nav".to_string(),
+        "world".to_string(),
+    ]));
     let exemption_of = |file: &str| {
-        let module = ws.modules.iter().find(|m| m.file == ustr(file)).expect("fixture module");
+        let module = ws
+            .modules
+            .iter()
+            .find(|m| m.file == ustr(file))
+            .expect("fixture module");
         identity_storage_exemption(&ws, module)
     };
     let nav = Some(IdentityStorageExemption::Module(ustr("nav")));
     assert_eq!(exemption_of("nav.rock"), nav);
     assert_eq!(exemption_of("nav/graph.rock"), nav);
-    assert_eq!(exemption_of("navigation.rock"), None, "a prefix matches whole segments");
-    assert_eq!(exemption_of("world.rock"), Some(IdentityStorageExemption::Module(ustr("world"))));
-    assert_eq!(exemption_of("other/world.rock"), None, "a declaration covers its own package only");
-    assert_eq!(exemption_of("lib.rock"), None, "the package root is not under `nav`");
+    assert_eq!(
+        exemption_of("navigation.rock"),
+        None,
+        "a prefix matches whole segments"
+    );
+    assert_eq!(
+        exemption_of("world.rock"),
+        Some(IdentityStorageExemption::Module(ustr("world")))
+    );
+    assert_eq!(
+        exemption_of("other/world.rock"),
+        None,
+        "a declaration covers its own package only"
+    );
+    assert_eq!(
+        exemption_of("lib.rock"),
+        None,
+        "the package root is not under `nav`"
+    );
     assert!(ws.fragment_scopes.get(&ustr("legacy.rock")).is_none());
-    assert_eq!(exemption_of("legacy.rock"), None, "a module with no v1 path matches no prefix");
+    assert_eq!(
+        exemption_of("legacy.rock"),
+        None,
+        "a module with no v1 path matches no prefix"
+    );
     let errors = module_error_messages(&ws);
     assert!(
-        !errors.iter().any(|e| e.contains("NavMob`;") || e.contains("GraphMob`;")),
+        !errors
+            .iter()
+            .any(|e| e.contains("NavMob`;") || e.contains("GraphMob`;")),
         "exempt modules get no diagnostics: {errors:?}"
     );
-    assert!(errors.iter().any(|e| e.contains("NavigationMob`;")), "{errors:?}");
+    assert!(
+        errors.iter().any(|e| e.contains("NavigationMob`;")),
+        "{errors:?}"
+    );
 }
 
 #[test]
 fn migrated_package_identity_storage_is_enforced() {
     let user = "struct Mob { hp: int }\nstruct Room { mobs: [Mob] }\nfn count(held: [Mob]) -> int { return 0 }";
-    let errors = identity_storage_errors("<stdlib>/fixture.rock", "fn print() {}", Some("migrated_package"), user);
+    let errors = identity_storage_errors(
+        "<stdlib>/fixture.rock",
+        "fn print() {}",
+        Some("migrated_package"),
+        user,
+    );
     assert!(
-        errors.iter().any(|e| e.contains("field `mobs` cannot store identity struct `Mob`")),
+        errors
+            .iter()
+            .any(|e| e.contains("field `mobs` cannot store identity struct `Mob`")),
         "migrated_package fields must reject ordinary identity storage: {errors:?}"
     );
     assert!(
-        errors.iter().any(|e| e.contains("parameter `held` cannot store identity struct `Mob`")),
+        errors
+            .iter()
+            .any(|e| e.contains("parameter `held` cannot store identity struct `Mob`")),
         "migrated_package bodies must reject ordinary identity storage: {errors:?}"
     );
-
 }
 
 // Identity-to-`any` erasure is recorded where `coerce` accepts the `any`
@@ -2840,10 +3258,15 @@ fn migrated_package_identity_storage_is_enforced() {
 // overload scoring and `as` classification try coercions they then undo.
 #[test]
 fn any_erasure_record_follows_trial_rollback() {
-    use bone_semantic::inference::{coerce, Gamma};
+    use bone_semantic::inference::{Gamma, coerce};
 
     let ws = check("struct Mob { hp: int }\nfn main() { }").expect("semantic pass");
-    let mid = ws.modules.iter().find(|m| m.file == ustr("<parse_rock>")).unwrap().id;
+    let mid = ws
+        .modules
+        .iter()
+        .find(|m| m.file == ustr("<parse_rock>"))
+        .unwrap()
+        .id;
     let body = bone_core::hir::Body::default();
     let mut gamma = Gamma::new(&ws, &body, mid);
     let mob = gamma.nominal_app(ustr("Mob"), &[], Span::unknown());
@@ -2851,17 +3274,29 @@ fn any_erasure_record_follows_trial_rollback() {
 
     let snap = gamma.out.checkpoint();
     assert!(gamma.trial(|g| coerce(g, mob, any, Span::unknown()).is_ok()));
-    assert_eq!(gamma.out.any_erasures.len(), 1, "the accepted erasure is recorded");
+    assert_eq!(
+        gamma.out.any_erasures.len(),
+        1,
+        "the accepted erasure is recorded"
+    );
     gamma.out.rollback_to(snap);
-    assert!(gamma.out.any_erasures.is_empty(), "a rolled-back trial keeps no erasure");
+    assert!(
+        gamma.out.any_erasures.is_empty(),
+        "a rolled-back trial keeps no erasure"
+    );
 
     coerce(&mut gamma, mob, any, Span::unknown()).expect("identity coerces to any at inference");
-    assert_eq!(gamma.out.any_erasures.len(), 1, "a committed coercion keeps its erasure");
+    assert_eq!(
+        gamma.out.any_erasures.len(),
+        1,
+        "a committed coercion keeps its erasure"
+    );
 }
 
 #[test]
 fn enumerated_arena_records_the_lazy_iterator_protocol() {
-    let ws = check(r#"
+    let ws = check(
+        r#"
         value Entity<T> { idx: int }
         value Arena<T> { count: int }
         struct AIter<T> { arena: Arena<T> }
@@ -2873,27 +3308,68 @@ fn enumerated_arena_records_the_lazy_iterator_protocol() {
         fn f(arena: Arena<int>) {
             for (index, (entity, value)) in enumerate(arena) { let seen = value }
         }
-    "#).expect("enumerated Arena typechecks");
+    "#,
+    )
+    .expect("enumerated Arena typechecks");
     let module = &ws.modules[1];
-    let (fid, _) = module.functions.iter().find(|(_, f)| f.name.as_str() == "f").unwrap();
+    let (fid, _) = module
+        .functions
+        .iter()
+        .find(|(_, f)| f.name.as_str() == "f")
+        .unwrap();
     let inference = &ws.inference(module.id).unwrap().per_fn[&BodyOwner::Function(fid)];
     assert_eq!(inference.for_iter_protocol.len(), 1);
-    assert!(inference.for_iter_protocol.values().all(|info| info.iter.is_none()));
+    assert!(
+        inference
+            .for_iter_protocol
+            .values()
+            .all(|info| info.iter.is_none())
+    );
 }
 
 fn annotation_resolution_errors(sources: &[(&str, &str)]) -> Vec<String> {
     use bone_core::modules::{NsAliases, PackageAliases};
-    let mut modules: Vec<_> = sources.iter().map(|(file, source)| {
-        let mut ast = skull_parser::parse_module_clean_with_dialect(source, (*file).into(), skull_parser::Dialect::V1).unwrap();
-        ast.package = Some(rock_core::source_code::PackageTag { id: 1, self_name: "sample".into(), identity_storage: Default::default() });
-        ast
-    }).collect();
-    let aliases = NsAliases { packages: vec![PackageAliases { id: 1, self_name: "sample".into(), aliases: vec![] }] };
+    let mut modules: Vec<_> = sources
+        .iter()
+        .map(|(file, source)| {
+            let mut ast = skull_parser::parse_module_clean_with_dialect(
+                source,
+                (*file).into(),
+                skull_parser::Dialect::V1,
+            )
+            .unwrap();
+            ast.package = Some(rock_core::source_code::PackageTag {
+                id: 1,
+                self_name: "sample".into(),
+                identity_storage: Default::default(),
+            });
+            ast
+        })
+        .collect();
+    let aliases = NsAliases {
+        packages: vec![PackageAliases {
+            id: 1,
+            self_name: "sample".into(),
+            aliases: vec![],
+        }],
+    };
     match semantic_pass_with_aliases(&mut modules, &aliases) {
         Err(error) => vec![error.message],
-        Ok(ws) => ws.modules.iter().flat_map(|module| module.interface_errors.iter().chain(module.lowering_errors.values().flatten()))
-            .chain(ws.inferences_iter().flat_map(|(_, inf)| inf.errors.values().flatten()))
-            .map(|error| error.message.clone()).collect(),
+        Ok(ws) => ws
+            .modules
+            .iter()
+            .flat_map(|module| {
+                module
+                    .interface_errors
+                    .iter()
+                    .chain(module.lowering_errors.values().flatten())
+            })
+            .chain(
+                ws.inferences_iter()
+                    .flat_map(|(_, inf)| inf.errors.values().flatten()),
+            )
+            .map(|error| error.message.clone())
+            .collect(),
     }
 }
 
@@ -2904,7 +3380,12 @@ fn ambiguous_annotation_does_not_select_builtin() {
         ("b.rock", "mod b; pub deco init test {}"),
         ("main.rock", "use a::*; use b::*; @test fn probe() {}"),
     ]);
-    assert!(errors.iter().any(|error| error.contains("test") && error.contains("ambiguous")), "{errors:?}");
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("test") && error.contains("ambiguous")),
+        "{errors:?}"
+    );
     let valid = annotation_resolution_errors(&[
         ("a.rock", "mod a; pub deco init test {}"),
         ("main.rock", "use a::*; @test fn probe() {}"),
@@ -2914,16 +3395,29 @@ fn ambiguous_annotation_does_not_select_builtin() {
 
 #[test]
 fn annotation_wire_onchange_references_must_resolve() {
-    for (name, diagnostic) in [("missing", "did not resolve"), ("changed", "not a single definition")] {
-        let source = format!("use a::*; use b::*; deco init wire {{}} @wire(onchange=[{name}]) fn probe() {{}}");
+    for (name, diagnostic) in [
+        ("missing", "did not resolve"),
+        ("changed", "not a single definition"),
+    ] {
+        let source = format!(
+            "use a::*; use b::*; deco init wire {{}} @wire(onchange=[{name}]) fn probe() {{}}"
+        );
         let errors = annotation_resolution_errors(&[
             ("a.rock", "mod a; pub fn changed() {}"),
             ("b.rock", "mod b; pub fn changed() {}"),
             ("main.rock", &source),
         ]);
-        assert!(errors.iter().any(|error| error.contains(name) && error.contains(diagnostic)), "{name}: {errors:?}");
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains(name) && error.contains(diagnostic)),
+            "{name}: {errors:?}"
+        );
     }
-    let valid = annotation_resolution_errors(&[("main.rock", "deco init wire {} fn changed() {} @wire(onchange=[changed]) fn probe() {}")]);
+    let valid = annotation_resolution_errors(&[(
+        "main.rock",
+        "deco init wire {} fn changed() {} @wire(onchange=[changed]) fn probe() {}",
+    )]);
     assert!(valid.is_empty(), "{valid:?}");
 }
 
@@ -2938,13 +3432,17 @@ fn legacy_struct_sharing_a_stdlib_name_reports_the_duplicate_at_the_user_file() 
     let mut modules = Vec::new();
     for f in rock_stdlib::stdlib_files() {
         modules.push(
-            skull_parser::parse_module_clean(f.contents, Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str()))
-                .expect("stdlib parses"),
+            skull_parser::parse_module_clean(
+                f.contents,
+                Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str()),
+            )
+            .expect("stdlib parses"),
         );
     }
-    let user_src =
-        "struct Scene { name: string }\nfn main() {\n    let s = Scene { name: \"hi\" }\n    print(s.name)\n}\n";
-    modules.push(skull_parser::parse_module_clean(user_src, Ustr::from("user.rock")).expect("user parses"));
+    let user_src = "struct Scene { name: string }\nfn main() {\n    let s = Scene { name: \"hi\" }\n    print(s.name)\n}\n";
+    modules.push(
+        skull_parser::parse_module_clean(user_src, Ustr::from("user.rock")).expect("user parses"),
+    );
     let ws = match semantic_pass(&mut modules) {
         Ok(ws) => ws,
         Err(e) => panic!("expected a recorded duplicate error, got fail-fast: {e}"),
@@ -2952,14 +3450,21 @@ fn legacy_struct_sharing_a_stdlib_name_reports_the_duplicate_at_the_user_file() 
     let errs: Vec<&CompilerError> = ws
         .inferences_iter()
         .flat_map(|(_, inf)| inf.errors.values().flatten())
-        .chain(ws.modules.iter().flat_map(|m| m.lowering_errors.values().flatten()))
+        .chain(
+            ws.modules
+                .iter()
+                .flat_map(|m| m.lowering_errors.values().flatten()),
+        )
         .chain(ws.modules.iter().flat_map(|m| m.interface_errors.iter()))
         .collect();
     assert!(
-        errs.iter().any(|e| e.message == "duplicate struct `Scene` across modules"
-            && e.location.file == Ustr::from("user.rock")),
+        errs.iter()
+            .any(|e| e.message == "duplicate struct `Scene` across modules"
+                && e.location.file == Ustr::from("user.rock")),
         "expected the duplicate at the user file, got: {:?}",
-        errs.iter().map(|e| (e.message.as_str(), e.location.file)).collect::<Vec<_>>()
+        errs.iter()
+            .map(|e| (e.message.as_str(), e.location.file))
+            .collect::<Vec<_>>()
     );
     for e in &errs {
         for file in std::iter::once(e.location.file).chain(e.labels.iter().map(|l| l.span.file)) {

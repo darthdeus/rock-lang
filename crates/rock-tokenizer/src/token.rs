@@ -42,10 +42,10 @@ pub enum TokenKind {
     Macro,
 
     // Preprocessor directives
-    DirectiveIf,      // #if
-    DirectiveElseIf,  // #elseif
-    DirectiveElse,    // #else
-    DirectiveEnd,     // #end
+    DirectiveIf,     // #if
+    DirectiveElseIf, // #elseif
+    DirectiveElse,   // #else
+    DirectiveEnd,    // #end
 
     Arrow,
     FatArrow,
@@ -234,7 +234,7 @@ impl TokenKind {
             Assign => right(5),
 
             DoubleColon => left(7),
-            DoubleDot => left(12),  // Range operator: between logical ops and comparisons
+            DoubleDot => left(12), // Range operator: between logical ops and comparisons
 
             AddAssign | SubAssign | MulAssign | DivAssign => right(9),
 
@@ -467,11 +467,7 @@ impl TokenKind {
 /// excluded — they're identifiers outside their specific syntactic
 /// context, recognized by parser lookahead rather than the lexer.
 pub const KEYWORDS: &[&str] = &[
-    "fn", "operator", "table", "type", "as", "yield", "await",
-    "if", "else", "for", "in", "while", "loop", "break", "continue",
-    "let", "return", "defer",
-    "struct", "newtype",
-    "null", "enum", "match", "extern", "global",
-    "deco", "macro",
-    "true", "false",
+    "fn", "operator", "table", "type", "as", "yield", "await", "if", "else", "for", "in", "while",
+    "loop", "break", "continue", "let", "return", "defer", "struct", "newtype", "null", "enum",
+    "match", "extern", "global", "deco", "macro", "true", "false",
 ];

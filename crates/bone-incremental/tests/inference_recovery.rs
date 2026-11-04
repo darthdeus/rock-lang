@@ -16,16 +16,16 @@
 //! `infer_module` stores the partial `BodyInference` in `per_fn` and records
 //! the error(s) in `InferenceResult.errors`.
 
-use bone_semantic::prelude::*;
 use bone_incremental::session::Session;
+use bone_semantic::prelude::*;
 
 fn parse(src: &str) -> skull_parser::Ast {
     skull_parser::parse_module_clean(src, Ustr::from("<inference_recovery>")).expect("parse")
 }
 
 fn ws_of(src: &str) -> (Workspace, ModuleId) {
-    let ws = semantic_pass(&mut [parse(src)])
-        .expect("a body INFERENCE error must not abort the pass");
+    let ws =
+        semantic_pass(&mut [parse(src)]).expect("a body INFERENCE error must not abort the pass");
     let mid = ws
         .modules
         .iter()
@@ -132,7 +132,8 @@ fn main() {
     let b: int = \"bad two\"
 }
 ";
-    let mut s = Session::new(vec![], vec![], &bone_core::modules::NsAliases::default()).expect("session");
+    let mut s =
+        Session::new(vec![], vec![], &bone_core::modules::NsAliases::default()).expect("session");
     let _ = s.update_file("c.rock", src);
     let diags = s.diagnostics();
     assert!(

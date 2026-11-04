@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use skull_graph::instance_graph;
 use skull_mir::instance::Instance;
-use skull_mir::lower::{lower_instance_with_plans, ScalarCtx};
+use skull_mir::lower::{ScalarCtx, lower_instance_with_plans};
 use skull_mir::monoty::MonoInterner;
 
 fn lower_test_root(
@@ -10,15 +10,17 @@ fn lower_test_root(
     mid: bone_semantic::prelude::ModuleId,
     fid: comfy_la_arena::Idx<bone_semantic::hir::Function>,
 ) -> Result<skull_mir::mir::MirFunc, skull_parser::CompilerError> {
-    let root = skull_mir::mir::FuncRef { module: mid, func: fid };
+    let root = skull_mir::mir::FuncRef {
+        module: mid,
+        func: fid,
+    };
     let interner = Arc::new(MonoInterner::new());
     let graph = instance_graph::build_in(ws, vec![root], false, Arc::clone(&interner));
     let concrete = skull_graph::concrete_body::build(ws, &graph);
     let scx = ScalarCtx::new(ws).sharing(interner);
-    let plan = concrete
-        .plans
-        .get(&Instance::base(root))
-        .ok_or_else(|| skull_parser::CompilerError::new_no_location("no concrete plan for test root"))?;
+    let plan = concrete.plans.get(&Instance::base(root)).ok_or_else(|| {
+        skull_parser::CompilerError::new_no_location("no concrete plan for test root")
+    })?;
     lower_instance_with_plans(ws, &scx, plan, &concrete.plans)
 }
 
@@ -53,8 +55,7 @@ fn narrowed_nullable_nobox_field_uses_the_nonnull_read_shape() {
                    row.goal = goal\n\
                    row.goal == goal\n\
                }";
-    let ast = skull_parser::parse_module_clean(src, ustr::Ustr::from("<test>"))
-        .expect("parse");
+    let ast = skull_parser::parse_module_clean(src, ustr::Ustr::from("<test>")).expect("parse");
     let dump = lower_dump(vec![ast], "compare");
     assert!(dump.contains("return"), "comparison must lower: {dump}");
 }
@@ -116,14 +117,22 @@ fn value_constructors_carry_the_owned_representation() {
                 other => panic!("value constructor must carry a leaf plan, got {other:?}"),
             };
             let expected = match form {
-                skull_mir::mir::ValueCtorForm::Declared => skull_mir::lower::struct_field_names(&ws, *name),
+                skull_mir::mir::ValueCtorForm::Declared => {
+                    skull_mir::lower::struct_field_names(&ws, *name)
+                }
                 skull_mir::mir::ValueCtorForm::Leaves => skull_mir::lower::value_leaf_paths(&shape),
             };
             let actual = fields.iter().map(|(field, _)| *field).collect::<Vec<_>>();
-            assert_eq!(actual, expected, "constructor `{name}` fields must match its selected form");
+            assert_eq!(
+                actual, expected,
+                "constructor `{name}` fields must match its selected form"
+            );
         }
     }
-    assert!(constructors > 0, "fixture must exercise a value constructor");
+    assert!(
+        constructors > 0,
+        "fixture must exercise a value constructor"
+    );
 }
 
 /// Stdlib-free: enough for literals, vars, `let`, and builtin operators.
@@ -158,8 +167,14 @@ fn value_struct_literal_scalarizes_at_boundary_else_cdata() {
         "value V2 { x: int, y: int }\n fn f() -> V2 { V2 { y: 7, x: 3 } }",
         "f",
     );
-    assert!(!dump.contains("V2_ct"), "value return must scalarize (no cdata ctor), got:\n{dump}");
-    assert!(!dump.contains("make_struct") && !dump.contains("__ty"), "value struct must not be a table:\n{dump}");
+    assert!(
+        !dump.contains("V2_ct"),
+        "value return must scalarize (no cdata ctor), got:\n{dump}"
+    );
+    assert!(
+        !dump.contains("make_struct") && !dump.contains("__ty"),
+        "value struct must not be a table:\n{dump}"
+    );
     // A literal escaping into a COLUMN-ELIGIBLE `[V2]` builds no element at
     // all: the leaves land straight in the per-leaf columns. Value semantics
     // still hold -- storing the scalar leaves IS the copy.
@@ -205,8 +220,14 @@ fn compound_assign_to_vec_index() {
         "fn f() -> int { let arr = [10, 20, 30]\n arr[1] += 5\n arr[1] }",
         "f",
     );
-    assert!(dump.contains("store_index"), "expected a store_index, got:\n{dump}");
-    assert!(dump.contains("int_add") || dump.contains("add"), "expected an add, got:\n{dump}");
+    assert!(
+        dump.contains("store_index"),
+        "expected a store_index, got:\n{dump}"
+    );
+    assert!(
+        dump.contains("int_add") || dump.contains("add"),
+        "expected an add, got:\n{dump}"
+    );
 }
 
 #[test]
@@ -215,7 +236,10 @@ fn compound_assign_to_struct_field() {
         "struct P { x: int }\n fn f() -> int { let p = P { x: 1 }\n p.x += 9\n p.x }",
         "f",
     );
-    assert!(dump.contains("store_field"), "expected a store_field, got:\n{dump}");
+    assert!(
+        dump.contains("store_field"),
+        "expected a store_field, got:\n{dump}"
+    );
 }
 
 #[test]
@@ -248,7 +272,10 @@ fn omitted_result_discards_tail_value_after_its_effects() {
          fn sink() { produce() }",
         "sink",
     );
-    assert!(dump.contains("call"), "the tail call must still execute, got:\n{dump}");
+    assert!(
+        dump.contains("call"),
+        "the tail call must still execute, got:\n{dump}"
+    );
     assert!(
         dump.lines().any(|line| line.trim() == "return"),
         "a function with no declared result must return no value, got:\n{dump}"
@@ -266,7 +293,10 @@ fn omitted_result_discards_tail_value_after_its_effects() {
 #[test]
 fn inferred_lambda_result_remains_value_bearing() {
     let dump = mir_std("fn sink() { let xs = [2, 1]\n xs.sort(x => x) }", "sink");
-    assert!(dump.contains("lambda"), "fixture must lower the sort key lambda, got:\n{dump}");
+    assert!(
+        dump.contains("lambda"),
+        "fixture must lower the sort key lambda, got:\n{dump}"
+    );
     assert!(
         dump.lines().any(|line| line.trim().starts_with("return v")),
         "the context-inferred lambda result must remain value-bearing, got:\n{dump}"
@@ -400,7 +430,10 @@ return v1
 #[test]
 fn if_as_value_joins_through_a_cell() {
     assert_eq!(
-        mir("fn sign(x: int) -> int { let value = if x < 0 { 0 } else { 1 }; value }", "sign"),
+        mir(
+            "fn sign(x: int) -> int { let value = if x < 0 { 0 } else { 1 }; value }",
+            "sign"
+        ),
         "\
 fn sign(c0) {
   bb0:
@@ -672,7 +705,10 @@ fn enum_unit_variant() {
     // A payload-free enum is just its integer tag: the unit variant lowers
     // to a plain int const (Red = 0), not an interned singleton table.
     assert_eq!(
-        mir("enum Color { Red, Green }\nfn f() -> Color { Color::Red }", "f"),
+        mir(
+            "enum Color { Red, Green }\nfn f() -> Color { Color::Red }",
+            "f"
+        ),
         "\
 fn f() {
   bb0:
@@ -831,7 +867,10 @@ return v2
 #[test]
 fn field_assignment_is_store_field() {
     assert_eq!(
-        mir("struct P { x: int, y: int }\nfn f(p: P) -> int { p.x = 5; p.x }", "f"),
+        mir(
+            "struct P { x: int, y: int }\nfn f(p: P) -> int { p.x = 5; p.x }",
+            "f"
+        ),
         "\
 fn f(c0) {
   bb0:
@@ -965,10 +1004,16 @@ fn match_payload_bindings_retain_their_semantic_types() {
         let cell = mir
             .cells
             .iter()
-            .find(|(_, cell)| cell.name.is_some_and(|cell_name| cell_name.as_str() == name))
+            .find(|(_, cell)| {
+                cell.name
+                    .is_some_and(|cell_name| cell_name.as_str() == name)
+            })
             .map(|(_, cell)| cell)
             .unwrap_or_else(|| panic!("missing match binding `{name}`: {mir}"));
-        assert!(cell.ty.is_some(), "match binding `{name}` lost its semantic type: {mir}");
+        assert!(
+            cell.ty.is_some(),
+            "match binding `{name}` lost its semantic type: {mir}"
+        );
     }
 }
 
@@ -1140,9 +1185,13 @@ return
 #[test]
 fn unsupported_interpolation_hole_error_is_located_at_the_hole() {
     let src = "fn f(a: any) -> string {\n    return \"x {a}\"\n}";
-    let mut modules = vec![skull_parser::parse_module(src, ustr::Ustr::from("<test>")).expect("parse")];
+    let mut modules =
+        vec![skull_parser::parse_module(src, ustr::Ustr::from("<test>")).expect("parse")];
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
-    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("user module id");
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("user module id");
     let (fid, _) = ws
         .module(mid)
         .functions
@@ -1150,7 +1199,11 @@ fn unsupported_interpolation_hole_error_is_located_at_the_hole() {
         .find(|(_, f)| f.name.as_str() == "f")
         .expect("function by name");
     let err = lower_test_root(&ws, mid, fid).expect_err("an `any` hole has no rendering");
-    assert!(err.message.contains("interpolation hole"), "got: {:?}", err.message);
+    assert!(
+        err.message.contains("interpolation hole"),
+        "got: {:?}",
+        err.message
+    );
     let span = err.labels.first().expect("the hole is labeled").span;
     assert_eq!(&src[span.offset_range.0..span.offset_range.1], "a");
 }
@@ -1185,7 +1238,8 @@ fn nullable_nobox_presence_conditions_skip_normalization() {
 
 #[test]
 fn narrowed_nullable_handle_value_can_enter_a_nonnullable_map() {
-    mir_std(r#"
+    mir_std(
+        r#"
         struct Resource { id: int }
         value Handle { handle: Entity<Resource> }
         global CACHE: Map<string, Handle> = map_new()
@@ -1193,7 +1247,9 @@ fn narrowed_nullable_handle_value_can_enter_a_nonnullable_map() {
             if value == null { return }
             CACHE["active"] = value
         }
-    "#, "retain");
+    "#,
+        "retain",
+    );
 }
 
 #[test]
@@ -1203,14 +1259,31 @@ fn branch_conditions_do_not_materialize_logical_results() {
         ("if !(a || b) && c { return 1 } return 0", 0),
         ("while !(a || b) && c { break } return 0", 0),
         ("match 0 { _ if !(a || b) && c => 1, _ => 0 }", 2),
-        ("match 0 { _ if !(a || b) && c => { return 1 }, _ => {} } return 0", 0),
+        (
+            "match 0 { _ if !(a || b) && c => { return 1 }, _ => {} } return 0",
+            0,
+        ),
     ] {
         let src = format!("fn probe(a: bool, b: bool, c: bool) -> int {{ {body} }}");
-        let ast = skull_parser::parse_module_clean(&src, ustr::Ustr::from("<test>")).expect("parse");
+        let ast =
+            skull_parser::parse_module_clean(&src, ustr::Ustr::from("<test>")).expect("parse");
         let dump = lower_dump(vec![ast], "probe");
-        assert!(!dump.contains("const false"), "condition must branch without a boolean result: {dump}");
-        assert!(!dump.contains("const true"), "condition must branch without a boolean result: {dump}");
-        assert!(!dump.contains(" = not "), "native not must swap branch destinations: {dump}");
-        assert_eq!(dump.matches("store ").count(), result_stores, "only non-terminal arm values need stores: {dump}");
+        assert!(
+            !dump.contains("const false"),
+            "condition must branch without a boolean result: {dump}"
+        );
+        assert!(
+            !dump.contains("const true"),
+            "condition must branch without a boolean result: {dump}"
+        );
+        assert!(
+            !dump.contains(" = not "),
+            "native not must swap branch destinations: {dump}"
+        );
+        assert_eq!(
+            dump.matches("store ").count(),
+            result_stores,
+            "only non-terminal arm values need stores: {dump}"
+        );
     }
 }

@@ -19,7 +19,9 @@ fn ws_of(src: &str) -> Workspace {
 fn emit_program(src: &str) -> String {
     let ws = ws_of(src);
     let mid = skull::user_module_id(&ws).unwrap();
-    skull::mir_emit::emit_workspace_mir(&ws, mid).expect("emit").lua
+    skull::mir_emit::emit_workspace_mir(&ws, mid)
+        .expect("emit")
+        .lua
 }
 
 static UNIQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -31,10 +33,16 @@ fn run_luajit(prog: &str) -> String {
     // luajit read (truncated -> "'=' expected near '<eof>'") and its cleanup
     // deleted the other's file.
     let n = UNIQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let path = std::env::temp_dir()
-        .join(format!("skull_static_reload_{}_{}.lua", std::process::id(), n));
+    let path = std::env::temp_dir().join(format!(
+        "skull_static_reload_{}_{}.lua",
+        std::process::id(),
+        n
+    ));
     std::fs::write(&path, prog).expect("write program");
-    let out = Command::new("luajit").arg(&path).output().expect("spawn luajit");
+    let out = Command::new("luajit")
+        .arg(&path)
+        .output()
+        .expect("spawn luajit");
     let _ = std::fs::remove_file(&path);
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     assert!(
@@ -62,7 +70,10 @@ fn main() { RESULT = probe() }
 fn static_initializer_hash_is_reproducible_across_two_emits() {
     let a = emit_program(STRING_STATIC);
     let b = emit_program(STRING_STATIC);
-    assert_eq!(a, b, "two in-process emits of the same static inits must be byte-identical");
+    assert_eq!(
+        a, b,
+        "two in-process emits of the same static inits must be byte-identical"
+    );
 }
 
 /// `probe()` reads a static `n` (init 42); when the DO_SET global is set it
@@ -94,7 +105,10 @@ fn static_survives_hot_reload_no_reinit() {
          if __rock_globals[result_key] == 99 then print(\"PASS\")\n\
          else print(\"FAIL RESULT=\"..tostring(__rock_globals[result_key])); os.exit(1) end\n"
     );
-    assert!(run_luajit(&script).trim().starts_with("PASS"), "expected preserved static");
+    assert!(
+        run_luajit(&script).trim().starts_with("PASS"),
+        "expected preserved static"
+    );
 }
 
 /// RE-INIT: edit the initializer (42 -> 7) -> the key's init-hash changes, the
@@ -113,7 +127,10 @@ fn static_reinits_when_initializer_edited() {
          if __rock_globals[result_key] == 7 then print(\"PASS\")\n\
          else print(\"FAIL RESULT=\"..tostring(__rock_globals[result_key])); os.exit(1) end\n"
     );
-    assert!(run_luajit(&script).trim().starts_with("PASS"), "expected re-init on edit");
+    assert!(
+        run_luajit(&script).trim().starts_with("PASS"),
+        "expected re-init on edit"
+    );
 }
 
 /// UNRELATED edit in the same body must NOT change the static's key (the hash
@@ -134,7 +151,10 @@ fn static_preserved_when_unrelated_body_edited() {
          if __rock_globals[result_key] == 99 then print(\"PASS\")\n\
          else print(\"FAIL RESULT=\"..tostring(__rock_globals[result_key])); os.exit(1) end\n"
     );
-    assert!(run_luajit(&script).trim().starts_with("PASS"), "expected key stable under unrelated edit");
+    assert!(
+        run_luajit(&script).trim().starts_with("PASS"),
+        "expected key stable under unrelated edit"
+    );
 }
 
 /// A body edit that adds or removes a `static` changes no global's storage, so
@@ -160,18 +180,31 @@ global TOTAL: int = 0
 fn main() {}
 ";
 
-fn fn_body(ws: &Workspace, name: &str) -> (bone_semantic::prelude::ModuleId, bone_semantic::hir::BodyOwner) {
+fn fn_body(
+    ws: &Workspace,
+    name: &str,
+) -> (
+    bone_semantic::prelude::ModuleId,
+    bone_semantic::hir::BodyOwner,
+) {
     ws.modules
         .iter()
         .find_map(|module| {
-            module.functions.iter().find(|(_, f)| f.name.as_str() == name).map(|(fid, _)| {
-                (module.id, bone_semantic::hir::BodyOwner::Function(fid))
-            })
+            module
+                .functions
+                .iter()
+                .find(|(_, f)| f.name.as_str() == name)
+                .map(|(fid, _)| (module.id, bone_semantic::hir::BodyOwner::Function(fid)))
         })
         .unwrap_or_else(|| panic!("fixture declares {name}"))
 }
 
-fn overlay_run(tag: &str, before: &str, after: &str, script: impl Fn(&str, &str) -> String) -> String {
+fn overlay_run(
+    tag: &str,
+    before: &str,
+    after: &str,
+    script: impl Fn(&str, &str) -> String,
+) -> String {
     overlay_run_editing(tag, "bump", before, after, script)
 }
 
@@ -193,20 +226,29 @@ fn overlay_run_editing(
 
 #[test]
 fn a_body_edit_that_adds_a_static_overlays_over_live_globals() {
-    let out = overlay_run("static_added_overlay", COUNTER, COUNTER_WITH_STATIC, |full, overlay| {
-        format!(
-            "{full}\nassert(bump() == 1)\nassert(bump() == 2)\n{overlay}\n\
+    let out = overlay_run(
+        "static_added_overlay",
+        COUNTER,
+        COUNTER_WITH_STATIC,
+        |full, overlay| {
+            format!(
+                "{full}\nassert(bump() == 1)\nassert(bump() == 2)\n{overlay}\n\
              assert(bump() == 12)\nassert(bump() == 23)\nprint('ok')"
-        )
-    });
+            )
+        },
+    );
     assert_eq!(out, "ok");
 }
 
 #[test]
 fn a_body_edit_that_removes_a_static_overlays_over_live_globals() {
-    let out = overlay_run("static_removed_overlay", COUNTER_WITH_STATIC, COUNTER, |full, overlay| {
-        format!(
-            "{full}\nassert(bump() == 10)\nassert(bump() == 21)\n\
+    let out = overlay_run(
+        "static_removed_overlay",
+        COUNTER_WITH_STATIC,
+        COUNTER,
+        |full, overlay| {
+            format!(
+                "{full}\nassert(bump() == 10)\nassert(bump() == 21)\n\
              local function static_cells()\n\
                local n = 0\n\
                for key in pairs(__rock_globals) do\n\
@@ -219,8 +261,9 @@ fn a_body_edit_that_removes_a_static_overlays_over_live_globals() {
              assert(bump() == 22)\n\
              assert(static_cells() == 0, 'the removed static still holds ' .. static_cells() .. ' cells')\n\
              print('ok')"
-        )
-    });
+            )
+        },
+    );
     assert_eq!(out, "ok");
 }
 
@@ -244,9 +287,14 @@ fn main() {}
 #[test]
 fn a_body_edit_that_removes_a_specialized_generics_static_drops_its_cells() {
     let after = SPECIALIZED.replace("    static seen = 0\n    seen = seen + 1\n", "");
-    let out = overlay_run_editing("spec_static_removed_overlay", "tagged", SPECIALIZED, &after, |full, overlay| {
-        format!(
-            "{full}\nassert(bump() == 1)\n\
+    let out = overlay_run_editing(
+        "spec_static_removed_overlay",
+        "tagged",
+        SPECIALIZED,
+        &after,
+        |full, overlay| {
+            format!(
+                "{full}\nassert(bump() == 1)\n\
              local function static_cells()\n\
                local n = 0\n\
                for key in pairs(__rock_globals) do\n\
@@ -259,7 +307,8 @@ fn a_body_edit_that_removes_a_specialized_generics_static_drops_its_cells() {
              assert(bump() == 2)\n\
              assert(static_cells() == 0, 'the removed static still holds ' .. static_cells() .. ' cells')\n\
              print('ok')"
-        )
-    });
+            )
+        },
+    );
     assert_eq!(out, "ok");
 }

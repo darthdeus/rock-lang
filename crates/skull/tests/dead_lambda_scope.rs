@@ -29,7 +29,10 @@ fn main() { print("{thing()}") }
 "#;
     let lua = emit_module(src);
     let out = run_luajit(&format!("{lua}\nmain()\n"), "dead_nested");
-    assert_eq!(out, "42", "the live branch runs; the dead nested lambdas are dropped; got: {out}");
+    assert_eq!(
+        out, "42",
+        "the live branch runs; the dead nested lambdas are dropped; got: {out}"
+    );
 }
 
 /// A 3-deep nest inside a const-false branch: outer -> mid -> inner, all dead.
@@ -53,7 +56,10 @@ fn main() { print("{thing()}") }
 "#;
     let lua = emit_module(src);
     let out = run_luajit(&format!("{lua}\nmain()\n"), "dead_three_deep");
-    assert_eq!(out, "5", "the live branch runs; three dead nested lambdas are dropped; got: {out}");
+    assert_eq!(
+        out, "5",
+        "the live branch runs; three dead nested lambdas are dropped; got: {out}"
+    );
 }
 
 /// A const-false branch whose inner lambda CAPTURES an outer local: the dead
@@ -76,7 +82,10 @@ fn main() { print("{thing(4)}") }
 "#;
     let lua = emit_module(src);
     let out = run_luajit(&format!("{lua}\nmain()\n"), "dead_capturing");
-    assert_eq!(out, "8", "the live branch runs; the dead capturing lambdas are dropped; got: {out}");
+    assert_eq!(
+        out, "8",
+        "the live branch runs; the dead capturing lambdas are dropped; got: {out}"
+    );
 }
 
 /// Control: REACHABLE nested lambdas still hoist and run (the fix must not drop
@@ -102,5 +111,8 @@ fn main() { print("{thing(4)}") }
         "reachable nested lambdas must still hoist:\n{lua}"
     );
     let out = run_luajit(&format!("{lua}\nmain()\n"), "reachable_nested");
-    assert_eq!(out, "5", "the reachable nested capture reads x (4+1); got: {out}");
+    assert_eq!(
+        out, "5",
+        "the reachable nested capture reads x (4+1); got: {out}"
+    );
 }

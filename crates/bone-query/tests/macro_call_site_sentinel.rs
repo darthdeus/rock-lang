@@ -16,7 +16,7 @@
 // position so a local that merely shadows a macro name (used as a value, no
 // following paren) keeps its HIR classification.
 
-use bone_query::{semantic_tokens_legend, semantic_tokens_modifiers_legend, BoneWorkspace};
+use bone_query::{BoneWorkspace, semantic_tokens_legend, semantic_tokens_modifiers_legend};
 use lsp_types::{SemanticTokenModifier, SemanticTokenType};
 
 const PATH: &str = "/probe/main.rock";

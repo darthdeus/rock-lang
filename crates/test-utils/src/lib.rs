@@ -102,14 +102,24 @@ pub fn extract_annotations(text: &str) -> Vec<((usize, usize), String)> {
 }
 
 enum LineAnnotation {
-    Annotation { range: (usize, usize), content: String },
-    Continuation { offset: usize, content: String },
+    Annotation {
+        range: (usize, usize),
+        content: String,
+    },
+    Continuation {
+        offset: usize,
+        content: String,
+    },
 }
 
 fn extract_line_annotations(mut line: &str) -> Vec<LineAnnotation> {
     let mut res = Vec::new();
     let mut offset: usize = 0;
-    let marker: fn(char) -> bool = if line.contains('^') { |c| c == '^' } else { |c| c == '|' };
+    let marker: fn(char) -> bool = if line.contains('^') {
+        |c| c == '^'
+    } else {
+        |c| c == '|'
+    };
     while let Some(idx) = line.find(marker) {
         offset += idx;
         line = &line[idx..];
@@ -141,7 +151,10 @@ fn extract_line_annotations(mut line: &str) -> Vec<LineAnnotation> {
         let content = content.trim_start().to_owned();
 
         let annotation = if continuation {
-            LineAnnotation::Continuation { offset: range.1, content }
+            LineAnnotation::Continuation {
+                offset: range.1,
+                content,
+            }
         } else {
             LineAnnotation::Annotation { range, content }
         };
@@ -177,14 +190,20 @@ pub fn parse_sections(src: &str) -> Vec<Section<'_>> {
         let line_end = cursor + line.len();
         if let Some(name) = line.trim_end().strip_prefix("//- ") {
             if let Some((prev_name, prev_start)) = current.take() {
-                out.push(Section { name: prev_name, content: &src[prev_start..cursor] });
+                out.push(Section {
+                    name: prev_name,
+                    content: &src[prev_start..cursor],
+                });
             }
             current = Some((name, line_end));
         }
         cursor = line_end;
     }
     if let Some((name, start)) = current {
-        out.push(Section { name, content: &src[start..] });
+        out.push(Section {
+            name,
+            content: &src[start..],
+        });
     }
     out
 }

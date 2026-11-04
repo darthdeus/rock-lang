@@ -19,7 +19,7 @@
 
 use std::sync::LazyLock;
 
-use skull_mir::gpu_layout::{uniform_array_block, uniform_block, ArrayMemberDecl, WireKind};
+use skull_mir::gpu_layout::{ArrayMemberDecl, WireKind, uniform_array_block, uniform_block};
 use ustr::Ustr;
 
 static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
@@ -42,12 +42,20 @@ fn decl(name: &str, elem: WireKind, capacity: u32) -> ArrayMemberDecl {
     // A synthetic span: these cases exercise the LAYOUT, and the real `@size(N)`
     // site is supplied by the GLSL classifier. That the rejections land on the
     // offending param is pinned there, against real source.
-    ArrayMemberDecl { name: Ustr::from(name), elem, capacity, span: bone_semantic::prelude::Span::unknown() }
+    ArrayMemberDecl {
+        name: Ustr::from(name),
+        elem,
+        capacity,
+        span: bone_semantic::prelude::Span::unknown(),
+    }
 }
 
 /// `(name, offset, stride, capacity)` per member.
 fn layout(p: &skull_mir::gpu_layout::UniformArrayBlockPlan) -> Vec<(&str, u32, u32, u32)> {
-    p.members.iter().map(|m| (m.name.as_str(), m.offset, m.stride, m.capacity)).collect()
+    p.members
+        .iter()
+        .map(|m| (m.name.as_str(), m.offset, m.stride, m.capacity))
+        .collect()
 }
 
 /// `outline_detect`'s three `@size(256)` `Vec4` arrays -- the tight consumer.
@@ -187,14 +195,22 @@ fn a_zero_capacity_array_is_rejected() {
 fn a_vec3_array_is_rejected() {
     let e = uniform_array_block(Ustr::from("arrays"), &[decl("a", WireKind::F32x3, 4)])
         .expect_err("Vec3 arrays are not admitted");
-    assert!(e.message.contains("Vec3") || e.message.contains("element"), "{}", e.message);
+    assert!(
+        e.message.contains("Vec3") || e.message.contains("element"),
+        "{}",
+        e.message
+    );
 }
 
 #[test]
 fn a_mat4_array_is_rejected() {
     let e = uniform_array_block(Ustr::from("arrays"), &[decl("a", WireKind::Mat4, 4)])
         .expect_err("Mat4 arrays are not admitted");
-    assert!(e.message.contains("Mat4") || e.message.contains("element"), "{}", e.message);
+    assert!(
+        e.message.contains("Mat4") || e.message.contains("element"),
+        "{}",
+        e.message
+    );
 }
 
 /// The fingerprint separates layouts a size comparison cannot. Two blocks with
@@ -207,8 +223,16 @@ fn the_fingerprint_separates_same_size_layouts() {
     let c = uniform_array_block(Ustr::from("arrays"), &[decl("b", WireKind::F32, 16)]).unwrap();
     assert_eq!(a.size, b.size, "same size is the premise of this test");
     assert_eq!(a.size, c.size);
-    assert_ne!(a.fingerprint(), b.fingerprint(), "element kind must be hashed");
-    assert_ne!(a.fingerprint(), c.fingerprint(), "member name must be hashed");
+    assert_ne!(
+        a.fingerprint(),
+        b.fingerprint(),
+        "element kind must be hashed"
+    );
+    assert_ne!(
+        a.fingerprint(),
+        c.fingerprint(),
+        "member name must be hashed"
+    );
 
     // And it must fit the 53-bit wire, for the same reason the scalar block's
     // does: it is emitted as a plain numeric literal.
@@ -239,8 +263,14 @@ fn an_array_block_fingerprint_differs_from_a_scalar_blocks() {
     // The premise: everything a fingerprint could key on agrees.
     assert_eq!(scalar.size, arrays.size, "both 16 bytes");
     assert_eq!(scalar.struct_name, arrays.block_name, "both named Shared");
-    assert_eq!(scalar.members[0].name, arrays.members[0].name, "both member m0");
-    assert_eq!(scalar.members[0].offset, arrays.members[0].offset, "both at 0");
+    assert_eq!(
+        scalar.members[0].name, arrays.members[0].name,
+        "both member m0"
+    );
+    assert_eq!(
+        scalar.members[0].offset, arrays.members[0].offset,
+        "both at 0"
+    );
     assert_eq!(scalar.members[0].kind, arrays.members[0].elem, "both Vec4");
 
     assert_ne!(
@@ -274,8 +304,11 @@ fn a_capacity_at_the_u32_wrap_point_is_rejected() {
 
 #[test]
 fn the_largest_possible_capacity_is_rejected() {
-    let e = uniform_array_block(Ustr::from("arrays"), &[decl("a", WireKind::F32x4, u32::MAX)])
-        .expect_err("u32::MAX elements is not a block");
+    let e = uniform_array_block(
+        Ustr::from("arrays"),
+        &[decl("a", WireKind::F32x4, u32::MAX)],
+    )
+    .expect_err("u32::MAX elements is not a block");
     assert!(e.message.contains("16384"), "{}", e.message);
 }
 
@@ -285,7 +318,10 @@ fn a_capacity_sum_that_would_overflow_is_rejected() {
     let big = (1u32 << 27) + 1;
     let e = uniform_array_block(
         Ustr::from("arrays"),
-        &[decl("a", WireKind::F32x4, big), decl("b", WireKind::F32x4, big)],
+        &[
+            decl("a", WireKind::F32x4, big),
+            decl("b", WireKind::F32x4, big),
+        ],
     )
     .expect_err("the two together exceed u32 at stride 16");
     assert!(e.message.contains("16384"), "{}", e.message);

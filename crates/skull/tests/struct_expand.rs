@@ -34,20 +34,36 @@ fn expands_to_literal_pairs_in_declaration_order() {
     let ia = body.find("\"alpha\"").expect("alpha key");
     let ic = body.find("\"count\"").expect("count key");
     let ip = body.find("\"pos\"").expect("pos key");
-    assert!(ia < ic && ic < ip, "keys must appear in declaration order:\n{body}");
+    assert!(
+        ia < ic && ic < ip,
+        "keys must appear in declaration order:\n{body}"
+    );
 
     // One variant box per field, structurally chosen (float->F, int->I, Vec2->Vv).
-    for needle in ["__variant = (\"F\")", "__variant = (\"I\")", "__variant = (\"Vv\")"] {
+    for needle in [
+        "__variant = (\"F\")",
+        "__variant = (\"I\")",
+        "__variant = (\"Vv\")",
+    ] {
         assert!(body.contains(needle), "missing `{needle}` in:\n{body}");
     }
     // The flat enum stores a value-struct payload spread over its slots, as a
     // source `U::Vv(V2 { .. })` does; a boxed `V2_ct` there is read back by the
     // match as the first slot alone.
-    assert!(!body.contains("V2_ct("), "the Vv payload was boxed, not spread:\n{body}");
+    assert!(
+        !body.contains("V2_ct("),
+        "the Vv payload was boxed, not spread:\n{body}"
+    );
 
     // The phantom body is never called or inlined -- the call is fully replaced.
-    assert!(!body.contains("phantom body"), "phantom body leaked into build():\n{body}");
-    assert!(!body.contains("upairs("), "unexpanded upairs call in build():\n{body}");
+    assert!(
+        !body.contains("phantom body"),
+        "phantom body leaked into build():\n{body}"
+    );
+    assert!(
+        !body.contains("upairs("),
+        "unexpanded upairs call in build():\n{body}"
+    );
 }
 
 // A cdata-eligible enum (`One`/`Both` share slot `_0: int`) expands to the
@@ -70,8 +86,14 @@ fn build(k: int) -> int {
 fn cdata_enum_expands_to_cdata_ctor() {
     let lua = emit_module(CDATA);
     let body = function_body(&lua, "build");
-    assert!(body.contains("M_ct("), "cdata enum variant should use `M_ct(...)`:\n{body}");
-    assert!(!body.contains("__variant"), "cdata enum must not box:\n{body}");
+    assert!(
+        body.contains("M_ct("),
+        "cdata enum variant should use `M_ct(...)`:\n{body}"
+    );
+    assert!(
+        !body.contains("__variant"),
+        "cdata enum must not box:\n{body}"
+    );
 }
 
 fn header(extra: &str) -> String {
@@ -93,7 +115,10 @@ fn rejects_non_value_struct_argument() {
 fn build() -> int { let ps = epairs(3); return ps.len() }
 "#,
     );
-    assert!(try_emit_module(&src).is_err(), "non-value-struct arg must reject");
+    assert!(
+        try_emit_module(&src).is_err(),
+        "non-value-struct arg must reject"
+    );
 }
 
 #[test]
@@ -107,7 +132,10 @@ value S { flag: bool }
 fn build() -> int { let ps = epairs(S { flag: true }); return ps.len() }
 "#,
     );
-    assert!(try_emit_module(&src).is_err(), "unmatched field type must reject");
+    assert!(
+        try_emit_module(&src).is_err(),
+        "unmatched field type must reject"
+    );
 }
 
 #[test]
@@ -120,7 +148,10 @@ value S { x: float }
 """
 fn build() -> int { let ps = dpairs(S { x: 1.0 }); return ps.len() }
 "#;
-    assert!(try_emit_module(src).is_err(), "ambiguous payload must reject");
+    assert!(
+        try_emit_module(src).is_err(),
+        "ambiguous payload must reject"
+    );
 }
 
 #[test]
@@ -132,7 +163,10 @@ value S { x: float }
 """
 fn build() -> int { return bad(S { x: 1.0 }) }
 "#;
-    assert!(try_emit_module(src).is_err(), "non-pairs return must reject");
+    assert!(
+        try_emit_module(src).is_err(),
+        "non-pairs return must reject"
+    );
 }
 
 const NOBOX_PAYLOAD: &str = r#"
@@ -158,6 +192,12 @@ fn build(t: float, c: NV2) -> int {
 fn a_nobox_payload_spreads_into_the_flat_slots() {
     let lua = emit_module(NOBOX_PAYLOAD);
     let body = function_body(&lua, "build");
-    assert!(body.contains("__variant = (\"Vv\")"), "missing the Vv variant in:\n{body}");
-    assert!(!body.contains("NV2_ct("), "the nobox payload was boxed, not spread:\n{body}");
+    assert!(
+        body.contains("__variant = (\"Vv\")"),
+        "missing the Vv variant in:\n{body}"
+    );
+    assert!(
+        !body.contains("NV2_ct("),
+        "the nobox payload was boxed, not spread:\n{body}"
+    );
 }

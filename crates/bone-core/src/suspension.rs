@@ -4,14 +4,15 @@ use crate::hir::{
 use crate::prelude::*;
 
 pub trait SuspensionPolicy {
-    fn binding_holds_frame_data(&self, binding: Idx<BindingInfo>, value: Option<Idx<Expr>>) -> bool;
+    fn binding_holds_frame_data(&self, binding: Idx<BindingInfo>, value: Option<Idx<Expr>>)
+    -> bool;
 }
 
-pub fn uses_after_suspension(
-    body: &Body,
-    policy: &impl SuspensionPolicy,
-) -> Vec<Idx<Expr>> {
-    suspension_crossings(body, policy).into_iter().map(|crossing| crossing.at).collect()
+pub fn uses_after_suspension(body: &Body, policy: &impl SuspensionPolicy) -> Vec<Idx<Expr>> {
+    suspension_crossings(body, policy)
+        .into_iter()
+        .map(|crossing| crossing.at)
+        .collect()
 }
 
 /// A use of frame data after a suspension, with the last suspension before
@@ -23,7 +24,9 @@ pub struct Crossing {
 }
 
 pub fn suspension_crossings(body: &Body, policy: &impl SuspensionPolicy) -> Vec<Crossing> {
-    let Some(root) = body.root else { return Vec::new() };
+    let Some(root) = body.root else {
+        return Vec::new();
+    };
     if !body
         .expr_arena
         .iter()
@@ -125,12 +128,18 @@ enum Exit {
 impl<P: SuspensionPolicy> Walk<'_, P> {
     fn report(&mut self, at: Idx<Expr>, binding: Idx<BindingInfo>, flow: &Flow) {
         if let Some(suspensions) = flow.crossed.get(&binding) {
-            self.reported.entry(at).or_default().extend(suspensions.iter().copied());
+            self.reported
+                .entry(at)
+                .or_default()
+                .extend(suspensions.iter().copied());
         }
     }
 
     fn bind(&self, binding: Idx<BindingInfo>, value: Option<Idx<Expr>>, flow: &mut Flow) {
-        flow.rebind(binding, self.policy.binding_holds_frame_data(binding, value));
+        flow.rebind(
+            binding,
+            self.policy.binding_holds_frame_data(binding, value),
+        );
     }
 
     fn branch(&mut self, expr: Option<Idx<Expr>>, entry: &Flow, out: &mut Flow) {
@@ -180,7 +189,9 @@ impl<P: SuspensionPolicy> Walk<'_, P> {
     fn exit(&mut self, exit: Exit, flow: &mut Flow) {
         let taken = std::mem::take(flow);
         self.unwound.merge(taken.clone());
-        let Some(exits) = self.loops.last_mut() else { return };
+        let Some(exits) = self.loops.last_mut() else {
+            return;
+        };
         match exit {
             Exit::Break => exits.breaks.merge(taken),
             Exit::Continue => exits.continues.merge(taken),
@@ -219,11 +230,19 @@ impl<P: SuspensionPolicy> Walk<'_, P> {
             Statement::Defer(_) => {}
             Statement::For { vars, iter, body } => {
                 self.expr(*iter, flow);
-                let vars: Vec<_> = vars.leaves().into_iter().map(|binding| (binding, None)).collect();
+                let vars: Vec<_> = vars
+                    .leaves()
+                    .into_iter()
+                    .map(|binding| (binding, None))
+                    .collect();
                 self.loop_body(None, &vars, *body, flow);
             }
             Statement::While { cond, body } => self.loop_body(Some(*cond), &[], *body, flow),
-            Statement::WhileLet { pattern, value, body } => {
+            Statement::WhileLet {
+                pattern,
+                value,
+                body,
+            } => {
                 let vars: &[_] = match self.body.pattern_arena[*pattern] {
                     Pattern::Bind(binding) => &[(binding, Some(*value))],
                     _ => &[],
@@ -261,7 +280,11 @@ impl<P: SuspensionPolicy> Walk<'_, P> {
                 self.run_defers(statements, flow);
                 self.unwound.merge(outer);
             }
-            Expr::If { cond, then_branch, else_branch } => {
+            Expr::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
                 self.expr(cond, flow);
                 let entry = flow.clone();
                 let mut out = Flow::default();
@@ -272,7 +295,12 @@ impl<P: SuspensionPolicy> Walk<'_, P> {
                 }
                 *flow = out;
             }
-            Expr::IfLet { pattern, value, then_branch, else_branch } => {
+            Expr::IfLet {
+                pattern,
+                value,
+                then_branch,
+                else_branch,
+            } => {
                 self.expr(value, flow);
                 let mut entry = flow.clone();
                 if let Pattern::Bind(binding) = self.body.pattern_arena[pattern] {
@@ -332,12 +360,20 @@ impl<P: SuspensionPolicy> Walk<'_, P> {
                     self.expr(arg, flow);
                 }
             }
-            Expr::SafeNavLet { receiver, binding, body } => {
+            Expr::SafeNavLet {
+                receiver,
+                binding,
+                body,
+            } => {
                 self.expr(receiver, flow);
                 self.bind(binding, Some(receiver), flow);
                 self.expr(body, flow);
             }
-            Expr::BinOp { op: BinOp::NullCoalesce, lhs, rhs } => {
+            Expr::BinOp {
+                op: BinOp::NullCoalesce,
+                lhs,
+                rhs,
+            } => {
                 self.expr(lhs, flow);
                 let entry = flow.clone();
                 let mut out = Flow::default();
@@ -345,7 +381,11 @@ impl<P: SuspensionPolicy> Walk<'_, P> {
                 out.merge(entry);
                 *flow = out;
             }
-            Expr::BinOp { lhs, rhs, .. } | Expr::Range { low: lhs, high: rhs } => {
+            Expr::BinOp { lhs, rhs, .. }
+            | Expr::Range {
+                low: lhs,
+                high: rhs,
+            } => {
                 self.expr(lhs, flow);
                 self.expr(rhs, flow);
             }

@@ -13,7 +13,11 @@ const FIXTURE: &str = include_str!("fixtures/number_format.rock");
 const FIXTURE_MOD: &str = "<number_format>";
 
 fn tool_available(tool: &str, arg: &str) -> bool {
-    crate::common::tool(tool).arg(arg).output().map(|o| o.status.success()).unwrap_or(false)
+    crate::common::tool(tool)
+        .arg(arg)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 fn both_backends_available(test: &str) -> bool {
@@ -35,7 +39,8 @@ fn fixture_ws() -> Workspace {
         })
         .collect();
     modules.push(
-        skull_parser::parse_module_clean(FIXTURE, ustr::Ustr::from(FIXTURE_MOD)).expect("fixture parse"),
+        skull_parser::parse_module_clean(FIXTURE, ustr::Ustr::from(FIXTURE_MOD))
+            .expect("fixture parse"),
     );
     bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass")
 }
@@ -44,7 +49,10 @@ fn find_fn(ws: &Workspace, name: &str) -> FuncRef {
     for (_, &mid) in ws.module_ids.iter() {
         for (fid, f) in ws.module(mid).functions.iter() {
             if f.name.as_str() == name && f.inline_body.is_none() {
-                return FuncRef { module: mid, func: fid };
+                return FuncRef {
+                    module: mid,
+                    func: fid,
+                };
             }
         }
     }
@@ -52,15 +60,20 @@ fn find_fn(ws: &Workspace, name: &str) -> FuncRef {
 }
 
 fn write_temp(tag: &str, ext: &str, contents: &str) -> std::path::PathBuf {
-    let path = std::env::temp_dir()
-        .join(format!("skull_js_numfmt_{}_{tag}.{ext}", std::process::id()));
+    let path = std::env::temp_dir().join(format!(
+        "skull_js_numfmt_{}_{tag}.{ext}",
+        std::process::id()
+    ));
     std::fs::write(&path, contents).expect("write temp program");
     path
 }
 
 fn run_lines(tool: &str, tag: &str, ext: &str, prog: &str) -> Vec<String> {
     let path = write_temp(tag, ext, prog);
-    let out = crate::common::tool(tool).arg(&path).output().unwrap_or_else(|e| panic!("spawn {tool}: {e}"));
+    let out = crate::common::tool(tool)
+        .arg(&path)
+        .output()
+        .unwrap_or_else(|e| panic!("spawn {tool}: {e}"));
     let _ = std::fs::remove_file(&path);
     assert!(
         out.status.success(),
@@ -71,7 +84,11 @@ fn run_lines(tool: &str, tag: &str, ext: &str, prog: &str) -> Vec<String> {
     // Faithful byte compare: keep every line verbatim (only strip the final
     // trailing newline), no per-line trim -- a stray space WOULD be a divergence.
     let s = String::from_utf8_lossy(&out.stdout).into_owned();
-    s.strip_suffix('\n').unwrap_or(&s).split('\n').map(|l| l.to_string()).collect()
+    s.strip_suffix('\n')
+        .unwrap_or(&s)
+        .split('\n')
+        .map(|l| l.to_string())
+        .collect()
 }
 
 #[test]
@@ -82,8 +99,13 @@ fn number_tostring_parity_luajit_vs_node() {
     let ws = fixture_ws();
     let name = "test_number_battery";
 
-    let mid = *ws.module_ids.get(&ustr::Ustr::from(FIXTURE_MOD)).expect("fixture module id");
-    let mut lua = skull::mir_emit::emit_workspace_mir(&ws, mid).expect("lua emit").lua;
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from(FIXTURE_MOD))
+        .expect("fixture module id");
+    let mut lua = skull::mir_emit::emit_workspace_mir(&ws, mid)
+        .expect("lua emit")
+        .lua;
     lua.push_str(&format!("\n{name}()\n"));
     let lua_lines = run_lines("luajit", "battery", "lua", &lua);
 
@@ -116,24 +138,38 @@ fn json_float_roundtrip(backend: &str) {
     );
     let name = "test_json_float_roundtrip";
     let lines = if backend == "lua" {
-        let mid = *ws.module_ids.get(&ustr::Ustr::from(FIXTURE_MOD)).expect("fixture module id");
-        let mut lua = skull::mir_emit::emit_workspace_mir(&ws, mid).expect("lua emit").lua;
+        let mid = *ws
+            .module_ids
+            .get(&ustr::Ustr::from(FIXTURE_MOD))
+            .expect("fixture module id");
+        let mut lua = skull::mir_emit::emit_workspace_mir(&ws, mid)
+            .expect("lua emit")
+            .lua;
         lua.push_str(&format!("\n{name}()\n"));
         run_lines("luajit", "json_roundtrip", "lua", &lua)
     } else {
         let roots = [(find_fn(&ws, name), name.to_string())];
         let defs = skull_codegen_js::emit::emit_with_closure(&ws, &roots)
             .unwrap_or_else(|e| panic!("closure emit: {}", e.message));
-        let prelude = skull_codegen_js::assemble_prelude(
-            &defs, true, skull_codegen_js::JS_NODE_HOST, &[],
-        );
+        let prelude =
+            skull_codegen_js::assemble_prelude(&defs, true, skull_codegen_js::JS_NODE_HOST, &[]);
         let js = format!("{prelude}\n{defs}\n{name}();\n");
         run_lines("node", "json_roundtrip", "js", &js)
     };
     let mut expected = vec!["true".to_string(); 14 * 4 + 6 + 4];
-    expected.push(if backend == "lua" { "0.10000000000000001" } else { "0.1" }.to_string());
+    expected.push(
+        if backend == "lua" {
+            "0.10000000000000001"
+        } else {
+            "0.1"
+        }
+        .to_string(),
+    );
     expected.push("true".to_string());
-    assert_eq!(lines, expected, "{backend} JSON must recover the exact input float");
+    assert_eq!(
+        lines, expected,
+        "{backend} JSON must recover the exact input float"
+    );
 }
 
 #[test]

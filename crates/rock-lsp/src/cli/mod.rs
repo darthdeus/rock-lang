@@ -1,7 +1,7 @@
 pub mod bone_lsp;
 pub mod inline_lua_census;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 /// Parse a position string in format "file:line:column" (1-indexed)
 pub fn parse_position(position: &str) -> Result<(String, u32, u32)> {

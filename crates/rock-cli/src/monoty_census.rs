@@ -26,8 +26,8 @@ use std::path::{Path, PathBuf};
 
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;
-use ustr::Ustr;
 use skull_mir::monoty::{MonoArena, MonoSubst, MonoTyReason};
+use ustr::Ustr;
 
 use crate::Result;
 
@@ -43,11 +43,17 @@ struct ProjectStats {
 
 pub fn do_monoty_census(root: Option<&str>) -> Result<()> {
     let root = Path::new(root.unwrap_or(".")).canonicalize().map_err(|e| {
-        anyhow::anyhow!("mono-ty-census: cannot resolve `{}`: {e}", root.unwrap_or("."))
+        anyhow::anyhow!(
+            "mono-ty-census: cannot resolve `{}`: {e}",
+            root.unwrap_or(".")
+        )
     })?;
     let projects = crate::lint_union::bin_projects_under(&root);
     if projects.is_empty() {
-        anyhow::bail!("mono-ty-census: no `bin` project found under `{}`", root.display());
+        anyhow::bail!(
+            "mono-ty-census: no `bin` project found under `{}`",
+            root.display()
+        );
     }
 
     let mut per_project: Vec<(String, ProjectStats)> = Vec::new();
@@ -84,7 +90,11 @@ pub fn do_monoty_census(root: Option<&str>) -> Result<()> {
 
     println!("# MonoTy conversion census");
     println!();
-    println!("projects: {} analyzed, {} skipped", per_project.len(), skipped.len());
+    println!(
+        "projects: {} analyzed, {} skipped",
+        per_project.len(),
+        skipped.len()
+    );
     println!();
     println!("| project | types | unique | failures |");
     println!("|---|---:|---:|---:|");
@@ -110,7 +120,10 @@ pub fn do_monoty_census(root: Option<&str>) -> Result<()> {
             let ex = if ex.is_empty() {
                 "--".to_string()
             } else {
-                ex.iter().map(|e| format!("`{e}`")).collect::<Vec<_>>().join(", ")
+                ex.iter()
+                    .map(|e| format!("`{e}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             };
             println!("| `{bucket}` | {n} | {ex} |");
         }
@@ -134,7 +147,11 @@ fn rel(root: &Path, p: &Path) -> String {
     p.strip_prefix(root).unwrap_or(p).display().to_string()
 }
 
-type ProjectResult = (ProjectStats, usize, BTreeMap<&'static str, (usize, Vec<String>)>);
+type ProjectResult = (
+    ProjectStats,
+    usize,
+    BTreeMap<&'static str, (usize, Vec<String>)>,
+);
 
 fn census_project(
     dir: &PathBuf,
@@ -155,7 +172,9 @@ fn census_project(
 
     // Module order is `ws.modules`, which assembly fixes deterministically.
     for mid in module_ids(&ws) {
-        let Some(ir) = ws.inference(mid) else { continue };
+        let Some(ir) = ws.inference(mid) else {
+            continue;
+        };
         let module = ws.module(mid);
         let subst = MonoSubst::default();
         for (owner, inf) in ir.per_fn.iter() {

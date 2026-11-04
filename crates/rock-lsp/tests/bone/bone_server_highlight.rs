@@ -7,7 +7,7 @@
 
 use crate::common::bone_ws;
 use lsp_types::*;
-use rock_lsp::{do_document_highlight_workspace, LspWorkspace};
+use rock_lsp::{LspWorkspace, do_document_highlight_workspace};
 use std::str::FromStr;
 
 // `count` is declared on line 1 and used on lines 2 and 3 -> three occurrences.
@@ -19,9 +19,12 @@ fn main() {
 }
 ";
 
-fn highlight_at(ws: &mut LspWorkspace, path: &std::path::Path, line: u32, ch: u32)
-    -> Vec<DocumentHighlight>
-{
+fn highlight_at(
+    ws: &mut LspWorkspace,
+    path: &std::path::Path,
+    line: u32,
+    ch: u32,
+) -> Vec<DocumentHighlight> {
     let params = DocumentHighlightParams {
         text_document_position_params: TextDocumentPositionParams {
             text_document: TextDocumentIdentifier {
@@ -32,7 +35,9 @@ fn highlight_at(ws: &mut LspWorkspace, path: &std::path::Path, line: u32, ch: u3
         work_done_progress_params: Default::default(),
         partial_result_params: Default::default(),
     };
-    do_document_highlight_workspace(ws, &params).unwrap().unwrap_or_default()
+    do_document_highlight_workspace(ws, &params)
+        .unwrap()
+        .unwrap_or_default()
 }
 
 #[test]
@@ -53,7 +58,11 @@ fn highlights_all_occurrences_of_a_local() {
     );
     // Each highlight covers the 5-char identifier `count`.
     for h in &hl {
-        assert_eq!(h.range.end.character - h.range.start.character, 5, "range: {h:?}");
+        assert_eq!(
+            h.range.end.character - h.range.start.character,
+            5,
+            "range: {h:?}"
+        );
     }
 }
 
@@ -69,4 +78,3 @@ fn highlight_from_a_use_site_finds_the_same_set() {
     lines.sort();
     assert_eq!(lines, vec![1, 2, 3], "from a use site, got {hl:?}");
 }
-

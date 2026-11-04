@@ -117,12 +117,17 @@ fn lint_name(d: &Diagnostic) -> Option<&'static str> {
     let lsp_types::NumberOrString::String(code) = d.code.as_ref()? else {
         return None;
     };
-    bone_lints::KNOWN_LINTS.iter().copied().find(|k| *k == code.as_str())
+    bone_lints::KNOWN_LINTS
+        .iter()
+        .copied()
+        .find(|k| *k == code.as_str())
 }
 
 /// The leading whitespace (spaces/tabs) of `line`.
 fn leading_whitespace(line: &str) -> String {
-    line.chars().take_while(|c| *c == ' ' || *c == '\t').collect()
+    line.chars()
+        .take_while(|c| *c == ' ' || *c == '\t')
+        .collect()
 }
 
 /// The bone diagnostics from the request context whose message contains `needle`
@@ -155,7 +160,12 @@ fn bone_edit_action(
     range: lsp_types::Range,
     new_text: String,
 ) -> CodeAction {
-    bone_multi_edit_action(title, uri, vec![TextEdit { range, new_text }], CodeActionKind::QUICKFIX)
+    bone_multi_edit_action(
+        title,
+        uri,
+        vec![TextEdit { range, new_text }],
+        CodeActionKind::QUICKFIX,
+    )
 }
 
 /// Build a multi-edit `CodeAction` of `kind` for the bone backend: several
@@ -166,7 +176,9 @@ fn bone_multi_edit_action(
     edits: Vec<TextEdit>,
     kind: CodeActionKind,
 ) -> CodeAction {
-    let changes = [(uri.clone(), edits)].into_iter().collect::<HashMap<_, _>>();
+    let changes = [(uri.clone(), edits)]
+        .into_iter()
+        .collect::<HashMap<_, _>>();
     CodeAction {
         title,
         kind: Some(kind),
@@ -178,4 +190,3 @@ fn bone_multi_edit_action(
         data: None,
     }
 }
-

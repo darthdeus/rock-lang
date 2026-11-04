@@ -37,7 +37,11 @@ fn fills_all_arms_for_empty_enum_match() {
         actions[0].title
     );
     let nt = new_text(&actions[0]);
-    for v in ["Color::Red => {}", "Color::Green => {}", "Color::Blue => {}"] {
+    for v in [
+        "Color::Red => {}",
+        "Color::Green => {}",
+        "Color::Blue => {}",
+    ] {
         assert!(nt.contains(v), "new_text missing {v:?}: {nt:?}");
     }
 }
@@ -57,11 +61,18 @@ fn main() {
     // cursor on the `match` line (line 4)
     let actions = run(src, 4, 4);
     assert_eq!(actions.len(), 1, "one action: {actions:?}");
-    assert!(actions[0].title.contains("2 missing"), "title: {}", actions[0].title);
+    assert!(
+        actions[0].title.contains("2 missing"),
+        "title: {}",
+        actions[0].title
+    );
     let nt = new_text(&actions[0]);
     assert!(nt.contains("Color::Green => {}"), "{nt:?}");
     assert!(nt.contains("Color::Blue => {}"), "{nt:?}");
-    assert!(!nt.contains("Color::Red"), "should not re-add the covered Red: {nt:?}");
+    assert!(
+        !nt.contains("Color::Red"),
+        "should not re-add the covered Red: {nt:?}"
+    );
 }
 
 #[test]
@@ -78,7 +89,10 @@ fn main() {
     }
 }
 ";
-    assert!(run(src, 4, 4).is_empty(), "no action when all variants covered");
+    assert!(
+        run(src, 4, 4).is_empty(),
+        "no action when all variants covered"
+    );
 }
 
 #[test]
@@ -94,7 +108,10 @@ fn main() {
     }
 }
 ";
-    assert!(run(src, 4, 4).is_empty(), "a `_` arm makes the match exhaustive");
+    assert!(
+        run(src, 4, 4).is_empty(),
+        "a `_` arm makes the match exhaustive"
+    );
 }
 
 #[test]
@@ -143,7 +160,11 @@ fn message(e: TargetError) -> string {
 ";
     // cursor on the `match e {` line (line 3, 0-based)
     let actions = run(src, 3, 4);
-    assert_eq!(actions.len(), 1, "expected the fill action despite the type error: {actions:?}");
+    assert_eq!(
+        actions.len(),
+        1,
+        "expected the fill action despite the type error: {actions:?}"
+    );
     let nt = new_text(&actions[0]);
     assert!(nt.contains("TargetError::TooFar => {}"), "{nt:?}");
     assert!(nt.contains("TargetError::NoLos => {}"), "{nt:?}");

@@ -18,9 +18,7 @@ use bone_semantic::inference::Workspace;
 use skull::artifact::{self, ArtifactRequest};
 use skull::instance_graph::{self, InstanceGraph};
 use skull::shader_artifact::{self, ShaderArtifactRequest, ShaderProgram, ShaderRejection};
-use skull::target_projection::{
-    JAVASCRIPT_WEB, LUAJIT_DESKTOP, LUAJIT_IOS,
-};
+use skull::target_projection::{JAVASCRIPT_WEB, LUAJIT_DESKTOP, LUAJIT_IOS};
 use ustr::Ustr;
 
 static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
@@ -52,13 +50,23 @@ fn shader_roots(ws: &Workspace) -> Vec<ShaderProgram> {
         .expect("shader pairs")
         .pairs
         .into_iter()
-        .map(|p| ShaderProgram { vert: p.vert, frag: p.frag })
+        .map(|p| ShaderProgram {
+            vert: p.vert,
+            frag: p.frag,
+        })
         .collect()
 }
 
-fn names(ws: &Workspace, set: impl IntoIterator<Item = skull::instance_graph::Instance>) -> Vec<String> {
+fn names(
+    ws: &Workspace,
+    set: impl IntoIterator<Item = skull::instance_graph::Instance>,
+) -> Vec<String> {
     set.into_iter()
-        .map(|i| ws.module(i.func.module).functions[i.func.func].name.to_string())
+        .map(|i| {
+            ws.module(i.func.module).functions[i.func.func]
+                .name
+                .to_string()
+        })
         .collect()
 }
 
@@ -90,7 +98,10 @@ fn the_shader_view_carries_the_typed_profile_from_the_axis() {
     let view = shader_artifact::realize_shader(
         &ws,
         &g,
-        &ShaderArtifactRequest { spec: LUAJIT_DESKTOP, programs: &roots },
+        &ShaderArtifactRequest {
+            spec: LUAJIT_DESKTOP,
+            programs: &roots,
+        },
     )
     .expect("a target with a GLSL axis packages a shader artifact");
     assert_eq!(view.profile, skull_codegen_glsl::GlslProfile::Core330);
@@ -104,9 +115,15 @@ fn the_shader_view_carries_the_typed_profile_from_the_axis() {
         )),
         ..LUAJIT_DESKTOP
     };
-    let es_view =
-        shader_artifact::realize_shader(&ws, &g, &ShaderArtifactRequest { spec: es, programs: &roots })
-            .expect("shader artifact");
+    let es_view = shader_artifact::realize_shader(
+        &ws,
+        &g,
+        &ShaderArtifactRequest {
+            spec: es,
+            programs: &roots,
+        },
+    )
+    .expect("shader artifact");
     assert_eq!(es_view.profile, skull_codegen_glsl::GlslProfile::Es300);
     assert_eq!(
         es_view.roots, view.roots,
@@ -138,12 +155,19 @@ fn the_shader_view_retains_the_helpers_its_entries_reach() {
     let view = shader_artifact::realize_shader(
         &ws,
         &g,
-        &ShaderArtifactRequest { spec: LUAJIT_DESKTOP, programs: &shader_roots(&ws) },
+        &ShaderArtifactRequest {
+            spec: LUAJIT_DESKTOP,
+            programs: &shader_roots(&ws),
+        },
     )
     .expect("shader artifact");
 
     let root_names = names(&ws, view.roots.iter().cloned());
-    assert_eq!(root_names, vec!["probe_frag".to_string()], "the entry set is not the pairs");
+    assert_eq!(
+        root_names,
+        vec!["probe_frag".to_string()],
+        "the entry set is not the pairs"
+    );
     let helper_names = names(&ws, view.helpers.iter().cloned());
     assert!(
         helper_names.iter().any(|n| n == "shader_helper"),
@@ -170,7 +194,10 @@ fn the_shader_view_retains_the_helpers_its_entries_reach() {
         !helper_names.iter().any(|n| n == "texture"),
         "an inline-rendered builtin was packaged as a definition: {helper_names:?}"
     );
-    assert!(view.sites_walked > 0, "no site was walked, so the exclusions above say nothing");
+    assert!(
+        view.sites_walked > 0,
+        "no site was walked, so the exclusions above say nothing"
+    );
 
     // ...and the CPU artifact keeps both, so the exclusion above is the SHADER
     // view's decision rather than the program's.
@@ -204,7 +231,10 @@ fn main() { let key = rock_shader(rec_frag) }
     let view = shader_artifact::realize_shader(
         &ws,
         &g,
-        &ShaderArtifactRequest { spec: LUAJIT_DESKTOP, programs: &shader_roots(&ws) },
+        &ShaderArtifactRequest {
+            spec: LUAJIT_DESKTOP,
+            programs: &shader_roots(&ws),
+        },
     )
     .expect("shader artifact");
 
@@ -223,20 +253,21 @@ fn main() { let key = rock_shader(rec_frag) }
     // exactly as emission does -- and NAMES the recursive helper in the
     // emitter's own message and span.
     assert_eq!(
-        ws.module(recursions[0].instance.func.module).functions
-            [recursions[0].instance.func.func]
+        ws.module(recursions[0].instance.func.module).functions[recursions[0].instance.func.func]
             .name
             .as_str(),
         "rec_frag"
     );
     assert!(
-        recursions[0].message.contains("rec_helper")
-            && recursions[0].message.contains("recursion"),
+        recursions[0].message.contains("rec_helper") && recursions[0].message.contains("recursion"),
         "the rejection lost the emitter's diagnostic: {}",
         recursions[0].message
     );
     assert!(view.disagreements.is_empty(), "{:?}", view.disagreements);
-    assert!(view.entries_checked > 0, "no entry was checked, so the kind says nothing");
+    assert!(
+        view.entries_checked > 0,
+        "no entry was checked, so the kind says nothing"
+    );
     assert!(
         !instance_graph::is_spanless(&recursions[0].span),
         "the recursion rejection carries no source span"
@@ -247,11 +278,18 @@ fn main() { let key = rock_shader(rec_frag) }
     let cpu = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
     assert!(
         cpu.realization.keys().any(|i| {
-            ws.module(i.func.module).functions[i.func.func].name.as_str() == "rec_helper"
+            ws.module(i.func.module).functions[i.func.func]
+                .name
+                .as_str()
+                == "rec_helper"
         }),
         "the CPU artifact dropped a recursive fn because GLSL cannot take one"
     );
-    assert_eq!(cpu.severed.len(), 0, "the CPU artifact severed a call over a shader rejection");
+    assert_eq!(
+        cpu.severed.len(),
+        0,
+        "the CPU artifact severed a call over a shader rejection"
+    );
 
     // CONTROL: the non-recursive fixture reports no recursion at all, so the
     // detector is not answering yes to every shader program.
@@ -260,7 +298,10 @@ fn main() { let key = rock_shader(rec_frag) }
     let ok = shader_artifact::realize_shader(
         &ws2,
         &g2,
-        &ShaderArtifactRequest { spec: LUAJIT_DESKTOP, programs: &shader_roots(&ws2) },
+        &ShaderArtifactRequest {
+            spec: LUAJIT_DESKTOP,
+            programs: &shader_roots(&ws2),
+        },
     )
     .expect("shader artifact");
     assert!(
@@ -292,7 +333,10 @@ fn main() { let key = rock_shader(tier_frag) }
     let view = shader_artifact::realize_shader(
         &ws,
         &g,
-        &ShaderArtifactRequest { spec: LUAJIT_DESKTOP, programs: &shader_roots(&ws) },
+        &ShaderArtifactRequest {
+            spec: LUAJIT_DESKTOP,
+            programs: &shader_roots(&ws),
+        },
     )
     .expect("shader artifact");
 
@@ -333,10 +377,16 @@ fn main() { let key = rock_shader(uniform_frag) }
     let entry = shader_artifact::realize_shader(
         &ws3,
         &g3,
-        &ShaderArtifactRequest { spec: LUAJIT_DESKTOP, programs: &shader_roots(&ws3) },
+        &ShaderArtifactRequest {
+            spec: LUAJIT_DESKTOP,
+            programs: &shader_roots(&ws3),
+        },
     )
     .expect("shader artifact");
-    assert!(!entry.roots.is_empty(), "the uniform fixture registered no entry");
+    assert!(
+        !entry.roots.is_empty(),
+        "the uniform fixture registered no entry"
+    );
     assert!(
         entry.rejections.is_empty(),
         "an entry's uniform-block param was refused by the library tier-0 check: {:?}",
@@ -349,7 +399,10 @@ fn main() { let key = rock_shader(uniform_frag) }
     let ok = shader_artifact::realize_shader(
         &ws2,
         &g2,
-        &ShaderArtifactRequest { spec: LUAJIT_DESKTOP, programs: &shader_roots(&ws2) },
+        &ShaderArtifactRequest {
+            spec: LUAJIT_DESKTOP,
+            programs: &shader_roots(&ws2),
+        },
     )
     .expect("shader artifact");
     assert!(ok.rejections.is_empty(), "{:?}", ok.render_rejections(&ws2));
@@ -365,13 +418,23 @@ fn platform_does_not_change_the_shader_artifact() {
     let (g, _) = graph_for(&ws);
     let roots = shader_roots(&ws);
     let of = |spec| {
-        shader_artifact::realize_shader(&ws, &g, &ShaderArtifactRequest { spec, programs: &roots })
-            .expect("shader artifact")
+        shader_artifact::realize_shader(
+            &ws,
+            &g,
+            &ShaderArtifactRequest {
+                spec,
+                programs: &roots,
+            },
+        )
+        .expect("shader artifact")
     };
     let desktop = of(LUAJIT_DESKTOP);
     let ios = of(LUAJIT_IOS);
     let web = of(JAVASCRIPT_WEB);
-    assert!(!desktop.roots.is_empty(), "the fixture packages no shader entry");
+    assert!(
+        !desktop.roots.is_empty(),
+        "the fixture packages no shader entry"
+    );
     assert_eq!(desktop.profile, ios.profile);
     assert_eq!(desktop.roots, ios.roots);
     assert_eq!(desktop.helpers, ios.helpers);
@@ -424,12 +487,19 @@ fn main() { let key = rock_shader(foreign_frag) }
         let view = shader_artifact::realize_shader(
             &ws,
             &g,
-            &ShaderArtifactRequest { spec: LUAJIT_DESKTOP, programs: &shader_roots(&ws) },
+            &ShaderArtifactRequest {
+                spec: LUAJIT_DESKTOP,
+                programs: &shader_roots(&ws),
+            },
         )
         .expect("shader artifact");
         assert!(view.entries_checked > 0, "no entry was checked at all");
         let msgs = view.render_rejections(&ws);
-        assert_eq!(msgs.len(), 1, "expected exactly one rejection, got {msgs:?}");
+        assert_eq!(
+            msgs.len(),
+            1,
+            "expected exactly one rejection, got {msgs:?}"
+        );
         assert!(
             msgs[0].contains(needle),
             "the rejection is not the emitter's own ({needle}): {msgs:?}"
@@ -473,11 +543,19 @@ fn main() {
     );
     let (g, _) = graph_for(&ws);
     let programs = shader_roots(&ws);
-    assert_eq!(programs.len(), 2, "the fixture registered {} programs", programs.len());
+    assert_eq!(
+        programs.len(),
+        2,
+        "the fixture registered {} programs",
+        programs.len()
+    );
     let view = shader_artifact::realize_shader(
         &ws,
         &g,
-        &ShaderArtifactRequest { spec: LUAJIT_DESKTOP, programs: &programs },
+        &ShaderArtifactRequest {
+            spec: LUAJIT_DESKTOP,
+            programs: &programs,
+        },
     )
     .expect("shader artifact");
 
@@ -487,7 +565,10 @@ fn main() {
     let generic_insts: Vec<&skull::instance_graph::Instance> = view
         .packaged()
         .filter(|i| {
-            ws.module(i.func.module).functions[i.func.func].name.as_str() == "passthrough"
+            ws.module(i.func.module).functions[i.func.func]
+                .name
+                .as_str()
+                == "passthrough"
         })
         .collect();
     assert_eq!(
@@ -498,7 +579,9 @@ fn main() {
     );
     for i in &generic_insts {
         assert!(
-            !g.substitution(i).expect("a recorded substitution").is_empty(),
+            !g.substitution(i)
+                .expect("a recorded substitution")
+                .is_empty(),
             "a `passthrough` instance carries an EMPTY substitution, so it is not generic"
         );
     }
@@ -511,7 +594,10 @@ fn main() {
         "the generic-helper program was excluded rather than checked at its instantiations"
     );
     assert_eq!(view.programs_unchecked, 0);
-    assert_eq!(view.entries_checked + view.programs_unchecked, view.programs);
+    assert_eq!(
+        view.entries_checked + view.programs_unchecked,
+        view.programs
+    );
     assert!(
         view.rejections.is_empty(),
         "a concretely instantiated generic helper was rejected: {:?}",
@@ -521,8 +607,14 @@ fn main() {
     assert!(view.missing_substitutions.is_empty());
 
     let root_names = names(&ws, view.roots.iter().cloned());
-    assert!(root_names.iter().any(|n| n == "generic_frag"), "{root_names:?}");
-    assert!(root_names.iter().any(|n| n == "concrete_frag"), "{root_names:?}");
+    assert!(
+        root_names.iter().any(|n| n == "generic_frag"),
+        "{root_names:?}"
+    );
+    assert!(
+        root_names.iter().any(|n| n == "concrete_frag"),
+        "{root_names:?}"
+    );
 }
 
 /// **A missing substitution record fails CLOSED.** `reach` records a
@@ -540,17 +632,28 @@ fn a_missing_substitution_record_is_a_finding_not_a_concrete_shape() {
     let before = shader_artifact::realize_shader(
         &ws,
         &g,
-        &ShaderArtifactRequest { spec: LUAJIT_DESKTOP, programs: &programs },
+        &ShaderArtifactRequest {
+            spec: LUAJIT_DESKTOP,
+            programs: &programs,
+        },
     )
     .expect("shader artifact");
-    assert_eq!(before.entries_checked, 1, "the fixture's program was not checked to begin with");
+    assert_eq!(
+        before.entries_checked, 1,
+        "the fixture's program was not checked to begin with"
+    );
     assert!(before.missing_substitutions.is_empty());
 
     // Remove exactly ONE record -- the entry's own.
     let entry = before
         .roots
         .iter()
-        .find(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == "probe_frag")
+        .find(|i| {
+            ws.module(i.func.module).functions[i.func.func]
+                .name
+                .as_str()
+                == "probe_frag"
+        })
         .expect("the entry instance")
         .clone();
     let removed = g.index.subst.remove(&entry).is_some() | g.root_instances.remove(&entry);
@@ -559,7 +662,10 @@ fn a_missing_substitution_record_is_a_finding_not_a_concrete_shape() {
     let after = shader_artifact::realize_shader(
         &ws,
         &g,
-        &ShaderArtifactRequest { spec: LUAJIT_DESKTOP, programs: &programs },
+        &ShaderArtifactRequest {
+            spec: LUAJIT_DESKTOP,
+            programs: &programs,
+        },
     )
     .expect("shader artifact");
     assert_eq!(
@@ -567,7 +673,11 @@ fn a_missing_substitution_record_is_a_finding_not_a_concrete_shape() {
         "a program with a missing substitution record was declaration-validated"
     );
     assert_eq!(after.programs_unchecked, 1);
-    assert!(after.rejections.is_empty(), "{:?}", after.render_rejections(&ws));
+    assert!(
+        after.rejections.is_empty(),
+        "{:?}",
+        after.render_rejections(&ws)
+    );
     // The finding is EXPLICIT and names the instance -- not folded into the
     // generic bucket, which would read as "we know it is generic".
     assert!(
@@ -610,13 +720,24 @@ fn main() { print("{PIPE_KEY}") }
     );
     let (g, _) = graph_for(&ws);
     let programs = shader_roots(&ws);
-    assert_eq!(programs.len(), 1, "the fixture registered {} programs", programs.len());
-    assert!(programs[0].vert.is_some(), "the fixture is not a PAIR, so it tests nothing");
+    assert_eq!(
+        programs.len(),
+        1,
+        "the fixture registered {} programs",
+        programs.len()
+    );
+    assert!(
+        programs[0].vert.is_some(),
+        "the fixture is not a PAIR, so it tests nothing"
+    );
 
     let view = shader_artifact::realize_shader(
         &ws,
         &g,
-        &ShaderArtifactRequest { spec: LUAJIT_DESKTOP, programs: &programs },
+        &ShaderArtifactRequest {
+            spec: LUAJIT_DESKTOP,
+            programs: &programs,
+        },
     )
     .expect("shader artifact");
     assert_eq!(view.entries_checked, 1, "the pair was not checked");
@@ -628,6 +749,12 @@ fn main() { print("{PIPE_KEY}") }
     // Both stages are packaged, and the vertex one is a root rather than a
     // helper: a pair is two entries of one program.
     let root_names = names(&ws, view.roots.iter().cloned());
-    assert!(root_names.iter().any(|n| n == "pipe_vert"), "{root_names:?}");
-    assert!(root_names.iter().any(|n| n == "pipe_frag"), "{root_names:?}");
+    assert!(
+        root_names.iter().any(|n| n == "pipe_vert"),
+        "{root_names:?}"
+    );
+    assert!(
+        root_names.iter().any(|n| n == "pipe_frag"),
+        "{root_names:?}"
+    );
 }

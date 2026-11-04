@@ -26,7 +26,7 @@
 use std::sync::LazyLock;
 use ustr::Ustr;
 
-use skull_mir::gpu_layout::{uniform_block, LeafStore, UniformBlockPlan, WireKind, WireView};
+use skull_mir::gpu_layout::{LeafStore, UniformBlockPlan, WireKind, WireView, uniform_block};
 use skull_mir::lower::RepArena;
 
 static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
@@ -55,7 +55,10 @@ fn plan_of(src: &str, struct_name: &str) -> UniformBlockPlan {
 
 /// `(name, offset)` per member, the shape most cases assert.
 fn offsets(p: &UniformBlockPlan) -> Vec<(&str, u32)> {
-    p.members.iter().map(|m| (m.name.as_str(), m.offset)).collect()
+    p.members
+        .iter()
+        .map(|m| (m.name.as_str(), m.offset))
+        .collect()
 }
 
 // -- The three in-tree structs whose std140 layout is NOT their C layout.
@@ -71,7 +74,10 @@ fn bloom_blur_diverges_from_its_c_layout() {
         "value BloomBlurU { radius: float, direction: Vec2, resolution: float }",
         "BloomBlurU",
     );
-    assert_eq!(offsets(&p), vec![("radius", 0), ("direction", 8), ("resolution", 16)]);
+    assert_eq!(
+        offsets(&p),
+        vec![("radius", 0), ("direction", 8), ("resolution", 16)]
+    );
     // C layout is [0, 4, 12] with size 16 -- every field after the first moves.
     assert_eq!(p.size, 32);
 }
@@ -85,7 +91,12 @@ fn heat_shimmer_diverges_from_its_c_layout() {
     );
     assert_eq!(
         offsets(&p),
-        vec![("uTime", 0), ("uCenter", 8), ("uRadius", 16), ("uStrength", 20)]
+        vec![
+            ("uTime", 0),
+            ("uCenter", 8),
+            ("uRadius", 16),
+            ("uStrength", 20)
+        ]
     );
     // C layout is [0, 4, 12, 16] size 20.
     assert_eq!(p.size, 32);
@@ -146,7 +157,10 @@ fn mat4_runs_are_sixty_four_apart() {
         "value UiVertU { uProjection: Mat4, uView: Mat4, uTransform: Mat4 }",
         "UiVertU",
     );
-    assert_eq!(offsets(&p), vec![("uProjection", 0), ("uView", 64), ("uTransform", 128)]);
+    assert_eq!(
+        offsets(&p),
+        vec![("uProjection", 0), ("uView", 64), ("uTransform", 128)]
+    );
     assert_eq!(p.size, 192);
     assert_eq!(p.members[0].matrix_stride, Some(16));
 }
@@ -220,7 +234,11 @@ fn an_empty_group_binds_nothing() {
 fn a_nested_user_struct_is_rejected_until_a_consumer_needs_it() {
     let ws = ws_of("value Inner { a: float }\nvalue Outer { i: Inner, b: float }");
     let e = uniform_block(&ws, Ustr::from("Outer")).expect_err("must reject");
-    assert!(e.message.contains("Inner"), "the message must name the field's type: {}", e.message);
+    assert!(
+        e.message.contains("Inner"),
+        "the message must name the field's type: {}",
+        e.message
+    );
 }
 
 // -- Two-walker agreement. The wire side derives its members from the field
@@ -263,7 +281,10 @@ fn a_mat4_members_leaf_paths_are_its_columns_in_order() {
 #[test]
 fn the_wire_and_value_walkers_agree_on_every_shape() {
     for (src, name) in [
-        ("value A { radius: float, direction: Vec2, resolution: float }", "A"),
+        (
+            "value A { radius: float, direction: Vec2, resolution: float }",
+            "A",
+        ),
         ("value B { m: Mat4, n: Mat4, tail: Vec2 }", "B"),
         ("value C { a: Vec3, b: float, c: Vec4 }", "C"),
         ("value D { flag: bool, count: int, scale: float }", "D"),
@@ -275,11 +296,7 @@ fn the_wire_and_value_walkers_agree_on_every_shape() {
         assert_eq!(
             plan.leaf_paths(),
             RepArena::default()
-                .nominal_value_leaf_paths_required(
-                    &ws,
-                    bone_semantic::hir::FnBackend::Any,
-                    n,
-                )
+                .nominal_value_leaf_paths_required(&ws, bone_semantic::hir::FnBackend::Any, n,)
                 .expect("a value struct has leaf paths")
                 .iter()
                 .map(|u| u.to_string())
@@ -310,7 +327,10 @@ fn two_blocks_alike_but_for_member_kind_fingerprint_differently() {
     let a = plan_of("value A { x: float, y: Vec2 }", "A");
     let b = plan_of("value A { x: Vec2, y: float }", "A");
 
-    assert_eq!(a.struct_name, b.struct_name, "fixture: the names must collide");
+    assert_eq!(
+        a.struct_name, b.struct_name,
+        "fixture: the names must collide"
+    );
     assert_eq!(
         a.members.iter().map(|m| m.name).collect::<Vec<_>>(),
         b.members.iter().map(|m| m.name).collect::<Vec<_>>(),
@@ -366,11 +386,16 @@ fn the_fingerprint_fits_a_host_number() {
         ("value A { x: float, y: Vec2, z: float }", "A"),
         ("value A { m: Mat4, n: Mat4, f: float }", "A"),
         ("value A { a: bool, b: bool, c: int, d: Vec4 }", "A"),
-        ("value LongerNameThatFeedsTheHashMoreBytes { alpha: Vec3, beta: int }",
-         "LongerNameThatFeedsTheHashMoreBytes"),
+        (
+            "value LongerNameThatFeedsTheHashMoreBytes { alpha: Vec3, beta: int }",
+            "LongerNameThatFeedsTheHashMoreBytes",
+        ),
     ] {
         let fp = plan_of(src, name).fingerprint();
-        assert!(fp < MAX_EXACT, "{name}: fingerprint {fp} exceeds 2^53 and would round in Lua/JS");
+        assert!(
+            fp < MAX_EXACT,
+            "{name}: fingerprint {fp} exceeds 2^53 and would round in Lua/JS"
+        );
     }
 }
 
@@ -445,10 +470,19 @@ fn bloom_blurs_leaf_stores_carry_the_std140_gap() {
     // One store per primitive leaf: the count the validator checks the value
     // side against.
     assert_eq!(p.leaf_stores().len(), 4);
-    assert_eq!(p.members[1].leaf_stores(), vec![
-        LeafStore { offset: 8, view: WireView::Float },
-        LeafStore { offset: 12, view: WireView::Float },
-    ]);
+    assert_eq!(
+        p.members[1].leaf_stores(),
+        vec![
+            LeafStore {
+                offset: 8,
+                view: WireView::Float
+            },
+            LeafStore {
+                offset: 12,
+                view: WireView::Float
+            },
+        ]
+    );
 }
 
 // -- The GLES 3.0 block-size budget.

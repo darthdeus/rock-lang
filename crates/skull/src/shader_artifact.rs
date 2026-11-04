@@ -53,7 +53,9 @@ fn is_compute_builtin_name(name: &str) -> bool {
     )
 }
 
-pub use crate::shader::{ComputeProgram, ComputeProgramView, ShaderProgram, ShaderProgramView, ShaderStageView};
+pub use crate::shader::{
+    ComputeProgram, ComputeProgramView, ShaderProgram, ShaderProgramView, ShaderStageView,
+};
 
 /// Everything one shader artifact view is taken through.
 pub struct ShaderArtifactRequest<'a> {
@@ -63,7 +65,6 @@ pub struct ShaderArtifactRequest<'a> {
     /// collector; the view never re-derives them.
     pub programs: &'a [ShaderProgram],
 }
-
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum ShaderRejectionKind {
@@ -205,8 +206,12 @@ pub fn realize_shader_with_context_and_compute(
         .chain(compute_programs.iter().map(|p| p.entry))
         .map(|r| DeclKey(skull_mir::lower::canonical_variant(ws, r)))
         .collect();
-    let roots: BTreeSet<Instance> =
-        g.instances.iter().filter(|i| root_decls.contains(&DeclKey(i.func))).cloned().collect();
+    let roots: BTreeSet<Instance> = g
+        .instances
+        .iter()
+        .filter(|i| root_decls.contains(&DeclKey(i.func)))
+        .cloned()
+        .collect();
 
     // Retention: the same graph-site walk shape the CPU view runs, from a
     // different shader root set. Inline callees are packaging leaves.
@@ -217,20 +222,29 @@ pub fn realize_shader_with_context_and_compute(
     let mut edges: BTreeMap<Instance, Vec<(Instance, Span)>> = BTreeMap::new();
     let mut sites_walked = 0usize;
     while let Some(caller) = queue.pop_front() {
-        let Some(sites) = g.sites_of(&caller) else { continue };
+        let Some(sites) = g.sites_of(&caller) else {
+            continue;
+        };
         for rec in sites.values() {
             sites_walked += 1;
-            let SiteOutcome::Resolved(callee) = &rec.outcome else { continue };
+            let SiteOutcome::Resolved(callee) = &rec.outcome else {
+                continue;
+            };
             let f = &ws.module(callee.func.module).functions[callee.func.func];
             let compute_builtin = is_compute_builtin_name(f.name.as_str());
-            if compute_builtin || skull_codegen_glsl::renders_inline_instance(ws, f, callee, g.interner()) {
+            if compute_builtin
+                || skull_codegen_glsl::renders_inline_instance(ws, f, callee, g.interner())
+            {
                 builtins.insert(callee.clone());
                 continue;
             }
             if skull_codegen_glsl::is_lowered_native_operator(ws, f, callee, g.interner()) {
                 continue;
             }
-            edges.entry(caller.clone()).or_default().push((callee.clone(), rec.span));
+            edges
+                .entry(caller.clone())
+                .or_default()
+                .push((callee.clone(), rec.span));
             if seen.insert(callee.clone()) {
                 helpers.insert(callee.clone());
                 queue.push_back(callee.clone());
@@ -248,22 +262,10 @@ pub fn realize_shader_with_context_and_compute(
         };
         let mut stages = Vec::new();
         if let Some(vertex) = program.vert.and_then(entry_of) {
-            stages.push(stage_view(
-                ws,
-                g,
-                &edges,
-                vertex,
-                ShaderStage::Vertex,
-            ));
+            stages.push(stage_view(ws, g, &edges, vertex, ShaderStage::Vertex));
         }
         if let Some(fragment) = entry_of(program.frag) {
-            stages.push(stage_view(
-                ws,
-                g,
-                &edges,
-                fragment,
-                ShaderStage::Fragment,
-            ));
+            stages.push(stage_view(ws, g, &edges, fragment, ShaderStage::Fragment));
         }
         let concrete_plans = Arc::new(skull_mir::concrete::select_concrete_plan_closure(
             &all_concrete_plans,
@@ -322,7 +324,9 @@ pub fn realize_shader_with_context_and_compute(
             let key = DeclKey(skull_mir::lower::canonical_variant(ws, r));
             roots.iter().find(|i| DeclKey(i.func) == key)
         };
-        let Some(root) = entry_of(program.frag) else { continue };
+        let Some(root) = entry_of(program.frag) else {
+            continue;
+        };
         let mut program_roots: Vec<Instance> = vec![root.clone()];
         if let Some(v) = program.vert {
             match entry_of(v) {
@@ -357,8 +361,7 @@ pub fn realize_shader_with_context_and_compute(
         }
 
         checked += 1;
-        let entry_cycle = cyclic.contains(root)
-            || reaches_cycle(root, &edges, &cyclic);
+        let entry_cycle = cyclic.contains(root) || reaches_cycle(root, &edges, &cyclic);
         let program_view = &program_views[program_index];
         let outcome = match program.vert {
             Some(_) => skull_codegen_glsl::check_pipeline_profile_with_view(ws, scx, program_view),
@@ -434,16 +437,16 @@ fn stage_view(
     stage: ShaderStage,
 ) -> ShaderStageView {
     let retained = reachable_from(std::slice::from_ref(entry), edges);
-    let helpers: BTreeSet<Instance> = retained
-        .iter()
-        .filter(|i| *i != entry)
-        .cloned()
-        .collect();
+    let helpers: BTreeSet<Instance> = retained.iter().filter(|i| *i != entry).cloned().collect();
     let mut builtins = BTreeSet::new();
     for caller in &retained {
-        let Some(sites) = g.sites_of(caller) else { continue };
+        let Some(sites) = g.sites_of(caller) else {
+            continue;
+        };
         for rec in sites.values() {
-            let SiteOutcome::Resolved(callee) = &rec.outcome else { continue };
+            let SiteOutcome::Resolved(callee) = &rec.outcome else {
+                continue;
+            };
             let f = &ws.module(callee.func.module).functions[callee.func.func];
             let compute_builtin = is_compute_builtin_name(f.name.as_str());
             if compute_builtin
@@ -465,7 +468,10 @@ fn stage_view(
     let mut dependencies = Vec::new();
     let mut seen = BTreeSet::new();
     for instance in order.iter().chain(std::iter::once(entry)) {
-        let key = (instance.func.module.raw(), instance.func.func.into_raw().into_u32());
+        let key = (
+            instance.func.module.raw(),
+            instance.func.func.into_raw().into_u32(),
+        );
         if seen.insert(key) {
             dependencies.push(instance.func);
         }

@@ -77,7 +77,9 @@ fn package_workspace() -> (tempfile::TempDir, rock_lsp::LspWorkspace) {
     let app_src = "use util::heal_first;\n\nfn main() {\n    heal_first()\n}\n";
     std::fs::write(&app_main, app_src).unwrap();
     let mut ws = rock_lsp::LspWorkspace::new();
-    let errors: Vec<_> = ws.bone.update(app_main.to_str().unwrap(), app_src.to_string())
+    let errors: Vec<_> = ws
+        .bone
+        .update(app_main.to_str().unwrap(), app_src.to_string())
         .into_iter()
         .flat_map(|(_, diagnostics)| diagnostics)
         .filter(|diagnostic| diagnostic.severity == Some(DiagnosticSeverity::ERROR))
@@ -103,7 +105,10 @@ fn document_symbols_returns_top_level_decls() {
         other => panic!("expected nested document symbols, got {other:?}"),
     };
     for want in ["Player", "heal", "main"] {
-        assert!(names.iter().any(|n| n == want), "missing {want} in {names:?}");
+        assert!(
+            names.iter().any(|n| n == want),
+            "missing {want} in {names:?}"
+        );
     }
 }
 
@@ -125,7 +130,11 @@ fn workspace_symbols_filters_by_query() {
         }
         other => panic!("expected flat workspace symbols, got {other:?}"),
     };
-    assert_eq!(hits.len(), 1, "query 'heal' should match exactly one: {hits:?}");
+    assert_eq!(
+        hits.len(),
+        1,
+        "query 'heal' should match exactly one: {hits:?}"
+    );
     assert_eq!(hits[0].0, "heal");
     assert_eq!(hits[0].1, SymbolKind::FUNCTION);
 }
@@ -145,11 +154,17 @@ fn workspace_symbols_ignores_package_prefix() {
         "util::Id",
         "util::LIMIT",
     ] {
-        assert!(all.iter().any(|name| name == want), "missing {want}: {all:?}");
+        assert!(
+            all.iter().any(|name| name == want),
+            "missing {want}: {all:?}"
+        );
     }
 
     let hits = workspace_names(&mut ws, "UTIL");
-    assert!(hits.is_empty(), "package-only query must not match symbols: {hits:?}");
+    assert!(
+        hits.is_empty(),
+        "package-only query must not match symbols: {hits:?}"
+    );
 }
 
 #[test]
@@ -183,7 +198,8 @@ fn workspace_symbols_ranks_tests_last() {
     );
 
     let all = workspace_names(&mut ws, "");
-    let heal_names: Vec<_> = all.iter()
+    let heal_names: Vec<_> = all
+        .iter()
         .filter(|name| name.to_lowercase().contains("heal_"))
         .cloned()
         .collect();

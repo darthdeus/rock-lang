@@ -39,13 +39,17 @@ fn borrowed(state: ref Motion) -> int {
 #[test]
 fn nested_cdata_scalar_reads_allocate_no_intermediate_descriptors() {
     let lua = emit_module(SOURCE);
-    let dir = std::env::var_os("HOME").map(std::path::PathBuf::from)
-        .expect("HOME for disk-backed ABI fixture").join("tmp")
+    let dir = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .expect("HOME for disk-backed ABI fixture")
+        .join("tmp")
         .join(format!("rock-cdata-abi-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("ABI fixture directory");
     let source = dir.join("abi.c");
     let library = dir.join("abi.so");
-    std::fs::write(&source, r#"
+    std::fs::write(
+        &source,
+        r#"
 #include <stdbool.h>
 typedef struct { int x, y; } Cell;
 typedef struct { int region; Cell cell; } Location;
@@ -58,13 +62,23 @@ double s19_motion(Motion v) {
 }
 double s19_floating(Floating v) { return v.pair.x + v.pair.y + v.other; }
 double s19_floating_pair(FloatingPair v) { return v.pair.x + v.pair.y; }
-"#).expect("write independent C layout");
+"#,
+    )
+    .expect("write independent C layout");
     let built = std::process::Command::new("cc")
-        .args(["-shared", "-fPIC", "-o"]).arg(&library).arg(&source)
-        .output().expect("compile independent ABI fixture");
-    assert!(built.status.success(), "C ABI fixture: {}", String::from_utf8_lossy(&built.stderr));
+        .args(["-shared", "-fPIC", "-o"])
+        .arg(&library)
+        .arg(&source)
+        .output()
+        .expect("compile independent ABI fixture");
+    assert!(
+        built.status.success(),
+        "C ABI fixture: {}",
+        String::from_utf8_lossy(&built.stderr)
+    );
     let library = library.to_str().expect("UTF-8 fixture path");
-    let program = format!(r#"{lua}
+    let program = format!(
+        r#"{lua}
 ffi.cdef[[double s19_motion(Motion v); double s19_floating(Floating v);
 double s19_floating_pair(FloatingPair v);]]
 local native = ffi.load('{library}')
@@ -85,7 +99,8 @@ local growth = collectgarbage('count') - before
 assert(growth < 4, 'nested scalar reads allocate descriptors: ' .. growth .. ' KiB')
 change(owner)
 print(read(owner))
-"#);
+"#
+    );
     let output = run_luajit(&program, "cdata_leaf_projection");
     std::fs::remove_dir_all(&dir).expect("remove ABI fixture");
     assert_eq!(output, "31");
@@ -101,12 +116,18 @@ fn main() { let owner = Owner { point: Point { x: 3, y: 5 } };
 "#;
     let error = crate::common::try_emit_module(source)
         .expect_err("an inline value has leaves but no holder to borrow");
-    assert!(error.message.contains("cannot borrow an inline value field"), "{error:?}");
+    assert!(
+        error
+            .message
+            .contains("cannot borrow an inline value field"),
+        "{error:?}"
+    );
 }
 
 #[test]
 fn native_value_iteration_snapshots_without_nested_descriptors() {
-    let lua = emit_module(&format!(r#"{SOURCE}
+    let lua = emit_module(&format!(
+        r#"{SOURCE}
 @nomangle fn rows() -> [Motion] {{ return [make().motion] }}
 @nomangle fn scan(rows: [Motion]) -> int {{
     let total = 0
@@ -123,8 +144,10 @@ fn native_value_iteration_snapshots_without_nested_descriptors() {
     for row in rows {{ rows[0].at.cell.y = 37; total += row.at.cell.y }}
     return total
 }}
-"#));
-    let program = format!(r#"{lua}
+"#
+    ));
+    let program = format!(
+        r#"{lua}
 local values = rows()
 assert(scan(values) == 7)
 assert(snapshot(values) == 5)
@@ -140,13 +163,15 @@ local growth = collectgarbage('count') - before
 collectgarbage('restart')
 assert(growth < 4, 'value iteration allocates nested descriptors: ' .. growth .. ' KiB')
 print('ok')
-"#);
+"#
+    );
     assert_eq!(run_luajit(&program, "cdata_iteration"), "ok");
 }
 
 #[test]
 fn nullable_native_field_snapshots_avoid_intermediate_descriptors() {
-    let lua = emit_module(r#"
+    let lua = emit_module(
+        r#"
 value Point { x: int, y: int }
 value Span { a: Point, b: Point }
 value State { active: bool, span: Span? }
@@ -168,8 +193,10 @@ fn ready(state: State) -> bool { state.active }
     if let span = state.span { return span.a.x + span.a.y + span.b.x + span.b.y }
     return -1
 }
-"#);
-    let program = format!(r#"{lua}
+"#,
+    );
+    let program = format!(
+        r#"{lua}
 local present, absent = make(true), make(false)
 assert(snapshot(present) and snapshot(absent))
 assert(retained(present) == 17 and retained(present) == -1)
@@ -185,13 +212,15 @@ local growth = collectgarbage('count') - before
 collectgarbage('restart')
 assert(growth < 4, 'nullable native snapshot allocates child descriptors: ' .. growth .. ' KiB')
 print('ok')
-"#);
+"#
+    );
     assert_eq!(run_luajit(&program, "nullable_native_snapshot"), "ok");
 }
 
 #[test]
 fn optional_inline_child_projection_keeps_constructor_folding() {
-    let lua = emit_module(r#"
+    let lua = emit_module(
+        r#"
 nobox value Point { x: int, y: int }
 nobox value Inner { point: Point, tag: int }
 nobox value SnapshotEnvelope { inner: Inner, flag: int }
@@ -205,6 +234,10 @@ fn main() {
     let value = before.unwrap()
     print("{value.point.x} {value.point.y} {value.tag} {child(owner) == null}")
 }
-"#);
-    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "optional_inline_child"), "2 3 7 true");
+"#,
+    );
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "optional_inline_child"),
+        "2 3 7 true"
+    );
 }

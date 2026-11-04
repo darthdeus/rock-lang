@@ -25,8 +25,14 @@ struct Holder { target: Target? }
 fn nullable_flat_enum_formats_null_as_nil() {
     require_luajit();
     let mut lua = emit_module(SRC);
-    lua.push_str("\nprint(null_text(), null_interp(), stored_null_text())\nprint(present_text())\n");
+    lua.push_str(
+        "\nprint(null_text(), null_interp(), stored_null_text())\nprint(present_text())\n",
+    );
     let out = run_luajit(&lua, "flat_enum_null_format");
     let lines: Vec<&str> = out.lines().collect();
-    assert_eq!(lines, ["true\ttrue\ttrue", "Target::Tagged(Pos { x: 3, y: 4 })"], "{lua}");
+    assert_eq!(
+        lines,
+        ["true\ttrue\ttrue", "Target::Tagged(Pos { x: 3, y: 4 })"],
+        "{lua}"
+    );
 }

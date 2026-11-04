@@ -33,13 +33,19 @@ fn main() { let f = mk_cap(5) print("{f()}") }
         body.contains("setmetatable({ __slot = __rock_code_slot_ref("),
         "the creation site builds an env record, not a closure:\n{body}"
     );
-    assert!(body.contains("__rock_fn_mt"), "the record uses the shared metatable:\n{body}");
+    assert!(
+        body.contains("__rock_fn_mt"),
+        "the record uses the shared metatable:\n{body}"
+    );
     assert!(
         !body.contains("function("),
         "a hoisted capturing lambda leaves NO inline closure at the creation site:\n{body}"
     );
     let out = run_luajit(&format!("{lua}\nmain()\n"), "envrec_simple");
-    assert_eq!(out, "5", "the record is callable via __call and reads its capture; got: {out}");
+    assert_eq!(
+        out, "5",
+        "the record is callable via __call and reads its capture; got: {out}"
+    );
 }
 
 /// A mutable capture is BOXED and the SAME box table is threaded into two
@@ -63,14 +69,20 @@ fn main() {
 "#;
     let lua = emit_module(src);
     let body = function_body(&lua, "pair_box");
-    assert!(body.contains("= {v = "), "the dominated initializer seeds its shared box:\n{body}");
+    assert!(
+        body.contains("= {v = "),
+        "the dominated initializer seeds its shared box:\n{body}"
+    );
     assert!(
         body.contains("setmetatable({ __slot = __rock_code_slot_ref("),
         "both captures hoist to env records:\n{body}"
     );
     // A boxed capture field passes the box TABLE (no `.v`); each hoisted body
     // reads/writes it through `__rock_env.c<N>.v`.
-    assert!(lua.contains(".v"), "the hoisted bodies read/write the box through `.v`:\n{lua}");
+    assert!(
+        lua.contains(".v"),
+        "the hoisted bodies read/write the box through `.v`:\n{lua}"
+    );
     let out = run_luajit(&format!("{lua}\nmain()\n"), "envrec_box");
     assert_eq!(
         out, "0\n2",
@@ -96,8 +108,14 @@ fn main() {
     // inst-arena order fixes which k is inner vs outer, so assert order-agnostically.
     // Post-cutover the env param is a colored `c<N>` cell, not the magic `__rock_env`.
     let m = mangled_name(&lua, "outer_cap");
-    assert!(lua.contains(&format!("function {m}__lambda0(c")), "one nested lambda hoists to an env body:\n{lua}");
-    assert!(lua.contains(&format!("function {m}__lambda1(c")), "the other nested lambda hoists to an env body:\n{lua}");
+    assert!(
+        lua.contains(&format!("function {m}__lambda0(c")),
+        "one nested lambda hoists to an env body:\n{lua}"
+    );
+    assert!(
+        lua.contains(&format!("function {m}__lambda1(c")),
+        "the other nested lambda hoists to an env body:\n{lua}"
+    );
     // The OUTER hoisted body constructs the INNER record, seeding the capture from
     // its OWN env (the transitive thread). The exact env-field render is a colored
     // `c<N>.c<M>`; the behavior below proves the thread, so pin only the record.
@@ -105,9 +123,15 @@ fn main() {
         let body = function_body(&lua, &format!("{m}__lambda{k}"));
         body.contains("setmetatable({ __slot = __rock_code_slot_ref(")
     });
-    assert!(outer_builds_inner, "the outer hoisted body must build the inner record:\n{lua}");
+    assert!(
+        outer_builds_inner,
+        "the outer hoisted body must build the inner record:\n{lua}"
+    );
     let out = run_luajit(&format!("{lua}\nmain()\n"), "envrec_nested");
-    assert_eq!(out, "9", "the nested capture must thread through both envs; got: {out}");
+    assert_eq!(
+        out, "9",
+        "the nested capture must thread through both envs; got: {out}"
+    );
 }
 
 /// BOXED LAMBDA-PARAM (deferred from P2.5, owed to P2.6): a lambda's OWN param,
@@ -137,7 +161,10 @@ fn main() { print("{drive()}") }
         "the mutated lambda param must rebind to a box seeded from the param:\n{lua}"
     );
     let out = run_luajit(&format!("{lua}\nmain()\n"), "envrec_boxparam");
-    assert_eq!(out, "15", "the nested capture must observe the param mutation via the shared box; got: {out}");
+    assert_eq!(
+        out, "15",
+        "the nested capture must observe the param mutation via the shared box; got: {out}"
+    );
 }
 
 /// SNAPSHOT-SHAPE: a record built for a lambda capturing only non-fn values holds
@@ -151,11 +178,13 @@ fn main() { let _ = mk_snap(1) }
 "#;
     let lua = emit_module(src);
     let mk = mangled_name(&lua, "mk_snap");
-    let driver = format!("\nlocal a = {mk}(1)\nlocal b = {mk}(2)\n\
+    let driver = format!(
+        "\nlocal a = {mk}(1)\nlocal b = {mk}(2)\n\
         print(rawequal(a.__slot, b.__slot))\n\
         local extra = false\n\
         for k, v in pairs(a) do if k ~= \"__slot\" and type(v) == \"function\" then extra = true end end\n\
-        print(extra)\n");
+        print(extra)\n"
+    );
     let out = run_luajit(&format!("{lua}{driver}"), "envrec_snapshape");
     assert_eq!(
         out, "true\nfalse",

@@ -10,7 +10,10 @@
 use crate::common::{node, ws_with, ws_with_named};
 
 fn emit_program(ws: &bone_semantic::inference::Workspace) -> String {
-    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("test module");
     skull_codegen_js::emit::emit_program(ws, mid)
         .unwrap_or_else(|e| panic!("emit_program rejected: {}", e.message))
         .program
@@ -18,7 +21,8 @@ fn emit_program(ws: &bone_semantic::inference::Workspace) -> String {
 
 #[test]
 fn nested_native_layout_values_keep_javascript_field_access() {
-    let ws = ws_with(r#"
+    let ws = ws_with(
+        r#"
 nobox value Cell { x: int, y: int }
 nobox value Location { region: int, cell: Cell }
 value Motion { active: bool, at: Location, weight: float }
@@ -36,20 +40,35 @@ fn main() -> int {
     assert(prior.cell.x == 3 && prior.cell.y == 5)
     return read(owner)
 }
-"#);
+"#,
+    );
     let js = emit_program(&ws);
-    let source = format!("var __G = {{}};\n{}\n{}\n{js}\nconsole.log(main());",
-        skull_codegen_js::JS_GLOBALS_RUNTIME, skull_codegen_js::JS_CALL_HELPER);
-    let output = node().arg("-e").arg(source)
-        .output().expect("run nested value JavaScript");
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let source = format!(
+        "var __G = {{}};\n{}\n{}\n{js}\nconsole.log(main());",
+        skull_codegen_js::JS_GLOBALS_RUNTIME,
+        skull_codegen_js::JS_CALL_HELPER
+    );
+    let output = node()
+        .arg("-e")
+        .arg(source)
+        .output()
+        .expect("run nested value JavaScript");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "23");
 }
 
 /// `<a>` appears before `<b>` in `s` (both must be present).
 fn ordered(s: &str, a: &str, b: &str) {
-    let ia = s.find(a).unwrap_or_else(|| panic!("missing `{a}` in:\n{s}"));
-    let ib = s.find(b).unwrap_or_else(|| panic!("missing `{b}` in:\n{s}"));
+    let ia = s
+        .find(a)
+        .unwrap_or_else(|| panic!("missing `{a}` in:\n{s}"));
+    let ib = s
+        .find(b)
+        .unwrap_or_else(|| panic!("missing `{b}` in:\n{s}"));
     assert!(ia < ib, "expected `{a}` before `{b}`:\n{s}");
 }
 
@@ -111,48 +130,80 @@ fn application_line_content() {
     let ws = ws_with(PROG);
     let js = emit_program(&ws);
     // The decorated-fn JS names are the shared (name + signature) mangle.
-    let alpha_app = js.lines().find(|l| l.contains("__deco_system(") && l.contains("\"alpha\""))
+    let alpha_app = js
+        .lines()
+        .find(|l| l.contains("__deco_system(") && l.contains("\"alpha\""))
         .unwrap_or_else(|| panic!("no alpha application line:\n{js}"));
-    assert!(alpha_app.contains("name: \"alpha\""), "descriptor name: {alpha_app}");
-    assert!(alpha_app.contains("params: []"), "descriptor params: {alpha_app}");
+    assert!(
+        alpha_app.contains("name: \"alpha\""),
+        "descriptor name: {alpha_app}"
+    );
+    assert!(
+        alpha_app.contains("params: []"),
+        "descriptor params: {alpha_app}"
+    );
     assert!(
         alpha_app.contains("func: __rock_code_slot_ref(\"named:<test>::alpha<>\")"),
         "decorator function values resolve through their logical CodeRef slot: {alpha_app}"
     );
-    assert!(!alpha_app.contains("func: alpha"), "decorators must not capture a backend body: {alpha_app}");
-    assert!(alpha_app.trim_end().ends_with(", 5);"), "literal stage arg: {alpha_app}");
+    assert!(
+        !alpha_app.contains("func: alpha"),
+        "decorators must not capture a backend body: {alpha_app}"
+    );
+    assert!(
+        alpha_app.trim_end().ends_with(", 5);"),
+        "literal stage arg: {alpha_app}"
+    );
 
-    let beta_app = js.lines().find(|l| l.contains("__deco_system(") && l.contains("\"beta\""))
+    let beta_app = js
+        .lines()
+        .find(|l| l.contains("__deco_system(") && l.contains("\"beta\""))
         .unwrap_or_else(|| panic!("no beta application line:\n{js}"));
-    assert!(beta_app.trim_end().ends_with(", null);"), "defaulted stage -> null: {beta_app}");
+    assert!(
+        beta_app.trim_end().ends_with(", null);"),
+        "defaulted stage -> null: {beta_app}"
+    );
 }
 
 #[test]
 fn lifecycle_metadata_uses_the_shared_sorted_plan_in_js() {
-    let ws = ws_with(r#"
+    let ws = ws_with(
+        r#"
 @lifecycle(phase="update", owner="process", stage_param="stage")
 deco init tick(stage: int = 100) {}
 @tick(stage=7) fn first() {}
 @tick(stage=7) fn second() {}
 @tick fn defaulted() {}
 fn main() {}
-"#);
+"#,
+    );
     let js = emit_program(&ws);
     assert!(!js.contains("function __deco_tick("));
     assert!(!js.contains("__deco_tick({"));
-    let first = js.find("name: \"first\", stage: 7").expect("first plan entry");
-    let second = js.find("name: \"second\", stage: 7").expect("second plan entry");
-    let defaulted = js.find("name: \"defaulted\", stage: 100").expect("default plan entry");
+    let first = js
+        .find("name: \"first\", stage: 7")
+        .expect("first plan entry");
+    let second = js
+        .find("name: \"second\", stage: 7")
+        .expect("second plan entry");
+    let defaulted = js
+        .find("name: \"defaulted\", stage: 100")
+        .expect("default plan entry");
     assert!(first < second && second < defaulted);
 }
 
 #[test]
 fn emitted_js_has_no_shadow_effect_plan() {
     let js = emit_program(&ws_with("fn main() {}"));
-    assert!(!js.contains("ShadowEffectPlan"), "JS must not carry the removed effect-plan type");
-    assert!(!js.contains("__ROCK_SHADOW_EFFECT_PLAN"), "JS must not publish the removed effect plan");
+    assert!(
+        !js.contains("ShadowEffectPlan"),
+        "JS must not carry the removed effect-plan type"
+    );
+    assert!(
+        !js.contains("__ROCK_SHADOW_EFFECT_PLAN"),
+        "JS must not publish the removed effect plan"
+    );
 }
-
 
 #[test]
 fn lua_and_js_guard_frame_hooks_owned_by_a_sim_fixture_module() {
@@ -170,17 +221,24 @@ fn lua_and_js_guard_frame_hooks_owned_by_a_sim_fixture_module() {
         }
         "#,
     );
-    let mid = *ws.module_ids.get(&ustr::Ustr::from(file)).expect("fixture module");
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from(file))
+        .expect("fixture module");
     let lua = skull::mir_emit::emit_full(&ws, mid).expect("Lua emit").0;
     let js = skull_codegen_js::emit::emit_program(&ws, mid).expect("JS emit");
-    assert_eq!(lua.lifecycle_plan, js.lifecycle_plan, "Lua and JS sim scopes drifted");
+    assert_eq!(
+        lua.lifecycle_plan, js.lifecycle_plan,
+        "Lua and JS sim scopes drifted"
+    );
     assert!(
         lua.lua.contains("_G.__ROCK_ACTIVE_SIM == \"wire-name\""),
         "Lua lifecycle thunk is not scoped to the fixture sim: {}",
         lua.lua
     );
     assert!(
-        js.program.contains("__G.__ROCK_ACTIVE_SIM === \"wire-name\""),
+        js.program
+            .contains("__G.__ROCK_ACTIVE_SIM === \"wire-name\""),
         "JS lifecycle thunk is not scoped to the fixture sim: {}",
         js.program
     );
@@ -188,23 +246,29 @@ fn lua_and_js_guard_frame_hooks_owned_by_a_sim_fixture_module() {
 
 #[test]
 fn scene_lifecycle_metadata_uses_the_same_canonical_root_key_in_js() {
-    let ws = ws_with(r#"
+    let ws = ws_with(
+        r#"
 struct Dungeon { ticks: int }
 @lifecycle(phase="update", owner="scene") deco init scene_update {}
 @scene_update fn tick(root: Dungeon) { root.ticks += 1 }
 fn main() {}
-"#);
+"#,
+    );
     let js = emit_program(&ws);
     assert!(
         js.contains("owner: \"scene\", root_type: \"a_n7_Dungeon_0_z\""),
         "scene plan lost its canonical typed root key: {js}",
     );
-    assert!(js.contains("scene_owned: 1"), "scene phase population is zero");
+    assert!(
+        js.contains("scene_owned: 1"),
+        "scene phase population is zero"
+    );
 }
 
 #[test]
 fn scene_creation_uses_the_monomorphized_type_key_without_runtime_discovery_in_js() {
-    let ws = ws_with(r#"
+    let ws = ws_with(
+        r#"
 struct Room { ticks: int }
 @lifecycle(phase="update", owner="scene") deco init scene_update {}
 @scene_update fn tick(root: Room) { root.ticks += 1 }
@@ -216,7 +280,8 @@ fn load() -> Scene<Room> {
     }).unwrap()
 }
 fn main() { ROOT = load() }
-"#);
+"#,
+    );
     let js = emit_program(&ws);
     let scene_create_body = js
         .split("\nfunction ")
@@ -234,7 +299,8 @@ fn main() { ROOT = load() }
 
 #[test]
 fn lua_and_js_publish_identical_dependency_gated_lifecycle_plans() {
-    let ws = ws_with(r#"
+    let ws = ws_with(
+        r#"
         @lifecycle(phase="wire", owner="process") deco init wire {}
         const BASE: int = 1
         const DERIVED: int = BASE + 1
@@ -242,8 +308,12 @@ fn lua_and_js_publish_identical_dependency_gated_lifecycle_plans() {
         @wire fn plain_wire() {}
         @wire(onchange=[DERIVED, OTHER]) fn gated_wire() {}
         fn main() {}
-    "#);
-    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
+    "#,
+    );
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("test module");
     let lua_plan = skull::mir_emit::emit_full(&ws, mid)
         .expect("Lua emit")
         .0
@@ -252,9 +322,18 @@ fn lua_and_js_publish_identical_dependency_gated_lifecycle_plans() {
         .expect("JS emit")
         .lifecycle_plan;
     assert_eq!(lua_plan, js_plan, "Lua and JS lifecycle metadata drifted");
-    assert!(lua_plan.census.plain > 0, "plain population must be nonzero");
-    assert!(lua_plan.census.gated > 0, "gated population must be nonzero");
-    assert!(lua_plan.census.dependency_edges > 2, "transitive dependency closure must be populated");
+    assert!(
+        lua_plan.census.plain > 0,
+        "plain population must be nonzero"
+    );
+    assert!(
+        lua_plan.census.gated > 0,
+        "gated population must be nonzero"
+    );
+    assert!(
+        lua_plan.census.dependency_edges > 2,
+        "transitive dependency closure must be populated"
+    );
     let gated = lua_plan
         .entries
         .iter()
@@ -295,7 +374,10 @@ fn lua_and_js_reject_the_same_unsupported_wire_dependencies() {
             "#
         );
         let ws = ws_with(&source);
-        let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
+        let mid = *ws
+            .module_ids
+            .get(&ustr::Ustr::from("<test>"))
+            .expect("test module");
         let lua_error = match skull::mir_emit::emit_full(&ws, mid) {
             Ok(_) => panic!("Lua accepted unsupported dependency {annotation}"),
             Err(error) => error.message,
@@ -304,20 +386,25 @@ fn lua_and_js_reject_the_same_unsupported_wire_dependencies() {
             Ok(_) => panic!("JS accepted unsupported dependency {annotation}"),
             Err(error) => error.message,
         };
-        assert!(lua_error.contains(expected), "Lua {annotation}: {lua_error}");
+        assert!(
+            lua_error.contains(expected),
+            "Lua {annotation}: {lua_error}"
+        );
         assert!(js_error.contains(expected), "JS {annotation}: {js_error}");
     }
 }
 
 #[test]
 fn artifact_definition_metadata_uses_the_shared_keyed_plan_in_js() {
-    let ws = ws_with(r#"
+    let ws = ws_with(
+        r#"
 @artifact_definition(catalog="widgets", key_param="key")
 deco init widget(key: string) {}
 @widget(key="alpha") fn make_alpha() -> int { return 1 }
 @widget(key="beta") fn make_beta() -> int { return 2 }
 fn main() {}
-"#);
+"#,
+    );
     let js = emit_program(&ws);
     assert!(!js.contains("function __deco_widget("));
     assert!(!js.contains("__deco_widget({"));
@@ -329,20 +416,26 @@ fn main() {}
     assert!(js.contains("factory: __rock_code_slot_pending_ref(\"named:<test>::make_beta<>\")"));
     let source = format!(
         "var __G = {{}};\n{}\n{}\nconsole.log(__G.__ROCK_DEFINITION_PLAN.widgets.len + ':' + __G.__ROCK_DEFINITION_PLAN.widgets._data[0].key + ':' + __rock_call(__G.__ROCK_DEFINITION_PLAN.widgets._data[0].factory));",
-        format!("{}\n{}", skull_codegen_js::JS_GLOBALS_RUNTIME, skull_codegen_js::JS_CALL_HELPER),
+        format!(
+            "{}\n{}",
+            skull_codegen_js::JS_GLOBALS_RUNTIME,
+            skull_codegen_js::JS_CALL_HELPER
+        ),
         js
     );
-    let output = node()
-        .args(["-e", &source])
-        .output()
-        .expect("node");
-    assert!(output.status.success(), "node failed: {}", String::from_utf8_lossy(&output.stderr));
+    let output = node().args(["-e", &source]).output().expect("node");
+    assert!(
+        output.status.success(),
+        "node failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "2:alpha:1");
 }
 
 #[test]
 fn typed_catalog_accessor_is_compiler_owned_and_returns_the_published_view_in_js() {
-    let ws = ws_with(r#"
+    let ws = ws_with(
+        r#"
 struct WidgetDef { value: int }
 @artifact_definition(catalog="widgets", key_param="key")
 deco init widget(key: string) {}
@@ -354,9 +447,12 @@ deco init empty(key: string) {}
 @intrinsic extern fn empty_definition_plan() -> [ArtifactDefinition<WidgetDef>]
 @widget(key="alpha") fn make_alpha() -> WidgetDef { return WidgetDef { value: 1 } }
 fn main() {}
-"#);
+"#,
+    );
     let js = emit_program(&ws);
-    assert!(js.contains("function widget_definition_plan() { return __rock_definition_catalog(\"widgets\"); }"));
+    assert!(js.contains(
+        "function widget_definition_plan() { return __rock_definition_catalog(\"widgets\"); }"
+    ));
     assert!(!js.contains("__ROCK_DEFINITION_PLAN || {}"));
     let source = format!(
         "var __G = {{}};\n{}\n{}\n{}\nconst p = widget_definition_plan(); const e = empty_definition_plan(); let missing = false; try {{ __rock_definition_catalog('missing'); }} catch (_) {{ missing = true; }} console.log(p.len + ':' + p._data[0].key + ':' + p._data[0].definition.value + ':' + e.len + ':' + missing);",
@@ -364,17 +460,22 @@ fn main() {}
         skull_codegen_js::JS_CALL_HELPER,
         js,
     );
-    let output = node()
-        .args(["-e", &source])
-        .output()
-        .expect("node");
-    assert!(output.status.success(), "node failed: {}", String::from_utf8_lossy(&output.stderr));
-    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "1:alpha:1:0:true");
+    let output = node().args(["-e", &source]).output().expect("node");
+    assert!(
+        output.status.success(),
+        "node failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "1:alpha:1:0:true"
+    );
 }
 
 #[test]
 fn typed_catalog_lua_and_js_emission_share_membership_order_and_type() {
-    let ws = ws_with(r#"
+    let ws = ws_with(
+        r#"
 struct WidgetDef { value: int }
 @artifact_definition(catalog="widgets", key_param="key")
 deco init widget(key: string) {}
@@ -387,18 +488,34 @@ deco init empty(key: string) {}
 @widget(key="beta") fn make_beta() -> WidgetDef { return WidgetDef { value: 2 } }
 @widget(key="alpha") fn make_alpha() -> WidgetDef { return WidgetDef { value: 1 } }
 fn main() {}
-"#);
+"#,
+    );
     let plan = skull_mir::definition::collect(&ws).expect("typed parity plan");
     assert_eq!(plan.catalogs.len(), 2);
     assert_eq!(plan.catalogs[0].catalog.as_str(), "empty");
     assert_eq!(
-        plan.catalogs[0].definition_type.as_ref().map(|t| t.render()),
+        plan.catalogs[0]
+            .definition_type
+            .as_ref()
+            .map(|t| t.render()),
         Some("WidgetDef".to_string())
     );
-    assert_eq!(plan.entries.iter().map(|e| e.key.as_str()).collect::<Vec<_>>(), ["beta", "alpha"]);
+    assert_eq!(
+        plan.entries
+            .iter()
+            .map(|e| e.key.as_str())
+            .collect::<Vec<_>>(),
+        ["beta", "alpha"]
+    );
 
-    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
-    let lua = skull::mir_emit::emit_full(&ws, mid).expect("Lua parity emission").0.lua;
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("test module");
+    let lua = skull::mir_emit::emit_full(&ws, mid)
+        .expect("Lua parity emission")
+        .0
+        .lua;
     let js = emit_program(&ws);
     for output in [&lua, &js] {
         assert!(output.contains("key = \"beta\"") || output.contains("key: \"beta\""));
@@ -434,11 +551,12 @@ const result = missingPlan && missingCatalog && empty.len === 0 && nonempty.len 
   ? "4/4 PASS" : "0/4 FAIL";
 "#,
     );
-    let output = node()
-        .args(["-e", &source])
-        .output()
-        .expect("node");
-    assert!(output.status.success(), "node failed: {}", String::from_utf8_lossy(&output.stderr));
+    let output = node().args(["-e", &source]).output().expect("node");
+    assert!(
+        output.status.success(),
+        "node failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "4/4 PASS");
 }
 
@@ -491,7 +609,8 @@ fn main() { print("{XS.len}") }
 // "missing Rock code slot" at load and the program never runs.
 #[test]
 fn a_program_global_lambda_initializes_after_the_code_slots_are_staged() {
-    let ws = ws_with(r#"
+    let ws = ws_with(
+        r#"
 global SQUARE: fn(int) -> int = (x: int) => x * x
 const OPS: [fn(int) -> int] = [(x: int) => x + 1]
 fn main() -> int {
@@ -499,7 +618,8 @@ fn main() -> int {
     assert(OPS[0](4) == 5)
     return SQUARE(3) + OPS[0](1)
 }
-"#);
+"#,
+    );
     let js = emit_program(&ws);
     let source = format!(
         "var __G = {{}};\n{}{}{}\n{}\n{}\nconsole.log(main());",
@@ -509,7 +629,11 @@ fn main() -> int {
         skull_codegen_js::JS_CALL_HELPER,
         js
     );
-    let output = node().arg("-e").arg(&source).output().expect("run global-lambda program");
+    let output = node()
+        .arg("-e")
+        .arg(&source)
+        .output()
+        .expect("run global-lambda program");
     assert!(
         output.status.success(),
         "node failed: {}\n--- js ---\n{js}",

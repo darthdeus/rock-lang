@@ -9,7 +9,10 @@ use bone_query::BoneWorkspace;
 const PATH: &str = "/tmp/rock_lsp_bone_stale_diag.rock";
 
 fn diag_msgs(bone: &BoneWorkspace) -> Vec<String> {
-    bone.diagnostics_for(PATH).into_iter().map(|d| d.message).collect()
+    bone.diagnostics_for(PATH)
+        .into_iter()
+        .map(|d| d.message)
+        .collect()
 }
 
 #[test]
@@ -20,10 +23,17 @@ fn intermediate_unsupported_type_clears_after_edit() {
 
     let mut bone = BoneWorkspace::new();
     bone.update(PATH, valid.to_string());
-    assert!(diag_msgs(&bone).is_empty(), "valid start: {:?}", diag_msgs(&bone));
+    assert!(
+        diag_msgs(&bone).is_empty(),
+        "valid start: {:?}",
+        diag_msgs(&bone)
+    );
 
     bone.update(PATH, broken.to_string());
-    assert!(!diag_msgs(&bone).is_empty(), "broken state should report something");
+    assert!(
+        !diag_msgs(&bone).is_empty(),
+        "broken state should report something"
+    );
 
     // Edit back to valid -- every diagnostic MUST clear.
     bone.update(PATH, valid.to_string());
@@ -57,15 +67,15 @@ fn typing_as_int_char_by_char_ends_clean() {
 
 #[test]
 fn const_to_global_clears_assign_error() {
-    let with_const =
-        "const X: float = 0.0\nfn w() {\n    X = 1.0\n}\n";
-    let with_global =
-        "global X: float = 0.0\nfn w() {\n    X = 1.0\n}\n";
+    let with_const = "const X: float = 0.0\nfn w() {\n    X = 1.0\n}\n";
+    let with_global = "global X: float = 0.0\nfn w() {\n    X = 1.0\n}\n";
 
     let mut bone = BoneWorkspace::new();
     bone.update(PATH, with_const.to_string());
     assert!(
-        diag_msgs(&bone).iter().any(|m| m.contains("cannot assign to const")),
+        diag_msgs(&bone)
+            .iter()
+            .any(|m| m.contains("cannot assign to const")),
         "const start should error: {:?}",
         diag_msgs(&bone)
     );
@@ -83,7 +93,10 @@ fn const_to_global_clears_assign_error_cross_file() {
     // The real scenario: the global is declared in one file, the assigning fn
     // lives in another. Flipping const->global must re-infer the DEPENDENT
     // module's body (it writes the global) and clear its diagnostic.
-    let dir = tempfile::Builder::new().prefix("rock_lsp_bone_const_xfile").tempdir().unwrap();
+    let dir = tempfile::Builder::new()
+        .prefix("rock_lsp_bone_const_xfile")
+        .tempdir()
+        .unwrap();
     let decl = dir.path().join("decl.rock");
     let user = dir.path().join("user.rock");
     let dp = decl.to_str().unwrap();
@@ -96,10 +109,15 @@ fn const_to_global_clears_assign_error_cross_file() {
     bone.update(dp, "const X: float = 0.0\n".to_string());
     bone.update(up, "fn w() {\n    X = 1.0\n}\n".to_string());
     let user_diags = |b: &BoneWorkspace| {
-        b.diagnostics_for(up).into_iter().map(|d| d.message).collect::<Vec<_>>()
+        b.diagnostics_for(up)
+            .into_iter()
+            .map(|d| d.message)
+            .collect::<Vec<_>>()
     };
     assert!(
-        user_diags(&bone).iter().any(|m| m.contains("cannot assign to const")),
+        user_diags(&bone)
+            .iter()
+            .any(|m| m.contains("cannot assign to const")),
         "const start should error in the user file: {:?}",
         user_diags(&bone)
     );

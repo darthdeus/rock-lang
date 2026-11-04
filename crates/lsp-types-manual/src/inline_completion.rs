@@ -11,9 +11,12 @@ pub struct InlineCompletionClientCapabilities {
     pub dynamic_registration: Option<bool>,
 }
 
-impl_lsp_struct!(InlineCompletionClientCapabilities,
+impl_lsp_struct!(
+    InlineCompletionClientCapabilities,
     required {},
-    optional { dynamic_registration: bool = "dynamicRegistration" }
+    optional {
+        dynamic_registration: bool = "dynamicRegistration"
+    }
 );
 
 /// Inline completion options used during static registration.
@@ -24,8 +27,11 @@ pub struct InlineCompletionOptions {
     pub work_done_progress_options: WorkDoneProgressOptions,
 }
 
-impl_lsp_struct!(InlineCompletionOptions,
-    flatten { work_done_progress_options: WorkDoneProgressOptions }
+impl_lsp_struct!(
+    InlineCompletionOptions,
+    flatten {
+        work_done_progress_options: WorkDoneProgressOptions
+    }
 );
 
 /// Inline completion options used during static or dynamic registration.
@@ -38,7 +44,8 @@ pub struct InlineCompletionRegistrationOptions {
     pub static_registration_options: StaticRegistrationOptions,
 }
 
-impl_lsp_struct!(InlineCompletionRegistrationOptions,
+impl_lsp_struct!(
+    InlineCompletionRegistrationOptions,
     flatten {
         inline_completion_options: InlineCompletionOptions,
         text_document_registration_options: TextDocumentRegistrationOptions,
@@ -58,8 +65,11 @@ pub struct InlineCompletionParams {
     pub context: InlineCompletionContext,
 }
 
-impl_lsp_struct!(InlineCompletionParams,
-    required { context: InlineCompletionContext = "context" },
+impl_lsp_struct!(
+    InlineCompletionParams,
+    required {
+        context: InlineCompletionContext = "context"
+    },
     optional {},
     flatten {
         work_done_progress_params: WorkDoneProgressParams,
@@ -93,7 +103,8 @@ pub struct SelectedCompletionInfo {
     pub text: String,
 }
 
-impl_lsp_struct!(SelectedCompletionInfo,
+impl_lsp_struct!(
+    SelectedCompletionInfo,
     required {
         range: Range = "range",
         text: String = "text",
@@ -111,9 +122,14 @@ pub struct InlineCompletionContext {
     pub selected_completion_info: Option<SelectedCompletionInfo>,
 }
 
-impl_lsp_struct!(InlineCompletionContext,
-    required { trigger_kind: InlineCompletionTriggerKind = "triggerKind" },
-    optional { selected_completion_info: SelectedCompletionInfo = "selectedCompletionInfo" }
+impl_lsp_struct!(
+    InlineCompletionContext,
+    required {
+        trigger_kind: InlineCompletionTriggerKind = "triggerKind"
+    },
+    optional {
+        selected_completion_info: SelectedCompletionInfo = "selectedCompletionInfo"
+    }
 );
 
 /// InlineCompletion response can be multiple completion items, or a list of completion items
@@ -154,8 +170,11 @@ pub struct InlineCompletionItem {
     pub insert_text_format: Option<InsertTextFormat>,
 }
 
-impl_lsp_struct!(InlineCompletionItem,
-    required { insert_text: String = "insertText" },
+impl_lsp_struct!(
+    InlineCompletionItem,
+    required {
+        insert_text: String = "insertText"
+    },
     optional {
         filter_text: String = "filterText",
         range: Range = "range",

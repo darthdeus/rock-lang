@@ -80,12 +80,21 @@ fn walk_expr(body: &Body, e: Idx<Expr>, out: &mut FxHashSet<Idx<Expr>>) {
         Expr::Index { base: a, index: b }
         | Expr::BinOp { lhs: a, rhs: b, .. }
         | Expr::Range { low: a, high: b }
-        | Expr::Assign { target: a, value: b }
-        | Expr::CompoundAssign { target: a, value: b, .. } => {
+        | Expr::Assign {
+            target: a,
+            value: b,
+        }
+        | Expr::CompoundAssign {
+            target: a,
+            value: b,
+            ..
+        } => {
             walk_expr(body, a, out);
             walk_expr(body, b, out);
         }
-        Expr::SafeNavLet { receiver, body: b, .. } => {
+        Expr::SafeNavLet {
+            receiver, body: b, ..
+        } => {
             walk_expr(body, receiver, out);
             walk_expr(body, b, out);
         }
@@ -103,14 +112,23 @@ fn walk_expr(body: &Body, e: Idx<Expr>, out: &mut FxHashSet<Idx<Expr>>) {
                 walk_expr(body, t, out);
             }
         }
-        Expr::If { cond, then_branch, else_branch } => {
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
             walk_expr(body, cond, out);
             walk_expr(body, then_branch, out);
             if let Some(e) = else_branch {
                 walk_expr(body, e, out);
             }
         }
-        Expr::IfLet { pattern, value, then_branch, else_branch } => {
+        Expr::IfLet {
+            pattern,
+            value,
+            then_branch,
+            else_branch,
+        } => {
             walk_pattern(body, pattern, out);
             walk_expr(body, value, out);
             walk_expr(body, then_branch, out);
@@ -150,7 +168,11 @@ fn walk_expr(body: &Body, e: Idx<Expr>, out: &mut FxHashSet<Idx<Expr>>) {
         Expr::Match { scrutinee, arms } => {
             walk_expr(body, scrutinee, out);
             for a in arms {
-                let MatchArm { pattern, body: b, guard } = body.match_arm_arena[a];
+                let MatchArm {
+                    pattern,
+                    body: b,
+                    guard,
+                } = body.match_arm_arena[a];
                 walk_pattern(body, pattern, out);
                 walk_expr(body, b, out);
                 if let Some(g) = guard {
@@ -186,7 +208,11 @@ fn walk_statement(body: &Body, s: Idx<Statement>, out: &mut FxHashSet<Idx<Expr>>
             walk_expr(body, cond, out);
             walk_expr(body, b, out);
         }
-        Statement::WhileLet { pattern, value, body: b } => {
+        Statement::WhileLet {
+            pattern,
+            value,
+            body: b,
+        } => {
             walk_pattern(body, pattern, out);
             walk_expr(body, value, out);
             walk_expr(body, b, out);
@@ -239,5 +265,8 @@ pub fn defaults_body_residue(body: &Body) -> usize {
     for root in body.field_defaults.values() {
         walk_expr(body, *root, &mut covered);
     }
-    body.expr_arena.iter().filter(|(e, _)| !covered.contains(e)).count()
+    body.expr_arena
+        .iter()
+        .filter(|(e, _)| !covered.contains(e))
+        .count()
 }

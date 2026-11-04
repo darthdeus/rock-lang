@@ -12,15 +12,15 @@
 //! goal is `rock test tests --backend skull` at 100%.
 
 use crate::Result;
-use crate::registry::{ProgramKind, RuntimeServices};
 use crate::bone_backend::{categorize, short_path};
+use crate::registry::{ProgramKind, RuntimeServices};
+use bone_core::prelude::Instant;
 use colored::Colorize;
 use rock_core::CompilerError;
 use rock_core::SourceFiles;
 use rock_core::source_file_from_path_and_contents;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
-use bone_core::prelude::Instant;
 
 /// Parse `src`, type-check it through bone WITH the stdlib injected (so
 /// operators/`print`/`assert` resolve, exactly like `--backend bone`), then emit
@@ -31,10 +31,7 @@ use bone_core::prelude::Instant;
 /// whether the caller appends the entry call. Not recovered from the text: the
 /// emitted spelling of a definition is the emitter's business and changes with
 /// `ROCK_SKULL_CALLEE_BINDING`.
-fn skull_emit(
-    file: &str,
-    src: &str,
-) -> std::result::Result<(String, bool), Vec<CompilerError>> {
+fn skull_emit(file: &str, src: &str) -> std::result::Result<(String, bool), Vec<CompilerError>> {
     let (lua, _, emits_main) = skull_emit_full(file, src).map_err(EmitFullErr::into_errs)?;
     Ok((lua, emits_main))
 }
@@ -106,10 +103,16 @@ impl skull::pipeline::CompileHost for CliCompileHost<'_> {
                 let source = source.borrow();
                 (source.file.to_id_path() == file).then(|| source.contents.clone())
             })
-        }).map_err(|error| CompilerError::new_no_location(format!("build var resolution failed: {error:#}")))
+        })
+        .map_err(|error| {
+            CompilerError::new_no_location(format!("build var resolution failed: {error:#}"))
+        })
     }
 
-    fn lint_findings(&mut self, ws: &bone_semantic::inference::Workspace) -> Vec<bone_lints::Finding> {
+    fn lint_findings(
+        &mut self,
+        ws: &bone_semantic::inference::Workspace,
+    ) -> Vec<bone_lints::Finding> {
         crate::lint_pass::findings(ws, self.sources, self.lint_root, self.lint_scope)
     }
 
@@ -159,7 +162,10 @@ impl skull::pipeline::CompileHost for PackageTestHost<'_> {
         self.inner.checked_comptime_inputs(ws)
     }
 
-    fn lint_findings(&mut self, ws: &bone_semantic::inference::Workspace) -> Vec<bone_lints::Finding> {
+    fn lint_findings(
+        &mut self,
+        ws: &bone_semantic::inference::Workspace,
+    ) -> Vec<bone_lints::Finding> {
         self.inner.lint_findings(ws)
     }
 
@@ -199,9 +205,17 @@ fn skull_emit_full(
         lint_scope: crate::lint_pass::Scope::WholeProject,
         comptime: CliComptime::FromEntry(file),
     };
-    let skull::pipeline::Compiled { ws, entry: user_mid, emission: emit } =
-        skull::pipeline::compile_source(file, src, skull::pipeline::EmitTarget::SINGLE_SOURCE, &mut host)
-            .map_err(|failure| EmitFullErr::Compile(failure.errors))?;
+    let skull::pipeline::Compiled {
+        ws,
+        entry: user_mid,
+        emission: emit,
+    } = skull::pipeline::compile_source(
+        file,
+        src,
+        skull::pipeline::EmitTarget::SINGLE_SOURCE,
+        &mut host,
+    )
+    .map_err(|failure| EmitFullErr::Compile(failure.errors))?;
     crate::compile_measurements::emission(&emit);
     let emits_main = emit.emits_main;
     let (lua, skipped) = (emit.lua, emit.skipped);
@@ -347,7 +361,9 @@ pub fn skull_workspace_timed(
         }
     };
 
-    if emit_ok { stats.success(); }
+    if emit_ok {
+        stats.success();
+    }
     (emit_ok, times)
 }
 
@@ -405,7 +421,11 @@ pub fn skull_iter_codegen(path: &str, iters: usize) -> Result<()> {
     }
     let elapsed = t.elapsed();
     let per = elapsed.as_secs_f64() * 1000.0 / iters as f64;
-    let mode = if cfg!(feature = "sequential") { "sequential" } else { "parallel" };
+    let mode = if cfg!(feature = "sequential") {
+        "sequential"
+    } else {
+        "parallel"
+    };
     log::info!(target: "PROFILE",
         "skull iter-codegen {}: {} iters x {} modules ({} KB Lua), {} mode, {:.3}ms total, {:.4}ms/iter",
         path, iters, ws.modules.len(), bytes / 1024, mode,
@@ -641,7 +661,10 @@ fn build_test_harness(tests: &[skull::SkullTest], token: &str) -> String {
         o
     }
 
-    let mut h = format!("\nlocal __skull_token = {}\nlocal __skull_T = {{\n", lua_str(token));
+    let mut h = format!(
+        "\nlocal __skull_token = {}\nlocal __skull_T = {{\n",
+        lua_str(token)
+    );
     for t in tests {
         let out = match &t.output {
             Some(s) => lua_str(s),
@@ -774,7 +797,10 @@ struct SkullFailure {
 
 impl From<crate::registry::RuntimeFailure> for SkullFailure {
     fn from(error: crate::registry::RuntimeFailure) -> Self {
-        Self { reason: format!("{}: {}", error.reason, error.rendered), rendered: error.rendered }
+        Self {
+            reason: format!("{}: {}", error.reason, error.rendered),
+            rendered: error.rendered,
+        }
     }
 }
 
@@ -788,7 +814,11 @@ impl From<crate::registry::RuntimeFailure> for SkullFailure {
 enum SkullOutcome {
     /// All `@test`s passed (or the file had none). `tests` = number that ran
     /// green (0 for a load-only file with no `@test`s).
-    Pass { tests: usize, skipped: usize, timings: Vec<TestTiming> },
+    Pass {
+        tests: usize,
+        skipped: usize,
+        timings: Vec<TestTiming>,
+    },
     /// Some `@test`s failed. `passed` ran green; `fails` holds the rest's detail.
     /// Abnormal shard stops also carry a concise diagnostic for the default CLI
     /// summary, independent of `ROCK_TEST_VERBOSE`.
@@ -871,7 +901,10 @@ fn timeout_cause(run: &crate::common::ProcessResult, limit: Duration) -> String 
             "timed out: emitted-program loading reached its wall-clock backstop ({}s)",
             crate::common::test_watchdog_wall_backstop(limit).as_secs_f64()
         ),
-        _ => format!("timed out: watchdog stopped the child ({:.3}s configured)", limit.as_secs_f64()),
+        _ => format!(
+            "timed out: watchdog stopped the child ({:.3}s configured)",
+            limit.as_secs_f64()
+        ),
     }
 }
 
@@ -885,9 +918,11 @@ fn skull_build(
     filter: Option<&crate::test::TestFilter>,
 ) -> std::result::Result<SkullOutcome, SkullFailure> {
     let _stats = crate::compile_measurements::Scope::begin(file);
-    (crate::registry::RuntimeServices::registered().prepare_unit)(file).map_err(|e| SkullFailure {
-        reason: "sound bank preparation failed".to_string(),
-        rendered: format!("sound bank preparation failed for {file}: {e:#}"),
+    (crate::registry::RuntimeServices::registered().prepare_unit)(file).map_err(|e| {
+        SkullFailure {
+            reason: "sound bank preparation failed".to_string(),
+            rendered: format!("sound bank preparation failed for {file}: {e:#}"),
+        }
     })?;
     // bone type-check + skull emit. Errors here are bone's (most files) or a
     // skull codegen gap; both carry a `CompilerError`.
@@ -933,8 +968,13 @@ fn skull_build(
 
     let host = (crate::registry::RuntimeServices::registered().program_host)(
         crate::registry::TestUnit::File(std::path::Path::new(file)),
-    ).map_err(SkullFailure::from)?;
-    let lua = TestProgram { preamble: host.preamble, lua, setup: host.setup };
+    )
+    .map_err(SkullFailure::from)?;
+    let lua = TestProgram {
+        preamble: host.preamble,
+        lua,
+        setup: host.setup,
+    };
     let files = vec![file.to_owned(); tests.len()];
     run_emitted_tests(lua, &tests, &files, TEST_CPU_LIMIT, 1, filter, false)
 }
@@ -995,27 +1035,46 @@ fn run_emitted_tests(
             reason: "invalid lua emitted (skull bug)".to_string(),
             rendered: e.to_string(),
         })?;
-        let run = run_test_program(script.path(), limit, run_token(), 0, None).map_err(|e| SkullFailure {
-            reason: "invalid lua emitted (skull bug)".to_string(),
-            rendered: e.to_string(),
+        let run = run_test_program(script.path(), limit, run_token(), 0, None).map_err(|e| {
+            SkullFailure {
+                reason: "invalid lua emitted (skull bug)".to_string(),
+                rendered: e.to_string(),
+            }
         })?;
         if run.timed_out || !run.output.status.success() {
             return Err(SkullFailure {
                 reason: "invalid lua emitted (skull bug)".to_string(),
                 rendered: if run.timed_out {
-                    format!("loading emitted program: timed out after {}s", limit.as_secs_f64())
+                    format!(
+                        "loading emitted program: timed out after {}s",
+                        limit.as_secs_f64()
+                    )
                 } else {
-                    format!("{}\n\n--- emitted lua (truncated) ---\n{}",
-                        format!("{}{}", String::from_utf8_lossy(&run.output.stdout),
-                            String::from_utf8_lossy(&run.output.stderr)), excerpt)
+                    format!(
+                        "{}\n\n--- emitted lua (truncated) ---\n{}",
+                        format!(
+                            "{}{}",
+                            String::from_utf8_lossy(&run.output.stdout),
+                            String::from_utf8_lossy(&run.output.stderr)
+                        ),
+                        excerpt
+                    )
                 },
             });
         }
-        return Ok(SkullOutcome::Pass { tests: 0, skipped: 0, timings: Vec::new() });
+        return Ok(SkullOutcome::Pass {
+            tests: 0,
+            skipped: 0,
+            timings: Vec::new(),
+        });
     }
     if selected_tests.is_empty() {
         crate::compile_measurements::finish("ok");
-        return Ok(SkullOutcome::Pass { tests: 0, skipped, timings: Vec::new() });
+        return Ok(SkullOutcome::Pass {
+            tests: 0,
+            skipped,
+            timings: Vec::new(),
+        });
     }
     // Only the selected tests exist from here on: the harness, the shard
     // indices and the never-reported accounting all count them alone.
@@ -1024,8 +1083,12 @@ fn run_emitted_tests(
     // Run the @tests: emit + harness, capture each test's PASS/FAIL line.
     // A stable key keeps existing tests in place when declarations are inserted.
     let token = run_token();
-    let shards = resolve_test_shards(shards, tests.len(), lua.len(),
-        std::env::var_os("ROCK_TEST_SHARDS").is_some());
+    let shards = resolve_test_shards(
+        shards,
+        tests.len(),
+        lua.len(),
+        std::env::var_os("ROCK_TEST_SHARDS").is_some(),
+    );
     let harness = build_test_harness(tests, &token);
     let (script, excerpt) = write_test_program(lua, &harness).map_err(|e| SkullFailure {
         reason: "test run errored (skull bug)".to_string(),
@@ -1044,12 +1107,20 @@ fn run_emitted_tests(
     assignment.retain(|indices| !indices.is_empty());
     let shards = assignment.len();
     let runs: Vec<Result<Vec<ShardRun>>> = std::thread::scope(|scope| {
-        let handles: Vec<_> = assignment.iter().map(|indices| {
-            let (script, token) = (script.path(), token.clone());
-            scope.spawn(move || run_shard(script, limit, token, indices, shards > 1))
-        }).collect();
-        handles.into_iter()
-            .map(|handle| handle.join().unwrap_or_else(|_| Err(anyhow::anyhow!("test shard thread panicked"))))
+        let handles: Vec<_> = assignment
+            .iter()
+            .map(|indices| {
+                let (script, token) = (script.path(), token.clone());
+                scope.spawn(move || run_shard(script, limit, token, indices, shards > 1))
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .unwrap_or_else(|_| Err(anyhow::anyhow!("test shard thread panicked")))
+            })
             .collect()
     });
     drop(script);
@@ -1094,11 +1165,16 @@ fn run_emitted_tests(
         if markers.is_none() && !run.timed_out && !died && run.running_test.is_none() {
             return Err(SkullFailure {
                 reason: "invalid lua emitted (skull bug)".to_string(),
-                rendered: format!("{label}{stdout}\n{stderr}\n\n--- emitted lua (truncated) ---\n{excerpt}"),
+                rendered: format!(
+                    "{label}{stdout}\n{stderr}\n\n--- emitted lua (truncated) ---\n{excerpt}"
+                ),
             });
         }
         let markers = markers.unwrap_or(crate::test_protocol::SkullMarkers {
-            passed: 0, fails: Vec::new(), values: Vec::new(), times: Vec::new(),
+            passed: 0,
+            fails: Vec::new(),
+            values: Vec::new(),
+            times: Vec::new(),
         });
         let reported = markers.passed + markers.fails.len() + markers.values.len();
         passed += markers.passed;
@@ -1114,8 +1190,11 @@ fn run_emitted_tests(
                     rendered: format!("VALUE line for `{name}` without a returns expectation"),
                 });
             };
-            match crate::test_protocol::compare_value(expect, val, crate::test_protocol::FLOAT_REL_TOL)
-            {
+            match crate::test_protocol::compare_value(
+                expect,
+                val,
+                crate::test_protocol::FLOAT_REL_TOL,
+            ) {
                 Ok(()) => passed += 1,
                 Err(detail) => {
                     value_fails.insert(name.as_str());
@@ -1125,15 +1204,20 @@ fn run_emitted_tests(
         }
         // A shard's TIME lines follow its run order, so the j-th is test
         // `indices[j]`; keying by it restores declaration order after merging.
-        timings.extend(markers.times.iter().zip(indices).map(|(time, &index)| (index, TestTiming {
-            name: time.name.clone(),
-            ms: time.ms,
-            status: match time.result.as_str() {
-                "pass" => "pass",
-                "value" if !value_fails.contains(time.name.as_str()) => "pass",
-                _ => "fail",
-            },
-        })));
+        timings.extend(markers.times.iter().zip(indices).map(|(time, &index)| {
+            (
+                index,
+                TestTiming {
+                    name: time.name.clone(),
+                    ms: time.ms,
+                    status: match time.result.as_str() {
+                        "pass" => "pass",
+                        "value" if !value_fails.contains(time.name.as_str()) => "pass",
+                        _ => "fail",
+                    },
+                },
+            )
+        }));
 
         // Every selected test owes exactly one marker. Counting only the
         // markers that ARRIVED makes a truncated run self-consistent -- three
@@ -1150,29 +1234,38 @@ fn run_emitted_tests(
         let missing = indices.iter().copied().skip(reported).collect::<Vec<_>>();
         if run.timed_out || died || !missing.is_empty() {
             let state = if let Some(position) = run.running_test {
-                indices.get(position).map(|&index| format!(
-                    "running test `{}` ({})",
-                    tests[index].name,
-                    files[index],
-                )).unwrap_or_else(|| format!("running shard test ordinal {position}"))
+                indices
+                    .get(position)
+                    .map(|&index| {
+                        format!("running test `{}` ({})", tests[index].name, files[index],)
+                    })
+                    .unwrap_or_else(|| format!("running shard test ordinal {position}"))
             } else if let Some(position) = run.last_completed_test {
-                indices.get(position).map(|&index| format!(
-                    "between tests after `{}` ({})",
-                    tests[index].name,
-                    files[index],
-                )).unwrap_or_else(|| "between tests".to_string())
+                indices
+                    .get(position)
+                    .map(|&index| {
+                        format!(
+                            "between tests after `{}` ({})",
+                            tests[index].name, files[index],
+                        )
+                    })
+                    .unwrap_or_else(|| "between tests".to_string())
             } else {
                 "before the first test started".to_string()
             };
-            let missing = missing.iter().map(|&index| format!(
-                "{}: never reported ({})",
-                tests[index].name,
-                files[index],
-            )).collect::<Vec<_>>().join(", ");
+            let missing = missing
+                .iter()
+                .map(|&index| format!("{}: never reported ({})", tests[index].name, files[index],))
+                .collect::<Vec<_>>()
+                .join(", ");
             diagnostics.push(format!(
                 "{label}stopped: {stop}; exit status: {}; {state}; never reported: {}; stderr:\n{}",
                 child_exit_status(&run.output.status),
-                if missing.is_empty() { "<none>" } else { &missing },
+                if missing.is_empty() {
+                    "<none>"
+                } else {
+                    &missing
+                },
                 stderr_excerpt(&run.output.stderr),
             ));
         }
@@ -1184,7 +1277,10 @@ fn run_emitted_tests(
             } else {
                 "its process stopped before it ran".to_string()
             };
-            fails.push(format!("{}: never reported ({}; {label}{reason})", tests[index].name, files[index]));
+            fails.push(format!(
+                "{}: never reported ({}; {label}{reason})",
+                tests[index].name, files[index]
+            ));
         }
         if reported >= indices.len() && died {
             fails.push(format!(
@@ -1197,9 +1293,19 @@ fn run_emitted_tests(
     let timings = timings.into_iter().map(|(_, timing)| timing).collect();
 
     if fails.is_empty() {
-        Ok(SkullOutcome::Pass { tests: passed, skipped, timings })
+        Ok(SkullOutcome::Pass {
+            tests: passed,
+            skipped,
+            timings,
+        })
     } else {
-        Ok(SkullOutcome::TestFail { passed, fails, skipped, timings, diagnostics })
+        Ok(SkullOutcome::TestFail {
+            passed,
+            fails,
+            skipped,
+            timings,
+            diagnostics,
+        })
     }
 }
 
@@ -1236,19 +1342,35 @@ fn run_shard(
     let mut rest = indices;
     loop {
         let selection = (select || !runs.is_empty()).then(|| {
-            rest.iter().map(|i| (i + 1).to_string()).collect::<Vec<_>>().join(",")
+            rest.iter()
+                .map(|i| (i + 1).to_string())
+                .collect::<Vec<_>>()
+                .join(",")
         });
-        let run = run_test_program(script, limit, token.clone(), rest.len(), selection.as_deref())?;
+        let run = run_test_program(
+            script,
+            limit,
+            token.clone(),
+            rest.len(),
+            selection.as_deref(),
+        )?;
         // A test still running when the process ended is the one that stopped it.
-        let resume_at = run.running_test
+        let resume_at = run
+            .running_test
             .filter(|_| runs.len() < SHARD_RESTARTS)
             .map(|position| position + 1)
             .filter(|&next| next < rest.len());
         let Some(next) = resume_at else {
-            runs.push(ShardRun { indices: rest.to_vec(), run });
+            runs.push(ShardRun {
+                indices: rest.to_vec(),
+                run,
+            });
             return Ok(runs);
         };
-        runs.push(ShardRun { indices: rest[..next].to_vec(), run });
+        runs.push(ShardRun {
+            indices: rest[..next].to_vec(),
+            run,
+        });
         rest = &rest[next..];
     }
 }
@@ -1262,8 +1384,11 @@ fn run_token() -> String {
     use std::hash::{BuildHasher, Hasher};
     let half = || {
         let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
-        hasher.write_u128(std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos()));
+        hasher.write_u128(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos()),
+        );
         hasher.write_u32(std::process::id());
         hasher.finish()
     };
@@ -1284,7 +1409,11 @@ impl TestProgram {
 
 impl From<String> for TestProgram {
     fn from(lua: String) -> Self {
-        Self { preamble: String::new(), lua, setup: "" }
+        Self {
+            preamble: String::new(),
+            lua,
+            setup: "",
+        }
     }
 }
 
@@ -1306,7 +1435,10 @@ fn program_excerpt(parts: &[&str]) -> String {
 
 /// A file avoids blocking on stdin before the startup watchdog is running, and
 /// lets every shard load the same program.
-fn write_test_program(program: TestProgram, harness: &str) -> Result<(tempfile::NamedTempFile, String)> {
+fn write_test_program(
+    program: TestProgram,
+    harness: &str,
+) -> Result<(tempfile::NamedTempFile, String)> {
     use std::io::Write;
     let parts = [&*program.preamble, &*program.lua, program.setup, harness];
     let excerpt = program_excerpt(&parts);
@@ -1328,8 +1460,8 @@ fn run_test_program(
     tests: usize,
     selection: Option<&str>,
 ) -> Result<crate::common::ProcessResult> {
-    use std::process::Stdio;
     use rock_host::process_management::{register_child_process, unregister_child_process};
+    use std::process::Stdio;
 
     let mut command = rock_host::project::build_luajit_command(script, &[]);
     // Shards and concurrent runs share one worktree; each process gets its own
@@ -1340,7 +1472,10 @@ fn run_test_program(
         Some(selection) => command.env("ROCK_TEST_SHARD_TESTS", selection),
         None => command.env_remove("ROCK_TEST_SHARD_TESTS"),
     };
-    command = (crate::registry::RuntimeServices::registered().runtime_command)(command, crate::registry::RuntimeProcess::LuaTest);
+    command = (crate::registry::RuntimeServices::registered().runtime_command)(
+        command,
+        crate::registry::RuntimeProcess::LuaTest,
+    );
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -1349,7 +1484,10 @@ fn run_test_program(
     let pid = child.id();
     register_child_process(pid);
     let result = crate::common::ProcessManager::wait_with_test_watchdog(
-        &mut child, limit, crate::common::TestWatch { token, tests });
+        &mut child,
+        limit,
+        crate::common::TestWatch { token, tests },
+    );
     if result.is_err() {
         if let Err(error) = child.kill() {
             log::error!(target: "CLI", "failed to kill Lua test process: {error}");
@@ -1431,7 +1569,10 @@ fn walk_test_units(
         let entry = match entry {
             Ok(e) => e,
             Err(e) => {
-                eprintln!("rock: skipping path under `{}` while scanning for tests: {e}", base.display());
+                eprintln!(
+                    "rock: skipping path under `{}` while scanning for tests: {e}",
+                    base.display()
+                );
                 continue;
             }
         };
@@ -1469,9 +1610,11 @@ fn skull_build_package_with_limit(
 ) -> std::result::Result<SkullOutcome, SkullFailure> {
     let _stats = crate::compile_measurements::Scope::begin(dir);
     // Like a game run, so tests never read a bank an earlier tree compiled.
-    (crate::registry::RuntimeServices::registered().prepare_unit)(dir).map_err(|e| SkullFailure {
-        reason: "sound bank preparation failed".to_string(),
-        rendered: format!("sound bank preparation failed for {dir}: {e:#}"),
+    (crate::registry::RuntimeServices::registered().prepare_unit)(dir).map_err(|e| {
+        SkullFailure {
+            reason: "sound bank preparation failed".to_string(),
+            rendered: format!("sound bank preparation failed for {dir}: {e:#}"),
+        }
     })?;
     let slot = crate::compile_slots::acquire(dir).map_err(|e| SkullFailure {
         reason: "no compile slot".to_string(),
@@ -1503,27 +1646,40 @@ fn skull_build_package_with_limit(
         },
         test_dir: dir,
     };
-    let target = skull::pipeline::EmitTarget { project_root: None, renderer: skull::mir_emit::RendererTarget::Gl };
-    let skull::pipeline::Compiled { ws, emission: emit, .. } =
-        skull::pipeline::compile_modules(modules, entry_file, target, &mut host).map_err(|failure| SkullFailure {
+    let target = skull::pipeline::EmitTarget {
+        project_root: None,
+        renderer: skull::mir_emit::RendererTarget::Gl,
+    };
+    let skull::pipeline::Compiled {
+        ws, emission: emit, ..
+    } = skull::pipeline::compile_modules(modules, entry_file, target, &mut host).map_err(
+        |failure| SkullFailure {
             reason: categorize(&failure.errors[0].message),
             rendered: render_project_errs(&sources, &failure.errors),
-        })?;
+        },
+    )?;
     crate::compile_measurements::emission(&emit);
     let lua = emit.lua;
     let test_fns = collect_package_test_fns(&ws, dir).map_err(|e| SkullFailure {
         reason: categorize(&e.message),
         rendered: render_project_err(&sources, &e),
     })?;
-    let files = test_fns.iter().map(|(func, _)| {
-        ws.modules[func.module.index()].file.as_str().to_owned()
-    }).collect::<Vec<_>>();
-    let tests = test_fns.into_iter().map(|(_, test)| test).collect::<Vec<_>>();
+    let files = test_fns
+        .iter()
+        .map(|(func, _)| ws.modules[func.module.index()].file.as_str().to_owned())
+        .collect::<Vec<_>>();
+    let tests = test_fns
+        .into_iter()
+        .map(|(_, test)| test)
+        .collect::<Vec<_>>();
     let facts = test_program_facts(&ws);
-    let lua = install_global_accessors(lua, &ws).map_err(|e| SkullFailure {
-        reason: categorize(&e.message),
-        rendered: render_project_err(&sources, &e),
-    })?.parts().concat();
+    let lua = install_global_accessors(lua, &ws)
+        .map_err(|e| SkullFailure {
+            reason: categorize(&e.message),
+            rendered: render_project_err(&sources, &e),
+        })?
+        .parts()
+        .concat();
     // The compiler state is dead once the program is emitted. Free it before
     // the program text is copied and the test process runs: project's peaks near
     // 5 GB, and keeping it resident doubled the memory a `rock test` needed
@@ -1533,8 +1689,13 @@ fn skull_build_package_with_limit(
     drop(slot);
     let host = (crate::registry::RuntimeServices::registered().program_host)(
         crate::registry::TestUnit::Package { dir, facts: &facts },
-    ).map_err(SkullFailure::from)?;
-    let lua = TestProgram { preamble: host.preamble, lua, setup: host.setup };
+    )
+    .map_err(SkullFailure::from)?;
+    let lua = TestProgram {
+        preamble: host.preamble,
+        lua,
+        setup: host.setup,
+    };
     run_emitted_tests(lua, &tests, &files, limit, shards, filter, true)
 }
 
@@ -1546,8 +1707,10 @@ fn test_shard_count() -> Result<usize> {
         Err(std::env::VarError::NotPresent) => None,
         Err(error) => anyhow::bail!("ROCK_TEST_SHARDS: {error}"),
     };
-    test_shard_count_from(value.as_deref(),
-        std::thread::available_parallelism().map_or(1, |cores| cores.get()))
+    test_shard_count_from(
+        value.as_deref(),
+        std::thread::available_parallelism().map_or(1, |cores| cores.get()),
+    )
 }
 
 fn test_shard_count_from(value: Option<&str>, cores: usize) -> Result<usize> {
@@ -1561,13 +1724,21 @@ fn test_shard_count_from(value: Option<&str>, cores: usize) -> Result<usize> {
 }
 
 fn stable_test_shard(name: &str, shards: usize) -> usize {
-    let hash = name.as_bytes().iter().fold(0xcbf29ce484222325u64, |hash, byte| {
-        (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
-    });
+    let hash = name
+        .as_bytes()
+        .iter()
+        .fold(0xcbf29ce484222325u64, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+        });
     (hash % shards as u64) as usize
 }
 
-fn resolve_test_shards(shards: usize, tests: usize, program_bytes: usize, overridden: bool) -> usize {
+fn resolve_test_shards(
+    shards: usize,
+    tests: usize,
+    program_bytes: usize,
+    overridden: bool,
+) -> usize {
     if !overridden && (tests < 60 || program_bytes < 8 * 1024 * 1024) {
         1
     } else {
@@ -1580,13 +1751,21 @@ fn resolve_test_shards(shards: usize, tests: usize, program_bytes: usize, overri
 mod test_shard_policy;
 
 /// Read the checked FFI namespace without assigning runtime meaning to names.
-fn test_program_facts(ws: &bone_semantic::inference::Workspace) -> crate::registry::TestProgramFacts {
-    let ffi_libraries = ws.modules.iter().flat_map(|module| {
-        module.functions.iter().filter_map(|(_, function)| {
-            (function.is_extern && function.backend != bone_semantic::hir::FnBackend::Js)
-                .then_some(function.ffi_lib).flatten().map(|library| library.as_str().to_owned())
+fn test_program_facts(
+    ws: &bone_semantic::inference::Workspace,
+) -> crate::registry::TestProgramFacts {
+    let ffi_libraries = ws
+        .modules
+        .iter()
+        .flat_map(|module| {
+            module.functions.iter().filter_map(|(_, function)| {
+                (function.is_extern && function.backend != bone_semantic::hir::FnBackend::Js)
+                    .then_some(function.ffi_lib)
+                    .flatten()
+                    .map(|library| library.as_str().to_owned())
+            })
         })
-    }).collect();
+        .collect();
     crate::registry::TestProgramFacts { ffi_libraries }
 }
 
@@ -1616,7 +1795,15 @@ pub fn collect_package_test_fns(
             out.extend(
                 skull::module_tests_with_ids(ws, m.id)?
                     .into_iter()
-                    .map(|(fid, t)| (skull_mir::mir::FuncRef { module: m.id, func: fid }, t)),
+                    .map(|(fid, t)| {
+                        (
+                            skull_mir::mir::FuncRef {
+                                module: m.id,
+                                func: fid,
+                            },
+                            t,
+                        )
+                    }),
             );
         }
     }
@@ -1675,11 +1862,12 @@ fn emit_shader_program_with_view(
         },
         &shader_scx,
     )
-    .ok_or_else(|| skull_parser::CompilerError::new_no_location("GLSL shader view is unavailable".to_string()))?;
-    let program_view = view
-        .program_views
-        .first()
-        .ok_or_else(|| skull_parser::CompilerError::new_no_location("GLSL shader view has no program".to_string()))?;
+    .ok_or_else(|| {
+        skull_parser::CompilerError::new_no_location("GLSL shader view is unavailable".to_string())
+    })?;
+    let program_view = view.program_views.first().ok_or_else(|| {
+        skull_parser::CompilerError::new_no_location("GLSL shader view has no program".to_string())
+    })?;
     match program.vert {
         Some(_) => skull_codegen_glsl::emit_shader_pipeline_with_view(
             ws,
@@ -1687,12 +1875,9 @@ fn emit_shader_program_with_view(
             program_view,
             profile,
         ),
-        None => skull_codegen_glsl::emit_shader_entry_with_view(
-            ws,
-            &shader_scx,
-            program_view,
-            profile,
-        ),
+        None => {
+            skull_codegen_glsl::emit_shader_entry_with_view(ws, &shader_scx, program_view, profile)
+        }
     }
 }
 
@@ -1704,9 +1889,15 @@ fn emit_shader_program_with_view(
 ///     `<vert_fn> <frag_fn>` (A2 pipeline, selected when a root is
 ///     `@shader(vertex)`): both take `[--profile 330core|300es]`.
 /// A profile violation renders spanned against the source and exits non-zero.
-pub fn skull_shader(files: &[String], output: Option<String>, profile: Option<String>) -> Result<()> {
+pub fn skull_shader(
+    files: &[String],
+    output: Option<String>,
+    profile: Option<String>,
+) -> Result<()> {
     let Some((path, roots)) = files.split_first() else {
-        anyhow::bail!("rock shader: usage: rock shader <file.rock> <fn> [fn...] --output <file.glsl>");
+        anyhow::bail!(
+            "rock shader: usage: rock shader <file.rock> <fn> [fn...] --output <file.glsl>"
+        );
     };
     if roots.is_empty() {
         anyhow::bail!("rock shader: need at least one root fn name");
@@ -1762,7 +1953,9 @@ pub fn skull_shader(files: &[String], output: Option<String>, profile: Option<St
 
     let glsl = if is_pipeline {
         if roots.len() != 2 {
-            anyhow::bail!("rock shader: the vertex+fragment pipeline form takes exactly two roots: <vert_fn> <frag_fn>");
+            anyhow::bail!(
+                "rock shader: the vertex+fragment pipeline form takes exactly two roots: <vert_fn> <frag_fn>"
+            );
         }
         let prof = parse_glsl_profile(profile.as_deref())?;
         let vert = match skull_codegen_glsl::resolve_root(&ws, user_mid, &roots[0]) {
@@ -1781,7 +1974,10 @@ pub fn skull_shader(files: &[String], output: Option<String>, profile: Option<St
         };
         match emit_shader_program_with_view(
             &ws,
-            skull::shader_artifact::ShaderProgram { vert: Some(vert), frag },
+            skull::shader_artifact::ShaderProgram {
+                vert: Some(vert),
+                frag,
+            },
             prof,
         )
         .map(|emission| emission.source)
@@ -1799,7 +1995,9 @@ pub fn skull_shader(files: &[String], output: Option<String>, profile: Option<St
         let is_entry = roots.len() == 1
             && skull_codegen_glsl::is_fragment_shader_root(&ws, user_mid, &roots[0]);
         if profile.is_some() && !is_entry {
-            anyhow::bail!("rock shader: --profile applies to shader entries (pipeline or @shader(fragment) fullscreen), not the route-B fn library (it emits no #version line)");
+            anyhow::bail!(
+                "rock shader: --profile applies to shader entries (pipeline or @shader(fragment) fullscreen), not the route-B fn library (it emits no #version line)"
+            );
         }
         let prof = parse_glsl_profile(profile.as_deref())?;
         let glsl = if is_entry {
@@ -1849,8 +2047,15 @@ pub fn skull_shader(files: &[String], output: Option<String>, profile: Option<St
     match output {
         Some(out) => {
             // Keep the fn-library header text stable: utils_math.glsl byte-identity.
-            let mode = if glsl.starts_with("#version") { "shader entry" } else { "route B" };
-            let profile_flag = profile.as_deref().map(|p| format!(" --profile {p}")).unwrap_or_default();
+            let mode = if glsl.starts_with("#version") {
+                "shader entry"
+            } else {
+                "route B"
+            };
+            let profile_flag = profile
+                .as_deref()
+                .map(|p| format!(" --profile {p}"))
+                .unwrap_or_default();
             let header = format!(
                 "// GENERATED by skull-codegen-glsl ({mode}) -- DO NOT EDIT.\n\
                  // Regenerate: rock shader {} {}{} --output {}\n\n",
@@ -1974,7 +2179,8 @@ pub fn skull_watch(path: &str, output: Option<String>) -> Result<()> {
         // is_game gate. See the compiler contract.
         let path_ref = std::path::Path::new(path);
         let sources = if path_ref.is_dir()
-            && (crate::registry::RuntimeServices::registered().is_game_project)(path_ref).unwrap_or(false)
+            && (crate::registry::RuntimeServices::registered().is_game_project)(path_ref)
+                .unwrap_or(false)
         {
             match sources.production_only(path_ref) {
                 Ok(sources) => sources,
@@ -1990,7 +2196,10 @@ pub fn skull_watch(path: &str, output: Option<String>) -> Result<()> {
         let files = crate::bone_backend::session_files(&sources);
 
         let t = Instant::now();
-        let mut reinferred: Vec<(bone_semantic::prelude::ModuleId, bone_semantic::hir::BodyOwner)> = Vec::new();
+        let mut reinferred: Vec<(
+            bone_semantic::prelude::ModuleId,
+            bone_semantic::hir::BodyOwner,
+        )> = Vec::new();
         let mut full = false; // interface/structural change -> rebuild cache
         let mut update_failed = false;
 
@@ -2013,7 +2222,12 @@ pub fn skull_watch(path: &str, output: Option<String>) -> Result<()> {
                 for f in &files {
                     match s.update_file(&f.path, &f.text) {
                         Ok(result) => {
-                            if matches!(result.tier, bone_incremental::session::UpdateTier::Interface | bone_incremental::session::UpdateTier::Scope | bone_incremental::session::UpdateTier::FullUser) {
+                            if matches!(
+                                result.tier,
+                                bone_incremental::session::UpdateTier::Interface
+                                    | bone_incremental::session::UpdateTier::Scope
+                                    | bone_incremental::session::UpdateTier::FullUser
+                            ) {
                                 full = true;
                             }
                             reinferred.extend(result.reinferred);
@@ -2111,7 +2325,11 @@ pub fn skull_watch(path: &str, output: Option<String>) -> Result<()> {
         };
         crate::compile_measurements::emission(&emit);
         let emit_ms = te.elapsed().as_secs_f64() * 1000.0;
-        let mode = if full || reinferred.is_empty() { "full" } else { "incremental" };
+        let mode = if full || reinferred.is_empty() {
+            "full"
+        } else {
+            "incremental"
+        };
         match rock_host::project::write_atomic(&out_file, &emit.lua) {
             Ok(()) => {
                 crate::compile_measurements::phase("write");
@@ -2119,7 +2337,7 @@ pub fn skull_watch(path: &str, output: Option<String>) -> Result<()> {
                 log::info!(target: "WATCH",
                 "skull {label}: {} files -> {} ({mode}, {} re-inferred; check {check_ms:.1}ms, emit {emit_ms:.1}ms)",
                 sources.files.len(), out_file.display(), reinferred.len());
-            },
+            }
             Err(err) => log::error!(target: "WATCH", "skull {label}: write failed: {err}"),
         }
     };
@@ -2273,16 +2491,25 @@ fn skull_emit_project_with_inputs(
         lint_scope: crate::lint_pass::Scope::ProductionOnly,
         comptime: CliComptime::Resolved(Some(inputs)),
     };
-    let target = skull::pipeline::EmitTarget { project_root: Some(dir), renderer: renderer_target };
+    let target = skull::pipeline::EmitTarget {
+        project_root: Some(dir),
+        renderer: renderer_target,
+    };
     let compiled = skull::pipeline::compile_modules(modules, entry_file, target, &mut host);
-    let skull::pipeline::Compiled { ws, emission: emit, .. } = match compiled {
+    let skull::pipeline::Compiled {
+        ws, emission: emit, ..
+    } = match compiled {
         Ok(compiled) => compiled,
         Err(failure) => {
             use skull::pipeline::Stage;
             eprintln!("{}", render_project_errs(&sources, &failure.errors));
             match failure.stage {
-                Stage::Lint => log::error!(target: "SKULL", "{} lint error(s) in project {}", failure.errors.len(), dir),
-                Stage::Emit => log::error!(target: "SKULL", "skull emit failed for project {}", dir),
+                Stage::Lint => {
+                    log::error!(target: "SKULL", "{} lint error(s) in project {}", failure.errors.len(), dir)
+                }
+                Stage::Emit => {
+                    log::error!(target: "SKULL", "skull emit failed for project {}", dir)
+                }
                 Stage::Parse | Stage::Check | Stage::Comptime => {
                     log::error!(target: "SKULL", "bone type-check failed for project {}", dir)
                 }
@@ -2347,9 +2574,7 @@ fn write_allocation_report(
 
 fn allocation_report_path_from_env() -> Option<std::ffi::OsString> {
     std::env::var_os("SKULL_ALLOCATION_REPORT").or_else(|| {
-        let mut path = std::path::PathBuf::from(std::env::var_os(
-            "SKULL_ALLOCATION_ACTIVATION",
-        )?);
+        let mut path = std::path::PathBuf::from(std::env::var_os("SKULL_ALLOCATION_ACTIVATION")?);
         path.set_extension("manifest.txt");
         Some(path.into_os_string())
     })
@@ -2366,10 +2591,17 @@ pub struct GameProgram {
 impl GameProgram {
     fn with_metadata(lua: String, metadata: String) -> std::result::Result<Self, CompilerError> {
         let marker = "__rock_globals_install_bridge()\n";
-        let at = lua.find(marker).ok_or_else(|| CompilerError::new_no_location(
-            "compiled program is missing its global directory".to_string(),
-        ))?;
-        Ok(Self { lua, metadata, metadata_at: at + marker.len(), comptime_inputs: Default::default() })
+        let at = lua.find(marker).ok_or_else(|| {
+            CompilerError::new_no_location(
+                "compiled program is missing its global directory".to_string(),
+            )
+        })?;
+        Ok(Self {
+            lua,
+            metadata,
+            metadata_at: at + marker.len(),
+            comptime_inputs: Default::default(),
+        })
     }
 
     fn parts(&self) -> [&str; 3] {
@@ -2417,10 +2649,17 @@ fn build_global_nobox_accessors(
         for (_gid, g) in m.globals.iter().filter(|(_, global)| !global.is_const) {
             let Some(acc) = skull_mir::lower::nobox_global_accessor_shape(ws, scx, g.ty)
                 .map_err(|e| CompilerError::new_no_location(e.message))?
-            else { continue };
+            else {
+                continue;
+            };
             let skull_mir::lower::NoboxGlobalAccessorShape {
-                ty_name, paths, nullable, storage, ctor_suffix: suffix,
-                presence_path: _, unbuildable,
+                ty_name,
+                paths,
+                nullable,
+                storage,
+                ctor_suffix: suffix,
+                presence_path: _,
+                unbuildable,
             } = acc;
             let ty_symbol = skull_mir::mangle::type_symbol(ws, ty_name);
             let plan = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, g.ty)
@@ -2467,7 +2706,9 @@ fn build_global_nobox_accessors(
                 )));
             }
             let all_leaf_names = if let Some(present) = present {
-                std::iter::once(present).chain(leaves.iter().copied()).collect::<Vec<_>>()
+                std::iter::once(present)
+                    .chain(leaves.iter().copied())
+                    .collect::<Vec<_>>()
             } else {
                 leaves.clone()
             };
@@ -2519,11 +2760,15 @@ fn build_global_nobox_accessors(
                 Some(_) => (
                     format!(
                         "if not __rock_globals[{}] then return nil end return {ty_symbol}{suffix}({args})",
-                        present_key.as_ref().expect("nullable accessor has a presence key")
+                        present_key
+                            .as_ref()
+                            .expect("nullable accessor has a presence key")
                     ),
                     format!(
                         "__rock_globals[{}] = v ~= nil; if v ~= nil then {writes} else {} end",
-                        present_key.as_ref().expect("nullable accessor has a presence key"),
+                        present_key
+                            .as_ref()
+                            .expect("nullable accessor has a presence key"),
                         leaves
                             .iter()
                             .zip(&value_keys)
@@ -2536,7 +2781,9 @@ fn build_global_nobox_accessors(
             };
             rows.entry(skull_mir::global_storage::global_identity(m.file, g.name))
                 .or_default()
-                .push(format!("get=function() {get} end,set=function(v) {set} end"));
+                .push(format!(
+                    "get=function() {get} end,set=function(v) {set} end"
+                ));
         }
     }
     Ok(())
@@ -2554,9 +2801,7 @@ pub struct SimDescriptor {
     pub render: bool,
 }
 
-pub fn collect_sim_descriptors(
-    ws: &bone_semantic::inference::Workspace,
-) -> Vec<SimDescriptor> {
+pub fn collect_sim_descriptors(ws: &bone_semantic::inference::Workspace) -> Vec<SimDescriptor> {
     use bone_core::prelude::ModuleId;
     use bone_semantic::hir::AnnoValue;
 
@@ -2630,7 +2875,9 @@ pub fn skull_compile_project_with_recorded_inputs(
     let parts = skull_game_main(&preamble, &emit, emits_main);
     match output {
         Some(out) => {
-            rock_host::project::write_atomic_streamed(&out, |file| write_program_parts(file, &parts))?;
+            rock_host::project::write_atomic_streamed(&out, |file| {
+                write_program_parts(file, &parts)
+            })?;
             log::info!(target: "SKULL", "{} -> {}", dir, out);
         }
         None => {
@@ -2656,7 +2903,8 @@ fn skull_run_project(dir: &str) -> Result<()> {
 fn write_test_timings(path: &std::path::Path, timings: &[(String, TestTiming)]) -> Result<()> {
     let mut text = String::new();
     for (unit, t) in timings {
-        let row = serde_json::json!({ "unit": unit, "name": t.name, "ms": t.ms, "status": t.status });
+        let row =
+            serde_json::json!({ "unit": unit, "name": t.name, "ms": t.ms, "status": t.status });
         text.push_str(&row.to_string());
         text.push('\n');
     }
@@ -2743,22 +2991,30 @@ pub fn skull_test(paths: &[String], filter: Option<&crate::test::TestFilter>) ->
     let mut outcomes: Vec<(String, UnitResult)> = Vec::new();
     for file in &files {
         let outcome: UnitResult = match fs_err::read_to_string(file) {
-            Ok(src) => {
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| skull_build(file, &src, filter)))
-            }
-            Err(e) => Ok(Err(SkullFailure { reason: e.to_string(), rendered: e.to_string() })),
+            Ok(src) => std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                skull_build(file, &src, filter)
+            })),
+            Err(e) => Ok(Err(SkullFailure {
+                reason: e.to_string(),
+                rendered: e.to_string(),
+            })),
         };
         outcomes.push((short_path(file).to_string(), outcome));
     }
     for dir in &package_dirs {
-        let outcome: UnitResult =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| skull_build_package(dir, shards, filter)));
+        let outcome: UnitResult = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            skull_build_package(dir, shards, filter)
+        }));
         outcomes.push((short_path(dir).to_string(), outcome));
     }
 
     for (label, outcome) in outcomes {
         match outcome {
-            Ok(Ok(SkullOutcome::Pass { tests, skipped, timings: unit_timings })) => {
+            Ok(Ok(SkullOutcome::Pass {
+                tests,
+                skipped,
+                timings: unit_timings,
+            })) => {
                 timings.extend(unit_timings.into_iter().map(|t| (label.clone(), t)));
                 emit_ok += 1;
                 exec_pass += 1;
@@ -2833,7 +3089,11 @@ pub fn skull_test(paths: &[String], filter: Option<&crate::test::TestFilter>) ->
             println!("  {:>4}  {}", count.to_string().yellow(), reason);
         }
         if rows.len() > shown {
-            println!("  {:>4}  ({} more distinct reasons)", "...", rows.len() - shown);
+            println!(
+                "  {:>4}  ({} more distinct reasons)",
+                "...",
+                rows.len() - shown
+            );
         }
     }
 
@@ -3076,16 +3336,11 @@ pub fn skull_incremental_profile(path: &str) -> Result<()> {
 
     let (baseline_lua, mut cache, full_ms) = {
         let ws = session.workspace();
-        let mid = skull::user_module_id(ws)
-            .map_err(no_user_module)?;
+        let mid = skull::user_module_id(ws).map_err(no_user_module)?;
         let t_full = Instant::now();
-        let (emit, c) = skull::mir_emit::emit_full_in_for_renderer(
-            ws,
-            mid,
-            Some(path),
-            renderer_target,
-        )
-            .map_err(|e| anyhow::anyhow!("{}", render_project_err(&sources, &e)))?;
+        let (emit, c) =
+            skull::mir_emit::emit_full_in_for_renderer(ws, mid, Some(path), renderer_target)
+                .map_err(|e| anyhow::anyhow!("{}", render_project_err(&sources, &e)))?;
         (emit.lua, c, ms(t_full))
     };
 
@@ -3156,7 +3411,12 @@ pub fn skull_incremental_profile(path: &str) -> Result<()> {
     let max_name = rows.iter().map(|r| r.name.len()).max().unwrap_or(8).max(8);
     eprintln!(
         "{:<w$}  {:>9}  {:>8}  {:>10}  {:>8}  {:>6}",
-        "Module", "Update", "Emit", "Reinferred", "vs Full", "Status",
+        "Module",
+        "Update",
+        "Emit",
+        "Reinferred",
+        "vs Full",
+        "Status",
         w = max_name
     );
     eprintln!("{}", "-".repeat(max_name + 50));
@@ -3199,7 +3459,11 @@ pub fn skull_incremental_profile(path: &str) -> Result<()> {
         avg_update,
         avg_emit
     );
-    eprintln!("   Modules profiled:       {}  ({} skipped: no touchable fn body)", rows.len(), skipped);
+    eprintln!(
+        "   Modules profiled:       {}  ({} skipped: no touchable fn body)",
+        rows.len(),
+        skipped
+    );
 
     if diffs.is_empty() {
         eprintln!(
@@ -3208,7 +3472,10 @@ pub fn skull_incremental_profile(path: &str) -> Result<()> {
         );
         Ok(())
     } else {
-        eprintln!("\n{} INCREMENTAL EMIT DIVERGENCES (incremental != fresh):", diffs.len());
+        eprintln!(
+            "\n{} INCREMENTAL EMIT DIVERGENCES (incremental != fresh):",
+            diffs.len()
+        );
         for r in &diffs {
             eprintln!("   {}", r.name);
         }
@@ -3253,15 +3520,10 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
 
     let mut cache = {
         let ws = session.workspace();
-        let mid = skull::user_module_id(ws)
-            .map_err(no_user_module)?;
-        let (_emit, c) = skull::mir_emit::emit_full_in_for_renderer(
-            ws,
-            mid,
-            Some(path),
-            renderer_target,
-        )
-            .map_err(|e| anyhow::anyhow!("{}", render_project_err(&sources, &e)))?;
+        let mid = skull::user_module_id(ws).map_err(no_user_module)?;
+        let (_emit, c) =
+            skull::mir_emit::emit_full_in_for_renderer(ws, mid, Some(path), renderer_target)
+                .map_err(|e| anyhow::anyhow!("{}", render_project_err(&sources, &e)))?;
         c
     };
 
@@ -3307,7 +3569,9 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
                     continue;
                 }
             }
-            let Some(touched) = body_touch(t) else { continue };
+            let Some(touched) = body_touch(t) else {
+                continue;
+            };
             let upd = session
                 .update_file(p, &touched)
                 .map_err(|e| anyhow::anyhow!("trial update_file({p}): {}", e.message))?;
@@ -3320,8 +3584,9 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
                 break;
             }
         }
-        let (target, orig) = chosen
-            .ok_or_else(|| anyhow::anyhow!("no project file whose touch re-cooks a body in {path}"))?;
+        let (target, orig) = chosen.ok_or_else(|| {
+            anyhow::anyhow!("no project file whose touch re-cooks a body in {path}")
+        })?;
         let a = body_touch(&orig).unwrap();
         let b = body_touch(&a).unwrap();
         (target, a, b)
@@ -3415,12 +3680,15 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
             bone_lints::LintCacheUpdate::body_only(
                 [ustr::Ustr::from(target.as_str())],
                 upd.reinferred.iter().copied(),
-                upd.body_update.edit.iter().map(|edit| bone_lints::TextEditDelta {
-                    file: edit.file,
-                    at: edit.at,
-                    byte_delta: edit.byte_delta,
-                    line_delta: edit.line_delta,
-                }),
+                upd.body_update
+                    .edit
+                    .iter()
+                    .map(|edit| bone_lints::TextEditDelta {
+                        file: edit.file,
+                        at: edit.at,
+                        byte_delta: edit.byte_delta,
+                        line_delta: edit.line_delta,
+                    }),
             )
         } else {
             bone_lints::LintCacheUpdate::full()
@@ -3452,7 +3720,7 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
                 &upd.reinferred,
                 &span_edits,
             )
-                .map_err(|e| anyhow::anyhow!("emit_overlay: {}", e.message))?;
+            .map_err(|e| anyhow::anyhow!("emit_overlay: {}", e.message))?;
             (ms(t_e), e.lua, e.phases)
         };
         let overlay_bytes = overlay.len();
@@ -3474,11 +3742,16 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
                     ("emit overlay", emit_ms),
                     ("atomic write", write_ms),
                 ] {
-                    phase_samples.entry(label.to_string()).or_default().push(value);
+                    phase_samples
+                        .entry(label.to_string())
+                        .or_default()
+                        .push(value);
                 }
                 for (prefix, timings) in [("session", &update_phases), ("emit", &phases)] {
                     for (label, duration) in timings {
-                        phase_samples.entry(format!("{prefix}/{label}")).or_default()
+                        phase_samples
+                            .entry(format!("{prefix}/{label}"))
+                            .or_default()
                             .push(duration.as_secs_f64() * 1000.0);
                     }
                 }
@@ -3499,7 +3772,10 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
                 upd.body_update.semantic_bodies.len(),
                 upd.body_update.span_only,
                 upd.body_update.edit.as_ref().map_or(0, |edit| edit.at),
-                upd.body_update.edit.as_ref().map_or(0, |edit| edit.byte_delta),
+                upd.body_update
+                    .edit
+                    .as_ref()
+                    .map_or(0, |edit| edit.byte_delta),
             );
             last_phases = phases;
             last_update_phases = update_phases;
@@ -3510,7 +3786,11 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
     let mean = samples.iter().sum::<f64>() / n;
     let var = samples.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / n;
     let stddev = var.sqrt();
-    let cv = if mean > 0.0 { stddev / mean * 100.0 } else { 0.0 };
+    let cv = if mean > 0.0 {
+        stddev / mean * 100.0
+    } else {
+        0.0
+    };
     let mut sorted = samples.clone();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let pct = |p: f64| sorted[((p / 100.0) * (sorted.len() as f64 - 1.0)).round() as usize];
@@ -3522,16 +3802,25 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
     );
     eprintln!(
         "  backend route per pass [ms] (update + diagnostics + lints + overlay):  mean {:.3}  p50 {:.3}  p99 {:.3}  min {:.3}  max {:.3}  stddev {:.3} (cv {:.1}%)",
-        mean, pct(50.0), pct(99.0), sorted[0], sorted[sorted.len() - 1], stddev, cv
+        mean,
+        pct(50.0),
+        pct(99.0),
+        sorted[0],
+        sorted[sorted.len() - 1],
+        stddev,
+        cv
     );
     if write_disk {
         let mut disk_sorted = disk_samples.clone();
         disk_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let disk_mean = disk_samples.iter().sum::<f64>() / n;
-        let disk_var = disk_samples.iter().map(|s| (s - disk_mean).powi(2)).sum::<f64>() / n;
-        let disk_pct = |p: f64| {
-            disk_sorted[((p / 100.0) * (disk_sorted.len() as f64 - 1.0)).round() as usize]
-        };
+        let disk_var = disk_samples
+            .iter()
+            .map(|s| (s - disk_mean).powi(2))
+            .sum::<f64>()
+            / n;
+        let disk_pct =
+            |p: f64| disk_sorted[((p / 100.0) * (disk_sorted.len() as f64 - 1.0)).round() as usize];
         eprintln!(
             "  disk-inclusive per pass [ms] (backend + atomic overlay write):  mean {:.3}  p50 {:.3}  p99 {:.3}  min {:.3}  max {:.3}  stddev {:.3} (cv {:.1}%)",
             disk_mean,
@@ -3540,7 +3829,11 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
             disk_sorted[0],
             disk_sorted[disk_sorted.len() - 1],
             disk_var.sqrt(),
-            if disk_mean > 0.0 { disk_var.sqrt() / disk_mean * 100.0 } else { 0.0 },
+            if disk_mean > 0.0 {
+                disk_var.sqrt() / disk_mean * 100.0
+            } else {
+                0.0
+            },
         );
     }
     if phase_stats {
@@ -3548,11 +3841,15 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
         for (label, mut values) in phase_samples {
             let mean = values.iter().sum::<f64>() / values.len() as f64;
             values.sort_by(f64::total_cmp);
-            let percentile = |p: f64| {
-                values[((p / 100.0) * (values.len() as f64 - 1.0)).round() as usize]
-            };
-            eprintln!("    phase | {label} | {} | {mean:.6} | {:.6} | {:.6} | {:.6}",
-                values.len(), percentile(50.0), percentile(99.0), values[0]);
+            let percentile =
+                |p: f64| values[((p / 100.0) * (values.len() as f64 - 1.0)).round() as usize];
+            eprintln!(
+                "    phase | {label} | {} | {mean:.6} | {:.6} | {:.6} | {:.6}",
+                values.len(),
+                percentile(50.0),
+                percentile(99.0),
+                values[0]
+            );
         }
     }
     eprintln!("\n  last-pass breakdown (the two-file split path):");
@@ -3562,8 +3859,14 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
     for (lbl, d) in &last_update_phases {
         eprintln!("       {lbl}: {:.3} ms", d.as_secs_f64() * 1000.0);
     }
-    let update_known: f64 = last_update_phases.iter().map(|(_, d)| d.as_secs_f64() * 1000.0).sum();
-    eprintln!("       (parse + classify, untimed: {:.3} ms)", (last_update - update_known).max(0.0));
+    let update_known: f64 = last_update_phases
+        .iter()
+        .map(|(_, d)| d.as_secs_f64() * 1000.0)
+        .sum();
+    eprintln!(
+        "       (parse + classify, untimed: {:.3} ms)",
+        (last_update - update_known).max(0.0)
+    );
     eprintln!("    diagnostics (O(workspace) scan): {last_diag:.3} ms");
     eprintln!("    lints (whole-project verdict):  {last_lint:.3} ms");
     eprintln!("    emit_overlay:                   {last_emit:.3} ms  ({last_bytes} B overlay)");
@@ -3685,9 +3988,17 @@ pub fn skull_renderer_backend(dir: &str) -> Result<rock_host::stick::RendererBac
 /// changed once (`ROCK_SKULL_CALLEE_BINDING=upvalue` moves every body into a
 /// factory, so `function main(` appears nowhere), which left a chunk that
 /// defined the whole game and then ran nothing.
-pub(crate) fn skull_game_main<'a>(preamble: &'a str, program: &'a GameProgram, emits_main: bool) -> [&'a str; 5] {
+pub(crate) fn skull_game_main<'a>(
+    preamble: &'a str,
+    program: &'a GameProgram,
+    emits_main: bool,
+) -> [&'a str; 5] {
     let [head, metadata, tail] = program.parts();
-    let entry = if emits_main { "\n__rock_main_wrapper(main)\n" } else { "" };
+    let entry = if emits_main {
+        "\n__rock_main_wrapper(main)\n"
+    } else {
+        ""
+    };
     [preamble, head, metadata, tail, entry]
 }
 
@@ -3739,12 +4050,23 @@ pub fn write_full_main(
 #[derive(Debug)]
 pub enum SkullReload {
     /// Full rebuild after an interface or structural edit.
-    Full { bytes: usize, cook_ms: f64, emit_ms: f64, write_ms: f64 },
+    Full {
+        bytes: usize,
+        cook_ms: f64,
+        emit_ms: f64,
+        write_ms: f64,
+    },
     /// Body edit: only `incremental.lua` rewritten (the overlay). `reinferred` is
     /// the number of bodies this edit re-inferred (the edit's churn). `emit_ms` is
     /// pure `emit_overlay` (directly comparable to `iter-incremental`); `write_ms`
     /// is the separate disk write of the overlay.
-    Incremental { bytes: usize, reinferred: usize, cook_ms: f64, emit_ms: f64, write_ms: f64 },
+    Incremental {
+        bytes: usize,
+        reinferred: usize,
+        cook_ms: f64,
+        emit_ms: f64,
+        write_ms: f64,
+    },
     /// A full artifact is required before the current process can observe this
     /// update; no output was written on this path.
     FullRequired { reasons: Vec<String> },
@@ -3819,15 +4141,13 @@ impl SkullRouteProfile {
         self.live_project_unaccounted_ns = self
             .live_project_call_ns
             .saturating_sub(self.session_snapshot_ns + self.live_update_ns);
-        self.route_unaccounted_ns = self
-            .route_emit_call_ns
-            .saturating_sub(
-                self.publication_shape_checks_ns
-                    + self.transaction_checkpoint_ns
-                    + self.transaction_commit_ns
-                    + self.emit_overlay_ns
-                    + self.atomic_output_write_ns,
-            );
+        self.route_unaccounted_ns = self.route_emit_call_ns.saturating_sub(
+            self.publication_shape_checks_ns
+                + self.transaction_checkpoint_ns
+                + self.transaction_commit_ns
+                + self.emit_overlay_ns
+                + self.atomic_output_write_ns,
+        );
         let accounted = self.live_project_call_ns + self.route_emit_call_ns + self.rollback_ns;
         self.unaccounted_ns = total_ns.saturating_sub(accounted);
     }
@@ -3886,14 +4206,22 @@ impl IncrementalProject {
     /// wipe `incremental.lua`. Errors render against the project sources.
     /// Game build: excludes test-only files (tests/ dirs) so a broken sim/test
     /// can't break the running game. See the compiler contract.
-    pub fn init(dir: &str, main_path: &std::path::Path, incremental_path: &std::path::Path) -> Result<IncrementalProject> {
+    pub fn init(
+        dir: &str,
+        main_path: &std::path::Path,
+        incremental_path: &std::path::Path,
+    ) -> Result<IncrementalProject> {
         Self::init_impl(dir, main_path, incremental_path, false, None, |_| Ok(None))
     }
 
     /// Sim-runner build: same as [`IncrementalProject::init`] but discovery KEEPS
     /// test-only files -- `@sim` bodies live in `tests/sims/` and must be part
     /// of the emitted program.
-    pub fn init_with_tests(dir: &str, main_path: &std::path::Path, incremental_path: &std::path::Path) -> Result<IncrementalProject> {
+    pub fn init_with_tests(
+        dir: &str,
+        main_path: &std::path::Path,
+        incremental_path: &std::path::Path,
+    ) -> Result<IncrementalProject> {
         Self::init_impl(dir, main_path, incremental_path, true, None, |_| Ok(None))
     }
 
@@ -3923,7 +4251,14 @@ impl IncrementalProject {
         allocation_manifest: Option<&std::path::Path>,
         select_sims: impl FnOnce(&bone_semantic::inference::Workspace) -> Result<Option<Vec<String>>>,
     ) -> Result<IncrementalProject> {
-        Self::init_impl(dir, main_path, incremental_path, true, allocation_manifest, select_sims)
+        Self::init_impl(
+            dir,
+            main_path,
+            incremental_path,
+            true,
+            allocation_manifest,
+            select_sims,
+        )
     }
 
     fn init_impl(
@@ -3941,18 +4276,26 @@ impl IncrementalProject {
         let project = crate::live_project::LiveProject::init(dir, include_tests)?;
         let (lua, cache, artifact_fingerprint, emits_main) = {
             let ws = project.workspace();
-            let mid = skull::user_module_id(ws)
-                .map_err(no_user_module)?;
+            let mid = skull::user_module_id(ws).map_err(no_user_module)?;
             let selected = select_sims(ws)?;
             let (emit, c) = if let Some(selected) = selected {
                 skull::mir_emit::emit_full_for_selected_sims(
-                    ws, mid, Some(dir), renderer_target, &selected,
+                    ws,
+                    mid,
+                    Some(dir),
+                    renderer_target,
+                    &selected,
                 )
             } else {
                 skull::mir_emit::emit_full_in_for_renderer_with_callee_binding(
-                    ws, mid, Some(dir), renderer_target, None,
+                    ws,
+                    mid,
+                    Some(dir),
+                    renderer_target,
+                    None,
                 )
-            }.map_err(|e| anyhow::anyhow!("{}", render_project_err(project.sources(), &e)))?;
+            }
+            .map_err(|e| anyhow::anyhow!("{}", render_project_err(project.sources(), &e)))?;
             crate::compile_measurements::emission(&emit);
             let allocation_report_path = allocation_report_path_from_env();
             write_allocation_report(
@@ -4006,11 +4349,7 @@ impl IncrementalProject {
         self.last_route_profile.take()
     }
 
-    fn finish_route_profile(
-        &mut self,
-        started: Option<Instant>,
-        mut profile: SkullRouteProfile,
-    ) {
+    fn finish_route_profile(&mut self, started: Option<Instant>, mut profile: SkullRouteProfile) {
         if let Some(started) = started {
             profile.finish(started.elapsed().as_nanos());
             self.last_route_profile = Some(profile);
@@ -4040,7 +4379,12 @@ impl IncrementalProject {
     /// wipe overlay; otherwise the accumulated body edits -> `incremental.lua`
     /// overlay. `changed` is the watcher's changed-path set; pass empty to force a
     /// full re-discover.
-    pub fn recompile(&mut self, changed: &[std::path::PathBuf], main_path: &std::path::Path, incremental_path: &std::path::Path) -> Result<SkullReload> {
+    pub fn recompile(
+        &mut self,
+        changed: &[std::path::PathBuf],
+        main_path: &std::path::Path,
+        incremental_path: &std::path::Path,
+    ) -> Result<SkullReload> {
         let stats = crate::compile_measurements::Scope::begin(self.project.dir());
         let started = self.route_profile_enabled.then(Instant::now);
         self.last_route_profile = None;
@@ -4111,7 +4455,13 @@ impl IncrementalProject {
     /// and writes only the overlay; the project tree is never mutated. Rejects
     /// a path the build didn't discover -- an edit to an unknown file would
     /// otherwise silently do nothing.
-    pub fn apply_edit(&mut self, path: &std::path::Path, new_text: &str, main_path: &std::path::Path, incremental_path: &std::path::Path) -> Result<SkullReload> {
+    pub fn apply_edit(
+        &mut self,
+        path: &std::path::Path,
+        new_text: &str,
+        main_path: &std::path::Path,
+        incremental_path: &std::path::Path,
+    ) -> Result<SkullReload> {
         let stats = crate::compile_measurements::Scope::begin(self.project.dir());
         let started = self.route_profile_enabled.then(Instant::now);
         self.last_route_profile = None;
@@ -4147,7 +4497,7 @@ impl IncrementalProject {
                 self.finish_route_profile(started, profile);
                 stats.success();
                 Ok(reload)
-            },
+            }
             Err(error) => {
                 let rollback_started = self.route_profile_enabled.then(Instant::now);
                 let restored = self.project.restore(snapshot);
@@ -4196,10 +4546,19 @@ impl IncrementalProject {
     /// instant.
     pub fn comptime_watch_files_with_hashes(&self) -> Vec<(std::path::PathBuf, u64)> {
         // File ids are already the absolute canonical path the resolver read.
-        let mut files = self.cache.comptime_file_hashes().into_iter()
+        let mut files = self
+            .cache
+            .comptime_file_hashes()
+            .into_iter()
             .collect::<rustc_hash::FxHashMap<_, _>>();
-        files.extend(self.project.workspace().comptime_inputs.source_fingerprint_files.iter()
-            .map(|(path, hash)| (*path, *hash)));
+        files.extend(
+            self.project
+                .workspace()
+                .comptime_inputs
+                .source_fingerprint_files
+                .iter()
+                .map(|(path, hash)| (*path, *hash)),
+        );
         files
             .into_iter()
             .map(|(abs, hash)| (std::path::PathBuf::from(abs.as_str()), hash))
@@ -4220,9 +4579,11 @@ impl IncrementalProject {
     ) -> Result<SkullReload> {
         let (full, reinferred, span_edits, cook_ms) = match update {
             crate::live_project::LiveUpdate::NoChange => return Ok(SkullReload::NoChange),
-            crate::live_project::LiveUpdate::BodyOnly { reinferred, span_edits, cook_ms } => {
-                (false, reinferred, span_edits, cook_ms)
-            }
+            crate::live_project::LiveUpdate::BodyOnly {
+                reinferred,
+                span_edits,
+                cook_ms,
+            } => (false, reinferred, span_edits, cook_ms),
             crate::live_project::LiveUpdate::Full { cook_ms } => {
                 (true, Vec::new(), Vec::new(), cook_ms)
             }
@@ -4233,14 +4594,15 @@ impl IncrementalProject {
         let shader_keys_changed = if full {
             self.cache
                 .shader_registration_keys_changed(self.project.workspace())
-                .map_err(|e| anyhow::anyhow!("{}", render_project_err(self.project.sources(), &e)))?
+                .map_err(|e| {
+                    anyhow::anyhow!("{}", render_project_err(self.project.sources(), &e))
+                })?
         } else {
             self.cache
-                .shader_registration_keys_changed_for_bodies(
-                    self.project.workspace(),
-                    &reinferred,
-                )
-                .map_err(|e| anyhow::anyhow!("{}", render_project_err(self.project.sources(), &e)))?
+                .shader_registration_keys_changed_for_bodies(self.project.workspace(), &reinferred)
+                .map_err(|e| {
+                    anyhow::anyhow!("{}", render_project_err(self.project.sources(), &e))
+                })?
         };
         if shader_keys_changed {
             if let (Some(started), Some(profile)) = (shape_started, profile.as_deref_mut()) {
@@ -4266,8 +4628,7 @@ impl IncrementalProject {
             }
             let lua = {
                 let ws = self.project.workspace();
-                let mid = skull::user_module_id(ws)
-                    .map_err(no_user_module)?;
+                let mid = skull::user_module_id(ws).map_err(no_user_module)?;
                 let (emit, c) = skull::mir_emit::emit_full_in_for_renderer_with_callee_binding(
                     ws,
                     mid,
@@ -4275,7 +4636,9 @@ impl IncrementalProject {
                     self.renderer_target,
                     Some(self.callee_binding),
                 )
-                    .map_err(|e| anyhow::anyhow!("{}", render_project_err(self.project.sources(), &e)))?;
+                .map_err(|e| {
+                    anyhow::anyhow!("{}", render_project_err(self.project.sources(), &e))
+                })?;
                 crate::compile_measurements::emission(&emit);
                 if old_shader_contracts != c.shader_registration_contracts() {
                     return Ok(SkullReload::FullRequired {
@@ -4291,12 +4654,15 @@ impl IncrementalProject {
                         reasons: vec!["global layout changed; restart required".to_string()],
                     });
                 }
-                if self.cache.lifecycle_plan().is_some_and(|old| {
-                    old.removed_gated_wire(&emit.lifecycle_plan)
-                }) {
+                if self
+                    .cache
+                    .lifecycle_plan()
+                    .is_some_and(|old| old.removed_gated_wire(&emit.lifecycle_plan))
+                {
                     return Ok(SkullReload::FullRequired {
                         reasons: vec![
-                            "removing a gated @wire requires a fresh Session/HostProjection".to_string(),
+                            "removing a gated @wire requires a fresh Session/HostProjection"
+                                .to_string(),
                         ],
                     });
                 }
@@ -4306,13 +4672,19 @@ impl IncrementalProject {
                 ((lua, emits_main), c)
             };
             self.preamble = (RuntimeServices::registered().program_preamble)(
-                self.project.dir(), ProgramKind::Game,
+                self.project.dir(),
+                ProgramKind::Game,
             )?;
             let emit_ms = t_emit.elapsed().as_secs_f64() * 1000.0;
             let t_write = Instant::now();
             let ((lua, emits_main), staged_cache) = lua;
-            let bytes =
-                write_full_main(&self.preamble, &lua, emits_main, main_path, incremental_path)?;
+            let bytes = write_full_main(
+                &self.preamble,
+                &lua,
+                emits_main,
+                main_path,
+                incremental_path,
+            )?;
             crate::compile_measurements::phase("write");
             self.cache = staged_cache;
             self.artifact_fingerprint = self
@@ -4321,7 +4693,12 @@ impl IncrementalProject {
                 .ok_or_else(|| anyhow::anyhow!("compiler did not publish an Artifact fingerprint"))?
                 .to_string();
             let write_ms = t_write.elapsed().as_secs_f64() * 1000.0;
-            Ok(SkullReload::Full { bytes, cook_ms, emit_ms, write_ms })
+            Ok(SkullReload::Full {
+                bytes,
+                cook_ms,
+                emit_ms,
+                write_ms,
+            })
         } else {
             if let (Some(started), Some(profile)) = (shape_started, profile.as_deref_mut()) {
                 profile.publication_shape_checks_ns += started.elapsed().as_nanos();
@@ -4344,7 +4721,9 @@ impl IncrementalProject {
                     &reinferred,
                     &span_edits,
                 )
-                    .map_err(|e| anyhow::anyhow!("{}", render_project_err(self.project.sources(), &e)))?
+                .map_err(|e| {
+                    anyhow::anyhow!("{}", render_project_err(self.project.sources(), &e))
+                })?
             };
             crate::compile_measurements::emission(&overlay);
             if let (Some(started), Some(profile)) = (emit_started, profile.as_deref_mut()) {
@@ -4358,20 +4737,27 @@ impl IncrementalProject {
                     reasons: vec!["shader registration ABI changed".to_string()],
                 });
             }
-            if self.cache.body_edit_baseline_lifecycle_plan().is_some_and(|old| {
-                old.structure_changed(
-                    self.cache
-                        .lifecycle_plan()
-                        .expect("overlay always carries a LifecyclePlan"),
-                )
-            }) {
-                let reason = if self.cache.body_edit_baseline_lifecycle_plan().is_some_and(|old| {
-                    old.removed_gated_wire(
+            if self
+                .cache
+                .body_edit_baseline_lifecycle_plan()
+                .is_some_and(|old| {
+                    old.structure_changed(
                         self.cache
                             .lifecycle_plan()
                             .expect("overlay always carries a LifecyclePlan"),
                     )
-                }) {
+                })
+            {
+                let reason = if self
+                    .cache
+                    .body_edit_baseline_lifecycle_plan()
+                    .is_some_and(|old| {
+                        old.removed_gated_wire(
+                            self.cache
+                                .lifecycle_plan()
+                                .expect("overlay always carries a LifecyclePlan"),
+                        )
+                    }) {
                     "removing a gated @wire requires a fresh Session/HostProjection"
                 } else {
                     "LifecyclePlan structure changed; full artifact transition required"
@@ -4400,7 +4786,13 @@ impl IncrementalProject {
                 profile.transaction_commit_ns += started.elapsed().as_nanos();
             }
             let write_ms = t_write.elapsed().as_secs_f64() * 1000.0;
-            Ok(SkullReload::Incremental { bytes, reinferred: reinferred.len(), cook_ms, emit_ms, write_ms })
+            Ok(SkullReload::Incremental {
+                bytes,
+                reinferred: reinferred.len(),
+                cook_ms,
+                emit_ms,
+                write_ms,
+            })
         }
     }
 
@@ -4417,7 +4809,11 @@ impl IncrementalProject {
     /// means the new process gets the complete current program. The overlay
     /// stays a within-process, single-consumer artifact that never has to cross
     /// a process boundary (the compiler contract).
-    pub fn force_full(&mut self, main_path: &std::path::Path, incremental_path: &std::path::Path) -> Result<()> {
+    pub fn force_full(
+        &mut self,
+        main_path: &std::path::Path,
+        incremental_path: &std::path::Path,
+    ) -> Result<()> {
         let stats = crate::compile_measurements::Scope::begin(self.project.dir());
         crate::compile_measurements::known_sources(self.project.sources().files.len());
         // A recompile that hit a type error bails AFTER `update_file` has already
@@ -4426,8 +4822,7 @@ impl IncrementalProject {
         self.project.verdict("on restart fold")?;
         let (lua, cache, artifact_fingerprint, emits_main) = {
             let ws = self.project.workspace();
-            let mid = skull::user_module_id(ws)
-                .map_err(no_user_module)?;
+            let mid = skull::user_module_id(ws).map_err(no_user_module)?;
             let (emit, c) = skull::mir_emit::emit_full_in_for_renderer_with_callee_binding(
                 ws,
                 mid,
@@ -4435,19 +4830,26 @@ impl IncrementalProject {
                 self.renderer_target,
                 Some(self.callee_binding),
             )
-                .map_err(|e| anyhow::anyhow!("skull force_full emit: {}", e.message))?;
+            .map_err(|e| anyhow::anyhow!("skull force_full emit: {}", e.message))?;
             crate::compile_measurements::emission(&emit);
             let artifact_fingerprint = emit.artifact_fingerprint.clone();
             let emits_main = emit.emits_main;
-            let lua = install_global_accessors(emit.lua, ws)
-                .map_err(|e| anyhow::anyhow!(e.message))?;
+            let lua =
+                install_global_accessors(emit.lua, ws).map_err(|e| anyhow::anyhow!(e.message))?;
             (lua, c, artifact_fingerprint, emits_main)
         };
         self.preamble = (RuntimeServices::registered().program_preamble)(
-            self.project.dir(), ProgramKind::Game,
+            self.project.dir(),
+            ProgramKind::Game,
         )?;
         crate::compile_measurements::phase("prepare");
-        write_full_main(&self.preamble, &lua, emits_main, main_path, incremental_path)?;
+        write_full_main(
+            &self.preamble,
+            &lua,
+            emits_main,
+            main_path,
+            incremental_path,
+        )?;
         crate::compile_measurements::phase("write");
         self.artifact_fingerprint = artifact_fingerprint;
         self.cache = cache; // resets changed_since_full -- the overlay is now folded in

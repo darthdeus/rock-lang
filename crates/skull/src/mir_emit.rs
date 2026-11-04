@@ -19,11 +19,12 @@
 //! `transitive_global_reads` -> `sort_global_init_lines`): a global read through
 //! a call chain still inits first, mirroring rock's `global_dependencies`.
 
+use bone_core::prelude::Instant;
 use bone_semantic::hir::{BodyOwner, Expr};
 use bone_semantic::inference::Workspace;
-use bone_semantic::prelude::{is_stdlib_module_file, Idx, ModuleId};
+use bone_semantic::prelude::{Idx, ModuleId, is_stdlib_module_file};
 use rustc_hash::{FxHashMap, FxHashSet};
-use skull_codegen_lua::{emit_function, mangle_fn, CodegenCtx};
+use skull_codegen_lua::{CodegenCtx, emit_function, mangle_fn};
 use skull_mir::instance::Instance;
 use skull_mir::mir::{FuncRef, Inst, MirFunc, Term};
 use skull_parser::CompilerError;
@@ -32,7 +33,6 @@ use skull_parser::CompilerErrorKind;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 use std::time::Duration;
-use bone_core::prelude::Instant;
 use ustr::Ustr;
 
 /// Map `f` over `items`, in PARALLEL by default (rayon work-stealing pool) or
@@ -115,17 +115,27 @@ fn par_map_with<T: Send, R: Send, S>(
     let mode = WorkerMode::capture();
     items
         .into_par_iter()
-        .map_init(move || (init(), mode.enter()), move |state, item| f(&mut state.0, item))
+        .map_init(
+            move || (init(), mode.enter()),
+            move |state, item| f(&mut state.0, item),
+        )
         .collect()
 }
 #[cfg(feature = "sequential")]
-fn par_map_with<T, R, S>(items: Vec<T>, init: impl Fn() -> S, f: impl Fn(&mut S, T) -> R) -> Vec<R> {
+fn par_map_with<T, R, S>(
+    items: Vec<T>,
+    init: impl Fn() -> S,
+    f: impl Fn(&mut S, T) -> R,
+) -> Vec<R> {
     let mut state = init();
     items.into_iter().map(|t| f(&mut state, t)).collect()
 }
 
 #[cfg(not(feature = "sequential"))]
-fn parallel_join<A: Send, B: Send>(left: impl FnOnce() -> A + Send, right: impl FnOnce() -> B + Send) -> (A, B) {
+fn parallel_join<A: Send, B: Send>(
+    left: impl FnOnce() -> A + Send,
+    right: impl FnOnce() -> B + Send,
+) -> (A, B) {
     rayon::join(left, right)
 }
 
@@ -139,10 +149,7 @@ fn parallel_join<A, B>(left: impl FnOnce() -> A, right: impl FnOnce() -> B) -> (
 /// sub-CFG unreachable from entry (its reads fire when the closure is later
 /// *called*, not at this function's load time), so it is intentionally not
 /// descended into — keeping init ordering from over-constraining on closures.
-fn direct_refs(
-    ws: &Workspace,
-    mf: &MirFunc,
-) -> (Vec<Ustr>, Vec<Ustr>) {
+fn direct_refs(ws: &Workspace, mf: &MirFunc) -> (Vec<Ustr>, Vec<Ustr>) {
     let mut globals = Vec::new();
     let mut calls = Vec::new();
     let mut seen: FxHashSet<Idx<skull_mir::mir::Block>> = Default::default();
@@ -164,7 +171,9 @@ fn direct_refs(
         }
         match &block.term {
             Term::Goto(t) => stack.push(*t),
-            Term::Branch { then_bb, else_bb, .. } => {
+            Term::Branch {
+                then_bb, else_bb, ..
+            } => {
                 stack.push(*then_bb);
                 stack.push(*else_bb);
             }
@@ -258,8 +267,7 @@ fn state_initializer_lua(init_lines: &[String]) -> String {
     }
 
     for (index, part) in parts.iter().enumerate() {
-        writeln!(out, "local function __rock_state_initialize_part_{index}()")
-            .unwrap();
+        writeln!(out, "local function __rock_state_initialize_part_{index}()").unwrap();
         for line in part {
             out.push_str(line);
         }
@@ -425,7 +433,9 @@ fn extern_ret(
 ) -> Result<ExternRet, CompilerError> {
     use skull_mir::monoty::{MonoCtor, MonoSubst, MonoTy, MonoTyReason};
 
-    let Some(ret) = f.return_ty else { return Ok(ExternRet::None) };
+    let Some(ret) = f.return_ty else {
+        return Ok(ExternRet::None);
+    };
     let unrealizable = |what: &str| {
         CompilerError::new_with_label(
             f.name_span,
@@ -448,7 +458,10 @@ fn extern_ret(
             }
             MonoTyReason::DepthLimit => unrealizable("a type that does not bottom out"),
             MonoTyReason::RecoveryError => unrealizable("a type inference could not recover"),
-            other => unrealizable(&format!("a type the compiler cannot normalize ({})", other.bucket())),
+            other => unrealizable(&format!(
+                "a type the compiler cannot normalize ({})",
+                other.bucket()
+            )),
         }
     };
 
@@ -467,9 +480,10 @@ fn extern_ret(
         MonoTy::Int => ExternRet::Int,
         MonoTy::Uint => ExternRet::Uint,
         MonoTy::Bool => ExternRet::Bool,
-        MonoTy::App { ctor: MonoCtor::Nominal(name), .. } if crate::is_value_struct(ws, name) => {
-            ExternRet::ValueStruct(name.as_str().to_string())
-        }
+        MonoTy::App {
+            ctor: MonoCtor::Nominal(name),
+            ..
+        } if crate::is_value_struct(ws, name) => ExternRet::ValueStruct(name.as_str().to_string()),
         _ => ExternRet::AsIs,
     })
 }
@@ -667,8 +681,8 @@ pub struct AttributionPhase {
     pub concrete_mono_shared_handle_requests: usize,
     pub concrete_mono_clone_self_ns: u64,
     pub concrete_mono_timed_requests: usize,
-    pub concrete_mono_by_consumer:
-        [skull_mir::lower::ConcreteMonoConsumerStats; skull_mir::lower::ConcreteMonoConsumer::COUNT],
+    pub concrete_mono_by_consumer: [skull_mir::lower::ConcreteMonoConsumerStats;
+        skull_mir::lower::ConcreteMonoConsumer::COUNT],
     pub abi_param_copy_volume: usize,
     pub abi_param_shared_views: usize,
     pub mir_instruction_allocations: usize,
@@ -877,9 +891,8 @@ impl InlineWork {
             entry.0 += 1;
             entry.1 += record.callee_insts;
             entry.2 += record.splice_ns;
-            entry.3 += record.clone.live_instructions
-                + record.clone.live_cells
-                + record.clone.live_blocks;
+            entry.3 +=
+                record.clone.live_instructions + record.clone.live_cells + record.clone.live_blocks;
             entry.4 += record.clone.dead_cloned_instructions
                 + record.clone.dead_cloned_cells
                 + record.clone.dead_cloned_blocks;
@@ -975,7 +988,11 @@ struct AttributionAccumulator {
 }
 
 fn inline_owner_key(fref: FuncRef) -> String {
-    format!("m{}:f{}", fref.module.index(), u32::from(fref.func.into_raw()))
+    format!(
+        "m{}:f{}",
+        fref.module.index(),
+        u32::from(fref.func.into_raw())
+    )
 }
 
 fn hir_nodes_for_owner(ws: &Workspace, mid: ModuleId, owner: BodyOwner) -> usize {
@@ -1056,7 +1073,8 @@ impl AttributionAccumulator {
                     LoweredInstanceKind::Specialized => {
                         self.specialized_consumer_keys.insert(instance.clone());
                         if unit.canonical_reused {
-                            self.specialized_canonical_reuse_keys.insert(instance.clone());
+                            self.specialized_canonical_reuse_keys
+                                .insert(instance.clone());
                         }
                     }
                 }
@@ -1085,7 +1103,8 @@ impl AttributionAccumulator {
             if unit.always_lowered {
                 self.always_lowered_units += 1;
             }
-            self.always_callee_keys.extend(unit.always_callee_keys.iter().cloned());
+            self.always_callee_keys
+                .extend(unit.always_callee_keys.iter().cloned());
         }
         let times = &unit.times;
         record_phase(
@@ -1107,8 +1126,11 @@ impl AttributionAccumulator {
             unit.lower_facts.concrete_mono_cache_insertion_cloned_nodes;
         self.result.lower.concrete_mono_cache_hit_cloned_nodes +=
             unit.lower_facts.concrete_mono_cache_hit_cloned_nodes;
-        self.result.lower.concrete_mono_explicit_owned_escape_cloned_nodes +=
-            unit.lower_facts.concrete_mono_explicit_owned_escape_cloned_nodes;
+        self.result
+            .lower
+            .concrete_mono_explicit_owned_escape_cloned_nodes += unit
+            .lower_facts
+            .concrete_mono_explicit_owned_escape_cloned_nodes;
         self.result.lower.concrete_mono_explicit_owned_escapes +=
             unit.lower_facts.concrete_mono_explicit_owned_escapes;
         self.result.lower.concrete_mono_lookup_ns += unit.lower_facts.concrete_mono_lookup_ns;
@@ -1116,7 +1138,8 @@ impl AttributionAccumulator {
             unit.lower_facts.concrete_mono_cache_lookup_ns;
         self.result.lower.concrete_mono_shared_handle_requests +=
             unit.lower_facts.concrete_mono_shared_handle_requests;
-        self.result.lower.concrete_mono_clone_self_ns += unit.lower_facts.concrete_mono_clone_self_ns;
+        self.result.lower.concrete_mono_clone_self_ns +=
+            unit.lower_facts.concrete_mono_clone_self_ns;
         self.result.lower.concrete_mono_timed_requests +=
             unit.lower_facts.concrete_mono_timed_requests;
         for (total, child) in self
@@ -1132,8 +1155,10 @@ impl AttributionAccumulator {
         }
         self.result.lower.abi_param_copy_volume += unit.lower_facts.abi_param_copy_volume;
         self.result.lower.abi_param_shared_views += unit.lower_facts.abi_param_shared_views;
-        self.result.lower.mir_instruction_allocations += unit.lower_facts.mir_instruction_allocations;
-        self.result.lower.mir_instruction_reallocations += unit.lower_facts.mir_instruction_reallocations;
+        self.result.lower.mir_instruction_allocations +=
+            unit.lower_facts.mir_instruction_allocations;
+        self.result.lower.mir_instruction_reallocations +=
+            unit.lower_facts.mir_instruction_reallocations;
         self.result.lower.mir_instruction_reallocation_ns +=
             unit.lower_facts.mir_instruction_reallocation_ns;
         self.result.lower.mir_instruction_capacity += unit.lower_facts.mir_instruction_capacity;
@@ -1260,8 +1285,14 @@ impl AttributionAccumulator {
         finish_distribution(&mut self.result.inline_phase, &mut self.inline_samples);
         finish_distribution(&mut self.result.cleanup, &mut self.cleanup_samples);
         finish_distribution(&mut self.result.closure, &mut self.closure_samples);
-        finish_distribution(&mut self.result.counted_loop, &mut self.counted_loop_samples);
-        finish_distribution(&mut self.result.hoisted_inline, &mut self.hoisted_inline_samples);
+        finish_distribution(
+            &mut self.result.counted_loop,
+            &mut self.counted_loop_samples,
+        );
+        finish_distribution(
+            &mut self.result.hoisted_inline,
+            &mut self.hoisted_inline_samples,
+        );
         finish_distribution(&mut self.result.validation, &mut self.validation_samples);
         finish_distribution(&mut self.result.regalloc, &mut self.regalloc_samples);
         finish_distribution(&mut self.result.stringify, &mut self.stringify_samples);
@@ -1279,13 +1310,7 @@ impl AttributionAccumulator {
             .iter()
             .collect::<FxHashSet<_>>()
             .len();
-        let ordinary_keys: FxHashSet<_> = self
-            .result
-            .inline
-            .census
-            .ordinary_keys
-            .iter()
-            .collect();
+        let ordinary_keys: FxHashSet<_> = self.result.inline.census.ordinary_keys.iter().collect();
         self.result.inline.candidate_snapshot_duplicates = self
             .result
             .inline
@@ -1343,11 +1368,8 @@ impl AttributionAccumulator {
                     duplicate_lower_ns += rest.iter().sum::<u64>();
                 }
             }
-            let ordinary_lowering_derivations = self
-                .ordinary_lower_ns_by_key
-                .values()
-                .map(Vec::len)
-                .sum();
+            let ordinary_lowering_derivations =
+                self.ordinary_lower_ns_by_key.values().map(Vec::len).sum();
             let specialized_lowering_derivations = self
                 .specialized_lower_ns_by_key
                 .values()
@@ -1397,12 +1419,15 @@ impl AttributionAccumulator {
             population.always_callee_keys = self.always_callee_keys.len();
             population.candidate_ordinary_overlap =
                 published.intersection(&self.ordinary_lowered_keys).count();
-            population.candidate_specialized_overlap =
-                published.intersection(&self.specialized_lowered_keys).count();
+            population.candidate_specialized_overlap = published
+                .intersection(&self.specialized_lowered_keys)
+                .count();
             population.candidate_always_callee_overlap =
                 published.intersection(&self.always_callee_keys).count();
-            population.ordinary_specialized_overlap =
-                self.ordinary_lowered_keys.intersection(&self.specialized_lowered_keys).count();
+            population.ordinary_specialized_overlap = self
+                .ordinary_lowered_keys
+                .intersection(&self.specialized_lowered_keys)
+                .count();
             population.candidate_requested_unique_keys = requested.len();
             population.candidate_spliced_unique_keys = spliced.len();
             population.candidate_published_never_requested =
@@ -1528,13 +1553,15 @@ fn emit_decorator_unit(
         .ok_or_else(|| {
             CompilerError::new_with_label(d.span, "no concrete plan for decorator".to_string())
         })
-        .and_then(|plan| skull_mir::lower::lower_decorator_with_plans(
-            ws,
-            scx,
-            plan,
-            &concrete.plans,
-            ustr::Ustr::from(deco_name.as_str()),
-        ));
+        .and_then(|plan| {
+            skull_mir::lower::lower_decorator_with_plans(
+                ws,
+                scx,
+                plan,
+                &concrete.plans,
+                ustr::Ustr::from(deco_name.as_str()),
+            )
+        });
     out.times.lower = tl.elapsed();
     match lowered {
         Ok(mut mf) => {
@@ -1563,7 +1590,9 @@ fn emit_decorator_unit(
             let owner = bone_semantic::hir::BodyOwner::Decorator(did);
             let plan = concrete_plan.expect("a lowered decorator has a concrete plan");
             out.attribution.always_lowered = true;
-            out.attribution.always_callee_keys.extend(plan.callees.values().cloned());
+            out.attribution
+                .always_callee_keys
+                .extend(plan.callees.values().cloned());
             let ctx = skull_mir::bound::concrete_body_ctx(
                 ws,
                 mid,
@@ -1572,7 +1601,8 @@ fn emit_decorator_unit(
                 scx.interner(),
             );
             let tv = Instant::now();
-            let check = check_unit_spec_bindings(ws, &ctx, mid, &deco_name, &mf, d.span, &mut out.specs);
+            let check =
+                check_unit_spec_bindings(ws, &ctx, mid, &deco_name, &mf, d.span, &mut out.specs);
             out.times.validation += tv.elapsed();
             out.times.validation_work = true;
             if let Err(e) = check {
@@ -1673,8 +1703,9 @@ fn global_init_line(
     g: &bone_semantic::hir::GlobalDef,
     init_name: &str,
 ) -> Result<String, CompilerError> {
-    let plan = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, g.ty)
-        .map_err(|_| CompilerError::new_no_location(format!("no storage plan for global `{}`", g.name)))?;
+    let plan = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, g.ty).map_err(|_| {
+        CompilerError::new_no_location(format!("no storage plan for global `{}`", g.name))
+    })?;
     let slot = |leaf: Ustr| {
         cg.state_slot(leaf).ok_or_else(|| {
             CompilerError::new_no_location(format!(
@@ -1687,7 +1718,9 @@ fn global_init_line(
     match plan.leaf_names(skull_mir::mangle::symbol_of_key(g.name)) {
         Some(leaves) => {
             let mut line = String::from("if __rock_globals_fresh then\n");
-            line.push_str(&format!("  local __rock_init_values = {{ {init_name}() }}\n"));
+            line.push_str(&format!(
+                "  local __rock_init_values = {{ {init_name}() }}\n"
+            ));
             for (index, leaf) in leaves.iter().enumerate() {
                 line.push_str(&format!(
                     "  {cell}[{}] = __rock_init_values[{}]\n",
@@ -1758,27 +1791,42 @@ fn globals_directory_lua(
         for (_, global) in module.globals.iter().filter(|(_, g)| !g.is_const) {
             let identity = skull_mir::global_storage::global_identity(module.file, global.name);
             let plan = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, global.ty)
-                .map_err(|_| CompilerError::new_no_location(format!("no storage plan for global `{}`", global.name)))?;
+                .map_err(|_| {
+                    CompilerError::new_no_location(format!(
+                        "no storage plan for global `{}`",
+                        global.name
+                    ))
+                })?;
             let physical = skull_mir::global_storage::physical_leaf_names(&plan, global.name);
             let slots = physical
                 .iter()
                 .map(|leaf| {
-                    cg.state_slot(*leaf).map(|slot| slot.to_string()).ok_or_else(|| {
-                        CompilerError::new_no_location(format!(
-                            "global `{}` has no compiler-owned storage slot for `{leaf}`",
-                            global.name
-                        ))
-                    })
+                    cg.state_slot(*leaf)
+                        .map(|slot| slot.to_string())
+                        .ok_or_else(|| {
+                            CompilerError::new_no_location(format!(
+                                "global `{}` has no compiler-owned storage slot for `{leaf}`",
+                                global.name
+                            ))
+                        })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            let name = identity.rsplit("::").next().unwrap_or(&identity).to_string();
+            let name = identity
+                .rsplit("::")
+                .next()
+                .unwrap_or(&identity)
+                .to_string();
             entries.push((identity, name, physical, slots));
         }
     }
     entries.sort_by(|a, b| a.0.cmp(&b.0));
     let mut out = String::from("_G.__rock_globals_publish({");
     for (identity, name, physical, slots) in entries {
-        let physical = physical.iter().map(|leaf| lua_string(leaf)).collect::<Vec<_>>().join(",");
+        let physical = physical
+            .iter()
+            .map(|leaf| lua_string(leaf))
+            .collect::<Vec<_>>()
+            .join(",");
         let _ = writeln!(
             out,
             "{{name={},identity={},physical={{{physical}}},slots={{{}}}}},",
@@ -1823,7 +1871,10 @@ fn emit_global_unit(
             .bodies
             .get(&bone_semantic::hir::BodyOwner::Global(gid))
             .and_then(|body| body.root)
-            .is_none() => Ok(None),
+            .is_none() =>
+        {
+            Ok(None)
+        }
         None => Err(CompilerError::new_with_label(
             g.name_span,
             "no concrete plan for global initializer".to_string(),
@@ -1862,7 +1913,9 @@ fn emit_global_unit(
             let owner = bone_semantic::hir::BodyOwner::Global(gid);
             let plan = concrete_plan.expect("a lowered global has a concrete plan");
             out.attribution.always_lowered = true;
-            out.attribution.always_callee_keys.extend(plan.callees.values().cloned());
+            out.attribution
+                .always_callee_keys
+                .extend(plan.callees.values().cloned());
             let ctx = skull_mir::bound::concrete_body_ctx(
                 ws,
                 mid,
@@ -1871,7 +1924,15 @@ fn emit_global_unit(
                 scx.interner(),
             );
             let tv = Instant::now();
-            let check = check_unit_spec_bindings(ws, &ctx, mid, g.name.as_str(), &mf, g.name_span, &mut out.specs);
+            let check = check_unit_spec_bindings(
+                ws,
+                &ctx,
+                mid,
+                g.name.as_str(),
+                &mf,
+                g.name_span,
+                &mut out.specs,
+            );
             out.times.validation += tv.elapsed();
             out.times.validation_work = true;
             if let Err(e) = check {
@@ -1922,7 +1983,15 @@ fn emit_global_unit(
                 out.hard_error = Some(e);
                 return out;
             }
-            emit_lowered(ws, &mut out, &mf, lua, &init_name, Some(key), Duration::ZERO);
+            emit_lowered(
+                ws,
+                &mut out,
+                &mf,
+                lua,
+                &init_name,
+                Some(key),
+                Duration::ZERO,
+            );
             out.attribution.times = out.times;
             // Hot-reload init line. A `const` is a compile-time constant: tweaking
             // the source literal should show the new value next reload, so its init
@@ -2069,10 +2138,7 @@ pub(crate) fn is_emission_root(
     is_global_emission_root(f, deco_map)
 }
 
-fn is_global_emission_root(
-    f: &bone_semantic::hir::Function,
-    deco_map: &DecoMap,
-) -> bool {
+fn is_global_emission_root(f: &bone_semantic::hir::Function, deco_map: &DecoMap) -> bool {
     if f.annotations.iter().any(|a| a.is_builtin("nomangle")) {
         return true;
     }
@@ -2131,18 +2197,21 @@ fn too_deep_to_instantiate(
     let at = skull_mir::monoty::too_deep_to_instantiate(args.iter())?.render();
     let f = &ws.module(inst.func.module).functions[inst.func.func];
     let name = inst.symbol(ws, scx.interner());
-    Some((name, CompilerError::new_with_label(
-        f.name_span,
-        format!(
-            "polymorphic recursion: instantiating `{}` at `{at}` exceeds the \
+    Some((
+        name,
+        CompilerError::new_with_label(
+            f.name_span,
+            format!(
+                "polymorphic recursion: instantiating `{}` at `{at}` exceeds the \
              instantiation depth limit of {}. A recursive call whose type \
              arguments GROW never terminates -- each call needs a new body -- so \
              it is rejected rather than expanded. Same-instance recursion (type \
              arguments unchanged) is unaffected.",
-            f.name,
-            crate::instance_graph::MAX_INSTANTIATION_DEPTH,
+                f.name,
+                crate::instance_graph::MAX_INSTANTIATION_DEPTH,
+            ),
         ),
-    )))
+    ))
 }
 
 fn inline_candidate_keys(concrete: &crate::concrete_body::ConcreteBodies) -> Vec<Instance> {
@@ -2216,28 +2285,30 @@ fn build_inline_candidate_table_with_census(
     let warms: Vec<skull_transform::InlineCandidateWarm> = par_map_with(
         warm_keys,
         skull_transform::InlineCache::default,
-        |inline_cache, inst| {
-            inline_cache.warm_candidate(ws, scx, inst, concrete.plans.as_ref())
-        },
+        |inline_cache, inst| inline_cache.warm_candidate(ws, scx, inst, concrete.plans.as_ref()),
     )
     .into_iter()
     .collect::<Result<_, _>>()?;
     census.warmed = warms.len();
     if let Some(base) = base {
         if let (Some(added), Some(removed)) = (added, removed) {
-            return Ok(std::sync::Arc::new(skull_transform::InlineCandidateTable::from_warms_incremental(
-                std::sync::Arc::clone(base),
-                warms,
-                &added.iter().cloned().collect::<Vec<_>>(),
-                &removed.iter().cloned().collect::<Vec<_>>(),
-            )));
+            return Ok(std::sync::Arc::new(
+                skull_transform::InlineCandidateTable::from_warms_incremental(
+                    std::sync::Arc::clone(base),
+                    warms,
+                    &added.iter().cloned().collect::<Vec<_>>(),
+                    &removed.iter().cloned().collect::<Vec<_>>(),
+                ),
+            ));
         }
     }
-    Ok(std::sync::Arc::new(skull_transform::InlineCandidateTable::from_warms_with_base(
-        base.map(std::sync::Arc::as_ref),
-        keys,
-        warms,
-    )))
+    Ok(std::sync::Arc::new(
+        skull_transform::InlineCandidateTable::from_warms_with_base(
+            base.map(std::sync::Arc::as_ref),
+            keys,
+            warms,
+        ),
+    ))
 }
 
 /// **Phase 2's specialized-body population, driven by SpecDemand closure over
@@ -2285,7 +2356,10 @@ fn view_driven_specialized_chunks(
             continue;
         }
         for (fid, f) in module.functions.iter() {
-            let self_ref = FuncRef { module: module.id, func: fid };
+            let self_ref = FuncRef {
+                module: module.id,
+                func: fid,
+            };
             if !is_cached_emitted_body(f, &shared(self_ref))
                 || !should_emit_via_view(ws, &cache.lua_view, self_ref)
             {
@@ -2332,7 +2406,14 @@ fn view_driven_specialized_chunks(
                 let name = inst.symbol(ws, scx.interner());
                 let mut specs = Vec::new();
                 let result = emit_spec_chunk(
-                    ws, cg, scx, &cache.concrete, &inst, &name, inline_cache, &mut specs,
+                    ws,
+                    cg,
+                    scx,
+                    &cache.concrete,
+                    &inst,
+                    &name,
+                    inline_cache,
+                    &mut specs,
                 );
                 (inst, name, result)
             },
@@ -2380,9 +2461,15 @@ pub fn emit_workspace_mir_in_for_renderer(
 ) -> Result<MirEmit, CompilerError> {
     let _allocation_environment = crate::allocation_report::environment_scope();
     emit_full_in_with_mutation(
-        ws, user_mid, project_root, BodyMutation::None, renderer_target,
-        FullBuild::OneShotProgram, ShapeOverrides::default(),
-    ).map(|(emit, _cache)| emit)
+        ws,
+        user_mid,
+        project_root,
+        BodyMutation::None,
+        renderer_target,
+        FullBuild::OneShotProgram,
+        ShapeOverrides::default(),
+    )
+    .map(|(emit, _cache)| emit)
 }
 
 /// Sim receipt emission keeps the shared workspace but roots only selected
@@ -2396,8 +2483,13 @@ pub fn emit_full_for_selected_sims(
 ) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
     let _allocation_environment = crate::allocation_report::environment_scope();
     emit_full_in_with_mutation(
-        ws, user_mid, project_root, BodyMutation::None, renderer_target,
-        FullBuild::SelectedSims(sims), ShapeOverrides::default(),
+        ws,
+        user_mid,
+        project_root,
+        BodyMutation::None,
+        renderer_target,
+        FullBuild::SelectedSims(sims),
+        ShapeOverrides::default(),
     )
 }
 
@@ -2543,7 +2635,11 @@ fn definition_global(line: &str) -> Option<&str> {
 
 impl LuaDefinitionBuffer {
     fn new() -> Self {
-        Self { lua: String::new(), units: Vec::new(), definition_count: 0 }
+        Self {
+            lua: String::new(),
+            units: Vec::new(),
+            definition_count: 0,
+        }
     }
 
     fn push_str(&mut self, lua: &str) {
@@ -2563,12 +2659,9 @@ impl LuaDefinitionBuffer {
         out.push_str("do\n(function()\n");
         let mut definitions_in_scope = 0;
         for (start, end, count) in self.units {
-            if definitions_in_scope > 0
-                && definitions_in_scope + count > LUA_DEFINITIONS_PER_SCOPE
+            if definitions_in_scope > 0 && definitions_in_scope + count > LUA_DEFINITIONS_PER_SCOPE
             {
-                out.push_str(
-                    "end)()\nend\ndo\n(function()\n",
-                );
+                out.push_str("end)()\nend\ndo\n(function()\n");
                 definitions_in_scope = 0;
             }
             out.push_str(&self.lua[start..end]);
@@ -2582,15 +2675,27 @@ impl LuaDefinitionBuffer {
 enum BodyMutation {
     None,
     #[cfg(test)]
-    RemoveCalleeOwner { caller: FuncRef, callee: FuncRef },
+    RemoveCalleeOwner {
+        caller: FuncRef,
+        callee: FuncRef,
+    },
     #[cfg(test)]
-    ClearCalleeOwnerKey { caller: FuncRef, callee: FuncRef },
+    ClearCalleeOwnerKey {
+        caller: FuncRef,
+        callee: FuncRef,
+    },
     #[cfg(test)]
-    ClearBoundPlan { body: FuncRef },
+    ClearBoundPlan {
+        body: FuncRef,
+    },
     #[cfg(test)]
-    ClearCoroutineResultPlan { body: FuncRef },
+    ClearCoroutineResultPlan {
+        body: FuncRef,
+    },
     #[cfg(test)]
-    ClearIteratorWitnessInstance { body: FuncRef },
+    ClearIteratorWitnessInstance {
+        body: FuncRef,
+    },
     #[cfg(test)]
     SkipAbiPlanPublish,
     #[cfg(test)]
@@ -2679,7 +2784,11 @@ impl SetupLaneScheduler {
 
     fn handshake(&self) -> (usize, usize, bool) {
         let handshake = *self.handshake.lock().expect("setup handshake lock");
-        (handshake.entered, handshake.released, handshake.released_after_both)
+        (
+            handshake.entered,
+            handshake.released,
+            handshake.released_after_both,
+        )
     }
 }
 
@@ -2707,7 +2816,11 @@ fn shared(fref: FuncRef) -> Instance {
 ///
 /// A declaration can be neither (pruned), either, or -- the whole point of
 /// modeling publication separately -- BOTH under two different symbols.
-fn should_emit_via_view(ws: &Workspace, view: &crate::artifact::ArtifactView, self_ref: FuncRef) -> bool {
+fn should_emit_via_view(
+    ws: &Workspace,
+    view: &crate::artifact::ArtifactView,
+    self_ref: FuncRef,
+) -> bool {
     let canonical = skull_mir::lower::canonical_variant(ws, self_ref);
     let call_serving = view
         .realization
@@ -3023,7 +3136,9 @@ impl FullBuild<'_> {
 
     fn kind(self) -> BuildKind {
         match self {
-            FullBuild::Program | FullBuild::OneShotProgram | FullBuild::SelectedSims(_) => BuildKind::Program,
+            FullBuild::Program | FullBuild::OneShotProgram | FullBuild::SelectedSims(_) => {
+                BuildKind::Program
+            }
             FullBuild::PackageTest(_) => BuildKind::PackageTest,
         }
     }
@@ -3044,7 +3159,9 @@ enum WgpuProjection<T> {
 }
 
 #[cfg(feature = "renderer-wgpu")]
-fn classify_wgpu_projection<T>(result: Result<T, CompilerError>) -> Result<WgpuProjection<T>, CompilerError> {
+fn classify_wgpu_projection<T>(
+    result: Result<T, CompilerError>,
+) -> Result<WgpuProjection<T>, CompilerError> {
     match result {
         Ok(value) => Ok(WgpuProjection::Admitted(value)),
         Err(error) => match error.kind {
@@ -3149,9 +3266,15 @@ fn collect_callee_frefs(mf: &MirFunc, out: &mut FxHashSet<FuncRef>) {
 }
 
 fn collect_abi_dependencies(mf: &MirFunc, out: &mut FxHashSet<FuncRef>) {
-    out.extend(mf.call_abi_plans.values()
-        .filter(|plan| plan.body_dependent_parameters()).map(|plan| plan.subject.func));
-    for nested in &mf.nested_fns { collect_abi_dependencies(nested, out); }
+    out.extend(
+        mf.call_abi_plans
+            .values()
+            .filter(|plan| plan.body_dependent_parameters())
+            .map(|plan| plan.subject.func),
+    );
+    for nested in &mf.nested_fns {
+        collect_abi_dependencies(nested, out);
+    }
 }
 
 fn emit_function_with_allocation_report(
@@ -3267,17 +3390,15 @@ fn emit_coroutine_chunk(
     .map_err(|reason| {
         CompilerError::new_with_label(
             f.name_span,
-            format!("cannot build concrete coroutine plan for `{}`: {}", f.name, reason.bucket()),
+            format!(
+                "cannot build concrete coroutine plan for `{}`: {}",
+                f.name,
+                reason.bucket()
+            ),
         )
     })?;
-    let (lua, code_artifact, allocation_bodies, mut deps, statics) = crate::coroutine_emit::emit_coroutine_with_artifact(
-        ws,
-        cg,
-        scx,
-        f,
-        &plan,
-        mf,
-    )?;
+    let (lua, code_artifact, allocation_bodies, mut deps, statics) =
+        crate::coroutine_emit::emit_coroutine_with_artifact(ws, cg, scx, f, &plan, mf)?;
     times.emit = te.elapsed();
     times.emit_work = times.emit > Duration::ZERO;
     times.regalloc = skull_codegen_lua::regalloc_time_elapsed().min(times.emit);
@@ -3325,7 +3446,16 @@ fn emit_body_chunk(
     f: &bone_semantic::hir::Function,
     inline_cache: &mut skull_transform::InlineCache,
 ) -> Result<Chunk, CompilerError> {
-    emit_body_chunk_with_mutation(ws, cg, scx, concrete, self_ref, f, inline_cache, BodyMutation::None)
+    emit_body_chunk_with_mutation(
+        ws,
+        cg,
+        scx,
+        concrete,
+        self_ref,
+        f,
+        inline_cache,
+        BodyMutation::None,
+    )
 }
 
 fn emit_body_chunk_with_mutation(
@@ -3344,9 +3474,9 @@ fn emit_body_chunk_with_mutation(
         ..UnitAttribution::default()
     };
     let tl = Instant::now();
-    let plan = concrete
-        .plan_for(&shared(self_ref))
-        .ok_or_else(|| CompilerError::new_with_label(f.name_span, format!("no concrete plan for `{}`", f.name)))?;
+    let plan = concrete.plan_for(&shared(self_ref)).ok_or_else(|| {
+        CompilerError::new_with_label(f.name_span, format!("no concrete plan for `{}`", f.name))
+    })?;
     let ordinary_instance = plan.function_instance().cloned();
     let canonical_body = ordinary_instance
         .as_ref()
@@ -3359,7 +3489,8 @@ fn emit_body_chunk_with_mutation(
     times.lower = tl.elapsed();
     times.lower_work = mf.insts.len() > 0;
     attribution.examined = true;
-    attribution.hir_nodes = hir_nodes_for_owner(ws, self_ref.module, BodyOwner::Function(self_ref.func));
+    attribution.hir_nodes =
+        hir_nodes_for_owner(ws, self_ref.module, BodyOwner::Function(self_ref.func));
     attribution.mir_instructions = mf.insts.len();
     attribution.lower_facts = mf.lower_attribution.clone();
     attribution.consumer_instance = ordinary_instance
@@ -3410,7 +3541,8 @@ fn emit_body_chunk_with_mutation(
                 BodyMutation::None => unreachable!(),
                 BodyMutation::ClearBoundPlan { .. } => unreachable!(),
                 BodyMutation::ClearCoroutineResultPlan { .. } => unreachable!(),
-                BodyMutation::ClearIteratorWitnessInstance { .. } | BodyMutation::SkipAbiPlanPublish => {
+                BodyMutation::ClearIteratorWitnessInstance { .. }
+                | BodyMutation::SkipAbiPlanPublish => {
                     unreachable!()
                 }
                 BodyMutation::ConcreteResultOrder(_) => unreachable!(),
@@ -3457,7 +3589,10 @@ fn emit_body_chunk_with_mutation(
     attribution.inline.ordinary_splices += splices.len();
     attribution.inline.add_scan(scan_stats);
     times.inline_work = !splices.is_empty();
-    attribution.inline.add_allocations(before_inline, (mf.insts.len(), mf.blocks.len(), mf.cells.len()));
+    attribution.inline.add_allocations(
+        before_inline,
+        (mf.insts.len(), mf.blocks.len(), mf.cells.len()),
+    );
     let mut deps: FxHashSet<FuncRef> = spliced.into_iter().collect();
     let cleanup_before = mir_live_instructions(&mf);
     let tc = Instant::now();
@@ -3514,7 +3649,7 @@ fn emit_body_chunk_with_mutation(
         &mut times,
         &mut hoisted_work,
     )
-        .map_err(|msg| CompilerError::new_with_label(f.name_span, msg))?;
+    .map_err(|msg| CompilerError::new_with_label(f.name_span, msg))?;
     times.hoisted_inline_work = hoisted_work.accepted_splices > 0;
     attribution.inline.add(hoisted_work);
     let tv = Instant::now();
@@ -3531,24 +3666,18 @@ fn emit_body_chunk_with_mutation(
     validate_emitted_body(ws, &ctx, &mf, &mut specs).map_err(|r| r.into_error(f.name_span, ""))?;
     let embedded_deps = deps.clone();
     collect_callee_frefs(&mf, &mut deps);
-    let mut code_artifact = skull_mir::code_identity::CodeArtifact::from_mir_tree_with_volatile_vars(
-        &mf,
-        &ws.comptime_inputs.volatile_vars,
-    );
+    let mut code_artifact =
+        skull_mir::code_identity::CodeArtifact::from_mir_tree_with_volatile_vars(
+            &mf,
+            &ws.comptime_inputs.volatile_vars,
+        );
     code_artifact.set_body_names(&mf, &mangle_fn(ws, f));
     let (direct_globals, direct_calls) = direct_refs(ws, &mf);
     times.validation = tv.elapsed();
     times.validation_work = true;
     skull_codegen_lua::regalloc_time_reset();
     let te = Instant::now();
-    let bind = skull_codegen_lua::callee_binding_plan(
-        ws,
-        cg,
-        scx.interner(),
-        &name,
-        self_ref,
-        &mf,
-    );
+    let bind = skull_codegen_lua::callee_binding_plan(ws, cg, scx.interner(), &name, self_ref, &mf);
     let emission =
         emit_function_with_allocation_report(ws, cg, scx.interner(), self_ref, &mf, bind.as_ref());
     let mut lua = emission.lua;
@@ -3876,9 +4005,9 @@ fn emit_spec_chunk(
 ) -> Result<Chunk, CompilerError> {
     let fref = body.func;
     let f = &ws.module(fref.module).functions[fref.func];
-    let plan = concrete
-        .plan_for(body)
-        .ok_or_else(|| CompilerError::new_with_label(f.name_span, format!("no concrete plan for `{name}`")))?;
+    let plan = concrete.plan_for(body).ok_or_else(|| {
+        CompilerError::new_with_label(f.name_span, format!("no concrete plan for `{name}`"))
+    })?;
     let tree = &plan.bound_tree;
     skull_mir::lower::validate_concrete_bound_plan(f, plan)?;
     let tl = Instant::now();
@@ -3917,17 +4046,11 @@ fn emit_spec_chunk(
         tree,
         &concrete.plans,
     )
-        .map_err(|e| CompilerError::new_with_label(f.name_span, e.message))?;
+    .map_err(|e| CompilerError::new_with_label(f.name_span, e.message))?;
     times.validation += tresolve.elapsed();
     times.validation_work = true;
     let owner = BodyOwner::Function(fref.func);
-    let ctx = skull_mir::bound::concrete_body_ctx(
-        ws,
-        fref.module,
-        owner,
-        tree,
-        scx.interner(),
-    );
+    let ctx = skull_mir::bound::concrete_body_ctx(ws, fref.module, owner, tree, scx.interner());
     if f.is_coroutine {
         let mut chunk = emit_coroutine_chunk(ws, cg, scx, &ctx, plan, f, &mut mf, times)?;
         attribution.mir_instructions = mf.insts.len();
@@ -3944,14 +4067,11 @@ fn emit_spec_chunk(
         inline_cache,
         &concrete.plans,
     )
-        .map_err(|e| CompilerError::new_with_label(f.name_span, e.message))?;
+    .map_err(|e| CompilerError::new_with_label(f.name_span, e.message))?;
     times.add(&prepared_times);
     let mut prepared_inline = prepared_inline;
     prepared_inline.specialized_splices = prepared_inline.accepted_splices;
-    prepared_inline
-        .census
-        .ordinary_keys
-        .push(body.clone());
+    prepared_inline.census.ordinary_keys.push(body.clone());
     attribution.inline.add(prepared_inline);
     let before = specs.len();
     // Discovered BEFORE the verdict, and handed back through `specs` even when
@@ -3963,15 +4083,15 @@ fn emit_spec_chunk(
     times.validation += tv.elapsed();
     times.validation_work = true;
     let specs = specs[before..].to_vec();
-    let mut code_artifact = skull_mir::code_identity::CodeArtifact::from_mir_tree_with_volatile_vars(
-        &mf,
-        &ws.comptime_inputs.volatile_vars,
-    );
+    let mut code_artifact =
+        skull_mir::code_identity::CodeArtifact::from_mir_tree_with_volatile_vars(
+            &mf,
+            &ws.comptime_inputs.volatile_vars,
+        );
     code_artifact.set_body_names(&mf, name);
     skull_codegen_lua::regalloc_time_reset();
     let te = Instant::now();
-    let bind =
-        skull_codegen_lua::callee_binding_plan(ws, cg, scx.interner(), name, fref, &mf);
+    let bind = skull_codegen_lua::callee_binding_plan(ws, cg, scx.interner(), name, fref, &mf);
     let emission =
         emit_named_with_allocation_report(ws, cg, scx.interner(), name, &mf, &[], bind.as_ref());
     let mut lua = emission.lua;
@@ -4060,8 +4180,7 @@ fn emit_specialized_callees(
 ) -> Vec<CompilerError> {
     let mut done: FxHashSet<Instance> = FxHashSet::default();
     let mut errs: Vec<(String, CompilerError)> = rejected.to_vec();
-    let rejected_names: FxHashSet<&str> =
-        rejected.iter().map(|(n, _)| n.as_str()).collect();
+    let rejected_names: FxHashSet<&str> = rejected.iter().map(|(n, _)| n.as_str()).collect();
     while let Some(demand) = pending.pop() {
         let body = demand.inst;
         let fref = body.func;
@@ -4070,7 +4189,9 @@ fn emit_specialized_callees(
         }
         let f = &ws.module(fref.module).functions[fref.func];
         let name = body.symbol(ws, scx.interner());
-        let Some(chunk) = live.get(&body).or_else(|| cached.get(&body).and_then(|c| c.as_ref().ok()))
+        let Some(chunk) = live
+            .get(&body)
+            .or_else(|| cached.get(&body).and_then(|c| c.as_ref().ok()))
         else {
             // Not a fallback: the walk either built this body or recorded why it
             // could not, and a rejected one is reported through `rejected`.
@@ -4141,9 +4262,8 @@ fn prepare_instance_body_with_attribution(
     let mut work = InlineWork::default();
     let before = (mf.insts.len(), mf.blocks.len(), mf.cells.len());
     let ti = Instant::now();
-    let (spliced, records, scan_stats) = skull_transform::inline_functions_with_plans(
-        ws, scx, fref, mf, cache, concrete_plans,
-    )?;
+    let (spliced, records, scan_stats) =
+        skull_transform::inline_functions_with_plans(ws, scx, fref, mf, cache, concrete_plans)?;
     times.inline = ti.elapsed();
     times.inline_work = !records.is_empty();
     work.add_records(&records);
@@ -4290,9 +4410,18 @@ fn validate_no_whole_element_column_access(mf: &skull_mir::mir::MirFunc) -> Resu
     for (_, block) in mf.blocks.iter() {
         for &iid in &block.insts {
             let elem = match &mf.insts[iid] {
-                Inst::Index { kind: VecValueColumns(e) | VecValueStrided(e), .. }
-                | Inst::StoreIndex { kind: VecValueColumns(e) | VecValueStrided(e), .. }
-                | Inst::ArrayPush { kind: VecValueColumns(e) | VecValueStrided(e), .. } => e,
+                Inst::Index {
+                    kind: VecValueColumns(e) | VecValueStrided(e),
+                    ..
+                }
+                | Inst::StoreIndex {
+                    kind: VecValueColumns(e) | VecValueStrided(e),
+                    ..
+                }
+                | Inst::ArrayPush {
+                    kind: VecValueColumns(e) | VecValueStrided(e),
+                    ..
+                } => e,
                 _ => continue,
             };
             return Err(format!(
@@ -4349,7 +4478,13 @@ struct Finding {
 
 impl BodyRejection {
     fn gap(message: String) -> Self {
-        Self { findings: vec![Finding { message, guarantee: false, site: None }] }
+        Self {
+            findings: vec![Finding {
+                message,
+                guarantee: false,
+                site: None,
+            }],
+        }
     }
 
     /// A guarantee violation anywhere in the body makes the whole rejection a
@@ -4364,7 +4499,11 @@ impl BodyRejection {
     }
 
     fn into_result(self) -> Result<(), BodyRejection> {
-        if self.findings.is_empty() { Ok(()) } else { Err(self) }
+        if self.findings.is_empty() {
+            Ok(())
+        } else {
+            Err(self)
+        }
     }
 
     fn prefixed(mut self, what: &str) -> Self {
@@ -4418,13 +4557,13 @@ fn validate_emitted_body(
     // stdlib body (every `xs.push(..)` reports at the same `Vec<T>.push` line),
     // so without the caller the diagnostic cannot tell two sites apart.
     acc.findings.extend(
-        skull_transform::nobox_materialization_violations(ws, mf).into_iter().map(
-            |(message, site)| Finding {
+        skull_transform::nobox_materialization_violations(ws, mf)
+            .into_iter()
+            .map(|(message, site)| Finding {
                 message: format!("{message}, while emitting `{}`", mf.name),
                 guarantee: true,
                 site,
-            },
-        ),
+            }),
     );
     if let Err(r) = validate_nested_bodies(ws, ctx, &mf.nested_fns, specs) {
         acc.absorb(r);
@@ -4476,7 +4615,12 @@ pub(crate) type DecoMap = FxHashMap<Ustr, (ModuleId, Idx<bone_semantic::hir::Dec
 /// Name -> definition map for every `deco` in the workspace, plus the def list
 /// (an application usually names a decorator declared in another module). Shared
 /// by `assemble` (which also emits the def bodies) and `assemble_overlay`.
-pub(crate) fn build_deco_map(ws: &Workspace) -> (DecoMap, Vec<(ModuleId, Idx<bone_semantic::hir::DecoratorDef>)>) {
+pub(crate) fn build_deco_map(
+    ws: &Workspace,
+) -> (
+    DecoMap,
+    Vec<(ModuleId, Idx<bone_semantic::hir::DecoratorDef>)>,
+) {
     let mut deco_map: DecoMap = Default::default();
     let mut deco_items: Vec<(ModuleId, Idx<bone_semantic::hir::DecoratorDef>)> = Vec::new();
     for module in ws.modules.iter() {
@@ -4518,9 +4662,11 @@ fn decorator_application_lines(
                 if skull_mir::definition::is_compiler_owned_decorator(d) {
                     continue;
                 }
-                let identity = skull_mir::code_identity::CodeIdentity::Named(Instance::base(
-                    FuncRef { module: module.id, func: _fid },
-                ));
+                let identity =
+                    skull_mir::code_identity::CodeIdentity::Named(Instance::base(FuncRef {
+                        module: module.id,
+                        func: _fid,
+                    }));
                 let key = identity.logical_key(ws, scx.interner());
                 let target = format!(
                     "{{ name = {:?}, params = {{}}, func = __rock_code_slot_ref({:?}) }}",
@@ -4531,7 +4677,12 @@ fn decorator_application_lines(
                     Ok(args) => {
                         let mut call_args = vec![target];
                         call_args.extend(args);
-                        let _ = writeln!(deco_lines, "{}({})", crate::decorator_fn_name(app_key.as_str()), call_args.join(", "));
+                        let _ = writeln!(
+                            deco_lines,
+                            "{}({})",
+                            crate::decorator_fn_name(app_key.as_str()),
+                            call_args.join(", ")
+                        );
                     }
                     Err(e) => skipped.push((f.name.as_str().to_string(), e.message)),
                 }
@@ -4598,8 +4749,13 @@ fn register_sim_candidates(ws: &Workspace) -> Vec<FuncRef> {
         .flat_map(|m| {
             m.functions
                 .iter()
-                .filter(|(_, f)| skull_mir::mangle::declared_name(f.name.as_str()) == "register_sim")
-                .map(|(fid, _)| FuncRef { module: m.id, func: fid })
+                .filter(|(_, f)| {
+                    skull_mir::mangle::declared_name(f.name.as_str()) == "register_sim"
+                })
+                .map(|(fid, _)| FuncRef {
+                    module: m.id,
+                    func: fid,
+                })
         })
         .collect()
 }
@@ -4617,7 +4773,10 @@ fn sim_entry_providers(ws: &Workspace) -> Vec<FuncRef> {
             m.functions
                 .iter()
                 .filter(|(_, f)| f.annotations.iter().any(|a| a.is_builtin("sim_entry")))
-                .map(|(fid, _)| FuncRef { module: m.id, func: fid })
+                .map(|(fid, _)| FuncRef {
+                    module: m.id,
+                    func: fid,
+                })
         })
         .collect()
 }
@@ -4649,21 +4808,41 @@ pub fn emission_roots(ws: &Workspace, project_root: Option<&str>) -> Vec<FuncRef
 fn explicit_and_global_roots(ws: &Workspace, explicit: &[FuncRef]) -> Vec<FuncRef> {
     let (deco_map, _) = build_deco_map(ws);
     let mut roots = explicit.to_vec();
-    roots.extend(ws.modules.iter().filter(|m| m.id != ModuleId::builtin()).flat_map(|m| {
-        m.functions.iter().filter_map(|(fid, f)| {
-            is_global_emission_root(f, &deco_map).then_some(FuncRef { module: m.id, func: fid })
-        })
-    }));
+    roots.extend(
+        ws.modules
+            .iter()
+            .filter(|m| m.id != ModuleId::builtin())
+            .flat_map(|m| {
+                m.functions.iter().filter_map(|(fid, f)| {
+                    is_global_emission_root(f, &deco_map).then_some(FuncRef {
+                        module: m.id,
+                        func: fid,
+                    })
+                })
+            }),
+    );
     roots.sort_by_key(|f| (f.module.index(), f.func.into_raw()));
     roots.dedup();
     roots
 }
 
 fn sim_refs_by_wire(ws: &Workspace) -> FxHashMap<String, FuncRef> {
-    ws.modules.iter().flat_map(|m| m.functions.iter().filter_map(|(fid, f)| {
-        skull_mir::lifecycle::sim_wire_name(f).map(|wire|
-            (wire.as_str().to_owned(), FuncRef { module: m.id, func: fid }))
-    })).collect()
+    ws.modules
+        .iter()
+        .flat_map(|m| {
+            m.functions.iter().filter_map(|(fid, f)| {
+                skull_mir::lifecycle::sim_wire_name(f).map(|wire| {
+                    (
+                        wire.as_str().to_owned(),
+                        FuncRef {
+                            module: m.id,
+                            func: fid,
+                        },
+                    )
+                })
+            })
+        })
+        .collect()
 }
 
 fn named_sim_dependencies(
@@ -4677,26 +4856,38 @@ fn named_sim_dependencies(
     let mut roots = Vec::new();
     for (_, expr) in body.expr_arena.iter() {
         if let Expr::String(name) = expr {
-            if let Some(func) = sims.get(name.as_str()) { roots.push(*func); }
+            if let Some(func) = sims.get(name.as_str()) {
+                roots.push(*func);
+            }
         }
     }
     // The engine dispatcher consumes the runner's resolved entry plan. Other
     // registry reads must name their dependencies statically.
     let engine_dispatch = match owner {
-        BodyOwner::Function(fid) => matches!(ws.module(mid).functions[fid].name.as_str(),
-            "stone::register_sim" | "stone::sim_start_entry" | "stone::clear_all_systems"),
+        BodyOwner::Function(fid) => matches!(
+            ws.module(mid).functions[fid].name.as_str(),
+            "stone::register_sim" | "stone::sim_start_entry" | "stone::clear_all_systems"
+        ),
         _ => false,
     };
     if !engine_dispatch {
         for (id, expr) in body.expr_arena.iter() {
             let Expr::Global(name) = expr else { continue };
-            if name.as_str() != "stone::SIMS" { continue; }
+            if name.as_str() != "stone::SIMS" {
+                continue;
+            }
             let literal_lookup = body.expr_arena.iter().any(|(_, expr)| {
                 let key = match expr {
                     Expr::Index { base, index } if *base == id => Some(*index),
-                    Expr::Call { args, family, .. } if skull_mir::mangle::declared_name(family.key().as_str()) == "get" => {
+                    Expr::Call { args, family, .. }
+                        if skull_mir::mangle::declared_name(family.key().as_str()) == "get" =>
+                    {
                         let mut args = args.clone();
-                        if args.next() == Some(id) { args.next() } else { None }
+                        if args.next() == Some(id) {
+                            args.next()
+                        } else {
+                            None
+                        }
                     }
                     _ => None,
                 };
@@ -4727,9 +4918,11 @@ fn emission_roots_with_census(
             census.functions_examined += module.functions.len();
         }
         for (fid, f) in module.functions.iter() {
-            if is_emission_root(module.file.as_str(), project_root, f, &deco_map)
-            {
-                roots.push(FuncRef { module: module.id, func: fid });
+            if is_emission_root(module.file.as_str(), project_root, f, &deco_map) {
+                roots.push(FuncRef {
+                    module: module.id,
+                    func: fid,
+                });
             }
         }
     }
@@ -4750,11 +4943,7 @@ fn emission_roots_with_census(
 /// The shader collection is therefore built BEFORE the graph, not beside the
 /// assembly that renders it.
 #[cfg(test)]
-fn all_roots(
-    ws: &Workspace,
-    project_root: Option<&str>,
-    shader_roots: &[FuncRef],
-) -> Vec<FuncRef> {
+fn all_roots(ws: &Workspace, project_root: Option<&str>, shader_roots: &[FuncRef]) -> Vec<FuncRef> {
     all_roots_with_census(ws, project_root, shader_roots, None)
 }
 
@@ -4806,8 +4995,10 @@ fn sim_registration_lines(
     scx: &skull_mir::lower::ScalarCtx,
     selected: Option<&FxHashSet<Ustr>>,
 ) -> Result<String, CompilerError> {
-    let sims = collect_sim_fns(ws).into_iter().filter(|(_, f, _)|
-        selected.is_none_or(|names| names.contains(&f.name))).collect::<Vec<_>>();
+    let sims = collect_sim_fns(ws)
+        .into_iter()
+        .filter(|(_, f, _)| selected.is_none_or(|names| names.contains(&f.name)))
+        .collect::<Vec<_>>();
     if sims.is_empty() {
         return Ok(String::new());
     }
@@ -4830,20 +5021,30 @@ fn sim_registration_lines(
                 .to_string(),
         )
     })?;
-    let register_name = mangle_fn(ws, &ws.module(register_fn.module).functions[register_fn.func]);
+    let register_name = mangle_fn(
+        ws,
+        &ws.module(register_fn.module).functions[register_fn.func],
+    );
 
     let mut out = String::new();
     for (_file, f, wire) in sims {
         if f.backend == bone_semantic::hir::FnBackend::Js {
             continue;
         }
-        let fref = ws.modules.iter().find_map(|module| {
-            module.functions.iter().find_map(|(fid, candidate)| {
-                std::ptr::eq(candidate, f).then_some(FuncRef { module: module.id, func: fid })
+        let fref = ws
+            .modules
+            .iter()
+            .find_map(|module| {
+                module.functions.iter().find_map(|(fid, candidate)| {
+                    std::ptr::eq(candidate, f).then_some(FuncRef {
+                        module: module.id,
+                        func: fid,
+                    })
+                })
             })
-        }).ok_or_else(|| {
-            CompilerError::new_no_location(format!("cannot locate @sim `{}`", f.name))
-        })?;
+            .ok_or_else(|| {
+                CompilerError::new_no_location(format!("cannot locate @sim `{}`", f.name))
+            })?;
         let identity = skull_mir::code_identity::CodeIdentity::Named(Instance::base(fref));
         let key = identity.logical_key(ws, scx.interner());
         let body = format!("__rock_code_slot_ref({:?})", key);
@@ -4862,7 +5063,7 @@ fn sim_registration_lines(
                         "`@sim` `{wire}` takes {n} parameters; a sim takes none or one entry \
                          argument supplied by the game's `@sim_entry` provider"
                     ),
-                ))
+                ));
             }
         };
         let _ = writeln!(out, "{}({:?}, {})", register_name, wire, entry);
@@ -4879,7 +5080,7 @@ fn sim_entry_provider_for(
     sim: &bone_semantic::hir::Function,
     wire: &str,
 ) -> Result<String, CompilerError> {
-    use skull_mir::monoty::{convert_decl, MonoSubst, MonoTy};
+    use skull_mir::monoty::{MonoSubst, MonoTy, convert_decl};
     let providers = sim_entry_providers(ws);
     let provider_ref = match providers.as_slice() {
         [only] => *only,
@@ -4891,7 +5092,7 @@ fn sim_entry_provider_for(
                      defined; the game declares one \
                      `@sim_entry co fn(body: fn(T) -> Coroutine<Wait>) -> Coroutine<Wait>`"
                 ),
-            ))
+            ));
         }
         many => {
             let names: Vec<&str> = many
@@ -4922,11 +5123,13 @@ fn sim_entry_provider_for(
                 sim.span,
                 format!(
                     "`@sim` `{wire}` takes `{}`, but the `@sim_entry` provider `{}` supplies `{}`",
-                    sim_param.as_ref().map_or("<unresolved>".to_string(), MonoTy::render),
+                    sim_param
+                        .as_ref()
+                        .map_or("<unresolved>".to_string(), MonoTy::render),
                     provider.name,
                     accepted.map_or("<not a one-argument body>".to_string(), MonoTy::render),
                 ),
-            ))
+            ));
         }
     }
     Ok(mangle_fn(ws, provider))
@@ -4954,7 +5157,10 @@ fn shader_programs(
     collection
         .pairs
         .iter()
-        .map(|pair| crate::shader_artifact::ShaderProgram { vert: pair.vert, frag: pair.frag })
+        .map(|pair| crate::shader_artifact::ShaderProgram {
+            vert: pair.vert,
+            frag: pair.frag,
+        })
         .collect()
 }
 
@@ -5039,7 +5245,9 @@ fn graph_rejection_error(
     ws: &Workspace,
     graph: &crate::instance_graph::InstanceGraph,
 ) -> Option<CompilerError> {
-    let mut callers: Option<FxHashMap<&crate::instance_graph::Instance, Vec<&crate::instance_graph::Edge>>> = None;
+    let mut callers: Option<
+        FxHashMap<&crate::instance_graph::Instance, Vec<&crate::instance_graph::Edge>>,
+    > = None;
     for rejection in graph.rejections() {
         let caller = &ws.module(rejection.at.func.module).functions[rejection.at.func.func];
         if rejection.kind == crate::instance_graph::RejectionKind::IdentityInOrdinaryStorage {
@@ -5075,7 +5283,8 @@ fn graph_rejection_error(
             skull_mir::ablation::note_examined();
             skull_mir::ablation::record(
                 category,
-                if rejection.kind == crate::instance_graph::RejectionKind::ChangingInstanceRecursion {
+                if rejection.kind == crate::instance_graph::RejectionKind::ChangingInstanceRecursion
+                {
                     caller.name.as_str().to_string()
                 } else {
                     rejection
@@ -5115,7 +5324,10 @@ fn identity_instance_rejection_error(
     rejection: &crate::instance_graph::Rejection,
 ) -> Option<CompilerError> {
     let exempt = |instance: &crate::instance_graph::Instance| {
-        bone_semantic::identity_storage::identity_storage_exempt(ws, ws.module(instance.func.module))
+        bone_semantic::identity_storage::identity_storage_exempt(
+            ws,
+            ws.module(instance.func.module),
+        )
     };
     let mut seen = FxHashSet::default();
     let mut work = vec![&rejection.at];
@@ -5135,10 +5347,14 @@ fn identity_instance_rejection_error(
             } else if !exempt(&edge.from) {
                 let callee = &ws.module(rejection.at.func.module).functions[rejection.at.func.func];
                 return Some(
-                    CompilerError::new_with_label(rejection.span, rejection.message.clone()).with_label(
-                        edge.span,
-                        format!("`{}` is instantiated from here with an identity struct", callee.name),
-                    ),
+                    CompilerError::new_with_label(rejection.span, rejection.message.clone())
+                        .with_label(
+                            edge.span,
+                            format!(
+                                "`{}` is instantiated from here with an identity struct",
+                                callee.name
+                            ),
+                        ),
                 );
             }
         }
@@ -5192,8 +5408,7 @@ fn shader_registration_lines(
     let profile = skull_codegen_glsl::GlslProfile::Core330;
     if view.profile != profile || view.program_views.len() != collection.pairs.len() {
         return Err(CompilerError::new_no_location(
-            "shader graph/view registration denominator differs from shader collection"
-                .to_string(),
+            "shader graph/view registration denominator differs from shader collection".to_string(),
         ));
     }
     let mut out = String::new();
@@ -5207,8 +5422,12 @@ fn shader_registration_lines(
         // vert=None is the A3c single-arg fullscreen form -> the A1 single-entry
         // emitter (PIXEL body + fullscreen VERTEX passthrough).
         let emission = match pair.vert {
-            Some(_) => skull_codegen_glsl::emit_shader_pipeline_with_view(ws, scx, program_view, profile)?,
-            None => skull_codegen_glsl::emit_shader_entry_with_view(ws, scx, program_view, profile)?,
+            Some(_) => {
+                skull_codegen_glsl::emit_shader_pipeline_with_view(ws, scx, program_view, profile)?
+            }
+            None => {
+                skull_codegen_glsl::emit_shader_entry_with_view(ws, scx, program_view, profile)?
+            }
         };
         dependencies.extend(emission.dependencies);
         sources.push(ShaderSource {
@@ -5218,14 +5437,22 @@ fn shader_registration_lines(
         });
         // Slot order is the engine's whole view of texture binding: it points
         // each sampler at its unit once at link time, then binds by slot.
-        let slot_names: Vec<&str> = emission.abi.texture_units.iter().map(|n| n.as_str()).collect();
+        let slot_names: Vec<&str> = emission
+            .abi
+            .texture_units
+            .iter()
+            .map(|n| n.as_str())
+            .collect();
         // The `@uniform` blocks' std140 layouts, in binding order: A1 has at
         // most one, an A2 pipeline has one per stage. Carried as PARALLEL FLAT
         // lists -- one entry per block, plus the members concatenated with a
         // per-block count -- so a hand-written driver never nests. A program
         // with no group sends empty lists, which are still arguments; a short
         // call is what rock-cli/tests/shader_register_arity_gate.rs catches.
-        let w = skull_codegen_glsl::BlockWire::of(emission.abi.uniform_blocks.iter(), emission.abi.uniform_array_blocks.iter());
+        let w = skull_codegen_glsl::BlockWire::of(
+            emission.abi.uniform_blocks.iter(),
+            emission.abi.uniform_array_blocks.iter(),
+        );
         let fullscreen = pair.vert.is_none();
         let semantic_wire = emission.interface.semantic_wire(fullscreen);
         let _ = writeln!(
@@ -5257,7 +5484,12 @@ fn shader_registration_lines(
         .pairs
         .iter()
         .map(|pair| pair.key.clone())
-        .chain(compute_collection.entries.iter().map(|entry| entry.key.clone()))
+        .chain(
+            compute_collection
+                .entries
+                .iter()
+                .map(|entry| entry.key.clone()),
+        )
         .collect();
     #[cfg(feature = "renderer-wgpu")]
     let mut wgpu_projection_census = None;
@@ -5270,97 +5502,104 @@ fn shader_registration_lines(
         ));
         #[cfg(feature = "renderer-wgpu")]
         {
-        let items = collection
-            .pairs
-            .iter()
-            .zip(&view.program_views)
-            .map(|(pair, program_view)| {
-                (pair.key.clone(), (pair.vert.is_none(), program_view))
-            });
-        let (artifacts, census) = collect_wgpu_projections(items, |key, (fullscreen, program_view)| {
-            let emitted = (|| -> Result<(String, String, String, Vec<FuncRef>), CompilerError> {
-                if fullscreen {
-                    let stage_view = program_view
-                        .stages
-                        .iter()
-                        .find(|stage| stage.stage == skull_mir::shader_ir::ShaderStage::Fragment)
-                        .ok_or_else(|| {
-                            CompilerError::new_no_location(format!(
-                                "wgsl artifact {key} has no fragment stage view"
-                            ))
-                        })?;
-                    let input = concrete_stage_input(stage_view, &program_view.concrete_plans);
-                    let neutral = skull_codegen_shader::plan_fullscreen_fragment_from_concrete(
-                        ws,
-                        scx,
-                        &input,
-                        &skull_codegen_wgsl::WgslShaderPolicy,
-                    )?;
-                    let abi = skull_codegen_wgsl::WgslAbiPlan::wgsl(
-                        &neutral.interface,
-                        bone_semantic::prelude::Span::default(),
-                    )?;
-                    let emission = skull_codegen_wgsl::emit_fullscreen_shader(
-                        ws,
-                        &neutral.ir,
-                        &neutral.interface,
-                        &abi,
-                        bone_semantic::prelude::Span::default(),
-                    )?;
-                    Ok((
-                        emission.source,
-                        emission.abi.wire()?,
-                        neutral.interface.semantic_wire(true),
-                        emission.dependencies,
-                    ))
-                } else {
-                    let glsl = skull_codegen_glsl::emit_shader_pipeline_with_view(
-                        ws,
-                        scx,
-                        program_view,
-                        profile,
-                    )?;
-                    let abi = skull_codegen_wgsl::WgslAbiPlan::explicit(
-                        &glsl.interface,
-                        "vertex_main",
-                        "fragment_main",
-                        bone_semantic::prelude::Span::default(),
-                    )?;
-                    let emission = skull_codegen_wgsl::emit_explicit_shader(
-                        ws,
-                        &glsl.ir,
-                        &glsl.interface,
-                        &abi,
-                        bone_semantic::prelude::Span::default(),
-                    )?;
-                    Ok((
-                        emission.source,
-                        emission.abi.wire()?,
-                        glsl.interface.semantic_wire(false),
-                        emission.dependencies,
-                    ))
-                }
-            })();
-            emitted
-        })?;
-        for (shader_key, (source, wire, semantic_wire, emission_dependencies)) in artifacts {
-            dependencies.extend(emission_dependencies);
-            abi_wires.insert(shader_key.clone(), wire.clone());
-            sources.push(ShaderSource {
-                key: shader_key.clone(),
-                language: ShaderLanguage::Wgsl,
-                source: source.clone(),
-            });
-            let _ = writeln!(
-                out,
-                "__rock_wgpu_shader_register({}, {}, {}, {})",
-                skull_codegen_lua::lua_string(&shader_key),
-                skull_codegen_lua::lua_string(&source),
-                skull_codegen_lua::lua_string(&wire),
-                skull_codegen_lua::lua_string(&semantic_wire),
-            );
-        }
-        wgpu_projection_census = Some(census);
+            let items =
+                collection
+                    .pairs
+                    .iter()
+                    .zip(&view.program_views)
+                    .map(|(pair, program_view)| {
+                        (pair.key.clone(), (pair.vert.is_none(), program_view))
+                    });
+            let (artifacts, census) =
+                collect_wgpu_projections(items, |key, (fullscreen, program_view)| {
+                    let emitted =
+                        (|| -> Result<(String, String, String, Vec<FuncRef>), CompilerError> {
+                            if fullscreen {
+                                let stage_view = program_view
+                                    .stages
+                                    .iter()
+                                    .find(|stage| {
+                                        stage.stage == skull_mir::shader_ir::ShaderStage::Fragment
+                                    })
+                                    .ok_or_else(|| {
+                                        CompilerError::new_no_location(format!(
+                                            "wgsl artifact {key} has no fragment stage view"
+                                        ))
+                                    })?;
+                                let input =
+                                    concrete_stage_input(stage_view, &program_view.concrete_plans);
+                                let neutral =
+                                    skull_codegen_shader::plan_fullscreen_fragment_from_concrete(
+                                        ws,
+                                        scx,
+                                        &input,
+                                        &skull_codegen_wgsl::WgslShaderPolicy,
+                                    )?;
+                                let abi = skull_codegen_wgsl::WgslAbiPlan::wgsl(
+                                    &neutral.interface,
+                                    bone_semantic::prelude::Span::default(),
+                                )?;
+                                let emission = skull_codegen_wgsl::emit_fullscreen_shader(
+                                    ws,
+                                    &neutral.ir,
+                                    &neutral.interface,
+                                    &abi,
+                                    bone_semantic::prelude::Span::default(),
+                                )?;
+                                Ok((
+                                    emission.source,
+                                    emission.abi.wire()?,
+                                    neutral.interface.semantic_wire(true),
+                                    emission.dependencies,
+                                ))
+                            } else {
+                                let glsl = skull_codegen_glsl::emit_shader_pipeline_with_view(
+                                    ws,
+                                    scx,
+                                    program_view,
+                                    profile,
+                                )?;
+                                let abi = skull_codegen_wgsl::WgslAbiPlan::explicit(
+                                    &glsl.interface,
+                                    "vertex_main",
+                                    "fragment_main",
+                                    bone_semantic::prelude::Span::default(),
+                                )?;
+                                let emission = skull_codegen_wgsl::emit_explicit_shader(
+                                    ws,
+                                    &glsl.ir,
+                                    &glsl.interface,
+                                    &abi,
+                                    bone_semantic::prelude::Span::default(),
+                                )?;
+                                Ok((
+                                    emission.source,
+                                    emission.abi.wire()?,
+                                    glsl.interface.semantic_wire(false),
+                                    emission.dependencies,
+                                ))
+                            }
+                        })();
+                    emitted
+                })?;
+            for (shader_key, (source, wire, semantic_wire, emission_dependencies)) in artifacts {
+                dependencies.extend(emission_dependencies);
+                abi_wires.insert(shader_key.clone(), wire.clone());
+                sources.push(ShaderSource {
+                    key: shader_key.clone(),
+                    language: ShaderLanguage::Wgsl,
+                    source: source.clone(),
+                });
+                let _ = writeln!(
+                    out,
+                    "__rock_wgpu_shader_register({}, {}, {}, {})",
+                    skull_codegen_lua::lua_string(&shader_key),
+                    skull_codegen_lua::lua_string(&source),
+                    skull_codegen_lua::lua_string(&wire),
+                    skull_codegen_lua::lua_string(&semantic_wire),
+                );
+            }
+            wgpu_projection_census = Some(census);
         }
     }
     if view.compute_views.len() != compute_collection.entries.len() {
@@ -5379,7 +5618,8 @@ fn shader_registration_lines(
         #[cfg(feature = "renderer-wgpu")]
         {
             out.push_str("__rock_wgpu_compute_snapshot_begin()\n");
-            for (entry, compute_view) in compute_collection.entries.iter().zip(&view.compute_views) {
+            for (entry, compute_view) in compute_collection.entries.iter().zip(&view.compute_views)
+            {
                 let input = concrete_stage_input(&compute_view.stage, &compute_view.concrete_plans);
                 let neutral = skull_codegen_shader::plan_compute_from_concrete(
                     ws,
@@ -5443,7 +5683,11 @@ fn shader_registration_lines(
         .iter()
         .map(|entry| (entry.key.clone(), entry.clone()))
         .collect();
-    let shader_root_set = roots.iter().chain(compute_collection.entries.iter().map(|entry| &entry.entry)).copied().collect();
+    let shader_root_set = roots
+        .iter()
+        .chain(compute_collection.entries.iter().map(|entry| &entry.entry))
+        .copied()
+        .collect();
     Ok(ShaderRegistrations {
         lua: out,
         sources: sources.into(),
@@ -5544,7 +5788,9 @@ fn artifact_fingerprint(
         &ws.comptime_inputs.volatile_vars,
         renderer_fingerprint_tag(renderer_target),
     )
-    .map_err(|error| CompilerError::new_no_location(format!("Artifact fingerprint generation failed: {error}")))
+    .map_err(|error| {
+        CompilerError::new_no_location(format!("Artifact fingerprint generation failed: {error}"))
+    })
 }
 
 fn assemble(
@@ -5665,7 +5911,9 @@ fn assemble(
     needed_specs.extend(deco_results.iter().flat_map(|u| u.specs.iter().cloned()));
     let mut unit_reads = UnitComptimeReads::default();
     for u in &deco_results {
-        unit_reads.decorators.extend(u.comptime_reads.iter().cloned());
+        unit_reads
+            .decorators
+            .extend(u.comptime_reads.iter().cloned());
     }
     let mut always_emitted_calls: Vec<FuncRef> = Vec::new();
     let mut always_emitted_names: Vec<Ustr> = Vec::new();
@@ -5774,7 +6022,10 @@ fn assemble(
             continue;
         }
         for (fid, f) in module.functions.iter() {
-            let self_ref = FuncRef { module: module.id, func: fid };
+            let self_ref = FuncRef {
+                module: module.id,
+                func: fid,
+            };
             if !is_cached_emitted_body(f, &shared(self_ref))
                 || !should_emit_via_view(ws, &cache.lua_view, self_ref)
             {
@@ -5795,8 +6046,8 @@ fn assemble(
         let stage = definition_plan_stage_lua(ws, cg, scx, &cache.concrete.plans, &plan)?;
         let plans = cache.concrete.plans.len() + cache.concrete.always_plans.len();
         drop(std::mem::take(&mut cache.concrete));
-        release_stats.concrete_plans = plans
-            - cache.concrete.plans.len() - cache.concrete.always_plans.len();
+        release_stats.concrete_plans =
+            plans - cache.concrete.plans.len() - cache.concrete.always_plans.len();
         Some((plan, stage))
     } else {
         None
@@ -5819,7 +6070,10 @@ fn assemble(
         }
         let mid = module.id;
         for (fid, f) in module.functions.iter() {
-            let self_ref = FuncRef { module: mid, func: fid };
+            let self_ref = FuncRef {
+                module: mid,
+                func: fid,
+            };
             // A JS-backend decl (`inline(js)` / `extern(js)`) is inert on luajit:
             // its lua sibling (if any) carries the binding, and a js-only call from
             // lua-reachable code is rejected at call lowering (resolve_funcref).
@@ -5840,7 +6094,12 @@ fn assemble(
                 // population input, and one is the whole point of the cut.
                 if let Some(lib) = f.ffi_lib {
                     let nm = mangle_fn(ws, f);
-                    let params = f.param_decls.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ");
+                    let params = f
+                        .param_decls
+                        .iter()
+                        .map(|p| p.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ");
                     let body = match extern_ret(ws, f)? {
                         // Returns an OWNING copy, never `__out[0]`. LuaJIT does
                         // not keep the parent array alive through a reference
@@ -5856,17 +6115,21 @@ fn assemble(
                             };
                             format!(
                                 "  local __out = ffi.new(\"{sname}[1]\")\n  {lib}.{nm}({call_args})\n{}",
-                                skull_codegen_lua::wrapper_return(&format!("ffi.new(\"{sname}\", __out[0])"))
+                                skull_codegen_lua::wrapper_return(&format!(
+                                    "ffi.new(\"{sname}\", __out[0])"
+                                ))
                             )
                         }
                         // `return <call>` is a `CALLT` into C, which a root trace
                         // cannot leave through; the bound local makes it a `RET`
                         // (`wrapper_return`). `Bool` ends in a compare, not a call.
-                        ExternRet::Int | ExternRet::Uint => {
-                            skull_codegen_lua::wrapper_return(&format!("tonumber({lib}.{nm}({params}))"))
-                        }
+                        ExternRet::Int | ExternRet::Uint => skull_codegen_lua::wrapper_return(
+                            &format!("tonumber({lib}.{nm}({params}))"),
+                        ),
                         ExternRet::Bool => format!("  return {lib}.{nm}({params}) ~= 0"),
-                        ExternRet::AsIs => skull_codegen_lua::wrapper_return(&format!("{lib}.{nm}({params})")),
+                        ExternRet::AsIs => {
+                            skull_codegen_lua::wrapper_return(&format!("{lib}.{nm}({params})"))
+                        }
                         ExternRet::None => format!("  {lib}.{nm}({params})"),
                     };
                     // The rejection above runs for EVERY extern; only the WRITE
@@ -5876,9 +6139,8 @@ fn assemble(
                     // a generic declaration the view holds no base instance for.
                     if emit_def {
                         let prologue = default_fill_prologue(ws, mid, fid, f);
-                        definitions.push_str(&format!(
-                            "function {nm}({params})\n{prologue}{body}\nend\n"
-                        ));
+                        definitions
+                            .push_str(&format!("function {nm}({params})\n{prologue}{body}\nend\n"));
                     }
                 }
                 continue;
@@ -5901,11 +6163,18 @@ fn assemble(
                 // value-returning bodyless-`return` and prepending default fills.
                 // (Js inline bodies were skipped above via the backend guard.)
                 let name = mangle_fn(ws, f);
-                let params = match skull_mir::lower::BackendFnAbiPlan::for_boundary_declaration(ws, scx, self_ref)
-                    .lua_param_names(ws)
+                let params = match skull_mir::lower::BackendFnAbiPlan::for_boundary_declaration(
+                    ws, scx, self_ref,
+                )
+                .lua_param_names(ws)
                 {
                     Some(names) => names.join(", "),
-                    None => f.param_decls.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", "),
+                    None => f
+                        .param_decls
+                        .iter()
+                        .map(|p| p.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", "),
                 };
                 let body = body.as_str();
                 let body = if f.return_ty.is_some() && !body.contains("return") {
@@ -5965,7 +6234,10 @@ fn assemble(
                 None if !emit_def => {}
                 None => {
                     if is_stdlib_module_file(module.file.as_str()) {
-                        skipped.push((mangle_fn(ws, f), "not emitted (no cached chunk)".to_string()));
+                        skipped.push((
+                            mangle_fn(ws, f),
+                            "not emitted (no cached chunk)".to_string(),
+                        ));
                     } else {
                         rejections.push(CompilerError::new_with_label(
                             f.name_span,
@@ -6001,11 +6273,21 @@ fn assemble(
     let specialized_instances: Vec<_> = spec_chunks.keys().cloned().collect();
     let one_shot_reads = if lifetime == CacheLifetime::OneShot {
         let reads = artifact_comptime_reads(cache, built_specs, &unit_reads, true);
-        compile_counts.chunks += built_specs.iter()
-            .filter(|(key, _)| !cache.chunks.contains_key(key)).count();
+        compile_counts.chunks += built_specs
+            .iter()
+            .filter(|(key, _)| !cache.chunks.contains_key(key))
+            .count();
         compile_counts.dependency_edges = Some(
-            cache.chunks.values().flatten().map(|chunk| chunk.deps.len()).sum::<usize>()
-                + built_specs.iter().map(|(_, chunk)| chunk.deps.len()).sum::<usize>(),
+            cache
+                .chunks
+                .values()
+                .flatten()
+                .map(|chunk| chunk.deps.len())
+                .sum::<usize>()
+                + built_specs
+                    .iter()
+                    .map(|(_, chunk)| chunk.deps.len())
+                    .sum::<usize>(),
         );
         let chunks = cache.chunks.len() + built_specs.len();
         drop(std::mem::take(&mut cache.chunks));
@@ -6027,7 +6309,12 @@ fn assemble(
     }
     definitions.append_to(&mut out);
     out.push_str(&callee_binding_pass_lua(&mut callee_binds));
-    mark_generated_code_values(ws, &mut code_artifact, cache.build_kind == BuildKind::Program, cache.selected_sim_functions.as_ref());
+    mark_generated_code_values(
+        ws,
+        &mut code_artifact,
+        cache.build_kind == BuildKind::Program,
+        cache.selected_sim_functions.as_ref(),
+    );
     let (definition_plan, early_stage) = match early_definition_stage {
         Some((plan, stage)) => (plan, Some(stage)),
         None => (collect_definition_plan(ws)?, None),
@@ -6035,12 +6322,12 @@ fn assemble(
     let lifecycle_plan = skull_mir::lifecycle::collect_with_artifact(ws, &code_artifact)?;
     if lifecycle_plan.census.applications != lifecycle_plan.census.admitted {
         return Err(CompilerError::new_no_location(format!(
-            "incomplete LifecyclePlan census: {:?}", lifecycle_plan.census
+            "incomplete LifecyclePlan census: {:?}",
+            lifecycle_plan.census
         )));
     }
     let allocation_report = if crate::allocation_report::enabled() {
-        let mut report =
-            crate::allocation_report::AllocationReport::from_bodies(allocation_bodies);
+        let mut report = crate::allocation_report::AllocationReport::from_bodies(allocation_bodies);
         report.populate_lifecycle_routes(&lifecycle_plan, &code_artifact);
         report
     } else {
@@ -6051,7 +6338,11 @@ fn assemble(
         || lifecycle_plan.census.declarations > 0;
     let global_layout = skull_mir::global_storage::global_layout_id(ws, scx)
         .map_err(CompilerError::new_no_location)?;
-    let static_count = all_statics.iter().map(|cell| cell.cell).collect::<FxHashSet<_>>().len();
+    let static_count = all_statics
+        .iter()
+        .map(|cell| cell.cell)
+        .collect::<FxHashSet<_>>()
+        .len();
     out.push_str(&globals_open_lua(&global_layout, cg, static_count));
     out.push_str(&wrap_large_lua_section(
         "__rock_globals_directory_part",
@@ -6141,12 +6432,9 @@ fn assemble(
             continue;
         }
         let key = static_cell_key(sc);
-        let (value_slot, done_slot) = skull_mir::global_storage::static_cell_storage_keys(
-            ws,
-            scx.interner(),
-            sc,
-        )
-        .map_err(CompilerError::new_no_location)?;
+        let (value_slot, done_slot) =
+            skull_mir::global_storage::static_cell_storage_keys(ws, scx.interner(), sc)
+                .map_err(CompilerError::new_no_location)?;
         let _ = write!(
             static_resets,
             "__rock_static_prepare({value_slot:?}, {done_slot:?}, {key:?})\n"
@@ -6158,10 +6446,19 @@ fn assemble(
     out.push_str(&state_initializer_lua(&init_lines));
 
     // Decorator APPLICATIONS (after global inits so a deco body can push a global).
-    out.push_str(&decorator_application_lines(ws, &deco_map, scx, &mut skipped));
+    out.push_str(&decorator_application_lines(
+        ws,
+        &deco_map,
+        scx,
+        &mut skipped,
+    ));
     // `@sim` registrations (after fn + global defs; same init slot as rock).
     if cache.build_kind == BuildKind::Program {
-        out.push_str(&sim_registration_lines(ws, scx, cache.selected_sim_functions.as_ref())?);
+        out.push_str(&sim_registration_lines(
+            ws,
+            scx,
+            cache.selected_sim_functions.as_ref(),
+        )?);
     }
     // `rock_shader` pipeline registrations:
     // one top-level `__rock_shader_register(key, glsl)` per distinct pair, so a
@@ -6211,7 +6508,10 @@ fn assemble(
             if f.backend == bone_semantic::hir::FnBackend::Js {
                 continue;
             }
-            let self_ref = FuncRef { module: module.id, func: fid };
+            let self_ref = FuncRef {
+                module: module.id,
+                func: fid,
+            };
             let actually_emitted = if f.is_extern {
                 should_emit_via_view(ws, &cache.lua_view, self_ref)
             } else if f.inline_body.is_some() {
@@ -6225,8 +6525,8 @@ fn assemble(
         }
     }
     emitted_bodies.extend(specialized_instances);
-    let artifact_reads = one_shot_reads.unwrap_or_else(||
-        artifact_comptime_reads(cache, built_specs, &unit_reads, true));
+    let artifact_reads = one_shot_reads
+        .unwrap_or_else(|| artifact_comptime_reads(cache, built_specs, &unit_reads, true));
     let artifact_fingerprint = artifact_fingerprint(
         ws,
         scx,
@@ -6341,7 +6641,12 @@ fn overlay_code_artifact(
     let mut artifact = skull_mir::code_identity::CodeArtifact::default();
     for body in bodies {
         if let Some(Ok(chunk)) = cache.chunks.get(body) {
-            for entry in chunk.code_artifact.entries.values().filter(|entry| entry.escaping) {
+            for entry in chunk
+                .code_artifact
+                .entries
+                .values()
+                .filter(|entry| entry.escaping)
+            {
                 let mut entry = entry.clone();
                 if entry.body_name.is_none() {
                     // An unchanged named value needs the resolved ABI as well as its body.
@@ -6386,11 +6691,14 @@ fn code_slot_publish_lua(
     }
 }
 
-fn collect_definition_plan(ws: &Workspace) -> Result<skull_mir::definition::DefinitionPlan, CompilerError> {
+fn collect_definition_plan(
+    ws: &Workspace,
+) -> Result<skull_mir::definition::DefinitionPlan, CompilerError> {
     let plan = skull_mir::definition::collect(ws)?;
     if plan.census.applications != plan.census.admitted {
         return Err(CompilerError::new_no_location(format!(
-            "incomplete DefinitionPlan census: {:?}", plan.census
+            "incomplete DefinitionPlan census: {:?}",
+            plan.census
         )));
     }
     Ok(plan)
@@ -6407,20 +6715,27 @@ fn definition_plan_stage_lua(
         return Ok(String::new());
     }
     let mut out = String::new();
-    let mut entries_by_catalog: std::collections::BTreeMap<Ustr, Vec<_>> = std::collections::BTreeMap::new();
+    let mut entries_by_catalog: std::collections::BTreeMap<Ustr, Vec<_>> =
+        std::collections::BTreeMap::new();
     let mut materializers = std::collections::BTreeMap::new();
     for entry in &plan.entries {
         let skull_mir::code_identity::CodeIdentity::Named(factory) = &entry.identity else {
-            return Err(CompilerError::new_no_location("definition factory has no named identity".to_string()));
+            return Err(CompilerError::new_no_location(
+                "definition factory has no named identity".to_string(),
+            ));
         };
         let mut mf = skull_mir::lower::lower_definition_factory(ws, scx, concrete, factory)?;
         skull_transform::cleanup_with_nobox(ws, &mut mf)?;
-        let body = skull_codegen_lua::emit_named_with_statics(ws, cg, scx.interner(), "", &mf, &[], None);
+        let body =
+            skull_codegen_lua::emit_named_with_statics(ws, cg, scx.interner(), "", &mf, &[], None);
         if let Some(error) = cg.take_rejection() {
             return Err(error);
         }
         materializers.insert(entry.identity.clone(), body);
-        entries_by_catalog.entry(entry.catalog).or_default().push(entry);
+        entries_by_catalog
+            .entry(entry.catalog)
+            .or_default()
+            .push(entry);
     }
     for catalog_plan in &plan.catalogs {
         if let Some(accessor) = catalog_plan.accessor {
@@ -6464,7 +6779,12 @@ fn definition_plan_stage_lua(
     }
     out.push_str("}, {\n");
     for (identity, body) in materializers {
-        let _ = writeln!(out, "[{}] = {},", skull_codegen_lua::lua_string(&identity.logical_key(ws, scx.interner())), body);
+        let _ = writeln!(
+            out,
+            "[{}] = {},",
+            skull_codegen_lua::lua_string(&identity.logical_key(ws, scx.interner())),
+            body
+        );
     }
     out.push_str("})\n");
     Ok(out)
@@ -6494,12 +6814,17 @@ fn mark_generated_code_values(
                 continue;
             }
             let generated_value = f.annotations.iter().any(|ann| {
-                (register_sims && ann.is_builtin("sim") && selected.is_none_or(|names| names.contains(&f.name)))
+                (register_sims
+                    && ann.is_builtin("sim")
+                    && selected.is_none_or(|names| names.contains(&f.name)))
                     || decorator_names.contains(&ann.resolved_name.unwrap_or(ann.name.name))
             });
             if generated_value {
                 artifact.mark_value(skull_mir::code_identity::CodeIdentity::Named(
-                    Instance::base(FuncRef { module: module.id, func: fid }),
+                    Instance::base(FuncRef {
+                        module: module.id,
+                        func: fid,
+                    }),
                 ));
             }
         }
@@ -6516,82 +6841,102 @@ fn lifecycle_plan_stage_lua(
     }
     let mut out = String::from("__rock_lifecycle_plan_stage({\n");
     let mut phases: std::collections::BTreeMap<Ustr, Vec<_>> = std::collections::BTreeMap::new();
-    for entry in &plan.entries { phases.entry(entry.phase).or_default().push(entry); }
+    for entry in &plan.entries {
+        phases.entry(entry.phase).or_default().push(entry);
+    }
     for (phase, entries) in phases {
-        let scene_owned = entries.iter().filter(|entry| entry.owner.as_str() == "scene").count();
-        let _ = writeln!(out, "[{}] = {{ len = {}, scene_owned = {}, _data = {{", skull_codegen_lua::lua_string(phase.as_str()), entries.len(), scene_owned);
+        let scene_owned = entries
+            .iter()
+            .filter(|entry| entry.owner.as_str() == "scene")
+            .count();
+        let _ = writeln!(
+            out,
+            "[{}] = {{ len = {}, scene_owned = {}, _data = {{",
+            skull_codegen_lua::lua_string(phase.as_str()),
+            entries.len(),
+            scene_owned
+        );
         for (index, entry) in entries.into_iter().enumerate() {
-        let key = entry.identity.logical_key(ws, scx.interner());
-        let dependencies = entry.qualification.dependencies();
-        let root_type = match &entry.root_type {
-            Some(root) => skull_codegen_lua::lua_string(
-                &skull_mir::lifecycle::scene_root_type_key(root)
-                    .unwrap_or_else(|| panic!("validated scene lifecycle root reached emission as {root:?}")),
-            ),
-            None => "nil".to_string(),
-        };
-        // A compiler-synthesized thunk of one uniform signature
-        // (`scene_id: int -> ()`) per entry, process- and scene-owned alike
-        // -- never the raw slot. A process thunk ignores its argument; a
-        // scene thunk resolves the live root for `scene_id` and calls
-        // through, skipping a Scene that closed since the population
-        // snapshot was taken (`__scene_root_any` returns nil there). Neither
-        // arm asks the value its runtime type: membership in the type's live
-        // population, established once at Scene creation
-        // (`__scene_type_bucket_insert`), is the only test.
-        let sim_guard = (!entry.sim_wires.is_empty()).then(|| {
-            entry
-                .sim_wires
-                .iter()
-                .map(|wire| {
-                    format!(
-                        "_G.__ROCK_ACTIVE_SIM == {}",
-                        skull_codegen_lua::lua_string(wire.as_str())
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(" or ")
-        });
-        let func_thunk = if entry.owner.as_str() == "scene" {
-            let call = "local __root = __scene_root_any(scene_id); if __root ~= nil then __s(__root) end";
-            let body = sim_guard
-                .as_ref()
-                .map(|guard| format!("if {guard} then {call} end"))
-                .unwrap_or_else(|| call.to_string());
-            format!(
-                "(function() local __s = __rock_code_slot_ref({key}); return function(scene_id) {body} end end)()",
-                key = skull_codegen_lua::lua_string(&key),
-            )
-        } else {
-            let call = "__s()";
-            let body = sim_guard
-                .as_ref()
-                .map(|guard| format!("if {guard} then {call} end"))
-                .unwrap_or_else(|| call.to_string());
-            format!(
-                "(function() local __s = __rock_code_slot_ref({key}); return function(__scene_id) {body} end end)()",
-                key = skull_codegen_lua::lua_string(&key),
-            )
-        };
-        let _ = writeln!(out, "[{}] = {{ phase = {}, owner = {}, root_type = {}, key = {}, name = {}, stage = {}, ordinal = {}, func = {}, qualification = {}, body_fingerprint = {}, dependencies = {{ len = {}, _data = {{", index + 1,
-            skull_codegen_lua::lua_string(entry.phase.as_str()),
-            skull_codegen_lua::lua_string(entry.owner.as_str()),
-            root_type,
-            skull_codegen_lua::lua_string(&key),
-            skull_codegen_lua::lua_string(entry.diagnostic_name.as_str()),
-            entry.stage, entry.declaration_ordinal,
-            func_thunk,
-            skull_codegen_lua::lua_string(entry.qualification.tag()),
-            skull_codegen_lua::lua_string(&format!("{:016x}", entry.body_fingerprint)),
-            dependencies.len());
-        for (dependency_index, dependency) in dependencies.iter().enumerate() {
-            let dependency_key = dependency.identity.logical_key(ws, scx.interner());
-            let _ = writeln!(out, "[{}] = {{ key = {}, fingerprint = {} }},",
-                dependency_index + 1,
-                skull_codegen_lua::lua_string(&dependency_key),
-                skull_codegen_lua::lua_string(&format!("{:016x}", dependency.fingerprint)));
-        }
-        out.push_str("} } },\n");
+            let key = entry.identity.logical_key(ws, scx.interner());
+            let dependencies = entry.qualification.dependencies();
+            let root_type = match &entry.root_type {
+                Some(root) => skull_codegen_lua::lua_string(
+                    &skull_mir::lifecycle::scene_root_type_key(root).unwrap_or_else(|| {
+                        panic!("validated scene lifecycle root reached emission as {root:?}")
+                    }),
+                ),
+                None => "nil".to_string(),
+            };
+            // A compiler-synthesized thunk of one uniform signature
+            // (`scene_id: int -> ()`) per entry, process- and scene-owned alike
+            // -- never the raw slot. A process thunk ignores its argument; a
+            // scene thunk resolves the live root for `scene_id` and calls
+            // through, skipping a Scene that closed since the population
+            // snapshot was taken (`__scene_root_any` returns nil there). Neither
+            // arm asks the value its runtime type: membership in the type's live
+            // population, established once at Scene creation
+            // (`__scene_type_bucket_insert`), is the only test.
+            let sim_guard = (!entry.sim_wires.is_empty()).then(|| {
+                entry
+                    .sim_wires
+                    .iter()
+                    .map(|wire| {
+                        format!(
+                            "_G.__ROCK_ACTIVE_SIM == {}",
+                            skull_codegen_lua::lua_string(wire.as_str())
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" or ")
+            });
+            let func_thunk = if entry.owner.as_str() == "scene" {
+                let call = "local __root = __scene_root_any(scene_id); if __root ~= nil then __s(__root) end";
+                let body = sim_guard
+                    .as_ref()
+                    .map(|guard| format!("if {guard} then {call} end"))
+                    .unwrap_or_else(|| call.to_string());
+                format!(
+                    "(function() local __s = __rock_code_slot_ref({key}); return function(scene_id) {body} end end)()",
+                    key = skull_codegen_lua::lua_string(&key),
+                )
+            } else {
+                let call = "__s()";
+                let body = sim_guard
+                    .as_ref()
+                    .map(|guard| format!("if {guard} then {call} end"))
+                    .unwrap_or_else(|| call.to_string());
+                format!(
+                    "(function() local __s = __rock_code_slot_ref({key}); return function(__scene_id) {body} end end)()",
+                    key = skull_codegen_lua::lua_string(&key),
+                )
+            };
+            let _ = writeln!(
+                out,
+                "[{}] = {{ phase = {}, owner = {}, root_type = {}, key = {}, name = {}, stage = {}, ordinal = {}, func = {}, qualification = {}, body_fingerprint = {}, dependencies = {{ len = {}, _data = {{",
+                index + 1,
+                skull_codegen_lua::lua_string(entry.phase.as_str()),
+                skull_codegen_lua::lua_string(entry.owner.as_str()),
+                root_type,
+                skull_codegen_lua::lua_string(&key),
+                skull_codegen_lua::lua_string(entry.diagnostic_name.as_str()),
+                entry.stage,
+                entry.declaration_ordinal,
+                func_thunk,
+                skull_codegen_lua::lua_string(entry.qualification.tag()),
+                skull_codegen_lua::lua_string(&format!("{:016x}", entry.body_fingerprint)),
+                dependencies.len()
+            );
+            for (dependency_index, dependency) in dependencies.iter().enumerate() {
+                let dependency_key = dependency.identity.logical_key(ws, scx.interner());
+                let _ = writeln!(
+                    out,
+                    "[{}] = {{ key = {}, fingerprint = {} }},",
+                    dependency_index + 1,
+                    skull_codegen_lua::lua_string(&dependency_key),
+                    skull_codegen_lua::lua_string(&format!("{:016x}", dependency.fingerprint))
+                );
+            }
+            out.push_str("} } },\n");
         }
         out.push_str("} },\n");
     }
@@ -6644,7 +6989,15 @@ pub fn emit_full_with_shapes(
     shapes: ShapeOverrides,
 ) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
     let _allocation_environment = crate::allocation_report::environment_scope();
-    emit_full_in_with_mutation(ws, user_mid, None, BodyMutation::None, RendererTarget::Gl, FullBuild::Program, shapes)
+    emit_full_in_with_mutation(
+        ws,
+        user_mid,
+        None,
+        BodyMutation::None,
+        RendererTarget::Gl,
+        FullBuild::Program,
+        shapes,
+    )
 }
 
 /// [`emit_full`] under an explicit emitted value-ctor shape, overriding
@@ -6663,7 +7016,10 @@ pub fn emit_full_with_value_ctor(
         BodyMutation::None,
         RendererTarget::Gl,
         FullBuild::Program,
-        ShapeOverrides { value_ctor: Some(shape), ..ShapeOverrides::default() },
+        ShapeOverrides {
+            value_ctor: Some(shape),
+            ..ShapeOverrides::default()
+        },
     )
 }
 
@@ -6685,7 +7041,10 @@ pub fn emit_full_with_callee_binding(
         BodyMutation::None,
         RendererTarget::Gl,
         FullBuild::Program,
-        ShapeOverrides { callee_binding: Some(binding), ..ShapeOverrides::default() },
+        ShapeOverrides {
+            callee_binding: Some(binding),
+            ..ShapeOverrides::default()
+        },
     )
 }
 
@@ -6701,7 +7060,9 @@ fn canonical_project_root(
     ws: &Workspace,
     project_root: Option<&str>,
 ) -> Result<Option<String>, CompilerError> {
-    let Some(root) = project_root else { return Ok(None) };
+    let Some(root) = project_root else {
+        return Ok(None);
+    };
     let abs = std::fs::canonicalize(root)
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| root.to_string());
@@ -6759,7 +7120,10 @@ pub fn emit_full_in_for_renderer_with_callee_binding(
         BodyMutation::None,
         renderer_target,
         FullBuild::Program,
-        ShapeOverrides { callee_binding, ..ShapeOverrides::default() },
+        ShapeOverrides {
+            callee_binding,
+            ..ShapeOverrides::default()
+        },
     )
 }
 
@@ -6769,7 +7133,15 @@ fn emit_full_in_with_test_mutation(
     user_mid: ModuleId,
     mutation: BodyMutation,
 ) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
-    emit_full_in_with_mutation(ws, user_mid, None, mutation, RendererTarget::Gl, FullBuild::Program, ShapeOverrides::default())
+    emit_full_in_with_mutation(
+        ws,
+        user_mid,
+        None,
+        mutation,
+        RendererTarget::Gl,
+        FullBuild::Program,
+        ShapeOverrides::default(),
+    )
 }
 
 fn emit_full_in_with_mutation(
@@ -6837,16 +7209,30 @@ fn emit_full_in_with_mutation(
         },
         || {
             Ok::<_, CompilerError>(match build {
-                FullBuild::Program | FullBuild::OneShotProgram => (emission_roots(ws, project_root), sim_glue_roots(ws)),
+                FullBuild::Program | FullBuild::OneShotProgram => {
+                    (emission_roots(ws, project_root), sim_glue_roots(ws))
+                }
                 FullBuild::PackageTest(tests) => (explicit_and_global_roots(ws, tests), Vec::new()),
                 FullBuild::SelectedSims(names) => {
                     let sims = sim_refs_by_wire(ws);
-                    let mut roots = names.iter().map(|name| sims.get(name.as_str()).copied().ok_or_else(||
-                        CompilerError::new_no_location(format!("unknown sim root: {name}"))))
+                    let mut roots = names
+                        .iter()
+                        .map(|name| {
+                            sims.get(name.as_str()).copied().ok_or_else(|| {
+                                CompilerError::new_no_location(format!("unknown sim root: {name}"))
+                            })
+                        })
                         .collect::<Result<Vec<_>, _>>()?;
-                    roots.extend(ws.modules.iter().flat_map(|m| m.functions.iter().filter_map(|(fid, f)|
-                        (skull_mir::mangle::declared_name(f.name.as_str()) == "main")
-                            .then_some(FuncRef { module: m.id, func: fid }))));
+                    roots.extend(ws.modules.iter().flat_map(|m| {
+                        m.functions.iter().filter_map(|(fid, f)| {
+                            (skull_mir::mangle::declared_name(f.name.as_str()) == "main").then_some(
+                                FuncRef {
+                                    module: m.id,
+                                    func: fid,
+                                },
+                            )
+                        })
+                    }));
                     (explicit_and_global_roots(ws, &roots), sim_glue_roots(ws))
                 }
             })
@@ -6857,7 +7243,12 @@ fn emit_full_in_with_mutation(
     let compute_programs = compute_programs(&compute_collection);
     let shader_roots: Vec<FuncRef> = shader_programs
         .iter()
-        .flat_map(|program| program.vert.into_iter().chain(std::iter::once(program.frag)))
+        .flat_map(|program| {
+            program
+                .vert
+                .into_iter()
+                .chain(std::iter::once(program.frag))
+        })
         .chain(compute_programs.iter().map(|program| program.entry))
         .collect();
     let (mut interface_roots, sim_roots) = roots?;
@@ -6878,30 +7269,53 @@ fn emit_full_in_with_mutation(
         let sims = sim_refs_by_wire(ws);
         let mut scanned = FxHashSet::default();
         loop {
-            let reached = graph.instances.iter().map(|i| i.func).collect::<FxHashSet<_>>();
+            let reached = graph
+                .instances
+                .iter()
+                .map(|i| i.func)
+                .collect::<FxHashSet<_>>();
             let mut added = Vec::new();
             for module in &ws.modules {
                 for (owner, body) in &module.bodies {
                     if let BodyOwner::Function(fid) = owner {
-                        let func = FuncRef { module: module.id, func: *fid };
-                        if !reached.contains(&func) { continue; }
+                        let func = FuncRef {
+                            module: module.id,
+                            func: *fid,
+                        };
+                        if !reached.contains(&func) {
+                            continue;
+                        }
                     }
-                    if !scanned.insert((module.id, *owner)) { continue; }
+                    if !scanned.insert((module.id, *owner)) {
+                        continue;
+                    }
                     added.extend(named_sim_dependencies(ws, module.id, *owner, body, &sims)?);
                 }
             }
             added.retain(|func| !emission_roots.contains(func));
-            if added.is_empty() { break; }
+            if added.is_empty() {
+                break;
+            }
             interface_roots.extend(added);
             interface_roots.sort_by_key(|f| (f.module.index(), f.func.into_raw()));
             interface_roots.dedup();
             emission_roots = cached_roots(&interface_roots, &sim_roots, &shader_roots);
             graph = crate::instance_graph::build(ws, emission_roots.clone(), false);
         }
-        let reached = graph.instances.iter().map(|i| i.func).collect::<FxHashSet<_>>();
-        Some(sims.values().filter(|func| reached.contains(func))
-            .map(|func| ws.module(func.module).functions[func.func].name).collect())
-    } else { None };
+        let reached = graph
+            .instances
+            .iter()
+            .map(|i| i.func)
+            .collect::<FxHashSet<_>>();
+        Some(
+            sims.values()
+                .filter(|func| reached.contains(func))
+                .map(|func| ws.module(func.module).functions[func.func].name)
+                .collect(),
+        )
+    } else {
+        None
+    };
     if let Some(err) = graph_rejection_error(ws, &graph) {
         return Err(err);
     }
@@ -6987,7 +7401,10 @@ fn emit_full_in_with_mutation(
                 .values_mut()
                 .find_map(|next| match next {
                     skull_mir::bound::ResolvedBoundNext::Concrete { instance, .. }
-                        if !instance.args.is_empty() => Some(instance),
+                        if !instance.args.is_empty() =>
+                    {
+                        Some(instance)
+                    }
                     _ => None,
                 })
                 .expect("iterator-plan mutation found no concrete witness instance");
@@ -7003,7 +7420,10 @@ fn emit_full_in_with_mutation(
         let f = &ws.module(instance.func.module).functions[instance.func.func];
         return Err(CompilerError::new_with_label(
             f.name_span,
-            format!("cannot build concrete lowering plan for `{}`: {:?}", f.name, reason),
+            format!(
+                "cannot build concrete lowering plan for `{}`: {:?}",
+                f.name, reason
+            ),
         ));
     }
     if let Some((owner, reason)) = concrete.first_always_plan_failure() {
@@ -7020,9 +7440,9 @@ fn emit_full_in_with_mutation(
 
     #[cfg(all(test, not(feature = "sequential")))]
     let setup_scheduler = match mutation {
-        BodyMutation::SetupLaneSchedule(schedule) => Some(std::sync::Arc::new(
-            SetupLaneScheduler::new(schedule),
-        )),
+        BodyMutation::SetupLaneSchedule(schedule) => {
+            Some(std::sync::Arc::new(SetupLaneScheduler::new(schedule)))
+        }
         _ => None,
     };
 
@@ -7036,116 +7456,134 @@ fn emit_full_in_with_mutation(
     let mono_before_lanes = graph.interner().stats();
     let run_setup_lanes = || {
         parallel_join(
-        || {
-            parallel_join(
-                || {
-                    #[cfg(all(test, not(feature = "sequential")))]
-                    setup_scheduler
-                        .as_deref()
-                        .map(|scheduler| scheduler.wait(SetupLaneKind::CpuArtifact));
-                    let started = Instant::now();
-                    let scx = skull_mir::lower::ScalarCtx::new(ws)
-                        .sharing(std::sync::Arc::clone(graph.interner()));
-                    let lua_view = crate::artifact::realize(
-                        ws,
-                        &graph,
-                        &crate::artifact::ArtifactRequest::new(
-                            crate::target_projection::LUAJIT_DESKTOP,
-                            &emission_roots,
-                        ).with_scalar_context(&scx),
-                    );
-                    let population = lua_view.instances.len() + lua_view.boundaries.len();
-                    let finished = Instant::now();
-                    #[cfg(all(test, not(feature = "sequential")))]
-                    setup_scheduler
-                        .as_deref()
-                        .map(|scheduler| scheduler.finish(SetupLaneKind::CpuArtifact));
-                    (
-                        lua_view,
-                        scx,
-                        SetupLaneWindow { started, finished, population },
-                    )
-                },
-                || {
-                    #[cfg(all(test, not(feature = "sequential")))]
-                    setup_scheduler
-                        .as_deref()
-                        .map(|scheduler| scheduler.wait(SetupLaneKind::Shader));
-                    let started = Instant::now();
-                    // The overload set lives in `cg` (computed once there);
-                    // borrow it rather than rescanning the workspace.
-                    let shader_scx = skull_mir::lower::ScalarCtx::new_values_first_class(ws)
-                        .sharing(std::sync::Arc::clone(graph.interner()));
-                    let result = (|| {
-                        let shader_view = realize_shader_view(
+            || {
+                parallel_join(
+                    || {
+                        #[cfg(all(test, not(feature = "sequential")))]
+                        setup_scheduler
+                            .as_deref()
+                            .map(|scheduler| scheduler.wait(SetupLaneKind::CpuArtifact));
+                        let started = Instant::now();
+                        let scx = skull_mir::lower::ScalarCtx::new(ws)
+                            .sharing(std::sync::Arc::clone(graph.interner()));
+                        let lua_view = crate::artifact::realize(
                             ws,
                             &graph,
-                            &shader_programs,
-                            &compute_programs,
-                            &shader_scx,
-                            shader_plans,
-                        )?;
-                        let population = shader_view.roots.len()
-                            + shader_view.helpers.len()
-                            + shader_view.builtins.len();
-                        let shader_registrations = shader_registration_lines(
-                            ws,
-                            &shader_scx,
-                            &shader_collection,
-                            &compute_collection,
-                            &shader_view,
-                            renderer_target,
-                        )?;
-                        Ok::<_, CompilerError>((shader_view, shader_registrations, population))
-                    })();
-                    let population = result.as_ref().map(|(_, _, population)| *population).unwrap_or(0);
-                    let finished = Instant::now();
-                    #[cfg(all(test, not(feature = "sequential")))]
-                    setup_scheduler
-                        .as_deref()
-                        .map(|scheduler| scheduler.finish(SetupLaneKind::Shader));
-                    (
-                        result.map(|(view, registrations, _)| (view, registrations)),
-                        SetupLaneWindow { started, finished, population },
-                    )
-                },
-            )
-        },
-        || {
-            #[cfg(all(test, not(feature = "sequential")))]
-            setup_scheduler
-                .as_deref()
-                .map(|scheduler| scheduler.wait(SetupLaneKind::AbiWarm));
-            let started = Instant::now();
-            let mut abi_scx = skull_mir::lower::ScalarCtx::new(ws)
-                .sharing(std::sync::Arc::clone(graph.interner()));
-            if !skip_abi_plan_publish {
-                abi_scx.warm_abi_plans(ws, &abi_plans, abi_always_plans);
-            }
-            let population = abi_scx.abi_plan_stats().warm_keys as usize;
-            let finished = Instant::now();
-            #[cfg(all(test, not(feature = "sequential")))]
-            setup_scheduler
-                .as_deref()
-                .map(|scheduler| scheduler.finish(SetupLaneKind::AbiWarm));
-            (
-                abi_scx,
-                SetupLaneWindow { started, finished, population },
-            )
-        },
+                            &crate::artifact::ArtifactRequest::new(
+                                crate::target_projection::LUAJIT_DESKTOP,
+                                &emission_roots,
+                            )
+                            .with_scalar_context(&scx),
+                        );
+                        let population = lua_view.instances.len() + lua_view.boundaries.len();
+                        let finished = Instant::now();
+                        #[cfg(all(test, not(feature = "sequential")))]
+                        setup_scheduler
+                            .as_deref()
+                            .map(|scheduler| scheduler.finish(SetupLaneKind::CpuArtifact));
+                        (
+                            lua_view,
+                            scx,
+                            SetupLaneWindow {
+                                started,
+                                finished,
+                                population,
+                            },
+                        )
+                    },
+                    || {
+                        #[cfg(all(test, not(feature = "sequential")))]
+                        setup_scheduler
+                            .as_deref()
+                            .map(|scheduler| scheduler.wait(SetupLaneKind::Shader));
+                        let started = Instant::now();
+                        // The overload set lives in `cg` (computed once there);
+                        // borrow it rather than rescanning the workspace.
+                        let shader_scx = skull_mir::lower::ScalarCtx::new_values_first_class(ws)
+                            .sharing(std::sync::Arc::clone(graph.interner()));
+                        let result = (|| {
+                            let shader_view = realize_shader_view(
+                                ws,
+                                &graph,
+                                &shader_programs,
+                                &compute_programs,
+                                &shader_scx,
+                                shader_plans,
+                            )?;
+                            let population = shader_view.roots.len()
+                                + shader_view.helpers.len()
+                                + shader_view.builtins.len();
+                            let shader_registrations = shader_registration_lines(
+                                ws,
+                                &shader_scx,
+                                &shader_collection,
+                                &compute_collection,
+                                &shader_view,
+                                renderer_target,
+                            )?;
+                            Ok::<_, CompilerError>((shader_view, shader_registrations, population))
+                        })();
+                        let population = result
+                            .as_ref()
+                            .map(|(_, _, population)| *population)
+                            .unwrap_or(0);
+                        let finished = Instant::now();
+                        #[cfg(all(test, not(feature = "sequential")))]
+                        setup_scheduler
+                            .as_deref()
+                            .map(|scheduler| scheduler.finish(SetupLaneKind::Shader));
+                        (
+                            result.map(|(view, registrations, _)| (view, registrations)),
+                            SetupLaneWindow {
+                                started,
+                                finished,
+                                population,
+                            },
+                        )
+                    },
+                )
+            },
+            || {
+                #[cfg(all(test, not(feature = "sequential")))]
+                setup_scheduler
+                    .as_deref()
+                    .map(|scheduler| scheduler.wait(SetupLaneKind::AbiWarm));
+                let started = Instant::now();
+                let mut abi_scx = skull_mir::lower::ScalarCtx::new(ws)
+                    .sharing(std::sync::Arc::clone(graph.interner()));
+                if !skip_abi_plan_publish {
+                    abi_scx.warm_abi_plans(ws, &abi_plans, abi_always_plans);
+                }
+                let population = abi_scx.abi_plan_stats().warm_keys as usize;
+                let finished = Instant::now();
+                #[cfg(all(test, not(feature = "sequential")))]
+                setup_scheduler
+                    .as_deref()
+                    .map(|scheduler| scheduler.finish(SetupLaneKind::AbiWarm));
+                (
+                    abi_scx,
+                    SetupLaneWindow {
+                        started,
+                        finished,
+                        population,
+                    },
+                )
+            },
         )
     };
     #[cfg(all(test, not(feature = "sequential")))]
-    let ((cpu_result, shader_result), (abi_scx, abi_lane)) =
-        if matches!(mutation, BodyMutation::SetupLaneSchedule(SetupLaneSchedule::Handshake)) {
-            rayon::ThreadPoolBuilder::new()
-                .num_threads(3)
-                .build()
-                .expect("setup handshake test pool")
-                .install(run_setup_lanes)
-        } else {
-            run_setup_lanes()
-        };
+    let ((cpu_result, shader_result), (abi_scx, abi_lane)) = if matches!(
+        mutation,
+        BodyMutation::SetupLaneSchedule(SetupLaneSchedule::Handshake)
+    ) {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(3)
+            .build()
+            .expect("setup handshake test pool")
+            .install(run_setup_lanes)
+    } else {
+        run_setup_lanes()
+    };
     #[cfg(any(not(test), feature = "sequential"))]
     let ((cpu_result, shader_result), (abi_scx, abi_lane)) = run_setup_lanes();
     let mono_after_lanes = graph.interner().stats();
@@ -7211,9 +7649,18 @@ fn emit_full_in_with_mutation(
         setup_handshake_released_after_both: setup_handshake.2,
     };
     setup_phases.push(("setup: artifact+shader+ABI lanes", t_setup.elapsed()));
-    setup_phases.push(("join: cpu artifact branch", cpu_lane.finished - cpu_lane.started));
-    setup_phases.push(("join: shader view branch", shader_lane.finished - shader_lane.started));
-    setup_phases.push(("join: ABI plan warm branch", abi_lane.finished - abi_lane.started));
+    setup_phases.push((
+        "join: cpu artifact branch",
+        cpu_lane.finished - cpu_lane.started,
+    ));
+    setup_phases.push((
+        "join: shader view branch",
+        shader_lane.finished - shader_lane.started,
+    ));
+    setup_phases.push((
+        "join: ABI plan warm branch",
+        abi_lane.finished - abi_lane.started,
+    ));
 
     // The emitted param list must be injective. Checked per SIGNATURE, over every
     // function rather than just the emitted set: a duplicate Lua param is illegal
@@ -7221,7 +7668,10 @@ fn emit_full_in_with_mutation(
     let t_setup = Instant::now();
     for m in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
         for (fid, _) in m.functions.iter() {
-            let fref = FuncRef { module: m.id, func: fid };
+            let fref = FuncRef {
+                module: m.id,
+                func: fid,
+            };
             for (key, err) in skull_mir::lower::scalar_abi_param_collisions(ws, &scx, fref) {
                 cg.reject(key, err);
             }
@@ -7237,13 +7687,14 @@ fn emit_full_in_with_mutation(
         .filter(|m| m.id != ModuleId::builtin())
         .flat_map(|m| {
             let view = &lua_view;
-            m.functions
-                .iter()
-                .filter_map(move |(fid, f)| {
-                    let self_ref = FuncRef { module: m.id, func: fid };
-                    (is_cached_body(f) && should_emit_via_view(ws, view, self_ref))
-                        .then_some((self_ref, f))
-                })
+            m.functions.iter().filter_map(move |(fid, f)| {
+                let self_ref = FuncRef {
+                    module: m.id,
+                    func: fid,
+                };
+                (is_cached_body(f) && should_emit_via_view(ws, view, self_ref))
+                    .then_some((self_ref, f))
+            })
         })
         .collect();
     let t_setup = Instant::now();
@@ -7261,11 +7712,24 @@ fn emit_full_in_with_mutation(
     setup_phases.push(("setup: inline candidate table", t_setup.elapsed()));
     let chunks = par_map_with(
         fn_items,
-        || skull_transform::InlineCache::with_candidate_table(std::sync::Arc::clone(&inline_candidate_table)),
+        || {
+            skull_transform::InlineCache::with_candidate_table(std::sync::Arc::clone(
+                &inline_candidate_table,
+            ))
+        },
         |inline_cache, (self_ref, f)| {
             (
                 shared(self_ref),
-                emit_body_chunk_with_mutation(ws, &cg, &scx, &concrete, self_ref, f, inline_cache, mutation),
+                emit_body_chunk_with_mutation(
+                    ws,
+                    &cg,
+                    &scx,
+                    &concrete,
+                    self_ref,
+                    f,
+                    inline_cache,
+                    mutation,
+                ),
             )
         },
     );
@@ -7325,7 +7789,8 @@ fn emit_full_in_with_mutation(
     };
     let mut built_specs: Vec<(Instance, Chunk)> = Vec::new();
     let graph_census = cache.graph.run_stats;
-    let (mut emit, emitted, unit_reads) = assemble(ws, &mut cache, &mut built_specs, build.lifetime())?;
+    let (mut emit, emitted, unit_reads) =
+        assemble(ws, &mut cache, &mut built_specs, build.lifetime())?;
     emit.concrete_stats = concrete_stats;
     emit.setup_lanes = setup_lanes;
     let mut phases = setup_phases;
@@ -7347,9 +7812,14 @@ fn emit_full_in_with_mutation(
     cache.global_layout = Some(emit.global_layout.clone());
     cache.definition_plan = Some(std::sync::Arc::new(emit.definition_plan.clone()));
     cache.artifact_fingerprint = Some(emit.artifact_fingerprint.clone());
-    cache.fingerprint_code_rows = Some(crate::artifact_fingerprint::CodeRows::collect(
-        ws, cache.scx.interner(), &emit.code_artifact,
-    ).map_err(|error| CompilerError::new_no_location(error.to_string()))?);
+    cache.fingerprint_code_rows = Some(
+        crate::artifact_fingerprint::CodeRows::collect(
+            ws,
+            cache.scx.interner(),
+            &emit.code_artifact,
+        )
+        .map_err(|error| CompilerError::new_no_location(error.to_string()))?,
+    );
     cache.unit_comptime_reads = unit_reads;
     dependency_edges += cache.absorb_spec_chunks(built_specs);
     // Baseline every `static` cell's reload key so the overlay can detect an
@@ -7361,7 +7831,8 @@ fn emit_full_in_with_mutation(
     emit.compile_counts.chunks = cache.chunks.len();
     emit.compile_counts.dependency_edges = Some(dependency_edges);
     emit.graph_census = graph_census;
-    emit.release_stats.retained_dependency_edges = cache.dependents.values().map(|keys| keys.len()).sum();
+    emit.release_stats.retained_dependency_edges =
+        cache.dependents.values().map(|keys| keys.len()).sum();
     emit.release_stats.retained_static_keys = cache.static_key_baseline.len();
     Ok((emit, cache))
 }
@@ -7392,7 +7863,7 @@ fn comptime_reads_stale(
     reads: &[skull_mir::mir::ComptimeRead],
     file_hashes: &mut FxHashMap<Ustr, Option<u64>>,
 ) -> bool {
-    use skull_mir::mir::{comptime_value_hash, ComptimeInputId};
+    use skull_mir::mir::{ComptimeInputId, comptime_value_hash};
     reads.iter().any(|read| {
         let current = match &read.input {
             ComptimeInputId::Var(name) => ws
@@ -7411,9 +7882,15 @@ fn comptime_reads_stale(
 
 impl SkullEmitCache {
     pub fn registered_sim_names(&self, ws: &Workspace) -> std::collections::HashSet<String> {
-        collect_sim_fns(ws).into_iter().filter(|(_, f, _)|
-            self.selected_sim_functions.as_ref().is_none_or(|names| names.contains(&f.name)))
-            .map(|(_, _, wire)| wire).collect()
+        collect_sim_fns(ws)
+            .into_iter()
+            .filter(|(_, f, _)| {
+                self.selected_sim_functions
+                    .as_ref()
+                    .is_none_or(|names| names.contains(&f.name))
+            })
+            .map(|(_, _, wire)| wire)
+            .collect()
     }
 
     pub fn repair_stats(&self) -> IncrementalRepairStats {
@@ -7589,10 +8066,7 @@ impl SkullEmitCache {
     /// registration lines only add or replace entries. A key-set change must
     /// therefore take the process-restarting reload path before any overlay is
     /// written.
-    pub fn shader_registration_keys_changed(
-        &self,
-        ws: &Workspace,
-    ) -> Result<bool, CompilerError> {
+    pub fn shader_registration_keys_changed(&self, ws: &Workspace) -> Result<bool, CompilerError> {
         let graphics = skull_mir::lower::collect_shader_pairs(ws)?
             .into_iter()
             .map(|pair| pair.key);
@@ -7615,7 +8089,11 @@ impl SkullEmitCache {
         let mut users = self.shader_registrations.shader_pair_users.clone();
         let mut compute_users = self.shader_registrations.compute_entry_users.clone();
         for &(mid, owner) in reinferred {
-            if let Some(previous) = self.shader_registrations.shader_contributions.get(&(mid, owner)) {
+            if let Some(previous) = self
+                .shader_registrations
+                .shader_contributions
+                .get(&(mid, owner))
+            {
                 for pair in previous {
                     let count = users
                         .get_mut(&pair.key)
@@ -7626,7 +8104,11 @@ impl SkullEmitCache {
                     }
                 }
             }
-            if let Some(previous) = self.shader_registrations.compute_contributions.get(&(mid, owner)) {
+            if let Some(previous) = self
+                .shader_registrations
+                .compute_contributions
+                .get(&(mid, owner))
+            {
                 for entry in previous {
                     let count = compute_users
                         .get_mut(&entry.key)
@@ -7646,7 +8128,11 @@ impl SkullEmitCache {
                 *compute_users.entry(entry.key).or_insert(0) += 1;
             }
         }
-        let current: BTreeSet<String> = users.keys().cloned().chain(compute_users.keys().cloned()).collect();
+        let current: BTreeSet<String> = users
+            .keys()
+            .cloned()
+            .chain(compute_users.keys().cloned())
+            .collect();
         Ok(current != self.shader_registrations.keys)
     }
 
@@ -7661,194 +8147,204 @@ impl SkullEmitCache {
         self.shader_registrations.wgpu_projection_census.as_ref()
     }
 
-
-fn update_shader_registrations(
-    &mut self,
-    ws: &Workspace,
-    reinferred: &[(ModuleId, BodyOwner)],
-) -> Result<bool, CompilerError> {
-    self.repair_stats.shader_delta_requests = reinferred.len();
-    let affected = reinferred.iter().any(|&(mid, owner)| {
-        self.shader_registrations.callsites.contains(&(mid, owner))
-            || matches!(
-                owner,
-                BodyOwner::Function(fid)
-                    if self
-                        .shader_registrations
-                        .dependencies
-                        .contains(&FuncRef { module: mid, func: fid })
-            )
-            || skull_mir::lower::body_has_shader_pipeline_call(ws, mid, owner)
-            || skull_mir::lower::body_has_compute_artifact_call(ws, mid, owner)
-    });
-    if !affected {
-        return Ok(false);
-    }
-    let mut roots_examined = 0;
-    let mut roots_derived = 0;
-    for &(mid, owner) in reinferred {
-        let key = (mid, owner);
-        let old_shader = self
-            .shader_registrations
-            .shader_contributions
-            .remove(&key)
-            .unwrap_or_default();
-        let old_compute = self
-            .shader_registrations
-            .compute_contributions
-            .remove(&key)
-            .unwrap_or_default();
-        roots_examined += old_shader
-            .iter()
-            .map(|pair| usize::from(pair.vert.is_some()) + 1)
-            .sum::<usize>();
-        roots_examined += old_compute.len();
-        for pair in old_shader {
-            let users = self
-                .shader_registrations
-                .shader_pair_users
-                .get_mut(&pair.key)
-                .expect("shader contribution index lost an existing key");
-            *users -= 1;
-            if *users == 0 {
-                self.shader_registrations.shader_pair_users.remove(&pair.key);
-                self.shader_registrations.shader_pairs.remove(&pair.key);
-                if let Some(vert) = pair.vert {
-                    self.shader_registrations.shader_root_set.remove(&vert);
-                }
-                self.shader_registrations.shader_root_set.remove(&pair.frag);
-            }
-        }
-        for entry in old_compute {
-            let users = self
-                .shader_registrations
-                .compute_entry_users
-                .get_mut(&entry.key)
-                .expect("compute contribution index lost an existing key");
-            *users -= 1;
-            if *users == 0 {
-                self.shader_registrations.compute_entry_users.remove(&entry.key);
-                self.shader_registrations.compute_entries.remove(&entry.key);
-                self.shader_registrations.shader_root_set.remove(&entry.entry);
-            }
-        }
-
-        let (shader, shader_callsite) = skull_mir::lower::collect_shader_body(ws, mid, owner)?;
-        let (compute, compute_callsite) = skull_mir::lower::collect_compute_body(ws, mid, owner)?;
-        roots_derived += shader
-            .iter()
-            .map(|pair| usize::from(pair.vert.is_some()) + 1)
-            .sum::<usize>();
-        roots_derived += compute.len();
-        for pair in &shader {
-            let users = self
-                .shader_registrations
-                .shader_pair_users
-                .entry(pair.key.clone())
-                .or_insert(0);
-            *users += 1;
-            if *users == 1 {
-                self.shader_registrations
-                    .shader_pairs
-                    .insert(pair.key.clone(), pair.clone());
-                if let Some(vert) = pair.vert {
-                    self.shader_registrations.shader_root_set.insert(vert);
-                }
-                self.shader_registrations.shader_root_set.insert(pair.frag);
-            }
-        }
-        for entry in &compute {
-            let users = self
-                .shader_registrations
-                .compute_entry_users
-                .entry(entry.key.clone())
-                .or_insert(0);
-            *users += 1;
-            if *users == 1 {
-                self.shader_registrations
-                    .compute_entries
-                    .insert(entry.key.clone(), entry.clone());
-                self.shader_registrations.shader_root_set.insert(entry.entry);
-            }
-        }
-        self.shader_registrations
-            .shader_contributions
-            .insert(key, shader);
-        self.shader_registrations
-            .compute_contributions
-            .insert(key, compute);
-        let callsite = shader_callsite || compute_callsite;
-        if callsite {
-            self.shader_registrations.callsites.insert(key);
-        } else {
-            self.shader_registrations.callsites.remove(&key);
-        }
-    }
-    let mut shader_roots: Vec<FuncRef> = self
-        .shader_registrations
-        .shader_root_set
-        .iter()
-        .copied()
-        .collect();
-    shader_roots.sort_by_key(|f| (f.module.index(), f.func.into_raw()));
-    self.shader_registrations.roots = shader_roots;
-    self.shader_registrations.keys = self
-        .shader_registrations
-        .shader_pairs
-        .keys()
-        .cloned()
-        .chain(self.shader_registrations.compute_entries.keys().cloned())
-        .collect();
-    self.repair_stats.shader_roots_examined = roots_examined;
-    self.repair_stats.shader_roots_derived = roots_derived;
-    Ok(true)
-}
-
-    fn refresh_shader_registrations(
+    fn update_shader_registrations(
         &mut self,
         ws: &Workspace,
-    ) -> Result<(), CompilerError> {
-    let collection = skull_mir::lower::ShaderCollection {
-        pairs: self
+        reinferred: &[(ModuleId, BodyOwner)],
+    ) -> Result<bool, CompilerError> {
+        self.repair_stats.shader_delta_requests = reinferred.len();
+        let affected = reinferred.iter().any(|&(mid, owner)| {
+            self.shader_registrations.callsites.contains(&(mid, owner))
+                || matches!(
+                    owner,
+                    BodyOwner::Function(fid)
+                        if self
+                            .shader_registrations
+                            .dependencies
+                            .contains(&FuncRef { module: mid, func: fid })
+                )
+                || skull_mir::lower::body_has_shader_pipeline_call(ws, mid, owner)
+                || skull_mir::lower::body_has_compute_artifact_call(ws, mid, owner)
+        });
+        if !affected {
+            return Ok(false);
+        }
+        let mut roots_examined = 0;
+        let mut roots_derived = 0;
+        for &(mid, owner) in reinferred {
+            let key = (mid, owner);
+            let old_shader = self
+                .shader_registrations
+                .shader_contributions
+                .remove(&key)
+                .unwrap_or_default();
+            let old_compute = self
+                .shader_registrations
+                .compute_contributions
+                .remove(&key)
+                .unwrap_or_default();
+            roots_examined += old_shader
+                .iter()
+                .map(|pair| usize::from(pair.vert.is_some()) + 1)
+                .sum::<usize>();
+            roots_examined += old_compute.len();
+            for pair in old_shader {
+                let users = self
+                    .shader_registrations
+                    .shader_pair_users
+                    .get_mut(&pair.key)
+                    .expect("shader contribution index lost an existing key");
+                *users -= 1;
+                if *users == 0 {
+                    self.shader_registrations
+                        .shader_pair_users
+                        .remove(&pair.key);
+                    self.shader_registrations.shader_pairs.remove(&pair.key);
+                    if let Some(vert) = pair.vert {
+                        self.shader_registrations.shader_root_set.remove(&vert);
+                    }
+                    self.shader_registrations.shader_root_set.remove(&pair.frag);
+                }
+            }
+            for entry in old_compute {
+                let users = self
+                    .shader_registrations
+                    .compute_entry_users
+                    .get_mut(&entry.key)
+                    .expect("compute contribution index lost an existing key");
+                *users -= 1;
+                if *users == 0 {
+                    self.shader_registrations
+                        .compute_entry_users
+                        .remove(&entry.key);
+                    self.shader_registrations.compute_entries.remove(&entry.key);
+                    self.shader_registrations
+                        .shader_root_set
+                        .remove(&entry.entry);
+                }
+            }
+
+            let (shader, shader_callsite) = skull_mir::lower::collect_shader_body(ws, mid, owner)?;
+            let (compute, compute_callsite) =
+                skull_mir::lower::collect_compute_body(ws, mid, owner)?;
+            roots_derived += shader
+                .iter()
+                .map(|pair| usize::from(pair.vert.is_some()) + 1)
+                .sum::<usize>();
+            roots_derived += compute.len();
+            for pair in &shader {
+                let users = self
+                    .shader_registrations
+                    .shader_pair_users
+                    .entry(pair.key.clone())
+                    .or_insert(0);
+                *users += 1;
+                if *users == 1 {
+                    self.shader_registrations
+                        .shader_pairs
+                        .insert(pair.key.clone(), pair.clone());
+                    if let Some(vert) = pair.vert {
+                        self.shader_registrations.shader_root_set.insert(vert);
+                    }
+                    self.shader_registrations.shader_root_set.insert(pair.frag);
+                }
+            }
+            for entry in &compute {
+                let users = self
+                    .shader_registrations
+                    .compute_entry_users
+                    .entry(entry.key.clone())
+                    .or_insert(0);
+                *users += 1;
+                if *users == 1 {
+                    self.shader_registrations
+                        .compute_entries
+                        .insert(entry.key.clone(), entry.clone());
+                    self.shader_registrations
+                        .shader_root_set
+                        .insert(entry.entry);
+                }
+            }
+            self.shader_registrations
+                .shader_contributions
+                .insert(key, shader);
+            self.shader_registrations
+                .compute_contributions
+                .insert(key, compute);
+            let callsite = shader_callsite || compute_callsite;
+            if callsite {
+                self.shader_registrations.callsites.insert(key);
+            } else {
+                self.shader_registrations.callsites.remove(&key);
+            }
+        }
+        let mut shader_roots: Vec<FuncRef> = self
+            .shader_registrations
+            .shader_root_set
+            .iter()
+            .copied()
+            .collect();
+        shader_roots.sort_by_key(|f| (f.module.index(), f.func.into_raw()));
+        self.shader_registrations.roots = shader_roots;
+        self.shader_registrations.keys = self
             .shader_registrations
             .shader_pairs
-            .values()
+            .keys()
             .cloned()
-            .collect(),
-        callsites: self.shader_registrations.callsites.iter().copied().collect(),
-        contributions: self.shader_registrations.shader_contributions.clone(),
-    };
-    let programs = shader_programs(&collection);
-    let compute_collection = skull_mir::lower::ComputeCollection {
-        entries: self
-            .shader_registrations
-            .compute_entries
-            .values()
-            .cloned()
-            .collect(),
-        callsites: Vec::new(),
-        contributions: self.shader_registrations.compute_contributions.clone(),
-    };
-    let compute = compute_programs(&compute_collection);
-    let shader_scx = skull_mir::lower::ScalarCtx::new_values_first_class(ws)
-        .sharing(std::sync::Arc::clone(self.graph.interner()));
-    let view = realize_shader_view(
-        ws,
-        &self.graph,
-        &programs,
-        &compute,
-        &shader_scx,
-        std::sync::Arc::clone(&self.concrete.plans),
-    )?;
-    let registrations = shader_registration_lines(
-        ws,
-        &shader_scx,
-        &collection,
-        &compute_collection,
-        &view,
-        self.renderer_target,
-    )?;
-    self.shader_view = view;
+            .chain(self.shader_registrations.compute_entries.keys().cloned())
+            .collect();
+        self.repair_stats.shader_roots_examined = roots_examined;
+        self.repair_stats.shader_roots_derived = roots_derived;
+        Ok(true)
+    }
+
+    fn refresh_shader_registrations(&mut self, ws: &Workspace) -> Result<(), CompilerError> {
+        let collection = skull_mir::lower::ShaderCollection {
+            pairs: self
+                .shader_registrations
+                .shader_pairs
+                .values()
+                .cloned()
+                .collect(),
+            callsites: self
+                .shader_registrations
+                .callsites
+                .iter()
+                .copied()
+                .collect(),
+            contributions: self.shader_registrations.shader_contributions.clone(),
+        };
+        let programs = shader_programs(&collection);
+        let compute_collection = skull_mir::lower::ComputeCollection {
+            entries: self
+                .shader_registrations
+                .compute_entries
+                .values()
+                .cloned()
+                .collect(),
+            callsites: Vec::new(),
+            contributions: self.shader_registrations.compute_contributions.clone(),
+        };
+        let compute = compute_programs(&compute_collection);
+        let shader_scx = skull_mir::lower::ScalarCtx::new_values_first_class(ws)
+            .sharing(std::sync::Arc::clone(self.graph.interner()));
+        let view = realize_shader_view(
+            ws,
+            &self.graph,
+            &programs,
+            &compute,
+            &shader_scx,
+            std::sync::Arc::clone(&self.concrete.plans),
+        )?;
+        let registrations = shader_registration_lines(
+            ws,
+            &shader_scx,
+            &collection,
+            &compute_collection,
+            &view,
+            self.renderer_target,
+        )?;
+        self.shader_view = view;
         self.shader_registrations = registrations;
         Ok(())
     }
@@ -7869,590 +8365,660 @@ fn update_shader_registrations(
             .any(|instance| shader_decls.contains(&instance.func))
     }
 
-/// Take the specialized chunks an assembly BUILT into the cache, with their
-/// reverse-dependency edges, so the next build reuses them and an edit to any
-/// declaration they depend on -- their own included -- invalidates them.
-/// Bring the static baseline up to the current chunks: a changed body's cells
-/// take their current key, a cell not yet baselined joins, and a cell no chunk
-/// holds any more leaves.
-fn advance_static_baseline(&mut self, ws: &Workspace) -> Result<(), CompilerError> {
-    let mut advanced: Vec<(Ustr, StaticBaseline)> = Vec::new();
-    let mut current: FxHashSet<Ustr> = FxHashSet::default();
-    for (body, chunk) in &self.chunks {
-        let Ok(chunk) = chunk else { continue };
-        let changed = self.changed_since_full.contains(body);
-        for sc in &chunk.statics {
-            current.insert(sc.cell);
-            if !changed && self.static_key_baseline.contains_key(&sc.cell) {
-                continue;
-            }
-            let (value_slot, done_slot) =
-                skull_mir::global_storage::static_cell_storage_keys(ws, self.scx.interner(), sc)
-                    .map_err(CompilerError::new_no_location)?;
-            advanced.push((sc.cell, StaticBaseline { key: static_cell_key(sc), value_slot, done_slot }));
-        }
-    }
-    self.static_key_baseline.extend(advanced);
-    self.static_key_baseline.retain(|cell, _| current.contains(cell));
-    Ok(())
-}
-
-fn absorb_spec_chunks(&mut self, built: Vec<(Instance, Chunk)>) -> usize {
-    let mut dependency_edges = 0;
-    for (body, chunk) in built {
-        dependency_edges += chunk.deps.len();
-        for d in &chunk.deps {
-            self.dependents.entry(*d).or_default().insert(body.clone());
-        }
-        self.chunks.insert(body, Ok(chunk));
-    }
-    dependency_edges
-}
-
-/// Drop every trace of an instance the graph pruned: its chunk, its
-/// reverse-dependency edges, and its membership in the overlay/emitted sets.
-///
-/// Leaving the chunk behind is not harmless -- `emit_incremental` reassembles
-/// from the cache, so a stale entry re-emits a definition no call reaches, and
-/// `changed_since_full` would keep offering it to the overlay forever.
-fn forget_instance(&mut self, gone: &Instance) {
-    if let Some(Ok(c)) = self.chunks.get(gone) {
-        let deps: Vec<FuncRef> = c.deps.iter().copied().collect();
-        for d in deps {
-            if let Some(set) = self.dependents.get_mut(&d) {
-                set.remove(gone);
-            }
-        }
-    }
-    self.chunks.remove(gone);
-    self.changed_since_full.remove(gone);
-    self.emitted.remove(gone);
-}
-
-/// Materialize the bodies a graph update newly reached. The graph owns both
-/// the concrete substitution and the resolved iterator witnesses; the cache
-/// only stores the chunks those facts produce.
-fn build_graph_added_chunks(
-    cache: &mut SkullEmitCache,
-    ws: &Workspace,
-    added: &std::collections::BTreeSet<Instance>,
-) -> (Vec<CompilerError>, FxHashSet<skull_mir::code_identity::CodeIdentity>) {
-    let mut fingerprint_identities = FxHashSet::default();
-    let mut pending: Vec<Instance> = added.iter().cloned().collect();
-    let mut seen: FxHashSet<Instance> = FxHashSet::default();
-    let mut built: Vec<(Instance, Chunk)> = Vec::new();
-    let mut errs = Vec::new();
-
-    while let Some(body) = pending.pop() {
-        if !seen.insert(body.clone()) {
-            continue;
-        }
-        let f = &ws.module(body.func.module).functions[body.func.func];
-        if !is_cached_emitted_body(f, &body) {
-            continue;
-        }
-        if let Some(Ok(chunk)) = cache.chunks.get(&body) {
-            if !cache.emitted.contains(&body) {
-                cache.changed_since_full.insert(body.clone());
-                fingerprint_identities.extend(chunk.code_artifact.entries.keys().cloned());
-            }
-            continue;
-        }
-        let chunk = if body.args.is_empty() {
-            match rebuild_chunk(
-                ws,
-                &cache.cg,
-                &cache.scx,
-                &cache.concrete,
-                &body,
-                f,
-                &mut cache.inline_cache,
-            ) {
-                Ok(chunk) => chunk,
-                Err(err) => {
-                    errs.push(err);
+    /// Take the specialized chunks an assembly BUILT into the cache, with their
+    /// reverse-dependency edges, so the next build reuses them and an edit to any
+    /// declaration they depend on -- their own included -- invalidates them.
+    /// Bring the static baseline up to the current chunks: a changed body's cells
+    /// take their current key, a cell not yet baselined joins, and a cell no chunk
+    /// holds any more leaves.
+    fn advance_static_baseline(&mut self, ws: &Workspace) -> Result<(), CompilerError> {
+        let mut advanced: Vec<(Ustr, StaticBaseline)> = Vec::new();
+        let mut current: FxHashSet<Ustr> = FxHashSet::default();
+        for (body, chunk) in &self.chunks {
+            let Ok(chunk) = chunk else { continue };
+            let changed = self.changed_since_full.contains(body);
+            for sc in &chunk.statics {
+                current.insert(sc.cell);
+                if !changed && self.static_key_baseline.contains_key(&sc.cell) {
                     continue;
                 }
-            }
-        } else {
-            let name = body.symbol(ws, cache.scx.interner());
-            let mut specs = Vec::new();
-            match emit_spec_chunk(
-                ws,
-                &cache.cg,
-                &cache.scx,
-                &cache.concrete,
-                &body,
-                &name,
-                &mut cache.inline_cache,
-                &mut specs,
-            ) {
-                Ok(chunk) => chunk,
-                Err(err) => {
-                    errs.push(err);
-                    continue;
-                }
-            }
-        };
-        let mut valid = true;
-        for demand in &chunk.specs {
-            if cache.graph.concreteness(&demand.inst)
-                == crate::instance_graph::Concreteness::Missing
-            {
-                errs.push(CompilerError::new_with_label(
-                    f.name_span,
-                    format!(
-                        "graph omitted added specialization `{}` demanded by `{}`",
-                        demand.inst.symbol(ws, cache.scx.interner()),
-                        body.symbol(ws, cache.scx.interner())
-                    ),
+                let (value_slot, done_slot) = skull_mir::global_storage::static_cell_storage_keys(
+                    ws,
+                    self.scx.interner(),
+                    sc,
+                )
+                .map_err(CompilerError::new_no_location)?;
+                advanced.push((
+                    sc.cell,
+                    StaticBaseline {
+                        key: static_cell_key(sc),
+                        value_slot,
+                        done_slot,
+                    },
                 ));
-                valid = false;
-                continue;
             }
-            pending.push(demand.inst.clone());
         }
-        if valid {
-            built.push((body, chunk));
-        }
+        self.static_key_baseline.extend(advanced);
+        self.static_key_baseline
+            .retain(|cell, _| current.contains(cell));
+        Ok(())
     }
 
-    for (body, chunk) in built {
-        fingerprint_identities.extend(chunk.code_artifact.entries.keys().cloned());
-        for dep in &chunk.deps {
-            cache.dependents.entry(*dep).or_default().insert(body.clone());
+    fn absorb_spec_chunks(&mut self, built: Vec<(Instance, Chunk)>) -> usize {
+        let mut dependency_edges = 0;
+        for (body, chunk) in built {
+            dependency_edges += chunk.deps.len();
+            for d in &chunk.deps {
+                self.dependents.entry(*d).or_default().insert(body.clone());
+            }
+            self.chunks.insert(body, Ok(chunk));
         }
-        cache.chunks.insert(body.clone(), Ok(chunk));
-        cache.changed_since_full.insert(body);
+        dependency_edges
     }
-    (errs, fingerprint_identities)
-}
 
-fn combine_errors(mut errors: Vec<CompilerError>) -> Option<CompilerError> {
-    let first = errors.first()?.clone();
-    errors.remove(0);
-    Some(first.with_siblings(errors))
-}
-
-fn update_chunk_cache(
-    &mut self,
-    ws: &Workspace,
-    reinferred: &[(ModuleId, BodyOwner)],
-    edits: &[crate::instance_graph::SpanEdit],
-) -> Result<(
-    FxHashSet<Instance>,
-    crate::instance_graph::UpdateStats,
-    Vec<CompilerError>,
-    FxHashSet<skull_mir::code_identity::CodeIdentity>,
-), CompilerError> {
-    let cache = self;
-    let changed_literals = if reinferred.iter().any(|(_, owner)| matches!(owner, BodyOwner::Global(_))) {
-        cache.cg.refresh_scalar_constants(ws)
-    } else {
-        FxHashSet::default()
-    };
-    let mut fingerprint_identities = FxHashSet::default();
-    let shader_delta_requests = cache.repair_stats.shader_delta_requests;
-    let shader_roots_examined = cache.repair_stats.shader_roots_examined;
-    let shader_roots_derived = cache.repair_stats.shader_roots_derived;
-    cache.repair_stats = IncrementalRepairStats {
-        body_only_edits: 1,
-        shader_delta_requests,
-        shader_roots_examined,
-        shader_roots_derived,
-        ..IncrementalRepairStats::default()
-    };
-    // Fold each re-inferred body's value-reference contribution into the cached
-    // ScalarCtx. A name whose taken-by-ref membership flips changes scalar-ABI
-    // eligibility, so the named fn(s) -- and, via the deps scan below, every
-    // direct caller -- must be re-emitted. `flipped_frefs` seeds `changed`.
-    let mut flipped_frefs: FxHashSet<FuncRef> = FxHashSet::default();
-    for (mid, owner) in reinferred {
-        for name in cache.scx.update_body(ws, *mid, *owner) {
-            if let Some(list) = ws.functions_by_name.get(&name) {
-                for (m, fid) in list.iter() {
-                    flipped_frefs.insert(FuncRef { module: *m, func: *fid });
+    /// Drop every trace of an instance the graph pruned: its chunk, its
+    /// reverse-dependency edges, and its membership in the overlay/emitted sets.
+    ///
+    /// Leaving the chunk behind is not harmless -- `emit_incremental` reassembles
+    /// from the cache, so a stale entry re-emits a definition no call reaches, and
+    /// `changed_since_full` would keep offering it to the overlay forever.
+    fn forget_instance(&mut self, gone: &Instance) {
+        if let Some(Ok(c)) = self.chunks.get(gone) {
+            let deps: Vec<FuncRef> = c.deps.iter().copied().collect();
+            for d in deps {
+                if let Some(set) = self.dependents.get_mut(&d) {
+                    set.remove(gone);
                 }
             }
         }
+        self.chunks.remove(gone);
+        self.changed_since_full.remove(gone);
+        self.emitted.remove(gone);
     }
-    // **THE GRAPH IS MAINTAINED BEFORE THE CHUNK SET IS DECIDED.**
-    //
-    // A body edit can add an instantiation, strand one, or both, and only the
-    // graph knows which -- the chunk cache is downstream of that answer, not a
-    // second derivation of it. `update_bodies` re-walks the owners the edit
-    // invalidated against the SAME monotonic arena every key here indexes, so
-    // ids stay stable and the added/removed sets below are directly usable as
-    // cache keys.
-    //
-    // Rebuilding the graph instead of updating it is what the arc measured and
-    // rejected: 15-33 ms release against a sub-millisecond edit.
-    let t_graph = Instant::now();
-    let graph_builds_before = crate::instance_graph::build_invocations();
-    cache.repair_stats.root_requests = 1;
-    let previous_shader_roots = cache.roots.shader_roots.clone();
-    let current_shader_roots = cache.shader_registrations.roots.clone();
-    let shader_roots_changed = previous_shader_roots != current_shader_roots;
-    let mut root_added = Vec::new();
-    let mut root_removed = Vec::new();
-    if shader_roots_changed {
-        let mut current_roots = cache.roots.roots.clone();
-        for root in previous_shader_roots
-            .iter()
-            .filter(|root| !current_shader_roots.contains(root))
-        {
-            if cache.roots.interface_roots.contains(root)
-                || cache.roots.sim_roots.contains(root)
-            {
+
+    /// Materialize the bodies a graph update newly reached. The graph owns both
+    /// the concrete substitution and the resolved iterator witnesses; the cache
+    /// only stores the chunks those facts produce.
+    fn build_graph_added_chunks(
+        cache: &mut SkullEmitCache,
+        ws: &Workspace,
+        added: &std::collections::BTreeSet<Instance>,
+    ) -> (
+        Vec<CompilerError>,
+        FxHashSet<skull_mir::code_identity::CodeIdentity>,
+    ) {
+        let mut fingerprint_identities = FxHashSet::default();
+        let mut pending: Vec<Instance> = added.iter().cloned().collect();
+        let mut seen: FxHashSet<Instance> = FxHashSet::default();
+        let mut built: Vec<(Instance, Chunk)> = Vec::new();
+        let mut errs = Vec::new();
+
+        while let Some(body) = pending.pop() {
+            if !seen.insert(body.clone()) {
                 continue;
             }
-            if let Some(position) = current_roots.iter().position(|current| current == root) {
-                current_roots.remove(position);
-                root_removed.push(*root);
+            let f = &ws.module(body.func.module).functions[body.func.func];
+            if !is_cached_emitted_body(f, &body) {
+                continue;
+            }
+            if let Some(Ok(chunk)) = cache.chunks.get(&body) {
+                if !cache.emitted.contains(&body) {
+                    cache.changed_since_full.insert(body.clone());
+                    fingerprint_identities.extend(chunk.code_artifact.entries.keys().cloned());
+                }
+                continue;
+            }
+            let chunk = if body.args.is_empty() {
+                match rebuild_chunk(
+                    ws,
+                    &cache.cg,
+                    &cache.scx,
+                    &cache.concrete,
+                    &body,
+                    f,
+                    &mut cache.inline_cache,
+                ) {
+                    Ok(chunk) => chunk,
+                    Err(err) => {
+                        errs.push(err);
+                        continue;
+                    }
+                }
+            } else {
+                let name = body.symbol(ws, cache.scx.interner());
+                let mut specs = Vec::new();
+                match emit_spec_chunk(
+                    ws,
+                    &cache.cg,
+                    &cache.scx,
+                    &cache.concrete,
+                    &body,
+                    &name,
+                    &mut cache.inline_cache,
+                    &mut specs,
+                ) {
+                    Ok(chunk) => chunk,
+                    Err(err) => {
+                        errs.push(err);
+                        continue;
+                    }
+                }
+            };
+            let mut valid = true;
+            for demand in &chunk.specs {
+                if cache.graph.concreteness(&demand.inst)
+                    == crate::instance_graph::Concreteness::Missing
+                {
+                    errs.push(CompilerError::new_with_label(
+                        f.name_span,
+                        format!(
+                            "graph omitted added specialization `{}` demanded by `{}`",
+                            demand.inst.symbol(ws, cache.scx.interner()),
+                            body.symbol(ws, cache.scx.interner())
+                        ),
+                    ));
+                    valid = false;
+                    continue;
+                }
+                pending.push(demand.inst.clone());
+            }
+            if valid {
+                built.push((body, chunk));
             }
         }
-        for root in current_shader_roots
+
+        for (body, chunk) in built {
+            fingerprint_identities.extend(chunk.code_artifact.entries.keys().cloned());
+            for dep in &chunk.deps {
+                cache
+                    .dependents
+                    .entry(*dep)
+                    .or_default()
+                    .insert(body.clone());
+            }
+            cache.chunks.insert(body.clone(), Ok(chunk));
+            cache.changed_since_full.insert(body);
+        }
+        (errs, fingerprint_identities)
+    }
+
+    fn combine_errors(mut errors: Vec<CompilerError>) -> Option<CompilerError> {
+        let first = errors.first()?.clone();
+        errors.remove(0);
+        Some(first.with_siblings(errors))
+    }
+
+    fn update_chunk_cache(
+        &mut self,
+        ws: &Workspace,
+        reinferred: &[(ModuleId, BodyOwner)],
+        edits: &[crate::instance_graph::SpanEdit],
+    ) -> Result<
+        (
+            FxHashSet<Instance>,
+            crate::instance_graph::UpdateStats,
+            Vec<CompilerError>,
+            FxHashSet<skull_mir::code_identity::CodeIdentity>,
+        ),
+        CompilerError,
+    > {
+        let cache = self;
+        let changed_literals = if reinferred
             .iter()
-            .filter(|root| !previous_shader_roots.contains(root))
+            .any(|(_, owner)| matches!(owner, BodyOwner::Global(_)))
         {
-            if !current_roots.contains(root) {
-                current_roots.push(*root);
-                root_added.push(*root);
+            cache.cg.refresh_scalar_constants(ws)
+        } else {
+            FxHashSet::default()
+        };
+        let mut fingerprint_identities = FxHashSet::default();
+        let shader_delta_requests = cache.repair_stats.shader_delta_requests;
+        let shader_roots_examined = cache.repair_stats.shader_roots_examined;
+        let shader_roots_derived = cache.repair_stats.shader_roots_derived;
+        cache.repair_stats = IncrementalRepairStats {
+            body_only_edits: 1,
+            shader_delta_requests,
+            shader_roots_examined,
+            shader_roots_derived,
+            ..IncrementalRepairStats::default()
+        };
+        // Fold each re-inferred body's value-reference contribution into the cached
+        // ScalarCtx. A name whose taken-by-ref membership flips changes scalar-ABI
+        // eligibility, so the named fn(s) -- and, via the deps scan below, every
+        // direct caller -- must be re-emitted. `flipped_frefs` seeds `changed`.
+        let mut flipped_frefs: FxHashSet<FuncRef> = FxHashSet::default();
+        for (mid, owner) in reinferred {
+            for name in cache.scx.update_body(ws, *mid, *owner) {
+                if let Some(list) = ws.functions_by_name.get(&name) {
+                    for (m, fid) in list.iter() {
+                        flipped_frefs.insert(FuncRef {
+                            module: *m,
+                            func: *fid,
+                        });
+                    }
+                }
             }
         }
-        current_roots.sort_by_key(|root| (root.module.index(), root.func.into_raw()));
-        cache.roots.roots = current_roots;
-    }
-    cache.roots.shader_roots = current_shader_roots;
-    // The full root enumerator remains an oracle for tests and verification;
-    // the body route consumes the retained root cache above.
-    let forced_roots = if std::env::var_os("SKULL_FORCE_ROOT_SCAN").is_some() {
-        let mut census = RootEnumerationCensus::default();
-        let roots = all_roots_with_census(
+        // **THE GRAPH IS MAINTAINED BEFORE THE CHUNK SET IS DECIDED.**
+        //
+        // A body edit can add an instantiation, strand one, or both, and only the
+        // graph knows which -- the chunk cache is downstream of that answer, not a
+        // second derivation of it. `update_bodies` re-walks the owners the edit
+        // invalidated against the SAME monotonic arena every key here indexes, so
+        // ids stay stable and the added/removed sets below are directly usable as
+        // cache keys.
+        //
+        // Rebuilding the graph instead of updating it is what the arc measured and
+        // rejected: 15-33 ms release against a sub-millisecond edit.
+        let t_graph = Instant::now();
+        let graph_builds_before = crate::instance_graph::build_invocations();
+        cache.repair_stats.root_requests = 1;
+        let previous_shader_roots = cache.roots.shader_roots.clone();
+        let current_shader_roots = cache.shader_registrations.roots.clone();
+        let shader_roots_changed = previous_shader_roots != current_shader_roots;
+        let mut root_added = Vec::new();
+        let mut root_removed = Vec::new();
+        if shader_roots_changed {
+            let mut current_roots = cache.roots.roots.clone();
+            for root in previous_shader_roots
+                .iter()
+                .filter(|root| !current_shader_roots.contains(root))
+            {
+                if cache.roots.interface_roots.contains(root)
+                    || cache.roots.sim_roots.contains(root)
+                {
+                    continue;
+                }
+                if let Some(position) = current_roots.iter().position(|current| current == root) {
+                    current_roots.remove(position);
+                    root_removed.push(*root);
+                }
+            }
+            for root in current_shader_roots
+                .iter()
+                .filter(|root| !previous_shader_roots.contains(root))
+            {
+                if !current_roots.contains(root) {
+                    current_roots.push(*root);
+                    root_added.push(*root);
+                }
+            }
+            current_roots.sort_by_key(|root| (root.module.index(), root.func.into_raw()));
+            cache.roots.roots = current_roots;
+        }
+        cache.roots.shader_roots = current_shader_roots;
+        // The full root enumerator remains an oracle for tests and verification;
+        // the body route consumes the retained root cache above.
+        let forced_roots = if std::env::var_os("SKULL_FORCE_ROOT_SCAN").is_some() {
+            let mut census = RootEnumerationCensus::default();
+            let roots = all_roots_with_census(
+                ws,
+                cache.roots.project_root.as_deref(),
+                &cache.roots.shader_roots,
+                Some(&mut census),
+            );
+            cache.repair_stats.root_functions_examined = census.functions_examined;
+            cache.repair_stats.root_modules_examined = census.modules_examined;
+            cache.repair_stats.root_reseeds = census.roots_reseeded;
+            let previous_roots = cache.roots.roots.clone();
+            root_added = roots
+                .iter()
+                .filter(|root| !previous_roots.contains(root))
+                .copied()
+                .collect();
+            root_removed = previous_roots
+                .iter()
+                .filter(|root| !roots.contains(root))
+                .copied()
+                .collect();
+            Some(roots)
+        } else {
+            None
+        };
+        let update = cache.graph.update_bodies_with_root_delta(
             ws,
-            cache.roots.project_root.as_deref(),
-            &cache.roots.shader_roots,
-            Some(&mut census),
+            &root_added,
+            &root_removed,
+            reinferred,
+            edits,
         );
-        cache.repair_stats.root_functions_examined = census.functions_examined;
-        cache.repair_stats.root_modules_examined = census.modules_examined;
-        cache.repair_stats.root_reseeds = census.roots_reseeded;
-        let previous_roots = cache.roots.roots.clone();
-        root_added = roots
-            .iter()
-            .filter(|root| !previous_roots.contains(root))
-            .copied()
-            .collect();
-        root_removed = previous_roots
-            .iter()
-            .filter(|root| !roots.contains(root))
-            .copied()
-            .collect();
-        Some(roots)
-    } else {
-        None
-    };
-    let update = cache
-        .graph
-        .update_bodies_with_root_delta(ws, &root_added, &root_removed, reinferred, edits);
-    cache.repair_stats.graph_update_ns = t_graph.elapsed().as_nanos() as u64;
-    cache.repair_stats.full_graph_rebuilds = crate::instance_graph::build_invocations()
-        .saturating_sub(graph_builds_before) as usize;
-    cache.repair_stats.owners_revisited = update.revisited_owners.len();
-    cache.repair_stats.instances_revisited = update.revisited.len();
-    cache.repair_stats.graph_contributions_retracted = update.retracted_owners.len();
-    cache.repair_stats.graph_contributions_installed = update.revisited_owners.len();
-    cache.repair_stats.broad_owner_scans = update.broad_scans;
-    cache.repair_stats.root_hole_names_examined = update.census.root_hole_names_examined;
-    cache.repair_stats.root_hole_rows_examined = update.census.root_hole_rows_examined;
-    cache.repair_stats.root_hole_decls_examined = update.census.root_hole_decls_examined;
-    cache.repair_stats.root_hole_reason_buckets_examined =
-        update.census.root_hole_reason_buckets_examined;
-    cache.repair_stats.root_instances_checked = update.census.root_instances_checked;
-    cache.repair_stats.erased_catalogue_entries_examined =
-        update.census.erased_catalogue_entries_examined;
-    let concrete_builds_before = crate::concrete_body::build_invocations();
-    let t_concrete = Instant::now();
-    let concrete_update = cache.concrete.update_local_with_span_edits(
-        ws,
-        &cache.graph,
-        &update.revisited,
-        &update.removed,
-        &update.revisited_owners,
-        edits,
-    );
-    cache.repair_stats.concrete_entries_derived = concrete_update.derived;
-    cache.repair_stats.concrete_entries_reused = concrete_update.reused;
-    cache.repair_stats.concrete_entries_retracted = concrete_update.retracted;
-    cache.repair_stats.full_concrete_rebuilds = crate::concrete_body::build_invocations()
-        .saturating_sub(concrete_builds_before) as usize;
-    cache.repair_stats.broad_concrete_scans = concrete_update.broad_scans;
-    cache.repair_stats.concrete_update_ns = t_concrete.elapsed().as_nanos() as u64;
-    let _graph_ms = Duration::from_nanos(
-        cache.repair_stats.graph_update_ns
-            + cache.repair_stats.concrete_update_ns
-            + cache.repair_stats.artifact_update_ns,
-    );
+        cache.repair_stats.graph_update_ns = t_graph.elapsed().as_nanos() as u64;
+        cache.repair_stats.full_graph_rebuilds =
+            crate::instance_graph::build_invocations().saturating_sub(graph_builds_before) as usize;
+        cache.repair_stats.owners_revisited = update.revisited_owners.len();
+        cache.repair_stats.instances_revisited = update.revisited.len();
+        cache.repair_stats.graph_contributions_retracted = update.retracted_owners.len();
+        cache.repair_stats.graph_contributions_installed = update.revisited_owners.len();
+        cache.repair_stats.broad_owner_scans = update.broad_scans;
+        cache.repair_stats.root_hole_names_examined = update.census.root_hole_names_examined;
+        cache.repair_stats.root_hole_rows_examined = update.census.root_hole_rows_examined;
+        cache.repair_stats.root_hole_decls_examined = update.census.root_hole_decls_examined;
+        cache.repair_stats.root_hole_reason_buckets_examined =
+            update.census.root_hole_reason_buckets_examined;
+        cache.repair_stats.root_instances_checked = update.census.root_instances_checked;
+        cache.repair_stats.erased_catalogue_entries_examined =
+            update.census.erased_catalogue_entries_examined;
+        let concrete_builds_before = crate::concrete_body::build_invocations();
+        let t_concrete = Instant::now();
+        let concrete_update = cache.concrete.update_local_with_span_edits(
+            ws,
+            &cache.graph,
+            &update.revisited,
+            &update.removed,
+            &update.revisited_owners,
+            edits,
+        );
+        cache.repair_stats.concrete_entries_derived = concrete_update.derived;
+        cache.repair_stats.concrete_entries_reused = concrete_update.reused;
+        cache.repair_stats.concrete_entries_retracted = concrete_update.retracted;
+        cache.repair_stats.full_concrete_rebuilds = crate::concrete_body::build_invocations()
+            .saturating_sub(concrete_builds_before)
+            as usize;
+        cache.repair_stats.broad_concrete_scans = concrete_update.broad_scans;
+        cache.repair_stats.concrete_update_ns = t_concrete.elapsed().as_nanos() as u64;
+        let _graph_ms = Duration::from_nanos(
+            cache.repair_stats.graph_update_ns
+                + cache.repair_stats.concrete_update_ns
+                + cache.repair_stats.artifact_update_ns,
+        );
 
-    // Before any borrow of the cache's own fields, because it mutates several.
-    for gone in &update.removed {
-        cache.forget_instance(gone);
-    }
+        // Before any borrow of the cache's own fields, because it mutates several.
+        for gone in &update.removed {
+            cache.forget_instance(gone);
+        }
 
-    // The graph moved; retract and install only the affected target subjects.
-    // The retained view owns the predecessor/successor indexes needed to
-    // update reachability without realizing the full graph again.
-    let t_artifact = Instant::now();
-    cache.repair_stats.artifact_iteration_requests = update
-        .revisited
-        .len()
-        .saturating_add(update.added.len())
-        .saturating_add(update.removed.len());
-    let artifact_realize_before = crate::artifact::realize_invocations();
-    if std::env::var_os("SKULL_FORCE_ARTIFACT_REALIZE").is_some() {
-        let _ = crate::artifact::realize(
+        // The graph moved; retract and install only the affected target subjects.
+        // The retained view owns the predecessor/successor indexes needed to
+        // update reachability without realizing the full graph again.
+        let t_artifact = Instant::now();
+        cache.repair_stats.artifact_iteration_requests = update
+            .revisited
+            .len()
+            .saturating_add(update.added.len())
+            .saturating_add(update.removed.len());
+        let artifact_realize_before = crate::artifact::realize_invocations();
+        if std::env::var_os("SKULL_FORCE_ARTIFACT_REALIZE").is_some() {
+            let _ = crate::artifact::realize(
                 ws,
                 &cache.graph,
                 &crate::artifact::ArtifactRequest::new(
                     crate::target_projection::LUAJIT_DESKTOP,
-                forced_roots.as_deref().unwrap_or(cache.roots.roots.as_slice()),
-            ).with_scalar_context(&cache.scx),
+                    forced_roots
+                        .as_deref()
+                        .unwrap_or(cache.roots.roots.as_slice()),
+                )
+                .with_scalar_context(&cache.scx),
+            );
+        }
+        let artifact_update = cache.lua_view.update_local_with_root_delta(
+            ws,
+            &cache.graph,
+            &crate::artifact::ArtifactRequest::new(
+                crate::target_projection::LUAJIT_DESKTOP,
+                forced_roots
+                    .as_deref()
+                    .unwrap_or(cache.roots.roots.as_slice()),
+            )
+            .with_scalar_context(&cache.scx),
+            &update.revisited,
+            &update.added,
+            &update.removed,
+            &root_added,
+            &root_removed,
         );
-    }
-    let artifact_update = cache.lua_view.update_local_with_root_delta(
-        ws,
-        &cache.graph,
-        &crate::artifact::ArtifactRequest::new(
-            crate::target_projection::LUAJIT_DESKTOP,
-            forced_roots.as_deref().unwrap_or(cache.roots.roots.as_slice()),
-        ).with_scalar_context(&cache.scx),
-        &update.revisited,
-        &update.added,
-        &update.removed,
-        &root_added,
-        &root_removed,
-    );
-    cache.repair_stats.artifact_chunks_revisited = artifact_update.revisited;
-    cache.repair_stats.artifact_chunks_added = artifact_update.added;
-    cache.repair_stats.artifact_chunks_removed = artifact_update.removed;
-    cache.repair_stats.artifact_iterations = artifact_update.iterations;
-    cache.repair_stats.artifact_root_entries_examined = artifact_update.root_entries_examined;
-    cache.repair_stats.artifact_index_rows_examined = artifact_update.local_index_rows_examined;
-    cache.repair_stats.artifact_scalar_context_builds = artifact_update.scalar_context_builds;
-    cache.repair_stats.artifact_realize_invocations = crate::artifact::realize_invocations()
-        .saturating_sub(artifact_realize_before) as usize;
-    cache.repair_stats.full_artifact_view_realizations = cache.repair_stats.artifact_realize_invocations;
-    cache.repair_stats.broad_artifact_scans = artifact_update.broad_scans;
-    cache.repair_stats.artifact_update_ns = t_artifact.elapsed().as_nanos() as u64;
+        cache.repair_stats.artifact_chunks_revisited = artifact_update.revisited;
+        cache.repair_stats.artifact_chunks_added = artifact_update.added;
+        cache.repair_stats.artifact_chunks_removed = artifact_update.removed;
+        cache.repair_stats.artifact_iterations = artifact_update.iterations;
+        cache.repair_stats.artifact_root_entries_examined = artifact_update.root_entries_examined;
+        cache.repair_stats.artifact_index_rows_examined = artifact_update.local_index_rows_examined;
+        cache.repair_stats.artifact_scalar_context_builds = artifact_update.scalar_context_builds;
+        cache.repair_stats.artifact_realize_invocations =
+            crate::artifact::realize_invocations().saturating_sub(artifact_realize_before) as usize;
+        cache.repair_stats.full_artifact_view_realizations =
+            cache.repair_stats.artifact_realize_invocations;
+        cache.repair_stats.broad_artifact_scans = artifact_update.broad_scans;
+        cache.repair_stats.artifact_update_ns = t_artifact.elapsed().as_nanos() as u64;
 
-    let scx = &cache.scx;
-    let cg = &cache.cg;
+        let scx = &cache.scx;
+        let cg = &cache.cg;
 
-    let _t_aff = Instant::now();
-    let mut changed: FxHashSet<FuncRef> = reinferred
-        .iter()
-        .filter_map(|(mid, owner)| match owner {
-            BodyOwner::Function(fid) => Some(FuncRef { module: *mid, func: *fid }),
-            _ => None,
-        })
-        .collect();
-    // Fns whose scalar ABI flipped (a body now takes them by ref, or stopped) must
-    // re-emit even if their own body didn't change.
-    changed.extend(flipped_frefs.iter().copied());
-
-    // A chunk whose baked comptime input (build_var value / embedded file
-    // content) no longer matches the CURRENT inputs is a body edit bone cannot
-    // see -- reinferred hashes only source text. Seed
-    // the decl so the chunk and every dependent (a caller that inlined the
-    // value) re-emits fresh.
-    {
-        let mut file_hashes: FxHashMap<Ustr, Option<u64>> = FxHashMap::default();
-        for (body, chunk) in cache.chunks.iter() {
-            let Ok(chunk) = chunk else { continue };
-            if comptime_reads_stale(ws, &chunk.comptime_reads, &mut file_hashes) {
-                changed.insert(body.func);
-            }
-        }
-    }
-
-    let mut invalidated_candidate_frefs = changed.clone();
-    invalidated_candidate_frefs.extend(update.added.iter().map(|instance| instance.func));
-    invalidated_candidate_frefs.extend(update.removed.iter().map(|instance| instance.func));
-    let mut warm_keys = concrete_update.candidate_keys_added.clone();
-    for fref in &invalidated_candidate_frefs {
-        if let Some(keys) = cache.candidate_index_by_func().get(fref) {
-            warm_keys.extend(keys.iter().cloned());
-        }
-    }
-    let candidate_entries_requested = warm_keys.len();
-    let candidate_entries_invalidated = concrete_update.candidate_keys_removed.len()
-        + warm_keys
+        let _t_aff = Instant::now();
+        let mut changed: FxHashSet<FuncRef> = reinferred
             .iter()
-            .filter(|key| {
-                !concrete_update.candidate_keys_added.contains(*key)
-                    && cache.concrete.candidate_keys().contains(*key)
+            .filter_map(|(mid, owner)| match owner {
+                BodyOwner::Function(fid) => Some(FuncRef {
+                    module: *mid,
+                    func: *fid,
+                }),
+                _ => None,
             })
-            .count();
-    let warm_keys: Vec<Instance> = warm_keys.into_iter().collect();
-    let t_candidate = Instant::now();
-    let previous_candidate_table = cache.inline_cache.candidate_table();
-    let force_candidate_scan = std::env::var_os("SKULL_FORCE_CANDIDATE_SCAN").is_some();
-    let mut candidate_census = CandidateBuildStats::default();
-    let candidate_table = build_inline_candidate_table_with_census(
-        ws,
-        scx,
-        &cache.concrete,
-        if force_candidate_scan {
-            cache.concrete.candidate_keys().iter().cloned().collect()
-        } else {
-            Vec::new()
-        },
-        previous_candidate_table.as_ref(),
-        Some(&invalidated_candidate_frefs),
-        (!force_candidate_scan).then_some(warm_keys),
-        Some(&concrete_update.candidate_keys_added),
-        Some(&concrete_update.candidate_keys_removed),
-        &mut candidate_census,
-    )?;
-    // A residual call embeds no callee body. It can keep its chunk when every
-    // concrete candidate for that declaration has the same decision inputs.
-    // Unknown/rejected candidates and graph/ABI transitions stay conservative.
-    let mut stable_residual_frefs = FxHashSet::default();
-    if let Some(previous) = previous_candidate_table.as_ref() {
-        for fref in &changed {
-            if flipped_frefs.contains(fref)
-                || update.added.iter().chain(&update.removed).any(|key| key.func == *fref)
-                || concrete_update.candidate_keys_added.iter()
-                    .chain(&concrete_update.candidate_keys_removed)
-                    .any(|key| key.func == *fref)
-            {
-                continue;
-            }
-            if let Some(keys) = cache.candidate_index_by_func().get(fref) {
-                if !keys.is_empty() && keys.iter().all(|key| {
-                    previous.residual_eligibility_matches(&candidate_table, key)
-                }) {
-                    stable_residual_frefs.insert(*fref);
-                }
-            }
-        }
-    }
-    cache.inline_cache.replace_candidate_table(candidate_table);
-    cache.repair_stats.candidate_entries_requested = candidate_entries_requested;
-    cache.repair_stats.candidate_entries_invalidated = candidate_entries_invalidated;
-    cache.repair_stats.candidate_entries_derived = candidate_census.warmed;
-    cache.repair_stats.candidate_entries_reused = candidate_entries_requested
-        .saturating_sub(candidate_census.warmed);
-    cache.repair_stats.broad_candidate_scans = candidate_census.keys_examined;
-    cache.repair_stats.candidate_update_ns = t_candidate.elapsed().as_nanos() as u64;
-    // **A changed declaration maps to its LIVE INSTANCES through the graph**,
-    // not to one declaration-shaped key. Editing a generic `co fn` with two
-    // instantiations must re-emit both bodies, and editing one specialization's
-    // declaration must not be indistinguishable from editing the other's.
-    // `Instance::base` is still taken for every changed fn: a non-generic one
-    // IS its base instance, and a declaration the graph never reached still has
-    // a chunk here that an edit can invalidate.
-    let mut affected: FxHashSet<Instance> = changed.iter().copied().map(shared).collect();
-    if !changed_literals.is_empty() {
-        affected.extend(cache.chunks.iter().filter_map(|(body, chunk)| {
-            chunk.as_ref().ok().filter(|chunk| chunk.literal_globals.iter()
-                .any(|name| changed_literals.contains(name))).map(|_| body.clone())
-        }));
-    }
-    cache.repair_stats.declaration_lookup_requests = changed.len();
-    for c in &changed {
-        let instances: Vec<Instance> = cache.graph.instances_of(*c).cloned().collect();
-        cache.repair_stats.declaration_instance_lookups += instances.len();
-        affected.extend(instances);
-    }
-    // ...plus every chunk that DEPENDS on a changed fn. This is the CODEGEN
-    // reverse graph, which the instance graph does not hold and must not be
-    // confused with `Indices::preds`: `preds` is call edges between instances,
-    // while `deps` records that a chunk's TEXT contains another declaration's
-    // body (an inline splice) or specializes it. Neither is derivable from the
-    // other, so both survive.
-    for c in &changed {
-        if let Some(deps) = cache.dependents.get(c) {
-            cache.repair_stats.dependent_requests += 1;
-            cache.repair_stats.dependents_visited += deps.len();
-            affected.extend(deps.iter().filter(|body| {
-                !stable_residual_frefs.contains(c)
-                    || !matches!(cache.chunks.get(*body), Some(Ok(chunk))
-                        if !chunk.embedded_deps.contains(c) && !chunk.abi_deps.contains(c))
-            }).cloned());
-        }
-    }
-    // REMOVAL is the graph's to report and emission's alone cannot see it:
-    // nothing on this side knows an instance was stranded, so a surviving chunk
-    // makes `emit_incremental` re-emit a definition no call reaches. That is
-    // handled above, before the borrows.
-    //
-    // Construction of graph additions happens after invalidation below, so a
-    // newly reached body cannot reuse an inline decision made for the old body.
-    cache.repair_stats.affected_selection_ns = _t_aff.elapsed().as_nanos() as u64;
-    cache.repair_stats.chunk_rebuild_requests = affected.len();
-    let _aff_ms = Duration::from_nanos(cache.repair_stats.affected_selection_ns);
+            .collect();
+        // Fns whose scalar ABI flipped (a body now takes them by ref, or stopped) must
+        // re-emit even if their own body didn't change.
+        changed.extend(flipped_frefs.iter().copied());
 
-    // The persistent InlineCache keeps unchanged callee bodies across edits; the
-    // affected entries are exactly those whose lowered body could have changed
-    // (own body edit, own ABI flip, or a callee's ABI flip -- all within
-    // `affected`), so invalidate them before re-lowering. Everything else is
-    // provably unchanged and reused.
-    let _t_relow = Instant::now();
-    let mut chunks_rebuilt = 0;
-    for body in &affected {
-        cache.inline_cache.invalidate(body.func);
-    }
-    for body in &affected {
-        // Drop this chunk's OLD reverse-dep edges -- re-emitting may change its
-        // deps, and a cached->regenerated flip removes the chunk entirely.
-        let old_deps: Vec<FuncRef> = match cache.chunks.get(body) {
-            Some(Ok(c)) => c.deps.iter().copied().collect(),
-            _ => Vec::new(),
-        };
-        for d in &old_deps {
-            if let Some(set) = cache.dependents.get_mut(d) {
-                set.remove(body);
-            }
-        }
-        let fref = body.func;
-        let f = &ws.module(fref.module).functions[fref.func];
-        // An edit can flip a body between cached (ordinary/coroutine) and
-        // regenerated (extern / inline(lua)); only the former has a chunk.
-        if is_cached_emitted_body(f, body) {
-            chunks_rebuilt += 1;
-            let chunk = rebuild_chunk(ws, cg, scx, &cache.concrete, body, f, &mut cache.inline_cache);
-            if let Ok(c) = &chunk {
-                fingerprint_identities.extend(c.code_artifact.entries.keys().cloned());
-                let new_deps: Vec<FuncRef> = c.deps.iter().copied().collect();
-                for d in new_deps {
-                    cache.dependents.entry(d).or_default().insert(body.clone());
+        // A chunk whose baked comptime input (build_var value / embedded file
+        // content) no longer matches the CURRENT inputs is a body edit bone cannot
+        // see -- reinferred hashes only source text. Seed
+        // the decl so the chunk and every dependent (a caller that inlined the
+        // value) re-emits fresh.
+        {
+            let mut file_hashes: FxHashMap<Ustr, Option<u64>> = FxHashMap::default();
+            for (body, chunk) in cache.chunks.iter() {
+                let Ok(chunk) = chunk else { continue };
+                if comptime_reads_stale(ws, &chunk.comptime_reads, &mut file_hashes) {
+                    changed.insert(body.func);
                 }
             }
-            cache.chunks.insert(body.clone(), chunk);
-        } else {
-            cache.chunks.remove(body);
         }
+
+        let mut invalidated_candidate_frefs = changed.clone();
+        invalidated_candidate_frefs.extend(update.added.iter().map(|instance| instance.func));
+        invalidated_candidate_frefs.extend(update.removed.iter().map(|instance| instance.func));
+        let mut warm_keys = concrete_update.candidate_keys_added.clone();
+        for fref in &invalidated_candidate_frefs {
+            if let Some(keys) = cache.candidate_index_by_func().get(fref) {
+                warm_keys.extend(keys.iter().cloned());
+            }
+        }
+        let candidate_entries_requested = warm_keys.len();
+        let candidate_entries_invalidated = concrete_update.candidate_keys_removed.len()
+            + warm_keys
+                .iter()
+                .filter(|key| {
+                    !concrete_update.candidate_keys_added.contains(*key)
+                        && cache.concrete.candidate_keys().contains(*key)
+                })
+                .count();
+        let warm_keys: Vec<Instance> = warm_keys.into_iter().collect();
+        let t_candidate = Instant::now();
+        let previous_candidate_table = cache.inline_cache.candidate_table();
+        let force_candidate_scan = std::env::var_os("SKULL_FORCE_CANDIDATE_SCAN").is_some();
+        let mut candidate_census = CandidateBuildStats::default();
+        let candidate_table = build_inline_candidate_table_with_census(
+            ws,
+            scx,
+            &cache.concrete,
+            if force_candidate_scan {
+                cache.concrete.candidate_keys().iter().cloned().collect()
+            } else {
+                Vec::new()
+            },
+            previous_candidate_table.as_ref(),
+            Some(&invalidated_candidate_frefs),
+            (!force_candidate_scan).then_some(warm_keys),
+            Some(&concrete_update.candidate_keys_added),
+            Some(&concrete_update.candidate_keys_removed),
+            &mut candidate_census,
+        )?;
+        // A residual call embeds no callee body. It can keep its chunk when every
+        // concrete candidate for that declaration has the same decision inputs.
+        // Unknown/rejected candidates and graph/ABI transitions stay conservative.
+        let mut stable_residual_frefs = FxHashSet::default();
+        if let Some(previous) = previous_candidate_table.as_ref() {
+            for fref in &changed {
+                if flipped_frefs.contains(fref)
+                    || update
+                        .added
+                        .iter()
+                        .chain(&update.removed)
+                        .any(|key| key.func == *fref)
+                    || concrete_update
+                        .candidate_keys_added
+                        .iter()
+                        .chain(&concrete_update.candidate_keys_removed)
+                        .any(|key| key.func == *fref)
+                {
+                    continue;
+                }
+                if let Some(keys) = cache.candidate_index_by_func().get(fref) {
+                    if !keys.is_empty()
+                        && keys
+                            .iter()
+                            .all(|key| previous.residual_eligibility_matches(&candidate_table, key))
+                    {
+                        stable_residual_frefs.insert(*fref);
+                    }
+                }
+            }
+        }
+        cache.inline_cache.replace_candidate_table(candidate_table);
+        cache.repair_stats.candidate_entries_requested = candidate_entries_requested;
+        cache.repair_stats.candidate_entries_invalidated = candidate_entries_invalidated;
+        cache.repair_stats.candidate_entries_derived = candidate_census.warmed;
+        cache.repair_stats.candidate_entries_reused =
+            candidate_entries_requested.saturating_sub(candidate_census.warmed);
+        cache.repair_stats.broad_candidate_scans = candidate_census.keys_examined;
+        cache.repair_stats.candidate_update_ns = t_candidate.elapsed().as_nanos() as u64;
+        // **A changed declaration maps to its LIVE INSTANCES through the graph**,
+        // not to one declaration-shaped key. Editing a generic `co fn` with two
+        // instantiations must re-emit both bodies, and editing one specialization's
+        // declaration must not be indistinguishable from editing the other's.
+        // `Instance::base` is still taken for every changed fn: a non-generic one
+        // IS its base instance, and a declaration the graph never reached still has
+        // a chunk here that an edit can invalidate.
+        let mut affected: FxHashSet<Instance> = changed.iter().copied().map(shared).collect();
+        if !changed_literals.is_empty() {
+            affected.extend(cache.chunks.iter().filter_map(|(body, chunk)| {
+                chunk
+                    .as_ref()
+                    .ok()
+                    .filter(|chunk| {
+                        chunk
+                            .literal_globals
+                            .iter()
+                            .any(|name| changed_literals.contains(name))
+                    })
+                    .map(|_| body.clone())
+            }));
+        }
+        cache.repair_stats.declaration_lookup_requests = changed.len();
+        for c in &changed {
+            let instances: Vec<Instance> = cache.graph.instances_of(*c).cloned().collect();
+            cache.repair_stats.declaration_instance_lookups += instances.len();
+            affected.extend(instances);
+        }
+        // ...plus every chunk that DEPENDS on a changed fn. This is the CODEGEN
+        // reverse graph, which the instance graph does not hold and must not be
+        // confused with `Indices::preds`: `preds` is call edges between instances,
+        // while `deps` records that a chunk's TEXT contains another declaration's
+        // body (an inline splice) or specializes it. Neither is derivable from the
+        // other, so both survive.
+        for c in &changed {
+            if let Some(deps) = cache.dependents.get(c) {
+                cache.repair_stats.dependent_requests += 1;
+                cache.repair_stats.dependents_visited += deps.len();
+                affected.extend(
+                    deps.iter()
+                        .filter(|body| {
+                            !stable_residual_frefs.contains(c)
+                                || !matches!(cache.chunks.get(*body), Some(Ok(chunk))
+                        if !chunk.embedded_deps.contains(c) && !chunk.abi_deps.contains(c))
+                        })
+                        .cloned(),
+                );
+            }
+        }
+        // REMOVAL is the graph's to report and emission's alone cannot see it:
+        // nothing on this side knows an instance was stranded, so a surviving chunk
+        // makes `emit_incremental` re-emit a definition no call reaches. That is
+        // handled above, before the borrows.
+        //
+        // Construction of graph additions happens after invalidation below, so a
+        // newly reached body cannot reuse an inline decision made for the old body.
+        cache.repair_stats.affected_selection_ns = _t_aff.elapsed().as_nanos() as u64;
+        cache.repair_stats.chunk_rebuild_requests = affected.len();
+        let _aff_ms = Duration::from_nanos(cache.repair_stats.affected_selection_ns);
+
+        // The persistent InlineCache keeps unchanged callee bodies across edits; the
+        // affected entries are exactly those whose lowered body could have changed
+        // (own body edit, own ABI flip, or a callee's ABI flip -- all within
+        // `affected`), so invalidate them before re-lowering. Everything else is
+        // provably unchanged and reused.
+        let _t_relow = Instant::now();
+        let mut chunks_rebuilt = 0;
+        for body in &affected {
+            cache.inline_cache.invalidate(body.func);
+        }
+        for body in &affected {
+            // Drop this chunk's OLD reverse-dep edges -- re-emitting may change its
+            // deps, and a cached->regenerated flip removes the chunk entirely.
+            let old_deps: Vec<FuncRef> = match cache.chunks.get(body) {
+                Some(Ok(c)) => c.deps.iter().copied().collect(),
+                _ => Vec::new(),
+            };
+            for d in &old_deps {
+                if let Some(set) = cache.dependents.get_mut(d) {
+                    set.remove(body);
+                }
+            }
+            let fref = body.func;
+            let f = &ws.module(fref.module).functions[fref.func];
+            // An edit can flip a body between cached (ordinary/coroutine) and
+            // regenerated (extern / inline(lua)); only the former has a chunk.
+            if is_cached_emitted_body(f, body) {
+                chunks_rebuilt += 1;
+                let chunk = rebuild_chunk(
+                    ws,
+                    cg,
+                    scx,
+                    &cache.concrete,
+                    body,
+                    f,
+                    &mut cache.inline_cache,
+                );
+                if let Ok(c) = &chunk {
+                    fingerprint_identities.extend(c.code_artifact.entries.keys().cloned());
+                    let new_deps: Vec<FuncRef> = c.deps.iter().copied().collect();
+                    for d in new_deps {
+                        cache.dependents.entry(d).or_default().insert(body.clone());
+                    }
+                }
+                cache.chunks.insert(body.clone(), chunk);
+            } else {
+                cache.chunks.remove(body);
+            }
+        }
+        cache.repair_stats.chunks_rebuilt = chunks_rebuilt;
+        let (added_errors, added_fingerprint_identities) =
+            Self::build_graph_added_chunks(cache, ws, &update.added);
+        fingerprint_identities.extend(added_fingerprint_identities);
+        cache.repair_stats.relowering_ns = _t_relow.elapsed().as_nanos() as u64;
+        if std::env::var("SKULL_EMIT_PROFILE").is_ok() {
+            eprintln!(
+                "    update_chunk_cache: graph {:.3}ms (+{} -{} instances) | affected-scan {:.3}ms (O(edit), {} chunks) | re-lower {:.3}ms ({} affected)",
+                _graph_ms.as_secs_f64() * 1000.0,
+                update.added.len(),
+                update.removed.len(),
+                _aff_ms.as_secs_f64() * 1000.0,
+                cache.chunks.len(),
+                _t_relow.elapsed().as_secs_f64() * 1000.0,
+                affected.len(),
+            );
+        }
+        Ok((affected, update, added_errors, fingerprint_identities))
     }
-    cache.repair_stats.chunks_rebuilt = chunks_rebuilt;
-    let (added_errors, added_fingerprint_identities) =
-        Self::build_graph_added_chunks(cache, ws, &update.added);
-    fingerprint_identities.extend(added_fingerprint_identities);
-    cache.repair_stats.relowering_ns = _t_relow.elapsed().as_nanos() as u64;
-    if std::env::var("SKULL_EMIT_PROFILE").is_ok() {
-        eprintln!(
-            "    update_chunk_cache: graph {:.3}ms (+{} -{} instances) | affected-scan {:.3}ms (O(edit), {} chunks) | re-lower {:.3}ms ({} affected)",
-            _graph_ms.as_secs_f64() * 1000.0,
-            update.added.len(),
-            update.removed.len(),
-            _aff_ms.as_secs_f64() * 1000.0,
-            cache.chunks.len(),
-            _t_relow.elapsed().as_secs_f64() * 1000.0,
-            affected.len(),
-        );
-    }
-    Ok((affected, update, added_errors, fingerprint_identities))
-}
 }
 
 pub fn emit_incremental(
@@ -8465,7 +9031,8 @@ pub fn emit_incremental(
     // `update_chunk_cache`'s re-walk must see this edit's set, not the last
     // build's.
     let shader_changed = cache.update_shader_registrations(ws, reinferred)?;
-    let (_affected, update, added_errors, _fingerprint_identities) = cache.update_chunk_cache(ws, reinferred, &[])?;
+    let (_affected, update, added_errors, _fingerprint_identities) =
+        cache.update_chunk_cache(ws, reinferred, &[])?;
     if let Some(err) = SkullEmitCache::combine_errors(added_errors) {
         return Err(err);
     }
@@ -8479,7 +9046,8 @@ pub fn emit_incremental(
     // The two-file split (`emit_overlay`) avoids it entirely on a body edit.
     let t_asm = Instant::now();
     let mut built_specs: Vec<(Instance, Chunk)> = Vec::new();
-    let (mut emit, emitted, unit_reads) = assemble(ws, cache, &mut built_specs, CacheLifetime::Retained)?;
+    let (mut emit, emitted, unit_reads) =
+        assemble(ws, cache, &mut built_specs, CacheLifetime::Retained)?;
     if concrete_stats_requested() {
         emit.concrete_stats = cache.concrete.snapshot_build_stats();
     }
@@ -8489,15 +9057,21 @@ pub fn emit_incremental(
     cache.global_layout = Some(emit.global_layout.clone());
     cache.definition_plan = Some(std::sync::Arc::new(emit.definition_plan.clone()));
     cache.artifact_fingerprint = Some(emit.artifact_fingerprint.clone());
-    cache.fingerprint_code_rows = Some(crate::artifact_fingerprint::CodeRows::collect(
-        ws, cache.scx.interner(), &emit.code_artifact,
-    ).map_err(|error| CompilerError::new_no_location(error.to_string()))?);
+    cache.fingerprint_code_rows = Some(
+        crate::artifact_fingerprint::CodeRows::collect(
+            ws,
+            cache.scx.interner(),
+            &emit.code_artifact,
+        )
+        .map_err(|error| CompilerError::new_no_location(error.to_string()))?,
+    );
     cache.unit_comptime_reads = unit_reads;
     cache.absorb_spec_chunks(built_specs);
     emit.compile_counts.chunks = cache.chunks.len();
     let reassemble = t_asm.elapsed();
     emit.phases.push(("incr: re-emit affected bodies", reemit));
-    emit.phases.push(("incr: reassemble full output", reassemble));
+    emit.phases
+        .push(("incr: reassemble full output", reassemble));
     // A codegen rejection (a newly-colliding synthetic name, a body an edit
     // pushed over a LuaJIT frame limit) is recorded on the shared `CodegenCtx`
     // rather than returned by `emit_named`, so it only surfaces where the sink
@@ -8517,7 +9091,10 @@ fn overlay_callee_bindings(
     ws: &Workspace,
     cache: &SkullEmitCache,
     changed: &[Instance],
-) -> (Vec<skull_codegen_lua::CalleeBindingPlan>, FxHashSet<Instance>) {
+) -> (
+    Vec<skull_codegen_lua::CalleeBindingPlan>,
+    FxHashSet<Instance>,
+) {
     let mut names: FxHashSet<String> = changed
         .iter()
         .map(|body| body.symbol(ws, cache.scx.interner()))
@@ -8527,7 +9104,9 @@ fn overlay_callee_bindings(
             names.extend(chunk.binds.iter().map(|plan| plan.name.clone()));
         }
     }
-    let mut candidates: Vec<_> = cache.chunks.iter()
+    let mut candidates: Vec<_> = cache
+        .chunks
+        .iter()
         .filter(|(body, _)| cache.lua_view.instances.contains(*body))
         .filter_map(|(body, chunk)| chunk.as_ref().ok().map(|chunk| (body, chunk)))
         .flat_map(|(body, chunk)| chunk.binds.iter().map(move |plan| (body, plan)))
@@ -8556,7 +9135,15 @@ fn assemble_overlay(
     shader_changed: bool,
     initialize_code_slots: bool,
     mut fingerprint_identities: FxHashSet<skull_mir::code_identity::CodeIdentity>,
-) -> Result<(MirEmit, UnitComptimeReads, crate::artifact_fingerprint::CodeRows, usize), CompilerError> {
+) -> Result<
+    (
+        MirEmit,
+        UnitComptimeReads,
+        crate::artifact_fingerprint::CodeRows,
+        usize,
+    ),
+    CompilerError,
+> {
     let t_clone_artifact = Instant::now();
     let mut out = String::from("-- skull incremental overlay (loaded after main.lua)\n");
     if initialize_code_slots {
@@ -8576,9 +9163,7 @@ fn assemble_overlay(
     let mut definitions = LuaDefinitionBuffer::new();
     for body in &order {
         match cache.chunks.get(body) {
-            Some(Ok(chunk)) => {
-                definitions.push_str(&chunk.lua)
-            }
+            Some(Ok(chunk)) => definitions.push_str(&chunk.lua),
             Some(Err(err)) => {
                 let fref = body.func;
                 let f = &ws.module(fref.module).functions[fref.func];
@@ -8597,7 +9182,11 @@ fn assemble_overlay(
 
     let d_definitions = t_definitions.elapsed();
     let t_code_slot_stage = Instant::now();
-    let has_code_slots = cache.code_artifact.entries.values().any(|entry| entry.escaping);
+    let has_code_slots = cache
+        .code_artifact
+        .entries
+        .values()
+        .any(|entry| entry.escaping);
     let code_slot_stage = code_slot_registration_lua_entries(
         ws,
         &cache.scx,
@@ -8620,7 +9209,9 @@ fn assemble_overlay(
     let mut static_resets = String::new();
     let mut seen_static: FxHashSet<Ustr> = FxHashSet::default();
     for body in &order {
-        let Some(Ok(chunk)) = cache.chunks.get(body) else { continue };
+        let Some(Ok(chunk)) = cache.chunks.get(body) else {
+            continue;
+        };
         for sc in &chunk.statics {
             if !seen_static.insert(sc.cell) {
                 continue;
@@ -8663,7 +9254,11 @@ fn assemble_overlay(
             .collect();
         dropped.sort_by(|a, b| a.value_slot.cmp(&b.value_slot));
         for base in dropped {
-            let _ = writeln!(static_resets, "__rock_static_drop({:?}, {:?})", base.value_slot, base.done_slot);
+            let _ = writeln!(
+                static_resets,
+                "__rock_static_drop({:?}, {:?})",
+                base.value_slot, base.done_slot
+            );
         }
     }
     let d_static_resets = t_static_resets.elapsed();
@@ -8687,15 +9282,21 @@ fn assemble_overlay(
         // re-emits an extra const, never misses one).
         let mut deps: FxHashMap<Ustr, FxHashSet<Ustr>> = FxHashMap::default();
         for module in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
-            let Some(inf) = ws.inference(module.id) else { continue };
+            let Some(inf) = ws.inference(module.id) else {
+                continue;
+            };
             for (fid, f) in module.functions.iter() {
                 if let Some(bi) = inf.per_fn.get(&BodyOwner::Function(fid)) {
-                    deps.entry(f.name).or_default().extend(bi.deps.iter().copied());
+                    deps.entry(f.name)
+                        .or_default()
+                        .extend(bi.deps.iter().copied());
                 }
             }
             for (gid, g) in module.globals.iter() {
                 if let Some(bi) = inf.per_fn.get(&BodyOwner::Global(gid)) {
-                    deps.entry(g.name).or_default().extend(bi.deps.iter().copied());
+                    deps.entry(g.name)
+                        .or_default()
+                        .extend(bi.deps.iter().copied());
                 }
             }
         }
@@ -8733,7 +9334,12 @@ fn assemble_overlay(
             let reach = forward_reach(&deps, name);
             let changed = changed_names.contains(&name);
             if changed || reach.iter().any(|n| changed_names.contains(n)) {
-                affected.push(Affected { mid, gid, name, reach });
+                affected.push(Affected {
+                    mid,
+                    gid,
+                    name,
+                    reach,
+                });
             }
         }
         let affected_names: FxHashSet<Ustr> = affected.iter().map(|a| a.name).collect();
@@ -8744,14 +9350,8 @@ fn assemble_overlay(
         let mut definitions = LuaDefinitionBuffer::new();
         for a in &affected {
             let line = {
-                let unit = emit_global_unit(
-                    ws,
-                    &cache.scx,
-                    &cache.cg,
-                    &cache.concrete,
-                    a.mid,
-                    a.gid,
-                );
+                let unit =
+                    emit_global_unit(ws, &cache.scx, &cache.cg, &cache.concrete, a.mid, a.gid);
                 fingerprint_identities.extend(unit.code_artifact.entries.keys().cloned());
                 candidate_code_artifact = std::sync::Arc::new(
                     candidate_code_artifact.with_replacements(&[&unit.code_artifact]),
@@ -8766,14 +9366,12 @@ fn assemble_overlay(
                 if let Some(s) = unit.skipped {
                     skipped.push(s);
                 }
-                unit.pending_init
-                    .map(|(_, _, line)| line)
-                    .ok_or_else(|| {
-                        CompilerError::new_no_location(format!(
-                            "changed global `{}` produced no initializer plan",
-                            a.name
-                        ))
-                    })?
+                unit.pending_init.map(|(_, _, line)| line).ok_or_else(|| {
+                    CompilerError::new_no_location(format!(
+                        "changed global `{}` produced no initializer plan",
+                        a.name
+                    ))
+                })?
             };
             let edges: Vec<Ustr> = a
                 .reach
@@ -8781,7 +9379,11 @@ fn assemble_overlay(
                 .copied()
                 .filter(|n| *n != a.name && affected_names.contains(n))
                 .collect();
-            inits.push(GlobalInit { name: a.name, deps: edges, line });
+            inits.push(GlobalInit {
+                name: a.name,
+                deps: edges,
+                line,
+            });
         }
         definitions.append_to(&mut out);
 
@@ -8796,8 +9398,7 @@ fn assemble_overlay(
         out.push_str(&cache.shader_registrations.lua);
     }
     let t_lifecycle = Instant::now();
-    let lifecycle_plan =
-        skull_mir::lifecycle::collect_with_artifact(ws, &candidate_code_artifact)?;
+    let lifecycle_plan = skull_mir::lifecycle::collect_with_artifact(ws, &candidate_code_artifact)?;
     let d_lifecycle = t_lifecycle.elapsed();
     if !has_code_slots && lifecycle_plan.census.declarations > 0 {
         out.push_str("__rock_code_slot_begin()\n");
@@ -8826,23 +9427,50 @@ fn assemble_overlay(
     let d_metadata = t_metadata.elapsed();
     let t_fingerprint = Instant::now();
     let mut fingerprint_code_rows = cache.fingerprint_code_rows.clone().ok_or_else(|| {
-        CompilerError::new_no_location("overlay requires a complete code fingerprint inventory".to_string())
+        CompilerError::new_no_location(
+            "overlay requires a complete code fingerprint inventory".to_string(),
+        )
     })?;
     let t_fingerprint_rows = Instant::now();
-    let fingerprint_rows_derived = fingerprint_code_rows.replace(
-        ws, cache.scx.interner(), &candidate_code_artifact, &fingerprint_identities,
-    ).map_err(|error| CompilerError::new_no_location(error.to_string()))?;
+    let fingerprint_rows_derived = fingerprint_code_rows
+        .replace(
+            ws,
+            cache.scx.interner(),
+            &candidate_code_artifact,
+            &fingerprint_identities,
+        )
+        .map_err(|error| CompilerError::new_no_location(error.to_string()))?;
     let d_fingerprint_rows = t_fingerprint_rows.elapsed();
     let artifact_fingerprint = crate::artifact_fingerprint::compute_cached(
-        ws, cache.scx.interner(), &candidate_code_artifact, &lifecycle_plan,
-        &definition_plan, &global_layout, &artifact_reads, &ws.comptime_inputs.volatile_vars,
-        renderer_fingerprint_tag(cache.renderer_target), &fingerprint_code_rows,
-    ).map_err(|error| CompilerError::new_no_location(format!("Artifact fingerprint generation failed: {error}")))?;
+        ws,
+        cache.scx.interner(),
+        &candidate_code_artifact,
+        &lifecycle_plan,
+        &definition_plan,
+        &global_layout,
+        &artifact_reads,
+        &ws.comptime_inputs.volatile_vars,
+        renderer_fingerprint_tag(cache.renderer_target),
+        &fingerprint_code_rows,
+    )
+    .map_err(|error| {
+        CompilerError::new_no_location(format!("Artifact fingerprint generation failed: {error}"))
+    })?;
     if std::env::var_os("SKULL_FORCE_FINGERPRINT_SCAN").is_some() {
-        let fresh = self::artifact_fingerprint(ws, &cache.scx, &candidate_code_artifact, &lifecycle_plan,
-            &definition_plan, &global_layout, &artifact_reads, cache.renderer_target)?;
+        let fresh = self::artifact_fingerprint(
+            ws,
+            &cache.scx,
+            &candidate_code_artifact,
+            &lifecycle_plan,
+            &definition_plan,
+            &global_layout,
+            &artifact_reads,
+            cache.renderer_target,
+        )?;
         if artifact_fingerprint != fresh {
-            return Err(CompilerError::new_no_location("cached code fingerprint differs from fresh inventory".to_string()));
+            return Err(CompilerError::new_no_location(
+                "cached code fingerprint differs from fresh inventory".to_string(),
+            ));
         }
     }
     let d_fingerprint = t_fingerprint.elapsed();
@@ -8931,7 +9559,8 @@ pub fn emit_overlay_with_span_edits(
     let shader_changed = cache.update_shader_registrations(ws, reinferred)?;
     let d_shader = t_shader.elapsed();
     let t_chunk = Instant::now();
-    let (affected, update, added_errors, fingerprint_identities) = cache.update_chunk_cache(ws, reinferred, edits)?;
+    let (affected, update, added_errors, fingerprint_identities) =
+        cache.update_chunk_cache(ws, reinferred, edits)?;
     let d_chunk = t_chunk.elapsed();
     if let Some(err) = SkullEmitCache::combine_errors(added_errors) {
         return Err(err);
@@ -8959,8 +9588,15 @@ pub fn emit_overlay_with_span_edits(
         .map(|chunk| &chunk.code_artifact)
         .collect();
     let next_code_artifact = cache.code_artifact.with_replacements(&replacements);
-    let initialize_code_slots = !cache.code_artifact.entries.values().any(|entry| entry.escaping)
-        && next_code_artifact.entries.values().any(|entry| entry.escaping);
+    let initialize_code_slots = !cache
+        .code_artifact
+        .entries
+        .values()
+        .any(|entry| entry.escaping)
+        && next_code_artifact
+            .entries
+            .values()
+            .any(|entry| entry.escaping);
     let d_replacements = t_replacements.elapsed();
     if !cache.code_artifact.compatible_overlay(&next_code_artifact) {
         return Err(CompilerError::new_no_location(
@@ -9010,7 +9646,13 @@ pub fn emit_overlay_with_span_edits(
     let t3 = Instant::now();
     let published_code_artifact = cache.code_artifact.clone();
     let (mut emit, overlay_unit_reads, fingerprint_code_rows, fingerprint_rows_derived) =
-        assemble_overlay(ws, cache, shader_changed, initialize_code_slots, fingerprint_identities)?;
+        assemble_overlay(
+            ws,
+            cache,
+            shader_changed,
+            initialize_code_slots,
+            fingerprint_identities,
+        )?;
     cache.fingerprint_code_rows = Some(fingerprint_code_rows);
     cache.repair_stats.fingerprint_code_rows_derived = fingerprint_rows_derived;
     cache.repair_stats.code_artifact_assembly_reused =
@@ -9053,12 +9695,30 @@ pub fn emit_overlay_with_span_edits(
         ("  CodeArtifact replacement", d_replacements),
         ("  global layout check", d_layout),
         ("  stale comptime scan", d_stale),
-        ("  graph update", Duration::from_nanos(cache.repair_stats.graph_update_ns)),
-        ("  concrete update", Duration::from_nanos(cache.repair_stats.concrete_update_ns)),
-        ("  ArtifactView update", Duration::from_nanos(cache.repair_stats.artifact_update_ns)),
-        ("  candidate update", Duration::from_nanos(cache.repair_stats.candidate_update_ns)),
-        ("  affected selection", Duration::from_nanos(cache.repair_stats.affected_selection_ns)),
-        ("  relowering", Duration::from_nanos(cache.repair_stats.relowering_ns)),
+        (
+            "  graph update",
+            Duration::from_nanos(cache.repair_stats.graph_update_ns),
+        ),
+        (
+            "  concrete update",
+            Duration::from_nanos(cache.repair_stats.concrete_update_ns),
+        ),
+        (
+            "  ArtifactView update",
+            Duration::from_nanos(cache.repair_stats.artifact_update_ns),
+        ),
+        (
+            "  candidate update",
+            Duration::from_nanos(cache.repair_stats.candidate_update_ns),
+        ),
+        (
+            "  affected selection",
+            Duration::from_nanos(cache.repair_stats.affected_selection_ns),
+        ),
+        (
+            "  relowering",
+            Duration::from_nanos(cache.repair_stats.relowering_ns),
+        ),
         ("assemble_overlay (+build_deco_map)", t_asm),
     ]);
     Ok(emit)
@@ -9082,7 +9742,10 @@ mod lua_definition_scope_tests {
             assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
         }
         let output = child.wait_with_output().unwrap();
-        Some((output.status.success(), String::from_utf8_lossy(&output.stderr).into_owned()))
+        Some((
+            output.status.success(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        ))
     }
 
     #[test]
@@ -9107,7 +9770,10 @@ mod lua_definition_scope_tests {
         definitions.append_to(&mut scoped);
         scoped.push_str("assert(generated_0() == 0 and generated_32768() == 32768)\n");
         let (scoped_loaded, scoped_error) = luajit_loads(&scoped).unwrap();
-        assert!(scoped_loaded, "partitioned definitions did not load: {scoped_error}");
+        assert!(
+            scoped_loaded,
+            "partitioned definitions did not load: {scoped_error}"
+        );
     }
 
     #[test]
@@ -9130,7 +9796,10 @@ mod wgpu_projection_tests {
         let unexpected = CompilerError::new_no_location("unexpected WGSL emitter failure");
         let mut visited = Vec::new();
         let result = collect_wgpu_projections(
-            vec![("admitted".to_string(), true), ("unexpected".to_string(), false)],
+            vec![
+                ("admitted".to_string(), true),
+                ("unexpected".to_string(), false),
+            ],
             |key, _| {
                 visited.push(key.to_string());
                 if key == "admitted" {
@@ -9150,9 +9819,9 @@ mod wgpu_projection_tests {
 #[cfg(all(test, not(feature = "sequential")))]
 mod setup_parallel_tests {
     use super::*;
+    use bone_core::prelude::Instant;
     use std::sync::{Condvar, Mutex};
     use std::time::Duration;
-    use bone_core::prelude::Instant;
 
     /// How long a setup branch waits for its peer to start before calling the
     /// branches serialized. Generous so a loaded gate host still passes.
@@ -9169,7 +9838,10 @@ mod setup_parallel_tests {
 
     impl StartRendezvous {
         fn new() -> Self {
-            Self { started: Mutex::new(0), both_started: Condvar::new() }
+            Self {
+                started: Mutex::new(0),
+                both_started: Condvar::new(),
+            }
         }
 
         /// Returns once both branches have arrived; panics with a clear message
@@ -9204,8 +9876,8 @@ mod setup_parallel_tests {
     #[cfg(not(feature = "sequential"))]
     #[test]
     fn independent_setup_branches_can_overlap() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(2)
@@ -9387,7 +10059,10 @@ fn main() {
 
     impl InlineOff {
         fn on() -> Self {
-            Self(skull_transform::inline_off_guard(), skull_mir::ablation::scope(true))
+            Self(
+                skull_transform::inline_off_guard(),
+                skull_mir::ablation::scope(true),
+            )
         }
     }
 
@@ -9454,8 +10129,11 @@ fn main() {
 
     fn cross_block_workspace() -> Workspace {
         let mut modules = vec![
-            skull_parser::parse_module_clean(CROSS_BLOCK_SRC, Ustr::from("<inline-cross-block-test>"))
-                .expect("parse"),
+            skull_parser::parse_module_clean(
+                CROSS_BLOCK_SRC,
+                Ustr::from("<inline-cross-block-test>"),
+            )
+            .expect("parse"),
         ];
         bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic")
     }
@@ -9493,7 +10171,10 @@ fn main() {
         let global = &ws.module(mid).globals[gid];
         let err = global_init_target(&ws, &scx, &cg, global)
             .expect_err("a missing global representation plan must reject");
-        assert!(err.message.contains("global type cannot be planned"), "{err}");
+        assert!(
+            err.message.contains("global type cannot be planned"),
+            "{err}"
+        );
     }
 
     fn bounded_workspace() -> Workspace {
@@ -9508,8 +10189,11 @@ fn main() {
     fn coroutine_workspace() -> Workspace {
         let mut modules = STDLIB.clone();
         modules.push(
-            skull_parser::parse_module_clean(COROUTINE_PLAN_SRC, Ustr::from("<coroutine-plan-test>"))
-                .expect("parse"),
+            skull_parser::parse_module_clean(
+                COROUTINE_PLAN_SRC,
+                Ustr::from("<coroutine-plan-test>"),
+            )
+            .expect("parse"),
         );
         bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic")
     }
@@ -9546,7 +10230,10 @@ fn main() {
         let (_, cache, _) = emit_with_mutation(BodyMutation::None).expect("intact emission");
         let canonical = cache.concrete.candidate_keys_by_func();
         let population: usize = canonical.values().map(|entries| entries.len()).sum();
-        assert!(population > 0, "candidate-index fixture has no published entries");
+        assert!(
+            population > 0,
+            "candidate-index fixture has no published entries"
+        );
         assert_eq!(
             cache.candidate_index_by_func() as *const _,
             canonical as *const _,
@@ -9568,12 +10255,9 @@ fn main() {
             .unwrap();
         // The overlay path is the global shape's (see
         // `an_overlay_is_refused_under_the_bound_shape_and_produced_under_global`).
-        let (_, mut cache) = emit_full_with_callee_binding(
-            &ws1,
-            mid,
-            skull_codegen_lua::CalleeBindingMode::Global,
-        )
-        .expect("full v1");
+        let (_, mut cache) =
+            emit_full_with_callee_binding(&ws1, mid, skull_codegen_lua::CalleeBindingMode::Global)
+                .expect("full v1");
 
         let changed = SRC.replace("return x", "let y = x\n return y");
         let mut modules = vec![parse(&changed)];
@@ -9606,7 +10290,10 @@ fn main() {
             let mut modules = vec![parse(SRC)];
             let ws1 =
                 bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic v1");
-            let mid = *ws1.module_ids.get(&Ustr::from("<overlay-binding-test>")).unwrap();
+            let mid = *ws1
+                .module_ids
+                .get(&Ustr::from("<overlay-binding-test>"))
+                .unwrap();
             let (_, mut cache) =
                 emit_full_with_callee_binding(&ws1, mid, binding).expect("full v1");
 
@@ -9614,7 +10301,11 @@ fn main() {
             let ws2 =
                 bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic v2");
             let top = ref_for(&ws2, "top");
-            emit_overlay(&ws2, &mut cache, &[(top.module, BodyOwner::Function(top.func))])
+            emit_overlay(
+                &ws2,
+                &mut cache,
+                &[(top.module, BodyOwner::Function(top.func))],
+            )
         };
 
         for binding in [
@@ -9622,7 +10313,10 @@ fn main() {
             skull_codegen_lua::CalleeBindingMode::Global,
         ] {
             let produced = overlay_for(binding).expect("overlay under either callee shape");
-            assert!(produced.lua.contains("top_0 = __rock_mk_top_0") || produced.lua.contains("function top_0("));
+            assert!(
+                produced.lua.contains("top_0 = __rock_mk_top_0")
+                    || produced.lua.contains("function top_0(")
+            );
         }
     }
 
@@ -9635,7 +10329,10 @@ fn main() {
                     .functions
                     .iter()
                     .find(|(_, f)| f.name.as_str() == name)
-                    .map(|(func, _)| FuncRef { module: module.id, func })
+                    .map(|(func, _)| FuncRef {
+                        module: module.id,
+                        func,
+                    })
             })
             .expect("function")
     }
@@ -9694,10 +10391,13 @@ fn main() {
     ) {
         match result {
             Err(err) => assert!(
-                err.message.contains("no concrete owner agreeing with its delivery instance"),
+                err.message
+                    .contains("no concrete owner agreeing with its delivery instance"),
                 "owner loss must be an explicit rejection, not an unrelated emission gap: {err:?}"
             ),
-            Ok((ws, cache, emit)) => assert_residual_definition_and_call(&ws, &cache, &emit, callee),
+            Ok((ws, cache, emit)) => {
+                assert_residual_definition_and_call(&ws, &cache, &emit, callee)
+            }
         }
     }
 
@@ -9732,12 +10432,17 @@ fn main() {
             .get(&Ustr::from("<bound-plan-test>"))
             .expect("test module");
         let body = ref_for(&ws, "total");
-        let err = match emit_full_in_with_test_mutation(&ws, mid, BodyMutation::ClearBoundPlan { body }) {
+        let err = match emit_full_in_with_test_mutation(
+            &ws,
+            mid,
+            BodyMutation::ClearBoundPlan { body },
+        ) {
             Ok(_) => panic!("emission ignored the poisoned concrete bound plan"),
             Err(err) => err,
         };
         assert!(
-            err.message.contains("concrete callee bound plan is empty for its site"),
+            err.message
+                .contains("concrete callee bound plan is empty for its site"),
             "the poisoned plan must fail at the plan consumer, got: {err:?}"
         );
     }
@@ -9766,7 +10471,8 @@ fn main() {
             Err(err) => err,
         };
         assert!(
-            err.message.contains("concrete callee signature disagrees with its body plan"),
+            err.message
+                .contains("concrete callee signature disagrees with its body plan"),
             "the poisoned coroutine plan must fail closed at the concrete-plan join, got: {err:?}"
         );
     }
@@ -9789,7 +10495,8 @@ fn main() {
             Err(err) => err,
         };
         assert!(
-            err.message.contains("concrete ABI plan is missing for callee `next`"),
+            err.message
+                .contains("concrete ABI plan is missing for callee `next`"),
             "the missing iterator bound plan must fail at its production consumer, got: {err:?}"
         );
     }
@@ -9810,13 +10517,20 @@ fn main() { let result = first() }
                 .expect("parse"),
         ];
         let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic");
-        let mid =
-            ws.modules.iter().find(|m| m.id != ModuleId::builtin()).expect("test module").id;
-        let (emit, cache) = emit_full_in_with_test_mutation(&ws, mid, BodyMutation::None)
-            .expect("intact emission");
+        let mid = ws
+            .modules
+            .iter()
+            .find(|m| m.id != ModuleId::builtin())
+            .expect("test module")
+            .id;
+        let (emit, cache) =
+            emit_full_in_with_test_mutation(&ws, mid, BodyMutation::None).expect("intact emission");
         let stats = cache.scx.abi_plan_stats();
         let (hits, misses) = (stats.hits(), stats.requests() - stats.hits());
-        assert!(misses > 0, "no ABI-plan question consulted the memo (hits={hits})");
+        assert!(
+            misses > 0,
+            "no ABI-plan question consulted the memo (hits={hits})"
+        );
         assert!(
             hits > 0,
             "three helper call sites repeat the callee question; zero hits means the \
@@ -9910,8 +10624,9 @@ fn main() { let result = first() }
             .find(|m| m.id != ModuleId::builtin())
             .expect("test module")
             .id;
-        let (_, cache) = emit_full_in_with_test_mutation(&ws, mid, BodyMutation::SkipAbiPlanPublish)
-            .expect("the bypass must still take the fallback path");
+        let (_, cache) =
+            emit_full_in_with_test_mutation(&ws, mid, BodyMutation::SkipAbiPlanPublish)
+                .expect("the bypass must still take the fallback path");
         let stats = cache.scx.abi_plan_stats();
         let witness = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             assert!(
@@ -9919,7 +10634,10 @@ fn main() { let result = first() }
                 "the publication witness must fail when the publish step is bypassed: {stats:?}"
             );
         }));
-        assert!(witness.is_err(), "the publication witness did not see its bypass: {stats:?}");
+        assert!(
+            witness.is_err(),
+            "the publication witness did not see its bypass: {stats:?}"
+        );
     }
 
     #[test]
@@ -9936,10 +10654,10 @@ fn main() { let result = first() }
                 "setup: validation+context",
                 "setup: root collection",
                 "setup: graph",
-            "setup: concrete plans",
-            "setup: artifact+shader+ABI lanes",
-            "setup: ABI validation",
-            "setup: inline candidate table",
+                "setup: concrete plans",
+                "setup: artifact+shader+ABI lanes",
+                "setup: ABI validation",
+                "setup: inline candidate table",
             ]
         );
         assert!(setup.iter().all(|(_, duration)| *duration > Duration::ZERO));
@@ -9966,10 +10684,12 @@ fn main() { let result = first() }
         let _inline = InlineOn::on();
         let (_, _, emit) = emit_with_mutation(BodyMutation::None).expect("intact emission");
         let attribution = &emit.attribution;
-        assert!(attribution.bodies_examined > 0, "no emitted bodies were examined: {attribution:?}");
         assert!(
-            attribution.lower.bodies_with_work > 0
-                && attribution.lower.instructions_visited > 0,
+            attribution.bodies_examined > 0,
+            "no emitted bodies were examined: {attribution:?}"
+        );
+        assert!(
+            attribution.lower.bodies_with_work > 0 && attribution.lower.instructions_visited > 0,
             "lowering attribution has no production population: {attribution:?}"
         );
         assert!(
@@ -10024,7 +10744,8 @@ fn main() { let result = first() }
                     .sum::<usize>()
                     == attribution.lower.concrete_mono_cloned_nodes
                 && attribution.lower.mir_instruction_allocations > 0
-                && attribution.lower.mir_instruction_capacity >= attribution.lower.instructions_visited,
+                && attribution.lower.mir_instruction_capacity
+                    >= attribution.lower.instructions_visited,
             "lowerer ownership census has no production population: {attribution:?}"
         );
         let consumers = &attribution.lower.concrete_mono_by_consumer;
@@ -10069,8 +10790,8 @@ fn main() { let result = first() }
             .module_ids
             .get(&Ustr::from("<inline-census-test>"))
             .expect("census test module");
-        let (emit, _) = emit_full_in_with_test_mutation(&ws, mid, BodyMutation::None)
-            .expect("intact emission");
+        let (emit, _) =
+            emit_full_in_with_test_mutation(&ws, mid, BodyMutation::None).expect("intact emission");
         let census = &emit.attribution.inline.census;
         assert!(
             census.candidate_requests > 0
@@ -10090,7 +10811,8 @@ fn main() { let result = first() }
         );
         assert!(
             emit.attribution.inline.candidate_unique_keys > 0
-                && census.candidate_requested_keys.len() >= emit.attribution.inline.candidate_unique_keys
+                && census.candidate_requested_keys.len()
+                    >= emit.attribution.inline.candidate_unique_keys
                 && census.candidate_derivations == 0
                 && emit.attribution.inline.candidate_setup_keys > 0
                 && emit.attribution.inline.candidate_setup_warmed > 0,
@@ -10148,18 +10870,15 @@ fn main() { let result = first() }
             "cloning may not exceed the measured source population: {census:?}"
         );
         assert_eq!(
-            census.clone.inst_remap_entries,
-            census.clone.live_instructions,
+            census.clone.inst_remap_entries, census.clone.live_instructions,
             "every live instruction and no dead instruction must enter the remap: {census:?}"
         );
         assert_eq!(
-            census.clone.cell_remap_entries,
-            census.clone.live_cells,
+            census.clone.cell_remap_entries, census.clone.live_cells,
             "every live cell and no dead cell must enter the remap: {census:?}"
         );
         assert_eq!(
-            census.clone.block_remap_entries,
-            census.clone.cloned_blocks,
+            census.clone.block_remap_entries, census.clone.cloned_blocks,
             "only cloned live blocks may enter the remap: {census:?}"
         );
         assert!(
@@ -10221,8 +10940,8 @@ fn main() { let result = first() }
             .module_ids
             .get(&Ustr::from("<inline-census-test>"))
             .expect("census test module");
-        let (emit, _) = emit_full_in_with_test_mutation(&ws, mid, BodyMutation::None)
-            .expect("intact emission");
+        let (emit, _) =
+            emit_full_in_with_test_mutation(&ws, mid, BodyMutation::None).expect("intact emission");
         let population = &emit.attribution.inline.population;
         assert!(
             population.candidate_published_keys > 0
@@ -10272,8 +10991,7 @@ fn main() { let result = first() }
                 && population.candidate_compact_capacity.0 > 0
                 && population.candidate_compact_capacity.1 > 0
                 && population.candidate_compact_capacity.2 > 0
-                && population.ordinary_lowering_derivations
-                    >= population.ordinary_lowered_keys
+                && population.ordinary_lowering_derivations >= population.ordinary_lowered_keys
                 && population.specialized_lowering_derivations
                     >= population.specialized_lowered_keys
                 && population.keys_lowered_more_than_once == 0
@@ -10291,13 +11009,11 @@ fn main() { let result = first() }
         );
         assert_eq!(
             population.candidate_requested_unique_keys,
-            population.candidate_spliced_unique_keys
-                + population.candidate_requested_never_spliced,
+            population.candidate_spliced_unique_keys + population.candidate_requested_never_spliced,
             "requested keys must partition into spliced and unspliced keys: {population:?}"
         );
         assert_eq!(
-            population.candidate_requested_not_published,
-            0,
+            population.candidate_requested_not_published, 0,
             "a production inline lookup must use the published candidate table: {population:?}"
         );
 
@@ -10324,53 +11040,65 @@ fn main() { let result = first() }
         let _inline = InlineOn::on();
         let _census = InlineCensusOn::on();
         let parse = |source: &str| {
-            skull_parser::parse_module_clean(
-                source,
-                Ustr::from("<inline-census-incremental-test>"),
-            )
-            .expect("parse")
+            skull_parser::parse_module_clean(source, Ustr::from("<inline-census-incremental-test>"))
+                .expect("parse")
         };
         let v1 = CENSUS_SRC;
         let v2 = CENSUS_SRC.replace("return flag", "return false");
         let mut modules = vec![parse(v1)];
-        let ws1 = bone_semantic::semantic_passes::semantic_pass(&mut modules)
-            .expect("semantic v1");
+        let ws1 = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic v1");
         let mid1 = *ws1
             .module_ids
             .get(&Ustr::from("<inline-census-incremental-test>"))
             .expect("module v1");
         let (full1, mut cache) = emit_full(&ws1, mid1).expect("full v1");
         assert!(
-            full1.attribution.inline.population.canonical_clone_derivations > 0,
+            full1
+                .attribution
+                .inline
+                .population
+                .canonical_clone_derivations
+                > 0,
             "fresh build did not use canonical consumers: {:?}",
             full1.attribution.inline.population
         );
 
         let mut modules = vec![parse(&v2)];
-        let ws2 = bone_semantic::semantic_passes::semantic_pass(&mut modules)
-            .expect("semantic v2");
+        let ws2 = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic v2");
         let mid2 = *ws2
             .module_ids
             .get(&Ustr::from("<inline-census-incremental-test>"))
             .expect("module v2");
         let straight = ref_for(&ws2, "straight");
         let reinferred = vec![(straight.module, BodyOwner::Function(straight.func))];
-        let incremental = emit_incremental(&ws2, &mut cache, &reinferred)
-            .expect("incremental canonical reuse");
+        let incremental =
+            emit_incremental(&ws2, &mut cache, &reinferred).expect("incremental canonical reuse");
         let fresh = emit_full(&ws2, mid2).expect("fresh v2").0;
-        assert_eq!(incremental.lua, fresh.lua, "incremental output drifted from fresh output");
+        assert_eq!(
+            incremental.lua, fresh.lua,
+            "incremental output drifted from fresh output"
+        );
         assert!(
             incremental.attribution.inline.candidate_setup_reused > 0
-                && incremental.attribution.inline.population.ordinary_canonical_miss_keys == 0
-                && incremental.attribution.inline.population.specialized_canonical_miss_keys == 0,
+                && incremental
+                    .attribution
+                    .inline
+                    .population
+                    .ordinary_canonical_miss_keys
+                    == 0
+                && incremental
+                    .attribution
+                    .inline
+                    .population
+                    .specialized_canonical_miss_keys
+                    == 0,
             "incremental build did not preserve the canonical contract: {:?}",
             incremental.attribution.inline.population
         );
 
         let v3 = v2.replace("return 2", "return 3");
         let mut modules = vec![parse(&v3)];
-        let ws3 = bone_semantic::semantic_passes::semantic_pass(&mut modules)
-            .expect("semantic v3");
+        let ws3 = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic v3");
         let mid3 = *ws3
             .module_ids
             .get(&Ustr::from("<inline-census-incremental-test>"))
@@ -10383,9 +11111,16 @@ fn main() { let result = first() }
         )
         .expect("sequential canonical reuse");
         let fresh3 = emit_full(&ws3, mid3).expect("fresh v3").0;
-        assert_eq!(sequential.lua, fresh3.lua, "sequential incremental output drifted");
         assert_eq!(
-            sequential.attribution.inline.population.ordinary_canonical_miss_keys,
+            sequential.lua, fresh3.lua,
+            "sequential incremental output drifted"
+        );
+        assert_eq!(
+            sequential
+                .attribution
+                .inline
+                .population
+                .ordinary_canonical_miss_keys,
             0,
             "sequential incremental path lost the canonical contract"
         );
@@ -10404,9 +11139,12 @@ fn main() { let result = first() }
             skull_codegen_lua::CalleeBindingMode::Global,
         )
         .expect("full overlay base");
-        let overlay = emit_overlay(&ws2, &mut overlay_cache, &reinferred)
-            .expect("overlay canonical reuse");
-        assert!(!overlay.lua.is_empty(), "overlay must emit the changed route");
+        let overlay =
+            emit_overlay(&ws2, &mut overlay_cache, &reinferred).expect("overlay canonical reuse");
+        assert!(
+            !overlay.lua.is_empty(),
+            "overlay must emit the changed route"
+        );
         let table = overlay_cache
             .inline_cache
             .candidate_table()
@@ -10438,8 +11176,7 @@ fn main() { let result = first() }
             "the straight callee must still inline in the cross-block fixture"
         );
         assert_eq!(
-            emit.attribution.inline.census.substitution_invocations,
-            0,
+            emit.attribution.inline.census.substitution_invocations, 0,
             "straight result binding must not scan the caller arena: {:?}",
             emit.attribution.inline.census
         );
@@ -10504,7 +11241,6 @@ fn main() { let result = first() }
             "the specialized fixture did not reach specialized inline splicing: {:?}",
             specialized_emit.attribution
         );
-
     }
 
     #[test]
@@ -10517,7 +11253,8 @@ fn outer(x: int) -> int {
 fn main() { let result = outer(1) }
 "#;
         let mut modules = vec![
-            skull_parser::parse_module_clean(NESTED_SRC, Ustr::from("<nested-lower-test>")).expect("parse"),
+            skull_parser::parse_module_clean(NESTED_SRC, Ustr::from("<nested-lower-test>"))
+                .expect("parse"),
         ];
         let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic");
         let mid = ws
@@ -10526,8 +11263,8 @@ fn main() { let result = outer(1) }
             .find(|m| m.id != ModuleId::builtin())
             .expect("test module")
             .id;
-        let (emit, _) = emit_full_in_with_test_mutation(&ws, mid, BodyMutation::None)
-            .expect("nested emission");
+        let (emit, _) =
+            emit_full_in_with_test_mutation(&ws, mid, BodyMutation::None).expect("nested emission");
         assert!(
             emit.attribution.lower.mir_instruction_allocations
                 > emit.attribution.lower.instructions_visited,
@@ -10592,8 +11329,14 @@ fn main() { let result = outer(1) }
             lanes.cpu_population > 0 && lanes.shader_population > 0 && lanes.abi_population > 0,
             "each setup lane must have a real population: {lanes:?}"
         );
-        assert_eq!(lanes.setup_handshake_entered, 0, "sequential setup used the parallel handshake");
-        assert_eq!(lanes.setup_handshake_released, 0, "sequential setup released a handshake");
+        assert_eq!(
+            lanes.setup_handshake_entered, 0,
+            "sequential setup used the parallel handshake"
+        );
+        assert_eq!(
+            lanes.setup_handshake_released, 0,
+            "sequential setup released a handshake"
+        );
         assert!(!lanes.setup_handshake_released_after_both);
     }
 
@@ -10607,12 +11350,8 @@ fn main() { let result = outer(1) }
             .get(&Ustr::from("<setup-lane-test>"))
             .expect("setup test module");
         let emit = |schedule| {
-            emit_full_in_with_test_mutation(
-                &ws,
-                mid,
-                BodyMutation::SetupLaneSchedule(schedule),
-            )
-            .expect("setup lane emission")
+            emit_full_in_with_test_mutation(&ws, mid, BodyMutation::SetupLaneSchedule(schedule))
+                .expect("setup lane emission")
         };
         let (cpu_first, cpu_cache) = emit(SetupLaneSchedule::CpuFirst);
         let (abi_first, abi_cache) = emit(SetupLaneSchedule::AbiFirst);

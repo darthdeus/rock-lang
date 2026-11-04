@@ -141,7 +141,11 @@ fn value_struct_equality_evaluates_each_operand_exactly_once() {
     lua.push_str("\nprint(eq_effectful())\n");
     let out = run_luajit(&lua, "value_struct_eq_single_eval");
     let lines: Vec<&str> = out.lines().collect();
-    assert_eq!(lines, vec!["lhs", "rhs", "true"], "unexpected evaluation order/result:\n{out}");
+    assert_eq!(
+        lines,
+        vec!["lhs", "rhs", "true"],
+        "unexpected evaluation order/result:\n{out}"
+    );
 }
 
 const SEMANTIC_CORRECTNESS: &str = r#"
@@ -175,7 +179,11 @@ fn value_struct_equality_preserves_semantics() {
         "\nprint(eq_scalar(1.0, 2.0, 1.0, 2.0), eq_scalar(1.0, 2.0, 1.0, 3.0), ne_scalar(1.0, 2.0, 1.0, 3.0), ne_scalar(1.0, 2.0, 1.0, 2.0), eq_gc_same_ref(5), ne_gc_different_tag(5, 6))\n",
     );
     let out = run_luajit(&lua, "value_struct_eq_semantics");
-    assert_eq!(out.trim(), "true\tfalse\ttrue\tfalse\ttrue\ttrue", "semantic mismatch:\n{out}");
+    assert_eq!(
+        out.trim(),
+        "true\tfalse\ttrue\tfalse\ttrue\ttrue",
+        "semantic mismatch:\n{out}"
+    );
 }
 
 // Scalar `value` operands arrive as leaf cells. Comparing them must stay
@@ -239,7 +247,11 @@ fn scalar_value_leaf_equality_keeps_field_semantics() {
     );
     let out = run_luajit(&lua, "value_struct_eq_leaf_semantics");
     let lines: Vec<&str> = out.lines().collect();
-    assert_eq!(lines, vec!["true\tfalse\tfalse", "false\ttrue"], "unexpected results:\n{out}");
+    assert_eq!(
+        lines,
+        vec!["true\tfalse\tfalse", "false\ttrue"],
+        "unexpected results:\n{out}"
+    );
 }
 
 // A C-layout `value` stores `float` leaves as single precision, so leaves read
@@ -271,13 +283,18 @@ fn stored_float_value_equality_matches_a_fresh_operand() {
     let mut lua = emit_module(STORED_FLOAT_VALUE);
     lua.push_str("\nprint(stored_float_eq(0.4, 0.1), stored_float_ne(0.4, 0.1), stored_float_eq(0.5, 0.25))\n");
     let out = run_luajit(&lua, "value_struct_eq_stored_float");
-    assert_eq!(out.trim(), "true\tfalse\ttrue", "stored float value equality:\n{out}");
+    assert_eq!(
+        out.trim(),
+        "true\tfalse\ttrue",
+        "stored float value equality:\n{out}"
+    );
 }
 
 #[test]
 fn nullable_boxed_value_fields_compare_contents_in_enclosing_values() {
     require_luajit();
-    let mut lua = emit_module(r#"
+    let mut lua = emit_module(
+        r#"
 value Child { name: string, amount: int }
 value Parent { name: string, child: Child? = null }
 struct Holder { row: Parent }
@@ -287,8 +304,10 @@ struct Reference { name: string }
 value ReferenceParent { child: Reference? = null }
 struct ReferenceHolder { row: ReferenceParent }
 fn same_reference(a: ReferenceHolder, b: ReferenceHolder) -> bool { return a.row == b.row }
-"#);
-    lua.push_str(r#"
+"#,
+    );
+    lua.push_str(
+        r#"
 local function row(child) return { row = Parent_vt("parent", child) } end
 local a = row(Child_vt("child", 3))
 local b = row(Child_vt("child", 3))
@@ -298,8 +317,12 @@ local reference = { name = "same" }
 print(a.row == b.row, a.row == c.row, absent.row == row(nil).row, a.row == absent.row,
   ReferenceParent_vt(reference) == ReferenceParent_vt(reference),
   ReferenceParent_vt(reference) == ReferenceParent_vt({name="same"}))
-"#);
+"#,
+    );
     let out = run_luajit(&lua, "nullable_boxed_value_field_equality");
-    assert_eq!(out.trim(), "true\tfalse\ttrue\tfalse\ttrue\tfalse",
-        "nullable value fields compare contents; nullable reference fields retain identity:\n{out}");
+    assert_eq!(
+        out.trim(),
+        "true\tfalse\ttrue\tfalse\ttrue\tfalse",
+        "nullable value fields compare contents; nullable reference fields retain identity:\n{out}"
+    );
 }

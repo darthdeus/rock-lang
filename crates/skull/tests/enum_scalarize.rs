@@ -38,7 +38,11 @@ fn main() { print(read()) }
     );
     let enum_id = ws.enums_by_name[&Ustr::from("Choice")];
     let choice = &ws.modules[enum_id.module.index()].enums[enum_id.def];
-    let variant = choice.variants.iter().find(|variant| variant.name == "A").unwrap();
+    let variant = choice
+        .variants
+        .iter()
+        .find(|variant| variant.name == "A")
+        .unwrap();
     let VariantPayload::Record(fields) = &variant.payload else {
         panic!("Choice::A declaration must be a record variant");
     };
@@ -104,8 +108,14 @@ fn value_struct_with_enum_field_has_cdef_int_not_table() {
     );
     // (`__tag` as a bare substring survives in the stdlib `inspect` key-filter;
     // the dual-rep was the `__tag = <ord>` singleton FIELD + the `by_tag` array.)
-    assert!(!lua.contains("__tag = "), "the dead `__tag =` singleton field must be gone:\n{lua}");
-    assert!(!lua.contains("_by_tag"), "the dead `by_tag` array must be gone:\n{lua}");
+    assert!(
+        !lua.contains("__tag = "),
+        "the dead `__tag =` singleton field must be gone:\n{lua}"
+    );
+    assert!(
+        !lua.contains("_by_tag"),
+        "the dead `by_tag` array must be gone:\n{lua}"
+    );
 }
 
 /// Runtime: construct + `match c.blend` + by-value pass `area(c)` (was crashing
@@ -126,14 +136,24 @@ fn value_struct_with_enum_field_runs_correctly() {
     let dir = std::env::temp_dir();
     let path = dir.join(format!("skull_enum_rt_{}.lua", std::process::id()));
     std::fs::write(&path, &prog).expect("write lua");
-    let out = std::process::Command::new("luajit").arg(&path).output().expect("run luajit");
+    let out = std::process::Command::new("luajit")
+        .arg(&path)
+        .output()
+        .expect("run luajit");
     let _ = std::fs::remove_file(&path);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         out.status.success(),
         "luajit failed:\nstderr: {}\n--- lua tail ---\n{}",
         String::from_utf8_lossy(&out.stderr),
-        prog.lines().rev().take(8).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n")
+        prog.lines()
+            .rev()
+            .take(8)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join("\n")
     );
     assert!(
         stdout.contains("5 Add 5"),
@@ -155,9 +175,16 @@ fn run_skull_test(src: &str, fn_name: &str) -> String {
     ));
     let path = std::env::temp_dir().join(format!("skull_enum_sentinel_{}.lua", std::process::id()));
     std::fs::write(&path, &prog).expect("write lua");
-    let out = std::process::Command::new("luajit").arg(&path).output().expect("run luajit");
+    let out = std::process::Command::new("luajit")
+        .arg(&path)
+        .output()
+        .expect("run luajit");
     let _ = std::fs::remove_file(&path);
-    assert!(out.status.success(), "luajit failed:\nstderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "luajit failed:\nstderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8_lossy(&out.stdout).to_string()
 }
 

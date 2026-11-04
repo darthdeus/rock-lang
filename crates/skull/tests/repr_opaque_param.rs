@@ -150,7 +150,9 @@ fn registry_rejection(src: &str) -> String {
 
 /// A SKULL rejection: the 2.4 layout rule, raised at emit.
 fn rejection(src: &str) -> String {
-    crate::common::try_emit_module(src).expect_err("must reject").message
+    crate::common::try_emit_module(src)
+        .expect_err("must reject")
+        .message
 }
 
 fn run(src: &str, tag: &str) -> String {
@@ -161,7 +163,9 @@ fn run(src: &str, tag: &str) -> String {
 /// The outcome of emitting, as a comparable value, so two sources can be
 /// asserted IDENTICAL rather than each asserted separately.
 fn outcome(src: &str) -> Result<(), String> {
-    crate::common::try_emit_module(src).map(|_| ()).map_err(|e| e.message)
+    crate::common::try_emit_module(src)
+        .map(|_| ())
+        .map_err(|e| e.message)
 }
 
 #[test]

@@ -31,9 +31,9 @@ use bone_core::comptime_files::{EmbedFiles, MemoryComptimeFiles};
 use bone_core::modules::NsAliases;
 use bone_semantic::inference::{ComptimeInputs, Workspace};
 use bone_semantic::prelude::{FxHashMap, Ustr};
+use lsp_server::{ErrorCode, Message, Response};
 use rock_core::CompilerError;
 use rock_core::errors::CompilerErrorLevel;
-use lsp_server::{ErrorCode, Message, Response};
 use serde_json::{Value, json};
 use skull::mir_emit::{RendererTarget, ShaderLanguage};
 use skull::pipeline::{CompileHost, EmitTarget, Stage};
@@ -42,7 +42,9 @@ use skull::pipeline::{CompileHost, EmitTarget, Stage};
 /// `{"ok":false,"error":...}`.
 pub fn handle(request: &str) -> Value {
     match serde_json::from_str::<Value>(request) {
-        Ok(request) => dispatch(&request).unwrap_or_else(|error| json!({"ok": false, "error": error})),
+        Ok(request) => {
+            dispatch(&request).unwrap_or_else(|error| json!({"ok": false, "error": error}))
+        }
         Err(e) => json!({"ok": false, "error": format!("request is not JSON: {e}")}),
     }
 }
@@ -85,9 +87,16 @@ fn compile(request: &Value) -> Result<Value, String> {
         embed_files: Some(EmbedFiles(Arc::new(MemoryComptimeFiles::new(files)))),
         soft: Vec::new(),
     };
-    let target = EmitTarget { project_root: None, renderer };
+    let target = EmitTarget {
+        project_root: None,
+        renderer,
+    };
     let result = skull::pipeline::compile_source(file, source, target, &mut host);
-    let mut diagnostics: Vec<Value> = host.soft.iter().map(|f| diagnostic(&f.error, Some(f.lint))).collect();
+    let mut diagnostics: Vec<Value> = host
+        .soft
+        .iter()
+        .map(|f| diagnostic(&f.error, Some(f.lint)))
+        .collect();
     Ok(match result {
         Ok(compiled) => {
             let shaders: Vec<Value> = compiled
@@ -132,13 +141,14 @@ thread_local! {
 
 fn lsp(request: &Value) -> Result<Value, String> {
     let message = request.get("message").ok_or("missing field `message`")?;
-    let message: Message =
-        serde_json::from_value(message.clone()).map_err(|e| format!("`message` is not JSON-RPC: {e}"))?;
+    let message: Message = serde_json::from_value(message.clone())
+        .map_err(|e| format!("`message` is not JSON-RPC: {e}"))?;
     let mut out = Vec::new();
     let handled = LSP.with_borrow_mut(|server| -> anyhow::Result<()> {
         match (server.as_mut(), message) {
             (None, Message::Request(req)) if req.method == "initialize" => {
-                let (started, response) = rock_lsp::LspServer::initialize(rock_lsp::CompilerPolicy::default(), req)?;
+                let (started, response) =
+                    rock_lsp::LspServer::initialize(rock_lsp::CompilerPolicy::default(), req)?;
                 *server = Some(started);
                 out.push(response);
             }
@@ -150,7 +160,12 @@ fn lsp(request: &Value) -> Result<Value, String> {
                 handled?;
             }
             (None, Message::Request(req)) => out.push(
-                Response::new_err(req.id, ErrorCode::ServerNotInitialized as i32, "initialize first".to_string()).into(),
+                Response::new_err(
+                    req.id,
+                    ErrorCode::ServerNotInitialized as i32,
+                    "initialize first".to_string(),
+                )
+                .into(),
             ),
             (None, _) => {}
         }
@@ -179,7 +194,10 @@ impl CompileHost for PlaygroundHost<'_> {
     }
 
     fn comptime_inputs(&mut self) -> Result<ComptimeInputs, CompilerError> {
-        Ok(ComptimeInputs { embed_files: self.embed_files.take().unwrap_or_default(), ..Default::default() })
+        Ok(ComptimeInputs {
+            embed_files: self.embed_files.take().unwrap_or_default(),
+            ..Default::default()
+        })
     }
 
     fn lint_findings(&mut self, ws: &Workspace) -> Vec<bone_lints::Finding> {
@@ -224,12 +242,19 @@ fn diagnostic(e: &CompilerError, lint: Option<&str>) -> Value {
 }
 
 fn str_field<'a>(request: &'a Value, name: &str) -> Result<&'a str, String> {
-    request.get(name).and_then(Value::as_str).ok_or_else(|| format!("missing string field `{name}`"))
+    request
+        .get(name)
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("missing string field `{name}`"))
 }
 
 fn string_map(request: &Value, name: &str) -> Result<Option<Vec<(String, String)>>, String> {
-    let Some(value) = request.get(name) else { return Ok(None) };
-    let object = value.as_object().ok_or_else(|| format!("`{name}` must be an object of strings"))?;
+    let Some(value) = request.get(name) else {
+        return Ok(None);
+    };
+    let object = value
+        .as_object()
+        .ok_or_else(|| format!("`{name}` must be an object of strings"))?;
     object
         .iter()
         .map(|(k, v)| {
@@ -270,7 +295,11 @@ mod abi {
         static HOOK: std::sync::Once = std::sync::Once::new();
         HOOK.call_once(|| {
             std::panic::set_hook(Box::new(|info| {
-                set_output(serde_json::json!({"ok": false, "panic": info.to_string()}).to_string().into_bytes());
+                set_output(
+                    serde_json::json!({"ok": false, "panic": info.to_string()})
+                        .to_string()
+                        .into_bytes(),
+                );
             }))
         });
         // SAFETY: the caller passes a buffer `rock_alloc(len)` returned, now filled.
@@ -301,8 +330,13 @@ mod tests {
 
     #[test]
     fn compile_uses_embedded_stdlib_without_install() {
-        let response = handle(r#"{"op":"compile","file":"main.rock","source":"fn main() { print(\"hi\") }\n"}"#);
-        assert_eq!(response["ok"], true, "compile must work without install_stdlib: {response}");
+        let response = handle(
+            r#"{"op":"compile","file":"main.rock","source":"fn main() { print(\"hi\") }\n"}"#,
+        );
+        assert_eq!(
+            response["ok"], true,
+            "compile must work without install_stdlib: {response}"
+        );
     }
 
     #[test]
@@ -310,7 +344,10 @@ mod tests {
         let response = handle(r#"{"op":"stdlib"}"#);
         assert_eq!(response["ok"], true, "stdlib op must succeed: {response}");
         for name in rock_stdlib::STDLIB_NAMES {
-            assert!(response["files"][name].is_string(), "stdlib must include {name}: {response}");
+            assert!(
+                response["files"][name].is_string(),
+                "stdlib must include {name}: {response}"
+            );
         }
     }
 }

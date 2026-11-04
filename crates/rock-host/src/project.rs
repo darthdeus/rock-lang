@@ -1,5 +1,5 @@
-use std::path::{Path, PathBuf};
 use anyhow::Result;
+use std::path::{Path, PathBuf};
 
 /// Check if a directory looks like the Rock workspace root.
 ///
@@ -23,8 +23,7 @@ pub fn find_workspace_root(path: &Path) -> Option<PathBuf> {
         return Some(root);
     }
 
-    let initial_path = fs_err::canonicalize(path)
-        .unwrap_or_else(|_| path.to_path_buf());
+    let initial_path = fs_err::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
 
     let mut current = if initial_path.is_file() {
         initial_path.parent()?.to_path_buf()
@@ -50,8 +49,7 @@ pub fn find_source_root(path: &Path) -> Option<PathBuf> {
         return Some(root);
     }
 
-    let initial_path = fs_err::canonicalize(path)
-        .unwrap_or_else(|_| path.to_path_buf());
+    let initial_path = fs_err::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let mut current = if initial_path.is_file() {
         initial_path.parent()?.to_path_buf()
     } else {
@@ -71,10 +69,7 @@ pub fn find_source_root(path: &Path) -> Option<PathBuf> {
 
 pub(crate) fn context_root_from_env() -> Option<PathBuf> {
     let root = PathBuf::from(std::env::var_os("ROCK_CONTEXT_ROOT")?);
-    if root.is_dir()
-        && root.join("sdk").is_dir()
-        && root.join(".context/context.json").is_file()
-    {
+    if root.is_dir() && root.join("sdk").is_dir() && root.join(".context/context.json").is_file() {
         Some(root)
     } else {
         None
@@ -120,13 +115,11 @@ pub fn ensure_workspace_root() -> Result<()> {
     ))
 }
 
-
 /// Find project directory by looking for stick.toml or other project markers
 /// This walks up the directory tree from the given path until it finds a project root
 pub fn find_project_root(path: &Path) -> Option<PathBuf> {
     // Convert to absolute path first to handle relative paths correctly
-    let initial_path = fs_err::canonicalize(path)
-        .unwrap_or_else(|_| path.to_path_buf());
+    let initial_path = fs_err::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
 
     // Start from the directory containing the path (or the path itself if it's a directory)
     let mut current_path = if initial_path.is_file() || initial_path.extension().is_some() {
@@ -186,7 +179,9 @@ pub fn is_release_layout() -> bool {
 /// Requires the `rock` executable itself: system roots such as `/` also hold
 /// bin/ and lib/.
 pub fn is_release_layout_in(root: &Path) -> bool {
-    root.join("bin").join(format!("rock{}", std::env::consts::EXE_SUFFIX)).is_file()
+    root.join("bin")
+        .join(format!("rock{}", std::env::consts::EXE_SUFFIX))
+        .is_file()
         && root.join("lib").is_dir()
         && !root.join("Cargo.toml").exists()
 }
@@ -194,19 +189,37 @@ pub fn is_release_layout_in(root: &Path) -> bool {
 /// Find LuaJIT through an explicit override, beside this executable, or PATH.
 /// A bare name on failure lets process spawning report the OS lookup error.
 pub fn luajit_path() -> PathBuf {
-    locate_luajit(std::env::var_os("ROCK_LUAJIT"), std::env::current_exe().ok().as_deref(), std::env::var_os("PATH").as_deref())
+    locate_luajit(
+        std::env::var_os("ROCK_LUAJIT"),
+        std::env::current_exe().ok().as_deref(),
+        std::env::var_os("PATH").as_deref(),
+    )
 }
 
-fn locate_luajit(override_path: Option<std::ffi::OsString>, exe: Option<&Path>, path: Option<&std::ffi::OsStr>) -> PathBuf {
-    if let Some(path) = override_path.filter(|path| !path.is_empty()) { return path.into(); }
-    let name = if cfg!(windows) { "luajit.exe" } else { "luajit" };
+fn locate_luajit(
+    override_path: Option<std::ffi::OsString>,
+    exe: Option<&Path>,
+    path: Option<&std::ffi::OsStr>,
+) -> PathBuf {
+    if let Some(path) = override_path.filter(|path| !path.is_empty()) {
+        return path.into();
+    }
+    let name = if cfg!(windows) {
+        "luajit.exe"
+    } else {
+        "luajit"
+    };
     if let Some(candidate) = exe.and_then(Path::parent).map(|dir| dir.join(name)) {
-        if candidate.is_file() { return candidate; }
+        if candidate.is_file() {
+            return candidate;
+        }
     }
     if let Some(path) = path {
         for dir in std::env::split_paths(path) {
             let candidate = dir.join(name);
-            if candidate.is_file() { return candidate; }
+            if candidate.is_file() {
+                return candidate;
+            }
         }
     }
     PathBuf::from(name)
@@ -215,7 +228,10 @@ fn locate_luajit(override_path: Option<std::ffi::OsString>, exe: Option<&Path>, 
 /// Preserve Lua's defaults and inherited module path, adding the selected
 /// binary's matching JIT toolkit when installed beside it.
 pub fn lua_path_value() -> String {
-    lua_path_for(&luajit_path(), std::env::var("LUA_PATH").unwrap_or_else(|_| ";;".into()))
+    lua_path_for(
+        &luajit_path(),
+        std::env::var("LUA_PATH").unwrap_or_else(|_| ";;".into()),
+    )
 }
 
 /// Add the toolkit belonging to this binary to a host-selected module path.
@@ -223,7 +239,9 @@ pub fn lua_path_for(luajit: &Path, mut value: String) -> String {
     if let Some(prefix) = luajit.parent().and_then(Path::parent) {
         let share = prefix.join("share/luajit-2.1");
         if share.is_dir() {
-            if !value.ends_with(';') { value.push(';'); }
+            if !value.ends_with(';') {
+                value.push(';');
+            }
             value.push_str(&format!("{}/?.lua;", share.display()));
         }
     }
@@ -251,7 +269,10 @@ pub const MAIN_BYTECODE_FILENAME: &str = "main.ljbc";
 /// `build_luajit_command` (which puts the script first). `LUA_PATH` is the same
 /// value, and it is required rather than incidental: `-b` is implemented by
 /// `jit/bcsave.lua` under `<prefix>/share/luajit-2.1/`.
-pub fn build_luajit_bytecode_command(lua_file: &Path, bytecode_file: &Path) -> std::process::Command {
+pub fn build_luajit_bytecode_command(
+    lua_file: &Path,
+    bytecode_file: &Path,
+) -> std::process::Command {
     let mut cmd = std::process::Command::new(luajit_path());
     cmd.arg("-b")
         .arg("-g")
@@ -351,7 +372,6 @@ pub fn build_luajit_stdin_command() -> std::process::Command {
     cmd
 }
 
-
 /// Recursively find every `.rock` file under `source_dir` (absolute paths,
 /// `~`-suffixed editor backups skipped). Surfaces per-entry walk errors to
 /// stderr rather than silently dropping them — a permission error on stdlib/
@@ -408,8 +428,6 @@ mod tests {
     use fs_err as fs;
     use tempfile::TempDir;
 
-
-
     #[test]
     fn plain_luajit_locator_obeys_override_sibling_and_path_order() {
         let root = TempDir::new().unwrap();
@@ -417,7 +435,11 @@ mod tests {
         let path_dir = root.path().join("path");
         fs::create_dir_all(&bin).unwrap();
         fs::create_dir_all(&path_dir).unwrap();
-        let name = if cfg!(windows) { "luajit.exe" } else { "luajit" };
+        let name = if cfg!(windows) {
+            "luajit.exe"
+        } else {
+            "luajit"
+        };
         let sibling = bin.join(name);
         let from_path = path_dir.join(name);
         fs::write(&sibling, "").unwrap();
@@ -425,10 +447,20 @@ mod tests {
         let exe = bin.join("rock");
         let path = std::env::join_paths([&path_dir]).unwrap();
         let explicit = root.path().join("diagnostic-luajit");
-        assert_eq!(locate_luajit(Some(explicit.clone().into_os_string()), Some(&exe), Some(&path)), explicit);
+        assert_eq!(
+            locate_luajit(
+                Some(explicit.clone().into_os_string()),
+                Some(&exe),
+                Some(&path)
+            ),
+            explicit
+        );
         assert_eq!(locate_luajit(None, Some(&exe), Some(&path)), sibling);
         fs::remove_file(&sibling).unwrap();
-        assert_eq!(locate_luajit(Some("".into()), Some(&exe), Some(&path)), from_path);
+        assert_eq!(
+            locate_luajit(Some("".into()), Some(&exe), Some(&path)),
+            from_path
+        );
         assert_eq!(locate_luajit(None, None, None), PathBuf::from(name));
     }
 
@@ -448,13 +480,19 @@ mod tests {
         fs::write(&file_path, "fn main() {}").unwrap();
 
         // Should find project root from file in subdirectory
-        assert_eq!(find_project_root(&file_path), Some(project_dir.to_path_buf()));
+        assert_eq!(
+            find_project_root(&file_path),
+            Some(project_dir.to_path_buf())
+        );
 
         // Should find project root from subdirectory
         assert_eq!(find_project_root(&sub_dir), Some(project_dir.to_path_buf()));
 
         // Should find project root from project directory itself
-        assert_eq!(find_project_root(&project_dir), Some(project_dir.to_path_buf()));
+        assert_eq!(
+            find_project_root(&project_dir),
+            Some(project_dir.to_path_buf())
+        );
     }
 
     #[test]
@@ -477,7 +515,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let file_path = temp.path().join("main.rock");
         fs::write(&file_path, "fn main() {}").unwrap();
-        
+
         // No project markers, should return None
         assert_eq!(find_project_root(&file_path), None);
     }
@@ -507,17 +545,18 @@ mod tests {
         assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
     }
 
-
-
-
-
     #[test]
     fn rock_luajit_env_selects_the_diagnostic_runtime() {
         const CHILD: &str = "ROCK_LUAJIT_OVERRIDE_WITNESS";
         if std::env::var_os(CHILD).is_none() {
             let status = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "project::tests::rock_luajit_env_selects_the_diagnostic_runtime"])
-                .env(CHILD, "1").status().unwrap();
+                .args([
+                    "--exact",
+                    "project::tests::rock_luajit_env_selects_the_diagnostic_runtime",
+                ])
+                .env(CHILD, "1")
+                .status()
+                .unwrap();
             assert!(status.success());
             return;
         }
@@ -536,8 +575,6 @@ mod tests {
         }
     }
 
-
-
     #[test]
     fn release_root_requires_the_rock_executable() {
         let temp = TempDir::new().unwrap();
@@ -546,7 +583,12 @@ mod tests {
         fs::create_dir_all(root.join("lib")).unwrap();
         assert!(!is_rock_root(root));
         assert!(!is_release_layout_in(root));
-        fs::write(root.join("bin").join(format!("rock{}", std::env::consts::EXE_SUFFIX)), "").unwrap();
+        fs::write(
+            root.join("bin")
+                .join(format!("rock{}", std::env::consts::EXE_SUFFIX)),
+            "",
+        )
+        .unwrap();
         assert!(is_rock_root(root));
         assert!(is_release_layout_in(root));
     }
@@ -571,12 +613,22 @@ mod tests {
             fs_err::create_dir(&project).unwrap();
             fs_err::write(project.join("stick.toml"), "[package]\nname = \"game\"\n").unwrap();
             let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "project::tests::ensure_workspace_root_preserves_cwd", "--nocapture"])
-                .current_dir(&project).env_remove("ROCK_DIR")
+                .args([
+                    "--exact",
+                    "project::tests::ensure_workspace_root_preserves_cwd",
+                    "--nocapture",
+                ])
+                .current_dir(&project)
+                .env_remove("ROCK_DIR")
                 .env(CHILD, if workspace { "ok" } else { "error" })
-                .output().unwrap();
-            assert!(output.status.success(), "{}{}",
-                String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
     }
 

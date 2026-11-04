@@ -22,7 +22,9 @@ impl Builder<'_> {
         fields: comfy_la_arena::IdxRange<bone_semantic::hir::StructLitField>,
         bases: comfy_la_arena::IdxRange<bone_semantic::hir::Expr>,
     ) -> Result<Idx<Inst>, CompilerError> {
-        self.with_value_lending(false, |s| s.lower_struct_literal_owned(e, name, fields, bases))
+        self.with_value_lending(false, |s| {
+            s.lower_struct_literal_owned(e, name, fields, bases)
+        })
     }
 
     fn lower_struct_literal_owned(
@@ -107,9 +109,8 @@ impl Builder<'_> {
                         fs.extend(slots.clone());
                     } else if let Some(&(_, v)) = lit_box.iter().find(|(n, _)| *n == fname) {
                         fs.push((fname, v));
-                    } else if let Some((cname, nullable)) = self
-                        .struct_field_plan(name, fname, false)?
-                        .embed()
+                    } else if let Some((cname, nullable)) =
+                        self.struct_field_plan(name, fname, false)?.embed()
                     {
                         // Unwritten embed field: copy the base's leaves through
                         // (including its presence slot), else the struct default.
@@ -117,11 +118,17 @@ impl Builder<'_> {
                             Some(bi) => {
                                 for k in self.embed_leaf_paths(cname)? {
                                     let key = Ustr::from(&format!("{fname}.{k}"));
-                                    let v = self.emit_cur(Inst::Field { base: bi, field: key });
+                                    let v = self.emit_cur(Inst::Field {
+                                        base: bi,
+                                        field: key,
+                                    });
                                     fs.push((key, v));
                                 }
                                 if nullable {
-                                    let p = self.emit_cur(Inst::Field { base: bi, field: fname });
+                                    let p = self.emit_cur(Inst::Field {
+                                        base: bi,
+                                        field: fname,
+                                    });
                                     fs.push((fname, p));
                                 }
                             }
@@ -132,9 +139,8 @@ impl Builder<'_> {
                                 fs.extend(Self::embed_field_slots(fname, slots));
                             }
                         }
-                    } else if let Some(shape) = self
-                        .struct_field_plan(name, fname, false)?
-                        .flat_shape()
+                    } else if let Some(shape) =
+                        self.struct_field_plan(name, fname, false)?.flat_shape()
                     {
                         // Unwritten flat field: from the base if present, else the
                         // struct default. A base stores the field in physical
@@ -150,7 +156,10 @@ impl Builder<'_> {
                         let v = match base_inst {
                             // The base keeps its own value fields.
                             Some(bi) => {
-                                let v = self.emit_cur(Inst::Field { base: bi, field: fname });
+                                let v = self.emit_cur(Inst::Field {
+                                    base: bi,
+                                    field: fname,
+                                });
                                 match self.concrete_struct_field_ty(e, fname) {
                                     Some(ty) => self.copied_value_box(&ty, v)?,
                                     None => v,
@@ -257,10 +266,9 @@ impl Builder<'_> {
     pub(crate) fn is_mutable_place(&self, e: Idx<Expr>) -> Result<bool, CompilerError> {
         match &self.body.expr_arena[e] {
             Expr::Global(_) | Expr::Index { .. } => Ok(true),
-            Expr::FieldAccess { base, .. } | Expr::SafeNav { base, .. }
-            | Expr::TupleIndex { tuple: base, .. } => {
-                self.is_mutable_place(*base)
-            }
+            Expr::FieldAccess { base, .. }
+            | Expr::SafeNav { base, .. }
+            | Expr::TupleIndex { tuple: base, .. } => self.is_mutable_place(*base),
             // A reference-struct binding aliases shared storage; a value binding
             // is a copy of its own.
             Expr::Var(b) => Ok(!self.binding_is_nonnull_value_struct(*b)),
@@ -356,12 +364,17 @@ impl Builder<'_> {
         {
             return None;
         }
-        self.value_struct_of(e).filter(|name| !self.is_nobox_struct(*name))
+        self.value_struct_of(e)
+            .filter(|name| !self.is_nobox_struct(*name))
     }
 
     /// The `V?` twin of [`Self::boxed_value_local`]: a plain binding whose cell
     /// holds a box or `nil`. A read for presence only is not a whole use.
-    pub(crate) fn nullable_boxed_value_local(&self, b: Idx<BindingInfo>, e: Idx<Expr>) -> Option<Ustr> {
+    pub(crate) fn nullable_boxed_value_local(
+        &self,
+        b: Idx<BindingInfo>,
+        e: Idx<Expr>,
+    ) -> Option<Ustr> {
         if self.scx.values_first_class
             || self.presence_only == Some(e)
             || !self.binds.contains_key(&raw(b))
@@ -371,7 +384,8 @@ impl Builder<'_> {
         {
             return None;
         }
-        self.value_struct_name_of(e).filter(|name| !self.is_nobox_struct(*name))
+        self.value_struct_name_of(e)
+            .filter(|name| !self.is_nobox_struct(*name))
     }
 
     /// Whether some `ref` borrow in this body (a `ref` argument or a `ref`
@@ -393,10 +407,16 @@ impl Builder<'_> {
                     .inf
                     .into_iter()
                     .flat_map(|inf| inf.ref_call_args.values().flatten().copied());
-                let ref_lets = self.body.statement_arena.iter().filter_map(|(_, st)| match st {
-                    Statement::Let { name, value } if self.binding_is_ref(*name) => Some(*value),
-                    _ => None,
-                });
+                let ref_lets = self
+                    .body
+                    .statement_arena
+                    .iter()
+                    .filter_map(|(_, st)| match st {
+                        Statement::Let { name, value } if self.binding_is_ref(*name) => {
+                            Some(*value)
+                        }
+                        _ => None,
+                    });
                 args.chain(ref_lets).filter_map(root).collect()
             })
             .contains(&raw(b))
@@ -404,7 +424,10 @@ impl Builder<'_> {
 
     pub(crate) fn binding_value_is_shareable(&self, b: Idx<BindingInfo>) -> bool {
         !self.binding_ref_borrowed(b)
-            && self.binds.get(&raw(b)).is_some_and(|cell| !self.unshareable_value_cells.contains(cell))
+            && self
+                .binds
+                .get(&raw(b))
+                .is_some_and(|cell| !self.unshareable_value_cells.contains(cell))
     }
 
     /// Whether binding `b`'s bone type is a NON-nullable value struct -- the one
@@ -417,7 +440,9 @@ impl Builder<'_> {
     /// lookup, so a generic bound to `BV2?` cannot be mistaken for a bare `BV2`
     /// and license SROA to rebuild an absent row as `BV2_ct(nil, nil)`.
     pub(crate) fn binding_is_nonnull_value_struct(&self, b: Idx<BindingInfo>) -> bool {
-        let Some(ty) = self.binding_ty(b) else { return false };
+        let Some(ty) = self.binding_ty(b) else {
+            return false;
+        };
         if let Some(concrete) = self.concrete_ty_id(ty) {
             let (payload, nullable) = concrete.peel_nullable();
             return !nullable
@@ -431,7 +456,9 @@ impl Builder<'_> {
         if self.is_nullable_ty(ty) {
             return false;
         }
-        let Some(rt) = self.resolve_tyid(ty) else { return false };
+        let Some(rt) = self.resolve_tyid(ty) else {
+            return false;
+        };
         matches!(
             self.ty_node(rt),
             Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }) if self.is_value_struct(name)
@@ -555,9 +582,11 @@ impl Builder<'_> {
         let domain = crate::site::SiteDomain::StructDefaults(sid.module, sid.def, args);
         if let Some(defaults_inf) = defaults_inf {
             let plan = self.concrete_plan;
-            let tables = plan
-                .domain_types(&domain)
-                .ok_or_else(|| gap(format!("concrete plan is missing type tables for site domain {domain:?}")))?;
+            let tables = plan.domain_types(&domain).ok_or_else(|| {
+                gap(format!(
+                    "concrete plan is missing type tables for site domain {domain:?}"
+                ))
+            })?;
             super::validate_concrete_type_tables(
                 self.ws,
                 defaults_inf,
@@ -633,7 +662,9 @@ impl Builder<'_> {
         variant: Ustr,
         args: VariantArgs,
     ) -> Result<ValueRepr, CompilerError> {
-        let tag = shape.tag_of(variant).ok_or_else(|| gap("enum variant not in shape"))?;
+        let tag = shape
+            .tag_of(variant)
+            .ok_or_else(|| gap("enum variant not in shape"))?;
         let tag_inst = self.emit_cur(Inst::Const(Lit::Int(tag)));
         // Map this variant's payload values onto their slot names.
         let mut by_slot: HashMap<Ustr, Idx<Inst>> = HashMap::new();
@@ -710,7 +741,7 @@ impl Builder<'_> {
         arg_idxs: &[Idx<Expr>],
     ) -> Result<ValueRepr, CompilerError> {
         let fname = self.ws.module(func.module).functions[func.func].name;
-        let [ ] = arg_idxs else {
+        let [] = arg_idxs else {
             return Err(CompilerError::new_with_label(
                 self.body.expr_spans[call],
                 format!("`@scene_type_key` fn `{fname}` takes no arguments"),
@@ -773,7 +804,10 @@ impl Builder<'_> {
         let ret = self.ws.module(func.module).functions[func.func]
             .return_ty
             .ok_or_else(|| {
-                reject(call_span, format!("`@struct_expand` fn `{fname}` must return `[(string, <enum>)]`"))
+                reject(
+                    call_span,
+                    format!("`@struct_expand` fn `{fname}` must return `[(string, <enum>)]`"),
+                )
             })?;
         let enum_name = pairs_return_enum(self.ws, ret).ok_or_else(|| {
             reject(
@@ -802,7 +836,9 @@ impl Builder<'_> {
         let Some(fields) = value_struct_field_tys(self.ws, struct_name) else {
             return Err(reject(
                 arg_span,
-                format!("`@struct_expand` fn `{fname}` argument must be a value struct, got `{struct_name}`"),
+                format!(
+                    "`@struct_expand` fn `{fname}` argument must be a value struct, got `{struct_name}`"
+                ),
             ));
         };
         // Validation (`struct_expand_rejection`) already gated this program, so a
@@ -812,7 +848,8 @@ impl Builder<'_> {
 
         let mut tuples = Vec::with_capacity(fields.len());
         for (i, ((field, _), variant)) in fields.iter().zip(variants).enumerate() {
-            let variant_v = self.make_single_payload_variant(enum_name, variant, parts[i].clone())?;
+            let variant_v =
+                self.make_single_payload_variant(enum_name, variant, parts[i].clone())?;
             let key = self.emit_cur(Inst::Const(Lit::Str(*field)));
             let tup = self.emit_cur(Inst::MakeTuple(vec![key, variant_v]));
             tuples.push(tup);
@@ -846,10 +883,11 @@ impl Builder<'_> {
         arg_idxs: &[Idx<Expr>],
         kind: ExpandKind,
     ) -> Result<ValueRepr, CompilerError> {
-        let resolved =
-            super::resolve_comptime_value(self.ws, self.body, call, arg_idxs, kind)?;
+        let resolved = super::resolve_comptime_value(self.ws, self.body, call, arg_idxs, kind)?;
         // The literal arg was just validated by the resolver.
-        let Expr::String(key) = self.body.expr_arena[arg_idxs[0]] else { unreachable!() };
+        let Expr::String(key) = self.body.expr_arena[arg_idxs[0]] else {
+            unreachable!()
+        };
         let input = match (kind, resolved.file_abs) {
             (ExpandKind::BuildVar, _) => crate::mir::ComptimeInputId::Var(key),
             // File reads are keyed by the ABSOLUTE path the resolver landed
@@ -873,7 +911,9 @@ impl Builder<'_> {
     ) -> Result<ValueRepr, CompilerError> {
         let entry = resolve_compute_entry(self.ws, self.body, call, arg_idxs)?;
         let key = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(
-            self.ws.module(entry.module).functions[entry.func].name.as_str(),
+            self.ws.module(entry.module).functions[entry.func]
+                .name
+                .as_str(),
         ))));
         Ok(ValueRepr::Scalar(key))
     }
@@ -905,7 +945,7 @@ impl Builder<'_> {
                 // return type rather than guessing from the call.
                 let returns_int = self.ws.module(func.module).functions[func.func]
                     .return_ty
-                    .map(|rt| self.ws.render(None, rt) == "int" )
+                    .map(|rt| self.ws.render(None, rt) == "int")
                     .unwrap_or(false);
                 if !returns_int {
                     return Err(reject(call_span, uniform_expand_arity_msg(fname)));
@@ -1000,7 +1040,12 @@ impl Builder<'_> {
         struct_name: Ustr,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         let repr = self.lower_expr_repr(u_e)?;
-        if self.scx.rep_arena().value_shape(repr.representation()).is_some() {
+        if self
+            .scx
+            .rep_arena()
+            .value_shape(repr.representation())
+            .is_some()
+        {
             return self.repr_to_leaves_bundle(&repr);
         }
         let shape = self.nominal_rep_shape_required(struct_name, false)?;
@@ -1069,7 +1114,10 @@ impl Builder<'_> {
             GlobalUniformSource::Boxed { boxed, paths } => {
                 let mut v = *boxed;
                 for field in &paths[i] {
-                    v = self.emit_cur(Inst::Field { base: v, field: *field });
+                    v = self.emit_cur(Inst::Field {
+                        base: v,
+                        field: *field,
+                    });
                 }
                 v
             }
@@ -1098,12 +1146,18 @@ impl Builder<'_> {
         let Some(struct_name) = self.value_struct_name_of(*u_e) else {
             return Err(reject(
                 u_span,
-                format!("`@uniform_values` fn `{fname}`'s argument must be a concrete value struct"),
+                format!(
+                    "`@uniform_values` fn `{fname}`'s argument must be a concrete value struct"
+                ),
             ));
         };
         let members = uniform_semantic_checked(self.ws, struct_name)
             .map_err(|m| reject(u_span, format!("`@uniform_values`: {m}")))?;
-        let Some(TypeExpr::App { ctor: TypeCtor::Nominal(block_name), .. }) = self.expr_ty(call) else {
+        let Some(TypeExpr::App {
+            ctor: TypeCtor::Nominal(block_name),
+            ..
+        }) = self.expr_ty(call)
+        else {
             return Err(reject(
                 call_span,
                 format!("`@uniform_values` fn `{fname}` must return the canonical packet struct"),
@@ -1138,7 +1192,11 @@ impl Builder<'_> {
                 | crate::gpu_layout::WireKind::F32x4
                 | crate::gpu_layout::WireKind::Mat4 => packet.float_variant,
             };
-            canonical.push(self.make_single_payload_variant(packet.leaf_enum, variant, ValueRepr::Scalar(leaf))?);
+            canonical.push(self.make_single_payload_variant(
+                packet.leaf_enum,
+                variant,
+                ValueRepr::Scalar(leaf),
+            )?);
         }
         let fingerprint = self.emit_cur(Inst::Const(Lit::Int(
             crate::shader_ir::semantic_uniform_group_fingerprint(struct_name, &members) as i64,
@@ -1146,7 +1204,10 @@ impl Builder<'_> {
         let values = self.emit_cur(Inst::MakeVec(canonical));
         Ok(ValueRepr::Scalar(self.emit_cur(Inst::MakeStruct {
             ty: Some(packet.block_name),
-            fields: vec![(packet.fingerprint_field, fingerprint), (packet.leaves_field, values)],
+            fields: vec![
+                (packet.fingerprint_field, fingerprint),
+                (packet.leaves_field, values),
+            ],
         })))
     }
 
@@ -1174,7 +1235,10 @@ impl Builder<'_> {
         let arg_span = self.body.expr_spans[arg];
 
         let Some(kind) = ret.and_then(|r| vertex_expand_return(self.ws, r)) else {
-            return Err(reject(call_span, vertex_expand_ret_msg(self.ws, fname, ret)));
+            return Err(reject(
+                call_span,
+                vertex_expand_ret_msg(self.ws, fname, ret),
+            ));
         };
         let Some(elem) = self.nb_type_value_elem(arg)? else {
             return Err(reject(arg_span, vertex_expand_arg_msg(fname)));
@@ -1214,8 +1278,15 @@ impl Builder<'_> {
         variant: Ustr,
         payload: ValueRepr,
     ) -> Result<Idx<Inst>, CompilerError> {
-        if let Some(shape) = EnumPlan::for_name(self.ws, enum_name).and_then(|plan| plan.flat().cloned()) {
-            let cells = self.flat_ctor_cells(&shape, variant, vec![FlatPayload::Repr(payload)], Vec::new())?;
+        if let Some(shape) =
+            EnumPlan::for_name(self.ws, enum_name).and_then(|plan| plan.flat().cloned())
+        {
+            let cells = self.flat_ctor_cells(
+                &shape,
+                variant,
+                vec![FlatPayload::Repr(payload)],
+                Vec::new(),
+            )?;
             let r = self.flat_cells_to_repr(&shape, cells);
             return self.pack(r);
         }
@@ -1226,7 +1297,9 @@ impl Builder<'_> {
         // rejecting a program the hand-written overload accepts.
         let payload = self.pack(payload)?;
         self.authorize_nobox_box(payload);
-        if let Some(shape) = EnumPlan::for_name(self.ws, enum_name).and_then(|plan| plan.cdata().cloned()) {
+        if let Some(shape) =
+            EnumPlan::for_name(self.ws, enum_name).and_then(|plan| plan.cdata().cloned())
+        {
             let tag = shape
                 .tag_of(variant)
                 .ok_or_else(|| gap("struct_expand: variant not in cdata enum shape"))?;
@@ -1265,7 +1338,9 @@ impl Builder<'_> {
         variant: Ustr,
         args: VariantArgs,
     ) -> Result<Idx<Inst>, CompilerError> {
-        if let Some(shape) = EnumPlan::for_name(self.ws, enum_name).and_then(|plan| plan.cdata().cloned()) {
+        if let Some(shape) =
+            EnumPlan::for_name(self.ws, enum_name).and_then(|plan| plan.cdata().cloned())
+        {
             let r = self.enum_cdata_repr(&shape, variant, args)?;
             return Ok(self.pack(r)?);
         }
@@ -1281,7 +1356,11 @@ impl Builder<'_> {
             // enum still has payload variants, so its values stay tables, and the
             // singleton is reference-equal across uses + usable as a Map key.
             let g = Ustr::from(
-                format!("__rock_enum_{}_{variant}", crate::mangle::type_symbol(self.ws, enum_name)).as_str(),
+                format!(
+                    "__rock_enum_{}_{variant}",
+                    crate::mangle::type_symbol(self.ws, enum_name)
+                )
+                .as_str(),
             );
             return Ok(self.emit_cur(Inst::Global(g)));
         }
@@ -1320,7 +1399,9 @@ impl Builder<'_> {
             return None;
         }
         if let Some(ty) = self.concrete_expr_ty(base) {
-            let Some(name) = ty.peel_nullable().0.nominal() else { return None };
+            let Some(name) = ty.peel_nullable().0.nominal() else {
+                return None;
+            };
             return bone_semantic::inference::vec_swizzle_components(name.as_str(), field.as_str());
         }
         None
@@ -1333,7 +1414,10 @@ impl Builder<'_> {
         let parts: Vec<ValueRepr> = idxs
             .iter()
             .map(|&i| {
-                ValueRepr::Scalar(self.emit_cur(Inst::Field { base: bv, field: Ustr::from(comps[i]) }))
+                ValueRepr::Scalar(self.emit_cur(Inst::Field {
+                    base: bv,
+                    field: Ustr::from(comps[i]),
+                }))
             })
             .collect();
         swizzle_group(parts)
@@ -1345,7 +1429,10 @@ enum GlobalUniformSource {
     /// A `nobox` global: one scalar global per leaf.
     LeafGlobals(Vec<Ustr>),
     /// A boxed global: the box plus each leaf's field path into it.
-    Boxed { boxed: Idx<Inst>, paths: Vec<Vec<Ustr>> },
+    Boxed {
+        boxed: Idx<Inst>,
+        paths: Vec<Vec<Ustr>>,
+    },
 }
 
 impl GlobalUniformSource {

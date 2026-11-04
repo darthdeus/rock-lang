@@ -6,8 +6,8 @@ use crate::common::{ws_of, ws_with_stdlib};
 
 use skull_codegen_lua::mangle_fn;
 use skull_mir::intrinsics::{
-    declared_intrinsics, expand_kind, is_intrinsic, is_native_required, unbacked_entries, Emission,
-    ExpandKind, IntrinsicEntry, IntrinsicTable,
+    Emission, ExpandKind, IntrinsicEntry, IntrinsicTable, declared_intrinsics, expand_kind,
+    is_intrinsic, is_native_required, unbacked_entries,
 };
 
 /// A stand-in backend table: two entries, one of which no declaration backs.
@@ -21,8 +21,14 @@ impl IntrinsicTable for ToyTable {
     }
     fn entries(&self) -> Vec<IntrinsicEntry> {
         vec![
-            IntrinsicEntry { name: "sin", arity: 1 },
-            IntrinsicEntry { name: "drifted", arity: 2 },
+            IntrinsicEntry {
+                name: "sin",
+                arity: 1,
+            },
+            IntrinsicEntry {
+                name: "drifted",
+                arity: 2,
+            },
         ]
     }
 }
@@ -48,7 +54,10 @@ fn unbacked_entries_flags_all_when_nothing_declared() {
 }
 
 /// Find the workspace `Function` named `name` (first match).
-fn find_fn<'a>(ws: &'a bone_semantic::inference::Workspace, name: &str) -> &'a bone_semantic::hir::Function {
+fn find_fn<'a>(
+    ws: &'a bone_semantic::inference::Workspace,
+    name: &str,
+) -> &'a bone_semantic::hir::Function {
     ws.modules
         .iter()
         .flat_map(|m| m.functions.iter().map(|(_, f)| f))
@@ -88,7 +97,10 @@ fn generic_intrinsic_key_is_declared_signature_mangle() {
     let key = mangle_fn(&ws, gid_generic);
     // The declared-signature mangle: generic param encoded as its NAME (`T`),
     // no `int`/`bool` from either call site.
-    assert_eq!(key, "gid_T", "generic intrinsic key must be the declared-signature mangle");
+    assert_eq!(
+        key, "gid_T",
+        "generic intrinsic key must be the declared-signature mangle"
+    );
     assert!(is_intrinsic(gid_generic));
     assert!(!is_native_required(gid_generic));
     assert!(expand_kind(gid_generic).is_none());
@@ -111,7 +123,10 @@ fn struct_expand_is_an_expansion_intrinsic() {
     let ws = ws_of(EXPAND);
     let upairs = find_fn(&ws, "upairs");
     assert_eq!(expand_kind(upairs), Some(ExpandKind::StructPairs));
-    assert!(is_intrinsic(upairs), "an expansion intrinsic is an intrinsic");
+    assert!(
+        is_intrinsic(upairs),
+        "an expansion intrinsic is an intrinsic"
+    );
 
     assert_eq!(
         mangle_fn(&ws, upairs),
@@ -132,7 +147,10 @@ fn stdlib_layer0_proving_set_is_declared_intrinsic() {
     let ws = ws_with_stdlib("fn main() {}");
     let declared = declared_intrinsics(&ws);
     let has = |n: &str, a: usize| {
-        assert!(declared.contains(&(ustr::Ustr::from(n), a)), "`{n}`/{a} not declared @intrinsic");
+        assert!(
+            declared.contains(&(ustr::Ustr::from(n), a)),
+            "`{n}`/{a} not declared @intrinsic"
+        );
     };
     // Math passthroughs (luajit mapping = inline(lua) body).
     for n in ["sin", "cos", "sqrt", "floor", "ceil"] {
@@ -158,7 +176,10 @@ fn stdlib_layer0_proving_set_is_declared_intrinsic() {
 }
 
 /// A stdlib fn by name (first match), or panic.
-fn stdlib_fn<'a>(ws: &'a bone_semantic::inference::Workspace, name: &str) -> &'a bone_semantic::hir::Function {
+fn stdlib_fn<'a>(
+    ws: &'a bone_semantic::inference::Workspace,
+    name: &str,
+) -> &'a bone_semantic::hir::Function {
     ws.modules
         .iter()
         .flat_map(|m| m.functions.iter().map(|(_, f)| f))
@@ -172,10 +193,20 @@ fn stdlib_fn<'a>(ws: &'a bone_semantic::inference::Workspace, name: &str) -> &'a
 #[test]
 fn stdlib_native_required_set_has_luajit_mapping() {
     let ws = ws_with_stdlib("fn main() {}");
-    for n in ["table_get", "table_set", "nb_get", "nb_set", "__nb_alloc_u8", "__nb_alloc_i8"] {
+    for n in [
+        "table_get",
+        "table_set",
+        "nb_get",
+        "nb_set",
+        "__nb_alloc_u8",
+        "__nb_alloc_i8",
+    ] {
         let f = stdlib_fn(&ws, n);
         assert!(is_native_required(f), "`{n}` must be @native_required");
         assert!(is_intrinsic(f), "`{n}` must be @intrinsic");
-        assert!(f.inline_body.is_some(), "`{n}` (native-required) must have an inline(lua) luajit mapping");
+        assert!(
+            f.inline_body.is_some(),
+            "`{n}` (native-required) must have an inline(lua) luajit mapping"
+        );
     }
 }

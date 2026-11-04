@@ -24,8 +24,9 @@ impl Builder<'_> {
         arms: comfy_la_arena::IdxRange<MatchArm>,
         shape: RetSlot,
     ) -> Result<ValueRepr, CompilerError> {
-        let results: Vec<Idx<Cell>> =
-            (0..shape.slot_count()).map(|_| self.f.new_cell(None)).collect();
+        let results: Vec<Idx<Cell>> = (0..shape.slot_count())
+            .map(|_| self.f.new_cell(None))
+            .collect();
         let variants = self.scrut_variants(scrut);
         let scrut_enum = self.scrut_enum_name(scrut);
         let scrut_s = self.lower_scrut(scrut)?;
@@ -51,8 +52,10 @@ impl Builder<'_> {
         self.f.set_term(self.cur, Term::Unreachable);
 
         self.cur = join;
-        let slots: Vec<Idx<Inst>> =
-            results.iter().map(|&cell| self.emit_cur(Inst::Load(cell))).collect();
+        let slots: Vec<Idx<Inst>> = results
+            .iter()
+            .map(|&cell| self.emit_cur(Inst::Load(cell)))
+            .collect();
         let mut idx = 0;
         Ok(self.slot_repr(&shape, &slots, &mut idx))
     }
@@ -121,7 +124,13 @@ impl Builder<'_> {
                 // A threaded flat enum binds as its cells; boxing it here cost a
                 // table that the arm's join or first payload read unpacked again.
                 // Native backends bind their own tagged enum value.
-                if let Scrut::Cells { tag, positional, named, shape } = scrut {
+                if let Scrut::Cells {
+                    tag,
+                    positional,
+                    named,
+                    shape,
+                } = scrut
+                {
                     let whole = self.binding_ty(b).and_then(|ty| self.concrete_ty_id(ty));
                     if !self.scx.native_flat_enums
                         && whole.is_some_and(|ty| ty.nominal() == Some(shape.name))
@@ -143,12 +152,7 @@ impl Builder<'_> {
                 {
                     val = self.copied_value_box(&ty, val)?;
                 }
-                let cell = self.new_binding_cell(
-                    b,
-                    name,
-                    self.binding_ty(b),
-                    Ustr::from(""),
-                );
+                let cell = self.new_binding_cell(b, name, self.binding_ty(b), Ustr::from(""));
                 self.emit_cur(Inst::Store { cell, value: val });
                 self.binds.insert(raw(b), cell);
                 Ok(())
@@ -160,7 +164,12 @@ impl Builder<'_> {
                 self.branch_or_fail(cond, fail);
                 Ok(())
             }
-            Pattern::EnumVariant { enum_name, variant, sub, .. } => {
+            Pattern::EnumVariant {
+                enum_name,
+                variant,
+                sub,
+                ..
+            } => {
                 // The variant's enum: the qualified name on the pattern, else the
                 // scrutinee's enum (an unqualified `Variant` form). `test_tag`
                 // gates on `payload_free_ordinal(en, variant)`: a payload-free
@@ -221,15 +230,18 @@ impl Builder<'_> {
             Pattern::Tuple { elements } => {
                 if let Scrut::Tuple(parts) = scrut {
                     for (i, sp) in elements.into_iter().enumerate() {
-                        let elem = parts
-                            .get(i)
-                            .ok_or_else(|| gap("tuple pattern exceeds its scrutinee representation"))?;
+                        let elem = parts.get(i).ok_or_else(|| {
+                            gap("tuple pattern exceeds its scrutinee representation")
+                        })?;
                         self.match_pattern(elem, sp, fail, variants, false, None)?;
                     }
                 } else {
                     let val = self.scrut_value(scrut);
                     for (i, sp) in elements.into_iter().enumerate() {
-                        let elem = self.emit_cur(Inst::TupleIndex { base: val, index: i });
+                        let elem = self.emit_cur(Inst::TupleIndex {
+                            base: val,
+                            index: i,
+                        });
                         self.match_pattern(&Scrut::Val(elem), sp, fail, variants, false, None)?;
                     }
                 }
@@ -268,7 +280,8 @@ impl Builder<'_> {
                 // written through its owner; its binder copies where a ref
                 // borrow could write it, and its `V?` descendants where it
                 // escapes ([`Self::owned_value_children`]).
-                let struct_destructure = name.is_some_and(|n| self.ws.struct_by_name.contains_key(&n))
+                let struct_destructure = name
+                    .is_some_and(|n| self.ws.struct_by_name.contains_key(&n))
                     && enum_name.is_none()
                     && !(top && name.is_some_and(|n| variants.contains(&n)));
                 for rfidx in fields {
@@ -281,9 +294,10 @@ impl Builder<'_> {
                     // a plain struct (an enum variant name is not in
                     // `struct_by_name`), so a variant record falls through.
                     let embedded = match (name, scrut) {
-                        (Some(sname), Scrut::Val(_)) if self.ws.struct_by_name.contains_key(&sname) => {
-                            self
-                                .struct_field_plan(sname, rpf.name, false)?
+                        (Some(sname), Scrut::Val(_))
+                            if self.ws.struct_by_name.contains_key(&sname) =>
+                        {
+                            self.struct_field_plan(sname, rpf.name, false)?
                                 .embed()
                                 .map(|(child, _)| (sname, child))
                         }
@@ -292,10 +306,7 @@ impl Builder<'_> {
                     let fv = match (embedded, scrut) {
                         (Some((sname, cname)), Scrut::Val(v)) => {
                             let parent = *v;
-                            if self
-                                .struct_field_plan(sname, rpf.name, false)?
-                                .nullable()
-                            {
+                            if self.struct_field_plan(sname, rpf.name, false)?.nullable() {
                                 self.materialize_embed_nullable(parent, rpf.name, cname)?
                             } else {
                                 self.materialize_embed(parent, rpf.name, cname)?
@@ -305,7 +316,9 @@ impl Builder<'_> {
                     };
                     let fv = match self.body.pattern_arena[rpf.pat] {
                         Pattern::Bind(b)
-                            if struct_destructure && !self.binding_is_ref(b) && !self.binding_ref_borrowed(b) =>
+                            if struct_destructure
+                                && !self.binding_is_ref(b)
+                                && !self.binding_ref_borrowed(b) =>
                         {
                             match self.binding_ty(b).and_then(|ty| self.concrete_ty_id(ty)) {
                                 Some(ty) => self.copied_value_box(&ty, fv)?,
@@ -377,32 +390,42 @@ impl Builder<'_> {
 
     /// Whether `pat` introduces a real binding (not a top-level variant-name tag
     /// test). Used to reject or-pattern alternatives that bind.
-    pub(crate) fn pattern_binds(&self, pat: Idx<Pattern>, variants: &HashSet<Ustr>, top: bool) -> bool {
+    pub(crate) fn pattern_binds(
+        &self,
+        pat: Idx<Pattern>,
+        variants: &HashSet<Ustr>,
+        top: bool,
+    ) -> bool {
         match self.body.pattern_arena[pat].clone() {
             Pattern::Wildcard | Pattern::Literal(_) | Pattern::Range { .. } => false,
             Pattern::Bind(b) => {
                 let name = self.body.binding_arena[b].name;
                 !(top && variants.contains(&name))
             }
-            Pattern::EnumVariant { sub, .. } => {
-                sub.into_iter().any(|p| self.pattern_binds(p, variants, false))
-            }
-            Pattern::Tuple { elements } => {
-                elements.into_iter().any(|p| self.pattern_binds(p, variants, false))
-            }
-            Pattern::Record { fields, .. } => fields
+            Pattern::EnumVariant { sub, .. } => sub
                 .into_iter()
-                .any(|f| self.pattern_binds(self.body.record_pat_field_arena[f].pat, variants, false)),
-            Pattern::Or { alternatives } => {
-                alternatives.into_iter().any(|p| self.pattern_binds(p, variants, top))
-            }
+                .any(|p| self.pattern_binds(p, variants, false)),
+            Pattern::Tuple { elements } => elements
+                .into_iter()
+                .any(|p| self.pattern_binds(p, variants, false)),
+            Pattern::Record { fields, .. } => fields.into_iter().any(|f| {
+                self.pattern_binds(self.body.record_pat_field_arena[f].pat, variants, false)
+            }),
+            Pattern::Or { alternatives } => alternatives
+                .into_iter()
+                .any(|p| self.pattern_binds(p, variants, top)),
         }
     }
 
     /// The enum NAME of payload field `i` of `enum_name::variant`, if that field's
     /// type is itself an enum (`None` otherwise) -- threaded into a nested match so
     /// the inner pattern tests the inner enum's tag repr.
-    pub(crate) fn variant_payload_enum(&self, enum_name: Ustr, variant: Ustr, i: usize) -> Option<Ustr> {
+    pub(crate) fn variant_payload_enum(
+        &self,
+        enum_name: Ustr,
+        variant: Ustr,
+        i: usize,
+    ) -> Option<Ustr> {
         use bone_semantic::hir::VariantPayload;
         let eid = self.ws.enums_by_name.get(&enum_name)?;
         let ed = &self.ws.modules[eid.module.index()].enums[eid.def];
@@ -412,9 +435,10 @@ impl Builder<'_> {
             _ => return None,
         };
         match static_ty(self.ws, ty)? {
-            TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } if self.ws.enums_by_name.contains_key(&n) => {
-                Some(n)
-            }
+            TypeExpr::App {
+                ctor: TypeCtor::Nominal(n),
+                ..
+            } if self.ws.enums_by_name.contains_key(&n) => Some(n),
             _ => None,
         }
     }
@@ -424,10 +448,18 @@ impl Builder<'_> {
     /// else lowers to an ordinary value.
     pub(crate) fn lower_scrut(&mut self, e: Idx<Expr>) -> Result<Scrut, CompilerError> {
         if let Expr::FieldAccess { base, field } = self.body.expr_arena[e].clone() {
-            if let Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) = self.field_base_ty(base) {
+            if let Some(TypeExpr::App {
+                ctor: TypeCtor::Nominal(sname),
+                ..
+            }) = self.field_base_ty(base)
+            {
                 if let Some(shape) = self.struct_field_plan(sname, field, false)?.flat_shape() {
                     let parent = self.lower_expr(base)?;
-                    return Ok(Scrut::Flat { parent, prefix: field, shape });
+                    return Ok(Scrut::Flat {
+                        parent,
+                        prefix: field,
+                        shape,
+                    });
                 }
             }
         }
@@ -452,7 +484,9 @@ impl Builder<'_> {
             {
                 let shape = EnumPlan::for_name(self.ws, name)
                     .and_then(|plan| plan.flat().cloned())
-                    .ok_or_else(|| gap(format!("flat enum `{name}` lost its match representation")))?;
+                    .ok_or_else(|| {
+                        gap(format!("flat enum `{name}` lost its match representation"))
+                    })?;
                 let cells = self.repr_group_to_cells(&shape, parts)?;
                 Ok(Scrut::Cells {
                     tag: cells.tag,
@@ -474,8 +508,17 @@ impl Builder<'_> {
                 let values = parts.iter().map(|p| self.scrut_value(p)).collect();
                 self.emit_cur(Inst::MakeTuple(values))
             }
-            Scrut::Flat { parent, prefix, shape } => self.materialize_flat(*parent, *prefix, shape),
-            Scrut::Cells { tag, positional, named, shape } => self.materialize_flat_cells(
+            Scrut::Flat {
+                parent,
+                prefix,
+                shape,
+            } => self.materialize_flat(*parent, *prefix, shape),
+            Scrut::Cells {
+                tag,
+                positional,
+                named,
+                shape,
+            } => self.materialize_flat_cells(
                 shape,
                 FlatCells {
                     tag: *tag,
@@ -507,8 +550,13 @@ impl Builder<'_> {
         let eid = self.ws.enums_by_name.get(&en)?;
         let ed = &self.ws.modules[eid.module.index()].enums[eid.def];
         let v = ed.variants.iter().find(|v| v.name == variant)?;
-        let VariantPayload::Tuple(tys) = &v.payload else { return None };
-        let TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } = static_ty(self.ws, *tys.get(i)?)?
+        let VariantPayload::Tuple(tys) = &v.payload else {
+            return None;
+        };
+        let TypeExpr::App {
+            ctor: TypeCtor::Nominal(n),
+            ..
+        } = static_ty(self.ws, *tys.get(i)?)?
         else {
             return None;
         };
@@ -560,8 +608,9 @@ impl Builder<'_> {
             )));
         }
         let width = shape.tuple_width();
-        let leaves: Vec<Idx<Inst>> =
-            (0..shape.leaf_count()).map(|k| self.scrut_slot(scrut, slot + k)).collect();
+        let leaves: Vec<Idx<Inst>> = (0..shape.leaf_count())
+            .map(|k| self.scrut_slot(scrut, slot + k))
+            .collect();
         let named = shape
             .record_fields
             .iter()
@@ -580,13 +629,20 @@ impl Builder<'_> {
     fn scrut_slot(&mut self, scrut: &Scrut, slot: usize) -> Idx<Inst> {
         match scrut {
             Scrut::Cells { positional, .. } => positional[slot],
-            Scrut::Flat { parent, prefix, .. } => {
-                self.emit_cur(Inst::Field { base: *parent, field: flat_payload_slot(*prefix, slot) })
-            }
-            Scrut::Val(v) => self.emit_cur(Inst::TupleIndex { base: *v, index: slot }),
+            Scrut::Flat { parent, prefix, .. } => self.emit_cur(Inst::Field {
+                base: *parent,
+                field: flat_payload_slot(*prefix, slot),
+            }),
+            Scrut::Val(v) => self.emit_cur(Inst::TupleIndex {
+                base: *v,
+                index: slot,
+            }),
             Scrut::Tuple(_) => {
                 let value = self.scrut_value(scrut);
-                self.emit_cur(Inst::TupleIndex { base: value, index: slot })
+                self.emit_cur(Inst::TupleIndex {
+                    base: value,
+                    index: slot,
+                })
             }
         }
     }
@@ -597,16 +653,21 @@ impl Builder<'_> {
     pub(crate) fn scrut_payload(&mut self, scrut: &Scrut, i: usize, cdata: bool) -> Idx<Inst> {
         match scrut {
             Scrut::Cells { positional, .. } => positional[i],
-            Scrut::Flat { parent, prefix, .. } => {
-                self.emit_cur(Inst::Field { base: *parent, field: flat_payload_slot(*prefix, i) })
-            }
-            Scrut::Val(v) if cdata => {
-                self.emit_cur(Inst::Field { base: *v, field: Ustr::from(format!("_{i}").as_str()) })
-            }
+            Scrut::Flat { parent, prefix, .. } => self.emit_cur(Inst::Field {
+                base: *parent,
+                field: flat_payload_slot(*prefix, i),
+            }),
+            Scrut::Val(v) if cdata => self.emit_cur(Inst::Field {
+                base: *v,
+                field: Ustr::from(format!("_{i}").as_str()),
+            }),
             Scrut::Val(v) => self.emit_cur(Inst::TupleIndex { base: *v, index: i }),
             Scrut::Tuple(_) => {
                 let value = self.scrut_value(scrut);
-                self.emit_cur(Inst::TupleIndex { base: value, index: i })
+                self.emit_cur(Inst::TupleIndex {
+                    base: value,
+                    index: i,
+                })
             }
         }
     }
@@ -625,15 +686,22 @@ impl Builder<'_> {
                 .iter()
                 .find(|(n, _)| *n == field)
                 .map(|(_, v)| *v)
-                .ok_or_else(|| gap(format!(
-                    "record field `{field}` is absent from flat enum `{}`",
-                    shape.name
-                ))),
-            Scrut::Flat { parent, prefix, .. } => {
-                Ok(self.emit_cur(Inst::Field { base: *parent, field: flat_named_slot(*prefix, field) }))
-            }
+                .ok_or_else(|| {
+                    gap(format!(
+                        "record field `{field}` is absent from flat enum `{}`",
+                        shape.name
+                    ))
+                }),
+            Scrut::Flat { parent, prefix, .. } => Ok(self.emit_cur(Inst::Field {
+                base: *parent,
+                field: flat_named_slot(*prefix, field),
+            })),
             Scrut::Val(v) => {
-                let f = if cdata { slot_name(field.as_str()) } else { field };
+                let f = if cdata {
+                    slot_name(field.as_str())
+                } else {
+                    field
+                };
                 Ok(self.emit_cur(Inst::Field { base: *v, field: f }))
             }
             Scrut::Tuple(_) => {
@@ -647,11 +715,18 @@ impl Builder<'_> {
     /// IS its ordinal int (compare ints); a cdata enum compares `.__tag` (int); a
     /// table enum compares `.__variant` (string); a FLATTENED field compares its
     /// `{prefix}__tag` slot; threaded CELLS compare the held tag (both strings).
-    pub(crate) fn test_tag(&mut self, scrut: &Scrut, variant: Ustr, enum_name: Option<Ustr>, fail: Idx<Block>) {
+    pub(crate) fn test_tag(
+        &mut self,
+        scrut: &Scrut,
+        variant: Ustr,
+        enum_name: Option<Ustr>,
+        fail: Idx<Block>,
+    ) {
         let flat_tag = match scrut {
-            Scrut::Flat { parent, prefix, .. } => {
-                Some(self.emit_cur(Inst::Field { base: *parent, field: flat_tag_slot(*prefix) }))
-            }
+            Scrut::Flat { parent, prefix, .. } => Some(self.emit_cur(Inst::Field {
+                base: *parent,
+                field: flat_tag_slot(*prefix),
+            })),
             Scrut::Cells { tag, .. } => Some(*tag),
             Scrut::Val(_) | Scrut::Tuple(_) => None,
         };
@@ -672,7 +747,10 @@ impl Builder<'_> {
             .and_then(|en| EnumPlan::for_name(self.ws, en).and_then(|plan| plan.cdata().cloned()))
             .and_then(|s| s.tag_of(variant))
         {
-            let tag = self.emit_cur(Inst::Field { base: val, field: Ustr::from("__tag") });
+            let tag = self.emit_cur(Inst::Field {
+                base: val,
+                field: Ustr::from("__tag"),
+            });
             let want = self.emit_cur(Inst::Const(Lit::Int(ord)));
             let cond = self.emit_cur(Inst::Eq(tag, want));
             self.branch_or_fail(cond, fail);
@@ -710,8 +788,15 @@ impl Builder<'_> {
         else_branch: Option<Idx<Expr>>,
         result_shape: Option<RetSlot>,
     ) -> Result<ValueRepr, CompilerError> {
-        self.lower_if_let_inner(pattern, value, then_branch, else_branch, result_shape, false)?
-            .ok_or_else(|| gap("value-position if let produced no result"))
+        self.lower_if_let_inner(
+            pattern,
+            value,
+            then_branch,
+            else_branch,
+            result_shape,
+            false,
+        )?
+        .ok_or_else(|| gap("value-position if let produced no result"))
     }
 
     pub(crate) fn lower_if_let_stmt(
@@ -765,14 +850,13 @@ impl Builder<'_> {
             self.current_expr_unit_storage_ty_id()
         };
         let nobox_binding = match self.body.pattern_arena[pattern] {
-            Pattern::Bind(binding) if self.expr_is_nullable(value) => {
-                self.nobox_binding_shape(binding)?
-                    .or(self.nullable_value_shape_of(value)?.map(|mut shape| {
-                        shape.nullable = false;
-                        shape
-                    }))
-                    .map(|shape| (binding, shape))
-            }
+            Pattern::Bind(binding) if self.expr_is_nullable(value) => self
+                .nobox_binding_shape(binding)?
+                .or(self.nullable_value_shape_of(value)?.map(|mut shape| {
+                    shape.nullable = false;
+                    shape
+                }))
+                .map(|shape| (binding, shape)),
             _ => None,
         };
         let tuple_shape = if nobox_binding.is_none() && self.pattern_is_names_only(pattern) {
@@ -781,15 +865,15 @@ impl Builder<'_> {
             None
         };
 
-        let (scrutinee, results, else_bb, join) = if let Some((binding, binding_shape)) = nobox_binding
+        let (scrutinee, results, else_bb, join) = if let Some((binding, binding_shape)) =
+            nobox_binding
         {
             let mut scrut_shape = binding_shape.clone();
             scrut_shape.nullable = true;
             let bundle = self.lower_expr_repr(value)?;
             let owned = self.snapshot_opaque_value(bundle.value().clone())?;
             let bundle = ValueBundle::new(bundle.representation(), owned);
-            let leaves = self
-                .repr_to_slot_values_bundle(&bundle, &RetSlot::Leaves(scrut_shape))?;
+            let leaves = self.repr_to_slot_values_bundle(&bundle, &RetSlot::Leaves(scrut_shape))?;
             let (present, values) = leaves
                 .split_first()
                 .expect("a nullable shape carries its presence leaf first");
@@ -807,7 +891,11 @@ impl Builder<'_> {
             let join = self.f.new_block();
             self.f.set_term(
                 self.cur,
-                Term::Branch { cond: *present, then_bb, else_bb },
+                Term::Branch {
+                    cond: *present,
+                    then_bb,
+                    else_bb,
+                },
             );
             (
                 IfLetScrutinee::Nobox {
@@ -845,7 +933,10 @@ impl Builder<'_> {
                 nullable: false,
             };
             let slots = self.tuple_repr_to_slots(
-                ValueRepr::Tuple { parts, present: None },
+                ValueRepr::Tuple {
+                    parts,
+                    present: None,
+                },
                 &bound_shape,
             )?;
             let then_bb = self.f.new_block();
@@ -853,7 +944,11 @@ impl Builder<'_> {
             let join = self.f.new_block();
             self.f.set_term(
                 self.cur,
-                Term::Branch { cond: present, then_bb, else_bb },
+                Term::Branch {
+                    cond: present,
+                    then_bb,
+                    else_bb,
+                },
             );
             (
                 IfLetScrutinee::Tuple {
@@ -886,7 +981,11 @@ impl Builder<'_> {
                 let cont = self.f.new_block();
                 self.f.set_term(
                     self.cur,
-                    Term::Branch { cond: is_nil, then_bb: else_bb, else_bb: cont },
+                    Term::Branch {
+                        cond: is_nil,
+                        then_bb: else_bb,
+                        else_bb: cont,
+                    },
                 );
                 self.cur = cont;
             }
@@ -948,8 +1047,10 @@ impl Builder<'_> {
             self.store_bundle_and_join(&results, &shape, &ev, join)?;
 
             self.cur = join;
-            let slots: Vec<Idx<Inst>> =
-                results.iter().map(|&cell| self.emit_cur(Inst::Load(cell))).collect();
+            let slots: Vec<Idx<Inst>> = results
+                .iter()
+                .map(|&cell| self.emit_cur(Inst::Load(cell)))
+                .collect();
             let mut idx = 0;
             Ok(Some(self.slot_repr(&shape, &slots, &mut idx)))
         } else {
@@ -1002,7 +1103,9 @@ impl Builder<'_> {
         // The CALLEE's instantiation, via the same oracle `lower_call` uses --
         // not the enclosing body's `spec_subst`, which is empty in a
         // non-generic caller and left every slot `Opaque`.
-        let Some(shape) = self.call_ret_tuple_shape(e)? else { return Ok(None) };
+        let Some(shape) = self.call_ret_tuple_shape(e)? else {
+            return Ok(None);
+        };
         Ok(shape.nullable.then_some(shape))
     }
 
@@ -1025,14 +1128,19 @@ impl Builder<'_> {
         e: Idx<Expr>,
     ) -> Result<Option<TupleRetShape>, CompilerError> {
         if let Expr::Var(b) = self.body.expr_arena[e] {
-            let Some((_, shape)) = self.tuple_binds.get(&raw(b)) else { return Ok(None) };
+            let Some((_, shape)) = self.tuple_binds.get(&raw(b)) else {
+                return Ok(None);
+            };
             return Ok(shape.nullable.then(|| shape.clone()));
         }
         if self.is_safe_nav(e) {
             let Some(inner) = self.peeled_tuple_shape(e)?.filter(TupleRetShape::splats) else {
                 return Ok(None);
             };
-            return Ok(Some(TupleRetShape { nullable: true, ..inner }));
+            return Ok(Some(TupleRetShape {
+                nullable: true,
+                ..inner
+            }));
         }
         self.nullable_tuple_call_shape(e)
     }
@@ -1085,7 +1193,9 @@ impl Builder<'_> {
                     return Err(gap("a tuple pattern against a non-tuple wire slot"));
                 };
                 if elements.len() != inner.slots.len() {
-                    return Err(gap("a tuple pattern of a different arity than its wire slot"));
+                    return Err(gap(
+                        "a tuple pattern of a different arity than its wire slot",
+                    ));
                 }
                 for (p, s) in elements.into_iter().zip(inner.slots.clone()) {
                     self.bind_names_slot(p, &s, values, idx)?;
@@ -1122,7 +1232,14 @@ impl Builder<'_> {
             let nil = self.emit_cur(Inst::Const(Lit::Nil));
             let is_nil = self.emit_cur(Inst::Eq(val_v, nil));
             let cont = self.f.new_block();
-            self.f.set_term(self.cur, Term::Branch { cond: is_nil, then_bb: exit, else_bb: cont });
+            self.f.set_term(
+                self.cur,
+                Term::Branch {
+                    cond: is_nil,
+                    then_bb: exit,
+                    else_bb: cont,
+                },
+            );
             self.cur = cont;
         }
         // Match: failure exits the loop; on success `self.cur` holds the bindings.
@@ -1203,7 +1320,11 @@ impl Builder<'_> {
 
         self.cur = latch;
         let i_v2 = self.emit_cur(Inst::Load(i_cell));
-        let one = self.emit_cur(Inst::Const(if is_uint { Lit::Uint(1) } else { Lit::Int(1) }));
+        let one = self.emit_cur(Inst::Const(if is_uint {
+            Lit::Uint(1)
+        } else {
+            Lit::Int(1)
+        }));
         let inc = if is_uint {
             self.emit_cur(Inst::UintAdd(i_v2, one))
         } else {

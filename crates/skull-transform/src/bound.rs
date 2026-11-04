@@ -14,11 +14,9 @@ use comfy_la_arena::Idx;
 use skull_mir::bound::ResolvedBoundNext;
 use skull_mir::concrete::ConcretePlans;
 use skull_mir::instance::Instance;
-use skull_mir::lower::{
-    bound_next_shape_from_concrete, BoundNextElem, ElemRebuild,
-};
-use skull_mir::monoty::MonoInterner;
+use skull_mir::lower::{BoundNextElem, ElemRebuild, bound_next_shape_from_concrete};
 use skull_mir::mir::*;
+use skull_mir::monoty::MonoInterner;
 
 /// Resolve every placeholder in a body that is being emitted STANDALONE at one
 /// instantiation, from the tree its specialization demand carried.
@@ -154,7 +152,11 @@ fn substitute_bound_call_inner(
         return Ok(());
     };
     let (dests, args) = (dests.clone(), args.clone());
-    func.insts[call] = Inst::CallMulti { dests, func: owner.func, args };
+    func.insts[call] = Inst::CallMulti {
+        dests,
+        func: owner.func,
+        args,
+    };
     skull_mir::site::record_call_owner(func, call, &owner);
     let abi = skull_mir::lower::owner_abi_plan(ws, scx, concrete_plans, &owner)?;
     func.call_abi_plans.insert(call, abi);
@@ -303,7 +305,10 @@ fn repack_bound_next_element(
     let mut tail: Vec<Idx<Inst>> = Vec::new();
     let mut taken = 0usize;
     let packed = emit_elem_rebuild(func, plan, &leaf_cells, &mut taken, &mut tail)?;
-    let store = func.alloc_inst(Inst::Store { cell: elem_cell, value: packed });
+    let store = func.alloc_inst(Inst::Store {
+        cell: elem_cell,
+        value: packed,
+    });
 
     // Inserted immediately after the call, in its own block: the element cell must
     // hold the rebuilt value before the `ok` branch reads it.

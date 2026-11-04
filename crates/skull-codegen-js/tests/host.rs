@@ -22,7 +22,11 @@ process.stdout.write(vm.runInContext("JSON.stringify({{out: __out.join(''), err:
         body = js_string(body)
     );
     let output = node().arg("-e").arg(script).output().expect("run node");
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     (field(&stdout, "out"), field(&stdout, "err"))
 }
@@ -44,7 +48,10 @@ fn js_string(s: &str) -> String {
 /// The string value of `"name":"..."` in the harness's flat JSON line.
 fn field(json: &str, name: &str) -> String {
     let key = format!("\"{name}\":\"");
-    let start = json.find(&key).unwrap_or_else(|| panic!("no `{name}` in {json}")) + key.len();
+    let start = json
+        .find(&key)
+        .unwrap_or_else(|| panic!("no `{name}` in {json}"))
+        + key.len();
     let mut out = String::new();
     let mut chars = json[start..].chars();
     while let Some(c) = chars.next() {
@@ -90,7 +97,10 @@ fn main() {
 
 fn whole_program(host: &str) -> String {
     let ws = ws_with(PROGRAM);
-    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("test module");
     let prog = skull_codegen_js::emit::emit_program(&ws, mid)
         .unwrap_or_else(|e| panic!("emit_program rejected: {}", e.message));
     let mut js = skull_codegen_js::assemble_prelude(&prog.program, prog.has_code_refs(), host, &[]);
@@ -122,7 +132,11 @@ fn run_node_default(seed: &str) -> String {
         .arg(whole_program(skull_codegen_js::JS_NODE_HOST))
         .output()
         .expect("run node");
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     String::from_utf8_lossy(&output.stdout).to_string()
 }
 

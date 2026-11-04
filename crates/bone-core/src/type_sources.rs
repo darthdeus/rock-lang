@@ -21,7 +21,9 @@ pub struct TypeSource {
 pub fn declaration_sources(ws: &Workspace, roots: &[Ustr]) -> Result<Vec<TypeSource>, String> {
     for root in roots {
         if ws.type_generic_arity.get(root).copied().unwrap_or(0) != 0 {
-            return Err(format!("source provenance requires a closed named root: {root}"));
+            return Err(format!(
+                "source provenance requires a closed named root: {root}"
+            ));
         }
     }
     let mut names = roots.to_vec();
@@ -35,7 +37,12 @@ pub fn declaration_sources(ws: &Workspace, roots: &[Ustr]) -> Result<Vec<TypeSou
             }
             let module = if let Some(id) = ws.struct_by_name.get(&name) {
                 let module = ws.module(id.module);
-                types.extend(module.structs[id.def].fields.iter().map(|field| field.storage_ty));
+                types.extend(
+                    module.structs[id.def]
+                        .fields
+                        .iter()
+                        .map(|field| field.storage_ty),
+                );
                 module
             } else if let Some(id) = ws.enums_by_name.get(&name) {
                 let module = ws.module(id.module);
@@ -43,7 +50,9 @@ pub fn declaration_sources(ws: &Workspace, roots: &[Ustr]) -> Result<Vec<TypeSou
                     match &variant.payload {
                         VariantPayload::Unit => {}
                         VariantPayload::Tuple(fields) => types.extend(fields.iter().copied()),
-                        VariantPayload::Record(fields) => types.extend(fields.iter().map(|field| field.storage_ty)),
+                        VariantPayload::Record(fields) => {
+                            types.extend(fields.iter().map(|field| field.storage_ty))
+                        }
                     }
                 }
                 module
@@ -54,7 +63,13 @@ pub fn declaration_sources(ws: &Workspace, roots: &[Ustr]) -> Result<Vec<TypeSou
             } else {
                 return Err(format!("source provenance cannot find declaration {name}"));
             };
-            owners.insert(name.to_string(), TypeSource { name, file: module.file });
+            owners.insert(
+                name.to_string(),
+                TypeSource {
+                    name,
+                    file: module.file,
+                },
+            );
             continue;
         }
         let ty = types.pop().expect("pending type or declaration");
@@ -66,9 +81,13 @@ pub fn declaration_sources(ws: &Workspace, roots: &[Ustr]) -> Result<Vec<TypeSou
         };
         match ws.module(mid).ty_arena[idx] {
             TypeExpr::Builtin(_) | TypeExpr::Generic(_, _) => {}
-            TypeExpr::Infer(_, _) => return Err("source provenance encountered an unresolved type".to_string()),
+            TypeExpr::Infer(_, _) => {
+                return Err("source provenance encountered an unresolved type".to_string());
+            }
             TypeExpr::Nullable(inner) => types.push(TyId::Static(mid, inner)),
-            TypeExpr::Tuple { elements } => types.extend(elements.into_iter().map(|idx| TyId::Static(mid, idx))),
+            TypeExpr::Tuple { elements } => {
+                types.extend(elements.into_iter().map(|idx| TyId::Static(mid, idx)))
+            }
             TypeExpr::Function { params, ret } => {
                 types.extend(params.into_iter().map(|idx| TyId::Static(mid, idx)));
                 types.push(TyId::Static(mid, ret));

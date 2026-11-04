@@ -8,10 +8,16 @@ use skull_mir::mir::FuncRef;
 
 /// FuncRef of the unique fn named `name` in the `<test>` module.
 fn test_fn_ref(ws: &bone_semantic::inference::Workspace, name: &str) -> FuncRef {
-    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("test module");
     for (fid, f) in ws.module(mid).functions.iter() {
         if f.name.as_str() == name {
-            return FuncRef { module: mid, func: fid };
+            return FuncRef {
+                module: mid,
+                func: fid,
+            };
         }
     }
     panic!("no fn `{name}` in <test> module");
@@ -27,7 +33,10 @@ fn co_emits_plain_rock_callee_transitively() {
     let root = test_fn_ref(&ws, "root");
     let js = skull_codegen_js::emit::emit_with_closure(&ws, &[(root, "root".to_string())])
         .expect("closure emit");
-    assert!(js.contains("function root("), "root under its given name:\n{js}");
+    assert!(
+        js.contains("function root("),
+        "root under its given name:\n{js}"
+    );
     // Callees under the shared (name + signature) mangle, one definition each
     // even though `leaf` is reached twice.
     assert_eq!(js.matches("function helper_int").count(), 1, "{js}");
@@ -63,8 +72,14 @@ fn user_fn_shadowing_intrinsic_name_is_co_emitted_not_mapped() {
     let root = test_fn_ref(&ws, "root");
     let js = skull_codegen_js::emit::emit_with_closure(&ws, &[(root, "root".to_string())])
         .expect("closure emit");
-    assert!(!js.contains("Math.abs"), "user `abs` must not map to Math.abs:\n{js}");
-    assert!(js.contains("function abs_bool"), "user `abs` co-emitted:\n{js}");
+    assert!(
+        !js.contains("Math.abs"),
+        "user `abs` must not map to Math.abs:\n{js}"
+    );
+    assert!(
+        js.contains("function abs_bool"),
+        "user `abs` co-emitted:\n{js}"
+    );
 }
 
 #[test]

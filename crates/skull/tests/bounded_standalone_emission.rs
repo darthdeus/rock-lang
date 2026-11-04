@@ -19,7 +19,9 @@ use skull_mir::mir::{Inst, MirFunc};
 use skull_mir::monoty::{MonoCtor, MonoTy};
 use ustr::Ustr;
 
-use crate::common::{definitions_matching, function_body, AblationGuard as ModeGuard, InlineOffGuard};
+use crate::common::{
+    AblationGuard as ModeGuard, InlineOffGuard, definitions_matching, function_body,
+};
 
 static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
     rock_stdlib::stdlib_files()
@@ -93,7 +95,9 @@ fn main() {
 fn emit(src: &str) -> Result<String, String> {
     let ws = check(src);
     let mid = skull::user_module_id(&ws).expect("user module");
-    skull::mir_emit::emit_workspace_mir(&ws, mid).map(|e| e.lua).map_err(|e| e.message)
+    skull::mir_emit::emit_workspace_mir(&ws, mid)
+        .map(|e| e.lua)
+        .map_err(|e| e.message)
 }
 
 fn emit_err(src: &str) -> Option<String> {
@@ -106,7 +110,11 @@ fn emit_err(src: &str) -> Option<String> {
 /// `__rock_mk_<symbol> = function(..) return function(..)`, so a scan for
 /// `function <symbol>` at column 0 finds nothing.
 fn body_of<'a>(lua: &'a str, symbol: &str) -> Vec<&'a str> {
-    function_body(lua, symbol).lines().skip(1).filter(|l| *l != "end" && *l != "end end").collect()
+    function_body(lua, symbol)
+        .lines()
+        .skip(1)
+        .filter(|l| *l != "end" && *l != "end end")
+        .collect()
 }
 
 /// The one emitted specialization whose name starts with `prefix` and carries a
@@ -229,7 +237,10 @@ fn main() {
         .plans
         .iter()
         .find(|(inst, plan)| {
-            ws.module(inst.func.module).functions[inst.func.func].name.as_str() == "sum_all"
+            ws.module(inst.func.module).functions[inst.func.func]
+                .name
+                .as_str()
+                == "sum_all"
                 && !plan.bound_tree.is_empty()
         })
         .expect("no standalone bounded instance with a resolved tree");
@@ -257,14 +268,20 @@ fn main() {
         &bodies.plans,
     )
     .expect("intact bounded body did not resolve");
-    assert_eq!(first_call_multi_arity(&intact), 2, "the control lost (ok, int)");
+    assert_eq!(
+        first_call_multi_arity(&intact),
+        2,
+        "the control lost (ok, int)"
+    );
 
     let mut poisoned_plans = (*bodies.plans).clone();
     let pair = MonoTy::App {
         ctor: MonoCtor::Nominal(Ustr::from("Pair")),
         params: Vec::new(),
     };
-    let wrong_result = graph.interner().intern(MonoTy::Tuple(vec![MonoTy::Bool, pair]));
+    let wrong_result = graph
+        .interner()
+        .intern(MonoTy::Tuple(vec![MonoTy::Bool, pair]));
     let witness_plan = std::sync::Arc::make_mut(
         poisoned_plans
             .get_mut(&witness)
@@ -283,13 +300,9 @@ fn main() {
             .result = Some(wrong_result);
         }
     }
-    let mut poisoned = skull_mir::lower::lower_instance_with_plans(
-        &ws,
-        &scx,
-        &poisoned_owner,
-        &poisoned_plans,
-    )
-    .expect("plan mutation made the bounded body fail before rewrite");
+    let mut poisoned =
+        skull_mir::lower::lower_instance_with_plans(&ws, &scx, &poisoned_owner, &poisoned_plans)
+            .expect("plan mutation made the bounded body fail before rewrite");
     skull_transform::bound::resolve_standalone_bound_calls(
         &ws,
         &scx,

@@ -5,7 +5,7 @@
 
 use bone_semantic::prelude::{InferenceResult, ModuleId, Workspace};
 
-use crate::backend::{expected_for_anchor, fn_unique_return_ty_in_scope, ExpectedArg};
+use crate::backend::{ExpectedArg, expected_for_anchor, fn_unique_return_ty_in_scope};
 
 /// True when a leading `.` sits just before the partial identifier under the
 /// cursor (a key-path `.field`, not member access -- `receiver_path` already
@@ -52,7 +52,11 @@ pub(crate) fn co_fn_return_slot(src: &[u8], offset: usize) -> bool {
     }
     // before the `(`: ws, fn-name ident, ws, `fn`, ws, `co`
     let mut p = k;
-    let skip_ws = |p: &mut usize| while *p > 0 && src[*p - 1].is_ascii_whitespace() { *p -= 1; };
+    let skip_ws = |p: &mut usize| {
+        while *p > 0 && src[*p - 1].is_ascii_whitespace() {
+            *p -= 1;
+        }
+    };
     skip_ws(&mut p);
     let name_end = p;
     while p > 0 && is_ident_byte(src[p - 1]) {
@@ -263,7 +267,11 @@ pub(crate) fn in_pattern_position(src: &str, offset: usize) -> bool {
     }
     // an already-typed payload pattern, e.g. `Loaded(x)` / `Bandage { .. }`
     if i < b.len() && (b[i] == b'(' || b[i] == b'{') {
-        let (open, close) = if b[i] == b'(' { (b'(', b')') } else { (b'{', b'}') };
+        let (open, close) = if b[i] == b'(' {
+            (b'(', b')')
+        } else {
+            (b'{', b'}')
+        };
         let mut depth = 0i32;
         while i < b.len() {
             if b[i] == open {
@@ -399,7 +407,11 @@ pub(crate) fn for_in_iterable_slot(src: &str, offset: usize) -> bool {
     while p > 0 && is_ident_byte(b[p - 1]) {
         p -= 1;
     }
-    let skip_ws = |p: &mut usize| while *p > 0 && b[*p - 1].is_ascii_whitespace() { *p -= 1; };
+    let skip_ws = |p: &mut usize| {
+        while *p > 0 && b[*p - 1].is_ascii_whitespace() {
+            *p -= 1;
+        }
+    };
     skip_ws(&mut p);
     let in_end = p;
     while p > 0 && is_ident_byte(b[p - 1]) {
@@ -521,7 +533,11 @@ pub(crate) fn classify(src: &str, offset: usize) -> CompletionCx {
     // less specific slot). So field_value must win whenever it fires;
     // arg_call is the fallback for a direct (non-record) call arg.
     let has_field_value = field_value.is_some();
-    let arg_call = if has_field_value { None } else { cx.and_then(|c| c.call_arg()) };
+    let arg_call = if has_field_value {
+        None
+    } else {
+        cx.and_then(|c| c.call_arg())
+    };
     let expr_position = !cx.is_some_and(|c| c.is_type_position());
     CompletionCx {
         member: cx.and_then(|c| c.member_path()),
@@ -534,14 +550,22 @@ pub(crate) fn classify(src: &str, offset: usize) -> CompletionCx {
         anchor: cx.and_then(slot_anchor),
         bool_chain: cx.is_some_and(|c| c.bool_condition_chain()),
         after_yield: expr_position && cx.is_some_and(|c| c.after_yield()),
-        param_type: if expr_position { None } else { cx.and_then(|c| c.param_type()) },
+        param_type: if expr_position {
+            None
+        } else {
+            cx.and_then(|c| c.param_type())
+        },
         // Same precedence as `arg_call` above: `named_arg_slot` is built on
         // the same `enclosing_arg_call` walk, so it has the identical bug --
         // typing a nested record literal's field VALUE (`run(Widget { x:
         // <cursor> })`) reports the OUTER call's still-unsupplied params as
         // `name:` candidates, leaking an unrelated arg-name suggestion into
         // an unrelated struct's field-value slot.
-        named_arg: if has_field_value { None } else { cx.and_then(|c| c.named_arg_slot()) },
+        named_arg: if has_field_value {
+            None
+        } else {
+            cx.and_then(|c| c.named_arg_slot())
+        },
         coroutine_generic: cx.is_some_and(|c| c.coroutine_first_generic_arg()),
         pattern_scrutinee: match_arm_scrutinee(src, offset),
         for_in: for_in_iterable_slot(src, offset),
@@ -604,13 +628,15 @@ impl CompletionCx {
         if let Some(cx) = self.ast.as_ref() {
             if cx.comparison_lhs().is_none() {
                 if let Some(name) = cx.assign_target_ident() {
-                    if let Some(ty) = crate::query::binding_ty_by_name(ws, mid, inf, offset, &name) {
+                    if let Some(ty) = crate::query::binding_ty_by_name(ws, mid, inf, offset, &name)
+                    {
                         return ExpectedArg::for_slot(ws, mid, inf, offset, ty);
                     }
                 }
             }
         }
-        self.anchor.and_then(|a| expected_for_anchor(ws, mid, inf, offset, a))
+        self.anchor
+            .and_then(|a| expected_for_anchor(ws, mid, inf, offset, a))
     }
 }
 

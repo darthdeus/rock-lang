@@ -23,7 +23,6 @@
 //! and no fn value anywhere -- this program was reaching it only through the
 //! missing slot.
 
-
 /// The repro, both arms -- the absent one no longer crashes.
 const RETURNED_LAMBDA: &str = r#"
 nobox value P { x: int, y: int }

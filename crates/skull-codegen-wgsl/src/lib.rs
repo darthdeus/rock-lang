@@ -21,26 +21,25 @@ use skull_mir::mir::{Block, Cell, Inst, Lit, MirFunc, Term};
 use skull_mir::monoty::{MonoInterner, MonoTy};
 use skull_mir::shader_ir::{
     ComputeAccess, ComputeAddressSpace, ComputeBuiltin, ComputeDispatchContract,
-    ComputeInterfacePlan, ComputeResourceShape, ComputeValueKind, FragmentOutput, LogicalArrayGroup,
-    LogicalComputeWorkgroup, LogicalTextureGroup, LogicalUniformGroup, ShaderIR, ShaderInstance,
-    ShaderInterfacePlan,
-    ShaderStage, ShaderStageIr, UniformRole, VertexRate,
+    ComputeInterfacePlan, ComputeResourceShape, ComputeValueKind, FragmentOutput,
+    LogicalArrayGroup, LogicalComputeWorkgroup, LogicalTextureGroup, LogicalUniformGroup, ShaderIR,
+    ShaderInstance, ShaderInterfacePlan, ShaderStage, ShaderStageIr, UniformRole, VertexRate,
 };
 use skull_parser::{CompilerError, CompilerErrorKind};
 use skull_wgsl_abi::{
-    WgslArtifactKind as SharedWgslArtifactKind, WgslComputeInfo as SharedWgslComputeInfo,
     WgslAbi as SharedWgslAbi, WgslArrayBlock as SharedWgslArrayBlock,
-    WgslArrayMember as SharedWgslArrayMember, WgslFragmentIo as SharedWgslFragmentIo,
-    WgslFragmentOutput as SharedWgslFragmentOutput, WgslFullscreenVertex as SharedWgslFullscreenVertex,
-    WgslGeometryKind as SharedWgslGeometryKind, WgslPrimitiveTopology as SharedWgslPrimitiveTopology,
-    WgslTextureBinding as SharedWgslTextureBinding, WgslTextureKind as SharedWgslTextureKind,
-    WgslComputeBuiltin as SharedWgslComputeBuiltin,
-    WgslComputeResource as SharedWgslComputeResource,
+    WgslArrayMember as SharedWgslArrayMember, WgslArtifactKind as SharedWgslArtifactKind,
+    WgslComputeBuiltin as SharedWgslComputeBuiltin, WgslComputeInfo as SharedWgslComputeInfo,
+    WgslComputeResource as SharedWgslComputeResource, WgslFragmentIo as SharedWgslFragmentIo,
+    WgslFragmentOutput as SharedWgslFragmentOutput,
+    WgslFullscreenVertex as SharedWgslFullscreenVertex, WgslGeometryKind as SharedWgslGeometryKind,
+    WgslPrimitiveTopology as SharedWgslPrimitiveTopology,
     WgslStorageAccess as SharedWgslStorageAccess,
     WgslStorageElementKind as SharedWgslStorageElementKind,
+    WgslTextureBinding as SharedWgslTextureBinding, WgslTextureKind as SharedWgslTextureKind,
     WgslUniformBlock as SharedWgslUniformBlock, WgslUniformMember as SharedWgslUniformMember,
-    WgslVertexAttribute as SharedWgslVertexAttribute, WgslVertexInput as SharedWgslVertexInput,
-    WgslVarying as SharedWgslVarying, WgslVisibility as SharedWgslVisibility,
+    WgslVarying as SharedWgslVarying, WgslVertexAttribute as SharedWgslVertexAttribute,
+    WgslVertexInput as SharedWgslVertexInput, WgslVisibility as SharedWgslVisibility,
 };
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
@@ -608,7 +607,10 @@ impl WgslAbiPlan {
                     size: 8,
                 },
             ],
-            visibility: WgslStageVisibility { vertex: true, fragment: false },
+            visibility: WgslStageVisibility {
+                vertex: true,
+                fragment: false,
+            },
         };
         let mut groups = iface.uniform_groups.clone();
         groups.sort_by_key(|g| uniform_role_key(g.role));
@@ -684,7 +686,10 @@ impl WgslAbiPlan {
     ) -> Result<Self, CompilerError> {
         validate_explicit_interface(iface, span)?;
         if vertex_entry.is_empty() || fragment_entry.is_empty() {
-            return Err(err(span, "WGSL explicit pipeline entry names cannot be empty"));
+            return Err(err(
+                span,
+                "WGSL explicit pipeline entry names cannot be empty",
+            ));
         }
         let mut vertex_inputs = Vec::new();
         let mut next_location = 0u32;
@@ -795,7 +800,10 @@ impl WgslAbiPlan {
                 binding: 0,
                 size: 16,
                 members: vec![],
-                visibility: WgslStageVisibility { vertex: false, fragment: false },
+                visibility: WgslStageVisibility {
+                    vertex: false,
+                    fragment: false,
+                },
             },
             uniform_blocks,
             array_blocks,
@@ -814,7 +822,10 @@ impl WgslAbiPlan {
         span: Span,
     ) -> Result<Self, CompilerError> {
         let Some(compute) = iface.compute.as_ref() else {
-            return Err(err(span, "WGSL compute projection requires a compute interface"));
+            return Err(err(
+                span,
+                "WGSL compute projection requires a compute interface",
+            ));
         };
         if iface.stages != [ShaderStage::Compute]
             || iface.fragment_output != FragmentOutput::None
@@ -824,7 +835,10 @@ impl WgslAbiPlan {
             || iface.textures.is_some()
             || !iface.bare_samplers.is_empty()
         {
-            return Err(err(span, "WGSL compute projection received graphics interface records"));
+            return Err(err(
+                span,
+                "WGSL compute projection received graphics interface records",
+            ));
         }
         if entry.is_empty() {
             return Err(err(span, "WGSL compute entry name cannot be empty"));
@@ -836,7 +850,10 @@ impl WgslAbiPlan {
         let dispatch_dimensions = match compute.dispatch {
             ComputeDispatchContract::Runtime { dimensions } => dimensions,
             ComputeDispatchContract::Fixed { .. } => {
-                return Err(err(span, "WGSL compute ABI requires a runtime dispatch contract"));
+                return Err(err(
+                    span,
+                    "WGSL compute ABI requires a runtime dispatch contract",
+                ));
             }
         };
         let mut resources = Vec::with_capacity(compute.resources.len());
@@ -852,13 +869,21 @@ impl WgslAbiPlan {
                 ComputeValueKind::I32 => SharedWgslStorageElementKind::I32,
                 ComputeValueKind::U32 => SharedWgslStorageElementKind::U32,
                 ComputeValueKind::AtomicU32 => SharedWgslStorageElementKind::AtomicU32,
-                ComputeValueKind::Bool => return Err(err(span, "WGSL compute storage resources require a numeric element kind")),
+                ComputeValueKind::Bool => {
+                    return Err(err(
+                        span,
+                        "WGSL compute storage resources require a numeric element kind",
+                    ));
+                }
             };
             let access = match resource.access {
                 ComputeAccess::Read => SharedWgslStorageAccess::Read,
                 ComputeAccess::ReadWrite => SharedWgslStorageAccess::ReadWrite,
                 ComputeAccess::Write => {
-                    return Err(err(span, "WGSL storage resources do not admit write-only access"));
+                    return Err(err(
+                        span,
+                        "WGSL storage resources do not admit write-only access",
+                    ));
                 }
             };
             identifier(resource.name, "compute storage resource", span)?;
@@ -883,7 +908,10 @@ impl WgslAbiPlan {
                 layout_uniform_group(
                     group,
                     resources.len() as u32 + binding as u32,
-                    WgslStageVisibility { vertex: false, fragment: false },
+                    WgslStageVisibility {
+                        vertex: false,
+                        fragment: false,
+                    },
                     span,
                 )
             })
@@ -895,7 +923,9 @@ impl WgslAbiPlan {
                 ComputeBuiltin::GlobalInvocationId => SharedWgslComputeBuiltin::GlobalInvocationId,
                 ComputeBuiltin::LocalInvocationId => SharedWgslComputeBuiltin::LocalInvocationId,
                 ComputeBuiltin::WorkgroupId => SharedWgslComputeBuiltin::WorkgroupId,
-                ComputeBuiltin::LocalInvocationIndex => SharedWgslComputeBuiltin::LocalInvocationIndex,
+                ComputeBuiltin::LocalInvocationIndex => {
+                    SharedWgslComputeBuiltin::LocalInvocationIndex
+                }
                 ComputeBuiltin::NumWorkgroups => SharedWgslComputeBuiltin::NumWorkgroups,
             })
             .collect();
@@ -921,7 +951,10 @@ impl WgslAbiPlan {
                 binding: 0,
                 size: 0,
                 members: Vec::new(),
-                visibility: WgslStageVisibility { vertex: false, fragment: false },
+                visibility: WgslStageVisibility {
+                    vertex: false,
+                    fragment: false,
+                },
             },
             uniform_blocks,
             array_blocks: Vec::new(),
@@ -959,7 +992,10 @@ impl WgslAbiPlan {
                 .clone();
             let expected = Self::compute(iface, &entry, span)?;
             if self != &expected {
-                return Err(err(span, "WGSL compute ABI plan no longer matches its interface projection"));
+                return Err(err(
+                    span,
+                    "WGSL compute ABI plan no longer matches its interface projection",
+                ));
             }
             return Ok(());
         }
@@ -1034,7 +1070,9 @@ impl WgslAbiPlan {
                 .collect(),
             fullscreen_vertex: SharedWgslFullscreenVertex {
                 topology: match self.fullscreen_vertex.topology {
-                    WgslPrimitiveTopology::TriangleStrip => SharedWgslPrimitiveTopology::TriangleStrip,
+                    WgslPrimitiveTopology::TriangleStrip => {
+                        SharedWgslPrimitiveTopology::TriangleStrip
+                    }
                 },
                 vertex_count: self.fullscreen_vertex.vertex_count,
                 varying_location: self.fullscreen_vertex.varying_location,
@@ -1059,11 +1097,18 @@ impl WgslAbiPlan {
                     struct_name: "FullscreenU".into(),
                     binding: 0,
                     size: 0,
-                    visibility: SharedWgslVisibility { vertex: false, fragment: false },
+                    visibility: SharedWgslVisibility {
+                        vertex: false,
+                        fragment: false,
+                    },
                     members: Vec::new(),
                 }
             },
-            uniform_blocks: self.uniform_blocks.iter().map(shared_uniform_block).collect(),
+            uniform_blocks: self
+                .uniform_blocks
+                .iter()
+                .map(shared_uniform_block)
+                .collect(),
             array_blocks: self.array_blocks.iter().map(shared_array_block).collect(),
             textures: self.textures.iter().map(shared_texture_binding).collect(),
             compute: self.compute.clone(),
@@ -1192,15 +1237,22 @@ fn validate_texture_orientation(
     iface: &ShaderInterfacePlan,
     span: Span,
 ) -> Result<(), CompilerError> {
-    let Some((_, kind)) = iface.uniform_group(UniformRole::Engine)
-        .and_then(|group| group.members.iter().find(|(name, _)| name.as_str() == "uTextureVFlip"))
-    else {
+    let Some((_, kind)) = iface.uniform_group(UniformRole::Engine).and_then(|group| {
+        group
+            .members
+            .iter()
+            .find(|(name, _)| name.as_str() == "uTextureVFlip")
+    }) else {
         return Ok(());
     };
     if *kind != WireKind::U32 {
         return Err(err(span, "engine texture orientation requires a uint mask"));
     }
-    if iface.textures.as_ref().is_some_and(|group| group.samplers.len() > u32::BITS as usize) {
+    if iface
+        .textures
+        .as_ref()
+        .is_some_and(|group| group.samplers.len() > u32::BITS as usize)
+    {
         return Err(unsupported_err(
             span,
             "per-texture WGPU Canvas orientation",
@@ -1317,13 +1369,18 @@ fn validate_fullscreen_interface(
 
 fn visibility_for_role(role: UniformRole) -> WgslStageVisibility {
     match role {
-        UniformRole::Engine => WgslStageVisibility { vertex: true, fragment: true },
-        UniformRole::Stage(ShaderStage::Vertex) => {
-            WgslStageVisibility { vertex: true, fragment: false }
-        }
-        UniformRole::Stage(ShaderStage::Fragment) => {
-            WgslStageVisibility { vertex: false, fragment: true }
-        }
+        UniformRole::Engine => WgslStageVisibility {
+            vertex: true,
+            fragment: true,
+        },
+        UniformRole::Stage(ShaderStage::Vertex) => WgslStageVisibility {
+            vertex: true,
+            fragment: false,
+        },
+        UniformRole::Stage(ShaderStage::Fragment) => WgslStageVisibility {
+            vertex: false,
+            fragment: true,
+        },
         UniformRole::Stage(ShaderStage::Compute) => {
             panic!("compute uniform roles must be lowered through the compute ABI")
         }
@@ -1358,12 +1415,18 @@ fn validate_explicit_interface(
     if iface.vertex_inputs[0].rate != VertexRate::PerVertex
         || iface.vertex_inputs[0].attrs.is_empty()
     {
-        return Err(err(span, "WGSL explicit projection requires a non-empty per-vertex stream first"));
+        return Err(err(
+            span,
+            "WGSL explicit projection requires a non-empty per-vertex stream first",
+        ));
     }
     for input in &iface.vertex_inputs {
         identifier(input.struct_name.symbol, "vertex input name", span)?;
         if input.attrs.is_empty() {
-            return Err(err(span, "WGSL explicit projection requires non-empty vertex streams"));
+            return Err(err(
+                span,
+                "WGSL explicit projection requires non-empty vertex streams",
+            ));
         }
         for (name, kind) in &input.attrs {
             identifier(*name, "vertex attribute name", span)?;
@@ -1376,7 +1439,10 @@ fn validate_explicit_interface(
         }
     }
     if iface.vertex_inputs.len() == 2 && iface.vertex_inputs[1].rate != VertexRate::PerInstance {
-        return Err(err(span, "WGSL explicit projection requires the second stream to be per-instance"));
+        return Err(err(
+            span,
+            "WGSL explicit projection requires the second stream to be per-instance",
+        ));
     }
     if iface.varyings.is_empty() {
         return Err(unsupported_err(
@@ -1469,7 +1535,10 @@ fn validate_explicit_interface(
             }
         }
         FragmentOutput::None => {
-            return Err(err(span, "WGSL explicit projection requires a fragment output"));
+            return Err(err(
+                span,
+                "WGSL explicit projection requires a fragment output",
+            ));
         }
     }
     if let Some(group) = &iface.textures {
@@ -1519,7 +1588,10 @@ fn layout_uniform_group(
     if group.members.is_empty() {
         return Err(err(
             span,
-            format!("WGSL uniform block `{}` cannot be empty", group.struct_name.key),
+            format!(
+                "WGSL uniform block `{}` cannot be empty",
+                group.struct_name.key
+            ),
         ));
     }
     let mut members = Vec::with_capacity(group.members.len());
@@ -1618,10 +1690,19 @@ fn layout_array_group(
         size: plan.size,
         members,
         visibility: match group.stage {
-            ShaderStage::Vertex => WgslStageVisibility { vertex: true, fragment: false },
-            ShaderStage::Fragment => WgslStageVisibility { vertex: false, fragment: true },
+            ShaderStage::Vertex => WgslStageVisibility {
+                vertex: true,
+                fragment: false,
+            },
+            ShaderStage::Fragment => WgslStageVisibility {
+                vertex: false,
+                fragment: true,
+            },
             ShaderStage::Compute => {
-                return Err(err(span, "WGSL uniform array blocks do not admit compute stages yet"));
+                return Err(err(
+                    span,
+                    "WGSL uniform array blocks do not admit compute stages yet",
+                ));
             }
         },
     })
@@ -1780,10 +1861,15 @@ fn sampler_params_for_body(
         .enumerate()
         .filter_map(|(index, cell)| {
             matches!(
-                value_kind_for_instance_type(ws, function.param_decls[index].ty, &instance.inst, interner),
+                value_kind_for_instance_type(
+                    ws,
+                    function.param_decls[index].ty,
+                    &instance.inst,
+                    interner
+                ),
                 Some(ValueKind::Sampler(_))
             )
-                .then_some(*cell)
+            .then_some(*cell)
         })
         .collect())
 }
@@ -1922,10 +2008,8 @@ pub fn emit_fullscreen_shader(
             abi,
             HashMap::new(),
             span,
-        )?.with_sampler_params(
-            instance_sampler_params,
-            &sampler_params,
-        );
+        )?
+        .with_sampler_params(instance_sampler_params, &sampler_params);
         source.push_str(&emitter.emit_function(f, false)?);
     }
 
@@ -1950,11 +2034,7 @@ pub fn emit_fullscreen_shader(
     )?
     .with_sampler_params(entry_sampler_params, &sampler_params);
     source.push_str(&emitter.emit_function(entry_fn, true)?);
-    emit_fullscreen_entries(
-        &mut source,
-        abi,
-        stage.entry.inst.symbol(ws, &ir.interner),
-    );
+    emit_fullscreen_entries(&mut source, abi, stage.entry.inst.symbol(ws, &ir.interner));
     validate_wgsl_source(&source, span)?;
 
     Ok(WgslShaderEmission {
@@ -1974,7 +2054,10 @@ pub fn emit_explicit_shader(
     span: Span,
 ) -> Result<WgslShaderEmission, CompilerError> {
     if abi.geometry != WgslGeometryKind::Triangles {
-        return Err(err(span, "WGSL explicit emission requires the triangles ABI"));
+        return Err(err(
+            span,
+            "WGSL explicit emission requires the triangles ABI",
+        ));
     }
     abi.validate(iface, span)?;
     validate_explicit_ir_shape(ir, span)?;
@@ -2061,7 +2144,10 @@ pub fn emit_explicit_shader(
     )?
     .with_sampler_params(
         vertex_sampler_params.get(&vertex.entry).ok_or_else(|| {
-            err(span, "WGSL sampler lowering has no vertex entry parameter record")
+            err(
+                span,
+                "WGSL sampler lowering has no vertex entry parameter record",
+            )
         })?,
         &vertex_sampler_params,
     );
@@ -2077,14 +2163,17 @@ pub fn emit_explicit_shader(
         span,
     )?
     .with_sampler_params(
-        fragment_sampler_params.get(&fragment.entry).ok_or_else(|| {
-            err(span, "WGSL sampler lowering has no fragment entry parameter record")
-        })?,
+        fragment_sampler_params
+            .get(&fragment.entry)
+            .ok_or_else(|| {
+                err(
+                    span,
+                    "WGSL sampler lowering has no fragment entry parameter record",
+                )
+            })?,
         &fragment_sampler_params,
     )
-    .with_frag_coord(
-        fragment_reads_frag_coord(ws, fragment).then(|| FRAG_COORD_PARAM.to_string()),
-    );
+    .with_frag_coord(fragment_reads_frag_coord(ws, fragment).then(|| FRAG_COORD_PARAM.to_string()));
     source.push_str(&emitter.emit_function(fragment_fn, true)?);
     emit_explicit_entries(&mut source, ws, &ir.interner, vertex, fragment, abi, span)?;
 
@@ -2172,11 +2261,21 @@ pub fn emit_compute_shader(
             }
         };
         let ty = wgsl_value_type(ws, kind).ok_or_else(|| {
-            err(span, format!("compute workgroup `{}` has no WGSL element type", workgroup.name))
+            err(
+                span,
+                format!(
+                    "compute workgroup `{}` has no WGSL element type",
+                    workgroup.name
+                ),
+            )
         })?;
         identifier(workgroup.name, "compute workgroup", span)?;
-        writeln!(source, "var<workgroup> wg_{}: array<{}, {}>;", workgroup.name, ty, workgroup.size)
-            .unwrap();
+        writeln!(
+            source,
+            "var<workgroup> wg_{}: array<{}, {}>;",
+            workgroup.name, ty, workgroup.size
+        )
+        .unwrap();
     }
     if !logical_compute.workgroup.is_empty() {
         source.push('\n');
@@ -2234,7 +2333,10 @@ pub fn emit_compute_shader(
             .then(|| "global_id".to_string()),
     )
     .with_compute_builtins(&logical_compute.builtins)
-    .with_workgroup_cells(compute_workgroup_cells(&stage.body, &logical_compute.workgroup));
+    .with_workgroup_cells(compute_workgroup_cells(
+        &stage.body,
+        &logical_compute.workgroup,
+    ));
     source.push_str(&emitter.emit_function(entry_fn, true)?);
     let mut wrapper_params = Vec::new();
     let mut wrapper_args = Vec::new();
@@ -2243,9 +2345,7 @@ pub fn emit_compute_shader(
             ComputeBuiltin::GlobalInvocationId => {
                 ("global_invocation_id", "global_id", "vec3<u32>")
             }
-            ComputeBuiltin::LocalInvocationId => {
-                ("local_invocation_id", "local_id", "vec3<u32>")
-            }
+            ComputeBuiltin::LocalInvocationId => ("local_invocation_id", "local_id", "vec3<u32>"),
             ComputeBuiltin::WorkgroupId => ("workgroup_id", "workgroup_id", "vec3<u32>"),
             ComputeBuiltin::LocalInvocationIndex => {
                 ("local_invocation_index", "local_index", "u32")
@@ -2325,7 +2425,10 @@ fn explicit_struct_fields(
     span: Span,
 ) -> Result<Vec<(Ustr, ValueKind)>, CompilerError> {
     let Some(&sid) = ws.struct_by_name.get(&name) else {
-        return Err(err(span, format!("WGSL value struct {name} is not declared")));
+        return Err(err(
+            span,
+            format!("WGSL value struct {name} is not declared"),
+        ));
     };
     ws.modules[sid.module.index()].structs[sid.def]
         .fields
@@ -2391,7 +2494,12 @@ fn varying_output_name(
     function
         .return_ty
         .and_then(|ty| nominal_name(ws, ty))
-        .ok_or_else(|| err(span, "WGSL explicit vertex return is not a named varying struct"))
+        .ok_or_else(|| {
+            err(
+                span,
+                "WGSL explicit vertex return is not a named varying struct",
+            )
+        })
 }
 
 fn emit_explicit_types(
@@ -2424,12 +2532,27 @@ fn emit_explicit_types(
             .iter()
             .find(|(name, _)| *name == field.name)
             .map(|(_, kind)| *kind)
-            .ok_or_else(|| err(span, format!("WGSL varying {} is absent from its struct", field.name)))?;
+            .ok_or_else(|| {
+                err(
+                    span,
+                    format!("WGSL varying {} is absent from its struct", field.name),
+                )
+            })?;
         // `emit_value_struct` above already rejected every untyped field.
         let ty = wgsl_value_type(ws, kind).ok_or_else(|| {
-            err(span, format!("internal error: WGSL varying {} has no type after its struct was emitted", field.name))
+            err(
+                span,
+                format!(
+                    "internal error: WGSL varying {} has no type after its struct was emitted",
+                    field.name
+                ),
+            )
         })?;
-        let interpolate = if field.flat { "@interpolate(flat) " } else { "" };
+        let interpolate = if field.flat {
+            "@interpolate(flat) "
+        } else {
+            ""
+        };
         writeln!(
             out,
             "  @location({}) {interpolate}{}: {},",
@@ -2449,11 +2572,7 @@ fn emit_explicit_types(
     Ok(())
 }
 
-fn emit_array_blocks(
-    out: &mut String,
-    abi: &WgslAbiPlan,
-    span: Span,
-) -> Result<(), CompilerError> {
+fn emit_array_blocks(out: &mut String, abi: &WgslAbiPlan, span: Span) -> Result<(), CompilerError> {
     for block in &abi.array_blocks {
         let struct_name = block.struct_name;
         writeln!(out, "struct {} {{", struct_name).unwrap();
@@ -2493,16 +2612,19 @@ fn emit_explicit_uniforms(out: &mut String, abi: &WgslAbiPlan) {
         let struct_name = block.struct_name;
         writeln!(out, "struct {} {{", struct_name).unwrap();
         for member in &block.members {
-            writeln!(out, "  {}: {},", member.name, uniform_member_type(member.kind).unwrap()).unwrap();
+            writeln!(
+                out,
+                "  {}: {},",
+                member.name,
+                uniform_member_type(member.kind).unwrap()
+            )
+            .unwrap();
         }
         out.push_str("}\n\n");
         writeln!(
             out,
             "@group({}) @binding({}) var<uniform> u_{}: {};",
-            abi.bind_group,
-            block.binding,
-            struct_name,
-            struct_name
+            abi.bind_group, block.binding, struct_name, struct_name
         )
         .unwrap();
     }
@@ -2552,7 +2674,13 @@ fn emit_explicit_entries(
         args.push(name);
     }
     args.push("vertex_index".to_string());
-    writeln!(out, "  let result = {}({});", vertex.entry.inst.symbol(ws, interner), args.join(", ")).unwrap();
+    writeln!(
+        out,
+        "  let result = {}({});",
+        vertex.entry.inst.symbol(ws, interner),
+        args.join(", ")
+    )
+    .unwrap();
     writeln!(out, "  var output: {output};").unwrap();
     out.push_str("  output.position = result.position;\n");
     for field in &abi.varyings {
@@ -2586,10 +2714,8 @@ fn emit_explicit_entries(
         format!(
             "@location({}) {}",
             output.location,
-            wgsl_type(output.kind).ok_or_else(|| err(
-                span,
-                "WGSL single fragment output has no emitted type"
-            ))?
+            wgsl_type(output.kind)
+                .ok_or_else(|| err(span, "WGSL single fragment output has no emitted type"))?
         )
     };
     writeln!(
@@ -2614,24 +2740,37 @@ fn emit_explicit_entries(
             }
         })
         .collect::<Result<Vec<_>, _>>()?;
-    writeln!(out, "  let vary = {}({});", varying_name, varying_args.join(", ")).unwrap();
+    writeln!(
+        out,
+        "  let vary = {}({});",
+        varying_name,
+        varying_args.join(", ")
+    )
+    .unwrap();
     let call_args = if fragment_reads_frag_coord(ws, fragment) {
-        format!(
-            "vary, {}",
-            explicit_frag_coord_expression(abi, span)?
-        )
+        format!("vary, {}", explicit_frag_coord_expression(abi, span)?)
     } else {
         "vary".to_string()
     };
     if mrt {
-        writeln!(out, "  let result = {}({call_args});", fragment.entry.inst.symbol(ws, interner)).unwrap();
+        writeln!(
+            out,
+            "  let result = {}({call_args});",
+            fragment.entry.inst.symbol(ws, interner)
+        )
+        .unwrap();
         writeln!(out, "  var targets: {result_ty};").unwrap();
         for output in outputs {
             writeln!(out, "  targets.{0} = result.{0};", output.name).unwrap();
         }
         out.push_str("  return targets;\n}\n");
     } else {
-        writeln!(out, "  return {}({call_args});", fragment.entry.inst.symbol(ws, interner)).unwrap();
+        writeln!(
+            out,
+            "  return {}({call_args});",
+            fragment.entry.inst.symbol(ws, interner)
+        )
+        .unwrap();
         out.push_str("}\n");
     }
     Ok(())
@@ -2647,7 +2786,12 @@ fn fragment_result_struct(
     function_for_instance(ws, &fragment.entry)
         .return_ty
         .and_then(|ty| nominal_name(ws, ty))
-        .ok_or_else(|| err(span, "WGSL MRT fragment entry does not return a named struct"))
+        .ok_or_else(|| {
+            err(
+                span,
+                "WGSL MRT fragment entry does not return a named struct",
+            )
+        })
 }
 
 /// Whether the fragment stage calls `frag_coord()`. WGSL has no global fragment
@@ -2663,10 +2807,7 @@ fn fragment_reads_frag_coord(ws: &Workspace, fragment: &ShaderStageIr) -> bool {
     })
 }
 
-fn explicit_frag_coord_expression(
-    abi: &WgslAbiPlan,
-    span: Span,
-) -> Result<String, CompilerError> {
+fn explicit_frag_coord_expression(abi: &WgslAbiPlan, span: Span) -> Result<String, CompilerError> {
     let engine = abi.uniform_block(UniformRole::Engine).ok_or_else(|| {
         unsupported_err(
             span,
@@ -2803,7 +2944,9 @@ fn emit_fullscreen_entries(out: &mut String, abi: &WgslAbiPlan, entry: String) {
     out.push_str("  let y = f32(vertex_index >> 1u) * 2.0 - 1.0;\n");
     out.push_str("  output.position = vec4<f32>(x, y, 0.0, 1.0);\n");
     out.push_str("  let corner = vec2<f32>(f32(vertex_index & 1u), f32(vertex_index >> 1u));\n");
-    out.push_str("  output.uv = u_FullscreenU.uv0 + corner * (u_FullscreenU.uv1 - u_FullscreenU.uv0);\n");
+    out.push_str(
+        "  output.uv = u_FullscreenU.uv0 + corner * (u_FullscreenU.uv1 - u_FullscreenU.uv0);\n",
+    );
     out.push_str("  return output;\n}\n\n");
     let output = &abi.fragment_outputs[0];
     writeln!(
@@ -2903,7 +3046,9 @@ fn compute_workgroup_cells(
         .iter()
         .filter_map(|(cell, data)| {
             let source_name = data.name?;
-            let logical = workgroups.iter().find(|workgroup| workgroup.name == source_name)?;
+            let logical = workgroups
+                .iter()
+                .find(|workgroup| workgroup.name == source_name)?;
             let kind = match logical.kind {
                 ComputeValueKind::F32 => ValueKind::F32,
                 ComputeValueKind::I32 => ValueKind::I32,
@@ -3064,7 +3209,11 @@ fn entry_param_roles(
                     "WGSL texture parameter is not a named group",
                 )
             })?;
-            let group_name = iface.textures.as_ref().and_then(|group| group.struct_name).map(|t| t.key);
+            let group_name = iface
+                .textures
+                .as_ref()
+                .and_then(|group| group.struct_name)
+                .map(|t| t.key);
             if group_name != Some(name) {
                 return Err(err(
                     param_span(function, index),
@@ -3163,8 +3312,15 @@ fn explicit_entry_param_roles(
                 VertexRate::PerInstance
             };
             let name = nominal_name(ws, param.ty).unwrap_or_default();
-            if !iface.vertex_inputs.iter().any(|input| input.struct_name.key == name && input.rate == rate) {
-                return Err(err(span, "WGSL explicit vertex input parameter is absent from the interface plan"));
+            if !iface
+                .vertex_inputs
+                .iter()
+                .any(|input| input.struct_name.key == name && input.rate == rate)
+            {
+                return Err(err(
+                    span,
+                    "WGSL explicit vertex input parameter is absent from the interface plan",
+                ));
             }
             if rate == VertexRate::PerInstance {
                 ParamRole::Instance
@@ -3172,11 +3328,20 @@ fn explicit_entry_param_roles(
                 ParamRole::Attribute
             }
         } else if has_anno(function, index, "engine") {
-            check_uniform_param(ws, param.ty, UniformRole::Engine, iface, param_span(function, index))?;
+            check_uniform_param(
+                ws,
+                param.ty,
+                UniformRole::Engine,
+                iface,
+                param_span(function, index),
+            )?;
             ParamRole::Uniform(UniformRole::Engine)
         } else if stage == ShaderStage::Fragment && index == 0 {
             if nominal_name(ws, param.ty).is_none() {
-                return Err(err(span, "WGSL explicit fragment entry does not take a varying struct"));
+                return Err(err(
+                    span,
+                    "WGSL explicit fragment entry does not take a varying struct",
+                ));
             }
             ParamRole::Varying
         } else if nominal_name(ws, param.ty) == Some(Ustr::from("UniformArray")) {
@@ -3210,10 +3375,22 @@ fn explicit_entry_param_roles(
             ParamRole::Uniform(UniformRole::Stage(stage))
         } else if stage == ShaderStage::Fragment && has_anno(function, index, "textures") {
             let name = nominal_name(ws, param.ty).ok_or_else(|| {
-                err(param_span(function, index), "WGSL texture parameter is not a named group")
+                err(
+                    param_span(function, index),
+                    "WGSL texture parameter is not a named group",
+                )
             })?;
-            if iface.textures.as_ref().and_then(|group| group.struct_name).map(|t| t.key) != Some(name) {
-                return Err(err(span, "WGSL explicit texture parameter is absent from the interface plan"));
+            if iface
+                .textures
+                .as_ref()
+                .and_then(|group| group.struct_name)
+                .map(|t| t.key)
+                != Some(name)
+            {
+                return Err(err(
+                    span,
+                    "WGSL explicit texture parameter is absent from the interface plan",
+                ));
             }
             ParamRole::Texture
         } else {
@@ -3252,10 +3429,17 @@ fn compute_entry_param_roles(
     for (index, cell) in body.params.iter().enumerate() {
         let param = &function.param_decls[index];
         if has_anno(function, index, "storage") {
-            if !compute.resources.iter().any(|resource| resource.name == param.name) {
+            if !compute
+                .resources
+                .iter()
+                .any(|resource| resource.name == param.name)
+            {
                 return Err(err(
                     param_span(function, index),
-                    format!("WGSL compute storage parameter `{}` is absent from the interface", param.name),
+                    format!(
+                        "WGSL compute storage parameter `{}` is absent from the interface",
+                        param.name
+                    ),
                 ));
             }
             roles.insert(*cell, ParamRole::Storage);
@@ -3267,17 +3451,29 @@ fn compute_entry_param_roles(
                 iface,
                 param_span(function, index),
             )?;
-            if abi.uniform_block(UniformRole::Stage(ShaderStage::Compute)).is_none() {
+            if abi
+                .uniform_block(UniformRole::Stage(ShaderStage::Compute))
+                .is_none()
+            {
                 return Err(err(
                     param_span(function, index),
-                    format!("WGSL compute uniform `{}` is absent from the ABI", param.name),
+                    format!(
+                        "WGSL compute uniform `{}` is absent from the ABI",
+                        param.name
+                    ),
                 ));
             }
-            roles.insert(*cell, ParamRole::Uniform(UniformRole::Stage(ShaderStage::Compute)));
+            roles.insert(
+                *cell,
+                ParamRole::Uniform(UniformRole::Stage(ShaderStage::Compute)),
+            );
         } else {
             return Err(err(
                 param_span(function, index),
-                format!("WGSL compute parameter `{}` has no storage or uniform role", param.name),
+                format!(
+                    "WGSL compute parameter `{}` has no storage or uniform role",
+                    param.name
+                ),
             ));
         }
     }
@@ -3303,7 +3499,11 @@ fn compute_helper_param_roles(
         if !is_compute_resource_type(ws, param.ty) {
             continue;
         }
-        if !iface.resources.iter().any(|resource| resource.name == param.name) {
+        if !iface
+            .resources
+            .iter()
+            .any(|resource| resource.name == param.name)
+        {
             return Err(err(
                 param_span(function, index),
                 format!(
@@ -3319,7 +3519,10 @@ fn compute_helper_param_roles(
 
 fn is_compute_resource_type(ws: &Workspace, ty: TyId) -> bool {
     nominal_name(ws, ty).is_some_and(|name| {
-        matches!(declared_name(name.as_str()), "StorageBuffer" | "AtomicStorageBuffer")
+        matches!(
+            declared_name(name.as_str()),
+            "StorageBuffer" | "AtomicStorageBuffer"
+        )
     })
 }
 
@@ -3534,10 +3737,7 @@ impl<'a> FunctionEmitter<'a> {
         self
     }
 
-    fn with_workgroup_cells(
-        mut self,
-        cells: HashMap<Idx<Cell>, (String, ValueKind)>,
-    ) -> Self {
+    fn with_workgroup_cells(mut self, cells: HashMap<Idx<Cell>, (String, ValueKind)>) -> Self {
         self.workgroup_cells = cells;
         self
     }
@@ -3657,7 +3857,12 @@ impl<'a> FunctionEmitter<'a> {
                     ),
                 )
             })?;
-            let line = format!("  var {}: {} = {};", self.cell_names[&cell], ty, zero_value(self.ws, kind));
+            let line = format!(
+                "  var {}: {} = {};",
+                self.cell_names[&cell],
+                ty,
+                zero_value(self.ws, kind)
+            );
             head.push_str(&line);
             head.push('\n');
         }
@@ -3712,11 +3917,7 @@ impl<'a> FunctionEmitter<'a> {
                 || (entry
                     && matches!(
                         self.param_roles.get(cell),
-                        Some(
-                            ParamRole::Texture
-                                | ParamRole::Uniform(_)
-                                | ParamRole::UniformArray
-                        )
+                        Some(ParamRole::Texture | ParamRole::Uniform(_) | ParamRole::UniformArray)
                     ))
             {
                 continue;
@@ -3828,7 +4029,11 @@ impl<'a> FunctionEmitter<'a> {
                     }
                     cur = target;
                 }
-                Term::Branch { cond, then_bb, else_bb } => {
+                Term::Branch {
+                    cond,
+                    then_bb,
+                    else_bb,
+                } => {
                     // Direct shader calls materialize scalar literal defaults
                     // at the call site, so the callee-side nil guard for such
                     // a param is dead. Other MIR defaults still need their
@@ -3872,11 +4077,9 @@ impl<'a> FunctionEmitter<'a> {
 
     fn is_void_call(&self, iid: Idx<Inst>) -> bool {
         match &self.body.insts[iid] {
-            Inst::Call { func, .. } => {
-                self.ws.module(func.module).functions[func.func]
-                    .return_ty
-                    .is_none()
-            }
+            Inst::Call { func, .. } => self.ws.module(func.module).functions[func.func]
+                .return_ty
+                .is_none(),
             _ => false,
         }
     }
@@ -4064,10 +4267,15 @@ impl<'a> FunctionEmitter<'a> {
         let slot = self.cell_names[&info.slot].clone();
         let bound = self.render_val(info.bound)?;
         let cmp = if info.inclusive { "<=" } else { "<" };
-        self.push(&format!("for (; {slot} {cmp} {bound}; {slot} = {slot} + 1) {{"));
+        self.push(&format!(
+            "for (; {slot} {cmp} {bound}; {slot} = {slot} + 1) {{"
+        ));
         self.indent += 1;
         let body_len = self.out.len();
-        let ctx = LoopCtx { cont: Some(info.latch), brk: Some(info.exit) };
+        let ctx = LoopCtx {
+            cont: Some(info.latch),
+            brk: Some(info.exit),
+        };
         self.emit_seq(info.body_entry, None, ctx)?;
         self.trim_trailing_continue(body_len);
         self.indent -= 1;
@@ -4077,11 +4285,7 @@ impl<'a> FunctionEmitter<'a> {
 
     /// A general loop: `loop { <cond region>; if !(cond) { break; } <body> }`.
     /// WGSL has no `while`, so the condition is always the explicit break.
-    fn emit_general(
-        &mut self,
-        region: &LoopRegion,
-        outer: LoopCtx,
-    ) -> Result<(), CompilerError> {
+    fn emit_general(&mut self, region: &LoopRegion, outer: LoopCtx) -> Result<(), CompilerError> {
         let header = region.header;
         let (test, cond, body_start, break_when_true) = self.find_test(region)?;
 
@@ -4100,7 +4304,10 @@ impl<'a> FunctionEmitter<'a> {
             self.push(&format!("if !({cond_s}) {{ break; }}"));
         }
 
-        let ctx = LoopCtx { cont: Some(header), brk: Some(region.exit) };
+        let ctx = LoopCtx {
+            cont: Some(header),
+            brk: Some(region.exit),
+        };
         let body_len = self.out.len();
         self.emit_seq(body_start, None, ctx)?;
         self.trim_trailing_continue(body_len);
@@ -4118,7 +4325,12 @@ impl<'a> FunctionEmitter<'a> {
         let mut body: Vec<Idx<Block>> = region.body.iter().copied().collect();
         body.sort_by_key(|b| b.into_raw().into_u32());
         for b in body {
-            if let Term::Branch { cond, then_bb, else_bb } = self.body.blocks[b].term {
+            if let Term::Branch {
+                cond,
+                then_bb,
+                else_bb,
+            } = self.body.blocks[b].term
+            {
                 if then_bb == region.exit {
                     return Ok((b, cond, else_bb, true));
                 }
@@ -4170,9 +4382,7 @@ impl<'a> FunctionEmitter<'a> {
                 .ok_or_else(|| {
                     err(
                         self.span,
-                        format!(
-                            "WGSL global `{name}` has no planner-proven scalar constant"
-                        ),
+                        format!("WGSL global `{name}` has no planner-proven scalar constant"),
                     )
                 }),
             Inst::Load(cell) => self.cell_kinds.get(cell).copied().ok_or_else(|| {
@@ -4302,7 +4512,10 @@ impl<'a> FunctionEmitter<'a> {
                 Some(ParamRole::Storage) => {
                     return Err(err(
                         self.span,
-                        format!("WGSL storage resource `{}` is only accessed through storage intrinsics", self.cell_names[&cell]),
+                        format!(
+                            "WGSL storage resource `{}` is only accessed through storage intrinsics",
+                            self.cell_names[&cell]
+                        ),
                     ));
                 }
                 Some(ParamRole::Attribute)
@@ -4323,12 +4536,14 @@ impl<'a> FunctionEmitter<'a> {
             return Ok(kind);
         }
         match base_kind {
-            ValueKind::Struct(name) => struct_field_kind_by_name(self.ws, name, field).ok_or_else(|| {
-                err(
-                    self.span,
-                    format!("WGSL field `{field}` is not present in value struct `{name}`"),
-                )
-            }),
+            ValueKind::Struct(name) => {
+                struct_field_kind_by_name(self.ws, name, field).ok_or_else(|| {
+                    err(
+                        self.span,
+                        format!("WGSL field `{field}` is not present in value struct `{name}`"),
+                    )
+                })
+            }
             _ => Err(err(
                 self.span,
                 format!("WGSL field `{field}` is not a supported projection"),
@@ -4349,9 +4564,7 @@ impl<'a> FunctionEmitter<'a> {
                 | WgslIntrinsic::LocalInvocationId
                 | WgslIntrinsic::WorkgroupId
                 | WgslIntrinsic::NumWorkgroups,
-            ) => {
-                Ok(ValueKind::Struct(Ustr::from("GlobalInvocationId")))
-            }
+            ) => Ok(ValueKind::Struct(Ustr::from("GlobalInvocationId"))),
             Some(WgslIntrinsic::LocalInvocationIndex) => Ok(ValueKind::U32),
             Some(WgslIntrinsic::StorageLoad) => {
                 let cell = self.direct_resource_cell(args, "storage_load")?;
@@ -4375,10 +4588,9 @@ impl<'a> FunctionEmitter<'a> {
             }
             Some(WgslIntrinsic::WorkgroupStore) => Ok(ValueKind::I32),
             Some(WgslIntrinsic::AtomicAdd) => Ok(ValueKind::U32),
-            Some(WgslIntrinsic::WorkgroupBarrier) => Err(err(
-                self.span,
-                "workgroup_barrier produces no value",
-            )),
+            Some(WgslIntrinsic::WorkgroupBarrier) => {
+                Err(err(self.span, "workgroup_barrier produces no value"))
+            }
             Some(WgslIntrinsic::VertexIndex) => Ok(ValueKind::I32),
             Some(WgslIntrinsic::Texture) => Ok(ValueKind::Vec4),
             Some(WgslIntrinsic::TextureId) => {
@@ -4392,17 +4604,11 @@ impl<'a> FunctionEmitter<'a> {
             }
             Some(WgslIntrinsic::Bvec3) => {
                 if args.len() != 3 {
-                    return Err(err(
-                        self.span,
-                        "WGSL bvec3 requires three bool arguments",
-                    ));
+                    return Err(err(self.span, "WGSL bvec3 requires three bool arguments"));
                 }
                 for arg in args {
                     if self.value_kind(*arg)? != ValueKind::Bool {
-                        return Err(err(
-                            self.span,
-                            "WGSL bvec3 requires three bool arguments",
-                        ));
+                        return Err(err(self.span, "WGSL bvec3 requires three bool arguments"));
                     }
                 }
                 Ok(ValueKind::BVec3)
@@ -4437,7 +4643,10 @@ impl<'a> FunctionEmitter<'a> {
                 wire_value_kind(member.elem).ok_or_else(|| {
                     err(
                         self.span,
-                        format!("WGSL uniform array `{}` has no emitted element", member.name),
+                        format!(
+                            "WGSL uniform array `{}` has no emitted element",
+                            member.name
+                        ),
                     )
                 })
             }
@@ -4533,9 +4742,8 @@ impl<'a> FunctionEmitter<'a> {
         let b = self.value_kind(args[1])?;
         Ok(match (operator, a, b) {
             (WgslOperator::Mul, ValueKind::Mat4, ValueKind::Mat4) => ValueKind::Mat4,
-            (WgslOperator::Mul, ValueKind::Mat4, other) | (WgslOperator::Mul, other, ValueKind::Mat4) => {
-                other
-            }
+            (WgslOperator::Mul, ValueKind::Mat4, other)
+            | (WgslOperator::Mul, other, ValueKind::Mat4) => other,
             _ if a.components() >= b.components() => a,
             _ => b,
         })
@@ -4595,9 +4803,19 @@ impl<'a> FunctionEmitter<'a> {
             .get(&iid)
             .cloned()
             .map(ShaderInstance::new)
-            .or_else(|| function.generics.is_empty().then(|| ShaderInstance::plain(func)));
+            .or_else(|| {
+                function
+                    .generics
+                    .is_empty()
+                    .then(|| ShaderInstance::plain(func))
+            });
         if let Some(instance) = instance {
-            if self.stage.order.iter().any(|candidate| candidate == &instance) {
+            if self
+                .stage
+                .order
+                .iter()
+                .any(|candidate| candidate == &instance)
+            {
                 return Ok(instance);
             }
         }
@@ -4630,9 +4848,7 @@ impl<'a> FunctionEmitter<'a> {
                 .ok_or_else(|| {
                     err(
                         self.span,
-                        format!(
-                            "WGSL global `{name}` has no planner-proven scalar constant"
-                        ),
+                        format!("WGSL global `{name}` has no planner-proven scalar constant"),
                     )
                 })
                 .and_then(|lit| self.render_lit(lit)),
@@ -4644,26 +4860,27 @@ impl<'a> FunctionEmitter<'a> {
                     return Ok(self.sampler_param_names(*cell).0);
                 }
                 match self.param_roles.get(cell).copied() {
-                Some(ParamRole::TexCoord) => Ok("uv".to_string()),
-                Some(ParamRole::Storage)
-                | Some(ParamRole::Texture)
-                | Some(ParamRole::Uniform(_)) => Err(err(
-                    self.span,
-                    format!(
-                        "WGSL resource cell `{}` must be accessed through a field",
-                        self.cell_names[cell]
-                    ),
-                )),
-                Some(ParamRole::UniformArray) => Err(err(
-                    self.span,
-                    format!(
-                        "WGSL uniform array `{}` must be read through `at`",
-                        self.cell_names[cell]
-                    ),
-                )),
-                Some(ParamRole::Attribute) | Some(ParamRole::Instance) | Some(ParamRole::Varying) | None => {
-                    Ok(self.cell_names[cell].clone())
-                }
+                    Some(ParamRole::TexCoord) => Ok("uv".to_string()),
+                    Some(ParamRole::Storage)
+                    | Some(ParamRole::Texture)
+                    | Some(ParamRole::Uniform(_)) => Err(err(
+                        self.span,
+                        format!(
+                            "WGSL resource cell `{}` must be accessed through a field",
+                            self.cell_names[cell]
+                        ),
+                    )),
+                    Some(ParamRole::UniformArray) => Err(err(
+                        self.span,
+                        format!(
+                            "WGSL uniform array `{}` must be read through `at`",
+                            self.cell_names[cell]
+                        ),
+                    )),
+                    Some(ParamRole::Attribute)
+                    | Some(ParamRole::Instance)
+                    | Some(ParamRole::Varying)
+                    | None => Ok(self.cell_names[cell].clone()),
                 }
             }
             Inst::Field { base, field } => {
@@ -4716,7 +4933,10 @@ impl<'a> FunctionEmitter<'a> {
                         Some(ParamRole::Storage) => {
                             return Err(err(
                                 self.span,
-                                format!("WGSL storage resource `{}` is only accessed through storage intrinsics", self.cell_names[&cell]),
+                                format!(
+                                    "WGSL storage resource `{}` is only accessed through storage intrinsics",
+                                    self.cell_names[&cell]
+                                ),
                             ));
                         }
                         Some(ParamRole::Attribute)
@@ -4732,10 +4952,17 @@ impl<'a> FunctionEmitter<'a> {
             Inst::MakeValueStruct { name, fields, .. }
             | Inst::MaterializeValueStruct { name, fields, .. } => {
                 let kind = value_struct_kind(*name).ok_or_else(|| {
-                    err(self.span, format!("WGSL does not support value struct `{name}`"))
+                    err(
+                        self.span,
+                        format!("WGSL does not support value struct `{name}`"),
+                    )
                 })?;
                 let ordered = self.ordered_struct_args(*name, kind, fields)?;
-                Ok(format!("{}({})", wgsl_value_type(self.ws, kind).unwrap(), ordered.join(", ")))
+                Ok(format!(
+                    "{}({})",
+                    wgsl_value_type(self.ws, kind).unwrap(),
+                    ordered.join(", ")
+                ))
             }
             Inst::Call { func, args } => self.render_call(iid, *func, args),
             Inst::IntAdd(a, b) | Inst::FloatAdd(a, b) => self.binary(*a, "+", *b),
@@ -4765,9 +4992,7 @@ impl<'a> FunctionEmitter<'a> {
             Inst::UintShr(a, b) => self.binary(*a, ">>", *b),
             Inst::Eq(a, b) => self.binary(*a, "==", *b),
             Inst::NotEq(a, b) => self.binary(*a, "!=", *b),
-            Inst::FloatToInt(value) => {
-                Ok(format!("i32(floor({}))", self.render_val(*value)?))
-            }
+            Inst::FloatToInt(value) => Ok(format!("i32(floor({}))", self.render_val(*value)?)),
             Inst::IntToFloat(value) => {
                 self.reject_compute_numeric_conversion("int as float", *value)?;
                 Ok(format!("f32({})", self.render_val(*value)?))
@@ -4827,7 +5052,9 @@ impl<'a> FunctionEmitter<'a> {
         conversion: &str,
         value: Idx<Inst>,
     ) -> Result<(), CompilerError> {
-        if self.stage.stage == ShaderStage::Compute && !self.safe_compute_numeric_constant(conversion, value) {
+        if self.stage.stage == ShaderStage::Compute
+            && !self.safe_compute_numeric_constant(conversion, value)
+        {
             return Err(err(
                 self.span,
                 format!(
@@ -4841,7 +5068,10 @@ impl<'a> FunctionEmitter<'a> {
     fn safe_compute_numeric_constant(&self, conversion: &str, value: Idx<Inst>) -> bool {
         match (conversion, &self.body.insts[value]) {
             ("float as int", Inst::Const(Lit::Float(value))) => {
-                value.is_finite() && value.fract() == 0.0 && *value >= 0.0 && *value <= i32::MAX as f64
+                value.is_finite()
+                    && value.fract() == 0.0
+                    && *value >= 0.0
+                    && *value <= i32::MAX as f64
             }
             ("int as float", Inst::Const(Lit::Int(value))) => {
                 (-16_777_216..=16_777_216).contains(value)
@@ -4891,7 +5121,9 @@ impl<'a> FunctionEmitter<'a> {
                     .ok_or_else(|| {
                         err(
                             self.span,
-                            format!("WGSL value struct `{name}` literal is missing field `{field}`"),
+                            format!(
+                                "WGSL value struct `{name}` literal is missing field `{field}`"
+                            ),
                         )
                     })?;
                 self.render_val(value.1)
@@ -4930,7 +5162,12 @@ impl<'a> FunctionEmitter<'a> {
         self.abi
             .compute
             .as_ref()
-            .and_then(|compute| compute.resources.iter().find(|resource| resource.name == *name))
+            .and_then(|compute| {
+                compute
+                    .resources
+                    .iter()
+                    .find(|resource| resource.name == *name)
+            })
             .ok_or_else(|| {
                 err(
                     self.span,
@@ -4945,7 +5182,10 @@ impl<'a> FunctionEmitter<'a> {
         intrinsic: &str,
     ) -> Result<Idx<Cell>, CompilerError> {
         let Some(first) = args.first() else {
-            return Err(err(self.span, format!("WGSL {intrinsic} has no resource argument")));
+            return Err(err(
+                self.span,
+                format!("WGSL {intrinsic} has no resource argument"),
+            ));
         };
         let Inst::Load(cell) = self.body.insts[*first] else {
             return Err(err(
@@ -4968,7 +5208,10 @@ impl<'a> FunctionEmitter<'a> {
         intrinsic: &str,
     ) -> Result<Idx<Cell>, CompilerError> {
         let Some(first) = args.first() else {
-            return Err(err(self.span, format!("WGSL {intrinsic} has no workgroup argument")));
+            return Err(err(
+                self.span,
+                format!("WGSL {intrinsic} has no workgroup argument"),
+            ));
         };
         let Inst::Load(cell) = self.body.insts[*first] else {
             return Err(err(
@@ -5005,7 +5248,9 @@ impl<'a> FunctionEmitter<'a> {
                 }
                 let invocation = match WgslIntrinsic::classify(function) {
                     Some(WgslIntrinsic::GlobalInvocationId) => self.compute_invocation.as_ref(),
-                    Some(WgslIntrinsic::LocalInvocationId) => self.compute_local_invocation.as_ref(),
+                    Some(WgslIntrinsic::LocalInvocationId) => {
+                        self.compute_local_invocation.as_ref()
+                    }
                     Some(WgslIntrinsic::WorkgroupId) => self.compute_workgroup_id.as_ref(),
                     Some(WgslIntrinsic::NumWorkgroups) => self.compute_num_workgroups.as_ref(),
                     _ => None,
@@ -5022,36 +5267,57 @@ impl<'a> FunctionEmitter<'a> {
             }
             Some(WgslIntrinsic::LocalInvocationIndex) => {
                 if !args.is_empty() {
-                    return Err(err(self.span, "WGSL local_invocation_index takes no arguments"));
+                    return Err(err(
+                        self.span,
+                        "WGSL local_invocation_index takes no arguments",
+                    ));
                 }
                 self.compute_local_index.clone().ok_or_else(|| {
-                    err(self.span, "local_invocation_index is only available in a compute entry")
+                    err(
+                        self.span,
+                        "local_invocation_index is only available in a compute entry",
+                    )
                 })
             }
             Some(WgslIntrinsic::StorageLoad) => {
                 let [_buffer, index] = args else {
-                    return Err(err(self.span, "WGSL storage_load requires a buffer and index"));
+                    return Err(err(
+                        self.span,
+                        "WGSL storage_load requires a buffer and index",
+                    ));
                 };
                 let cell = self.direct_resource_cell(args, "storage_load")?;
                 let resource = self.compute_resource(cell)?;
                 if resource.element == SharedWgslStorageElementKind::AtomicU32 {
-                    return Err(err(self.span, "storage_load cannot access AtomicStorageBuffer"));
+                    return Err(err(
+                        self.span,
+                        "storage_load cannot access AtomicStorageBuffer",
+                    ));
                 }
                 Ok(format!("s_{}[{}]", resource.name, self.render_val(*index)?))
             }
             Some(WgslIntrinsic::StorageStore) => {
                 let [_buffer, index, value] = args else {
-                    return Err(err(self.span, "WGSL storage_store requires a buffer, index, and value"));
+                    return Err(err(
+                        self.span,
+                        "WGSL storage_store requires a buffer, index, and value",
+                    ));
                 };
                 let cell = self.direct_resource_cell(args, "storage_store")?;
                 let resource = self.compute_resource(cell)?;
                 if resource.element == SharedWgslStorageElementKind::AtomicU32 {
-                    return Err(err(self.span, "storage_store cannot access AtomicStorageBuffer"));
+                    return Err(err(
+                        self.span,
+                        "storage_store cannot access AtomicStorageBuffer",
+                    ));
                 }
                 if resource.access != SharedWgslStorageAccess::ReadWrite {
                     return Err(err(
                         self.span,
-                        format!("WGSL storage_store requires read_write resource `{}`", resource.name),
+                        format!(
+                            "WGSL storage_store requires read_write resource `{}`",
+                            resource.name
+                        ),
                     ));
                 }
                 Ok(format!(
@@ -5067,7 +5333,10 @@ impl<'a> FunctionEmitter<'a> {
             )),
             Some(WgslIntrinsic::WorkgroupLoad) => {
                 let [_array, index] = args else {
-                    return Err(err(self.span, "WGSL workgroup_load requires an array and index"));
+                    return Err(err(
+                        self.span,
+                        "WGSL workgroup_load requires an array and index",
+                    ));
                 };
                 let cell = self.direct_workgroup_cell(args, "workgroup_load")?;
                 let (name, _) = &self.workgroup_cells[&cell];
@@ -5075,23 +5344,40 @@ impl<'a> FunctionEmitter<'a> {
             }
             Some(WgslIntrinsic::WorkgroupStore) => {
                 let [_array, index, value] = args else {
-                    return Err(err(self.span, "WGSL workgroup_store requires an array, index, and value"));
+                    return Err(err(
+                        self.span,
+                        "WGSL workgroup_store requires an array, index, and value",
+                    ));
                 };
                 let cell = self.direct_workgroup_cell(args, "workgroup_store")?;
                 let (name, _) = &self.workgroup_cells[&cell];
-                Ok(format!("{}[{}] = {}", name, self.render_val(*index)?, self.render_val(*value)?))
+                Ok(format!(
+                    "{}[{}] = {}",
+                    name,
+                    self.render_val(*index)?,
+                    self.render_val(*value)?
+                ))
             }
             Some(WgslIntrinsic::AtomicAdd) => {
                 let [_buffer, index, value] = args else {
-                    return Err(err(self.span, "WGSL atomic_add requires a buffer, index, and value"));
+                    return Err(err(
+                        self.span,
+                        "WGSL atomic_add requires a buffer, index, and value",
+                    ));
                 };
                 let cell = self.direct_resource_cell(args, "atomic_add")?;
                 let resource = self.compute_resource(cell)?;
                 if resource.element != SharedWgslStorageElementKind::AtomicU32 {
-                    return Err(err(self.span, "atomic_add requires AtomicStorageBuffer<uint>"));
+                    return Err(err(
+                        self.span,
+                        "atomic_add requires AtomicStorageBuffer<uint>",
+                    ));
                 }
                 if resource.access != SharedWgslStorageAccess::ReadWrite {
-                    return Err(err(self.span, "atomic_add requires a read_write atomic resource"));
+                    return Err(err(
+                        self.span,
+                        "atomic_add requires a read_write atomic resource",
+                    ));
                 }
                 Ok(format!(
                     "atomicAdd(&s_{}[{}], {})",
@@ -5121,9 +5407,7 @@ impl<'a> FunctionEmitter<'a> {
                 }
                 let (texture_arg, sampler_arg) = self.sampler_expressions(args[0])?;
                 let uv = self.sample_uv(args[0], self.render_val(args[1])?)?;
-                Ok(format!(
-                    "textureSample({texture_arg}, {sampler_arg}, {uv})"
-                ))
+                Ok(format!("textureSample({texture_arg}, {sampler_arg}, {uv})"))
             }
             Some(WgslIntrinsic::TextureId) => {
                 self.validate_texture_id_args(args)?;
@@ -5143,14 +5427,13 @@ impl<'a> FunctionEmitter<'a> {
                 let bits = format!("bitcast<u32>({})", self.render_val(args[0])?);
                 let exponent = format!("({bits} & 0x7f800000u)");
                 let mantissa = format!("({bits} & 0x007fffffu)");
-                if matches!(WgslIntrinsic::classify(function), Some(WgslIntrinsic::IsNan)) {
-                    Ok(format!(
-                        "({exponent} == 0x7f800000u && {mantissa} != 0u)"
-                    ))
+                if matches!(
+                    WgslIntrinsic::classify(function),
+                    Some(WgslIntrinsic::IsNan)
+                ) {
+                    Ok(format!("({exponent} == 0x7f800000u && {mantissa} != 0u)"))
                 } else {
-                    Ok(format!(
-                        "({exponent} == 0x7f800000u && {mantissa} == 0u)"
-                    ))
+                    Ok(format!("({exponent} == 0x7f800000u && {mantissa} == 0u)"))
                 }
             }
             Some(WgslIntrinsic::Bvec3) => {
@@ -5167,7 +5450,11 @@ impl<'a> FunctionEmitter<'a> {
             }
             Some(WgslIntrinsic::GreaterThan) => {
                 self.call_kind(iid, func, args)?;
-                Ok(format!("({} > {})", self.render_val(args[0])?, self.render_val(args[1])?))
+                Ok(format!(
+                    "({} > {})",
+                    self.render_val(args[0])?,
+                    self.render_val(args[1])?
+                ))
             }
             Some(WgslIntrinsic::ToVec3) => {
                 self.call_kind(iid, func, args)?;
@@ -5190,7 +5477,12 @@ impl<'a> FunctionEmitter<'a> {
                 self.vertex_index
                     .as_ref()
                     .map(|name| format!("i32({name})"))
-                    .ok_or_else(|| err(self.span, "WGSL vertex_id() is only available in the vertex entry"))
+                    .ok_or_else(|| {
+                        err(
+                            self.span,
+                            "WGSL vertex_id() is only available in the vertex entry",
+                        )
+                    })
             }
             Some(WgslIntrinsic::Discard) => Ok("discard".to_string()),
             Some(WgslIntrinsic::At) => {
@@ -5220,11 +5512,13 @@ impl<'a> FunctionEmitter<'a> {
                     .iter()
                     .map(|arg| self.render_val(*arg))
                     .collect::<Result<Vec<_>, _>>()?;
-                Ok(format!("{}({})", wgsl_value_type(self.ws, kind).unwrap(), rendered.join(", ")))
+                Ok(format!(
+                    "{}({})",
+                    wgsl_value_type(self.ws, kind).unwrap(),
+                    rendered.join(", ")
+                ))
             }
-            Some(WgslIntrinsic::Round) => {
-                Ok(format!("floor({} + 0.5)", self.render_val(args[0])?))
-            }
+            Some(WgslIntrinsic::Round) => Ok(format!("floor({} + 0.5)", self.render_val(args[0])?)),
             Some(WgslIntrinsic::Builtin(spelling, _)) => {
                 let target = self.call_kind(iid, func, args)?;
                 let rendered = args
@@ -5266,13 +5560,9 @@ impl<'a> FunctionEmitter<'a> {
                     if compute_resource {
                         continue;
                     }
-                    let sampler_resource = target_body
-                        .params
-                        .get(index)
-                        .is_some_and(|cell| {
-                            target_sampler_params
-                                .is_some_and(|params| params.contains(cell))
-                        });
+                    let sampler_resource = target_body.params.get(index).is_some_and(|cell| {
+                        target_sampler_params.is_some_and(|params| params.contains(cell))
+                    });
                     if sampler_resource {
                         rendered.push(self.texture_expression(*arg)?);
                         if self.value_kind(*arg)? == ValueKind::Sampler(SamplerKind::Float) {
@@ -5297,7 +5587,11 @@ impl<'a> FunctionEmitter<'a> {
     ) -> Result<String, CompilerError> {
         let rendered = self.render_val(arg)?;
         if target.components() > 1 && self.value_kind(arg)?.components() == 1 {
-            Ok(format!("{}({})", wgsl_value_type(self.ws, target).unwrap(), rendered))
+            Ok(format!(
+                "{}({})",
+                wgsl_value_type(self.ws, target).unwrap(),
+                rendered
+            ))
         } else {
             Ok(rendered)
         }
@@ -5496,7 +5790,12 @@ impl<'a> FunctionEmitter<'a> {
 /// slot carries `lower_for_range`'s `loop_binding` provenance, entered by a
 /// pure-increment latch.
 fn match_counted_loop(f: &MirFunc, header: Idx<Block>) -> Option<LoopInfo> {
-    let Term::Branch { cond, then_bb, else_bb } = f.blocks[header].term else {
+    let Term::Branch {
+        cond,
+        then_bb,
+        else_bb,
+    } = f.blocks[header].term
+    else {
         return None;
     };
     let (slot, bound, inclusive) = match &f.insts[cond] {
@@ -5533,7 +5832,9 @@ fn reachable_blocks(f: &MirFunc) -> HashSet<Idx<Block>> {
         }
         match &f.blocks[b].term {
             Term::Goto(t) => stack.push(*t),
-            Term::Branch { then_bb, else_bb, .. } => {
+            Term::Branch {
+                then_bb, else_bb, ..
+            } => {
                 stack.push(*then_bb);
                 stack.push(*else_bb);
             }
@@ -5561,7 +5862,8 @@ fn is_incr_latch(f: &MirFunc, p: Idx<Block>, slot: Idx<Cell>) -> bool {
             if cell == slot {
                 if let Inst::IntAdd(a, b) = f.insts[value] {
                     let is_one = |x: Idx<Inst>| matches!(f.insts[x], Inst::Const(Lit::Int(1)));
-                    let loads_slot = |x: Idx<Inst>| matches!(f.insts[x], Inst::Load(c) if c == slot);
+                    let loads_slot =
+                        |x: Idx<Inst>| matches!(f.insts[x], Inst::Load(c) if c == slot);
                     return (loads_slot(a) && is_one(b)) || (loads_slot(b) && is_one(a));
                 }
                 return false;
@@ -5683,14 +5985,24 @@ fn main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     #[test]
     fn intrinsic_classifier_matches_the_admitted_wgsl_surface() {
         assert!(
-            WgslIntrinsic::classify_name_arity("texture", 2).is_some_and(WgslIntrinsic::is_admitted)
+            WgslIntrinsic::classify_name_arity("texture", 2)
+                .is_some_and(WgslIntrinsic::is_admitted)
         );
         assert!(
-            WgslIntrinsic::classify_name_arity("texture_id", 2).is_some_and(WgslIntrinsic::is_admitted)
+            WgslIntrinsic::classify_name_arity("texture_id", 2)
+                .is_some_and(WgslIntrinsic::is_admitted)
         );
-        for (name, arity) in [("isnan", 1), ("isinf", 1), ("bvec3", 3), ("any", 1), ("greater_than", 2), ("to_vec3", 1)] {
+        for (name, arity) in [
+            ("isnan", 1),
+            ("isinf", 1),
+            ("bvec3", 3),
+            ("any", 1),
+            ("greater_than", 2),
+            ("to_vec3", 1),
+        ] {
             assert!(
-                WgslIntrinsic::classify_name_arity(name, arity).is_some_and(WgslIntrinsic::is_admitted),
+                WgslIntrinsic::classify_name_arity(name, arity)
+                    .is_some_and(WgslIntrinsic::is_admitted),
                 "{name}/{arity} must be admitted"
             );
         }

@@ -5,19 +5,29 @@
 //! (byte-match incl. round-half-to-even); `tests/js_format_specs.rock`
 //! cross-checks against luajit.
 
-use skull_mir::mir::FuncRef;
 use crate::common::ws_with;
+use skull_mir::mir::FuncRef;
 
 fn node_available() -> bool {
-    crate::common::node().arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+    crate::common::node()
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 fn emit_closure(ws: &bone_semantic::inference::Workspace, root: &str) -> Result<String, String> {
-    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("test module");
     let mut r = None;
     for (fid, f) in ws.module(mid).functions.iter() {
         if f.name.as_str() == root {
-            r = Some(FuncRef { module: mid, func: fid });
+            r = Some(FuncRef {
+                module: mid,
+                func: fid,
+            });
         }
     }
     skull_codegen_js::emit::emit_with_closure(ws, &[(r.unwrap(), root.to_string())])
@@ -35,7 +45,11 @@ fn eval_str(defs: &str, root: &str, expect: &str) {
         skull_codegen_js::JS_VEC_CHECK_SHIMS,
         skull_codegen_js::JS_STRING_RUNTIME,
     );
-    let out = crate::common::node().arg("-e").arg(&program).output().expect("spawn node");
+    let out = crate::common::node()
+        .arg("-e")
+        .arg(&program)
+        .output()
+        .expect("spawn node");
     assert!(
         out.status.success(),
         "node failed:\n--- program ---\n{program}\n--- stderr ---\n{}",
@@ -56,7 +70,10 @@ fn fixed_point_half_even() {
                }";
     let ws = ws_with(src);
     let js = emit_closure(&ws, "root").expect("format emits");
-    assert!(js.contains("__rock_sprintf"), "renders the printf port:\n{js}");
+    assert!(
+        js.contains("__rock_sprintf"),
+        "renders the printf port:\n{js}"
+    );
     eval_str(&js, "root", "2|4");
 }
 
@@ -94,7 +111,8 @@ fn format_float_dynamic() {
 #[test]
 fn sinking_preserves_dynamic_format_error_order() {
     for result in ["s", "\"[{s}]\""] {
-        let ws = ws_with(&format!(r#"
+        let ws = ws_with(&format!(
+            r#"
 fn compute(w: int, mark: fn()) -> string {{
     let x = 3.25
     let s = "{{x:{{w}}.2f}}"
@@ -102,9 +120,11 @@ fn compute(w: int, mark: fn()) -> string {{
     mark()
     return result
 }}
-"#));
+"#
+        ));
         let js = emit_closure(&ws, "compute").expect("emit ordering probe");
-        let program = format!(r#"{runtime}
+        let program = format!(
+            r#"{runtime}
 {calls}
 {js}
 for (const width of [8, 1000, 1000000000]) {{
@@ -120,21 +140,36 @@ for (const width of [8, 1000, 1000000000]) {{
         throw new Error('side effects before error: ' + actualMarks + ' vs ' + expectedMarks);
     if (width === 1000000000 && (ok || actualMarks !== 0)) throw new Error('expected format error');
 }}
-"#, runtime = skull_codegen_js::JS_STRING_RUNTIME, calls = skull_codegen_js::JS_CALL_HELPER,
-            control = if result == "s" { "s" } else { "'[' + s + ']'" });
-        let run = crate::common::node().arg("-e").arg(&program).output().expect("run ordering probe");
-        assert!(run.status.success(), "{}\n{js}", String::from_utf8_lossy(&run.stderr));
+"#,
+            runtime = skull_codegen_js::JS_STRING_RUNTIME,
+            calls = skull_codegen_js::JS_CALL_HELPER,
+            control = if result == "s" { "s" } else { "'[' + s + ']'" }
+        );
+        let run = crate::common::node()
+            .arg("-e")
+            .arg(&program)
+            .output()
+            .expect("run ordering probe");
+        assert!(
+            run.status.success(),
+            "{}\n{js}",
+            String::from_utf8_lossy(&run.stderr)
+        );
     }
 }
 
 #[test]
 fn sinking_preserves_checked_numeric_error_order() {
-    for (ty, expr, bad) in [("float", "x as uint", "-1"), ("uint", "(1 as uint) << x", "32")] {
+    for (ty, expr, bad) in [
+        ("float", "x as uint", "-1"),
+        ("uint", "(1 as uint) << x", "32"),
+    ] {
         let ws = ws_with(&format!(
             "fn compute(x: {ty}, mark: fn()) -> uint {{ let v = {expr}; let result = v + (1 as uint); mark(); return result }}"
         ));
         let js = emit_closure(&ws, "compute").expect("emit numeric ordering probe");
-        let program = format!(r#"{calls}
+        let program = format!(
+            r#"{calls}
 {js}
 for (const input of [2, {bad}]) {{
     let marks = 0, ok = true;
@@ -142,8 +177,18 @@ for (const input of [2, {bad}]) {{
     if (ok !== (input === 2) || marks !== (ok ? 1 : 0))
         throw new Error('side effects before checked numeric error: ' + marks);
 }}
-"#, calls = skull_codegen_js::JS_CALL_HELPER);
-        let run = crate::common::node().arg("-e").arg(&program).output().expect("run numeric ordering probe");
-        assert!(run.status.success(), "{}\n{js}", String::from_utf8_lossy(&run.stderr));
+"#,
+            calls = skull_codegen_js::JS_CALL_HELPER
+        );
+        let run = crate::common::node()
+            .arg("-e")
+            .arg(&program)
+            .output()
+            .expect("run numeric ordering probe");
+        assert!(
+            run.status.success(),
+            "{}\n{js}",
+            String::from_utf8_lossy(&run.stderr)
+        );
     }
 }

@@ -134,7 +134,10 @@ fn main() {
 fn opaque_struct_payloads_keep_structural_equality() {
     let lua = emit_module(STRUCTURAL_PAYLOAD);
     assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "flat_enum_structural_payload_eq"),
+        run_luajit(
+            &format!("{lua}\nmain()\n"),
+            "flat_enum_structural_payload_eq"
+        ),
         "true"
     );
 }

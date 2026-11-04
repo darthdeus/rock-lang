@@ -166,7 +166,10 @@ fn vec_overload_rejects() {
             // Vec overloads only: skip the 3-float scalar fallback (it emits).
             if f.name.as_str() == "lerp"
                 && f.inline_body.is_none()
-                && !f.annotations.iter().any(|a| a.name.name.as_str() == "intrinsic")
+                && !f
+                    .annotations
+                    .iter()
+                    .any(|a| a.name.name.as_str() == "intrinsic")
             {
                 let mf = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     lower_test_ref(&ws, mid, fid)

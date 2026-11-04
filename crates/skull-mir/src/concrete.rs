@@ -149,7 +149,9 @@ pub fn select_concrete_plan_closure<'a>(
         .cloned()
         .collect();
     while let Some(instance) = queue.pop() {
-        let Some(plan) = plans.get(&instance) else { continue };
+        let Some(plan) = plans.get(&instance) else {
+            continue;
+        };
         for callee in plan.callees.values() {
             if selected.insert(callee.clone()) {
                 queue.push(callee.clone());

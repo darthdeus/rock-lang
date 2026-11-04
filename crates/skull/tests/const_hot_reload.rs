@@ -6,7 +6,9 @@ use crate::common::ws_of;
 fn emit_program(src: &str) -> String {
     let ws = ws_of(src);
     let mid = skull::user_module_id(&ws).unwrap();
-    skull::mir_emit::emit_workspace_mir(&ws, mid).expect("emit").lua
+    skull::mir_emit::emit_workspace_mir(&ws, mid)
+        .expect("emit")
+        .lua
 }
 
 fn global_slot(lua: &str, name: &str) -> u32 {
@@ -37,7 +39,10 @@ fn run_luajit(prog: &str) -> String {
 fn const_reinits_on_hot_reload_but_session_global_is_preserved() {
     let ws = ws_of("const FOO: int = 5\nglobal bar: int = 7\nfn main() {}\n");
     let mid = skull::user_module_id(&ws).unwrap();
-    let lua = skull::mir_emit::emit_full(&ws, mid).expect("emit_full").0.lua;
+    let lua = skull::mir_emit::emit_full(&ws, mid)
+        .expect("emit_full")
+        .0
+        .lua;
 
     let line = |needle: &str| {
         lua.lines()

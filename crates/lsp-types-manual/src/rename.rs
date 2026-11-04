@@ -13,8 +13,11 @@ pub struct RenameParams {
     pub work_done_progress_params: WorkDoneProgressParams,
 }
 
-impl_lsp_struct!(RenameParams,
-    required { new_name: String = "newName" },
+impl_lsp_struct!(
+    RenameParams,
+    required {
+        new_name: String = "newName"
+    },
     optional {},
     flatten {
         text_document_position: TextDocumentPositionParams,
@@ -30,9 +33,14 @@ pub struct RenameOptions {
     pub work_done_progress_options: WorkDoneProgressOptions,
 }
 
-impl_lsp_struct!(RenameOptions,
-    optional { prepare_provider: bool = "prepareProvider" },
-    flatten { work_done_progress_options: WorkDoneProgressOptions }
+impl_lsp_struct!(
+    RenameOptions,
+    optional {
+        prepare_provider: bool = "prepareProvider"
+    },
+    flatten {
+        work_done_progress_options: WorkDoneProgressOptions
+    }
 );
 
 #[derive(Debug, Eq, PartialEq, Clone, Default)]
@@ -43,12 +51,14 @@ pub struct RenameClientCapabilities {
     pub honors_change_annotations: Option<bool>,
 }
 
-impl_lsp_struct!(RenameClientCapabilities,
+impl_lsp_struct!(
+    RenameClientCapabilities,
     required {},
     optional {
         dynamic_registration: bool = "dynamicRegistration",
         prepare_support: bool = "prepareSupport",
-        prepare_support_default_behavior: PrepareSupportDefaultBehavior = "prepareSupportDefaultBehavior",
+        prepare_support_default_behavior: PrepareSupportDefaultBehavior =
+            "prepareSupportDefaultBehavior",
         honors_change_annotations: bool = "honorsChangeAnnotations",
     }
 );
@@ -66,13 +76,8 @@ impl PrepareSupportDefaultBehavior {
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub enum PrepareRenameResponse {
     Range(Range),
-    RangeWithPlaceholder {
-        range: Range,
-        placeholder: String,
-    },
-    DefaultBehavior {
-        default_behavior: bool,
-    },
+    RangeWithPlaceholder { range: Range, placeholder: String },
+    DefaultBehavior { default_behavior: bool },
 }
 
 impl serde::Serialize for PrepareRenameResponse {
@@ -85,13 +90,22 @@ impl serde::Serialize for PrepareRenameResponse {
             Self::Range(v) => v.serialize(s),
             Self::RangeWithPlaceholder { range, placeholder } => {
                 let mut map = serde_json::Map::new();
-                map.insert("range".to_string(), serde_json::to_value(range).map_err(S::Error::custom)?);
-                map.insert("placeholder".to_string(), serde_json::Value::String(placeholder.clone()));
+                map.insert(
+                    "range".to_string(),
+                    serde_json::to_value(range).map_err(S::Error::custom)?,
+                );
+                map.insert(
+                    "placeholder".to_string(),
+                    serde_json::Value::String(placeholder.clone()),
+                );
                 serde_json::Value::Object(map).serialize(s)
             }
             Self::DefaultBehavior { default_behavior } => {
                 let mut map = serde_json::Map::new();
-                map.insert("defaultBehavior".to_string(), serde_json::Value::Bool(*default_behavior));
+                map.insert(
+                    "defaultBehavior".to_string(),
+                    serde_json::Value::Bool(*default_behavior),
+                );
                 serde_json::Value::Object(map).serialize(s)
             }
         }
@@ -105,7 +119,9 @@ impl<'de> serde::Deserialize<'de> for PrepareRenameResponse {
     {
         let val = serde_json::Value::deserialize(d)?;
         if let Some(v) = val.get("defaultBehavior").and_then(|v| v.as_bool()) {
-            return Ok(Self::DefaultBehavior { default_behavior: v });
+            return Ok(Self::DefaultBehavior {
+                default_behavior: v,
+            });
         }
         if val.get("placeholder").is_some() {
             let range: Range = serde_json::from_value(

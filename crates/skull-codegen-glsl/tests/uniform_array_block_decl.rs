@@ -27,7 +27,12 @@ static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
         .collect()
 });
 
-fn workspace(src: &str) -> (bone_semantic::inference::Workspace, bone_semantic::prelude::ModuleId) {
+fn workspace(
+    src: &str,
+) -> (
+    bone_semantic::inference::Workspace,
+    bone_semantic::prelude::ModuleId,
+) {
     let mut modules = STDLIB.clone();
     modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
@@ -64,16 +69,22 @@ fn emit_err(src: &str, vert: &str, frag: &str) -> String {
 /// The one block at `binding`, or a panic naming what was actually there.
 fn block_at(e: &ShaderEmission, binding: u32) -> &UniformArrayBlockPlan {
     let found: Vec<u32> = e.abi.uniform_array_blocks.iter().map(|(b, _)| *b).collect();
-    e.abi.uniform_array_blocks
+    e.abi
+        .uniform_array_blocks
         .iter()
         .find(|(b, _)| *b == binding)
         .map(|(_, p)| p)
-        .unwrap_or_else(|| panic!("no array block at binding {binding}; bindings present: {found:?}"))
+        .unwrap_or_else(|| {
+            panic!("no array block at binding {binding}; bindings present: {found:?}")
+        })
 }
 
 /// `(name, capacity, offset, stride)` per member, declaration order.
 fn layout(p: &UniformArrayBlockPlan) -> Vec<(&str, u32, u32, u32)> {
-    p.members.iter().map(|m| (m.name.as_str(), m.capacity, m.offset, m.stride)).collect()
+    p.members
+        .iter()
+        .map(|m| (m.name.as_str(), m.capacity, m.offset, m.stride))
+        .collect()
 }
 
 /// An instanced grass fixture: two vertex-stage arrays of different element kinds.
@@ -134,8 +145,14 @@ fn a_stages_arrays_are_declared_as_one_std140_block() {
         src.contains("layout(std140) uniform vt_Arrays {"),
         "expected a std140 array block for the vertex stage:\n{src}"
     );
-    assert!(src.contains("    vec2 entity_positions[32];"), "got:\n{src}");
-    assert!(src.contains("    float entity_influences[32];"), "got:\n{src}");
+    assert!(
+        src.contains("    vec2 entity_positions[32];"),
+        "got:\n{src}"
+    );
+    assert!(
+        src.contains("    float entity_influences[32];"),
+        "got:\n{src}"
+    );
 }
 
 #[test]
@@ -159,8 +176,14 @@ fn bodies_still_read_the_arrays_as_bare_globals() {
     // globals and every body reading them is byte-identical to the loose form.
     // That is what confines this change to declaration lines.
     let src = emit(VERTEX_ARRAYS, "vt", "fr").source;
-    assert!(src.contains("entity_positions["), "at() must render as indexing:\n{src}");
-    assert!(!src.contains("at("), "at() must not render as a call:\n{src}");
+    assert!(
+        src.contains("entity_positions["),
+        "at() must render as indexing:\n{src}"
+    );
+    assert!(
+        !src.contains("at("),
+        "at() must not render as a call:\n{src}"
+    );
 }
 
 // --- the reserved bindings ------------------------------------------------
@@ -190,7 +213,10 @@ fn an_array_block_never_lands_on_a_scalar_blocks_binding() {
     let scalar: Vec<u32> = e.abi.uniform_blocks.iter().map(|(b, _)| *b).collect();
     let arrays: Vec<u32> = e.abi.uniform_array_blocks.iter().map(|(b, _)| *b).collect();
     for b in &arrays {
-        assert!(!scalar.contains(b), "array binding {b} collides with a scalar block: {scalar:?}");
+        assert!(
+            !scalar.contains(b),
+            "array binding {b} collides with a scalar block: {scalar:?}"
+        );
     }
 }
 
@@ -223,7 +249,11 @@ fn a_stage_with_no_arrays_declares_no_array_block() {
     assert!(
         e.abi.uniform_array_blocks.iter().all(|(b, _)| *b == 4),
         "the vertex stage has no arrays and must contribute no block: {:?}",
-        e.abi.uniform_array_blocks.iter().map(|(b, _)| *b).collect::<Vec<_>>()
+        e.abi
+            .uniform_array_blocks
+            .iter()
+            .map(|(b, _)| *b)
+            .collect::<Vec<_>>()
     );
 }
 
@@ -237,7 +267,10 @@ fn members_carry_the_std140_layout_the_host_packs_against() {
     // bytes to carry 128. Accepted (backlog 18); visible here rather than buried.
     assert_eq!(
         layout(p),
-        vec![("entity_positions", 32, 0, 16), ("entity_influences", 32, 512, 16)]
+        vec![
+            ("entity_positions", 32, 0, 16),
+            ("entity_influences", 32, 512, 16)
+        ]
     );
     assert_eq!(p.size, 1024);
 }
@@ -248,7 +281,10 @@ fn the_array_blocks_fingerprint_travels_with_it() {
     let p = block_at(&e, 3);
     // Folded to 53 bits: it is emitted as a plain numeric literal and LuaJIT and
     // JS both represent integers exactly only that far.
-    assert!(p.fingerprint() < (1u64 << 53), "fingerprint must fit 53 bits");
+    assert!(
+        p.fingerprint() < (1u64 << 53),
+        "fingerprint must fit 53 bits"
+    );
     assert_ne!(p.fingerprint(), 0);
 }
 
@@ -274,7 +310,10 @@ fn an_oversized_array_block_is_rejected_at_the_size_annotation() {
     "#;
     let msg = emit_err(src, "vt", "fr");
     assert!(msg.contains("16384"), "the budget must be named: {msg}");
-    assert!(msg.contains("big"), "the offending member must be named: {msg}");
+    assert!(
+        msg.contains("big"),
+        "the offending member must be named: {msg}"
+    );
 }
 
 #[test]

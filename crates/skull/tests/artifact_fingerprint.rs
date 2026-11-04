@@ -11,10 +11,14 @@ fn inputs(values: &[(&str, &str)], volatile: &[&str]) -> ComptimeInputs {
     for (name, value) in values {
         out.vars.insert(
             Ustr::from(*name),
-            ComptimeVarValue { value: (*value).to_string(), secret: false },
+            ComptimeVarValue {
+                value: (*value).to_string(),
+                secret: false,
+            },
         );
     }
-    out.volatile_vars.extend(volatile.iter().copied().map(Ustr::from));
+    out.volatile_vars
+        .extend(volatile.iter().copied().map(Ustr::from));
     out
 }
 
@@ -38,13 +42,22 @@ fn main() { let _ = helper() }
 fn declared_volatile_metadata_does_not_change_the_artifact_fingerprint() {
     let old = fingerprint(
         VOLATILE_SOURCE,
-        inputs(&[("BUILD_DATE", "2026-08-23 10:00"), ("BUILD_UNIX", "1")], &["BUILD_DATE", "BUILD_UNIX"]),
+        inputs(
+            &[("BUILD_DATE", "2026-08-23 10:00"), ("BUILD_UNIX", "1")],
+            &["BUILD_DATE", "BUILD_UNIX"],
+        ),
     );
     let new = fingerprint(
         VOLATILE_SOURCE,
-        inputs(&[("BUILD_DATE", "2026-08-23 10:01"), ("BUILD_UNIX", "2")], &["BUILD_DATE", "BUILD_UNIX"]),
+        inputs(
+            &[("BUILD_DATE", "2026-08-23 10:01"), ("BUILD_UNIX", "2")],
+            &["BUILD_DATE", "BUILD_UNIX"],
+        ),
     );
-    assert_eq!(old, new, "only declared volatile presentation metadata changed");
+    assert_eq!(
+        old, new,
+        "only declared volatile presentation metadata changed"
+    );
 }
 
 #[test]
@@ -64,7 +77,10 @@ fn lifecycle_definition_and_state_structure_change_the_fingerprint() {
 @tick fn first() {}
 fn main() {}
 "#;
-    let lifecycle_b = lifecycle_a.replace("@tick fn first() {}", "@tick fn first() {}\n@tick fn second() {}");
+    let lifecycle_b = lifecycle_a.replace(
+        "@tick fn first() {}",
+        "@tick fn first() {}\n@tick fn second() {}",
+    );
     assert_ne!(
         fingerprint(lifecycle_a, ComptimeInputs::default()),
         fingerprint(&lifecycle_b, ComptimeInputs::default()),
@@ -128,21 +144,22 @@ fn embedded_comptime_input_change_changes_the_artifact_fingerprint() {
 
 #[test]
 fn unknown_or_malformed_volatile_metadata_fails_fingerprint_generation() {
-    let unknown = match try_emit_mir_with_inputs(
-        "fn main() {}",
-        inputs(&[], &["NOT_A_DECLARED_INPUT"]),
-    ) {
-        Ok(_) => panic!("unknown volatile metadata must not disappear"),
-        Err(error) => error,
-    };
-    assert!(unknown.message.contains("volatile"), "diagnostic must identify volatile metadata: {unknown}");
+    let unknown =
+        match try_emit_mir_with_inputs("fn main() {}", inputs(&[], &["NOT_A_DECLARED_INPUT"])) {
+            Ok(_) => panic!("unknown volatile metadata must not disappear"),
+            Err(error) => error,
+        };
+    assert!(
+        unknown.message.contains("volatile"),
+        "diagnostic must identify volatile metadata: {unknown}"
+    );
 
-    let empty = match try_emit_mir_with_inputs(
-        "fn main() {}",
-        inputs(&[], &[""]),
-    ) {
+    let empty = match try_emit_mir_with_inputs("fn main() {}", inputs(&[], &[""])) {
         Ok(_) => panic!("malformed volatile metadata must not disappear"),
         Err(error) => error,
     };
-    assert!(empty.message.contains("volatile"), "diagnostic must identify volatile metadata: {empty}");
+    assert!(
+        empty.message.contains("volatile"),
+        "diagnostic must identify volatile metadata: {empty}"
+    );
 }

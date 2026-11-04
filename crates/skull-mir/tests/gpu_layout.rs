@@ -13,7 +13,7 @@ use std::sync::LazyLock;
 use ustr::Ustr;
 
 use skull_mir::gpu_layout::{
-    texture_slots, vertex_attrs, AttrKind, SamplerKind, TextureSlots, VertexAttrs,
+    AttrKind, SamplerKind, TextureSlots, VertexAttrs, texture_slots, vertex_attrs,
 };
 
 static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
@@ -106,7 +106,10 @@ fn non_numeric_field_rejects() {
     let ws = ws_of("value Bad { pos: Vec2, name: string }");
     let e = vertex_attrs(&ws, Ustr::from("Bad")).expect_err("a string field must reject");
     let msg = format!("{e:?}");
-    assert!(msg.contains("name"), "the error must name the offending field: {msg}");
+    assert!(
+        msg.contains("name"),
+        "the error must name the offending field: {msg}"
+    );
 }
 
 /// A non-`value` struct has no guaranteed C layout, so it cannot back a vertex
@@ -147,7 +150,10 @@ fn mesh_textures_take_slots_in_field_order() {
 /// sampler is undefined, and the id canvases (r32i) depend on the distinction.
 #[test]
 fn int_samplers_are_a_distinct_kind() {
-    let t = slots_of("struct Picker { color: Sampler2D, ids: ISampler2D }", "Picker");
+    let t = slots_of(
+        "struct Picker { color: Sampler2D, ids: ISampler2D }",
+        "Picker",
+    );
     assert_eq!(t.slots[0].kind, SamplerKind::Float);
     assert_eq!(t.slots[1].kind, SamplerKind::Int);
     assert_eq!(t.slots[1].slot, 1);
@@ -160,7 +166,10 @@ fn non_sampler_field_rejects() {
     let ws = ws_of("struct Bad { tex: Sampler2D, scale: float }");
     let e = texture_slots(&ws, Ustr::from("Bad")).expect_err("a float field must reject");
     let msg = format!("{e:?}");
-    assert!(msg.contains("scale"), "the error must name the offending field: {msg}");
+    assert!(
+        msg.contains("scale"),
+        "the error must name the offending field: {msg}"
+    );
 }
 
 /// Samplers are opaque handles, not uploadable bytes, so the group is a plain

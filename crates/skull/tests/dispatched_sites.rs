@@ -68,14 +68,17 @@ fn prepared_body(ws: &Workspace, name: &str) -> MirFunc {
         .iter()
         .find(|(_, f)| f.name.as_str() == name)
         .expect("fn not found");
-    let fref = skull_mir::mir::FuncRef { module: mid, func: fid };
+    let fref = skull_mir::mir::FuncRef {
+        module: mid,
+        func: fid,
+    };
     let graph = graph_of(ws);
     let bodies = skull::concrete_body::build(ws, &graph);
     let scx = ScalarCtx::new(ws).sharing(graph.interner().clone());
     let instance = skull_mir::instance::Instance::base(fref);
     let plan = bodies.plans.get(&instance).expect("concrete plan");
-    let mut mf = skull_mir::lower::lower_instance_with_plans(ws, &scx, plan, &bodies.plans)
-        .expect("lower");
+    let mut mf =
+        skull_mir::lower::lower_instance_with_plans(ws, &scx, plan, &bodies.plans).expect("lower");
     let mangled = skull_mir::mangle::mangle_fn(ws, f);
     let mut cache = skull_transform::InlineCache::default();
     skull::mir_emit::prepare_instance_body_with_plans(
@@ -99,7 +102,10 @@ fn lowered_body_in_mode(ws: &Workspace, name: &str, values_first_class: bool) ->
         .iter()
         .find(|(_, f)| f.name.as_str() == name)
         .expect("fn not found");
-    let fref = skull_mir::mir::FuncRef { module: mid, func: fid };
+    let fref = skull_mir::mir::FuncRef {
+        module: mid,
+        func: fid,
+    };
     let graph = graph_of(ws);
     let bodies = skull::concrete_body::build(ws, &graph);
     let scx = if values_first_class {
@@ -168,7 +174,10 @@ fn walk_dispatched_in(ws: &Workspace, name: &str) -> Vec<&'static str> {
         .iter()
         .find(|(_, f)| f.name.as_str() == name)
         .expect("fn not found");
-    let fref = skull_mir::mir::FuncRef { module: mid, func: fid };
+    let fref = skull_mir::mir::FuncRef {
+        module: mid,
+        func: fid,
+    };
     let mut out: Vec<&'static str> = Vec::new();
     for (inst, sites) in g.call_sites() {
         if inst.func != fref {
@@ -229,10 +238,17 @@ fn main() { print(f_float(1.5)) print(f_int(2)) }
 "#,
     );
     assert_eq!(dispatched_in(&ws, "f_float"), vec!["__rock_format_float"]);
-    assert_eq!(walk_dispatched_in(&ws, "f_float"), vec!["__rock_format_float"]);
+    assert_eq!(
+        walk_dispatched_in(&ws, "f_float"),
+        vec!["__rock_format_float"]
+    );
 
     let empty: Vec<&'static str> = Vec::new();
-    assert_eq!(dispatched_in(&ws, "f_int"), empty, "an int hole emits no call");
+    assert_eq!(
+        dispatched_in(&ws, "f_int"),
+        empty,
+        "an int hole emits no call"
+    );
     assert_eq!(
         walk_dispatched_in(&ws, "f_int"),
         empty,
@@ -291,12 +307,20 @@ fn main() { print(show(V { a: 1.0, b: 2.0, c: 3, s: "x" })) }
     let ws = check(src);
     assert_eq!(
         dispatched_in(&ws, "show"),
-        vec!["__rock_format_float", "__rock_format_float", "__rock_quote_string"],
+        vec![
+            "__rock_format_float",
+            "__rock_format_float",
+            "__rock_quote_string"
+        ],
         "two float leaves and a string leaf; the int leaf synthesizes nothing"
     );
     assert_eq!(
         walk_dispatched_in(&ws, "show"),
-        vec!["__rock_format_float", "__rock_format_float", "__rock_quote_string"]
+        vec![
+            "__rock_format_float",
+            "__rock_format_float",
+            "__rock_quote_string"
+        ]
     );
     assert_dispatched_population(&census_of(src), 3);
 }
@@ -355,12 +379,19 @@ fn main() { print(show_p(P { x: 1, y: 2 })) print(show_f(1.5)) }
         dispatched_instance_names_in(&ws, "show_p"),
         vec![
             ("__rock_fmt_pad".to_string(), "__rock_fmt_pad".to_string()),
-            ("inspect_formatted".to_string(), "inspect_formatted".to_string()),
+            (
+                "inspect_formatted".to_string(),
+                "inspect_formatted".to_string()
+            ),
         ]
     );
 
     let empty: Vec<&'static str> = Vec::new();
-    assert_eq!(dispatched_in(&ws, "show_f"), empty, "a printf conversion calls nothing");
+    assert_eq!(
+        dispatched_in(&ws, "show_f"),
+        empty,
+        "a printf conversion calls nothing"
+    );
     assert_eq!(walk_dispatched_in(&ws, "show_f"), empty);
     assert_dispatched_population(&census_of(src), 2);
 }
@@ -379,9 +410,11 @@ fn main() { print("{P { x: 1 }:.2}") }
         "two distinct bare declarations must be ambiguous"
     );
     let graph = graph_of(&ws);
-    assert!(graph.unresolved().any(|unresolved| {
-        unresolved.reason == "compiler-generated-entry-unresolved"
-    }));
+    assert!(
+        graph
+            .unresolved()
+            .any(|unresolved| { unresolved.reason == "compiler-generated-entry-unresolved" })
+    );
 }
 
 #[test]
@@ -441,17 +474,32 @@ fn main() {
 
     assert_eq!(dispatched_in(&ws, "pct"), vec!["__rock_fmt_percent"]);
     assert_eq!(walk_dispatched_in(&ws, "pct"), vec!["__rock_fmt_percent"]);
-    assert_eq!(dispatched_in(&ws, "pct_plain"), empty, "a plain `f` calls nothing");
+    assert_eq!(
+        dispatched_in(&ws, "pct_plain"),
+        empty,
+        "a plain `f` calls nothing"
+    );
     assert_eq!(walk_dispatched_in(&ws, "pct_plain"), empty);
 
     assert_eq!(dispatched_in(&ws, "bin"), vec!["__rock_fmt_binary"]);
     assert_eq!(walk_dispatched_in(&ws, "bin"), vec!["__rock_fmt_binary"]);
-    assert_eq!(dispatched_in(&ws, "bin_plain"), empty, "a plain `x` calls nothing");
+    assert_eq!(
+        dispatched_in(&ws, "bin_plain"),
+        empty,
+        "a plain `x` calls nothing"
+    );
     assert_eq!(walk_dispatched_in(&ws, "bin_plain"), empty);
 
     assert_eq!(dispatched_in(&ws, "grouped"), vec!["__rock_fmt_grouping"]);
-    assert_eq!(walk_dispatched_in(&ws, "grouped"), vec!["__rock_fmt_grouping"]);
-    assert_eq!(dispatched_in(&ws, "grouped_plain"), empty, "a plain `d` calls nothing");
+    assert_eq!(
+        walk_dispatched_in(&ws, "grouped"),
+        vec!["__rock_fmt_grouping"]
+    );
+    assert_eq!(
+        dispatched_in(&ws, "grouped_plain"),
+        empty,
+        "a plain `d` calls nothing"
+    );
     assert_eq!(walk_dispatched_in(&ws, "grouped_plain"), empty);
 
     assert_dispatched_population(&census_of(src), 3);
@@ -486,7 +534,10 @@ fn main() {
         vec!["__rock_fmt_pad", "__rock_fmt_percent"]
     );
     assert_eq!(dispatched_in(&ws, "pct_bare"), vec!["__rock_fmt_percent"]);
-    assert_eq!(walk_dispatched_in(&ws, "pct_bare"), vec!["__rock_fmt_percent"]);
+    assert_eq!(
+        walk_dispatched_in(&ws, "pct_bare"),
+        vec!["__rock_fmt_percent"]
+    );
 
     assert_eq!(
         dispatched_in(&ws, "bin_wide"),
@@ -497,7 +548,10 @@ fn main() {
         vec!["__rock_fmt_binary", "__rock_fmt_pad"]
     );
     assert_eq!(dispatched_in(&ws, "bin_bare"), vec!["__rock_fmt_binary"]);
-    assert_eq!(walk_dispatched_in(&ws, "bin_bare"), vec!["__rock_fmt_binary"]);
+    assert_eq!(
+        walk_dispatched_in(&ws, "bin_bare"),
+        vec!["__rock_fmt_binary"]
+    );
 }
 
 /// GROUPING plus a WIDTH pads as well, and grouping alone does not.
@@ -523,7 +577,10 @@ fn main() { print(wide(1000)) print(narrow(1000)) }
         vec!["__rock_fmt_grouping", "__rock_fmt_pad"]
     );
     assert_eq!(dispatched_in(&ws, "narrow"), vec!["__rock_fmt_grouping"]);
-    assert_eq!(walk_dispatched_in(&ws, "narrow"), vec!["__rock_fmt_grouping"]);
+    assert_eq!(
+        walk_dispatched_in(&ws, "narrow"),
+        vec!["__rock_fmt_grouping"]
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -580,7 +637,9 @@ fn main() { print("{same(Point { x: 1, y: 2 }, Point { x: 1, y: 2 })}") }
     assert_eq!(walk_dispatched_in(&ws, "same"), Vec::<&'static str>::new());
     let mf = lowered_values_first_class_body(&ws, "same");
     assert!(
-        mf.insts.iter().any(|(_, inst)| matches!(inst, Inst::Eq(_, _))),
+        mf.insts
+            .iter()
+            .any(|(_, inst)| matches!(inst, Inst::Eq(_, _))),
         "values-first-class equality must remain a typed MIR operation"
     );
     assert!(
@@ -620,7 +679,9 @@ fn the_structural_helper_is_the_declaration_that_emits_its_bare_name() {
     );
     let f = &ws.module(callable[0].module).functions[callable[0].func];
     assert!(
-        f.annotations.iter().any(|a| a.name.name.as_str() == "nomangle"),
+        f.annotations
+            .iter()
+            .any(|a| a.name.name.as_str() == "nomangle"),
         "the callable one is the `@nomangle` structural helper"
     );
 }

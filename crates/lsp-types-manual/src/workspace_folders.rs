@@ -29,7 +29,8 @@ pub struct WorkspaceFolder {
     pub name: String,
 }
 
-impl_lsp_struct!(WorkspaceFolder,
+impl_lsp_struct!(
+    WorkspaceFolder,
     required {
         uri: Uri = "uri",
         name: String = "name",
@@ -43,8 +44,11 @@ pub struct DidChangeWorkspaceFoldersParams {
     pub event: WorkspaceFoldersChangeEvent,
 }
 
-impl_lsp_struct!(DidChangeWorkspaceFoldersParams,
-    required { event: WorkspaceFoldersChangeEvent = "event" },
+impl_lsp_struct!(
+    DidChangeWorkspaceFoldersParams,
+    required {
+        event: WorkspaceFoldersChangeEvent = "event"
+    },
     optional {}
 );
 

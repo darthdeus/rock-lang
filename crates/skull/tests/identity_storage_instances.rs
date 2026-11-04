@@ -3,7 +3,10 @@
 //! it; emission makes the rejection fatal for the package whose call site
 //! instantiated it, and exempt packages keep compiling.
 
-use crate::common::{try_emit_module, try_emit_module_enforcing_identity_storage, ws_with_stdlib, ws_with_stdlib_module};
+use crate::common::{
+    try_emit_module, try_emit_module_enforcing_identity_storage, ws_with_stdlib,
+    ws_with_stdlib_module,
+};
 use bone_semantic::inference::Workspace;
 use skull::instance_graph;
 
@@ -19,7 +22,10 @@ fn rejections_in(ws: &Workspace) -> Vec<String> {
     g.rejections()
         .filter(|r| r.kind.name() == IDENTITY_STORAGE)
         .map(|r| {
-            assert!(!instance_graph::is_spanless(&r.span), "spanless rejection: {r:?}");
+            assert!(
+                !instance_graph::is_spanless(&r.span),
+                "spanless rejection: {r:?}"
+            );
             format!("{}: {}", g.identity(ws, &r.at), r.message)
         })
         .collect()
@@ -93,8 +99,13 @@ fn main() {
 
 #[test]
 fn substitution_only_identity_storage_is_fatal_for_an_enforced_package() {
-    let err = try_emit_module_enforcing_identity_storage(STASH).expect_err("stash<Unit> must reject");
-    assert!(err.message.contains("cannot store identity struct `Unit`"), "{}", err.message);
+    let err =
+        try_emit_module_enforcing_identity_storage(STASH).expect_err("stash<Unit> must reject");
+    assert!(
+        err.message.contains("cannot store identity struct `Unit`"),
+        "{}",
+        err.message
+    );
 }
 
 #[test]
@@ -117,7 +128,10 @@ fn main() {
 "#,
     );
     assert_eq!(r.len(), 1, "{r:?}");
-    assert!(r[0].contains("erase") && r[0].contains("cannot erase identity struct `Unit`"), "{r:?}");
+    assert!(
+        r[0].contains("erase") && r[0].contains("cannot erase identity struct `Unit`"),
+        "{r:?}"
+    );
 }
 
 /// Stdlib bodies are held to the rule under substitution too: only the exact
@@ -139,7 +153,10 @@ fn main() {
     );
     let r = rejections_in(&ws);
     assert_eq!(r.len(), 1, "{r:?}");
-    assert!(r[0].contains("__probe_erase") && r[0].contains("cannot erase identity struct `Unit`"), "{r:?}");
+    assert!(
+        r[0].contains("__probe_erase") && r[0].contains("cannot erase identity struct `Unit`"),
+        "{r:?}"
+    );
 }
 
 /// Arena rows and Scene roots are the legal homes of an identity: every Arena

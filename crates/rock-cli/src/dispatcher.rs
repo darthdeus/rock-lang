@@ -1,5 +1,5 @@
-use crate::*;
 use crate::registry::{OptionRule, Route};
+use crate::*;
 
 /// Special device files cannot serve as an input path: the compiler reads them
 /// more than once and a stream cannot be rewound.
@@ -139,13 +139,16 @@ impl CommandContext {
     /// Resolve a project directory using this build's project conventions.
     pub fn get_project_dir_or_current(&self) -> Result<String> {
         let arg = self.get_path_or_current()?;
-        Ok((crate::registry::RuntimeServices::registered().resolve_project_dir)(&arg)?
-            .to_string_lossy()
-            .into_owned())
+        Ok(
+            (crate::registry::RuntimeServices::registered().resolve_project_dir)(&arg)?
+                .to_string_lossy()
+                .into_owned(),
+        )
     }
 
     pub fn get_path_or_current(&self) -> Result<String> {
-        let path = self.args
+        let path = self
+            .args
             .files
             .first()
             .cloned()
@@ -173,7 +176,8 @@ impl CommandContext {
     }
 
     pub fn get_output_or_default(&self, default: &str) -> Result<String> {
-        let output = self.args
+        let output = self
+            .args
             .output
             .clone()
             .unwrap_or_else(|| default.to_string());
@@ -248,7 +252,12 @@ impl CommandContext {
     fn require_backend_options(&self) -> Result<()> {
         for rule in OptionRule::all() {
             match rule {
-                OptionRule::Owned { flag, given, backend, operation } => {
+                OptionRule::Owned {
+                    flag,
+                    given,
+                    backend,
+                    operation,
+                } => {
                     if given(&self.args)
                         && (self.args.command.operation() != Some(*operation)
                             || self.args.backend != *backend)
@@ -268,7 +277,9 @@ impl CommandContext {
                         && !(self.args.command.operation() == Some(Operation::Test)
                             && self.args.backend == Backend::Glsl)
                     {
-                        anyhow::bail!("`--skip-gpu` is supported only by `rock test --backend glsl` and `rock shader-validate`");
+                        anyhow::bail!(
+                            "`--skip-gpu` is supported only by `rock test --backend glsl` and `rock shader-validate`"
+                        );
                     }
                 }
             }

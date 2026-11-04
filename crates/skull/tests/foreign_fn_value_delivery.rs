@@ -70,7 +70,10 @@ fn main() {
 }
 "#,
     );
-    assert!(defines(&lua, SYMBOL), "`{SYMBOL}` needs a definition when stored as a value");
+    assert!(
+        defines(&lua, SYMBOL),
+        "`{SYMBOL}` needs a definition when stored as a value"
+    );
 }
 
 /// The second control: `sqrt` is not unconditionally present. A program that
@@ -87,5 +90,8 @@ fn main() {
 }
 "#,
     );
-    assert!(!defines(&lua, SYMBOL), "`{SYMBOL}` is reached by nothing here");
+    assert!(
+        !defines(&lua, SYMBOL),
+        "`{SYMBOL}` is reached by nothing here"
+    );
 }

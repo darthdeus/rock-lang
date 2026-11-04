@@ -51,7 +51,10 @@ fn main() {
         out.contains("Point { x: 1, y: ? }"),
         "only y added, comma inserted: {out:?}"
     );
-    assert!(!out.contains("x: ?"), "must not re-add the present x: {out:?}");
+    assert!(
+        !out.contains("x: ?"),
+        "must not re-add the present x: {out:?}"
+    );
 }
 
 #[test]

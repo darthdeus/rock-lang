@@ -34,7 +34,10 @@ fn exercise() -> int {
 
 fn emit_js() -> String {
     let ws = ws_with(SRC);
-    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("test module");
     let fid = ws
         .module(mid)
         .functions
@@ -44,19 +47,33 @@ fn emit_js() -> String {
         .expect("exercise function");
     skull_codegen_js::emit::emit_with_closure(
         &ws,
-        &[(FuncRef { module: mid, func: fid }, "exercise".to_string())],
+        &[(
+            FuncRef {
+                module: mid,
+                func: fid,
+            },
+            "exercise".to_string(),
+        )],
     )
     .unwrap_or_else(|error| panic!("emit exercise: {}", error.message))
 }
 
 #[test]
 fn wide_flat_enum_vec_round_trips_mutation_and_sort_under_node() {
-    if !crate::common::node().arg("--version").output().map(|out| out.status.success()).unwrap_or(false) {
+    if !crate::common::node()
+        .arg("--version")
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false)
+    {
         eprintln!("SKIP: node not found");
         return;
     }
     let js = emit_js();
-    assert!(js.contains(r#"repr: "strided""#), "JS did not select strided storage:\n{js}");
+    assert!(
+        js.contains(r#"repr: "strided""#),
+        "JS did not select strided storage:\n{js}"
+    );
     let program = format!(
         "{}{}{}{}{}{}\n{js}\nconsole.log(exercise());",
         skull_codegen_js::JS_NB_CHECK_SHIMS,
@@ -66,7 +83,11 @@ fn wide_flat_enum_vec_round_trips_mutation_and_sort_under_node() {
         skull_codegen_js::JS_STRUCTURAL_EQ,
         skull_codegen_js::JS_ENUM_RUNTIME,
     );
-    let output = crate::common::node().arg("-e").arg(&program).output().expect("spawn node");
+    let output = crate::common::node()
+        .arg("-e")
+        .arg(&program)
+        .output()
+        .expect("spawn node");
     assert!(
         output.status.success(),
         "node failed:\n--- program ---\n{program}\n--- stderr ---\n{}",

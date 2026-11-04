@@ -23,11 +23,11 @@
 //! The taxonomy grows as lowering phases land (constructors, container ops,
 //! cast, stringify/format, inline-lua) — see the plan's phase checklist.
 
+use bone_core::prelude::Instant;
 use bone_semantic::hir::TyId;
 use bone_semantic::prelude::Span;
 use comfy_la_arena::{Arena, Idx};
 use std::sync::Arc;
-use bone_core::prelude::Instant;
 use ustr::Ustr;
 
 pub const VEC_COLUMN_HEADER_FIELD: &str = "@vec";
@@ -73,8 +73,18 @@ pub fn column_elem_rep_plans(
 ) {
     for inst in mf.insts.values() {
         match inst {
-            Inst::MakeVecColumns { elem, nobox, representation, .. }
-            | Inst::MakeVecColumnHeader { elem, nobox, representation, .. } => {
+            Inst::MakeVecColumns {
+                elem,
+                nobox,
+                representation,
+                ..
+            }
+            | Inst::MakeVecColumnHeader {
+                elem,
+                nobox,
+                representation,
+                ..
+            } => {
                 out.insert(*elem, (*nobox, *representation));
             }
             _ => {}
@@ -195,7 +205,12 @@ impl ColumnElem {
         representation: crate::lower::RepId,
         nobox: bool,
     ) -> Self {
-        ColumnElem { name, nullable, representation, nobox }
+        ColumnElem {
+            name,
+            nullable,
+            representation,
+            nobox,
+        }
     }
 
     pub fn representation(&self) -> crate::lower::RepId {
@@ -243,7 +258,10 @@ impl ClosureEnvPlan {
 impl ContainerKind {
     /// Either NativeBuffer flavor — the `{ ptr, len }` C-array shape.
     pub fn is_native_buffer(self) -> bool {
-        matches!(self, ContainerKind::NativeBuffer | ContainerKind::NativeBufferValue(_))
+        matches!(
+            self,
+            ContainerKind::NativeBuffer | ContainerKind::NativeBufferValue(_)
+        )
     }
 
     /// Either Vec flavor — the `{ .., len }` growable shape, 1-indexed.
@@ -319,11 +337,17 @@ pub enum Inst {
     /// `string.format("<fmt>", value)` — a static interpolation format spec
     /// (`{x:.2f}` etc.). The printf conversion string is baked at build time
     /// (D8: the format dispatch is decided HERE, not at the backend).
-    Format { value: Idx<Inst>, fmt: Ustr },
+    Format {
+        value: Idx<Inst>,
+        fmt: Ustr,
+    },
     /// `string.format(<fmt>, value)` — a format spec with a runtime-assembled
     /// conversion string (dynamic width/precision `{x:.{p}f}`); `fmt` is the
     /// already-built format-string value.
-    FormatDyn { value: Idx<Inst>, fmt: Idx<Inst> },
+    FormatDyn {
+        value: Idx<Inst>,
+        fmt: Idx<Inst>,
+    },
 
     // --- typed comparisons (yield a real bool) ---
     IntLt(Idx<Inst>, Idx<Inst>),
@@ -393,7 +417,10 @@ pub enum Inst {
     // for the design: `IdxRange<Inst>` only holds for operands allocated together,
     // which lowered call args are not.)
     /// Direct call to a statically-resolved function.
-    Call { func: FuncRef, args: Vec<Idx<Inst>> },
+    Call {
+        func: FuncRef,
+        args: Vec<Idx<Inst>>,
+    },
     /// Direct call whose result is a SCALARIZED value struct: the callee returns
     /// N leaf scalars (the scalar ABI), bound positionally into `dests` (`d0, d1,
     /// ... = callee(args)`). An effect (like [`Inst::MapNext`]) — the id is never
@@ -615,13 +642,22 @@ pub enum Inst {
     /// `cty` is a primitive C type (`int` / `float` / `bool`). The view aliases
     /// the SAME bytes as `.ptr`, so leaf-addressed and slot-addressed accesses
     /// to one buffer stay coherent -- which is what lets the two coexist.
-    FfiViewCast { cty: Ustr, ptr: Idx<Inst> },
+    FfiViewCast {
+        cty: Ustr,
+        ptr: Idx<Inst>,
+    },
 
     // --- projections ---
     /// `base.field` (struct field, or an enum record-payload field).
-    Field { base: Idx<Inst>, field: Ustr },
+    Field {
+        base: Idx<Inst>,
+        field: Ustr,
+    },
     /// `base.N` on a tuple/newtype. 0-based (Rock); emit adds `+1` for Lua.
-    TupleIndex { base: Idx<Inst>, index: usize },
+    TupleIndex {
+        base: Idx<Inst>,
+        index: usize,
+    },
 
     // --- container reads (0-based IR; emit adds `+1` on sequence access) ---
     /// `base[index]`, shape per `kind`: `Vec` -> `base.data[index+1]`,
@@ -636,7 +672,10 @@ pub enum Inst {
     /// [`ContainerKind::VecValueColumns`] access, where the K column reads that
     /// follow share ONE check; each then indexes raw via
     /// [`ContainerKind::VecColumn`].
-    VecCheckedIndex { vec: Idx<Inst>, index: Idx<Inst> },
+    VecCheckedIndex {
+        vec: Idx<Inst>,
+        index: Idx<Inst>,
+    },
     /// Element count: `Vec` -> `base.len`, `NativeBuffer` -> `base.len`.
     Len {
         base: Idx<Inst>,
@@ -645,7 +684,10 @@ pub enum Inst {
 
     // --- effects (no value; the id is never referenced) ---
     /// Write a variable cell.
-    Store { cell: Idx<Cell>, value: Idx<Inst> },
+    Store {
+        cell: Idx<Cell>,
+        value: Idx<Inst>,
+    },
     /// `base.field = value`.
     StoreField {
         base: Idx<Inst>,
@@ -660,7 +702,10 @@ pub enum Inst {
         kind: ContainerKind,
     },
     /// `NAME = value` — assign a module-level global (a Lua global).
-    StoreGlobal { name: Ustr, value: Idx<Inst> },
+    StoreGlobal {
+        name: Ustr,
+        value: Idx<Inst>,
+    },
     /// Append `value` to the array under construction `arr` (spread literals
     /// `[..a, b]`). `Vec`: `arr.len = arr.len + 1; arr.data[arr.len] = value`.
     /// An effect.
@@ -680,7 +725,10 @@ pub enum Inst {
     /// (rendered as `s.__on_<kind> = function() .. end`) so a kill before the
     /// first resume still fires the hook (the body would otherwise register it
     /// only on first resume). An effect — the id is never referenced.
-    CoroHook { kind: CoroHookKind, lambda: Idx<Inst> },
+    CoroHook {
+        kind: CoroHookKind,
+        lambda: Idx<Inst>,
+    },
     /// `<key_cell>, <val_cell> = next(<table>, <key_cell>)` — one step of Lua
     /// stateless table iteration (for-over-`Map`). The key cell is both the
     /// previous key (cursor) and the new key; a nil key signals exhaustion.
@@ -702,7 +750,9 @@ impl Inst {
                 dests.iter().for_each(|cell| push(*cell));
             }
             Inst::Lambda { params, .. } => params.iter().for_each(|cell| push(*cell)),
-            Inst::MapNext { key_cell, val_cell, .. } => {
+            Inst::MapNext {
+                key_cell, val_cell, ..
+            } => {
                 push(*key_cell);
                 push(*val_cell);
             }
@@ -787,12 +837,19 @@ impl Inst {
                 args.iter().for_each(|arg| push(*arg));
             }
             Inst::Lambda { .. } => {}
-            Inst::MakeVecColumns { columns, capacity, .. } => {
+            Inst::MakeVecColumns {
+                columns, capacity, ..
+            } => {
                 push(*capacity);
-                columns.iter().flat_map(|(_, values)| values).for_each(|&value| push(value));
+                columns
+                    .iter()
+                    .flat_map(|(_, values)| values)
+                    .for_each(|&value| push(value));
             }
             Inst::MakeVecColumnHeader { capacity, .. } => push(*capacity),
-            Inst::MakeVecStrided { values, capacity, .. } => {
+            Inst::MakeVecStrided {
+                values, capacity, ..
+            } => {
                 push(*capacity);
                 values.iter().for_each(|&value| push(value));
             }
@@ -810,11 +867,18 @@ impl Inst {
                 push(*present);
                 push(*value);
             }
-            Inst::MakeEnum { positional, named, .. } => {
+            Inst::MakeEnum {
+                positional, named, ..
+            } => {
                 positional.iter().for_each(|value| push(*value));
                 named.iter().for_each(|(_, value)| push(*value));
             }
-            Inst::MakeEnumDyn { tag, positional, named, .. } => {
+            Inst::MakeEnumDyn {
+                tag,
+                positional,
+                named,
+                ..
+            } => {
                 push(*tag);
                 positional.iter().for_each(|value| push(*value));
                 named.iter().for_each(|(_, value)| push(*value));
@@ -831,7 +895,9 @@ impl Inst {
                 push(*base);
                 push(*value);
             }
-            Inst::StoreIndex { base, index, value, .. } => {
+            Inst::StoreIndex {
+                base, index, value, ..
+            } => {
                 push(*base);
                 push(*index);
                 push(*value);
@@ -1087,8 +1153,7 @@ pub struct MirFunc {
     /// conversion. It contains no backend symbol or build-local RepId.
     pub code_abi_fingerprint: Option<String>,
     /// Function-value ABI witnesses keyed by the pre-conversion lambda inst.
-    pub lambda_abi_fingerprints:
-        bone_semantic::prelude::FxHashMap<Idx<Inst>, String>,
+    pub lambda_abi_fingerprints: bone_semantic::prelude::FxHashMap<Idx<Inst>, String>,
     pub lambda_abi_representations:
         bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::lower::FunctionRepPlan>,
     /// Concrete logical target for each named function-value mint.
@@ -1107,15 +1172,13 @@ pub struct MirFunc {
     /// Callee-entry comparisons that ask whether a declared parameter was
     /// omitted. Backends with typed parameters cannot use the Lua/JS nil
     /// sentinel and consume this provenance through their own call ABI.
-    pub param_default_guards:
-        bone_semantic::prelude::FxHashMap<Idx<Inst>, usize>,
+    pub param_default_guards: bone_semantic::prelude::FxHashMap<Idx<Inst>, usize>,
     /// Source parameter indices whose scalar literal defaults are supplied by
     /// direct calls instead of entering the default-fill branch.
     pub param_default_materialized: std::collections::HashSet<usize>,
     /// Default expression roots keyed by source parameter index. Placement
     /// callers need the callee-owned value when a wire slot is omitted.
-    pub param_default_values:
-        bone_semantic::prelude::FxHashMap<usize, Vec<Idx<Inst>>>,
+    pub param_default_values: bone_semantic::prelude::FxHashMap<usize, Vec<Idx<Inst>>>,
     /// Opt-in timing for arena growth attribution.
     pub lower_timing_enabled: bool,
     pub lower_attribution: crate::lower::LowerAttribution,
@@ -1210,8 +1273,7 @@ pub struct MirFunc {
     /// the policy decided, so a call that keeps the shared body still states
     /// which instance it means. Reading the delivery record as identity is what
     /// made a declined specialization indistinguishable from an unknown callee.
-    pub callee_instances:
-        bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::instance::Instance>,
+    pub callee_instances: bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::instance::Instance>,
     /// The ABI plan the call lowering used for each direct call. This is kept
     /// beside identity because reconstructing it from a later, possibly mutated
     /// owner would make an ABI corruption look self-consistent.
@@ -1220,13 +1282,11 @@ pub struct MirFunc {
     /// The owned function-type representation used by an indirect call. A
     /// function value has no declaration `Instance`, so its physical signature
     /// is carried directly beside the `CallValue`/`CallValueMulti` instruction.
-    pub call_rep_plans:
-        bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::lower::FunctionRepPlan>,
+    pub call_rep_plans: bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::lower::FunctionRepPlan>,
     /// The owned capture transport for each closure creation instruction. The
     /// closure transform consumes this instead of re-deriving captures from the
     /// rewritten CFG.
-    pub closure_env_plans:
-        bone_semantic::prelude::FxHashMap<Idx<Inst>, ClosureEnvPlan>,
+    pub closure_env_plans: bone_semantic::prelude::FxHashMap<Idx<Inst>, ClosureEnvPlan>,
     /// Placeholder [`Inst::CallBoundMulti`]s whose element the LOWERING already
     /// split into leaf cells: `dests` is sized to the real return arity and the
     /// loop pattern is bound to the leaves, so the splice must leave both alone.
@@ -1252,8 +1312,7 @@ pub struct MirFunc {
     /// Representation plans intentionally erase nominal generic arguments, so
     /// native backends consume this build-owned identity instead of guessing
     /// them from a constructor's field shape.
-    pub inst_logical_types:
-        bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::monoty::MonoTyId>,
+    pub inst_logical_types: bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::monoty::MonoTyId>,
     /// **Which callee obligation of the source body each call instruction is**
     /// (plan S 9, Stage 3). The join key between a lowered call and the callee
     /// `skull::concrete_body::ConcreteBody` already resolved for that site, so
@@ -1400,8 +1459,9 @@ impl MirFunc {
         self.record_new_cell();
         if self.cells.capacity() != capacity {
             self.lower_attribution.mir_cell_reallocations += 1;
-            self.lower_attribution.mir_cell_reallocation_ns +=
-                start.map(|start| start.elapsed().as_nanos() as u64).unwrap_or_default();
+            self.lower_attribution.mir_cell_reallocation_ns += start
+                .map(|start| start.elapsed().as_nanos() as u64)
+                .unwrap_or_default();
         }
         id
     }
@@ -1424,8 +1484,9 @@ impl MirFunc {
         self.record_new_cell();
         if self.cells.capacity() != capacity {
             self.lower_attribution.mir_cell_reallocations += 1;
-            self.lower_attribution.mir_cell_reallocation_ns +=
-                start.map(|start| start.elapsed().as_nanos() as u64).unwrap_or_default();
+            self.lower_attribution.mir_cell_reallocation_ns += start
+                .map(|start| start.elapsed().as_nanos() as u64)
+                .unwrap_or_default();
         }
         id
     }
@@ -1486,8 +1547,9 @@ impl MirFunc {
         self.record_new_block();
         if self.blocks.capacity() != capacity {
             self.lower_attribution.mir_block_reallocations += 1;
-            self.lower_attribution.mir_block_reallocation_ns +=
-                start.map(|start| start.elapsed().as_nanos() as u64).unwrap_or_default();
+            self.lower_attribution.mir_block_reallocation_ns += start
+                .map(|start| start.elapsed().as_nanos() as u64)
+                .unwrap_or_default();
         }
         id
     }
@@ -1500,8 +1562,9 @@ impl MirFunc {
         self.record_new_inst();
         if self.insts.capacity() != capacity {
             self.lower_attribution.mir_instruction_reallocations += 1;
-            self.lower_attribution.mir_instruction_reallocation_ns +=
-                start.map(|start| start.elapsed().as_nanos() as u64).unwrap_or_default();
+            self.lower_attribution.mir_instruction_reallocation_ns += start
+                .map(|start| start.elapsed().as_nanos() as u64)
+                .unwrap_or_default();
         }
         self.blocks[block].insts.push(id);
         id
@@ -1535,39 +1598,56 @@ impl MirFunc {
     pub fn emit_inst_id(&self, id: Idx<Inst>) -> u32 {
         self.emit_ids
             .as_ref()
-            .map_or(u32::from(id.into_raw()), |ids| ids.insts[u32::from(id.into_raw()) as usize])
+            .map_or(u32::from(id.into_raw()), |ids| {
+                ids.insts[u32::from(id.into_raw()) as usize]
+            })
     }
 
     pub fn emit_cell_id(&self, id: Idx<Cell>) -> u32 {
         self.emit_ids
             .as_ref()
-            .map_or(u32::from(id.into_raw()), |ids| ids.cells[u32::from(id.into_raw()) as usize])
+            .map_or(u32::from(id.into_raw()), |ids| {
+                ids.cells[u32::from(id.into_raw()) as usize]
+            })
     }
 
     pub fn emit_block_id(&self, id: Idx<Block>) -> u32 {
         self.emit_ids
             .as_ref()
-            .map_or(u32::from(id.into_raw()), |ids| ids.blocks[u32::from(id.into_raw()) as usize])
+            .map_or(u32::from(id.into_raw()), |ids| {
+                ids.blocks[u32::from(id.into_raw()) as usize]
+            })
     }
 
     pub fn emit_inst_span(&self) -> u32 {
-        self.emit_ids.as_ref().map_or(self.insts.len() as u32, |ids| ids.next_insts)
+        self.emit_ids
+            .as_ref()
+            .map_or(self.insts.len() as u32, |ids| ids.next_insts)
     }
 
     pub fn emit_cell_span(&self) -> u32 {
-        self.emit_ids.as_ref().map_or(self.cells.len() as u32, |ids| ids.next_cells)
+        self.emit_ids
+            .as_ref()
+            .map_or(self.cells.len() as u32, |ids| ids.next_cells)
     }
 
     pub fn emit_block_span(&self) -> u32 {
-        self.emit_ids.as_ref().map_or(self.blocks.len() as u32, |ids| ids.next_blocks)
+        self.emit_ids
+            .as_ref()
+            .map_or(self.blocks.len() as u32, |ids| ids.next_blocks)
     }
 
     pub fn emit_nexts(&self) -> Option<(u32, u32, u32)> {
-        self.emit_ids.as_ref().map(|ids| (ids.next_insts, ids.next_cells, ids.next_blocks))
+        self.emit_ids
+            .as_ref()
+            .map(|ids| (ids.next_insts, ids.next_cells, ids.next_blocks))
     }
 
     pub fn set_emit_nexts(&mut self, nexts: (u32, u32, u32)) {
-        let ids = self.emit_ids.as_mut().expect("emit identities must be enabled");
+        let ids = self
+            .emit_ids
+            .as_mut()
+            .expect("emit identities must be enabled");
         ids.next_insts = nexts.0;
         ids.next_cells = nexts.1;
         ids.next_blocks = nexts.2;

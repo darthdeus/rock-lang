@@ -12,8 +12,11 @@ pub struct CallHierarchyOptions {
     pub work_done_progress_options: WorkDoneProgressOptions,
 }
 
-impl_lsp_struct!(CallHierarchyOptions,
-    flatten { work_done_progress_options: WorkDoneProgressOptions }
+impl_lsp_struct!(
+    CallHierarchyOptions,
+    flatten {
+        work_done_progress_options: WorkDoneProgressOptions
+    }
 );
 
 #[derive(Debug, Eq, PartialEq, Clone, Copy)]
@@ -45,7 +48,8 @@ pub struct CallHierarchyPrepareParams {
     pub work_done_progress_params: WorkDoneProgressParams,
 }
 
-impl_lsp_struct!(CallHierarchyPrepareParams,
+impl_lsp_struct!(
+    CallHierarchyPrepareParams,
     flatten {
         text_document_position_params: TextDocumentPositionParams,
         work_done_progress_params: WorkDoneProgressParams,
@@ -86,8 +90,11 @@ pub struct CallHierarchyIncomingCallsParams {
     pub partial_result_params: PartialResultParams,
 }
 
-impl_lsp_struct!(CallHierarchyIncomingCallsParams,
-    required { item: CallHierarchyItem = "item" },
+impl_lsp_struct!(
+    CallHierarchyIncomingCallsParams,
+    required {
+        item: CallHierarchyItem = "item"
+    },
     optional {},
     flatten {
         work_done_progress_params: WorkDoneProgressParams,
@@ -117,8 +124,11 @@ pub struct CallHierarchyOutgoingCallsParams {
     pub partial_result_params: PartialResultParams,
 }
 
-impl_lsp_struct!(CallHierarchyOutgoingCallsParams,
-    required { item: CallHierarchyItem = "item" },
+impl_lsp_struct!(
+    CallHierarchyOutgoingCallsParams,
+    required {
+        item: CallHierarchyItem = "item"
+    },
     optional {},
     flatten {
         work_done_progress_params: WorkDoneProgressParams,

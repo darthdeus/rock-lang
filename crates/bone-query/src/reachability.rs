@@ -26,7 +26,9 @@ pub enum EdgeKind {
     /// receiver fills the first one -- such a method can only be the LAST hop of
     /// a path (you cannot park a snippet hole mid-path), so it is never
     /// traversed through.
-    Method { takes_args: bool },
+    Method {
+        takes_args: bool,
+    },
 }
 
 struct Edge {
@@ -117,7 +119,10 @@ impl ReachabilityIndex {
                         kind: EdgeKind::Field,
                         target: type_key(ws, f.ty),
                         method: None,
-                        field: Some(FieldRef { owner: src, vis: f.read_vis.clone() }),
+                        field: Some(FieldRef {
+                            owner: src,
+                            vis: f.read_vis.clone(),
+                        }),
                     });
                 }
             }
@@ -132,8 +137,12 @@ impl ReachabilityIndex {
                 if f.name.as_str().starts_with("__") {
                     continue;
                 }
-                let Some(p0) = f.param_decls.first() else { continue };
-                let Some(recv) = struct_name_of_ty(ws, p0.ty) else { continue };
+                let Some(p0) = f.param_decls.first() else {
+                    continue;
+                };
+                let Some(recv) = struct_name_of_ty(ws, p0.ty) else {
+                    continue;
+                };
                 let Some(ret) = f.return_ty else { continue };
                 let rendered = ws.render(None, ret);
                 if rendered == "()" || rendered.is_empty() {
@@ -160,7 +169,9 @@ impl ReachabilityIndex {
             let mut q: VecDeque<(Ustr, u16)> = VecDeque::new();
             q.push_back((src, 0));
             while let Some((cur, d)) = q.pop_front() {
-                let Some(outs) = edges.get(&cur) else { continue };
+                let Some(outs) = edges.get(&cur) else {
+                    continue;
+                };
                 for e in outs {
                     let nd = d + 1;
                     // Keep the first (=shortest, BFS) distance seen per target.
@@ -182,13 +193,27 @@ impl ReachabilityIndex {
             let mut paths = Vec::new();
             let mut on_path: HashSet<Ustr> = HashSet::new();
             on_path.insert(src);
-            enumerate_arg_paths(&edges, src, "", 0, false, &mut on_path, &mut paths, &[], &[]);
+            enumerate_arg_paths(
+                &edges,
+                src,
+                "",
+                0,
+                false,
+                &mut on_path,
+                &mut paths,
+                &[],
+                &[],
+            );
             if !paths.is_empty() {
                 arg_paths.insert(src, paths);
             }
         }
 
-        ReachabilityIndex { edges, reaches, arg_paths }
+        ReachabilityIndex {
+            edges,
+            reaches,
+            arg_paths,
+        }
     }
 
     /// Precomputed depth-`<= ARG_PATH_DEPTH` reach paths from a value of `ty` to
@@ -219,7 +244,10 @@ impl ReachabilityIndex {
     pub fn stats(&self) -> String {
         let edges: usize = self.edges.values().map(|v| v.len()).sum();
         let pairs: usize = self.reaches.values().map(|m| m.len()).sum();
-        format!("{} nodes, {edges} edges, {pairs} closure-pairs", self.edges.len())
+        format!(
+            "{} nodes, {edges} edges, {pairs} closure-pairs",
+            self.edges.len()
+        )
     }
 
     fn reaches_any(&self, from: Ustr, expected: &[Ustr]) -> bool {
@@ -266,7 +294,10 @@ impl ReachabilityIndex {
         // Bail unless this root can actually reach a wanted type -- avoids any
         // DFS for the many scalar / unrelated roots.
         if !self.edges.contains_key(&root) || !self.reaches_any(root, &want) {
-            return ReachResult { paths: out, truncated: false };
+            return ReachResult {
+                paths: out,
+                truncated: false,
+            };
         }
         let mut on_path: HashSet<Ustr> = HashSet::new();
         on_path.insert(root);
@@ -286,7 +317,10 @@ impl ReachabilityIndex {
         out.sort_by(|a, b| a.dist.cmp(&b.dist).then_with(|| a.suffix.cmp(&b.suffix)));
         let truncated = out.len() > cap;
         out.truncate(cap);
-        ReachResult { paths: out, truncated }
+        ReachResult {
+            paths: out,
+            truncated,
+        }
     }
 
     fn dfs(
@@ -302,7 +336,9 @@ impl ReachabilityIndex {
         field_members: &[FieldRef],
         visibility: Option<(&Workspace, &FragmentScope)>,
     ) {
-        let Some(outs) = self.edges.get(&cur) else { return };
+        let Some(outs) = self.edges.get(&cur) else {
+            return;
+        };
         for e in outs {
             let mut next_methods = method_members.to_vec();
             if let Some(method) = e.method {
@@ -328,8 +364,11 @@ impl ReachabilityIndex {
                 EdgeKind::Field => e.label.clone(),
                 EdgeKind::Method { .. } => format!("{}()", e.label),
             };
-            let leaf_suffix =
-                if prefix.is_empty() { e.label.clone() } else { format!("{prefix}.{}", e.label) };
+            let leaf_suffix = if prefix.is_empty() {
+                e.label.clone()
+            } else {
+                format!("{prefix}.{}", e.label)
+            };
 
             // Productive leaf: this edge's target IS a wanted type.
             if want.iter().any(|w| *w == e.target) {
@@ -352,11 +391,17 @@ impl ReachabilityIndex {
             // Descend only through TRAVERSABLE edges (fields + no-arg methods)
             // whose target still reaches a wanted type -- the closure prunes
             // every dead branch, so only productive paths are walked.
-            let traversable = matches!(e.kind, EdgeKind::Field | EdgeKind::Method { takes_args: false });
+            let traversable = matches!(
+                e.kind,
+                EdgeKind::Field | EdgeKind::Method { takes_args: false }
+            );
             if traversable && self.reaches_any(e.target, want) {
                 let hop_call = matches!(e.kind, EdgeKind::Method { .. });
-                let descend_prefix =
-                    if prefix.is_empty() { seg_label } else { format!("{prefix}.{seg_label}") };
+                let descend_prefix = if prefix.is_empty() {
+                    seg_label
+                } else {
+                    format!("{prefix}.{seg_label}")
+                };
                 on_path.insert(e.target);
                 self.dfs(
                     e.target,
@@ -407,8 +452,11 @@ fn enumerate_arg_paths(
         if let Some(field) = &e.field {
             next_fields.push(field.clone());
         }
-        let leaf_suffix =
-            if prefix.is_empty() { e.label.clone() } else { format!("{prefix}.{}", e.label) };
+        let leaf_suffix = if prefix.is_empty() {
+            e.label.clone()
+        } else {
+            format!("{prefix}.{}", e.label)
+        };
         let (is_method, takes_args) = match e.kind {
             EdgeKind::Field => (false, false),
             EdgeKind::Method { takes_args } => (true, takes_args),
@@ -425,14 +473,20 @@ fn enumerate_arg_paths(
         });
         // Descend through traversable edges (fields + no-arg methods) until the
         // depth cap. An args-taking method ends the path (can't chain through it).
-        let traversable = matches!(e.kind, EdgeKind::Field | EdgeKind::Method { takes_args: false });
+        let traversable = matches!(
+            e.kind,
+            EdgeKind::Field | EdgeKind::Method { takes_args: false }
+        );
         if traversable && depth + 1 < ARG_PATH_DEPTH {
             let seg_label = match e.kind {
                 EdgeKind::Field => e.label.clone(),
                 EdgeKind::Method { .. } => format!("{}()", e.label),
             };
-            let descend_prefix =
-                if prefix.is_empty() { seg_label } else { format!("{prefix}.{seg_label}") };
+            let descend_prefix = if prefix.is_empty() {
+                seg_label
+            } else {
+                format!("{prefix}.{seg_label}")
+            };
             on_path.insert(e.target);
             enumerate_arg_paths(
                 edges,
@@ -450,7 +504,11 @@ fn enumerate_arg_paths(
     }
 }
 
-pub(crate) fn methods_admitted(ws: &Workspace, frag: &FragmentScope, methods: &[MethodRef]) -> bool {
+pub(crate) fn methods_admitted(
+    ws: &Workspace,
+    frag: &FragmentScope,
+    methods: &[MethodRef],
+) -> bool {
     methods.iter().all(|(key, mid, fid)| {
         crate::modules_scope::callable_member_admitted(ws, frag, *key, *mid, *fid)
     })
@@ -488,7 +546,9 @@ fn type_key(ws: &Workspace, ty: TyId) -> Ustr {
 /// `query::struct_name_of_ty` but for the static (signature) arena only -- field
 /// and parameter types are always static, so no body is threaded.
 fn struct_name_of_ty(ws: &Workspace, ty: TyId) -> Option<Ustr> {
-    let TyId::Static(m, idx) = ty else { return None };
+    let TyId::Static(m, idx) = ty else {
+        return None;
+    };
     let te = &ws.modules.get(m.index())?.ty_arena[idx];
     match te {
         bone_semantic::hir::TypeExpr::App {

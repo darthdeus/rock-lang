@@ -66,7 +66,11 @@ fn a_type_without_a_c_layout_rejects_by_name() {
             Ustr::from("NotAType"),
         )
         .expect_err("a non-value type must not produce a layout");
-    assert!(err.message.contains("NotAType"), "the rejection must name the type, got: {}", err.message);
+    assert!(
+        err.message.contains("NotAType"),
+        "the rejection must name the type, got: {}",
+        err.message
+    );
 }
 
 /// Offsets follow C rules, not declaration index: `Mixed` packs float@0, int@4,
@@ -79,10 +83,15 @@ fn mixed_width_offsets_follow_c_layout() {
         .iter()
         .map(|l| (l.path.as_str(), l.cty, l.byte_off))
         .collect();
-    assert_eq!(got, vec![("a", "float", 0), ("n", "int", 4), ("b", "bool", 8)]);
+    assert_eq!(
+        got,
+        vec![("a", "float", 0), ("n", "int", 4), ("b", "bool", 8)]
+    );
 
-    let bools: Vec<(&str, usize)> =
-        layout(&ws, "Bools").iter().map(|l| (l.path.as_str(), l.byte_off)).collect();
+    let bools: Vec<(&str, usize)> = layout(&ws, "Bools")
+        .iter()
+        .map(|l| (l.path.as_str(), l.byte_off))
+        .collect();
     assert_eq!(bools, vec![("p", 0), ("q", 1), ("r", 2)]);
 }
 
@@ -90,14 +99,21 @@ fn mixed_width_offsets_follow_c_layout() {
 #[test]
 fn nested_leaf_offsets_compose() {
     let ws = ws_of(SHAPES);
-    let got: Vec<(&str, usize)> =
-        layout(&ws, "Nested").iter().map(|l| (l.path.as_str(), l.byte_off)).collect();
-    assert_eq!(got, vec![("pos.x", 0), ("pos.y", 4), ("uv.x", 8), ("uv.y", 12)]);
+    let got: Vec<(&str, usize)> = layout(&ws, "Nested")
+        .iter()
+        .map(|l| (l.path.as_str(), l.byte_off))
+        .collect();
+    assert_eq!(
+        got,
+        vec![("pos.x", 0), ("pos.y", 4), ("uv.x", 8), ("uv.y", 12)]
+    );
 
     // Depth 3, and a nested aggregate followed by a sibling: the sibling starts
     // after the WHOLE nested struct, not after its first leaf.
-    let deep: Vec<(&str, usize)> =
-        layout(&ws, "Deep3").iter().map(|l| (l.path.as_str(), l.byte_off)).collect();
+    let deep: Vec<(&str, usize)> = layout(&ws, "Deep3")
+        .iter()
+        .map(|l| (l.path.as_str(), l.byte_off))
+        .collect();
     assert_eq!(
         deep,
         vec![
@@ -117,8 +133,10 @@ fn nested_leaf_offsets_compose() {
 #[test]
 fn nested_struct_trailing_padding_is_respected() {
     let ws = ws_of(SHAPES);
-    let got: Vec<(&str, usize)> =
-        layout(&ws, "DeepMixed").iter().map(|l| (l.path.as_str(), l.byte_off)).collect();
+    let got: Vec<(&str, usize)> = layout(&ws, "DeepMixed")
+        .iter()
+        .map(|l| (l.path.as_str(), l.byte_off))
+        .collect();
     assert_eq!(
         got,
         vec![
@@ -141,23 +159,38 @@ fn float_width_follows_the_declared_type() {
     );
     let arena = RepArena::default();
     let (narrow, size, _) = arena
-        .nominal_leaf_layout(&ws, bone_semantic::hir::FnBackend::Any, Ustr::from("Narrow"))
+        .nominal_leaf_layout(
+            &ws,
+            bone_semantic::hir::FnBackend::Any,
+            Ustr::from("Narrow"),
+        )
         .expect("Narrow layout");
-    let leaves: Vec<(&str, &str, usize)> =
-        narrow.iter().map(|l| (l.path.as_str(), l.cty, l.byte_off)).collect();
-    assert_eq!(leaves, vec![("x", "float", 0), ("y", "float", 4), ("n", "int", 8)]);
+    let leaves: Vec<(&str, &str, usize)> = narrow
+        .iter()
+        .map(|l| (l.path.as_str(), l.cty, l.byte_off))
+        .collect();
+    assert_eq!(
+        leaves,
+        vec![("x", "float", 0), ("y", "float", 4), ("n", "int", 8)]
+    );
     assert_eq!(size, 12);
 
     let (wide, size, align) = arena
         .nominal_leaf_layout(&ws, bone_semantic::hir::FnBackend::Any, Ustr::from("Wide"))
         .expect("Wide layout");
-    let leaves: Vec<(&str, &str, usize)> =
-        wide.iter().map(|l| (l.path.as_str(), l.cty, l.byte_off)).collect();
+    let leaves: Vec<(&str, &str, usize)> = wide
+        .iter()
+        .map(|l| (l.path.as_str(), l.cty, l.byte_off))
+        .collect();
     assert_eq!(leaves, vec![("x", "double", 0), ("n", "int", 8)]);
     assert_eq!((size, align), (16, 8));
 
     let (spelled, _, _) = arena
-        .nominal_leaf_layout(&ws, bone_semantic::hir::FnBackend::Any, Ustr::from("Spelled"))
+        .nominal_leaf_layout(
+            &ws,
+            bone_semantic::hir::FnBackend::Any,
+            Ustr::from("Spelled"),
+        )
         .expect("Spelled layout");
     assert_eq!(spelled[0].cty, "double");
 }

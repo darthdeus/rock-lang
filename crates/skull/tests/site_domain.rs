@@ -38,7 +38,10 @@ fn check(src: &str) -> Workspace {
 /// An instance's arguments as one string, for comparison and for a failure
 /// message that names what was found rather than an opaque id.
 fn render_args(g: &InstanceGraph, args: &[skull_mir::monoty::MonoTyId]) -> String {
-    args.iter().map(|a| g.interner().render(*a)).collect::<Vec<_>>().join(",")
+    args.iter()
+        .map(|a| g.interner().render(*a))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn graph_of(ws: &Workspace) -> InstanceGraph {
@@ -62,14 +65,17 @@ fn prepared_body(ws: &Workspace, name: &str) -> MirFunc {
         .iter()
         .find(|(_, f)| f.name.as_str() == name)
         .expect("fn not found");
-    let fref = skull_mir::mir::FuncRef { module: mid, func: fid };
+    let fref = skull_mir::mir::FuncRef {
+        module: mid,
+        func: fid,
+    };
     let graph = graph_of(ws);
     let bodies = skull::concrete_body::build(ws, &graph);
     let scx = ScalarCtx::new(ws).sharing(graph.interner().clone());
     let instance = skull_mir::instance::Instance::base(fref);
     let plan = bodies.plans.get(&instance).expect("concrete plan");
-    let mut mf = skull_mir::lower::lower_instance_with_plans(ws, &scx, plan, &bodies.plans)
-        .expect("lower");
+    let mut mf =
+        skull_mir::lower::lower_instance_with_plans(ws, &scx, plan, &bodies.plans).expect("lower");
     let mangled = skull_mir::mangle::mangle_fn(ws, f);
     let mut cache = skull_transform::InlineCache::default();
     skull::mir_emit::prepare_instance_body_with_plans(
@@ -135,7 +141,9 @@ fn main() {
     let ws = check(src);
     let stamped = stamped_domains(&ws, "main");
     assert!(
-        stamped.iter().any(|(d, _)| matches!(d, SiteDomain::StructDefaults(..))),
+        stamped
+            .iter()
+            .any(|(d, _)| matches!(d, SiteDomain::StructDefaults(..))),
         "the default's call was not stamped in a defaults domain: {stamped:?}"
     );
     assert!(
@@ -334,7 +342,10 @@ fn main() { let c = Cfg { m: 1 } print("{c.a + c.m}") }
             residue += skull::expr_subtree::defaults_body_residue(body);
         }
     }
-    assert!(examined > 0, "no defaults body was examined, so the zero says nothing");
+    assert!(
+        examined > 0,
+        "no defaults body was examined, so the zero says nothing"
+    );
     assert_eq!(
         residue, 0,
         "{residue} of {examined} defaults-body expressions belong to no field subtree"
@@ -415,7 +426,10 @@ fn main() {
         })
         .collect();
     assert_eq!(defaults[0].1, defaults[1].1, "same initializer expression");
-    assert_ne!(args[0], args[1], "the domains differ somewhere other than the arguments");
+    assert_ne!(
+        args[0], args[1],
+        "the domains differ somewhere other than the arguments"
+    );
 
     let c = census_of(src);
     assert!(c.accounts(), "accounting identity broken: {c:?}");
@@ -455,7 +469,10 @@ fn main() {
         .instances
         .iter()
         .filter(|i| {
-            ws.module(i.func.module).functions[i.func.func].name.as_str() == "seed"
+            ws.module(i.func.module).functions[i.func.func]
+                .name
+                .as_str()
+                == "seed"
         })
         .map(|i| &i.args)
         .collect();
@@ -464,7 +481,10 @@ fn main() {
         2,
         "expected `seed<int>` and `seed<string>`, got {}: {:?}",
         seeds.len(),
-        seeds.iter().map(|a| render_args(&g2, a)).collect::<Vec<_>>()
+        seeds
+            .iter()
+            .map(|a| render_args(&g2, a))
+            .collect::<Vec<_>>()
     );
     let mut rendered: Vec<String> = seeds.iter().map(|a| render_args(&g2, a)).collect();
     rendered.sort();
@@ -475,14 +495,20 @@ fn main() {
     let unconstrained = g
         .rejections()
         .filter(|r| {
-            matches!(r.kind, skull::instance_graph::RejectionKind::UnconstrainedTypeVar)
+            matches!(
+                r.kind,
+                skull::instance_graph::RejectionKind::UnconstrainedTypeVar
+            )
         })
         .count();
     assert_eq!(
-        unconstrained, 0,
+        unconstrained,
+        0,
         "a legal generic-struct default is reported as an unconstrained type \
          variable: {:?}",
-        g.rejections().map(|r| r.message.clone()).collect::<Vec<_>>()
+        g.rejections()
+            .map(|r| r.message.clone())
+            .collect::<Vec<_>>()
     );
 }
 
@@ -548,7 +574,10 @@ fn main() {{
 
     let base = census_of(&written);
     let with_defaults = census_of(&omitted);
-    assert!(base.accounts() && with_defaults.accounts(), "accounting identity broken");
+    assert!(
+        base.accounts() && with_defaults.accounts(),
+        "accounting identity broken"
+    );
 
     // The three injected calls are examined...
     assert_eq!(
@@ -579,7 +608,6 @@ fn main() {{
     );
 }
 
-
 /// Both `iter` witness forms state their own concrete instance, so the census
 /// can verify them.
 ///
@@ -599,11 +627,21 @@ fn main() {{
 fn both_iter_witness_forms_state_the_instance_they_target() {
     let _inline = crate::common::InlineOffGuard::on();
     for (form, src) in [
-        ("implicit coercion", "fn main() { let a: [int] = [1, 2]\n  print(\"{a.map(_ * 2).sum()}\") }"),
-        ("`for` head", "fn main() { let a: [int] = [1, 2]\n  let s = 0\n  for v in a { s = s + v }\n  print(\"{s}\") }"),
+        (
+            "implicit coercion",
+            "fn main() { let a: [int] = [1, 2]\n  print(\"{a.map(_ * 2).sum()}\") }",
+        ),
+        (
+            "`for` head",
+            "fn main() { let a: [int] = [1, 2]\n  let s = 0\n  for v in a { s = s + v }\n  print(\"{s}\") }",
+        ),
     ] {
         let c = census_of(src);
-        let op = if form == "`for` head" { "for-iter" } else { "implicit-iter" };
+        let op = if form == "`for` head" {
+            "for-iter"
+        } else {
+            "implicit-iter"
+        };
         assert!(
             c.examined_by_op.get(op).copied().unwrap_or(0) > 0,
             "no `{op}` site examined for the {form} form, so its zero would be \

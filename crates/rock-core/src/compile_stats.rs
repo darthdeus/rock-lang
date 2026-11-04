@@ -78,12 +78,20 @@ mod tests {
     #[test]
     fn merge_sums_fields() {
         let mut a = CompileStats {
-            files: 1, total_lines: 10, code_lines: 7,
-            comment_lines: 2, blank_lines: 1, bytes: 100,
+            files: 1,
+            total_lines: 10,
+            code_lines: 7,
+            comment_lines: 2,
+            blank_lines: 1,
+            bytes: 100,
         };
         let b = CompileStats {
-            files: 2, total_lines: 20, code_lines: 15,
-            comment_lines: 3, blank_lines: 2, bytes: 200,
+            files: 2,
+            total_lines: 20,
+            code_lines: 15,
+            comment_lines: 3,
+            blank_lines: 2,
+            bytes: 200,
         };
         a.merge(&b);
         assert_eq!(a.files, 3);
@@ -94,26 +102,41 @@ mod tests {
 
     #[test]
     fn loc_per_sec_zero_elapsed() {
-        let s = CompileStats { total_lines: 1000, ..Default::default() };
+        let s = CompileStats {
+            total_lines: 1000,
+            ..Default::default()
+        };
         assert_eq!(s.loc_per_sec(Duration::ZERO), 0.0);
     }
 
     #[test]
     fn loc_per_sec_basic() {
-        let s = CompileStats { total_lines: 1000, ..Default::default() };
+        let s = CompileStats {
+            total_lines: 1000,
+            ..Default::default()
+        };
         let rate = s.loc_per_sec(Duration::from_secs(1));
         assert!((rate - 1000.0).abs() < 0.01);
     }
 
     #[test]
     fn format_throughput_units() {
-        let s = CompileStats { total_lines: 50_000, ..Default::default() };
+        let s = CompileStats {
+            total_lines: 50_000,
+            ..Default::default()
+        };
         assert_eq!(s.format_throughput(Duration::from_secs(1)), "50.0k loc/sec");
 
-        let s = CompileStats { total_lines: 2_500, ..Default::default() };
+        let s = CompileStats {
+            total_lines: 2_500,
+            ..Default::default()
+        };
         assert_eq!(s.format_throughput(Duration::from_secs(1)), "2.50k loc/sec");
 
-        let s = CompileStats { total_lines: 100, ..Default::default() };
+        let s = CompileStats {
+            total_lines: 100,
+            ..Default::default()
+        };
         assert_eq!(s.format_throughput(Duration::from_secs(1)), "100 loc/sec");
     }
 }

@@ -1,6 +1,6 @@
 use crate::prelude::*;
 use crate::source_files::SourceFiles;
-use crate::utils::{make_report_builder, ReportBuilderExt};
+use crate::utils::{ReportBuilderExt, make_report_builder};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum CompilerErrorLevel {
@@ -243,7 +243,12 @@ impl CompilerError {
             ),
         };
 
-        format!("{} {}{}", self.level.one_line_prefix(), self.message, location)
+        format!(
+            "{} {}{}",
+            self.level.one_line_prefix(),
+            self.message,
+            location
+        )
     }
 
     #[must_use]
@@ -274,10 +279,7 @@ impl CompilerError {
 
         match self.labels.as_slice() {
             // No marked range: point at the single byte the error sits on.
-            [] => builder.add_label(ariadne::Label::new((
-                file.to_string(),
-                offset..offset + 1,
-            ))),
+            [] => builder.add_label(ariadne::Label::new((file.to_string(), offset..offset + 1))),
             labels => {
                 for label in labels {
                     builder.add_span_label(&label.span, label.message.clone());
@@ -307,9 +309,10 @@ pub fn render_all(errs: &[CompilerError], sources: &SourceFiles) -> String {
     }
 
     let has_source = |error: &CompilerError| {
-        sources.files.iter().any(|source| {
-            source.borrow().file.to_id_path() == error.location.file.as_str()
-        })
+        sources
+            .files
+            .iter()
+            .any(|source| source.borrow().file.to_id_path() == error.location.file.as_str())
     };
     let frameless = |error: &CompilerError| {
         error.location.file.as_str().contains("<stdlib>") && !has_source(error)
@@ -373,7 +376,6 @@ mod tests {
     use crate::source_code::source_file_from_path_and_contents;
     use test_utils::strip_ansi_sgr;
 
-
     // Frame glyphs ariadne draws, escaped to keep this file ASCII.
     const OPEN: &str = "\u{256d}\u{2500}";
     const CLOSE: &str = "\u{2500}\u{2500}\u{2500}\u{256f}";
@@ -384,7 +386,10 @@ mod tests {
 
     fn files() -> SourceFiles {
         let mut files = SourceFiles::empty();
-        for (path, contents) in [("main.rock", MAIN), ("<stdlib>/core.rock", "fn core() {}\n")] {
+        for (path, contents) in [
+            ("main.rock", MAIN),
+            ("<stdlib>/core.rock", "fn core() {}\n"),
+        ] {
             files.add_or_update_file(source_file_from_path_and_contents(
                 path.to_string(),
                 path.to_string(),
@@ -482,37 +487,27 @@ mod tests {
     fn render_prefixes_the_level_and_a_two_digit_code() {
         let error = labelled();
         let rendered = strip_ansi_sgr(&error.render(&files()));
-        assert_eq!(
-            rendered.lines().next(),
-            Some("[E00] Error: bad thing")
-        );
+        assert_eq!(rendered.lines().next(), Some("[E00] Error: bad thing"));
         let rendered = strip_ansi_sgr(
             &error
                 .clone()
                 .with_code(CompilerErrorCode::SyntaxError)
                 .render(&files()),
         );
-        assert_eq!(
-            rendered.lines().next(),
-            Some("[E02] Error: bad thing")
-        );
+        assert_eq!(rendered.lines().next(), Some("[E02] Error: bad thing"));
         let rendered = strip_ansi_sgr(
             &error
                 .clone()
                 .with_level(CompilerErrorLevel::Warning)
                 .render(&files()),
         );
-        assert_eq!(
-            rendered.lines().next(),
-            Some("[W00] Warning: bad thing")
-        );
+        assert_eq!(rendered.lines().next(), Some("[W00] Warning: bad thing"));
         let rendered = strip_ansi_sgr(
-            &error.with_level(CompilerErrorLevel::Advice).render(&files()),
+            &error
+                .with_level(CompilerErrorLevel::Advice)
+                .render(&files()),
         );
-        assert_eq!(
-            rendered.lines().next(),
-            Some("[A00] Advice: bad thing")
-        );
+        assert_eq!(rendered.lines().next(), Some("[A00] Advice: bad thing"));
     }
 
     #[test]
@@ -564,7 +559,9 @@ mod tests {
             assert_eq!(body(&rendered), body(&base));
         }
         let rendered = strip_ansi_sgr(
-            &error.with_level(CompilerErrorLevel::Warning).render(&files()),
+            &error
+                .with_level(CompilerErrorLevel::Warning)
+                .render(&files()),
         );
         assert_eq!(rendered.lines().next(), Some("[W00] Warning: bad thing"));
     }
@@ -588,7 +585,9 @@ mod tests {
             )
         );
         assert_eq!(
-            body(&rendered).matches(&format!("{CLOSE}\n\n[E00]")).count(),
+            body(&rendered)
+                .matches(&format!("{CLOSE}\n\n[E00]"))
+                .count(),
             1
         );
     }
@@ -663,12 +662,17 @@ mod tests {
     #[test]
     fn siblings_are_flattened_and_stay_out_of_the_report() {
         let primary = labelled();
-        let sibling = CompilerError::new_with_label(at("main.rock", 2, 0, 29), "sibling".to_string());
+        let sibling =
+            CompilerError::new_with_label(at("main.rock", 2, 0, 29), "sibling".to_string());
         let nested = CompilerError::new_with_label(at("main.rock", 2, 0, 29), "nested".to_string())
             .with_siblings(vec![sibling.clone()]);
         let error = primary.clone().with_siblings(vec![sibling, nested]);
         assert_eq!(
-            error.siblings.iter().map(|s| s.message.as_str()).collect::<Vec<_>>(),
+            error
+                .siblings
+                .iter()
+                .map(|s| s.message.as_str())
+                .collect::<Vec<_>>(),
             ["sibling", "nested", "sibling"]
         );
         assert!(error.siblings.iter().all(|s| s.siblings.is_empty()));
@@ -698,7 +702,9 @@ mod tests {
 
     #[test]
     fn to_compiler_error_wraps_the_debug_rendering() {
-        let error = fallible().to_compiler_error(at("main.rock", 0, 0, 0)).unwrap_err();
+        let error = fallible()
+            .to_compiler_error(at("main.rock", 0, 0, 0))
+            .unwrap_err();
         assert_eq!(error.message, "boom");
         assert_eq!(error.labels.len(), 1);
         assert_eq!(error.labels[0].message, "boom");

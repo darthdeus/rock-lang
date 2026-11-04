@@ -55,10 +55,16 @@ fn offers_suppress_action_on_an_unused_var_diagnostic() {
     let mut params = params_at(&path, diag.range.start.line, diag.range.start.character);
     params.context.diagnostics = vec![diag.clone()];
 
-    let actions = compute_code_actions_workspace(&mut ws, &params).unwrap().unwrap_or_default();
+    let actions = compute_code_actions_workspace(&mut ws, &params)
+        .unwrap()
+        .unwrap_or_default();
     let action = suppress_action(&actions).expect("suppress action offered");
 
-    assert!(action.title.contains("unused_var"), "title names the lint: {}", action.title);
+    assert!(
+        action.title.contains("unused_var"),
+        "title names the lint: {}",
+        action.title
+    );
     assert_eq!(
         action.diagnostics.as_deref(),
         Some(&[diag][..]),
@@ -68,8 +74,7 @@ fn offers_suppress_action_on_an_unused_var_diagnostic() {
     // The edit inserts the magic comment above the offender, indentation matched.
     let out = apply(UNUSED_VAR_SRC, action);
     assert_eq!(
-        out,
-        "fn main() {\n    // rock: allow(unused_var)\n    let unused_thing = 5\n}\n",
+        out, "fn main() {\n    // rock: allow(unused_var)\n    let unused_thing = 5\n}\n",
         "got:\n{out}"
     );
 }
@@ -82,9 +87,13 @@ fn no_suppress_action_without_a_lint_diagnostic_in_context() {
     let path = dir.path().join("main.rock");
     let mut ws = bone_ws(&path, UNUSED_VAR_SRC);
     // Cursor on the `let`, but no diagnostics supplied in the request context.
-    let actions =
-        compute_code_actions_workspace(&mut ws, &params_at(&path, 1, 8)).unwrap().unwrap_or_default();
-    assert!(suppress_action(&actions).is_none(), "no suppress action: {actions:?}");
+    let actions = compute_code_actions_workspace(&mut ws, &params_at(&path, 1, 8))
+        .unwrap()
+        .unwrap_or_default();
+    assert!(
+        suppress_action(&actions).is_none(),
+        "no suppress action: {actions:?}"
+    );
 }
 
 // A non-lint bone diagnostic (no known lint `code`) must not trigger the action.
@@ -102,6 +111,11 @@ fn ignores_non_lint_diagnostics() {
     };
     let mut params = params_at(&path, 1, 8);
     params.context.diagnostics = vec![fake];
-    let actions = compute_code_actions_workspace(&mut ws, &params).unwrap().unwrap_or_default();
-    assert!(suppress_action(&actions).is_none(), "unknown code must not trigger: {actions:?}");
+    let actions = compute_code_actions_workspace(&mut ws, &params)
+        .unwrap()
+        .unwrap_or_default();
+    assert!(
+        suppress_action(&actions).is_none(),
+        "unknown code must not trigger: {actions:?}"
+    );
 }

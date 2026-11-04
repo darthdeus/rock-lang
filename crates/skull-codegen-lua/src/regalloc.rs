@@ -31,7 +31,9 @@ struct BitSet {
 
 impl BitSet {
     fn new(n: usize) -> Self {
-        BitSet { words: vec![0; n.div_ceil(64)] }
+        BitSet {
+            words: vec![0; n.div_ceil(64)],
+        }
     }
     fn set(&mut self, i: usize) {
         self.words[i >> 6] |= 1u64 << (i & 63);
@@ -310,7 +312,11 @@ pub fn color_values(
         }
     }
     let parent_of = |p: u32| -> u32 {
-        if p == 0 { 0 } else { block_part[raw(loops[p as usize - 1].header)] }
+        if p == 0 {
+            0
+        } else {
+            block_part[raw(loops[p as usize - 1].header)]
+        }
     };
     let depth_of = |mut p: u32| -> u32 {
         let mut d = 0;
@@ -399,7 +405,9 @@ pub fn color_values(
         term_uses(&block.term, &mut |v| {
             // term operands are after all insts; see through inlined ones.
             if inline[raw(v)] {
-                effective_uses(func, inline, &func.insts[v], &mut |w| live.set(vi[raw(w)] as usize));
+                effective_uses(func, inline, &func.insts[v], &mut |w| {
+                    live.set(vi[raw(w)] as usize)
+                });
             } else {
                 live.set(vi[raw(v)] as usize);
             }
@@ -413,7 +421,9 @@ pub fn color_values(
                 live.remove(d as usize);
                 live.for_each(|o| edges.push((d, o as u32)));
             }
-            effective_uses(func, inline, &func.insts[id], &mut |v| live.set(vi[raw(v)] as usize));
+            effective_uses(func, inline, &func.insts[id], &mut |v| {
+                live.set(vi[raw(v)] as usize)
+            });
         }
     }
     let adj = Csr::from_edges(&edges, v_count);
@@ -462,9 +472,18 @@ pub fn color_values(
     }
     let color_scope = color_part
         .iter()
-        .map(|&p| if p == 0 { None } else { Some(loops[p as usize - 1].header) })
+        .map(|&p| {
+            if p == 0 {
+                None
+            } else {
+                Some(loops[p as usize - 1].header)
+            }
+        })
         .collect();
-    ValueAlloc { colors, color_scope }
+    ValueAlloc {
+        colors,
+        color_scope,
+    }
 }
 
 // --- cell coloring (mutable locals) ----------------------------------------
@@ -482,7 +501,9 @@ pub(crate) fn cell_defs(inst: &Inst, push: &mut impl FnMut(Idx<Cell>)) {
         Inst::Store { cell, .. } => push(*cell),
         Inst::CallMulti { dests, .. } => dests.iter().for_each(|d| push(*d)),
         Inst::CallValueMulti { dests, .. } => dests.iter().for_each(|d| push(*d)),
-        Inst::MapNext { key_cell, val_cell, .. } => {
+        Inst::MapNext {
+            key_cell, val_cell, ..
+        } => {
             push(*key_cell);
             push(*val_cell);
         }
@@ -665,7 +686,9 @@ pub(crate) fn color_cells_with_analysis(
                     use_set[bi].set(k);
                 }
             });
-            cell_defs(&func.insts[id], &mut |c| def_set[bi].set(ci[raw(c)] as usize));
+            cell_defs(&func.insts[id], &mut |c| {
+                def_set[bi].set(ci[raw(c)] as usize)
+            });
         }
         term_cell_uses(func, inline, &func.blocks[b].term, &mut |c| {
             let k = ci[raw(c)] as usize;
@@ -789,7 +812,9 @@ pub(crate) fn color_cells_with_analysis(
                 live.or_with(&live_in[si]);
             }
         });
-        term_cell_uses(func, inline, &block.term, &mut |c| live.set(ci[raw(c)] as usize));
+        term_cell_uses(func, inline, &block.term, &mut |c| {
+            live.set(ci[raw(c)] as usize)
+        });
         for &id in block.insts.iter().rev() {
             defs.clear();
             cell_defs(&func.insts[id], &mut |c| defs.push(ci[raw(c)] as usize));
@@ -962,7 +987,12 @@ impl NilKills {
             return Vec::new();
         }
         let mut out = Vec::new();
-        for (wi, (&e, &l)) in self.end_live[fi].words.iter().zip(self.live_in[ti].words.iter()).enumerate() {
+        for (wi, (&e, &l)) in self.end_live[fi]
+            .words
+            .iter()
+            .zip(self.live_in[ti].words.iter())
+            .enumerate()
+        {
             let mut bits = e & !l;
             while bits != 0 {
                 let b = bits.trailing_zeros() as usize;
@@ -985,20 +1015,64 @@ pub(crate) fn statement_is_pure(func: &MirFunc, inline: &[bool], id: Idx<Inst>) 
     let inst = &func.insts[id];
     let pure_kind = matches!(
         inst,
-        Inst::Const(_) | Inst::Global(_) | Inst::Load(_) | Inst::Store { .. }
-            | Inst::Field { .. } | Inst::TupleIndex { .. }
-            | Inst::IntAdd(..) | Inst::IntSub(..) | Inst::IntMul(..) | Inst::IntDiv(..) | Inst::IntMod(..)
-            | Inst::UintAdd(..) | Inst::UintSub(..) | Inst::UintMul(..) | Inst::UintDiv(..) | Inst::UintMod(..)
-            | Inst::FloatAdd(..) | Inst::FloatSub(..) | Inst::FloatMul(..) | Inst::FloatDiv(..) | Inst::FloatMod(..)
-            | Inst::IntLt(..) | Inst::IntLeq(..) | Inst::IntGt(..) | Inst::IntGeq(..)
-            | Inst::UintLt(..) | Inst::UintLeq(..) | Inst::UintGt(..) | Inst::UintGeq(..)
-            | Inst::FloatLt(..) | Inst::FloatLeq(..) | Inst::FloatGt(..) | Inst::FloatGeq(..)
-            | Inst::Eq(..) | Inst::NotEq(..)
-            | Inst::FloatToInt(_) | Inst::IntToFloat(_) | Inst::UintToFloat(_) | Inst::FloatToF32(_) | Inst::IntToUint(_)
-            | Inst::UintToInt(_) | Inst::FloatToUint(_) | Inst::UintBitcastInt(_) | Inst::IntBitcastUint(_)
-            | Inst::Neg(_) | Inst::Not(_) | Inst::BitNot(_) | Inst::UintBitNot(_)
-            | Inst::BitAnd(..) | Inst::BitOr(..) | Inst::BitXor(..) | Inst::Shl(..) | Inst::Shr(..)
-            | Inst::UintBitAnd(..) | Inst::UintBitOr(..) | Inst::UintBitXor(..) | Inst::UintShl(..) | Inst::UintShr(..)
+        Inst::Const(_)
+            | Inst::Global(_)
+            | Inst::Load(_)
+            | Inst::Store { .. }
+            | Inst::Field { .. }
+            | Inst::TupleIndex { .. }
+            | Inst::IntAdd(..)
+            | Inst::IntSub(..)
+            | Inst::IntMul(..)
+            | Inst::IntDiv(..)
+            | Inst::IntMod(..)
+            | Inst::UintAdd(..)
+            | Inst::UintSub(..)
+            | Inst::UintMul(..)
+            | Inst::UintDiv(..)
+            | Inst::UintMod(..)
+            | Inst::FloatAdd(..)
+            | Inst::FloatSub(..)
+            | Inst::FloatMul(..)
+            | Inst::FloatDiv(..)
+            | Inst::FloatMod(..)
+            | Inst::IntLt(..)
+            | Inst::IntLeq(..)
+            | Inst::IntGt(..)
+            | Inst::IntGeq(..)
+            | Inst::UintLt(..)
+            | Inst::UintLeq(..)
+            | Inst::UintGt(..)
+            | Inst::UintGeq(..)
+            | Inst::FloatLt(..)
+            | Inst::FloatLeq(..)
+            | Inst::FloatGt(..)
+            | Inst::FloatGeq(..)
+            | Inst::Eq(..)
+            | Inst::NotEq(..)
+            | Inst::FloatToInt(_)
+            | Inst::IntToFloat(_)
+            | Inst::UintToFloat(_)
+            | Inst::FloatToF32(_)
+            | Inst::IntToUint(_)
+            | Inst::UintToInt(_)
+            | Inst::FloatToUint(_)
+            | Inst::UintBitcastInt(_)
+            | Inst::IntBitcastUint(_)
+            | Inst::Neg(_)
+            | Inst::Not(_)
+            | Inst::BitNot(_)
+            | Inst::UintBitNot(_)
+            | Inst::BitAnd(..)
+            | Inst::BitOr(..)
+            | Inst::BitXor(..)
+            | Inst::Shl(..)
+            | Inst::Shr(..)
+            | Inst::UintBitAnd(..)
+            | Inst::UintBitOr(..)
+            | Inst::UintBitXor(..)
+            | Inst::UintShl(..)
+            | Inst::UintShr(..)
     );
     if !pure_kind {
         return false;
@@ -1281,8 +1355,8 @@ pub(crate) fn nil_kills(
 #[cfg(test)]
 mod cell_color_tests {
     use super::*;
-    use ustr::Ustr;
     use skull_mir::mir::Lit;
+    use ustr::Ustr;
 
     /// Two cells whose live ranges do NOT overlap (`a` is read and dead before
     /// `b` is written) share one color.
@@ -1293,16 +1367,32 @@ mod cell_color_tests {
         let a = f.new_cell(None);
         let b = f.new_cell(None);
         let one = f.emit(e, Inst::Const(Lit::Int(1)));
-        f.emit(e, Inst::Store { cell: a, value: one });
+        f.emit(
+            e,
+            Inst::Store {
+                cell: a,
+                value: one,
+            },
+        );
         let la = f.emit(e, Inst::Load(a)); // a's last use -> dead after
         let na = f.emit(e, Inst::Neg(la));
         let two = f.emit(e, Inst::Const(Lit::Int(2)));
-        f.emit(e, Inst::Store { cell: b, value: two }); // b born after a died
+        f.emit(
+            e,
+            Inst::Store {
+                cell: b,
+                value: two,
+            },
+        ); // b born after a died
         let lb = f.emit(e, Inst::Load(b));
         let sum = f.emit(e, Inst::IntAdd(na, lb));
         f.set_term(e, Term::Return(vec![sum]));
         let colors = color_cells(&f);
-        assert_eq!(colors[raw(a)], colors[raw(b)], "disjoint-lived cells should share a color");
+        assert_eq!(
+            colors[raw(a)],
+            colors[raw(b)],
+            "disjoint-lived cells should share a color"
+        );
     }
 
     /// Two cells live at the same time (both read after both written) get
@@ -1314,14 +1404,30 @@ mod cell_color_tests {
         let a = f.new_cell(None);
         let b = f.new_cell(None);
         let one = f.emit(e, Inst::Const(Lit::Int(1)));
-        f.emit(e, Inst::Store { cell: a, value: one });
+        f.emit(
+            e,
+            Inst::Store {
+                cell: a,
+                value: one,
+            },
+        );
         let two = f.emit(e, Inst::Const(Lit::Int(2)));
-        f.emit(e, Inst::Store { cell: b, value: two });
+        f.emit(
+            e,
+            Inst::Store {
+                cell: b,
+                value: two,
+            },
+        );
         let la = f.emit(e, Inst::Load(a));
         let lb = f.emit(e, Inst::Load(b));
         let sum = f.emit(e, Inst::IntAdd(la, lb)); // a and b both live here
         f.set_term(e, Term::Return(vec![sum]));
         let colors = color_cells(&f);
-        assert_ne!(colors[raw(a)], colors[raw(b)], "simultaneously-live cells must not share a color");
+        assert_ne!(
+            colors[raw(a)],
+            colors[raw(b)],
+            "simultaneously-live cells must not share a color"
+        );
     }
 }

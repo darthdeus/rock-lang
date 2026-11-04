@@ -12,7 +12,8 @@ pub struct DocumentHighlightParams {
     pub partial_result_params: PartialResultParams,
 }
 
-impl_lsp_struct!(DocumentHighlightParams,
+impl_lsp_struct!(
+    DocumentHighlightParams,
     flatten {
         text_document_position_params: TextDocumentPositionParams,
         work_done_progress_params: WorkDoneProgressParams,
@@ -32,9 +33,14 @@ pub struct DocumentHighlight {
     pub kind: Option<DocumentHighlightKind>,
 }
 
-impl_lsp_struct!(DocumentHighlight,
-    required { range: Range = "range" },
-    optional { kind: DocumentHighlightKind = "kind" }
+impl_lsp_struct!(
+    DocumentHighlight,
+    required {
+        range: Range = "range"
+    },
+    optional {
+        kind: DocumentHighlightKind = "kind"
+    }
 );
 
 /// A document highlight kind.

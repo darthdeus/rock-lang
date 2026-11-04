@@ -17,7 +17,10 @@ use crate::common::ws_with;
 
 fn emit_res(src: &str, root: &str) -> Result<String, String> {
     let ws = ws_with(src);
-    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("test module");
     let fid = ws
         .module(mid)
         .functions
@@ -27,7 +30,13 @@ fn emit_res(src: &str, root: &str) -> Result<String, String> {
         .expect("root fn");
     skull_codegen_js::emit::emit_with_closure(
         &ws,
-        &[(FuncRef { module: mid, func: fid }, root.to_string())],
+        &[(
+            FuncRef {
+                module: mid,
+                func: fid,
+            },
+            root.to_string(),
+        )],
     )
     .map_err(|e| e.message)
 }

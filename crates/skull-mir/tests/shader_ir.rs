@@ -10,8 +10,8 @@ use skull_mir::mir::FuncRef;
 use skull_mir::shader_ir::{
     ComputeAccess, ComputeAddressSpace, ComputeBuiltin, ComputeDispatchContract,
     ComputeResourceShape, ComputeValueKind, ComputeWorkgroupSize, LogicalComputeResource,
-    LogicalTextureGroup, LogicalUniformGroup, NominalType, ShaderIR, ShaderInstance, ShaderInterfacePlan,
-    ShaderStage, ShaderStageIr, UniformRole,
+    LogicalTextureGroup, LogicalUniformGroup, NominalType, ShaderIR, ShaderInstance,
+    ShaderInterfacePlan, ShaderStage, ShaderStageIr, UniformRole,
 };
 use ustr::Ustr;
 
@@ -85,7 +85,11 @@ fn a_stage_reload_set_dedups_a_nonadjacent_repeat() {
         1,
         "a nonadjacent repeat of one declaration survived dedup: {decls:?}"
     );
-    assert_eq!(decls.len(), 3, "entry + two distinct helper declarations: {decls:?}");
+    assert_eq!(
+        decls.len(),
+        3,
+        "entry + two distinct helper declarations: {decls:?}"
+    );
     assert!(decls.contains(&other) && decls.contains(&entry));
 }
 
@@ -96,8 +100,14 @@ fn a_stage_reload_set_dedups_a_nonadjacent_repeat() {
 fn a_program_reload_set_dedups_across_stages() {
     use skull_mir::monoty::MonoTy;
     let shared = fref(0, 7);
-    let vert = stage_ir(ShaderInstance::plain(fref(0, 1)), vec![inst(0, 7, Some(MonoTy::Float))]);
-    let mut frag = stage_ir(ShaderInstance::plain(fref(0, 2)), vec![inst(0, 7, Some(MonoTy::Int))]);
+    let vert = stage_ir(
+        ShaderInstance::plain(fref(0, 1)),
+        vec![inst(0, 7, Some(MonoTy::Float))],
+    );
+    let mut frag = stage_ir(
+        ShaderInstance::plain(fref(0, 2)),
+        vec![inst(0, 7, Some(MonoTy::Int))],
+    );
     frag.stage = ShaderStage::Fragment;
     let ir = ShaderIR {
         interner: std::sync::Arc::new(skull_mir::monoty::MonoInterner::new()),
@@ -122,18 +132,27 @@ fn perturbing_an_interface_member_changes_the_interface() {
         uniform_groups: vec![LogicalUniformGroup {
             role: UniformRole::Stage(ShaderStage::Fragment),
             struct_name: nominal("U"),
-            members: vec![(Ustr::from("a"), WireKind::F32), (Ustr::from("b"), WireKind::F32x4)],
+            members: vec![
+                (Ustr::from("a"), WireKind::F32),
+                (Ustr::from("b"), WireKind::F32x4),
+            ],
         }],
         ..Default::default()
     };
     let mut widened = base.clone();
     widened.uniform_groups[0].members[0].1 = WireKind::F32x4;
-    assert_ne!(base, widened, "the interface plan does not distinguish its own members");
+    assert_ne!(
+        base, widened,
+        "the interface plan does not distinguish its own members"
+    );
 }
 
 /// A legacy-spelled type: its key is already its symbol.
 fn nominal(name: &str) -> NominalType {
-    NominalType { key: Ustr::from(name), symbol: Ustr::from(name) }
+    NominalType {
+        key: Ustr::from(name),
+        symbol: Ustr::from(name),
+    }
 }
 
 /// The wire spells a group by its symbol, which the runtime joins to the
@@ -141,7 +160,10 @@ fn nominal(name: &str) -> NominalType {
 /// packer's plan of the same type hashes too.
 #[test]
 fn semantic_wire_spells_symbols_and_fingerprints_keys() {
-    let exempt = NominalType { key: Ustr::from("pkg::gfx::Params"), symbol: Ustr::from("Params") };
+    let exempt = NominalType {
+        key: Ustr::from("pkg::gfx::Params"),
+        symbol: Ustr::from("Params"),
+    };
     let members = vec![(Ustr::from("a"), WireKind::F32)];
     let plan = ShaderInterfacePlan {
         uniform_groups: vec![LogicalUniformGroup {
@@ -154,7 +176,10 @@ fn semantic_wire_spells_symbols_and_fingerprints_keys() {
     let wire = plan.semantic_wire(true);
     let group = &plan.uniform_groups[0];
     assert!(
-        wire.contains(&format!("group fragment Params {} 1\n", group.semantic_fingerprint())),
+        wire.contains(&format!(
+            "group fragment Params {} 1\n",
+            group.semantic_fingerprint()
+        )),
         "{wire}"
     );
     assert!(!wire.contains("pkg::"), "{wire}");
@@ -184,17 +209,32 @@ fn semantic_wire_is_neutral_and_fingerprint_tracks_logical_shape() {
     };
     let wire = base.semantic_wire(true);
     for forbidden in ["offset", "binding", "std140", "WGSL", "GLSL"] {
-        assert!(!wire.contains(forbidden), "semantic wire leaked {forbidden}: {wire}");
+        assert!(
+            !wire.contains(forbidden),
+            "semantic wire leaked {forbidden}: {wire}"
+        );
     }
-    assert!(!wire.contains("compute"), "graphics semantic wire changed without a compute contract: {wire}");
+    assert!(
+        !wire.contains("compute"),
+        "graphics semantic wire changed without a compute contract: {wire}"
+    );
     let mut renamed = base.clone();
     renamed.uniform_groups[0].members[0].0 = Ustr::from("b");
-    assert_ne!(base.semantic_fingerprint(true), renamed.semantic_fingerprint(true));
+    assert_ne!(
+        base.semantic_fingerprint(true),
+        renamed.semantic_fingerprint(true)
+    );
 
     let mut swapped = base.clone();
     swapped.textures.as_mut().unwrap().samplers.swap(0, 1);
-    assert_ne!(base.semantic_fingerprint(true), swapped.semantic_fingerprint(true));
-    assert_ne!(base.semantic_fingerprint(true), base.semantic_fingerprint(false));
+    assert_ne!(
+        base.semantic_fingerprint(true),
+        swapped.semantic_fingerprint(true)
+    );
+    assert_ne!(
+        base.semantic_fingerprint(true),
+        base.semantic_fingerprint(false)
+    );
 }
 
 #[test]
@@ -226,12 +266,28 @@ fn compute_interface_keeps_storage_contract_neutral_and_complete() {
 
     assert_eq!(plan.stages, [ShaderStage::Compute]);
     let compute = plan.compute.as_ref().expect("compute contract");
-    assert_eq!(compute.resources.len(), 2, "two storage resources are examined");
+    assert_eq!(
+        compute.resources.len(),
+        2,
+        "two storage resources are examined"
+    );
     assert_eq!(compute.resources[1].access, ComputeAccess::ReadWrite);
     assert_eq!(compute.workgroup_size.x, 64);
-    assert_eq!(compute.dispatch, ComputeDispatchContract::Runtime { dimensions: 1 });
+    assert_eq!(
+        compute.dispatch,
+        ComputeDispatchContract::Runtime { dimensions: 1 }
+    );
     let wire = plan.semantic_wire(false);
-    assert!(wire.contains("stage compute"), "stage identity is retained: {wire}");
-    assert!(wire.contains("compute"), "compute contract is retained: {wire}");
-    assert!(!wire.contains("binding"), "compute wire leaked target binding: {wire}");
+    assert!(
+        wire.contains("stage compute"),
+        "stage identity is retained: {wire}"
+    );
+    assert!(
+        wire.contains("compute"),
+        "compute contract is retained: {wire}"
+    );
+    assert!(
+        !wire.contains("binding"),
+        "compute wire leaked target binding: {wire}"
+    );
 }

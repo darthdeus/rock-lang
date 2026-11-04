@@ -58,7 +58,11 @@ impl LambdaSiteId {
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub enum CodeOwner {
     Instance(Instance),
-    Artifact { kind: CodeOwnerKind, module: Ustr, name: Ustr },
+    Artifact {
+        kind: CodeOwnerKind,
+        module: Ustr,
+        name: Ustr,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
@@ -76,11 +80,18 @@ pub enum CodeIdentity {
     /// it owns lambda identities stored in a global or decorator artifact.
     Artifact(CodeOwner),
     /// A lambda literal in a concrete declaration body.
-    Lambda { enclosing: CodeOwner, site: LambdaSiteId },
+    Lambda {
+        enclosing: CodeOwner,
+        site: LambdaSiteId,
+    },
     /// A source-named nested function. It is still owned by the enclosing
     /// concrete declaration because nested functions do not enter the mono
     /// declaration graph as independent top-level declarations.
-    Nested { enclosing: CodeOwner, site: LambdaSiteId, name: Ustr },
+    Nested {
+        enclosing: CodeOwner,
+        site: LambdaSiteId,
+        name: Ustr,
+    },
     /// Compiler-generated callable machinery stored in a Rock runtime record,
     /// such as a coroutine's resume/advance/defer/hook entry.
     Generated { enclosing: CodeOwner, role: Ustr },
@@ -90,13 +101,31 @@ impl CodeIdentity {
     pub fn enclosing(&self) -> Option<&Instance> {
         match self {
             Self::Named(i) => Some(i),
-            Self::Lambda { enclosing: CodeOwner::Instance(i), .. }
-            | Self::Nested { enclosing: CodeOwner::Instance(i), .. }
-            | Self::Generated { enclosing: CodeOwner::Instance(i), .. } => Some(i),
+            Self::Lambda {
+                enclosing: CodeOwner::Instance(i),
+                ..
+            }
+            | Self::Nested {
+                enclosing: CodeOwner::Instance(i),
+                ..
+            }
+            | Self::Generated {
+                enclosing: CodeOwner::Instance(i),
+                ..
+            } => Some(i),
             Self::Artifact(_)
-            | Self::Lambda { enclosing: CodeOwner::Artifact { .. }, .. }
-            | Self::Nested { enclosing: CodeOwner::Artifact { .. }, .. }
-            | Self::Generated { enclosing: CodeOwner::Artifact { .. }, .. } => None,
+            | Self::Lambda {
+                enclosing: CodeOwner::Artifact { .. },
+                ..
+            }
+            | Self::Nested {
+                enclosing: CodeOwner::Artifact { .. },
+                ..
+            }
+            | Self::Generated {
+                enclosing: CodeOwner::Artifact { .. },
+                ..
+            } => None,
         }
     }
 
@@ -104,9 +133,15 @@ impl CodeIdentity {
         match self {
             Self::Named(i) => Some(CodeOwner::Instance(i.clone())),
             Self::Artifact(owner)
-            | Self::Lambda { enclosing: owner, .. }
-            | Self::Nested { enclosing: owner, .. }
-            | Self::Generated { enclosing: owner, .. } => Some(owner.clone()),
+            | Self::Lambda {
+                enclosing: owner, ..
+            }
+            | Self::Nested {
+                enclosing: owner, ..
+            }
+            | Self::Generated {
+                enclosing: owner, ..
+            } => Some(owner.clone()),
         }
     }
 
@@ -147,7 +182,11 @@ impl CodeIdentity {
                 site.file,
                 site.offset
             ),
-            Self::Nested { enclosing, site, name } => format!(
+            Self::Nested {
+                enclosing,
+                site,
+                name,
+            } => format!(
                 "nested:{}::{}@{}:{}",
                 owner_key(enclosing),
                 name,
@@ -216,8 +255,13 @@ pub enum CaptureMode {
 
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub enum CaptureIdentity {
-    Binding { site: LambdaSiteId, projection: Ustr },
-    Generated { role: Ustr },
+    Binding {
+        site: LambdaSiteId,
+        projection: Ustr,
+    },
+    Generated {
+        role: Ustr,
+    },
 }
 
 impl CaptureIdentity {
@@ -230,10 +274,16 @@ impl CaptureIdentity {
             }
         };
         match self {
-            Self::Binding { site, projection: base } => {
-                Self::Binding { site: *site, projection: append(*base) }
-            }
-            Self::Generated { role } => Self::Generated { role: append(*role) },
+            Self::Binding {
+                site,
+                projection: base,
+            } => Self::Binding {
+                site: *site,
+                projection: append(*base),
+            },
+            Self::Generated { role } => Self::Generated {
+                role: append(*role),
+            },
         }
     }
 }
@@ -254,7 +304,10 @@ pub struct CaptureSchema {
 
 impl CaptureSchema {
     pub fn empty() -> Self {
-        Self { fields: Vec::new(), complete: true }
+        Self {
+            fields: Vec::new(),
+            complete: true,
+        }
     }
 }
 
@@ -277,9 +330,7 @@ pub struct CodeCompatibility {
 
 impl CodeCompatibility {
     pub fn compatible_with(&self, other: &Self) -> bool {
-        self.capture.complete
-            && other.capture.complete
-            && self == other
+        self.capture.complete && other.capture.complete && self == other
     }
 }
 
@@ -334,7 +385,9 @@ pub struct CodeArtifact {
 
 impl CodeArtifact {
     pub fn body_fingerprint(&self, identity: &CodeIdentity) -> Option<u64> {
-        self.entries.get(identity).map(|entry| entry.body_fingerprint)
+        self.entries
+            .get(identity)
+            .map(|entry| entry.body_fingerprint)
     }
 
     pub fn merge(&mut self, other: Self) {
@@ -413,7 +466,9 @@ impl CodeArtifact {
         let mut per_owner: BTreeMap<CodeOwner, BTreeSet<LambdaTopologyFingerprint>> =
             BTreeMap::new();
         for entry in self.entries.values() {
-            let Some(owner) = entry.identity.owner() else { continue };
+            let Some(owner) = entry.identity.owner() else {
+                continue;
+            };
             let topology = entry.compatibility.lambda_topology;
             if topology == LambdaTopologyFingerprint::default() {
                 continue;
@@ -436,7 +491,9 @@ impl CodeArtifact {
             if entry.compatibility.lambda_topology == LambdaTopologyFingerprint::default() {
                 continue;
             }
-            let Some(owner) = entry.identity.owner() else { continue };
+            let Some(owner) = entry.identity.owner() else {
+                continue;
+            };
             if let Some(unified) = unions.get(&owner) {
                 entry.compatibility.lambda_topology = *unified;
             }
@@ -505,9 +562,7 @@ impl CodeArtifact {
                 CodeIdentity::Named(_)
                 | CodeIdentity::Artifact(_)
                 | CodeIdentity::Nested { .. }
-                | CodeIdentity::Generated { .. } => {
-                    self.census.named_values += 1
-                }
+                | CodeIdentity::Generated { .. } => self.census.named_values += 1,
                 CodeIdentity::Lambda { .. } => {
                     self.census.lambda_values += 1;
                     if entry.capture_free {
@@ -562,7 +617,10 @@ impl CodeArtifact {
             let mut duplicate = false;
             let mut capture_kind_change = None;
             {
-                let old = self.entries.get_mut(&entry.identity).expect("identity still present");
+                let old = self
+                    .entries
+                    .get_mut(&entry.identity)
+                    .expect("identity still present");
                 if old.body_fingerprint == 0 && entry.body_fingerprint != 0 {
                     resolved = old.escaping;
                     let was_escaping = old.escaping;
@@ -596,7 +654,8 @@ impl CodeArtifact {
             }
             if let Some((was_free, is_free)) = capture_kind_change {
                 if was_free {
-                    self.census.capture_free_lambdas = self.census.capture_free_lambdas.saturating_sub(1);
+                    self.census.capture_free_lambdas =
+                        self.census.capture_free_lambdas.saturating_sub(1);
                 } else {
                     self.census.capturing_lambdas = self.census.capturing_lambdas.saturating_sub(1);
                 }
@@ -629,9 +688,7 @@ impl CodeArtifact {
             CodeIdentity::Named(_)
             | CodeIdentity::Artifact(_)
             | CodeIdentity::Nested { .. }
-            | CodeIdentity::Generated { .. } => {
-                self.census.named_values += 1
-            }
+            | CodeIdentity::Generated { .. } => self.census.named_values += 1,
             CodeIdentity::Lambda { .. } => {
                 self.census.lambda_values += 1;
                 if capture_free {
@@ -668,7 +725,9 @@ impl CodeArtifact {
             if !old.escaping {
                 continue;
             }
-            let Some(new) = next.entries.get(identity) else { return false };
+            let Some(new) = next.entries.get(identity) else {
+                return false;
+            };
             if !new.escaping {
                 return false;
             }
@@ -693,7 +752,9 @@ impl CodeArtifact {
         }
         let mut owners: BTreeMap<CodeOwner, LambdaTopologyFingerprint> = BTreeMap::new();
         for entry in self.entries.values().chain(next.entries.values()) {
-            let Some(owner) = entry.identity.owner() else { continue };
+            let Some(owner) = entry.identity.owner() else {
+                continue;
+            };
             let topology = entry.compatibility.lambda_topology;
             if topology == LambdaTopologyFingerprint::default() {
                 continue;
@@ -723,12 +784,18 @@ impl CodeArtifact {
                 } else if entry.escaping {
                     // A newly stored function value can refer to a body that
                     // already exists. Keep its payload, but publish its slot.
-                    next.entries.get_mut(identity).expect("existing body").escaping = true;
+                    next.entries
+                        .get_mut(identity)
+                        .expect("existing body")
+                        .escaping = true;
                 }
             }
         }
         let direct_call_only = self.census.direct_call_only;
-        let mut census = CodeIdentityCensus { direct_call_only, ..Default::default() };
+        let mut census = CodeIdentityCensus {
+            direct_call_only,
+            ..Default::default()
+        };
         for entry in next.entries.values() {
             if !entry.escaping {
                 continue;
@@ -739,9 +806,7 @@ impl CodeArtifact {
                 CodeIdentity::Named(_)
                 | CodeIdentity::Artifact(_)
                 | CodeIdentity::Nested { .. }
-                | CodeIdentity::Generated { .. } => {
-                    census.named_values += 1
-                }
+                | CodeIdentity::Generated { .. } => census.named_values += 1,
                 CodeIdentity::Lambda { .. } => {
                     census.lambda_values += 1;
                     if entry.capture_free {
@@ -758,7 +823,6 @@ impl CodeArtifact {
         next.census = census;
         next
     }
-
 }
 
 fn body_fingerprint(mf: &MirFunc, volatile_vars: &FxHashSet<Ustr>) -> u64 {
@@ -772,7 +836,9 @@ fn body_fingerprint(mf: &MirFunc, volatile_vars: &FxHashSet<Ustr>) -> u64 {
         .comptime_reads
         .iter()
         .filter_map(|read| match &read.input {
-            crate::mir::ComptimeInputId::Var(name) if volatile_vars.contains(name) => Some(read.span),
+            crate::mir::ComptimeInputId::Var(name) if volatile_vars.contains(name) => {
+                Some(read.span)
+            }
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -1084,13 +1150,21 @@ impl BodyHasher {
                 self.inst_idx(*callee);
                 self.inst_list(args);
             }
-            Inst::CallValueMulti { dests, callee, args } => {
+            Inst::CallValueMulti {
+                dests,
+                callee,
+                args,
+            } => {
                 self.tag(61);
                 self.cell_list(dests);
                 self.inst_idx(*callee);
                 self.inst_list(args);
             }
-            Inst::CallBoundMulti { dests, generic_idx, args } => {
+            Inst::CallBoundMulti {
+                dests,
+                generic_idx,
+                args,
+            } => {
                 self.tag(62);
                 self.cell_list(dests);
                 self.hash.write_u32(*generic_idx);
@@ -1109,7 +1183,14 @@ impl BodyHasher {
                 self.tag(65);
                 self.inst_list(values);
             }
-            Inst::MakeVecColumns { elem, representation, nobox, columns, len, capacity } => {
+            Inst::MakeVecColumns {
+                elem,
+                representation,
+                nobox,
+                columns,
+                len,
+                capacity,
+            } => {
                 self.tag(66);
                 self.string(elem.as_str());
                 self.rep_id(*representation);
@@ -1122,7 +1203,12 @@ impl BodyHasher {
                 self.hash.write_usize(*len);
                 self.inst_idx(*capacity);
             }
-            Inst::MakeVecColumnHeader { elem, representation, nobox, capacity } => {
+            Inst::MakeVecColumnHeader {
+                elem,
+                representation,
+                nobox,
+                capacity,
+            } => {
                 self.tag(67);
                 self.string(elem.as_str());
                 self.rep_id(*representation);
@@ -1178,7 +1264,12 @@ impl BodyHasher {
                     self.inst_idx(*value);
                 }
             }
-            Inst::MakeValueStruct { name, representation, form, fields } => {
+            Inst::MakeValueStruct {
+                name,
+                representation,
+                form,
+                fields,
+            } => {
                 self.tag(69);
                 self.string(name.as_str());
                 self.rep_id(*representation);
@@ -1189,7 +1280,12 @@ impl BodyHasher {
                     self.inst_idx(*value);
                 }
             }
-            Inst::MaterializeValueStruct { name, representation, form, fields } => {
+            Inst::MaterializeValueStruct {
+                name,
+                representation,
+                form,
+                fields,
+            } => {
                 self.tag(70);
                 self.string(name.as_str());
                 self.rep_id(*representation);
@@ -1205,7 +1301,12 @@ impl BodyHasher {
                 self.inst_idx(*present);
                 self.inst_idx(*value);
             }
-            Inst::MakeEnum { tag, ty, positional, named } => {
+            Inst::MakeEnum {
+                tag,
+                ty,
+                positional,
+                named,
+            } => {
                 self.tag(71);
                 self.string(tag.as_str());
                 self.string(ty.as_str());
@@ -1216,7 +1317,12 @@ impl BodyHasher {
                     self.inst_idx(*value);
                 }
             }
-            Inst::MakeEnumDyn { tag, ty, positional, named } => {
+            Inst::MakeEnumDyn {
+                tag,
+                ty,
+                positional,
+                named,
+            } => {
                 self.tag(72);
                 self.inst_idx(*tag);
                 self.string(ty.as_str());
@@ -1242,7 +1348,11 @@ impl BodyHasher {
                     self.inst_idx(*value);
                 }
             }
-            Inst::FfiNewArray { ctype, count, representation } => {
+            Inst::FfiNewArray {
+                ctype,
+                count,
+                representation,
+            } => {
                 self.tag(74);
                 self.string(ctype.as_str());
                 self.inst_idx(*count);
@@ -1290,7 +1400,12 @@ impl BodyHasher {
                 self.string(field.as_str());
                 self.inst_idx(*value);
             }
-            Inst::StoreIndex { base, index, value, kind } => {
+            Inst::StoreIndex {
+                base,
+                index,
+                value,
+                kind,
+            } => {
                 self.tag(83);
                 self.inst_idx(*base);
                 self.inst_idx(*index);
@@ -1314,7 +1429,11 @@ impl BodyHasher {
                 self.coro_hook(*kind);
                 self.inst_idx(*lambda);
             }
-            Inst::MapNext { key_cell, val_cell, table } => {
+            Inst::MapNext {
+                key_cell,
+                val_cell,
+                table,
+            } => {
                 self.tag(88);
                 self.cell_idx(*key_cell);
                 self.cell_idx(*val_cell);
@@ -1334,13 +1453,21 @@ impl BodyHasher {
                 self.tag(2);
                 self.block_idx(*block);
             }
-            Term::Branch { cond, then_bb, else_bb } => {
+            Term::Branch {
+                cond,
+                then_bb,
+                else_bb,
+            } => {
                 self.tag(3);
                 self.inst_idx(*cond);
                 self.block_idx(*then_bb);
                 self.block_idx(*else_bb);
             }
-            Term::Switch { discr, cases, default } => {
+            Term::Switch {
+                discr,
+                cases,
+                default,
+            } => {
                 self.tag(4);
                 self.inst_idx(*discr);
                 self.hash.write_usize(cases.len());
@@ -1419,14 +1546,19 @@ mod tests {
     #[test]
     fn mono_arguments_and_enclosing_instances_are_identity_axes() {
         let interner = crate::monoty::MonoInterner::new();
-        let int_instance = Instance::intern(&interner, declaration(), vec![crate::monoty::MonoTy::Int]);
-        let float_instance = Instance::intern(&interner, declaration(), vec![crate::monoty::MonoTy::Float]);
+        let int_instance =
+            Instance::intern(&interner, declaration(), vec![crate::monoty::MonoTy::Int]);
+        let float_instance =
+            Instance::intern(&interner, declaration(), vec![crate::monoty::MonoTy::Float]);
         assert_ne!(
             CodeIdentity::Named(int_instance.clone()),
             CodeIdentity::Named(float_instance.clone()),
             "two concrete generic instances must not share a code identity"
         );
-        let site = LambdaSiteId { file: Ustr::from("same.rock"), offset: 12 };
+        let site = LambdaSiteId {
+            file: Ustr::from("same.rock"),
+            offset: 12,
+        };
         assert_ne!(
             CodeIdentity::Lambda {
                 enclosing: CodeOwner::Instance(int_instance),

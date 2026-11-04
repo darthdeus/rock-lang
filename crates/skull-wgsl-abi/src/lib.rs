@@ -196,7 +196,9 @@ pub struct AbiError {
 
 impl AbiError {
     fn new(message: impl Into<String>) -> Self {
-        Self { message: message.into() }
+        Self {
+            message: message.into(),
+        }
     }
 }
 
@@ -220,7 +222,9 @@ impl WgslAbi {
             .strip_suffix('\n')
             .ok_or_else(|| wire_error("WGSL ABI version is missing a newline"))?;
         if version == "WGSL_ABI_V1" || version == "WGSL_ABI_V2" || version == "WGSL_ABI_V3" {
-            return Err(wire_error("older WGSL ABI versions are rejected; expected WGSL_ABI_V4"));
+            return Err(wire_error(
+                "older WGSL ABI versions are rejected; expected WGSL_ABI_V4",
+            ));
         }
         if version != WGSL_ABI_V4 {
             return Err(wire_error(format!("expected {WGSL_ABI_V4}, got {version}")));
@@ -251,11 +255,7 @@ impl WgslAbi {
         let group = fields(next_line(&mut payload_lines, "group")?, "group", 2)?;
         let bind_group = parse_u32(group[1], "bind group")?;
         if artifact == WgslArtifactKind::Compute {
-            return parse_compute_abi(
-                &mut payload_lines,
-                semantic_fingerprint,
-                bind_group,
-            );
+            return parse_compute_abi(&mut payload_lines, semantic_fingerprint, bind_group);
         }
         let geometry_line = fields(next_line(&mut payload_lines, "geometry")?, "geometry", 2)?;
         let geometry = match geometry_line[1] {
@@ -278,7 +278,9 @@ impl WgslAbi {
                     )?;
                     let topology = match vertex[1] {
                         "triangle_strip" => WgslPrimitiveTopology::TriangleStrip,
-                        other => return Err(wire_error(format!("unknown fullscreen topology {other}"))),
+                        other => {
+                            return Err(wire_error(format!("unknown fullscreen topology {other}")));
+                        }
                     };
                     let vertex_count = parse_u32(vertex[2], "fullscreen vertex count")?;
                     let varying_location = parse_u32(vertex[3], "fullscreen varying location")?;
@@ -295,7 +297,11 @@ impl WgslAbi {
                         0,
                     )?;
                     (
-                        WgslFullscreenVertex { topology, vertex_count, varying_location },
+                        WgslFullscreenVertex {
+                            topology,
+                            vertex_count,
+                            varying_location,
+                        },
                         WgslFragmentIo { uv_location },
                         uniform,
                         Vec::new(),
@@ -304,7 +310,11 @@ impl WgslAbi {
                 }
                 WgslGeometryKind::Triangles => {
                     let input_count = parse_count(
-                        fields(next_line(&mut payload_lines, "vertex_inputs")?, "vertex_inputs", 2)?[1],
+                        fields(
+                            next_line(&mut payload_lines, "vertex_inputs")?,
+                            "vertex_inputs",
+                            2,
+                        )?[1],
                         "vertex input count",
                     )?;
                     let mut inputs = Vec::with_capacity(input_count);
@@ -321,7 +331,11 @@ impl WgslAbi {
                         }
                         let rate = match input[3] {
                             "vertex" | "instance" => input[3].to_string(),
-                            other => return Err(wire_error(format!("unknown vertex input rate {other}"))),
+                            other => {
+                                return Err(wire_error(format!(
+                                    "unknown vertex input rate {other}"
+                                )));
+                            }
                         };
                         let attr_count = parse_count(input[4], "vertex attribute count")?;
                         let mut attrs = Vec::with_capacity(attr_count);
@@ -353,7 +367,8 @@ impl WgslAbi {
                     )?;
                     let mut varyings = Vec::with_capacity(varying_count);
                     for expected_location in 0..varying_count {
-                        let varying = fields(next_line(&mut payload_lines, "varying")?, "varying", 5)?;
+                        let varying =
+                            fields(next_line(&mut payload_lines, "varying")?, "varying", 5)?;
                         let location = parse_u32(varying[1], "varying location")?;
                         if location != expected_location as u32 {
                             return Err(wire_error("varyings are not in order"));
@@ -407,12 +422,20 @@ impl WgslAbi {
         }
 
         let array_count = parse_count(
-            fields(next_line(&mut payload_lines, "array_blocks")?, "array_blocks", 2)?[1],
+            fields(
+                next_line(&mut payload_lines, "array_blocks")?,
+                "array_blocks",
+                2,
+            )?[1],
             "uniform array block count",
         )?;
         let mut array_blocks = Vec::with_capacity(array_count);
         for _ in 0..array_count {
-            let block = fields(next_line(&mut payload_lines, "array_block")?, "array_block", 8)?;
+            let block = fields(
+                next_line(&mut payload_lines, "array_block")?,
+                "array_block",
+                8,
+            )?;
             let binding = parse_u32(block[4], "uniform array binding")?;
             let member_count = parse_count(block[7], "uniform array member count")?;
             if member_count == 0 {
@@ -420,7 +443,11 @@ impl WgslAbi {
             }
             let mut members = Vec::with_capacity(member_count);
             for _ in 0..member_count {
-                let member = fields(next_line(&mut payload_lines, "array_member")?, "array_member", 6)?;
+                let member = fields(
+                    next_line(&mut payload_lines, "array_member")?,
+                    "array_member",
+                    6,
+                )?;
                 members.push(WgslArrayMember {
                     name: identifier(member[1], "uniform array member name")?,
                     elem: parse_kind(member[2], "uniform array element kind")?,
@@ -445,7 +472,11 @@ impl WgslAbi {
             fields(next_line(&mut payload_lines, "blocks")?, "blocks", 2)?[1],
             "uniform block count",
         )?;
-        let expected_block_start = if geometry == WgslGeometryKind::Fullscreen { 1 } else { 0 };
+        let expected_block_start = if geometry == WgslGeometryKind::Fullscreen {
+            1
+        } else {
+            0
+        };
         let mut uniform_blocks = Vec::with_capacity(block_count);
         for expected_index in 0..block_count {
             uniform_blocks.push(parse_uniform_block(
@@ -539,14 +570,20 @@ impl WgslAbi {
                 }
             ),
         );
-        push_line(&mut payload, format_args!("semantic {}", self.semantic_fingerprint));
+        push_line(
+            &mut payload,
+            format_args!("semantic {}", self.semantic_fingerprint),
+        );
         push_line(&mut payload, format_args!("group {}", self.bind_group));
         if self.artifact == WgslArtifactKind::Compute {
             let compute = self
                 .compute
                 .as_ref()
                 .ok_or_else(|| wire_error("compute artifact is missing compute metadata"))?;
-            push_line(&mut payload, format_args!("compute_entry {}", compute.entry));
+            push_line(
+                &mut payload,
+                format_args!("compute_entry {}", compute.entry),
+            );
             push_line(
                 &mut payload,
                 format_args!(
@@ -558,7 +595,10 @@ impl WgslAbi {
                 &mut payload,
                 format_args!("dispatch {}", compute.dispatch_dimensions),
             );
-            push_line(&mut payload, format_args!("builtins {}", compute.builtins.len()));
+            push_line(
+                &mut payload,
+                format_args!("builtins {}", compute.builtins.len()),
+            );
             for builtin in &compute.builtins {
                 push_line(
                     &mut payload,
@@ -574,7 +614,10 @@ impl WgslAbi {
                     ),
                 );
             }
-            push_line(&mut payload, format_args!("resources {}", compute.resources.len()));
+            push_line(
+                &mut payload,
+                format_args!("resources {}", compute.resources.len()),
+            );
             for resource in &compute.resources {
                 push_line(
                     &mut payload,
@@ -587,7 +630,10 @@ impl WgslAbi {
                     ),
                 );
             }
-            push_line(&mut payload, format_args!("blocks {}", self.uniform_blocks.len()));
+            push_line(
+                &mut payload,
+                format_args!("blocks {}", self.uniform_blocks.len()),
+            );
             for block in &self.uniform_blocks {
                 write_uniform_block(&mut payload, "block", block)?;
             }
@@ -612,7 +658,10 @@ impl WgslAbi {
                 }
             ),
         );
-        push_line(&mut payload, format_args!("entries {} {}", self.vertex_entry, self.fragment_entry));
+        push_line(
+            &mut payload,
+            format_args!("entries {} {}", self.vertex_entry, self.fragment_entry),
+        );
         match self.geometry {
             WgslGeometryKind::Fullscreen => {
                 push_line(
@@ -623,11 +672,17 @@ impl WgslAbi {
                         self.fullscreen_vertex.varying_location
                     ),
                 );
-                push_line(&mut payload, format_args!("fullscreen_fragment {}", self.fragment.uv_location));
+                push_line(
+                    &mut payload,
+                    format_args!("fullscreen_fragment {}", self.fragment.uv_location),
+                );
                 write_uniform_block(&mut payload, "fullscreen_uniform", &self.fullscreen_uniform)?;
             }
             WgslGeometryKind::Triangles => {
-                push_line(&mut payload, format_args!("vertex_inputs {}", self.vertex_inputs.len()));
+                push_line(
+                    &mut payload,
+                    format_args!("vertex_inputs {}", self.vertex_inputs.len()),
+                );
                 for input in &self.vertex_inputs {
                     push_line(
                         &mut payload,
@@ -646,7 +701,10 @@ impl WgslAbi {
                         );
                     }
                 }
-                push_line(&mut payload, format_args!("varyings {}", self.varyings.len()));
+                push_line(
+                    &mut payload,
+                    format_args!("varyings {}", self.varyings.len()),
+                );
                 for varying in &self.varyings {
                     push_line(
                         &mut payload,
@@ -661,14 +719,20 @@ impl WgslAbi {
                 }
             }
         }
-        push_line(&mut payload, format_args!("outputs {}", self.fragment_outputs.len()));
+        push_line(
+            &mut payload,
+            format_args!("outputs {}", self.fragment_outputs.len()),
+        );
         for output in &self.fragment_outputs {
             push_line(
                 &mut payload,
                 format_args!("output {} {} {}", output.location, output.name, output.kind),
             );
         }
-        push_line(&mut payload, format_args!("array_blocks {}", self.array_blocks.len()));
+        push_line(
+            &mut payload,
+            format_args!("array_blocks {}", self.array_blocks.len()),
+        );
         for block in &self.array_blocks {
             push_line(
                 &mut payload,
@@ -693,11 +757,17 @@ impl WgslAbi {
                 );
             }
         }
-        push_line(&mut payload, format_args!("blocks {}", self.uniform_blocks.len()));
+        push_line(
+            &mut payload,
+            format_args!("blocks {}", self.uniform_blocks.len()),
+        );
         for block in &self.uniform_blocks {
             write_uniform_block(&mut payload, "block", block)?;
         }
-        push_line(&mut payload, format_args!("textures {}", self.textures.len()));
+        push_line(
+            &mut payload,
+            format_args!("textures {}", self.textures.len()),
+        );
         for texture in &self.textures {
             push_line(
                 &mut payload,
@@ -760,28 +830,50 @@ impl WgslAbi {
                     return Err(wire_error("fullscreen ABI requires exactly one output"));
                 }
                 validate_uniform_block(&self.fullscreen_uniform, 0, "FullscreenU")?;
-                if self.fullscreen_uniform.visibility != (WgslVisibility { vertex: true, fragment: false }) {
+                if self.fullscreen_uniform.visibility
+                    != (WgslVisibility {
+                        vertex: true,
+                        fragment: false,
+                    })
+                {
                     return Err(wire_error("fullscreen uniform has unsupported visibility"));
                 }
                 if self.uniform_blocks.iter().any(|block| {
-                    block.visibility != (WgslVisibility { vertex: false, fragment: true })
+                    block.visibility
+                        != (WgslVisibility {
+                            vertex: false,
+                            fragment: true,
+                        })
                 }) {
-                    return Err(wire_error("fullscreen ordinary uniform has unsupported visibility"));
+                    return Err(wire_error(
+                        "fullscreen ordinary uniform has unsupported visibility",
+                    ));
                 }
                 if self.array_blocks.iter().any(|block| {
-                    block.visibility != (WgslVisibility { vertex: false, fragment: true })
+                    block.visibility
+                        != (WgslVisibility {
+                            vertex: false,
+                            fragment: true,
+                        })
                 }) {
-                    return Err(wire_error("fullscreen uniform array has unsupported visibility"));
+                    return Err(wire_error(
+                        "fullscreen uniform array has unsupported visibility",
+                    ));
                 }
                 if self.textures.iter().any(|texture| {
-                    texture.visibility != (WgslVisibility { vertex: false, fragment: true })
+                    texture.visibility
+                        != (WgslVisibility {
+                            vertex: false,
+                            fragment: true,
+                        })
                 }) {
                     return Err(wire_error("fullscreen texture has unsupported visibility"));
                 }
                 validate_binding_order(&self.uniform_blocks, &self.array_blocks, 1)?;
             }
             WgslGeometryKind::Triangles => {
-                if self.fullscreen_uniform.size != 0 || !self.fullscreen_uniform.members.is_empty() {
+                if self.fullscreen_uniform.size != 0 || !self.fullscreen_uniform.members.is_empty()
+                {
                     return Err(wire_error("explicit ABI carries a fullscreen uniform"));
                 }
                 let mut expected_vertex_location = 0u32;
@@ -791,7 +883,10 @@ impl WgslAbi {
                     }
                     identifier(&input.struct_name, "vertex input name")?;
                     if input.rate != "vertex" && input.rate != "instance" {
-                        return Err(wire_error(format!("unknown vertex input rate {}", input.rate)));
+                        return Err(wire_error(format!(
+                            "unknown vertex input rate {}",
+                            input.rate
+                        )));
                     }
                     for attr in &input.attrs {
                         if attr.location != expected_vertex_location {
@@ -824,8 +919,16 @@ impl WgslAbi {
         for block in &self.uniform_blocks {
             validate_uniform_block(block, block.binding, "ordinary")?;
         }
-        let expected_block_start = if self.geometry == WgslGeometryKind::Fullscreen { 1 } else { 0 };
-        validate_binding_order(&self.uniform_blocks, &self.array_blocks, expected_block_start)?;
+        let expected_block_start = if self.geometry == WgslGeometryKind::Fullscreen {
+            1
+        } else {
+            0
+        };
+        validate_binding_order(
+            &self.uniform_blocks,
+            &self.array_blocks,
+            expected_block_start,
+        )?;
 
         let mut texture_base = expected_block_start
             .checked_add(self.uniform_blocks.len() as u32)
@@ -873,10 +976,15 @@ impl WgslAbi {
         }
         for (binding, resource) in compute.resources.iter().enumerate() {
             if resource.binding != binding as u32 {
-                return Err(wire_error("compute storage resources are not in binding order"));
+                return Err(wire_error(
+                    "compute storage resources are not in binding order",
+                ));
             }
             identifier(&resource.name, "compute storage name")?;
-            if compute.resources[..binding].iter().any(|candidate| candidate.name == resource.name) {
+            if compute.resources[..binding]
+                .iter()
+                .any(|candidate| candidate.name == resource.name)
+            {
                 return Err(wire_error("compute storage resource names are repeated"));
             }
             if resource.element == WgslStorageElementKind::AtomicU32
@@ -960,14 +1068,22 @@ fn parse_compute_abi<'a>(
         let access = match resource[3] {
             "read" => WgslStorageAccess::Read,
             "read_write" => WgslStorageAccess::ReadWrite,
-            other => return Err(wire_error(format!("unsupported compute storage access {other}"))),
+            other => {
+                return Err(wire_error(format!(
+                    "unsupported compute storage access {other}"
+                )));
+            }
         };
         let element = match resource[4] {
             "f32" => WgslStorageElementKind::F32,
             "i32" => WgslStorageElementKind::I32,
             "u32" => WgslStorageElementKind::U32,
             "atomic_u32" => WgslStorageElementKind::AtomicU32,
-            other => return Err(wire_error(format!("unsupported compute storage element {other}"))),
+            other => {
+                return Err(wire_error(format!(
+                    "unsupported compute storage element {other}"
+                )));
+            }
         };
         resources.push(WgslComputeResource {
             binding,
@@ -1047,7 +1163,11 @@ fn write_uniform_block(
     tag: &str,
     block: &WgslUniformBlock,
 ) -> Result<(), AbiError> {
-    let role = if tag == "fullscreen_uniform" { "fullscreen" } else { &block.role };
+    let role = if tag == "fullscreen_uniform" {
+        "fullscreen"
+    } else {
+        &block.role
+    };
     push_line(
         payload,
         format_args!(
@@ -1092,13 +1212,17 @@ fn parse_uniform_block<'a>(
                 return Err(wire_error(format!("unknown uniform role {role}")));
             }
         } else if role != expected_role {
-            return Err(wire_error(format!("uniform role {role} is not {expected_role}")));
+            return Err(wire_error(format!(
+                "uniform role {role} is not {expected_role}"
+            )));
         }
         role.to_string()
     };
     let binding = parse_u32(block[3], "uniform binding")?;
     if binding != expected_binding {
-        return Err(wire_error(format!("uniform binding {binding} is not {expected_binding}")));
+        return Err(wire_error(format!(
+            "uniform binding {binding} is not {expected_binding}"
+        )));
     }
     let member_count = parse_count(block[6], "uniform member count")?;
     let mut members = Vec::with_capacity(member_count);
@@ -1132,13 +1256,18 @@ fn validate_uniform_block(
         return Err(wire_error(format!("unknown uniform role {}", block.role)));
     }
     if name != "ordinary" && name != "FullscreenU" && block.role != name {
-        return Err(wire_error(format!("uniform role {} is not {name}", block.role)));
+        return Err(wire_error(format!(
+            "uniform role {} is not {name}",
+            block.role
+        )));
     }
     if name == "FullscreenU" && block.role != "fullscreen" {
         return Err(wire_error("fullscreen uniform has the wrong role"));
     }
     if block.binding != expected_binding {
-        return Err(wire_error(format!("{name} uniform binding is out of order")));
+        return Err(wire_error(format!(
+            "{name} uniform binding is out of order"
+        )));
     }
     if block.members.is_empty() && block.size != 0 {
         return Err(wire_error(format!("{name} uniform block has no members")));
@@ -1146,18 +1275,35 @@ fn validate_uniform_block(
     let mut cursor = 0u64;
     for member in &block.members {
         identifier(&member.name, "uniform member name")?;
-        if block.members.iter().filter(|candidate| candidate.name == member.name).count() != 1 {
-            return Err(wire_error(format!("uniform member {} is repeated", member.name)));
+        if block
+            .members
+            .iter()
+            .filter(|candidate| candidate.name == member.name)
+            .count()
+            != 1
+        {
+            return Err(wire_error(format!(
+                "uniform member {} is repeated",
+                member.name
+            )));
         }
         let (align, size) = uniform_layout(member.kind)?;
         cursor = round_up(cursor, align as u64)?;
         if member.offset as u64 != cursor || member.align != align || member.size != size {
-            return Err(wire_error(format!("uniform member {} has inconsistent physical layout", member.name)));
+            return Err(wire_error(format!(
+                "uniform member {} has inconsistent physical layout",
+                member.name
+            )));
         }
-        cursor = cursor.checked_add(size as u64).ok_or_else(|| wire_error("uniform layout overflows"))?;
+        cursor = cursor
+            .checked_add(size as u64)
+            .ok_or_else(|| wire_error("uniform layout overflows"))?;
     }
     if round_up(cursor, 16)? != block.size as u64 {
-        return Err(wire_error(format!("uniform block {} size does not match members", block.struct_name)));
+        return Err(wire_error(format!(
+            "uniform block {} size does not match members",
+            block.struct_name
+        )));
     }
     Ok(())
 }
@@ -1166,23 +1312,39 @@ fn validate_array_block(block: &WgslArrayBlock) -> Result<(), AbiError> {
     let mut cursor = 0u64;
     for member in &block.members {
         identifier(&member.name, "uniform array member name")?;
-        if block.members.iter().filter(|candidate| candidate.name == member.name).count() != 1 {
-            return Err(wire_error(format!("uniform array member {} is repeated", member.name)));
+        if block
+            .members
+            .iter()
+            .filter(|candidate| candidate.name == member.name)
+            .count()
+            != 1
+        {
+            return Err(wire_error(format!(
+                "uniform array member {} is repeated",
+                member.name
+            )));
         }
         validate_array_kind(member.elem)?;
         if member.capacity == 0 || member.stride != 16 {
             return Err(wire_error("uniform array capacity or stride is invalid"));
         }
         if member.offset as u64 != cursor {
-            return Err(wire_error(format!("uniform array member {} has an inconsistent offset", member.name)));
+            return Err(wire_error(format!(
+                "uniform array member {} has an inconsistent offset",
+                member.name
+            )));
         }
         let bytes = (member.capacity as u64)
             .checked_mul(member.stride as u64)
             .ok_or_else(|| wire_error("uniform array member size overflows"))?;
-        cursor = cursor.checked_add(bytes).ok_or_else(|| wire_error("uniform array block size overflows"))?;
+        cursor = cursor
+            .checked_add(bytes)
+            .ok_or_else(|| wire_error("uniform array block size overflows"))?;
     }
     if cursor != block.size as u64 {
-        return Err(wire_error("uniform array block size does not match members"));
+        return Err(wire_error(
+            "uniform array block size does not match members",
+        ));
     }
     Ok(())
 }
@@ -1214,7 +1376,10 @@ fn empty_uniform_block() -> WgslUniformBlock {
         struct_name: "FullscreenU".into(),
         binding: 0,
         size: 0,
-        visibility: WgslVisibility { vertex: false, fragment: false },
+        visibility: WgslVisibility {
+            vertex: false,
+            fragment: false,
+        },
         members: Vec::new(),
     }
 }
@@ -1233,7 +1398,9 @@ fn uniform_layout(kind: u32) -> Result<(u32, u32), AbiError> {
 fn validate_array_kind(kind: u32) -> Result<(), AbiError> {
     match kind {
         0 | 1 | 3 | 4 | 7 => Ok(()),
-        _ => Err(wire_error(format!("unsupported uniform array element kind {kind}"))),
+        _ => Err(wire_error(format!(
+            "unsupported uniform array element kind {kind}"
+        ))),
     }
 }
 
@@ -1247,7 +1414,9 @@ fn validate_kind(kind: u32, what: &str) -> Result<(), AbiError> {
 fn validate_fragment_output_kind(kind: u32) -> Result<(), AbiError> {
     match kind {
         3 | 4 => Ok(()),
-        _ => Err(wire_error(format!("fragment output kind {kind} is unsupported"))),
+        _ => Err(wire_error(format!(
+            "fragment output kind {kind} is unsupported"
+        ))),
     }
 }
 
@@ -1260,7 +1429,9 @@ fn round_up(value: u64, alignment: u64) -> Result<u64, AbiError> {
 
 fn push_line(output: &mut String, args: fmt::Arguments<'_>) {
     use fmt::Write as _;
-    output.write_fmt(args).expect("String formatting cannot fail");
+    output
+        .write_fmt(args)
+        .expect("String formatting cannot fail");
     output.push('\n');
 }
 
@@ -1268,11 +1439,18 @@ fn wire_error(message: impl Into<String>) -> AbiError {
     AbiError::new(message)
 }
 
-fn next_line<'a>(lines: &mut impl Iterator<Item = &'a str>, what: &str) -> Result<&'a str, AbiError> {
-    lines.next().ok_or_else(|| wire_error(format!("missing {what} record")))
+fn next_line<'a>(
+    lines: &mut impl Iterator<Item = &'a str>,
+    what: &str,
+) -> Result<&'a str, AbiError> {
+    lines
+        .next()
+        .ok_or_else(|| wire_error(format!("missing {what} record")))
 }
 
-fn next_line_optional<'a>(lines: &mut impl Iterator<Item = &'a str>) -> Result<Option<&'a str>, AbiError> {
+fn next_line_optional<'a>(
+    lines: &mut impl Iterator<Item = &'a str>,
+) -> Result<Option<&'a str>, AbiError> {
     Ok(lines.next())
 }
 
@@ -1314,7 +1492,9 @@ fn parse_u64(value: &str, what: &str) -> Result<u64, AbiError> {
 fn parse_count(value: &str, what: &str) -> Result<usize, AbiError> {
     let wide = parse_u64(value, what)?;
     if wide > MAX_RECORDS {
-        return Err(wire_error(format!("{what} {wide} exceeds the record budget")));
+        return Err(wire_error(format!(
+            "{what} {wide} exceeds the record budget"
+        )));
     }
     usize::try_from(wide).map_err(|_| wire_error(format!("{what} {wide} does not fit in usize")))
 }
@@ -1385,10 +1565,22 @@ fn visibility_wire(visibility: WgslVisibility) -> &'static str {
 
 fn parse_visibility(value: &str) -> Result<WgslVisibility, AbiError> {
     match value {
-        "none" => Ok(WgslVisibility { vertex: false, fragment: false }),
-        "v" => Ok(WgslVisibility { vertex: true, fragment: false }),
-        "f" => Ok(WgslVisibility { vertex: false, fragment: true }),
-        "vf" => Ok(WgslVisibility { vertex: true, fragment: true }),
+        "none" => Ok(WgslVisibility {
+            vertex: false,
+            fragment: false,
+        }),
+        "v" => Ok(WgslVisibility {
+            vertex: true,
+            fragment: false,
+        }),
+        "f" => Ok(WgslVisibility {
+            vertex: false,
+            fragment: true,
+        }),
+        "vf" => Ok(WgslVisibility {
+            vertex: true,
+            fragment: true,
+        }),
         _ => Err(wire_error(format!("unknown visibility {value}"))),
     }
 }
@@ -1445,10 +1637,25 @@ mod tests {
                 struct_name: "FullscreenU".into(),
                 binding: 0,
                 size: 16,
-                visibility: WgslVisibility { vertex: true, fragment: false },
+                visibility: WgslVisibility {
+                    vertex: true,
+                    fragment: false,
+                },
                 members: vec![
-                    WgslUniformMember { name: "uv0".into(), kind: 1, offset: 0, align: 8, size: 8 },
-                    WgslUniformMember { name: "uv1".into(), kind: 1, offset: 8, align: 8, size: 8 },
+                    WgslUniformMember {
+                        name: "uv0".into(),
+                        kind: 1,
+                        offset: 0,
+                        align: 8,
+                        size: 8,
+                    },
+                    WgslUniformMember {
+                        name: "uv1".into(),
+                        kind: 1,
+                        offset: 8,
+                        align: 8,
+                        size: 8,
+                    },
                 ],
             },
             uniform_blocks: Vec::new(),
@@ -1489,8 +1696,16 @@ mod tests {
             },
             fragment: WgslFragmentIo { uv_location: 0 },
             fragment_outputs: vec![
-                WgslFragmentOutput { name: "FragColor".into(), location: 0, kind: 3 },
-                WgslFragmentOutput { name: "FragId".into(), location: 1, kind: 4 },
+                WgslFragmentOutput {
+                    name: "FragColor".into(),
+                    location: 0,
+                    kind: 3,
+                },
+                WgslFragmentOutput {
+                    name: "FragId".into(),
+                    location: 1,
+                    kind: 4,
+                },
             ],
             fullscreen_uniform: empty_uniform_block(),
             uniform_blocks: vec![WgslUniformBlock {
@@ -1498,7 +1713,10 @@ mod tests {
                 struct_name: "EngineU".into(),
                 binding: 0,
                 size: 16,
-                visibility: WgslVisibility { vertex: true, fragment: true },
+                visibility: WgslVisibility {
+                    vertex: true,
+                    fragment: true,
+                },
                 members: vec![WgslUniformMember {
                     name: "projection".into(),
                     kind: 3,
@@ -1513,7 +1731,10 @@ mod tests {
                 struct_name: "Frag_Arrays".into(),
                 binding: 1,
                 size: 32,
-                visibility: WgslVisibility { vertex: false, fragment: true },
+                visibility: WgslVisibility {
+                    vertex: false,
+                    fragment: true,
+                },
                 members: vec![WgslArrayMember {
                     name: "lights".into(),
                     elem: 0,
@@ -1528,7 +1749,10 @@ mod tests {
                 kind: WgslTextureKind::Float,
                 texture_binding: 2,
                 sampler_binding: Some(3),
-                visibility: WgslVisibility { vertex: false, fragment: true },
+                visibility: WgslVisibility {
+                    vertex: false,
+                    fragment: true,
+                },
             }],
             compute: None,
         }
@@ -1557,10 +1781,25 @@ mod tests {
                 struct_name: "SaxpyParams".into(),
                 binding: 3,
                 size: 16,
-                visibility: WgslVisibility { vertex: false, fragment: false },
+                visibility: WgslVisibility {
+                    vertex: false,
+                    fragment: false,
+                },
                 members: vec![
-                    WgslUniformMember { name: "a".into(), kind: 4, offset: 0, align: 4, size: 4 },
-                    WgslUniformMember { name: "n".into(), kind: 4, offset: 4, align: 4, size: 4 },
+                    WgslUniformMember {
+                        name: "a".into(),
+                        kind: 4,
+                        offset: 0,
+                        align: 4,
+                        size: 4,
+                    },
+                    WgslUniformMember {
+                        name: "n".into(),
+                        kind: 4,
+                        offset: 4,
+                        align: 4,
+                        size: 4,
+                    },
                 ],
             }],
             array_blocks: Vec::new(),
@@ -1630,12 +1869,21 @@ mod tests {
             ),
             ("storage 0 x read i32", "storage 1 x read i32"),
             ("storage 1 y read i32", "storage 1 x read i32"),
-            ("block compute SaxpyParams 3 16 none 2", "block fragment SaxpyParams 3 16 none 2"),
-            ("storage 2 out read_write i32", "storage 1 out read_write i32"),
+            (
+                "block compute SaxpyParams 3 16 none 2",
+                "block fragment SaxpyParams 3 16 none 2",
+            ),
+            (
+                "storage 2 out read_write i32",
+                "storage 1 out read_write i32",
+            ),
         ];
         for (old, new) in mutations {
             let mutated = rechecksum(&replace_once(&wire, old, new));
-            assert!(WgslAbi::parse(&mutated).is_err(), "compute mutation `{old}` was accepted");
+            assert!(
+                WgslAbi::parse(&mutated).is_err(),
+                "compute mutation `{old}` was accepted"
+            );
         }
     }
 
@@ -1659,7 +1907,10 @@ mod tests {
 
         let mut wrong_access = abi;
         wrong_access.compute.as_mut().unwrap().resources[2].access = WgslStorageAccess::Read;
-        assert!(wrong_access.serialize().is_err(), "atomic access mutation must reject");
+        assert!(
+            wrong_access.serialize().is_err(),
+            "atomic access mutation must reject"
+        );
     }
 
     #[test]
@@ -1698,7 +1949,10 @@ mod tests {
             .expect("checksum label")
             .parse::<u64>()
             .expect("checksum value");
-        let wrong_checksum = format!("{version}\nchecksum {}\n{payload}", checksum.wrapping_add(1));
+        let wrong_checksum = format!(
+            "{version}\nchecksum {}\n{payload}",
+            checksum.wrapping_add(1)
+        );
         assert!(WgslAbi::parse(&wrong_checksum).is_err());
 
         let mutations = [
@@ -1712,14 +1966,26 @@ mod tests {
                 "array_block fragment Frag Frag_Arrays 1 32 f 1",
                 "array_block fragment Frag Frag_Arrays 2 32 f 1",
             ),
-            ("array_member lights 0 2 0 16", "array_member lights 0 2 16 16"),
-            ("array_member lights 0 2 0 16", "array_member lights 0 2 0 8"),
-            ("array_member lights 0 2 0 16", "array_member lights 0 3 0 16"),
+            (
+                "array_member lights 0 2 0 16",
+                "array_member lights 0 2 16 16",
+            ),
+            (
+                "array_member lights 0 2 0 16",
+                "array_member lights 0 2 0 8",
+            ),
+            (
+                "array_member lights 0 2 0 16",
+                "array_member lights 0 3 0 16",
+            ),
             ("texture 0 scene float 2 3 f", "texture 0 scene int 2 3 f"),
         ];
         for (old, new) in mutations {
             let mutated = rechecksum(&replace_once(&wire, old, new));
-            assert!(WgslAbi::parse(&mutated).is_err(), "mutation `{old}` was accepted");
+            assert!(
+                WgslAbi::parse(&mutated).is_err(),
+                "mutation `{old}` was accepted"
+            );
         }
     }
 }

@@ -1,7 +1,7 @@
 use crate::support;
 use bone_lints::{
-    lint_workspace, Finding, LintOptions, ACTION_CALLERS, RAW_INPUT_CLASSIFICATION,
-    RAW_INPUT_MIGRATION,
+    ACTION_CALLERS, Finding, LintOptions, RAW_INPUT_CLASSIFICATION, RAW_INPUT_MIGRATION,
+    lint_workspace,
 };
 use bone_semantic::prelude::*;
 
@@ -46,7 +46,10 @@ fn the_action_census_reads_both_declaration_spellings() {
         "a const ACT_* declaration is still an action declaration"
     );
     assert_eq!(action_declaration("global OTHER: int = 1"), None);
-    assert_eq!(action_declaration("    global ACT_MOVE: AppAction = app_action(\"move\")"), None);
+    assert_eq!(
+        action_declaration("    global ACT_MOVE: AppAction = app_action(\"move\")"),
+        None
+    );
 }
 
 #[test]
@@ -94,10 +97,12 @@ fn caller_census_rejects_an_empty_production_declaration_population() {
         1,
         "empty population must not be 0/0: {found:?}"
     );
-    assert!(found[0]
-        .error
-        .message
-        .contains("no production App ACT_* declarations"));
+    assert!(
+        found[0]
+            .error
+            .message
+            .contains("no production App ACT_* declarations")
+    );
 }
 
 #[test]

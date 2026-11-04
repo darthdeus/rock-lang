@@ -13,7 +13,9 @@ use lsp_types::{HoverContents, Position};
 fn stdlib_path(name: &str) -> String {
     let dir = match rock_stdlib::stdlib_origin() {
         rock_stdlib::StdlibSource::Dir(dir) => dir,
-        rock_stdlib::StdlibSource::Embedded => panic!("the stdlib is built in; this test needs a stdlib directory"),
+        rock_stdlib::StdlibSource::Embedded => {
+            panic!("the stdlib is built in; this test needs a stdlib directory")
+        }
     };
     bone_query::canonicalize_lenient(&dir.join(name).to_string_lossy())
 }
@@ -43,7 +45,10 @@ fn opening_a_stdlib_file_has_no_self_collision() {
         .collect();
     assert!(dups.is_empty(), "opening stdlib self-collided: {dups:?}");
     assert!(
-        !bone.diagnostics_for(&path).iter().any(|d| d.message.contains("across modules")),
+        !bone
+            .diagnostics_for(&path)
+            .iter()
+            .any(|d| d.message.contains("across modules")),
         "diagnostics_for on stdlib self-collided: {:?}",
         bone.diagnostics_for(&path)
     );
@@ -53,14 +58,20 @@ fn opening_a_stdlib_file_has_no_self_collision() {
 fn goto_def_into_stdlib_still_resolves() {
     // `xs.push(..)` must resolve to the stdlib file's real path (a regression
     // guard for the warm-module path change).
-    let (_dir, main) = project_calling_stdlib("fn main() -> int {\n  let xs = [1]\n  xs.push(2)\n  xs.len()\n}\n");
+    let (_dir, main) =
+        project_calling_stdlib("fn main() -> int {\n  let xs = [1]\n  xs.push(2)\n  xs.len()\n}\n");
     let mut bone = BoneWorkspace::new();
     let src = std::fs::read_to_string(&main).unwrap();
     bone.update(&main, src);
     // cursor on `push` (line 2, char 5).
-    let def = bone.definition(&main, Position::new(2, 5)).expect("push resolves");
+    let def = bone
+        .definition(&main, Position::new(2, 5))
+        .expect("push resolves");
     let uri = def.uri.as_str();
-    assert!(uri.ends_with("unified.rock"), "push must resolve into stdlib: {uri}");
+    assert!(
+        uri.ends_with("unified.rock"),
+        "push must resolve into stdlib: {uri}"
+    );
 }
 
 #[test]
@@ -87,7 +98,8 @@ fn stdlib_fn_default_value_renders_in_hover() {
 fn stdlib_symbols_appear_in_workspace_symbols() {
     // A stdlib function (`vec_push`) must be findable by name so Ctrl-T / ctags
     // can jump to it.
-    let (_dir, main) = project_calling_stdlib("fn main() -> int {\n  let xs = [1]\n  xs.push(2)\n  xs.len()\n}\n");
+    let (_dir, main) =
+        project_calling_stdlib("fn main() -> int {\n  let xs = [1]\n  xs.push(2)\n  xs.len()\n}\n");
     let mut bone = BoneWorkspace::new();
     let s = std::fs::read_to_string(&main).unwrap();
     bone.update(&main, s);
@@ -104,7 +116,8 @@ fn stdlib_functions_are_not_flagged_unused_in_a_bin_project() {
     // The `unused_fn` lint runs whole-project for a bin. Stdlib functions have no
     // in-project caller, so a naive walk would flag hundreds of them. They must
     // be excluded (via warm_mids, not the old file-id prefix).
-    let (_dir, main) = project_calling_stdlib("fn main() -> int {\n  let xs = [1]\n  xs.push(2)\n  xs.len()\n}\n");
+    let (_dir, main) =
+        project_calling_stdlib("fn main() -> int {\n  let xs = [1]\n  xs.push(2)\n  xs.len()\n}\n");
     let mut bone = BoneWorkspace::new();
     let s = std::fs::read_to_string(&main).unwrap();
     let per_file = bone.update(&main, s);
@@ -126,7 +139,8 @@ fn the_stdlib_builds_clean_in_the_editor() {
     // (`@frame_ref_source` in arena.rock) are admitted by the file's stdlib
     // identity, so a session that keys the stdlib by any other id reports its
     // own stdlib as broken.
-    let (_dir, main) = project_calling_stdlib("fn main() -> int {\n  let xs = [1]\n  xs.push(2)\n  xs.len()\n}\n");
+    let (_dir, main) =
+        project_calling_stdlib("fn main() -> int {\n  let xs = [1]\n  xs.push(2)\n  xs.len()\n}\n");
     let mut bone = BoneWorkspace::new();
     let s = std::fs::read_to_string(&main).unwrap();
     let per_file = bone.update(&main, s);
@@ -136,7 +150,10 @@ fn the_stdlib_builds_clean_in_the_editor() {
         .filter(|(_, d)| d.severity == Some(lsp_types::DiagnosticSeverity::ERROR))
         .map(|(f, d)| (f.clone(), d.message.clone()))
         .collect();
-    assert!(errors.is_empty(), "a legacy project over the stdlib must build clean: {errors:?}");
+    assert!(
+        errors.is_empty(),
+        "a legacy project over the stdlib must build clean: {errors:?}"
+    );
 }
 
 #[test]
@@ -148,8 +165,14 @@ fn stdlib_diagnostics_are_published_under_the_stdlib_file_path() {
     let s = std::fs::read_to_string(&main).unwrap();
     let per_file = bone.update(&main, s);
     let unified = stdlib_path("unified.rock");
-    assert!(per_file.iter().any(|(f, _)| f == &unified), "unified.rock reported under its real path");
+    assert!(
+        per_file.iter().any(|(f, _)| f == &unified),
+        "unified.rock reported under its real path"
+    );
     for (f, _) in &per_file {
-        assert!(std::path::Path::new(f).exists(), "`{f}` is not a file the editor can open");
+        assert!(
+            std::path::Path::new(f).exists(),
+            "`{f}` is not a file the editor can open"
+        );
     }
 }

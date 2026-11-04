@@ -49,7 +49,12 @@ pub struct Recorder {
 
 impl Recorder {
     pub fn new(out_path: PathBuf) -> Self {
-        Self { out_path, ring: VecDeque::new(), next_id: 1, git_heads: HashMap::new() }
+        Self {
+            out_path,
+            ring: VecDeque::new(),
+            next_id: 1,
+            git_heads: HashMap::new(),
+        }
     }
 
     pub fn stash(
@@ -71,7 +76,14 @@ impl Recorder {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         self.ring.push_back(Stashed {
-            record_id, ts_unix, path, position, prefix, buffer_text, items, timings,
+            record_id,
+            ts_unix,
+            path,
+            position,
+            prefix,
+            buffer_text,
+            items,
+            timings,
         });
         record_id
     }
@@ -104,7 +116,9 @@ impl Recorder {
             }
         }
 
-        let dir = Path::new(&s.path).parent().map(|p| p.to_string_lossy().to_string());
+        let dir = Path::new(&s.path)
+            .parent()
+            .map(|p| p.to_string_lossy().to_string());
         let git_head = dir.and_then(|d| self.git_head_for(&d));
 
         let row = json!({
@@ -149,7 +163,10 @@ fn append_line(path: &Path, row: &serde_json::Value) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
     writeln!(f, "{row}")
 }
 
@@ -208,7 +225,12 @@ pub fn stash_and_tag(
         .map(|it| json!({ "label": it.label, "sortText": it.sort_text, "kind": it.kind }))
         .collect();
     let record_id = rec.stash(
-        file_path.to_string(), pos, prefix, src.to_string(), item_rows, timings,
+        file_path.to_string(),
+        pos,
+        prefix,
+        src.to_string(),
+        item_rows,
+        timings,
     );
     for (i, it) in items.iter_mut().enumerate() {
         it.command = Some(Command::new(
@@ -254,7 +276,10 @@ mod tests {
 
     fn read_rows(path: &Path) -> Vec<serde_json::Value> {
         match std::fs::read_to_string(path) {
-            Ok(s) => s.lines().map(|l| serde_json::from_str(l).unwrap()).collect(),
+            Ok(s) => s
+                .lines()
+                .map(|l| serde_json::from_str(l).unwrap())
+                .collect(),
             Err(_) => Vec::new(),
         }
     }
@@ -293,13 +318,21 @@ mod tests {
         assert!(read_rows(&out).is_empty(), "unknown id must not write");
 
         let first = rec.stash(
-            "/nowhere/a.rock".into(), Position::new(0, 0), String::new(),
-            String::new(), vec![item("a")], json!({}),
+            "/nowhere/a.rock".into(),
+            Position::new(0, 0),
+            String::new(),
+            String::new(),
+            vec![item("a")],
+            json!({}),
         );
         for _ in 0..RING_CAP {
             rec.stash(
-                "/nowhere/a.rock".into(), Position::new(0, 0), String::new(),
-                String::new(), vec![item("b")], json!({}),
+                "/nowhere/a.rock".into(),
+                Position::new(0, 0),
+                String::new(),
+                String::new(),
+                vec![item("b")],
+                json!({}),
             );
         }
         rec.accept(first, Some(0), Some("a"));

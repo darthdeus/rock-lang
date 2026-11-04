@@ -149,7 +149,10 @@ impl TextureSlots {
 
 fn sampler_kind(ws: &Workspace, ty: TyId) -> Option<SamplerKind> {
     match ty_expr(ws, ty) {
-        Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), .. }) => {
+        Some(TypeExpr::App {
+            ctor: TypeCtor::Nominal(n),
+            ..
+        }) => {
             if bone_semantic::prelude::is_intrinsic_key(n, "Sampler2D") {
                 Some(SamplerKind::Float)
             } else if bone_semantic::prelude::is_intrinsic_key(n, "ISampler2D") {
@@ -185,7 +188,9 @@ pub fn texture_slots(ws: &Workspace, struct_name: Ustr) -> Result<TextureSlots, 
     if sd.fields.is_empty() {
         return Err(err(
             sd.name_span,
-            format!("texture slots: `{struct_name}` has no fields -- an empty texture group binds nothing"),
+            format!(
+                "texture slots: `{struct_name}` has no fields -- an empty texture group binds nothing"
+            ),
         ));
     }
 
@@ -202,7 +207,11 @@ pub fn texture_slots(ws: &Workspace, struct_name: Ustr) -> Result<TextureSlots, 
                 ),
             ));
         };
-        slots.push(TexSlot { name: fd.name, kind, slot: i as u32 });
+        slots.push(TexSlot {
+            name: fd.name,
+            kind,
+            slot: i as u32,
+        });
     }
 
     Ok(TextureSlots { struct_name, slots })
@@ -282,7 +291,10 @@ impl WireKind {
             WireKind::F32 | WireKind::I32 | WireKind::U32 | WireKind::Bool32 => vec![String::new()],
             WireKind::F32x2 => ["x", "y"].iter().map(|k| format!(".{k}")).collect(),
             WireKind::F32x3 => ["x", "y", "z"].iter().map(|k| format!(".{k}")).collect(),
-            WireKind::F32x4 => ["x", "y", "z", "w"].iter().map(|k| format!(".{k}")).collect(),
+            WireKind::F32x4 => ["x", "y", "z", "w"]
+                .iter()
+                .map(|k| format!(".{k}"))
+                .collect(),
             WireKind::Mat4 => (0..4)
                 .flat_map(|c| ["x", "y", "z", "w"].map(move |k| format!(".c{c}.{k}")))
                 .collect(),
@@ -353,7 +365,10 @@ impl BlockMember {
     pub fn leaf_stores(&self) -> Vec<LeafStore> {
         let view = self.kind.view();
         (0..self.kind.size() / 4)
-            .map(|i| LeafStore { offset: self.offset + i * 4, view })
+            .map(|i| LeafStore {
+                offset: self.offset + i * 4,
+                view,
+            })
             .collect()
     }
 }
@@ -409,7 +424,12 @@ impl UniformBlockPlan {
     pub fn leaf_paths(&self) -> Vec<String> {
         self.members
             .iter()
-            .flat_map(|m| m.kind.leaf_suffixes().into_iter().map(move |s| format!("{}{s}", m.name)))
+            .flat_map(|m| {
+                m.kind
+                    .leaf_suffixes()
+                    .into_iter()
+                    .map(move |s| format!("{}{s}", m.name))
+            })
             .collect()
     }
 
@@ -437,12 +457,21 @@ pub fn wire_kind(ws: &Workspace, ty: TyId) -> Option<WireKind> {
         Some(TypeExpr::Builtin(BuiltinTy::Int)) => Some(WireKind::I32),
         Some(TypeExpr::Builtin(BuiltinTy::Uint)) => Some(WireKind::U32),
         Some(TypeExpr::Builtin(BuiltinTy::Bool)) => Some(WireKind::Bool32),
-        Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), .. }) => {
-            if bone_semantic::prelude::is_intrinsic_key(n, "Vec2") || bone_semantic::prelude::is_intrinsic_key(n, "Vec2f") {
+        Some(TypeExpr::App {
+            ctor: TypeCtor::Nominal(n),
+            ..
+        }) => {
+            if bone_semantic::prelude::is_intrinsic_key(n, "Vec2")
+                || bone_semantic::prelude::is_intrinsic_key(n, "Vec2f")
+            {
                 Some(WireKind::F32x2)
-            } else if bone_semantic::prelude::is_intrinsic_key(n, "Vec3") || bone_semantic::prelude::is_intrinsic_key(n, "Vec3f") {
+            } else if bone_semantic::prelude::is_intrinsic_key(n, "Vec3")
+                || bone_semantic::prelude::is_intrinsic_key(n, "Vec3f")
+            {
                 Some(WireKind::F32x3)
-            } else if bone_semantic::prelude::is_intrinsic_key(n, "Vec4") || bone_semantic::prelude::is_intrinsic_key(n, "Vec4f") {
+            } else if bone_semantic::prelude::is_intrinsic_key(n, "Vec4")
+                || bone_semantic::prelude::is_intrinsic_key(n, "Vec4f")
+            {
                 Some(WireKind::F32x4)
             } else if bone_semantic::prelude::is_intrinsic_key(n, "Mat4") {
                 Some(WireKind::Mat4)
@@ -506,7 +535,10 @@ pub fn uniform_group_members(
         let Some(kind) = wire_kind(ws, fd.ty) else {
             let ty_name = ty_expr(ws, fd.ty)
                 .and_then(|t| match t {
-                    TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => Some(n.to_string()),
+                    TypeExpr::App {
+                        ctor: TypeCtor::Nominal(n),
+                        ..
+                    } => Some(n.to_string()),
                     _ => None,
                 })
                 .unwrap_or_else(|| "that type".to_string());
@@ -552,7 +584,9 @@ pub fn std140_block(
     span: Option<Span>,
 ) -> Result<UniformBlockPlan, CompilerError> {
     if members.is_empty() {
-        let msg = format!("uniform block: `{struct_name}` has no members -- an empty block binds nothing");
+        let msg = format!(
+            "uniform block: `{struct_name}` has no members -- an empty block binds nothing"
+        );
         return Err(match span {
             Some(sp) => err(sp, msg),
             None => CompilerError::new_no_location(msg),
@@ -586,7 +620,11 @@ pub fn std140_block(
         });
     }
 
-    Ok(UniformBlockPlan { struct_name, members: out, size })
+    Ok(UniformBlockPlan {
+        struct_name,
+        members: out,
+        size,
+    })
 }
 
 /// One `UniformArray<T>` member as DECLARED: the shader entry's `@size(N)` param.
@@ -673,12 +711,15 @@ fn round_up_u64(v: u64, align: u64) -> u64 {
 /// Spanned at the member that pushed the block over, which is the one whose
 /// `@size(N)` the author can usefully shrink.
 fn oversized(block_name: Ustr, member: Ustr, span: Span, size: u64) -> CompilerError {
-    CompilerError::new_with_label(span, format!(
-        "uniform array block: `{block_name}` needs {size} std140 bytes at `{member}`, over the \
+    CompilerError::new_with_label(
+        span,
+        format!(
+            "uniform array block: `{block_name}` needs {size} std140 bytes at `{member}`, over the \
          {GLES3_MAX_UNIFORM_BLOCK_SIZE} an ES 3.0 driver is required to offer. Array stride is 16 \
          for every element kind, so a `@size(N)` array costs `N * 16` whatever it holds -- the \
          budget is per BLOCK, and this one is the arrays alone"
-    ))
+        ),
+    )
 }
 
 /// Lay out one stage's `UniformArray<T>` params as a std140 array block.
@@ -716,20 +757,26 @@ pub fn uniform_array_block(
                     WireKind::Mat4 => "Mat4",
                     _ => "bool",
                 };
-                return Err(CompilerError::new_with_label(d.span, format!(
-                    "uniform array block: `{block_name}` member `{}` has element type `{name}`, \
+                return Err(CompilerError::new_with_label(
+                    d.span,
+                    format!(
+                        "uniform array block: `{block_name}` member `{}` has element type `{name}`, \
                      which a uniform array may not hold (allowed: float, int, Vec2, Vec4)",
-                    d.name
-                )));
+                        d.name
+                    ),
+                ));
             }
         };
         if d.capacity == 0 {
-            return Err(CompilerError::new_with_label(d.span, format!(
-                "uniform array block: `{block_name}` member `{}` has capacity 0 -- `@size(N)` \
+            return Err(CompilerError::new_with_label(
+                d.span,
+                format!(
+                    "uniform array block: `{block_name}` member `{}` has capacity 0 -- `@size(N)` \
                  declares how many elements the shader may index, so 0 declares an array nothing \
                  can read",
-                d.name
-            )));
+                    d.name
+                ),
+            ));
         }
 
         // u64 throughout, and the budget is checked BEFORE anything narrows.
@@ -749,7 +796,12 @@ pub fn uniform_array_block(
         });
         offset += d.capacity as u64 * stride as u64;
         if offset > GLES3_MAX_UNIFORM_BLOCK_SIZE as u64 {
-            return Err(oversized(block_name, d.name, d.span, round_up_u64(offset, 16)));
+            return Err(oversized(
+                block_name,
+                d.name,
+                d.span,
+                round_up_u64(offset, 16),
+            ));
         }
     }
 
@@ -765,7 +817,11 @@ pub fn uniform_array_block(
     // hide, so it rejects rather than truncating.
     let size =
         u32::try_from(size).map_err(|_| oversized(block_name, last.name, last.span, size))?;
-    Ok(UniformArrayBlockPlan { block_name, members, size })
+    Ok(UniformArrayBlockPlan {
+        block_name,
+        members,
+        size,
+    })
 }
 
 /// The ES 3.0 guaranteed minimum for `MAX_UNIFORM_BLOCK_SIZE` (ES 3.0 spec table
@@ -790,12 +846,21 @@ fn attr_kind(ws: &Workspace, ty: TyId) -> Option<AttrKind> {
     match ty_expr(ws, ty) {
         Some(TypeExpr::Builtin(BuiltinTy::Float)) => Some(AttrKind::F32),
         Some(TypeExpr::Builtin(BuiltinTy::Int)) => Some(AttrKind::I32),
-        Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), .. }) => {
-            if bone_semantic::prelude::is_intrinsic_key(n, "Vec2") || bone_semantic::prelude::is_intrinsic_key(n, "Vec2f") {
+        Some(TypeExpr::App {
+            ctor: TypeCtor::Nominal(n),
+            ..
+        }) => {
+            if bone_semantic::prelude::is_intrinsic_key(n, "Vec2")
+                || bone_semantic::prelude::is_intrinsic_key(n, "Vec2f")
+            {
                 Some(AttrKind::F32x2)
-            } else if bone_semantic::prelude::is_intrinsic_key(n, "Vec3") || bone_semantic::prelude::is_intrinsic_key(n, "Vec3f") {
+            } else if bone_semantic::prelude::is_intrinsic_key(n, "Vec3")
+                || bone_semantic::prelude::is_intrinsic_key(n, "Vec3f")
+            {
                 Some(AttrKind::F32x3)
-            } else if bone_semantic::prelude::is_intrinsic_key(n, "Vec4") || bone_semantic::prelude::is_intrinsic_key(n, "Vec4f") {
+            } else if bone_semantic::prelude::is_intrinsic_key(n, "Vec4")
+                || bone_semantic::prelude::is_intrinsic_key(n, "Vec4f")
+            {
                 Some(AttrKind::F32x4)
             } else {
                 None
@@ -827,7 +892,10 @@ pub fn vertex_attrs(ws: &Workspace, struct_name: Ustr) -> Result<VertexAttrs, Co
         ));
     }
     if sd.fields.is_empty() {
-        return Err(err(sd.name_span, format!("vertex attributes: `{struct_name}` has no fields")));
+        return Err(err(
+            sd.name_span,
+            format!("vertex attributes: `{struct_name}` has no fields"),
+        ));
     }
 
     let mut attrs = Vec::with_capacity(sd.fields.len());
@@ -842,7 +910,11 @@ pub fn vertex_attrs(ws: &Workspace, struct_name: Ustr) -> Result<VertexAttrs, Co
                 ),
             ));
         };
-        attrs.push(Attr { name: fd.name, kind, location: i as u32 });
+        attrs.push(Attr {
+            name: fd.name,
+            kind,
+            location: i as u32,
+        });
     }
 
     Ok(VertexAttrs { struct_name, attrs })

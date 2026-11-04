@@ -70,11 +70,17 @@ fn display_tiers_expected(n: usize) -> String {
         cdata.clone(),
         cdata,
         format!("GcWide {{ {} }}", join(&|i| format!("g{i}: s{i}"))),
-        format!("LeafWide {{ pos: true, pos.x: 1, pos.y: 2, {} }}", join(&|i| format!("l{i}: {i}.25"))),
+        format!(
+            "LeafWide {{ pos: true, pos.x: 1, pos.y: 2, {} }}",
+            join(&|i| format!("l{i}: {i}.25"))
+        ),
         format!("Holder {{ tag: t, inner: {inline} }}"),
         "MaybeHolder { tag: t, maybe: nil }".to_string(),
         format!("MaybeHolder {{ tag: t, maybe: {inline} }}"),
-        format!("Wide::Tuple {{ {} }}", join(&|i| format!("[{}] = {i}", i + 1))),
+        format!(
+            "Wide::Tuple {{ {} }}",
+            join(&|i| format!("[{}] = {i}", i + 1))
+        ),
     ]
     .join("\n")
 }
@@ -93,7 +99,10 @@ fn narrow_display_helpers_render_unchanged() {
                     MaybeHolder { tag: t, maybe: InlineWide { f0: 0.5, f1: 1.5 } }\n\
                     Wide::Tuple { [1] = 0, [2] = 1 }";
     assert_eq!(expected, display_tiers_expected(2));
-    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "narrow_display_helpers"), expected);
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "narrow_display_helpers"),
+        expected
+    );
 }
 
 #[test]
@@ -114,11 +123,18 @@ fn wide_display_helpers_load_and_render() {
 fn wide_value_interpolation_loads_and_renders() {
     require_luajit();
     let n = 70;
-    let fields = (0..n).map(|i| format!("f{i}: int = {i}")).collect::<Vec<_>>().join(", ");
-    let src = format!("value Row {{ {fields} }}\nfn main() {{ let r = Row {{}}; print(\"<{{r}}>\") }}\n");
+    let fields = (0..n)
+        .map(|i| format!("f{i}: int = {i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let src =
+        format!("value Row {{ {fields} }}\nfn main() {{ let r = Row {{}}; print(\"<{{r}}>\") }}\n");
     let lua = try_emit_module(&src).expect("emits");
     luajit_loads(&lua, "wide_value_interpolation").expect("the emitted chunk must load");
-    let body = (0..n).map(|i| format!("f{i}: {i}")).collect::<Vec<_>>().join(", ");
+    let body = (0..n)
+        .map(|i| format!("f{i}: {i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
     assert_eq!(
         run_luajit(&format!("{lua}\nmain()\n"), "wide_value_interpolation"),
         format!("<Row {{ {body} }}>")
@@ -127,9 +143,17 @@ fn wide_value_interpolation_loads_and_renders() {
 
 /// `sum(p0..p9)` adding the parameters cyclically in `statements` statements.
 fn accumulation(statements: usize) -> String {
-    let params = (0..10).map(|i| format!("p{i}: int")).collect::<Vec<_>>().join(", ");
-    let adds = (0..statements).map(|i| format!("    total += p{}\n", i % 10)).collect::<String>();
-    let args = (1..=10).map(|i| i.to_string()).collect::<Vec<_>>().join(", ");
+    let params = (0..10)
+        .map(|i| format!("p{i}: int"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let adds = (0..statements)
+        .map(|i| format!("    total += p{}\n", i % 10))
+        .collect::<String>();
+    let args = (1..=10)
+        .map(|i| i.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
     format!(
         "fn sum({params}) -> int {{\n    let total = 0\n{adds}    return total\n}}\n\
          fn main() {{ print(\"{{sum({args})}}\") }}\n"
@@ -143,7 +167,10 @@ fn long_accumulation_loads_and_runs() {
     require_luajit();
     let lua = try_emit_module(&accumulation(300)).expect("emits");
     luajit_loads(&lua, "long_accumulation").expect("the emitted chunk must load");
-    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "long_accumulation"), "1650");
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "long_accumulation"),
+        "1650"
+    );
 }
 
 /// The bound only splits what LuaJIT could not load: an accumulation well

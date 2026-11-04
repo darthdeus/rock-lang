@@ -3,11 +3,11 @@ use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::{CompilerError, Idx, ModuleId};
 use ustr::Ustr;
 
-use crate::code_identity::{CodeIdentity, CodeOwner, CodeOwnerKind};
 use crate::code_identity::CodeArtifact;
+use crate::code_identity::{CodeIdentity, CodeOwner, CodeOwnerKind};
 use crate::instance::Instance;
 use crate::mir::FuncRef;
-use crate::monoty::{convert_decl, MonoCtor, MonoSubst, MonoTy};
+use crate::monoty::{MonoCtor, MonoSubst, MonoTy, convert_decl};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LifecycleDependency {
@@ -18,7 +18,9 @@ pub struct LifecycleDependency {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LifecycleQualification {
     Plain,
-    OnChange { dependencies: Vec<LifecycleDependency> },
+    OnChange {
+        dependencies: Vec<LifecycleDependency>,
+    },
 }
 
 impl LifecycleQualification {
@@ -71,23 +73,29 @@ impl LifecyclePlan {
         if self.entries.len() != next.entries.len() {
             return true;
         }
-        self.entries.iter().zip(&next.entries).any(|(old, candidate)| {
-            old.phase != candidate.phase
-                || old.owner != candidate.owner
-                || old.root_type != candidate.root_type
-                || old.identity != candidate.identity
-                || old.stage != candidate.stage
-                || old.declaration_ordinal != candidate.declaration_ordinal
-                || old.sim_wires != candidate.sim_wires
-                || qualification_structure_changed(&old.qualification, &candidate.qualification)
-        })
+        self.entries
+            .iter()
+            .zip(&next.entries)
+            .any(|(old, candidate)| {
+                old.phase != candidate.phase
+                    || old.owner != candidate.owner
+                    || old.root_type != candidate.root_type
+                    || old.identity != candidate.identity
+                    || old.stage != candidate.stage
+                    || old.declaration_ordinal != candidate.declaration_ordinal
+                    || old.sim_wires != candidate.sim_wires
+                    || qualification_structure_changed(&old.qualification, &candidate.qualification)
+            })
     }
 
     pub fn removed_gated_wire(&self, next: &Self) -> bool {
         self.entries.iter().any(|old| {
             old.phase == "wire"
                 && old.qualification.is_gated()
-                && !next.entries.iter().any(|candidate| candidate.identity == old.identity)
+                && !next
+                    .entries
+                    .iter()
+                    .any(|candidate| candidate.identity == old.identity)
         })
     }
 }
@@ -100,10 +108,13 @@ fn qualification_structure_changed(
         (LifecycleQualification::Plain, LifecycleQualification::Plain) => false,
         (
             LifecycleQualification::OnChange { dependencies: old },
-            LifecycleQualification::OnChange { dependencies: candidate },
-        ) => old.iter().map(|dependency| &dependency.identity).ne(
-            candidate.iter().map(|dependency| &dependency.identity),
-        ),
+            LifecycleQualification::OnChange {
+                dependencies: candidate,
+            },
+        ) => old
+            .iter()
+            .map(|dependency| &dependency.identity)
+            .ne(candidate.iter().map(|dependency| &dependency.identity)),
         _ => true,
     }
 }
@@ -145,10 +156,12 @@ pub fn sim_wire_name(function: &bone_semantic::hir::Function) -> Option<Ustr> {
         .annotations
         .iter()
         .find(|annotation| annotation.is_builtin("sim"))?;
-    Some(match annotation.args.first().map(|argument| &argument.value) {
-        Some(AnnoValue::String(name)) => *name,
-        _ => function.name,
-    })
+    Some(
+        match annotation.args.first().map(|argument| &argument.value) {
+            Some(AnnoValue::String(name)) => *name,
+            _ => function.name,
+        },
+    )
 }
 
 fn is_sim_fixture_module(file: &str) -> bool {
@@ -200,9 +213,6 @@ fn int_expr(body: &bone_semantic::hir::Body, e: Idx<bone_semantic::hir::Expr>) -
     }
 }
 
-
-
-
 fn global_identity(
     ws: &Workspace,
     module: ModuleId,
@@ -221,7 +231,13 @@ fn global_locations(
 ) -> Vec<(ModuleId, Idx<bone_semantic::hir::GlobalDef>)> {
     ws.modules
         .iter()
-        .filter_map(|module| module.global_by_name.get(&name).copied().map(|gid| (module.id, gid)))
+        .filter_map(|module| {
+            module
+                .global_by_name
+                .get(&name)
+                .copied()
+                .map(|gid| (module.id, gid))
+        })
         .collect()
 }
 
@@ -284,7 +300,10 @@ fn wire_dependency_identities(
                 if user_function_named(ws, key) {
                     return Err(CompilerError::new_with_label(
                         name.span,
-                        format!("@wire dependency `{}` names a function; expected a top-level const", name.name),
+                        format!(
+                            "@wire dependency `{}` names a function; expected a top-level const",
+                            name.name
+                        ),
                     ));
                 }
                 return Err(CompilerError::new_with_label(
@@ -303,7 +322,10 @@ fn wire_dependency_identities(
         if !ws.module(module).globals[global].is_const {
             return Err(CompilerError::new_with_label(
                 name.span,
-                format!("@wire dependency `{}` is mutable; only top-level const is supported", name.name),
+                format!(
+                    "@wire dependency `{}` is mutable; only top-level const is supported",
+                    name.name
+                ),
             ));
         }
         identities.push(global_identity(ws, module, global));
@@ -354,8 +376,13 @@ fn dependency_names_for_const(
             && ws.functions_by_name.get(&name).is_some_and(|functions| {
                 functions.iter().any(|(module, function)| {
                     *module != ModuleId::builtin()
-                        && bone_semantic::hir::operator_entry(crate::mangle::declared_name(name.as_str())).is_none()
-                        && !crate::intrinsics::is_intrinsic(&ws.module(*module).functions[*function])
+                        && bone_semantic::hir::operator_entry(crate::mangle::declared_name(
+                            name.as_str(),
+                        ))
+                        .is_none()
+                        && !crate::intrinsics::is_intrinsic(
+                            &ws.module(*module).functions[*function],
+                        )
                 })
             })
         {
@@ -388,7 +415,12 @@ fn dependency_closure(
             continue;
         }
         out.push(identity.clone());
-        let CodeIdentity::Artifact(CodeOwner::Artifact { kind: CodeOwnerKind::Global, name, .. }) = identity else {
+        let CodeIdentity::Artifact(CodeOwner::Artifact {
+            kind: CodeOwnerKind::Global,
+            name,
+            ..
+        }) = identity
+        else {
             continue;
         };
         let Some(&(module, global)) = locations.get(&name) else {
@@ -427,7 +459,8 @@ fn wire_qualification(
     {
         return Err(CompilerError::new_with_label(
             app.span,
-            "@wire accepts either no arguments or one named onchange=[CONST, ...] argument".to_string(),
+            "@wire accepts either no arguments or one named onchange=[CONST, ...] argument"
+                .to_string(),
         ));
     }
     let names = match &app.args[0].value {
@@ -439,10 +472,14 @@ fn wire_qualification(
             ));
         }
     };
-    let declared = wire_dependency_identities(ws, names, app.resolved_ident_list.as_deref(), app.span)?;
+    let declared =
+        wire_dependency_identities(ws, names, app.resolved_ident_list.as_deref(), app.span)?;
     let dependencies = dependency_closure(ws, &declared)?
         .into_iter()
-        .map(|identity| LifecycleDependency { identity, fingerprint: 0 })
+        .map(|identity| LifecycleDependency {
+            identity,
+            fingerprint: 0,
+        })
         .collect();
     Ok(LifecycleQualification::OnChange { dependencies })
 }
@@ -516,11 +553,7 @@ pub fn collect(ws: &Workspace) -> Result<LifecyclePlan, CompilerError> {
     let mut census = LifecycleCensus::default();
     for module in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
         for (did, deco) in module.decorators.iter() {
-            let Some(meta) = deco
-                .annotations
-                .iter()
-                .find(|a| a.is_builtin("lifecycle"))
-            else {
+            let Some(meta) = deco.annotations.iter().find(|a| a.is_builtin("lifecycle")) else {
                 continue;
             };
             census.declarations += 1;
@@ -565,10 +598,7 @@ pub fn collect(ws: &Workspace) -> Result<LifecyclePlan, CompilerError> {
                     ));
                 }
             };
-            roles.insert(
-                deco.def_key,
-                (module.id, did, phase, owner, stage_index),
-            );
+            roles.insert(deco.def_key, (module.id, did, phase, owner, stage_index));
         }
     }
 
@@ -579,8 +609,7 @@ pub fn collect(ws: &Workspace) -> Result<LifecyclePlan, CompilerError> {
         for (fid, f) in module.functions.iter() {
             for app in &f.annotations {
                 let app_key = app.resolved_name.unwrap_or(app.name.name);
-                let Some(&(dmid, did, phase, owner, stage_index)) = roles.get(&app_key)
-                else {
+                let Some(&(dmid, did, phase, owner, stage_index)) = roles.get(&app_key) else {
                     continue;
                 };
                 let identity = CodeIdentity::Named(Instance::base(FuncRef {
@@ -593,7 +622,10 @@ pub fn collect(ws: &Workspace) -> Result<LifecyclePlan, CompilerError> {
                 census.applications += 1;
                 let root_type = match owner.as_str() {
                     "process" => {
-                        if !f.generics.is_empty() || !f.param_decls.is_empty() || f.return_ty.is_some() {
+                        if !f.generics.is_empty()
+                            || !f.param_decls.is_empty()
+                            || f.return_ty.is_some()
+                        {
                             return Err(CompilerError::new_with_label(
                                 f.span,
                                 format!(
@@ -615,7 +647,10 @@ pub fn collect(ws: &Workspace) -> Result<LifecyclePlan, CompilerError> {
                                 ),
                             ));
                         }
-                        if !f.generics.is_empty() || f.param_decls.len() != 1 || f.return_ty.is_some() {
+                        if !f.generics.is_empty()
+                            || f.param_decls.len() != 1
+                            || f.return_ty.is_some()
+                        {
                             return Err(CompilerError::new_with_label(
                                 f.span,
                                 format!(
@@ -741,7 +776,10 @@ pub fn collect(ws: &Workspace) -> Result<LifecyclePlan, CompilerError> {
                     declaration_ordinal: ordinal,
                     qualification,
                     sim_wires: if is_frame_phase(phase) {
-                        sim_wires_by_module.get(&module.id).cloned().unwrap_or_default()
+                        sim_wires_by_module
+                            .get(&module.id)
+                            .cloned()
+                            .unwrap_or_default()
                     } else {
                         Vec::new()
                     },
@@ -779,11 +817,14 @@ mod tests {
 
     #[test]
     fn lifecycle_owner_rejects_retired_session_spelling() {
-        let ws = workspace(&[("old_owner.rock", r#"
+        let ws = workspace(&[(
+            "old_owner.rock",
+            r#"
             @lifecycle(phase="update", owner="session")
             deco init tick {}
             @tick fn run() {}
-        "#)]);
+        "#,
+        )]);
         let error = collect(&ws).expect_err("retired lifecycle owner must be rejected");
         assert!(error.message.contains("unsupported lifecycle owner"));
     }
@@ -847,11 +888,22 @@ mod tests {
         let argument = annotation
             .args
             .iter()
-            .find(|argument| argument.name.as_ref().is_some_and(|name| name.name.as_str() == "onchange"))
+            .find(|argument| {
+                argument
+                    .name
+                    .as_ref()
+                    .is_some_and(|name| name.name.as_str() == "onchange")
+            })
             .expect("onchange argument");
         match &argument.value {
             AnnoValue::IdentList(names) => {
-                assert_eq!(names.iter().map(|name| name.name.as_str()).collect::<Vec<_>>(), vec!["GAME_VOLUME", "ART_FILTER"]);
+                assert_eq!(
+                    names
+                        .iter()
+                        .map(|name| name.name.as_str())
+                        .collect::<Vec<_>>(),
+                    vec!["GAME_VOLUME", "ART_FILTER"]
+                );
             }
             other => panic!("qualified wire list was lowered as {other:?}"),
         }
@@ -898,7 +950,9 @@ mod tests {
                 "#
             ),
         )]);
-        collect(&ws).expect_err("unsupported dependency must reject").message
+        collect(&ws)
+            .expect_err("unsupported dependency must reject")
+            .message
     }
 
     #[test]
@@ -1148,7 +1202,11 @@ mod tests {
         assert_eq!(
             plan.entries
                 .iter()
-                .map(|entry| (entry.phase.as_str(), entry.diagnostic_name.as_str(), entry.stage))
+                .map(|entry| (
+                    entry.phase.as_str(),
+                    entry.diagnostic_name.as_str(),
+                    entry.stage
+                ))
                 .collect::<Vec<_>>(),
             vec![
                 ("post_imgui_draw", "first", 10),
@@ -1178,7 +1236,11 @@ mod tests {
         assert_eq!(
             plan.entries
                 .iter()
-                .map(|entry| (entry.phase.as_str(), entry.diagnostic_name.as_str(), entry.stage))
+                .map(|entry| (
+                    entry.phase.as_str(),
+                    entry.diagnostic_name.as_str(),
+                    entry.stage
+                ))
                 .collect::<Vec<_>>(),
             vec![
                 ("late_update", "settle", 900),
@@ -1189,6 +1251,4 @@ mod tests {
         );
         assert!(is_frame_phase(Ustr::from("prepare")));
     }
-
-
 }

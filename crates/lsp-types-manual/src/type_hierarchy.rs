@@ -11,8 +11,11 @@ pub struct TypeHierarchyOptions {
     pub work_done_progress_options: WorkDoneProgressOptions,
 }
 
-impl_lsp_struct!(TypeHierarchyOptions,
-    flatten { work_done_progress_options: WorkDoneProgressOptions }
+impl_lsp_struct!(
+    TypeHierarchyOptions,
+    flatten {
+        work_done_progress_options: WorkDoneProgressOptions
+    }
 );
 
 #[derive(Debug, Eq, PartialEq, Clone, Default)]
@@ -22,7 +25,8 @@ pub struct TypeHierarchyRegistrationOptions {
     pub static_registration_options: StaticRegistrationOptions,
 }
 
-impl_lsp_struct!(TypeHierarchyRegistrationOptions,
+impl_lsp_struct!(
+    TypeHierarchyRegistrationOptions,
     flatten {
         text_document_registration_options: TextDocumentRegistrationOptions,
         type_hierarchy_options: TypeHierarchyOptions,
@@ -36,7 +40,8 @@ pub struct TypeHierarchyPrepareParams {
     pub work_done_progress_params: WorkDoneProgressParams,
 }
 
-impl_lsp_struct!(TypeHierarchyPrepareParams,
+impl_lsp_struct!(
+    TypeHierarchyPrepareParams,
     flatten {
         text_document_position_params: TextDocumentPositionParams,
         work_done_progress_params: WorkDoneProgressParams,
@@ -50,8 +55,11 @@ pub struct TypeHierarchySupertypesParams {
     pub partial_result_params: PartialResultParams,
 }
 
-impl_lsp_struct!(TypeHierarchySupertypesParams,
-    required { item: TypeHierarchyItem = "item" },
+impl_lsp_struct!(
+    TypeHierarchySupertypesParams,
+    required {
+        item: TypeHierarchyItem = "item"
+    },
     optional {},
     flatten {
         work_done_progress_params: WorkDoneProgressParams,
@@ -66,8 +74,11 @@ pub struct TypeHierarchySubtypesParams {
     pub partial_result_params: PartialResultParams,
 }
 
-impl_lsp_struct!(TypeHierarchySubtypesParams,
-    required { item: TypeHierarchyItem = "item" },
+impl_lsp_struct!(
+    TypeHierarchySubtypesParams,
+    required {
+        item: TypeHierarchyItem = "item"
+    },
     optional {},
     flatten {
         work_done_progress_params: WorkDoneProgressParams,
@@ -106,7 +117,8 @@ pub struct TypeHierarchyItem {
     pub data: Option<LSPAny>,
 }
 
-impl_lsp_struct!(TypeHierarchyItem,
+impl_lsp_struct!(
+    TypeHierarchyItem,
     required {
         name: String = "name",
         kind: SymbolKind = "kind",

@@ -28,7 +28,14 @@ fn looping(t: Trace) -> int {
 fn main() {}
 "#;
     let emitted = emit_mir(src);
-    assert!(emitted.skipped.iter().all(|(n, _)| !["choose", "value", "statement", "looping"].contains(&n.as_str())), "{:?}", emitted.skipped);
+    assert!(
+        emitted
+            .skipped
+            .iter()
+            .all(|(n, _)| !["choose", "value", "statement", "looping"].contains(&n.as_str())),
+        "{:?}",
+        emitted.skipped
+    );
     let checks = r#"
 local expected = {
     {false, false, false, 0, 134}, {false, false, true, 1, 13},
@@ -53,13 +60,17 @@ print('ok')
     let mut checks = checks.to_string();
     for name in ["choose", "value", "statement", "looping"] {
         let prefix = format!("{name}_");
-        let symbols: Vec<_> = definition_names(&emitted.lua).into_iter()
+        let symbols: Vec<_> = definition_names(&emitted.lua)
+            .into_iter()
             .filter(|symbol| symbol.starts_with(&prefix) && !symbol.contains("__"))
             .collect();
         assert_eq!(symbols.len(), 1, "one callable for {name}: {symbols:?}");
         checks = checks.replace(&format!("{name}("), &format!("{}(", symbols[0]));
     }
-    assert_eq!(run_luajit(&format!("{}\n{checks}", emitted.lua), "condition_branches"), "ok");
+    assert_eq!(
+        run_luajit(&format!("{}\n{checks}", emitted.lua), "condition_branches"),
+        "ok"
+    );
 }
 
 #[test]
@@ -136,7 +147,22 @@ fn main() {
 }
 "#;
     let emitted = emit_mir(src);
-    assert!(emitted.skipped.iter().all(|(n, _)| !["main", "nullable", "guarded", "guarded_statement", "overloaded", "present", "nullable_loop"].contains(&n.as_str())), "{:?}", emitted.skipped);
-    assert_eq!(run_luajit(&format!("{}\nmain()", emitted.lua), "condition_nullable"),
-        "2\n1\n2\n2\n1\n2\n2\n1\n2\n0\n1\n1\n2\n2\n1\n2\n3\n0\n0\n1");
+    assert!(
+        emitted.skipped.iter().all(|(n, _)| ![
+            "main",
+            "nullable",
+            "guarded",
+            "guarded_statement",
+            "overloaded",
+            "present",
+            "nullable_loop"
+        ]
+        .contains(&n.as_str())),
+        "{:?}",
+        emitted.skipped
+    );
+    assert_eq!(
+        run_luajit(&format!("{}\nmain()", emitted.lua), "condition_nullable"),
+        "2\n1\n2\n2\n1\n2\n2\n1\n2\n0\n1\n1\n2\n2\n1\n2\n3\n0\n0\n1"
+    );
 }

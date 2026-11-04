@@ -7,8 +7,7 @@
 use crate::common::ws_with;
 
 struct ModeGuard(
-    #[allow(dead_code)]
-    crate::common::InlineOffGuard,
+    #[allow(dead_code)] crate::common::InlineOffGuard,
     #[allow(dead_code)] skull_mir::ablation::Scope,
 );
 
@@ -20,7 +19,10 @@ impl ModeGuard {
 }
 
 fn emit_js(ws: &bone_semantic::inference::Workspace) -> Result<String, String> {
-    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("test module");
     skull_codegen_js::emit::emit_program(ws, mid)
         .map(|p| p.program)
         .map_err(|e| e.message)
@@ -84,7 +86,8 @@ fn a_bounded_body_emits_standalone_to_js_with_inlining_disabled() {
          bound-call was not resolved: {body:?}"
     );
     assert!(
-        js.lines().any(|l| !l.trim_start().starts_with("function ") && l.contains(&format!("{symbol}("))),
+        js.lines()
+            .any(|l| !l.trim_start().starts_with("function ") && l.contains(&format!("{symbol}("))),
         "`{symbol}` is emitted but nothing calls it"
     );
 }
@@ -150,7 +153,8 @@ fn main() {
 "#;
     let js = emit_js(&ws_with(source)).expect("the retained field_get boundary must emit");
     assert!(
-        js.lines().any(|line| line.starts_with("function field_get_") && line.contains("_spec_")),
+        js.lines()
+            .any(|line| line.starts_with("function field_get_") && line.contains("_spec_")),
         "the concrete inline(js) instance must have its own definition:\n{js}"
     );
 }

@@ -28,7 +28,10 @@ fn js_value_mismatch_fails() {
     let summary = run_src("@test(returns = 43)\nfn r() -> int { return 42 }\n");
     assert_eq!(summary.unit_failures, 0);
     assert_eq!(summary.tests_passed, 0);
-    assert_eq!(summary.tests_failed, 1, "mismatching value test must FAIL under node");
+    assert_eq!(
+        summary.tests_failed, 1,
+        "mismatching value test must FAIL under node"
+    );
 }
 
 #[test]

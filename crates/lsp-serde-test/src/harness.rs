@@ -1,5 +1,5 @@
-use rand::SeedableRng;
 use rand::rngs::StdRng;
+use rand::SeedableRng;
 use serde_json::Value;
 
 pub struct TestResult {
@@ -51,7 +51,11 @@ pub trait TypeTest: Send + Sync {
             }
         }
 
-        TestResult { type_name: self.type_name(), total, failures }
+        TestResult {
+            type_name: self.type_name(),
+            total,
+            failures,
+        }
     }
 }
 
@@ -70,7 +74,12 @@ pub fn print_results(results: &[TestResult], verbose: bool) {
             println!("  PASS  {} ({} inputs)", r.type_name, r.total);
         } else {
             any_failed = true;
-            println!("  FAIL  {} ({}/{} inputs failed)", r.type_name, r.failures.len(), r.total);
+            println!(
+                "  FAIL  {} ({}/{} inputs failed)",
+                r.type_name,
+                r.failures.len(),
+                r.total
+            );
             if verbose {
                 for (i, f) in r.failures.iter().enumerate().take(3) {
                     println!("    failure {}:", i + 1);
@@ -92,7 +101,13 @@ pub fn print_results(results: &[TestResult], verbose: bool) {
 #[macro_export]
 macro_rules! type_test {
     ($struct_name:ident, $type_name:ident, $gen_fn:expr) => {
-        $crate::type_test!($struct_name, $type_name, lsp_types :: $type_name, lsp_types_manual :: $type_name, $gen_fn);
+        $crate::type_test!(
+            $struct_name,
+            $type_name,
+            lsp_types::$type_name,
+            lsp_types_manual::$type_name,
+            $gen_fn
+        );
     };
     ($struct_name:ident, $label:ident, $orig:path, $fork:path, $gen_fn:expr) => {
         pub struct $struct_name;

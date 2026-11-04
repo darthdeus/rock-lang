@@ -10,12 +10,17 @@
 
 use skull_mir::mir::FuncRef;
 
-
 fn test_fn_ref(ws: &bone_semantic::inference::Workspace, name: &str) -> FuncRef {
-    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("test module");
     for (fid, f) in ws.module(mid).functions.iter() {
         if f.name.as_str() == name {
-            return FuncRef { module: mid, func: fid };
+            return FuncRef {
+                module: mid,
+                func: fid,
+            };
         }
     }
     panic!("no fn `{name}` in <test> module");
@@ -124,22 +129,36 @@ fn a_lone_rejection_has_no_siblings() {
         "inline(lua) fn lua_one(x: int) -> int = \"\"\" return x \"\"\"\n\
          fn root(y: int) -> int { lua_one(y) }\n",
     );
-    assert_eq!(all.len(), 1, "expected exactly one rejection, got:\n{}", all.join("\n"));
+    assert_eq!(
+        all.len(),
+        1,
+        "expected exactly one rejection, got:\n{}",
+        all.join("\n")
+    );
 }
 
 #[test]
 fn a_rejected_registration_target_names_the_unsupported_callee() {
-    let ws = crate::common::ws_with(r#"
+    let ws = crate::common::ws_with(
+        r#"
 deco init hook() {}
 inline(lua) fn unsupported_callback_leaf() = "print('native')"
 @hook fn callback() { unsupported_callback_leaf() }
 fn main() {}
-"#);
+"#,
+    );
     let mid = ws.module_ids[&ustr::Ustr::from("<test>")];
-    let error = skull_codegen_js::emit::emit_program(&ws, mid).err().expect("callback must reject");
+    let error = skull_codegen_js::emit::emit_program(&ws, mid)
+        .err()
+        .expect("callback must reject");
     let messages: Vec<_> = std::iter::once(&error)
         .chain(error.siblings.iter())
-        .map(|error| error.message.as_str()).collect();
-    assert!(messages.iter().any(|message| message.contains("unsupported_callback_leaf")),
-        "callback rejection was hidden by staging: {messages:?}");
+        .map(|error| error.message.as_str())
+        .collect();
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("unsupported_callback_leaf")),
+        "callback rejection was hidden by staging: {messages:?}"
+    );
 }

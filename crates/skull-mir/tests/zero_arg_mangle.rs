@@ -41,7 +41,10 @@ fn mangled(ws: &bone_semantic::inference::Workspace, name: &str) -> Vec<String> 
 fn zero_parameter_symbol_does_not_collide_with_restore_lookup_name() {
     let ws = ws_of("fn hidden_callback() {}");
     let mid = ws.module_ids[&Ustr::from("<test>")];
-    let (_, callback) = ws.module(mid).functions.iter()
+    let (_, callback) = ws
+        .module(mid)
+        .functions
+        .iter()
         .find(|(_, f)| f.name.as_str() == "hidden_callback")
         .expect("restore callback declaration");
     assert_ne!(mangle_fn(&ws, callback), callback.name.as_str());
@@ -84,6 +87,14 @@ fn foo() -> int { return 1 }
 "#,
     );
     let errors = collision_errors(&ws);
-    assert_eq!(errors.len(), 1, "{:?}", errors.iter().map(|(n, e)| (n, &e.message)).collect::<Vec<_>>());
+    assert_eq!(
+        errors.len(),
+        1,
+        "{:?}",
+        errors
+            .iter()
+            .map(|(n, e)| (n, &e.message))
+            .collect::<Vec<_>>()
+    );
     assert_eq!(errors[0].0, "foo_0");
 }

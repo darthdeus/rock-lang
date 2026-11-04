@@ -2,7 +2,7 @@
 //! `rock lint`, the build pass) drives, so no surface assembles the lint list
 //! itself. Harness mirrors unused_var.rs.
 
-use bone_lints::{lint_workspace, Finding, LintOptions, KNOWN_LINTS};
+use bone_lints::{Finding, KNOWN_LINTS, LintOptions, lint_workspace};
 use bone_semantic::prelude::*;
 use rock_core::errors::CompilerErrorLevel;
 
@@ -43,8 +43,15 @@ fn findings_carry_their_lint_name_and_file() {
     let fs = findings(src);
     assert_eq!(fs.len(), 1, "one finding, got {fs:?}");
     assert_eq!(fs[0].lint, "unused_var");
-    assert_eq!(fs[0].file().as_str(), FILE, "finding is attributed to its source file");
-    assert!(KNOWN_LINTS.contains(&fs[0].lint), "every finding's name is in the registry");
+    assert_eq!(
+        fs[0].file().as_str(),
+        FILE,
+        "finding is attributed to its source file"
+    );
+    assert!(
+        KNOWN_LINTS.contains(&fs[0].lint),
+        "every finding's name is in the registry"
+    );
 }
 
 #[test]
@@ -54,7 +61,10 @@ fn this_fixture_produces_only_soft_findings() {
     let src = "fn dead() -> int { 1 }\nfn main() {\n    let unread = 5\n}";
     for f in findings(src) {
         assert!(
-            matches!(f.level(), CompilerErrorLevel::Warning | CompilerErrorLevel::Advice),
+            matches!(
+                f.level(),
+                CompilerErrorLevel::Warning | CompilerErrorLevel::Advice
+            ),
             "{} is {:?}",
             f.lint,
             f.level()
@@ -85,8 +95,17 @@ fn unused_fn_is_gated_on_bin_packages() {
     let ws = semantic_pass(&mut [parse(src)]).expect("typechecks");
     let mut sources = FxHashMap::default();
     sources.insert(Ustr::from(FILE), src);
-    let lib = lint_workspace(&ws, &FxHashSet::default(), false, &sources, &Default::default());
-    assert!(lib.is_empty(), "a lib's public fn has no in-project caller, got {lib:?}");
+    let lib = lint_workspace(
+        &ws,
+        &FxHashSet::default(),
+        false,
+        &sources,
+        &Default::default(),
+    );
+    assert!(
+        lib.is_empty(),
+        "a lib's public fn has no in-project caller, got {lib:?}"
+    );
 }
 
 #[test]
@@ -94,7 +113,9 @@ fn backend_sibling_mismatch_is_opt_in() {
     let src = "inline(lua) fn probe(x: int) -> int = \"return x\"\ninline(js) fn probe(x: float) -> int = \"return x;\"\nfn main() {}";
     let default_findings = findings(src);
     assert!(
-        default_findings.iter().all(|f| f.lint != bone_lints::BACKEND_SIBLING_MISMATCH),
+        default_findings
+            .iter()
+            .all(|f| f.lint != bone_lints::BACKEND_SIBLING_MISMATCH),
         "default lint selection reached backend_sibling_mismatch: {default_findings:?}"
     );
     let explicit = LintOptions::only([bone_lints::BACKEND_SIBLING_MISMATCH.to_owned()]);
@@ -112,8 +133,12 @@ fn warm_modules_are_not_reported_on() {
     // never reported. Marking the only module warm must yield nothing.
     let src = "fn dead() -> int { 1 }\nfn main() {\n    let unread = 5\n}";
     let ws = semantic_pass(&mut [parse(src)]).expect("typechecks");
-    let warm: FxHashSet<ModuleId> =
-        ws.modules.iter().filter(|m| m.id != ModuleId::builtin()).map(|m| m.id).collect();
+    let warm: FxHashSet<ModuleId> = ws
+        .modules
+        .iter()
+        .filter(|m| m.id != ModuleId::builtin())
+        .map(|m| m.id)
+        .collect();
     let mut sources = FxHashMap::default();
     sources.insert(Ustr::from(FILE), src);
     assert!(lint_workspace(&ws, &warm, true, &sources, &Default::default()).is_empty());

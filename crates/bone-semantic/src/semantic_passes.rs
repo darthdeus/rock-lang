@@ -1,11 +1,11 @@
-use skull_parser::{Ast, Item, ItemKind};
 use bone_core::modules::{
-    is_stdlib_module_file, DefKind, FragmentScope, LegacyImports, LegacyProjection, NsNode, NsPackage,
-    NsVisibility, UsePathRef, STD_INTRINSIC_TYPES, STD_PACKAGE_ID, STD_PACKAGE_NAME,
+    DefKind, FragmentScope, LegacyImports, LegacyProjection, NsNode, NsPackage, NsVisibility,
+    STD_INTRINSIC_TYPES, STD_PACKAGE_ID, STD_PACKAGE_NAME, UsePathRef, is_stdlib_module_file,
 };
+use skull_parser::{Ast, Item, ItemKind};
 
-use bone_core::annotations::{validate_annotations, AnnoPos};
-use bone_lower::{lower_annotations_with_ctx, LowerCtx};
+use bone_core::annotations::{AnnoPos, validate_annotations};
+use bone_lower::{LowerCtx, lower_annotations_with_ctx};
 
 use crate::hir::{BuiltinTy, TypeCtor, TypeExpr, VariantPayload};
 use crate::{hir::Module, prelude::*};
@@ -46,8 +46,7 @@ fn trailing_generic_defaults(
             TypeExprKind::Unit => GenericDefault::Builtin(BuiltinTy::Unit),
             TypeExprKind::Any => GenericDefault::Builtin(BuiltinTy::Any),
             TypeExprKind::Ident(n)
-                if n.name.as_str() != "_"
-                    && !generics.iter().any(|s| s.name.name == n.name) =>
+                if n.name.as_str() != "_" && !generics.iter().any(|s| s.name.name == n.name) =>
             {
                 GenericDefault::Named(n.name)
             }
@@ -144,7 +143,11 @@ pub fn lower_modules(
         .map(|rock_mod| Module {
             file: rock_mod.file,
             package: rock_mod.package.as_ref().map(|tag| ustr(&tag.self_name)),
-            identity_storage: rock_mod.package.as_ref().map(|tag| tag.identity_storage.clone()).unwrap_or_default(),
+            identity_storage: rock_mod
+                .package
+                .as_ref()
+                .map(|tag| tag.identity_storage.clone())
+                .unwrap_or_default(),
             ..Default::default()
         })
         .collect_vec();
@@ -167,7 +170,9 @@ pub fn lower_modules(
         // A legacy lookup that could also reach a projected v1 name is
         // decided from this fact, so it is recorded before any body lowers.
         if rock_mod.dialect == skull_parser::Dialect::Legacy {
-            ws.ns.legacy_owned.replace_file(rock_mod.file, legacy_owned_names(rock_mod));
+            ws.ns
+                .legacy_owned
+                .replace_file(rock_mod.file, legacy_owned_names(rock_mod));
         }
         let mid = ws.intern_module(rock_mod.file);
         let scope = ws.fragment_scopes.get(&rock_mod.file).cloned();
@@ -214,7 +219,10 @@ pub fn lower_modules(
             }
             Ok(())
         };
-        let start = scope.as_ref().map(|s| s.module_path.clone()).unwrap_or_default();
+        let start = scope
+            .as_ref()
+            .map(|s| s.module_path.clone())
+            .unwrap_or_default();
         for_each_def_item(rock_mod.items.as_slice(), &start, &mut walk)?;
     }
 
@@ -271,16 +279,15 @@ pub fn lower_modules(
                 ItemKind::Newtype(_) => AnnoPos::NewtypeItem,
                 ItemKind::Global(_) => AnnoPos::GlobalItem,
                 ItemKind::Decorator(_) => AnnoPos::DecoItem,
-                ItemKind::CompilerDirective(_) | ItemKind::Comment(_) | ItemKind::MacroInvocation { .. } => continue,
+                ItemKind::CompilerDirective(_)
+                | ItemKind::Comment(_)
+                | ItemKind::MacroInvocation { .. } => continue,
                 // Legacy use/mod are rejected in build_namespaces; v1 Module
                 // blocks are walked via for_each_def_item, not as annotated items.
                 ItemKind::Use(_) | ItemKind::Module(_) => continue,
             };
-            let lowered = lower_annotations_with_ctx(
-                &ctx,
-                lower_item.rock_module,
-                &ast_item.annotations,
-            )?;
+            let lowered =
+                lower_annotations_with_ctx(&ctx, lower_item.rock_module, &ast_item.annotations)?;
             validate_annotations(pos, &lowered, &ws.decorator_names)?;
         }
         ctx.flush_scope_probes();
@@ -642,10 +649,12 @@ fn embed_target(ws: &Workspace, ty: TyId) -> EmbedTarget {
             ..
         }
         | TypeExpr::App {
-            ctor: TypeCtor::Map, ..
+            ctor: TypeCtor::Map,
+            ..
         } => EmbedTarget::NotAStruct("a collection"),
         TypeExpr::App {
-            ctor: TypeCtor::Ref, ..
+            ctor: TypeCtor::Ref,
+            ..
         } => EmbedTarget::NotAStruct("a frame reference"),
         TypeExpr::Builtin(BuiltinTy::Any) => EmbedTarget::NotAStruct("`any`"),
         TypeExpr::Builtin(_) => EmbedTarget::NotAStruct("a primitive"),
@@ -901,8 +910,10 @@ pub fn api_closure_requirements(ws: &Workspace) -> Vec<ClosureRequirement> {
         return out;
     }
 
-    let mut reachability: FxHashMap<bone_core::modules::PackageId, (FxHashSet<Ustr>, FxHashSet<Ustr>)> =
-        FxHashMap::default();
+    let mut reachability: FxHashMap<
+        bone_core::modules::PackageId,
+        (FxHashSet<Ustr>, FxHashSet<Ustr>),
+    > = FxHashMap::default();
     for &pkg_id in ws.ns.packages.keys() {
         reachability.insert(pkg_id, compute_export_reachability(ws, pkg_id));
     }
@@ -913,20 +924,19 @@ pub fn api_closure_requirements(ws: &Workspace) -> Vec<ClosureRequirement> {
             continue;
         };
 
-        let module_reachable = ws.ns.package(pkg_id).is_some() && reachable_modules.contains(&meta.node);
+        let module_reachable =
+            ws.ns.package(pkg_id).is_some() && reachable_modules.contains(&meta.node);
         let is_exported = match meta.kind {
             bone_core::modules::DefKind::Callable => {
-                let has_public_member = ws
-                    .functions_by_name
-                    .get(def_key)
-                    .is_some_and(|fns| {
-                        fns.iter()
-                            .any(|&(mid, fid)| ws.callable_member_is_public(*def_key, mid, fid))
-                    });
+                let has_public_member = ws.functions_by_name.get(def_key).is_some_and(|fns| {
+                    fns.iter()
+                        .any(|&(mid, fid)| ws.callable_member_is_public(*def_key, mid, fid))
+                });
                 has_public_member && (reachable_defs.contains(def_key) || module_reachable)
             }
             _ => {
-                reachable_defs.contains(def_key) || (matches!(meta.vis, NsVisibility::Pub) && module_reachable)
+                reachable_defs.contains(def_key)
+                    || (matches!(meta.vis, NsVisibility::Pub) && module_reachable)
             }
         };
 
@@ -941,7 +951,13 @@ pub fn api_closure_requirements(ws: &Workspace) -> Vec<ClosureRequirement> {
                     required,
                     reason,
                     span,
-                    satisfied: is_type_publicly_accessible(ws, pkg_id, required, reachable_modules, reachable_defs),
+                    satisfied: is_type_publicly_accessible(
+                        ws,
+                        pkg_id,
+                        required,
+                        reachable_modules,
+                        reachable_defs,
+                    ),
                 });
             });
         };
@@ -999,7 +1015,11 @@ pub fn api_closure_requirements(ws: &Workspace) -> Vec<ClosureRequirement> {
                 }
             }
             bone_core::modules::DefKind::Global => {
-                if let Some(&ty) = ws.globals_by_name.get(&meta.name).or_else(|| ws.globals_by_name.get(def_key)) {
+                if let Some(&ty) = ws
+                    .globals_by_name
+                    .get(&meta.name)
+                    .or_else(|| ws.globals_by_name.get(def_key))
+                {
                     need(ty, meta.span, "type of exported global");
                 }
             }
@@ -1016,7 +1036,12 @@ fn collect_type_closure(ws: &Workspace, ty: TyId, found: &mut impl FnMut(Ustr)) 
     }
 }
 
-fn collect_type_expr_closure(ws: &Workspace, mid: ModuleId, te: TypeExpr, found: &mut impl FnMut(Ustr)) {
+fn collect_type_expr_closure(
+    ws: &Workspace,
+    mid: ModuleId,
+    te: TypeExpr,
+    found: &mut impl FnMut(Ustr),
+) {
     let arena = &ws.module(mid).ty_arena;
     match te {
         TypeExpr::App { ctor, params } => {
@@ -1049,8 +1074,15 @@ pub fn pass_validate_api_closure(ws: &Workspace) -> Result<(), CompilerError> {
     if ws.fragment_scopes.is_empty() {
         return Ok(());
     }
-    if let Some(r) = api_closure_requirements(ws).into_iter().find(|r| !r.satisfied) {
-        let display_name = ws.defs.get(&r.required).map(|m| m.name).unwrap_or(r.required);
+    if let Some(r) = api_closure_requirements(ws)
+        .into_iter()
+        .find(|r| !r.satisfied)
+    {
+        let display_name = ws
+            .defs
+            .get(&r.required)
+            .map(|m| m.name)
+            .unwrap_or(r.required);
         comp_error!(
             r.span,
             "type `{}` in public API is not accessible (reason: {})",
@@ -1090,8 +1122,13 @@ pub fn semantic_pass_without_closure_gate(
 
 /// [`semantic_pass`] enforcing identity storage in unpackaged files: the bone
 /// fixture harness.
-pub fn semantic_pass_enforcing_identity_storage(rock_modules: &mut [Ast]) -> Result<Workspace, CompilerError> {
-    semantic_pass_enforcing_identity_storage_with_aliases(rock_modules, &bone_core::modules::NsAliases::default())
+pub fn semantic_pass_enforcing_identity_storage(
+    rock_modules: &mut [Ast],
+) -> Result<Workspace, CompilerError> {
+    semantic_pass_enforcing_identity_storage_with_aliases(
+        rock_modules,
+        &bone_core::modules::NsAliases::default(),
+    )
 }
 
 pub fn semantic_pass_enforcing_identity_storage_with_aliases(
@@ -1280,8 +1317,7 @@ pub fn build_namespaces(
     // Legacy workspaces do not consult the modules-v1 namespace. Avoid cloning
     // every legacy item into FragmentContribution just to skip it again.
     if !rock_modules.iter().any(|module| {
-        module.dialect == skull_parser::Dialect::V1
-            && !is_stdlib_module_file(module.file.as_str())
+        module.dialect == skull_parser::Dialect::V1 && !is_stdlib_module_file(module.file.as_str())
     }) {
         for module in rock_modules
             .iter()
@@ -1369,21 +1405,21 @@ pub fn assemble_namespaces(
             ));
         }
         // Ensure the package exists in the tree.
-        ws.ns
-            .packages
-            .entry(pkg_id)
-            .or_insert_with(|| NsPackage {
-                id: pkg_id,
-                self_name: ustr::Ustr::from(&tag.self_name),
-                ..Default::default()
-            });
+        ws.ns.packages.entry(pkg_id).or_insert_with(|| NsPackage {
+            id: pkg_id,
+            self_name: ustr::Ustr::from(&tag.self_name),
+            ..Default::default()
+        });
 
         let module_path: Vec<ustr::Ustr> = contribution
             .header
             .as_ref()
             .map(|h| h.path.iter().map(|i| i.name).collect())
             .unwrap_or_default();
-        if module_path.first().is_some_and(|name| name.as_str() == STD_PACKAGE_NAME) {
+        if module_path
+            .first()
+            .is_some_and(|name| name.as_str() == STD_PACKAGE_NAME)
+        {
             return Err(CompilerError::new_with_label(
                 header_span,
                 "package-root module name `std` is reserved for the compiler-owned standard library".to_string(),
@@ -1430,7 +1466,15 @@ pub fn assemble_namespaces(
             }
         }
 
-        register_items(ws, pkg_id, contribution.file, &module_path, &contribution.items, &mut scope, &mut errs);
+        register_items(
+            ws,
+            pkg_id,
+            contribution.file,
+            &module_path,
+            &contribution.items,
+            &mut scope,
+            &mut errs,
+        );
         if !errs.is_empty() {
             errs.sort_by_key(|e| e.location.offset);
             return Err(errs.remove(0));
@@ -1472,7 +1516,9 @@ fn register_legacy_views(ws: &mut Workspace, contributions: &[&FragmentContribut
         .filter(|target| legacy.contains(target) && !v1.contains(target))
         .collect();
     for contribution in contributions {
-        let Some(tag) = contribution.package.as_ref() else { continue };
+        let Some(tag) = contribution.package.as_ref() else {
+            continue;
+        };
         if contribution.dialect != skull_parser::Dialect::Legacy || !viewed.contains(&tag.id) {
             continue;
         }
@@ -1488,7 +1534,9 @@ fn register_legacy_views(ws: &mut Workspace, contributions: &[&FragmentContribut
             ..Default::default()
         });
         for item in &contribution.items {
-            let ScopeItem::Def { name, kind, .. } = item else { continue };
+            let ScopeItem::Def { name, kind, .. } = item else {
+                continue;
+            };
             let table = match *kind {
                 "type" => &mut root.owned_types,
                 "global" => &mut root.owned_globals,
@@ -1505,12 +1553,19 @@ fn register_legacy_views(ws: &mut Workspace, contributions: &[&FragmentContribut
 /// Fragment-local imports resolve from the fragment's scope, exactly as the
 /// lazy lookup will; shared export bindings resolve from the module that
 /// records them.
-fn validate_v1_use_targets(ws: &Workspace, contributions: &[&FragmentContribution]) -> Result<(), CompilerError> {
+fn validate_v1_use_targets(
+    ws: &Workspace,
+    contributions: &[&FragmentContribution],
+) -> Result<(), CompilerError> {
     for contribution in contributions {
-        if contribution.dialect != skull_parser::Dialect::V1 || is_stdlib_module_file(contribution.file.as_str()) {
+        if contribution.dialect != skull_parser::Dialect::V1
+            || is_stdlib_module_file(contribution.file.as_str())
+        {
             continue;
         }
-        let Some(frag) = ws.fragment_scopes.get(&contribution.file) else { continue };
+        let Some(frag) = ws.fragment_scopes.get(&contribution.file) else {
+            continue;
+        };
         validate_use_items(ws, frag, &frag.module_path, &contribution.items)?;
     }
     Ok(())
@@ -1534,12 +1589,21 @@ fn validate_use_items(
                 collect_use_leaves(&decl.tree, &[], false, &mut leaves);
                 for (local, target, glob) in leaves {
                     let checked = if decl.vis.is_some() {
-                        bone_lower::resolve::check_export_target(ws, frag.package, path, &target, glob)
+                        bone_lower::resolve::check_export_target(
+                            ws,
+                            frag.package,
+                            path,
+                            &target,
+                            glob,
+                        )
                     } else {
                         bone_lower::resolve::check_use_target(ws, frag, &target, glob)
                     };
                     checked.map_err(|message| {
-                        CompilerError::new_with_label(decl.span, format!("invalid `use` target: {message}"))
+                        CompilerError::new_with_label(
+                            decl.span,
+                            format!("invalid `use` target: {message}"),
+                        )
                     })?;
                     if glob {
                         continue;
@@ -1569,12 +1633,19 @@ fn validate_use_items(
 /// Build the compiler-owned `std` root from the trusted stdlib inputs. These
 /// definitions stay legacy in the lowering maps, so their namespace keys are
 /// their original bare names and no second implementation is introduced.
-fn register_stdlib_items(ws: &mut Workspace, contribution: &FragmentContribution) -> Result<(), CompilerError> {
-    let pkg = ws.ns.packages.entry(STD_PACKAGE_ID).or_insert_with(|| NsPackage {
-        id: STD_PACKAGE_ID,
-        self_name: ustr(STD_PACKAGE_NAME),
-        ..Default::default()
-    });
+fn register_stdlib_items(
+    ws: &mut Workspace,
+    contribution: &FragmentContribution,
+) -> Result<(), CompilerError> {
+    let pkg = ws
+        .ns
+        .packages
+        .entry(STD_PACKAGE_ID)
+        .or_insert_with(|| NsPackage {
+            id: STD_PACKAGE_ID,
+            self_name: ustr(STD_PACKAGE_NAME),
+            ..Default::default()
+        });
     let root = pkg.nodes.entry(ustr("")).or_insert_with(|| NsNode {
         path_key: ustr(""),
         vis: Some(NsVisibility::Pub),
@@ -1583,7 +1654,10 @@ fn register_stdlib_items(ws: &mut Workspace, contribution: &FragmentContribution
     root.vis = Some(NsVisibility::Pub);
 
     for item in &contribution.items {
-        let ScopeItem::Def { name, kind, span, .. } = item else {
+        let ScopeItem::Def {
+            name, kind, span, ..
+        } = item
+        else {
             continue;
         };
         let (name, kind) = (*name, *kind);
@@ -1603,7 +1677,9 @@ fn register_stdlib_items(ws: &mut Workspace, contribution: &FragmentContribution
     }
 
     for name in STD_INTRINSIC_TYPES {
-        root.owned_types.entry(ustr(name)).or_insert_with(|| ustr(name));
+        root.owned_types
+            .entry(ustr(name))
+            .or_insert_with(|| ustr(name));
     }
     Ok(())
 }
@@ -1688,7 +1764,7 @@ fn project_public_module(
     path: &[ustr::Ustr],
     projection: &mut LegacyProjection,
 ) -> Result<(), CompilerError> {
-    use bone_lower::resolve::{module_member_names, module_members, Viewer};
+    use bone_lower::resolve::{Viewer, module_member_names, module_members};
     if ws.ns.package(package).is_none() {
         return Err(CompilerError::new_no_location(format!(
             "legacy projection references unknown package {package}"
@@ -1696,7 +1772,9 @@ fn project_public_module(
     }
     let viewers = [Viewer::Public];
     let names = module_member_names(ws, &viewers, package, path).map_err(|message| {
-        CompilerError::new_no_location(format!("legacy projection cannot resolve a public glob export: {message}"))
+        CompilerError::new_no_location(format!(
+            "legacy projection cannot resolve a public glob export: {message}"
+        ))
     })?;
     for name in names {
         let members = module_members(ws, &viewers, package, path, name).map_err(|message| {
@@ -1721,8 +1799,9 @@ fn projection_kind(kind: bone_lower::resolve::ResolvedKind) -> Option<DefKind> {
         bone_lower::resolve::ResolvedKind::Global => Some(DefKind::Global),
         bone_lower::resolve::ResolvedKind::Callable => Some(DefKind::Callable),
         bone_lower::resolve::ResolvedKind::Decorator => Some(DefKind::Decorator),
-        bone_lower::resolve::ResolvedKind::Module
-        | bone_lower::resolve::ResolvedKind::Binding => None,
+        bone_lower::resolve::ResolvedKind::Module | bone_lower::resolve::ResolvedKind::Binding => {
+            None
+        }
     }
 }
 
@@ -1759,7 +1838,11 @@ fn build_legacy_imports(
             )
             .map_err(|message| {
                 CompilerError::new_with_label(
-                    contribution.header.as_ref().map(|h| h.span).unwrap_or_else(Span::unknown),
+                    contribution
+                        .header
+                        .as_ref()
+                        .map(|h| h.span)
+                        .unwrap_or_else(Span::unknown),
                     format!("legacy `use` glob could not be resolved: {message}"),
                 )
             })?;
@@ -1771,18 +1854,28 @@ fn build_legacy_imports(
                 }
             }
         } else {
-            let resolved = bone_lower::resolve::resolve_path(ws, &site, &path).map_err(|message| {
-                CompilerError::new_no_location(format!("legacy `use` could not be resolved: {message}"))
-            })?;
+            let resolved =
+                bone_lower::resolve::resolve_path(ws, &site, &path).map_err(|message| {
+                    CompilerError::new_no_location(format!(
+                        "legacy `use` could not be resolved: {message}"
+                    ))
+                })?;
             let Some(kind) = projection_kind(resolved.kind) else {
                 return Err(CompilerError::new_no_location(format!(
                     "legacy `use` name `{local}` resolves to a module"
                 )));
             };
             imports.named.insert(local, resolved.key, kind);
-            let exported_as = *path.segments.last().expect("a named use has a last segment");
+            let exported_as = *path
+                .segments
+                .last()
+                .expect("a named use has a last segment");
             if exported_as != local {
-                imports.renamed.entry(exported_as).or_default().push(resolved.key);
+                imports
+                    .renamed
+                    .entry(exported_as)
+                    .or_default()
+                    .push(resolved.key);
             }
         }
     }
@@ -1795,7 +1888,11 @@ fn collect_use_leaves(
     from_root: bool,
     out: &mut Vec<(ustr::Ustr, UsePathRef, bool)>,
 ) {
-    let skull_parser::UseTree::Path { from_root: tree_root, segments, kind } = tree;
+    let skull_parser::UseTree::Path {
+        from_root: tree_root,
+        segments,
+        kind,
+    } = tree;
     // Subtrees parse with `allow_root = false` (`parse_use_tree`), so only
     // the declaration's own tree carries the root anchor; `from_root` hands
     // it down.
@@ -1803,26 +1900,55 @@ fn collect_use_leaves(
     let mut full = prefix.to_vec();
     full.extend(segments.iter().map(|segment| segment.name));
     // `p::m::{self}` / `{self as n}` binds the module `p::m` itself (spec 8.1).
-    let self_leaf = !prefix.is_empty() && segments.len() == 1 && segments[0].name.as_str() == "self";
+    let self_leaf =
+        !prefix.is_empty() && segments.len() == 1 && segments[0].name.as_str() == "self";
     if self_leaf {
         full.pop();
     }
     match kind {
         skull_parser::UseSuffix::Bind => {
             if let Some(&local) = full.last() {
-                out.push((local, UsePathRef { from_root: path_root, segments: full }, false));
+                out.push((
+                    local,
+                    UsePathRef {
+                        from_root: path_root,
+                        segments: full,
+                    },
+                    false,
+                ));
             }
         }
         skull_parser::UseSuffix::BindAs(alias) => {
-            out.push((alias.name, UsePathRef { from_root: path_root, segments: full }, false));
+            out.push((
+                alias.name,
+                UsePathRef {
+                    from_root: path_root,
+                    segments: full,
+                },
+                false,
+            ));
         }
         skull_parser::UseSuffix::Operator { op, alias } => {
             full.push(op.name);
             let local = alias.as_ref().map_or(op.name, |a| a.name);
-            out.push((local, UsePathRef { from_root: path_root, segments: full }, false));
+            out.push((
+                local,
+                UsePathRef {
+                    from_root: path_root,
+                    segments: full,
+                },
+                false,
+            ));
         }
         skull_parser::UseSuffix::Glob => {
-            out.push((ustr::Ustr::from("*"), UsePathRef { from_root: path_root, segments: full }, true));
+            out.push((
+                ustr::Ustr::from("*"),
+                UsePathRef {
+                    from_root: path_root,
+                    segments: full,
+                },
+                true,
+            ));
         }
         skull_parser::UseSuffix::Nested(children) => {
             for child in children {
@@ -1871,7 +1997,13 @@ fn register_items(
 
     for item in items {
         match item {
-            ScopeItem::Module { name: block_name, vis: block_vis, item_span, items: block_items, .. } => {
+            ScopeItem::Module {
+                name: block_name,
+                vis: block_vis,
+                item_span,
+                items: block_items,
+                ..
+            } => {
                 let mut child = path.to_vec();
                 child.push(*block_name);
                 if path.is_empty() && block_name.as_str() == STD_PACKAGE_NAME {
@@ -1903,12 +2035,17 @@ fn register_items(
                                 if path.is_empty() {
                                     scope.package_name.to_string()
                                 } else {
-                                    path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::")
+                                    path.iter()
+                                        .map(|s| s.as_str())
+                                        .collect::<Vec<_>>()
+                                        .join("::")
                                 }
                             ),
                         ));
                     } else {
-                        parent.children.insert(*block_name, NsPackage::path_key(&child));
+                        parent
+                            .children
+                            .insert(*block_name, NsPackage::path_key(&child));
                     }
                 }
                 // Child visibility from the block header (`pub mod x { .. }`).
@@ -1925,10 +2062,7 @@ fn register_items(
                         if *existing != ns_vis {
                             errs.push(CompilerError::new_with_label(
                                 *item_span,
-                                format!(
-                                    "conflicting visibility for module `{}`",
-                                    block_name
-                                ),
+                                format!("conflicting visibility for module `{}`", block_name),
                             ));
                             continue;
                         }
@@ -1938,7 +2072,12 @@ fn register_items(
                 register_items(ws, pkg_id, file, &child, block_items, scope, errs);
             }
             ScopeItem::Use(u) => flatten_use_decl(ws, pkg_id, path, scope, u, errs),
-            ScopeItem::Def { name: bare, kind, vis: item_vis, span: item_span } => {
+            ScopeItem::Def {
+                name: bare,
+                kind,
+                vis: item_vis,
+                span: item_span,
+            } => {
                 // Ordinary definitions: register under the DefKey on the node.
                 let (bare, kind) = (*bare, *kind);
                 if path.is_empty() {
@@ -1972,8 +2111,7 @@ fn register_items(
                     kind == "callable" && node.owned_callables.contains_key(&bare);
                 let taken = node.owned_types.contains_key(&bare)
                     || node.owned_globals.contains_key(&bare)
-                    || (node.owned_callables.contains_key(&bare)
-                        && !callable_overload)
+                    || (node.owned_callables.contains_key(&bare) && !callable_overload)
                     || node.owned_decorators.contains_key(&bare)
                     || node.children.contains_key(&bare);
                 if taken {
@@ -1984,7 +2122,10 @@ fn register_items(
                             if path.is_empty() {
                                 scope.package_name.to_string()
                             } else {
-                                path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::")
+                                path.iter()
+                                    .map(|s| s.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join("::")
                             }
                         ),
                     ));
@@ -2003,11 +2144,19 @@ fn register_items(
                     "callable" => bone_core::modules::DefKind::Callable,
                     _ => bone_core::modules::DefKind::Decorator,
                 };
-                let vis = to_ns_vis(&item_vis.clone().unwrap_or(skull_parser::Visibility::Private));
+                let vis = to_ns_vis(
+                    &item_vis
+                        .clone()
+                        .unwrap_or(skull_parser::Visibility::Private),
+                );
                 if def_kind == bone_core::modules::DefKind::Callable {
                     let members = node.callable_members.entry(bare).or_default();
                     let ordinal = members.iter().filter(|member| member.file == file).count();
-                    members.push(bone_core::modules::CallableMember { file, ordinal, vis: vis.clone() });
+                    members.push(bone_core::modules::CallableMember {
+                        file,
+                        ordinal,
+                        vis: vis.clone(),
+                    });
                 }
                 let meta = bone_core::modules::DefMeta {
                     package: pkg_id,
@@ -2271,11 +2420,9 @@ pub fn pass_register_forward_decls(
     for_each_def_item(rock_module.items.as_slice(), &start, &mut |item, path| {
         let def_key = |name: &ustr::Ustr| -> ustr::Ustr {
             match v1_scope {
-                Some(sc) => bone_core::modules::def_key(
-                    &sc.package_name.to_string(),
-                    path,
-                    name.as_str(),
-                ),
+                Some(sc) => {
+                    bone_core::modules::def_key(&sc.package_name.to_string(), path, name.as_str())
+                }
                 None => *name,
             }
         };
@@ -2303,11 +2450,7 @@ pub fn pass_register_forward_decls(
                 fields: Vec::new(),
             });
 
-            if module
-                .struct_by_name
-                .insert(reg_name, idx)
-                .is_some()
-            {
+            if module.struct_by_name.insert(reg_name, idx).is_some() {
                 comp_error!(item.span, "duplicate struct definition: `{}`", s.name.name);
             }
         } else if let ItemKind::Enum(e) = &item.kind {
@@ -2343,7 +2486,7 @@ pub fn pass_register_forward_decls(
             }
         }
         Ok(())
-        })?;
+    })?;
     Ok(())
 }
 
@@ -2359,7 +2502,10 @@ pub fn pass_lower_fields(a: &Ast, ctx: &mut LowerCtx) -> Result<(), CompilerErro
             None => *name,
         }
     };
-    let start = scope.as_ref().map(|s| s.module_path.clone()).unwrap_or_default();
+    let start = scope
+        .as_ref()
+        .map(|s| s.module_path.clone())
+        .unwrap_or_default();
     for_each_def_item(a.items.as_slice(), &start, &mut |item, path| {
         match &item.kind {
             ItemKind::Struct(s) => lower_struct_def(ctx, a, s, reg_key(&s.name.name, path))?,
@@ -2384,7 +2530,10 @@ pub fn pass_lower_functions(a: &Ast, ctx: &mut LowerCtx) -> Result<(), CompilerE
             None => *name,
         }
     };
-    let start = scope.as_ref().map(|s| s.module_path.clone()).unwrap_or_default();
+    let start = scope
+        .as_ref()
+        .map(|s| s.module_path.clone())
+        .unwrap_or_default();
     for_each_def_item(a.items.as_slice(), &start, &mut |item, path| {
         match &item.kind {
             ItemKind::Function(f) => {
@@ -2460,7 +2609,9 @@ pub fn pass_lower_functions(a: &Ast, ctx: &mut LowerCtx) -> Result<(), CompilerE
                 } else {
                     reg_key(&f.name.name, path)
                 };
-                ctx.workspace.relowered_body_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                ctx.workspace
+                    .relowered_body_count
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let fn_id = lower_function_def(
                     ctx,
                     a,

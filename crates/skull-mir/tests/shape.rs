@@ -115,12 +115,52 @@ fn dump_covers_aggregates_and_containers() {
             named: vec![],
         },
     );
-    let fld = f.emit(bb, Inst::Field { base: st, field: ustr("a") });
-    f.emit(bb, Inst::TupleIndex { base: tup, index: 0 });
-    f.emit(bb, Inst::Index { base: vec, index: a, kind: ContainerKind::Vec });
-    f.emit(bb, Inst::Len { base: vec, kind: ContainerKind::Vec });
-    f.emit(bb, Inst::StoreField { base: st, field: ustr("a"), value: b });
-    f.emit(bb, Inst::StoreIndex { base: vec, index: a, value: b, kind: ContainerKind::Vec });
+    let fld = f.emit(
+        bb,
+        Inst::Field {
+            base: st,
+            field: ustr("a"),
+        },
+    );
+    f.emit(
+        bb,
+        Inst::TupleIndex {
+            base: tup,
+            index: 0,
+        },
+    );
+    f.emit(
+        bb,
+        Inst::Index {
+            base: vec,
+            index: a,
+            kind: ContainerKind::Vec,
+        },
+    );
+    f.emit(
+        bb,
+        Inst::Len {
+            base: vec,
+            kind: ContainerKind::Vec,
+        },
+    );
+    f.emit(
+        bb,
+        Inst::StoreField {
+            base: st,
+            field: ustr("a"),
+            value: b,
+        },
+    );
+    f.emit(
+        bb,
+        Inst::StoreIndex {
+            base: vec,
+            index: a,
+            value: b,
+            kind: ContainerKind::Vec,
+        },
+    );
     f.set_term(bb, Term::Return(vec![fld]));
 
     let expected = "\
@@ -167,14 +207,20 @@ fn dump_covers_arith_unary_switch_and_yield() {
         },
     );
 
-    f.set_term(s0, Term::Yield {
-        values: vec![bits],
-        resume,
-    });
-    f.set_term(s1, Term::Yield {
-        values: vec![],
-        resume,
-    });
+    f.set_term(
+        s0,
+        Term::Yield {
+            values: vec![bits],
+            resume,
+        },
+    );
+    f.set_term(
+        s1,
+        Term::Yield {
+            values: vec![],
+            resume,
+        },
+    );
     f.set_term(resume, Term::Return(vec![]));
 
     let expected = "\

@@ -57,7 +57,16 @@ impl Connection {
     pub fn memory() -> (Connection, Connection) {
         let (s1, r1) = crossbeam_channel::unbounded();
         let (s2, r2) = crossbeam_channel::unbounded();
-        (Connection { sender: s1, receiver: r2 }, Connection { sender: s2, receiver: r1 })
+        (
+            Connection {
+                sender: s1,
+                receiver: r2,
+            },
+            Connection {
+                sender: s2,
+                receiver: r1,
+            },
+        )
     }
 
     pub fn initialize_start(&self) -> Result<(RequestId, serde_json::Value), ProtocolError> {
@@ -72,7 +81,10 @@ impl Connection {
         C: Fn() -> bool,
     {
         while running() {
-            let msg = match self.receiver.recv_timeout(std::time::Duration::from_secs(1)) {
+            let msg = match self
+                .receiver
+                .recv_timeout(std::time::Duration::from_secs(1))
+            {
                 Ok(msg) => msg,
                 Err(RecvTimeoutError::Timeout) => {
                     continue;
@@ -136,7 +148,10 @@ impl Connection {
         self.sender.send(resp.into()).unwrap();
 
         while running() {
-            let msg = match self.receiver.recv_timeout(std::time::Duration::from_secs(1)) {
+            let msg = match self
+                .receiver
+                .recv_timeout(std::time::Duration::from_secs(1))
+            {
                 Ok(msg) => msg,
                 Err(RecvTimeoutError::Timeout) => {
                     continue;
@@ -199,7 +214,10 @@ impl Connection {
         self.sender.send(resp.into()).map_err(|error| {
             ProtocolError::new(format!("failed to send shutdown response: {error}"))
         })?;
-        match &self.receiver.recv_timeout(std::time::Duration::from_secs(30)) {
+        match &self
+            .receiver
+            .recv_timeout(std::time::Duration::from_secs(30))
+        {
             Ok(Message::Notification(n)) if n.is_exit() => (),
             Ok(msg) => {
                 return Err(ProtocolError::new(format!(
@@ -227,9 +245,14 @@ mod shutdown_tests {
     #[test]
     fn shutdown_reports_send_failure_before_exit() {
         let (server, client) = Connection::memory();
-        client.sender.send(Notification::new("exit".into(), ()).into()).unwrap();
+        client
+            .sender
+            .send(Notification::new("exit".into(), ()).into())
+            .unwrap();
         drop(client);
-        let error = server.handle_shutdown(&Request::new(1.into(), "shutdown".into(), ())).unwrap_err();
+        let error = server
+            .handle_shutdown(&Request::new(1.into(), "shutdown".into(), ()))
+            .unwrap_err();
         assert!(error.to_string().contains("shutdown response"), "{error}");
     }
 }

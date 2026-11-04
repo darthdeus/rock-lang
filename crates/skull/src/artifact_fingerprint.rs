@@ -12,11 +12,11 @@ use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;
 use rustc_hash::FxHashSet;
 use skull_mir::code_identity::{CaptureMode, CodeArtifact, CodeEntry, CodeIdentity};
-use std::sync::Arc;
 use skull_mir::definition::DefinitionPlan;
 use skull_mir::lifecycle::LifecyclePlan;
-use skull_mir::mir::{comptime_value_hash, ComptimeInputId, ComptimeRead};
+use skull_mir::mir::{ComptimeInputId, ComptimeRead, comptime_value_hash};
 use skull_mir::monoty::MonoInterner;
+use std::sync::Arc;
 use ustr::Ustr;
 
 const FINGERPRINT_VERSION: &str = "semantic-artifact-v3";
@@ -46,8 +46,18 @@ pub fn compute(
     volatile_vars: &FxHashSet<Ustr>,
     renderer: &str,
 ) -> Result<String, FingerprintError> {
-    compute_inner(ws, interner, artifact, lifecycle, definitions, global_layout, comptime_reads,
-        volatile_vars, renderer, None)
+    compute_inner(
+        ws,
+        interner,
+        artifact,
+        lifecycle,
+        definitions,
+        global_layout,
+        comptime_reads,
+        volatile_vars,
+        renderer,
+        None,
+    )
 }
 
 pub(crate) fn compute_cached(
@@ -62,8 +72,18 @@ pub(crate) fn compute_cached(
     renderer: &str,
     code_rows: &CodeRows,
 ) -> Result<String, FingerprintError> {
-    compute_inner(ws, interner, artifact, lifecycle, definitions, global_layout, comptime_reads,
-        volatile_vars, renderer, Some(code_rows))
+    compute_inner(
+        ws,
+        interner,
+        artifact,
+        lifecycle,
+        definitions,
+        global_layout,
+        comptime_reads,
+        volatile_vars,
+        renderer,
+        Some(code_rows),
+    )
 }
 
 fn compute_inner(
@@ -121,12 +141,16 @@ fn compute_inner(
     );
     if let Some(rows) = code_rows {
         if rows.len() != artifact.entries.len() {
-            return Err(FingerprintError("cached code fingerprint inventory is incomplete".to_string()));
+            return Err(FingerprintError(
+                "cached code fingerprint inventory is incomplete".to_string(),
+            ));
         }
         h.len(rows.len());
         rows.append_to(&mut h.bytes);
     } else {
-        let mut code = artifact.entries.values()
+        let mut code = artifact
+            .entries
+            .values()
             .map(|entry| (entry.identity.logical_key(ws, interner), entry))
             .collect::<Vec<_>>();
         code.sort_by(|left, right| left.0.cmp(&right.0));
@@ -219,7 +243,11 @@ fn compute_inner(
     Ok(format!("{:016x}", h.finish()))
 }
 
-fn write_code_row(h: &mut CanonicalHasher, key: &str, entry: &CodeEntry) -> Result<(), FingerprintError> {
+fn write_code_row(
+    h: &mut CanonicalHasher,
+    key: &str,
+    entry: &CodeEntry,
+) -> Result<(), FingerprintError> {
     h.string(key);
     h.string(&entry.compatibility.call_abi);
     h.boolean(entry.compatibility.capture.complete);
@@ -286,28 +314,66 @@ struct RowNode<K, V> {
 }
 
 impl<K: Ord, V> RowNode<K, V> {
-    fn new(key: Arc<K>, value: Arc<V>, priority: u64, weight: usize,
-        left: Option<Arc<Self>>, right: Option<Arc<Self>>) -> Arc<Self>
-    {
-        let len = 1 + left.as_ref().map_or(0, |node| node.len)
+    fn new(
+        key: Arc<K>,
+        value: Arc<V>,
+        priority: u64,
+        weight: usize,
+        left: Option<Arc<Self>>,
+        right: Option<Arc<Self>>,
+    ) -> Arc<Self> {
+        let len = 1
+            + left.as_ref().map_or(0, |node| node.len)
             + right.as_ref().map_or(0, |node| node.len);
-        let bytes = weight + left.as_ref().map_or(0, |node| node.bytes)
+        let bytes = weight
+            + left.as_ref().map_or(0, |node| node.bytes)
             + right.as_ref().map_or(0, |node| node.bytes);
-        Arc::new(Self { key, value, priority, weight, left, right, len, bytes })
+        Arc::new(Self {
+            key,
+            value,
+            priority,
+            weight,
+            left,
+            right,
+            len,
+            bytes,
+        })
     }
 
     fn with_children(&self, left: Option<Arc<Self>>, right: Option<Arc<Self>>) -> Arc<Self> {
-        Self::new(self.key.clone(), self.value.clone(), self.priority, self.weight, left, right)
+        Self::new(
+            self.key.clone(),
+            self.value.clone(),
+            self.priority,
+            self.weight,
+            left,
+            right,
+        )
     }
 
     fn before(&self, other: &Self) -> bool {
         (self.priority, &self.key) < (other.priority, &other.key)
     }
 
-    fn insert(root: &Option<Arc<Self>>, key: Arc<K>, value: Arc<V>, priority: u64, weight: usize) -> Arc<Self> {
-        let Some(old) = root else { return Self::new(key, value, priority, weight, None, None) };
+    fn insert(
+        root: &Option<Arc<Self>>,
+        key: Arc<K>,
+        value: Arc<V>,
+        priority: u64,
+        weight: usize,
+    ) -> Arc<Self> {
+        let Some(old) = root else {
+            return Self::new(key, value, priority, weight, None, None);
+        };
         match key.cmp(&old.key) {
-            std::cmp::Ordering::Equal => Self::new(key, value, priority, weight, old.left.clone(), old.right.clone()),
+            std::cmp::Ordering::Equal => Self::new(
+                key,
+                value,
+                priority,
+                weight,
+                old.left.clone(),
+                old.right.clone(),
+            ),
             std::cmp::Ordering::Less => {
                 let left = Self::insert(&old.left, key, value, priority, weight);
                 if left.before(old) {
@@ -347,9 +413,7 @@ impl<K: Ord, V> RowNode<K, V> {
             (Some(a), Some(b)) if a.before(b) => {
                 Some(a.with_children(a.left.clone(), Self::join(&a.right, right)))
             }
-            (Some(_), Some(b)) => {
-                Some(b.with_children(Self::join(left, &b.left), b.right.clone()))
-            }
+            (Some(_), Some(b)) => Some(b.with_children(Self::join(left, &b.left), b.right.clone())),
         }
     }
 
@@ -357,22 +421,32 @@ impl<K: Ord, V> RowNode<K, V> {
         let node = root.as_ref()?;
         match key.cmp(node.key.as_ref()) {
             std::cmp::Ordering::Equal => Self::join(&node.left, &node.right),
-            std::cmp::Ordering::Less => Some(node.with_children(Self::remove(&node.left, key), node.right.clone())),
-            std::cmp::Ordering::Greater => Some(node.with_children(node.left.clone(), Self::remove(&node.right, key))),
+            std::cmp::Ordering::Less => {
+                Some(node.with_children(Self::remove(&node.left, key), node.right.clone()))
+            }
+            std::cmp::Ordering::Greater => {
+                Some(node.with_children(node.left.clone(), Self::remove(&node.right, key)))
+            }
         }
     }
 
     fn visit(&self, visit: &mut impl FnMut(&V)) {
-        if let Some(left) = &self.left { left.visit(visit); }
+        if let Some(left) = &self.left {
+            left.visit(visit);
+        }
         visit(&self.value);
-        if let Some(right) = &self.right { right.visit(visit); }
+        if let Some(right) = &self.right {
+            right.visit(visit);
+        }
     }
 }
 
 impl CodeRows {
-    pub(crate) fn collect(ws: &Workspace, interner: &MonoInterner, artifact: &CodeArtifact)
-        -> Result<Self, FingerprintError>
-    {
+    pub(crate) fn collect(
+        ws: &Workspace,
+        interner: &MonoInterner,
+        artifact: &CodeArtifact,
+    ) -> Result<Self, FingerprintError> {
         let mut rows = Self::default();
         rows.replace(ws, interner, artifact, artifact.entries.keys())?;
         Ok(rows)
@@ -389,7 +463,9 @@ impl CodeRows {
         let mut derived = 0;
         for identity in identities {
             let entry = artifact.entries.get(identity).ok_or_else(|| {
-                FingerprintError(format!("missing edited code fingerprint row for {identity:?}"))
+                FingerprintError(format!(
+                    "missing edited code fingerprint row for {identity:?}"
+                ))
             })?;
             let key = Arc::new((entry.identity.logical_key(ws, interner), identity.clone()));
             let mut encoded = CanonicalHasher::default();
@@ -401,10 +477,22 @@ impl CodeRows {
             }
             let priority = xxhash64(key.0.as_bytes());
             let weight = encoded.bytes.len();
-            self.root = Some(RowNode::insert(&self.root, key.clone(), Arc::new(encoded.bytes), priority, weight));
+            self.root = Some(RowNode::insert(
+                &self.root,
+                key.clone(),
+                Arc::new(encoded.bytes),
+                priority,
+                weight,
+            ));
             let mut hasher = rustc_hash::FxHasher::default();
             identity.hash(&mut hasher);
-            self.identities = Some(RowNode::insert(&self.identities, Arc::new(identity.clone()), key, hasher.finish(), 0));
+            self.identities = Some(RowNode::insert(
+                &self.identities,
+                Arc::new(identity.clone()),
+                key,
+                hasher.finish(),
+                0,
+            ));
             derived += 1;
         }
         Ok(derived)
@@ -512,11 +600,15 @@ fn canonical_reads(
                         "malformed empty embedded comptime path".to_string(),
                     ));
                 }
-                let text = ws.comptime_inputs.embed_files.reread(path.as_str()).map_err(|error| {
-                    FingerprintError(format!(
-                        "embedded comptime input `{path}` is unreadable: {error}"
-                    ))
-                })?;
+                let text = ws
+                    .comptime_inputs
+                    .embed_files
+                    .reread(path.as_str())
+                    .map_err(|error| {
+                        FingerprintError(format!(
+                            "embedded comptime input `{path}` is unreadable: {error}"
+                        ))
+                    })?;
                 let current_hash = comptime_value_hash(&text);
                 if current_hash != read.value_hash {
                     return Err(FingerprintError(format!(
@@ -595,24 +687,39 @@ mod tests {
 
     #[test]
     fn cached_code_rows_preserve_canonical_order_and_snapshots() {
-        use skull_mir::code_identity::{CodeCompatibility, CodeOwner, CodeOwnerKind, CaptureSchema};
+        use skull_mir::code_identity::{
+            CaptureSchema, CodeCompatibility, CodeOwner, CodeOwnerKind,
+        };
         let ws = Workspace::new();
         let interner = MonoInterner::new();
         let mut artifact = CodeArtifact::default();
         for index in 0..256 {
             let identity = CodeIdentity::Artifact(CodeOwner::Artifact {
-                kind: CodeOwnerKind::Global, module: Ustr::from("<rows>"),
+                kind: CodeOwnerKind::Global,
+                module: Ustr::from("<rows>"),
                 name: Ustr::from(&format!("row{index}")),
             });
-            artifact.add_generated_value(identity, CodeCompatibility {
-                call_abi: "() -> unit".to_string(),
-                capture: CaptureSchema { complete: true, ..Default::default() },
-                frame: None, lambda_topology: Default::default(),
-            }, "body");
+            artifact.add_generated_value(
+                identity,
+                CodeCompatibility {
+                    call_abi: "() -> unit".to_string(),
+                    capture: CaptureSchema {
+                        complete: true,
+                        ..Default::default()
+                    },
+                    frame: None,
+                    lambda_topology: Default::default(),
+                },
+                "body",
+            );
         }
         let canonical = |artifact: &CodeArtifact| {
-            let mut entries: Vec<_> = artifact.entries.iter()
-                .map(|(identity, entry)| (entry.identity.logical_key(&ws, &interner), identity, entry))
+            let mut entries: Vec<_> = artifact
+                .entries
+                .iter()
+                .map(|(identity, entry)| {
+                    (entry.identity.logical_key(&ws, &interner), identity, entry)
+                })
                 .collect();
             entries.sort_by(|a, b| a.0.cmp(&b.0));
             let mut encoded = CanonicalHasher::default();
@@ -628,14 +735,23 @@ mod tests {
         let entry = artifact.entries.get_mut(&identity).unwrap();
         entry.body_fingerprint += 1;
         entry.body_name = Some(Ustr::from("a_different_length_body"));
-        rows.replace(&ws, &interner, &artifact, [&identity]).unwrap();
+        rows.replace(&ws, &interner, &artifact, [&identity])
+            .unwrap();
         let addition = CodeIdentity::Generated {
             enclosing: CodeOwner::Artifact {
-                kind: CodeOwnerKind::Global, module: Ustr::from("<rows>"), name: Ustr::from("middle"),
-            }, role: Ustr::from("late"),
+                kind: CodeOwnerKind::Global,
+                module: Ustr::from("<rows>"),
+                name: Ustr::from("middle"),
+            },
+            role: Ustr::from("late"),
         };
-        artifact.add_generated_value(addition.clone(), artifact.entries[&identity].compatibility.clone(), "new");
-        rows.replace(&ws, &interner, &artifact, [&addition]).unwrap();
+        artifact.add_generated_value(
+            addition.clone(),
+            artifact.entries[&identity].compatibility.clone(),
+            "new",
+        );
+        rows.replace(&ws, &interner, &artifact, [&addition])
+            .unwrap();
         let mut cached = Vec::new();
         rows.append_to(&mut cached);
         assert_eq!(cached, canonical(&artifact));
@@ -714,9 +830,8 @@ fn xxhash64(bytes: &[u8]) -> u64 {
             .rotate_left(31)
             .wrapping_mul(P1)
     };
-    let merge_round = |acc: u64, value: u64| {
-        (acc ^ round(0, value)).wrapping_mul(P1).wrapping_add(P4)
-    };
+    let merge_round =
+        |acc: u64, value: u64| (acc ^ round(0, value)).wrapping_mul(P1).wrapping_add(P4);
 
     let mut offset = 0;
     let mut hash = if bytes.len() >= 32 {
@@ -751,11 +866,7 @@ fn xxhash64(bytes: &[u8]) -> u64 {
         offset += 8;
     }
     if offset + 4 <= bytes.len() {
-        let value = u32::from_le_bytes(
-            bytes[offset..offset + 4]
-                .try_into()
-                .expect("four bytes"),
-        );
+        let value = u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("four bytes"));
         hash ^= u64::from(value).wrapping_mul(P1);
         hash = hash.rotate_left(23).wrapping_mul(P2).wrapping_add(P3);
         offset += 4;

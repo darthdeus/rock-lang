@@ -39,10 +39,6 @@ mod lambda;
 mod log_dedup;
 #[path = "loops.rs"]
 mod loops;
-#[path = "publisher_abi.rs"]
-mod publisher_abi;
-#[path = "scalar_abi_arity.rs"]
-mod scalar_abi_arity;
 #[path = "map_iter.rs"]
 mod map_iter;
 #[path = "map_key_admission.rs"]
@@ -53,17 +49,25 @@ mod match_fold;
 mod misc_intrinsics;
 #[path = "module_globals.rs"]
 mod module_globals;
-#[path = "qualified_globals.rs"]
-mod qualified_globals;
 #[path = "multi_rejection.rs"]
 mod multi_rejection;
+#[path = "publisher_abi.rs"]
+mod publisher_abi;
+#[path = "qualified_globals.rs"]
+mod qualified_globals;
+#[path = "scalar_abi_arity.rs"]
+mod scalar_abi_arity;
 
+#[path = "global_layout.rs"]
+mod global_layout;
+#[path = "global_storage.rs"]
+mod global_storage;
 #[path = "multivalue.rs"]
 mod multivalue;
-#[path = "nb_leaf_layout_premise.rs"]
-mod nb_leaf_layout_premise;
 #[path = "nb_differential.rs"]
 mod nb_differential;
+#[path = "nb_leaf_layout_premise.rs"]
+mod nb_leaf_layout_premise;
 #[path = "no_inline_function.rs"]
 mod no_inline_function;
 #[path = "nomangle_roots.rs"]
@@ -72,11 +76,19 @@ mod nomangle_roots;
 mod number_format;
 #[path = "session_arena.rs"]
 mod session_arena;
-#[path = "global_layout.rs"]
-mod global_layout;
-#[path = "global_storage.rs"]
-mod global_storage;
 
+#[path = "host.rs"]
+mod host;
+#[path = "native_buffer_element_admission_js.rs"]
+mod native_buffer_element_admission_js;
+#[path = "native_buffer_equality.rs"]
+mod native_buffer_equality;
+#[path = "nb_value_struct.rs"]
+mod nb_value_struct;
+#[path = "opaque_container_axes_js.rs"]
+mod opaque_container_axes_js;
+#[path = "optional_entity_vec.rs"]
+mod optional_entity_vec;
 #[path = "overlay.rs"]
 mod overlay;
 #[path = "parse_float.rs"]
@@ -93,6 +105,10 @@ mod release_mode_deleted;
 mod ret_bank_sizing;
 #[path = "rng.rs"]
 mod rng;
+#[path = "safenav_fold.rs"]
+mod safenav_fold;
+#[path = "shader_register.rs"]
+mod shader_register;
 #[path = "shared_tail.rs"]
 mod shared_tail;
 #[path = "snippets.rs"]
@@ -101,6 +117,8 @@ mod snippets;
 mod sort;
 #[path = "spec_column_callee.rs"]
 mod spec_column_callee;
+#[path = "stdlib_sibling_location.rs"]
+mod stdlib_sibling_location;
 #[path = "string_builder.rs"]
 mod string_builder;
 #[path = "string_primitives.rs"]
@@ -123,21 +141,3 @@ mod value_structs;
 mod vec_columns;
 #[path = "vec_flat_enum_strided.rs"]
 mod vec_flat_enum_strided;
-#[path = "optional_entity_vec.rs"]
-mod optional_entity_vec;
-#[path = "shader_register.rs"]
-mod shader_register;
-#[path = "opaque_container_axes_js.rs"]
-mod opaque_container_axes_js;
-#[path = "nb_value_struct.rs"]
-mod nb_value_struct;
-#[path = "native_buffer_element_admission_js.rs"]
-mod native_buffer_element_admission_js;
-#[path = "stdlib_sibling_location.rs"]
-mod stdlib_sibling_location;
-#[path = "host.rs"]
-mod host;
-#[path = "safenav_fold.rs"]
-mod safenav_fold;
-#[path = "native_buffer_equality.rs"]
-mod native_buffer_equality;

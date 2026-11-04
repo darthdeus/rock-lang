@@ -10,14 +10,24 @@ use crate::mir::{Block, Inst, MirFunc};
 pub fn may_throw(inst: &Inst) -> bool {
     matches!(
         inst,
-        Inst::Format { .. } | Inst::FormatDyn { .. }
-            | Inst::IntToUint(_) | Inst::FloatToUint(_)
-            | Inst::UintShl(..) | Inst::UintShr(..)
-            | Inst::Index { .. } | Inst::VecCheckedIndex { .. }
-            | Inst::Field { .. } | Inst::TupleIndex { .. } | Inst::Len { .. }
-            | Inst::Call { .. } | Inst::CallValue { .. }
-            | Inst::CallMulti { .. } | Inst::CallValueMulti { .. } | Inst::CallBoundMulti { .. }
-            | Inst::FfiNewArray { .. } | Inst::FfiViewCast { .. }
+        Inst::Format { .. }
+            | Inst::FormatDyn { .. }
+            | Inst::IntToUint(_)
+            | Inst::FloatToUint(_)
+            | Inst::UintShl(..)
+            | Inst::UintShr(..)
+            | Inst::Index { .. }
+            | Inst::VecCheckedIndex { .. }
+            | Inst::Field { .. }
+            | Inst::TupleIndex { .. }
+            | Inst::Len { .. }
+            | Inst::Call { .. }
+            | Inst::CallValue { .. }
+            | Inst::CallMulti { .. }
+            | Inst::CallValueMulti { .. }
+            | Inst::CallBoundMulti { .. }
+            | Inst::FfiNewArray { .. }
+            | Inst::FfiViewCast { .. }
     )
 }
 
@@ -65,7 +75,11 @@ mod tests {
     use ustr::Ustr;
 
     fn mask(func: &MirFunc) -> Vec<bool> {
-        let mut inlinable = func.insts.iter().map(|(_, inst)| inst.produces_value()).collect::<Vec<_>>();
+        let mut inlinable = func
+            .insts
+            .iter()
+            .map(|(_, inst)| inst.produces_value())
+            .collect::<Vec<_>>();
         preserve_effect_order(func, &[func.entry], &mut inlinable);
         inlinable
     }
@@ -77,17 +91,33 @@ mod tests {
     #[test]
     fn throwing_projections_and_calls_cannot_cross_a_write() {
         for make in [
-            (|v| Inst::Index { base: v, index: v, kind: ContainerKind::Vec }) as fn(Idx<Inst>) -> Inst,
+            (|v| Inst::Index {
+                base: v,
+                index: v,
+                kind: ContainerKind::Vec,
+            }) as fn(Idx<Inst>) -> Inst,
             |v| Inst::VecCheckedIndex { vec: v, index: v },
-            |v| Inst::Field { base: v, field: Ustr::from("value") },
+            |v| Inst::Field {
+                base: v,
+                field: Ustr::from("value"),
+            },
             |v| Inst::TupleIndex { base: v, index: 0 },
-            |v| Inst::CallValue { callee: v, args: vec![] },
+            |v| Inst::CallValue {
+                callee: v,
+                args: vec![],
+            },
         ] {
             let mut func = MirFunc::new(Ustr::from("probe"));
             let b = func.entry;
             let base = func.emit(b, Inst::Const(Lit::Nil));
             let value = func.emit(b, make(base));
-            func.emit(b, Inst::StoreGlobal { name: Ustr::from("marks"), value: base });
+            func.emit(
+                b,
+                Inst::StoreGlobal {
+                    name: Ustr::from("marks"),
+                    value: base,
+                },
+            );
             func.set_term(b, Term::Return(vec![value]));
             assert!(!folded(&mask(&func), value), "{:?}", func.insts[value]);
         }
@@ -100,7 +130,13 @@ mod tests {
         let input = func.emit(b, Inst::Const(Lit::Int(-1)));
         let checked = func.emit(b, Inst::IntToUint(input));
         let tuple = func.emit(b, Inst::MakeTuple(vec![checked]));
-        func.emit(b, Inst::StoreGlobal { name: Ustr::from("marks"), value: input });
+        func.emit(
+            b,
+            Inst::StoreGlobal {
+                name: Ustr::from("marks"),
+                value: input,
+            },
+        );
         func.set_term(b, Term::Return(vec![tuple]));
         let inlinable = mask(&func);
         assert!(!folded(&inlinable, checked));
@@ -114,7 +150,13 @@ mod tests {
         let input = func.emit(b, Inst::Const(Lit::Int(1)));
         let sum = func.emit(b, Inst::IntAdd(input, input));
         let tuple = func.emit(b, Inst::MakeTuple(vec![sum]));
-        func.emit(b, Inst::CallValue { callee: input, args: vec![] });
+        func.emit(
+            b,
+            Inst::CallValue {
+                callee: input,
+                args: vec![],
+            },
+        );
         func.set_term(b, Term::Return(vec![tuple]));
         let inlinable = mask(&func);
         assert!(folded(&inlinable, sum));
@@ -127,7 +169,13 @@ mod tests {
         let b = func.entry;
         let input = func.emit(b, Inst::Const(Lit::Int(-1)));
         let checked = func.emit(b, Inst::IntToUint(input));
-        func.emit(b, Inst::StoreGlobal { name: Ustr::from("value"), value: checked });
+        func.emit(
+            b,
+            Inst::StoreGlobal {
+                name: Ustr::from("value"),
+                value: checked,
+            },
+        );
         assert!(folded(&mask(&func), checked));
     }
 
@@ -137,7 +185,13 @@ mod tests {
         let b = func.entry;
         let input = func.emit(b, Inst::Const(Lit::Int(-1)));
         let checked = func.emit(b, Inst::IntToUint(input));
-        func.emit(b, Inst::Field { base: input, field: Ustr::from("value") });
+        func.emit(
+            b,
+            Inst::Field {
+                base: input,
+                field: Ustr::from("value"),
+            },
+        );
         func.set_term(b, Term::Return(vec![checked]));
         assert!(!folded(&mask(&func), checked));
     }

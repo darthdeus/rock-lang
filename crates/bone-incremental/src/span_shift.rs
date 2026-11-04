@@ -21,7 +21,11 @@ struct Shift {
 impl Shift {
     /// Shift one stored offset iff it sits at/after the edit point.
     fn off(&self, o: usize) -> usize {
-        if o >= self.at { (o as isize + self.byte_delta) as usize } else { o }
+        if o >= self.at {
+            (o as isize + self.byte_delta) as usize
+        } else {
+            o
+        }
     }
 
     /// Move a span by the byte/line delta iff it starts at/after `at`.
@@ -59,7 +63,11 @@ pub fn shift_module_after_edit(
     byte_delta: isize,
     line_delta: isize,
 ) {
-    let sh = Shift { at, byte_delta, line_delta };
+    let sh = Shift {
+        at,
+        byte_delta,
+        line_delta,
+    };
 
     // Kept bodies: reused HIR with stale absolute spans + node index. The edited
     // body is re-lowered fresh, so skip it.
@@ -100,7 +108,9 @@ pub fn shift_module_after_edit(
                     sh.span(enum_name_span);
                     sh.span(variant_span);
                 }
-                Expr::Call { callee, args: _, .. } => match callee {
+                Expr::Call {
+                    callee, args: _, ..
+                } => match callee {
                     Callee::Unresolved { name: _, name_span } => sh.span(name_span),
                     Callee::Local(_) | Callee::Value(_) => {}
                 },

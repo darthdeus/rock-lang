@@ -16,17 +16,29 @@ fn messages(report: &serde_json::Value) -> Vec<String> {
 #[test]
 fn dir_reports_diagnostics_across_files() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("stick.toml"), "[package]\nname = \"g\"\ntype = \"bin\"\n").unwrap();
+    std::fs::write(
+        dir.path().join("stick.toml"),
+        "[package]\nname = \"g\"\ntype = \"bin\"\n",
+    )
+    .unwrap();
     // a.rock: an uncalled non-root fn -> whole-project unused_fn (needs the
     // directory load to see there's no caller anywhere).
     std::fs::write(dir.path().join("a.rock"), "fn main() {}\nfn orphan() {}\n").unwrap();
     // b.rock: a plain type error, file-local.
-    std::fs::write(dir.path().join("b.rock"), "fn b() -> int {\n  \"nope\"\n}\n").unwrap();
+    std::fs::write(
+        dir.path().join("b.rock"),
+        "fn b() -> int {\n  \"nope\"\n}\n",
+    )
+    .unwrap();
 
     let report = diagnostics_report(dir.path().to_str().unwrap()).unwrap();
 
     assert_eq!(report["dir"].is_string(), true, "dir report shape");
-    assert_eq!(report["file_count"].as_u64(), Some(2), "walked both .rock files");
+    assert_eq!(
+        report["file_count"].as_u64(),
+        Some(2),
+        "walked both .rock files"
+    );
 
     let msgs = messages(&report);
     assert!(
@@ -34,7 +46,8 @@ fn dir_reports_diagnostics_across_files() {
         "whole-project unused_fn must appear: {msgs:?}"
     );
     assert!(
-        msgs.iter().any(|m| m.to_lowercase().contains("int") || m.to_lowercase().contains("type")),
+        msgs.iter()
+            .any(|m| m.to_lowercase().contains("int") || m.to_lowercase().contains("type")),
         "b.rock's type error must appear: {msgs:?}"
     );
 }
@@ -44,21 +57,33 @@ fn lint_report_excludes_typecheck_errors() {
     // `rock lsp lint` reports only lints -- the type error that `diagnostics`
     // surfaces must NOT appear, but the unused_fn/unused_var findings must.
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("stick.toml"), "[package]\nname = \"g\"\ntype = \"bin\"\n").unwrap();
+    std::fs::write(
+        dir.path().join("stick.toml"),
+        "[package]\nname = \"g\"\ntype = \"bin\"\n",
+    )
+    .unwrap();
     std::fs::write(dir.path().join("a.rock"), "fn main() {}\nfn orphan() {}\n").unwrap();
-    std::fs::write(dir.path().join("b.rock"), "fn b() -> int {\n  \"nope\"\n}\n").unwrap();
+    std::fs::write(
+        dir.path().join("b.rock"),
+        "fn b() -> int {\n  \"nope\"\n}\n",
+    )
+    .unwrap();
 
     let diag_msgs = messages(&diagnostics_report(dir.path().to_str().unwrap()).unwrap());
     let lint_msgs = messages(&lint_report(dir.path().to_str().unwrap()).unwrap());
 
     // Sanity: diagnostics DOES carry the type error.
     assert!(
-        diag_msgs.iter().any(|m| m.contains("unify") || m.to_lowercase().contains("int")),
+        diag_msgs
+            .iter()
+            .any(|m| m.contains("unify") || m.to_lowercase().contains("int")),
         "diagnostics should include the type error: {diag_msgs:?}"
     );
     // Lint report: the unused_fn lint is present, the type error is not.
     assert!(
-        lint_msgs.iter().any(|m| m.contains("unused function `orphan`")),
+        lint_msgs
+            .iter()
+            .any(|m| m.contains("unused function `orphan`")),
         "lint report must include unused_fn: {lint_msgs:?}"
     );
     assert!(
@@ -70,7 +95,11 @@ fn lint_report_excludes_typecheck_errors() {
 #[test]
 fn dir_stays_silent_for_lib() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("stick.toml"), "[package]\nname = \"l\"\ntype = \"lib\"\n").unwrap();
+    std::fs::write(
+        dir.path().join("stick.toml"),
+        "[package]\nname = \"l\"\ntype = \"lib\"\n",
+    )
+    .unwrap();
     std::fs::write(dir.path().join("a.rock"), "fn public_api() {}\n").unwrap();
 
     let report = diagnostics_report(dir.path().to_str().unwrap()).unwrap();
@@ -93,14 +122,23 @@ fn identity_storage_diagnostics_follow_the_package_declaration() {
     let reported = |manifest: &str| {
         std::fs::write(dir.path().join("stick.toml"), manifest).unwrap();
         let report = diagnostics_report(dir.path().to_str().unwrap()).unwrap();
-        let in_report = messages(&report).iter().any(|m| m.contains("cannot store identity struct `Actor`"));
+        let in_report = messages(&report)
+            .iter()
+            .any(|m| m.contains("cannot store identity struct `Actor`"));
         let mut server = rock_lsp::workspace::LspWorkspace::new();
         server.bone.update(path, source.to_owned());
-        let in_server = server.bone.diagnostics_for(path).iter().any(|d| d.message.contains("cannot store identity struct `Actor`"));
+        let in_server = server
+            .bone
+            .diagnostics_for(path)
+            .iter()
+            .any(|d| d.message.contains("cannot store identity struct `Actor`"));
         assert_eq!(in_report, in_server, "{manifest}: {report}");
         in_report
     };
-    assert!(reported("[package]\nname = \"example-lib\"\n"), "a package that declares nothing is enforced");
+    assert!(
+        reported("[package]\nname = \"example-lib\"\n"),
+        "a package that declares nothing is enforced"
+    );
     assert!(
         !reported("[package]\nname = \"example-lib\"\n[language]\nidentity_storage = \"exempt\"\n"),
         "a package declared exempt gets no identity-storage diagnostics"
@@ -120,6 +158,9 @@ fn unreadable_file_fails_the_dir_report_by_name() {
         ("lint", rock_lsp::cli::bone_lsp::lint(path)),
     ] {
         let err = res.expect_err(what).to_string();
-        assert!(err.contains("bad.rock") && !err.contains("a.rock,"), "{what}: {err}");
+        assert!(
+            err.contains("bad.rock") && !err.contains("a.rock,"),
+            "{what}: {err}"
+        );
     }
 }

@@ -13,13 +13,16 @@
 //! prove the presence slot: that comparison folds to a constant, which is pinned
 //! separately in `nobox_tuple_option_presence_sentinel.rs`.
 
-
 use std::process::Command;
 
 fn run_capturing(prog: &str, tag: &str) -> (bool, String) {
-    let path = std::env::temp_dir().join(format!("skull_sentinel_{}_{tag}.lua", std::process::id()));
+    let path =
+        std::env::temp_dir().join(format!("skull_sentinel_{}_{tag}.lua", std::process::id()));
     std::fs::write(&path, prog).expect("write program");
-    let out = Command::new("luajit").arg(&path).output().expect("spawn luajit");
+    let out = Command::new("luajit")
+        .arg(&path)
+        .output()
+        .expect("spawn luajit");
     let _ = std::fs::remove_file(&path);
     let combined = format!(
         "{}{}",
@@ -56,8 +59,15 @@ fn main() {
 fn arena_random_at_a_nobox_element_works() {
     let lua = crate::common::try_emit_module(MARKED).expect("marked column element must emit");
     let (ok, out) = run_capturing(&format!("{lua}\nmain()\n"), "arena_random_marked");
-    assert!(ok, "`Arena<NP>.random()` must work for a marked element:\n{out}");
-    assert_eq!(out.trim(), "true", "expected a live entry to be selected:\n{out}");
+    assert!(
+        ok,
+        "`Arena<NP>.random()` must work for a marked element:\n{out}"
+    );
+    assert_eq!(
+        out.trim(),
+        "true",
+        "expected a live entry to be selected:\n{out}"
+    );
 }
 
 /// The call must reach the SPECIALIZED copy: reading the columns is the whole
@@ -79,6 +89,13 @@ fn arena_random_at_a_nobox_element_targets_the_specialized_copy() {
 fn arena_random_at_an_unmarked_column_element_works() {
     let lua = crate::common::try_emit_module(UNMARKED).expect("unmarked column element must emit");
     let (ok, out) = run_capturing(&format!("{lua}\nmain()\n"), "arena_random_unmarked");
-    assert!(ok, "`Arena<CV>.random()` must work for a column-stored element:\n{out}");
-    assert_eq!(out.trim(), "true", "expected a live entry to be selected:\n{out}");
+    assert!(
+        ok,
+        "`Arena<CV>.random()` must work for a column-stored element:\n{out}"
+    );
+    assert_eq!(
+        out.trim(),
+        "true",
+        "expected a live entry to be selected:\n{out}"
+    );
 }

@@ -114,12 +114,19 @@ fn an_int_representation_is_coerced_through_every_alias_shape() {
     let lua = emit_module(SRC);
 
     for name in [
-        "ret_int", "ret_handle", "ret_alias", "ret_boxed", "ret_deep", "ret_wrap",
-        "ret_outer", "ret_twice",
+        "ret_int",
+        "ret_handle",
+        "ret_alias",
+        "ret_boxed",
+        "ret_deep",
+        "ret_wrap",
+        "ret_outer",
+        "ret_twice",
     ] {
         let w = wrapper(&lua, name);
         assert!(
-            w.contains(&format!("local __rock_ret = tonumber(m.{name}(")) && w.contains("return __rock_ret"),
+            w.contains(&format!("local __rock_ret = tonumber(m.{name}("))
+                && w.contains("return __rock_ret"),
             "`{name}` bottoms out at an int representation, so its return must be a \
              Rock number and not whatever the C ABI handed back:\n{w}"
         );
@@ -244,16 +251,33 @@ fn main() { print("x") }
 fn every_value_returning_wrapper_returns_through_a_local() {
     let lua = emit_module(SRC);
     for name in [
-        "ret_int", "ret_handle", "ret_alias", "ret_boxed", "ret_deep", "ret_wrap",
-        "ret_outer", "ret_twice", "ret_ratio", "ret_boxed_float", "ret_outer_float",
+        "ret_int",
+        "ret_handle",
+        "ret_alias",
+        "ret_boxed",
+        "ret_deep",
+        "ret_wrap",
+        "ret_outer",
+        "ret_twice",
+        "ret_ratio",
+        "ret_boxed_float",
+        "ret_outer_float",
     ] {
         let w = wrapper(&lua, name);
         let tail = w.lines().any(|l| {
             let t = l.trim_start();
-            t.starts_with("return m.") || t.starts_with("return tonumber(") || t.starts_with("return ffi.new(")
+            t.starts_with("return m.")
+                || t.starts_with("return tonumber(")
+                || t.starts_with("return ffi.new(")
         });
-        assert!(!tail, "`{name}` still returns through a tail call into C:\n{w}");
-        assert!(w.contains("return __rock_ret"), "`{name}` must return the bound local:\n{w}");
+        assert!(
+            !tail,
+            "`{name}` still returns through a tail call into C:\n{w}"
+        );
+        assert!(
+            w.contains("return __rock_ret"),
+            "`{name}` must return the bound local:\n{w}"
+        );
     }
 }
 

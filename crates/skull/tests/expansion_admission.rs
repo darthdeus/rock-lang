@@ -45,7 +45,10 @@ fn main() {
 
 fn direct_admission_error(src: &str) -> skull_parser::CompilerError {
     let ws = ws_with_stdlib(src);
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("test module");
+    let mid = *ws
+        .module_ids
+        .get(&Ustr::from("<test>"))
+        .expect("test module");
     skull_mir::lower::expansion_rejection(&ws, mid).expect("fixture must be rejected by admission")
 }
 
@@ -82,7 +85,8 @@ fn struct_priority_beats_invalid_shader_pipeline() {
         err.message
     );
     assert!(
-        !err.message.contains("`rock_shader` takes either one argument"),
+        !err.message
+            .contains("`rock_shader` takes either one argument"),
         "shader expansion incorrectly won over the higher-priority struct rejection:\n{}",
         err.message
     );

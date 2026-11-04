@@ -2,7 +2,7 @@
 //! contract lives in `tests/enum_format_conformance.rock`; this holder pins the
 //! package and module segments a packaged program names.
 
-use crate::common::{emit_v1_package, run_luajit, V1Fragment};
+use crate::common::{V1Fragment, emit_v1_package, run_luajit};
 
 const MAIN: &str = r#"
 enum MobKind { Skeleton, Zombie }
@@ -66,10 +66,22 @@ fn package() -> skull::mir_emit::MirEmit {
     emit_v1_package(
         "pkgenum",
         &[
-            V1Fragment { file: "main.rock", src: MAIN },
-            V1Fragment { file: "status.rock", src: STATUS },
-            V1Fragment { file: "actor_identity.rock", src: ACTOR_IDENTITY },
-            V1Fragment { file: "movement.rock", src: MOVEMENT },
+            V1Fragment {
+                file: "main.rock",
+                src: MAIN,
+            },
+            V1Fragment {
+                file: "status.rock",
+                src: STATUS,
+            },
+            V1Fragment {
+                file: "actor_identity.rock",
+                src: ACTOR_IDENTITY,
+            },
+            V1Fragment {
+                file: "movement.rock",
+                src: MOVEMENT,
+            },
         ],
     )
 }
@@ -101,7 +113,8 @@ fn packaged_nested_enum_prints_each_path() {
 #[test]
 fn packaged_value_record_payload_prints_its_path() {
     let out = lines("enum_format_packages_record");
-    let id = "pkgenum::actor_identity::MobId { scene_id: 11, arena_id: 23, slot: 4, generation: 7 }";
+    let id =
+        "pkgenum::actor_identity::MobId { scene_id: 11, arena_id: 23, slot: 4, generation: 7 }";
     assert_eq!(out[3], format!("pkgenum::DamageSource::Mob({id})"));
     assert_eq!(out[4], id);
 }

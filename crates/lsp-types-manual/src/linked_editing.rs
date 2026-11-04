@@ -11,8 +11,11 @@ pub struct LinkedEditingRangeOptions {
     pub work_done_progress_options: WorkDoneProgressOptions,
 }
 
-impl_lsp_struct!(LinkedEditingRangeOptions,
-    flatten { work_done_progress_options: WorkDoneProgressOptions }
+impl_lsp_struct!(
+    LinkedEditingRangeOptions,
+    flatten {
+        work_done_progress_options: WorkDoneProgressOptions
+    }
 );
 
 #[derive(Debug, Eq, PartialEq, Clone)]
@@ -22,7 +25,8 @@ pub struct LinkedEditingRangeRegistrationOptions {
     pub static_registration_options: StaticRegistrationOptions,
 }
 
-impl_lsp_struct!(LinkedEditingRangeRegistrationOptions,
+impl_lsp_struct!(
+    LinkedEditingRangeRegistrationOptions,
     flatten {
         text_document_registration_options: TextDocumentRegistrationOptions,
         linked_editing_range_options: LinkedEditingRangeOptions,
@@ -49,7 +53,8 @@ pub struct LinkedEditingRangeParams {
     pub work_done_progress_params: WorkDoneProgressParams,
 }
 
-impl_lsp_struct!(LinkedEditingRangeParams,
+impl_lsp_struct!(
+    LinkedEditingRangeParams,
     flatten {
         text_document_position_params: TextDocumentPositionParams,
         work_done_progress_params: WorkDoneProgressParams,

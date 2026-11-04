@@ -36,11 +36,7 @@ const SEP: &str = "_";
 /// An exempt (`@nomangle`, `extern`, ...) callee still gets a suffixed name here.
 /// Its bare name belongs to the ONE body the author owns; a specialized copy is a
 /// different function and must not claim it.
-pub fn spec_fn_name(
-    ws: &Workspace,
-    f: &Function,
-    key: &[crate::monoty::MonoTy],
-) -> Option<String> {
+pub fn spec_fn_name(ws: &Workspace, f: &Function, key: &[crate::monoty::MonoTy]) -> Option<String> {
     if key.is_empty() {
         return None;
     }
@@ -359,7 +355,12 @@ fn ty_key(ws: &Workspace, ty: TyId, out: &mut String) {
     }
 }
 
-fn function_collision_error(ws: &Workspace, name: &str, prev: &Function, f: &Function) -> CompilerError {
+fn function_collision_error(
+    ws: &Workspace,
+    name: &str,
+    prev: &Function,
+    f: &Function,
+) -> CompilerError {
     let prev_signature = sig_key(ws, prev);
     let signature = sig_key(ws, f);
     let msg = if prev_signature.split("\x1f#ret#\x1f").next()
@@ -377,8 +378,10 @@ fn function_collision_error(ws: &Workspace, name: &str, prev: &Function, f: &Fun
              overloads (mangling is keyed on name + declared parameter types)"
         )
     };
-    CompilerError::new_with_label(f.name_span, msg)
-        .with_label(prev.name_span, format!("other declaration of `{}`", prev.name))
+    CompilerError::new_with_label(f.name_span, msg).with_label(
+        prev.name_span,
+        format!("other declaration of `{}`", prev.name),
+    )
 }
 
 /// The permanent collision check (reject, don't fall back). Returns a spanned
@@ -470,7 +473,10 @@ pub fn collision_errors(ws: &Workspace) -> Vec<(String, CompilerError)> {
                     "types `{prev}` and `{key}` would both emit as `{symbol}`; \
                      a `@nomangle` struct owns its declared name -- rename one of them"
                 );
-                out.push((symbol.to_string(), CompilerError::new_with_label(*span, msg)));
+                out.push((
+                    symbol.to_string(),
+                    CompilerError::new_with_label(*span, msg),
+                ));
             }
             None => {
                 type_owner.insert(symbol, *key);
@@ -502,7 +508,10 @@ mod tests {
     use ustr::Ustr;
 
     fn nominal(name: &str, params: Vec<MonoTy>) -> MonoTy {
-        MonoTy::App { ctor: MonoCtor::Nominal(Ustr::from(name)), params }
+        MonoTy::App {
+            ctor: MonoCtor::Nominal(Ustr::from(name)),
+            params,
+        }
     }
 
     /// Every constructor and composition the encoder can see, spelled out. The
@@ -524,7 +533,9 @@ mod tests {
 
         assert_eq!(enc(&MonoTy::Nullable(Box::new(MonoTy::Int))), "o_p_int");
         assert_eq!(
-            enc(&MonoTy::Nullable(Box::new(MonoTy::Nullable(Box::new(MonoTy::Int))))),
+            enc(&MonoTy::Nullable(Box::new(MonoTy::Nullable(Box::new(
+                MonoTy::Int
+            ))))),
             "o_o_p_int"
         );
 
@@ -543,7 +554,10 @@ mod tests {
         );
 
         assert_eq!(
-            enc(&MonoTy::App { ctor: MonoCtor::Array, params: vec![MonoTy::Float] }),
+            enc(&MonoTy::App {
+                ctor: MonoCtor::Array,
+                params: vec![MonoTy::Float]
+            }),
             "a_v_1_p_float_z"
         );
         assert_eq!(

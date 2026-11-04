@@ -108,8 +108,14 @@ fn resolve_package(
     exe: Option<&Path>,
     checkout: &Path,
 ) -> Result<PathBuf, String> {
-    if name.is_empty() || !name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_') {
-        return Err(format!("invalid package name `{name}`; expected letters, digits, '-' or '_'"));
+    if name.is_empty()
+        || !name
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+    {
+        return Err(format!(
+            "invalid package name `{name}`; expected letters, digits, '-' or '_'"
+        ));
     }
     let mut tried = Vec::new();
     let mut lookup = |root: &Path| {
@@ -131,8 +137,14 @@ fn resolve_package(
     if package.join("stick.toml").is_file() {
         return Ok(package);
     }
-    Err(format!("cannot resolve package `{name}`; looked for {}",
-        tried.iter().map(|p| format!("`{}`", p.display())).collect::<Vec<_>>().join(", ")))
+    Err(format!(
+        "cannot resolve package `{name}`; looked for {}",
+        tried
+            .iter()
+            .map(|p| format!("`{}`", p.display()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
 }
 
 fn install_sources(exe: Option<&Path>, directory: &str) -> Option<PathBuf> {
@@ -213,15 +225,42 @@ fn embedded_files() -> Vec<StdlibFile> {
 
 fn embedded_source(name: &str) -> &'static str {
     match name {
-        "unified.rock" => include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../stdlib/unified.rock")),
-        "logging.rock" => include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../stdlib/logging.rock")),
-        "vec.rock" => include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../stdlib/vec.rock")),
-        "mat.rock" => include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../stdlib/mat.rock")),
-        "arena.rock" => include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../stdlib/arena.rock")),
-        "scene.rock" => include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../stdlib/scene.rock")),
-        "strings.rock" => include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../stdlib/strings.rock")),
-        "json.rock" => include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../stdlib/json.rock")),
-        "shader.rock" => include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../stdlib/shader.rock")),
+        "unified.rock" => include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../stdlib/unified.rock"
+        )),
+        "logging.rock" => include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../stdlib/logging.rock"
+        )),
+        "vec.rock" => include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../stdlib/vec.rock"
+        )),
+        "mat.rock" => include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../stdlib/mat.rock"
+        )),
+        "arena.rock" => include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../stdlib/arena.rock"
+        )),
+        "scene.rock" => include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../stdlib/scene.rock"
+        )),
+        "strings.rock" => include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../stdlib/strings.rock"
+        )),
+        "json.rock" => include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../stdlib/json.rock"
+        )),
+        "shader.rock" => include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../stdlib/shader.rock"
+        )),
         "js.rock" => include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../stdlib/js.rock")),
         _ => panic!("rock: `{name}` is not a stdlib file (see STDLIB_NAMES)"),
     }
@@ -244,12 +283,21 @@ mod tests {
         let exe = temp.path().join("install/bin/rock");
         let checkout = temp.path().join("checkout/packages");
         let built = package_fixture(&checkout, "build");
-        assert_eq!(resolve_package("probe", None, Some(&exe), &checkout).unwrap(), built);
+        assert_eq!(
+            resolve_package("probe", None, Some(&exe), &checkout).unwrap(),
+            built
+        );
         let installed = package_fixture(&temp.path().join("install/packages"), "install");
-        assert_eq!(resolve_package("probe", None, Some(&exe), &checkout).unwrap(), installed);
+        assert_eq!(
+            resolve_package("probe", None, Some(&exe), &checkout).unwrap(),
+            installed
+        );
         let override_root = temp.path().join("override");
         let overridden = package_fixture(&override_root, "override");
-        assert_eq!(resolve_package("probe", Some(override_root), Some(&exe), &checkout).unwrap(), overridden);
+        assert_eq!(
+            resolve_package("probe", Some(override_root), Some(&exe), &checkout).unwrap(),
+            overridden
+        );
     }
 
     #[test]
@@ -261,10 +309,18 @@ mod tests {
         let installed = temp.path().join("install/packages");
         std::fs::create_dir_all(&installed).unwrap();
         let error = resolve_package("probe", None, Some(&exe), &checkout).unwrap_err();
-        assert!(error.contains("probe") && error.contains(&installed.join("probe/stick.toml").display().to_string()), "{error}");
+        assert!(
+            error.contains("probe")
+                && error.contains(&installed.join("probe/stick.toml").display().to_string()),
+            "{error}"
+        );
         let override_root = temp.path().join("missing-override");
-        let error = resolve_package("probe", Some(override_root.clone()), Some(&exe), &checkout).unwrap_err();
-        assert!(error.contains(&override_root.join("probe/stick.toml").display().to_string()), "{error}");
+        let error = resolve_package("probe", Some(override_root.clone()), Some(&exe), &checkout)
+            .unwrap_err();
+        assert!(
+            error.contains(&override_root.join("probe/stick.toml").display().to_string()),
+            "{error}"
+        );
     }
 
     #[test]
@@ -273,11 +329,18 @@ mod tests {
         let exe = temp.path().join("install/bin/rock");
         let checkout = temp.path().join("checkout/packages");
         let error = resolve_package("absent", None, Some(&exe), &checkout).unwrap_err();
-        for path in [temp.path().join("install/packages/absent/stick.toml"), checkout.join("absent/stick.toml")] {
+        for path in [
+            temp.path().join("install/packages/absent/stick.toml"),
+            checkout.join("absent/stick.toml"),
+        ] {
             assert!(error.contains(&path.display().to_string()), "{error}");
         }
         for name in ["", "..", "../escape", "/absolute", "a/b", "a\\b"] {
-            assert!(resolve_package(name, None, Some(&exe), &checkout).unwrap_err().contains("invalid package name"));
+            assert!(
+                resolve_package(name, None, Some(&exe), &checkout)
+                    .unwrap_err()
+                    .contains("invalid package name")
+            );
         }
     }
 
@@ -295,7 +358,11 @@ mod tests {
     #[test]
     fn release_layout_stdlib_wins_over_build_checkout() {
         assert_eq!(
-            resolve(None, Some("/opt/rock/bin/rock"), &["/opt/rock/stdlib", CHECKOUT]),
+            resolve(
+                None,
+                Some("/opt/rock/bin/rock"),
+                &["/opt/rock/stdlib", CHECKOUT]
+            ),
             StdlibSource::Dir(PathBuf::from("/opt/rock/stdlib"))
         );
     }
@@ -327,7 +394,11 @@ mod tests {
         // A dev exe under target/ and a bin/ without a sibling stdlib/ both
         // fall through to the checkout the crate was built from.
         assert_eq!(
-            resolve(None, Some("/work/rock/target/debug/rock"), &["/work/rock/target/stdlib", CHECKOUT]),
+            resolve(
+                None,
+                Some("/work/rock/target/debug/rock"),
+                &["/work/rock/target/stdlib", CHECKOUT]
+            ),
             StdlibSource::Dir(PathBuf::from(CHECKOUT))
         );
         assert_eq!(
@@ -340,9 +411,15 @@ mod tests {
     fn no_stdlib_on_disk_falls_back_to_embedded() {
         // No override, no release-layout sibling, no checkout: an installed
         // binary outside any checkout serves the compiled-in stdlib.
-        assert_eq!(resolve(None, Some("/usr/bin/rock"), &[]), StdlibSource::Embedded);
+        assert_eq!(
+            resolve(None, Some("/usr/bin/rock"), &[]),
+            StdlibSource::Embedded
+        );
         assert_eq!(resolve(None, None, &[]), StdlibSource::Embedded);
-        assert_eq!(resolve(None, Some("/opt/rock/bin/rock"), &[]), StdlibSource::Embedded);
+        assert_eq!(
+            resolve(None, Some("/opt/rock/bin/rock"), &[]),
+            StdlibSource::Embedded
+        );
     }
 
     #[test]
@@ -358,7 +435,11 @@ mod tests {
         for name in STDLIB_NAMES {
             let on_disk = std::fs::read_to_string(Path::new(BUILD_CHECKOUT_STDLIB).join(name))
                 .expect("checkout stdlib readable");
-            assert_eq!(embedded_source(name), on_disk, "{name} drifted from the checkout");
+            assert_eq!(
+                embedded_source(name),
+                on_disk,
+                "{name} drifted from the checkout"
+            );
         }
     }
 }

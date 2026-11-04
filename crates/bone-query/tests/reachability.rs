@@ -18,7 +18,12 @@ fn index_of(src: &str) -> ReachabilityIndex {
 /// Sorted `suffix` strings of the paths from `root` to `expected`.
 fn suffixes(idx: &ReachabilityIndex, root: &str, expected: &[&str]) -> Vec<String> {
     let exp: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
-    let mut s: Vec<String> = idx.paths_to(root, &exp, 64).paths.into_iter().map(|p| p.suffix).collect();
+    let mut s: Vec<String> = idx
+        .paths_to(root, &exp, 64)
+        .paths
+        .into_iter()
+        .map(|p| p.suffix)
+        .collect();
     s.sort();
     s
 }
@@ -32,7 +37,10 @@ fn diamond_yields_both_paths() {
                struct B { e: E }\n\
                struct T { a: A, b: B }\n";
     let idx = index_of(src);
-    assert_eq!(suffixes(&idx, "T", &["E"]), vec!["a.e".to_string(), "b.e".to_string()]);
+    assert_eq!(
+        suffixes(&idx, "T", &["E"]),
+        vec!["a.e".to_string(), "b.e".to_string()]
+    );
 }
 
 #[test]
@@ -54,7 +62,10 @@ fn mutual_cycle_terminates() {
                struct A { b: B?, tag: Tag }\n\
                struct B { a: A?, tag: Tag }\n";
     let idx = index_of(src);
-    assert_eq!(suffixes(&idx, "A", &["Tag"]), vec!["b.tag".to_string(), "tag".to_string()]);
+    assert_eq!(
+        suffixes(&idx, "A", &["Tag"]),
+        vec!["b.tag".to_string(), "tag".to_string()]
+    );
 }
 
 #[test]
@@ -68,11 +79,17 @@ fn method_with_args_is_terminal_not_traversed() {
                fn build(w: W, scale: int) -> V { w.v }\n";
     let idx = index_of(src);
     let res = idx.paths_to("W", &["V".to_string()], 64);
-    let mut by_suffix: Vec<(String, bool, bool)> =
-        res.paths.iter().map(|p| (p.suffix.clone(), p.is_method, p.takes_args)).collect();
+    let mut by_suffix: Vec<(String, bool, bool)> = res
+        .paths
+        .iter()
+        .map(|p| (p.suffix.clone(), p.is_method, p.takes_args))
+        .collect();
     by_suffix.sort();
     assert_eq!(
         by_suffix,
-        vec![("build".to_string(), true, true), ("v".to_string(), false, false)],
+        vec![
+            ("build".to_string(), true, true),
+            ("v".to_string(), false, false)
+        ],
     );
 }

@@ -40,20 +40,47 @@ fn main() {
 #[test]
 fn a_coalesced_nullable_asset_keeps_owned_copies() {
     let lua = emit_module(NULLABLE_ASSET_READ);
-    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "nullable_asset_copy"), "-1\n24\n2 2\n2");
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "nullable_asset_copy"),
+        "-1\n24\n2 2\n2"
+    );
 }
 
 #[test]
 fn coalesced_nullable_children_snapshot_before_source_writes() {
     let probes = [
-        ("source-write", include_str!("fixtures/coalesce_snapshot/source-write.rock")),
-        ("closure-read", include_str!("fixtures/coalesce_snapshot/closure-read.rock")),
-        ("cdata-source-write", include_str!("fixtures/coalesce_snapshot/cdata-source-write.rock")),
-        ("cdata-closure-read", include_str!("fixtures/coalesce_snapshot/cdata-closure-read.rock")),
-        ("generic-source-write", include_str!("fixtures/coalesce_snapshot/generic-source-write.rock")),
-        ("global-source-write", include_str!("fixtures/coalesce_snapshot/global-source-write.rock")),
-        ("array-source-write", include_str!("fixtures/coalesce_snapshot/array-source-write.rock")),
-        ("source-write-then-escape", include_str!("fixtures/coalesce_snapshot/source-write-then-escape.rock")),
+        (
+            "source-write",
+            include_str!("fixtures/coalesce_snapshot/source-write.rock"),
+        ),
+        (
+            "closure-read",
+            include_str!("fixtures/coalesce_snapshot/closure-read.rock"),
+        ),
+        (
+            "cdata-source-write",
+            include_str!("fixtures/coalesce_snapshot/cdata-source-write.rock"),
+        ),
+        (
+            "cdata-closure-read",
+            include_str!("fixtures/coalesce_snapshot/cdata-closure-read.rock"),
+        ),
+        (
+            "generic-source-write",
+            include_str!("fixtures/coalesce_snapshot/generic-source-write.rock"),
+        ),
+        (
+            "global-source-write",
+            include_str!("fixtures/coalesce_snapshot/global-source-write.rock"),
+        ),
+        (
+            "array-source-write",
+            include_str!("fixtures/coalesce_snapshot/array-source-write.rock"),
+        ),
+        (
+            "source-write-then-escape",
+            include_str!("fixtures/coalesce_snapshot/source-write-then-escape.rock"),
+        ),
     ];
     let mut failures = Vec::new();
     for (name, source) in probes {
@@ -158,10 +185,21 @@ fn value_struct_with_whole_use_keeps_cdata() {
     require_luajit();
     let path = std::env::temp_dir().join(format!("skull_coexist_{}.lua", std::process::id()));
     std::fs::write(&path, format!("{lua}\nmain()\n")).expect("write");
-    let out = std::process::Command::new("luajit").arg(&path).output().expect("run");
+    let out = std::process::Command::new("luajit")
+        .arg(&path)
+        .output()
+        .expect("run");
     let _ = std::fs::remove_file(&path);
-    assert!(out.status.success(), "luajit failed:\n{}", String::from_utf8_lossy(&out.stderr));
-    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "33", "coexist must compute correctly");
+    assert!(
+        out.status.success(),
+        "luajit failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "33",
+        "coexist must compute correctly"
+    );
 }
 
 #[test]
@@ -233,7 +271,10 @@ fn native_buffer_value_store_writes_leaves_through_views() {
     );
     // No ctor survives -- neither the element's nor a nested field's.
     for ct in ["Vert_ct(", "V2_ct("] {
-        assert!(!body.contains(ct), "`{ct}` must not survive the store:\n{body}");
+        assert!(
+            !body.contains(ct),
+            "`{ct}` must not survive the store:\n{body}"
+        );
     }
 }
 
@@ -333,7 +374,11 @@ fn nested_scalar_abi_leaf_params_are_injective() {
         .and_then(|(_, rest)| rest.split_once(')'))
         .map(|(p, _)| p.to_string())
         .unwrap_or_else(|| panic!("no param list in:\n{f}"));
-    let names: Vec<&str> = params.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+    let names: Vec<&str> = params
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
     let mut uniq = names.clone();
     uniq.sort_unstable();
     uniq.dedup();
@@ -458,7 +503,10 @@ fn non_colliding_underscore_field_still_scalarizes() {
     let lua = emit_module(UNDERSCORE_FIELD_NO_COLLISION);
     let f = function_body(&lua, "fine");
     for leaf in ["r__tl__z", "r__tl__x", "r__tl__y"] {
-        assert!(f.contains(leaf), "leaf param `{leaf}` must be emitted:\n{f}");
+        assert!(
+            f.contains(leaf),
+            "leaf param `{leaf}` must be emitted:\n{f}"
+        );
     }
     assert!(
         !f.contains("r__tl__z, r__tl__z"),
@@ -509,7 +557,13 @@ fn leaf_form_value_copy_in_a_closure_builds_one_box() {
         1,
         "restoring the saved Mat4 builds exactly one box:\n{body}"
     );
-    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "value_scalarize_leaf_form_saved"), "true 1");
+    assert_eq!(
+        run_luajit(
+            &format!("{lua}\nmain()\n"),
+            "value_scalarize_leaf_form_saved"
+        ),
+        "true 1"
+    );
 }
 
 // Enums are immutable, so a copy of a value that holds an enum box can share
@@ -551,8 +605,18 @@ fn a_value_copy_shares_its_enum_children() {
     let body = function_body(&lua, "set_count");
     // `let item` keeps its join as leaves, so the one `kind` box is the
     // stored item's; the copies of `item` add none.
-    assert_eq!(body.matches("__ty = \"QKind\"").count(), 1, "set_count rebuilds a QKind box:\n{body}");
-    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "value_scalarize_enum_child_copy"), "8 8 0 0 gold");
+    assert_eq!(
+        body.matches("__ty = \"QKind\"").count(),
+        1,
+        "set_count rebuilds a QKind box:\n{body}"
+    );
+    assert_eq!(
+        run_luajit(
+            &format!("{lua}\nmain()\n"),
+            "value_scalarize_enum_child_copy"
+        ),
+        "8 8 0 0 gold"
+    );
 }
 
 /// `W` is wide enough (50 leaves) to cross every boundary as one box.
@@ -582,7 +646,13 @@ fn main() {{
 #[test]
 fn a_copy_keeps_its_sources_nullable_child_snapshot() {
     let lua = emit_module(&nullable_child_snapshot_source());
-    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "value_scalarize_nullable_child_snapshot"), "1");
+    assert_eq!(
+        run_luajit(
+            &format!("{lua}\nmain()\n"),
+            "value_scalarize_nullable_child_snapshot"
+        ),
+        "1"
+    );
 }
 
 const RECURSIVE_VALUE_COPY: &str = r#"
@@ -627,5 +697,11 @@ fn main() {
 }
 "#,
     );
-    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "value_scalarize_recursive_read"), "1");
+    assert_eq!(
+        run_luajit(
+            &format!("{lua}\nmain()\n"),
+            "value_scalarize_recursive_read"
+        ),
+        "1"
+    );
 }

@@ -69,7 +69,8 @@ fn on_killed_hook_hoisted_to_shared_toplevel_fn() {
 fn hook_fn_shared_across_constructions_and_still_fires() {
     let lua = emit_module(ON_KILLED);
     let w = mangled_name(&lua, "worker");
-    let driver = format!("\n\
+    let driver = format!(
+        "\n\
         local h1 = {w}(5)\n\
         local h2 = {w}(6)\n\
         {w}__resume(h1, nil)\n\
@@ -81,7 +82,8 @@ fn hook_fn_shared_across_constructions_and_still_fires() {
         print(#fresh == 0 and \"shared\" or table.concat(fresh, \",\"))\n\
         __rock_coroutine_kill(h1)\n\
         local log_key = __rock_global_entry(\"LOG\").slots[1]\n\
-        print(__rock_globals[log_key])\n");
+        print(__rock_globals[log_key])\n"
+    );
     let out = run_luajit(&format!("{lua}{driver}"), "shared");
     assert_eq!(
         out, "shared\n105",

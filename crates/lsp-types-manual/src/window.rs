@@ -27,7 +27,8 @@ pub struct WindowClientCapabilities {
     pub show_document: Option<ShowDocumentClientCapabilities>,
 }
 
-impl_lsp_struct!(WindowClientCapabilities,
+impl_lsp_struct!(
+    WindowClientCapabilities,
     required {},
     optional {
         work_done_progress: bool = "workDoneProgress",
@@ -42,9 +43,12 @@ pub struct ShowMessageRequestClientCapabilities {
     pub message_action_item: Option<MessageActionItemCapabilities>,
 }
 
-impl_lsp_struct!(ShowMessageRequestClientCapabilities,
+impl_lsp_struct!(
+    ShowMessageRequestClientCapabilities,
     required {},
-    optional { message_action_item: MessageActionItemCapabilities = "messageActionItem" }
+    optional {
+        message_action_item: MessageActionItemCapabilities = "messageActionItem"
+    }
 );
 
 #[derive(Debug, PartialEq, Clone, Default)]
@@ -52,9 +56,12 @@ pub struct MessageActionItemCapabilities {
     pub additional_properties_support: Option<bool>,
 }
 
-impl_lsp_struct!(MessageActionItemCapabilities,
+impl_lsp_struct!(
+    MessageActionItemCapabilities,
     required {},
-    optional { additional_properties_support: bool = "additionalPropertiesSupport" }
+    optional {
+        additional_properties_support: bool = "additionalPropertiesSupport"
+    }
 );
 
 #[derive(Debug, Eq, PartialEq, Clone)]
@@ -71,10 +78,15 @@ pub struct MessageActionItem {
 impl serde::Serialize for MessageActionItem {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         let mut map = serde_json::Map::new();
-        map.insert("title".to_string(),
-            serde_json::to_value(&self.title).map_err(serde::ser::Error::custom)?);
+        map.insert(
+            "title".to_string(),
+            serde_json::to_value(&self.title).map_err(serde::ser::Error::custom)?,
+        );
         for (k, v) in &self.properties {
-            map.insert(k.clone(), serde_json::to_value(v).map_err(serde::ser::Error::custom)?);
+            map.insert(
+                k.clone(),
+                serde_json::to_value(v).map_err(serde::ser::Error::custom)?,
+            );
         }
         serde_json::Value::Object(map).serialize(s)
     }
@@ -83,10 +95,12 @@ impl serde::Serialize for MessageActionItem {
 impl<'de> serde::Deserialize<'de> for MessageActionItem {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let mut map = serde_json::Map::<String, serde_json::Value>::deserialize(d)?;
-        let title = map.remove("title")
+        let title = map
+            .remove("title")
             .ok_or_else(|| serde::de::Error::missing_field("title"))
             .and_then(|v| serde_json::from_value(v).map_err(serde::de::Error::custom))?;
-        let properties = map.into_iter()
+        let properties = map
+            .into_iter()
             .map(|(k, v)| {
                 serde_json::from_value(v)
                     .map(|p| (k, p))
@@ -118,7 +132,8 @@ pub struct LogMessageParams {
     pub message: String,
 }
 
-impl_lsp_struct!(LogMessageParams,
+impl_lsp_struct!(
+    LogMessageParams,
     required {
         typ: MessageType = "type",
         message: String = "message",
@@ -132,7 +147,8 @@ pub struct ShowMessageParams {
     pub message: String,
 }
 
-impl_lsp_struct!(ShowMessageParams,
+impl_lsp_struct!(
+    ShowMessageParams,
     required {
         typ: MessageType = "type",
         message: String = "message",
@@ -161,8 +177,11 @@ pub struct ShowDocumentClientCapabilities {
     pub support: bool,
 }
 
-impl_lsp_struct!(ShowDocumentClientCapabilities,
-    required { support: bool = "support" },
+impl_lsp_struct!(
+    ShowDocumentClientCapabilities,
+    required {
+        support: bool = "support"
+    },
     optional {}
 );
 
@@ -177,7 +196,8 @@ pub struct ShowDocumentParams {
     pub selection: Option<Range>,
 }
 
-impl_lsp_struct!(ShowDocumentParams,
+impl_lsp_struct!(
+    ShowDocumentParams,
     required { uri: Uri = "uri" },
     optional {
         external: bool = "external",
@@ -194,7 +214,10 @@ pub struct ShowDocumentResult {
     pub success: bool,
 }
 
-impl_lsp_struct!(ShowDocumentResult,
-    required { success: bool = "success" },
+impl_lsp_struct!(
+    ShowDocumentResult,
+    required {
+        success: bool = "success"
+    },
     optional {}
 );

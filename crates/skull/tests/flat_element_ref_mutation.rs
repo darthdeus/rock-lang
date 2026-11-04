@@ -79,15 +79,24 @@ fn emit_past_relocatable_ref_rule(source: &str) -> String {
         .iter()
         .flatten()
         .flat_map(|inf| inf.errors.values().flatten())
-        .chain(ws.modules.iter().flat_map(|m| m.lowering_errors.values().flatten()))
+        .chain(
+            ws.modules
+                .iter()
+                .flat_map(|m| m.lowering_errors.values().flatten()),
+        )
         .chain(ws.modules.iter().flat_map(|m| m.interface_errors.iter()))
         .map(|e| e.message.clone())
         .collect();
     assert!(
-        errors.iter().all(|m| m.contains("cannot retain a reference into relocatable")),
+        errors
+            .iter()
+            .all(|m| m.contains("cannot retain a reference into relocatable")),
         "unexpected frontend errors: {errors:#?}"
     );
-    let module = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
+    let module = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("test module");
     let (emission, _) = skull::mir_emit::emit_full(&ws, module).expect("production emit");
     emission.lua
 }
@@ -181,7 +190,10 @@ fn main() {
         &format!("{lua}\nlocal ok, err = pcall(main)\nprint(ok, err ~= nil)\n"),
         "missing_key_ref",
     );
-    assert_eq!(out, "false\ttrue", "the borrow of a missing key must raise: {out}");
+    assert_eq!(
+        out, "false\ttrue",
+        "the borrow of a missing key must raise: {out}"
+    );
 }
 
 /// Recursion settles a `ref` result only when every return agrees: a recursive
@@ -208,6 +220,12 @@ fn main() {
         Ok(_) => panic!("a flat and a boxed `ref` return of one callee must not emit"),
         Err(err) => err,
     };
-    assert!(err.message.contains("`pick`") && err.message.contains("differently stored reference"), "{err:?}");
-    assert!(!err.labels.is_empty(), "the rejection must carry a source span: {err:?}");
+    assert!(
+        err.message.contains("`pick`") && err.message.contains("differently stored reference"),
+        "{err:?}"
+    );
+    assert!(
+        !err.labels.is_empty(),
+        "the rejection must carry a source span: {err:?}"
+    );
 }

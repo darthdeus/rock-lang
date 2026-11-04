@@ -73,7 +73,9 @@ impl ArgsError {
 
 /// How many generics the struct declares.
 pub fn declared_generics(ws: &Workspace, sid: StructId) -> usize {
-    ws.modules[sid.module.index()].structs[sid.def].generics.len()
+    ws.modules[sid.module.index()].structs[sid.def]
+        .generics
+        .len()
 }
 
 /// The struct's generic ARGUMENTS at an injection, from the literal expression
@@ -111,11 +113,10 @@ pub fn args_at(
         Err(r) => return Err(ArgsError::Unconvertible(r)),
     };
     match mono {
-        MonoTy::App { ctor: MonoCtor::Nominal(n), params }
-            if n == struct_name && params.len() == generics =>
-        {
-            Ok(Args::At(params))
-        }
+        MonoTy::App {
+            ctor: MonoCtor::Nominal(n),
+            params,
+        } if n == struct_name && params.len() == generics => Ok(Args::At(params)),
         other => Err(ArgsError::NotThisStruct(other.render())),
     }
 }

@@ -77,13 +77,14 @@ impl ComptimeFiles for FsComptimeFiles {
             .join(rel)
             .canonicalize()
             .map_err(|e| EmbedReadError::Unreadable(e.to_string()))?;
-        let canon_root =
-            root.canonicalize().map_err(|e| EmbedReadError::RootUnreadable(e.to_string()))?;
+        let canon_root = root
+            .canonicalize()
+            .map_err(|e| EmbedReadError::RootUnreadable(e.to_string()))?;
         if !file.starts_with(&canon_root) {
             return Err(EmbedReadError::EscapesRoot);
         }
-        let value =
-            std::fs::read_to_string(&file).map_err(|e| EmbedReadError::Unreadable(e.to_string()))?;
+        let value = std::fs::read_to_string(&file)
+            .map_err(|e| EmbedReadError::Unreadable(e.to_string()))?;
         Ok((file.to_string_lossy().into_owned(), value))
     }
 
@@ -102,7 +103,9 @@ pub struct MemoryComptimeFiles {
 
 impl MemoryComptimeFiles {
     pub fn new(files: impl IntoIterator<Item = (String, String)>) -> Self {
-        Self { files: files.into_iter().collect() }
+        Self {
+            files: files.into_iter().collect(),
+        }
     }
 
     fn key(root: &Path, rel: &Path) -> Option<String> {
@@ -159,7 +162,9 @@ mod tests {
             Err(EmbedReadError::EscapesRoot)
         ));
         match files.read(&root, Path::new("b.txt")) {
-            Err(EmbedReadError::Unreadable(why)) => assert!(why.contains("supplied no file `b.txt`")),
+            Err(EmbedReadError::Unreadable(why)) => {
+                assert!(why.contains("supplied no file `b.txt`"))
+            }
             other => panic!("unsupplied file must be unreadable: {other:?}"),
         }
     }

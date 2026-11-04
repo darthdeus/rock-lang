@@ -3,9 +3,11 @@
 //! skull-mir produces for a tier-0 fn is reducible by construction, so the simple
 //! iterative algorithms suffice at shader scale (tens of blocks).
 
-use skull_mir::cfg::dense::{bi, bx, collect_loop_body, dominates, idoms, pred_list, rpo, succ_list};
 use comfy_la_arena::Idx;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use skull_mir::cfg::dense::{
+    bi, bx, collect_loop_body, dominates, idoms, pred_list, rpo, succ_list,
+};
 use skull_mir::mir::{Block, MirFunc, Term};
 
 /// One natural loop: its header (back-edge target), the set of blocks in the
@@ -122,10 +124,17 @@ pub fn natural_loops(
             })
             .collect();
         candidates.sort_by_key(|&b| b);
-        let Some(&test) = candidates.iter().find(|&&c| candidates.iter().all(|&c2| dominates(idom, c, c2))) else {
+        let Some(&test) = candidates
+            .iter()
+            .find(|&&c| candidates.iter().all(|&c2| dominates(idom, c, c2)))
+        else {
             continue; // no single condition test; emit rejects via the walker
         };
-        let exits: Vec<usize> = succ[test].iter().copied().filter(|s| !body.contains(s)).collect();
+        let exits: Vec<usize> = succ[test]
+            .iter()
+            .copied()
+            .filter(|s| !body.contains(s))
+            .collect();
         if exits.len() != 1 {
             continue;
         }
@@ -172,7 +181,11 @@ mod tests {
         let f = mk(
             4,
             vec![
-                Term::Branch { cond: cond(), then_bb: bi(1), else_bb: bi(2) },
+                Term::Branch {
+                    cond: cond(),
+                    then_bb: bi(1),
+                    else_bb: bi(2),
+                },
                 Term::Goto(bi(3)),
                 Term::Goto(bi(3)),
                 Term::Return(vec![]),
@@ -192,7 +205,11 @@ mod tests {
         let f = mk(
             4,
             vec![
-                Term::Branch { cond: cond(), then_bb: bi(1), else_bb: bi(2) },
+                Term::Branch {
+                    cond: cond(),
+                    then_bb: bi(1),
+                    else_bb: bi(2),
+                },
                 Term::Return(vec![]),
                 Term::Goto(bi(3)),
                 Term::Return(vec![]),
@@ -212,8 +229,16 @@ mod tests {
             7,
             vec![
                 Term::Goto(bi(1)),
-                Term::Branch { cond: cond(), then_bb: bi(2), else_bb: bi(6) },
-                Term::Branch { cond: cond(), then_bb: bi(3), else_bb: bi(5) },
+                Term::Branch {
+                    cond: cond(),
+                    then_bb: bi(2),
+                    else_bb: bi(6),
+                },
+                Term::Branch {
+                    cond: cond(),
+                    then_bb: bi(3),
+                    else_bb: bi(5),
+                },
                 Term::Goto(bi(4)),
                 Term::Goto(bi(2)),
                 Term::Goto(bi(1)),
@@ -223,7 +248,11 @@ mod tests {
         let s = analyze(&f);
         let outer = s.loops.get(&bi(1)).expect("outer loop");
         assert_eq!(outer.exit, bi(6));
-        assert!(outer.body.contains(&bi(1)) && outer.body.contains(&bi(5)) && outer.body.contains(&bi(2)));
+        assert!(
+            outer.body.contains(&bi(1))
+                && outer.body.contains(&bi(5))
+                && outer.body.contains(&bi(2))
+        );
         assert!(!outer.body.contains(&bi(6)));
         let inner = s.loops.get(&bi(2)).expect("inner loop");
         assert_eq!(inner.exit, bi(5));

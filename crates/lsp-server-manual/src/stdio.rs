@@ -50,7 +50,11 @@ pub(crate) fn stdio_transport() -> (Sender<Message>, Receiver<Message>, IoThread
             Ok(())
         })
         .unwrap();
-    let threads = IoThreads { reader, writer, dropper };
+    let threads = IoThreads {
+        reader,
+        writer,
+        dropper,
+    };
     (writer_sender, reader_receiver, threads)
 }
 
@@ -60,7 +64,11 @@ pub(crate) fn make_io_threads(
     writer: thread::JoinHandle<io::Result<()>>,
     dropper: thread::JoinHandle<()>,
 ) -> IoThreads {
-    IoThreads { reader, writer, dropper }
+    IoThreads {
+        reader,
+        writer,
+        dropper,
+    }
 }
 
 pub struct IoThreads {

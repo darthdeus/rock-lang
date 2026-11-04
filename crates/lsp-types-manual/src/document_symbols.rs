@@ -17,10 +17,18 @@ impl serde::Serialize for DocumentSymbolClientCapabilities {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
         let mut st = s.serialize_struct("DocumentSymbolClientCapabilities", 4)?;
-        if let Some(ref v) = self.dynamic_registration { st.serialize_field("dynamicRegistration", v)?; }
-        if let Some(ref v) = self.symbol_kind { st.serialize_field("symbolKind", v)?; }
-        if let Some(ref v) = self.hierarchical_document_symbol_support { st.serialize_field("hierarchicalDocumentSymbolSupport", v)?; }
-        if let Some(ref v) = self.tag_support { st.serialize_field("tagSupport", v)?; }
+        if let Some(ref v) = self.dynamic_registration {
+            st.serialize_field("dynamicRegistration", v)?;
+        }
+        if let Some(ref v) = self.symbol_kind {
+            st.serialize_field("symbolKind", v)?;
+        }
+        if let Some(ref v) = self.hierarchical_document_symbol_support {
+            st.serialize_field("hierarchicalDocumentSymbolSupport", v)?;
+        }
+        if let Some(ref v) = self.tag_support {
+            st.serialize_field("tagSupport", v)?;
+        }
         st.end()
     }
 }
@@ -80,8 +88,11 @@ pub struct DocumentSymbolParams {
     pub partial_result_params: PartialResultParams,
 }
 
-impl_lsp_struct!(DocumentSymbolParams,
-    required { text_document: TextDocumentIdentifier = "textDocument" },
+impl_lsp_struct!(
+    DocumentSymbolParams,
+    required {
+        text_document: TextDocumentIdentifier = "textDocument"
+    },
     optional {},
     flatten {
         work_done_progress_params: WorkDoneProgressParams,

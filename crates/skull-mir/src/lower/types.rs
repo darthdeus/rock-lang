@@ -49,8 +49,14 @@ impl Builder<'_> {
                 self.scx.target(),
                 ty,
                 use_context,
-                &RepUseFacts { tuple_spelled, span: self.cur_span },
-                RepGuarantees { nobox, allow_opaque: true },
+                &RepUseFacts {
+                    tuple_spelled,
+                    span: self.cur_span,
+                },
+                RepGuarantees {
+                    nobox,
+                    allow_opaque: true,
+                },
             )
             .map_err(|error| match error.span.or(self.cur_span) {
                 Some(span) => CompilerError::new_with_label(span, error.message),
@@ -77,8 +83,13 @@ impl Builder<'_> {
 
         let has_presence = matches!(
             value,
-            ValueRepr::Group { present: Some(_), .. }
-                | ValueRepr::Tuple { present: Some(_), .. }
+            ValueRepr::Group {
+                present: Some(_),
+                ..
+            } | ValueRepr::Tuple {
+                present: Some(_),
+                ..
+            }
         );
         let ty = if has_presence && !ty.peel_nullable().1 {
             MonoTy::Nullable(Box::new(ty.clone()))
@@ -88,7 +99,11 @@ impl Builder<'_> {
         let tuple_spelled = matches!(ty.peel_nullable().0, MonoTy::Tuple(_));
         self.concrete_rep_id(
             &ty,
-            if tuple_spelled { RepUse::Return } else { RepUse::Value },
+            if tuple_spelled {
+                RepUse::Return
+            } else {
+                RepUse::Value
+            },
             tuple_spelled,
             self.nobox_value_name(e).is_some(),
         )
@@ -105,9 +120,10 @@ impl Builder<'_> {
                 let enum_name = match self.body.expr_arena[e] {
                     Expr::EnumVariant { enum_name, .. } => Some(enum_name),
                     _ => match self.expr_ty(e) {
-                        Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. })
-                            if EnumPlan::for_name(self.ws, name).is_some() =>
-                            Some(name),
+                        Some(TypeExpr::App {
+                            ctor: TypeCtor::Nominal(name),
+                            ..
+                        }) if EnumPlan::for_name(self.ws, name).is_some() => Some(name),
                         _ => None,
                     },
                 };
@@ -118,7 +134,9 @@ impl Builder<'_> {
                     })
                 } else {
                     let inf = self.inf.ok_or_else(|| {
-                        self.gap_here("expression has no inference context for representation planning")
+                        self.gap_here(
+                            "expression has no inference context for representation planning",
+                        )
                     })?;
                     let ty_id = inf.expr_types.get(e).copied().ok_or_else(|| {
                         self.gap_here("expression has no type for representation planning")
@@ -202,7 +220,9 @@ impl Builder<'_> {
                         if let Some(nested) = self.nested_fn_globals.get(&raw(binding)) {
                             return Ok(nested.representation.result());
                         }
-                        let Some(ty) = self.binding_ty(binding) else { return Ok(None) };
+                        let Some(ty) = self.binding_ty(binding) else {
+                            return Ok(None);
+                        };
                         Ok(self.fn_value_rep_plan(ty)?.and_then(|plan| plan.result()))
                     }
                     Callee::Value(value) => {
@@ -272,7 +292,10 @@ impl Builder<'_> {
                 &ty,
                 RepUse::Value,
                 &RepUseFacts::default(),
-                RepGuarantees { nobox, allow_opaque: true },
+                RepGuarantees {
+                    nobox,
+                    allow_opaque: true,
+                },
             )
             .map_err(|error| match error.span.or(self.cur_span) {
                 Some(span) => CompilerError::new_with_label(span, error.message),
@@ -303,7 +326,9 @@ impl Builder<'_> {
         use_context: RepUse,
         nobox: bool,
     ) -> Result<Option<ValueShape>, CompilerError> {
-        let Some(mono) = self.concrete_ty_id(ty) else { return Ok(None) };
+        let Some(mono) = self.concrete_ty_id(ty) else {
+            return Ok(None);
+        };
         let id = self.concrete_rep_id(&mono, use_context, false, nobox)?;
         Ok(self.scx.rep_arena().value_shape(id))
     }
@@ -320,7 +345,10 @@ impl Builder<'_> {
 
     /// The boxed-ABI view of [`Self::spread_field_bundles`]. Field extraction has
     /// one representation-aware implementation; only the final packing differs.
-    pub(crate) fn spread_field_insts(&mut self, op: Idx<Expr>) -> Result<Vec<(Ustr, Idx<Inst>)>, CompilerError> {
+    pub(crate) fn spread_field_insts(
+        &mut self,
+        op: Idx<Expr>,
+    ) -> Result<Vec<(Ustr, Idx<Inst>)>, CompilerError> {
         let bundles = self.spread_field_bundles(op)?;
         let mut out = Vec::with_capacity(bundles.len());
         for (field, bundle) in bundles {
@@ -331,8 +359,16 @@ impl Builder<'_> {
 
     /// Extract a spread into field bundles. Every field gets the child plan from
     /// the declaring struct before a caller places it into a parameter slot.
-    pub(crate) fn spread_field_bundles(&mut self, op: Idx<Expr>) -> Result<Vec<(Ustr, ValueBundle)>, CompilerError> {
-        if let Expr::StructLiteral { name, fields, bases } = self.body.expr_arena[op].clone() {
+    pub(crate) fn spread_field_bundles(
+        &mut self,
+        op: Idx<Expr>,
+    ) -> Result<Vec<(Ustr, ValueBundle)>, CompilerError> {
+        if let Expr::StructLiteral {
+            name,
+            fields,
+            bases,
+        } = self.body.expr_arena[op].clone()
+        {
             let decl = self
                 .struct_field_names(name)
                 .ok_or_else(|| gap(format!("spread operand `{name}` has no known fields")))?;
@@ -378,7 +414,8 @@ impl Builder<'_> {
                     let r = if let Some((_, r)) = explicit.iter().find(|(n, _)| *n == fname) {
                         r.clone()
                     } else {
-                        let raw = self.spread_base_field_repr(&base_repr, base_boxed, name, fname, base)?;
+                        let raw =
+                            self.spread_base_field_repr(&base_repr, base_boxed, name, fname, base)?;
                         self.bundle_struct_field(name, fname, raw, Some(op))?
                     };
                     out.push((fname, r));
@@ -393,7 +430,10 @@ impl Builder<'_> {
             other => Some(self.pack(other.clone())?),
         };
         let name = match self.expr_ty(op) {
-            Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }) => name,
+            Some(TypeExpr::App {
+                ctor: TypeCtor::Nominal(name),
+                ..
+            }) => name,
             _ => return Err(gap("spread operand is not a nominal struct")),
         };
         let fields = self
@@ -402,7 +442,13 @@ impl Builder<'_> {
         let origin = Some(op);
         let mut out = Vec::new();
         for fname in fields {
-            let r = self.spread_base_field_repr(&Some(base_repr.clone()), base_boxed, name, fname, origin)?;
+            let r = self.spread_base_field_repr(
+                &Some(base_repr.clone()),
+                base_boxed,
+                name,
+                fname,
+                origin,
+            )?;
             out.push((fname, self.bundle_struct_field(name, fname, r, origin)?));
         }
         Ok(out)
@@ -435,13 +481,12 @@ impl Builder<'_> {
             .iter()
             .find(|f| f.name == field)
             .ok_or_else(|| gap(format!("spread field `{sname}.{field}` is not declared")))?;
-        let ty = origin
-            .and_then(|literal| {
-                self.dispatch()
-                    .concrete_types
-                    .and_then(|tables| tables.struct_field_type(literal, field))
-                    .map(|id| self.concrete_mono_view(id, ConcreteMonoConsumer::Dispatch))
-            });
+        let ty = origin.and_then(|literal| {
+            self.dispatch()
+                .concrete_types
+                .and_then(|tables| tables.struct_field_type(literal, field))
+                .map(|id| self.concrete_mono_view(id, ConcreteMonoConsumer::Dispatch))
+        });
         let ty = match ty {
             Some(ty) => Some(ty),
             None => match origin.and_then(|subject| self.concrete_expr_ty(subject)) {
@@ -452,16 +497,12 @@ impl Builder<'_> {
         Ok(match ty {
             Some(ty) => ty,
             None => Rc::new(
-                crate::monoty::convert_decl(
-                    self.ws,
-                    fdef.ty,
-                    &crate::monoty::MonoSubst::default(),
-                )
-                .map_err(|reason| {
-                    self.gap_here(format!(
-                        "spread field `{sname}.{field}` has no concrete type plan: {reason:?}"
-                    ))
-                })?,
+                crate::monoty::convert_decl(self.ws, fdef.ty, &crate::monoty::MonoSubst::default())
+                    .map_err(|reason| {
+                        self.gap_here(format!(
+                            "spread field `{sname}.{field}` has no concrete type plan: {reason:?}"
+                        ))
+                    })?,
             ),
         })
     }
@@ -486,7 +527,11 @@ impl Builder<'_> {
             .iter()
             .find(|f| f.name == field)
             .ok_or_else(|| gap(format!("field `{sname}.{field}` is not declared")))?;
-        let MonoTy::App { ctor: crate::monoty::MonoCtor::Nominal(base), params } = owner.peel_nullable().0 else {
+        let MonoTy::App {
+            ctor: crate::monoty::MonoCtor::Nominal(base),
+            params,
+        } = owner.peel_nullable().0
+        else {
             return Err(gap(format!("a `{sname}` value has type `{owner:?}`")));
         };
         if *base != sname {
@@ -506,13 +551,19 @@ impl Builder<'_> {
                 .raw_ty_node(*generic)
                 .ok_or_else(|| gap("struct generic parameter has no type node"))?
             else {
-                return Err(gap(format!("struct `{sname}` has a non-generic parameter slot")));
+                return Err(gap(format!(
+                    "struct `{sname}` has a non-generic parameter slot"
+                )));
             };
             subst.insert(var, param.clone());
         }
-        crate::monoty::convert_decl(self.ws, fdef.ty, &subst).map(Rc::new).map_err(|reason| {
-            gap(format!("field `{sname}.{field}` has no concrete type plan: {reason:?}"))
-        })
+        crate::monoty::convert_decl(self.ws, fdef.ty, &subst)
+            .map(Rc::new)
+            .map_err(|reason| {
+                gap(format!(
+                    "field `{sname}.{field}` has no concrete type plan: {reason:?}"
+                ))
+            })
     }
 
     fn struct_field_representation(
@@ -543,8 +594,13 @@ impl Builder<'_> {
         fname: Ustr,
         origin: Option<Idx<Expr>>,
     ) -> Result<ValueRepr, CompilerError> {
-        if let Some(ValueRepr::Group { name: bn, parts, .. }) = base_repr {
-            let i = self.field_index(*bn, fname).ok_or_else(|| gap("spread field"))?;
+        if let Some(ValueRepr::Group {
+            name: bn, parts, ..
+        }) = base_repr
+        {
+            let i = self
+                .field_index(*bn, fname)
+                .ok_or_else(|| gap("spread field"))?;
             return Ok(parts[i].clone());
         }
         let field_plan = self.struct_field_plan(name, fname, false)?;
@@ -559,15 +615,16 @@ impl Builder<'_> {
             };
             return Ok(self.flat_cells_to_repr(&shape, cells));
         }
-        if let (Some((cname, nullable)), Some(parent)) =
-            (field_plan.embed(), base_boxed)
-        {
+        if let (Some((cname, nullable)), Some(parent)) = (field_plan.embed(), base_boxed) {
             return self.load_embed_repr(parent, fname, cname, nullable);
         }
         Ok(match (base_repr, base_boxed) {
             // The base keeps its own value fields.
             (Some(_), Some(bi)) => {
-                let v = self.emit_cur(Inst::Field { base: bi, field: fname });
+                let v = self.emit_cur(Inst::Field {
+                    base: bi,
+                    field: fname,
+                });
                 let ty = self.struct_field_mono_ty(name, fname, origin)?;
                 self.copied_value_repr(&ty, v)?
             }
@@ -593,7 +650,10 @@ impl Builder<'_> {
             match dispatch.ty_node(ty)? {
                 TypeExpr::Infer(var, _) => ty = self.inf?.substitutions.get(var)?,
                 TypeExpr::Nullable(inner) => ty = ty.with_idx(inner),
-                TypeExpr::App { ctor: TypeCtor::Ref, params } => {
+                TypeExpr::App {
+                    ctor: TypeCtor::Ref,
+                    params,
+                } => {
                     return dispatch.resolve_ty(ty.with_idx(params.into_iter().next()?));
                 }
                 other => return Some(other),
@@ -602,7 +662,9 @@ impl Builder<'_> {
     }
 
     pub(crate) fn current_expr_storage_ty_id(&self) -> Option<TyId> {
-        let ty = self.cur_expr.and_then(|e| self.inf?.expr_types.get(e).copied())?;
+        let ty = self
+            .cur_expr
+            .and_then(|e| self.inf?.expr_types.get(e).copied())?;
         let resolved = self.resolve_tyid(ty)?;
         if matches!(
             self.dispatch().ty_node(resolved),
@@ -615,7 +677,9 @@ impl Builder<'_> {
     }
 
     pub(crate) fn current_expr_unit_storage_ty_id(&self) -> Option<TyId> {
-        let ty = self.cur_expr.and_then(|e| self.inf?.expr_types.get(e).copied())?;
+        let ty = self
+            .cur_expr
+            .and_then(|e| self.inf?.expr_types.get(e).copied())?;
         let resolved = self.resolve_tyid(ty)?;
         matches!(
             self.dispatch().ty_node(resolved),
@@ -719,13 +783,16 @@ impl Builder<'_> {
                 return Ok(Some(RetSlot::Leaves(shape)));
             }
         }
-        let shape = match self.nobox_value_shape_of(e)?.or(self.nullable_value_shape_of(e)?) {
+        let shape = match self
+            .nobox_value_shape_of(e)?
+            .or(self.nullable_value_shape_of(e)?)
+        {
             Some(shape) => shape,
             None => {
-                let Some(name) = self.value_struct_of(e) else { return Ok(None) };
-                if self.scx.values_first_class
-                    || !planned_value_contains_flat_enum(self.ws, name)
-                {
+                let Some(name) = self.value_struct_of(e) else {
+                    return Ok(None);
+                };
+                if self.scx.values_first_class || !planned_value_contains_flat_enum(self.ws, name) {
                     return Ok(None);
                 }
                 let Some(rep) = self.expr_rep_id(e, RepUse::Value, false)? else {
@@ -766,14 +833,16 @@ impl Builder<'_> {
         gidx: usize,
     ) -> Result<TupleRetShape, CompilerError> {
         let next = self.concrete_plan.bound_tree.get(gidx).ok_or_else(|| {
-            gap(format!("concrete plan is missing bound `next` witness {gidx}"))
+            gap(format!(
+                "concrete plan is missing bound `next` witness {gidx}"
+            ))
         })?;
         let instance = match next {
             crate::bound::ResolvedBoundNext::Concrete { instance, .. } => instance.clone(),
             crate::bound::ResolvedBoundNext::CallerGeneric(inner) => {
                 return Err(gap(format!(
                     "concrete bound `next` witness {gidx} remains caller-generic at {inner}"
-                )))
+                )));
             }
         };
         let shape = self
@@ -800,17 +869,24 @@ impl Builder<'_> {
     /// Attached at CONSTRUCTION so the cast happens once per buffer. Casting per
     /// access would allocate a pointer cdata each time, which is the allocation
     /// leaf addressing exists to remove.
-    pub(crate) fn leaf_view_fields(&mut self, ctype: Ustr, ptr: Idx<Inst>) -> Vec<(Ustr, Idx<Inst>)> {
-        let Ok(ctys) = self.scx.rep_arena().nominal_leaf_view_ctys(
-            self.ws,
-            self.scx.target,
-            ctype,
-        ) else {
+    pub(crate) fn leaf_view_fields(
+        &mut self,
+        ctype: Ustr,
+        ptr: Idx<Inst>,
+    ) -> Vec<(Ustr, Idx<Inst>)> {
+        let Ok(ctys) = self
+            .scx
+            .rep_arena()
+            .nominal_leaf_view_ctys(self.ws, self.scx.target, ctype)
+        else {
             return Vec::new();
         };
         ctys.into_iter()
             .map(|cty| {
-                let view = self.emit_cur(Inst::FfiViewCast { cty: Ustr::from(cty), ptr });
+                let view = self.emit_cur(Inst::FfiViewCast {
+                    cty: Ustr::from(cty),
+                    ptr,
+                });
                 (leaf_view_field(cty), view)
             })
             .collect()
@@ -862,7 +938,9 @@ impl Builder<'_> {
         &self,
         e: Idx<Expr>,
     ) -> Result<Option<TupleRetShape>, CompilerError> {
-        let Some(concrete) = self.concrete_expr_ty(e) else { return Ok(None) };
+        let Some(concrete) = self.concrete_expr_ty(e) else {
+            return Ok(None);
+        };
         let (payload, _) = concrete.peel_nullable();
         match payload {
             MonoTy::Tuple(_) => self.concrete_rep_tuple(&concrete, RepUse::Return, true, false),

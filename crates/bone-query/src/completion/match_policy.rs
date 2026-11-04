@@ -136,7 +136,10 @@ mod tests {
         // The canonical bug: `lotop` skips the 2nd `O`, landing `t` mid-word.
         assert!(!crate::query::clean_match(b"LOOT_OPEN", b"lotop"));
         assert!(under(MatchPolicy::Subseq, || admit(b"LOOT_OPEN", b"lotop")));
-        assert!(under(MatchPolicy::Subseq3, || admit(b"LOOT_OPEN", b"lotop")));
+        assert!(under(MatchPolicy::Subseq3, || admit(
+            b"LOOT_OPEN",
+            b"lotop"
+        )));
         assert!(!under(MatchPolicy::Clean, || admit(b"LOOT_OPEN", b"lotop")));
     }
 
@@ -144,9 +147,18 @@ mod tests {
     fn subseq3_stays_clean_below_three_chars() {
         // 2-char scatter: subseq admits the flood, subseq3 (== clean here) rejects.
         assert!(!crate::query::clean_match(b"close_loot_panel", b"op"));
-        assert!(under(MatchPolicy::Subseq, || admit(b"close_loot_panel", b"op")));
-        assert!(!under(MatchPolicy::Subseq3, || admit(b"close_loot_panel", b"op")));
+        assert!(under(MatchPolicy::Subseq, || admit(
+            b"close_loot_panel",
+            b"op"
+        )));
+        assert!(!under(MatchPolicy::Subseq3, || admit(
+            b"close_loot_panel",
+            b"op"
+        )));
         // At 3 chars subseq3 opens up.
-        assert!(under(MatchPolicy::Subseq3, || admit(b"close_loot_panel", b"opl")));
+        assert!(under(MatchPolicy::Subseq3, || admit(
+            b"close_loot_panel",
+            b"opl"
+        )));
     }
 }

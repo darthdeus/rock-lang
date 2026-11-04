@@ -41,9 +41,16 @@ pub fn backend_variant(
     // (bone collapsed a backend-variant group to `rep`). The overwhelmingly
     // common single-candidate call skips the sibling scan entirely, keeping
     // the `Any`-serves-everything fast path off the hot overload-select path.
-    let has_variants = ws.functions_by_name.get(&name).is_some_and(|l| l.len() >= 2);
+    let has_variants = ws
+        .functions_by_name
+        .get(&name)
+        .is_some_and(|l| l.len() >= 2);
     if !has_variants {
-        return if serves_target(rep_backend, target) { Ok(rep) } else { Err(NoServingBinding) };
+        return if serves_target(rep_backend, target) {
+            Ok(rep)
+        } else {
+            Err(NoServingBinding)
+        };
     }
     // An exact-target sibling outranks an `Any` representative: backend
     // mapping beats the portable fallback (the intrinsics precedence
@@ -72,7 +79,10 @@ pub fn backend_variant_instance(
 ) -> Result<crate::instance::Instance, NoServingBinding> {
     let f = &ws.module(inst.func.module).functions[inst.func.func];
     let func = backend_variant(ws, f.name, inst.func, target)?;
-    Ok(crate::instance::Instance { func, args: inst.args.clone() })
+    Ok(crate::instance::Instance {
+        func,
+        args: inst.args.clone(),
+    })
 }
 
 /// The backend-variant group representative of `rep` -- the declaration bone
@@ -101,14 +111,22 @@ pub fn canonical_variant(ws: &Workspace, rep: FuncRef) -> FuncRef {
 /// stays by itself.
 pub fn backend_variant_group(ws: &Workspace, member: FuncRef) -> Vec<FuncRef> {
     let key = ws.backend_variant_key(member.module, member.func);
-    let Some(cands) = ws.functions_by_name.get(&key.0) else { return vec![member] };
+    let Some(cands) = ws.functions_by_name.get(&key.0) else {
+        return vec![member];
+    };
     let group: Vec<FuncRef> = cands
         .iter()
         .filter(|&&(mid, fid)| ws.backend_variant_key(mid, fid) == key)
-        .map(|&(mid, fid)| FuncRef { module: mid, func: fid })
+        .map(|&(mid, fid)| FuncRef {
+            module: mid,
+            func: fid,
+        })
         .collect();
     let mut backends = std::collections::BTreeSet::new();
-    if group.iter().all(|r| backends.insert(ws.module(r.module).functions[r.func].backend)) {
+    if group
+        .iter()
+        .all(|r| backends.insert(ws.module(r.module).functions[r.func].backend))
+    {
         group
     } else {
         vec![member]
@@ -183,7 +201,10 @@ impl Builder<'_> {
     /// Select an immediate projection before expanding its storage. Both
     /// scalarized cells and borrowed boxes use the same shape-owned leaf range;
     /// reads happen here, with no deferred place carried to a later consumer.
-    fn immediate_value_projection_repr(&mut self, e: Idx<Expr>) -> Result<Option<ValueRepr>, CompilerError> {
+    fn immediate_value_projection_repr(
+        &mut self,
+        e: Idx<Expr>,
+    ) -> Result<Option<ValueRepr>, CompilerError> {
         if self.scx.values_first_class {
             return Ok(None);
         }
@@ -210,7 +231,8 @@ impl Builder<'_> {
             root = base;
         }
         let indexed = if let Expr::Index { base, index } = self.body.expr_arena[root] {
-            self.vec_strided_elem_of(base)?.map(|elem| (base, index, elem))
+            self.vec_strided_elem_of(base)?
+                .map(|elem| (base, index, elem))
         } else {
             None
         };
@@ -226,17 +248,31 @@ impl Builder<'_> {
             {
                 // A borrowed leaf table uses the same selected-range reader as
                 // an owned box; expanding the whole ref retains unused reads.
-                (None, Some(Inst::Load(self.binds[&raw(binding)])), Some(name))
+                (
+                    None,
+                    Some(Inst::Load(self.binds[&raw(binding)])),
+                    Some(name),
+                )
             }
             Expr::Var(binding) => {
-                let Some(name) = self.boxed_value_local(binding, root) else { return Ok(None) };
-                (None, Some(Inst::Load(self.binds[&raw(binding)])), Some(name))
+                let Some(name) = self.boxed_value_local(binding, root) else {
+                    return Ok(None);
+                };
+                (
+                    None,
+                    Some(Inst::Load(self.binds[&raw(binding)])),
+                    Some(name),
+                )
             }
             Expr::Global(global) => {
-                let Some(name) = self.value_struct_of(root) else { return Ok(None) };
+                let Some(name) = self.value_struct_of(root) else {
+                    return Ok(None);
+                };
                 // Nobox globals use declared-type scalar storage, including a
                 // presence leaf when narrowed from nullable. Keep that reader.
-                if self.is_nobox_struct(name) { return Ok(None); }
+                if self.is_nobox_struct(name) {
+                    return Ok(None);
+                }
                 (None, Some(Inst::Global(global)), Some(name))
             }
             Expr::FieldAccess { .. } if reference_field.is_some() => {
@@ -247,7 +283,9 @@ impl Builder<'_> {
         };
         let mut path = Vec::new();
         let mut at = e;
-        while at != root && let Expr::FieldAccess { base, field } = self.body.expr_arena[at] {
+        while at != root
+            && let Expr::FieldAccess { base, field } = self.body.expr_arena[at]
+        {
             if self.swizzle_of(base, field).is_some() {
                 return Ok(None);
             }
@@ -255,19 +293,28 @@ impl Builder<'_> {
             at = base;
         }
         path.reverse();
-        let boxed_shape = boxed.map(|name| self.nominal_rep_shape_required(name, false)).transpose()?;
-        let indexed_shape = indexed.map(|(_, _, elem)| self.column_shape(elem)).transpose()?;
+        let boxed_shape = boxed
+            .map(|name| self.nominal_rep_shape_required(name, false))
+            .transpose()?;
+        let indexed_shape = indexed
+            .map(|(_, _, elem)| self.column_shape(elem))
+            .transpose()?;
         let shape = match boxed_shape.as_ref().or(indexed_shape.as_ref()) {
             Some(shape) => shape,
             None => &self.group_binds[&raw(binding.expect("grouped projection"))].1,
         };
-        let Some((range, selected)) = self.value_projection_range(shape, &path) else { return Ok(None) };
+        let Some((range, selected)) = self.value_projection_range(shape, &path) else {
+            return Ok(None);
+        };
         // An opaque value slot needs the parent's borrowed-child copy policy.
         // Keep that existing path when the type is absent too; only slice known
         // primitive leaves and shape-owned nested groups.
         if matches!(selected, FieldShape::Prim)
             && self.concrete_expr_ty(e).is_none_or(|ty| {
-                ty.peel_nullable().0.nominal().is_some_and(|name| self.is_value_struct(name))
+                ty.peel_nullable()
+                    .0
+                    .nominal()
+                    .is_some_and(|name| self.is_value_struct(name))
             })
         {
             return Ok(None);
@@ -281,8 +328,13 @@ impl Builder<'_> {
             if path.len() != 1 || !self.boxed_copy_uses_gc_fields(shape)? {
                 return Ok(None);
             }
-            Some(shape.fields.iter().position(|(field, _)| *field == path[0])
-                .expect("projection range selected a declared field"))
+            Some(
+                shape
+                    .fields
+                    .iter()
+                    .position(|(field, _)| *field == path[0])
+                    .expect("projection range selected a declared field"),
+            )
         } else {
             None
         };
@@ -311,13 +363,24 @@ impl Builder<'_> {
             if let Some(index) = enum_field {
                 let inline = self.gc_table_inline_layout(shape.name)?;
                 let owner = self.concrete_expr_ty(root);
-                return self.boxed_gc_field_copy_repr(value, &shape, owner.as_deref(), index,
-                    inline.as_ref().and_then(|layout| layout.get(index))).map(Some);
+                return self
+                    .boxed_gc_field_copy_repr(
+                        value,
+                        &shape,
+                        owner.as_deref(),
+                        index,
+                        inline.as_ref().and_then(|layout| layout.get(index)),
+                    )
+                    .map(Some);
             }
             self.cdata_leaf_range(value, &shape, range)?
         } else {
-            let cells = self.group_binds[&raw(binding.expect("grouped projection"))].0[range].to_vec();
-            cells.into_iter().map(|cell| self.emit_cur(Inst::Load(cell))).collect()
+            let cells =
+                self.group_binds[&raw(binding.expect("grouped projection"))].0[range].to_vec();
+            cells
+                .into_iter()
+                .map(|cell| self.emit_cur(Inst::Load(cell)))
+                .collect()
         };
         let repr = match selected {
             FieldShape::Prim => ValueRepr::Scalar(leaves[0]),
@@ -335,7 +398,11 @@ impl Builder<'_> {
     /// independent value read. Apply the ordinary value/place copy policy;
     /// the parent's borrowed-child pack policy no longer covers a standalone
     /// scalar. Nullable presence and borrowed reads must remain projection-only.
-    fn snapshot_projected_value(&mut self, e: Idx<Expr>, repr: ValueRepr) -> Result<ValueRepr, CompilerError> {
+    fn snapshot_projected_value(
+        &mut self,
+        e: Idx<Expr>,
+        repr: ValueRepr,
+    ) -> Result<ValueRepr, CompilerError> {
         if let ValueRepr::Scalar(value) = &repr
             && self.borrowed_value_children.contains_key(value)
             && (self.value_struct_of(e).is_some() || self.nullable_place_value_of(e)?.is_some())
@@ -352,11 +419,17 @@ impl Builder<'_> {
         }
         // Probed ahead of the match rather than in a guard: the wire-shape oracle
         // is fallible, and a guard cannot propagate.
-        if let Expr::BinOp { op: BinOp::NullCoalesce, lhs, rhs } = self.body.expr_arena[e] {
+        if let Expr::BinOp {
+            op: BinOp::NullCoalesce,
+            lhs,
+            rhs,
+        } = self.body.expr_arena[e]
+        {
             if self.expr_is_flat_enum(e) || self.nullable_value_shape_of(lhs)?.is_some() {
                 return self.nullcoalesce_repr(e, lhs, rhs);
             }
-            if self.nobox_value_name(e).is_none() && self.nullable_tuple_wire_shape(lhs)?.is_some() {
+            if self.nobox_value_name(e).is_none() && self.nullable_tuple_wire_shape(lhs)?.is_some()
+            {
                 return self.nullcoalesce_tuple_repr(lhs, rhs);
             }
         }
@@ -372,9 +445,11 @@ impl Builder<'_> {
                 else_branch,
             } => match self.repr_join_slot(e)? {
                 Some(shape) => self.lower_if_repr(cond, then_branch, else_branch, shape),
-                None => Ok(ValueRepr::Scalar(
-                    self.lower_if(cond, then_branch, else_branch)?,
-                )),
+                None => Ok(ValueRepr::Scalar(self.lower_if(
+                    cond,
+                    then_branch,
+                    else_branch,
+                )?)),
             },
             Expr::IfLet {
                 pattern,
@@ -399,11 +474,20 @@ impl Builder<'_> {
                 Some(shape) => self.safe_nav_field_repr(e, base, field, shape),
                 None => Ok(ValueRepr::Scalar(self.lower_expr(e)?)),
             },
-            Expr::SafeNavCall { receiver, method, args, .. } => match self.repr_join_slot(e)? {
+            Expr::SafeNavCall {
+                receiver,
+                method,
+                args,
+                ..
+            } => match self.repr_join_slot(e)? {
                 Some(shape) => self.safe_nav_call_repr(e, receiver, method, args, shape),
                 None => Ok(ValueRepr::Scalar(self.lower_expr(e)?)),
             },
-            Expr::SafeNavLet { receiver, binding, body } => match self.repr_join_slot(e)? {
+            Expr::SafeNavLet {
+                receiver,
+                binding,
+                body,
+            } => match self.repr_join_slot(e)? {
                 Some(shape) => self.safe_nav_let_repr(receiver, binding, body, shape),
                 None => Ok(ValueRepr::Scalar(self.lower_expr(e)?)),
             },
@@ -415,29 +499,44 @@ impl Builder<'_> {
                     .into_iter()
                     .map(|el| self.lower_expr_repr_inner(el))
                     .collect::<Result<_, CompilerError>>()?;
-                Ok(ValueRepr::Tuple { parts, present: None })
+                Ok(ValueRepr::Tuple {
+                    parts,
+                    present: None,
+                })
             }
             // Project splatting tuples directly; boxed value slots use the same
             // snapshot path as fields and array elements. Newtype `.0` is identity.
             Expr::TupleIndex { tuple, index } if !self.expr_is_newtype(tuple) => {
                 let r = self.lower_expr_repr_inner(tuple)?;
                 let projected = if let ValueRepr::Tuple { parts, .. } = r {
-                    parts.into_iter().nth(index)
+                    parts
+                        .into_iter()
+                        .nth(index)
                         .ok_or_else(|| gap("tuple index past the end of a splatting tuple"))?
                 } else {
                     let base = self.pack(r)?;
                     ValueRepr::Scalar(self.emit_cur(Inst::TupleIndex { base, index }))
                 };
-                if !self.scx.values_first_class && let ValueRepr::Scalar(slot) = &projected {
+                if !self.scx.values_first_class
+                    && let ValueRepr::Scalar(slot) = &projected
+                {
                     // A tuple slot is a place too: retaining its value must snapshot
                     // the leaves, while container leaves keep their shared backing.
                     if let Some(name) = self.value_struct_of(e)
                         && (self.is_mutable_place(tuple)? || self.is_nobox_struct(name))
                     {
-                        return self.boxed_value_copy_repr(*slot, name, self.concrete_expr_ty(e).as_deref());
+                        return self.boxed_value_copy_repr(
+                            *slot,
+                            name,
+                            self.concrete_expr_ty(e).as_deref(),
+                        );
                     }
                     if let Some(name) = nullable_place_value {
-                        return Ok(ValueRepr::Scalar(self.nullable_boxed_value_copy(*slot, name, self.concrete_expr_ty(e).as_deref())?));
+                        return Ok(ValueRepr::Scalar(self.nullable_boxed_value_copy(
+                            *slot,
+                            name,
+                            self.concrete_expr_ty(e).as_deref(),
+                        )?));
                     }
                 }
                 Ok(projected)
@@ -447,8 +546,10 @@ impl Builder<'_> {
             // packed table (which would re-materialize a `nobox` element).
             Expr::Var(b) if self.tuple_binds.contains_key(&raw(b)) => {
                 let (cells, shape) = self.tuple_binds.get(&raw(b)).cloned().unwrap();
-                let slots: Vec<Idx<Inst>> =
-                    cells.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
+                let slots: Vec<Idx<Inst>> = cells
+                    .iter()
+                    .map(|c| self.emit_cur(Inst::Load(*c)))
+                    .collect();
                 let mut idx = 0;
                 Ok(self.tuple_from_slots(&shape, &slots, &mut idx))
             }
@@ -456,15 +557,18 @@ impl Builder<'_> {
             // Its value children are still the caller's or the storage's.
             Expr::Var(b) if self.group_binds.contains_key(&raw(b)) => {
                 let (cells, shape) = self.group_binds.get(&raw(b)).cloned().unwrap();
-                let leaves: Vec<Idx<Inst>> =
-                    cells.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
+                let leaves: Vec<Idx<Inst>> = cells
+                    .iter()
+                    .map(|c| self.emit_cur(Inst::Load(*c)))
+                    .collect();
                 let mut idx = 0;
                 let repr = self.rebuild_from_leaves(&shape, &leaves, &mut idx);
                 if !self.scx.values_first_class {
                     let owner = self.concrete_expr_ty(e);
                     self.mark_borrowed_value_children(&shape, &repr, owner.as_deref())?;
                     if self.body.param_bindings.into_iter().any(|pb| pb == b)
-                        && !self.binding_ref_borrowed(b) {
+                        && !self.binding_ref_borrowed(b)
+                    {
                         self.share_borrowed_children(&repr);
                     }
                 }
@@ -505,26 +609,33 @@ impl Builder<'_> {
                 }
                 // A flattened enum field read as a WHOLE value re-materializes the
                 // box from the parent's slots (the single escape boundary).
-                if let Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) = self.field_base_ty(base)
-                    && let Some(shape) = self
-                        .struct_field_plan(sname, field, false)?
-                        .flat_shape()
+                if let Some(TypeExpr::App {
+                    ctor: TypeCtor::Nominal(sname),
+                    ..
+                }) = self.field_base_ty(base)
+                    && let Some(shape) = self.struct_field_plan(sname, field, false)?.flat_shape()
                 {
                     let parent = self.lower_expr(base)?;
-                    return Ok(ValueRepr::Scalar(self.materialize_flat(parent, field, &shape)));
+                    return Ok(ValueRepr::Scalar(
+                        self.materialize_flat(parent, field, &shape),
+                    ));
                 }
                 if self.scx.values_first_class {
                     let parent = self.lower_expr(base)?;
-                    return Ok(ValueRepr::Scalar(self.emit_cur(Inst::Field { base: parent, field })));
+                    return Ok(ValueRepr::Scalar(self.emit_cur(Inst::Field {
+                        base: parent,
+                        field,
+                    })));
                 }
                 // An embedded field read as a WHOLE value re-materializes from
                 // its leaves. Projection-only keeps every such read transient
                 // (never bound, returned, captured or stored), so this is the
                 // consuming boundary, not a reintroduced box.
-                if let Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) = self.field_base_ty(base)
-                    && let Some((cname, _)) = self
-                        .struct_field_plan(sname, field, false)?
-                        .embed()
+                if let Some(TypeExpr::App {
+                    ctor: TypeCtor::Nominal(sname),
+                    ..
+                }) = self.field_base_ty(base)
+                    && let Some((cname, _)) = self.struct_field_plan(sname, field, false)?.embed()
                 {
                     // A leaf-table VALUE parent can still be UNBOXED here (a
                     // local, a param, a call result): project the part off the
@@ -543,10 +654,14 @@ impl Builder<'_> {
                 }
                 // An embed LEAF read composes to one dotted key on the parent
                 // that holds it; no intermediate projection exists.
-                let (pbase, mut key, projected_shape, native_leaf) = self.physical_field_layout(base, field)?;
+                let (pbase, mut key, projected_shape, native_leaf) =
+                    self.physical_field_layout(base, field)?;
                 if native_leaf {
                     let parent = self.lower_place_base(pbase)?;
-                    return Ok(ValueRepr::Scalar(self.emit_cur(Inst::Field { base: parent, field: key })));
+                    return Ok(ValueRepr::Scalar(self.emit_cur(Inst::Field {
+                        base: parent,
+                        field: key,
+                    })));
                 }
                 if key != field {
                     // A value parent can still be UNBOXED (a param, a local):
@@ -558,17 +673,24 @@ impl Builder<'_> {
                     // is split back into the Group rather than read off one key.
                     if let ValueRepr::Scalar(v) = repr {
                         repr = match self.value_struct_name_of(pbase) {
-                            Some(sname) if self.gc_table_inline_layout(sname)?.is_some() => {
-                                self.boxed_value_copy_repr(v, sname, self.concrete_expr_ty(pbase).as_deref())?
-                            }
+                            Some(sname) if self.gc_table_inline_layout(sname)?.is_some() => self
+                                .boxed_value_copy_repr(
+                                    v,
+                                    sname,
+                                    self.concrete_expr_ty(pbase).as_deref(),
+                                )?,
                             _ => ValueRepr::Scalar(v),
                         };
                     }
                     let segs: Vec<Ustr> = key.as_str().split('.').map(Ustr::from).collect();
                     let mut at = 0;
                     while at < segs.len() {
-                        let ValueRepr::Group { name, parts, .. } = &repr else { break };
-                        let Some(i) = self.field_index(*name, segs[at]) else { break };
+                        let ValueRepr::Group { name, parts, .. } = &repr else {
+                            break;
+                        };
+                        let Some(i) = self.field_index(*name, segs[at]) else {
+                            break;
+                        };
                         repr = parts[i].clone();
                         at += 1;
                     }
@@ -583,9 +705,12 @@ impl Builder<'_> {
                     if let Some(shape) = projected_shape {
                         let leaves = super::shape::leaf_names(&shape, key.as_str(), ".")
                             .into_iter()
-                            .map(|key| self.emit_cur(Inst::Field {
-                                base: parent, field: Ustr::from(&key),
-                            }))
+                            .map(|key| {
+                                self.emit_cur(Inst::Field {
+                                    base: parent,
+                                    field: Ustr::from(&key),
+                                })
+                            })
                             .collect::<Vec<_>>();
                         return Ok(self.rebuild_from_leaves(&shape, &leaves, &mut 0));
                     }
@@ -595,9 +720,10 @@ impl Builder<'_> {
                         let nullable = self.embed_read_is_nullable(base, field)?;
                         return self.load_embed_repr(parent, key, name, nullable);
                     }
-                    return Ok(ValueRepr::Scalar(
-                        self.emit_cur(Inst::Field { base: parent, field: key }),
-                    ));
+                    return Ok(ValueRepr::Scalar(self.emit_cur(Inst::Field {
+                        base: parent,
+                        field: key,
+                    })));
                 }
                 let mut br = self.lower_expr_repr_inner(base)?;
                 // A leaf-table BOX has no declared-field keys -- a nested child
@@ -607,7 +733,11 @@ impl Builder<'_> {
                 // leaves nothing reads die in DCE.
                 if let ValueRepr::Scalar(v) = br {
                     br = match self.leaf_table_base(base)? {
-                        Some(sname) => self.boxed_value_copy_repr(v, sname, self.concrete_expr_ty(base).as_deref())?,
+                        Some(sname) => self.boxed_value_copy_repr(
+                            v,
+                            sname,
+                            self.concrete_expr_ty(base).as_deref(),
+                        )?,
                         None => ValueRepr::Scalar(v),
                     };
                 }
@@ -629,11 +759,19 @@ impl Builder<'_> {
                 // runtime, and that test pins the cell feeding it against SROA.
                 if let Some(name) = self.value_struct_of(e) {
                     if self.is_mutable_place(base)? || self.is_nobox_struct(name) {
-                        return self.boxed_value_copy_repr(fv, name, self.concrete_expr_ty(e).as_deref());
+                        return self.boxed_value_copy_repr(
+                            fv,
+                            name,
+                            self.concrete_expr_ty(e).as_deref(),
+                        );
                     }
                 }
                 match nullable_place_value {
-                    Some(name) => Ok(ValueRepr::Scalar(self.nullable_boxed_value_copy(fv, name, self.concrete_expr_ty(e).as_deref())?)),
+                    Some(name) => Ok(ValueRepr::Scalar(self.nullable_boxed_value_copy(
+                        fv,
+                        name,
+                        self.concrete_expr_ty(e).as_deref(),
+                    )?)),
                     None => Ok(ValueRepr::Scalar(fv)),
                 }
             }
@@ -642,8 +780,7 @@ impl Builder<'_> {
             // presence guard while its storage still carries the wrapper; keep
             // that wrapper until the native consumer reads it.
             Expr::Global(g)
-                if self.scx.values_first_class
-                    && !self.ws.functions_by_name.contains_key(&g) =>
+                if self.scx.values_first_class && !self.ws.functions_by_name.contains_key(&g) =>
             {
                 Ok(ValueRepr::Scalar(self.emit_cur(Inst::Global(g))))
             }
@@ -668,10 +805,16 @@ impl Builder<'_> {
             {
                 let gv = self.emit_cur(Inst::Global(self.static_cells[&raw(b)]));
                 match self.value_struct_of(e) {
-                    Some(name) => self.boxed_value_copy_repr(gv, name, self.concrete_expr_ty(e).as_deref()),
+                    Some(name) => {
+                        self.boxed_value_copy_repr(gv, name, self.concrete_expr_ty(e).as_deref())
+                    }
                     None => {
                         let name = nullable_place_value.expect("guard matched");
-                        Ok(ValueRepr::Scalar(self.nullable_boxed_value_copy(gv, name, self.concrete_expr_ty(e).as_deref())?))
+                        Ok(ValueRepr::Scalar(self.nullable_boxed_value_copy(
+                            gv,
+                            name,
+                            self.concrete_expr_ty(e).as_deref(),
+                        )?))
                     }
                 }
             }
@@ -679,18 +822,29 @@ impl Builder<'_> {
             Expr::Global(g) if nullable_place_value.is_some() => {
                 let name = nullable_place_value.expect("guard matched");
                 let gv = self.emit_cur(Inst::Global(g));
-                Ok(ValueRepr::Scalar(self.nullable_boxed_value_copy(gv, name, self.concrete_expr_ty(e).as_deref())?))
+                Ok(ValueRepr::Scalar(self.nullable_boxed_value_copy(
+                    gv,
+                    name,
+                    self.concrete_expr_ty(e).as_deref(),
+                )?))
             }
             // A value-struct literal stays an unboxed Group (its fields lowered as
             // reprs); `pack` builds the cdata only if a boxed context needs it.
-            Expr::StructLiteral { name, fields, bases } if self.is_value_struct(name) => {
-                self.value_literal_repr(name, fields, bases)
-            }
+            Expr::StructLiteral {
+                name,
+                fields,
+                bases,
+            } if self.is_value_struct(name) => self.value_literal_repr(name, fields, bases),
             // A cdata-eligible enum construction stays an unboxed Group `[tag, _0]`
             // (so a callsite/field can splat it without a cdata round-trip); `pack`
             // builds `<Enum>_ct` only if a boxed context needs it.
-            Expr::EnumVariant { enum_name, variant, args, .. }
-                if EnumPlan::for_name(self.ws, enum_name).is_some_and(|plan| plan.cdata().is_some()) =>
+            Expr::EnumVariant {
+                enum_name,
+                variant,
+                args,
+                ..
+            } if EnumPlan::for_name(self.ws, enum_name)
+                .is_some_and(|plan| plan.cdata().is_some()) =>
             {
                 let shape = EnumPlan::for_name(self.ws, enum_name)
                     .and_then(|plan| plan.cdata().cloned())
@@ -701,7 +855,8 @@ impl Builder<'_> {
             // <rec>..]` so a call/return/match can thread it as scalars; `pack`
             // builds the `{__variant}` box only if a boxed context needs it.
             Expr::EnumVariant { enum_name, .. }
-                if EnumPlan::for_name(self.ws, enum_name).is_some_and(|plan| plan.flat().is_some()) =>
+                if EnumPlan::for_name(self.ws, enum_name)
+                    .is_some_and(|plan| plan.flat().is_some()) =>
             {
                 let shape = EnumPlan::for_name(self.ws, enum_name)
                     .and_then(|plan| plan.flat().cloned())
@@ -718,13 +873,15 @@ impl Builder<'_> {
                 let elem = self.vec_column_elem_of(base)?.expect("guard matched");
                 let (b, _) = self.lower_index_base(base)?;
                 let i = self.lower_expr(index)?;
-                self.column_element_repr(b, i, elem).map(ValueBundle::into_value)
+                self.column_element_repr(b, i, elem)
+                    .map(ValueBundle::into_value)
             }
             Expr::Index { base, index } if self.vec_strided_elem_of(base)?.is_some() => {
                 let elem = self.vec_strided_elem_of(base)?.expect("guard matched");
                 let (b, _) = self.lower_index_base(base)?;
                 let i = self.lower_expr(index)?;
-                self.strided_element_repr(b, i, elem).map(ValueBundle::into_value)
+                self.strided_element_repr(b, i, elem)
+                    .map(ValueBundle::into_value)
             }
             // A value-struct ELEMENT read (`buf[i]`/`fv[i]`/`v[i]`) as an unboxed
             // Group of leaf reads off the checked slot: a leaf projection reads the
@@ -746,10 +903,14 @@ impl Builder<'_> {
                 // each leaf lives in its own array, so the Group is built from K
                 // direct column reads. Bounds are checked ONCE for the element.
                 if let ContainerKind::VecValueColumns(elem) = kind {
-                    return self.column_element_repr(b, i, elem).map(ValueBundle::into_value);
+                    return self
+                        .column_element_repr(b, i, elem)
+                        .map(ValueBundle::into_value);
                 }
                 if let ContainerKind::VecValueStrided(elem) = kind {
-                    return self.strided_element_repr(b, i, elem).map(ValueBundle::into_value);
+                    return self
+                        .strided_element_repr(b, i, elem)
+                        .map(ValueBundle::into_value);
                 }
                 // A column-stored Map reaches its leaves the same way, one
                 // indirection out: the spine resolves the key to a slot, and the
@@ -764,17 +925,25 @@ impl Builder<'_> {
                         return self.nb_leaf_element_repr(b, i, elem);
                     }
                 }
-                let slot = self.emit_cur(Inst::Index { base: b, index: i, kind });
+                let slot = self.emit_cur(Inst::Index {
+                    base: b,
+                    index: i,
+                    kind,
+                });
                 if nullable {
-                    return Ok(ValueRepr::Scalar(self.nullable_boxed_value_copy(slot, name, self.concrete_expr_ty(e).as_deref())?));
+                    return Ok(ValueRepr::Scalar(self.nullable_boxed_value_copy(
+                        slot,
+                        name,
+                        self.concrete_expr_ty(e).as_deref(),
+                    )?));
                 }
                 self.boxed_value_copy_repr(slot, name, self.concrete_expr_ty(e).as_deref())
             }
-            Expr::BinOp { op: BinOp::NullCoalesce, lhs, rhs }
-                if self.nobox_value_name(e).is_some() =>
-            {
-                self.nullcoalesce_repr(e, lhs, rhs)
-            }
+            Expr::BinOp {
+                op: BinOp::NullCoalesce,
+                lhs,
+                rhs,
+            } if self.nobox_value_name(e).is_some() => self.nullcoalesce_repr(e, lhs, rhs),
             // A BOXED tuple whose layout splats -- read from a container, a field,
             // an opaque call. Rebuild the unboxed `Tuple` repr from the box's
             // slots, the exact inverse of the producer in `Expr::Tuple`, so a
@@ -811,7 +980,8 @@ impl Builder<'_> {
         let is_flat_enum = flat_shape.is_some();
         let shape = match flat_shape {
             Some(shape) => shape,
-            None => self.nobox_value_shape_of(e)?
+            None => self
+                .nobox_value_shape_of(e)?
                 .or(self.nullable_value_shape_of(lhs)?.map(|mut shape| {
                     shape.nullable = self.expr_is_nullable(e);
                     shape
@@ -824,7 +994,8 @@ impl Builder<'_> {
         let lhs_bundle = self.lower_expr_repr(lhs)?;
         let owned = self.snapshot_opaque_value(lhs_bundle.value().clone())?;
         let lhs_bundle = ValueBundle::new(lhs_bundle.representation(), owned);
-        let lhs_leaves = self.repr_to_slot_values_bundle(&lhs_bundle, &RetSlot::Leaves(lhs_shape))?;
+        let lhs_leaves =
+            self.repr_to_slot_values_bundle(&lhs_bundle, &RetSlot::Leaves(lhs_shape))?;
         let (first, rest) = lhs_leaves
             .split_first()
             .ok_or_else(|| gap("coalesce lhs has no presence or tag leaf"))?;
@@ -835,13 +1006,19 @@ impl Builder<'_> {
             (*first, rest.to_vec())
         };
 
-        let cells: Vec<Idx<Cell>> = (0..shape.leaf_count()).map(|_| self.f.new_cell(None)).collect();
+        let cells: Vec<Idx<Cell>> = (0..shape.leaf_count())
+            .map(|_| self.f.new_cell(None))
+            .collect();
         let lhs_bb = self.f.new_block();
         let rhs_bb = self.f.new_block();
         let join = self.f.new_block();
         self.f.set_term(
             self.cur,
-            Term::Branch { cond: present, then_bb: lhs_bb, else_bb: rhs_bb },
+            Term::Branch {
+                cond: present,
+                then_bb: lhs_bb,
+                else_bb: rhs_bb,
+            },
         );
 
         self.cur = rhs_bb;
@@ -857,7 +1034,10 @@ impl Builder<'_> {
         self.store_slots_and_join(&cells, &lhs_slots, join)?;
 
         self.cur = join;
-        let loads: Vec<Idx<Inst>> = cells.iter().map(|&c| self.emit_cur(Inst::Load(c))).collect();
+        let loads: Vec<Idx<Inst>> = cells
+            .iter()
+            .map(|&c| self.emit_cur(Inst::Load(c)))
+            .collect();
         let mut idx = 0;
         Ok(self.rebuild_from_leaves(&shape, &loads, &mut idx))
     }
@@ -875,10 +1055,15 @@ impl Builder<'_> {
         lhs: Idx<Expr>,
         rhs: Idx<Expr>,
     ) -> Result<ValueRepr, CompilerError> {
-        let lhs_shape = self.nullable_tuple_wire_shape(lhs)?.expect("caller checked");
+        let lhs_shape = self
+            .nullable_tuple_wire_shape(lhs)?
+            .expect("caller checked");
         // `??` always yields a value, so the result wire is the lhs wire minus its
         // presence -- which is also what makes the rhs (non-nullable) arm fit it.
-        let shape = TupleRetShape { nullable: false, ..lhs_shape.clone() };
+        let shape = TupleRetShape {
+            nullable: false,
+            ..lhs_shape.clone()
+        };
 
         let lhs_repr = self.lower_expr_repr_inner(lhs)?;
         let lhs_slots = self.tuple_repr_to_slots(lhs_repr, &lhs_shape)?;
@@ -893,7 +1078,11 @@ impl Builder<'_> {
         let join = self.f.new_block();
         self.f.set_term(
             self.cur,
-            Term::Branch { cond: present, then_bb: lhs_bb, else_bb: rhs_bb },
+            Term::Branch {
+                cond: present,
+                then_bb: lhs_bb,
+                else_bb: rhs_bb,
+            },
         );
 
         self.cur = rhs_bb;
@@ -906,7 +1095,10 @@ impl Builder<'_> {
         self.store_slots_and_join(&cells, &lhs_values, join)?;
 
         self.cur = join;
-        let loads: Vec<Idx<Inst>> = cells.iter().map(|&c| self.emit_cur(Inst::Load(c))).collect();
+        let loads: Vec<Idx<Inst>> = cells
+            .iter()
+            .map(|&c| self.emit_cur(Inst::Load(c)))
+            .collect();
         let mut idx = 0;
         Ok(self.tuple_from_slots(&shape, &loads, &mut idx))
     }
@@ -943,7 +1135,10 @@ impl Builder<'_> {
                 // owns its own box.
                 Some(ValueRepr::Scalar(v)) => {
                     let ty = self.concrete_expr_ty(lf.value).ok_or_else(|| {
-                        self.gap_here(format!("grouped field `{name}.{}` has no concrete type", lf.name))
+                        self.gap_here(format!(
+                            "grouped field `{name}.{}` has no concrete type",
+                            lf.name
+                        ))
                     })?;
                     self.copied_value_repr(&ty, *v)?
                 }
@@ -963,7 +1158,9 @@ impl Builder<'_> {
                 for fname in decl {
                     match litmap.iter().find(|(n, _)| *n == fname) {
                         Some((_, r)) => fs.push(r.clone()),
-                        None => fs.push(self.spread_base_field_repr(&base_repr, base_boxed, name, fname, base)?),
+                        None => fs.push(
+                            self.spread_base_field_repr(&base_repr, base_boxed, name, fname, base)?,
+                        ),
                     }
                 }
                 fs
@@ -990,10 +1187,7 @@ impl Builder<'_> {
         func: FuncRef,
         callee_inst: Option<&crate::instance::Instance>,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
-        let param_names: Vec<Ustr> = self
-            .ws
-            .module(func.module)
-            .functions[func.func]
+        let param_names: Vec<Ustr> = self.ws.module(func.module).functions[func.func]
             .param_decls
             .iter()
             .map(|pd| pd.name)
@@ -1009,9 +1203,12 @@ impl Builder<'_> {
             // a named arg after the spread overrides via last-write-wins.
             if self.body.spread_args.contains(&a) {
                 for (fname, fv) in self.spread_field_insts(a)? {
-                    let pidx = param_names.iter().position(|p| *p == fname).ok_or_else(|| {
-                        gap(format!("spread field `{fname}` matches no parameter"))
-                    })?;
+                    let pidx = param_names
+                        .iter()
+                        .position(|p| *p == fname)
+                        .ok_or_else(|| {
+                            gap(format!("spread field `{fname}` matches no parameter"))
+                        })?;
                     slots[pidx] = Some(fv);
                 }
                 continue;
@@ -1091,7 +1288,11 @@ impl Builder<'_> {
     /// value's expected type); otherwise every candidate is a backend VARIANT of
     /// one `(name, signature)` and so mangles identically -- dedup and take it.
     /// A genuine unresolved overload rejects (reject, don't fall back).
-    pub(crate) fn fn_value_symbol(&self, e: Idx<Expr>, name: ustr::Ustr) -> Result<String, CompilerError> {
+    pub(crate) fn fn_value_symbol(
+        &self,
+        e: Idx<Expr>,
+        name: ustr::Ustr,
+    ) -> Result<String, CompilerError> {
         if let Some(fref) = self.overload_target(e) {
             let f = &self.ws.module(fref.module).functions[fref.func];
             return Ok(crate::mangle::mangle_fn(self.ws, f));
@@ -1104,7 +1305,12 @@ impl Builder<'_> {
     }
 
     fn unresolved_function_variant(&self, name: ustr::Ustr) -> Result<FuncRef, CompilerError> {
-        let cands = self.ws.functions_by_name.get(&name).map(|l| l.as_slice()).unwrap_or(&[]);
+        let cands = self
+            .ws
+            .functions_by_name
+            .get(&name)
+            .map(|l| l.as_slice())
+            .unwrap_or(&[]);
         let Some(&(module, func)) = cands.first() else {
             return Err(gap(format!("unresolved function `{name}`")));
         };
@@ -1139,9 +1345,8 @@ impl Builder<'_> {
         e: Idx<Expr>,
         name: ustr::Ustr,
     ) -> Result<FuncRef, CompilerError> {
-        let rep = if let Some(&(module, func)) = self
-            .inf
-            .and_then(|i| i.resolved_overload_calls.get(&e))
+        let rep = if let Some(&(module, func)) =
+            self.inf.and_then(|i| i.resolved_overload_calls.get(&e))
         {
             FuncRef { module, func }
         } else {
@@ -1203,8 +1408,13 @@ impl Builder<'_> {
     /// re-yielding each value; the expression's value is `sub`'s return value.
     /// Built as a normal pump loop with a `yield` inside, so the coroutine
     /// transform splits it like any other yield. Mirrors rock-codegen / old skull.
-    pub(crate) fn lower_yield_delegate(&mut self, sub_expr: Idx<Expr>) -> Result<Idx<Inst>, CompilerError> {
-        let rac = self.resume_arg.ok_or_else(|| gap("await outside a coroutine"))?;
+    pub(crate) fn lower_yield_delegate(
+        &mut self,
+        sub_expr: Idx<Expr>,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let rac = self
+            .resume_arg
+            .ok_or_else(|| gap("await outside a coroutine"))?;
         let sub = self.lower_expr(sub_expr)?;
         // Register `sub` as the active inner (kill() chains into it).
         self.emit_cur(Inst::CoroSetInner(sub));
@@ -1218,9 +1428,18 @@ impl Builder<'_> {
         }
 
         let slot = self.f.new_cell(None);
-        let resume0 = self.emit_cur(Inst::Field { base: sub, field: Ustr::from("__resume") });
-        let primed = self.emit_cur(Inst::CallValue { callee: resume0, args: vec![sub] });
-        self.emit_cur(Inst::Store { cell: slot, value: primed });
+        let resume0 = self.emit_cur(Inst::Field {
+            base: sub,
+            field: Ustr::from("__resume"),
+        });
+        let primed = self.emit_cur(Inst::CallValue {
+            callee: resume0,
+            args: vec![sub],
+        });
+        self.emit_cur(Inst::Store {
+            cell: slot,
+            value: primed,
+        });
 
         let header = self.f.new_block();
         let body = self.f.new_block();
@@ -1232,18 +1451,40 @@ impl Builder<'_> {
         let v = self.emit_cur(Inst::Load(slot));
         let nil = self.emit_cur(Inst::Const(Lit::Nil));
         let is_nil = self.emit_cur(Inst::Eq(v, nil));
-        self.f.set_term(self.cur, Term::Branch { cond: is_nil, then_bb: exit, else_bb: body });
+        self.f.set_term(
+            self.cur,
+            Term::Branch {
+                cond: is_nil,
+                then_bb: exit,
+                else_bb: body,
+            },
+        );
 
         // body: yield the inner's value, resume it with our resume arg.
         self.cur = body;
         let vv = self.emit_cur(Inst::Load(slot));
         let resume_bb = self.f.new_block();
-        self.f.set_term(self.cur, Term::Yield { values: vec![vv], resume: resume_bb });
+        self.f.set_term(
+            self.cur,
+            Term::Yield {
+                values: vec![vv],
+                resume: resume_bb,
+            },
+        );
         self.cur = resume_bb;
         let arg = self.emit_cur(Inst::Load(rac));
-        let resume1 = self.emit_cur(Inst::Field { base: sub, field: Ustr::from("__resume") });
-        let v2 = self.emit_cur(Inst::CallValue { callee: resume1, args: vec![sub, arg] });
-        self.emit_cur(Inst::Store { cell: slot, value: v2 });
+        let resume1 = self.emit_cur(Inst::Field {
+            base: sub,
+            field: Ustr::from("__resume"),
+        });
+        let v2 = self.emit_cur(Inst::CallValue {
+            callee: resume1,
+            args: vec![sub, arg],
+        });
+        self.emit_cur(Inst::Store {
+            cell: slot,
+            value: v2,
+        });
         self.f.set_term(self.cur, Term::Goto(header));
 
         // exit: clear the active inner, re-raise the inner's error if any, then
@@ -1257,23 +1498,42 @@ impl Builder<'_> {
     /// The inner object IS its frame, so `__error`/`__return` are direct field
     /// reads (what the `__last_error`/`__result` methods read). Emitted into the
     /// current block.
-    pub(crate) fn yield_delegate_exit(&mut self, sub: Idx<Inst>) -> Result<Idx<Inst>, CompilerError> {
+    pub(crate) fn yield_delegate_exit(
+        &mut self,
+        sub: Idx<Inst>,
+    ) -> Result<Idx<Inst>, CompilerError> {
         let clear = self.emit_cur(Inst::Const(Lit::Nil));
         self.emit_cur(Inst::CoroSetInner(clear));
-        let inner_err = self.emit_cur(Inst::Field { base: sub, field: Ustr::from("__error") });
+        let inner_err = self.emit_cur(Inst::Field {
+            base: sub,
+            field: Ustr::from("__error"),
+        });
         let nil2 = self.emit_cur(Inst::Const(Lit::Nil));
         let has_err = self.emit_cur(Inst::NotEq(inner_err, nil2));
         let raise = self.f.new_block();
         let cont = self.f.new_block();
-        self.f.set_term(self.cur, Term::Branch { cond: has_err, then_bb: raise, else_bb: cont });
+        self.f.set_term(
+            self.cur,
+            Term::Branch {
+                cond: has_err,
+                then_bb: raise,
+                else_bb: cont,
+            },
+        );
         self.cur = raise;
         // `error` is the Lua builtin (a global), NOT a rock fn — read it as a
         // global and call indirectly, so re-raise works with no stdlib present.
         let err_fn = self.emit_cur(Inst::Global(Ustr::from("error")));
-        self.emit_cur(Inst::CallValue { callee: err_fn, args: vec![inner_err] });
+        self.emit_cur(Inst::CallValue {
+            callee: err_fn,
+            args: vec![inner_err],
+        });
         self.f.set_term(self.cur, Term::Goto(cont));
         self.cur = cont;
-        Ok(self.emit_cur(Inst::Field { base: sub, field: Ustr::from("__return") }))
+        Ok(self.emit_cur(Inst::Field {
+            base: sub,
+            field: Ustr::from("__return"),
+        }))
     }
 
     /// `await sub` where `sub` yields a flat enum: drive the inner via its
@@ -1290,8 +1550,14 @@ impl Builder<'_> {
         let n = shape.leaf_count();
         let frame = sub;
         // Prime the inner (advance once).
-        let adv0 = self.emit_cur(Inst::Field { base: sub, field: Ustr::from("__advance") });
-        self.emit_cur(Inst::CallValue { callee: adv0, args: vec![sub] });
+        let adv0 = self.emit_cur(Inst::Field {
+            base: sub,
+            field: Ustr::from("__advance"),
+        });
+        self.emit_cur(Inst::CallValue {
+            callee: adv0,
+            args: vec![sub],
+        });
 
         let header = self.f.new_block();
         let body = self.f.new_block();
@@ -1300,22 +1566,49 @@ impl Builder<'_> {
 
         // header: loop while the inner is still producing (`__state >= 0`).
         self.cur = header;
-        let state = self.emit_cur(Inst::Field { base: frame, field: Ustr::from("__state") });
+        let state = self.emit_cur(Inst::Field {
+            base: frame,
+            field: Ustr::from("__state"),
+        });
         let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
         let done = self.emit_cur(Inst::IntLt(state, zero));
-        self.f.set_term(self.cur, Term::Branch { cond: done, then_bb: exit, else_bb: body });
+        self.f.set_term(
+            self.cur,
+            Term::Branch {
+                cond: done,
+                then_bb: exit,
+                else_bb: body,
+            },
+        );
 
         // body: re-yield the inner's current leaves, then advance it with our arg.
         self.cur = body;
         let values: Vec<Idx<Inst>> = (0..n)
-            .map(|i| self.emit_cur(Inst::Field { base: frame, field: yield_slot(i) }))
+            .map(|i| {
+                self.emit_cur(Inst::Field {
+                    base: frame,
+                    field: yield_slot(i),
+                })
+            })
             .collect();
         let resume_bb = self.f.new_block();
-        self.f.set_term(self.cur, Term::Yield { values, resume: resume_bb });
+        self.f.set_term(
+            self.cur,
+            Term::Yield {
+                values,
+                resume: resume_bb,
+            },
+        );
         self.cur = resume_bb;
         let arg = self.emit_cur(Inst::Load(rac));
-        let adv1 = self.emit_cur(Inst::Field { base: sub, field: Ustr::from("__advance") });
-        self.emit_cur(Inst::CallValue { callee: adv1, args: vec![sub, arg] });
+        let adv1 = self.emit_cur(Inst::Field {
+            base: sub,
+            field: Ustr::from("__advance"),
+        });
+        self.emit_cur(Inst::CallValue {
+            callee: adv1,
+            args: vec![sub, arg],
+        });
         self.f.set_term(self.cur, Term::Goto(header));
 
         self.cur = exit;
@@ -1332,8 +1625,13 @@ impl Builder<'_> {
             .get(&Ustr::from(name))
             .map(|l| l.as_slice())
         {
-            Some([(module, func)]) => Ok(FuncRef { module: *module, func: *func }),
-            _ => Err(gap(format!("interp helper `{name}` not uniquely resolvable"))),
+            Some([(module, func)]) => Ok(FuncRef {
+                module: *module,
+                func: *func,
+            }),
+            _ => Err(gap(format!(
+                "interp helper `{name}` not uniquely resolvable"
+            ))),
         }
     }
 }

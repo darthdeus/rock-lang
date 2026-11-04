@@ -5,9 +5,7 @@ use anyhow::Result;
 use atomic_refcell::AtomicRefCell;
 use rock_core::{SourceFile, SourceFiles};
 
-use crate::source_files::{
-    source_file_new, source_file_new_preprocessed, SourceFilesExt,
-};
+use crate::source_files::{SourceFilesExt, source_file_new, source_file_new_preprocessed};
 
 /// Represents different types of compilation units based on file directives
 #[derive(Debug, Clone)]
@@ -43,16 +41,22 @@ pub fn analyze_files_in_directory(dir_path: impl AsRef<Path>) -> Result<FileAnal
     let mut test_util_files = Vec::new();
 
     let dir_path_ref = dir_path.as_ref();
-    let rock_files = if let Some((manifest, config)) = crate::stick::StickConfig::find_from_dir(dir_path_ref)? {
-        let root = manifest.parent().unwrap_or(&manifest);
-        let graph = crate::stick::graph::PackageGraph::build_with_channel(
-            root, &config, &crate::stick::resolved_channel_for(&config),
-        )?;
-        graph.selected_rock_files(graph.root(), dir_path_ref)?
-            .into_iter().map(|path| path.to_string_lossy().into_owned()).collect()
-    } else {
-        crate::project::find_rock_files_at_path(dir_path_ref)?
-    };
+    let rock_files =
+        if let Some((manifest, config)) = crate::stick::StickConfig::find_from_dir(dir_path_ref)? {
+            let root = manifest.parent().unwrap_or(&manifest);
+            let graph = crate::stick::graph::PackageGraph::build_with_channel(
+                root,
+                &config,
+                &crate::stick::resolved_channel_for(&config),
+            )?;
+            graph
+                .selected_rock_files(graph.root(), dir_path_ref)?
+                .into_iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect()
+        } else {
+            crate::project::find_rock_files_at_path(dir_path_ref)?
+        };
 
     // Check if this is a tests directory or a directory without a project
     let is_tests_directory = dir_path_ref
@@ -117,7 +121,6 @@ impl FileAnalysis {
             test_file,
         }
     }
-
 }
 
 /// Parse the lib directive from a file's contents
@@ -187,7 +190,9 @@ pub fn determine_compilation_unit_for_file(file_path: impl AsRef<Path>) -> Resul
         let analysis = analyze_files_in_directory(dir)?;
         Ok(analysis.test_compilation_unit(path.to_path_buf()))
     } else if source_file.is_test_util {
-        Err(anyhow::anyhow!("Cannot run test-util files directly. Test utilities are meant to be used by test files."))
+        Err(anyhow::anyhow!(
+            "Cannot run test-util files directly. Test utilities are meant to be used by test files."
+        ))
     } else {
         // Regular file - find the project directory and compile the whole project
         if let Some((stick_path, _)) =
@@ -214,7 +219,9 @@ pub fn source_package<'g>(
     path: &Path,
 ) -> Option<&'g crate::stick::graph::PackageNode> {
     let owner = graph.package_of_file(path)?;
-    graph.includes_file(owner, path).then(|| graph.package(owner))
+    graph
+        .includes_file(owner, path)
+        .then(|| graph.package(owner))
 }
 
 /// Load SourceFiles based on a compilation unit
@@ -228,7 +235,9 @@ pub fn load_sources_for_compilation_unit(unit: &CompilationUnit) -> Result<Sourc
             // Try to find stick.toml in the project directory
             if let Some(first_file) = files.first() {
                 if let Some(project_dir) = first_file.parent() {
-                    if let Some((stick_path, stick_config)) = crate::stick::StickConfig::find_from_dir(project_dir)? {
+                    if let Some((stick_path, stick_config)) =
+                        crate::stick::StickConfig::find_from_dir(project_dir)?
+                    {
                         // Resolve every package through the one graph, so the
                         // LSP's file set matches a real compile on the same
                         // channel: recursive, manifest-relative, channel-filtered.
@@ -286,7 +295,10 @@ pub fn load_sources_for_compilation_unit(unit: &CompilationUnit) -> Result<Sourc
 
             Ok(sources)
         }
-        CompilationUnit::Script { file, used_packages } => {
+        CompilationUnit::Script {
+            file,
+            used_packages,
+        } => {
             if used_packages.is_empty() {
                 // No dependencies, just load the script file
                 SourceFiles::from_single_path_preprocessed(file)
@@ -313,7 +325,10 @@ pub fn load_sources_for_compilation_unit(unit: &CompilationUnit) -> Result<Sourc
                             }
                         }
                     } else {
-                        eprintln!("Warning: Package '{}' not found at {:?}", package_name, package_path);
+                        eprintln!(
+                            "Warning: Package '{}' not found at {:?}",
+                            package_name, package_path
+                        );
                     }
                 }
 

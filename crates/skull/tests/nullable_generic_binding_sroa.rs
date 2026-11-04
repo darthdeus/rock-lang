@@ -23,13 +23,16 @@
 //! unmarked does no leaf splitting at all and is only opportunistically
 //! scalarized by SROA afterwards. Only the nullability QUERY was duplicated.
 
-
 use std::process::Command;
 
 fn run_capturing(prog: &str, tag: &str) -> (bool, String) {
-    let path = std::env::temp_dir().join(format!("skull_sentinel_{}_{tag}.lua", std::process::id()));
+    let path =
+        std::env::temp_dir().join(format!("skull_sentinel_{}_{tag}.lua", std::process::id()));
     std::fs::write(&path, prog).expect("write program");
-    let out = Command::new("luajit").arg(&path).output().expect("spawn luajit");
+    let out = Command::new("luajit")
+        .arg(&path)
+        .output()
+        .expect("spawn luajit");
     let _ = std::fs::remove_file(&path);
     let combined = format!(
         "{}{}",
@@ -109,12 +112,18 @@ fn iterating_an_absent_row_works() {
 
 #[test]
 fn indexed_reads_are_correct() {
-    assert_eq!(run_ok(INDEXED, "nullable_generic_indexed"), "true true true 3");
+    assert_eq!(
+        run_ok(INDEXED, "nullable_generic_indexed"),
+        "true true true 3"
+    );
 }
 
 #[test]
 fn the_non_generic_twin_is_correct() {
-    assert_eq!(run_ok(NON_GENERIC, "nullable_generic_nongeneric"), "true true");
+    assert_eq!(
+        run_ok(NON_GENERIC, "nullable_generic_nongeneric"),
+        "true true"
+    );
 }
 
 /// THE PROPERTY THE FIX ENDANGERED. `nonnull_value_struct` exists to LICENSE

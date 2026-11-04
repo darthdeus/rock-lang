@@ -21,7 +21,12 @@ static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
         .collect()
 });
 
-fn workspace(src: &str) -> (bone_semantic::inference::Workspace, bone_semantic::prelude::ModuleId) {
+fn workspace(
+    src: &str,
+) -> (
+    bone_semantic::inference::Workspace,
+    bone_semantic::prelude::ModuleId,
+) {
     let mut modules = STDLIB.clone();
     modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
@@ -32,7 +37,8 @@ fn workspace(src: &str) -> (bone_semantic::inference::Workspace, bone_semantic::
 /// A1 fragment entry -- for the GPU-builtin goldens.
 fn emit_entry(src: &str, root: &str) -> Result<String, String> {
     let (ws, mid) = workspace(src);
-    skull_codegen_glsl::emit_shader_entry(&ws, mid, root, GlslProfile::Core330).map_err(|e| e.message)
+    skull_codegen_glsl::emit_shader_entry(&ws, mid, root, GlslProfile::Core330)
+        .map_err(|e| e.message)
 }
 
 /// The A2 vertex+fragment pipeline.
@@ -42,7 +48,12 @@ fn emit_pipeline(src: &str, vert: &str, frag: &str) -> Result<String, String> {
         .map_err(|e| e.message)
 }
 
-fn emit_pipeline_profile(src: &str, vert: &str, frag: &str, p: GlslProfile) -> Result<String, String> {
+fn emit_pipeline_profile(
+    src: &str,
+    vert: &str,
+    frag: &str,
+    p: GlslProfile,
+) -> Result<String, String> {
     let (ws, mid) = workspace(src);
     skull_codegen_glsl::emit_shader_pipeline(&ws, mid, vert, frag, p).map_err(|e| e.message)
 }
@@ -51,12 +62,24 @@ fn emit_pipeline_profile(src: &str, vert: &str, frag: &str, p: GlslProfile) -> R
 fn vector_scalar_bounds_are_splatted() {
     for width in [2, 3, 4] {
         let components = &['x', 'y', 'z', 'w'][..width];
-        let ctor = std::iter::repeat("tc.x").take(width).collect::<Vec<_>>().join(", ");
-        let min = components.iter().map(|c| format!("min(a.{c}, b)")).collect::<Vec<_>>().join(", ");
-        let max = components.iter().map(|c| format!("max(a.{c}, b)")).collect::<Vec<_>>().join(", ");
+        let ctor = std::iter::repeat("tc.x")
+            .take(width)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let min = components
+            .iter()
+            .map(|c| format!("min(a.{c}, b)"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let max = components
+            .iter()
+            .map(|c| format!("max(a.{c}, b)"))
+            .collect::<Vec<_>>()
+            .join(", ");
         // Scalar min/max overloads exercise the intrinsic mapping alongside
         // the stdlib's scalar clamp and vector-bound overloads.
-        let src = format!(r#"
+        let src = format!(
+            r#"
             fn Vec{width}.min(a, b: float) -> Vec{width} {{ return v({min}) }}
             fn Vec{width}.max(a, b: float) -> Vec{width} {{ return v({max}) }}
             @shader(fragment)
@@ -68,7 +91,8 @@ fn vector_scalar_bounds_are_splatted() {
                 let e = a.clamp(a, a) + a.min(a) + a.max(a)
                 return v(b.x + c.x + d.x + e.x, min(tc.x, 6.0), max(tc.x, 0.0), clamp(tc.x, 0.0, 6.0))
             }}
-        "#);
+        "#
+        );
         let (ws, mid) = workspace(&src);
         for profile in [GlslProfile::Core330, GlslProfile::Es300] {
             let glsl = skull_codegen_glsl::emit_shader_entry(&ws, mid, "f", profile).expect("emit");
@@ -120,7 +144,10 @@ fn builtin_frag_coord_maps() {
     let glsl = emit_entry(src, "f").expect("emit");
     assert!(glsl.contains("gl_FragCoord"), "got:\n{glsl}");
     // frag_coord() takes no args -- the template is a bare builtin, not a call.
-    assert!(!glsl.contains("frag_coord("), "must not emit a fn call:\n{glsl}");
+    assert!(
+        !glsl.contains("frag_coord("),
+        "must not emit a fn call:\n{glsl}"
+    );
 }
 
 #[test]
@@ -136,7 +163,10 @@ fn builtin_discard_is_a_statement() {
     // discard is a control-flow statement, not an expression: `discard;`, never
     // `discard()` or an assignment to a temp.
     assert!(glsl.contains("discard;"), "got:\n{glsl}");
-    assert!(!glsl.contains("discard()"), "discard must not render as a call:\n{glsl}");
+    assert!(
+        !glsl.contains("discard()"),
+        "discard must not render as a call:\n{glsl}"
+    );
 }
 
 /// texture_size(s) -> `vec2(textureSize(s, 0))`: the sampler's mip-0 dimensions
@@ -153,7 +183,10 @@ fn builtin_texture_size_maps() {
     "#;
     let glsl = emit_entry(src, "f").expect("emit");
     assert!(glsl.contains("vec2(textureSize(tex, 0))"), "got:\n{glsl}");
-    assert!(!glsl.contains("texture_size("), "must not emit a fn call:\n{glsl}");
+    assert!(
+        !glsl.contains("texture_size("),
+        "must not emit a fn call:\n{glsl}"
+    );
 }
 
 // --- the vertex+fragment pipeline scaffold (A2a) -----------------------------
@@ -217,18 +250,33 @@ fn pipeline_scaffold_vertex_block() {
     assert!(glsl.starts_with("#version 330 core\n"), "got:\n{glsl}");
     assert!(glsl.contains("#ifdef VERTEX"), "got:\n{glsl}");
     // Attribute struct fields -> `in` with declaration-order locations.
-    assert!(glsl.contains("layout (location = 0) in vec2 aPos;"), "got:\n{glsl}");
-    assert!(glsl.contains("layout (location = 1) in vec2 aTexCoord;"), "got:\n{glsl}");
-    assert!(glsl.contains("layout (location = 2) in vec4 aColor;"), "got:\n{glsl}");
+    assert!(
+        glsl.contains("layout (location = 0) in vec2 aPos;"),
+        "got:\n{glsl}"
+    );
+    assert!(
+        glsl.contains("layout (location = 1) in vec2 aTexCoord;"),
+        "got:\n{glsl}"
+    );
+    assert!(
+        glsl.contains("layout (location = 2) in vec4 aColor;"),
+        "got:\n{glsl}"
+    );
     // Vertex uniforms are a std140 block -- see `pipeline_emits_one_block_per_stage`.
-    assert!(glsl.contains("layout(std140) uniform UiVertU {"), "got:\n{glsl}");
+    assert!(
+        glsl.contains("layout(std140) uniform UiVertU {"),
+        "got:\n{glsl}"
+    );
     assert!(glsl.contains("    mat4 uProjection;"), "got:\n{glsl}");
     assert!(glsl.contains("    mat4 uView;"), "got:\n{glsl}");
     assert!(glsl.contains("    mat4 uTransform;"), "got:\n{glsl}");
     // Varyings out -- position is suppressed (it is gl_Position, not a varying).
     assert!(glsl.contains("out vec2 TexCoord;"), "got:\n{glsl}");
     assert!(glsl.contains("out vec4 Color;"), "got:\n{glsl}");
-    assert!(!glsl.contains("out vec4 position;"), "position must not be a varying:\n{glsl}");
+    assert!(
+        !glsl.contains("out vec4 position;"),
+        "position must not be a varying:\n{glsl}"
+    );
     // main writes gl_Position from the position field + the varying outs.
     assert!(glsl.contains("gl_Position ="), "got:\n{glsl}");
     assert!(glsl.contains("TexCoord = "), "got:\n{glsl}");
@@ -254,7 +302,8 @@ fn pipeline_scaffold_pixel_block() {
 /// Both profiles emit; only the version line (and precision preamble) differ.
 #[test]
 fn pipeline_es300_profile() {
-    let glsl = emit_pipeline_profile(UI_SRC, "ui_vert", "ui_frag", GlslProfile::Es300).expect("emit");
+    let glsl =
+        emit_pipeline_profile(UI_SRC, "ui_vert", "ui_frag", GlslProfile::Es300).expect("emit");
     assert!(glsl.starts_with("#version 300 es\n"), "got:\n{glsl}");
     assert!(glsl.contains("precision highp float;"), "got:\n{glsl}");
 }
@@ -264,7 +313,10 @@ fn pipeline_es300_profile() {
 fn reject_pipeline(src: &str, vert: &str, frag: &str, needle: &str) {
     match emit_pipeline(src, vert, frag) {
         Ok(glsl) => panic!("expected rejection ({needle}) but emitted:\n{glsl}"),
-        Err(msg) => assert!(msg.contains(needle), "rejection should mention `{needle}`, got: {msg}"),
+        Err(msg) => assert!(
+            msg.contains(needle),
+            "rejection should mention `{needle}`, got: {msg}"
+        ),
     }
 }
 
@@ -459,16 +511,28 @@ const MRT_SRC: &str = r#"
 fn mrt_fragment_outputs_by_field_order() {
     let glsl = emit_pipeline(MRT_SRC, "vt", "fr").expect("emit");
     // Field order == layout location, mirroring the @attr location contract.
-    assert!(glsl.contains("layout(location = 0) out vec4 FragColor;"), "got:\n{glsl}");
-    assert!(glsl.contains("layout(location = 1) out vec4 FragId;"), "got:\n{glsl}");
+    assert!(
+        glsl.contains("layout(location = 0) out vec4 FragColor;"),
+        "got:\n{glsl}"
+    );
+    assert!(
+        glsl.contains("layout(location = 1) out vec4 FragId;"),
+        "got:\n{glsl}"
+    );
     // MRT frag is `void main()` with destructured assignments -- no `vec4 fr()`
     // returning + a `FragColor = fr();` wrapper.
     assert!(glsl.contains("void main()"), "got:\n{glsl}");
     assert!(glsl.contains("FragColor = "), "got:\n{glsl}");
     assert!(glsl.contains("FragId = "), "got:\n{glsl}");
-    assert!(!glsl.contains("FragColor = fr("), "MRT must not emit a single-output wrapper:\n{glsl}");
+    assert!(
+        !glsl.contains("FragColor = fr("),
+        "MRT must not emit a single-output wrapper:\n{glsl}"
+    );
     // The bare (non-layout) single-output declaration must be absent.
-    assert!(!glsl.contains("\nout vec4 FragColor;"), "MRT must not emit the bare FragColor out:\n{glsl}");
+    assert!(
+        !glsl.contains("\nout vec4 FragColor;"),
+        "MRT must not emit the bare FragColor out:\n{glsl}"
+    );
 }
 
 /// Both profiles emit the same MRT outputs (only the version/precision differ).
@@ -476,8 +540,14 @@ fn mrt_fragment_outputs_by_field_order() {
 fn mrt_fragment_es300() {
     let glsl = emit_pipeline_profile(MRT_SRC, "vt", "fr", GlslProfile::Es300).expect("emit");
     assert!(glsl.starts_with("#version 300 es\n"), "got:\n{glsl}");
-    assert!(glsl.contains("layout(location = 0) out vec4 FragColor;"), "got:\n{glsl}");
-    assert!(glsl.contains("layout(location = 1) out vec4 FragId;"), "got:\n{glsl}");
+    assert!(
+        glsl.contains("layout(location = 0) out vec4 FragColor;"),
+        "got:\n{glsl}"
+    );
+    assert!(
+        glsl.contains("layout(location = 1) out vec4 FragId;"),
+        "got:\n{glsl}"
+    );
 }
 
 /// Single-Vec4 fragment return is unchanged by the MRT work.
@@ -486,7 +556,10 @@ fn single_output_fragment_still_wraps() {
     let glsl = emit_pipeline(UI_SRC, "ui_vert", "ui_frag").expect("emit");
     assert!(glsl.contains("out vec4 FragColor;"), "got:\n{glsl}");
     assert!(glsl.contains("FragColor = ui_frag("), "got:\n{glsl}");
-    assert!(!glsl.contains("layout(location = 0) out vec4"), "single output has no layout:\n{glsl}");
+    assert!(
+        !glsl.contains("layout(location = 0) out vec4"),
+        "single output has no layout:\n{glsl}"
+    );
 }
 
 /// Every MRT output field must be Vec4 (each is a `out vec4`); a non-Vec4 field
@@ -548,12 +621,31 @@ const FRAG_DEPTH_SRC: &str = r#"
 fn frag_depth_field_writes_gl_frag_depth_without_an_out_location() {
     for p in [GlslProfile::Core330, GlslProfile::Es300] {
         let glsl = emit_pipeline_profile(FRAG_DEPTH_SRC, "vt", "fr", p).expect("emit");
-        assert!(glsl.contains("layout(location = 0) out vec4 FragColor;"), "got:\n{glsl}");
-        assert!(glsl.contains("layout(location = 1) out vec4 FragId;"), "got:\n{glsl}");
-        assert!(!glsl.contains("layout(location = 2)"), "FragDepth must not take a location:\n{glsl}");
-        assert!(!glsl.contains("out float FragDepth"), "FragDepth is not an out:\n{glsl}");
-        assert!(glsl.contains("gl_FragDepth = (Depth * 0.5);"), "got:\n{glsl}");
-        assert_eq!(glsl.matches("FragDepth = ").count(), 1, "only gl_FragDepth is assigned:\n{glsl}");
+        assert!(
+            glsl.contains("layout(location = 0) out vec4 FragColor;"),
+            "got:\n{glsl}"
+        );
+        assert!(
+            glsl.contains("layout(location = 1) out vec4 FragId;"),
+            "got:\n{glsl}"
+        );
+        assert!(
+            !glsl.contains("layout(location = 2)"),
+            "FragDepth must not take a location:\n{glsl}"
+        );
+        assert!(
+            !glsl.contains("out float FragDepth"),
+            "FragDepth is not an out:\n{glsl}"
+        );
+        assert!(
+            glsl.contains("gl_FragDepth = (Depth * 0.5);"),
+            "got:\n{glsl}"
+        );
+        assert_eq!(
+            glsl.matches("FragDepth = ").count(),
+            1,
+            "only gl_FragDepth is assigned:\n{glsl}"
+        );
     }
 }
 
@@ -561,7 +653,10 @@ fn frag_depth_field_writes_gl_frag_depth_without_an_out_location() {
 fn reject_frag_depth_that_is_not_float() {
     let src = FRAG_DEPTH_SRC
         .replace("FragDepth: float", "FragDepth: Vec4")
-        .replace("FragDepth: vary.Depth * 0.5", "FragDepth: Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 1.0 }");
+        .replace(
+            "FragDepth: vary.Depth * 0.5",
+            "FragDepth: Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 1.0 }",
+        );
     reject_pipeline(&src, "vt", "fr", "`FragDepth` must be float");
 }
 
@@ -613,12 +708,30 @@ fn instanced_locations_continue_across_structs() {
         }
     "#;
     let glsl = emit_pipeline(src, "vt", "fr").expect("emit");
-    assert!(glsl.contains("layout (location = 0) in vec2 aPos;"), "got:\n{glsl}");
-    assert!(glsl.contains("layout (location = 1) in vec2 aTexCoord;"), "got:\n{glsl}");
-    assert!(glsl.contains("layout (location = 2) in vec2 InstancePosition;"), "got:\n{glsl}");
-    assert!(glsl.contains("layout (location = 3) in float InstanceRotation;"), "got:\n{glsl}");
-    assert!(glsl.contains("layout (location = 4) in float InstanceScale;"), "got:\n{glsl}");
-    assert!(glsl.contains("layout (location = 5) in float InstanceHeight;"), "got:\n{glsl}");
+    assert!(
+        glsl.contains("layout (location = 0) in vec2 aPos;"),
+        "got:\n{glsl}"
+    );
+    assert!(
+        glsl.contains("layout (location = 1) in vec2 aTexCoord;"),
+        "got:\n{glsl}"
+    );
+    assert!(
+        glsl.contains("layout (location = 2) in vec2 InstancePosition;"),
+        "got:\n{glsl}"
+    );
+    assert!(
+        glsl.contains("layout (location = 3) in float InstanceRotation;"),
+        "got:\n{glsl}"
+    );
+    assert!(
+        glsl.contains("layout (location = 4) in float InstanceScale;"),
+        "got:\n{glsl}"
+    );
+    assert!(
+        glsl.contains("layout (location = 5) in float InstanceHeight;"),
+        "got:\n{glsl}"
+    );
     assert!(glsl.contains("flat out float y_pos;"), "got:\n{glsl}");
     assert!(glsl.contains("flat in float y_pos;"), "got:\n{glsl}");
     assert!(glsl.contains("gl_VertexID"), "got:\n{glsl}");
@@ -649,9 +762,18 @@ fn uniform_array_vertex_decl_and_at() {
         fn fr(vary: Vary) -> Vec4 { return Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 1.0 } }
     "#;
     let glsl = emit_pipeline(src, "vt", "fr").expect("emit");
-    assert!(glsl.contains("    vec2 entity_positions[32];"), "got:\n{glsl}");
-    assert!(glsl.contains("entity_positions["), "at() must render as indexing:\n{glsl}");
-    assert!(!glsl.contains("at("), "at() must not render as a call:\n{glsl}");
+    assert!(
+        glsl.contains("    vec2 entity_positions[32];"),
+        "got:\n{glsl}"
+    );
+    assert!(
+        glsl.contains("entity_positions["),
+        "at() must render as indexing:\n{glsl}"
+    );
+    assert!(
+        !glsl.contains("at("),
+        "at() must not render as a call:\n{glsl}"
+    );
     // The loop-bound temp for min(int, int) must be int: ES300 has no implicit
     // int->float on assignment, so the float fallback fails to compile there.
     let line = glsl
@@ -659,7 +781,10 @@ fn uniform_array_vertex_decl_and_at() {
         .find(|l| l.contains("= min(entity_count, 32);"))
         .expect("min bound assignment");
     let name = line.trim().split(" = ").next().unwrap();
-    assert!(glsl.contains(&format!("int {name};")), "bound temp `{name}` must be int:\n{glsl}");
+    assert!(
+        glsl.contains(&format!("int {name};")),
+        "bound temp `{name}` must be int:\n{glsl}"
+    );
 }
 
 #[test]
@@ -734,7 +859,10 @@ fn builtin_vertex_id_maps() {
     "#;
     let glsl = emit_pipeline(src, "vt", "fr").expect("emit");
     assert!(glsl.contains("gl_VertexID"), "got:\n{glsl}");
-    assert!(!glsl.contains("vertex_id("), "must not emit a fn call:\n{glsl}");
+    assert!(
+        !glsl.contains("vertex_id("),
+        "must not emit a fn call:\n{glsl}"
+    );
 }
 
 /// The premise the backend-neutral fullscreen submission rests on: an A1 entry contributes NO vertex code, so
@@ -750,7 +878,10 @@ fn builtin_vertex_id_maps() {
 fn a1_vertex_stage_is_compiler_owned_and_order_blind() {
     let vertex_of = |glsl: &str| -> String {
         let (_, v) = glsl.split_once("#ifdef VERTEX").expect("a VERTEX section");
-        v.split("#endif").next().expect("a terminated VERTEX section").to_string()
+        v.split("#endif")
+            .next()
+            .expect("a terminated VERTEX section")
+            .to_string()
     };
     let a = emit_entry(
         r#"
@@ -770,12 +901,24 @@ fn a1_vertex_stage_is_compiler_owned_and_order_blind() {
     .expect("emit b");
 
     let (va, vb) = (vertex_of(&a), vertex_of(&b));
-    assert_eq!(va, vb, "two A1 entries must share one compiler-owned vertex stage");
-    assert!(va.contains("gl_Position = vec4(aPos, 0.0, 1.0)"), "got:\n{va}");
+    assert_eq!(
+        va, vb,
+        "two A1 entries must share one compiler-owned vertex stage"
+    );
+    assert!(
+        va.contains("gl_Position = vec4(aPos, 0.0, 1.0)"),
+        "got:\n{va}"
+    );
     assert!(va.contains("TexCoord = aTexCoord"), "got:\n{va}");
-    assert!(!va.contains("gl_VertexID"), "the generated stage must not read vertex order:\n{va}");
+    assert!(
+        !va.contains("gl_VertexID"),
+        "the generated stage must not read vertex order:\n{va}"
+    );
     // And the entry's own body reached only the fragment half.
-    assert!(!va.contains("f("), "the entry body must not appear in the vertex stage:\n{va}");
+    assert!(
+        !va.contains("f("),
+        "the entry body must not appear in the vertex stage:\n{va}"
+    );
 }
 
 #[test]
@@ -808,7 +951,10 @@ fn reject_vertex_id_in_a1_entry() {
     "#;
     match emit_entry(src, "f") {
         Ok(glsl) => panic!("expected rejection but emitted:\n{glsl}"),
-        Err(msg) => assert!(msg.contains("vertex-stage builtin"), "rejection should mention `vertex-stage builtin`, got: {msg}"),
+        Err(msg) => assert!(
+            msg.contains("vertex-stage builtin"),
+            "rejection should mention `vertex-stage builtin`, got: {msg}"
+        ),
     }
 }
 
@@ -857,12 +1003,21 @@ fn bvec_nonfinite_entry_golden() {
     "#;
     let glsl = emit_entry(src, "nonfinite_frag").expect("emit");
     assert!(glsl.contains("bvec3("), "bvec3 ctor inline:\n{glsl}");
-    assert!(glsl.contains("isinf(") && glsl.contains("isnan("), "isinf/isnan:\n{glsl}");
+    assert!(
+        glsl.contains("isinf(") && glsl.contains("isnan("),
+        "isinf/isnan:\n{glsl}"
+    );
     assert!(glsl.contains("any("), "any reduction:\n{glsl}");
     assert!(glsl.contains("greaterThan("), "greaterThan:\n{glsl}");
-    assert!(glsl.contains("vec3(bad)"), "to_vec3 bool->float cast:\n{glsl}");
+    assert!(
+        glsl.contains("vec3(bad)"),
+        "to_vec3 bool->float cast:\n{glsl}"
+    );
     // The bvec3 ctor renders as the native builtin, never a mangled helper fn.
-    assert!(!glsl.contains("bvec3__"), "no mangled bvec3 helper:\n{glsl}");
+    assert!(
+        !glsl.contains("bvec3__"),
+        "no mangled bvec3 helper:\n{glsl}"
+    );
 }
 
 /// GLSL forbids bool-vector interpolants -- a Bvec3 varying field rejects at emit.
@@ -926,8 +1081,14 @@ const INT_MRT_SRC: &str = r#"
 #[test]
 fn mrt_int_output_field() {
     let glsl = emit_pipeline(INT_MRT_SRC, "vt", "fr").expect("emit");
-    assert!(glsl.contains("layout(location = 0) out vec4 FragColor;"), "got:\n{glsl}");
-    assert!(glsl.contains("layout(location = 1) out int FragId;"), "got:\n{glsl}");
+    assert!(
+        glsl.contains("layout(location = 0) out vec4 FragColor;"),
+        "got:\n{glsl}"
+    );
+    assert!(
+        glsl.contains("layout(location = 1) out int FragId;"),
+        "got:\n{glsl}"
+    );
     assert!(glsl.contains("FragId = "), "got:\n{glsl}");
 }
 
@@ -936,7 +1097,10 @@ fn mrt_int_output_field() {
 fn mrt_int_output_es300() {
     let glsl = emit_pipeline_profile(INT_MRT_SRC, "vt", "fr", GlslProfile::Es300).expect("emit");
     assert!(glsl.starts_with("#version 300 es\n"), "got:\n{glsl}");
-    assert!(glsl.contains("layout(location = 1) out int FragId;"), "got:\n{glsl}");
+    assert!(
+        glsl.contains("layout(location = 1) out int FragId;"),
+        "got:\n{glsl}"
+    );
 }
 
 /// A single bare `int` fragment return is a lone `out int` (the silhouette
@@ -982,7 +1146,10 @@ const ISAMPLER_SRC: &str = r#"
 #[test]
 fn isampler_texture_id() {
     let glsl = emit_pipeline(ISAMPLER_SRC, "vt", "fr").expect("emit");
-    assert!(glsl.contains("uniform highp isampler2D ids;"), "got:\n{glsl}");
+    assert!(
+        glsl.contains("uniform highp isampler2D ids;"),
+        "got:\n{glsl}"
+    );
     assert!(glsl.contains("texture(ids, TexCoord).r"), "got:\n{glsl}");
     assert!(glsl.contains("vec2(textureSize(ids, 0))"), "got:\n{glsl}");
 }
@@ -992,7 +1159,10 @@ fn isampler_texture_id() {
 #[test]
 fn isampler_es300() {
     let glsl = emit_pipeline_profile(ISAMPLER_SRC, "vt", "fr", GlslProfile::Es300).expect("emit");
-    assert!(glsl.contains("uniform highp isampler2D ids;"), "got:\n{glsl}");
+    assert!(
+        glsl.contains("uniform highp isampler2D ids;"),
+        "got:\n{glsl}"
+    );
 }
 
 /// ISampler2D is opaque like Sampler2D: illegal as a return type.
@@ -1068,7 +1238,12 @@ fn reject_texture_field_select() {
         }
     "#
     );
-    reject_pipeline(&src, "vs", "fs", "`a` is not a value field of the shader interface");
+    reject_pipeline(
+        &src,
+        "vs",
+        "fs",
+        "`a` is not a value field of the shader interface",
+    );
 }
 
 // --- Attribute locations are RECORDED, not invented while printing ----------
@@ -1169,7 +1344,6 @@ fn mat4_attribute_rejects_rather_than_misnumbering_what_follows() {
     }
 }
 
-
 // --- @textures: the unit is compiler-assigned (P2) ---------------------------
 // Sampler params bound by hand-typed name AND hand-assigned unit are the
 // silent-collision class -- two bind sites sharing a number bind one texture
@@ -1193,10 +1367,16 @@ fn textures_group_declares_each_sampler() {
     "#;
     let glsl = emit_pipeline(src, "vs", "fs").expect("must emit");
     for n in ["uTexture", "mask_tex", "shadowmap_tex"] {
-        assert!(glsl.contains(&format!("uniform sampler2D {n};")), "want `{n}` declared:\n{glsl}");
+        assert!(
+            glsl.contains(&format!("uniform sampler2D {n};")),
+            "want `{n}` declared:\n{glsl}"
+        );
     }
     // The group param is not itself a GLSL entity -- field reads are bare globals.
-    assert!(!glsl.contains("t."), "the group param must not survive into GLSL:\n{glsl}");
+    assert!(
+        !glsl.contains("t."),
+        "the group param must not survive into GLSL:\n{glsl}"
+    );
 }
 
 /// An integer sampler in the group keeps its kind: `isampler2D`, not the float
@@ -1319,7 +1499,11 @@ fn emission_reports_texture_slots_in_order() {
     "#;
     let (ws, mid) = workspace(src);
     let e = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
-        &ws, mid, "vs", "fs", GlslProfile::Core330,
+        &ws,
+        mid,
+        "vs",
+        "fs",
+        GlslProfile::Core330,
     )
     .expect("must emit");
     let names: Vec<String> = e.abi.texture_units.iter().map(|n| n.to_string()).collect();
@@ -1332,10 +1516,18 @@ fn emission_reports_texture_slots_in_order() {
 fn emission_reports_no_slots_without_a_group() {
     let (ws, mid) = workspace(UI_SRC);
     let e = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
-        &ws, mid, "ui_vert", "ui_frag", GlslProfile::Core330,
+        &ws,
+        mid,
+        "ui_vert",
+        "ui_frag",
+        GlslProfile::Core330,
     )
     .expect("must emit");
-    assert!(e.abi.texture_units.is_empty(), "got {:?}", e.abi.texture_units);
+    assert!(
+        e.abi.texture_units.is_empty(),
+        "got {:?}",
+        e.abi.texture_units
+    );
 }
 
 // --- @engine: the engine-owned block at binding 0 ----------------------------
@@ -1390,10 +1582,19 @@ fn engine_block_is_declared_in_both_stages() {
 #[test]
 fn engine_block_coexists_with_a_shader_owned_block() {
     let glsl = emit_pipeline(ENGINE_SRC, "e_vert", "e_frag").expect("emit");
-    assert!(glsl.contains("layout(std140) uniform UiFragU {\n    vec2 uSize;\n    float uRatio;\n};\n"), "got:\n{glsl}");
-    assert!(glsl.contains("layout(std140) uniform EngineU {"), "got:\n{glsl}");
+    assert!(
+        glsl.contains("layout(std140) uniform UiFragU {\n    vec2 uSize;\n    float uRatio;\n};\n"),
+        "got:\n{glsl}"
+    );
+    assert!(
+        glsl.contains("layout(std140) uniform EngineU {"),
+        "got:\n{glsl}"
+    );
     // The vertex stage's own group is a block at its own binding.
-    assert!(glsl.contains("layout(std140) uniform GrassVertU {\n    int entity_count;\n};\n"), "got:\n{glsl}");
+    assert!(
+        glsl.contains("layout(std140) uniform GrassVertU {\n    int entity_count;\n};\n"),
+        "got:\n{glsl}"
+    );
     // ...but the engine block's members never fall back to loose uniforms.
     assert!(!glsl.contains("uniform mat4 uProjection;"), "got:\n{glsl}");
 }
@@ -1406,11 +1607,25 @@ fn engine_block_coexists_with_a_shader_owned_block() {
 #[test]
 fn engine_block_binds_at_index_zero() {
     let (ws, mid) = workspace(ENGINE_SRC);
-    let em = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(&ws, mid, "e_vert", "e_frag", GlslProfile::Core330)
-        .expect("emit");
-    let bound: Vec<(u32, &str)> =
-        em.abi.uniform_blocks.iter().map(|(b, p)| (*b, p.plan.struct_name.as_str())).collect();
-    assert_eq!(bound, vec![(0, "EngineU"), (1, "GrassVertU"), (2, "UiFragU")], "role -> binding");
+    let em = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
+        &ws,
+        mid,
+        "e_vert",
+        "e_frag",
+        GlslProfile::Core330,
+    )
+    .expect("emit");
+    let bound: Vec<(u32, &str)> = em
+        .abi
+        .uniform_blocks
+        .iter()
+        .map(|(b, p)| (*b, p.plan.struct_name.as_str()))
+        .collect();
+    assert_eq!(
+        bound,
+        vec![(0, "EngineU"), (1, "GrassVertU"), (2, "UiFragU")],
+        "role -> binding"
+    );
 }
 
 /// One block per PROGRAM, so the stages cannot name different engine groups --
@@ -1469,7 +1684,8 @@ fn textures_and_engine_conflict() {
 /// Builds a pipeline whose ENGINE block declares `name`, against a fixture that
 /// already uses that name in another namespace.
 fn engine_member_named(name: &str) -> String {
-    format!(r#"
+    format!(
+        r#"
     value QuadVert  {{ aPos: Vec2, TexCoordAttr: Vec2 }}
     value EngineU   {{ uProjection: Mat4, {name}: float }}
     value Vary      {{ position: Vec4, TexCoord: Vec2 }}
@@ -1486,7 +1702,8 @@ fn engine_member_named(name: &str) -> String {
     fn c_frag(vary: Vary, tex: Sampler2D, @size(4) tints: UniformArray<Vec4>) -> Vec4 {{
         return texture(tex, vary.TexCoord) + at(tints, 0)
     }}
-"#)
+"#
+    )
 }
 
 #[test]
@@ -1550,8 +1767,12 @@ fn engine_member_colliding_with_an_mrt_output_rejects() {
 /// (a fixture that never compiles).
 #[test]
 fn engine_member_with_a_free_name_emits() {
-    let glsl = emit_pipeline(&engine_member_named("uEngineTime"), "c_vert", "c_frag").expect("emit");
-    assert!(glsl.contains("layout(std140) uniform EngineU {"), "got:\n{glsl}");
+    let glsl =
+        emit_pipeline(&engine_member_named("uEngineTime"), "c_vert", "c_frag").expect("emit");
+    assert!(
+        glsl.contains("layout(std140) uniform EngineU {"),
+        "got:\n{glsl}"
+    );
     assert!(glsl.contains("float uEngineTime;"), "got:\n{glsl}");
 }
 
@@ -1589,13 +1810,28 @@ fn engine_member_colliding_with_a_stage_block_member_rejects() {
 fn a_program_without_an_engine_group_leaves_slot_zero_empty() {
     let (ws, mid) = workspace(UI_SRC);
     let em = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
-        &ws, mid, "ui_vert", "ui_frag", GlslProfile::Core330,
+        &ws,
+        mid,
+        "ui_vert",
+        "ui_frag",
+        GlslProfile::Core330,
     )
     .expect("emit");
-    let bound: Vec<(u32, &str)> =
-        em.abi.uniform_blocks.iter().map(|(b, p)| (*b, p.plan.struct_name.as_str())).collect();
-    assert_eq!(bound, vec![(1, "UiVertU"), (2, "UiFragU")], "role -> binding");
-    assert!(!em.abi.uniform_blocks.iter().any(|(b, _)| *b == 0), "slot 0 is the engine's");
+    let bound: Vec<(u32, &str)> = em
+        .abi
+        .uniform_blocks
+        .iter()
+        .map(|(b, p)| (*b, p.plan.struct_name.as_str()))
+        .collect();
+    assert_eq!(
+        bound,
+        vec![(1, "UiVertU"), (2, "UiFragU")],
+        "role -> binding"
+    );
+    assert!(
+        !em.abi.uniform_blocks.iter().any(|(b, _)| *b == 0),
+        "slot 0 is the engine's"
+    );
 }
 
 #[test]
@@ -1665,7 +1901,10 @@ fn mrt_early_return_terminates_the_entry() {
     let glsl = emit_pipeline(&source, "vt", "fr").expect("emit");
     let branch = glsl.split("if (").last().expect("conditional entry");
     let end = branch.find('}').expect("branch end");
-    assert!(branch[..end].contains("return;"), "MRT branch must not fall through:\n{glsl}");
+    assert!(
+        branch[..end].contains("return;"),
+        "MRT branch must not fall through:\n{glsl}"
+    );
 }
 
 // --- per-stage sampler budget ---------------------------------------------
@@ -1675,7 +1914,9 @@ fn mrt_early_return_terminates_the_entry() {
 
 fn sampler_group_src(n: usize) -> String {
     let fields: Vec<String> = (0..n).map(|i| format!("s{i}: Sampler2D")).collect();
-    let reads: Vec<String> = (0..n).map(|i| format!("acc += texture(t.s{i}, uv).x")).collect();
+    let reads: Vec<String> = (0..n)
+        .map(|i| format!("acc += texture(t.s{i}, uv).x"))
+        .collect();
     format!(
         r#"
         struct ManyTex {{ {} }}
@@ -1714,7 +1955,13 @@ fn fragment_stage_at_sixteen_samplers_emits() {
 fn fragment_stage_over_sixteen_samplers_rejects_naming_the_shader() {
     let src = sampler_group_src(17);
     let e = emit_pipeline(&src, "many_vs", "many_fs").expect_err("17 samplers must reject");
-    assert!(e.contains("many_fs") && e.contains("17 samplers") && e.contains("16"), "got: {e}");
+    assert!(
+        e.contains("many_fs") && e.contains("17 samplers") && e.contains("16"),
+        "got: {e}"
+    );
     let e = emit_entry(&src, "many_entry").expect_err("17 samplers must reject");
-    assert!(e.contains("many_entry") && e.contains("17 samplers") && e.contains("16"), "got: {e}");
+    assert!(
+        e.contains("many_entry") && e.contains("17 samplers") && e.contains("16"),
+        "got: {e}"
+    );
 }

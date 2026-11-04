@@ -88,9 +88,12 @@ fn main() {
     let syms = g.manifest_lines(&ws);
     for want in ["<int>", "<bool>"] {
         assert!(
-            syms.iter().any(|s| s.contains("inner") && s.ends_with(want)),
+            syms.iter()
+                .any(|s| s.contains("inner") && s.ends_with(want)),
             "inner was not instantiated at {want}: {:?}",
-            syms.iter().filter(|s| s.contains("inner")).collect::<Vec<_>>()
+            syms.iter()
+                .filter(|s| s.contains("inner"))
+                .collect::<Vec<_>>()
         );
     }
 }
@@ -160,7 +163,11 @@ fn main() {
     );
     let syms = g.manifest_lines(&ws);
     let idents: Vec<&String> = syms.iter().filter(|s| s.contains("ident")).collect();
-    assert_eq!(idents.len(), 2, "P and Q must not share an instance: {idents:?}");
+    assert_eq!(
+        idents.len(),
+        2,
+        "P and Q must not share an instance: {idents:?}"
+    );
     assert!(idents.iter().any(|s| s.ends_with("<P>")), "{idents:?}");
     assert!(idents.iter().any(|s| s.ends_with("<Q>")), "{idents:?}");
 }
@@ -181,7 +188,10 @@ fn main() {
 }
 "#,
     );
-    let nexts = g.edges().filter(|e| e.kind == EdgeKind::IteratorNext).count();
+    let nexts = g
+        .edges()
+        .filter(|e| e.kind == EdgeKind::IteratorNext)
+        .count();
     assert!(nexts > 0, "no iterator-next edge was recorded");
     assert!(
         g.edges()
@@ -210,14 +220,23 @@ fn main() {
 "#,
     );
     let r = instance_graph::reconcile_call_identities(&ws, &g);
-    assert!(r.calls > 0, "the fixture produced no concrete calls to reconcile");
+    assert!(
+        r.calls > 0,
+        "the fixture produced no concrete calls to reconcile"
+    );
     assert!(
         r.missing.is_empty(),
         "concrete call identities absent from the instance graph: {:?}",
         r.missing
     );
-    assert_eq!(r.unresolved_sites, 0, "a valid call identity could not be stated");
-    assert!(r.graph_only > 0, "the graph had no identities beyond direct calls");
+    assert_eq!(
+        r.unresolved_sites, 0,
+        "a valid call identity could not be stated"
+    );
+    assert!(
+        r.graph_only > 0,
+        "the graph had no identities beyond direct calls"
+    );
 }
 
 /// A Rock function taken as a VALUE is an edge. The known-positive fixture
@@ -269,9 +288,7 @@ fn main() {
     );
     let witnesses: Vec<String> = g
         .edges()
-        .filter(|e| {
-            e.kind == EdgeKind::IteratorNext || e.kind == EdgeKind::BoundNextWitness
-        })
+        .filter(|e| e.kind == EdgeKind::IteratorNext || e.kind == EdgeKind::BoundNextWitness)
         .map(|e| g.symbol(&ws, &e.to))
         .collect();
     // `next` is one overload per iterator type, so the mangling carries the
@@ -334,14 +351,25 @@ fn main() {
         v.realization
             .iter()
             .filter(|(i, _)| {
-                ws.module(i.func.module).functions[i.func.func].name.as_str() == "variant_probe"
+                ws.module(i.func.module).functions[i.func.func]
+                    .name
+                    .as_str()
+                    == "variant_probe"
             })
             .map(|(i, r)| (i.clone(), r.decl))
             .collect::<Vec<_>>()
     };
     let (lp, jp) = (probe(&lua), probe(&js));
-    assert_eq!(lp.len(), 1, "the probe was not retained exactly once on luajit");
-    assert_eq!(jp.len(), 1, "the probe was not retained exactly once on javascript");
+    assert_eq!(
+        lp.len(),
+        1,
+        "the probe was not retained exactly once on luajit"
+    );
+    assert_eq!(
+        jp.len(),
+        1,
+        "the probe was not retained exactly once on javascript"
+    );
     assert_eq!(lp[0].0, jp[0].0, "one shared instance, not two");
     assert_ne!(
         lp[0].1, jp[0].1,
@@ -423,7 +451,9 @@ fn main() { host_tick(3) }
             .excluded
             .iter()
             .find(|e| {
-                ws.module(e.instance.func.module).functions[e.instance.func.func].name.as_str()
+                ws.module(e.instance.func.module).functions[e.instance.func.func]
+                    .name
+                    .as_str()
                     == name
             })
             .map(|e| e.cause)
@@ -476,8 +506,14 @@ fn main() { let c = ticker(3) }
         .filter(|h| h.symbol_today.contains("ticker"))
         .map(|h| h.suffix)
         .collect();
-    assert!(helpers.contains(&"__step"), "no `__step` helper: {helpers:?}");
-    assert!(helpers.contains(&"__resume"), "no `__resume` helper: {helpers:?}");
+    assert!(
+        helpers.contains(&"__step"),
+        "no `__step` helper: {helpers:?}"
+    );
+    assert!(
+        helpers.contains(&"__resume"),
+        "no `__resume` helper: {helpers:?}"
+    );
 }
 
 #[test]
@@ -514,8 +550,14 @@ fn main() { let c = ticker(); let _ = c.resume() }
             .filter(|helper| helper.owner_identity == g.identity(&ws, inst))
             .map(|helper| helper.suffix)
             .collect();
-        assert_eq!(actual, expected, "graph helper accounting drifted from the plan");
-        assert!(expected.contains("__advance"), "fixture did not produce a yield channel");
+        assert_eq!(
+            actual, expected,
+            "graph helper accounting drifted from the plan"
+        );
+        assert!(
+            expected.contains("__advance"),
+            "fixture did not produce a yield channel"
+        );
         compared += 1;
     }
     assert!(compared > 0, "fixture produced no concrete coroutine plan");
@@ -576,7 +618,10 @@ fn main() {
         instance_graph::manifest_digest(&ws, &no_inline_rev),
         "digest differs across the two knobs"
     );
-    assert!(!normal_text.is_empty(), "the fixture produced an empty manifest");
+    assert!(
+        !normal_text.is_empty(),
+        "the fixture produced an empty manifest"
+    );
 }
 
 /// The identity adversary: one generic instantiated at `(fn(int) -> int)?` and
@@ -606,9 +651,19 @@ fn main() {
     let idents: Vec<&instance_graph::Instance> = g
         .instances
         .iter()
-        .filter(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == "ident")
+        .filter(|i| {
+            ws.module(i.func.module).functions[i.func.func]
+                .name
+                .as_str()
+                == "ident"
+        })
         .collect();
-    assert_eq!(idents.len(), 2, "expected two `ident` instances, got {}", idents.len());
+    assert_eq!(
+        idents.len(),
+        2,
+        "expected two `ident` instances, got {}",
+        idents.len()
+    );
 
     let display: Vec<String> = idents.iter().map(|i| g.symbol(&ws, i)).collect();
     assert_eq!(
@@ -624,8 +679,7 @@ fn main() {
 
     // ...and the manifest keeps both, rather than deduplicating them into one.
     let lines = g.manifest_lines(&ws);
-    let ident_lines: Vec<&String> =
-        lines.iter().filter(|l| l.contains("ident")).collect();
+    let ident_lines: Vec<&String> = lines.iter().filter(|l| l.contains("ident")).collect();
     assert_eq!(
         ident_lines.len(),
         2,
@@ -649,9 +703,14 @@ fn rejections_of(
     // one is an error with nowhere to point (plan S 2). Asserted HERE rather
     // than per fixture: every rejection kind reaches the property this way, and
     // the corpus measures 0 rejections, so these fixtures are its only evidence.
-    let spanless: Vec<&instance_graph::Rejection> =
-        g.rejections().filter(|r| instance_graph::is_spanless(&r.span)).collect();
-    assert!(spanless.is_empty(), "a rejection carried no source span: {spanless:?}");
+    let spanless: Vec<&instance_graph::Rejection> = g
+        .rejections()
+        .filter(|r| instance_graph::is_spanless(&r.span))
+        .collect();
+    assert!(
+        spanless.is_empty(),
+        "a rejection carried no source span: {spanless:?}"
+    );
     g.rejections()
         .filter(|r| r.kind == kind)
         .map(|r| format!("{} at {:?}: {}", g.identity(ws, &r.at), r.span, r.message))
@@ -673,12 +732,24 @@ fn depth<T>(x: T, n: int) -> int {
 fn main() { depth(1, 3) }
 "#,
     );
-    let r = rejections_of(&ws, &g, instance_graph::RejectionKind::ChangingInstanceRecursion);
-    assert_eq!(r.len(), 1, "expected exactly one polymorphic-recursion rejection, got {r:?}");
+    let r = rejections_of(
+        &ws,
+        &g,
+        instance_graph::RejectionKind::ChangingInstanceRecursion,
+    );
+    assert_eq!(
+        r.len(),
+        1,
+        "expected exactly one polymorphic-recursion rejection, got {r:?}"
+    );
     assert!(r[0].contains("depth"), "{r:?}");
     // The WALK still had to terminate to produce that rejection -- detection is
     // a post-pass, so `MAX_INSTANTIATION_DEPTH` is what stops the expansion.
-    assert!(g.instances.len() < 500, "instance explosion: {}", g.instances.len());
+    assert!(
+        g.instances.len() < 500,
+        "instance explosion: {}",
+        g.instances.len()
+    );
     assert_eq!(
         g.recursion_census(&ws).changing_instance.len(),
         1,
@@ -687,13 +758,20 @@ fn main() { depth(1, 3) }
     // ...and the graph is NOT closed, which is what makes `is_closed` a test
     // rather than a constant: the capped expansion left callees undiscovered.
     let c = g.closure(&ws);
-    assert!(!c.depth_capped.is_empty(), "a capped expansion was not reported");
-    assert!(!c.is_closed(), "a graph with a cut expansion reported itself closed");
+    assert!(
+        !c.depth_capped.is_empty(),
+        "a capped expansion was not reported"
+    );
+    assert!(
+        !c.is_closed(),
+        "a graph with a cut expansion reported itself closed"
+    );
 }
 
 #[test]
 fn recursive_diagnostics_do_not_depend_on_type_interning_order() {
-    let ws = check(r#"
+    let ws = check(
+        r#"
 fn grow<T>(x: T, n: int) -> int {
     if n <= 0 { return 0 }
     return grow([x], n - 1)
@@ -701,7 +779,8 @@ fn grow<T>(x: T, n: int) -> int {
 fn first() -> int { return grow(1, 3) }
 fn second() -> int { return grow(true, 3) }
 fn main() { first(); second() }
-"#);
+"#,
+    );
     let roots = skull::mir_emit::emission_roots(&ws, Some("<test>"));
     let build = |types| {
         let interner = std::sync::Arc::new(skull_mir::monoty::MonoInterner::new());
@@ -713,7 +792,11 @@ fn main() { first(); second() }
     let reverse = build([MonoTy::Bool, MonoTy::Int]);
     let kind = instance_graph::RejectionKind::ChangingInstanceRecursion;
     let expected = rejections_of(&ws, &forward, kind);
-    assert_eq!(expected.len(), 1, "fixture produced no recursive diagnostic");
+    assert_eq!(
+        expected.len(),
+        1,
+        "fixture produced no recursive diagnostic"
+    );
     assert_eq!(expected, rejections_of(&ws, &reverse, kind));
 }
 
@@ -735,8 +818,15 @@ fn pong<T>(x: T, n: int) -> int {
 fn main() { ping(1, 3) }
 "#,
     );
-    let r = rejections_of(&ws, &g, instance_graph::RejectionKind::ChangingInstanceRecursion);
-    assert!(!r.is_empty(), "mutual polymorphic recursion was not rejected");
+    let r = rejections_of(
+        &ws,
+        &g,
+        instance_graph::RejectionKind::ChangingInstanceRecursion,
+    );
+    assert!(
+        !r.is_empty(),
+        "mutual polymorphic recursion was not rejected"
+    );
 }
 
 /// CONTROL: ordinary same-instance recursion, direct and mutual, is finite and
@@ -764,7 +854,11 @@ fn main() {
 }
 "#,
     );
-    let r = rejections_of(&ws, &g, instance_graph::RejectionKind::ChangingInstanceRecursion);
+    let r = rejections_of(
+        &ws,
+        &g,
+        instance_graph::RejectionKind::ChangingInstanceRecursion,
+    );
     assert!(r.is_empty(), "finite recursion was rejected: {r:?}");
     // ...and the fixture really did produce the recursion it claims to.
     let census = g.recursion_census(&ws);
@@ -774,7 +868,10 @@ fn main() {
         census.changing_instance
     );
     assert!(
-        census.direct_same_instance.iter().any(|s| s.contains("countdown")),
+        census
+            .direct_same_instance
+            .iter()
+            .any(|s| s.contains("countdown")),
         "the fixture produced no direct recursion to control against"
     );
     assert!(
@@ -787,7 +884,10 @@ fn main() {
     assert_eq!(
         g.instances
             .iter()
-            .filter(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == "hold")
+            .filter(|i| ws.module(i.func.module).functions[i.func.func]
+                .name
+                .as_str()
+                == "hold")
             .count(),
         2,
         "the fixture lost the two-instantiation arm of the control"
@@ -810,8 +910,15 @@ fn main() {
 "#,
     );
     let r = rejections_of(&ws, &g, instance_graph::RejectionKind::GenericFnValue);
-    assert_eq!(r.len(), 1, "expected one generic-fn-value rejection, got {r:?}");
-    assert!(r[0].contains("ident"), "the rejection does not name the function: {r:?}");
+    assert_eq!(
+        r.len(),
+        1,
+        "expected one generic-fn-value rejection, got {r:?}"
+    );
+    assert!(
+        r[0].contains("ident"),
+        "the rejection does not name the function: {r:?}"
+    );
 }
 
 /// CONTROL: a concrete function taken as a value is ordinary and must survive.
@@ -856,10 +963,17 @@ fn main() {
     // synthesized-call scan cannot decide that receiver's STORAGE either -- an
     // unresolved receiver must be reported, never read as "boxed".
     let r = rejections_of(&ws, &g, instance_graph::RejectionKind::UnconstrainedTypeVar);
-    assert_eq!(r.len(), 3, "expected `make`, `len` and the storage query, got {r:?}");
+    assert_eq!(
+        r.len(),
+        3,
+        "expected `make`, `len` and the storage query, got {r:?}"
+    );
     assert!(r.iter().any(|s| s.contains("make")), "{r:?}");
     assert!(r.iter().any(|s| s.contains("len_arr_T")), "{r:?}");
-    assert!(r.iter().any(|s| s.contains("storage cannot be decided")), "{r:?}");
+    assert!(
+        r.iter().any(|s| s.contains("storage cannot be decided")),
+        "{r:?}"
+    );
 }
 
 /// CONTROL: a type variable constrained anywhere in the body -- not at the call
@@ -878,15 +992,30 @@ fn main() {
 "#,
     );
     let r = rejections_of(&ws, &g, instance_graph::RejectionKind::UnconstrainedTypeVar);
-    assert!(r.is_empty(), "a body-constrained type variable was rejected: {r:?}");
+    assert!(
+        r.is_empty(),
+        "a body-constrained type variable was rejected: {r:?}"
+    );
     let makes: Vec<String> = g
         .instances
         .iter()
-        .filter(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == "make")
+        .filter(|i| {
+            ws.module(i.func.module).functions[i.func.func]
+                .name
+                .as_str()
+                == "make"
+        })
         .map(|i| g.symbol(&ws, i))
         .collect();
-    assert_eq!(makes.len(), 1, "expected one concrete `make` instance, got {makes:?}");
-    assert!(makes[0].ends_with("<int>"), "T did not unify to int: {makes:?}");
+    assert_eq!(
+        makes.len(),
+        1,
+        "expected one concrete `make` instance, got {makes:?}"
+    );
+    assert!(
+        makes[0].ends_with("<int>"),
+        "T did not unify to int: {makes:?}"
+    );
 }
 
 /// A valid program reaches instance construction with NOTHING rejected. Without
@@ -906,7 +1035,10 @@ fn main() {
 "#,
     );
     let rejected: Vec<String> = g.rejections().map(|r| r.message.clone()).collect();
-    assert!(rejected.is_empty(), "a valid program was rejected: {rejected:?}");
+    assert!(
+        rejected.is_empty(),
+        "a valid program was rejected: {rejected:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -938,13 +1070,19 @@ fn main() {
         .filter(|e| e.kind == EdgeKind::IteratorIter)
         .map(|e| g.symbol(&ws, &e.to))
         .collect();
-    assert!(!iters.is_empty(), "the `for` head recorded no iterator-iter edge");
     assert!(
-        iters.iter().any(|s| s.contains("iter") && s.ends_with("<int>")),
+        !iters.is_empty(),
+        "the `for` head recorded no iterator-iter edge"
+    );
+    assert!(
+        iters
+            .iter()
+            .any(|s| s.contains("iter") && s.ends_with("<int>")),
         "the generic `iter` witness was not instantiated at `int`: {iters:?}"
     );
     assert!(
-        !g.unresolved().any(|u| u.reason == "iter-witness-no-instantiation-record"),
+        !g.unresolved()
+            .any(|u| u.reason == "iter-witness-no-instantiation-record"),
         "a witness was still filed as having no instantiation record"
     );
 }
@@ -967,9 +1105,14 @@ fn main() {
         .filter(|e| e.kind == EdgeKind::ImplicitIter)
         .map(|e| g.symbol(&ws, &e.to))
         .collect();
-    assert!(!iters.is_empty(), "the coerced argument recorded no implicit-iter edge");
     assert!(
-        iters.iter().any(|s| s.contains("iter") && s.ends_with("<int>")),
+        !iters.is_empty(),
+        "the coerced argument recorded no implicit-iter edge"
+    );
+    assert!(
+        iters
+            .iter()
+            .any(|s| s.contains("iter") && s.ends_with("<int>")),
         "the generic `iter` witness was not instantiated at `int`: {iters:?}"
     );
     assert!(
@@ -1050,7 +1193,10 @@ fn main() {
         .filter(|e| e.kind == EdgeKind::IteratorIter)
         .map(|e| g.symbol(&ws, &e.to))
         .collect();
-    assert!(!iters.is_empty(), "a concrete `iter` witness produced no edge");
+    assert!(
+        !iters.is_empty(),
+        "a concrete `iter` witness produced no edge"
+    );
     assert!(
         g.edges()
             .filter(|e| e.kind == EdgeKind::IteratorIter)
@@ -1073,8 +1219,10 @@ fn main() {
 }
 "#,
     );
-    let nexts: Vec<&instance_graph::Edge> =
-        g.edges().filter(|e| e.kind == EdgeKind::IteratorNext).collect();
+    let nexts: Vec<&instance_graph::Edge> = g
+        .edges()
+        .filter(|e| e.kind == EdgeKind::IteratorNext)
+        .collect();
     assert!(!nexts.is_empty(), "no iterator-next edge was recorded");
     assert!(
         nexts.iter().all(|e| !e.to.args.is_empty()),
@@ -1122,11 +1270,16 @@ fn main() {
         !g.unresolved().any(|u| u.reason.contains("unbound")),
         "a witness degraded to unbound: {:?}",
         g.unresolved()
-            .map(|u| (u.reason, ws.module(u.callee.module).functions[u.callee.func].name))
+            .map(|u| (
+                u.reason,
+                ws.module(u.callee.module).functions[u.callee.func].name
+            ))
             .collect::<Vec<_>>()
     );
-    let witnesses: Vec<&instance_graph::Edge> =
-        g.edges().filter(|e| e.kind == EdgeKind::IteratorIter).collect();
+    let witnesses: Vec<&instance_graph::Edge> = g
+        .edges()
+        .filter(|e| e.kind == EdgeKind::IteratorIter)
+        .collect();
     assert!(!witnesses.is_empty(), "no iterator-iter edge");
 
     // The witness is ONE instance, and each artifact realizes it to its own
@@ -1143,7 +1296,10 @@ fn main() {
         };
         // Same instance -- it is the same key in both maps -- with the JS
         // sibling chosen only on JS.
-        assert_eq!(l.decl, e.to.func, "luajit did not select the representative itself");
+        assert_eq!(
+            l.decl, e.to.func,
+            "luajit did not select the representative itself"
+        );
         selected += usize::from(j.decl != e.to.func);
     }
     assert!(
@@ -1181,8 +1337,16 @@ fn main() {
 "#,
     );
     let c = g.closure(&ws);
-    assert!(c.unexpanded.is_empty(), "instances with a missing body: {:?}", c.unexpanded);
-    assert!(c.depth_capped.is_empty(), "expansion was cut: {:?}", c.depth_capped);
+    assert!(
+        c.unexpanded.is_empty(),
+        "instances with a missing body: {:?}",
+        c.unexpanded
+    );
+    assert!(
+        c.depth_capped.is_empty(),
+        "expansion was cut: {:?}",
+        c.depth_capped
+    );
     // The logical-symbol collisions a non-injective `identity` used to HIDE and
     // the target-per-graph walk then made real: `__nb_checked_index` is declared
     // `inline(lua)` and `inline(js)`, both `@nomangle`, both emission roots, and
@@ -1234,13 +1398,25 @@ fn main() {
     let idents: Vec<&instance_graph::Instance> = g
         .instances
         .iter()
-        .filter(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == "ident")
+        .filter(|i| {
+            ws.module(i.func.module).functions[i.func.func]
+                .name
+                .as_str()
+                == "ident"
+        })
         .collect();
     assert_eq!(idents.len(), 2);
     let display: Vec<String> = idents.iter().map(|i| g.symbol(&ws, i)).collect();
-    assert_eq!(display[0], display[1], "the fixture is no longer the collision it tests");
+    assert_eq!(
+        display[0], display[1],
+        "the fixture is no longer the collision it tests"
+    );
     let encoded: Vec<String> = idents.iter().map(|i| g.logical_symbol(&ws, i)).collect();
-    assert_ne!(encoded[0], encoded[1], "two instances encode alike as `{}`", encoded[0]);
+    assert_ne!(
+        encoded[0], encoded[1],
+        "two instances encode alike as `{}`",
+        encoded[0]
+    );
     // The ENCODER is injective over these two, which is what this test is
     // about. The graph's own collision set is not asserted here: it holds the
     // stdlib's backend-sibling collisions, pinned as a sentinel in
@@ -1264,7 +1440,12 @@ fn main() { bump(1) }
     let bump = g
         .instances
         .iter()
-        .find(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == "bump")
+        .find(|i| {
+            ws.module(i.func.module).functions[i.func.func]
+                .name
+                .as_str()
+                == "bump"
+        })
         .expect("no `bump` instance");
     assert_eq!(g.logical_symbol(&ws, bump), "bump_int");
 }
@@ -1302,7 +1483,12 @@ fn main() {
     let pushes: Vec<String> = g
         .instances
         .iter()
-        .filter(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == "push")
+        .filter(|i| {
+            ws.module(i.func.module).functions[i.func.func]
+                .name
+                .as_str()
+                == "push"
+        })
         .map(|i| g.symbol(&ws, i))
         .collect();
     assert!(
@@ -1312,7 +1498,10 @@ fn main() {
     assert!(
         g.instances
             .iter()
-            .filter(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == "hold")
+            .filter(|i| ws.module(i.func.module).functions[i.func.func]
+                .name
+                .as_str()
+                == "hold")
             .all(|i| !i.args.is_empty()),
         "a `hold` instance carries no arguments"
     );
@@ -1324,14 +1513,15 @@ fn main() {
 // name alone.
 // ---------------------------------------------------------------------------
 
-fn generated_edges(
-    ws: &Workspace,
-    g: &instance_graph::InstanceGraph,
-) -> Vec<String> {
+fn generated_edges(ws: &Workspace, g: &instance_graph::InstanceGraph) -> Vec<String> {
     let mut v: Vec<String> = g
         .edges()
         .filter(|e| e.kind == EdgeKind::CompilerGenerated)
-        .map(|e| ws.module(e.to.func.module).functions[e.to.func.func].name.to_string())
+        .map(|e| {
+            ws.module(e.to.func.module).functions[e.to.func.func]
+                .name
+                .to_string()
+        })
         .collect();
     v.sort();
     v.dedup();
@@ -1379,7 +1569,9 @@ fn main() {
     );
     let names = generated_edges(&ws, &g);
     assert!(
-        !names.iter().any(|n| n.starts_with("__rock_col_") || n.starts_with("__map_col_")),
+        !names
+            .iter()
+            .any(|n| n.starts_with("__rock_col_") || n.starts_with("__map_col_")),
         "a boxed `[int]` produced column intercepts: {names:?}"
     );
 }
@@ -1408,12 +1600,16 @@ fn main() {
 "#,
     );
     assert!(
-        generated_edges(&ws, &col).iter().any(|n| n.starts_with("__map_col_")),
+        generated_edges(&ws, &col)
+            .iter()
+            .any(|n| n.starts_with("__map_col_")),
         "a column-stored Map value produced no intercept: {:?}",
         generated_edges(&ws, &col)
     );
     assert!(
-        !generated_edges(&ws2, &boxed).iter().any(|n| n.starts_with("__map_col_")),
+        !generated_edges(&ws2, &boxed)
+            .iter()
+            .any(|n| n.starts_with("__map_col_")),
         "a boxed Map value produced column intercepts: {:?}",
         generated_edges(&ws2, &boxed)
     );
@@ -1442,7 +1638,12 @@ fn main() {
     let dups: Vec<String> = g
         .instances
         .iter()
-        .filter(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == "dup")
+        .filter(|i| {
+            ws.module(i.func.module).functions[i.func.func]
+                .name
+                .as_str()
+                == "dup"
+        })
         .map(|i| g.symbol(&ws, i))
         .collect();
     assert_eq!(dups.len(), 2, "expected `dup<P>` and `dup<int>`: {dups:?}");
@@ -1460,7 +1661,10 @@ fn main() {
         })
         .map(|e| g.symbol(&ws, &e.from))
         .collect();
-    assert!(!sources.is_empty(), "no column intercept at all: the fixture proves nothing");
+    assert!(
+        !sources.is_empty(),
+        "no column intercept at all: the fixture proves nothing"
+    );
     assert!(
         sources.iter().all(|s| s.contains("P")),
         "a column intercept came from a non-`P` instantiation: {sources:?}"
@@ -1475,19 +1679,22 @@ fn main() {
 // Stage 2: `@intrinsic` is not unconditionally a boundary.
 // ---------------------------------------------------------------------------
 
-fn is_expanded(
-    ws: &Workspace,
-    g: &instance_graph::InstanceGraph,
-    name: &str,
-) -> bool {
-    g.expanded()
-        .any(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == name)
+fn is_expanded(ws: &Workspace, g: &instance_graph::InstanceGraph, name: &str) -> bool {
+    g.expanded().any(|i| {
+        ws.module(i.func.module).functions[i.func.func]
+            .name
+            .as_str()
+            == name
+    })
 }
 
 fn reached(ws: &Workspace, g: &instance_graph::InstanceGraph, name: &str) -> bool {
-    g.instances
-        .iter()
-        .any(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == name)
+    g.instances.iter().any(|i| {
+        ws.module(i.func.module).functions[i.func.func]
+            .name
+            .as_str()
+            == name
+    })
 }
 
 /// HOSTILE: an `@intrinsic` whose body is a portable ROCK fallback. Emit
@@ -1560,12 +1767,17 @@ fn main() { pinned_op(1) }
     let out: Vec<String> = g
         .edges()
         .filter(|e| {
-            ws.module(e.from.func.module).functions[e.from.func.func].name.as_str()
+            ws.module(e.from.func.module).functions[e.from.func.func]
+                .name
+                .as_str()
                 == "pinned_op"
         })
         .map(|e| g.symbol(&ws, &e.to))
         .collect();
-    assert!(out.is_empty(), "a boundary produced outgoing edges: {out:?}");
+    assert!(
+        out.is_empty(),
+        "a boundary produced outgoing edges: {out:?}"
+    );
 }
 
 /// CONTROL: an intrinsic with only a FOREIGN body has nothing to expand.
@@ -1577,14 +1789,19 @@ fn a_foreign_bodied_intrinsic_stays_a_boundary() {
 fn main() { mapped_op(1) }
 "#,
     );
-    assert!(!is_expanded(&ws, &g, "mapped_op"), "an inline-only intrinsic reported an expansion");
+    assert!(
+        !is_expanded(&ws, &g, "mapped_op"),
+        "an inline-only intrinsic reported an expansion"
+    );
     assert!(
         g.boundaries.keys().any(|k| k.contains("mapped_op")),
         "an inline-only intrinsic was not classified as a boundary"
     );
     assert!(
         !g.edges().any(|e| {
-            ws.module(e.from.func.module).functions[e.from.func.func].name.as_str()
+            ws.module(e.from.func.module).functions[e.from.func.func]
+                .name
+                .as_str()
                 == "mapped_op"
         }),
         "a foreign-bodied boundary produced outgoing edges"
@@ -1609,7 +1826,11 @@ fn main() {
 "#,
     );
     let c = g.closure(&ws);
-    assert!(c.unexpanded.is_empty(), "neither expanded nor a boundary: {:?}", c.unexpanded);
+    assert!(
+        c.unexpanded.is_empty(),
+        "neither expanded nor a boundary: {:?}",
+        c.unexpanded
+    );
     let both: Vec<String> = g
         .expanded()
         .filter(|i| {
@@ -1621,7 +1842,10 @@ fn main() {
         })
         .map(|i| g.identity(&ws, i))
         .collect();
-    assert!(both.is_empty(), "instances counted as BOTH expanded and boundary: {both:?}");
+    assert!(
+        both.is_empty(),
+        "instances counted as BOTH expanded and boundary: {both:?}"
+    );
     assert!(c.expanded > 0 && c.expanded < c.instances);
 }
 
@@ -1638,7 +1862,10 @@ fn synthesized_targets_belong_to_the_runtime_catalogue() {
     for (_, _, names) in instance_graph::INDEX_TRIGGERED {
         missing.extend(names.iter().filter(|n| !catalogue.contains(n)));
     }
-    assert!(missing.is_empty(), "synthesized targets outside the catalogue: {missing:?}");
+    assert!(
+        missing.is_empty(),
+        "synthesized targets outside the catalogue: {missing:?}"
+    );
 }
 
 /// A generic emission root can have concrete instances from other call sites
@@ -1672,7 +1899,10 @@ fn main() {
         .uninstantiated_roots
         .get("keep")
         .unwrap_or_else(|| panic!("`keep` is not a root: {:?}", g.uninstantiated_roots.keys()));
-    assert!(hole.generic_root, "`keep` was recorded under the wrong cause: {hole:?}");
+    assert!(
+        hole.generic_root,
+        "`keep` was recorded under the wrong cause: {hole:?}"
+    );
     assert!(
         hole.instances >= 2,
         "`keep` is called at two type arguments but reports {} instances",
@@ -1682,7 +1912,10 @@ fn main() {
         g.closure(&ws).uninstantiated_roots.contains("keep"),
         "a root with instances stopped counting as a hole -- the falsely-green reading"
     );
-    assert!(!g.closure(&ws).is_closed(), "the fixture hole vanished from the closure gate");
+    assert!(
+        !g.closure(&ws).is_closed(),
+        "the fixture hole vanished from the closure gate"
+    );
 }
 
 /// The narrowing in `generic_root_obligation`, both sides. A generic emission
@@ -1720,7 +1953,10 @@ fn main() {{ let a = keep(1) }}
         "the mangled twin must be EXCUSED, not silently absent: {excused:?}"
     );
     assert!(
-        !mangled.uninstantiated_roots.keys().any(|n| n.starts_with("keep")),
+        !mangled
+            .uninstantiated_roots
+            .keys()
+            .any(|n| n.starts_with("keep")),
         "a mangled generic root is not an obligation: {:?}",
         mangled.uninstantiated_roots.keys()
     );
@@ -1760,7 +1996,9 @@ fn main() { }
 "#,
     );
     assert!(
-        shadowed.uninstantiated_roots.contains_key("__rock_col_sort"),
+        shadowed
+            .uninstantiated_roots
+            .contains_key("__rock_col_sort"),
         "a same-name overload makes the entry unresolvable, so the obligation \
          returns rather than riding the catalogue name: excused={:?}",
         shadowed.excused_generic_roots
@@ -1801,9 +2039,10 @@ fn main() { let x = G }
     );
     let roots = skull::mir_emit::emission_roots(&ws, Some("<project>"));
     let g = instance_graph::build(&ws, roots, false);
-    let hole = g.uninstantiated_roots.get("pick_0").unwrap_or_else(|| {
-        panic!("no hole recorded for `pick`: {:?}", g.uninstantiated_roots)
-    });
+    let hole = g
+        .uninstantiated_roots
+        .get("pick_0")
+        .unwrap_or_else(|| panic!("no hole recorded for `pick`: {:?}", g.uninstantiated_roots));
     assert_eq!(
         hole.always_emitted_sites.len(),
         1,
@@ -1849,7 +2088,9 @@ fn main() { let x = pick() }
         g2.rejections()
             .any(|r| r.kind == instance_graph::RejectionKind::UnconstrainedTypeVar),
         "the same call from a function body did not reject: {:?}",
-        g2.rejections().map(|r| r.message.clone()).collect::<Vec<_>>()
+        g2.rejections()
+            .map(|r| r.message.clone())
+            .collect::<Vec<_>>()
     );
 }
 
@@ -1900,21 +2141,30 @@ fn main() {
         "bound-next-witness",
         "compiler-generated",
     ] {
-        assert!(kinds.contains(want), "fixture produced no `{want}` edge; covered: {kinds:?}");
+        assert!(
+            kinds.contains(want),
+            "fixture produced no `{want}` edge; covered: {kinds:?}"
+        );
     }
     let mut spanless: std::collections::BTreeMap<&'static str, Vec<String>> = Default::default();
     for e in g.edges() {
         if instance_graph::is_spanless(&e.span) {
             let v = spanless.entry(e.kind.name()).or_default();
             if v.len() < 5 {
-                v.push(format!("{} -> {}", g.symbol(&ws, &e.from), g.symbol(&ws, &e.to)));
+                v.push(format!(
+                    "{} -> {}",
+                    g.symbol(&ws, &e.from),
+                    g.symbol(&ws, &e.to)
+                ));
             }
         }
     }
     assert!(
         spanless.is_empty(),
         "{} of {} edges carry no source span: {spanless:#?}",
-        g.edges().filter(|e| instance_graph::is_spanless(&e.span)).count(),
+        g.edges()
+            .filter(|e| instance_graph::is_spanless(&e.span))
+            .count(),
         g.edges().count()
     );
 }
@@ -1944,8 +2194,8 @@ fn main() { opaque_caller(1) }
         })
         .collect();
     assert!(
-        deps.iter().any(|d| d.contains("opaque_caller")
-            && d.contains("__rock_vec_column_elements")),
+        deps.iter()
+            .any(|d| d.contains("opaque_caller") && d.contains("__rock_vec_column_elements")),
         "an opaque body's runtime dependency was not recorded: {deps:?}"
     );
     assert!(
@@ -1980,7 +2230,10 @@ fn main() { let y = F(1) }
         .values()
         .flat_map(|h| h.always_emitted_sites.iter())
         .collect();
-    assert!(!sites.is_empty(), "the fixture recorded no always-emitted failure");
+    assert!(
+        !sites.is_empty(),
+        "the fixture recorded no always-emitted failure"
+    );
     assert!(
         sites.iter().any(|s| s.outcome
             == instance_graph::AlwaysEmittedOutcome::Rejection(
@@ -2017,14 +2270,23 @@ fn main() { let a = ident(1) }
     // must appear. This equality only became assertable once the helper stopped
     // applying a module-local `BodyOwner` to every module -- before that it
     // removed a same-index stdlib `get` record too and reported 2.
-    assert_eq!(removed, 1, "expected exactly `ident`'s binding record to be dropped");
+    assert_eq!(
+        removed, 1,
+        "expected exactly `ident`'s binding record to be dropped"
+    );
     let roots = skull::mir_emit::emission_roots(&ws, None);
     let g = instance_graph::build(&ws, roots, false);
-    let sites: Vec<&instance_graph::Unresolved> =
-        g.unresolved().filter(|u| u.reason == "no-bindings").collect();
+    let sites: Vec<&instance_graph::Unresolved> = g
+        .unresolved()
+        .filter(|u| u.reason == "no-bindings")
+        .collect();
     let callees: Vec<&str> = sites
         .iter()
-        .map(|u| ws.module(u.callee.module).functions[u.callee.func].name.as_str())
+        .map(|u| {
+            ws.module(u.callee.module).functions[u.callee.func]
+                .name
+                .as_str()
+        })
         .collect();
     assert_eq!(
         callees,
@@ -2032,7 +2294,11 @@ fn main() { let a = ident(1) }
         "expected exactly the `ident` call to lose its instantiation, got {:?}",
         g.unresolved().map(|u| u.reason).collect::<Vec<_>>()
     );
-    assert_eq!(sites.len(), removed, "one dropped record, one unresolved site");
+    assert_eq!(
+        sites.len(),
+        removed,
+        "one dropped record, one unresolved site"
+    );
     assert!(
         sites.iter().all(|u| !instance_graph::is_spanless(&u.span)),
         "a `no-bindings` unresolved call carries no span: {sites:?}"
@@ -2053,7 +2319,10 @@ fn main() {
 "#,
     );
     let removed = drop_witness_generic_records(&mut ws, "main");
-    assert_eq!(removed, 1, "expected the one `for`-protocol ITER record to be dropped");
+    assert_eq!(
+        removed, 1,
+        "expected the one `for`-protocol ITER record to be dropped"
+    );
     let roots = skull::mir_emit::emission_roots(&ws, None);
     let g = instance_graph::build(&ws, roots, false);
     // Discriminated by CALLEE, not by reason: both halves fail through
@@ -2134,8 +2403,10 @@ fn main() { a(); b(); c(); d() }
              never tested; compared: {compared:?}"
         );
     }
-    let disagreements: Vec<String> =
-        g.subst_disagreements().map(|d| g.identity(&ws, &d.instance)).collect();
+    let disagreements: Vec<String> = g
+        .subst_disagreements()
+        .map(|d| g.identity(&ws, &d.instance))
+        .collect();
     assert!(
         disagreements.is_empty(),
         "{} of {} comparisons found an instance reached at two substitutions: {disagreements:?}",
@@ -2148,7 +2419,10 @@ fn main() { a(); b(); c(); d() }
     // EMPTY, not absent, and skipping them hid that root seeding bypassed the
     // recorder entirely.
     let missing = g.instances_without_substitution(&ws);
-    assert!(missing.is_empty(), "instances with no recorded substitution: {missing:?}");
+    assert!(
+        missing.is_empty(),
+        "instances with no recorded substitution: {missing:?}"
+    );
     assert!(
         g.substitution(&instance_graph::Instance {
             func: main_ref(&ws),
@@ -2165,7 +2439,10 @@ fn main_ref(ws: &Workspace) -> skull_mir::mir::FuncRef {
     for module in ws.modules.iter() {
         for (fid, f) in module.functions.iter() {
             if f.name.as_str() == "main" {
-                return skull_mir::mir::FuncRef { module: module.id, func: fid };
+                return skull_mir::mir::FuncRef {
+                    module: module.id,
+                    func: fid,
+                };
             }
         }
     }
@@ -2188,7 +2465,10 @@ fn main() {
 "#,
     );
     let removed = drop_bound_next_generic_records(&mut ws, "main");
-    assert_eq!(removed, 1, "expected the one `for`-protocol `next` record to be dropped");
+    assert_eq!(
+        removed, 1,
+        "expected the one `for`-protocol `next` record to be dropped"
+    );
     let roots = skull::mir_emit::emission_roots(&ws, None);
     let g = instance_graph::build(&ws, roots, false);
     // Same discriminant as the iter fixture, pointed at the other callee.
@@ -2224,7 +2504,10 @@ fn unresolved_witnesses_of<'g>(
     g.unresolved()
         .filter(|u| {
             u.reason == "witness-generic-unbound"
-                && ws.module(u.callee.module).functions[u.callee.func].name.as_str() == fn_name
+                && ws.module(u.callee.module).functions[u.callee.func]
+                    .name
+                    .as_str()
+                    == fn_name
         })
         .collect()
 }
@@ -2234,7 +2517,9 @@ fn all_unresolved(ws: &Workspace, g: &instance_graph::InstanceGraph) -> Vec<(Str
         .map(|u| {
             (
                 u.reason.to_string(),
-                ws.module(u.callee.module).functions[u.callee.func].name.to_string(),
+                ws.module(u.callee.module).functions[u.callee.func]
+                    .name
+                    .to_string(),
             )
         })
         .collect()
@@ -2250,7 +2535,10 @@ fn all_unresolved(ws: &Workspace, g: &instance_graph::InstanceGraph) -> Vec<(Str
 fn body_of(
     ws: &Workspace,
     fn_name: &str,
-) -> (bone_semantic::prelude::ModuleId, bone_semantic::hir::BodyOwner) {
+) -> (
+    bone_semantic::prelude::ModuleId,
+    bone_semantic::hir::BodyOwner,
+) {
     for module in ws.modules.iter() {
         for (fid, f) in module.functions.iter() {
             if f.name.as_str() == fn_name {
@@ -2362,7 +2650,9 @@ fn main() {{
 "#
         )
     };
-    let ws = check(&program(r#"inline(lua) fn __map_col_len(n: int) -> int = "return n""#));
+    let ws = check(&program(
+        r#"inline(lua) fn __map_col_len(n: int) -> int = "return n""#,
+    ));
     let roots = skull::mir_emit::emission_roots(&ws, None);
     let g = instance_graph::build(&ws, roots.clone(), false);
     // The EXACT denominator and reason, not merely non-empty: a fixture that
@@ -2380,10 +2670,17 @@ fn main() {{
         .filter(|u| instance_graph::is_spanless(&u.span))
         .map(|u| u.reason)
         .collect();
-    assert!(spanless.is_empty(), "unresolved call sites with no source span: {spanless:?}");
+    assert!(
+        spanless.is_empty(),
+        "unresolved call sites with no source span: {spanless:?}"
+    );
     let census = g.span_census();
     assert_eq!(
-        census.unresolved.values().map(|c| c.examined).sum::<usize>(),
+        census
+            .unresolved
+            .values()
+            .map(|c| c.examined)
+            .sum::<usize>(),
         g.unresolved().count(),
         "the census did not examine every unresolved site"
     );
@@ -2445,8 +2742,11 @@ fn main() {
             .entry((i.func.module.raw(), i.func.func.into_raw().into_u32()))
             .or_default() += 1;
     }
-    let multi: std::collections::BTreeSet<(u32, u32)> =
-        per_decl.iter().filter(|(_, n)| **n > 1).map(|(k, _)| *k).collect();
+    let multi: std::collections::BTreeSet<(u32, u32)> = per_decl
+        .iter()
+        .filter(|(_, n)| **n > 1)
+        .map(|(k, _)| *k)
+        .collect();
 
     // The candidate starts are instances with outgoing edges -- what the pass
     // would search from with no filter at all.
@@ -2467,14 +2767,17 @@ fn main() {
         "fixture has no single-instance declarations to skip ({admissible} of {})",
         candidates.len()
     );
-    assert!(admissible > 0, "fixture has no multi-instance declaration to keep");
+    assert!(
+        admissible > 0,
+        "fixture has no multi-instance declaration to keep"
+    );
 
     assert_eq!(
-        g.recursion_starts, admissible,
+        g.recursion_starts,
+        admissible,
         "the pass searched from {} instances but only {admissible} of {} candidates \
          belong to a declaration with more than one instance",
         g.recursion_starts,
         candidates.len()
     );
-
 }

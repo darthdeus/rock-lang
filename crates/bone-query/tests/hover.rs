@@ -122,16 +122,19 @@ fn fresh() -> BoneWorkspace {
 
 /// Hover text at (0-based line, 1-based-ish char computed from a substring).
 fn at(bone: &BoneWorkspace, line: u32, ch: u32) -> Option<String> {
-    bone.hover(PATH, Position::new(line, ch)).map(|h| match h.contents {
-        HoverContents::Markup(m) => m.value,
-        other => panic!("expected markup hover, got {other:?}"),
-    })
+    bone.hover(PATH, Position::new(line, ch))
+        .map(|h| match h.contents {
+            HoverContents::Markup(m) => m.value,
+            other => panic!("expected markup hover, got {other:?}"),
+        })
 }
 
 /// Char index (0-based) of `sub` on `line` (0-based), + `nth` char into it.
 fn col(line: usize, sub: &str, into: usize) -> u32 {
     let l = SRC.lines().nth(line).unwrap();
-    (l.find(sub).unwrap_or_else(|| panic!("{sub:?} not on line {line}: {l:?}")) + into) as u32
+    (l.find(sub)
+        .unwrap_or_else(|| panic!("{sub:?} not on line {line}: {l:?}"))
+        + into) as u32
 }
 
 #[test]
@@ -160,7 +163,10 @@ fn struct_literal_colon_hovers_the_field() {
     // The `:` in `x: 3` (line 3) -> the field, same as hovering `x`.
     let colon = SRC.lines().nth(3).unwrap().find(": 3").unwrap() as u32;
     let h = at(&b, 3, colon).expect("field `:` hovers");
-    assert!(h.contains("x: int (field of FixVec2)"), "`:` -> field: {h:?}");
+    assert!(
+        h.contains("x: int (field of FixVec2)"),
+        "`:` -> field: {h:?}"
+    );
 }
 
 #[test]
@@ -197,7 +203,10 @@ fn body_keywords_do_not_leak_the_fn_signature() {
     let b = fresh();
     for (line, kw) in [(3u32, "let"), (5, "match"), (9, "return")] {
         if let Some(h) = at(&b, line, col(line as usize, kw, 0)) {
-            assert!(!h.contains("fn pick("), "`{kw}` leaked the fn signature: {h:?}");
+            assert!(
+                !h.contains("fn pick("),
+                "`{kw}` leaked the fn signature: {h:?}"
+            );
         }
     }
 }
@@ -220,11 +229,20 @@ fn hover_on_resolved_overloaded_call_lists_all_overloads_selected_first() {
     let mut bone = BoneWorkspace::new();
     bone.update(PATH, src.to_string());
     let h = hover_on(&bone, src, "= foo");
-    assert!(h.contains("fn foo(a: A) -> int"), "missing overload 1: {h:?}");
-    assert!(h.contains("fn foo(b: B) -> int"), "missing overload 2: {h:?}");
+    assert!(
+        h.contains("fn foo(a: A) -> int"),
+        "missing overload 1: {h:?}"
+    );
+    assert!(
+        h.contains("fn foo(b: B) -> int"),
+        "missing overload 2: {h:?}"
+    );
     let i1 = h.find("fn foo(a: A)").unwrap();
     let i2 = h.find("fn foo(b: B)").unwrap();
-    assert!(i1 < i2, "resolved overload `foo(a: A)` should come first: {h:?}");
+    assert!(
+        i1 < i2,
+        "resolved overload `foo(a: A)` should come first: {h:?}"
+    );
 }
 
 #[test]
@@ -239,8 +257,14 @@ fn hover_on_unresolvable_overloaded_call_still_lists_overloads() {
     let mut bone = BoneWorkspace::new();
     bone.update(PATH, src.to_string());
     let h = hover_on(&bone, src, "= foo");
-    assert!(h.contains("fn foo(a: A) -> int"), "missing overload 1: {h:?}");
-    assert!(h.contains("fn foo(b: B) -> int"), "missing overload 2: {h:?}");
+    assert!(
+        h.contains("fn foo(a: A) -> int"),
+        "missing overload 1: {h:?}"
+    );
+    assert!(
+        h.contains("fn foo(b: B) -> int"),
+        "missing overload 2: {h:?}"
+    );
 }
 
 #[test]
@@ -270,8 +294,14 @@ fn assign_target_ident_hovers_its_binding_type_not_unit() {
         (off - before.rfind('\n').map_or(0, |i| i + 1)) as u32,
     );
     let h = hover_at(&bone, pos);
-    assert!(h.contains("Widget"), "assign-target hover should show Widget, got: {h:?}");
-    assert!(!h.contains("()"), "assign-target hover must not be unit: {h:?}");
+    assert!(
+        h.contains("Widget"),
+        "assign-target hover should show Widget, got: {h:?}"
+    );
+    assert!(
+        !h.contains("()"),
+        "assign-target hover must not be unit: {h:?}"
+    );
 }
 
 #[test]
@@ -286,7 +316,16 @@ fn field_ref_hovers_the_referenced_field_not_the_fieldref_wrapper() {
     bone.update(PATH, src.to_string());
     let pos = pos_of(src, ".attack_co"); // cursor on the field-ref name (last char `o`)
     let h = hover_at(&bone, pos);
-    assert!(h.contains("attack_co"), "field-ref hover should name the field: {h:?}");
-    assert!(h.contains("field of Mob"), "field-ref hover should show the owning struct: {h:?}");
-    assert!(!h.contains("FieldRef"), "field-ref hover must not show the FieldRef wrapper: {h:?}");
+    assert!(
+        h.contains("attack_co"),
+        "field-ref hover should name the field: {h:?}"
+    );
+    assert!(
+        h.contains("field of Mob"),
+        "field-ref hover should show the owning struct: {h:?}"
+    );
+    assert!(
+        !h.contains("FieldRef"),
+        "field-ref hover must not show the FieldRef wrapper: {h:?}"
+    );
 }

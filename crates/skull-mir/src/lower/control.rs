@@ -19,7 +19,8 @@ impl Builder<'_> {
         // typed float, so an int operand is used-as-float. String concat and pure
         // int ops leave their operands untouched.
         let str_op = op == "__op_add" && (lt == ArithTy::Str || rt == ArithTy::Str);
-        let to_float = !str_op && (op == "__op_div" || lt == ArithTy::Float || rt == ArithTy::Float);
+        let to_float =
+            !str_op && (op == "__op_div" || lt == ArithTy::Float || rt == ArithTy::Float);
         let lv = self.coerce_numeric_to_float(lv, lt, to_float);
         let rv = self.coerce_numeric_to_float(rv, rt, to_float);
         let inst = arith_inst(op, lt, rt, lv, rv)?;
@@ -34,9 +35,11 @@ impl Builder<'_> {
         shape: &ValueShape,
     ) -> Result<Idx<Inst>, CompilerError> {
         let lhs_repr = self.lower_expr_repr(lhs)?;
-        let lhs_leaves = self.repr_to_storage_leaves(&lhs_repr, shape, "value equality left operand")?;
+        let lhs_leaves =
+            self.repr_to_storage_leaves(&lhs_repr, shape, "value equality left operand")?;
         let rhs_repr = self.lower_expr_repr(rhs)?;
-        let rhs_leaves = self.repr_to_storage_leaves(&rhs_repr, shape, "value equality right operand")?;
+        let rhs_leaves =
+            self.repr_to_storage_leaves(&rhs_repr, shape, "value equality right operand")?;
         let equal = if shape.nullable && self.scx.target() == bone_semantic::hir::FnBackend::Lua {
             let left_absent = self.emit_cur(Inst::Not(lhs_leaves[0]));
             let right_absent = self.emit_cur(Inst::Not(rhs_leaves[0]));
@@ -44,9 +47,14 @@ impl Builder<'_> {
             let absent = self.f.new_block();
             let present = self.f.new_block();
             let join = self.f.new_block();
-            self.f.set_term(self.cur, Term::Branch {
-                cond: left_absent, then_bb: absent, else_bb: present,
-            });
+            self.f.set_term(
+                self.cur,
+                Term::Branch {
+                    cond: left_absent,
+                    then_bb: absent,
+                    else_bb: present,
+                },
+            );
             self.cur = absent;
             self.store_and_join(result, right_absent, join);
             self.cur = present;
@@ -197,9 +205,12 @@ impl Builder<'_> {
                     }
                     if self.expr_is_flat_enum(v) {
                         let tag = match self.lower_expr_repr(v)?.into_value() {
-                            ValueRepr::Group { parts, .. } => {
-                                self.pack(parts.into_iter().next().expect("flat enum group has a tag leaf"))?
-                            }
+                            ValueRepr::Group { parts, .. } => self.pack(
+                                parts
+                                    .into_iter()
+                                    .next()
+                                    .expect("flat enum group has a tag leaf"),
+                            )?,
                             // a boxed flat enum: nil-or-table, compare directly.
                             other => self.pack(other)?,
                         };
@@ -215,12 +226,12 @@ impl Builder<'_> {
                     (self.nobox_value_name(lhs), self.nobox_value_name(rhs))
                 {
                     if ln == rn {
-                        let mut shape = self
-                            .nobox_value_shape_of(lhs)?
-                            .ok_or_else(|| gap(format!("nobox value `{ln}` has no scalar shape")))?;
-                        let rhs_shape = self
-                            .nobox_value_shape_of(rhs)?
-                            .ok_or_else(|| gap(format!("nobox value `{rn}` has no scalar shape")))?;
+                        let mut shape = self.nobox_value_shape_of(lhs)?.ok_or_else(|| {
+                            gap(format!("nobox value `{ln}` has no scalar shape"))
+                        })?;
+                        let rhs_shape = self.nobox_value_shape_of(rhs)?.ok_or_else(|| {
+                            gap(format!("nobox value `{rn}` has no scalar shape"))
+                        })?;
                         if shape.name != rhs_shape.name || shape.fields != rhs_shape.fields {
                             return Err(gap(format!(
                                 "nobox equality operands for `{ln}` have different scalar shapes"
@@ -243,25 +254,38 @@ impl Builder<'_> {
                         (Some(ln), Some(rn)) if ln == rn
                     );
                 if same_value {
-                    if let Some(shape) = self.nullable_value_shape_of(lhs)?
+                    if let Some(shape) = self
+                        .nullable_value_shape_of(lhs)?
                         .or(self.nullable_value_shape_of(rhs)?)
                     {
                         return self.lower_leafwise_value_eq(op, lhs, rhs, &shape);
                     }
                     // Identity lanes are integral. Other values retain their
                     // metatype's rounding, presence and structural field rules.
-                    let integral = self.value_struct_name_of(lhs)
+                    let integral = self
+                        .value_struct_name_of(lhs)
                         .and_then(|name| value_struct_field_tys(self.ws, name))
-                        .is_some_and(|fields| fields.iter().all(|(_, ty)| matches!(
-                            super::shape::static_ty(self.ws, *ty),
-                            Some(TypeExpr::Builtin(BuiltinTy::Int | BuiltinTy::Uint))
-                        )));
+                        .is_some_and(|fields| {
+                            fields.iter().all(|(_, ty)| {
+                                matches!(
+                                    super::shape::static_ty(self.ws, *ty),
+                                    Some(TypeExpr::Builtin(BuiltinTy::Int | BuiltinTy::Uint))
+                                )
+                            })
+                        });
                     if integral {
-                        let ty = self.concrete_expr_ty(lhs)
+                        let ty = self
+                            .concrete_expr_ty(lhs)
                             .ok_or_else(|| self.gap_here("value equality has no concrete type"))?;
-                        let id = self.concrete_rep_id(ty.peel_nullable().0, RepUse::Parameter, false, false)?;
+                        let id = self.concrete_rep_id(
+                            ty.peel_nullable().0,
+                            RepUse::Parameter,
+                            false,
+                            false,
+                        )?;
                         if let Some(mut shape) = self.scx.rep_arena().value_shape(id) {
-                            shape.nullable = self.expr_is_nullable(lhs) || self.expr_is_nullable(rhs);
+                            shape.nullable =
+                                self.expr_is_nullable(lhs) || self.expr_is_nullable(rhs);
                             return self.lower_leafwise_value_eq(op, lhs, rhs, &shape);
                         }
                     }
@@ -273,7 +297,14 @@ impl Builder<'_> {
                         _ => None,
                     };
                     if let Some(shape) = shape
-                        && matching_scalar_leaves(self.ws, self.scx.values_first_class, &lhs_repr, &rhs_repr, &shape, &mut pairs)
+                        && matching_scalar_leaves(
+                            self.ws,
+                            self.scx.values_first_class,
+                            &lhs_repr,
+                            &rhs_repr,
+                            &shape,
+                            &mut pairs,
+                        )
                     {
                         let (mut lhs_leaves, mut rhs_leaves) = (Vec::new(), Vec::new());
                         for pair in pairs {
@@ -313,11 +344,17 @@ impl Builder<'_> {
                         && flat_enum_equality_is_leafwise(self.ws, lhs_shape.name)
                     {
                         let lhs_repr = self.lower_expr_repr(lhs)?;
-                        let lhs_leaves =
-                            self.repr_to_storage_leaves(&lhs_repr, &lhs_shape, "flat enum equality")?;
+                        let lhs_leaves = self.repr_to_storage_leaves(
+                            &lhs_repr,
+                            &lhs_shape,
+                            "flat enum equality",
+                        )?;
                         let rhs_repr = self.lower_expr_repr(rhs)?;
-                        let rhs_leaves =
-                            self.repr_to_storage_leaves(&rhs_repr, &rhs_shape, "flat enum equality")?;
+                        let rhs_leaves = self.repr_to_storage_leaves(
+                            &rhs_repr,
+                            &rhs_shape,
+                            "flat enum equality",
+                        )?;
                         let equal = self.emit_all_equal(&lhs_leaves, &rhs_leaves);
                         return Ok(if matches!(op, BinOp::Eq) {
                             equal
@@ -426,8 +463,7 @@ impl Builder<'_> {
         then_branch: Idx<Expr>,
         else_branch: Option<Idx<Expr>>,
     ) -> Result<Idx<Inst>, CompilerError> {
-        let repr =
-            self.lower_if_repr(cond, then_branch, else_branch, RetSlot::Opaque)?;
+        let repr = self.lower_if_repr(cond, then_branch, else_branch, RetSlot::Opaque)?;
         self.pack_maybe_absent(repr)
     }
 
@@ -441,8 +477,9 @@ impl Builder<'_> {
         let result_ty = matches!(shape, RetSlot::Opaque)
             .then(|| self.current_expr_unit_storage_ty_id())
             .flatten();
-        let results: Vec<Idx<Cell>> =
-            (0..shape.slot_count()).map(|_| self.f.new_cell_typed(None, result_ty)).collect();
+        let results: Vec<Idx<Cell>> = (0..shape.slot_count())
+            .map(|_| self.f.new_cell_typed(None, result_ty))
+            .collect();
         let then_bb = self.f.new_block();
         let else_bb = self.f.new_block();
         let join = self.f.new_block();
@@ -463,8 +500,10 @@ impl Builder<'_> {
         self.store_bundle_and_join(&results, &shape, &ev, join)?;
 
         self.cur = join;
-        let slots: Vec<Idx<Inst>> =
-            results.iter().map(|&cell| self.emit_cur(Inst::Load(cell))).collect();
+        let slots: Vec<Idx<Inst>> = results
+            .iter()
+            .map(|&cell| self.emit_cur(Inst::Load(cell)))
+            .collect();
         let mut idx = 0;
         Ok(self.slot_repr(&shape, &slots, &mut idx))
     }
@@ -524,12 +563,20 @@ impl Builder<'_> {
     ) -> Result<ValueRepr, CompilerError> {
         let recv = self.lower_safe_nav_receiver(receiver)?;
         let is_nil = self.safe_nav_absent_cond(&recv);
-        let results: Vec<Idx<Cell>> =
-            (0..shape.slot_count()).map(|_| self.f.new_cell(None)).collect();
+        let results: Vec<Idx<Cell>> = (0..shape.slot_count())
+            .map(|_| self.f.new_cell(None))
+            .collect();
         let nil_bb = self.f.new_block();
         let val_bb = self.f.new_block();
         let join = self.f.new_block();
-        self.f.set_term(self.cur, Term::Branch { cond: is_nil, then_bb: nil_bb, else_bb: val_bb });
+        self.f.set_term(
+            self.cur,
+            Term::Branch {
+                cond: is_nil,
+                then_bb: nil_bb,
+                else_bb: val_bb,
+            },
+        );
 
         self.cur = val_bb;
         let recv_v = self.safe_nav_present_value(recv)?;
@@ -542,8 +589,10 @@ impl Builder<'_> {
         self.store_bundle_and_join(&results, &shape, &nil, join)?;
 
         self.cur = join;
-        let slots: Vec<Idx<Inst>> =
-            results.iter().map(|&cell| self.emit_cur(Inst::Load(cell))).collect();
+        let slots: Vec<Idx<Inst>> = results
+            .iter()
+            .map(|&cell| self.emit_cur(Inst::Load(cell)))
+            .collect();
         let mut idx = 0;
         Ok(self.slot_repr(&shape, &slots, &mut idx))
     }
@@ -615,7 +664,9 @@ impl Builder<'_> {
         rhs: Idx<Expr>,
         condition: bool,
     ) -> Result<Idx<Inst>, CompilerError> {
-        let result = self.f.new_cell_typed(None, self.current_expr_storage_ty_id());
+        let result = self
+            .f
+            .new_cell_typed(None, self.current_expr_storage_ty_id());
         let lv = self.lower_condition(lhs)?;
         let rhs_bb = self.f.new_block();
         let else_bb = self.f.new_block();
@@ -649,7 +700,9 @@ impl Builder<'_> {
         rhs: Idx<Expr>,
         condition: bool,
     ) -> Result<Idx<Inst>, CompilerError> {
-        let result = self.f.new_cell_typed(None, self.current_expr_storage_ty_id());
+        let result = self
+            .f
+            .new_cell_typed(None, self.current_expr_storage_ty_id());
         let lv = self.lower_condition(lhs)?;
         let then_bb = self.f.new_block();
         let rhs_bb = self.f.new_block();
@@ -682,7 +735,9 @@ impl Builder<'_> {
         lhs: Idx<Expr>,
         rhs: Idx<Expr>,
     ) -> Result<Idx<Inst>, CompilerError> {
-        let result = self.f.new_cell_typed(None, self.current_expr_storage_ty_id());
+        let result = self
+            .f
+            .new_cell_typed(None, self.current_expr_storage_ty_id());
         let lv = self.lower_expr(lhs)?;
         let nil = self.emit_cur(Inst::Const(Lit::Nil));
         let is_nil = self.emit_cur(Inst::Eq(lv, nil));
@@ -736,30 +791,44 @@ fn matching_scalar_leaves(
             false
         }
         (
-            ValueRepr::Group { name: ln, parts: lp, present: None },
-            ValueRepr::Group { name: rn, parts: rp, present: None },
+            ValueRepr::Group {
+                name: ln,
+                parts: lp,
+                present: None,
+            },
+            ValueRepr::Group {
+                name: rn,
+                parts: rp,
+                present: None,
+            },
         ) if ln == rn && lp.len() == rp.len() && lp.len() == shape.fields.len() => {
-            shape.fields.iter().zip(lp.iter().zip(rp)).all(|((_, fs), (l, r))| match (fs, l, r) {
-                (FieldShape::Prim, ValueRepr::Scalar(l), ValueRepr::Scalar(r)) => {
-                    out.push(LeafPair::Leaf(*l, *r));
-                    true
-                }
-                (FieldShape::Prim, ..) => false,
-                (FieldShape::Nested(sub), ValueRepr::Group { .. }, ValueRepr::Group { .. }) => {
-                    matching_scalar_leaves(ws, first_class, l, r, sub, out)
-                }
-                (FieldShape::Nested(_), ValueRepr::Scalar(l), ValueRepr::Scalar(r)) if first_class => {
-                    out.push(LeafPair::Leaf(*l, *r));
-                    true
-                }
-                // A boxed child (a copy shares an enum child's box) is not one
-                // leaf: raw `==` on two enum tables compares identity.
-                (FieldShape::Nested(sub), ..) if shape_equality_is_leafwise(ws, sub) => {
-                    out.push(LeafPair::Split(l.clone(), r.clone(), sub.clone()));
-                    true
-                }
-                (FieldShape::Nested(_), ..) => false,
-            })
+            shape
+                .fields
+                .iter()
+                .zip(lp.iter().zip(rp))
+                .all(|((_, fs), (l, r))| match (fs, l, r) {
+                    (FieldShape::Prim, ValueRepr::Scalar(l), ValueRepr::Scalar(r)) => {
+                        out.push(LeafPair::Leaf(*l, *r));
+                        true
+                    }
+                    (FieldShape::Prim, ..) => false,
+                    (FieldShape::Nested(sub), ValueRepr::Group { .. }, ValueRepr::Group { .. }) => {
+                        matching_scalar_leaves(ws, first_class, l, r, sub, out)
+                    }
+                    (FieldShape::Nested(_), ValueRepr::Scalar(l), ValueRepr::Scalar(r))
+                        if first_class =>
+                    {
+                        out.push(LeafPair::Leaf(*l, *r));
+                        true
+                    }
+                    // A boxed child (a copy shares an enum child's box) is not one
+                    // leaf: raw `==` on two enum tables compares identity.
+                    (FieldShape::Nested(sub), ..) if shape_equality_is_leafwise(ws, sub) => {
+                        out.push(LeafPair::Split(l.clone(), r.clone(), sub.clone()));
+                        true
+                    }
+                    (FieldShape::Nested(_), ..) => false,
+                })
         }
         _ => false,
     }

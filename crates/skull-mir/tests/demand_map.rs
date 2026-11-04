@@ -13,13 +13,16 @@
 
 use skull_mir::bound::{DemandMap, ResolvedBoundNext, ResolvedBoundTree, SpecDemand};
 use skull_mir::instance::Instance;
-use skull_mir::monoty::MonoInterner;
 use skull_mir::mir::FuncRef;
+use skull_mir::monoty::MonoInterner;
 use skull_mir::monoty::{MonoCtor, MonoTy};
 use ustr::Ustr;
 
 fn nominal(name: &str) -> MonoTy {
-    MonoTy::App { ctor: MonoCtor::Nominal(Ustr::from(name)), params: Vec::new() }
+    MonoTy::App {
+        ctor: MonoCtor::Nominal(Ustr::from(name)),
+        params: Vec::new(),
+    }
 }
 
 fn fref(n: u32) -> FuncRef {
@@ -51,7 +54,10 @@ fn inst(i: &MonoInterner, callee: u32, ty: &str) -> Instance {
 }
 
 fn demand(i: &MonoInterner, callee: u32, ty: &str, tree: ResolvedBoundTree) -> SpecDemand {
-    SpecDemand { inst: inst(i, callee, ty), tree }
+    SpecDemand {
+        inst: inst(i, callee, ty),
+        tree,
+    }
 }
 
 /// Two sites demanding ONE emitted body with DIFFERENT trees is a clash: one
@@ -61,7 +67,10 @@ fn demand(i: &MonoInterner, callee: u32, ty: &str, tree: ResolvedBoundTree) -> S
 fn two_sites_demanding_one_body_with_different_trees_clash() {
     let i = interner();
     let mut map = DemandMap::default();
-    assert!(map.record(&[demand(&i, 1, "int", tree(&i, 7))]).is_empty(), "a first sighting is not a clash");
+    assert!(
+        map.record(&[demand(&i, 1, "int", tree(&i, 7))]).is_empty(),
+        "a first sighting is not a clash"
+    );
 
     let clashes = map.record(&[demand(&i, 1, "int", tree(&i, 9))]);
     assert_eq!(
@@ -81,7 +90,11 @@ fn a_repeated_demand_that_agrees_is_silent() {
     let mut map = DemandMap::default();
     map.record(&[demand(&i, 1, "int", tree(&i, 7))]);
     assert!(
-        map.record(&[demand(&i, 1, "int", tree(&i, 7)), demand(&i, 1, "int", tree(&i, 7))]).is_empty(),
+        map.record(&[
+            demand(&i, 1, "int", tree(&i, 7)),
+            demand(&i, 1, "int", tree(&i, 7))
+        ])
+        .is_empty(),
         "agreeing repeats must be silent"
     );
 }
@@ -98,7 +111,10 @@ fn two_instantiations_of_one_declaration_may_differ() {
         demand(&i, 1, "int", tree(&i, 7)),
         demand(&i, 1, "string", tree(&i, 9)),
     ]);
-    assert!(clashes.is_empty(), "distinct instantiations are distinct bodies: {clashes:?}");
+    assert!(
+        clashes.is_empty(),
+        "distinct instantiations are distinct bodies: {clashes:?}"
+    );
     assert_eq!(map.tree_of(&inst(&i, 1, "int")), tree(&i, 7));
     assert_eq!(map.tree_of(&inst(&i, 1, "string")), tree(&i, 9));
 }

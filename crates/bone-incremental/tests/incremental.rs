@@ -10,8 +10,10 @@
 // narrowing reuses bodies whose arena indices no longer match a fresh batch
 // lowering.
 
+use bone_incremental::session::{
+    Session, UpdateResult, UpdateTier, changed_names, item_prints, name_shapes,
+};
 use bone_semantic::prelude::*;
-use bone_incremental::session::{changed_names, item_prints, name_shapes, Session, UpdateResult, UpdateTier};
 
 use crate::common;
 use common::{mid_for, type_profile};
@@ -160,8 +162,10 @@ fn origin_doubled() -> int {
 #[test]
 fn comparator_equal_programs_compare_equal() {
     let fs = files(&[("a.rock", CROSS_FILE_A), ("b.rock", CROSS_FILE_B)]);
-    let left = batch_check(&[], &fs, &bone_core::modules::NsAliases::default()).expect("batch check");
-    let right = batch_check(&[], &fs, &bone_core::modules::NsAliases::default()).expect("batch check");
+    let left =
+        batch_check(&[], &fs, &bone_core::modules::NsAliases::default()).expect("batch check");
+    let right =
+        batch_check(&[], &fs, &bone_core::modules::NsAliases::default()).expect("batch check");
     ws_equiv(&left, &right, &fs, 1).expect("identical batch runs must compare equal");
 }
 
@@ -173,8 +177,14 @@ fn comparator_detects_type_divergence() {
     let int_version = files(&[("a.rock", "fn f() -> int   { let v = 1   \n v }")]);
     let float_version = files(&[("a.rock", "fn f() -> float { let v = 1.0 \n v }")]);
 
-    let left = batch_check(&[], &int_version, &bone_core::modules::NsAliases::default()).expect("batch check");
-    let right = batch_check(&[], &float_version, &bone_core::modules::NsAliases::default()).expect("batch check");
+    let left = batch_check(&[], &int_version, &bone_core::modules::NsAliases::default())
+        .expect("batch check");
+    let right = batch_check(
+        &[],
+        &float_version,
+        &bone_core::modules::NsAliases::default(),
+    )
+    .expect("batch check");
 
     let err = ws_equiv(&left, &right, &int_version, 1)
         .expect_err("comparator must detect differing inferred types");
@@ -237,8 +247,7 @@ impl Harness {
         stride: usize,
         aliases: bone_core::modules::NsAliases,
     ) -> Harness {
-        let session =
-            Session::new(warm.clone(), texts.clone(), &aliases).expect("session init");
+        let session = Session::new(warm.clone(), texts.clone(), &aliases).expect("session init");
         let h = Harness {
             session,
             warm,
@@ -265,7 +274,6 @@ impl Harness {
         result
     }
 
-
     fn remove(&mut self, path: &str) -> UpdateResult {
         let result = self
             .session
@@ -277,8 +285,8 @@ impl Harness {
     }
 
     fn assert_matches_batch(&self) {
-        let batch =
-            batch_check(&self.warm, &self.texts, &self.aliases).expect("batch check of session texts");
+        let batch = batch_check(&self.warm, &self.texts, &self.aliases)
+            .expect("batch check of session texts");
         ws_equiv(self.session.workspace(), &batch, &self.texts, self.stride)
             .unwrap_or_else(|d| panic!("incremental != fresh: {d}"));
     }
@@ -322,12 +330,19 @@ fn macro_def_span_shifts_on_fast_body_edit() {
     let before = &h.session.files["m.rock"].macros;
     assert_eq!(before.len(), 1, "one macro recorded");
     assert_eq!(before[0].name.as_str(), "m");
-    assert_eq!(before[0].span.line_range.0, 4, "macro starts on line 5 (0-based 4)");
+    assert_eq!(
+        before[0].span.line_range.0, 4,
+        "macro starts on line 5 (0-based 4)"
+    );
 
     // Grow `helper`'s body by one line; `m` slides from line 5 to line 6.
     let v2 = "fn helper() -> int {\n  let a = 2\n  a\n}\n\nmacro m(x: expr) -> int {\n  x\n}\n";
     let result = h.update("m.rock", v2);
-    assert_eq!(result.tier, UpdateTier::BodyOnly, "a localized body edit is BodyOnly");
+    assert_eq!(
+        result.tier,
+        UpdateTier::BodyOnly,
+        "a localized body edit is BodyOnly"
+    );
 
     let after = &h.session.files["m.rock"].macros;
     assert_eq!(after.len(), 1);
@@ -349,14 +364,25 @@ fn oracle_coroutine_body_edit_stays_a_coroutine() {
     let v1 = "co fn counter() -> Coroutine<int> {\n  yield 1\n}\n";
     let mut h = Harness::new(&[("c.rock", v1)]);
     h.assert_clean();
-    let result = h.update("c.rock", "co fn counter() -> Coroutine<int> {\n  yield 2\n}\n");
-    assert_eq!(result.tier, UpdateTier::BodyOnly, "a co fn body edit is BodyOnly");
+    let result = h.update(
+        "c.rock",
+        "co fn counter() -> Coroutine<int> {\n  yield 2\n}\n",
+    );
+    assert_eq!(
+        result.tier,
+        UpdateTier::BodyOnly,
+        "a co fn body edit is BodyOnly"
+    );
     h.assert_clean();
     // The re-lowered function must still be a coroutine.
     let ws = h.session.workspace();
     let mid = h.mid("c.rock");
     let m = ws.modules.get(mid.index()).unwrap();
-    let (_, fns) = m.functions_by_name.iter().find(|(n, _)| n.as_str() == "counter").unwrap();
+    let (_, fns) = m
+        .functions_by_name
+        .iter()
+        .find(|(n, _)| n.as_str() == "counter")
+        .unwrap();
     let (fmid, fid) = fns[0];
     assert!(
         ws.modules[fmid.index()].functions[fid].is_coroutine,
@@ -446,7 +472,11 @@ fn decorated_body_edit_reinfers_the_body() {
     let v1 = "global G: int = 0\ndeco init upd { }\n@upd\nfn tick() { G = 2 }";
     let mut h = Harness::new(&[("m.rock", v0)]);
     let result = h.update("m.rock", v1);
-    assert_eq!(result.tier, UpdateTier::BodyOnly, "a decorated body edit is still a body edit");
+    assert_eq!(
+        result.tier,
+        UpdateTier::BodyOnly,
+        "a decorated body edit is still a body edit"
+    );
 
     let ws = h.session.workspace();
     let mut names: Vec<String> = result
@@ -550,10 +580,15 @@ fn overloaded_body_edit_bumps_only_the_edited_overload() {
             })
             .collect()
     };
-    let prog = |c: i64| format!("fn foo(x: int) -> int {{ {c} }}\nfn foo(x: float) -> float {{ 0.0 }}\n");
+    let prog =
+        |c: i64| format!("fn foo(x: int) -> int {{ {c} }}\nfn foo(x: float) -> float {{ 0.0 }}\n");
 
     let mut h = Harness::new(&[("m.rock", &prog(1))]);
-    assert_eq!(gens_in_order(&h), vec![0, 0], "fresh module starts at gen 0");
+    assert_eq!(
+        gens_in_order(&h),
+        vec![0, 0],
+        "fresh module starts at gen 0"
+    );
     // Edit only foo(int)'s body, twice.
     let r1 = h.update("m.rock", &prog(2));
     assert_eq!(r1.tier, UpdateTier::BodyOnly);
@@ -599,7 +634,11 @@ fn body_edit_reinfers_only_the_changed_body() {
         for i in 0..6 {
             let c0 = 1 + (i % 2) as i64;
             let r = h.update("m.rock", &cook_premise_module(n, c0));
-            assert_eq!(r.tier, UpdateTier::BodyOnly, "f0 const edit must be BodyOnly (n={n})");
+            assert_eq!(
+                r.tier,
+                UpdateTier::BodyOnly,
+                "f0 const edit must be BodyOnly (n={n})"
+            );
             count = h.session.ws.reinferred_body_count.load(Ordering::Relaxed);
         }
         assert_eq!(
@@ -717,7 +756,10 @@ fn itemless_file_before_others_keeps_module_ids_aligned() {
         vec![warm],
         files(&[
             ("empty.rock", ""),
-            ("later.rock", "fn foo() -> int { 1 }\nfn use_foo() -> int { foo() }"),
+            (
+                "later.rock",
+                "fn foo() -> int { 1 }\nfn use_foo() -> int { foo() }",
+            ),
         ]),
         &bone_core::modules::NsAliases::default(),
     )
@@ -831,11 +873,21 @@ fn delete_of_signature_dependency_surfaces_dependent_error() {
 
     h.remove("a.rock");
     assert!(
-        h.session.diagnostics().iter().any(|d| d.message.contains("Point")),
+        h.session
+            .diagnostics()
+            .iter()
+            .any(|d| d.message.contains("Point")),
         "removing Point's definition surfaces b.rock's unknown-type error: {:?}",
-        h.session.diagnostics().iter().map(|e| e.message.clone()).collect::<Vec<_>>()
+        h.session
+            .diagnostics()
+            .iter()
+            .map(|e| e.message.clone())
+            .collect::<Vec<_>>()
     );
-    assert!(!h.session.is_tracked("a.rock"), "the remove commits (no revert)");
+    assert!(
+        !h.session.is_tracked("a.rock"),
+        "the remove commits (no revert)"
+    );
 
     h.update("a.rock", CROSS_FILE_A);
     h.assert_clean();
@@ -870,9 +922,16 @@ fn update_with_unlowerable_signature_recovers_and_surfaces() {
     let mut h = Harness::new(&[("a.rock", CROSS_FILE_A), ("b.rock", CROSS_FILE_B)]);
     h.update("b.rock", "fn f(p: Nonexistent) -> int { 1 }");
     assert!(
-        h.session.diagnostics().iter().any(|d| d.message.contains("Nonexistent")),
+        h.session
+            .diagnostics()
+            .iter()
+            .any(|d| d.message.contains("Nonexistent")),
         "the unresolved signature type surfaces: {:?}",
-        h.session.diagnostics().iter().map(|e| e.message.clone()).collect::<Vec<_>>()
+        h.session
+            .diagnostics()
+            .iter()
+            .map(|e| e.message.clone())
+            .collect::<Vec<_>>()
     );
 
     h.update("b.rock", CROSS_FILE_B);
@@ -893,9 +952,16 @@ fn oracle_broken_type_definer_cascades_to_dependent() {
     // Drop Point entirely from a.rock (its only items are Point + make_point).
     h.update("a.rock", "fn unrelated() -> int { 1 }");
     assert!(
-        h.session.diagnostics().iter().any(|d| d.message.contains("Point")),
+        h.session
+            .diagnostics()
+            .iter()
+            .any(|d| d.message.contains("Point")),
         "b.rock's signature reference to the removed Point must surface: {:?}",
-        h.session.diagnostics().iter().map(|e| e.message.clone()).collect::<Vec<_>>()
+        h.session
+            .diagnostics()
+            .iter()
+            .map(|e| e.message.clone())
+            .collect::<Vec<_>>()
     );
 
     h.update("a.rock", CROSS_FILE_A);
@@ -981,9 +1047,16 @@ fn oracle_type_rename_cascades_both_directions() {
 
     h.update("a.rock", "struct Pointe { x: int }"); // rename Point -> Pointe
     assert!(
-        h.session.diagnostics().iter().any(|d| d.message.contains("Point")),
+        h.session
+            .diagnostics()
+            .iter()
+            .any(|d| d.message.contains("Point")),
         "b's reference to the old name must surface: {:?}",
-        h.session.diagnostics().iter().map(|e| e.message.clone()).collect::<Vec<_>>()
+        h.session
+            .diagnostics()
+            .iter()
+            .map(|e| e.message.clone())
+            .collect::<Vec<_>>()
     );
 
     h.update("b.rock", "fn px(p: Pointe) -> int { p.x }"); // fix the reference
@@ -1622,12 +1695,20 @@ fn booly() -> bool {
 }
 ";
     let result = h.update("m.rock", v1);
-    assert_eq!(result.tier, UpdateTier::BodyOnly, "a body-length edit is BodyOnly");
+    assert_eq!(
+        result.tier,
+        UpdateTier::BodyOnly,
+        "a body-length edit is BodyOnly"
+    );
     h.assert_clean();
 
     // The shift is real: same node text, +8 byte offset.
     let flo = v1.find("3.14").expect("float literal present");
-    assert_eq!(flo, flo0 + 8, "the edit must shift the float literal by 8 bytes");
+    assert_eq!(
+        flo,
+        flo0 + 8,
+        "the edit must shift the float literal by 8 bytes"
+    );
     assert_eq!(
         type_and_span_at(&h, "m.rock", flo),
         Some(("float".to_string(), (flo, flo + "3.14".len()))),
@@ -1689,19 +1770,36 @@ fn shift_module_after_edit_moves_only_later_item_spans() {
     // re-lowered owner.
     let at = b_hdr0.0;
     let d = 100usize;
-    bone_incremental::span_shift::shift_module_after_edit(&mut module, BodyOwner::Function(b), at, d as isize, 5);
+    bone_incremental::span_shift::shift_module_after_edit(
+        &mut module,
+        BodyOwner::Function(b),
+        at,
+        d as isize,
+        5,
+    );
 
     let bump = |v: &[(usize, usize)]| -> Vec<(usize, usize)> {
         v.iter().map(|(s, e)| (s + d, e + d)).collect()
     };
 
     // (1) `a` is entirely before `at`: untouched, header and body.
-    assert_eq!(module.functions[a].span.offset_range, a_hdr0, "earlier fn `a` header must not move");
-    assert_eq!(body_offsets(&module, a), a_body0, "earlier fn `a` body must not move");
+    assert_eq!(
+        module.functions[a].span.offset_range, a_hdr0,
+        "earlier fn `a` header must not move"
+    );
+    assert_eq!(
+        body_offsets(&module, a),
+        a_body0,
+        "earlier fn `a` body must not move"
+    );
 
     // (2) `b` is the edited owner: its BODY spans are skipped (caller re-lowers
     //     them fresh), even though its header sits at `at` and shifts.
-    assert_eq!(body_offsets(&module, b), b_body0, "edited fn `b` body spans must be left for re-lowering");
+    assert_eq!(
+        body_offsets(&module, b),
+        b_body0,
+        "edited fn `b` body spans must be left for re-lowering"
+    );
     assert_eq!(
         module.functions[b].span.offset_range,
         (b_hdr0.0 + d, b_hdr0.1 + d),
@@ -1714,7 +1812,11 @@ fn shift_module_after_edit_moves_only_later_item_spans() {
         (c_hdr0.0 + d, c_hdr0.1 + d),
         "later fn `c` header must shift by the delta"
     );
-    assert_eq!(body_offsets(&module, c), bump(&c_body0), "later fn `c` body spans must shift by the delta");
+    assert_eq!(
+        body_offsets(&module, c),
+        bump(&c_body0),
+        "later fn `c` body spans must shift by the delta"
+    );
 }
 
 /// Isolated parity gate for `relower_function_in_place` (rung 2's lowering
@@ -1761,26 +1863,37 @@ fn relower_function_in_place_matches_fresh_lower() {
     // vacuous (relowering same source onto an already-correct module is
     // indistinguishable from a no-op). With the body gone, a relower that fails
     // to install leaves target body-less and ws_equiv diverges from fresh.
-    ws.module_mut(mid).bodies.remove(&bone_semantic::hir::BodyOwner::Function(fid));
+    ws.module_mut(mid)
+        .bodies
+        .remove(&bone_semantic::hir::BodyOwner::Function(fid));
     assert!(
-        ws.module(mid).bodies.get(&bone_semantic::hir::BodyOwner::Function(fid)).is_none(),
+        ws.module(mid)
+            .bodies
+            .get(&bone_semantic::hir::BodyOwner::Function(fid))
+            .is_none(),
         "precondition: target body removed"
     );
 
     // Swap the module out so `&ws` (workspace lookups) and `&mut module` don't
     // alias -- the exact dance rebuild_module will perform.
     let mut module = std::mem::take(ws.module_mut(mid));
-    let installed = bone_semantic::lower::relower_function_in_place(&ws, &mut module, cooked, f, annos, fid)
-        .expect("relower must succeed");
-    assert!(installed, "target has a Rock body, so a body must be installed");
+    let installed =
+        bone_semantic::lower::relower_function_in_place(&ws, &mut module, cooked, f, annos, fid)
+            .expect("relower must succeed");
+    assert!(
+        installed,
+        "target has a Rock body, so a body must be installed"
+    );
     *ws.module_mut(mid) = module;
 
     // Re-infer (the relowered body's old inference is stale) and compare to a
     // fresh batch lower of the same files: relower(same source) == fresh lower.
-    let inf = bone_semantic::semantic_passes::check_module(&ws, mid, ws.module(mid)).expect("reinfer");
+    let inf =
+        bone_semantic::semantic_passes::check_module(&ws, mid, ws.module(mid)).expect("reinfer");
     ws.set_inference(mid, inf);
 
-    let fresh = batch_check(&[], &fs, &bone_core::modules::NsAliases::default()).expect("fresh batch");
+    let fresh =
+        batch_check(&[], &fs, &bone_core::modules::NsAliases::default()).expect("fresh batch");
     ws_equiv(&ws, &fresh, &fs, 1)
         .expect("relower_function_in_place(same cooked source) must equal a fresh full lower");
 }
@@ -1956,8 +2069,14 @@ fn origin_doubled() -> int {
     );
     assert_eq!(r.tier, UpdateTier::BodyOnly);
 
-    assert!(!has(&h, "make_point"), "make_point dep must be dropped after the edit");
-    assert!(has(&h, "Point"), "Point dep (via double_x `p.x`) must remain");
+    assert!(
+        !has(&h, "make_point"),
+        "make_point dep must be dropped after the edit"
+    );
+    assert!(
+        has(&h, "Point"),
+        "Point dep (via double_x `p.x`) must remain"
+    );
 
     // The incrementally-patched index must be byte-identical to a full rescan
     // (no stale/empty entries) -- the soundness invariant the body path relies on.
@@ -2448,7 +2567,9 @@ fn run_fuzz_session(seed: u64, steps: usize) {
 
     let warm = parse_rock_with_file(WARM_PRELUDE, WARM_PRELUDE_PATH).expect("warm prelude parses");
     let initial: Files = (0..model.files.len())
-        .map(|i| bone_incremental::session::SessionFile::legacy(FuzzModel::path(i), model.render(i)))
+        .map(|i| {
+            bone_incremental::session::SessionFile::legacy(FuzzModel::path(i), model.render(i))
+        })
         .collect();
     let mut h = Harness::with_warm(vec![warm], initial, 1);
 
@@ -2520,8 +2641,8 @@ fn fuzz_session_fixture_package_graph() {
     // root-package files are mutated, as in a real project edit.
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/incremental_package/app");
-    let graph = rock_host::stick::graph::PackageGraph::build(&manifest_dir)
-        .expect("fixture package graph");
+    let graph =
+        rock_host::stick::graph::PackageGraph::build(&manifest_dir).expect("fixture package graph");
     let root = graph.root();
     let mut all_files: Files = Vec::new();
     let mut originals: Files = Vec::new();
@@ -2534,7 +2655,9 @@ fn fuzz_session_fixture_package_graph() {
         } else {
             node.root.clone()
         };
-        let selected = graph.selected_rock_files(*id, &load_dir).expect("selected rock files");
+        let selected = graph
+            .selected_rock_files(*id, &load_dir)
+            .expect("selected rock files");
         for path in selected {
             let text = std::fs::read_to_string(&path)
                 .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
@@ -2567,7 +2690,10 @@ fn fuzz_session_fixture_package_graph() {
         !originals.is_empty(),
         "fixture package graph has no root .rock files (guards against a silent skip)"
     );
-    assert!(all_files.len() > originals.len(), "fixture graph must include a dependency package");
+    assert!(
+        all_files.len() > originals.len(),
+        "fixture graph must include a dependency package"
+    );
 
     let aliases = bone_query::package_aliases::from_graph(&graph);
     let mut h = Harness::with_warm_aliases(stdlib_warm_modules(), all_files, 13, aliases);
@@ -2606,7 +2732,8 @@ fn comparator_detects_diagnostic_divergence() {
     let clean = files(&[("a.rock", "fn f() -> int { 1 }")]);
     let broken = files(&[("a.rock", "fn f() -> int { true }")]);
 
-    let left = batch_check(&[], &clean, &bone_core::modules::NsAliases::default()).expect("batch check");
+    let left =
+        batch_check(&[], &clean, &bone_core::modules::NsAliases::default()).expect("batch check");
     let right = batch_check(&[], &broken, &bone_core::modules::NsAliases::default())
         .expect("batch check (body errors are per-owner, not Err)");
 
@@ -2632,7 +2759,8 @@ fn comparator_detects_diagnostic_divergence() {
 #[test]
 fn fastpath_arena_drift_is_not_an_interface_change() {
     let v = |fb: &str, gb: &str| {
-        format!("
+        format!(
+            "
 struct P {{ x: int }}
 
 fn f(p: P) -> int {{
@@ -2642,7 +2770,8 @@ fn f(p: P) -> int {{
 fn g(p: P) -> int {{
     return{gb}p.x
 }}
-")
+"
+        )
     };
 
     let mut h = Harness::new(&[("a.rock", &v(" ", " "))]);
@@ -2671,12 +2800,16 @@ fn g(p: P) -> int {{
 // to the correct assertion when the bone-lower reuse landed.
 #[test]
 fn body_edit_does_not_grow_module_ty_arena() {
-    let v = |fb: &str| format!("
+    let v = |fb: &str| {
+        format!(
+            "
 struct P {{ x: int }}
 fn f(p: P) -> int {{
     return{fb}p.x
 }}
-");
+"
+        )
+    };
     let mut h = Harness::new(&[("a.rock", &v(" "))]);
     let mid = h.mid("a.rock");
     let start = h.session.workspace().module(mid).ty_arena.len();
@@ -2694,7 +2827,6 @@ fn f(p: P) -> int {{
     );
 }
 
-
 // STRESS (gated; `--ignored`). Empirical backstop for "memory does not grow with
 // edits": 100k single-function body edits must leave every per-module collection
 // flat. Arenas are the deterministic oracle (RSS is allocator-noisy). Covers the
@@ -2703,23 +2835,36 @@ fn f(p: P) -> int {{
 #[test]
 #[ignore]
 fn stress_100k_edits_arena_flat() {
-    let v = |b: &str| format!(
-        "struct P {{ x: int }}\n\
+    let v = |b: &str| {
+        format!(
+            "struct P {{ x: int }}\n\
          fn f(p: P) -> P {{\n{b}\n    return p\n}}\n\
          fn g(p: P) -> int {{ return p.x }}\n\
-         fn h(a: P, b: P) -> int {{ return a.x + b.x }}\n");
+         fn h(a: P, b: P) -> int {{ return a.x + b.x }}\n"
+        )
+    };
     let mut h = Harness::new(&[("a.rock", &v("    let y: P = p"))]);
     let mid = h.mid("a.rock");
 
     // settle one edit so lazily-grown per-body arenas reach steady state.
-    h.session.update_file("a.rock", &v("    let y: P = p ")).unwrap();
+    h.session
+        .update_file("a.rock", &v("    let y: P = p "))
+        .unwrap();
     let snap = |h: &Harness| {
         let m = h.session.workspace().module(mid);
-        let body: usize = m.bodies.values()
+        let body: usize = m
+            .bodies
+            .values()
             .map(|b| b.lowered_tys.len() + b.expr_arena.len() + b.node_intervals.len())
             .sum();
-        (m.ty_arena.len(), m.ty_spans.iter().count(), m.lowering_errors.len(),
-         m.functions.len(), m.bodies.len(), body)
+        (
+            m.ty_arena.len(),
+            m.ty_spans.iter().count(),
+            m.lowering_errors.len(),
+            m.functions.len(),
+            m.bodies.len(),
+            body,
+        )
     };
     let baseline = snap(&h);
 
@@ -2753,16 +2898,30 @@ fn body_lower_errors_are_replaced_not_accumulated() {
     let mut h = Harness::new(&[("a.rock", &ok)]);
     let mid = h.mid("a.rock");
     let total = |h: &Harness| -> usize {
-        h.session.workspace().module(mid).lowering_errors.values().map(|v| v.len()).sum()
+        h.session
+            .workspace()
+            .module(mid)
+            .lowering_errors
+            .values()
+            .map(|v| v.len())
+            .sum()
     };
     assert_eq!(total(&h), 0);
 
     // Toggle bad <-> ok many times; the oracle validates diagnostics each step.
     for _ in 0..25 {
         h.update("a.rock", &bad);
-        assert_eq!(total(&h), 1, "the single lowering error must not accumulate across edits");
+        assert_eq!(
+            total(&h),
+            1,
+            "the single lowering error must not accumulate across edits"
+        );
         h.update("a.rock", &ok);
-        assert_eq!(total(&h), 0, "fixing the body must CLEAR its stale lowering error");
+        assert_eq!(
+            total(&h),
+            0,
+            "fixing the body must CLEAR its stale lowering error"
+        );
     }
 }
 
@@ -2775,9 +2934,16 @@ fn const_value_edit_is_body_only() {
     use bone_semantic::hir::BodyOwner;
     let mut h = Harness::new(&[("m.rock", "const FOO: int = 5\nfn f() -> int { FOO }")]);
     let result = h.update("m.rock", "const FOO: int = 10\nfn f() -> int { FOO }");
-    assert_eq!(result.tier, UpdateTier::BodyOnly, "editing a const's value is a body edit");
+    assert_eq!(
+        result.tier,
+        UpdateTier::BodyOnly,
+        "editing a const's value is a body edit"
+    );
     assert!(
-        result.reinferred.iter().any(|(_, owner)| matches!(owner, BodyOwner::Global(_))),
+        result
+            .reinferred
+            .iter()
+            .any(|(_, owner)| matches!(owner, BodyOwner::Global(_))),
         "the changed const must appear in reinferred, got: {:?}",
         result.reinferred
     );
@@ -2789,7 +2955,11 @@ fn const_value_edit_is_body_only() {
 fn mutable_global_value_edit_is_interface() {
     let mut h = Harness::new(&[("m.rock", "global BAR: int = 5\nfn f() -> int { BAR }")]);
     let result = h.update("m.rock", "global BAR: int = 7\nfn f() -> int { BAR }");
-    assert_eq!(result.tier, UpdateTier::Interface, "editing a mutable global's value is an interface edit");
+    assert_eq!(
+        result.tier,
+        UpdateTier::Interface,
+        "editing a mutable global's value is an interface edit"
+    );
 }
 
 // Control: changing a global's TYPE is still an Interface edit (the type is in
@@ -2798,14 +2968,22 @@ fn mutable_global_value_edit_is_interface() {
 fn const_type_edit_is_interface() {
     let mut h = Harness::new(&[("m.rock", "const FOO: int = 5\nfn f() {}")]);
     let result = h.update("m.rock", "const FOO: float = 5.0\nfn f() {}");
-    assert_eq!(result.tier, UpdateTier::Interface, "changing a const's type is an interface edit");
+    assert_eq!(
+        result.tier,
+        UpdateTier::Interface,
+        "changing a const's type is an interface edit"
+    );
 }
 
 #[test]
 fn const_to_global_keyword_flip_is_interface() {
     let mut h = Harness::new(&[("m.rock", "const FOO: int = 5\nfn f() {}")]);
     let result = h.update("m.rock", "global FOO: int = 5\nfn f() {}");
-    assert_eq!(result.tier, UpdateTier::Interface, "const->global flip changes write/reload semantics");
+    assert_eq!(
+        result.tier,
+        UpdateTier::Interface,
+        "const->global flip changes write/reload semantics"
+    );
 }
 
 /// A `co fn` body edit must REPORT the edited body in `reinferred` -- not just
@@ -2822,8 +3000,10 @@ fn const_to_global_keyword_flip_is_interface() {
 /// (`BodiesOnly([0])`); the miss is purely the locator/footprint mismatch.
 #[test]
 fn coroutine_body_edit_is_reported_in_reinferred() {
-    let t0 = "co fn counter() -> Coroutine<int> {\n  yield 1\n}\nfn main() {\n  let c = counter()\n}\n";
-    let t1 = "co fn counter() -> Coroutine<int> {\n  yield 10\n}\nfn main() {\n  let c = counter()\n}\n";
+    let t0 =
+        "co fn counter() -> Coroutine<int> {\n  yield 1\n}\nfn main() {\n  let c = counter()\n}\n";
+    let t1 =
+        "co fn counter() -> Coroutine<int> {\n  yield 10\n}\nfn main() {\n  let c = counter()\n}\n";
     let mut h = Harness::new(&[("c.rock", t0)]);
     let r = h.update("c.rock", t1);
     assert_eq!(
@@ -2839,9 +3019,9 @@ fn coroutine_body_edit_is_reported_in_reinferred() {
 /// verdict at the unchanged caller's element-reference call, both ways.
 #[test]
 fn relocation_verdict_follows_an_edit_to_the_callee() {
-    let clean_callee = "value Cell { v: int }\nfn touch(cell: ref Cell, cells: [Cell]) { cell.v = cells.len() }";
-    let growing_callee =
-        "value Cell { v: int }\nfn touch(cell: ref Cell, cells: [Cell]) { cells.push(Cell { v: 2 })\n cell.v = 7 }";
+    let clean_callee =
+        "value Cell { v: int }\nfn touch(cell: ref Cell, cells: [Cell]) { cell.v = cells.len() }";
+    let growing_callee = "value Cell { v: int }\nfn touch(cell: ref Cell, cells: [Cell]) { cells.push(Cell { v: 2 })\n cell.v = 7 }";
     let caller = "fn main() { let cells: [Cell] = [Cell { v: 1 }]\n touch(cells[0], cells) }";
     let relocations = |session: &Session| {
         session
@@ -2858,9 +3038,13 @@ fn relocation_verdict_follows_an_edit_to_the_callee() {
     .expect("session");
     assert_eq!(relocations(&session), 0, "{:?}", session.diagnostics());
 
-    session.update_file("cell.rock", growing_callee).expect("update");
+    session
+        .update_file("cell.rock", growing_callee)
+        .expect("update");
     assert_eq!(relocations(&session), 1, "{:?}", session.diagnostics());
 
-    session.update_file("cell.rock", clean_callee).expect("update");
+    session
+        .update_file("cell.rock", clean_callee)
+        .expect("update");
     assert_eq!(relocations(&session), 0, "{:?}", session.diagnostics());
 }

@@ -25,9 +25,8 @@ pub fn run(inputs: &[String], output: Option<&str>) -> Result<()> {
     if inputs.is_empty() {
         anyhow::bail!("usage: rock docs-index <dir|file>... --output <file>");
     }
-    let output = output.ok_or_else(|| {
-        anyhow::anyhow!("usage: rock docs-index <dir|file>... --output <file>")
-    })?;
+    let output = output
+        .ok_or_else(|| anyhow::anyhow!("usage: rock docs-index <dir|file>... --output <file>"))?;
 
     let cwd = fs::canonicalize(std::env::current_dir()?)
         .context("resolve declaration-index working directory")?;
@@ -74,15 +73,34 @@ pub fn run(inputs: &[String], output: Option<&str>) -> Result<()> {
         }
     }
     declarations.sort_by(|a, b| {
-        (&a.source, a.line, a.kind, &a.name, &a.signature)
-            .cmp(&(&b.source, b.line, b.kind, &b.name, &b.signature))
+        (&a.source, a.line, a.kind, &a.name, &a.signature).cmp(&(
+            &b.source,
+            b.line,
+            b.kind,
+            &b.name,
+            &b.signature,
+        ))
     });
 
     let mut document = std::collections::BTreeMap::new();
-    document.insert("declarations", json!(declarations.iter().map(declaration_value).collect::<Vec<_>>()));
-    document.insert("repository_revision", repository_revision(&cwd).map_or(Value::Null, Value::String));
+    document.insert(
+        "declarations",
+        json!(
+            declarations
+                .iter()
+                .map(declaration_value)
+                .collect::<Vec<_>>()
+        ),
+    );
+    document.insert(
+        "repository_revision",
+        repository_revision(&cwd).map_or(Value::Null, Value::String),
+    );
     document.insert("schema", json!(1));
-    document.insert("source_identity", json!(format!("sha256:{:x}", identity.finalize())));
+    document.insert(
+        "source_identity",
+        json!(format!("sha256:{:x}", identity.finalize())),
+    );
     document.insert("sources", json!(source_values));
     let mut encoded = serde_json::to_vec_pretty(&document)?;
     encoded.push(b'\n');
@@ -107,7 +125,9 @@ fn collect_sources_with_stdlib(
             match stdlib {
                 rock_stdlib::StdlibSource::Dir(dir) => dir.clone(),
                 rock_stdlib::StdlibSource::Embedded => {
-                    anyhow::bail!("the stdlib is built in to this binary; no stdlib directory to index");
+                    anyhow::bail!(
+                        "the stdlib is built in to this binary; no stdlib directory to index"
+                    );
                 }
             }
         } else if candidate.is_absolute() {
@@ -127,7 +147,10 @@ fn collect_sources_with_stdlib(
                 paths.insert(path);
             }
         } else {
-            anyhow::bail!("declaration input is neither a file nor directory: '{}'", input);
+            anyhow::bail!(
+                "declaration input is neither a file nor directory: '{}'",
+                input
+            );
         }
     }
     if paths.is_empty() {
@@ -138,7 +161,9 @@ fn collect_sources_with_stdlib(
         rock_stdlib::StdlibSource::Embedded => None,
     };
     for path in &paths {
-        let under_stdlib = stdlib_canonical.as_ref().is_some_and(|s| path.starts_with(s));
+        let under_stdlib = stdlib_canonical
+            .as_ref()
+            .is_some_and(|s| path.starts_with(s));
         if !path.starts_with(cwd) && !under_stdlib {
             anyhow::bail!(
                 "declaration input escapes the working directory: '{}'",
@@ -151,7 +176,10 @@ fn collect_sources_with_stdlib(
 
 fn ensure_rock_file(path: &Path) -> Result<()> {
     if path.extension().and_then(|extension| extension.to_str()) != Some("rock") {
-        anyhow::bail!("declaration input is not a .rock file: '{}'", path.display());
+        anyhow::bail!(
+            "declaration input is not a .rock file: '{}'",
+            path.display()
+        );
     }
     Ok(())
 }
@@ -160,12 +188,18 @@ fn display_path(path: &Path, cwd: &Path) -> Result<String> {
     if let rock_stdlib::StdlibSource::Dir(dir) = rock_stdlib::stdlib_origin() {
         if let Ok(stdlib) = fs::canonicalize(dir) {
             if let Ok(relative) = path.strip_prefix(&stdlib) {
-                return Ok(format!("stdlib/{}", relative.to_string_lossy().replace('\\', "/")));
+                return Ok(format!(
+                    "stdlib/{}",
+                    relative.to_string_lossy().replace('\\', "/")
+                ));
             }
         }
     }
     let relative = path.strip_prefix(cwd).map_err(|_| {
-        anyhow::anyhow!("declaration input escapes the working directory: '{}'", path.display())
+        anyhow::anyhow!(
+            "declaration input escapes the working directory: '{}'",
+            path.display()
+        )
     })?;
     Ok(relative.to_string_lossy().replace('\\', "/"))
 }
@@ -238,7 +272,11 @@ fn declaration(ast: &Ast, item: &Item, source: &str, text: &str) -> Result<Optio
                 || global.name.name.to_string(),
                 |ty| format!("{}: {}", global.name.name, ast.type_surface(ty)),
             );
-            ("global", global.name.name.to_string(), format!("{keyword} {typed_name}"))
+            (
+                "global",
+                global.name.name.to_string(),
+                format!("{keyword} {typed_name}"),
+            )
         }
         _ => return Ok(None),
     };
@@ -326,7 +364,10 @@ fn params_signature(ast: &Ast, params: &[Param], text: &str) -> Result<String> {
                 let (start, end) = ast.exprs[default].span.offset_range;
                 // Source spelling preserves literals and grouping without an expression printer.
                 let expression = text.get(start..end).with_context(|| {
-                    format!("invalid default expression span for parameter '{}'", param.name.name)
+                    format!(
+                        "invalid default expression span for parameter '{}'",
+                        param.name.name
+                    )
                 })?;
                 signature.push_str(" = ");
                 signature.push_str(expression);
@@ -399,8 +440,15 @@ mod tests {
     #[test]
     fn stdlib_input_when_built_in_says_so() {
         let cwd = std::env::current_dir().unwrap();
-        let err = collect_sources_with_stdlib(&["stdlib".to_string()], &cwd, &rock_stdlib::StdlibSource::Embedded)
-            .unwrap_err();
-        assert!(err.to_string().contains("built in"), "unexpected error: {err:#}");
+        let err = collect_sources_with_stdlib(
+            &["stdlib".to_string()],
+            &cwd,
+            &rock_stdlib::StdlibSource::Embedded,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("built in"),
+            "unexpected error: {err:#}"
+        );
     }
 }

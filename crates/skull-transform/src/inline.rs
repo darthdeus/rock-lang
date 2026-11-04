@@ -15,11 +15,11 @@
 //! (math, getters, value-struct ctors) carry `@inline`/`@pure`, so they still
 //! inline; incidental small accessors no longer do.
 
+use bone_core::prelude::Instant;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::cell::Cell as ThreadCell;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use bone_core::prelude::Instant;
 
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::{BoundTree, CompilerError};
@@ -338,7 +338,8 @@ impl InlineScanStats {
         self.candidate_requests += other.candidate_requests;
         self.candidate_cache_hits += other.candidate_cache_hits;
         self.candidate_derivations += other.candidate_derivations;
-        self.candidate_requested_keys.extend(other.candidate_requested_keys);
+        self.candidate_requested_keys
+            .extend(other.candidate_requested_keys);
         self.candidate_lower_ns += other.candidate_lower_ns;
         self.candidate_cleanup_ns += other.candidate_cleanup_ns;
         self.candidate_eligibility_ns += other.candidate_eligibility_ns;
@@ -562,7 +563,9 @@ fn adjust_candidate_profile(
         stats.rejected += usize::from(!profile.eligible);
     } else {
         stats.eligible = stats.eligible.saturating_sub(usize::from(profile.eligible));
-        stats.rejected = stats.rejected.saturating_sub(usize::from(!profile.eligible));
+        stats.rejected = stats
+            .rejected
+            .saturating_sub(usize::from(!profile.eligible));
     }
     if !profile.worker.is_empty() {
         adjust_count(&mut stats.worker_derivations, &profile.worker, add);
@@ -629,18 +632,26 @@ impl InlineCandidateTable {
             }
             if warm.lowered {
                 stats.lowered += 1;
-                stats.lower_ns_by_key.insert(warm.key.clone(), warm.lower_ns);
+                stats
+                    .lower_ns_by_key
+                    .insert(warm.key.clone(), warm.lower_ns);
             }
             stats.eligibility_ns += warm.eligibility_ns;
             if !warm.worker.is_empty() {
-                *stats.worker_derivations.entry(warm.worker.clone()).or_default() += 1;
+                *stats
+                    .worker_derivations
+                    .entry(warm.worker.clone())
+                    .or_default() += 1;
             }
             if let Some(reason) = warm.rejection {
                 stats.rejected += 1;
                 if !warm.lower_attempted {
                     stats.rejected_before_lower += 1;
                 }
-                *stats.rejection_reasons.entry(reason.to_string()).or_default() += 1;
+                *stats
+                    .rejection_reasons
+                    .entry(reason.to_string())
+                    .or_default() += 1;
             } else {
                 stats.eligible += 1;
             }
@@ -650,13 +661,18 @@ impl InlineCandidateTable {
                     .insert(warm.key.clone(), InlineCandidateProfile::from_warm(&warm));
             }
             let previous = warmed.insert(warm.key, warm.candidate);
-            assert!(previous.is_none(), "inline candidate table received a duplicate key");
+            assert!(
+                previous.is_none(),
+                "inline candidate table received a duplicate key"
+            );
         }
         if census_enabled {
             stats.lower_ns_by_key = stats
                 .profiles
                 .iter()
-                .filter_map(|(key, profile)| profile.lowered.then_some((key.clone(), profile.lower_ns)))
+                .filter_map(|(key, profile)| {
+                    profile.lowered.then_some((key.clone(), profile.lower_ns))
+                })
                 .collect();
         }
         stats.reused = keys.len().saturating_sub(stats.warmed);
@@ -673,8 +689,16 @@ impl InlineCandidateTable {
                 .expect("inline candidate table omitted an unwarmed key");
             entries.insert(key, candidate);
         }
-        assert!(warmed.is_empty(), "inline candidate table warmed an unused key");
-        Self { entries, removed: HashSet::default(), parent: None, stats }
+        assert!(
+            warmed.is_empty(),
+            "inline candidate table warmed an unused key"
+        );
+        Self {
+            entries,
+            removed: HashSet::default(),
+            parent: None,
+            stats,
+        }
     }
 
     /// Publish an edit-local candidate delta over the prior immutable table.
@@ -688,8 +712,8 @@ impl InlineCandidateTable {
     ) -> Self {
         let mut entries = HashMap::default();
         let mut stats = base.stats.clone();
-        let census_enabled = !stats.profiles.is_empty()
-            || warms.iter().any(|warm| !warm.worker.is_empty());
+        let census_enabled =
+            !stats.profiles.is_empty() || warms.iter().any(|warm| !warm.worker.is_empty());
         if census_enabled {
             for key in removed {
                 if let Some(profile) = stats.profiles.remove(key) {
@@ -709,7 +733,10 @@ impl InlineCandidateTable {
         }
         for warm in warms {
             let previous = entries.insert(warm.key, warm.candidate);
-            assert!(previous.is_none(), "inline candidate delta received a duplicate key");
+            assert!(
+                previous.is_none(),
+                "inline candidate delta received a duplicate key"
+            );
         }
         let mut removed_keys = removed.iter().cloned().collect::<HashSet<_>>();
         for key in entries.keys() {
@@ -929,8 +956,8 @@ impl UseIndex {
 
 impl Default for InlineCache {
     fn default() -> Self {
-        let census_enabled = std::env::var_os("ROCK_INLINE_CENSUS")
-            .is_some_and(|v| v.to_str() == Some("1"));
+        let census_enabled =
+            std::env::var_os("ROCK_INLINE_CENSUS").is_some_and(|v| v.to_str() == Some("1"));
         let worker = census_enabled
             .then(|| format!("{:?}", std::thread::current().id()))
             .unwrap_or_default();
@@ -939,7 +966,10 @@ impl Default for InlineCache {
             shared: None,
             scratch: InlineScratch::default(),
             census_enabled,
-            census: InlineScanStats { enabled: census_enabled, ..InlineScanStats::default() },
+            census: InlineScanStats {
+                enabled: census_enabled,
+                ..InlineScanStats::default()
+            },
             worker,
         }
     }
@@ -947,7 +977,10 @@ impl Default for InlineCache {
 
 impl InlineCache {
     pub fn with_candidate_table(table: Arc<InlineCandidateTable>) -> Self {
-        Self { shared: Some(table), ..Self::default() }
+        Self {
+            shared: Some(table),
+            ..Self::default()
+        }
     }
 
     pub fn candidate_table(&self) -> Option<Arc<InlineCandidateTable>> {
@@ -959,7 +992,9 @@ impl InlineCache {
     }
 
     pub fn canonical_body(&self, key: &Instance) -> Option<Arc<MirFunc>> {
-        self.shared.as_ref().and_then(|table| table.canonical_body(key))
+        self.shared
+            .as_ref()
+            .and_then(|table| table.canonical_body(key))
     }
 
     pub fn replace_candidate_table(&mut self, table: Arc<InlineCandidateTable>) {
@@ -1040,7 +1075,11 @@ impl InlineCache {
 
     fn rejection(&mut self, reason: &'static str) {
         if self.census_enabled {
-            *self.census.rejection_reasons.entry(reason.to_string()).or_default() += 1;
+            *self
+                .census
+                .rejection_reasons
+                .entry(reason.to_string())
+                .or_default() += 1;
         }
     }
 }
@@ -1069,7 +1108,9 @@ fn term_values(term: &Term, push: &mut impl FnMut(Idx<Inst>)) {
 fn term_targets(term: &Term, push: &mut impl FnMut(Idx<Block>)) {
     match term {
         Term::Goto(target) => push(*target),
-        Term::Branch { then_bb, else_bb, .. } => {
+        Term::Branch {
+            then_bb, else_bb, ..
+        } => {
             push(*then_bb);
             push(*else_bb);
         }
@@ -1089,7 +1130,9 @@ fn cell_operands(inst: &Inst, push: &mut impl FnMut(Idx<Cell>)) {
         | Inst::CallValueMulti { dests, .. }
         | Inst::CallBoundMulti { dests, .. } => dests.iter().copied().for_each(push),
         Inst::Lambda { params, .. } => params.iter().copied().for_each(push),
-        Inst::MapNext { key_cell, val_cell, .. } => {
+        Inst::MapNext {
+            key_cell, val_cell, ..
+        } => {
             push(*key_cell);
             push(*val_cell);
         }
@@ -1197,17 +1240,65 @@ fn template_counts(func: &MirFunc, live: &LiveClosure) -> InlineCloneStats {
     let live_inst = |id: &Idx<Inst>| live.insts.contains(id);
     let live_block = |id: &Idx<Block>| live.blocks.contains(id);
     let mut side = InlineSideTableStats::default();
-    side.spec_bindings = side_family(func.spec_bindings.len(), func.spec_bindings.keys().filter(|id| live_inst(*id)).count());
-    side.callee_instances = side_family(func.callee_instances.len(), func.callee_instances.keys().filter(|id| live_inst(*id)).count());
-    side.abi_plans = side_family(func.call_abi_plans.len(), func.call_abi_plans.keys().filter(|id| live_inst(*id)).count());
-    side.representation_plans = side_family(func.call_rep_plans.len(), func.call_rep_plans.keys().filter(|id| live_inst(*id)).count());
-    side.closure_environment_plans = side_family(func.closure_env_plans.len(), func.closure_env_plans.keys().filter(|id| live_inst(*id)).count());
-    side.raw_bound_trees = side_family(func.bound_trees.len(), func.bound_trees.keys().filter(|id| live_inst(*id)).count());
-    side.resolved_bound_trees = side_family(func.resolved_bound_trees.len(), func.resolved_bound_trees.keys().filter(|id| live_inst(*id)).count());
-    side.function_value_symbols = side_family(func.fn_value_symbols.len(), func.fn_value_symbols.keys().filter(|id| live_inst(*id)).count());
+    side.spec_bindings = side_family(
+        func.spec_bindings.len(),
+        func.spec_bindings
+            .keys()
+            .filter(|id| live_inst(*id))
+            .count(),
+    );
+    side.callee_instances = side_family(
+        func.callee_instances.len(),
+        func.callee_instances
+            .keys()
+            .filter(|id| live_inst(*id))
+            .count(),
+    );
+    side.abi_plans = side_family(
+        func.call_abi_plans.len(),
+        func.call_abi_plans
+            .keys()
+            .filter(|id| live_inst(*id))
+            .count(),
+    );
+    side.representation_plans = side_family(
+        func.call_rep_plans.len(),
+        func.call_rep_plans
+            .keys()
+            .filter(|id| live_inst(*id))
+            .count(),
+    );
+    side.closure_environment_plans = side_family(
+        func.closure_env_plans.len(),
+        func.closure_env_plans
+            .keys()
+            .filter(|id| live_inst(*id))
+            .count(),
+    );
+    side.raw_bound_trees = side_family(
+        func.bound_trees.len(),
+        func.bound_trees.keys().filter(|id| live_inst(*id)).count(),
+    );
+    side.resolved_bound_trees = side_family(
+        func.resolved_bound_trees.len(),
+        func.resolved_bound_trees
+            .keys()
+            .filter(|id| live_inst(*id))
+            .count(),
+    );
+    side.function_value_symbols = side_family(
+        func.fn_value_symbols.len(),
+        func.fn_value_symbols
+            .keys()
+            .filter(|id| live_inst(*id))
+            .count(),
+    );
     side.instruction_spans = side_family(
         func.inst_spans.iter().count(),
-        func.inst_spans.iter().filter(|(id, _)| live_inst(id)).count(),
+        func.inst_spans
+            .iter()
+            .filter(|(id, _)| live_inst(id))
+            .count(),
     );
     let retained_call_sites = func.call_sites.keys().filter(|id| live_inst(*id)).count();
     side.call_sites = side_family(func.call_sites.len(), retained_call_sites);
@@ -1220,7 +1311,10 @@ fn template_counts(func: &MirFunc, live: &LiveClosure) -> InlineCloneStats {
     side.call_site_owners = side_family(func.site_owners.len(), retained_owners.len());
     side.iterator_headers = side_family(
         func.for_iter_headers.len(),
-        func.for_iter_headers.iter().filter(|id| live_block(id)).count(),
+        func.for_iter_headers
+            .iter()
+            .filter(|id| live_block(id))
+            .count(),
     );
     InlineCloneStats {
         source_instructions: func.insts.len(),
@@ -1355,7 +1449,10 @@ fn compact_live_template(
         cells: emit_cells,
         blocks: emit_blocks,
         forced_cells: source_forced_cells.iter().map(|(cell, _)| *cell).collect(),
-        forced_cell_blocks: source_forced_cells.iter().map(|(_, block)| *block).collect(),
+        forced_cell_blocks: source_forced_cells
+            .iter()
+            .map(|(_, block)| *block)
+            .collect(),
         next_insts: source_inst_span,
         next_cells: source_cell_span,
         next_blocks: source_block_span,
@@ -1409,16 +1506,21 @@ fn compact_live_template(
     }
     for (old_id, identity) in &source.code_value_identities {
         if let Some(&new_id) = inst_map.get(old_id) {
-            template.code_value_identities.insert(new_id, identity.clone());
+            template
+                .code_value_identities
+                .insert(new_id, identity.clone());
         }
     }
     for (old_id, plan) in &source.closure_env_plans {
-        let Some(&new_id) = inst_map.get(old_id) else { continue };
+        let Some(&new_id) = inst_map.get(old_id) else {
+            continue;
+        };
         let captures = plan.captures().iter().map(|cell| cell_map[cell]).collect();
         let env_cell = plan.env_cell().map(|cell| cell_map[&cell]);
-        template
-            .closure_env_plans
-            .insert(new_id, skull_mir::mir::ClosureEnvPlan::new(captures, env_cell));
+        template.closure_env_plans.insert(
+            new_id,
+            skull_mir::mir::ClosureEnvPlan::new(captures, env_cell),
+        );
     }
     for old_id in &source.bound_next_split {
         if let Some(&new_id) = inst_map.get(old_id) {
@@ -1433,7 +1535,9 @@ fn compact_live_template(
 
     let mut owner_map: HashMap<u32, skull_mir::site::OwnerRef> = HashMap::default();
     for (old_id, site) in &source.call_sites {
-        let Some(&new_id) = inst_map.get(old_id) else { continue };
+        let Some(&new_id) = inst_map.get(old_id) else {
+            continue;
+        };
         let owner = match owner_map.get(&site.owner.0) {
             Some(&owner) => owner,
             None => {
@@ -1449,7 +1553,10 @@ fn compact_live_template(
         };
         template.call_sites.insert(
             new_id,
-            skull_mir::site::CallSite { owner, site: site.site.clone() },
+            skull_mir::site::CallSite {
+                owner,
+                site: site.site.clone(),
+            },
         );
     }
 
@@ -1484,7 +1591,9 @@ fn map_forced_cells(
     cell_base: u32,
     block_base: u32,
 ) -> Vec<(u32, u32)> {
-    let Some(source) = callee.emit_ids.as_ref() else { return Vec::new() };
+    let Some(source) = callee.emit_ids.as_ref() else {
+        return Vec::new();
+    };
     source
         .forced_cells
         .iter()
@@ -1523,7 +1632,9 @@ fn full_clone_stats(
     stats.cloned_instructions = stats.live_instructions;
     stats.cloned_cells = stats.live_cells;
     stats.cloned_blocks = if straight { 0 } else { stats.live_blocks };
-    stats.dead_instructions = stats.source_instructions.saturating_sub(stats.live_instructions);
+    stats.dead_instructions = stats
+        .source_instructions
+        .saturating_sub(stats.live_instructions);
     stats.dead_cells = stats.source_cells.saturating_sub(stats.live_cells);
     stats.dead_blocks = stats.source_blocks.saturating_sub(stats.live_blocks);
     stats.dead_cloned_instructions = 0;
@@ -1552,7 +1663,12 @@ fn full_clone_stats(
     stats.caller_reserved_blocks = if straight { 0 } else { cand.func.blocks.len() };
     stats.argument_elements = argument_elements;
     stats.cloned_cells = stats.live_cells.saturating_sub(coalesced_cells);
-    stats.argument_stores = cand.func.params.len().min(argument_elements).saturating_sub(coalesced_cells);
+    stats.argument_stores = cand
+        .func
+        .params
+        .len()
+        .min(argument_elements)
+        .saturating_sub(coalesced_cells);
     stats.destination_elements = destination_elements;
     stats.destination_stores = destination_elements;
     stats.block_prefix_copies = prefix;
@@ -1617,7 +1733,10 @@ fn classify(
     if f.is_coroutine {
         return reject_candidate(&mut timing, "coroutine");
     }
-    let has_inline = f.annotations.iter().any(|a| a.name.name.as_str() == "inline");
+    let has_inline = f
+        .annotations
+        .iter()
+        .any(|a| a.name.name.as_str() == "inline");
     let has_pure = f.annotations.iter().any(|a| a.name.name.as_str() == "pure");
     // An `Iterator`-bounded body carries placeholder calls until a concrete
     // splice or standalone demand resolves them, so inline eligibility forces
@@ -1705,8 +1824,10 @@ fn classify(
             _ => {}
         }
     }
-    let reachable_insts: usize =
-        source_reachable.iter().map(|&b| mf.blocks[b].insts.len()).sum();
+    let reachable_insts: usize = source_reachable
+        .iter()
+        .map(|&b| mf.blocks[b].insts.len())
+        .sum();
 
     // A param is coalescable iff nothing in the body rebinds its cell WHOLE (a
     // `Store` to it, or defining it as a multi-return dest / map cursor). Reads
@@ -1723,15 +1844,16 @@ fn classify(
             | Inst::CallBoundMulti { dests, .. } => {
                 rebound.extend(dests.iter().copied());
             }
-            Inst::MapNext { key_cell, val_cell, .. } => {
+            Inst::MapNext {
+                key_cell, val_cell, ..
+            } => {
                 rebound.insert(*key_cell);
                 rebound.insert(*val_cell);
             }
             _ => {}
         }
     }
-    let coalescable_params: Vec<bool> =
-        mf.params.iter().map(|p| !rebound.contains(p)).collect();
+    let coalescable_params: Vec<bool> = mf.params.iter().map(|p| !rebound.contains(p)).collect();
     let live = live_closure(&mf);
     let template = template_counts(&mf, &live);
     let compact_started = timing.as_ref().map(|_| Instant::now());
@@ -1769,14 +1891,14 @@ fn classify(
         }))
     } else {
         // General: uniform return arity across every reachable Return.
-        let reachable: Vec<Idx<Block>> =
-            source_reachable.iter().map(|block| block_map[block]).collect();
-        let mut arities = reachable
+        let reachable: Vec<Idx<Block>> = source_reachable
             .iter()
-            .filter_map(|&b| match &mf.blocks[b].term {
-                Term::Return(vs) => Some(vs.len()),
-                _ => None,
-            });
+            .map(|block| block_map[block])
+            .collect();
+        let mut arities = reachable.iter().filter_map(|&b| match &mf.blocks[b].term {
+            Term::Return(vs) => Some(vs.len()),
+            _ => None,
+        });
         let Some(ret_arity) = arities.next() else {
             return reject_candidate(&mut timing, "no_return");
         };
@@ -1972,9 +2094,7 @@ fn call_target(
 /// Whether candidate `cand` matches the call site's arg/result arity.
 fn arity_ok(cand: &CalleeBody, site: &Site) -> bool {
     match site {
-        Site::Single { args, .. } => {
-            cand.func.params.len() == args.len() && cand.ret_arity <= 1
-        }
+        Site::Single { args, .. } => cand.func.params.len() == args.len() && cand.ret_arity <= 1,
         Site::Multi { args, dests, .. } => {
             cand.func.params.len() == args.len() && cand.ret_arity == dests.len()
         }
@@ -2037,9 +2157,20 @@ fn find_site(
                         continue;
                     };
                     scan_stats.call_target_resolutions += 1;
-                    Site::Single { bid, idx, call_id: iid, args: args.clone(), inst, abi }
+                    Site::Single {
+                        bid,
+                        idx,
+                        call_id: iid,
+                        args: args.clone(),
+                        inst,
+                        abi,
+                    }
                 }
-                Inst::CallMulti { dests, func: fref, args } if *fref != self_ref => {
+                Inst::CallMulti {
+                    dests,
+                    func: fref,
+                    args,
+                } if *fref != self_ref => {
                     scan_stats.call_instructions_examined += 1;
                     let Some((inst, abi)) = call_target(func, iid, *fref, ws)? else {
                         cache.rejection("missing_or_incomplete_concrete_owner");
@@ -2138,7 +2269,12 @@ fn clone_cells_insts(
         scratch.inst_ids.push(nid);
     }
     for &nid in &scratch.inst_ids {
-        remap_clone(&mut caller.insts[nid], &scratch.inst_map, &scratch.cell_map, &scratch.block_map);
+        remap_clone(
+            &mut caller.insts[nid],
+            &scratch.inst_map,
+            &scratch.cell_map,
+            &scratch.block_map,
+        );
     }
     if track_emit_ids {
         caller.set_emit_nexts((
@@ -2162,11 +2298,7 @@ fn clone_cells_insts(
 /// Clone the callee's cells, blocks, AND insts into `caller`. Returns
 /// `(inst_map, cell_map, block_map)`. Two-pass (alloc-then-remap) so it is
 /// independent of arena order.
-fn clone_all(
-    caller: &mut MirFunc,
-    callee: &MirFunc,
-    scratch: &mut InlineScratch,
-) -> CloneMapStats {
+fn clone_all(caller: &mut MirFunc, callee: &MirFunc, scratch: &mut InlineScratch) -> CloneMapStats {
     let track_emit_ids = caller.emit_ids.is_some() || callee.emit_ids.is_some();
     if track_emit_ids {
         caller.ensure_emit_ids();
@@ -2229,7 +2361,12 @@ fn clone_all(
         scratch.inst_ids.push(nid);
     }
     for &nid in &scratch.inst_ids {
-        remap_clone(&mut caller.insts[nid], &scratch.inst_map, &scratch.cell_map, &scratch.block_map);
+        remap_clone(
+            &mut caller.insts[nid],
+            &scratch.inst_map,
+            &scratch.cell_map,
+            &scratch.block_map,
+        );
     }
     // Fill cloned block inst-lists + terminators.
     for (bid, block) in callee.blocks.iter() {
@@ -2239,9 +2376,12 @@ fn clone_all(
         remap_term_clone(&mut term, &scratch.inst_map, &scratch.block_map);
         caller.blocks[nbid].term = term;
     }
-    caller
-        .for_iter_headers
-        .extend(callee.for_iter_headers.iter().map(|header| scratch.block_map[header]));
+    caller.for_iter_headers.extend(
+        callee
+            .for_iter_headers
+            .iter()
+            .map(|header| scratch.block_map[header]),
+    );
     if track_emit_ids {
         caller.set_emit_nexts((
             inst_base + callee.emit_inst_span(),
@@ -2301,7 +2441,9 @@ fn remap_clone(
                 *d = cm[d];
             }
         }
-        Inst::MapNext { key_cell, val_cell, .. } => {
+        Inst::MapNext {
+            key_cell, val_cell, ..
+        } => {
             *key_cell = cm[key_cell];
             *val_cell = cm[val_cell];
         }
@@ -2325,12 +2467,20 @@ fn remap_term_clone(
     match term {
         Term::Return(vs) => vs.iter_mut().for_each(|v| *v = mi(*v)),
         Term::Goto(b) => *b = bm[b],
-        Term::Branch { cond, then_bb, else_bb } => {
+        Term::Branch {
+            cond,
+            then_bb,
+            else_bb,
+        } => {
             *cond = mi(*cond);
             *then_bb = bm[then_bb];
             *else_bb = bm[else_bb];
         }
-        Term::Switch { discr, cases, default } => {
+        Term::Switch {
+            discr,
+            cases,
+            default,
+        } => {
             *discr = mi(*discr);
             for (_, b) in cases.iter_mut() {
                 *b = bm[b];
@@ -2484,9 +2634,10 @@ fn resolve_cloned_bound_calls(
             "at this splice site",
         )?;
     }
-    if let Some((&old_id, &new_id)) = inst_map.iter().find(|(_, new_id)| {
-        matches!(func.insts[**new_id], Inst::CallBoundMulti { .. })
-    }) {
+    if let Some((&old_id, &new_id)) = inst_map
+        .iter()
+        .find(|(_, new_id)| matches!(func.insts[**new_id], Inst::CallBoundMulti { .. }))
+    {
         return Err(CompilerError::new_no_location(format!(
             "internal: cloned bounded placeholder {:?} from `{}` survived concrete splice as {:?}",
             old_id, callee.name, new_id
@@ -2504,7 +2655,10 @@ fn collect_nested_names(nested: &[MirFunc], out: &mut Vec<Ustr>) {
 
 fn remap_nested_global(inst: &mut Inst, names: &HashMap<Ustr, Ustr>) {
     match inst {
-        Inst::Global(name) | Inst::MakeEnv { fn_ref: Some(name), .. } => {
+        Inst::Global(name)
+        | Inst::MakeEnv {
+            fn_ref: Some(name), ..
+        } => {
             if let Some(&new) = names.get(name) {
                 *name = new;
             }
@@ -2669,17 +2823,27 @@ fn import_spec_bindings(
     // would join through the wrong body while looking perfectly well-formed.
     let mut owner_map: HashMap<u32, skull_mir::site::OwnerRef> = HashMap::default();
     for (old_id, cs) in &callee.call_sites {
-        let Some(&new_id) = inst_map.get(old_id) else { continue };
+        let Some(&new_id) = inst_map.get(old_id) else {
+            continue;
+        };
         let owner = match owner_map.get(&cs.owner.0) {
             Some(&o) => o,
             None => {
-                let Some(inst) = callee.site_owners.get(cs.owner.0 as usize) else { continue };
+                let Some(inst) = callee.site_owners.get(cs.owner.0 as usize) else {
+                    continue;
+                };
                 let o = skull_mir::site::intern_owner(&mut func.site_owners, inst.clone());
                 owner_map.insert(cs.owner.0, o);
                 o
             }
         };
-        func.call_sites.insert(new_id, skull_mir::site::CallSite { owner, site: cs.site.clone() });
+        func.call_sites.insert(
+            new_id,
+            skull_mir::site::CallSite {
+                owner,
+                site: cs.site.clone(),
+            },
+        );
     }
 }
 
@@ -2700,13 +2864,30 @@ fn splice(
     scratch.added_blocks.clear();
     match cand.kind {
         Kind::Straight => {
-            let (maps, coalesced) =
-                splice_straight(func, site, cand, ws, scx, concrete_plans, scratch, uses, census)?;
+            let (maps, coalesced) = splice_straight(
+                func,
+                site,
+                cand,
+                ws,
+                scx,
+                concrete_plans,
+                scratch,
+                uses,
+                census,
+            )?;
             Ok((maps, coalesced))
         }
-        Kind::General => {
-            splice_general(func, site, cand, ws, scx, concrete_plans, scratch, uses, census)
-        }
+        Kind::General => splice_general(
+            func,
+            site,
+            cand,
+            ws,
+            scx,
+            concrete_plans,
+            scratch,
+            uses,
+            census,
+        ),
     }
 }
 
@@ -2727,7 +2908,9 @@ fn splice_straight(
 ) -> Result<(CloneMapStats, usize), CompilerError> {
     let callee = &cand.func;
     let (bid, idx, args) = match &site {
-        Site::Single { bid, idx, args, .. } | Site::Multi { bid, idx, args, .. } => (*bid, *idx, args.clone()),
+        Site::Single { bid, idx, args, .. } | Site::Multi { bid, idx, args, .. } => {
+            (*bid, *idx, args.clone())
+        }
     };
     let site_tree = func.bound_trees.remove(&site.call_id());
     let site_resolved_tree = func.resolved_bound_trees.remove(&site.call_id());
@@ -2759,7 +2942,10 @@ fn splice_straight(
     for (i, (param, arg)) in callee.params.iter().zip(args.iter()).enumerate() {
         if !scratch.coalesced[i] {
             let pc = scratch.cell_map[param];
-            let store = func.alloc_inst(Inst::Store { cell: pc, value: *arg });
+            let store = func.alloc_inst(Inst::Store {
+                cell: pc,
+                value: *arg,
+            });
             uses.add_inst(func, store);
             new_insts.push(store);
         }
@@ -2807,8 +2993,7 @@ fn splice_straight(
             func.blocks[bid].insts = new_insts;
             let binding_started = census.enabled.then(Instant::now);
             if to != *call_id {
-                let (instructions, terminators, replacements) =
-                    uses.replace(func, *call_id, to);
+                let (instructions, terminators, replacements) = uses.replace(func, *call_id, to);
                 census.targeted_binding_users += instructions;
                 census.targeted_binding_terminators += terminators;
                 census.targeted_binding_replacements += replacements;
@@ -2839,7 +3024,9 @@ fn splice_general(
 ) -> Result<(CloneMapStats, usize), CompilerError> {
     let callee = &cand.func;
     let (bid, idx, args) = match &site {
-        Site::Single { bid, idx, args, .. } | Site::Multi { bid, idx, args, .. } => (*bid, *idx, args.clone()),
+        Site::Single { bid, idx, args, .. } | Site::Multi { bid, idx, args, .. } => {
+            (*bid, *idx, args.clone())
+        }
     };
     let site_tree = func.bound_trees.remove(&site.call_id());
     let site_resolved_tree = func.resolved_bound_trees.remove(&site.call_id());
@@ -2903,7 +3090,10 @@ fn splice_general(
             continue;
         }
         let pc = scratch.cell_map[param];
-        let store = func.alloc_inst(Inst::Store { cell: pc, value: *arg });
+        let store = func.alloc_inst(Inst::Store {
+            cell: pc,
+            value: *arg,
+        });
         uses.add_inst(func, store);
         prefix.push(store);
     }
@@ -2938,7 +3128,10 @@ fn splice_general(
             }
             Site::Multi { dests, .. } => {
                 for (dest, rv) in dests.iter().zip(vs.iter()) {
-                let st = func.alloc_inst(Inst::Store { cell: *dest, value: *rv });
+                    let st = func.alloc_inst(Inst::Store {
+                        cell: *dest,
+                        value: *rv,
+                    });
                     func.blocks[nb].insts.push(st);
                     uses.add_inst(func, st);
                 }
@@ -3016,7 +3209,12 @@ fn inline_functions_inner(
     let original_calls: HashSet<Idx<Inst>> = top
         .iter()
         .flat_map(|bid| func.blocks[*bid].insts.iter().copied())
-        .filter(|iid| matches!(&func.insts[*iid], Inst::Call { .. } | Inst::CallMulti { .. }))
+        .filter(|iid| {
+            matches!(
+                &func.insts[*iid],
+                Inst::Call { .. } | Inst::CallMulti { .. }
+            )
+        })
         .collect();
     // Resume cursor: the position of the last splice. No eligible call can appear
     // before it, so the next scan starts there (turns the per-splice full re-scan
@@ -3036,7 +3234,8 @@ fn inline_functions_inner(
             cell_budget,
             concrete_plans,
             &mut scan_stats,
-        )? else {
+        )?
+        else {
             break;
         };
         let pos = site.pos();
@@ -3071,9 +3270,8 @@ fn inline_functions_inner(
                 func.blocks.capacity(),
             )
         });
-        let result_cell = usize::from(
-            cand.kind == Kind::General && matches!(&site, Site::Single { .. }),
-        );
+        let result_cell =
+            usize::from(cand.kind == Kind::General && matches!(&site, Site::Single { .. }));
         let (maps, coalesced_cells) = splice(
             func,
             site,
@@ -3125,7 +3323,8 @@ fn inline_functions_inner(
         // `Iterator`-bounded fn -- reaches the emitted program's registry.
         // Deduped below; one callee can be spliced at many sites.
         func.statics.extend(cand.func.statics.iter().cloned());
-        func.comptime_reads.extend(cand.func.comptime_reads.iter().cloned());
+        func.comptime_reads
+            .extend(cand.func.comptime_reads.iter().cloned());
         func.struct_registry_roots
             .extend(cand.func.struct_registry_roots.iter().copied());
         cell_budget += cand.template.source_cells.saturating_sub(coalesced_cells) + result_cell;
@@ -3195,7 +3394,10 @@ pub fn validate_no_residual_bound_calls(
                     let callee = &ws.module(func.module).functions[func.func];
                     // A non-empty concrete owner is the admission: a bounded
                     // call without one would have no resolved standalone body.
-                    let named = mf.spec_bindings.get(&iid).is_some_and(|i| !i.args.is_empty());
+                    let named = mf
+                        .spec_bindings
+                        .get(&iid)
+                        .is_some_and(|i| !i.args.is_empty());
                     if fn_has_bounds(callee) && !named {
                         // Stage-0e: this rejection IS the ablation's
                         // unsupported-surface population, and it fires from
@@ -3287,7 +3489,10 @@ mod tests {
         let counts = template_counts(&source, &live);
         let (template, _) = compact_live_template(source, &live);
 
-        assert_eq!((counts.source_instructions, counts.live_instructions), (2, 1));
+        assert_eq!(
+            (counts.source_instructions, counts.live_instructions),
+            (2, 1)
+        );
         assert_eq!((counts.source_cells, counts.live_cells), (1, 0));
         assert_eq!((counts.source_blocks, counts.live_blocks), (2, 1));
         assert_eq!(template.insts.len(), counts.live_instructions);
@@ -3310,7 +3515,10 @@ mod tests {
         let (template, _) = compact_live_template(source, &live);
 
         assert_eq!(template.cells.len(), 1);
-        assert_eq!(template.emit_cell_id(template.cells.iter().next().unwrap().0), 1);
+        assert_eq!(
+            template.emit_cell_id(template.cells.iter().next().unwrap().0),
+            1
+        );
         assert_eq!(template.emit_cell_span(), 2);
         assert_eq!(template.blocks.len(), 1);
         assert_eq!(template.emit_block_span(), 2);
@@ -3359,13 +3567,24 @@ mod tests {
         let dead = func.new_block();
         let cell = func.new_cell(None);
         let value = func.emit(dead, Inst::Load(cell));
-        func.set_term(func.entry, Term::Branch { cond, then_bb: live, else_bb: dead });
+        func.set_term(
+            func.entry,
+            Term::Branch {
+                cond,
+                then_bb: live,
+                else_bb: dead,
+            },
+        );
         func.set_term(live, Term::Return(Vec::new()));
         func.set_term(dead, Term::Return(vec![value]));
         func.ensure_emit_ids();
         let dead_cell_id = func.emit_cell_id(cell);
         let dead_block_id = func.emit_block_id(dead);
-        func.emit_ids.as_mut().unwrap().forced_cells.push(dead_cell_id);
+        func.emit_ids
+            .as_mut()
+            .unwrap()
+            .forced_cells
+            .push(dead_cell_id);
         func.emit_ids
             .as_mut()
             .unwrap()
@@ -3374,7 +3593,13 @@ mod tests {
 
         assert!(crate::fold_const_branches(&mut func));
         assert!(func.emit_ids.as_ref().unwrap().forced_cells.is_empty());
-        assert!(func.emit_ids.as_ref().unwrap().forced_cell_blocks.is_empty());
+        assert!(
+            func.emit_ids
+                .as_ref()
+                .unwrap()
+                .forced_cell_blocks
+                .is_empty()
+        );
     }
 
     #[test]
@@ -3386,7 +3611,11 @@ mod tests {
         let else_bb = func.new_block();
         func.set_term(
             func.entry,
-            Term::Branch { cond: from, then_bb, else_bb },
+            Term::Branch {
+                cond: from,
+                then_bb,
+                else_bb,
+            },
         );
         func.set_term(then_bb, Term::Return(vec![user]));
         func.set_term(else_bb, Term::Return(vec![from]));
@@ -3397,7 +3626,14 @@ mod tests {
 
         assert_eq!(counts, (1, 2, 4));
         assert_eq!(func.insts[user], Inst::IntAdd(to, to));
-        assert_eq!(func.blocks[func.entry].term, Term::Branch { cond: to, then_bb, else_bb });
+        assert_eq!(
+            func.blocks[func.entry].term,
+            Term::Branch {
+                cond: to,
+                then_bb,
+                else_bb
+            }
+        );
         assert_eq!(func.blocks[else_bb].term, Term::Return(vec![to]));
     }
 
@@ -3457,7 +3693,10 @@ mod tests {
     #[test]
     fn incremental_candidate_replacement_updates_rejection_profile() {
         let key = candidate_test_key();
-        let base = Arc::new(InlineCandidateTable::from_warms(vec![candidate_warm(key.clone(), None)]));
+        let base = Arc::new(InlineCandidateTable::from_warms(vec![candidate_warm(
+            key.clone(),
+            None,
+        )]));
         assert_eq!(base.stats().eligible, 1);
         assert_eq!(base.stats().rejected, 0);
 
@@ -3469,9 +3708,15 @@ mod tests {
         );
         let stats = delta.stats();
         assert_eq!(stats.eligible, 0, "the replaced candidate stayed eligible");
-        assert_eq!(stats.rejected, 1, "the replaced rejection was not published");
+        assert_eq!(
+            stats.rejected, 1,
+            "the replaced rejection was not published"
+        );
         assert_eq!(stats.rejection_reasons.get("body_changed"), Some(&1));
-        assert!(!stats.profiles[&key].eligible, "the replacement profile is stale");
+        assert!(
+            !stats.profiles[&key].eligible,
+            "the replacement profile is stale"
+        );
     }
 
     fn resolved_tree_count(mf: &MirFunc) -> (usize, usize) {
@@ -3501,14 +3746,20 @@ fn outer(x: int) -> int {
             .expect("parse"),
         ];
         let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic");
-        let mid = *ws.module_ids.get(&Ustr::from("<inline-test>")).expect("module");
+        let mid = *ws
+            .module_ids
+            .get(&Ustr::from("<inline-test>"))
+            .expect("module");
         let (fid, _) = ws
             .module(mid)
             .functions
             .iter()
             .find(|(_, f)| f.name.as_str() == "outer")
             .expect("outer");
-        let root = FuncRef { module: mid, func: fid };
+        let root = FuncRef {
+            module: mid,
+            func: fid,
+        };
         let interner = std::sync::Arc::new(skull_mir::monoty::MonoInterner::new());
         let graph = skull_graph::instance_graph::build_in(
             &ws,
@@ -3525,7 +3776,13 @@ fn outer(x: int) -> int {
         let body = skull_mir::lower::lower_instance_with_plans(&ws, &scx, plan, &concrete.plans)
             .expect("the inline fixture must lower");
         let (bodies, trees) = resolved_tree_count(&body);
-        assert!(bodies > 1, "the candidate census did not include its nested body");
-        assert_eq!(trees, 0, "fresh candidate lowering already carried resolved trees");
+        assert!(
+            bodies > 1,
+            "the candidate census did not include its nested body"
+        );
+        assert_eq!(
+            trees, 0,
+            "fresh candidate lowering already carried resolved trees"
+        );
     }
 }

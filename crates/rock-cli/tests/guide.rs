@@ -103,7 +103,9 @@ fn inventory() -> (Vec<RunCase>, Vec<ShaderCase>, Vec<PathBuf>) {
                         expected: std::fs::read(&out_file).expect("read .out"),
                     }),
                     (true, true) => problems.push(format!("{stem} has both .roots and .out")),
-                    (false, false) => problems.push(format!("{stem}.rock has neither .out nor .roots")),
+                    (false, false) => {
+                        problems.push(format!("{stem}.rock has neither .out nor .roots"))
+                    }
                 }
             }
             "out" => {
@@ -211,7 +213,10 @@ fn guide_fences() -> Vec<String> {
             lines.push(line);
         }
     }
-    assert!(current.is_none(), "docs/guide.md leaves a ```rock fence open");
+    assert!(
+        current.is_none(),
+        "docs/guide.md leaves a ```rock fence open"
+    );
     assert!(!fences.is_empty(), "docs/guide.md has no ```rock fences");
     fences
 }
@@ -240,7 +245,10 @@ fn guide_fences_match_example_files_byte_for_byte() {
     for (index, fence) in fences.iter().enumerate() {
         if !bodies.iter().any(|(_, body)| body == fence) {
             let head: String = fence.lines().take(3).collect::<Vec<_>>().join("\n");
-            failures.push(format!("fence {} matches no file under examples/guide:\n{head}", index + 1));
+            failures.push(format!(
+                "fence {} matches no file under examples/guide:\n{head}",
+                index + 1
+            ));
         }
     }
     for (path, body) in &bodies {
@@ -269,7 +277,11 @@ fn guide_shader_examples_compile_to_glsl() {
         args.extend(case.roots.iter().map(String::as_str));
         let out = invoke(scratch.path(), &args);
         if !out.status.success() {
-            failures.push(format!("{}: `rock shader` failed:\n{}", case.name, text(&out)));
+            failures.push(format!(
+                "{}: `rock shader` failed:\n{}",
+                case.name,
+                text(&out)
+            ));
             continue;
         }
         let glsl = String::from_utf8_lossy(&out.stdout);
@@ -348,15 +360,17 @@ fn guide_shader_examples_compile_to_wgsl() {
     for case in &shaders {
         let src = std::fs::read_to_string(&case.path).expect("read shader example");
         let (ws, mid) = wgsl_workspace(&src);
-        let keys: Vec<String> = case.roots.iter().map(|r| wgsl_root_key(&ws, mid, r)).collect();
+        let keys: Vec<String> = case
+            .roots
+            .iter()
+            .map(|r| wgsl_root_key(&ws, mid, r))
+            .collect();
         let emitted = (|| -> Result<String, skull_parser::CompilerError> {
             if keys.len() == 1 {
                 let fref = skull_codegen_shader::resolve_root(&ws, mid, &keys[0])?;
                 let neutral = skull_codegen_wgsl::plan_fullscreen_artifact(&ws, fref)?;
-                let abi = WgslAbiPlan::wgsl(
-                    &neutral.interface,
-                    bone_semantic::prelude::Span::default(),
-                )?;
+                let abi =
+                    WgslAbiPlan::wgsl(&neutral.interface, bone_semantic::prelude::Span::default())?;
                 Ok(emit_fullscreen_shader(
                     &ws,
                     &neutral.ir,

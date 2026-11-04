@@ -37,11 +37,18 @@ impl Builder<'_> {
     /// rewrite. A no-op on anything that is not an implicit box of a `nobox`
     /// struct.
     pub(crate) fn authorize_nobox_box(&mut self, inst: Idx<Inst>) {
-        let Inst::MakeValueStruct { name, representation, form, fields } = &self.f.insts[inst]
+        let Inst::MakeValueStruct {
+            name,
+            representation,
+            form,
+            fields,
+        } = &self.f.insts[inst]
         else {
             return;
         };
-        let Some(sid) = self.ws.struct_by_name.get(name) else { return };
+        let Some(sid) = self.ws.struct_by_name.get(name) else {
+            return;
+        };
         if !self.ws.modules[sid.module.index()].structs[sid.def].is_nobox {
             return;
         }
@@ -91,8 +98,12 @@ impl Builder<'_> {
                 continue;
             }
             if let Some(ty) = self.concrete_expr_ty(arg) {
-                let Some(name) = ty.peel_nullable().0.nominal() else { continue };
-                let Some(sid) = self.ws.struct_by_name.get(&name) else { continue };
+                let Some(name) = ty.peel_nullable().0.nominal() else {
+                    continue;
+                };
+                let Some(sid) = self.ws.struct_by_name.get(&name) else {
+                    continue;
+                };
                 if self.ws.modules[sid.module.index()].structs[sid.def].is_nobox {
                     return Err(CompilerError::new_with_label(
                         self.body.expr_spans[arg],
@@ -153,9 +164,10 @@ impl Builder<'_> {
         if plan.callees.get(&site) != Some(concrete_callee) {
             return Err(self.gap_here("concrete callee identity disagrees with its site plan"));
         }
-        let signature = plan.callee_signatures.get(&site).ok_or_else(|| {
-            self.gap_here("concrete callee signature is missing for its site")
-        })?;
+        let signature = plan
+            .callee_signatures
+            .get(&site)
+            .ok_or_else(|| self.gap_here("concrete callee signature is missing for its site"))?;
         self.reject_concrete_column_container_opaque_slots(e, concrete_callee.func, signature)
     }
 
@@ -187,14 +199,17 @@ impl Builder<'_> {
         mono: &crate::monoty::MonoTy,
     ) -> Result<Option<(String, &'static str)>, CompilerError> {
         let family = match mono {
-            crate::monoty::MonoTy::App { ctor: crate::monoty::MonoCtor::Array, .. } => {
-                Some(ContainerFamily::Vec)
-            }
-            crate::monoty::MonoTy::App { ctor: crate::monoty::MonoCtor::Map, .. } => {
-                Some(ContainerFamily::Map)
-            }
             crate::monoty::MonoTy::App {
-                ctor: crate::monoty::MonoCtor::Nominal(name), ..
+                ctor: crate::monoty::MonoCtor::Array,
+                ..
+            } => Some(ContainerFamily::Vec),
+            crate::monoty::MonoTy::App {
+                ctor: crate::monoty::MonoCtor::Map,
+                ..
+            } => Some(ContainerFamily::Map),
+            crate::monoty::MonoTy::App {
+                ctor: crate::monoty::MonoCtor::Nominal(name),
+                ..
             } => {
                 if bone_semantic::prelude::is_intrinsic_key(*name, "Arena") {
                     Some(ContainerFamily::Arena)
@@ -208,7 +223,9 @@ impl Builder<'_> {
             }
             _ => None,
         };
-        let Some(family) = family else { return Ok(None) };
+        let Some(family) = family else {
+            return Ok(None);
+        };
         let plan = self.container_plan_for_type(mono, family)?;
         let arena = self.scx.rep_arena();
         match plan.storage() {
@@ -231,7 +248,8 @@ impl Builder<'_> {
                 Ok(Some((rendered, physical)))
             }
             ContainerStorage::LeafAddressed { .. }
-                if self.scx.target == bone_semantic::hir::FnBackend::Js => {
+                if self.scx.target == bone_semantic::hir::FnBackend::Js =>
+            {
                 let elem = plan
                     .ffi_element_name(&arena)
                     .unwrap_or_else(|| Ustr::from("<element>"));
@@ -280,7 +298,9 @@ impl Builder<'_> {
                 ));
             }
         }
-        let Some(id) = signature.result else { return Ok(()) };
+        let Some(id) = signature.result else {
+            return Ok(());
+        };
         let mono = self.concrete_mono_view(id, ConcreteMonoConsumer::NoboxBoundary);
         let Some((rendered, physical)) = self.slot_hazard_mono(&mono)? else {
             return Ok(());
@@ -309,7 +329,6 @@ impl Builder<'_> {
             .get(i)
             .is_some_and(|pd| pd.annotations.iter().any(|a| a.is_builtin("repr")))
     }
-
 
     /// A fn taken BY VALUE must have the ABI an indirect caller can derive.
     ///
@@ -456,7 +475,12 @@ impl Builder<'_> {
     /// Round `value` when it is written into an `f32` field of struct `name`.
     /// Every write path calls this, so the field's number never depends on
     /// whether it lands in cdata, a table or scalarized leaves.
-    pub(crate) fn round_f32_field(&mut self, name: Ustr, field: Ustr, value: Idx<Inst>) -> Idx<Inst> {
+    pub(crate) fn round_f32_field(
+        &mut self,
+        name: Ustr,
+        field: Ustr,
+        value: Idx<Inst>,
+    ) -> Idx<Inst> {
         let narrow = self.ws.struct_by_name.get(&name).is_some_and(|sid| {
             self.ws.modules[sid.module.index()].structs[sid.def].fields.iter().any(|f| {
                 f.name == field
@@ -467,7 +491,11 @@ impl Builder<'_> {
                     )
             })
         });
-        if narrow { self.emit_cur(Inst::FloatToF32(value)) } else { value }
+        if narrow {
+            self.emit_cur(Inst::FloatToF32(value))
+        } else {
+            value
+        }
     }
 
     /// Coerce a value-struct field's repr int->float at CONSTRUCTION (before any
@@ -506,12 +534,15 @@ impl Builder<'_> {
                         None => s,
                     },
                 };
-                Ok(ValueRepr::Scalar(self.round_f32_field(struct_name, field, s)))
+                Ok(ValueRepr::Scalar(self.round_f32_field(
+                    struct_name,
+                    field,
+                    s,
+                )))
             }
             other => Ok(other),
         }
     }
-
 
     /// The scalar class of a resolved type, seeing through a TRANSPARENT newtype
     /// to its wrapped type (a `newtype Score(int)` is the raw int at runtime, so
@@ -522,9 +553,10 @@ impl Builder<'_> {
             TypeExpr::Builtin(BuiltinTy::Uint) => Some(ArithTy::Uint),
             TypeExpr::Builtin(BuiltinTy::Float) => Some(ArithTy::Float),
             TypeExpr::Builtin(BuiltinTy::String) => Some(ArithTy::Str),
-            TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }
-                if self.ws.newtypes_by_name.contains_key(&name) =>
-            {
+            TypeExpr::App {
+                ctor: TypeCtor::Nominal(name),
+                ..
+            } if self.ws.newtypes_by_name.contains_key(&name) => {
                 let nid = self.ws.newtypes_by_name.get(&name)?;
                 let wrapped = self.ws.modules[nid.module.index()].newtypes[nid.def].wrapped;
                 self.arith_ty_of(self.resolve_ty(wrapped)?)
@@ -561,7 +593,9 @@ impl Builder<'_> {
         if self.scx.values_first_class {
             return Ok(None);
         }
-        let Some(id) = self.expr_rep_id(e, RepUse::Value, true)? else { return Ok(None) };
+        let Some(id) = self.expr_rep_id(e, RepUse::Value, true)? else {
+            return Ok(None);
+        };
         Ok(self.scx.rep_arena().value_shape(id))
     }
 
@@ -572,15 +606,23 @@ impl Builder<'_> {
         if self.scx.values_first_class {
             return Ok(None);
         }
-        let Some(id) = self.expr_rep_id(e, RepUse::Value, false)? else { return Ok(None) };
-        Ok(self.scx.rep_arena().value_shape(id).filter(|shape| shape.nullable))
+        let Some(id) = self.expr_rep_id(e, RepUse::Value, false)? else {
+            return Ok(None);
+        };
+        Ok(self
+            .scx
+            .rep_arena()
+            .value_shape(id)
+            .filter(|shape| shape.nullable))
     }
 
     pub(crate) fn nobox_binding_shape(
         &self,
         binding: Idx<BindingInfo>,
     ) -> Result<Option<ValueShape>, CompilerError> {
-        let Some(ty) = self.binding_ty(binding) else { return Ok(None) };
+        let Some(ty) = self.binding_ty(binding) else {
+            return Ok(None);
+        };
         self.nobox_shape_of_ty(ty)
     }
 
@@ -609,10 +651,7 @@ impl Builder<'_> {
             })
     }
 
-    pub(crate) fn nobox_shape_of_ty(
-        &self,
-        ty: TyId,
-    ) -> Result<Option<ValueShape>, CompilerError> {
+    pub(crate) fn nobox_shape_of_ty(&self, ty: TyId) -> Result<Option<ValueShape>, CompilerError> {
         if self.scx.values_first_class {
             return Ok(None);
         }
@@ -650,8 +689,9 @@ impl Builder<'_> {
                 // `global_storage::physical_leaf_names`: a v1 DefKey is not an
                 // identifier, and these leaves ARE emitted Lua globals.
                 let symbol = crate::mangle::symbol_of_key(name);
-                let leaves =
-                    (0..shape.leaf_count()).map(|i| nobox_global_leaf_name(symbol, i)).collect();
+                let leaves = (0..shape.leaf_count())
+                    .map(|i| nobox_global_leaf_name(symbol, i))
+                    .collect();
                 Ok(Some((leaves, Some(shape))))
             }
             Expr::FieldAccess { base, field } => {
@@ -681,8 +721,10 @@ impl Builder<'_> {
         leaves: &[Ustr],
         shape: Option<ValueShape>,
     ) -> ValueRepr {
-        let vals: Vec<Idx<Inst>> =
-            leaves.iter().map(|g| self.emit_cur(Inst::Global(*g))).collect();
+        let vals: Vec<Idx<Inst>> = leaves
+            .iter()
+            .map(|g| self.emit_cur(Inst::Global(*g)))
+            .collect();
         match shape {
             Some(shape) => {
                 let mut idx = 0;

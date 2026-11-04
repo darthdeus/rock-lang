@@ -41,7 +41,11 @@ pub(crate) fn write_tags_file(path: &Path, mut entries: Vec<CtagsEntry>) -> std:
     out.push_str("!_TAG_PROGRAM_AUTHOR\tRock Language\t//\n");
     out.push_str("!_TAG_PROGRAM_NAME\trock\t//\n");
     // Formatting into String is infallible; disk write failures below are returned.
-    let _ = writeln!(out, "!_TAG_PROGRAM_VERSION\t{}\t//", env!("CARGO_PKG_VERSION"));
+    let _ = writeln!(
+        out,
+        "!_TAG_PROGRAM_VERSION\t{}\t//",
+        env!("CARGO_PKG_VERSION")
+    );
 
     for e in &entries {
         // Formatting into String is infallible.
@@ -53,7 +57,10 @@ pub(crate) fn write_tags_file(path: &Path, mut entries: Vec<CtagsEntry>) -> std:
         out.push('\n');
     }
 
-    if fs_err::read_to_string(path).map(|cur| cur == out).unwrap_or(false) {
+    if fs_err::read_to_string(path)
+        .map(|cur| cur == out)
+        .unwrap_or(false)
+    {
         return Ok(entries.len());
     }
     fs_err::write(path, out)?;

@@ -180,12 +180,36 @@ mod tests {
         }
         // Cross-field dominance pairs and a couple of composites.
         keys.push(RankKey { fine: 9999, ..base });
-        keys.push(RankKey { band: 1, fine: 9999, ..base });
-        keys.push(RankKey { band: 2, fine: 0, ..base });
-        keys.push(RankKey { dist: 12, method: 1, ..base });
-        keys.push(RankKey { fine: 100, prox: 3, ..base });
-        keys.push(RankKey { prox: 1, freq: 2, ..base });
-        keys.push(RankKey { freq: 1, rec: 4, ..base });
+        keys.push(RankKey {
+            band: 1,
+            fine: 9999,
+            ..base
+        });
+        keys.push(RankKey {
+            band: 2,
+            fine: 0,
+            ..base
+        });
+        keys.push(RankKey {
+            dist: 12,
+            method: 1,
+            ..base
+        });
+        keys.push(RankKey {
+            fine: 100,
+            prox: 3,
+            ..base
+        });
+        keys.push(RankKey {
+            prox: 1,
+            freq: 2,
+            ..base
+        });
+        keys.push(RankKey {
+            freq: 1,
+            rec: 4,
+            ..base
+        });
         for a in &keys {
             for b in &keys {
                 let by_struct = a.cmp(b);
@@ -201,9 +225,18 @@ mod tests {
     #[test]
     fn clamped_ord_agrees_with_encode_beyond_widths() {
         // Unclamped Ord would order these; both encode dist as `99`.
-        let a = RankKey { dist: 150, ..RankKey::default() };
-        let b = RankKey { dist: 100, ..RankKey::default() };
-        assert_eq!(a.clamped().cmp(&b.clamped()), a.encode("x").cmp(&b.encode("x")));
+        let a = RankKey {
+            dist: 150,
+            ..RankKey::default()
+        };
+        let b = RankKey {
+            dist: 100,
+            ..RankKey::default()
+        };
+        assert_eq!(
+            a.clamped().cmp(&b.clamped()),
+            a.encode("x").cmp(&b.encode("x"))
+        );
         // In-range values pass through untouched.
         let k = RankKey {
             exact: 1,

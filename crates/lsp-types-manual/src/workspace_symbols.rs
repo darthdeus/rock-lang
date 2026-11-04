@@ -15,10 +15,18 @@ impl serde::Serialize for WorkspaceSymbolClientCapabilities {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
         let mut st = s.serialize_struct("WorkspaceSymbolClientCapabilities", 4)?;
-        if let Some(ref v) = self.dynamic_registration { st.serialize_field("dynamicRegistration", v)?; }
-        if let Some(ref v) = self.symbol_kind { st.serialize_field("symbolKind", v)?; }
-        if let Some(ref v) = self.tag_support { st.serialize_field("tagSupport", v)?; }
-        if let Some(ref v) = self.resolve_support { st.serialize_field("resolveSupport", v)?; }
+        if let Some(ref v) = self.dynamic_registration {
+            st.serialize_field("dynamicRegistration", v)?;
+        }
+        if let Some(ref v) = self.symbol_kind {
+            st.serialize_field("symbolKind", v)?;
+        }
+        if let Some(ref v) = self.tag_support {
+            st.serialize_field("tagSupport", v)?;
+        }
+        if let Some(ref v) = self.resolve_support {
+            st.serialize_field("resolveSupport", v)?;
+        }
         st.end()
     }
 }
@@ -55,8 +63,11 @@ pub struct WorkspaceSymbolParams {
     pub query: String,
 }
 
-impl_lsp_struct!(WorkspaceSymbolParams,
-    required { query: String = "query" },
+impl_lsp_struct!(
+    WorkspaceSymbolParams,
+    required {
+        query: String = "query"
+    },
     optional {},
     flatten {
         partial_result_params: PartialResultParams,
@@ -105,7 +116,8 @@ pub struct WorkspaceLocation {
     pub uri: Uri,
 }
 
-impl_lsp_struct!(WorkspaceLocation,
+impl_lsp_struct!(
+    WorkspaceLocation,
     required { uri: Uri = "uri" },
     optional {}
 );

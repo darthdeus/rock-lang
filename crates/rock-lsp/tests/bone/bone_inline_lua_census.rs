@@ -34,7 +34,10 @@ fn counts_meaningful_lines_excluding_blank_and_comment() {
     assert_eq!(file.fns[0].name, "big");
     assert_eq!(file.fns[1].name, "small");
     // big body: `local x`, `local y`, `return y` meaningful; blank + `--` line excluded.
-    assert_eq!(file.fns[0].lines, 3, "blank + pure-comment excluded, trailing-comment line kept");
+    assert_eq!(
+        file.fns[0].lines, 3,
+        "blank + pure-comment excluded, trailing-comment line kept"
+    );
     assert_eq!(file.fns[1].lines, 1);
 
     assert_eq!(c.total_fns, 2, "plain Rock fn not counted");
@@ -69,7 +72,10 @@ fn summary_renders_only_total_line() {
     // Full render carries the per-fn detail AND the total.
     let full = render(&c, false);
     assert!(full.contains("big"), "full render lists fns: {full}");
-    assert!(full.contains("TOTAL: 2 fns, 4 meaningful lines across 1 files"), "{full}");
+    assert!(
+        full.contains("TOTAL: 2 fns, 4 meaningful lines across 1 files"),
+        "{full}"
+    );
 }
 
 #[test]
@@ -81,5 +87,8 @@ fn unreadable_and_unparsable_files_fail_the_census_by_name() {
     let err = rock_lsp::cli::inline_lua_census::inline_lua_census(&[path], &[], true)
         .expect_err("census must fail when files are left out")
         .to_string();
-    assert!(err.contains("2 files") && err.contains("bad_utf8.rock") && err.contains("bad_parse.rock"), "{err}");
+    assert!(
+        err.contains("2 files") && err.contains("bad_utf8.rock") && err.contains("bad_parse.rock"),
+        "{err}"
+    );
 }

@@ -49,7 +49,9 @@ fn every_static_including_a_generic_ones_is_registered_by_logical_identity() {
     let keys = static_keys(&emit_mir(FIXTURE).lua);
     for name in ["with_static", "generic_static"] {
         assert!(
-            keys.iter().any(|key| key.starts_with("static:") && key.contains(name) && key.ends_with("::value")),
+            keys.iter().any(|key| key.starts_with("static:")
+                && key.contains(name)
+                && key.ends_with("::value")),
             "static of {name} is not registered: {keys:?}"
         );
     }
@@ -71,8 +73,14 @@ fn global_layout_ignores_bodies_statics_and_source_order_but_tracks_globals_and_
         static_keys(&static_edit.lua),
         "an unrelated statement before a static must not rename its storage key"
     );
-    let static_added = FIXTURE.replace("    static lazy = 2\n", "    static lazy = 2\n    static more = 3\n");
-    assert_eq!(baseline.global_layout, emit_mir(&static_added).global_layout);
+    let static_added = FIXTURE.replace(
+        "    static lazy = 2\n",
+        "    static lazy = 2\n    static more = 3\n",
+    );
+    assert_eq!(
+        baseline.global_layout,
+        emit_mir(&static_added).global_layout
+    );
 
     let reordered = FIXTURE.replace(
         "global BOXED: Boxed = Boxed { x: 1, y: 2 }\nglobal FLAT: Flat = Flat { x: 3, y: 4 }",

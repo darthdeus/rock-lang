@@ -10,7 +10,11 @@ pub fn loaded_source_watch_paths(project: &str, roots: &[(u32, PathBuf)]) -> Vec
     }
     for (id, root) in roots {
         // Discovery loads only the invoked directory for package zero.
-        paths.push(if *id == 0 { root.join("stick.toml") } else { root.clone() });
+        paths.push(if *id == 0 {
+            root.join("stick.toml")
+        } else {
+            root.clone()
+        });
     }
     paths.sort();
     paths.dedup();
@@ -21,18 +25,25 @@ pub fn project_engine_watch_paths(project: &str) -> Vec<PathBuf> {
     // Compilation may have failed before it retained a graph. Resolve the same
     // channel-filtered graph so edits to a broken dependency can repair it.
     let graph = (|| -> Result<Option<rock_host::stick::graph::PackageGraph>> {
-        let Some((config_path, config)) = rock_host::stick::StickConfig::find_from_dir(Path::new(project))? else {
+        let Some((config_path, config)) =
+            rock_host::stick::StickConfig::find_from_dir(Path::new(project))?
+        else {
             return Ok(None);
         };
-        Ok(Some(rock_host::stick::graph::PackageGraph::build_with_channel(
-            config_path.parent().unwrap_or(&config_path),
-            &config,
-            &rock_host::stick::resolved_channel_for(&config),
-        )?))
+        Ok(Some(
+            rock_host::stick::graph::PackageGraph::build_with_channel(
+                config_path.parent().unwrap_or(&config_path),
+                &config,
+                &rock_host::stick::resolved_channel_for(&config),
+            )?,
+        ))
     })();
     let roots = match graph {
-        Ok(Some(graph)) => graph.packages().iter()
-            .map(|package| (package.id.0, package.root.clone())).collect(),
+        Ok(Some(graph)) => graph
+            .packages()
+            .iter()
+            .map(|package| (package.id.0, package.root.clone()))
+            .collect(),
         Ok(None) => Vec::new(),
         Err(error) => {
             log::error!(target: "WATCH",

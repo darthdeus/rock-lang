@@ -41,7 +41,11 @@ fn make_reader(stream: TcpStream) -> (Receiver<Message>, thread::JoinHandle<io::
 
 fn make_write(
     mut stream: TcpStream,
-) -> (Sender<Message>, thread::JoinHandle<io::Result<()>>, Receiver<Message>) {
+) -> (
+    Sender<Message>,
+    thread::JoinHandle<io::Result<()>>,
+    Receiver<Message>,
+) {
     let (writer_sender, writer_receiver) = bounded::<Message>(0);
     let (drop_sender, drop_receiver) = bounded::<Message>(0);
     let writer = thread::spawn(move || {

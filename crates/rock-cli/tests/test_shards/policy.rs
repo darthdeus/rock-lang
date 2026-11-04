@@ -10,8 +10,11 @@ fn default_shards_use_the_selected_count_and_program_size() {
         (60, 8 * mib, 2),
         (600, 64 * mib, 2),
     ] {
-        assert_eq!(resolve_test_shards(2, tests, bytes, false), expected,
-            "tests={tests}, bytes={bytes}");
+        assert_eq!(
+            resolve_test_shards(2, tests, bytes, false),
+            expected,
+            "tests={tests}, bytes={bytes}"
+        );
     }
 }
 

@@ -8,11 +8,11 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use atomic_refcell::AtomicRefCell;
 use rock_core::{FileContents, ModuleId, SourceFile, SourceFiles, Span};
 
-use crate::preprocessor::{preprocess, PreprocessorContext};
+use crate::preprocessor::{PreprocessorContext, preprocess};
 
 /// Preprocessor-dependent SourceFiles constructors (can't be in rock-core since
 /// they depend on the preprocessor).
@@ -78,7 +78,10 @@ impl SourceFilesExt for SourceFiles {
     }
 }
 
-fn source_files_from_dir_impl<P: AsRef<Path>>(source_dir: P, preprocess: bool) -> Result<SourceFiles> {
+fn source_files_from_dir_impl<P: AsRef<Path>>(
+    source_dir: P,
+    preprocess: bool,
+) -> Result<SourceFiles> {
     let paths = crate::project::find_rock_files_at_path(source_dir)?;
 
     // Each file does read_to_string + preprocess. Paths are already canonical
@@ -115,15 +118,17 @@ fn source_files_from_dir_impl<P: AsRef<Path>>(source_dir: P, preprocess: bool) -
 pub fn parse_modules_directive(contents: &str) -> Result<rock_core::source_code::Dialect> {
     for line in contents.lines().take(10) {
         let trimmed = line.trim_start();
-        let Some(rest) = trimmed.strip_prefix("//!") else { continue };
+        let Some(rest) = trimmed.strip_prefix("//!") else {
+            continue;
+        };
         let rest = rest.trim();
         if let Some(value) = rest.strip_prefix("modules:") {
             return match value.trim() {
                 "v1" => Ok(rock_core::source_code::Dialect::V1),
                 "legacy" | "" => Ok(rock_core::source_code::Dialect::Legacy),
-                other => bail!(
-                    "unknown `//! modules:` directive value `{other}` (known: legacy, v1)"
-                ),
+                other => {
+                    bail!("unknown `//! modules:` directive value `{other}` (known: legacy, v1)")
+                }
             };
         }
     }
@@ -200,11 +205,8 @@ pub fn source_file_new_with_context(path: impl AsRef<Path>) -> Result<SourceFile
     if let Some((manifest, config)) = crate::stick::StickConfig::find_from_dir(start_dir)? {
         let manifest_dir = manifest.parent().unwrap_or(&manifest);
         let channel = crate::stick::resolved_channel_for(&config);
-        let graph = crate::stick::graph::PackageGraph::build_with_channel(
-            manifest_dir,
-            &config,
-            &channel,
-        )?;
+        let graph =
+            crate::stick::graph::PackageGraph::build_with_channel(manifest_dir, &config, &channel)?;
         let owner = graph.package_of_file(&canonical).ok_or_else(|| {
             anyhow::anyhow!(
                 "file {} is not owned by the package graph rooted at {}",
@@ -231,10 +233,7 @@ fn source_file_load(path: impl AsRef<Path>, preprocess: bool) -> Result<SourceFi
 }
 
 /// Load a source file from an already-canonical absolute path (skips canonicalize syscall).
-fn source_file_from_canonical_path(
-    path: &Path,
-    preprocess: bool,
-) -> Result<SourceFile> {
+fn source_file_from_canonical_path(path: &Path, preprocess: bool) -> Result<SourceFile> {
     let raw_contents = fs_err::read_to_string(path)
         .with_context(|| format!("Failed to read '{}'", path.display()))?;
 
@@ -274,18 +273,26 @@ pub fn source_file_from_path_and_contents(
     // the error so the user sees the real cause; keep the safe defaults
     // so a downstream parse can still produce useful diagnostics
     // (silent-errors audit, 2026-05-02).
-    let (_, is_script, is_test, is_test_util, used_packages) = match preprocess_content(&contents, false) {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("rock: preprocessor error for `{path}`: {e:#}");
-            (contents.clone(), false, false, false, vec![])
-        }
-    };
+    let (_, is_script, is_test, is_test_util, used_packages) =
+        match preprocess_content(&contents, false) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("rock: preprocessor error for `{path}`: {e:#}");
+                (contents.clone(), false, false, false, vec![])
+            }
+        };
 
     let file = FileContents::Filesystem { path, filename };
 
-    create_source_file(file, contents, is_script, is_test, is_test_util, used_packages)
-        .unwrap_or_else(|e| panic!("rock: {e:#}"))
+    create_source_file(
+        file,
+        contents,
+        is_script,
+        is_test,
+        is_test_util,
+        used_packages,
+    )
+    .unwrap_or_else(|e| panic!("rock: {e:#}"))
 }
 
 pub fn source_file_from_code(id_path: String, contents: String) -> SourceFile {
@@ -304,8 +311,15 @@ pub fn source_file_from_code(id_path: String, contents: String) -> SourceFile {
         contents,
     };
 
-    create_source_file(file, processed_contents, is_script, is_test, is_test_util, used_packages)
-        .unwrap_or_else(|e| panic!("rock: {e:#}"))
+    create_source_file(
+        file,
+        processed_contents,
+        is_script,
+        is_test,
+        is_test_util,
+        used_packages,
+    )
+    .unwrap_or_else(|e| panic!("rock: {e:#}"))
 }
 
 #[cfg(all(test, unix))]
@@ -318,7 +332,9 @@ mod tests {
     #[test]
     fn non_utf8_source_path_is_an_error() {
         let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join(std::ffi::OsStr::from_bytes(b"bad\xff.rock"));
+        let path = dir
+            .path()
+            .join(std::ffi::OsStr::from_bytes(b"bad\xff.rock"));
         fs_err::write(&path, "fn main() {}\n").unwrap();
         let err = super::source_file_new(&path).expect_err("non-UTF-8 path must be rejected");
         assert!(format!("{err:#}").contains("not valid UTF-8"), "{err:#}");

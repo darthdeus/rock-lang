@@ -27,7 +27,10 @@ co fn worker() -> Coroutine<int> {
 fn main() { print("{worker_0__on_killed()}") }
 "#;
     let lua = emit_module(src); // must not reject
-    assert!(lua.contains("function worker_0__on_killed"), "the user fn is emitted:\n{lua}");
+    assert!(
+        lua.contains("function worker_0__on_killed"),
+        "the user fn is emitted:\n{lua}"
+    );
 }
 
 /// POSITIVE CONTROL: a fn named `<name>__lambda0` in a file whose enclosing fn
@@ -40,5 +43,8 @@ fn bar() -> int { return 1 }
 fn main() { print("{bar_0__lambda0()}") }
 "#;
     let lua = emit_module(src); // must not reject
-    assert!(lua.contains("function bar_0__lambda0"), "the user fn is emitted:\n{lua}");
+    assert!(
+        lua.contains("function bar_0__lambda0"),
+        "the user fn is emitted:\n{lua}"
+    );
 }

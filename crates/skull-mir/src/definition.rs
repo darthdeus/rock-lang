@@ -1,5 +1,5 @@
+use bone_semantic::hir::{AnnoValue, TyId, TypeCtor, TypeExpr};
 use bone_semantic::inference::Workspace;
-use bone_semantic::hir::{AnnoValue, TypeCtor, TypeExpr, TyId};
 use bone_semantic::prelude::CompilerError;
 use bone_semantic::prelude::ModuleId;
 use ustr::Ustr;
@@ -7,7 +7,7 @@ use ustr::Ustr;
 use crate::code_identity::CodeIdentity;
 use crate::instance::Instance;
 use crate::mir::FuncRef;
-use crate::monoty::{convert_decl, MonoSubst, MonoTy};
+use crate::monoty::{MonoSubst, MonoTy, convert_decl};
 
 pub fn is_artifact_definition(decorator: &bone_semantic::hir::DecoratorDef) -> bool {
     decorator
@@ -198,10 +198,7 @@ fn role_for(
             format!("artifact definition key parameter `{key_param}` must have type string"),
         ));
     }
-    Ok(Role {
-        catalog,
-        key_param,
-    })
+    Ok(Role { catalog, key_param })
 }
 
 pub fn collect(ws: &Workspace) -> Result<DefinitionPlan, CompilerError> {
@@ -209,13 +206,18 @@ pub fn collect(ws: &Workspace) -> Result<DefinitionPlan, CompilerError> {
     let mut census = DefinitionCensus::default();
     for module in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
         for (_, decorator) in module.decorators.iter() {
-            let Some(ann) = metadata(decorator)? else { continue };
+            let Some(ann) = metadata(decorator)? else {
+                continue;
+            };
             census.declarations += 1;
             let role = role_for(ws, decorator, ann)?;
             if roles.insert(decorator.def_key, role).is_some() {
                 return Err(CompilerError::new_with_label(
                     ann.span,
-                    format!("duplicate artifact definition decorator `{}`", decorator.name),
+                    format!(
+                        "duplicate artifact definition decorator `{}`",
+                        decorator.name
+                    ),
                 ));
             }
         }
@@ -223,11 +225,13 @@ pub fn collect(ws: &Workspace) -> Result<DefinitionPlan, CompilerError> {
 
     let mut catalogs = std::collections::HashMap::<Ustr, DefinitionCatalog>::new();
     for role in roles.values() {
-        catalogs.entry(role.catalog).or_insert_with(|| DefinitionCatalog {
-            catalog: role.catalog,
-            accessor: None,
-            definition_type: None,
-        });
+        catalogs
+            .entry(role.catalog)
+            .or_insert_with(|| DefinitionCatalog {
+                catalog: role.catalog,
+                accessor: None,
+                definition_type: None,
+            });
     }
 
     for module in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
@@ -293,20 +297,24 @@ pub fn collect(ws: &Workspace) -> Result<DefinitionPlan, CompilerError> {
                     ),
                 ));
             };
-            let definition_type = convert_decl(ws, definition_ty, &MonoSubst::default()).map_err(|reason| {
-                CompilerError::new_with_label(
-                    function.span,
-                    format!(
-                        "artifact catalog accessor `{}` has non-concrete definition type ({})",
-                        function.name,
-                        reason.bucket(),
-                    ),
-                )
-            })?;
+            let definition_type =
+                convert_decl(ws, definition_ty, &MonoSubst::default()).map_err(|reason| {
+                    CompilerError::new_with_label(
+                        function.span,
+                        format!(
+                            "artifact catalog accessor `{}` has non-concrete definition type ({})",
+                            function.name,
+                            reason.bucket(),
+                        ),
+                    )
+                })?;
             let Some(plan_catalog) = catalogs.get_mut(&catalog) else {
                 return Err(CompilerError::new_with_label(
                     ann.span,
-                    format!("artifact catalog accessor `{}` names unknown catalog `{catalog}`", function.name),
+                    format!(
+                        "artifact catalog accessor `{}` names unknown catalog `{catalog}`",
+                        function.name
+                    ),
                 ));
             };
             if plan_catalog.accessor.is_some() {
@@ -330,7 +338,9 @@ pub fn collect(ws: &Workspace) -> Result<DefinitionPlan, CompilerError> {
         for (fid, function) in module.functions.iter() {
             for application in &function.annotations {
                 let application_key = application.resolved_name.unwrap_or(application.name.name);
-                let Some(role) = roles.get(&application_key) else { continue };
+                let Some(role) = roles.get(&application_key) else {
+                    continue;
+                };
                 census.applications += 1;
                 if !function.generics.is_empty() || !function.param_decls.is_empty() {
                     return Err(CompilerError::new_with_label(
@@ -472,7 +482,7 @@ mod tests {
 
     #[test]
     fn collector_admits_literal_keyed_factories_and_counts_population() {
-        let ws = workspace(&[ (
+        let ws = workspace(&[(
             "defs.rock",
             r#"
                 @artifact_definition(catalog="widgets", key_param="key")
@@ -481,7 +491,7 @@ mod tests {
                 @widget(key="beta") fn make_beta() -> int { return 2 }
                 fn main() {}
             "#,
-        ) ]);
+        )]);
 
         let plan = collect(&ws).expect("definition plan");
         assert_eq!(plan.census.declarations, 1);
@@ -501,7 +511,7 @@ mod tests {
 
     #[test]
     fn duplicate_keys_reject_with_the_catalog_and_key() {
-        let ws = workspace(&[ (
+        let ws = workspace(&[(
             "dupe.rock",
             r#"
                 @artifact_definition(catalog="widgets", key_param="key")
@@ -510,7 +520,7 @@ mod tests {
                 @widget(key="same") fn second() -> int { return 2 }
                 fn main() {}
             "#,
-        ) ]);
+        )]);
 
         let err = collect(&ws).expect_err("duplicate definition keys must reject");
         assert!(err.message.contains("widgets"), "{err:?}");
@@ -659,7 +669,10 @@ mod tests {
             ),
         )]))
         .expect_err("duplicate typed accessors must reject");
-        assert!(err.message.contains("more than one") || err.message.contains("duplicate"), "{err:?}");
+        assert!(
+            err.message.contains("more than one") || err.message.contains("duplicate"),
+            "{err:?}"
+        );
     }
 
     #[test]
@@ -683,7 +696,10 @@ mod tests {
                 fn main() {}
             "#,
         );
-        assert!(nonliteral.message.contains("string literal"), "{nonliteral:?}");
+        assert!(
+            nonliteral.message.contains("string literal"),
+            "{nonliteral:?}"
+        );
     }
 
     #[test]
@@ -696,7 +712,10 @@ mod tests {
                 fn main() {}
             "#,
         );
-        assert!(extra_param.message.contains("exactly the required string"), "{extra_param:?}");
+        assert!(
+            extra_param.message.contains("exactly the required string"),
+            "{extra_param:?}"
+        );
 
         let unit = collect_error(
             r#"
@@ -706,7 +725,10 @@ mod tests {
                 fn main() {}
             "#,
         );
-        assert!(unit.message.contains("return a concrete definition"), "{unit:?}");
+        assert!(
+            unit.message.contains("return a concrete definition"),
+            "{unit:?}"
+        );
 
         let backend = collect_error(
             r#"

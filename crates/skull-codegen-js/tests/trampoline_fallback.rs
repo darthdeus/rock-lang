@@ -4,19 +4,29 @@
 //! checks are the correctness oracle; the shape assertions pin that the
 //! fallback fired (and, dually, that a structured body does NOT trampoline).
 
-use skull_mir::mir::FuncRef;
 use crate::common::ws_with;
+use skull_mir::mir::FuncRef;
 
 fn node_available() -> bool {
-    crate::common::node().arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+    crate::common::node()
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 fn emit_closure(ws: &bone_semantic::inference::Workspace, root: &str) -> Result<String, String> {
-    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("test module");
     let mut r = None;
     for (fid, f) in ws.module(mid).functions.iter() {
         if f.name.as_str() == root {
-            r = Some(FuncRef { module: mid, func: fid });
+            r = Some(FuncRef {
+                module: mid,
+                func: fid,
+            });
         }
     }
     skull_codegen_js::emit::emit_with_closure(ws, &[(r.unwrap(), root.to_string())])
@@ -36,14 +46,21 @@ fn eval_int(defs: &str, root: &str, expect: i64) {
         skull_codegen_js::JS_STRUCTURAL_EQ,
         skull_codegen_js::JS_CALL_HELPER,
     );
-    let out = crate::common::node().arg("-e").arg(&program).output().expect("spawn node");
+    let out = crate::common::node()
+        .arg("-e")
+        .arg(&program)
+        .output()
+        .expect("spawn node");
     assert!(
         out.status.success(),
         "node failed:\n--- program ---\n{program}\n--- stderr ---\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
     let s = String::from_utf8_lossy(&out.stdout);
-    let got: i64 = s.trim().parse().unwrap_or_else(|_| panic!("not an int: {s:?}\n{program}"));
+    let got: i64 = s
+        .trim()
+        .parse()
+        .unwrap_or_else(|_| panic!("not an int: {s:?}\n{program}"));
     assert_eq!(got, expect, "wrong result\n{program}");
 }
 
@@ -68,8 +85,14 @@ fn nested_loop_tail_trampolines() {
          }",
     );
     let js = emit_closure(&ws, "root").expect("nested-loop tail should trampoline, not reject");
-    assert!(js.contains("for (;;) {"), "expected a trampoline loop:\n{js}");
-    assert!(js.contains("switch (__bb"), "expected a __bb dispatch:\n{js}");
+    assert!(
+        js.contains("for (;;) {"),
+        "expected a trampoline loop:\n{js}"
+    );
+    assert!(
+        js.contains("switch (__bb"),
+        "expected a __bb dispatch:\n{js}"
+    );
     eval_int(&js, "root", 12);
 }
 
@@ -110,7 +133,10 @@ fn over_cap_tail_trampolines_and_hoists_temp() {
          }",
     );
     let js = emit_closure(&ws, "root").expect("over-cap tail should trampoline");
-    assert!(js.contains("switch (__bb"), "expected a __bb dispatch:\n{js}");
+    assert!(
+        js.contains("switch (__bb"),
+        "expected a __bb dispatch:\n{js}"
+    );
     // The discriminant temp is declared at fn scope (an assignment `= c` inside a
     // case, not a per-case `let v<N> = c`), proving the cross-case hoist. Without
     // it, node would throw "v is not defined" -- so a green eval also guards this.
@@ -141,12 +167,21 @@ fn multi_value_return_through_fallback() {
          }",
     );
     let js = emit_closure(&ws, "root").expect("multi-value return through fallback");
-    assert!(js.contains("switch (__bb"), "expected the callee to trampoline:\n{js}");
+    assert!(
+        js.contains("switch (__bb"),
+        "expected the callee to trampoline:\n{js}"
+    );
     // The trampoline printer must use the SAME scratch ABI as the structured
     // one -- if it diverged, a body that falls back would silently change
     // calling convention against callers emitted the other way.
-    assert!(js.contains("__rock_ret1 = "), "expected a scratch-slot publish:\n{js}");
-    assert!(!js.contains("return ["), "the fallback must not allocate an array:\n{js}");
+    assert!(
+        js.contains("__rock_ret1 = "),
+        "expected a scratch-slot publish:\n{js}"
+    );
+    assert!(
+        !js.contains("return ["),
+        "the fallback must not allocate an array:\n{js}"
+    );
     // pair(2) = (6, 7) -> 6*10 + 7.
     eval_int(&js, "root", 67);
 }
@@ -167,6 +202,9 @@ fn structured_body_does_not_trampoline() {
          }",
     );
     let js = emit_closure(&ws, "root").expect("structured body should emit");
-    assert!(!js.contains("__bb"), "a structured body must not trampoline:\n{js}");
+    assert!(
+        !js.contains("__bb"),
+        "a structured body must not trampoline:\n{js}"
+    );
     eval_int(&js, "root", 103);
 }

@@ -22,10 +22,12 @@ pub fn definition_at(
     // type (see `hover_at`): keeps goto-definition on the identifier if a small
     // uninformative overlay ever shares its offset.
     let def_bi = inf.per_fn.get(&owner);
-    let iv = body
-        .node_index()
-        .find(offset, offset + 1)
-        .min_by_key(|x| (def_bi.map_or(0, |bi| node_ty_uninformative(ws, bi, x.val)), x.stop - x.start))?;
+    let iv = body.node_index().find(offset, offset + 1).min_by_key(|x| {
+        (
+            def_bi.map_or(0, |bi| node_ty_uninformative(ws, bi, x.val)),
+            x.stop - x.start,
+        )
+    })?;
 
     match iv.val {
         // Cursor on a decl itself
@@ -78,7 +80,13 @@ pub fn definition_at(
 
             // The variant name -> the variant decl; the enum qualifier -> the
             // enum decl.
-            hir::Expr::EnumVariant { enum_name, variant, variant_span, args, .. } => {
+            hir::Expr::EnumVariant {
+                enum_name,
+                variant,
+                variant_span,
+                args,
+                ..
+            } => {
                 if let Some(seg) = path_segment_at(ws, mid, offset) {
                     return segment_target_def(ws, seg.target);
                 }
@@ -363,7 +371,12 @@ pub fn hover_at(
                                         .get(fld.value)
                                         .map_or(fld.name_span.offset_range.1, |s| s.offset_range.0);
                                     if fs <= offset && offset < fe {
-                                        if let Some(s) = render_record_field(ws, enum_name, Some(*name), fld.name) {
+                                        if let Some(s) = render_record_field(
+                                            ws,
+                                            enum_name,
+                                            Some(*name),
+                                            fld.name,
+                                        ) {
                                             return Some((s, fld.name_span));
                                         }
                                     }
@@ -371,7 +384,8 @@ pub fn hover_at(
                                 if let Some(en) = enum_name {
                                     let head = leading_name_span(&span, name.len());
                                     if span_contains(&head, offset) {
-                                        return render_variant(ws, Some(en), *name).map(|s| (s, head));
+                                        return render_variant(ws, Some(en), *name)
+                                            .map(|s| (s, head));
                                     }
                                 } else if let Some(def) = render_struct_def(ws, *name) {
                                     return Some((def, span));
@@ -412,14 +426,20 @@ pub fn hover_at(
                                     for fidx in *fields {
                                         let f = &body.struct_lit_field_arena[fidx];
                                         if span_contains(&f.name_span, offset) {
-                                            return render_record_field(ws, Some(*enum_name), Some(*variant), f.name)
-                                                .map(|s| (s, f.name_span));
+                                            return render_record_field(
+                                                ws,
+                                                Some(*enum_name),
+                                                Some(*variant),
+                                                f.name,
+                                            )
+                                            .map(|s| (s, f.name_span));
                                         }
                                     }
                                 }
                                 let (vs, ve) = variant_span.offset_range;
                                 if vs <= offset && offset < ve {
-                                    if let Some(s) = render_variant(ws, Some(*enum_name), *variant) {
+                                    if let Some(s) = render_variant(ws, Some(*enum_name), *variant)
+                                    {
                                         return Some((s, *variant_span));
                                     }
                                 } else if enum_name_span.offset_range.0 <= offset && offset < vs {
@@ -450,12 +470,18 @@ pub fn hover_at(
                                 ty = bt;
                             }
                         }
-                        return Some((format!("Type: {}", render_hover_type(ws, Some(bi), ty)), span));
+                        return Some((
+                            format!("Type: {}", render_hover_type(ws, Some(bi), ty)),
+                            span,
+                        ));
                     }
                     NodeRef::Binding(b) => {
                         let ty = *bi.binding_types.get(b)?;
                         let span = *body.binding_spans.get(b)?;
-                        return Some((format!("Type: {}", render_hover_type(ws, Some(bi), ty)), span));
+                        return Some((
+                            format!("Type: {}", render_hover_type(ws, Some(bi), ty)),
+                            span,
+                        ));
                     }
                     // A type annotation (`m: Movable`, `-> Vec2`): show the
                     // referenced type's definition, like a struct-literal head.
@@ -521,7 +547,11 @@ pub fn hover_at(
         let (s, e) = nt.name_span.offset_range;
         if s <= offset && offset < e {
             return Some((
-                fenced(&format!("newtype {}({})", nt.name, render_hover_type(ws, None, nt.wrapped))),
+                fenced(&format!(
+                    "newtype {}({})",
+                    nt.name,
+                    render_hover_type(ws, None, nt.wrapped)
+                )),
                 nt.name_span,
             ));
         }
@@ -529,13 +559,20 @@ pub fn hover_at(
     for g in module.globals.values() {
         let (s, e) = g.name_span.offset_range;
         if s <= offset && offset < e {
-            return Some((format!("Type: {}", render_hover_type(ws, None, g.ty)), g.name_span));
+            return Some((
+                format!("Type: {}", render_hover_type(ws, None, g.ty)),
+                g.name_span,
+            ));
         }
         // The type annotation (`global boss: Mob` -> hover `Mob`). A value-less
         // global has no inference body, so the body-level path skips it; resolve
         // the type's recorded span here at item level.
         if let TyId::Static(tmid, idx) = g.ty {
-            if let Some(sp) = ws.modules.get(tmid.index()).and_then(|m| m.ty_spans.get(idx).copied()) {
+            if let Some(sp) = ws
+                .modules
+                .get(tmid.index())
+                .and_then(|m| m.ty_spans.get(idx).copied())
+            {
                 let (ts, te) = sp.offset_range;
                 if ts <= offset && offset < te {
                     return Some((render_type_hover(ws, None, g.ty), sp));
@@ -604,11 +641,21 @@ fn render_call_overloads_hover(
             if others == 1 { "" } else { "s" }
         ));
         out.push_str(&fenced(
-            &ordered[1..].iter().map(|&fq| sig(fq)).collect::<Vec<_>>().join("\n"),
+            &ordered[1..]
+                .iter()
+                .map(|&fq| sig(fq))
+                .collect::<Vec<_>>()
+                .join("\n"),
         ));
     } else {
         out.push_str(&format!("*{} overloads:*\n", ordered.len()));
-        out.push_str(&fenced(&ordered.iter().map(|&fq| sig(fq)).collect::<Vec<_>>().join("\n")));
+        out.push_str(&fenced(
+            &ordered
+                .iter()
+                .map(|&fq| sig(fq))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ));
     }
     Some(out)
 }
@@ -637,7 +684,10 @@ pub fn fn_signature_hover(
         }
         // Signature ends at the body's opening brace (or the item end for an
         // extern/abstract fn with no body).
-        let body_open = src.get(s..e).and_then(|seg| seg.find('{')).map_or(e, |i| s + i);
+        let body_open = src
+            .get(s..e)
+            .and_then(|seg| seg.find('{'))
+            .map_or(e, |i| s + i);
         if offset < body_open {
             let sig = render_fn_signature_with_defaults(ws, mid, fid, sources);
             return Some((fenced(&sig), f.name_span));
@@ -668,8 +718,10 @@ fn render_variant_payload(ws: &Workspace, v: &hir::EnumVariantDef) -> String {
             format!("{}({})", v.name, parts.join(", "))
         }
         hir::VariantPayload::Record(fields) => {
-            let parts: Vec<String> =
-                fields.iter().map(|f| format!("{}: {}", f.name, ws.render(None, f.ty))).collect();
+            let parts: Vec<String> = fields
+                .iter()
+                .map(|f| format!("{}: {}", f.name, ws.render(None, f.ty)))
+                .collect();
             format!("{} {{ {} }}", v.name, parts.join(", "))
         }
     }
@@ -680,7 +732,11 @@ fn render_variant_payload(ws: &Workspace, v: &hir::EnumVariantDef) -> String {
 fn render_variant(ws: &Workspace, enum_name: Option<Ustr>, variant: Ustr) -> Option<String> {
     let edef = enum_def_for_variant(ws, enum_name, variant)?;
     let v = edef.variants.iter().find(|v| v.name == variant)?;
-    Some(fenced(&format!("{}::{}", edef.name, render_variant_payload(ws, v))))
+    Some(fenced(&format!(
+        "{}::{}",
+        edef.name,
+        render_variant_payload(ws, v)
+    )))
 }
 
 /// Bare record heads retain the struct-literal HIR shape, including in an
@@ -696,9 +752,16 @@ fn record_literal_enum(
         return None;
     }
     let inferred = bi
-        .and_then(|bi| bi.expr_types.get(expr).and_then(|ty| deref_ty(ws, Some(bi), *ty)))
+        .and_then(|bi| {
+            bi.expr_types
+                .get(expr)
+                .and_then(|ty| deref_ty(ws, Some(bi), *ty))
+        })
         .and_then(|ty| match ty {
-            hir::TypeExpr::App { ctor: hir::TypeCtor::Nominal(en), .. } => Some(*en),
+            hir::TypeExpr::App {
+                ctor: hir::TypeCtor::Nominal(en),
+                ..
+            } => Some(*en),
             _ => None,
         });
     let edef = enum_def_for_variant(ws, inferred, name)?;
@@ -709,7 +772,10 @@ fn record_literal_enum(
 /// Declaration span (the variant name) of `Enum::Variant`. None if unknown.
 fn variant_def_span(ws: &Workspace, enum_name: Option<Ustr>, variant: Ustr) -> Option<Span> {
     let edef = enum_def_for_variant(ws, enum_name, variant)?;
-    edef.variants.iter().find(|v| v.name == variant).map(|v| v.name_span)
+    edef.variants
+        .iter()
+        .find(|v| v.name == variant)
+        .map(|v| v.name_span)
 }
 
 /// Hover text for a type annotation (`m: Movable`, `-> Vec2`): a bare nominal
@@ -745,10 +811,18 @@ fn render_hover_type(ws: &Workspace, bi: Option<&BodyInference>, ty: TyId) -> St
     {
         if params.is_empty() {
             let name = *name;
-            if ws.modules.iter().any(|m| m.struct_by_name.contains_key(&name)) {
+            if ws
+                .modules
+                .iter()
+                .any(|m| m.struct_by_name.contains_key(&name))
+            {
                 return format!("struct {}", name);
             }
-            if ws.modules.iter().any(|m| m.enums_by_name.contains_key(&name)) {
+            if ws
+                .modules
+                .iter()
+                .any(|m| m.enums_by_name.contains_key(&name))
+            {
                 return format!("enum {}", name);
             }
         }
@@ -867,7 +941,11 @@ fn render_struct_def(ws: &Workspace, name: Ustr) -> Option<String> {
 /// The modules-v1 path segment under `offset` in module `mid`, as lowering
 /// recorded it ([`hir::PathSegmentRef`]): the enclosing body's segments,
 /// then the module's own (`use` items, signatures, fields).
-pub fn path_segment_at(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<hir::PathSegmentRef> {
+pub fn path_segment_at(
+    ws: &Workspace,
+    mid: ModuleId,
+    offset: usize,
+) -> Option<hir::PathSegmentRef> {
     let module = ws.modules.get(mid.index())?;
     let hit = |seg: &&hir::PathSegmentRef| span_contains(&seg.span, offset);
     module
@@ -884,11 +962,15 @@ pub fn path_segment_at(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<h
 pub fn segment_target_def(ws: &Workspace, target: hir::SegmentTarget) -> Option<Span> {
     match target {
         // A callable lands on its (first overload's) name, like a call does.
-        hir::SegmentTarget::Def(key) => match ws.functions_by_name.get(&key).and_then(|l| l.first()) {
-            Some(&(fmid, fid)) => Some(ws.module(fmid).functions[fid].name_span),
-            None => def_of_name(ws, key),
-        },
-        hir::SegmentTarget::Variant { enum_key, variant } => variant_def_span(ws, Some(enum_key), variant),
+        hir::SegmentTarget::Def(key) => {
+            match ws.functions_by_name.get(&key).and_then(|l| l.first()) {
+                Some(&(fmid, fid)) => Some(ws.module(fmid).functions[fid].name_span),
+                None => def_of_name(ws, key),
+            }
+        }
+        hir::SegmentTarget::Variant { enum_key, variant } => {
+            variant_def_span(ws, Some(enum_key), variant)
+        }
         hir::SegmentTarget::Module { .. } => None,
     }
 }
@@ -909,10 +991,9 @@ pub fn segments_naming(ws: &Workspace, target: hir::SegmentTarget) -> Vec<hir::P
 /// The modules-v1 definition whose declaration [`segment_target_def`]
 /// reports as `decl`: the definition a navigation landed on.
 pub fn v1_def_declared_at(ws: &Workspace, decl: &Span) -> Option<Ustr> {
-    ws.defs
-        .keys()
-        .copied()
-        .find(|key| segment_target_def(ws, hir::SegmentTarget::Def(*key)).is_some_and(|d| d == *decl))
+    ws.defs.keys().copied().find(|key| {
+        segment_target_def(ws, hir::SegmentTarget::Def(*key)).is_some_and(|d| d == *decl)
+    })
 }
 
 /// The modules-v1 definition whose declared name covers `offset` of `file`.
@@ -1084,7 +1165,9 @@ pub fn references<'t>(
 }
 
 fn newtype_declared(ws: &Workspace, name: Ustr) -> bool {
-    ws.modules.iter().any(|m| m.newtypes_by_name.contains_key(&name))
+    ws.modules
+        .iter()
+        .any(|m| m.newtypes_by_name.contains_key(&name))
 }
 
 /// The newtype whose DECLARATION name the cursor is on (`newtype UserId(int)`).
@@ -1123,8 +1206,7 @@ fn newtype_references<'t>(ws: &Workspace, name: Ustr, text_of: TextOf<'_, 't>) -
             for_each_nominal_annotation(ws, m.file, body, name, &mut |sp| {
                 let clipped = leading_name_span(sp, len);
                 let verified = text.is_none_or(|t| {
-                    t.get(clipped.offset_range.0..clipped.offset_range.1)
-                        == Some(name.as_str())
+                    t.get(clipped.offset_range.0..clipped.offset_range.1) == Some(name.as_str())
                 });
                 if verified {
                     push(clipped);
@@ -1132,7 +1214,11 @@ fn newtype_references<'t>(ws: &Workspace, name: Ustr, text_of: TextOf<'_, 't>) -
             });
             for (_, expr) in body.expr_arena.iter() {
                 if let hir::Expr::Call {
-                    callee: hir::Callee::Unresolved { name: cn, name_span },
+                    callee:
+                        hir::Callee::Unresolved {
+                            name: cn,
+                            name_span,
+                        },
                     ..
                 } = expr
                 {
@@ -1311,7 +1397,9 @@ fn decorator_at<'t>(
     let module = ws.modules.get(mid.index())?;
 
     for d in module.decorators.values() {
-        let Some(text) = text_of(d.span.file.as_str()) else { continue };
+        let Some(text) = text_of(d.span.file.as_str()) else {
+            continue;
+        };
         if let Some(sp) = decl_name_span_in(
             text,
             d.span.offset_range.0,
@@ -1361,7 +1449,9 @@ fn decorator_references<'t>(ws: &Workspace, name: Ustr, text_of: TextOf<'_, 't>)
             if d.def_key != name {
                 continue;
             }
-            let Some(text) = text_of(d.span.file.as_str()) else { continue };
+            let Some(text) = text_of(d.span.file.as_str()) else {
+                continue;
+            };
             if let Some(sp) = decl_name_span_in(
                 text,
                 d.span.offset_range.0,
@@ -1389,8 +1479,7 @@ fn decorator_references<'t>(ws: &Workspace, name: Ustr, text_of: TextOf<'_, 't>)
 /// interpolation, `_G.name`). Gated on the name existing in some module's
 /// global namespace, so an unresolved-typo ident never triggers a walk.
 fn global_at(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<Ustr> {
-    let is_declared =
-        |n: &Ustr| ws.modules.iter().any(|m| m.global_by_name.contains_key(n));
+    let is_declared = |n: &Ustr| ws.modules.iter().any(|m| m.global_by_name.contains_key(n));
     let module = ws.modules.get(mid.index())?;
 
     for g in module.globals.values() {
@@ -1503,9 +1592,11 @@ fn struct_at(ws: &Workspace, mid: ModuleId, _inf: &InferenceResult, offset: usiz
             let m = ws.modules.get(tmid.index())?;
             ctor_name_if_on(&m.ty_arena[idx], m.ty_spans.get(idx), offset)
         }
-        NodeRef::LocalTy(idx) => {
-            ctor_name_if_on(&body.lowered_tys[idx], body.lowered_ty_spans.get(idx), offset)
-        }
+        NodeRef::LocalTy(idx) => ctor_name_if_on(
+            &body.lowered_tys[idx],
+            body.lowered_ty_spans.get(idx),
+            offset,
+        ),
         NodeRef::Expr(e) => {
             if let hir::Expr::StructLiteral { name, .. } = &body.expr_arena[e] {
                 let sp = body.expr_spans.get(e)?;
@@ -1669,9 +1760,7 @@ fn field_references(ws: &Workspace, sname: Ustr, field: Ustr) -> Vec<RefSite> {
                     // key-path arg. Span ends at the name (leading dot stays).
                     hir::Expr::SiblingRef(n) if *n == field => {
                         let of_struct = match owner {
-                            hir::BodyOwner::StructDefaults(sidx) => {
-                                m.structs[*sidx].name == sname
-                            }
+                            hir::BodyOwner::StructDefaults(sidx) => m.structs[*sidx].name == sname,
                             _ => bi.is_some_and(|bi| {
                                 bi.expr_types
                                     .get(e)
@@ -1682,8 +1771,8 @@ fn field_references(ws: &Workspace, sname: Ustr, field: Ustr) -> Vec<RefSite> {
                                             ctor,
                                             &["FieldRef", "ReadFieldRef", "WriteFieldRef"],
                                         )
-                                            .then(|| args.into_iter().next())
-                                            .flatten()
+                                        .then(|| args.into_iter().next())
+                                        .flatten()
                                     })
                                     .and_then(|t0| struct_app_args(ws, bi, t0))
                                     .is_some_and(|(sn, _)| sn == sname)
@@ -1719,12 +1808,11 @@ fn field_references(ws: &Workspace, sname: Ustr, field: Ustr) -> Vec<RefSite> {
                             let f = &body.record_pat_field_arena[fidx];
                             if f.name == field {
                                 let is_shorthand = match body.pattern_arena[f.pat] {
-                                    hir::Pattern::Bind(b) => body
-                                        .binding_spans
-                                        .get(b)
-                                        .is_some_and(|bs| {
+                                    hir::Pattern::Bind(b) => {
+                                        body.binding_spans.get(b).is_some_and(|bs| {
                                             bs.offset_range == f.name_span.offset_range
-                                        }),
+                                        })
+                                    }
                                     _ => false,
                                 };
                                 push(RefSite {
@@ -1792,9 +1880,7 @@ fn for_each_nominal_annotation(
     name: Ustr,
     f: &mut impl FnMut(&Span),
 ) {
-    let on_nominal = |te: &hir::TypeExpr| {
-        matches!(te, hir::TypeExpr::App { ctor: hir::TypeCtor::Nominal(n), .. } if *n == name)
-    };
+    let on_nominal = |te: &hir::TypeExpr| matches!(te, hir::TypeExpr::App { ctor: hir::TypeCtor::Nominal(n), .. } if *n == name);
     for iv in body.node_index().iter() {
         // A `Mob?` annotation is ONE node whose TypeExpr is Nullable(inner)
         // with no separate node for the inner nominal -- unwrap before the
@@ -2110,9 +2196,7 @@ fn generic_param_at(
         hir::TypeExpr::Generic(..) => Some((tmid, idx)),
         // `T?` lowers to one node whose slot is a fresh `Nullable` wrapping
         // the shared generic; the name still leads the span.
-        hir::TypeExpr::Nullable(ii)
-            if matches!(m.ty_arena[ii], hir::TypeExpr::Generic(..)) =>
-        {
+        hir::TypeExpr::Nullable(ii) if matches!(m.ty_arena[ii], hir::TypeExpr::Generic(..)) => {
             Some((tmid, ii))
         }
         _ => None,
@@ -2155,8 +2239,8 @@ fn generic_param_references(ws: &Workspace, gmid: ModuleId, gidx: Idx<hir::TypeE
             if tmid != gmid {
                 continue;
             }
-            let hits = idx == gidx
-                || matches!(m.ty_arena[idx], hir::TypeExpr::Nullable(ii) if ii == gidx);
+            let hits =
+                idx == gidx || matches!(m.ty_arena[idx], hir::TypeExpr::Nullable(ii) if ii == gidx);
             if hits {
                 push(Span {
                     file: m.file,
@@ -2265,11 +2349,21 @@ fn param_named_arg_sites<'t>(
     offset: usize,
     text_of: TextOf<'_, 't>,
 ) -> Vec<RefSite> {
-    let Some(module) = ws.modules.get(mid.index()) else { return Vec::new() };
-    let Some(owner) = module.body_at(offset) else { return Vec::new() };
-    let hir::BodyOwner::Function(target_fid) = owner else { return Vec::new() };
-    let Some(body) = module.bodies.get(&owner) else { return Vec::new() };
-    let Some(b) = binding_at(body, offset) else { return Vec::new() };
+    let Some(module) = ws.modules.get(mid.index()) else {
+        return Vec::new();
+    };
+    let Some(owner) = module.body_at(offset) else {
+        return Vec::new();
+    };
+    let hir::BodyOwner::Function(target_fid) = owner else {
+        return Vec::new();
+    };
+    let Some(body) = module.bodies.get(&owner) else {
+        return Vec::new();
+    };
+    let Some(b) = binding_at(body, offset) else {
+        return Vec::new();
+    };
     if body.binding_arena[b].kind != hir::BindingKind::Param
         || !body.param_bindings.into_iter().any(|p| p == b)
     {
@@ -2279,9 +2373,13 @@ fn param_named_arg_sites<'t>(
 
     let mut out = Vec::new();
     for (cm, inf) in ws.inferences_iter() {
-        let Some(cmod) = ws.modules.get(cm.index()) else { continue };
+        let Some(cmod) = ws.modules.get(cm.index()) else {
+            continue;
+        };
         for (cowner, bi) in inf.per_fn.iter() {
-            let Some(cbody) = cmod.bodies.get(cowner) else { continue };
+            let Some(cbody) = cmod.bodies.get(cowner) else {
+                continue;
+            };
             for (call_idx, (rmid, rfid)) in bi.resolved_overload_calls.iter() {
                 if !(*rmid == mid && *rfid == target_fid) {
                     continue;
@@ -2295,8 +2393,12 @@ fn param_named_arg_sites<'t>(
                     if cbody.arg_names.get(&a) != Some(&pname) {
                         continue;
                     }
-                    let Some(asp) = cbody.expr_spans.get(a) else { continue };
-                    let Some(text) = text_of(asp.file.as_str()) else { continue };
+                    let Some(asp) = cbody.expr_spans.get(a) else {
+                        continue;
+                    };
+                    let Some(text) = text_of(asp.file.as_str()) else {
+                        continue;
+                    };
                     if let Some(span) =
                         named_label_before(text, asp.offset_range.0, pname.as_str(), asp)
                     {
@@ -2369,7 +2471,13 @@ fn ident_span_in(text: &str, start: usize, end: usize, ident: &str, like: &Span)
     ident_span_where(text, start, end, ident, like, false)
 }
 
-fn decl_name_span_in(text: &str, start: usize, end: usize, ident: &str, like: &Span) -> Option<Span> {
+fn decl_name_span_in(
+    text: &str,
+    start: usize,
+    end: usize,
+    ident: &str,
+    like: &Span,
+) -> Option<Span> {
     ident_span_where(text, start, end, ident, like, true)
 }
 
@@ -2539,7 +2647,9 @@ fn function_references_by_name<'t>(
                             ) else {
                                 continue;
                             };
-                            let Some(text) = text_of(sp.file.as_str()) else { continue };
+                            let Some(text) = text_of(sp.file.as_str()) else {
+                                continue;
+                            };
                             if let Some(span) = ident_span_in(
                                 text,
                                 rsp.offset_range.1,
@@ -2713,7 +2823,10 @@ fn render_type_expr(ast: &Ast, idx: skull_parser::Idx<skull_parser::TypeExprData
     use skull_parser::TypeExprKind as K;
     let te = ast.te(&idx);
     let join = |xs: &[skull_parser::Idx<skull_parser::TypeExprData>]| {
-        xs.iter().map(|x| render_type_expr(ast, *x)).collect::<Vec<_>>().join(", ")
+        xs.iter()
+            .map(|x| render_type_expr(ast, *x))
+            .collect::<Vec<_>>()
+            .join(", ")
     };
     let base = match &te.kind {
         K::Any => "any".to_string(),
@@ -2731,7 +2844,11 @@ fn render_type_expr(ast: &Ast, idx: skull_parser::Idx<skull_parser::TypeExprData
             let root = if path.from_root { "::" } else { "" };
             format!(
                 "{root}{}",
-                path.segments.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join("::")
+                path.segments
+                    .iter()
+                    .map(|s| s.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join("::")
             )
         }
         K::Array(el) => format!("[{}]", render_type_expr(ast, *el)),
@@ -2739,7 +2856,11 @@ fn render_type_expr(ast: &Ast, idx: skull_parser::Idx<skull_parser::TypeExprData
             let root = if ctor.from_root { "::" } else { "" };
             format!(
                 "{root}{}<{}>",
-                ctor.segments.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join("::"),
+                ctor.segments
+                    .iter()
+                    .map(|s| s.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join("::"),
                 join(args)
             )
         }
@@ -2811,13 +2932,15 @@ pub fn locals_in_scope(
     for (b_idx, binding) in body.binding_arena.iter() {
         let in_scope = match binding.kind {
             hir::BindingKind::Param => true,
-            hir::BindingKind::Let | hir::BindingKind::Static | hir::BindingKind::Fn => match init_end.get(&b_idx) {
-                Some(end) => *end <= offset,
-                None => body
-                    .binding_spans
-                    .get(b_idx)
-                    .is_some_and(|s| s.offset_range.1 <= offset),
-            },
+            hir::BindingKind::Let | hir::BindingKind::Static | hir::BindingKind::Fn => {
+                match init_end.get(&b_idx) {
+                    Some(end) => *end <= offset,
+                    None => body
+                        .binding_spans
+                        .get(b_idx)
+                        .is_some_and(|s| s.offset_range.1 <= offset),
+                }
+            }
         };
         if !in_scope {
             continue;
@@ -2991,7 +3114,12 @@ pub(crate) fn struct_members_of_receiver_expr(
     ws: &Workspace,
     mid: ModuleId,
     recv_end: usize,
-) -> Option<(Vec<(String, String, Option<TyId>)>, Ustr, Option<String>, Option<Ustr>)> {
+) -> Option<(
+    Vec<(String, String, Option<TyId>)>,
+    Ustr,
+    Option<String>,
+    Option<Ustr>,
+)> {
     let inf = ws.inference(mid)?;
     let ta = bone_semantic::query::type_at(ws, mid, inf, recv_end.checked_sub(1)?)?;
     let (fields, sname) = struct_fields_of_ty(ws, ta.body, ta.ty)?;
@@ -3083,10 +3211,16 @@ fn struct_app_args(ws: &Workspace, bi: &BodyInference, ty: TyId) -> Option<(Ustr
 /// where the FieldRef owner `T` binds through the receiver's `Entity<T>`.
 fn sole_type_arg_struct(ws: &Workspace, bi: Option<&BodyInference>, ty: TyId) -> Option<Ustr> {
     match deref_ty(ws, bi, ty)? {
-        hir::TypeExpr::App { ctor: hir::TypeCtor::Nominal(_), params } if params.len() == 1 => {
+        hir::TypeExpr::App {
+            ctor: hir::TypeCtor::Nominal(_),
+            params,
+        } if params.len() == 1 => {
             let arg = ty.with_idx(params.into_iter().next()?);
             match deref_ty(ws, bi, arg)? {
-                hir::TypeExpr::App { ctor: hir::TypeCtor::Nominal(n), .. } => Some(*n),
+                hir::TypeExpr::App {
+                    ctor: hir::TypeCtor::Nominal(n),
+                    ..
+                } => Some(*n),
                 _ => None,
             }
         }
@@ -3128,7 +3262,10 @@ fn deref_ty<'a>(
 /// recover the real type from the binding when they see it -- see
 /// `var_binding_ty_at`.
 pub(crate) fn ty_is_unit(ws: &Workspace, bi: Option<&BodyInference>, ty: TyId) -> bool {
-    matches!(deref_ty(ws, bi, ty), Some(hir::TypeExpr::Builtin(hir::BuiltinTy::Unit)))
+    matches!(
+        deref_ty(ws, bi, ty),
+        Some(hir::TypeExpr::Builtin(hir::BuiltinTy::Unit))
+    )
 }
 
 /// The declared type of a place variable at `offset`, read from its binding. A
@@ -3347,7 +3484,11 @@ fn iter_element_struct(ws: &Workspace, body: &Body, iter: Idx<hir::Expr>) -> Opt
 /// If `b_idx` is bound by a `match` arm pattern (`Opt::Some(p)` / record
 /// destructure), the type the variant's payload gives it. Structural -- reads
 /// the enum def's `VariantPayload`, no inference.
-fn match_pattern_binding_ty(ws: &Workspace, body: &Body, b_idx: Idx<hir::BindingInfo>) -> Option<TyId> {
+fn match_pattern_binding_ty(
+    ws: &Workspace,
+    body: &Body,
+    b_idx: Idx<hir::BindingInfo>,
+) -> Option<TyId> {
     for (_, arm) in body.match_arm_arena.iter() {
         if let Some(ty) = pattern_binding_ty(ws, body, arm.pattern, b_idx) {
             return Some(ty);
@@ -3438,7 +3579,11 @@ fn pat_variant_hover(
 ) -> Option<(String, Span)> {
     use skull_parser::Pattern;
     match pat {
-        Pattern::EnumVariant { enum_name, variant_name, args } => {
+        Pattern::EnumVariant {
+            enum_name,
+            variant_name,
+            args,
+        } => {
             if let Some(hit) = variant_head_hover(ws, enum_name, variant_name, offset) {
                 return Some(hit);
             }
@@ -3448,11 +3593,18 @@ fn pat_variant_hover(
         // An enum record-variant pattern (`E::B { .. }`); a bare struct head
         // (`Point { .. }`) resolves to `None` here and falls through to the
         // struct-def hover in `hover_record_pat`.
-        Pattern::Record { enum_name, name: Some(variant_name), fields, .. } => {
+        Pattern::Record {
+            enum_name,
+            name: Some(variant_name),
+            fields,
+            ..
+        } => {
             if let Some(hit) = variant_head_hover(ws, enum_name, variant_name, offset) {
                 return Some(hit);
             }
-            fields.iter().find_map(|(_, sub)| pat_variant_hover(ws, sub, offset))
+            fields
+                .iter()
+                .find_map(|(_, sub)| pat_variant_hover(ws, sub, offset))
         }
         Pattern::Tuple(ps) | Pattern::Or(ps) => {
             ps.iter().find_map(|sub| pat_variant_hover(ws, sub, offset))
@@ -3554,18 +3706,29 @@ pub fn enum_variant_pattern_def(
 fn pat_variant_def(ws: &Workspace, pat: &skull_parser::Pattern, offset: usize) -> Option<Span> {
     use skull_parser::Pattern;
     match pat {
-        Pattern::EnumVariant { enum_name, variant_name, args } => {
+        Pattern::EnumVariant {
+            enum_name,
+            variant_name,
+            args,
+        } => {
             if let Some(hit) = variant_head_def(ws, enum_name, variant_name, offset) {
                 return Some(hit);
             }
             args.as_ref()
                 .and_then(|ps| ps.iter().find_map(|sub| pat_variant_def(ws, sub, offset)))
         }
-        Pattern::Record { enum_name, name: Some(variant_name), fields, .. } => {
+        Pattern::Record {
+            enum_name,
+            name: Some(variant_name),
+            fields,
+            ..
+        } => {
             if let Some(hit) = variant_head_def(ws, enum_name, variant_name, offset) {
                 return Some(hit);
             }
-            fields.iter().find_map(|(_, sub)| pat_variant_def(ws, sub, offset))
+            fields
+                .iter()
+                .find_map(|(_, sub)| pat_variant_def(ws, sub, offset))
         }
         Pattern::Tuple(ps) | Pattern::Or(ps) => {
             ps.iter().find_map(|sub| pat_variant_def(ws, sub, offset))
@@ -3574,7 +3737,11 @@ fn pat_variant_def(ws: &Workspace, pat: &skull_parser::Pattern, offset: usize) -
     }
 }
 
-fn enum_def_for_variant(ws: &Workspace, enum_name: Option<Ustr>, variant: Ustr) -> Option<&hir::EnumDef> {
+fn enum_def_for_variant(
+    ws: &Workspace,
+    enum_name: Option<Ustr>,
+    variant: Ustr,
+) -> Option<&hir::EnumDef> {
     for m in ws.modules.iter() {
         if let Some(name) = enum_name {
             if let Some(idx) = m.enums_by_name.get(&name) {
@@ -3592,7 +3759,12 @@ fn enum_def_for_variant(ws: &Workspace, enum_name: Option<Ustr>, variant: Ustr) 
 }
 
 /// Type of a tuple-variant payload slot (`Opt::Some(Point)` -> slot 0 = Point).
-fn variant_tuple_field_ty(ws: &Workspace, enum_name: Option<Ustr>, variant: Ustr, pos: usize) -> Option<TyId> {
+fn variant_tuple_field_ty(
+    ws: &Workspace,
+    enum_name: Option<Ustr>,
+    variant: Ustr,
+    pos: usize,
+) -> Option<TyId> {
     let edef = enum_def_for_variant(ws, enum_name, variant)?;
     let v = edef.variants.iter().find(|v| v.name == variant)?;
     match &v.payload {
@@ -3602,7 +3774,12 @@ fn variant_tuple_field_ty(ws: &Workspace, enum_name: Option<Ustr>, variant: Ustr
 }
 
 /// Type of a named field in a record-variant payload.
-fn variant_record_field_ty(ws: &Workspace, enum_name: Option<Ustr>, variant: Option<Ustr>, field: Ustr) -> Option<TyId> {
+fn variant_record_field_ty(
+    ws: &Workspace,
+    enum_name: Option<Ustr>,
+    variant: Option<Ustr>,
+    field: Ustr,
+) -> Option<TyId> {
     let variant = variant?;
     let edef = enum_def_for_variant(ws, enum_name, variant)?;
     let v = edef.variants.iter().find(|v| v.name == variant)?;
@@ -3771,7 +3948,11 @@ fn receiver_head_ty<'a>(
         .global_by_name
         .get(&name)
         .map(|g| module.globals[*g].ty)
-        .or_else(|| ws.modules.iter().find_map(|m| m.global_by_name.get(&name).map(|g| m.globals[*g].ty)))?;
+        .or_else(|| {
+            ws.modules
+                .iter()
+                .find_map(|m| m.global_by_name.get(&name).map(|g| m.globals[*g].ty))
+        })?;
     Some((gty, None))
 }
 
@@ -3779,7 +3960,12 @@ fn receiver_head_ty<'a>(
 /// the arena the tuple's TyId indexes (`None` for a `Static` declared/global
 /// type). `None` when `ty` isn't a tuple, `seg` isn't a valid index, or the
 /// element isn't nominal.
-fn tuple_elem_struct(ws: &Workspace, bi: Option<&BodyInference>, ty: TyId, seg: &str) -> Option<Ustr> {
+fn tuple_elem_struct(
+    ws: &Workspace,
+    bi: Option<&BodyInference>,
+    ty: TyId,
+    seg: &str,
+) -> Option<Ustr> {
     // A non-numeric member name is a normal non-match for a tuple projection.
     let n: usize = seg.parse().ok()?;
     match deref_ty(ws, bi, ty)? {
@@ -3796,8 +3982,14 @@ fn tuple_elem_struct(ws: &Workspace, bi: Option<&BodyInference>, ty: TyId, seg: 
 /// (which derefs through a `Body` instead).
 fn nominal_name_of_ty(ws: &Workspace, bi: Option<&BodyInference>, ty: TyId) -> Option<Ustr> {
     match deref_ty(ws, bi, ty)? {
-        hir::TypeExpr::App { ctor: hir::TypeCtor::Nominal(name), .. } => Some(*name),
-        hir::TypeExpr::App { ctor: hir::TypeCtor::Array, .. } => Some(Ustr::from("Vec")),
+        hir::TypeExpr::App {
+            ctor: hir::TypeCtor::Nominal(name),
+            ..
+        } => Some(*name),
+        hir::TypeExpr::App {
+            ctor: hir::TypeCtor::Array,
+            ..
+        } => Some(Ustr::from("Vec")),
         hir::TypeExpr::Nullable(inner) => nominal_name_of_ty(ws, bi, ty.with_idx(*inner)),
         _ => None,
     }
@@ -3810,7 +4002,9 @@ fn nominal_name_of_ty(ws: &Workspace, bi: Option<&BodyInference>, ty: TyId) -> O
 fn field_hop_struct(ws: &Workspace, cur: Ustr, seg: &str) -> Option<Ustr> {
     if let Some(nt) = newtype_def_by_name(ws, cur) {
         // A single-wrapped newtype exposes its inner value as `.0`.
-        return (seg == "0").then_some(()).and_then(|_| struct_name_of_ty(ws, None, nt.wrapped));
+        return (seg == "0")
+            .then_some(())
+            .and_then(|_| struct_name_of_ty(ws, None, nt.wrapped));
     }
     let sdef = struct_def_by_name(ws, cur)?;
     let field = sdef.fields.iter().find(|f| f.name.as_str() == seg)?;
@@ -4039,7 +4233,10 @@ pub fn struct_field_fn_return_type(ws: &Workspace, name: &str, field: &str) -> O
 /// are lowered module items). Typed twin of `struct_fields_by_name`'s render.
 pub fn struct_field_ty(ws: &Workspace, name: &str, field: &str) -> Option<TyId> {
     let sdef = struct_def_by_name(ws, Ustr::from(name))?;
-    sdef.fields.iter().find(|f| f.name.as_str() == field).map(|f| f.ty)
+    sdef.fields
+        .iter()
+        .find(|f| f.name.as_str() == field)
+        .map(|f| f.ty)
 }
 
 /// TyId twin of `struct_field_fn_return_type`: the RETURN TyId of a
@@ -4057,7 +4254,11 @@ pub fn struct_field_fn_return_ty(ws: &Workspace, name: &str, field: &str) -> Opt
     }
 }
 
-pub fn variant_record_fields(ws: &Workspace, enum_name: &str, variant: &str) -> Vec<(String, String)> {
+pub fn variant_record_fields(
+    ws: &Workspace,
+    enum_name: &str,
+    variant: &str,
+) -> Vec<(String, String)> {
     let ename = Ustr::from(enum_name);
     let vname = Ustr::from(variant);
     for m in ws.modules.iter() {
@@ -4102,7 +4303,9 @@ pub fn match_arms_fill(
         if !matches!(expr, hir::Expr::Match { .. }) {
             continue;
         }
-        let Some(sp) = body.expr_spans.get(e) else { continue };
+        let Some(sp) = body.expr_spans.get(e) else {
+            continue;
+        };
         let (s, en) = sp.offset_range;
         if s <= offset && offset < en {
             let len = en - s;
@@ -4113,7 +4316,10 @@ pub fn match_arms_fill(
     }
     let (_, e) = best?;
     let (enum_name, missing) = match_missing_variants(ws, body, bi, e)?;
-    let arms_text: Vec<String> = missing.iter().map(|v| format_variant_arm(enum_name, v)).collect();
+    let arms_text: Vec<String> = missing
+        .iter()
+        .map(|v| format_variant_arm(enum_name, v))
+        .collect();
     Some((*body.expr_spans.get(e)?, arms_text))
 }
 
@@ -4189,7 +4395,9 @@ pub fn struct_fields_fill(
         if !matches!(expr, hir::Expr::StructLiteral { .. }) {
             continue;
         }
-        let Some(sp) = body.expr_spans.get(e) else { continue };
+        let Some(sp) = body.expr_spans.get(e) else {
+            continue;
+        };
         let (s, en) = sp.offset_range;
         if s <= offset && offset < en {
             let len = en - s;
@@ -4199,7 +4407,12 @@ pub fn struct_fields_fill(
         }
     }
     let (_, e) = best?;
-    let hir::Expr::StructLiteral { name, fields, bases } = &body.expr_arena[e] else {
+    let hir::Expr::StructLiteral {
+        name,
+        fields,
+        bases,
+    } = &body.expr_arena[e]
+    else {
         return None;
     };
 
@@ -4356,13 +4569,19 @@ pub fn generate_function(
     // inference (an `Unresolved` name not promoted into `resolved_overload_calls`).
     let mut best: Option<(usize, Idx<hir::Expr>)> = None;
     for (e, expr) in body.expr_arena.iter() {
-        let hir::Expr::Call { callee: hir::Callee::Unresolved { .. }, .. } = expr else {
+        let hir::Expr::Call {
+            callee: hir::Callee::Unresolved { .. },
+            ..
+        } = expr
+        else {
             continue;
         };
         if bi.resolved_overload_calls.contains_key(&e) {
             continue;
         }
-        let Some(sp) = body.expr_spans.get(e) else { continue };
+        let Some(sp) = body.expr_spans.get(e) else {
+            continue;
+        };
         let (s, en) = sp.offset_range;
         if s <= offset && offset < en {
             let len = en - s;
@@ -4372,8 +4591,11 @@ pub fn generate_function(
         }
     }
     let (_, e) = best?;
-    let hir::Expr::Call { callee: hir::Callee::Unresolved { name, .. }, args, .. } =
-        &body.expr_arena[e]
+    let hir::Expr::Call {
+        callee: hir::Callee::Unresolved { name, .. },
+        args,
+        ..
+    } = &body.expr_arena[e]
     else {
         return None;
     };
@@ -4387,7 +4609,12 @@ pub fn generate_function(
     let params: Vec<(String, String)> = args
         .clone()
         .enumerate()
-        .map(|(i, arg)| (arg_param_name(body, arg, i), arg_param_type(ws, bi, body, arg)))
+        .map(|(i, arg)| {
+            (
+                arg_param_name(body, arg, i),
+                arg_param_type(ws, bi, body, arg),
+            )
+        })
         .collect();
 
     // Return type: a concrete inferred result, else the annotation on the `let`
@@ -4475,9 +4702,11 @@ fn binding_for_value(body: &Body, value: Idx<hir::Expr>) -> Option<Idx<hir::Bind
 
 /// True if any module declares a function named `name`.
 fn function_name_exists(ws: &Workspace, name: Ustr) -> bool {
-    ws.modules
-        .iter()
-        .any(|m| m.functions_by_name.get(&name).is_some_and(|l| !l.is_empty()))
+    ws.modules.iter().any(|m| {
+        m.functions_by_name
+            .get(&name)
+            .is_some_and(|l| !l.is_empty())
+    })
 }
 
 /// Render `ty` to a user type string, but only if it's a CONCRETE type safe to
@@ -4536,7 +4765,12 @@ fn format_variant_arm(enum_name: Ustr, v: &hir::EnumVariantDef) -> String {
     let pat = match &v.payload {
         hir::VariantPayload::Unit => format!("{}::{}", enum_name, v.name),
         hir::VariantPayload::Tuple(tys) => {
-            format!("{}::{}({})", enum_name, v.name, vec!["_"; tys.len()].join(", "))
+            format!(
+                "{}::{}({})",
+                enum_name,
+                v.name,
+                vec!["_"; tys.len()].join(", ")
+            )
         }
         hir::VariantPayload::Record(_) => format!("{}::{} {{ .. }}", enum_name, v.name),
     };
@@ -4622,10 +4856,19 @@ pub(crate) enum VisibleBindingKind {
         takes_params: bool,
         multiple_overloads: bool,
     },
-    Struct { def_file: ustr::Ustr },
-    Enum { def_file: ustr::Ustr, variants: Vec<VisibleEnumVariant> },
-    Newtype { def_file: ustr::Ustr },
-    Global { def_file: ustr::Ustr },
+    Struct {
+        def_file: ustr::Ustr,
+    },
+    Enum {
+        def_file: ustr::Ustr,
+        variants: Vec<VisibleEnumVariant>,
+    },
+    Newtype {
+        def_file: ustr::Ustr,
+    },
+    Global {
+        def_file: ustr::Ustr,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -4701,24 +4944,24 @@ fn v1_scope_entries(
     };
     let mut scratch = Vec::new();
     let mut test_path_cache: FxHashMap<Ustr, bool> = FxHashMap::default();
-    let mut emit_binding = |binding: &VisibleBinding,
-                            test_path_cache: &mut FxHashMap<Ustr, bool>| {
-        emit_visible_binding_entries(
-            ws,
-            binding,
-            Some(frag),
-            expr_position,
-            pfx,
-            show_private,
-            test_path_cache,
-            &mut scratch,
-        );
-        for e in scratch.drain(..) {
-            if seen.insert(e.name) {
-                out.push(e);
+    let mut emit_binding =
+        |binding: &VisibleBinding, test_path_cache: &mut FxHashMap<Ustr, bool>| {
+            emit_visible_binding_entries(
+                ws,
+                binding,
+                Some(frag),
+                expr_position,
+                pfx,
+                show_private,
+                test_path_cache,
+                &mut scratch,
+            );
+            for e in scratch.drain(..) {
+                if seen.insert(e.name) {
+                    out.push(e);
+                }
             }
-        }
-    };
+        };
     if let Some(bindings) = visible_bindings {
         for binding in bindings {
             if admit(binding.name.as_str()) {
@@ -4727,14 +4970,9 @@ fn v1_scope_entries(
         }
     } else {
         for (name, key) in crate::modules_scope::bound_names(ws, frag, admit) {
-            if let Some(binding) = resolve_visible_binding(
-                ws,
-                Some(frag),
-                name,
-                key,
-                None,
-                &mut test_path_cache,
-            ) {
+            if let Some(binding) =
+                resolve_visible_binding(ws, Some(frag), name, key, None, &mut test_path_cache)
+            {
                 emit_binding(&binding, &mut test_path_cache);
             }
         }
@@ -4774,7 +5012,9 @@ pub(crate) fn resolve_visible_binding(
             multiple_overloads: function_family.is_some_and(|functions| functions.len() > 1),
         }
     } else if let Some(sid) = ws.struct_by_name.get(&key) {
-        VisibleBindingKind::Struct { def_file: ws.module(sid.module).file }
+        VisibleBindingKind::Struct {
+            def_file: ws.module(sid.module).file,
+        }
     } else if let Some(eid) = ws.enums_by_name.get(&key) {
         let def_file = ws.module(eid.module).file;
         let variants = ws.module(eid.module).enums[eid.def]
@@ -4791,7 +5031,9 @@ pub(crate) fn resolve_visible_binding(
             .collect();
         VisibleBindingKind::Enum { def_file, variants }
     } else if let Some(nid) = ws.newtypes_by_name.get(&key) {
-        VisibleBindingKind::Newtype { def_file: ws.module(nid.module).file }
+        VisibleBindingKind::Newtype {
+            def_file: ws.module(nid.module).file,
+        }
     } else if ws.globals_by_name.contains_key(&key) {
         let def_file = global_def_file.unwrap_or_else(|| {
             ws.modules
@@ -4807,7 +5049,12 @@ pub(crate) fn resolve_visible_binding(
     let file_is_test = *test_path_cache
         .entry(def_file)
         .or_insert_with(|| is_test_path(def_file.as_str()));
-    Some(VisibleBinding { name, key, kind, file_is_test })
+    Some(VisibleBinding {
+        name,
+        key,
+        kind,
+        file_is_test,
+    })
 }
 
 /// Emit one resolved binding using the existing prefix, soft-private, enum,
@@ -4932,7 +5179,9 @@ pub(crate) fn key_entries_in_scope(
     out: &mut Vec<CompletionEntry>,
     test_path_cache: &mut FxHashMap<Ustr, bool>,
 ) {
-    if let Some(binding) = resolve_visible_binding(ws, frag, name, key, global_def_file, test_path_cache) {
+    if let Some(binding) =
+        resolve_visible_binding(ws, frag, name, key, global_def_file, test_path_cache)
+    {
         emit_visible_binding_entries(
             ws,
             &binding,
@@ -4954,7 +5203,10 @@ pub fn completion(
     prefix: &str,
     expr_position: bool,
 ) -> Vec<CompletionEntry> {
-    let req_file = ws.modules.get(mid.index()).map_or_else(ustr::Ustr::default, |m| m.file);
+    let req_file = ws
+        .modules
+        .get(mid.index())
+        .map_or_else(ustr::Ustr::default, |m| m.file);
     let fragment_file = crate::modules_scope::fragment(ws, req_file).map(|_| req_file);
     let mut entries =
         completion_with_visible_bindings(ws, mid, inf, offset, prefix, expr_position, None);
@@ -4965,12 +5217,8 @@ pub fn completion(
         match entry.kind {
             SymCat::Function => {
                 if let (Some(fragment_file), Some(key)) = (fragment_file, entry.signature_key) {
-                    entry.detail = render_deferred_signature(
-                        ws,
-                        Some(fragment_file),
-                        key,
-                        entry.name,
-                    );
+                    entry.detail =
+                        render_deferred_signature(ws, Some(fragment_file), key, entry.name);
                 }
             }
             SymCat::Global => {
@@ -5027,7 +5275,10 @@ pub(crate) fn completion_with_visible_bindings(
 
     // Locals/params in scope shadow the global namespace -- emit them first and
     // let the shared `seen` set suppress a same-named global.
-    let req_file = ws.modules.get(mid.index()).map_or_else(ustr::Ustr::default, |m| m.file);
+    let req_file = ws
+        .modules
+        .get(mid.index())
+        .map_or_else(ustr::Ustr::default, |m| m.file);
     if expr_position {
         let locals = locals_in_scope(ws, mid, inf, offset);
         // Scope recency: rank by declaration position DESC (closest above
@@ -5098,7 +5349,9 @@ pub(crate) fn completion_with_visible_bindings(
             if !seen.insert(*name) {
                 continue;
             }
-            let first = fns.first().map(|(fmid, fid)| &ws.modules[fmid.index()].functions[*fid]);
+            let first = fns
+                .first()
+                .map(|(fmid, fid)| &ws.modules[fmid.index()].functions[*fid]);
             out.push(CompletionEntry {
                 name: *name,
                 kind: SymCat::Function,
@@ -5117,7 +5370,18 @@ pub(crate) fn completion_with_visible_bindings(
         }
         for name in m.struct_by_name.keys() {
             if matches(name.as_str()) && seen.insert(*name) {
-                out.push(CompletionEntry { name: *name, kind: SymCat::Struct, detail: None, signature_key: None, ty: None, takes_params: false, variant_shape: None, test_scoped: scoped(name.as_str()), def_file: m.file, rec: 0 });
+                out.push(CompletionEntry {
+                    name: *name,
+                    kind: SymCat::Struct,
+                    detail: None,
+                    signature_key: None,
+                    ty: None,
+                    takes_params: false,
+                    variant_shape: None,
+                    test_scoped: scoped(name.as_str()),
+                    def_file: m.file,
+                    rec: 0,
+                });
             }
         }
         // A user enum in an expression slot is offered as its qualified
@@ -5137,8 +5401,7 @@ pub(crate) fn completion_with_visible_bindings(
                     let vname = v.name.as_str();
                     // Same soft-private gate as `matches`, against the
                     // enum AND variant names.
-                    if (name.as_str().starts_with('_') || vname.starts_with('_')) && !show_private
-                    {
+                    if (name.as_str().starts_with('_') || vname.starts_with('_')) && !show_private {
                         continue;
                     }
                     let hit = pfx.is_empty()
@@ -5160,12 +5423,34 @@ pub(crate) fn completion_with_visible_bindings(
                     }
                 }
             } else if matches(name.as_str()) && seen.insert(*name) {
-                out.push(CompletionEntry { name: *name, kind: SymCat::Enum, detail: None, signature_key: None, ty: None, takes_params: false, variant_shape: None, test_scoped: scoped(name.as_str()), def_file: m.file, rec: 0 });
+                out.push(CompletionEntry {
+                    name: *name,
+                    kind: SymCat::Enum,
+                    detail: None,
+                    signature_key: None,
+                    ty: None,
+                    takes_params: false,
+                    variant_shape: None,
+                    test_scoped: scoped(name.as_str()),
+                    def_file: m.file,
+                    rec: 0,
+                });
             }
         }
         for name in m.newtypes_by_name.keys() {
             if matches(name.as_str()) && seen.insert(*name) {
-                out.push(CompletionEntry { name: *name, kind: SymCat::Newtype, detail: None, signature_key: None, ty: None, takes_params: false, variant_shape: None, test_scoped: scoped(name.as_str()), def_file: m.file, rec: 0 });
+                out.push(CompletionEntry {
+                    name: *name,
+                    kind: SymCat::Newtype,
+                    detail: None,
+                    signature_key: None,
+                    ty: None,
+                    takes_params: false,
+                    variant_shape: None,
+                    test_scoped: scoped(name.as_str()),
+                    def_file: m.file,
+                    rec: 0,
+                });
             }
         }
         for (name, gidx) in m.global_by_name.iter() {
@@ -5246,8 +5531,18 @@ pub(crate) fn completion_with_visible_bindings(
 /// Type-name builtins surfaced in a type slot (see the call site). The generic
 /// builtins (`Coroutine`, `Map`) and the scalar primitives have no workspace
 /// name-index entry.
-const BUILTIN_TYPE_NAMES: &[&str] =
-    &["Coroutine", "Map", "int", "uint", "float", "f32", "f64", "string", "bool", "any"];
+const BUILTIN_TYPE_NAMES: &[&str] = &[
+    "Coroutine",
+    "Map",
+    "int",
+    "uint",
+    "float",
+    "f32",
+    "f64",
+    "string",
+    "bool",
+    "any",
+];
 
 /// Whether the body enclosing `offset` is a `co fn`. Drives `yield`/`await`
 /// keyword completion (and -- in the facade -- coroutine-fn ranking after a
@@ -5264,7 +5559,11 @@ fn enclosing_is_coroutine(ws: &Workspace, mid: ModuleId, offset: usize) -> bool 
 
 /// Render `fn name(p: T, ...) -> R` from a HIR function (static types, no body
 /// inference context needed).
-pub(crate) fn render_fn_signature(ws: &Workspace, name: ustr::Ustr, f: &bone_semantic::hir::Function) -> String {
+pub(crate) fn render_fn_signature(
+    ws: &Workspace,
+    name: ustr::Ustr,
+    f: &bone_semantic::hir::Function,
+) -> String {
     let params: Vec<String> = f
         .param_decls
         .iter()
@@ -5292,7 +5591,11 @@ pub(crate) fn render_deferred_signature(
         None => None,
     };
     let (mid, fid) = first_callable_in_scope(ws, frag, key)?;
-    Some(render_fn_signature(ws, display_name, &ws.module(mid).functions[fid]))
+    Some(render_fn_signature(
+        ws,
+        display_name,
+        &ws.module(mid).functions[fid],
+    ))
 }
 
 /// File-path-keyed source map (the LSP's per-project `texts`), threaded into the
@@ -5313,7 +5616,9 @@ pub(crate) fn render_fn_signature_with_defaults(
 ) -> String {
     let module = &ws.modules[fmid.index()];
     let f = &module.functions[fid];
-    let body = module.bodies.get(&bone_semantic::hir::BodyOwner::Function(fid));
+    let body = module
+        .bodies
+        .get(&bone_semantic::hir::BodyOwner::Function(fid));
     let params: Vec<String> = f
         .param_decls
         .iter()
@@ -5378,7 +5683,10 @@ pub(crate) fn fn_ctags_signatures(
             .map(|p| format!("{}: {}", p.name, ws.render(None, p.ty)))
             .collect();
         let returns = f.return_ty.map(|t| ws.render(None, t));
-        out.insert(f.span.offset_range.0, (format!("({})", params.join(", ")), returns));
+        out.insert(
+            f.span.offset_range.0,
+            (format!("({})", params.join(", ")), returns),
+        );
     }
     out
 }
@@ -5399,7 +5707,11 @@ pub fn document_symbols(ws: &Workspace, mid: ModuleId) -> Vec<SymbolEntry> {
 
     let mut out = Vec::new();
     let mut push = |name: ustr::Ustr, kind: SymCat, span: Span| {
-        out.push(SymbolEntry { name: name.to_string(), kind, span });
+        out.push(SymbolEntry {
+            name: name.to_string(),
+            kind,
+            span,
+        });
     };
 
     for (_, f) in m.functions.iter() {
@@ -5487,12 +5799,10 @@ pub fn signature_help(
             // concrete nominal (`rb.push()` on RingBuffer must not offer the
             // FlatVec/Vec `push`). Overloads with a generic/builtin first param
             // are kept -- they can still accept the receiver.
-            let recv_nominal = inf
-                .and_then(|inf| inf.per_fn.get(&owner))
-                .and_then(|bi| {
-                    let first = args.clone().next()?;
-                    nominal_name_of_ty(ws, Some(bi), *bi.expr_types.get(first)?)
-                });
+            let recv_nominal = inf.and_then(|inf| inf.per_fn.get(&owner)).and_then(|bi| {
+                let first = args.clone().next()?;
+                nominal_name_of_ty(ws, Some(bi), *bi.expr_types.get(first)?)
+            });
             let sigs = functions_named(ws, *name, sources, recv_nominal, frag);
             (!sigs.is_empty()).then_some((sigs, call_span))
         }
@@ -5629,7 +5939,12 @@ pub fn hole_info(
         .into_iter()
         .map(|(name, _kind, ty, _ty_id, _decl)| (name.to_string(), ty))
         .collect();
-    Some(HoleInfo { kind, ty, in_scope, span })
+    Some(HoleInfo {
+        kind,
+        ty,
+        in_scope,
+        span,
+    })
 }
 
 /// Every `?` hole in `ast`, each with its kind, solved/expected type (when
@@ -5680,7 +5995,12 @@ fn hole_kind_at(ast: &Ast, offset: usize) -> Option<(HoleKind, Span)> {
 /// chain. A type hole's `?` is a type annotation (`LocalTy`/`StaticTy` -> the
 /// inference var); an expression hole's `?` is an `Expr` (its `expr_types`
 /// entry, the fresh var coerced from context).
-fn type_at_offset(ws: &Workspace, mid: ModuleId, inf: &InferenceResult, offset: usize) -> Option<String> {
+fn type_at_offset(
+    ws: &Workspace,
+    mid: ModuleId,
+    inf: &InferenceResult,
+    offset: usize,
+) -> Option<String> {
     let module = ws.modules.get(mid.index())?;
     let owner = module.body_at(offset)?;
     let body = module.bodies.get(&owner)?;

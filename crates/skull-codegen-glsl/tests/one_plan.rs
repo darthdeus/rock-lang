@@ -27,7 +27,12 @@ static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
         .collect()
 });
 
-fn workspace(src: &str) -> (bone_semantic::inference::Workspace, bone_semantic::prelude::ModuleId) {
+fn workspace(
+    src: &str,
+) -> (
+    bone_semantic::inference::Workspace,
+    bone_semantic::prelude::ModuleId,
+) {
     let mut modules = STDLIB.clone();
     modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
@@ -35,7 +40,11 @@ fn workspace(src: &str) -> (bone_semantic::inference::Workspace, bone_semantic::
     (ws, mid)
 }
 
-fn fref(ws: &bone_semantic::inference::Workspace, mid: bone_semantic::prelude::ModuleId, name: &str) -> FuncRef {
+fn fref(
+    ws: &bone_semantic::inference::Workspace,
+    mid: bone_semantic::prelude::ModuleId,
+    name: &str,
+) -> FuncRef {
     skull_codegen_glsl::resolve_root(ws, mid, name).expect("shader root")
 }
 
@@ -51,18 +60,15 @@ fn entry_answers(src: &str, root: &str) -> (Result<(), String>, Result<(), Strin
     (checked, emitted)
 }
 
-fn pipeline_answers(
-    src: &str,
-    vert: &str,
-    frag: &str,
-) -> (Result<(), String>, Result<(), String>) {
+fn pipeline_answers(src: &str, vert: &str, frag: &str) -> (Result<(), String>, Result<(), String>) {
     let (ws, mid) = workspace(src);
     let checked =
         skull_codegen_glsl::check_pipeline_profile(&ws, fref(&ws, mid, vert), fref(&ws, mid, frag))
             .map_err(|e| e.message);
-    let emitted = skull_codegen_glsl::emit_shader_pipeline(&ws, mid, vert, frag, GlslProfile::Core330)
-        .map(|_| ())
-        .map_err(|e| e.message);
+    let emitted =
+        skull_codegen_glsl::emit_shader_pipeline(&ws, mid, vert, frag, GlslProfile::Core330)
+            .map(|_| ())
+            .map_err(|e| e.message);
     (checked, emitted)
 }
 
@@ -92,7 +98,10 @@ fn lone_vert(@attr a: QuadVert) -> PipeVary {
 #[test]
 fn a_standalone_vertex_entry_gets_one_answer() {
     let answers = entry_answers(STANDALONE_VERTEX, "lone_vert");
-    assert!(answers.1.is_err(), "the emitter accepted a standalone vertex entry");
+    assert!(
+        answers.1.is_err(),
+        "the emitter accepted a standalone vertex entry"
+    );
     assert_agree("standalone vertex", answers);
 }
 
@@ -112,7 +121,10 @@ fn bad_uniform_frag(uTexture: Sampler2D, @uniform u: GcU, tc: Vec2) -> Vec4 {
 }
 "#;
     let answers = entry_answers(src, "bad_uniform_frag");
-    assert!(answers.1.is_err(), "the emitter packed a non-value uniform group");
+    assert!(
+        answers.1.is_err(),
+        "the emitter packed a non-value uniform group"
+    );
     assert_agree("unpackable uniform group", answers);
 }
 
@@ -140,7 +152,10 @@ fn tex_frag(vary: PipeVary, @textures t: FragTex) -> Vec4 {
 }
 "#;
     let answers = pipeline_answers(src, "tex_vert", "tex_frag");
-    assert!(answers.1.is_err(), "the emitter accepted two different @textures groups");
+    assert!(
+        answers.1.is_err(),
+        "the emitter accepted two different @textures groups"
+    );
     assert_agree("pipeline texture-group mismatch", answers);
 }
 
@@ -166,7 +181,10 @@ fn eng_frag(vary: PipeVary, @engine e: FragEng) -> Vec4 {
 }
 "#;
     let answers = pipeline_answers(src, "eng_vert", "eng_frag");
-    assert!(answers.1.is_err(), "the emitter accepted two different @engine groups");
+    assert!(
+        answers.1.is_err(),
+        "the emitter accepted two different @engine groups"
+    );
     assert_agree("pipeline engine-group mismatch", answers);
 }
 
@@ -188,7 +206,10 @@ fn body_frag(uTexture: Sampler2D, tc: Vec2) -> Vec4 {
 }
 "#;
     let answers = entry_answers(src, "body_frag");
-    assert!(answers.1.is_err(), "the emitter accepted a string-bodied helper");
+    assert!(
+        answers.1.is_err(),
+        "the emitter accepted a string-bodied helper"
+    );
     assert_agree("string body helper", answers);
 }
 
@@ -205,7 +226,10 @@ fn foreign_frag(uTexture: Sampler2D, tc: Vec2) -> Vec4 {
 }
 "#;
     let answers = entry_answers(src, "foreign_frag");
-    assert!(answers.1.is_err(), "the emitter accepted a foreign-bodied helper");
+    assert!(
+        answers.1.is_err(),
+        "the emitter accepted a foreign-bodied helper"
+    );
     assert_agree("foreign helper", answers);
 }
 
@@ -248,7 +272,10 @@ fn stage_frag(vary: PipeVary) -> Vec4 {
 }
 "#;
     let answers = pipeline_answers(src, "stage_vert", "stage_frag");
-    assert!(answers.1.is_err(), "the emitter accepted a fragment builtin in the vertex stage");
+    assert!(
+        answers.1.is_err(),
+        "the emitter accepted a fragment builtin in the vertex stage"
+    );
     assert_agree("wrong-stage builtin", answers);
 }
 
@@ -290,7 +317,11 @@ fn good_pipe_frag(vary: PipeVary, @textures t: PipeTex) -> Vec4 {
 }
 "#;
     let answers = pipeline_answers(pipeline, "good_vert", "good_pipe_frag");
-    assert_eq!(answers.0, Ok(()), "a valid A2 pipeline was refused by the check");
+    assert_eq!(
+        answers.0,
+        Ok(()),
+        "a valid A2 pipeline was refused by the check"
+    );
     assert_agree("valid pipeline", answers);
 }
 
@@ -310,7 +341,11 @@ fn bool_match_frag(tc: Vec2) -> Vec4 {
 }
 "#;
     let answers = entry_answers(src, "bool_match_frag");
-    assert_eq!(answers.0, Ok(()), "a valid bool-match entry was refused by the check");
+    assert_eq!(
+        answers.0,
+        Ok(()),
+        "a valid bool-match entry was refused by the check"
+    );
     assert_agree("exhaustive bool-match entry", answers);
 
     for profile in [GlslProfile::Core330, GlslProfile::Es300] {
@@ -318,7 +353,10 @@ fn bool_match_frag(tc: Vec2) -> Vec4 {
         let out = skull_codegen_glsl::emit_shader_entry(&ws, mid, "bool_match_frag", profile)
             .expect("a valid bool-match entry must emit under every profile");
         for arm in ["= 10;", "= 20;"] {
-            assert!(out.contains(arm), "arm `{arm}` must survive under {profile:?}; got:\n{out}");
+            assert!(
+                out.contains(arm),
+                "arm `{arm}` must survive under {profile:?}; got:\n{out}"
+            );
         }
     }
 }
@@ -384,7 +422,10 @@ fn generic_frag(uTexture: Sampler2D, tc: Vec2) -> Vec4 {
 }
 fn main() { let a = rock_shader(generic_frag) }
 "#;
-    assert_agree("a generic helper at two instantiations", entry_answers(src, "generic_frag"));
+    assert_agree(
+        "a generic helper at two instantiations",
+        entry_answers(src, "generic_frag"),
+    );
 
     let (ws, mid) = workspace(src);
     let out = skull_codegen_glsl::emit_shader_entry(&ws, mid, "generic_frag", GlslProfile::Core330)
@@ -399,8 +440,14 @@ fn main() { let a = rock_shader(generic_frag) }
         2,
         "the two instantiations did not become two definitions: {defs:?}\n{out}"
     );
-    assert!(defs.iter().any(|d| d.starts_with("float passthrough")), "{defs:?}");
-    assert!(defs.iter().any(|d| d.starts_with("int passthrough")), "{defs:?}");
+    assert!(
+        defs.iter().any(|d| d.starts_with("float passthrough")),
+        "{defs:?}"
+    );
+    assert!(
+        defs.iter().any(|d| d.starts_with("int passthrough")),
+        "{defs:?}"
+    );
     // Each definition's own name is what its CALL SITE spells -- a specialized
     // callee and its definition cannot disagree, because both come off the key
     // lowering recorded at the site.
@@ -409,13 +456,21 @@ fn main() { let a = rock_shader(generic_frag) }
     // definition line contains its own name, so `out.contains(name)` is true
     // for any name that was emitted at all and proves nothing about a call.
     let entry_body = {
-        let start = out.find("vec4 generic_frag(").expect("the entry definition");
+        let start = out
+            .find("vec4 generic_frag(")
+            .expect("the entry definition");
         let rest = &out[start..];
         let end = rest.find("\n}\n").expect("the entry's closing brace");
         &rest[..end]
     };
     for d in &defs {
-        let name = d.split_whitespace().nth(1).unwrap().split('(').next().unwrap();
+        let name = d
+            .split_whitespace()
+            .nth(1)
+            .unwrap()
+            .split('(')
+            .next()
+            .unwrap();
         assert!(
             entry_body.contains(&format!("{name}(")),
             "the entry body calls no `{name}`:\n{entry_body}"

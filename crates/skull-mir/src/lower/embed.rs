@@ -14,8 +14,16 @@ impl Builder<'_> {
             .map_err(|e| self.gap_here(e.message))?;
         // First-class targets store inline children as declared fields, not leaf keys.
         if self.scx.values_first_class {
-            if let StructFieldPlan::Inline { child, nullable, flat: None } = plan {
-                return Ok(StructFieldPlan::Direct { child: Some(child), nullable });
+            if let StructFieldPlan::Inline {
+                child,
+                nullable,
+                flat: None,
+            } = plan
+            {
+                return Ok(StructFieldPlan::Direct {
+                    child: Some(child),
+                    nullable,
+                });
             }
         }
         Ok(plan)
@@ -50,25 +58,40 @@ impl Builder<'_> {
         let mut parts = vec![field];
         let mut cur = base;
         let mut physical = (base, field, None, false);
-        while let Expr::FieldAccess { base: owner, field: child_field } = self.body.expr_arena[cur] {
+        while let Expr::FieldAccess {
+            base: owner,
+            field: child_field,
+        } = self.body.expr_arena[cur]
+        {
             if self.swizzle_of(owner, child_field).is_some() {
                 break;
             }
-            let Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) = self.field_base_ty(owner) else {
+            let Some(TypeExpr::App {
+                ctor: TypeCtor::Nominal(sname),
+                ..
+            }) = self.field_base_ty(owner)
+            else {
                 break;
             };
             if self.scx.target == bone_semantic::hir::FnBackend::Lua
-                && !self.scx.values_first_class && self.is_value_struct(sname)
+                && !self.scx.values_first_class
+                && self.is_value_struct(sname)
                 && self.is_mutable_place(owner)?
                 && self.native_projection_holder(owner)
-                && self.scx.rep_arena()
+                && self
+                    .scx
+                    .rep_arena()
                     .nominal_value_storage_required(self.ws, self.scx.target, sname)
-                    .map_err(|e| self.gap_here(e.message))? == ValueStorage::CData
+                    .map_err(|e| self.gap_here(e.message))?
+                    == ValueStorage::CData
             {
                 let path = std::iter::once(child_field.as_str())
                     .chain(parts.iter().rev().map(|part| part.as_str()))
-                    .collect::<Vec<_>>().join(".");
-                let paths = self.scx.rep_arena()
+                    .collect::<Vec<_>>()
+                    .join(".");
+                let paths = self
+                    .scx
+                    .rep_arena()
                     .nominal_value_leaf_paths_required(self.ws, self.scx.target, sname)
                     .map_err(|e| self.gap_here(e.message))?;
                 if paths.iter().any(|leaf| leaf.as_str() == path) {
@@ -83,9 +106,17 @@ impl Builder<'_> {
             if let Some(child) = child {
                 let shape = self.nobox_embed_group_shape(child)?;
                 let paths = self.embed_leaf_paths(child)?;
-                let relative = parts.iter().rev().map(|p| p.as_str()).collect::<Vec<_>>().join(".");
+                let relative = parts
+                    .iter()
+                    .rev()
+                    .map(|p| p.as_str())
+                    .collect::<Vec<_>>()
+                    .join(".");
                 let prefix = format!("{relative}.");
-                if paths.iter().any(|path| path.as_str() == relative || path.as_str().starts_with(&prefix)) {
+                if paths
+                    .iter()
+                    .any(|path| path.as_str() == relative || path.as_str().starts_with(&prefix))
+                {
                     let mut projected = shape;
                     for part in parts.iter().rev() {
                         projected = projected.and_then(|shape| {
@@ -95,7 +126,12 @@ impl Builder<'_> {
                             }
                         });
                     }
-                    physical = (owner, Ustr::from(&format!("{child_field}.{relative}")), projected, false);
+                    physical = (
+                        owner,
+                        Ustr::from(&format!("{child_field}.{relative}")),
+                        projected,
+                        false,
+                    );
                 }
             }
             parts.push(child_field);
@@ -110,8 +146,10 @@ impl Builder<'_> {
         loop {
             match self.body.expr_arena[base] {
                 Expr::FieldAccess { base: owner, .. } => base = owner,
-                Expr::Var(binding) => return !self.group_binds.contains_key(&raw(binding))
-                    && !self.tuple_binds.contains_key(&raw(binding)),
+                Expr::Var(binding) => {
+                    return !self.group_binds.contains_key(&raw(binding))
+                        && !self.tuple_binds.contains_key(&raw(binding));
+                }
                 _ => return false,
             }
         }
@@ -122,7 +160,11 @@ impl Builder<'_> {
         if self.scx.values_first_class {
             return Ok(None);
         }
-        let Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) = self.field_base_ty(base) else {
+        let Some(TypeExpr::App {
+            ctor: TypeCtor::Nominal(sname),
+            ..
+        }) = self.field_base_ty(base)
+        else {
             return Ok(None);
         };
         if !self.is_value_struct(sname) {
@@ -174,8 +216,11 @@ impl Builder<'_> {
         value: Idx<Expr>,
     ) -> Result<(), CompilerError> {
         let shape = self.nominal_rep_shape_required(sname, false)?;
-        let Some((_, FieldShape::Nested(sub))) = shape.fields.iter().find(|(f, _)| *f == field) else {
-            return Err(self.gap_here(format!("leaf-table value `{sname}` has no nested field `{field}`")));
+        let Some((_, FieldShape::Nested(sub))) = shape.fields.iter().find(|(f, _)| *f == field)
+        else {
+            return Err(self.gap_here(format!(
+                "leaf-table value `{sname}` has no nested field `{field}`"
+            )));
         };
         let repr = self.lower_expr_repr(value)?;
         let leaves = self.repr_to_leaves_bundle_for_shape(&repr, sub)?;
@@ -188,7 +233,11 @@ impl Builder<'_> {
             )));
         }
         for (k, v) in keys.into_iter().zip(leaves) {
-            self.emit_cur(Inst::StoreField { base: parent, field: Ustr::from(&k), value: v });
+            self.emit_cur(Inst::StoreField {
+                base: parent,
+                field: Ustr::from(&k),
+                value: v,
+            });
         }
         Ok(())
     }
@@ -215,7 +264,10 @@ impl Builder<'_> {
                 fields,
             }))
         } else {
-            Ok(self.emit_cur(Inst::MakeStruct { ty: Some(cname), fields }))
+            Ok(self.emit_cur(Inst::MakeStruct {
+                ty: Some(cname),
+                fields,
+            }))
         }
     }
 
@@ -252,19 +304,28 @@ impl Builder<'_> {
             let field_plan = self.struct_field_plan(cname, f, false)?;
             if let Some((inner, nullable)) = field_plan.embed() {
                 if nullable {
-                        let v = self.emit_cur(Inst::Field { base: parent, field: key });
-                        out.push((Ustr::from(relkey.as_str()), v));
+                    let v = self.emit_cur(Inst::Field {
+                        base: parent,
+                        field: key,
+                    });
+                    out.push((Ustr::from(relkey.as_str()), v));
                 }
                 self.collect_embed_slots(parent, key, &format!("{relkey}."), inner, out)?;
             } else if let Some(shape) = field_plan.flat_shape() {
-                    for slot in flat_slot_names(f, &shape) {
-                        let src = Ustr::from(&format!("{prefix}.{slot}"));
-                        let v = self.emit_cur(Inst::Field { base: parent, field: src });
-                        out.push((Ustr::from(&format!("{rel}{slot}")), v));
-                    }
+                for slot in flat_slot_names(f, &shape) {
+                    let src = Ustr::from(&format!("{prefix}.{slot}"));
+                    let v = self.emit_cur(Inst::Field {
+                        base: parent,
+                        field: src,
+                    });
+                    out.push((Ustr::from(&format!("{rel}{slot}")), v));
+                }
             } else {
-                    let v = self.emit_cur(Inst::Field { base: parent, field: key });
-                    out.push((Ustr::from(relkey.as_str()), v));
+                let v = self.emit_cur(Inst::Field {
+                    base: parent,
+                    field: key,
+                });
+                out.push((Ustr::from(relkey.as_str()), v));
             }
         }
         Ok(())
@@ -286,12 +347,20 @@ impl Builder<'_> {
     /// parent's dotted leaves. Driven by the SHAPE rather than by the field
     /// list, so the parts line up with [`Builder::repr_to_leaves`]' order by
     /// construction instead of by two walks agreeing.
-    pub(crate) fn embed_group(&mut self, parent: Idx<Inst>, prefix: Ustr, shape: &ValueShape) -> ValueRepr {
+    pub(crate) fn embed_group(
+        &mut self,
+        parent: Idx<Inst>,
+        prefix: Ustr,
+        shape: &ValueShape,
+    ) -> ValueRepr {
         let leaves = super::shape::leaf_names(shape, prefix.as_str(), ".")
             .into_iter()
-            .map(|key| self.emit_cur(Inst::Field {
-                base: parent, field: Ustr::from(&key),
-            }))
+            .map(|key| {
+                self.emit_cur(Inst::Field {
+                    base: parent,
+                    field: Ustr::from(&key),
+                })
+            })
             .collect::<Vec<_>>();
         self.rebuild_from_leaves(shape, &leaves, &mut 0)
     }
@@ -314,7 +383,10 @@ impl Builder<'_> {
         };
         let mut repr = self.embed_group(parent, prefix, &shape);
         if nullable {
-            let present = self.emit_cur(Inst::Field { base: parent, field: prefix });
+            let present = self.emit_cur(Inst::Field {
+                base: parent,
+                field: prefix,
+            });
             if let ValueRepr::Group { present: slot, .. } = &mut repr {
                 *slot = Some(present);
             }
@@ -344,7 +416,12 @@ impl Builder<'_> {
             let leaves = self.repr_to_storage_leaves(&repr, &shape, "embedded value")?;
             return Self::pair_embed_leaves(paths, leaves);
         }
-        if let Expr::StructLiteral { name, fields, bases } = self.body.expr_arena[value].clone() {
+        if let Expr::StructLiteral {
+            name,
+            fields,
+            bases,
+        } = self.body.expr_arena[value].clone()
+        {
             // A functional-update base reads unwritten fields off another
             // instance; leave that to the general path rather than duplicating
             // the base-copy rule here.
@@ -361,16 +438,12 @@ impl Builder<'_> {
                 }
                 let mut out = Vec::new();
                 for f in self.struct_field_names_required(cname)? {
-                    let inner = self
-                        .struct_field_plan(cname, f, true)?
-                        .inline_child();
+                    let inner = self.struct_field_plan(cname, f, true)?.inline_child();
                     // A flat-enum field contributes its sub-slots, never one
                     // boxed leaf -- same expansion the non-embed struct literal
                     // does via `flat_literal_slots`.
                     let flat = if inner.is_none() {
-                        self
-                            .struct_field_plan(cname, f, false)?
-                            .flat_shape()
+                        self.struct_field_plan(cname, f, false)?.flat_shape()
                     } else {
                         None
                     };
@@ -380,9 +453,7 @@ impl Builder<'_> {
                             // directly: a nullable inner embed owns a presence slot,
                             // and `= null` must not be read leaf-wise off nil.
                             (Some(ic), _) => {
-                                let n = self
-                                    .struct_field_plan(cname, f, true)?
-                                    .nullable();
+                                let n = self.struct_field_plan(cname, f, true)?.nullable();
                                 let leaves = self.embed_value_leaves(n, ic, ve)?;
                                 out.extend(Self::embed_field_slots(f, leaves));
                             }
@@ -415,7 +486,9 @@ impl Builder<'_> {
                         None => {
                             let d = self.lower_struct_default(cname, f)?;
                             match (inner, flat) {
-                                (Some(ic), _) => out.extend(prefixed(f, self.embed_leaf_reads(ic, d)?)),
+                                (Some(ic), _) => {
+                                    out.extend(prefixed(f, self.embed_leaf_reads(ic, d)?))
+                                }
                                 (None, Some(shape)) => {
                                     let cells = self.spread_maybe_null_box_to_cells(d, &shape)?;
                                     out.extend(self.flat_literal_slots(f, cells));
@@ -439,19 +512,13 @@ impl Builder<'_> {
         }
         let mut out = Vec::new();
         for f in self.struct_field_names_required(cname)? {
-            match self
-                .struct_field_plan(cname, f, true)?
-                .inline_child()
-            {
+            match self.struct_field_plan(cname, f, true)?.inline_child() {
                 Some(inner) => out.extend(
                     self.embed_leaf_paths(inner)?
                         .into_iter()
                         .map(|k| Ustr::from(&format!("{f}.{k}"))),
                 ),
-                None => match self
-                    .struct_field_plan(cname, f, false)?
-                    .flat_shape()
-                {
+                None => match self.struct_field_plan(cname, f, false)?.flat_shape() {
                     Some(shape) => out.extend(flat_slot_names(f, &shape)),
                     None => out.push(f),
                 },
@@ -480,7 +547,8 @@ impl Builder<'_> {
             let nil = self.emit_cur(Inst::Const(Lit::Nil));
             return Ok((nil, paths.into_iter().map(|k| (k, nil)).collect()));
         }
-        if matches!(self.body.expr_arena[value], Expr::StructLiteral { name, .. } if name == cname) {
+        if matches!(self.body.expr_arena[value], Expr::StructLiteral { name, .. } if name == cname)
+        {
             let leaves = self.embed_leaf_values(cname, value)?;
             let present = self.emit_cur(Inst::Const(Lit::Bool(true)));
             return Ok((present, leaves));
@@ -493,7 +561,8 @@ impl Builder<'_> {
             let paths = value_leaf_paths(&shape);
             shape.nullable = true;
             let bundle = self.lower_expr_repr(value)?;
-            let leaves = self.repr_to_slot_values_bundle(&bundle, &RetSlot::Leaves(shape.clone()))?;
+            let leaves =
+                self.repr_to_slot_values_bundle(&bundle, &RetSlot::Leaves(shape.clone()))?;
             let mut leaves = leaves.into_iter();
             let present = leaves
                 .next()
@@ -509,7 +578,14 @@ impl Builder<'_> {
         let absent_bb = self.f.new_block();
         let present_bb = self.f.new_block();
         let join = self.f.new_block();
-        self.f.set_term(self.cur, Term::Branch { cond: is_nil, then_bb: absent_bb, else_bb: present_bb });
+        self.f.set_term(
+            self.cur,
+            Term::Branch {
+                cond: is_nil,
+                then_bb: absent_bb,
+                else_bb: present_bb,
+            },
+        );
 
         self.cur = absent_bb;
         for &c in &cells {
@@ -553,22 +629,22 @@ impl Builder<'_> {
                 .inline_child()
                 .is_none()
             {
-                if let Some(shape) = self
-                    .struct_field_plan(cname, f, false)?
-                    .flat_shape()
-                {
+                if let Some(shape) = self.struct_field_plan(cname, f, false)?.flat_shape() {
                     for slot in flat_slot_names(f, &shape) {
-                        let v = self.emit_cur(Inst::Field { base: value, field: slot });
+                        let v = self.emit_cur(Inst::Field {
+                            base: value,
+                            field: slot,
+                        });
                         out.push((slot, v));
                     }
                     continue;
                 }
             }
-            let part = self.emit_cur(Inst::Field { base: value, field: f });
-            match self
-                .struct_field_plan(cname, f, true)?
-                .inline_child()
-            {
+            let part = self.emit_cur(Inst::Field {
+                base: value,
+                field: f,
+            });
+            match self.struct_field_plan(cname, f, true)?.inline_child() {
                 Some(inner) => out.extend(prefixed(f, self.embed_leaf_reads(inner, part)?)),
                 None => out.push((f, part)),
             }
@@ -583,11 +659,10 @@ impl Builder<'_> {
         field: Ustr,
     ) -> Result<bool, CompilerError> {
         match self.field_base_ty(base) {
-            Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) => {
-                Ok(self
-                    .struct_field_plan(sname, field, false)?
-                    .nullable())
-            }
+            Some(TypeExpr::App {
+                ctor: TypeCtor::Nominal(sname),
+                ..
+            }) => Ok(self.struct_field_plan(sname, field, false)?.nullable()),
             _ => Ok(false),
         }
     }
@@ -635,13 +710,23 @@ impl Builder<'_> {
         // LuaJIT inserts missing hash keys even for nil stores. Re-clearing an
         // absent embed can therefore rehash the parent on every frame.
         let skip_clear = if nullable && matches!(self.body.expr_arena[value], Expr::Null) {
-            let present = self.emit_cur(Inst::Field { base: parent, field });
+            let present = self.emit_cur(Inst::Field {
+                base: parent,
+                field,
+            });
             // False presence still needs normalization for boxed embed readers.
             let nil = self.emit_cur(Inst::Const(Lit::Nil));
             let absent = self.emit_cur(Inst::Eq(present, nil));
             let clear = self.f.new_block();
             let join = self.f.new_block();
-            self.f.set_term(self.cur, Term::Branch { cond: absent, then_bb: join, else_bb: clear });
+            self.f.set_term(
+                self.cur,
+                Term::Branch {
+                    cond: absent,
+                    then_bb: join,
+                    else_bb: clear,
+                },
+            );
             self.cur = clear;
             Some(join)
         } else {
@@ -649,7 +734,11 @@ impl Builder<'_> {
         };
         let leaves = self.embed_value_leaves(nullable, cname, value)?;
         for (key, v) in Self::embed_field_slots(field, leaves) {
-            self.emit_cur(Inst::StoreField { base: parent, field: key, value: v });
+            self.emit_cur(Inst::StoreField {
+                base: parent,
+                field: key,
+                value: v,
+            });
         }
         if let Some(join) = skip_clear {
             self.f.set_term(self.cur, Term::Goto(join));
@@ -666,14 +755,24 @@ impl Builder<'_> {
         field: Ustr,
         cname: Ustr,
     ) -> Result<Idx<Inst>, CompilerError> {
-        let present = self.emit_cur(Inst::Field { base: parent, field });
+        let present = self.emit_cur(Inst::Field {
+            base: parent,
+            field,
+        });
         let nil = self.emit_cur(Inst::Const(Lit::Nil));
         let is_nil = self.emit_cur(Inst::Eq(present, nil));
         let result = self.f.new_cell(None);
         let nil_bb = self.f.new_block();
         let val_bb = self.f.new_block();
         let join = self.f.new_block();
-        self.f.set_term(self.cur, Term::Branch { cond: is_nil, then_bb: nil_bb, else_bb: val_bb });
+        self.f.set_term(
+            self.cur,
+            Term::Branch {
+                cond: is_nil,
+                then_bb: nil_bb,
+                else_bb: val_bb,
+            },
+        );
 
         self.cur = nil_bb;
         let n = self.emit_cur(Inst::Const(Lit::Nil));

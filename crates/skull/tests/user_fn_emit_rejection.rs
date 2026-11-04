@@ -72,7 +72,10 @@ fn user_fn_emit_failure_is_a_hard_error() {
 #[test]
 fn same_instance_recursion_still_emits() {
     if let Err(e) = try_emit_module(SAME_INSTANCE_RECURSION) {
-        panic!("recursion whose type arguments do not change must still emit: {}", e.message);
+        panic!(
+            "recursion whose type arguments do not change must still emit: {}",
+            e.message
+        );
     }
 }
 
@@ -83,7 +86,9 @@ fn same_instance_recursion_still_emits() {
 fn stdlib_parity_gaps_stay_lenient() {
     let emit = emit_mir("fn main() { print(1) }");
     assert!(
-        emit.skipped.iter().all(|(name, _)| name.starts_with("flat_vec_new") || name.starts_with("grow")),
+        emit.skipped
+            .iter()
+            .all(|(name, _)| name.starts_with("flat_vec_new") || name.starts_with("grow")),
         "only the known stdlib gaps may skip: {:?}",
         emit.skipped
     );

@@ -1,15 +1,15 @@
 use skull_parser::{
     Ast, Dialect, FunctionBody, GlobalPolicy, ItemKind, MacroRegistry, PackageTag,
-    check_macro_call_labels,
-    check_macro_call_labels_in, check_macro_name_uniqueness, collect_registry, cook_one,
+    check_macro_call_labels, check_macro_call_labels_in, check_macro_name_uniqueness,
+    collect_registry, cook_one,
 };
 
+use bone_core::modules::ScopeProbe;
 use bone_semantic::{
     hir::{Function, Module, TypeCtor, TypeExpr},
     prelude::*,
-    semantic_passes::{contribute, FragmentContribution},
+    semantic_passes::{FragmentContribution, contribute},
 };
-use bone_core::modules::ScopeProbe;
 
 use crate::span_shift;
 
@@ -107,8 +107,13 @@ impl ScopeDelta {
 
     fn hits(&self, probe: &ScopeProbe) -> bool {
         match *probe {
-            ScopeProbe::Member { package, node, name } => {
-                self.members.contains(&(package, node, name)) || self.all_members.contains(&(package, node))
+            ScopeProbe::Member {
+                package,
+                node,
+                name,
+            } => {
+                self.members.contains(&(package, node, name))
+                    || self.all_members.contains(&(package, node))
             }
             ScopeProbe::Node { package, node } => self.nodes.contains(&(package, node)),
             ScopeProbe::Legacy { name } => self.legacy.contains(&name),
@@ -120,7 +125,13 @@ impl ScopeDelta {
     fn between(old: &Workspace, new: &Workspace) -> Self {
         let mut delta = ScopeDelta::default();
 
-        let package_ids: FxHashSet<u32> = old.ns.packages.keys().chain(new.ns.packages.keys()).copied().collect();
+        let package_ids: FxHashSet<u32> = old
+            .ns
+            .packages
+            .keys()
+            .chain(new.ns.packages.keys())
+            .copied()
+            .collect();
         for package in package_ids {
             let (o, n) = (old.ns.packages.get(&package), new.ns.packages.get(&package));
             let node_keys: FxHashSet<Ustr> = o
@@ -130,7 +141,10 @@ impl ScopeDelta {
                 .copied()
                 .collect();
             for key in node_keys {
-                match (o.and_then(|p| p.nodes.get(&key)), n.and_then(|p| p.nodes.get(&key))) {
+                match (
+                    o.and_then(|p| p.nodes.get(&key)),
+                    n.and_then(|p| p.nodes.get(&key)),
+                ) {
                     (Some(on), Some(nn)) => {
                         if on.vis != nn.vis {
                             delta.nodes.insert((package, key));
@@ -170,7 +184,11 @@ impl ScopeDelta {
             let (o, n) = (old.defs.get(&key), new.defs.get(&key));
             let same = match (o, n) {
                 (Some(o), Some(n)) => {
-                    o.package == n.package && o.module == n.module && o.kind == n.kind && o.name == n.name && o.vis == n.vis
+                    o.package == n.package
+                        && o.module == n.module
+                        && o.kind == n.kind
+                        && o.name == n.name
+                        && o.vis == n.vis
                 }
                 _ => false,
             };
@@ -193,22 +211,44 @@ impl ScopeDelta {
         let empty_imports = bone_core::modules::LegacyImports::default();
         for file in files {
             let (old_view, new_view) = (
-                old.legacy_projections.get(&file).unwrap_or(&empty_projection),
-                new.legacy_projections.get(&file).unwrap_or(&empty_projection),
+                old.legacy_projections
+                    .get(&file)
+                    .unwrap_or(&empty_projection),
+                new.legacy_projections
+                    .get(&file)
+                    .unwrap_or(&empty_projection),
             );
             let (old_imports, new_imports) = (
                 old.legacy_imports.get(&file).unwrap_or(&empty_imports),
                 new.legacy_imports.get(&file).unwrap_or(&empty_imports),
             );
-            delta.legacy.extend(changed_keys(&old_view.by_name, &new_view.by_name));
-            delta.legacy.extend(changed_keys(&old_imports.named.by_name, &new_imports.named.by_name));
-            delta.legacy.extend(changed_keys(&old_imports.globs.by_name, &new_imports.globs.by_name));
-            delta.legacy.extend(changed_keys(&old_imports.renamed, &new_imports.renamed));
+            delta
+                .legacy
+                .extend(changed_keys(&old_view.by_name, &new_view.by_name));
+            delta.legacy.extend(changed_keys(
+                &old_imports.named.by_name,
+                &new_imports.named.by_name,
+            ));
+            delta.legacy.extend(changed_keys(
+                &old_imports.globs.by_name,
+                &new_imports.globs.by_name,
+            ));
+            delta
+                .legacy
+                .extend(changed_keys(&old_imports.renamed, &new_imports.renamed));
         }
 
-        let scoped: FxHashSet<Ustr> = old.fragment_scopes.keys().chain(new.fragment_scopes.keys()).copied().collect();
+        let scoped: FxHashSet<Ustr> = old
+            .fragment_scopes
+            .keys()
+            .chain(new.fragment_scopes.keys())
+            .copied()
+            .collect();
         for file in scoped {
-            let same = match (old.fragment_scopes.get(&file), new.fragment_scopes.get(&file)) {
+            let same = match (
+                old.fragment_scopes.get(&file),
+                new.fragment_scopes.get(&file),
+            ) {
                 (Some(o), Some(n)) => {
                     o.package == n.package
                         && o.package_name == n.package_name
@@ -488,7 +528,13 @@ pub fn scope_hash(a: &Ast, text: &str) -> u64 {
 /// block's name and visibility. A legacy file's definitions are not in the
 /// tree. Signatures, fields and bodies are left out -- an edit to them keeps
 /// every DefKey and stays on the interface path.
-fn scope_items(items: &[skull_parser::Item], text: &str, v1: bool, depth: usize, h: &mut rustc_hash::FxHasher) {
+fn scope_items(
+    items: &[skull_parser::Item],
+    text: &str,
+    v1: bool,
+    depth: usize,
+    h: &mut rustc_hash::FxHasher,
+) {
     use skull_parser::ItemKind;
     use std::hash::Hash;
 
@@ -558,7 +604,9 @@ pub fn item_prints(a: &Ast, text: &str) -> Vec<ItemPrint> {
         let (kind, name, body_hash, body_range) = match &item.kind {
             ItemKind::Function(f) => {
                 let mut body_range = None;
-                let body_hash = if let FunctionBody::Rock(b) = f.body && !f.is_macro {
+                let body_hash = if let FunctionBody::Rock(b) = f.body
+                    && !f.is_macro
+                {
                     let (bs, be) = a.b(&b).span.offset_range;
 
                     debug_assert!(start <= bs && be <= stop, "block escapes item span");
@@ -608,12 +656,19 @@ pub fn item_prints(a: &Ast, text: &str) -> Vec<ItemPrint> {
                 // preserves its live value across the re-dofile, so a value edit has
                 // no live effect and the overlay deliberately never re-emits it.
                 // Whole-item iface keeps such an edit on the full-rebuild path.
-                if g.is_const && let Some(value) = g.value {
+                if g.is_const
+                    && let Some(value) = g.value
+                {
                     let (vs, ve) = a.e(&value).span.offset_range;
                     debug_assert!(start <= vs && ve <= stop, "const init escapes item span");
                     text[start..vs].hash(&mut h);
                     text[ve..stop].hash(&mut h);
-                    (ItemKindTag::Other, g.name.name, Some(text_hash(&text[vs..ve])), Some((vs, ve)))
+                    (
+                        ItemKindTag::Other,
+                        g.name.name,
+                        Some(text_hash(&text[vs..ve])),
+                        Some((vs, ve)),
+                    )
                 } else {
                     text[start..stop].hash(&mut h);
                     (ItemKindTag::Other, g.name.name, None, None)
@@ -747,10 +802,8 @@ impl Session {
     ) -> Result<Self, CompilerError> {
         let mut ws = Workspace::default();
 
-        let warm_mids: FxHashSet<ModuleId> = warm
-            .iter()
-            .map(|m| ws.intern_module(m.file))
-            .collect();
+        let warm_mids: FxHashSet<ModuleId> =
+            warm.iter().map(|m| ws.intern_module(m.file)).collect();
 
         let warm_macros: Vec<(Ustr, MacroDef)> = warm
             .iter()
@@ -784,14 +837,25 @@ impl Session {
                 bone_semantic::semantic_passes::ScopeItem::Def { name, .. } => Some(*name),
                 _ => None,
             })
-            .chain(bone_core::modules::STD_INTRINSIC_TYPES.iter().map(|n| ustr(n)))
+            .chain(
+                bone_core::modules::STD_INTRINSIC_TYPES
+                    .iter()
+                    .map(|n| ustr(n)),
+            )
             .collect();
 
         // Parse each file once for its prints/macros AND keep the module to feed
         // lowering directly -- avoids a second parse via `combined_unexpanded`,
         // which re-parses (the AST is transient and not persisted).
         let mut user_modules: Vec<Ast> = Vec::new();
-        for SessionFile { path, text, dialect, package, global_policy } in files {
+        for SessionFile {
+            path,
+            text,
+            dialect,
+            package,
+            global_policy,
+        } in files
+        {
             if session.files.contains_key(&path) {
                 comp_error!(
                     Span::unknown(),
@@ -800,19 +864,23 @@ impl Session {
                 );
             }
 
-            let module =
-                parse_with_facts(
-                    &text,
-                    ustr(path.as_str()),
-                    dialect,
-                    package.clone(),
-                    global_policy,
-                )?;
+            let module = parse_with_facts(
+                &text,
+                ustr(path.as_str()),
+                dialect,
+                package.clone(),
+                global_policy,
+            )?;
 
             // Looked up, not interned: user modules take their ids when they
             // lower, after the warm modules, so a warm-alone build
             // (`warm_base`) interns the warm modules alone.
-            if session.ws.module_ids.get(&module.file).is_some_and(|mid| session.warm_mids.contains(mid)) {
+            if session
+                .ws
+                .module_ids
+                .get(&module.file)
+                .is_some_and(|mid| session.warm_mids.contains(mid))
+            {
                 // A stdlib file present in the initial set IS the warm module --
                 // skip the user copy (adding it would self-collide on every
                 // stdlib type); the warm build already covers it.
@@ -879,11 +947,11 @@ impl Session {
     fn facts_of(&self, path: &str) -> (Dialect, Option<PackageTag>, GlobalPolicy) {
         match self.files.get(path) {
             Some(f) => (f.dialect, f.package.clone(), f.global_policy),
-            None => self
-                .declared_facts
-                .get(path)
-                .cloned()
-                .unwrap_or((Dialect::Legacy, None, GlobalPolicy::Any)),
+            None => self.declared_facts.get(path).cloned().unwrap_or((
+                Dialect::Legacy,
+                None,
+                GlobalPolicy::Any,
+            )),
         }
     }
 
@@ -915,7 +983,8 @@ impl Session {
                 package
             );
         }
-        self.declared_facts.insert(path.to_string(), (dialect, package, global_policy));
+        self.declared_facts
+            .insert(path.to_string(), (dialect, package, global_policy));
         Ok(())
     }
 
@@ -983,7 +1052,11 @@ impl Session {
         Ok(result)
     }
 
-    fn update_file_bodies(&mut self, path: &str, text: &str) -> Result<UpdateResult, CompilerError> {
+    fn update_file_bodies(
+        &mut self,
+        path: &str,
+        text: &str,
+    ) -> Result<UpdateResult, CompilerError> {
         // Reset the work counters so callers can read EXACTLY how many bodies
         // this update re-inferred (check_module_incremental bumps it) and
         // re-lowered (the lowering passes bump it).
@@ -1017,13 +1090,7 @@ impl Session {
         }
 
         let (dialect, package, global_policy) = self.facts_of(path);
-        let module = parse_with_facts(
-            text,
-            ustr(path),
-            dialect,
-            package.clone(),
-            global_policy,
-        )?;
+        let module = parse_with_facts(text, ustr(path), dialect, package.clone(), global_policy)?;
         let syntax_errors = module.recovery_errors.clone();
         let mid = self.ws.intern_module(module.file);
         if self.warm_mids.contains(&mid) {
@@ -1118,26 +1185,49 @@ impl Session {
                 if changed.len() == 1 {
                     let idx = changed[0];
 
-                    self.rebuild_or_revert("update", path, move |s| s.rebuild_body_incremental(path, module, idx), restore)
+                    self.rebuild_or_revert(
+                        "update",
+                        path,
+                        move |s| s.rebuild_body_incremental(path, module, idx),
+                        restore,
+                    )
                 } else {
-                    self.rebuild_or_revert("update", path, move |s| s.rebuild_module(path, module, &changed), restore)
+                    self.rebuild_or_revert(
+                        "update",
+                        path,
+                        move |s| s.rebuild_module(path, module, &changed),
+                        restore,
+                    )
                 }
             }
 
-            Some(FileDiff::LayoutOnly) => {
-                self.rebuild_or_revert("update", path, move |s| s.rebuild_module(path, module, &[]), restore)
-            }
+            Some(FileDiff::LayoutOnly) => self.rebuild_or_revert(
+                "update",
+                path,
+                move |s| s.rebuild_module(path, module, &[]),
+                restore,
+            ),
 
             Some(FileDiff::Interface) if !touches_macros => self.rebuild_or_revert(
                 "update",
                 path,
-                move |s| s.rebuild_interface(module, &changed, ScopeDelta::default(), UpdateTier::Interface),
+                move |s| {
+                    s.rebuild_interface(
+                        module,
+                        &changed,
+                        ScopeDelta::default(),
+                        UpdateTier::Interface,
+                    )
+                },
                 restore,
             ),
 
-            _ if scope_path => {
-                self.rebuild_or_revert("update", path, move |s| s.rebuild_scope(module, &changed), restore)
-            }
+            _ if scope_path => self.rebuild_or_revert(
+                "update",
+                path,
+                move |s| s.rebuild_scope(module, &changed),
+                restore,
+            ),
 
             // Everything else rebuilds every user file, on purpose: a file the
             // session did not hold (it is a new fragment, so every lookup
@@ -1151,7 +1241,9 @@ impl Session {
                 edit: previous_text
                     .as_deref()
                     .map(|old| text_edit_delta(path, old, text)),
-                semantic_bodies: (!span_only).then(|| result.reinferred.clone()).unwrap_or_default(),
+                semantic_bodies: (!span_only)
+                    .then(|| result.reinferred.clone())
+                    .unwrap_or_default(),
                 span_only,
             };
         }
@@ -1164,23 +1256,42 @@ impl Session {
     /// (ambiguous, a merged callable family, or the v1 definition alone), so
     /// the callers that looked it up have to re-lower: the scope path.
     fn changes_a_projected_collision(&self, path: &str, module: &Ast) -> bool {
-        !self.projected_legacy_owned_changes(ustr(path), module).is_empty()
+        !self
+            .projected_legacy_owned_changes(ustr(path), module)
+            .is_empty()
     }
 
     /// Whether a legacy file's edit adds, removes or re-kinds a definition of
     /// a provider some v1 package depends on: its namespace view (spec 3.2)
     /// holds what the provider's files define, and v1 lookups through it are
     /// decided at lowering.
-    fn changes_a_legacy_view(&self, path: &str, package: Option<&PackageTag>, module: &Ast) -> bool {
+    fn changes_a_legacy_view(
+        &self,
+        path: &str,
+        package: Option<&PackageTag>,
+        module: &Ast,
+    ) -> bool {
         let Some(tag) = package else { return false };
-        let viewed = self.ws.ns.package(tag.id).is_some_and(|pkg| pkg.node(ustr("")).is_some());
+        let viewed = self
+            .ws
+            .ns
+            .package(tag.id)
+            .is_some_and(|pkg| pkg.node(ustr("")).is_some());
         if !viewed {
             return false;
         }
-        let old: FxHashSet<(Ustr, bone_core::modules::DefKind)> =
-            self.ws.ns.legacy_owned.names_defined_by(ustr(path)).iter().copied().collect();
+        let old: FxHashSet<(Ustr, bone_core::modules::DefKind)> = self
+            .ws
+            .ns
+            .legacy_owned
+            .names_defined_by(ustr(path))
+            .iter()
+            .copied()
+            .collect();
         let new: FxHashSet<(Ustr, bone_core::modules::DefKind)> =
-            bone_semantic::semantic_passes::legacy_owned_names(module).into_iter().collect();
+            bone_semantic::semantic_passes::legacy_owned_names(module)
+                .into_iter()
+                .collect();
         old != new
     }
 
@@ -1191,15 +1302,30 @@ impl Session {
         if self.ws.legacy_projections.is_empty() && self.ws.legacy_imports.is_empty() {
             return FxHashSet::default();
         }
-        let old: FxHashSet<(Ustr, bone_core::modules::DefKind)> =
-            self.ws.ns.legacy_owned.names_defined_by(file).iter().copied().collect();
+        let old: FxHashSet<(Ustr, bone_core::modules::DefKind)> = self
+            .ws
+            .ns
+            .legacy_owned
+            .names_defined_by(file)
+            .iter()
+            .copied()
+            .collect();
         let new: FxHashSet<(Ustr, bone_core::modules::DefKind)> =
-            bone_semantic::semantic_passes::legacy_owned_names(module).into_iter().collect();
+            bone_semantic::semantic_passes::legacy_owned_names(module)
+                .into_iter()
+                .collect();
         old.symmetric_difference(&new)
             .map(|(name, _)| *name)
             .filter(|name| {
-                self.ws.legacy_projections.values().any(|view| view.by_name.contains_key(name))
-                    || self.ws.legacy_imports.values().any(|imports| imports.mentions(*name))
+                self.ws
+                    .legacy_projections
+                    .values()
+                    .any(|view| view.by_name.contains_key(name))
+                    || self
+                        .ws
+                        .legacy_imports
+                        .values()
+                        .any(|imports| imports.mentions(*name))
             })
             .collect()
     }
@@ -1241,15 +1367,28 @@ impl Session {
             .iter()
             .zip(&user_contributions)
             .all(|(ast, contribution)| self.apart_from_warm(ast, contribution));
-        let base = if independent { self.warm_alone(registry).cloned() } else { None };
+        let base = if independent {
+            self.warm_alone(registry).cloned()
+        } else {
+            None
+        };
         let (mut ws, mut lowered, first_user) = match base {
             Some(base) => (base, unexpanded.split_off(warm_len), 0),
             None => (Workspace::default(), unexpanded, warm_len),
         };
-        let contributions: Vec<&FragmentContribution> =
-            self.warm_contributions.iter().chain(&user_contributions).collect();
-        bone_semantic::semantic_passes::assemble_namespaces(&mut ws, &contributions, &self.aliases)?;
-        lowered.par_iter_mut().for_each(|ast| cook_one(ast, registry));
+        let contributions: Vec<&FragmentContribution> = self
+            .warm_contributions
+            .iter()
+            .chain(&user_contributions)
+            .collect();
+        bone_semantic::semantic_passes::assemble_namespaces(
+            &mut ws,
+            &contributions,
+            &self.aliases,
+        )?;
+        lowered
+            .par_iter_mut()
+            .for_each(|ast| cook_one(ast, registry));
         let mids = lower_and_infer(&mut ws, &lowered)?;
         // The same whole-program gate the batch path runs, so an export whose
         // type closure is not public fails in a session too rather than only
@@ -1266,12 +1405,18 @@ impl Session {
         if matches!(self.warm_base, WarmBase::Unbuilt) {
             let mut ws = Workspace::default();
             let mut cooked = self.warm.clone();
-            cooked.par_iter_mut().for_each(|ast| cook_one(ast, registry));
+            cooked
+                .par_iter_mut()
+                .for_each(|ast| cook_one(ast, registry));
             // A refusal here is not the build's verdict: the warm modules may
             // name a user definition, and the combined build decides.
             let built = lower_and_infer(&mut ws, &cooked).is_ok() && body_errors(&ws).is_empty();
             ws.phase_timings.clear();
-            self.warm_base = if built { WarmBase::Clean(Box::new(ws)) } else { WarmBase::Unusable };
+            self.warm_base = if built {
+                WarmBase::Clean(Box::new(ws))
+            } else {
+                WarmBase::Unusable
+            };
         }
         match &self.warm_base {
             WarmBase::Clean(ws) => Some(ws),
@@ -1289,15 +1434,21 @@ impl Session {
         fn apart(items: &[ScopeItem], legacy: bool, warm: &FxHashSet<Ustr>) -> bool {
             items.iter().all(|item| match item {
                 ScopeItem::Def { name, kind, .. } => {
-                    let bare = legacy || (*kind == "callable" && name.as_str().starts_with("__op_"));
+                    let bare =
+                        legacy || (*kind == "callable" && name.as_str().starts_with("__op_"));
                     !(bare && warm.contains(name))
                 }
                 ScopeItem::Module { items, .. } => apart(items, legacy, warm),
                 ScopeItem::Use(_) => true,
             })
         }
-        apart(&contribution.items, ast.dialect == Dialect::Legacy, &self.warm_names)
-            && macro_defs(ast).iter().all(|m| !self.warm_names.contains(&m.name))
+        apart(
+            &contribution.items,
+            ast.dialect == Dialect::Legacy,
+            &self.warm_names,
+        ) && macro_defs(ast)
+            .iter()
+            .all(|m| !self.warm_names.contains(&m.name))
     }
 
     /// Every file's namespace contribution in module order: the warm modules,
@@ -1306,7 +1457,11 @@ impl Session {
     fn contributions(&self) -> Vec<&FragmentContribution> {
         self.warm_contributions
             .iter()
-            .chain(self.paths.iter().map(|p| &self.files[p.as_str()].contribution))
+            .chain(
+                self.paths
+                    .iter()
+                    .map(|p| &self.files[p.as_str()].contribution),
+            )
             .collect()
     }
 
@@ -1322,13 +1477,23 @@ impl Session {
     /// it against the current tree, commit it, and run the interface cascade
     /// with every module whose lowering read a changed fact added to the
     /// re-lower set. The warm modules never read a user fact.
-    fn rebuild_scope(&mut self, module: Ast, changed: &FxHashSet<Ustr>) -> Result<UpdateResult, CompilerError> {
+    fn rebuild_scope(
+        &mut self,
+        module: Ast,
+        changed: &FxHashSet<Ustr>,
+    ) -> Result<UpdateResult, CompilerError> {
         let mut next = Workspace::default();
-        bone_semantic::semantic_passes::assemble_namespaces(&mut next, &self.contributions(), &self.aliases)?;
+        bone_semantic::semantic_passes::assemble_namespaces(
+            &mut next,
+            &self.contributions(),
+            &self.aliases,
+        )?;
 
         let mut delta = ScopeDelta::between(&self.ws, &next);
         if module.dialect == Dialect::Legacy {
-            delta.legacy.extend(self.projected_legacy_owned_changes(module.file, &module));
+            delta
+                .legacy
+                .extend(self.projected_legacy_owned_changes(module.file, &module));
         }
 
         self.ws.ns.packages = next.ns.packages;
@@ -1348,8 +1513,12 @@ impl Session {
         self.ws
             .modules
             .iter()
-            .filter(|m| m.id != except && m.id != ModuleId::builtin() && !self.warm_mids.contains(&m.id))
-            .filter(|m| delta.fragments.contains(&m.file) || m.scope_probes.iter().any(|p| delta.hits(p)))
+            .filter(|m| {
+                m.id != except && m.id != ModuleId::builtin() && !self.warm_mids.contains(&m.id)
+            })
+            .filter(|m| {
+                delta.fragments.contains(&m.file) || m.scope_probes.iter().any(|p| delta.hits(p))
+            })
             .map(|m| m.id)
             .collect()
     }
@@ -1394,23 +1563,48 @@ impl Session {
             let facts = |key: &Ustr, flavor| NominalFacts {
                 flavor,
                 arity: self.ws.type_generic_arity.get(key).copied().unwrap_or(0),
-                defaults: self.ws.type_generic_defaults.get(key).cloned().unwrap_or_default(),
+                defaults: self
+                    .ws
+                    .type_generic_defaults
+                    .get(key)
+                    .cloned()
+                    .unwrap_or_default(),
             };
             self.ws
                 .struct_by_name
                 .iter()
                 .filter(|(_, id)| id.module == mid)
                 .map(|(n, _)| (*n, facts(n, NominalFlavor::Struct)))
-                .chain(self.ws.enums_by_name.iter().filter(|(_, id)| id.module == mid).map(|(n, _)| (*n, facts(n, NominalFlavor::Enum))))
-                .chain(self.ws.newtypes_by_name.iter().filter(|(_, id)| id.module == mid).map(|(n, _)| (*n, facts(n, NominalFlavor::Newtype))))
+                .chain(
+                    self.ws
+                        .enums_by_name
+                        .iter()
+                        .filter(|(_, id)| id.module == mid)
+                        .map(|(n, _)| (*n, facts(n, NominalFlavor::Enum))),
+                )
+                .chain(
+                    self.ws
+                        .newtypes_by_name
+                        .iter()
+                        .filter(|(_, id)| id.module == mid)
+                        .map(|(n, _)| (*n, facts(n, NominalFlavor::Newtype))),
+                )
                 .collect()
         };
-        let new_types = bone_semantic::semantic_passes::nominal_type_facts(self.ws.fragment_scopes.get(&file), &module);
+        let new_types = bone_semantic::semantic_passes::nominal_type_facts(
+            self.ws.fragment_scopes.get(&file),
+            &module,
+        );
         let changed_types: Vec<Ustr> = old_types
             .iter()
             .filter(|(key, facts)| new_types.get(*key) != Some(*facts))
             .map(|(key, _)| *key)
-            .chain(new_types.keys().filter(|key| !old_types.contains_key(*key)).copied())
+            .chain(
+                new_types
+                    .keys()
+                    .filter(|key| !old_types.contains_key(*key))
+                    .copied(),
+            )
             .collect();
 
         let mut to_relower: FxHashSet<ModuleId> = FxHashSet::default();
@@ -1582,7 +1776,13 @@ impl Session {
         if stats {
             eprintln!(
                 "[cascade] closure {:.3}ms ({} relower) | reparse {:.3}ms | lower {:.3}ms | reinfer {:.3}ms ({} bodies) | dep-index {:.3}ms",
-                closure_ms, closure_n, parse_ms, lower_ms, reinfer_ms, ids.len(), dep_ms
+                closure_ms,
+                closure_n,
+                parse_ms,
+                lower_ms,
+                reinfer_ms,
+                ids.len(),
+                dep_ms
             );
         }
 
@@ -1632,7 +1832,11 @@ impl Session {
         // Recovered syntax errors from each file's total parse. The compile path
         // rejects on these; the interactive path keeps the partial tree AND shows
         // them here, so a broken file gets both best-effort features and a squiggle.
-        errs.extend(self.files.values().flat_map(|f| f.syntax_errors.iter().cloned()));
+        errs.extend(
+            self.files
+                .values()
+                .flat_map(|f| f.syntax_errors.iter().cloned()),
+        );
         errs
     }
 
@@ -1772,7 +1976,9 @@ impl Session {
             if mid == ModuleId::builtin() || self.warm_mids.contains(&mid) {
                 continue;
             }
-            let names = self.module_iface_dep_names.entry(mid)
+            let names = self
+                .module_iface_dep_names
+                .entry(mid)
                 .or_insert_with(|| iface_dep_names(module));
             for &name in names.iter() {
                 self.dependents_iface.entry(name).or_default().insert(mid);
@@ -1817,7 +2023,12 @@ impl Session {
             .collect()
     }
 
-    pub fn rebuild_module(&mut self, path: &str, ast: Ast, changed: &[usize]) -> Result<UpdateResult, CompilerError> {
+    pub fn rebuild_module(
+        &mut self,
+        path: &str,
+        ast: Ast,
+        changed: &[usize],
+    ) -> Result<UpdateResult, CompilerError> {
         let file = ast.file;
         let mid = self.ws.module_ids[&file];
 
@@ -1828,12 +2039,21 @@ impl Session {
         // not Idx<Function> for persistent ids, but maybe not needed for now
         let old_gens: FxHashMap<Idx<Function>, u64> = {
             let m = self.ws.module(mid);
-            m.functions.iter()
-            .filter_map(|(fid, _)| m.bodies.get(&BodyOwner::Function(fid)).map(|b| (fid, b.generation)))
-            .collect()
+            m.functions
+                .iter()
+                .filter_map(|(fid, _)| {
+                    m.bodies
+                        .get(&BodyOwner::Function(fid))
+                        .map(|b| (fid, b.generation))
+                })
+                .collect()
         };
 
-        let old_inf = self.ws.inferences.get_mut(mid.index()).and_then(|s| s.take());
+        let old_inf = self
+            .ws
+            .inferences
+            .get_mut(mid.index())
+            .and_then(|s| s.take());
 
         self.retain_modules(|m| m != mid);
         self.ws.phase_timings.clear();
@@ -1846,7 +2066,8 @@ impl Session {
             let prints = &self.files[path].item_prints;
             let module = self.ws.module(mid);
 
-            changed.iter()
+            changed
+                .iter()
                 .filter_map(|&i| prints.get(i).and_then(|p| module.body_at(p.offset)))
                 .collect()
         };
@@ -1861,19 +2082,32 @@ impl Session {
 
                 if let Some(body) = module.bodies.get_mut(&owner) {
                     let old = old_gens.get(&fid).copied().unwrap_or(0);
-                    body.generation = if changed_owners.contains(&owner) { old + 1 } else { old };
+                    body.generation = if changed_owners.contains(&owner) {
+                        old + 1
+                    } else {
+                        old
+                    };
                 }
             }
         }
 
         let timer = Instant::now();
-        let result = check_module_incremental(&self.ws, mid, self.ws.module(mid), old_inf.unwrap_or_default())?;
+        let result = check_module_incremental(
+            &self.ws,
+            mid,
+            self.ws.module(mid),
+            old_inf.unwrap_or_default(),
+        )?;
         self.ws.set_inference(mid, result);
         self.ws.log_time("infer functions", timer);
 
         #[cfg(debug_assertions)]
         if let Some(old) = old_iface {
-            debug_assert_eq!(old, interface_snapshot(&self.ws, mid), "relower of `{path}` changed the module interface, classify mis-tiered an interface edit")
+            debug_assert_eq!(
+                old,
+                interface_snapshot(&self.ws, mid),
+                "relower of `{path}` changed the module interface, classify mis-tiered an interface edit"
+            )
         }
 
         self.rebuild_dependents();
@@ -1881,11 +2115,15 @@ impl Session {
         let prints = &self.files[path].item_prints;
         let module = self.ws.module(mid);
 
-        let reinferred: Vec<BodyId> = changed.iter()
+        let reinferred: Vec<BodyId> = changed
+            .iter()
             .filter_map(|&i| {
-                prints.get(i).and_then(|p| module.body_at(p.offset)).map(|owner| (mid, owner))
+                prints
+                    .get(i)
+                    .and_then(|p| module.body_at(p.offset))
+                    .map(|owner| (mid, owner))
             })
-        .collect();
+            .collect();
 
         let relowered = self.collect_reinferred(&[mid]);
 
@@ -1914,22 +2152,63 @@ impl Session {
         // would survive (a `... as in` -> `... as int` keystroke left a phantom
         // "unsupported type" diagnostic until LSP restart). Whenever the file
         // currently has syntax errors, take the full path, which recomputes them.
-        if self.files.get(path).is_some_and(|f| !f.syntax_errors.is_empty()) {
+        if self
+            .files
+            .get(path)
+            .is_some_and(|f| !f.syntax_errors.is_empty())
+        {
             return Ok(None);
         }
         // --- locate (non-mutating; releases the files borrow before any change) ---
-        let (es, oe, delta, idx, so, eo, line, col, old_iface, old_name, old_text, old_prints, old_macros, old_syntax_errors, old_dialect, old_package, old_global_policy, old_scope_hash, old_contribution) = {
-            let Some(old) = self.files.get(path) else { return Ok(None) };
+        let (
+            es,
+            oe,
+            delta,
+            idx,
+            so,
+            eo,
+            line,
+            col,
+            old_iface,
+            old_name,
+            old_text,
+            old_prints,
+            old_macros,
+            old_syntax_errors,
+            old_dialect,
+            old_package,
+            old_global_policy,
+            old_scope_hash,
+            old_contribution,
+        ) = {
+            let Some(old) = self.files.get(path) else {
+                return Ok(None);
+            };
             let (es, oe, delta) = byte_diff(&old.text, new_text);
-            let Some(idx) = locate_body_edit(&old.item_prints, es, oe) else { return Ok(None) };
+            let Some(idx) = locate_body_edit(&old.item_prints, es, oe) else {
+                return Ok(None);
+            };
             let p = &old.item_prints[idx];
             (
-                es, oe, delta, idx,
-                p.item_span.offset_range.0, p.item_span.offset_range.1,
-                p.item_span.line_range.0, p.item_span.col_range.0,
-                p.iface_hash, p.name,
-                old.text.clone(), old.item_prints.clone(), old.macros.clone(), old.syntax_errors.clone(),
-                old.dialect, old.package.clone(), old.global_policy, old.scope_hash, old.contribution.clone(),
+                es,
+                oe,
+                delta,
+                idx,
+                p.item_span.offset_range.0,
+                p.item_span.offset_range.1,
+                p.item_span.line_range.0,
+                p.item_span.col_range.0,
+                p.iface_hash,
+                p.name,
+                old.text.clone(),
+                old.item_prints.clone(),
+                old.macros.clone(),
+                old.syntax_errors.clone(),
+                old.dialect,
+                old.package.clone(),
+                old.global_policy,
+                old.scope_hash,
+                old.contribution.clone(),
             )
         };
         let _ = (es, oe);
@@ -1972,9 +2251,15 @@ impl Session {
         }
 
         // Resolve the HIR body + spans (non-mutating). Bail if anything is off.
-        let Some(&mid) = self.ws.module_ids.get(&ustr(path)) else { return Ok(None) };
-        let Some(owner) = self.ws.module(mid).body_at(so) else { return Ok(None) };
-        let BodyOwner::Function(fid) = owner else { return Ok(None) };
+        let Some(&mid) = self.ws.module_ids.get(&ustr(path)) else {
+            return Ok(None);
+        };
+        let Some(owner) = self.ws.module(mid).body_at(so) else {
+            return Ok(None);
+        };
+        let BodyOwner::Function(fid) = owner else {
+            return Ok(None);
+        };
         let old_fn_span = self.ws.module(mid).functions[fid].span;
         let new_fn_span = match &mini.items[0].kind {
             ItemKind::Function(f) => f.span,
@@ -2049,15 +2334,28 @@ impl Session {
         byte_delta: isize,
         line_delta: isize,
     ) -> Result<UpdateResult, CompilerError> {
-        let old_gen = self.ws.module(mid).bodies.get(&owner).map(|b| b.generation).unwrap_or(0);
+        let old_gen = self
+            .ws
+            .module(mid)
+            .bodies
+            .get(&owner)
+            .map(|b| b.generation)
+            .unwrap_or(0);
 
         let item = &mini.items[0];
         let ItemKind::Function(f) = &item.kind else {
-            comp_error!(Span::unknown(), "skull incremental: mini-Ast item is not a function");
+            comp_error!(
+                Span::unknown(),
+                "skull incremental: mini-Ast item is not a function"
+            );
         };
         let annotations = item.annotations.as_slice();
 
-        let old_inf = self.ws.inferences.get_mut(mid.index()).and_then(|s| s.take());
+        let old_inf = self
+            .ws
+            .inferences
+            .get_mut(mid.index())
+            .and_then(|s| s.take());
         self.ws.phase_timings.clear();
 
         let mut module = std::mem::take(self.ws.module_mut(mid));
@@ -2067,8 +2365,14 @@ impl Session {
         self.ws.log_time("shift spans", shift_timer);
 
         let lower_timer = Instant::now();
-        let installed =
-            bone_semantic::lower::relower_function_in_place(&self.ws, &mut module, &mini, f, annotations, fid)?;
+        let installed = bone_semantic::lower::relower_function_in_place(
+            &self.ws,
+            &mut module,
+            &mini,
+            f,
+            annotations,
+            fid,
+        )?;
         if installed {
             if let Some(b) = module.bodies.get_mut(&owner) {
                 b.generation = old_gen + 1;
@@ -2079,7 +2383,12 @@ impl Session {
         self.ws.log_time("lower functions", lower_timer);
 
         let infer_timer = Instant::now();
-        let result = check_module_incremental(&self.ws, mid, self.ws.module(mid), old_inf.unwrap_or_default())?;
+        let result = check_module_incremental(
+            &self.ws,
+            mid,
+            self.ws.module(mid),
+            old_inf.unwrap_or_default(),
+        )?;
         self.ws.set_inference(mid, result);
         self.ws.log_time("infer functions", infer_timer);
 
@@ -2096,7 +2405,12 @@ impl Session {
         })
     }
 
-    fn rebuild_body_incremental(&mut self, path: &str, ast: Ast, changed_idx: usize) -> Result<UpdateResult, CompilerError> {
+    fn rebuild_body_incremental(
+        &mut self,
+        path: &str,
+        ast: Ast,
+        changed_idx: usize,
+    ) -> Result<UpdateResult, CompilerError> {
         let file = ast.file;
         let mid = self.ws.module_ids[&file];
 
@@ -2116,12 +2430,19 @@ impl Session {
         };
 
         let old_fn_span = self.ws.module(mid).functions[fid].span;
-        let old_gen = self.ws.module(mid).bodies.get(&owner)
-            .map(|b| b.generation).unwrap_or(0);
+        let old_gen = self
+            .ws
+            .module(mid)
+            .bodies
+            .get(&owner)
+            .map(|b| b.generation)
+            .unwrap_or(0);
 
         // Extract the new fn span as an owned value so the borrow into `ast`
         // ends before the fallback may move `ast` into `rebuild_module`.
-        let new_fn_span_opt = ast.items.iter()
+        let new_fn_span_opt = ast
+            .items
+            .iter()
             .find(|it| it.span.offset_range.0 == new_start)
             .and_then(|it| match &it.kind {
                 ItemKind::Function(nf) => Some(nf.span),
@@ -2147,7 +2468,11 @@ impl Session {
         // so re-parse the stored text for a fresh un-cooked module to hand to the
         // whole-module path. Effectively unreachable for a classify-confirmed
         // body edit.
-        let item = match edited.items.iter().find(|it| it.span.offset_range.0 == new_start) {
+        let item = match edited
+            .items
+            .iter()
+            .find(|it| it.span.offset_range.0 == new_start)
+        {
             Some(it) => it,
             None => {
                 let m = self.parse_stored(ustr(path))?;
@@ -2166,7 +2491,11 @@ impl Session {
         let byte_delta = new_fn_span.offset_range.1 as isize - old_fn_span.offset_range.1 as isize;
         let line_delta = new_fn_span.line_range.1 as isize - old_fn_span.line_range.1 as isize;
 
-        let old_inf = self.ws.inferences.get_mut(mid.index()).and_then(|s| s.take());
+        let old_inf = self
+            .ws
+            .inferences
+            .get_mut(mid.index())
+            .and_then(|s| s.take());
         self.ws.phase_timings.clear();
         self.ws.phase_timings.push(("clone ast", clone_dur));
         self.ws.phase_timings.push(("cook one", cook_dur));
@@ -2179,7 +2508,14 @@ impl Session {
 
         let lower_timer = Instant::now();
 
-        let installed = bone_semantic::lower::relower_function_in_place(&self.ws, &mut module, &edited, f, annotations, fid)?;
+        let installed = bone_semantic::lower::relower_function_in_place(
+            &self.ws,
+            &mut module,
+            &edited,
+            f,
+            annotations,
+            fid,
+        )?;
 
         if installed {
             if let Some(b) = module.bodies.get_mut(&owner) {
@@ -2192,7 +2528,12 @@ impl Session {
         self.ws.log_time("lower functions", lower_timer);
 
         let infer_timer = Instant::now();
-        let result = check_module_incremental(&self.ws, mid, self.ws.module(mid), old_inf.unwrap_or_default())?;
+        let result = check_module_incremental(
+            &self.ws,
+            mid,
+            self.ws.module(mid),
+            old_inf.unwrap_or_default(),
+        )?;
         self.ws.set_inference(mid, result);
         self.ws.log_time("infer functions", infer_timer);
 
@@ -2217,7 +2558,10 @@ impl Session {
     /// changed, so the cached registry is current and every other file's
     /// calls were checked against it already.
     fn cook_edited(&self, ast: &mut Ast) -> Result<(), CompilerError> {
-        if let Some(e) = check_macro_call_labels_in(ast, &self.registry).into_iter().next() {
+        if let Some(e) = check_macro_call_labels_in(ast, &self.registry)
+            .into_iter()
+            .next()
+        {
             return Err(e);
         }
         cook_one(ast, &self.registry);
@@ -2237,11 +2581,10 @@ impl Session {
                 restore(self);
 
                 if let Err(revert_err) = self.rebuild_users() {
-                    return Err(
-
-                    CompilerError::new_no_location(format!("bone session: rebuild of previous good state failed after a failed {action} of `{path}` - session is inconsistent: {} (original {action} error: {})",
-                            revert_err.message, e.message))
-                    );
+                    return Err(CompilerError::new_no_location(format!(
+                        "bone session: rebuild of previous good state failed after a failed {action} of `{path}` - session is inconsistent: {} (original {action} error: {})",
+                        revert_err.message, e.message
+                    )));
                 }
 
                 Err(e)
@@ -2301,7 +2644,11 @@ fn macro_defs(module: &Ast) -> Vec<MacroDef> {
 /// need re-expansion; an added one isn't in `old`.) Takes the OLD names from the
 /// stored `UserFile.macros` (no retained AST) and the NEW names from the freshly
 /// parsed module.
-fn touches_macro(old_macros: &[MacroDef], new_macros: &[MacroDef], changed: &FxHashSet<Ustr>) -> bool {
+fn touches_macro(
+    old_macros: &[MacroDef],
+    new_macros: &[MacroDef],
+    changed: &FxHashSet<Ustr>,
+) -> bool {
     old_macros
         .iter()
         .chain(new_macros)
@@ -2340,8 +2687,14 @@ fn byte_diff(old: &str, new: &str) -> (usize, usize, isize) {
 fn text_edit_delta(path: &str, old: &str, new: &str) -> TextEditDelta {
     let (at, old_end, byte_delta) = byte_diff(old, new);
     let new_end = (old_end as isize + byte_delta) as usize;
-    let old_lines = old.as_bytes()[at..old_end].iter().filter(|b| **b == b'\n').count();
-    let new_lines = new.as_bytes()[at..new_end].iter().filter(|b| **b == b'\n').count();
+    let old_lines = old.as_bytes()[at..old_end]
+        .iter()
+        .filter(|b| **b == b'\n')
+        .count();
+    let new_lines = new.as_bytes()[at..new_end]
+        .iter()
+        .filter(|b| **b == b'\n')
+        .count();
     TextEditDelta {
         file: Ustr::from(path),
         at,
@@ -2449,7 +2802,10 @@ fn iface_dep_names(module: &Module) -> FxHashSet<Ustr> {
         .ty_arena
         .iter()
         .filter_map(|(_, te)| match te {
-            TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => Some(*n),
+            TypeExpr::App {
+                ctor: TypeCtor::Nominal(n),
+                ..
+            } => Some(*n),
             _ => None,
         })
         .collect()
@@ -2461,8 +2817,16 @@ fn body_errors(ws: &Workspace) -> Vec<CompilerError> {
         .iter()
         .flatten()
         .flat_map(|inf| inf.errors.values().flatten().cloned())
-        .chain(ws.modules.iter().flat_map(|m| m.lowering_errors.values().flatten().cloned()))
-        .chain(ws.modules.iter().flat_map(|m| m.interface_errors.iter().cloned()))
+        .chain(
+            ws.modules
+                .iter()
+                .flat_map(|m| m.lowering_errors.values().flatten().cloned()),
+        )
+        .chain(
+            ws.modules
+                .iter()
+                .flat_map(|m| m.interface_errors.iter().cloned()),
+        )
         .collect();
 
     errs.sort_by(|a, b| {
@@ -2504,15 +2868,39 @@ fn interface_snapshot(ws: &Workspace, mid: ModuleId) -> String {
         let params = f
             .param_decls
             .iter()
-            .map(|p| format!("{}:{}{}", p.name, render_ty(ws, &p.ty), if p.has_default { "=?" } else { "" }))
+            .map(|p| {
+                format!(
+                    "{}:{}{}",
+                    p.name,
+                    render_ty(ws, &p.ty),
+                    if p.has_default { "=?" } else { "" }
+                )
+            })
             .collect::<Vec<_>>()
             .join(",");
-        let generics = f.generics.iter().map(|g| render_ty(ws, g)).collect::<Vec<_>>().join(",");
-        let ret = f.return_ty.as_ref().map(|t| render_ty(ws, t)).unwrap_or_default();
+        let generics = f
+            .generics
+            .iter()
+            .map(|g| render_ty(ws, g))
+            .collect::<Vec<_>>()
+            .join(",");
+        let ret = f
+            .return_ty
+            .as_ref()
+            .map(|t| render_ty(ws, t))
+            .unwrap_or_default();
         let _ = write!(
             out,
             "fn {} co={} var={} gen=[{generics}] params=[{params}] req={} ret={ret} inline={:?} backend={:?} extern={} anns={:?} ffi={:?}\n",
-            f.name, f.is_coroutine, f.is_variadic, f.num_required, f.inline_body, f.backend, f.is_extern, f.annotations, f.ffi_lib,
+            f.name,
+            f.is_coroutine,
+            f.is_variadic,
+            f.num_required,
+            f.inline_body,
+            f.backend,
+            f.is_extern,
+            f.annotations,
+            f.ffi_lib,
         );
     }
 
@@ -2520,7 +2908,11 @@ fn interface_snapshot(ws: &Workspace, mid: ModuleId) -> String {
         let _ = write!(out, "global {}:{}\n", g.name, render_ty(ws, &g.ty));
     }
 
-    let _ = write!(out, "{:?}", (&m.structs, &m.enums, &m.newtypes, &m.decorators));
+    let _ = write!(
+        out,
+        "{:?}",
+        (&m.structs, &m.enums, &m.newtypes, &m.decorators)
+    );
     out
 }
 
@@ -2540,7 +2932,10 @@ fn render_ty_node(ws: &Workspace, mid: ModuleId, idx: Idx<bone_semantic::hir::Ty
     use bone_semantic::hir::TypeExpr;
 
     let render_range = |range: IdxRange<TypeExpr>| {
-        range.map(|i| render_ty_node(ws, mid, i)).collect::<Vec<_>>().join(",")
+        range
+            .map(|i| render_ty_node(ws, mid, i))
+            .collect::<Vec<_>>()
+            .join(",")
     };
 
     match &ws.module(mid).ty_arena[idx] {
@@ -2552,7 +2947,11 @@ fn render_ty_node(ws: &Workspace, mid: ModuleId, idx: Idx<bone_semantic::hir::Ty
         TypeExpr::Nullable(i) => format!("?{}", render_ty_node(ws, mid, *i)),
         TypeExpr::App { ctor, params } => format!("App({ctor:?},[{}])", render_range(*params)),
         TypeExpr::Function { params, ret } => {
-            format!("Fn([{}]=>{})", render_range(*params), render_ty_node(ws, mid, *ret))
+            format!(
+                "Fn([{}]=>{})",
+                render_range(*params),
+                render_ty_node(ws, mid, *ret)
+            )
         }
         TypeExpr::Tuple { elements } => format!("Tuple([{}])", render_range(*elements)),
     }

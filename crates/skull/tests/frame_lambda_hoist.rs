@@ -32,10 +32,16 @@ fn contains_digit_bridge(hay: &str, needle: &str, tail: &str) -> bool {
 /// params).
 fn fn_params(lua: &str, name: &str) -> Vec<String> {
     let head = format!("function {name}(");
-    let p = lua.find(&head).unwrap_or_else(|| panic!("no `function {name}(` in:\n{lua}"));
+    let p = lua
+        .find(&head)
+        .unwrap_or_else(|| panic!("no `function {name}(` in:\n{lua}"));
     let after = &lua[p + head.len()..];
     let close = after.find(')').expect("param list closes");
-    after[..close].split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+    after[..close]
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 fn state_capture_field(step: &str, state_param: &str) -> Option<String> {
@@ -82,8 +88,7 @@ fn param_lambda_hoists_as_record_under_frame() {
     let lp = fn_params(&lua, &format!("{w}__step__lambda0"));
     assert_eq!(lp.len(), 2, "the hoisted lambda must take (env, n):\n{lua}");
     assert!(
-        step.contains(&format!("__slot = __rock_code_slot_ref("))
-            && state_field.is_some(),
+        step.contains(&format!("__slot = __rock_code_slot_ref(")) && state_field.is_some(),
         "the step must build a CodeRef env record carrying the frame state param `{s}`: {step}"
     );
     assert!(
@@ -188,7 +193,8 @@ fn loop_binding_snapshots_by_value_into_record() {
         "the hoisted body must read a snapshot field `.c<slot>` from its env:\n{body}"
     );
     assert_eq!(
-        body.matches(".c").count(), 1,
+        body.matches(".c").count(),
+        1,
         "a read-only loop binding must read its snapshot without a second frame-field hop:\n{body}"
     );
 }

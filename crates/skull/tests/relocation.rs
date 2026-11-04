@@ -8,12 +8,22 @@ use crate::common::bone_rejection_errors;
 /// The one relocation rejection of `src`, asserted to point at `at`.
 fn rejected_at(src: &str, at: &str) -> String {
     let errors = bone_rejection_errors(src);
-    let relocations: Vec<_> = errors.iter().filter(|e| e.message.contains("relocat")).collect();
-    assert_eq!(relocations.len(), 1, "expected one relocation rejection: {errors:#?}");
-    let error = relocations[0];
-    let expected = src.find(at).unwrap_or_else(|| panic!("`{at}` is not in the source"));
+    let relocations: Vec<_> = errors
+        .iter()
+        .filter(|e| e.message.contains("relocat"))
+        .collect();
     assert_eq!(
-        error.location.offset, expected,
+        relocations.len(),
+        1,
+        "expected one relocation rejection: {errors:#?}"
+    );
+    let error = relocations[0];
+    let expected = src
+        .find(at)
+        .unwrap_or_else(|| panic!("`{at}` is not in the source"));
+    assert_eq!(
+        error.location.offset,
+        expected,
         "the rejection must point at `{at}`, found {:?}: {}",
         &src[error.location.offset..(error.location.offset + at.len()).min(src.len())],
         error.message
@@ -106,7 +116,9 @@ fn main() {
 "#,
     );
     assert!(
-        errors.iter().any(|e| e.message.contains("relocatable Vec or Map storage")),
+        errors
+            .iter()
+            .any(|e| e.message.contains("relocatable Vec or Map storage")),
         "a retained Map-element ref dangles when an insert rehashes: {errors:#?}"
     );
 }
@@ -287,7 +299,9 @@ fn fake(values: [int]) {}
 "#,
     );
     assert!(
-        errors.iter().any(|e| e.message.contains("`@relocates` is reserved")),
+        errors
+            .iter()
+            .any(|e| e.message.contains("`@relocates` is reserved")),
         "{errors:#?}"
     );
 }

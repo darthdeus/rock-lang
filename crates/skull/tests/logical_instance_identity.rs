@@ -61,7 +61,11 @@ fn instantiations_of(ws: &Workspace, g: &InstanceGraph, name: &str) -> Vec<Strin
             i.func.module == mid && ws.module(mid).functions[i.func.func].name.as_str() == name
         })
         .map(|i| {
-            i.args.iter().map(|a| g.interner().get(*a).render()).collect::<Vec<_>>().join(", ")
+            i.args
+                .iter()
+                .map(|a| g.interner().get(*a).render())
+                .collect::<Vec<_>>()
+                .join(", ")
         })
         .collect();
     out.sort();
@@ -84,7 +88,10 @@ fn assert_population(c: &SiteJoinCensus) {
         .get(&skull::site_join::BodySkip::LowerFailed)
         .copied()
         .unwrap_or(0);
-    assert_eq!(failed, 0, "a body did not lower, so the counts below are over a hole: {c:?}");
+    assert_eq!(
+        failed, 0,
+        "a body did not lower, so the counts below are over a hole: {c:?}"
+    );
     assert!(c.joined > 0, "the fixture joined nothing: {c:?}");
 }
 
@@ -125,7 +132,11 @@ fn main() {
         "no function-typed instance was recorded: {insts:?}"
     );
     let unique: std::collections::BTreeSet<&String> = insts.iter().collect();
-    assert_eq!(unique.len(), insts.len(), "two shapes share one identity: {insts:?}");
+    assert_eq!(
+        unique.len(),
+        insts.len(),
+        "two shapes share one identity: {insts:?}"
+    );
 
     let c = census_of(src);
     assert_population(&c);
@@ -166,8 +177,15 @@ fn main() {
     let ws = check(src);
     let g = graph_of(&ws);
     let insts = instantiations_of(&ws, &g, "ident");
-    assert_eq!(insts.len(), 2, "expected two `ident` instances, got {insts:?}");
-    assert_ne!(insts[0], insts[1], "the bare and contained coroutine share one identity");
+    assert_eq!(
+        insts.len(),
+        2,
+        "expected two `ident` instances, got {insts:?}"
+    );
+    assert_ne!(
+        insts[0], insts[1],
+        "the bare and contained coroutine share one identity"
+    );
 
     let c = census_of(src);
     assert_population(&c);
@@ -197,7 +215,11 @@ fn main() {
     let ws = check(src);
     let g = graph_of(&ws);
     let insts = instantiations_of(&ws, &g, "ident");
-    assert_eq!(insts.len(), 2, "expected two `ident` instances, got {insts:?}");
+    assert_eq!(
+        insts.len(),
+        2,
+        "expected two `ident` instances, got {insts:?}"
+    );
     assert_ne!(
         insts[0], insts[1],
         "`[int]` and `[[int]]` collapsed onto one identity: {insts:?}"
@@ -240,7 +262,10 @@ fn main() { print("{pass(1)}") }
         .expect("ident");
     let inf = ws
         .inference(mid)
-        .and_then(|ir| ir.per_fn.get(&bone_semantic::hir::BodyOwner::Function(pass_fid)))
+        .and_then(|ir| {
+            ir.per_fn
+                .get(&bone_semantic::hir::BodyOwner::Function(pass_fid))
+        })
         .expect("pass has inference");
     let call = *inf
         .resolved_overload_calls
@@ -253,7 +278,10 @@ fn main() { print("{pass(1)}") }
         &ws,
         inf,
         call,
-        skull_mir::mir::FuncRef { module: mid, func: ident_fid },
+        skull_mir::mir::FuncRef {
+            module: mid,
+            func: ident_fid,
+        },
         &empty,
     )
     .expect("an unbound declared generic is not a rejection");
@@ -263,19 +291,19 @@ fn main() { print("{pass(1)}") }
     );
 
     // CONTROL: under a substitution that binds `U`, the SAME call resolves.
-    let u_var = skull_mir::monoty::generic_var_of(
-        &ws,
-        inf,
-        ws.module(mid).functions[pass_fid].generics[0],
-    )
-    .expect("`pass`'s declared generic is a type variable");
+    let u_var =
+        skull_mir::monoty::generic_var_of(&ws, inf, ws.module(mid).functions[pass_fid].generics[0])
+            .expect("`pass`'s declared generic is a type variable");
     let mut bound = skull_mir::lower::SpecSubst::default();
     bound.insert(u_var, skull_mir::monoty::MonoTy::Int);
     let got = skull_mir::lower::callee_instance_subst(
         &ws,
         inf,
         call,
-        skull_mir::mir::FuncRef { module: mid, func: ident_fid },
+        skull_mir::mir::FuncRef {
+            module: mid,
+            func: ident_fid,
+        },
         &bound,
     )
     .expect("a bound generic converts")
@@ -356,7 +384,10 @@ fn main() { print("x") }
         .functions
         .iter()
         .filter(|(_, f)| f.name.as_str() == "twice")
-        .map(|(fid, _)| skull_mir::mir::FuncRef { module: mid, func: fid })
+        .map(|(fid, _)| skull_mir::mir::FuncRef {
+            module: mid,
+            func: fid,
+        })
         .collect();
     assert_eq!(
         decls.len(),
@@ -414,8 +445,15 @@ fn main() { print("x") }
 #[test]
 fn a_repeated_backend_pair_is_not_one_declaration() {
     let ws = check("fn main() { print(\"x\") }");
-    let all = ws.functions_by_name.get(&Ustr::from("__op_eq")).expect("declared");
-    assert!(all.len() > 2, "the repeated-backend population is the point: {}", all.len());
+    let all = ws
+        .functions_by_name
+        .get(&Ustr::from("__op_eq"))
+        .expect("declared");
+    assert!(
+        all.len() > 2,
+        "the repeated-backend population is the point: {}",
+        all.len()
+    );
     let ops = skull_mir::lower::dispatched_callee_decls(&ws, "__op_eq");
     assert_eq!(ops.len(), 1, "the callable `__op_eq` is unique: {ops:?}");
     for &(m, f) in all.iter() {

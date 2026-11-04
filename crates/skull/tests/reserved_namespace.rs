@@ -28,7 +28,10 @@ fn use_it(a: int) -> int { return a + r }
 fn main() { print("{use_it(1)}") }
 "#,
     );
-    assert!(lua.contains("r = (1)") || lua.contains("r ="), "the user global is emitted:\n{lua}");
+    assert!(
+        lua.contains("r = (1)") || lua.contains("r ="),
+        "the user global is emitted:\n{lua}"
+    );
 }
 
 /// POSITIVE CONTROL: `rx1` -- a digit not immediately after the prefix letter.
@@ -82,7 +85,10 @@ fn use_it(a: int) -> int { return a + __rock_foo }
 fn main() { print("{use_it(1)}") }
 "#,
     );
-    assert!(lua.contains("__rock_foo"), "the user global is emitted:\n{lua}");
+    assert!(
+        lua.contains("__rock_foo"),
+        "the user global is emitted:\n{lua}"
+    );
 }
 
 /// The stdlib defines `@nomangle __rock_*` fns and is loaded into every emit

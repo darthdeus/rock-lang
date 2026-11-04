@@ -1,4 +1,3 @@
-
 #[derive(Debug, Eq, PartialEq, Clone, Default)]
 pub struct WorkspaceFileOperationsClientCapabilities {
     /// Whether the client supports dynamic registration for file requests/notifications.
@@ -17,7 +16,8 @@ pub struct WorkspaceFileOperationsClientCapabilities {
     pub will_delete: Option<bool>,
 }
 
-impl_lsp_struct!(WorkspaceFileOperationsClientCapabilities,
+impl_lsp_struct!(
+    WorkspaceFileOperationsClientCapabilities,
     required {},
     optional {
         dynamic_registration: bool = "dynamicRegistration",
@@ -46,7 +46,8 @@ pub struct WorkspaceFileOperationsServerCapabilities {
     pub will_delete: Option<FileOperationRegistrationOptions>,
 }
 
-impl_lsp_struct!(WorkspaceFileOperationsServerCapabilities,
+impl_lsp_struct!(
+    WorkspaceFileOperationsServerCapabilities,
     required {},
     optional {
         did_create: FileOperationRegistrationOptions = "didCreate",
@@ -84,9 +85,14 @@ pub struct FileOperationFilter {
     pub pattern: FileOperationPattern,
 }
 
-impl_lsp_struct!(FileOperationFilter,
-    required { pattern: FileOperationPattern = "pattern" },
-    nullable { scheme: String = "scheme" },
+impl_lsp_struct!(
+    FileOperationFilter,
+    required {
+        pattern: FileOperationPattern = "pattern"
+    },
+    nullable {
+        scheme: String = "scheme"
+    },
     optional {}
 );
 
@@ -112,9 +118,12 @@ pub struct FileOperationPatternOptions {
     pub ignore_case: Option<bool>,
 }
 
-impl_lsp_struct!(FileOperationPatternOptions,
+impl_lsp_struct!(
+    FileOperationPatternOptions,
     required {},
-    optional { ignore_case: bool = "ignoreCase" }
+    optional {
+        ignore_case: bool = "ignoreCase"
+    }
 );
 
 /// A pattern to describe in which file operation requests or notifications
@@ -141,8 +150,11 @@ pub struct FileOperationPattern {
     pub options: Option<FileOperationPatternOptions>,
 }
 
-impl_lsp_struct!(FileOperationPattern,
-    required { glob: String = "glob" },
+impl_lsp_struct!(
+    FileOperationPattern,
+    required {
+        glob: String = "glob"
+    },
     optional {
         matches: FileOperationPatternKind = "matches",
         options: FileOperationPatternOptions = "options",
@@ -172,8 +184,11 @@ pub struct FileCreate {
     pub uri: String,
 }
 
-impl_lsp_struct!(FileCreate,
-    required { uri: String = "uri" },
+impl_lsp_struct!(
+    FileCreate,
+    required {
+        uri: String = "uri"
+    },
     optional {}
 );
 
@@ -203,7 +218,8 @@ pub struct FileRename {
     pub new_uri: String,
 }
 
-impl_lsp_struct!(FileRename,
+impl_lsp_struct!(
+    FileRename,
     required {
         old_uri: String = "oldUri",
         new_uri: String = "newUri",
@@ -234,7 +250,10 @@ pub struct FileDelete {
     pub uri: String,
 }
 
-impl_lsp_struct!(FileDelete,
-    required { uri: String = "uri" },
+impl_lsp_struct!(
+    FileDelete,
+    required {
+        uri: String = "uri"
+    },
     optional {}
 );

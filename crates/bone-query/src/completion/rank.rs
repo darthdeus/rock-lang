@@ -16,7 +16,6 @@ pub(crate) const FZ_BOUNDARY: i32 = 10; // matched char at a word start
 pub(crate) const FZ_CONSEC: i32 = 10; // matched char right after the previous match (run); == FZ_BOUNDARY so a contiguous run is never worth less than a one-char boundary hop
 pub(crate) const FZ_FIRST: i32 = 10; // extra for matching at absolute position 0
 
-
 /// How many leading chars of `query` (already lowercased) match the START of
 /// `cand` contiguously, case-insensitively. `lootpa` vs `LOOT_PANEL` = 4
 /// (`loot`); vs `LATER_...` = 1 (`l`). "You typed the beginning of this name" --
@@ -96,7 +95,10 @@ pub(crate) fn fuzzy_score(cand: &[u8], query: &[u8]) -> i32 {
         // A true whole-string prefix (typing the name/root from its start) is the
         // strongest signal -- it must beat any boundary-aligned partial match
         // elsewhere (`play` -> `player...` over `pixel_LAYer...`). Dominant bonus.
-        if best > MISS && cand.len() >= query.len() && cand[..query.len()].eq_ignore_ascii_case(query) {
+        if best > MISS
+            && cand.len() >= query.len()
+            && cand[..query.len()].eq_ignore_ascii_case(query)
+        {
             best += 1000;
         }
         best
@@ -262,12 +264,19 @@ pub(crate) fn arg_path_penalty(arg: &str) -> i32 {
     hops * HOP + calls * CALL
 }
 
-
 /// Build the arg-position / reach-path / member-default `sort_text`: a
 /// case- and kind-neutral `RankKey` with the caller's `type_rank` (0
 /// value-of-expected-type / 1 fn-returning-it / 2 other), `dist` (shorter
 /// paths first) and `method` (field/var before method/fn).
-pub(crate) fn arg_sort_text(type_rank: u8, kind: u8, cand: &str, query: &[u8], dist: u16, method: u8, score_bonus: i32) -> String {
+pub(crate) fn arg_sort_text(
+    type_rank: u8,
+    kind: u8,
+    cand: &str,
+    query: &[u8],
+    dist: u16,
+    method: u8,
+    score_bonus: i32,
+) -> String {
     arg_rank_key(type_rank, kind, cand, query, dist, method, score_bonus).encode(cand)
 }
 
@@ -295,7 +304,15 @@ pub(crate) fn closed_set_sort_text(name: &str, prefix: &[u8], tier: u8, decl_idx
 
 /// The `RankKey` behind `arg_sort_text` -- the reach source emits it as a
 /// `Cand` fact and defers the encode to materialization.
-pub(crate) fn arg_rank_key(type_rank: u8, kind: u8, cand: &str, query: &[u8], dist: u16, method: u8, score_bonus: i32) -> RankKey {
+pub(crate) fn arg_rank_key(
+    type_rank: u8,
+    kind: u8,
+    cand: &str,
+    query: &[u8],
+    dist: u16,
+    method: u8,
+    score_bonus: i32,
+) -> RankKey {
     // `fuzzy_score` lowercases the candidate inline; `query` is pre-lowercased.
     // `score_bonus` is a soft caller lean (member fields over methods) -- a
     // within-band tiebreak a better raw match still overrides.
@@ -412,7 +429,13 @@ pub(crate) fn ci_cmp(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
 /// (rank 0), everything else 1 -- the bool-context analogue of an expected
 /// type. Banded like every other path: a prefix-tier match outranks a
 /// boundary-richer higher-scoring one.
-pub(crate) fn member_bool_sort_text(name: &str, pfx: &[u8], is_bool: bool, method: u8, score_bonus: i32) -> String {
+pub(crate) fn member_bool_sort_text(
+    name: &str,
+    pfx: &[u8],
+    is_bool: bool,
+    method: u8,
+    score_bonus: i32,
+) -> String {
     let score = fuzzy_score(name.as_bytes(), pfx) + score_bonus;
     let (exact, band) = match_band_exact(name, pfx, pfx);
     let key = RankKey {
@@ -434,7 +457,14 @@ pub(crate) fn member_bool_sort_text(name: &str, pfx: &[u8], is_bool: bool, metho
 /// where a value of the expected type outranks a better-prefix candidate of the
 /// wrong type). The prefix filter still removes wrong-prefix candidates first,
 /// so this only reorders genuine matches.
-pub(crate) fn member_arg_sort_text(name: &str, pfx: &[u8], type_match: bool, method: u8, dist: u16, score_bonus: i32) -> String {
+pub(crate) fn member_arg_sort_text(
+    name: &str,
+    pfx: &[u8],
+    type_match: bool,
+    method: u8,
+    dist: u16,
+    score_bonus: i32,
+) -> String {
     let score = fuzzy_score(name.as_bytes(), pfx) + score_bonus;
     let (exact, band) = match_band_exact(name, pfx, pfx);
     let key = RankKey {

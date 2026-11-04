@@ -95,8 +95,14 @@ fn optional_value_return_builds_no_box_on_the_presence_path() {
         assert!(!body.contains(ctor), "`{name}` builds `{ctor}..)`:\n{body}");
     }
     let body = function_body(&lua, "mk_mix");
-    assert!(body.contains("do return (true), "), "present arm is the presence lane:\n{body}");
-    assert!(body.contains("do return (false), "), "absent arm is the presence lane:\n{body}");
+    assert!(
+        body.contains("do return (true), "),
+        "present arm is the presence lane:\n{body}"
+    );
+    assert!(
+        body.contains("do return (false), "),
+        "absent arm is the presence lane:\n{body}"
+    );
 }
 
 #[test]

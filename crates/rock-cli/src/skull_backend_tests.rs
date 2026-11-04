@@ -1,50 +1,77 @@
 use crate::compile_cmd;
-use std::time::Duration;
 #[cfg(unix)]
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 #[test]
 fn source_fingerprint_support_files_follow_successful_live_compiles() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("stick.toml"),
         "[package]\nname = \"fingerprint-watch\"\n[build.vars]\nREV = { source_fingerprint = { roots = [\"Root\"], files = [\"support.txt\"] } }\n").unwrap();
-    std::fs::write(dir.path().join("main.rock"),
-        "value Root { count: int }\nfn main() { print(build_var(\"REV\")) }\n").unwrap();
+    std::fs::write(
+        dir.path().join("main.rock"),
+        "value Root { count: int }\nfn main() { print(build_var(\"REV\")) }\n",
+    )
+    .unwrap();
     let support = dir.path().join("support.txt");
     std::fs::write(&support, "first decoder").unwrap();
     let support = support.canonicalize().unwrap();
     let main = dir.path().join("main.lua");
     let overlay = dir.path().join("incremental.lua");
-    let mut project = super::IncrementalProject::init(
-        dir.path().to_str().unwrap(), &main, &overlay).unwrap();
+    let mut project =
+        super::IncrementalProject::init(dir.path().to_str().unwrap(), &main, &overlay).unwrap();
     let recorded_hash = |project: &super::IncrementalProject| {
-        project.comptime_watch_files_with_hashes().into_iter()
+        project
+            .comptime_watch_files_with_hashes()
+            .into_iter()
             .find(|(path, _)| path == &support)
-            .expect("declared support file must reach the watcher").1
+            .expect("declared support file must reach the watcher")
+            .1
     };
     let revision = |project: &super::IncrementalProject| {
-        project.comptime_inputs().vars[&ustr::Ustr::from("REV")].value.clone()
+        project.comptime_inputs().vars[&ustr::Ustr::from("REV")]
+            .value
+            .clone()
     };
     let first_hash = recorded_hash(&project);
     let first_revision = revision(&project);
     std::fs::write(&support, "second decoder").unwrap();
-    assert_eq!(recorded_hash(&project), first_hash,
-        "watch seeding must describe compiled bytes, not reread current disk");
-    assert!(matches!(project.recompile(std::slice::from_ref(&support), &main, &overlay).unwrap(),
-        super::SkullReload::Full { .. }));
+    assert_eq!(
+        recorded_hash(&project),
+        first_hash,
+        "watch seeding must describe compiled bytes, not reread current disk"
+    );
+    assert!(matches!(
+        project
+            .recompile(std::slice::from_ref(&support), &main, &overlay)
+            .unwrap(),
+        super::SkullReload::Full { .. }
+    ));
     let second_hash = recorded_hash(&project);
     let second_revision = revision(&project);
     assert_ne!(first_hash, second_hash);
     assert_ne!(first_revision, second_revision);
     std::fs::remove_file(&support).unwrap();
-    assert!(project.recompile(std::slice::from_ref(&support), &main, &overlay).is_err());
+    assert!(
+        project
+            .recompile(std::slice::from_ref(&support), &main, &overlay)
+            .is_err()
+    );
     assert_eq!(recorded_hash(&project), second_hash);
     assert_eq!(revision(&project), second_revision);
     let manifest = dir.path().join("stick.toml");
-    std::fs::write(&manifest,
-        "[package]\nname = \"fingerprint-watch\"\n[build.vars]\nREV = \"fixed\"\n").unwrap();
+    std::fs::write(
+        &manifest,
+        "[package]\nname = \"fingerprint-watch\"\n[build.vars]\nREV = \"fixed\"\n",
+    )
+    .unwrap();
     project.recompile(&[manifest], &main, &overlay).unwrap();
-    assert!(project.comptime_watch_files_with_hashes().iter().all(|(path, _)| path != &support));
+    assert!(
+        project
+            .comptime_watch_files_with_hashes()
+            .iter()
+            .all(|(path, _)| path != &support)
+    );
     assert_eq!(revision(&project), "fixed");
 }
 
@@ -56,8 +83,11 @@ fn iter_incremental_uses_the_same_production_sources_as_live_builds() {
         "[package]\nname = \"iter-production-sources\"\n",
     )
     .expect("manifest");
-    std::fs::write(dir.path().join("main.rock"), "fn main() { let value = 1 }\n")
-        .expect("main source");
+    std::fs::write(
+        dir.path().join("main.rock"),
+        "fn main() { let value = 1 }\n",
+    )
+    .expect("main source");
     std::fs::create_dir(dir.path().join("tests")).expect("tests dir");
     std::fs::write(dir.path().join("tests/broken.rock"), "fn broken( {\n")
         .expect("broken test source");
@@ -65,10 +95,12 @@ fn iter_incremental_uses_the_same_production_sources_as_live_builds() {
     let sources = super::iter_incremental_sources(dir.path().to_str().unwrap())
         .expect("discover profiler sources");
     assert_eq!(sources.files.len(), 1);
-    assert!(sources
-        .files
-        .iter()
-        .all(|source| !source.borrow().file.to_id_path().contains("/tests/")));
+    assert!(
+        sources
+            .files
+            .iter()
+            .all(|source| !source.borrow().file.to_id_path().contains("/tests/"))
+    );
 }
 
 /// Every directory field the nobox accessor builder emits, as one text.
@@ -79,7 +111,11 @@ fn nobox_accessors(
     let mut rows = std::collections::BTreeMap::new();
     super::build_global_nobox_accessors(workspace, scalar, &mut rows)
         .expect("build nobox reflection accessors");
-    rows.values().flatten().cloned().collect::<Vec<_>>().join("\n")
+    rows.values()
+        .flatten()
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[test]
@@ -95,9 +131,18 @@ fn main() {}
         .expect("typecheck nobox reflection fixture");
     let scalar = skull_mir::lower::ScalarCtx::new(&workspace);
     let bridge = nobox_accessors(&workspace, &scalar);
-    assert!(bridge.contains("__rock_globals[1]"), "first leaf did not use its numeric slot:\n{bridge}");
-    assert!(bridge.contains("__rock_globals[2]"), "second leaf did not use its numeric slot:\n{bridge}");
-    assert!(!bridge.contains("global:main.rock::SPOT::"), "logical identity leaked into physical access:\n{bridge}");
+    assert!(
+        bridge.contains("__rock_globals[1]"),
+        "first leaf did not use its numeric slot:\n{bridge}"
+    );
+    assert!(
+        bridge.contains("__rock_globals[2]"),
+        "second leaf did not use its numeric slot:\n{bridge}"
+    );
+    assert!(
+        !bridge.contains("global:main.rock::SPOT::"),
+        "logical identity leaked into physical access:\n{bridge}"
+    );
 }
 
 #[test]
@@ -114,9 +159,18 @@ fn main() {}
         .expect("typecheck nested nobox reflection fixture");
     let scalar = skull_mir::lower::ScalarCtx::new(&workspace);
     let bridge = nobox_accessors(&workspace, &scalar);
-    assert!(bridge.contains("Place_lct("), "nested CData did not use its leaf ctor:\n{bridge}");
-    assert!(bridge.contains("v.space.value"), "nested CData write did not read declared fields:\n{bridge}");
-    assert!(!bridge.contains("v[\"space.value\"]"), "nested CData used a leaf-table key:\n{bridge}");
+    assert!(
+        bridge.contains("Place_lct("),
+        "nested CData did not use its leaf ctor:\n{bridge}"
+    );
+    assert!(
+        bridge.contains("v.space.value"),
+        "nested CData write did not read declared fields:\n{bridge}"
+    );
+    assert!(
+        !bridge.contains("v[\"space.value\"]"),
+        "nested CData used a leaf-table key:\n{bridge}"
+    );
 }
 
 #[test]
@@ -143,15 +197,20 @@ fn main() {}
         self_name: ustr::Ustr::from("example_space"),
         aliases: vec![],
     });
-    let workspace = bone_semantic::semantic_passes::semantic_pass_with_aliases(
-        &mut [module], &aliases,
-    )
-    .expect("typecheck scoped nobox fixture");
+    let workspace =
+        bone_semantic::semantic_passes::semantic_pass_with_aliases(&mut [module], &aliases)
+            .expect("typecheck scoped nobox fixture");
     let scalar = skull_mir::lower::ScalarCtx::new(&workspace);
     let bridge = nobox_accessors(&workspace, &scalar);
     let symbol = skull_mir::mangle::symbol_of_key(ustr::Ustr::from("example_space::Place"));
-    assert!(bridge.contains(&format!("return {symbol}_ct(")), "scoped ctor did not use its emitted symbol:\n{bridge}");
-    assert!(!bridge.contains("example_space::Place_ct("), "logical type key leaked into Lua:\n{bridge}");
+    assert!(
+        bridge.contains(&format!("return {symbol}_ct(")),
+        "scoped ctor did not use its emitted symbol:\n{bridge}"
+    );
+    assert!(
+        !bridge.contains("example_space::Place_ct("),
+        "logical type key leaked into Lua:\n{bridge}"
+    );
 }
 
 #[test]
@@ -181,7 +240,10 @@ mod incremental_watch_tests {
     use crate::bone_backend::bone_session;
 
     fn files(src: &str) -> Vec<bone_incremental::session::SessionFile> {
-        vec![bone_incremental::session::SessionFile::legacy("main.rock", src)]
+        vec![bone_incremental::session::SessionFile::legacy(
+            "main.rock",
+            src,
+        )]
     }
 
     #[test]
@@ -192,7 +254,8 @@ mod incremental_watch_tests {
         // Warm session at v1, full emit -> cache.
         let mut session = bone_session(files(v1)).expect("session v1");
         let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (_full_v1, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v1");
+        let (_full_v1, mut cache) =
+            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v1");
 
         // Edit helper's body -> a body-level re-inference.
         let result = session.update_file("main.rock", v2).expect("update");
@@ -207,7 +270,9 @@ mod incremental_watch_tests {
 
         // Fresh session at v2, full emit.
         let fresh_session = bone_session(files(v2)).expect("session v2");
-        let fresh = skull::mir_emit::emit_full(fresh_session.workspace(), mid).expect("emit_full v2").0;
+        let fresh = skull::mir_emit::emit_full(fresh_session.workspace(), mid)
+            .expect("emit_full v2")
+            .0;
 
         assert_eq!(
             incremental.lua, fresh.lua,
@@ -221,18 +286,33 @@ mod incremental_watch_tests {
         // inline dep — `deps` holds the callee's FuncRef across modules). Editing
         // a.rock re-infers only a's body, but skull must still re-emit b's caller.
         let mut session = bone_session(vec![
-            bone_incremental::session::SessionFile::legacy("a.rock", "@inline\nfn helper() -> int { 3 }"),
-            bone_incremental::session::SessionFile::legacy("b.rock", "fn caller() -> int { helper() }"),
+            bone_incremental::session::SessionFile::legacy(
+                "a.rock",
+                "@inline\nfn helper() -> int { 3 }",
+            ),
+            bone_incremental::session::SessionFile::legacy(
+                "b.rock",
+                "fn caller() -> int { helper() }",
+            ),
         ])
         .expect("session");
         let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (_init, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full");
+        let (_init, mut cache) =
+            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full");
 
-        let result = session.update_file("a.rock", "@inline\nfn helper() -> int { 7 }").expect("update");
+        let result = session
+            .update_file("a.rock", "@inline\nfn helper() -> int { 7 }")
+            .expect("update");
         let incremental =
-            skull::mir_emit::emit_incremental(session.workspace(), &mut cache, &result.reinferred).expect("inc");
-        let fresh = skull::mir_emit::emit_full(session.workspace(), mid).expect("fresh").0;
-        assert_eq!(incremental.lua, fresh.lua, "cross-file inline edit: incremental != fresh");
+            skull::mir_emit::emit_incremental(session.workspace(), &mut cache, &result.reinferred)
+                .expect("inc");
+        let fresh = skull::mir_emit::emit_full(session.workspace(), mid)
+            .expect("fresh")
+            .0;
+        assert_eq!(
+            incremental.lua, fresh.lua,
+            "cross-file inline edit: incremental != fresh"
+        );
     }
 
     /// Byte-identity oracle for the taken_by_ref -> ScalarCtx -> affected-set
@@ -244,7 +324,8 @@ mod incremental_watch_tests {
     fn abi_flip_case(v1: &str, v2: &str) {
         let mut session = bone_session(files(v1)).expect("session v1");
         let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (_full, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v1");
+        let (_full, mut cache) =
+            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v1");
         let result = session.update_file("main.rock", v2).expect("update");
         assert!(
             matches!(result.tier, bone_incremental::session::UpdateTier::BodyOnly),
@@ -252,9 +333,15 @@ mod incremental_watch_tests {
             result.tier
         );
         let incremental =
-            skull::mir_emit::emit_incremental(session.workspace(), &mut cache, &result.reinferred).expect("inc");
-        let fresh = skull::mir_emit::emit_full(session.workspace(), mid).expect("fresh").0;
-        assert_eq!(incremental.lua, fresh.lua, "by-ref ABI flip: incremental != fresh");
+            skull::mir_emit::emit_incremental(session.workspace(), &mut cache, &result.reinferred)
+                .expect("inc");
+        let fresh = skull::mir_emit::emit_full(session.workspace(), mid)
+            .expect("fresh")
+            .0;
+        assert_eq!(
+            incremental.lua, fresh.lua,
+            "by-ref ABI flip: incremental != fresh"
+        );
     }
 
     const ABI_DECL: &str = "value V2 { x: float, y: float }\n\
@@ -265,7 +352,9 @@ mod incremental_watch_tests {
     fn taken_by_ref_removal_flips_abi() {
         // use_ref drops its by-ref to foo -> foo scalarizes (cdata -> splat).
         abi_flip_case(
-            &format!("{ABI_DECL}fn use_ref() -> float {{ let f = foo; f(V2 {{ x: 1.0, y: 2.0 }}) }}"),
+            &format!(
+                "{ABI_DECL}fn use_ref() -> float {{ let f = foo; f(V2 {{ x: 1.0, y: 2.0 }}) }}"
+            ),
             &format!("{ABI_DECL}fn use_ref() -> float {{ other() }}"),
         );
     }
@@ -277,7 +366,9 @@ mod incremental_watch_tests {
         // a single cdata from the new CallValue site.
         abi_flip_case(
             &format!("{ABI_DECL}fn use_ref() -> float {{ other() }}"),
-            &format!("{ABI_DECL}fn use_ref() -> float {{ let f = foo; f(V2 {{ x: 1.0, y: 2.0 }}) }}"),
+            &format!(
+                "{ABI_DECL}fn use_ref() -> float {{ let f = foo; f(V2 {{ x: 1.0, y: 2.0 }}) }}"
+            ),
         );
     }
 
@@ -310,17 +401,29 @@ mod incremental_watch_tests {
 
         let mut session = bone_session(files(v0)).expect("v0");
         let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (_f0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit v0");
+        let (_f0, mut cache) =
+            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit v0");
 
         let r1 = session.update_file("main.rock", v1).expect("update a");
-        let inc1 = skull::mir_emit::emit_incremental(session.workspace(), &mut cache, &r1.reinferred).expect("inc1");
-        let fresh1 = skull::mir_emit::emit_full(bone_session(files(v1)).unwrap().workspace(), mid).expect("fresh1").0;
+        let inc1 =
+            skull::mir_emit::emit_incremental(session.workspace(), &mut cache, &r1.reinferred)
+                .expect("inc1");
+        let fresh1 = skull::mir_emit::emit_full(bone_session(files(v1)).unwrap().workspace(), mid)
+            .expect("fresh1")
+            .0;
         assert_eq!(inc1.lua, fresh1.lua, "after multi-line growth edit to `a`");
 
         let r2 = session.update_file("main.rock", v2).expect("update c");
-        let inc2 = skull::mir_emit::emit_incremental(session.workspace(), &mut cache, &r2.reinferred).expect("inc2");
-        let fresh2 = skull::mir_emit::emit_full(bone_session(files(v2)).unwrap().workspace(), mid).expect("fresh2").0;
-        assert_eq!(inc2.lua, fresh2.lua, "after editing `c` following a multi-line edit to `a`");
+        let inc2 =
+            skull::mir_emit::emit_incremental(session.workspace(), &mut cache, &r2.reinferred)
+                .expect("inc2");
+        let fresh2 = skull::mir_emit::emit_full(bone_session(files(v2)).unwrap().workspace(), mid)
+            .expect("fresh2")
+            .0;
+        assert_eq!(
+            inc2.lua, fresh2.lua,
+            "after editing `c` following a multi-line edit to `a`"
+        );
     }
 
     // --- fuzz oracle: incremental == fresh over random valid body edits -------
@@ -338,7 +441,10 @@ mod incremental_watch_tests {
     struct Rng(u64);
     impl Rng {
         fn next(&mut self) -> u64 {
-            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             self.0 >> 33
         }
         fn pick(&mut self, n: usize) -> usize {
@@ -405,25 +511,33 @@ mod incremental_watch_tests {
 
         let mut session = bone_session(files(&render(&bodies))).expect("fuzz session init");
         let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (_init, mut cache) = skull::mir_emit::emit_full_with_callee_binding(
-            session.workspace(), mid, binding,
-        ).expect("fuzz emit_full init");
-        let names = (0..n_fns).map(|i| {
-            let name = format!("f{i}");
-            let (_, function) = session.workspace().modules.iter()
-                .flat_map(|module| module.functions.iter())
-                .find(|(_, function)| function.name.as_str() == name)
-                .expect("fuzz function");
-            skull_mir::mangle::mangle_fn(session.workspace(), function)
-        }).collect::<Vec<_>>();
-        let calls = names.iter().map(|name| format!("print({name}())\n")).collect::<String>();
+        let (_init, mut cache) =
+            skull::mir_emit::emit_full_with_callee_binding(session.workspace(), mid, binding)
+                .expect("fuzz emit_full init");
+        let names = (0..n_fns)
+            .map(|i| {
+                let name = format!("f{i}");
+                let (_, function) = session
+                    .workspace()
+                    .modules
+                    .iter()
+                    .flat_map(|module| module.functions.iter())
+                    .find(|(_, function)| function.name.as_str() == name)
+                    .expect("fuzz function");
+                skull_mir::mangle::mangle_fn(session.workspace(), function)
+            })
+            .collect::<Vec<_>>();
+        let calls = names
+            .iter()
+            .map(|name| format!("print({name}())\n"))
+            .collect::<String>();
 
         for step in 0..steps {
             let changed = mutate(&mut bodies, &mut rng);
             let text = render(&bodies);
-            let result = session
-                .update_file("main.rock", &text)
-                .unwrap_or_else(|e| panic!("seed {seed} step {step}: update_file failed: {}", e.message));
+            let result = session.update_file("main.rock", &text).unwrap_or_else(|e| {
+                panic!("seed {seed} step {step}: update_file failed: {}", e.message)
+            });
 
             // By construction every program type-checks; a diagnostic is a bug.
             let diags = session.diagnostics();
@@ -433,12 +547,23 @@ mod incremental_watch_tests {
                 diags.iter().map(|d| d.message.clone()).collect::<Vec<_>>()
             );
 
-            let incremental =
-                skull::mir_emit::emit_incremental(session.workspace(), &mut cache, &result.reinferred)
-                    .unwrap_or_else(|e| panic!("seed {seed} step {step}: emit_incremental failed: {}", e.message));
-            let fresh = skull::mir_emit::emit_full_with_callee_binding(session.workspace(), mid, binding)
-                .unwrap_or_else(|e| panic!("seed {seed} step {step}: emit_full failed: {}", e.message))
-                .0;
+            let incremental = skull::mir_emit::emit_incremental(
+                session.workspace(),
+                &mut cache,
+                &result.reinferred,
+            )
+            .unwrap_or_else(|e| {
+                panic!(
+                    "seed {seed} step {step}: emit_incremental failed: {}",
+                    e.message
+                )
+            });
+            let fresh =
+                skull::mir_emit::emit_full_with_callee_binding(session.workspace(), mid, binding)
+                    .unwrap_or_else(|e| {
+                        panic!("seed {seed} step {step}: emit_full failed: {}", e.message)
+                    })
+                    .0;
             let context = format!("seed {seed} step {step}: edited f{changed}");
             match binding {
                 skull::CalleeBindingMode::Global => assert!(
@@ -452,10 +577,14 @@ mod incremental_watch_tests {
                     // must not create captures for calls absent from emitted code.
                     for name in &names {
                         let factory = format!("__rock_mk_{name} = function(");
-                        assert!(!incremental.lua.contains(&factory),
-                            "{context}: incremental retained an inlined callee binding for {name}");
-                        assert!(!fresh.lua.contains(&factory),
-                            "{context}: fresh retained an inlined callee binding for {name}");
+                        assert!(
+                            !incremental.lua.contains(&factory),
+                            "{context}: incremental retained an inlined callee binding for {name}"
+                        );
+                        assert!(
+                            !fresh.lua.contains(&factory),
+                            "{context}: fresh retained an inlined callee binding for {name}"
+                        );
                     }
                     let mut values = Vec::<i64>::with_capacity(n_fns);
                     for body in &bodies {
@@ -464,8 +593,17 @@ mod incremental_watch_tests {
                             Body::Call(callee) => values[*callee],
                         });
                     }
-                    let expected = values.iter().map(i64::to_string).collect::<Vec<_>>().join("\n");
-                    assert_fuzz_values(&incremental.lua, &calls, &expected, &format!("{context}: incremental"));
+                    let expected = values
+                        .iter()
+                        .map(i64::to_string)
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    assert_fuzz_values(
+                        &incremental.lua,
+                        &calls,
+                        &expected,
+                        &format!("{context}: incremental"),
+                    );
                     assert_fuzz_values(&fresh.lua, &calls, &expected, &format!("{context}: fresh"));
                 }
             }
@@ -477,10 +615,21 @@ mod incremental_watch_tests {
         // A handful of deterministic seeds; each drives many valid body edits on a
         // call/inline graph and checks incremental==fresh every step. Override with
         // SKULL_FUZZ_SEEDS / SKULL_FUZZ_STEPS for a longer soak.
-        let steps: usize = std::env::var("SKULL_FUZZ_STEPS").ok().and_then(|s| s.parse().ok()).unwrap_or(120);
-        let seeds: u64 = std::env::var("SKULL_FUZZ_SEEDS").ok().and_then(|s| s.parse().ok()).unwrap_or(8);
+        let steps: usize = std::env::var("SKULL_FUZZ_STEPS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(120);
+        let seeds: u64 = std::env::var("SKULL_FUZZ_SEEDS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(8);
         for seed in 1..=seeds {
-            run_fuzz(seed.wrapping_mul(2654435761), 16, steps, skull::CalleeBindingMode::Global);
+            run_fuzz(
+                seed.wrapping_mul(2654435761),
+                16,
+                steps,
+                skull::CalleeBindingMode::Global,
+            );
         }
     }
 
@@ -490,7 +639,10 @@ mod incremental_watch_tests {
         // because each edit launches LuaJIT for both incremental and fresh output.
         for seed in 1_u64..=2 {
             run_fuzz(
-                seed.wrapping_mul(2654435761), 16, 12, skull::CalleeBindingMode::Upvalue,
+                seed.wrapping_mul(2654435761),
+                16,
+                12,
+                skull::CalleeBindingMode::Upvalue,
             );
         }
     }
@@ -504,9 +656,13 @@ mod incremental_watch_tests {
         let mut session = bone_session(files(initial)).expect("rank fixture session");
         let mid = skull::user_module_id(session.workspace()).unwrap();
         let symbol = |name: &str| {
-            let (_, function) = session.workspace().modules.iter()
+            let (_, function) = session
+                .workspace()
+                .modules
+                .iter()
                 .flat_map(|module| module.functions.iter())
-                .find(|(_, function)| function.name.as_str() == name).expect("rank fixture function");
+                .find(|(_, function)| function.name.as_str() == name)
+                .expect("rank fixture function");
             skull_mir::mangle::mangle_fn(session.workspace(), function)
         };
         let (a, b, x, y) = (symbol("a"), symbol("b"), symbol("x"), symbol("y"));
@@ -514,40 +670,84 @@ mod incremental_watch_tests {
             format!("__rock_mk_{caller} = function({callee}) return function(")
         };
         let (before, mut cache) = skull::mir_emit::emit_full_with_callee_binding(
-            session.workspace(), mid, skull::CalleeBindingMode::Upvalue,
-        ).expect("initial rank fixture emit");
-        assert!(before.lua.contains(&factory(&a, &x)), "initial a must capture x");
-        assert!(before.lua.contains(&factory(&b, &y)), "initial b must capture y");
-        let bind_position = |name: &str| before.lua.find(&format!("\n{name} = __rock_mk_{name}(")).expect("initial binding line");
+            session.workspace(),
+            mid,
+            skull::CalleeBindingMode::Upvalue,
+        )
+        .expect("initial rank fixture emit");
+        assert!(
+            before.lua.contains(&factory(&a, &x)),
+            "initial a must capture x"
+        );
+        assert!(
+            before.lua.contains(&factory(&b, &y)),
+            "initial b must capture y"
+        );
+        let bind_position = |name: &str| {
+            before
+                .lua
+                .find(&format!("\n{name} = __rock_mk_{name}("))
+                .expect("initial binding line")
+        };
         let a_first = bind_position(&a) < bind_position(&b);
         let (caller, callee, initial_value, next_value) = if a_first {
             (&a, &b, 1, 2)
         } else {
             (&b, &a, 2, 1)
         };
-        assert_fuzz_values(&before.lua, &format!("print({caller}())"), &initial_value.to_string(), "initial rank fixture");
+        assert_fuzz_values(
+            &before.lua,
+            &format!("print({caller}())"),
+            &initial_value.to_string(),
+            "initial rank fixture",
+        );
         for delta in [0, 10] {
             let (a_body, b_body) = if a_first {
                 ("b()".to_string(), format!("y() + {delta}"))
             } else {
                 (format!("x() + {delta}"), "a()".to_string())
             };
-            let text = format!("fn a() -> int {{ {a_body} }}\nfn x() -> int {{ 1 }}\nfn b() -> int {{ {b_body} }}\nfn y() -> int {{ 2 }}");
-            let updated = session.update_file("main.rock", &text).expect("rank fixture edit");
-            assert!(session.diagnostics().is_empty(), "rank fixture must typecheck");
+            let text = format!(
+                "fn a() -> int {{ {a_body} }}\nfn x() -> int {{ 1 }}\nfn b() -> int {{ {b_body} }}\nfn y() -> int {{ 2 }}"
+            );
+            let updated = session
+                .update_file("main.rock", &text)
+                .expect("rank fixture edit");
+            assert!(
+                session.diagnostics().is_empty(),
+                "rank fixture must typecheck"
+            );
             let incremental = skull::mir_emit::emit_incremental(
-                session.workspace(), &mut cache, &updated.reinferred,
-            ).expect("incremental rank fixture emit");
+                session.workspace(),
+                &mut cache,
+                &updated.reinferred,
+            )
+            .expect("incremental rank fixture emit");
             let fresh = skull::mir_emit::emit_full_with_callee_binding(
-                session.workspace(), mid, skull::CalleeBindingMode::Upvalue,
-            ).expect("fresh rank fixture emit").0;
-            assert!(!incremental.lua.contains(&format!("__rock_mk_{caller} = function(")),
-                "cached rank must leave the new caller -> callee edge global");
-            assert!(fresh.lua.contains(&factory(caller, callee)),
-                "fresh rank must capture the live callee");
+                session.workspace(),
+                mid,
+                skull::CalleeBindingMode::Upvalue,
+            )
+            .expect("fresh rank fixture emit")
+            .0;
+            assert!(
+                !incremental
+                    .lua
+                    .contains(&format!("__rock_mk_{caller} = function(")),
+                "cached rank must leave the new caller -> callee edge global"
+            );
+            assert!(
+                fresh.lua.contains(&factory(caller, callee)),
+                "fresh rank must capture the live callee"
+            );
             let expected = (next_value + delta).to_string();
             let calls = format!("print({caller}())");
-            assert_fuzz_values(&incremental.lua, &calls, &expected, "incremental live rank edit");
+            assert_fuzz_values(
+                &incremental.lua,
+                &calls,
+                &expected,
+                "incremental live rank edit",
+            );
             assert_fuzz_values(&fresh.lua, &calls, &expected, "fresh live rank edit");
         }
     }
@@ -577,20 +777,28 @@ mod overlay_runtime_tests {
     //! `update_file` -> `reinferred`, `emit_overlay` from the SAME accumulating
     //! cache, and compose `frozen_baseline ++ overlay` against a fresh `emit_full`.
 
+    use super::super::{IncrementalProject, SkullReload};
+    use super::{ExecOutcome, emit_overlay_checked, exec_lua, normalize_stdout};
     use crate::bone_backend::bone_session;
-    use super::super::{SkullReload, IncrementalProject};
-    use super::{emit_overlay_checked, exec_lua, normalize_stdout, ExecOutcome};
     use std::path::Path;
 
-    use super::overlay_test_support::{run_parts, stub_for, SYS_STUB};
+    use super::overlay_test_support::{SYS_STUB, run_parts, stub_for};
 
     /// Execute the files written by `IncrementalProject`, including the game entry
     /// wrapper. The two small host hooks make this the same Lua artifact the
     /// engine consumes while keeping the test independent of a renderer.
-    fn run_project_artifacts(main_path: &Path, incremental_path: &Path, call_after_overlay: bool) -> String {
+    fn run_project_artifacts(
+        main_path: &Path,
+        incremental_path: &Path,
+        call_after_overlay: bool,
+    ) -> String {
         let main = std::fs::read_to_string(main_path).expect("read generated main.lua");
         let overlay = std::fs::read_to_string(incremental_path).unwrap_or_default();
-        let tail = if call_after_overlay { "\nmain()\n" } else { "\n" };
+        let tail = if call_after_overlay {
+            "\nmain()\n"
+        } else {
+            "\n"
+        };
         let program = format!(
             "function clear_all_systems() end\nfunction __rock_main_wrapper(f) f() end\n{main}\n{overlay}{tail}"
         );
@@ -619,17 +827,27 @@ mod overlay_runtime_tests {
             &incremental_path,
         )
         .expect("initial production build");
-        assert!(!incremental_path.exists(), "initial load must not leave an overlay");
+        assert!(
+            !incremental_path.exists(),
+            "initial load must not leave an overlay"
+        );
 
         std::fs::write(&source_path, v1).expect("edited source");
         let reload = project
-            .recompile(std::slice::from_ref(&source_path), &main_path, &incremental_path)
+            .recompile(
+                std::slice::from_ref(&source_path),
+                &main_path,
+                &incremental_path,
+            )
             .expect("body edit through production recompile");
         assert!(
             matches!(reload, SkullReload::Incremental { .. }),
             "body edit must publish an overlay, got {reload:?}"
         );
-        assert!(incremental_path.exists(), "body edit must write incremental.lua");
+        assert!(
+            incremental_path.exists(),
+            "body edit must write incremental.lua"
+        );
 
         // The first call is made by main.lua's production entry wrapper. The
         // second call happens after the overlay is loaded, so the static cell
@@ -640,12 +858,20 @@ mod overlay_runtime_tests {
     #[test]
     fn production_overlay_executes_v1_body_edit_and_preserves_state() {
         let legacy = run_production_body_overlay(None);
-        assert_eq!(legacy.trim(), "2\n12", "legacy control must execute the overlay");
+        assert_eq!(
+            legacy.trim(),
+            "2\n12",
+            "legacy control must execute the overlay"
+        );
 
         let v1 = run_production_body_overlay(Some(
             "[package]\nname = \"overlay-v1\"\ntype = \"bin\"\n\n[language]\nmodules = \"v1\"\n",
         ));
-        assert_eq!(v1.trim(), "2\n12", "v1 overlay must execute changed code with retained state");
+        assert_eq!(
+            v1.trim(),
+            "2\n12",
+            "v1 overlay must execute changed code with retained state"
+        );
     }
 
     #[test]
@@ -660,11 +886,8 @@ mod overlay_runtime_tests {
         let incremental_path = dir.path().join("incremental.lua");
         let main_source = dir.path().join("main.rock");
         let module_source = dir.path().join("a.rock");
-        std::fs::write(
-            &main_source,
-            "fn main() { print(a::bump(2)) }\n",
-        )
-        .expect("initial main source");
+        std::fs::write(&main_source, "fn main() { print(a::bump(2)) }\n")
+            .expect("initial main source");
         std::fs::write(
             &module_source,
             "mod a;\npub fn bump(n: int) -> int { n + 1 }\n",
@@ -679,11 +902,8 @@ mod overlay_runtime_tests {
         let baseline = run_project_artifacts(&main_path, &incremental_path, false);
         assert_eq!(baseline.trim(), "3");
 
-        std::fs::write(
-            &main_source,
-            "fn main() { print(a::twice(3)) }\n",
-        )
-        .expect("edited main source");
+        std::fs::write(&main_source, "fn main() { print(a::twice(3)) }\n")
+            .expect("edited main source");
         std::fs::write(
             &module_source,
             "mod a;\npub fn bump(n: int) -> int { n + 1 }\npub fn twice(n: int) -> int { n * 2 }\n",
@@ -700,10 +920,21 @@ mod overlay_runtime_tests {
             matches!(reload, SkullReload::Full { .. }),
             "a namespace-affecting edit must publish the supported full path, got {reload:?}"
         );
-        assert!(!incremental_path.exists(), "full namespace reload must wipe the overlay");
+        assert!(
+            !incremental_path.exists(),
+            "full namespace reload must wipe the overlay"
+        );
         let updated = run_project_artifacts(&main_path, &incremental_path, false);
-        assert_eq!(updated.trim(), "6", "the full artifact must contain the new namespace definition");
-        assert_ne!(updated.trim(), baseline.trim(), "namespace edit must not serve stale output");
+        assert_eq!(
+            updated.trim(),
+            "6",
+            "the full artifact must contain the new namespace definition"
+        );
+        assert_ne!(
+            updated.trim(),
+            baseline.trim(),
+            "namespace edit must not serve stale output"
+        );
     }
 
     /// Assert the frozen-baseline+overlay execution matches the fresh full build
@@ -733,7 +964,10 @@ mod overlay_runtime_tests {
     }
 
     fn files(src: &str) -> Vec<bone_incremental::session::SessionFile> {
-        vec![bone_incremental::session::SessionFile::legacy("main.rock", src)]
+        vec![bone_incremental::session::SessionFile::legacy(
+            "main.rock",
+            src,
+        )]
     }
 
     #[test]
@@ -789,7 +1023,9 @@ mod overlay_runtime_tests {
 
         // Broken edit: total parse -> Ok, but a diagnostic appears. The watcher's
         // gate (`!errs.is_empty()`) fires here, so it serves last good + no reload.
-        session.update_file("main.rock", broken).expect("broken update is total (Ok)");
+        session
+            .update_file("main.rock", broken)
+            .expect("broken update is total (Ok)");
         assert!(
             !session.diagnostics().is_empty(),
             "a broken edit must surface a diagnostic so the watcher skips the reload",
@@ -799,11 +1035,15 @@ mod overlay_runtime_tests {
         // fresh session built from v2 (no corruption from the broken intermediate).
         session.update_file("main.rock", v2).expect("recover to v2");
         assert!(session.diagnostics().is_empty(), "v2 is clean again");
-        let recovered = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit recovered").0;
+        let recovered = skull::mir_emit::emit_full(session.workspace(), mid)
+            .expect("emit recovered")
+            .0;
 
         let fresh_session = bone_session(files(v2)).expect("fresh v2 session");
         let fresh_mid = skull::user_module_id(fresh_session.workspace()).unwrap();
-        let fresh = skull::mir_emit::emit_full(fresh_session.workspace(), fresh_mid).expect("emit fresh").0;
+        let fresh = skull::mir_emit::emit_full(fresh_session.workspace(), fresh_mid)
+            .expect("emit fresh")
+            .0;
 
         assert_eq!(
             recovered.lua, fresh.lua,
@@ -819,16 +1059,22 @@ mod overlay_runtime_tests {
         // compare scalar leaves without ever invoking the constructor.
         let decl = "value P { x: int, y: int }\nglobal INPUT: int = 5\n\
                     inline(lua) fn ctor_sum(p: P) -> int = \"return p.x + p.y\"\n";
-        let v0 = format!("{decl}fn compute() -> int {{ 1 }}\nfn main() {{ print(\"{{compute()}}\") }}\n");
+        let v0 = format!(
+            "{decl}fn compute() -> int {{ 1 }}\nfn main() {{ print(\"{{compute()}}\") }}\n"
+        );
         let v1 = format!(
             "{decl}fn compute() -> int {{ ctor_sum(P {{ x: INPUT, y: INPUT + 1 }}) }}\nfn main() {{ print(\"{{compute()}}\") }}\n"
         );
 
         let mut session = bone_session(files(&v0)).expect("session v0");
         let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let (full0, mut cache) =
+            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
         let stale_main = full0.lua;
-        assert!(stale_main.contains("P_ct"), "baseline must emit every value-struct ctor, even unused ones");
+        assert!(
+            stale_main.contains("P_ct"),
+            "baseline must emit every value-struct ctor, even unused ones"
+        );
 
         let result = session.update_file("main.rock", &v1).expect("update v1");
         assert!(
@@ -837,10 +1083,20 @@ mod overlay_runtime_tests {
             result.tier
         );
         let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
-        assert!(overlay.lua.contains("P_ct("), "overlay's edited body must call P_ct");
-        let fresh = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v1").0;
+        assert!(
+            overlay.lua.contains("P_ct("),
+            "overlay's edited body must call P_ct"
+        );
+        let fresh = skull::mir_emit::emit_full(session.workspace(), mid)
+            .expect("emit_full v1")
+            .0;
 
-        assert_runtime_eq(&stale_main, &overlay.lua, &fresh.lua, "overlay refs baseline value ctor (P 5+6=11)");
+        assert_runtime_eq(
+            &stale_main,
+            &overlay.lua,
+            &fresh.lua,
+            "overlay refs baseline value ctor (P 5+6=11)",
+        );
         match run_parts(&[&stale_main, stub_for(&stale_main), &overlay.lua, "main()"]) {
             ExecOutcome::Output(output) => assert_eq!(output.trim(), "11"),
             ExecOutcome::Errored(error) => panic!("overlay value constructor failed: {error}"),
@@ -863,7 +1119,8 @@ mod overlay_runtime_tests {
 
         let mut session = bone_session(files(v0)).expect("session v0");
         let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let (full0, mut cache) =
+            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
         let stale_main = full0.lua;
 
         let result = session.update_file("main.rock", v1).expect("update v1");
@@ -873,12 +1130,18 @@ mod overlay_runtime_tests {
             result.tier
         );
         let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
-        let fresh = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v1").0;
+        let fresh = skull::mir_emit::emit_full(session.workspace(), mid)
+            .expect("emit_full v1")
+            .0;
 
         // Sanity: the stale baseline alone prints 1,1 -- so a leak is observable.
         let baseline_only = run_parts(&[&stale_main, SYS_STUB, "main()"]);
         if let ExecOutcome::Output(o) = baseline_only {
-            assert_eq!(normalize_stdout(&o).trim(), "1\n1", "baseline should print the STALE values");
+            assert_eq!(
+                normalize_stdout(&o).trim(),
+                "1\n1",
+                "baseline should print the STALE values"
+            );
         } else {
             panic!("stale baseline failed to run");
         }
@@ -897,7 +1160,8 @@ mod overlay_runtime_tests {
 
         let mut session = bone_session(files(v0)).expect("session v0");
         let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let (full0, mut cache) =
+            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
         let stale_main = full0.lua;
 
         let result = session.update_file("main.rock", v1).expect("update v1");
@@ -907,12 +1171,18 @@ mod overlay_runtime_tests {
             result.tier
         );
         let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
-        let fresh = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v1").0;
+        let fresh = skull::mir_emit::emit_full(session.workspace(), mid)
+            .expect("emit_full v1")
+            .0;
 
         // Sanity: the stale baseline alone prints the OLD const, so a leak is observable.
         let baseline_only = run_parts(&[&stale_main, SYS_STUB, "main()"]);
         if let ExecOutcome::Output(o) = baseline_only {
-            assert_eq!(normalize_stdout(&o).trim(), "5", "baseline prints the STALE const");
+            assert_eq!(
+                normalize_stdout(&o).trim(),
+                "5",
+                "baseline prints the STALE const"
+            );
         } else {
             panic!("stale baseline failed to run");
         }
@@ -939,7 +1209,8 @@ mod overlay_runtime_tests {
 
         let mut session = bone_session(files(v0)).expect("session v0");
         let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let (full0, mut cache) =
+            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
         let stale_main = full0.lua;
 
         let result = session.update_file("main.rock", v1).expect("update v1");
@@ -977,7 +1248,8 @@ mod overlay_runtime_tests {
 
         let mut session = bone_session(files(v0)).expect("session v0");
         let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let (full0, mut cache) =
+            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
         let stale_main = full0.lua;
 
         let result = session.update_file("main.rock", v1).expect("update v1");
@@ -1017,7 +1289,8 @@ mod overlay_runtime_tests {
 
         let mut session = bone_session(files(v0)).expect("session v0");
         let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let (full0, mut cache) =
+            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
         let stale_main = full0.lua;
 
         let r1 = session.update_file("main.rock", v1).expect("update v1");
@@ -1030,12 +1303,16 @@ mod overlay_runtime_tests {
         // reload1 re-inits to 100 -> 101,102 -> reload2 UNRELATED must PRESERVE ->
         // 103,104. A re-reset at reload2 would drop back to 101.
         let composed = run_parts(&[
-            &stale_main, SYS_STUB,
-            "main()", "main()",            // 1, 2   (init 0)
+            &stale_main,
+            SYS_STUB,
+            "main()",
+            "main()", // 1, 2   (init 0)
             &overlay1.lua,
-            "main()", "main()",            // 101, 102  (re-init 100)
+            "main()",
+            "main()", // 101, 102  (re-init 100)
             &overlay2.lua,
-            "main()", "main()",            // 103, 104  (preserve)
+            "main()",
+            "main()", // 103, 104  (preserve)
         ]);
         match composed {
             ExecOutcome::Output(o) => assert_eq!(
@@ -1066,7 +1343,8 @@ mod overlay_runtime_tests {
 
         let mut session = bone_session(files(v0)).expect("session v0");
         let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let (full0, mut cache) =
+            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
         let stale_main = full0.lua;
 
         let result = session.update_file("main.rock", v1).expect("update v1");
@@ -1079,7 +1357,15 @@ mod overlay_runtime_tests {
 
         // Warm the static to 99 (DO_SET=true, one call), load the overlay, then call
         // again with DO_SET=false: an unrelated edit must PRESERVE n -> still 99.
-        let composed = run_parts(&[&stale_main, SYS_STUB, "DO_SET = true", "main()", &overlay.lua, "DO_SET = false", "main()"]);
+        let composed = run_parts(&[
+            &stale_main,
+            SYS_STUB,
+            "DO_SET = true",
+            "main()",
+            &overlay.lua,
+            "DO_SET = false",
+            "main()",
+        ]);
         match composed {
             ExecOutcome::Output(o) => assert_eq!(
                 normalize_stdout(&o).trim(),
@@ -1103,7 +1389,8 @@ mod overlay_runtime_tests {
 
         let mut session = bone_session(files(v0)).expect("session v0");
         let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let (full0, mut cache) =
+            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
         let stale_main = full0.lua;
 
         let result = session.update_file("main.rock", v1).expect("update v1");
@@ -1113,17 +1400,28 @@ mod overlay_runtime_tests {
             result.tier
         );
         let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
-        let fresh = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v1").0;
+        let fresh = skull::mir_emit::emit_full(session.workspace(), mid)
+            .expect("emit_full v1")
+            .0;
 
         // Sanity: the stale baseline prints the OLD downstream value (B = old A + 1).
         let baseline_only = run_parts(&[&stale_main, SYS_STUB, "main()"]);
         if let ExecOutcome::Output(o) = baseline_only {
-            assert_eq!(normalize_stdout(&o).trim(), "6", "baseline prints stale B = old A + 1");
+            assert_eq!(
+                normalize_stdout(&o).trim(),
+                "6",
+                "baseline prints stale B = old A + 1"
+            );
         } else {
             panic!("stale baseline failed to run");
         }
 
-        assert_runtime_eq(&stale_main, &overlay.lua, &fresh.lua, "const B reads A, A 5->10 => B 11");
+        assert_runtime_eq(
+            &stale_main,
+            &overlay.lua,
+            &fresh.lua,
+            "const B reads A, A 5->10 => B 11",
+        );
     }
 
     /// Narrowing: editing one const re-emits ONLY the affected consts -- the
@@ -1137,7 +1435,8 @@ mod overlay_runtime_tests {
 
         let mut session = bone_session(files(v0)).expect("session v0");
         let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let (full0, mut cache) =
+            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
 
         let result = session.update_file("main.rock", v1).expect("update v1");
         let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
@@ -1145,13 +1444,32 @@ mod overlay_runtime_tests {
         // A changed -> its ginit fn + line re-emitted. DEP reads A -> its line
         // re-emitted (ginit unchanged, lives in main.lua). UNRELATED is independent
         // -> it must NOT appear in the overlay at all.
-        assert!(overlay.lua.contains("__skull_ginit_A"), "changed const A must be re-emitted:\n{}", overlay.lua);
-        assert!(overlay.lua.contains("DEP = "), "dependent const DEP (reads A) must be re-emitted:\n{}", overlay.lua);
-        assert!(!overlay.lua.contains("UNRELATED"), "independent const UNRELATED must NOT be re-emitted:\n{}", overlay.lua);
+        assert!(
+            overlay.lua.contains("__skull_ginit_A"),
+            "changed const A must be re-emitted:\n{}",
+            overlay.lua
+        );
+        assert!(
+            overlay.lua.contains("DEP = "),
+            "dependent const DEP (reads A) must be re-emitted:\n{}",
+            overlay.lua
+        );
+        assert!(
+            !overlay.lua.contains("UNRELATED"),
+            "independent const UNRELATED must NOT be re-emitted:\n{}",
+            overlay.lua
+        );
 
         // ...and the result is still runtime-correct.
-        let fresh = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v1").0;
-        assert_runtime_eq(&full0.lua, &overlay.lua, &fresh.lua, "narrowed const overlay: A 5->10, DEP follows, UNRELATED untouched");
+        let fresh = skull::mir_emit::emit_full(session.workspace(), mid)
+            .expect("emit_full v1")
+            .0;
+        assert_runtime_eq(
+            &full0.lua,
+            &overlay.lua,
+            &fresh.lua,
+            "narrowed const overlay: A 5->10, DEP follows, UNRELATED untouched",
+        );
     }
 
     /// Positive control: the oracle must not be vacuously green. With the overlay
@@ -1165,9 +1483,15 @@ mod overlay_runtime_tests {
 
         let mut session = bone_session(files(v0)).expect("session v0");
         let mid = skull::user_module_id(session.workspace()).unwrap();
-        let stale_main = skull::mir_emit::emit_full(session.workspace(), mid).expect("full v0").0.lua;
+        let stale_main = skull::mir_emit::emit_full(session.workspace(), mid)
+            .expect("full v0")
+            .0
+            .lua;
         session.update_file("main.rock", v1).expect("update v1");
-        let fresh = skull::mir_emit::emit_full(session.workspace(), mid).expect("full v1").0.lua;
+        let fresh = skull::mir_emit::emit_full(session.workspace(), mid)
+            .expect("full v1")
+            .0
+            .lua;
 
         // Empty overlay (just the stub) == "the overlay dropped everything".
         let stale = run_parts(&[&stale_main, SYS_STUB, "main()"]);
@@ -1197,7 +1521,10 @@ mod overlay_runtime_tests {
     struct Rng(u64);
     impl Rng {
         fn next(&mut self) -> u64 {
-            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             self.0 >> 33
         }
         fn pick(&mut self, n: usize) -> usize {
@@ -1221,8 +1548,12 @@ mod overlay_runtime_tests {
         // overlay accumulation fuzz must exercise inlined-callee re-emit at runtime.
         for (i, b) in bodies.iter().enumerate() {
             match b {
-                Body::Const(k) => { let _ = writeln!(s, "@inline\nfn f{i}() -> int {{ {k} }}"); }
-                Body::Call(j) => { let _ = writeln!(s, "@inline\nfn f{i}() -> int {{ f{j}() }}"); }
+                Body::Const(k) => {
+                    let _ = writeln!(s, "@inline\nfn f{i}() -> int {{ {k} }}");
+                }
+                Body::Call(j) => {
+                    let _ = writeln!(s, "@inline\nfn f{i}() -> int {{ f{j}() }}");
+                }
             }
         }
         let _ = write!(s, "fn main() {{");
@@ -1247,12 +1578,17 @@ mod overlay_runtime_tests {
         let mut rng = Rng(seed.max(1));
         let mut bodies: Vec<Body> = (0..n_fns)
             .map(|i| {
-                if i > 0 && rng.pick(2) == 0 { Body::Call(rng.pick(i)) } else { Body::Const(rng.pick(1000) as i64) }
+                if i > 0 && rng.pick(2) == 0 {
+                    Body::Call(rng.pick(i))
+                } else {
+                    Body::Const(rng.pick(1000) as i64)
+                }
             })
             .collect();
 
         let v0 = render(&bodies);
-        let mut session = bone_session(files(&v0)).unwrap_or_else(|e| panic!("seed {seed}: session init: {}", e.message));
+        let mut session = bone_session(files(&v0))
+            .unwrap_or_else(|e| panic!("seed {seed}: session init: {}", e.message));
         let mid = skull::user_module_id(session.workspace()).unwrap();
         // The FROZEN baseline: emitted once at v0, never rebuilt. The overlay must
         // carry the cumulative v0->vk diff on top of it.
@@ -1293,8 +1629,14 @@ mod overlay_runtime_tests {
         // Each luajit spawn costs ~10-30ms, so this runs fewer/shorter than the
         // byte fuzz. Override with SKULL_RT_FUZZ_SEEDS / SKULL_RT_FUZZ_STEPS for a
         // longer soak.
-        let steps: usize = std::env::var("SKULL_RT_FUZZ_STEPS").ok().and_then(|s| s.parse().ok()).unwrap_or(20);
-        let seeds: u64 = std::env::var("SKULL_RT_FUZZ_SEEDS").ok().and_then(|s| s.parse().ok()).unwrap_or(4);
+        let steps: usize = std::env::var("SKULL_RT_FUZZ_STEPS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(20);
+        let seeds: u64 = std::env::var("SKULL_RT_FUZZ_SEEDS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(4);
         for seed in 1..=seeds {
             run_overlay_fuzz(seed.wrapping_mul(2654435761), 8, steps);
         }
@@ -1338,11 +1680,16 @@ mod overlay_runtime_tests {
 
         let mut session = bone_session(files(&v0)).expect("session v0");
         let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let (full0, mut cache) =
+            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
 
         // Baseline: the registry runs the v0 body.
         match run_parts(&[&full0.lua, SIM_DRIVER]) {
-            ExecOutcome::Output(o) => assert_eq!(normalize_stdout(&o).trim(), "1", "baseline frame should run the v0 system body"),
+            ExecOutcome::Output(o) => assert_eq!(
+                normalize_stdout(&o).trim(),
+                "1",
+                "baseline frame should run the v0 system body"
+            ),
             ExecOutcome::Errored(_) => panic!("baseline fixture failed to run"),
         }
 
@@ -1350,7 +1697,8 @@ mod overlay_runtime_tests {
         // The decorated body edit must re-infer the body (else the overlay can't
         // re-emit it). Guards the bone `lower.rs` footprint fix.
         assert_eq!(
-            result.reinferred.len(), 1,
+            result.reinferred.len(),
+            1,
             "a decorated-fn body edit must re-infer exactly the edited body"
         );
         let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
@@ -1361,13 +1709,19 @@ mod overlay_runtime_tests {
             "overlay must redefine the body without a name-based registry repair:\n{}",
             overlay.lua
         );
-        let fresh = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v1").0;
+        let fresh = skull::mir_emit::emit_full(session.workspace(), mid)
+            .expect("emit_full v1")
+            .0;
 
         let composed = run_parts(&[&full0.lua, &overlay.lua, SIM_DRIVER]);
         let fresh_run = run_parts(&[&fresh.lua, SIM_DRIVER]);
         match (composed, fresh_run) {
             (ExecOutcome::Output(c), ExecOutcome::Output(f)) => {
-                assert_eq!(normalize_stdout(&f).trim(), "2", "fresh full build should run the v1 body");
+                assert_eq!(
+                    normalize_stdout(&f).trim(),
+                    "2",
+                    "fresh full build should run the v1 body"
+                );
                 assert_eq!(
                     normalize_stdout(&c).trim(),
                     "2",
@@ -1393,7 +1747,8 @@ mod overlay_runtime_tests {
         );
         let mut session = bone_session(files(&v0)).expect("session v0");
         let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let (full0, mut cache) =
+            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
 
         let result = session.update_file("main.rock", &v1).expect("update v1");
         let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
@@ -1450,9 +1805,11 @@ fn main() {}
         );
         let mut session = bone_session(files(v0)).expect("wire session v0");
         let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid)
-            .expect("wire full v0");
-        let result = session.update_file("main.rock", &v1).expect("wire body edit");
+        let (full0, mut cache) =
+            skull::mir_emit::emit_full(session.workspace(), mid).expect("wire full v0");
+        let result = session
+            .update_file("main.rock", &v1)
+            .expect("wire body edit");
         let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
         let driver = r#"
 local function run_wire()
@@ -1501,15 +1858,22 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
 
         let mut session = bone_session(files(v0)).expect("session v0");
         let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let (full0, mut cache) =
+            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
         match run_parts(&[&full0.lua, stub_for(&full0.lua), "main()"]) {
-            ExecOutcome::Output(o) => assert_eq!(normalize_stdout(&o).trim(), "1 2", "baseline co fn body"),
+            ExecOutcome::Output(o) => {
+                assert_eq!(normalize_stdout(&o).trim(), "1 2", "baseline co fn body")
+            }
             ExecOutcome::Errored(_) => panic!("baseline coroutine fixture failed to run"),
         }
 
         let result = session.update_file("main.rock", v1).expect("update v1");
         // The co fn body edit must re-infer exactly the edited body.
-        assert_eq!(result.reinferred.len(), 1, "a co fn body edit re-infers exactly one body");
+        assert_eq!(
+            result.reinferred.len(),
+            1,
+            "a co fn body edit re-infers exactly one body"
+        );
 
         let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
         // The overlay must carry the re-emitted coroutine (its top-level step fn).
@@ -1519,12 +1883,18 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
             overlay.lua
         );
 
-        let fresh = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v1").0;
+        let fresh = skull::mir_emit::emit_full(session.workspace(), mid)
+            .expect("emit_full v1")
+            .0;
         let composed = run_parts(&[&full0.lua, stub_for(&full0.lua), &overlay.lua, "main()"]);
         let fresh_run = run_parts(&[&fresh.lua, stub_for(&fresh.lua), "main()"]);
         match (composed, fresh_run) {
             (ExecOutcome::Output(c), ExecOutcome::Output(f)) => {
-                assert_eq!(normalize_stdout(&f).trim(), "10 20", "fresh full build runs the v1 co fn body");
+                assert_eq!(
+                    normalize_stdout(&f).trim(),
+                    "10 20",
+                    "fresh full build runs the v1 co fn body"
+                );
                 assert_eq!(
                     normalize_stdout(&c).trim(),
                     "10 20",
@@ -1560,31 +1930,54 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
 
         let mut session = bone_session(files(&v0)).expect("session v0");
         let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let (full0, mut cache) =
+            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
         match run_parts(&[&full0.lua, stub_for(&full0.lua), "main()"]) {
-            ExecOutcome::Output(o) => assert_eq!(normalize_stdout(&o).trim(), "1 3", "baseline flat-enum co fn (Tick(1)=1, Pair(1,2)=3)"),
+            ExecOutcome::Output(o) => assert_eq!(
+                normalize_stdout(&o).trim(),
+                "1 3",
+                "baseline flat-enum co fn (Tick(1)=1, Pair(1,2)=3)"
+            ),
             ExecOutcome::Errored(_) => panic!("baseline flat-enum coroutine fixture failed to run"),
         }
 
         let result = session.update_file("main.rock", &v1).expect("update v1");
         let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
         // The overlay must re-emit the whole frame-slot channel.
-        assert!(overlay.lua.contains("gen_0__step("), "overlay must re-emit the step fn:\n{}", overlay.lua);
-        assert!(overlay.lua.contains(".__y0 = "), "overlay step must write yield leaves to frame slots:\n{}", overlay.lua);
+        assert!(
+            overlay.lua.contains("gen_0__step("),
+            "overlay must re-emit the step fn:\n{}",
+            overlay.lua
+        );
+        assert!(
+            overlay.lua.contains(".__y0 = "),
+            "overlay step must write yield leaves to frame slots:\n{}",
+            overlay.lua
+        );
         assert!(
             overlay.lua.contains("function gen_0__advance(")
-                && overlay.lua.contains("__rock_code_slot_ref(\"generated:main.rock::gen<>::advance\")")
-                && overlay.lua.contains("__rock_code_slot_ref(\"generated:main.rock::gen<>::resume\")"),
+                && overlay
+                    .lua
+                    .contains("__rock_code_slot_ref(\"generated:main.rock::gen<>::advance\")")
+                && overlay
+                    .lua
+                    .contains("__rock_code_slot_ref(\"generated:main.rock::gen<>::resume\")"),
             "overlay must re-emit the per-co-fn __advance/__resume fns + CodeRefs in the ctor:\n{}",
             overlay.lua
         );
 
-        let fresh = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v1").0;
+        let fresh = skull::mir_emit::emit_full(session.workspace(), mid)
+            .expect("emit_full v1")
+            .0;
         let composed = run_parts(&[&full0.lua, stub_for(&full0.lua), &overlay.lua, "main()"]);
         let fresh_run = run_parts(&[&fresh.lua, stub_for(&fresh.lua), "main()"]);
         match (composed, fresh_run) {
             (ExecOutcome::Output(c), ExecOutcome::Output(f)) => {
-                assert_eq!(normalize_stdout(&f).trim(), "10 30", "fresh v1: Tick(10)=10, Pair(10,20)=30");
+                assert_eq!(
+                    normalize_stdout(&f).trim(),
+                    "10 30",
+                    "fresh v1: Tick(10)=10, Pair(10,20)=30"
+                );
                 assert_eq!(
                     normalize_stdout(&c).trim(),
                     "10 30",
@@ -1624,7 +2017,8 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
 
         let mut session = bone_session(files(&v0)).expect("session v0");
         let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let (full0, mut cache) =
+            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
 
         let result = session.update_file("main.rock", &v1).expect("update v1");
         let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
@@ -1647,7 +2041,9 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
                 "1\n30\n100\n-1",
                 "live coroutine: v0 first yield (Tick=1), then v1 body across the reload (Pair=30, Done=100, done)"
             ),
-            ExecOutcome::Errored(_) => panic!("live flat-enum coroutine reload fixture failed to run"),
+            ExecOutcome::Errored(_) => {
+                panic!("live flat-enum coroutine reload fixture failed to run")
+            }
         }
     }
 
@@ -1686,7 +2082,8 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
 
         let mut session = bone_session(files(v0)).expect("session v0");
         let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (_full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let (_full0, mut cache) =
+            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
 
         let result = session.update_file("main.rock", v1).expect("update v1");
         assert!(
@@ -1694,7 +2091,11 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
             "inserting a let is a body edit -- must be BodyOnly (the premise), got {:?}",
             result.tier
         );
-        let err = match skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred) {
+        let err = match skull::mir_emit::emit_overlay(
+            session.workspace(),
+            &mut cache,
+            &result.reinferred,
+        ) {
             Ok(_) => panic!("a changed coroutine frame schema must not overlay"),
             Err(err) => err,
         };
@@ -1730,7 +2131,8 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
 
         let mut session = bone_session(files(&v0)).expect("session v0");
         let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let (full0, mut cache) =
+            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
 
         let result = session.update_file("main.rock", &v1).expect("update v1");
         assert!(
@@ -1746,14 +2148,25 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         // replayed the already-delivered Tick(1), then ran fire/cleanup a pump
         // late). The per-state variant tags in the layout stamp catch the
         // renumbering: resume #2 stamp-kills the coroutine -> -1, no replay.
-        let composed = run_parts(&[&full0.lua, stub_for(&full0.lua), "start()", "pump()", &overlay.lua, "pump()", "pump()", "pump()"]);
+        let composed = run_parts(&[
+            &full0.lua,
+            stub_for(&full0.lua),
+            "start()",
+            "pump()",
+            &overlay.lua,
+            "pump()",
+            "pump()",
+            "pump()",
+        ]);
         match composed {
             ExecOutcome::Output(o) => assert_eq!(
                 normalize_stdout(&o).trim(),
                 "1\n-1\n-1\n-1",
                 "a yield-renumbering overlay must stamp-kill the live coroutine, not teleport its resume point"
             ),
-            ExecOutcome::Errored(_) => panic!("yield-renumber + live resume errored (expected the clean kill output)"),
+            ExecOutcome::Errored(_) => {
+                panic!("yield-renumber + live resume errored (expected the clean kill output)")
+            }
         }
     }
 
@@ -1782,7 +2195,8 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
 
         let mut session = bone_session(files(&v0)).expect("session v0");
         let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let (full0, mut cache) =
+            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
 
         let result = session.update_file("main.rock", &v1).expect("update v1");
         assert!(
@@ -1796,7 +2210,15 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         // (layout-stable: constants only). pump #2 resumes the live chain: the
         // inner's stale advance runs the NEW inner_0__step -> Tick(20). pump #3:
         // inner done -> outer's delegate exits, outer completes -> -1.
-        let composed = run_parts(&[&full0.lua, stub_for(&full0.lua), "start()", "pump()", &overlay.lua, "pump()", "pump()"]);
+        let composed = run_parts(&[
+            &full0.lua,
+            stub_for(&full0.lua),
+            "start()",
+            "pump()",
+            &overlay.lua,
+            "pump()",
+            "pump()",
+        ]);
         match composed {
             ExecOutcome::Output(o) => assert_eq!(
                 normalize_stdout(&o).trim(),
@@ -1836,7 +2258,8 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
 
         let mut session = bone_session(files(&v0)).expect("session v0");
         let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let (full0, mut cache) =
+            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
         let result = session.update_file("main.rock", &v1).expect("update v1");
         assert!(
             matches!(result.tier, bone_incremental::session::UpdateTier::BodyOnly),
@@ -1847,7 +2270,15 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
 
         // pump #1: outer primes inner -> Tick(1). Overlay shifts OUTER's layout.
         // pump #2: outer stamp-killed -> -1, and the inner's on_killed must fire.
-        let composed = run_parts(&[&full0.lua, stub_for(&full0.lua), "start()", "pump()", &overlay.lua, "pump()", "report()"]);
+        let composed = run_parts(&[
+            &full0.lua,
+            stub_for(&full0.lua),
+            "start()",
+            "pump()",
+            &overlay.lua,
+            "pump()",
+            "report()",
+        ]);
         match composed {
             ExecOutcome::Output(o) => assert_eq!(
                 normalize_stdout(&o).trim(),
@@ -1887,10 +2318,18 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
 
         let mut session = bone_session(files(&v0)).expect("session v0");
         let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (_full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let (_full0, mut cache) =
+            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
         let result = session.update_file("main.rock", &v1).expect("update v1");
-        assert!(matches!(result.tier, bone_incremental::session::UpdateTier::BodyOnly));
-        let err = match skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred) {
+        assert!(matches!(
+            result.tier,
+            bone_incremental::session::UpdateTier::BodyOnly
+        ));
+        let err = match skull::mir_emit::emit_overlay(
+            session.workspace(),
+            &mut cache,
+            &result.reinferred,
+        ) {
             Ok(_) => panic!("a changed coroutine frame schema must not overlay"),
             Err(err) => err,
         };
@@ -1995,7 +2434,8 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
 
         let mut session = bone_session(files(v0)).expect("session v0");
         let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, _cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let (full0, _cache) =
+            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
 
         let result = session.update_file("main.rock", v1).expect("update v1");
         assert!(
@@ -2007,7 +2447,9 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
             "an enum shape edit must be a full rebuild (the premise), got {:?}",
             result.tier
         );
-        let full1 = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v1").0;
+        let full1 = skull::mir_emit::emit_full(session.workspace(), mid)
+            .expect("emit_full v1")
+            .0;
 
         // Premise (non-inverted, stays green): the live coroutine SURVIVES the full
         // re-dofile -- the mutable-global preservation guard keeps GEN.
@@ -2050,7 +2492,9 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
                 "7\ntrue\n-1",
                 "a shape-edit full reload must stamp-kill the surviving live coroutine, not corrupt it"
             ),
-            ExecOutcome::Errored(_) => panic!("full-reload survivor resume crashed -- the layout stamp regressed"),
+            ExecOutcome::Errored(_) => {
+                panic!("full-reload survivor resume crashed -- the layout stamp regressed")
+            }
         }
     }
 
@@ -2084,7 +2528,9 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
 
         let mut session = bone_session(files(v0)).expect("session v0");
         let mid = skull::user_module_id(session.workspace()).unwrap();
-        let full0 = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0").0;
+        let full0 = skull::mir_emit::emit_full(session.workspace(), mid)
+            .expect("emit_full v0")
+            .0;
 
         let result = session.update_file("main.rock", v1).expect("update v1");
         assert!(
@@ -2096,7 +2542,9 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
             "a struct shape edit must be a full rebuild (the premise), got {:?}",
             result.tier
         );
-        let full1 = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v1").0;
+        let full1 = skull::mir_emit::emit_full(session.workspace(), mid)
+            .expect("emit_full v1")
+            .0;
 
         // Survival premise: the live v0 instance rides through the full
         // re-dofile untouched -- `"Mob?"` didn't change, so the guard skips
@@ -2169,7 +2617,9 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
 
         let mut session = bone_session(files(v0)).expect("session v0");
         let mid = skull::user_module_id(session.workspace()).unwrap();
-        let full0 = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0").0;
+        let full0 = skull::mir_emit::emit_full(session.workspace(), mid)
+            .expect("emit_full v0")
+            .0;
 
         let result = session.update_file("main.rock", v1).expect("update v1");
         assert!(
@@ -2181,7 +2631,9 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
             "a value-struct layout edit must be a full rebuild (the premise), got {:?}",
             result.tier
         );
-        let full1 = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v1").0;
+        let full1 = skull::mir_emit::emit_full(session.workspace(), mid)
+            .expect("emit_full v1")
+            .0;
 
         // v0 alone: sanity -- set/show agree on the layout.
         let fresh = run_parts(&[&full0.lua, stub_for(&full0.lua), "store_p()", "show()"]);
@@ -2289,7 +2741,8 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
 
         let mut session = bone_session(files(&v0)).expect("session v0");
         let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let (full0, mut cache) =
+            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
 
         let r1 = session.update_file("main.rock", &v1).expect("update v1");
         let overlay1 = emit_overlay_checked(session.workspace(), &mut cache, &r1.reinferred);
@@ -2335,7 +2788,8 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
 
         let mut session = bone_session(files(&v0)).expect("session v0");
         let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let (full0, mut cache) =
+            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
 
         let r1 = session.update_file("main.rock", &v1).expect("update v1");
         let overlay = emit_overlay_checked(session.workspace(), &mut cache, &r1.reinferred);
@@ -2407,7 +2861,9 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         let key = "__layout = ";
         let lpos = tail.find(key).expect("ctor has no __layout stamp");
         let after = &tail[lpos + key.len()..];
-        let end = after.find(|c: char| !c.is_ascii_digit() && c != '-').unwrap_or(after.len());
+        let end = after
+            .find(|c: char| !c.is_ascii_digit() && c != '-')
+            .unwrap_or(after.len());
         after[..end].parse().expect("parse __layout stamp")
     }
 
@@ -2435,7 +2891,8 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
 
         let mut session = bone_session(files(&v0)).expect("session v0");
         let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let (full0, mut cache) =
+            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
 
         let result = session.update_file("main.rock", &v1).expect("update v1");
         assert!(
@@ -2453,14 +2910,23 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         // "12\n-1" IS a fresh v1 full build's output, so this doubles as the
         // fresh-equivalence check (the program has no `main`, so the generic
         // `assert_runtime_eq` driver doesn't apply -- start/pump is the driver).
-        let composed = run_parts(&[&full0.lua, stub_for(&full0.lua), &overlay.lua, "start()", "pump()", "pump()"]);
+        let composed = run_parts(&[
+            &full0.lua,
+            stub_for(&full0.lua),
+            &overlay.lua,
+            "start()",
+            "pump()",
+            "pump()",
+        ]);
         match composed {
             ExecOutcome::Output(o) => assert_eq!(
                 normalize_stdout(&o).trim(),
                 "12\n-1",
                 "a coroutine created after the reload runs the new hoisted lambda body (4*3=12)"
             ),
-            ExecOutcome::Errored(_) => panic!("post-reload coroutine with hoisted lambda failed to run"),
+            ExecOutcome::Errored(_) => {
+                panic!("post-reload coroutine with hoisted lambda failed to run")
+            }
         }
     }
 
@@ -2485,14 +2951,17 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
 
         let mut session = bone_session(files(&v0)).expect("session v0");
         let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let (full0, mut cache) =
+            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
         // Layout-stable premise: an operator edit doesn't touch the frame canon.
         assert_eq!(
             layout_stamp(&full0.lua, "gen_0"),
             {
                 let mut s = bone_session(files(&v1)).expect("session v1 probe");
                 let m = skull::user_module_id(s.workspace()).unwrap();
-                let f = skull::mir_emit::emit_full(s.workspace(), m).expect("emit v1 probe").0;
+                let f = skull::mir_emit::emit_full(s.workspace(), m)
+                    .expect("emit v1 probe")
+                    .0;
                 let _ = &mut s;
                 layout_stamp(&f.lua, "gen_0")
             },
@@ -2501,11 +2970,23 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
 
         let result = session.update_file("main.rock", &v1).expect("update v1");
         let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
-        assert!(overlay.lua.contains("gen_0__step__lambda1"), "overlay must carry the hoisted g body");
+        assert!(
+            overlay.lua.contains("gen_0__step__lambda1"),
+            "overlay must carry the hoisted g body"
+        );
 
         // start() + pump() under v0: f(3)=8. Overlay (op *). The same stored
         // record now resolves lambda0's edited body, then g uses lambda1.
-        let composed = run_parts(&[&full0.lua, stub_for(&full0.lua), "start()", "pump()", &overlay.lua, "pump()", "pump()", "pump()"]);
+        let composed = run_parts(&[
+            &full0.lua,
+            stub_for(&full0.lua),
+            "start()",
+            "pump()",
+            &overlay.lua,
+            "pump()",
+            "pump()",
+            "pump()",
+        ]);
         let fresh_session = bone_session(files(&v1)).expect("fresh session v1");
         let fresh_mid = skull::user_module_id(fresh_session.workspace()).unwrap();
         let fresh = skull::mir_emit::emit_full(fresh_session.workspace(), fresh_mid)
@@ -2526,7 +3007,11 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
                 let fresh = normalize_stdout(&fresh);
                 assert_eq!(fresh.trim(), "15\n15\n15\n-1", "fresh v1 build output");
                 let mut post_reload = composed.lines();
-                assert_eq!(post_reload.next(), Some("8"), "the pre-reload record ran v0");
+                assert_eq!(
+                    post_reload.next(),
+                    Some("8"),
+                    "the pre-reload record ran v0"
+                );
                 let mut fresh_after_first = fresh.lines();
                 assert_eq!(fresh_after_first.next(), Some("15"), "fresh v1 first yield");
                 assert_eq!(
@@ -2570,11 +3055,14 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         let v1 = program(2, 20);
         let mut session = bone_session(files(&v0)).expect("session v0");
         let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let (full0, mut cache) =
+            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
         let baseline = run_parts(&[&full0.lua, "start()", "invoke()"]);
         match baseline {
             ExecOutcome::Output(output) => assert_eq!(normalize_stdout(&output).trim(), "4 10"),
-            ExecOutcome::Errored(error) => panic!("baseline named/capture-free values failed: {error}"),
+            ExecOutcome::Errored(error) => {
+                panic!("baseline named/capture-free values failed: {error}")
+            }
         }
 
         let update = session.update_file("main.rock", &v1).expect("update v1");
@@ -2582,7 +3070,9 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         assert!(overlay.lua.contains("__rock_code_slot_stage"));
         assert!(overlay.lua.contains("__rock_code_slot_publish"));
         let composed = run_parts(&[&full0.lua, "start()", &overlay.lua, "invoke()"]);
-        let fresh = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v1").0;
+        let fresh = skull::mir_emit::emit_full(session.workspace(), mid)
+            .expect("emit_full v1")
+            .0;
         let fresh_run = run_parts(&[&fresh.lua, "start()", "invoke()"]);
         match (composed, fresh_run) {
             (ExecOutcome::Output(composed), ExecOutcome::Output(fresh)) => {
@@ -2592,7 +3082,9 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
             (ExecOutcome::Errored(composed), ExecOutcome::Errored(fresh)) => {
                 panic!("slot values both failed: composed={composed}; fresh={fresh}")
             }
-            (ExecOutcome::Errored(composed), _) => panic!("composed slot values failed: {composed}"),
+            (ExecOutcome::Errored(composed), _) => {
+                panic!("composed slot values failed: {composed}")
+            }
             (_, ExecOutcome::Errored(fresh)) => panic!("fresh slot values failed: {fresh}"),
         }
     }
@@ -2621,7 +3113,8 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
 
         let mut session = bone_session(files(&v0)).expect("session v0");
         let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let (full0, mut cache) =
+            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
 
         let result = session.update_file("main.rock", &v1).expect("update v1");
         assert!(
@@ -2629,15 +3122,23 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
             "adding a lambda-local is a body edit, got {:?}",
             result.tier
         );
-        let fresh = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v1").0;
+        let fresh = skull::mir_emit::emit_full(session.workspace(), mid)
+            .expect("emit_full v1")
+            .0;
 
         assert_eq!(
             layout_stamp(&full0.lua, "gen_0"),
             layout_stamp(&fresh.lua, "gen_0"),
             "the lambda-local edit must not change the coroutine frame stamp"
         );
-        let err = match skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred) {
-            Ok(_) => panic!("a changed escaping lambda body must not overlay across its compatibility record"),
+        let err = match skull::mir_emit::emit_overlay(
+            session.workspace(),
+            &mut cache,
+            &result.reinferred,
+        ) {
+            Ok(_) => panic!(
+                "a changed escaping lambda body must not overlay across its compatibility record"
+            ),
             Err(err) => err,
         };
         assert!(
@@ -2670,7 +3171,8 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
 
         let mut session = bone_session(files(&v0)).expect("session v0");
         let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let (full0, mut cache) =
+            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
 
         let result = session.update_file("main.rock", &v1).expect("update v1");
         assert!(
@@ -2678,7 +3180,9 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
             "adding a co-fn local is a body edit, got {:?}",
             result.tier
         );
-        let fresh = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v1").0;
+        let fresh = skull::mir_emit::emit_full(session.workspace(), mid)
+            .expect("emit_full v1")
+            .0;
 
         assert_ne!(
             layout_stamp(&full0.lua, "gen_0"),
@@ -2686,7 +3190,11 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
             "a co-fn-level local must shift the frame layout stamp"
         );
 
-        let err = match skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred) {
+        let err = match skull::mir_emit::emit_overlay(
+            session.workspace(),
+            &mut cache,
+            &result.reinferred,
+        ) {
             Ok(_) => panic!("a changed coroutine frame schema must not overlay"),
             Err(err) => err,
         };
@@ -2707,10 +3215,18 @@ mod shape_drift_tests {
     //! `struct_field_add_full_reload_nil_poisons_live_instances` and
     //! `value_struct_reorder_full_reload_misassigns_positional_ctor`.
 
-    use super::super::{SkullReload, IncrementalProject};
+    use super::super::{IncrementalProject, SkullReload};
     use std::path::PathBuf;
 
-    fn boot(v0: &str) -> (tempfile::TempDir, IncrementalProject, PathBuf, PathBuf, PathBuf) {
+    fn boot(
+        v0: &str,
+    ) -> (
+        tempfile::TempDir,
+        IncrementalProject,
+        PathBuf,
+        PathBuf,
+        PathBuf,
+    ) {
         let dir = tempfile::tempdir().expect("tempdir");
         let dir_str = dir.path().to_str().unwrap().to_string();
         let main_lua = dir.path().join("main.lua");
@@ -2737,13 +3253,17 @@ mod shape_drift_tests {
         let baseline = std::fs::read_to_string(&main_lua).unwrap();
 
         std::fs::write(&rock, v1).unwrap();
-        let reload = project.recompile(&[rock.clone()], &main_lua, &inc_lua).expect("recompile v1");
+        let reload = project
+            .recompile(&[rock.clone()], &main_lua, &inc_lua)
+            .expect("recompile v1");
         match &reload {
             SkullReload::ShapeChanged { types } => assert!(
                 types.iter().any(|t| t == "Mob"),
                 "the restart request must name the drifted type, got {types:?}"
             ),
-            other => panic!("a struct shape edit must request a restart (ShapeChanged), got {other:?}"),
+            other => {
+                panic!("a struct shape edit must request a restart (ShapeChanged), got {other:?}")
+            }
         }
         assert_eq!(
             std::fs::read_to_string(&main_lua).unwrap(),
@@ -2761,7 +3281,9 @@ mod shape_drift_tests {
 
         // Re-baselined: recompiling the same source again is a no-op, not a
         // second restart request.
-        let again = project.recompile(&[rock], &main_lua, &inc_lua).expect("recompile same");
+        let again = project
+            .recompile(&[rock], &main_lua, &inc_lua)
+            .expect("recompile same");
         assert!(
             matches!(again, SkullReload::NoChange),
             "the shape delta must be consumed by the restart, got {again:?}"
@@ -2782,7 +3304,9 @@ mod shape_drift_tests {
                   global SPOT: NV2 = NV2 { x: 1.0, y: 2.0 }\nfn main() { }\n";
         let (_dir, mut project, main_lua, inc_lua, rock) = boot(v0);
         std::fs::write(&rock, v1).unwrap();
-        let reload = project.recompile(&[rock], &main_lua, &inc_lua).expect("recompile v1");
+        let reload = project
+            .recompile(&[rock], &main_lua, &inc_lua)
+            .expect("recompile v1");
         assert!(
             matches!(&reload, SkullReload::ShapeChanged { types } if types.iter().any(|t| t == "NV2")),
             "a nobox flip relocates live global storage -- must restart, got {reload:?}"
@@ -2795,7 +3319,9 @@ mod shape_drift_tests {
         let v1 = "value P { y: int, x: int }\nfn probe(p: P) -> int { p.x }\nfn main() { }\n";
         let (_dir, mut project, main_lua, inc_lua, rock) = boot(v0);
         std::fs::write(&rock, v1).unwrap();
-        let reload = project.recompile(&[rock], &main_lua, &inc_lua).expect("recompile v1");
+        let reload = project
+            .recompile(&[rock], &main_lua, &inc_lua)
+            .expect("recompile v1");
         assert!(
             matches!(&reload, SkullReload::ShapeChanged { types } if types.iter().any(|t| t == "P")),
             "a value-struct field reorder freezes against the process ctype -- must restart, got {reload:?}"
@@ -2808,7 +3334,11 @@ mod shape_drift_tests {
         let v1 = "global A: int = 1\nglobal B: int = 2\nfn main() { }\n";
         let (_dir, mut project, main_lua, inc_lua, rock) = boot(v0);
         let baseline = std::fs::read_to_string(&main_lua).expect("baseline");
-        let old_layout = project.cache.global_layout().expect("baseline global layout").to_string();
+        let old_layout = project
+            .cache
+            .global_layout()
+            .expect("baseline global layout")
+            .to_string();
 
         std::fs::write(&rock, v1).expect("edited source");
         let reload = project
@@ -2816,7 +3346,9 @@ mod shape_drift_tests {
             .expect("membership edit");
         match reload {
             SkullReload::FullRequired { reasons } => assert!(
-                reasons.iter().any(|reason| reason.contains("global layout changed")),
+                reasons
+                    .iter()
+                    .any(|reason| reason.contains("global layout changed")),
                 "membership drift must name the global layout: {reasons:?}"
             ),
             other => panic!("adding a mutable global must require restart, got {other:?}"),
@@ -2827,7 +3359,10 @@ mod shape_drift_tests {
             "an incompatible layout must not replace the old process artifact"
         );
         assert_eq!(
-            project.cache.global_layout().expect("retained global layout"),
+            project
+                .cache
+                .global_layout()
+                .expect("retained global layout"),
             old_layout,
             "a refused publication must retain the old global layout"
         );
@@ -2836,7 +3371,10 @@ mod shape_drift_tests {
             .force_full(&main_lua, &inc_lua)
             .expect("restart canonicalization");
         let current = std::fs::read_to_string(&main_lua).expect("new main");
-        assert_ne!(current, baseline, "force_full must materialize the new layout");
+        assert_ne!(
+            current, baseline,
+            "force_full must materialize the new layout"
+        );
         assert!(
             current.contains("identity=\"global:") && current.contains("::B\""),
             "the new logical global identity must be present in the published directory: {current}"
@@ -2862,14 +3400,18 @@ mod shape_drift_tests {
         let (_dir, mut project, main_lua, inc_lua, rock) = boot(v0);
 
         std::fs::write(&rock, body).unwrap();
-        let reload = project.recompile(&[rock.clone()], &main_lua, &inc_lua).expect("body edit");
+        let reload = project
+            .recompile(&[rock.clone()], &main_lua, &inc_lua)
+            .expect("body edit");
         assert!(
             matches!(reload, SkullReload::Incremental { .. }),
             "a body edit must stay a hot overlay, got {reload:?}"
         );
 
         std::fs::write(&rock, sig).unwrap();
-        let reload = project.recompile(&[rock], &main_lua, &inc_lua).expect("sig edit");
+        let reload = project
+            .recompile(&[rock], &main_lua, &inc_lua)
+            .expect("sig edit");
         assert!(
             matches!(reload, SkullReload::Full { .. }),
             "a signature-only edit carries no data-shape drift -- full reload, NOT a restart, got {reload:?}"
@@ -2895,7 +3437,9 @@ mod shape_drift_tests {
         assert!(baseline.contains("__rock_shader_register(\"frag\""));
 
         std::fs::write(&rock, v1).unwrap();
-        let reload = project.recompile(&[rock], &main_lua, &inc_lua).expect("shader recompile");
+        let reload = project
+            .recompile(&[rock], &main_lua, &inc_lua)
+            .expect("shader recompile");
         assert!(
             matches!(reload, SkullReload::Full { .. }),
             "a shader resource/interface change must use the full path, got {reload:?}"
@@ -2905,13 +3449,16 @@ mod shape_drift_tests {
             current.contains("texture("),
             "the full shader reassembly must carry the new resource-consuming source"
         );
-        assert_ne!(current, baseline, "the resource edit must change the registered artifact");
+        assert_ne!(
+            current, baseline,
+            "the resource edit must change the registered artifact"
+        );
     }
 }
 
 #[cfg(test)]
 mod shader_registration_removal_tests {
-    use super::super::{SkullReload, IncrementalProject};
+    use super::super::{IncrementalProject, SkullReload};
     use std::collections::BTreeSet;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -3002,14 +3549,23 @@ fn main() { print(choose_a()); print(choose_b()) }
             .collect()
     }
 
-    fn boot(source: &str) -> (tempfile::TempDir, IncrementalProject, PathBuf, PathBuf, PathBuf) {
+    fn boot(
+        source: &str,
+    ) -> (
+        tempfile::TempDir,
+        IncrementalProject,
+        PathBuf,
+        PathBuf,
+        PathBuf,
+    ) {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path().to_str().expect("tempdir path").to_string();
         let main = dir.path().join("main.lua");
         let incremental = dir.path().join("incremental.lua");
         let rock = dir.path().join("main.rock");
         std::fs::write(&rock, source).expect("source");
-        let project = IncrementalProject::init(&root, &main, &incremental).expect("initial compile");
+        let project =
+            IncrementalProject::init(&root, &main, &incremental).expect("initial compile");
         (dir, project, main, incremental, rock)
     }
 
@@ -3019,7 +3575,10 @@ fn main() { print(choose_a()); print(choose_b()) }
         let wanted = BTreeSet::from(["frag_a".to_string(), "frag_b".to_string()]);
         let baseline = std::fs::read_to_string(&main).unwrap();
         assert_eq!(registration_keys(&baseline), wanted);
-        assert_eq!(logical_keys(project.project.workspace(), project.cache.graph()), wanted);
+        assert_eq!(
+            logical_keys(project.project.workspace(), project.cache.graph()),
+            wanted
+        );
 
         std::fs::write(&rock, v1()).expect("edited source");
         let reload = project
@@ -3040,7 +3599,10 @@ fn main() { print(choose_a()); print(choose_b()) }
             .expect("canonicalize shader removal");
 
         let current = BTreeSet::from(["frag_a".to_string()]);
-        assert_eq!(logical_keys(project.project.workspace(), project.cache.graph()), current);
+        assert_eq!(
+            logical_keys(project.project.workspace(), project.cache.graph()),
+            current
+        );
         let runtime = registration_keys(&std::fs::read_to_string(&main).unwrap());
         assert_eq!(
             runtime, current,
@@ -3051,7 +3613,7 @@ fn main() { print(choose_a()); print(choose_b()) }
 
 #[cfg(all(test, feature = "renderer-wgpu"))]
 mod compute_registration_contract_tests {
-    use super::super::{SkullReload, IncrementalProject};
+    use super::super::{IncrementalProject, SkullReload};
     use std::path::PathBuf;
 
     const V0: &str = r#"
@@ -3074,7 +3636,15 @@ global COPY_VALUES: string = rock_compute(copy_values)
 fn main() { }
 "#;
 
-    fn boot(source: &str) -> (tempfile::TempDir, IncrementalProject, PathBuf, PathBuf, PathBuf) {
+    fn boot(
+        source: &str,
+    ) -> (
+        tempfile::TempDir,
+        IncrementalProject,
+        PathBuf,
+        PathBuf,
+        PathBuf,
+    ) {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path().to_str().expect("tempdir path").to_string();
         let main = dir.path().join("main.lua");
@@ -3086,7 +3656,8 @@ fn main() { }
         )
             .expect("renderer config");
         std::fs::write(&rock, source).expect("source");
-        let project = IncrementalProject::init(&root, &main, &incremental).expect("initial compile");
+        let project =
+            IncrementalProject::init(&root, &main, &incremental).expect("initial compile");
         (dir, project, main, incremental, rock)
     }
 
@@ -3102,7 +3673,9 @@ fn main() { }
             .expect("compute ABI recompile");
         match reload {
             SkullReload::FullRequired { reasons } => assert!(
-                reasons.iter().any(|reason| reason == "shader registration ABI changed"),
+                reasons
+                    .iter()
+                    .any(|reason| reason == "shader registration ABI changed"),
                 "the restart reason must identify the ABI contract: {reasons:?}"
             ),
             other => panic!("a compute workgroup ABI edit must require restart, got {other:?}"),
@@ -3113,15 +3686,24 @@ fn main() { }
             "a FullRequired compute edit must not write the program for the old process"
         );
 
-        project.force_full(&main, &incremental).expect("canonicalize ABI edit");
+        project
+            .force_full(&main, &incremental)
+            .expect("canonicalize ABI edit");
         let current = std::fs::read_to_string(&main).expect("canonicalized main");
-        assert_ne!(current, baseline, "force_full must materialize the new ABI after restart");
-        assert!(current.contains("@workgroup_size(32, 1, 1)"), "new compute ABI was not materialized");
+        assert_ne!(
+            current, baseline,
+            "force_full must materialize the new ABI after restart"
+        );
+        assert!(
+            current.contains("@workgroup_size(32, 1, 1)"),
+            "new compute ABI was not materialized"
+        );
     }
 
     #[test]
     fn compute_root_addition_and_removal_require_restart() {
-        let (_dir_removed, mut removed_project, removed_main, removed_incremental, removed_rock) = boot(V0);
+        let (_dir_removed, mut removed_project, removed_main, removed_incremental, removed_rock) =
+            boot(V0);
         let removed_baseline = std::fs::read_to_string(&removed_main).expect("removed baseline");
         std::fs::write(
             &removed_rock,
@@ -3129,16 +3711,25 @@ fn main() { }
         )
         .expect("removed compute root");
         let removed = removed_project
-            .recompile(std::slice::from_ref(&removed_rock), &removed_main, &removed_incremental)
+            .recompile(
+                std::slice::from_ref(&removed_rock),
+                &removed_main,
+                &removed_incremental,
+            )
             .expect("removed compute root reload");
         match removed {
             SkullReload::FullRequired { reasons } => assert!(
-                reasons.iter().any(|reason| reason == "shader registration key set changed"),
+                reasons
+                    .iter()
+                    .any(|reason| reason == "shader registration key set changed"),
                 "root removal must identify the registration key set: {reasons:?}"
             ),
             other => panic!("removing a compute root must require restart, got {other:?}"),
         }
-        assert_eq!(std::fs::read_to_string(&removed_main).unwrap(), removed_baseline);
+        assert_eq!(
+            std::fs::read_to_string(&removed_main).unwrap(),
+            removed_baseline
+        );
 
         let (_dir_added, mut added_project, added_main, added_incremental, added_rock) = boot(V0);
         let added_baseline = std::fs::read_to_string(&added_main).expect("added baseline");
@@ -3147,22 +3738,31 @@ fn main() { }
         );
         std::fs::write(&added_rock, addition).expect("added compute root");
         let added = added_project
-            .recompile(std::slice::from_ref(&added_rock), &added_main, &added_incremental)
+            .recompile(
+                std::slice::from_ref(&added_rock),
+                &added_main,
+                &added_incremental,
+            )
             .expect("added compute root reload");
         match added {
             SkullReload::FullRequired { reasons } => assert!(
-                reasons.iter().any(|reason| reason == "shader registration key set changed"),
+                reasons
+                    .iter()
+                    .any(|reason| reason == "shader registration key set changed"),
                 "root addition must identify the registration key set: {reasons:?}"
             ),
             other => panic!("adding a compute root must require restart, got {other:?}"),
         }
-        assert_eq!(std::fs::read_to_string(&added_main).unwrap(), added_baseline);
+        assert_eq!(
+            std::fs::read_to_string(&added_main).unwrap(),
+            added_baseline
+        );
     }
 }
 
 #[cfg(test)]
 mod definition_transition_tests {
-    use super::super::{SkullReload, IncrementalProject};
+    use super::super::{IncrementalProject, SkullReload};
     use std::path::PathBuf;
 
     const V0: &str = r#"
@@ -3189,10 +3789,16 @@ fn main() {}
         let old_artifact = harness.current_artifact();
         let old = harness.published_catalog_from(old_artifact.clone());
         assert_eq!(old, vec!["2", "alpha", "beta"]);
-        assert!(old.first().is_some_and(|count| count != "0"), "catalog population must be nonzero");
+        assert!(
+            old.first().is_some_and(|count| count != "0"),
+            "catalog population must be nonzero"
+        );
 
         let reload = harness.replace_source(V1).expect("full definition rebuild");
-        assert!(matches!(reload, SkullReload::Full { .. }), "structural definition edit must use full path: {reload:?}");
+        assert!(
+            matches!(reload, SkullReload::Full { .. }),
+            "structural definition edit must use full path: {reload:?}"
+        );
         assert_eq!(harness.published_catalog(), vec!["2", "beta", "gamma"]);
 
         let failed = harness.replace_source(
@@ -3206,7 +3812,10 @@ fn main() {}
         );
         assert!(failed.is_err(), "duplicate keys must fail the full rebuild");
         assert_eq!(harness.last_good_catalog(), vec!["2", "beta", "gamma"]);
-        assert_eq!(harness.published_catalog_from(old_artifact), vec!["2", "alpha", "beta"]);
+        assert_eq!(
+            harness.published_catalog_from(old_artifact),
+            vec!["2", "alpha", "beta"]
+        );
     }
 
     #[test]
@@ -3255,9 +3864,13 @@ fn main() {}
     #[test]
     fn definition_reconciliation_preserves_prunes_and_recreates_state() {
         let mut harness = StateTransitionHarness::boot(STATE_V0);
-        harness.replace_source(STATE_V1).expect("remove alpha and add gamma");
+        harness
+            .replace_source(STATE_V1)
+            .expect("remove alpha and add gamma");
         let v1 = harness.current_artifact();
-        harness.replace_source(STATE_V2).expect("remove gamma and re-add alpha");
+        harness
+            .replace_source(STATE_V2)
+            .expect("remove gamma and re-add alpha");
         let v2 = harness.current_artifact();
         let output = harness.session_state_script(v1, v2);
         assert_eq!(
@@ -3275,10 +3888,18 @@ fn main() {}
     fn body_only_definition_callback_changes_body_and_preserves_state() {
         let mut harness = StateTransitionHarness::boot(STATE_V0);
         let body_source = STATE_V0.replace("() => 2", "() => 22");
-        let reload = harness.replace_source(&body_source).expect("body-only definition edit");
-        assert!(matches!(reload, SkullReload::Incremental { .. }), "callback body edit must stay on overlay path: {reload:?}");
+        let reload = harness
+            .replace_source(&body_source)
+            .expect("body-only definition edit");
+        assert!(
+            matches!(reload, SkullReload::Incremental { .. }),
+            "callback body edit must stay on overlay path: {reload:?}"
+        );
         let overlay = std::fs::read_to_string(&harness.incremental).expect("definition overlay");
-        assert!(!overlay.contains("__rock_definition_plan_stage"), "body-only overlay must not replace catalog membership");
+        assert!(
+            !overlay.contains("__rock_definition_plan_stage"),
+            "body-only overlay must not replace catalog membership"
+        );
         assert_eq!(harness.run_body_script(overlay), vec!["body:41:1:22"]);
     }
 
@@ -3388,7 +4009,8 @@ fn main() {}
             let incremental = dir.path().join("incremental.lua");
             let source_path = dir.path().join("main.rock");
             std::fs::write(&source_path, source).expect("initial source");
-            let project = IncrementalProject::init(&root, &main, &incremental).expect("initial build");
+            let project =
+                IncrementalProject::init(&root, &main, &incremental).expect("initial build");
             let mut harness = Self {
                 _dir: dir,
                 project,
@@ -3512,7 +4134,9 @@ line("v2:" .. plan.len .. ":" .. plan._data[1].key .. ":" .. plan._data[2].key .
                 .replace("REPLACE_V2", &v2);
             let output = match super::exec_lua(&script) {
                 super::ExecOutcome::Output(output) => output,
-                super::ExecOutcome::Errored(error) => panic!("state transition artifact failed: {error}"),
+                super::ExecOutcome::Errored(error) => {
+                    panic!("state transition artifact failed: {error}")
+                }
             };
             output
                 .lines()
@@ -3548,7 +4172,9 @@ io.write("__STATE__body:" .. WIDGET_STATES["beta"].seq .. ":" .. WIDGET_STATES["
                 .replace("REPLACE_OVERLAY", &overlay);
             let output = match super::exec_lua(&script) {
                 super::ExecOutcome::Output(output) => output,
-                super::ExecOutcome::Errored(error) => panic!("body transition artifact failed: {error}"),
+                super::ExecOutcome::Errored(error) => {
+                    panic!("body transition artifact failed: {error}")
+                }
             };
             output
                 .lines()
@@ -3593,7 +4219,9 @@ io.write("__STATE__old:" .. plan.len .. ":" .. plan._data[1].key .. ":" .. plan.
                 .replace("REPLACE_FAILED", &failed_artifact);
             let output = match super::exec_lua(&script) {
                 super::ExecOutcome::Output(output) => output,
-                super::ExecOutcome::Errored(error) => panic!("materialization failure artifact failed: {error}"),
+                super::ExecOutcome::Errored(error) => {
+                    panic!("materialization failure artifact failed: {error}")
+                }
             };
             output
                 .lines()
@@ -3606,7 +4234,7 @@ io.write("__STATE__old:" .. plan.len .. ":" .. plan._data[1].key .. ":" .. plan.
 
 #[cfg(test)]
 mod wire_transition_tests {
-    use super::super::{SkullReload, IncrementalProject};
+    use super::super::{IncrementalProject, SkullReload};
     use std::path::PathBuf;
 
     const V0: &str = r#"
@@ -3625,14 +4253,27 @@ fn unrelated() -> int { return UNRELATED }
 fn main() {}
 "#;
 
-    fn boot(source: &str) -> (tempfile::TempDir, IncrementalProject, PathBuf, PathBuf, PathBuf) {
+    fn boot(
+        source: &str,
+    ) -> (
+        tempfile::TempDir,
+        IncrementalProject,
+        PathBuf,
+        PathBuf,
+        PathBuf,
+    ) {
         let dir = tempfile::tempdir().expect("wire transition tempdir");
-        let root = dir.path().to_str().expect("wire transition root").to_string();
+        let root = dir
+            .path()
+            .to_str()
+            .expect("wire transition root")
+            .to_string();
         let main = dir.path().join("main.lua");
         let incremental = dir.path().join("incremental.lua");
         let source_path = dir.path().join("main.rock");
         std::fs::write(&source_path, source).expect("initial wire source");
-        let project = IncrementalProject::init(&root, &main, &incremental).expect("initial wire build");
+        let project =
+            IncrementalProject::init(&root, &main, &incremental).expect("initial wire build");
         (dir, project, main, incremental, source_path)
     }
 
@@ -3651,7 +4292,10 @@ fn main() {}
     fn compatible_wire_edits_overlay_and_structural_changes_take_full_path() {
         let (_dir, mut project, main, incremental, source_path) = boot(V0);
         let baseline = std::fs::read_to_string(&main).expect("wire baseline");
-        assert!(baseline.contains("__ROCK_LIFECYCLE_PLAN"), "baseline must publish LifecyclePlan");
+        assert!(
+            baseline.contains("__ROCK_LIFECYCLE_PLAN"),
+            "baseline must publish LifecyclePlan"
+        );
 
         let unrelated = V0.replace("return UNRELATED", "return UNRELATED + 1");
         assert!(matches!(
@@ -3668,22 +4312,24 @@ fn main() {}
             Ok(SkullReload::Incremental { .. })
         ));
 
-        let structural = direct.replace(
-            "@wire(onchange=[DIRECT])",
-            "@wire(onchange=[BASE])",
-        );
+        let structural = direct.replace("@wire(onchange=[DIRECT])", "@wire(onchange=[BASE])");
         assert!(matches!(
             replace_source(&mut project, &source_path, &structural, &main, &incremental),
             Ok(SkullReload::Full { .. })
         ));
-        assert!(!incremental.exists(), "full LifecyclePlan transition must wipe the overlay");
+        assert!(
+            !incremental.exists(),
+            "full LifecyclePlan transition must wipe the overlay"
+        );
         let full = std::fs::read_to_string(&main).expect("structural wire artifact");
-        assert_ne!(full, baseline, "structural wire transition must publish the candidate artifact");
+        assert_ne!(
+            full, baseline,
+            "structural wire transition must publish the candidate artifact"
+        );
 
         let (_dir_added, mut added_project, added_main, added_incremental, added_source) = boot(V0);
-        let added = format!(
-            "{V0}\n@wire(onchange=[UNRELATED]) fn added_wire() {{ let _ = UNRELATED }}\n"
-        );
+        let added =
+            format!("{V0}\n@wire(onchange=[UNRELATED]) fn added_wire() {{ let _ = UNRELATED }}\n");
         assert!(matches!(
             replace_source(
                 &mut added_project,
@@ -3694,24 +4340,35 @@ fn main() {}
             ),
             Ok(SkullReload::Full { .. })
         ));
-        assert!(!added_incremental.exists(), "wire addition must take the full path");
+        assert!(
+            !added_incremental.exists(),
+            "wire addition must take the full path"
+        );
     }
 
     #[test]
     fn gated_wire_removal_requires_restart_and_keeps_the_last_good_artifact() {
         let (_dir, mut project, main, incremental, source_path) = boot(V0);
         let baseline = std::fs::read_to_string(&main).expect("wire baseline");
-        let removed = V0.replace("@wire(onchange=[DIRECT]) fn direct_wire() { let _ = DIRECT }\n", "");
+        let removed = V0.replace(
+            "@wire(onchange=[DIRECT]) fn direct_wire() { let _ = DIRECT }\n",
+            "",
+        );
         let reload = replace_source(&mut project, &source_path, &removed, &main, &incremental)
             .expect("gated removal route");
         match reload {
             SkullReload::FullRequired { reasons } => assert!(
-                reasons.iter().any(|reason| reason.contains("removing a gated @wire")),
+                reasons
+                    .iter()
+                    .any(|reason| reason.contains("removing a gated @wire")),
                 "removal reason must request a fresh projection: {reasons:?}"
             ),
             other => panic!("gated removal must not publish live state: {other:?}"),
         }
-        assert_eq!(std::fs::read_to_string(&main).expect("retained artifact"), baseline);
+        assert_eq!(
+            std::fs::read_to_string(&main).expect("retained artifact"),
+            baseline
+        );
         assert_eq!(
             project.source_text(&source_path).as_deref(),
             Some(removed.as_str()),
@@ -3728,20 +4385,22 @@ fn main() {}
             replace_source(&mut project, &source_path, &invalid, &main, &incremental).is_err(),
             "an unknown dependency must fail before publication"
         );
-        assert_eq!(std::fs::read_to_string(&main).expect("last-good main"), baseline);
+        assert_eq!(
+            std::fs::read_to_string(&main).expect("last-good main"),
+            baseline
+        );
         assert_eq!(project.source_text(&source_path).as_deref(), Some(V0));
 
         let blocked = source_path.parent().unwrap().join("blocked-incremental");
         std::fs::create_dir(&blocked).expect("blocked publication directory");
         let body_edit = V0.replace("return UNRELATED", "return UNRELATED + 1");
         std::fs::write(&source_path, &body_edit).expect("body edit");
-        let failed = project.recompile(
-            std::slice::from_ref(&source_path),
-            &main,
-            &blocked,
-        );
+        let failed = project.recompile(std::slice::from_ref(&source_path), &main, &blocked);
         assert!(failed.is_err(), "a failed overlay write must surface");
-        assert_eq!(std::fs::read_to_string(&main).expect("main after failed publication"), baseline);
+        assert_eq!(
+            std::fs::read_to_string(&main).expect("main after failed publication"),
+            baseline
+        );
         assert_eq!(project.source_text(&source_path).as_deref(), Some(V0));
     }
 }
@@ -3779,8 +4438,6 @@ mod force_full_tests {
         );
     }
 
-
-
     /// init at v1 -> body-edit to v2 (writes the overlay) -> force_full. The
     /// canonical `main.lua` must equal a fresh full build of v2, must DIFFER from
     /// the v1 baseline (proving the edit was actually folded in, not served
@@ -3812,7 +4469,9 @@ mod force_full_tests {
         // (re-read only `main.rock`); if it failed to pick up v2, the byte-identity
         // check against a fresh v2 build below would catch it.
         std::fs::write(&rock, v2).unwrap();
-        let reload = skull.recompile(&[rock.clone()], &main_lua, &inc_lua).expect("recompile v2");
+        let reload = skull
+            .recompile(&[rock.clone()], &main_lua, &inc_lua)
+            .expect("recompile v2");
         assert!(
             matches!(reload, SkullReload::Incremental { .. }),
             "a const body edit should route to the overlay (Incremental tier)"
@@ -3837,7 +4496,8 @@ mod force_full_tests {
         // same on-disk source). force_full's main.lua must match it byte-for-byte.
         let fresh_main = src("fresh_main.lua");
         let fresh_inc = src("fresh_incremental.lua");
-        let fresh = IncrementalProject::init(&dir_str, &fresh_main, &fresh_inc).expect("fresh init v2");
+        let fresh =
+            IncrementalProject::init(&dir_str, &fresh_main, &fresh_inc).expect("fresh init v2");
         let main_fresh = std::fs::read_to_string(&fresh_main).expect("fresh main.lua");
         assert_eq!(
             main_forced, main_fresh,
@@ -3887,7 +4547,9 @@ mod force_full_tests {
 
         // Body edit: main now calls `split`, which routes to the overlay.
         std::fs::write(&rock, v2).unwrap();
-        let reload = skull.recompile(&[rock.clone()], &main_lua, &inc_lua).expect("recompile v2");
+        let reload = skull
+            .recompile(&[rock.clone()], &main_lua, &inc_lua)
+            .expect("recompile v2");
         assert!(
             matches!(reload, SkullReload::Incremental { .. }),
             "a body edit should route to the overlay (Incremental tier)"
@@ -3967,7 +4629,10 @@ mod force_full_tests {
         // A fold after the failed update now sees the retained v1 Session and
         // succeeds without changing the last-good artifact.
         let res = skull.force_full(&main_lua, &inc_lua);
-        assert!(res.is_ok(), "force_full must retain the previous good Session");
+        assert!(
+            res.is_ok(),
+            "force_full must retain the previous good Session"
+        );
         assert_eq!(
             std::fs::read_to_string(&main_lua).unwrap(),
             main_v1,
@@ -3978,8 +4643,8 @@ mod force_full_tests {
 
 #[cfg(test)]
 mod incremental_lint_snapshot_tests {
+    use super::super::{IncrementalProject, SkullReload};
     use super::overlay_test_support::{direct_overlay, print_route_profile};
-    use super::super::{SkullReload, IncrementalProject};
     use bone_core::prelude::Instant;
 
     #[test]
@@ -4010,7 +4675,10 @@ mod incremental_lint_snapshot_tests {
             .apply_edit(&source, v2, &main, &incremental)
             .expect("body edit");
         let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
-        assert!(matches!(reload, SkullReload::Incremental { .. }), "reload: {reload:?}");
+        assert!(
+            matches!(reload, SkullReload::Incremental { .. }),
+            "reload: {reload:?}"
+        );
         let census = crate::lint_pass::take_census().expect("census enabled");
         assert_eq!(
             census.cache_snapshots.snapshots, 1,
@@ -4024,8 +4692,14 @@ mod incremental_lint_snapshot_tests {
             "body publication must checkpoint the lint cache without cloning it: {:?}",
             census.cache_snapshots
         );
-        assert!(census.source_view_requests > 0, "source-view denominator must be populated");
-        assert!(census.source_files_borrowed > 0, "source-view file population must be nonzero");
+        assert!(
+            census.source_view_requests > 0,
+            "source-view denominator must be populated"
+        );
+        assert!(
+            census.source_files_borrowed > 0,
+            "source-view file population must be nonzero"
+        );
         assert_eq!(
             census.source_views_aliased, census.source_files_borrowed,
             "a body edit must borrow source text instead of cloning the workspace"
@@ -4071,13 +4745,22 @@ mod incremental_lint_snapshot_tests {
         let reload = project
             .apply_edit(&source, v2, &main, &incremental)
             .expect("body edit");
-        assert!(matches!(reload, SkullReload::Incremental { .. }), "reload: {reload:?}");
+        assert!(
+            matches!(reload, SkullReload::Incremental { .. }),
+            "reload: {reload:?}"
+        );
         let incremental_fingerprint = project.artifact_fingerprint().to_string();
         assert_ne!(incremental_fingerprint, initial_fingerprint);
         let route_overlay = std::fs::read_to_string(&incremental).expect("route overlay");
         let direct = direct_overlay(&root, "main.rock", v2);
-        assert!(!route_overlay.is_empty(), "overlay population must be nonzero");
-        assert_eq!(route_overlay, direct, "lint-cache integration changed overlay bytes");
+        assert!(
+            !route_overlay.is_empty(),
+            "overlay population must be nonzero"
+        );
+        assert_eq!(
+            route_overlay, direct,
+            "lint-cache integration changed overlay bytes"
+        );
         std::fs::write(&source, v2).expect("fresh source");
         let fresh_outputs = tempfile::tempdir().expect("fresh outputs");
         let fresh = IncrementalProject::init(
@@ -4100,7 +4783,6 @@ mod incremental_lint_snapshot_tests {
                 .expect("capture direct");
         }
     }
-
 
     #[test]
     fn incremental_apply_edit_route_benchmark() {
@@ -4127,7 +4809,10 @@ mod incremental_lint_snapshot_tests {
             let reload = project
                 .apply_edit(&source, text, &main, &incremental)
                 .expect("apply edit");
-            assert!(matches!(reload, SkullReload::Incremental { .. }), "reload: {reload:?}");
+            assert!(
+                matches!(reload, SkullReload::Incremental { .. }),
+                "reload: {reload:?}"
+            );
             if i >= warmup {
                 samples.push(started.elapsed().as_secs_f64() * 1000.0);
             }
@@ -4135,7 +4820,8 @@ mod incremental_lint_snapshot_tests {
         let census = crate::lint_pass::take_census().expect("census enabled");
         let mut sorted = samples.clone();
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let percentile = |p: f64| sorted[((p / 100.0) * (sorted.len() as f64 - 1.0)).round() as usize];
+        let percentile =
+            |p: f64| sorted[((p / 100.0) * (sorted.len() as f64 - 1.0)).round() as usize];
         let mean = samples.iter().sum::<f64>() / samples.len() as f64;
         assert_eq!(census.cache_snapshots.snapshots, warmup + iters);
         assert!(census.cache_snapshots.cached_entries > 0);
@@ -4154,7 +4840,6 @@ mod incremental_lint_snapshot_tests {
         }
     }
 
-
     #[test]
     fn incremental_apply_edit_profile_covers_the_real_route() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -4171,7 +4856,10 @@ mod incremental_lint_snapshot_tests {
         let reload = project
             .apply_edit(&source, v2, &main, &incremental)
             .expect("body edit");
-        assert!(matches!(reload, SkullReload::Incremental { .. }), "reload: {reload:?}");
+        assert!(
+            matches!(reload, SkullReload::Incremental { .. }),
+            "reload: {reload:?}"
+        );
         let profile = project.take_last_route_profile().expect("route profile");
         assert!(profile.session_snapshot_ns > 0);
         assert!(profile.source_lookup_feed_ns > 0);
@@ -4212,7 +4900,9 @@ mod incremental_lint_snapshot_tests {
         std::fs::create_dir(&incremental).expect("blocked overlay");
 
         assert!(
-            project.apply_edit(&source, v2, &main, &incremental).is_err(),
+            project
+                .apply_edit(&source, v2, &main, &incremental)
+                .is_err(),
             "a body publication to a directory must fail"
         );
         assert_eq!(project.source_text(&source).as_deref(), Some(v1));
@@ -4221,10 +4911,16 @@ mod incremental_lint_snapshot_tests {
         let reload = project
             .apply_edit(&source, v3, &main, &incremental)
             .expect("next body edit");
-        assert!(matches!(reload, SkullReload::Incremental { .. }), "reload: {reload:?}");
+        assert!(
+            matches!(reload, SkullReload::Incremental { .. }),
+            "reload: {reload:?}"
+        );
         let route_overlay = std::fs::read_to_string(&incremental).expect("overlay");
         let direct = direct_overlay(&root, "main.rock", v3);
-        assert_eq!(route_overlay, direct, "rollback must retain the last-good cache");
+        assert_eq!(
+            route_overlay, direct,
+            "rollback must retain the last-good cache"
+        );
     }
 }
 
@@ -4244,7 +4940,10 @@ mod value_test_exec {
         match skull_build("val.rock", src, None).expect("build ok") {
             SkullOutcome::TestFail { passed, fails, .. } => {
                 assert_eq!(passed, 0);
-                assert_eq!(fails, vec!["r: value mismatch: expected <43> got <42>".to_string()]);
+                assert_eq!(
+                    fails,
+                    vec!["r: value mismatch: expected <43> got <42>".to_string()]
+                );
             }
             SkullOutcome::Pass { .. } => panic!("mismatching value test must FAIL"),
         }
@@ -4276,7 +4975,8 @@ mod value_test_exec {
     #[test]
     fn returns_plus_expect_failure_is_a_unit_failure_not_expected_pass() {
         let src = "@test(expect_failure = true, returns = 42)\nfn contra() -> int { return 42 }\n";
-        let err = skull_build("val.rock", src, None).expect_err("contradiction must reject the unit");
+        let err =
+            skull_build("val.rock", src, None).expect_err("contradiction must reject the unit");
         assert!(
             err.reason.contains("contradictory"),
             "unexpected reason: {}",
@@ -4288,7 +4988,7 @@ mod value_test_exec {
 #[cfg(test)]
 mod backend_stats_workspace_tests {
     use super::super::skull_workspace_timed;
-    use crate::unified_compile::{discover_sources, SourceSpec};
+    use crate::unified_compile::{SourceSpec, discover_sources};
     use std::path::PathBuf;
 
     #[test]
@@ -4334,19 +5034,31 @@ mod backend_stats_workspace_tests {
         std::fs::write(
             dependency.join("stick.toml"),
             "[package]\nname = \"dependency\"\n",
-        ).unwrap();
-        std::fs::write(dependency.join("library.rock"), "fn library_value() -> int { return 7 }\n").unwrap();
+        )
+        .unwrap();
+        std::fs::write(
+            dependency.join("library.rock"),
+            "fn library_value() -> int { return 7 }\n",
+        )
+        .unwrap();
         std::fs::write(
             project.join("application.rock"),
             "fn main() { print(build_var(\"REQUIRED\")); print(library_value()) }\n",
-        ).unwrap();
+        )
+        .unwrap();
         let sources = discover_sources(&SourceSpec::Directory(project.clone())).unwrap();
         let (_, entry, _) = crate::bone_backend::parse_user_modules(&sources).unwrap();
-        assert!(std::path::Path::new(entry.as_str()).starts_with(
-            std::fs::canonicalize(&dependency).expect("canonical dependency path")),
-            "fixture must exercise dependency-first entry selection without main.rock");
+        assert!(
+            std::path::Path::new(entry.as_str()).starts_with(
+                std::fs::canonicalize(&dependency).expect("canonical dependency path")
+            ),
+            "fixture must exercise dependency-first entry selection without main.rock"
+        );
         let result = crate::backend_stats::do_backend_stats(project.to_str().unwrap(), 1, 0);
-        assert!(result.is_ok(), "profiling must use the invoked project's build vars: {result:?}");
+        assert!(
+            result.is_ok(),
+            "profiling must use the invoked project's build vars: {result:?}"
+        );
     }
 
     #[test]
@@ -4359,8 +5071,11 @@ mod backend_stats_workspace_tests {
         .expect("stick.toml");
         let tests_dir = dir.path().join("tests");
         std::fs::create_dir_all(&tests_dir).expect("create tests dir");
-        std::fs::write(tests_dir.join("foo_test.rock"), "@test fn t() { assert(true) }\n")
-            .expect("foo_test.rock");
+        std::fs::write(
+            tests_dir.join("foo_test.rock"),
+            "@test fn t() { assert(true) }\n",
+        )
+        .expect("foo_test.rock");
 
         let tests_str = tests_dir.to_string_lossy().to_string();
         let resolved = crate::skull_backend::is_package_tests_dir(&tests_str);
@@ -4369,7 +5084,10 @@ mod backend_stats_workspace_tests {
         let unrelated_dir = tempfile::TempDir::new().expect("tempdir");
         let bare_tests = unrelated_dir.path().join("tests");
         std::fs::create_dir_all(&bare_tests).expect("create bare tests");
-        assert_eq!(crate::skull_backend::is_package_tests_dir(&bare_tests.to_string_lossy()), None);
+        assert_eq!(
+            crate::skull_backend::is_package_tests_dir(&bare_tests.to_string_lossy()),
+            None
+        );
     }
 
     #[test]
@@ -4387,7 +5105,8 @@ mod backend_stats_workspace_tests {
         let source = std::fs::canonicalize(source).expect("canonical source path");
         for selected in [paths, vec![dir.path().to_string_lossy().into_owned()]] {
             let (files, packages) = crate::skull_backend::collect_test_units(&selected).unwrap();
-            let files: Vec<_> = files.into_iter()
+            let files: Vec<_> = files
+                .into_iter()
                 .map(|file| std::fs::canonicalize(file).expect("canonical collected source"))
                 .collect();
             assert_eq!(files, vec![source.clone()]);
@@ -4400,14 +5119,23 @@ mod backend_stats_workspace_tests {
     #[test]
     fn package_path_spellings_select_one_package_unit() {
         let dir = tempfile::TempDir::new().expect("tempdir");
-        std::fs::write(dir.path().join("stick.toml"), "[package]\nname = \"spell-pkg\"\n")
-            .expect("stick.toml");
-        std::fs::write(dir.path().join("lib.rock"), "@test fn in_root() { assert(true) }\n")
-            .expect("lib.rock");
+        std::fs::write(
+            dir.path().join("stick.toml"),
+            "[package]\nname = \"spell-pkg\"\n",
+        )
+        .expect("stick.toml");
+        std::fs::write(
+            dir.path().join("lib.rock"),
+            "@test fn in_root() { assert(true) }\n",
+        )
+        .expect("lib.rock");
         let tests_dir = dir.path().join("tests");
         std::fs::create_dir_all(&tests_dir).expect("tests dir");
-        std::fs::write(tests_dir.join("t_test.rock"), "@test fn in_tests() { assert(true) }\n")
-            .expect("t_test.rock");
+        std::fs::write(
+            tests_dir.join("t_test.rock"),
+            "@test fn in_tests() { assert(true) }\n",
+        )
+        .expect("t_test.rock");
 
         let root = dir.path().to_string_lossy().to_string();
         let spellings = [
@@ -4420,31 +5148,51 @@ mod backend_stats_workspace_tests {
         for spelling in &spellings {
             let (files, packages) =
                 crate::skull_backend::collect_test_units(std::slice::from_ref(spelling)).unwrap();
-            assert!(files.is_empty(), "`{spelling}` selects no loose files: {files:?}");
-            assert_eq!(packages.len(), 1, "`{spelling}` selects the package: {packages:?}");
+            assert!(
+                files.is_empty(),
+                "`{spelling}` selects no loose files: {files:?}"
+            );
+            assert_eq!(
+                packages.len(),
+                1,
+                "`{spelling}` selects the package: {packages:?}"
+            );
         }
         let (files, packages) = crate::skull_backend::collect_test_units(&spellings).unwrap();
         assert!(files.is_empty(), "{files:?}");
-        assert_eq!(packages.len(), 1, "all spellings together are one package unit: {packages:?}");
+        assert_eq!(
+            packages.len(),
+            1,
+            "all spellings together are one package unit: {packages:?}"
+        );
     }
 }
 
-
 fn file_limit_package(first: &str, second: Option<&str>) -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("timeout package");
-    std::fs::write(dir.path().join("stick.toml"),
-        "[package]\nname = \"file-limit\"\ntype = \"lib\"\n").unwrap();
+    std::fs::write(
+        dir.path().join("stick.toml"),
+        "[package]\nname = \"file-limit\"\ntype = \"lib\"\n",
+    )
+    .unwrap();
     // The marker proves the first test body ran, so a timeout is the test's
     // own and not a loading or compile failure.
     let first = format!(
         "local started = assert(io.open([=[{}]=], 'w')); \
          assert(started:write('started')); assert(started:close()); {first}",
-        dir.path().join("test-start").display());
-    std::fs::write(dir.path().join("first.rock"), format!(
-        "@test inline(lua) fn first_test() = \"{first}\"\n")).unwrap();
+        dir.path().join("test-start").display()
+    );
+    std::fs::write(
+        dir.path().join("first.rock"),
+        format!("@test inline(lua) fn first_test() = \"{first}\"\n"),
+    )
+    .unwrap();
     if let Some(second) = second {
-        std::fs::write(dir.path().join("second.rock"), format!(
-            "@test inline(lua) fn second_test() = \"{second}\"\n")).unwrap();
+        std::fs::write(
+            dir.path().join("second.rock"),
+            format!("@test inline(lua) fn second_test() = \"{second}\"\n"),
+        )
+        .unwrap();
     }
     dir
 }
@@ -4452,33 +5200,60 @@ fn file_limit_package(first: &str, second: Option<&str>) -> tempfile::TempDir {
 // Each caller asserts that the watchdog stopped its fixture and named the
 // test; a wall-time bound here would only measure how loaded the host is.
 fn assert_first_test_started(dir: &tempfile::TempDir, message: &str) {
-    assert!(dir.path().join("test-start").is_file(), "{message}: the first test never started in {}",
-        dir.path().display());
+    assert!(
+        dir.path().join("test-start").is_file(),
+        "{message}: the first test never started in {}",
+        dir.path().display()
+    );
 }
 
 #[test]
 fn test_limit_allows_two_files_over_total_budget() {
     let dir = file_limit_package("os.execute('sleep 1')", Some("os.execute('sleep 1')"));
-    for (file, name) in [("first.rock", "another_first_test"), ("second.rock", "another_second_test")] {
+    for (file, name) in [
+        ("first.rock", "another_first_test"),
+        ("second.rock", "another_second_test"),
+    ] {
         let path = dir.path().join(file);
         let mut source = std::fs::read_to_string(&path).unwrap();
-        source.push_str(&format!("@test inline(lua) fn {name}() = \"os.execute('sleep 1')\"\n"));
+        source.push_str(&format!(
+            "@test inline(lua) fn {name}() = \"os.execute('sleep 1')\"\n"
+        ));
         std::fs::write(path, source).unwrap();
     }
     // Four one-second tests exceed the total budget, with room between markers.
-    let result = super::skull_build_package_with_limit(dir.path().to_str().unwrap(), Duration::from_secs(3), 1, None);
-    assert!(matches!(result, Ok(super::SkullOutcome::Pass { tests: 4, .. })), "{result:?}");
+    let result = super::skull_build_package_with_limit(
+        dir.path().to_str().unwrap(),
+        Duration::from_secs(3),
+        1,
+        None,
+    );
+    assert!(
+        matches!(result, Ok(super::SkullOutcome::Pass { tests: 4, .. })),
+        "{result:?}"
+    );
 }
 
 #[test]
 fn test_limit_kills_and_names_stuck_file() {
     let dir = file_limit_package("while true do end", None);
-    let result = super::skull_build_package_with_limit(dir.path().to_str().unwrap(), Duration::from_secs(1), 1, None);
+    let result = super::skull_build_package_with_limit(
+        dir.path().to_str().unwrap(),
+        Duration::from_secs(1),
+        1,
+        None,
+    );
     assert_first_test_started(&dir, "stuck file was not bounded");
     match result {
-        Ok(super::SkullOutcome::TestFail { passed: 0, fails, .. }) => {
-            assert!(fails.iter().any(|f| f.contains("first.rock") && f.contains("timed out")
-                && f.contains("CPU-time budget")), "{fails:?}");
+        Ok(super::SkullOutcome::TestFail {
+            passed: 0, fails, ..
+        }) => {
+            assert!(
+                fails.iter().any(|f| f.contains("first.rock")
+                    && f.contains("timed out")
+                    && f.contains("CPU-time budget")),
+                "{fails:?}"
+            );
         }
         other => panic!("{other:?}"),
     }
@@ -4487,25 +5262,49 @@ fn test_limit_kills_and_names_stuck_file() {
 #[test]
 fn test_limit_keeps_completed_file_results() {
     let dir = file_limit_package("print('done')", Some("while true do end"));
-    let result = super::skull_build_package_with_limit(dir.path().to_str().unwrap(), Duration::from_secs(1), 1, None);
+    let result = super::skull_build_package_with_limit(
+        dir.path().to_str().unwrap(),
+        Duration::from_secs(1),
+        1,
+        None,
+    );
     match result {
-        Ok(super::SkullOutcome::TestFail { passed: 1, fails, .. }) => {
-            assert!(fails.iter().any(|f| f.contains("second.rock") && f.contains("timed out")), "{fails:?}");
+        Ok(super::SkullOutcome::TestFail {
+            passed: 1, fails, ..
+        }) => {
+            assert!(
+                fails
+                    .iter()
+                    .any(|f| f.contains("second.rock") && f.contains("timed out")),
+                "{fails:?}"
+            );
         }
         other => panic!("{other:?}"),
     }
 }
 
-
 #[test]
 fn test_limit_bounds_program_loading() {
     let start = bone_core::prelude::Instant::now();
-    let result = super::run_emitted_tests("while true do end".to_string(), &[], &[], Duration::from_millis(100), 1, None, false);
+    let result = super::run_emitted_tests(
+        "while true do end".to_string(),
+        &[],
+        &[],
+        Duration::from_millis(100),
+        1,
+        None,
+        false,
+    );
     // The program never finishes loading; the bound only leaves room for a
     // loaded host.
     assert!(start.elapsed() < Duration::from_millis(100) + Duration::from_secs(30));
     let error = result.expect_err("loading must time out");
-    assert!(error.rendered.contains("loading emitted program: timed out"), "{error:?}");
+    assert!(
+        error
+            .rendered
+            .contains("loading emitted program: timed out"),
+        "{error:?}"
+    );
 }
 
 #[test]
@@ -4515,12 +5314,26 @@ fn test_limit_resets_for_each_test() {
     let dir = file_limit_package("os.execute('sleep 0.3')", None);
     let file = dir.path().join("first.rock");
     let mut source = std::fs::read_to_string(&file).unwrap();
-    for name in ["second_test_in_file", "third_test_in_file", "fourth_test_in_file"] {
-        source.push_str(&format!("@test inline(lua) fn {name}() = \"os.execute('sleep 0.3')\"\n"));
+    for name in [
+        "second_test_in_file",
+        "third_test_in_file",
+        "fourth_test_in_file",
+    ] {
+        source.push_str(&format!(
+            "@test inline(lua) fn {name}() = \"os.execute('sleep 0.3')\"\n"
+        ));
     }
     std::fs::write(file, source).unwrap();
-    let result = super::skull_build_package_with_limit(dir.path().to_str().unwrap(), Duration::from_secs(1), 1, None);
-    assert!(matches!(result, Ok(super::SkullOutcome::Pass { tests: 4, .. })), "{result:?}");
+    let result = super::skull_build_package_with_limit(
+        dir.path().to_str().unwrap(),
+        Duration::from_secs(1),
+        1,
+        None,
+    );
+    assert!(
+        matches!(result, Ok(super::SkullOutcome::Pass { tests: 4, .. })),
+        "{result:?}"
+    );
 }
 
 #[test]
@@ -4531,12 +5344,23 @@ fn test_limit_names_hung_test_after_healthy_ones() {
     source.push_str("@test inline(lua) fn slow_but_fine() = \"os.execute('sleep 0.3')\"\n");
     source.push_str("@test inline(lua) fn hung_test() = \"while true do end\"\n");
     std::fs::write(file, source).unwrap();
-    let result = super::skull_build_package_with_limit(dir.path().to_str().unwrap(), Duration::from_secs(1), 1, None);
+    let result = super::skull_build_package_with_limit(
+        dir.path().to_str().unwrap(),
+        Duration::from_secs(1),
+        1,
+        None,
+    );
     assert_first_test_started(&dir, "hung test was not bounded");
     match result {
-        Ok(super::SkullOutcome::TestFail { passed: 2, fails, .. }) => {
-            assert!(fails.iter().any(|f| f.contains("first.rock") && f.contains("hung_test")
-                && f.contains("timed out")), "{fails:?}");
+        Ok(super::SkullOutcome::TestFail {
+            passed: 2, fails, ..
+        }) => {
+            assert!(
+                fails.iter().any(|f| f.contains("first.rock")
+                    && f.contains("hung_test")
+                    && f.contains("timed out")),
+                "{fails:?}"
+            );
         }
         other => panic!("{other:?}"),
     }
@@ -4557,21 +5381,43 @@ fn test_limit_reruns_the_tests_after_a_stopped_one() {
     // the tests after them still run, and only the three that stopped fail,
     // by name.
     let dir = file_limit_package("os.execute('sleep 0.1')", None);
-    add_tests(&dir, &[
-        ("hung_test", "while true do end"),
-        ("crashing_test", "os.exit(3)"),
-        ("exiting_test", "os.exit(0)"),
-        ("last_test", "os.execute('sleep 0.1')"),
-    ]);
-    let result = super::skull_build_package_with_limit(dir.path().to_str().unwrap(), Duration::from_secs(1), 1, None);
+    add_tests(
+        &dir,
+        &[
+            ("hung_test", "while true do end"),
+            ("crashing_test", "os.exit(3)"),
+            ("exiting_test", "os.exit(0)"),
+            ("last_test", "os.execute('sleep 0.1')"),
+        ],
+    );
+    let result = super::skull_build_package_with_limit(
+        dir.path().to_str().unwrap(),
+        Duration::from_secs(1),
+        1,
+        None,
+    );
     match result {
-        Ok(super::SkullOutcome::TestFail { passed: 2, fails, .. }) => {
+        Ok(super::SkullOutcome::TestFail {
+            passed: 2, fails, ..
+        }) => {
             assert_eq!(fails.len(), 3, "{fails:?}");
-            assert!(fails[0].starts_with("hung_test: ") && fails[0].contains("first.rock")
-                && fails[0].contains("CPU-time budget") && fails[0].contains("while it ran"), "{fails:?}");
-            assert!(fails[1].starts_with("crashing_test: ") && fails[1].contains("child process stopped while it ran"), "{fails:?}");
-            assert!(fails[2].starts_with("exiting_test: ")
-                && fails[2].contains("process exited 0 before all tests reported while it ran"), "{fails:?}");
+            assert!(
+                fails[0].starts_with("hung_test: ")
+                    && fails[0].contains("first.rock")
+                    && fails[0].contains("CPU-time budget")
+                    && fails[0].contains("while it ran"),
+                "{fails:?}"
+            );
+            assert!(
+                fails[1].starts_with("crashing_test: ")
+                    && fails[1].contains("child process stopped while it ran"),
+                "{fails:?}"
+            );
+            assert!(
+                fails[2].starts_with("exiting_test: ")
+                    && fails[2].contains("process exited 0 before all tests reported while it ran"),
+                "{fails:?}"
+            );
         }
         other => panic!("{other:?}"),
     }
@@ -4582,24 +5428,61 @@ fn test_limit_bounds_the_reruns_of_a_shard() {
     // A defect that hangs every test costs a bounded number of processes; the
     // tests after the last one are still named.
     let dir = file_limit_package("while true do end", None);
-    let hung = (0..super::SHARD_RESTARTS + 1).map(|i| format!("hung_test_{i}")).collect::<Vec<_>>();
-    add_tests(&dir, &hung.iter().map(|name| (name.as_str(), "while true do end")).collect::<Vec<_>>());
-    let result = super::skull_build_package_with_limit(dir.path().to_str().unwrap(), Duration::from_millis(200), 1, None);
+    let hung = (0..super::SHARD_RESTARTS + 1)
+        .map(|i| format!("hung_test_{i}"))
+        .collect::<Vec<_>>();
+    add_tests(
+        &dir,
+        &hung
+            .iter()
+            .map(|name| (name.as_str(), "while true do end"))
+            .collect::<Vec<_>>(),
+    );
+    let result = super::skull_build_package_with_limit(
+        dir.path().to_str().unwrap(),
+        Duration::from_millis(200),
+        1,
+        None,
+    );
     match result {
-        Ok(super::SkullOutcome::TestFail { passed: 0, fails, diagnostics, .. }) => {
+        Ok(super::SkullOutcome::TestFail {
+            passed: 0,
+            fails,
+            diagnostics,
+            ..
+        }) => {
             assert_eq!(fails.len(), super::SHARD_RESTARTS + 2, "{fails:?}");
-            let charged = fails.iter().filter(|f| f.contains("CPU-time budget") && f.contains("while it ran")).count();
-            assert_eq!(charged, super::SHARD_RESTARTS + 1, "one stopped test per process: {fails:?}");
-            assert_eq!(diagnostics.len(), super::SHARD_RESTARTS + 1, "{diagnostics:?}");
+            let charged = fails
+                .iter()
+                .filter(|f| f.contains("CPU-time budget") && f.contains("while it ran"))
+                .count();
+            assert_eq!(
+                charged,
+                super::SHARD_RESTARTS + 1,
+                "one stopped test per process: {fails:?}"
+            );
+            assert_eq!(
+                diagnostics.len(),
+                super::SHARD_RESTARTS + 1,
+                "{diagnostics:?}"
+            );
             let last = format!("hung_test_{}: never reported", super::SHARD_RESTARTS);
-            assert!(fails.iter().any(|f| f.starts_with(&last) && f.contains("stopped before it ran")), "{fails:?}");
+            assert!(
+                fails
+                    .iter()
+                    .any(|f| f.starts_with(&last) && f.contains("stopped before it ran")),
+                "{fails:?}"
+            );
         }
         other => panic!("{other:?}"),
     }
 }
 
 #[cfg(unix)]
-fn wait_for_test_watchdog_fixture(script: &str, policy: crate::common::WaitPolicy) -> crate::common::ProcessResult {
+fn wait_for_test_watchdog_fixture(
+    script: &str,
+    policy: crate::common::WaitPolicy,
+) -> crate::common::ProcessResult {
     let mut child = Command::new("sh")
         .arg("-c")
         .arg(script)
@@ -4620,14 +5503,24 @@ fn wait_for_test_watchdog_fixture(script: &str, policy: crate::common::WaitPolic
     )
     .expect("wait for watchdog fixture");
     // Child::try_wait can reap the child itself; ECHILD proves the watchdog did.
-    let waited = unsafe { libc::waitpid(child.id() as libc::pid_t, std::ptr::null_mut(), libc::WNOHANG) };
+    let waited = unsafe {
+        libc::waitpid(
+            child.id() as libc::pid_t,
+            std::ptr::null_mut(),
+            libc::WNOHANG,
+        )
+    };
     let error = std::io::Error::last_os_error();
     assert_eq!(waited, -1, "watchdog must reap its child: {run:?}");
     assert_eq!(error.raw_os_error(), Some(libc::ECHILD), "{error}");
     run
 }
 
-fn run_lua_watchdog_fixture(source: &str, limit: Duration, tests: usize) -> crate::common::ProcessResult {
+fn run_lua_watchdog_fixture(
+    source: &str,
+    limit: Duration,
+    tests: usize,
+) -> crate::common::ProcessResult {
     let dir = tempfile::tempdir().expect("watchdog Lua fixture directory");
     let script = dir.path().join("watchdog.lua");
     std::fs::write(&script, source).expect("write watchdog Lua fixture");
@@ -4660,8 +5553,14 @@ start(1)
 finish("second_test", 1)
 "#;
     let run = run_lua_watchdog_fixture(script, Duration::from_secs(1), 2);
-    assert!(!run.timed_out, "a completed TIME line must start a fresh inter-test budget: {run:?}");
-        assert!(run.output.status.success(), "the child should finish after the gap: {run:?}");
+    assert!(
+        !run.timed_out,
+        "a completed TIME line must start a fresh inter-test budget: {run:?}"
+    );
+    assert!(
+        run.output.status.success(),
+        "the child should finish after the gap: {run:?}"
+    );
 }
 
 #[cfg(unix)]
@@ -4673,12 +5572,21 @@ sleep 1.5
 printf '__SKULL__\tTIME\tfirst_test\t1500.0\tpass\twatch-token\t0\n'
 "#;
     let limit = Duration::from_secs(1);
-    let run = wait_for_test_watchdog_fixture(script, crate::common::WaitPolicy::Test {
-        cpu_limit: limit,
-        wall_limit: crate::common::test_watchdog_wall_backstop(limit),
-    });
-    assert!(!run.timed_out, "wall time without child CPU must not exhaust the test budget: {run:?}");
-    assert!(run.output.status.success(), "the slow but completed test should pass: {run:?}");
+    let run = wait_for_test_watchdog_fixture(
+        script,
+        crate::common::WaitPolicy::Test {
+            cpu_limit: limit,
+            wall_limit: crate::common::test_watchdog_wall_backstop(limit),
+        },
+    );
+    assert!(
+        !run.timed_out,
+        "wall time without child CPU must not exhaust the test budget: {run:?}"
+    );
+    assert!(
+        run.output.status.success(),
+        "the slow but completed test should pass: {run:?}"
+    );
 }
 
 #[cfg(unix)]
@@ -4688,12 +5596,21 @@ fn test_limit_kills_a_blocked_test_at_the_wall_backstop() {
 printf 'ROCK_TEST_START\twatch-token\t0\n' >&2
 exec sleep 600
 "#;
-    let run = wait_for_test_watchdog_fixture(script, crate::common::WaitPolicy::Test {
-        cpu_limit: Duration::from_millis(100),
-        wall_limit: Duration::from_secs(1),
-    });
-    assert!(run.timed_out, "a blocked child must eventually be bounded: {run:?}");
-    assert_eq!(run.timeout_phase, Some(crate::common::TimeoutPhase::TestWall));
+    let run = wait_for_test_watchdog_fixture(
+        script,
+        crate::common::WaitPolicy::Test {
+            cpu_limit: Duration::from_millis(100),
+            wall_limit: Duration::from_secs(1),
+        },
+    );
+    assert!(
+        run.timed_out,
+        "a blocked child must eventually be bounded: {run:?}"
+    );
+    assert_eq!(
+        run.timeout_phase,
+        Some(crate::common::TimeoutPhase::TestWall)
+    );
     assert_eq!(run.running_test, Some(0));
 }
 
@@ -4712,7 +5629,7 @@ fn forge_marker_lua() -> String {
         "local T, N = string.char(9), string.char(10) \
          local function forge(tok, ord) \
          local line = 'ROCK_TEST_START' .. T .. tok .. T .. ord .. N \
-         io.stderr:write(line) io.stderr:flush() io.stdout:write(line) end"
+         io.stderr:write(line) io.stderr:flush() io.stdout:write(line) end",
     )
 }
 
@@ -4726,13 +5643,27 @@ fn test_limit_ignores_forged_start_markers() {
         forge_marker_lua()
     );
     let dir = file_limit_package(&body, Some("os.execute('sleep 0.1')"));
-    let result = super::skull_build_package_with_limit(dir.path().to_str().unwrap(), Duration::from_secs(1), 1, None);
+    let result = super::skull_build_package_with_limit(
+        dir.path().to_str().unwrap(),
+        Duration::from_secs(1),
+        1,
+        None,
+    );
     assert_first_test_started(&dir, "forged future must not extend the limit");
     match result {
-        Ok(super::SkullOutcome::TestFail { passed: 1, fails, .. }) => {
-            assert!(fails.iter().any(|f| f.contains("first.rock") && f.contains("first_test")
-                && f.contains("timed out")), "{fails:?}");
-            assert!(!fails.iter().any(|f| f.contains("second_test")), "{fails:?}");
+        Ok(super::SkullOutcome::TestFail {
+            passed: 1, fails, ..
+        }) => {
+            assert!(
+                fails.iter().any(|f| f.contains("first.rock")
+                    && f.contains("first_test")
+                    && f.contains("timed out")),
+                "{fails:?}"
+            );
+            assert!(
+                !fails.iter().any(|f| f.contains("second_test")),
+                "{fails:?}"
+            );
         }
         other => panic!("{other:?}"),
     }
@@ -4744,13 +5675,27 @@ fn test_limit_names_real_test_after_forged_marker() {
     // still names the runner's own first test.
     let body = format!("{} forge('', '1') while true do end", forge_marker_lua());
     let dir = file_limit_package(&body, Some("os.execute('sleep 0.1')"));
-    let result = super::skull_build_package_with_limit(dir.path().to_str().unwrap(), Duration::from_secs(1), 1, None);
+    let result = super::skull_build_package_with_limit(
+        dir.path().to_str().unwrap(),
+        Duration::from_secs(1),
+        1,
+        None,
+    );
     assert_first_test_started(&dir, "forged future must not extend the limit");
     match result {
-        Ok(super::SkullOutcome::TestFail { passed: 1, fails, .. }) => {
-            assert!(fails.iter().any(|f| f.contains("first.rock") && f.contains("first_test")
-                && f.contains("timed out")), "{fails:?}");
-            assert!(!fails.iter().any(|f| f.contains("second_test")), "{fails:?}");
+        Ok(super::SkullOutcome::TestFail {
+            passed: 1, fails, ..
+        }) => {
+            assert!(
+                fails.iter().any(|f| f.contains("first.rock")
+                    && f.contains("first_test")
+                    && f.contains("timed out")),
+                "{fails:?}"
+            );
+            assert!(
+                !fails.iter().any(|f| f.contains("second_test")),
+                "{fails:?}"
+            );
         }
         other => panic!("{other:?}"),
     }
@@ -4759,21 +5704,29 @@ fn test_limit_names_real_test_after_forged_marker() {
 #[test]
 fn package_compile_holds_a_compile_slot_only_while_compiling() {
     use crate::compile_slots::{
-        acquire_with, finish_slot_waiter, last_acquisition, set_thread_config,
-        spawn_slot_waiter, CompileClass, SlotConfig,
+        CompileClass, SlotConfig, acquire_with, finish_slot_waiter, last_acquisition,
+        set_thread_config, spawn_slot_waiter,
     };
     let slots = tempfile::tempdir().expect("slot dir");
     let config = SlotConfig::for_compiles(slots.path(), 1, CompileClass::Batch);
     let package = tempfile::tempdir().expect("package");
-    std::fs::write(package.path().join("stick.toml"),
-        "[package]\nname = \"slot-probe\"\ntype = \"lib\"\n").unwrap();
+    std::fs::write(
+        package.path().join("stick.toml"),
+        "[package]\nname = \"slot-probe\"\ntype = \"lib\"\n",
+    )
+    .unwrap();
     // A held slot is a `held-*` file in the slot directory until released: the
     // test passes only if the compile released its slot before its tests ran.
-    std::fs::write(package.path().join("probe.rock"), format!(
-        "@test inline(lua) fn slot_is_free_during_tests() = \"local ls = io.popen('ls -A {}'); \
+    std::fs::write(
+        package.path().join("probe.rock"),
+        format!(
+            "@test inline(lua) fn slot_is_free_during_tests() = \"local ls = io.popen('ls -A {}'); \
          local names = ls:read('*a'); ls:close(); assert(names:find('queue'), 'list slots'); \
          assert(not names:find('held%-'), 'compile slot held while tests run')\"\n",
-        slots.path().display())).unwrap();
+            slots.path().display()
+        ),
+    )
+    .unwrap();
 
     let held = acquire_with(&config, "test holder").unwrap();
     let (compile, waiting) = {
@@ -4781,15 +5734,22 @@ fn package_compile_holds_a_compile_slot_only_while_compiling() {
         let package = package.path().to_str().unwrap().to_owned();
         spawn_slot_waiter(move || {
             set_thread_config(Some(config));
-            let result = super::skull_build_package_with_limit(&package, Duration::from_secs(10), 1, None);
+            let result =
+                super::skull_build_package_with_limit(&package, Duration::from_secs(10), 1, None);
             (result, last_acquisition())
         })
     };
     let ((result, acquisition), held_for) = finish_slot_waiter(held, compile, waiting);
-    assert!(matches!(result, Ok(super::SkullOutcome::Pass { tests: 1, .. })), "{result:?}");
+    assert!(
+        matches!(result, Ok(super::SkullOutcome::Pass { tests: 1, .. })),
+        "{result:?}"
+    );
     let acquisition = acquisition.expect("the package compile took no slot");
     assert_eq!(acquisition.slot.as_deref(), Some("held-000000000002"));
-    assert!(acquisition.waited >= held_for, "held after observing contention: {held_for:?}; {acquisition:?}");
+    assert!(
+        acquisition.waited >= held_for,
+        "held after observing contention: {held_for:?}; {acquisition:?}"
+    );
 }
 
 #[cfg(unix)]
@@ -4801,8 +5761,10 @@ fn plain_luajit_without_runtime_layout() {
         super::skull_test(&[file.to_string_lossy().into_owned()], None).unwrap();
         return;
     }
-    let luajit = std::process::Command::new("sh").args(["-c", "command -v luajit"])
-        .output().unwrap();
+    let luajit = std::process::Command::new("sh")
+        .args(["-c", "command -v luajit"])
+        .output()
+        .unwrap();
     assert!(luajit.status.success());
     let luajit = std::fs::canonicalize(String::from_utf8(luajit.stdout).unwrap().trim()).unwrap();
     let root = tempfile::tempdir().unwrap();
@@ -4814,11 +5776,22 @@ fn plain_luajit_without_runtime_layout() {
     let mut failures = Vec::new();
     for use_override in [false, true] {
         let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-        command.args(["--exact", "skull_backend::tests::plain_luajit_without_runtime_layout", "--nocapture"])
-            .current_dir(root.path()).env(CHILD, "1").env("ROCK_DIR", root.path())
-            .env("PATH", &bin).env_remove("ROCK_LUAJIT").env_remove("STONE_HEADLESS")
+        command
+            .args([
+                "--exact",
+                "skull_backend::tests::plain_luajit_without_runtime_layout",
+                "--nocapture",
+            ])
+            .current_dir(root.path())
+            .env(CHILD, "1")
+            .env("ROCK_DIR", root.path())
+            .env("PATH", &bin)
+            .env_remove("ROCK_LUAJIT")
+            .env_remove("STONE_HEADLESS")
             .env_remove("ROCK_TEST_FILTER");
-        if use_override { command.env("ROCK_LUAJIT", &luajit); }
+        if use_override {
+            command.env("ROCK_LUAJIT", &luajit);
+        }
         let output = command.output().unwrap();
         let text = test_utils::strip_ansi_sgr(&format!(
             "{}{}",
@@ -4826,7 +5799,9 @@ fn plain_luajit_without_runtime_layout() {
             String::from_utf8_lossy(&output.stderr)
         ));
         if !output.status.success() || !text.contains("1/1 @tests passed") {
-            failures.push(format!("plain runtime (override={use_override}) failed:\n{text}"));
+            failures.push(format!(
+                "plain runtime (override={use_override}) failed:\n{text}"
+            ));
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));

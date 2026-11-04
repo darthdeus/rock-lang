@@ -5,7 +5,7 @@
 //! `semantic_pass`. `Arena`/`Entity`/`Scene` are declared locally with the same
 //! shapes `stdlib/unified.rock` gives them; the lint never looks at the stdlib.
 
-use bone_lints::{filter_suppressed, row_escapes, EscapeClass, EscapeKind, LintFinding, RowEscape};
+use bone_lints::{EscapeClass, EscapeKind, LintFinding, RowEscape, filter_suppressed, row_escapes};
 use bone_semantic::prelude::*;
 use rock_core::errors::CompilerErrorLevel;
 
@@ -99,7 +99,9 @@ fn store_into_struct_literal_field_is_flagged() {
 #[test]
 fn push_into_collection_is_flagged() {
     assert_eq!(
-        kinds("fn main() {\n    let e = some_entity()\n    let m = unwrap(e.get())\n    BAG.push(m)\n}"),
+        kinds(
+            "fn main() {\n    let e = some_entity()\n    let m = unwrap(e.get())\n    BAG.push(m)\n}"
+        ),
         vec![EscapeKind::StoreCollection]
     );
 }
@@ -107,7 +109,9 @@ fn push_into_collection_is_flagged() {
 #[test]
 fn index_store_into_collection_is_flagged() {
     assert_eq!(
-        kinds("fn main() {\n    let e = some_entity()\n    let m = unwrap(e.get())\n    BAG[0] = m\n}"),
+        kinds(
+            "fn main() {\n    let e = some_entity()\n    let m = unwrap(e.get())\n    BAG[0] = m\n}"
+        ),
         vec![EscapeKind::StoreCollection]
     );
 }
@@ -115,7 +119,9 @@ fn index_store_into_collection_is_flagged() {
 #[test]
 fn static_local_store_is_flagged() {
     assert_eq!(
-        kinds("fn main() {\n    let e = some_entity()\n    static keep: Mob? = e.get()\n    let _u = keep\n}"),
+        kinds(
+            "fn main() {\n    let e = some_entity()\n    static keep: Mob? = e.get()\n    let _u = keep\n}"
+        ),
         vec![EscapeKind::StoreStatic]
     );
 }
@@ -142,7 +148,13 @@ fn returning_a_row_is_propagation_not_a_hazard() {
 fn escape_classes_partition_the_kinds() {
     use EscapeKind::*;
     // A row outliving an invalidation point unconditionally.
-    for k in [StoreGlobal, StoreStatic, StoreField, StoreCollection, AcrossYield] {
+    for k in [
+        StoreGlobal,
+        StoreStatic,
+        StoreField,
+        StoreCollection,
+        AcrossYield,
+    ] {
         assert_eq!(k.class(), EscapeClass::Hazard, "{k:?}");
     }
     // A hazard only if the consumer RETAINS -- which no retain summary proves
@@ -220,7 +232,10 @@ fn bind_and_use_within_one_iteration_is_clean() {
     let ks = kinds(
         "co fn f(e: Entity<Mob>) -> Coroutine<int> {\n    for _i in 0..3 {\n        let m = unwrap(e.get())\n        m.hp -= 1\n        yield 1\n    }\n}",
     );
-    assert!(ks.is_empty(), "bound and used before the yield, every iteration: {ks:?}");
+    assert!(
+        ks.is_empty(),
+        "bound and used before the yield, every iteration: {ks:?}"
+    );
 }
 
 #[test]
@@ -243,7 +258,10 @@ fn refetch_into_the_same_local_clears_the_taint() {
     let ks = kinds(
         "co fn f(e: Entity<Mob>) -> Coroutine<int> {\n    let m = unwrap(e.get())\n    yield 1\n    m = unwrap(e.get())\n    m.hp -= 1\n}",
     );
-    assert!(ks.is_empty(), "re-fetching into the same local is the documented fix: {ks:?}");
+    assert!(
+        ks.is_empty(),
+        "re-fetching into the same local is the documented fix: {ks:?}"
+    );
 }
 
 #[test]
@@ -253,7 +271,10 @@ fn scalar_payload_is_not_tracked() {
     let ks = kinds(
         "co fn f(e: Entity<int>) -> Coroutine<int> {\n    let n = unwrap(e.get())\n    yield 1\n    let _u = n + 1\n}",
     );
-    assert!(ks.is_empty(), "a scalar payload is a copy, not a row: {ks:?}");
+    assert!(
+        ks.is_empty(),
+        "a scalar payload is a copy, not a row: {ks:?}"
+    );
 }
 
 #[test]
@@ -261,7 +282,10 @@ fn entity_handle_held_across_yield_is_clean() {
     let ks = kinds(
         "co fn f(e: Entity<Mob>) -> Coroutine<int> {\n    let h = e\n    yield 1\n    let _m = unwrap(h.get())\n}",
     );
-    assert!(ks.is_empty(), "the handle is what you are supposed to hold: {ks:?}");
+    assert!(
+        ks.is_empty(),
+        "the handle is what you are supposed to hold: {ks:?}"
+    );
 }
 
 // --- the row sources ------------------------------------------------------
@@ -314,7 +338,10 @@ fn storing_the_entity_handle_is_clean() {
     let ks = kinds(
         "global KEEP: Entity<Mob>? = null\nfn main() {\n    let e = some_entity()\n    KEEP = e\n}",
     );
-    assert!(ks.is_empty(), "the handle is the thing you are SUPPOSED to store: {ks:?}");
+    assert!(
+        ks.is_empty(),
+        "the handle is the thing you are SUPPOSED to store: {ks:?}"
+    );
 }
 
 #[test]
@@ -322,7 +349,10 @@ fn copying_a_scalar_out_of_a_row_is_clean() {
     let ks = kinds(
         "global HP: int = 0\nfn main() {\n    let e = some_entity()\n    let m = unwrap(e.get())\n    HP = m.hp\n}",
     );
-    assert!(ks.is_empty(), "a scalar read out of a row is a copy, not a row: {ks:?}");
+    assert!(
+        ks.is_empty(),
+        "a scalar read out of a row is a copy, not a row: {ks:?}"
+    );
 }
 
 #[test]
@@ -330,7 +360,10 @@ fn reading_and_mutating_a_row_in_place_is_clean() {
     let ks = kinds(
         "fn main() {\n    let e = some_entity()\n    let m = unwrap(e.get())\n    m.hp -= 10\n}",
     );
-    assert!(ks.is_empty(), "read/mutate in place is the whole point of .get(): {ks:?}");
+    assert!(
+        ks.is_empty(),
+        "read/mutate in place is the whole point of .get(): {ks:?}"
+    );
 }
 
 #[test]
@@ -338,7 +371,10 @@ fn passing_a_row_to_an_ordinary_helper_is_clean() {
     let ks = kinds(
         "fn hurt(m: Mob, n: int) { m.hp -= n }\nfn main() {\n    let e = some_entity()\n    let m = unwrap(e.get())\n    hurt(m, 10)\n}",
     );
-    assert!(ks.is_empty(), "a Rock-bodied helper taking a row by value is not an escape: {ks:?}");
+    assert!(
+        ks.is_empty(),
+        "a Rock-bodied helper taking a row by value is not an escape: {ks:?}"
+    );
 }
 
 #[test]
@@ -346,7 +382,10 @@ fn refetching_after_the_yield_is_clean() {
     let ks = kinds(
         "co fn good(e: Entity<Mob>) -> Coroutine<int> {\n    yield 1\n    let m = unwrap(e.get())\n    m.hp -= 10\n}",
     );
-    assert!(ks.is_empty(), "a row bound AFTER the last suspension is the correct form: {ks:?}");
+    assert!(
+        ks.is_empty(),
+        "a row bound AFTER the last suspension is the correct form: {ks:?}"
+    );
 }
 
 #[test]
@@ -354,7 +393,10 @@ fn row_used_before_the_yield_is_clean() {
     let ks = kinds(
         "co fn fine(e: Entity<Mob>) -> Coroutine<int> {\n    let m = unwrap(e.get())\n    m.hp -= 10\n    yield 1\n}",
     );
-    assert!(ks.is_empty(), "liveness, not scope -- finished with before the suspension: {ks:?}");
+    assert!(
+        ks.is_empty(),
+        "liveness, not scope -- finished with before the suspension: {ks:?}"
+    );
 }
 
 #[test]
@@ -363,7 +405,10 @@ fn closure_capturing_the_entity_and_refetching_is_clean() {
     let ks = kinds(
         "fn take(f: () -> int) -> int { return f() }\nfn main() -> int {\n    let e = some_entity()\n    return take(() => unwrap(e.get()).hp)\n}",
     );
-    assert!(ks.is_empty(), "capturing the handle and re-getting inside is correct: {ks:?}");
+    assert!(
+        ks.is_empty(),
+        "capturing the handle and re-getting inside is correct: {ks:?}"
+    );
 }
 
 #[test]
@@ -371,7 +416,10 @@ fn a_trailing_row_in_a_unit_fn_is_clean() {
     // A unit function discards its tail value. Reading only the expression
     // type would incorrectly report a returned row.
     let ks = kinds("fn drop_it(e: Entity<Mob>) {\n    e.get()\n}");
-    assert!(ks.is_empty(), "a discarded tail in a unit fn returns nothing: {ks:?}");
+    assert!(
+        ks.is_empty(),
+        "a discarded tail in a unit fn returns nothing: {ks:?}"
+    );
 }
 
 #[test]
@@ -386,8 +434,13 @@ fn a_trailing_row_in_a_returning_fn_is_still_flagged() {
 
 #[test]
 fn iterating_an_arena_without_storing_is_clean() {
-    let ks = kinds("fn main() -> int {\n    let t = 0\n    for m in MOBS {\n        t += m.hp\n    }\n    return t\n}");
-    assert!(ks.is_empty(), "a bulk scan that keeps nothing is the common correct loop: {ks:?}");
+    let ks = kinds(
+        "fn main() -> int {\n    let t = 0\n    for m in MOBS {\n        t += m.hp\n    }\n    return t\n}",
+    );
+    assert!(
+        ks.is_empty(),
+        "a bulk scan that keeps nothing is the common correct loop: {ks:?}"
+    );
 }
 
 // --- catalog wiring -------------------------------------------------------
@@ -413,7 +466,11 @@ fn diagnostic_names_the_row_type_and_the_kind() {
 fn allow_comment_above_suppresses() {
     let body =
         "fn leak(e: Entity<Mob>) -> Mob? {\n    // rock: allow(row_escape)\n    return e.get()\n}";
-    assert_eq!(kinds(body), vec![EscapeKind::Return], "raw finding still exists");
+    assert_eq!(
+        kinds(body),
+        vec![EscapeKind::Return],
+        "raw finding still exists"
+    );
     let src = format!("{PRELUDE}\n{body}\n");
     let kept = filter_suppressed(findings(body), &src);
     assert!(kept.is_empty(), "allow comment above silences it: {kept:?}");
@@ -430,10 +487,17 @@ fn default_tier_does_not_report_row_escape() {
     let mut sources = FxHashMap::default();
     sources.insert(Ustr::from("<row_escape>"), src.as_str());
 
-    let default_tier =
-        bone_lints::lint_workspace(&ws, &FxHashSet::default(), true, &sources, &Default::default());
+    let default_tier = bone_lints::lint_workspace(
+        &ws,
+        &FxHashSet::default(),
+        true,
+        &sources,
+        &Default::default(),
+    );
     assert!(
-        !default_tier.iter().any(|f| f.lint == bone_lints::ROW_ESCAPE),
+        !default_tier
+            .iter()
+            .any(|f| f.lint == bone_lints::ROW_ESCAPE),
         "a build must not see row_escape: {:?}",
         default_tier.iter().map(|f| f.lint).collect::<Vec<_>>()
     );
@@ -446,7 +510,10 @@ fn default_tier_does_not_report_row_escape() {
         &bone_lints::LintOptions::only([bone_lints::ROW_ESCAPE.to_string()]),
     );
     assert_eq!(
-        named.iter().filter(|f| f.lint == bone_lints::ROW_ESCAPE).count(),
+        named
+            .iter()
+            .filter(|f| f.lint == bone_lints::ROW_ESCAPE)
+            .count(),
         1,
         "naming it runs it: {named:?}"
     );

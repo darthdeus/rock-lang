@@ -11,14 +11,14 @@
 //! only *consumes* bone's public pipeline (`parse_rock` + `passes::semantic_pass`).
 
 use crate::Result;
+use bone_core::prelude::Instant;
 use rock_core::CompilerError;
 use rock_core::SourceFiles;
 use rock_core::source_file_from_path_and_contents;
+use skull::pipeline::ClosureGate;
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
-use bone_core::prelude::Instant;
-use skull::pipeline::ClosureGate;
 
 /// Wall-clock split of bone's pipeline stages for one source string. bone fuses
 /// lowering + type-checking into `passes::semantic_pass`, so the split we can
@@ -94,8 +94,11 @@ pub(crate) fn render_errs(sources: &SourceFiles, errs: &[CompilerError]) -> Stri
     let expanded: Vec<CompilerError> = errs
         .iter()
         .flat_map(|e| {
-            std::iter::once(CompilerError { siblings: Vec::new(), ..e.clone() })
-                .chain(e.siblings.iter().cloned())
+            std::iter::once(CompilerError {
+                siblings: Vec::new(),
+                ..e.clone()
+            })
+            .chain(e.siblings.iter().cloned())
         })
         .collect();
     rock_core::errors::render_all(&expanded, &sf)
@@ -109,9 +112,9 @@ pub(crate) fn render_errs(sources: &SourceFiles, errs: &[CompilerError]) -> Stri
 pub(crate) fn aliases_for_modules(
     modules: &[skull_parser::Ast],
 ) -> std::result::Result<bone_core::modules::NsAliases, CompilerError> {
-    let has_v1 = modules.iter().any(|module| {
-        module.dialect == skull_parser::Dialect::V1 && module.package.is_some()
-    });
+    let has_v1 = modules
+        .iter()
+        .any(|module| module.dialect == skull_parser::Dialect::V1 && module.package.is_some());
     if !has_v1 {
         return Ok(bone_core::modules::NsAliases::default());
     }
@@ -127,7 +130,9 @@ pub(crate) fn aliases_for_modules(
             "modules-v1 sources have no root package file from which to load dependency aliases",
         ));
     };
-    let mut manifest_dir = Path::new(root.file.as_str()).parent().map(Path::to_path_buf);
+    let mut manifest_dir = Path::new(root.file.as_str())
+        .parent()
+        .map(Path::to_path_buf);
     let manifest_dir = loop {
         let Some(dir) = manifest_dir.as_ref() else {
             return Err(CompilerError::new_no_location(format!(
@@ -174,14 +179,20 @@ pub fn check_modules(
 /// errors come back beside the workspace instead of replacing it.
 pub fn check_modules_for_tools(
     modules: &mut [skull_parser::Ast],
-) -> std::result::Result<(bone_semantic::inference::Workspace, Vec<CompilerError>), Vec<CompilerError>> {
+) -> std::result::Result<
+    (bone_semantic::inference::Workspace, Vec<CompilerError>),
+    Vec<CompilerError>,
+> {
     check_modules_gated(modules, ClosureGate::LeaveToCaller)
 }
 
 fn check_modules_gated(
     modules: &mut [skull_parser::Ast],
     gate: ClosureGate,
-) -> std::result::Result<(bone_semantic::inference::Workspace, Vec<CompilerError>), Vec<CompilerError>> {
+) -> std::result::Result<
+    (bone_semantic::inference::Workspace, Vec<CompilerError>),
+    Vec<CompilerError>,
+> {
     skull::pipeline::check_modules(modules, gate, aliases_for_modules)
 }
 
@@ -264,10 +275,14 @@ pub(crate) fn bone_session_for_emission(
 ) -> std::result::Result<bone_incremental::session::Session, CompilerError> {
     let mut session = bone_session(files)?;
     let inputs = crate::comptime::inputs_for_entry_path(anchor)
-        .and_then(|inputs| crate::comptime::resolve_checked_inputs(&session.ws, inputs, |file| {
-            session.files.get(file).map(|source| source.text.clone())
-        }))
-        .map_err(|e| CompilerError::new_no_location(format!("build var resolution failed: {e:#}")))?;
+        .and_then(|inputs| {
+            crate::comptime::resolve_checked_inputs(&session.ws, inputs, |file| {
+                session.files.get(file).map(|source| source.text.clone())
+            })
+        })
+        .map_err(|e| {
+            CompilerError::new_no_location(format!("build var resolution failed: {e:#}"))
+        })?;
     session.ws.comptime_inputs = inputs;
     Ok(session)
 }
@@ -277,7 +292,9 @@ pub(crate) fn bone_session_for_emission(
 /// `backend-stats`) layers on top so the timing split is consistent. Timed with
 /// plain `Instant`s at the call boundaries — no coupling to bone, which stays
 /// uninstrumented.
-pub fn bone_pipeline_timed(src: &str) -> (std::result::Result<(), Vec<CompilerError>>, BonePhaseTimes) {
+pub fn bone_pipeline_timed(
+    src: &str,
+) -> (std::result::Result<(), Vec<CompilerError>>, BonePhaseTimes) {
     let stats = crate::compile_measurements::Scope::begin("<parse_rock>");
     crate::compile_measurements::source("<parse_rock>", src.len());
     let mut times = BonePhaseTimes::default();
@@ -298,7 +315,9 @@ pub fn bone_pipeline_timed(src: &str) -> (std::result::Result<(), Vec<CompilerEr
     times.semantic = t.elapsed();
 
     crate::compile_measurements::phase("stdlib+semantic");
-    if res.is_ok() { stats.success(); }
+    if res.is_ok() {
+        stats.success();
+    }
     (res, times)
 }
 
@@ -326,9 +345,8 @@ pub(crate) fn parse_user_modules(
         .map(|file| {
             let f = file.borrow();
             let id = ustr::Ustr::from(f.file.to_id_path().as_str());
-            let mut module =
-                skull_parser::parse_module_with_dialect(&f.contents, id, f.dialect)
-                    .map_err(|e| vec![e])?;
+            let mut module = skull_parser::parse_module_with_dialect(&f.contents, id, f.dialect)
+                .map_err(|e| vec![e])?;
             module.package = f.package.clone();
             module.global_policy = f.global_policy;
             Ok((module, id, f.contents.len()))
@@ -370,9 +388,11 @@ pub(crate) fn parse_user_modules(
         return Err(syntax);
     }
 
-    let entry = user_file
-        .or(first_file)
-        .ok_or_else(|| vec![CompilerError::new_no_location("bone: project has no .rock files")])?;
+    let entry = user_file.or(first_file).ok_or_else(|| {
+        vec![CompilerError::new_no_location(
+            "bone: project has no .rock files",
+        )]
+    })?;
     Ok((modules, entry, t.elapsed()))
 }
 
@@ -779,15 +799,15 @@ pub fn bone_iter_inference(path: &str, iters: usize, warmup: usize) -> Result<()
     let one_pass = || -> f64 {
         let t = Instant::now();
         #[cfg(not(feature = "sequential"))]
-        let res: std::result::Result<(), CompilerError> = ws
-            .modules
-            .par_iter()
-            .try_for_each(|module| bone_semantic::semantic_passes::check_module(&ws, module.id, module).map(|_| ()));
+        let res: std::result::Result<(), CompilerError> =
+            ws.modules.par_iter().try_for_each(|module| {
+                bone_semantic::semantic_passes::check_module(&ws, module.id, module).map(|_| ())
+            });
         #[cfg(feature = "sequential")]
-        let res: std::result::Result<(), CompilerError> = ws
-            .modules
-            .iter()
-            .try_for_each(|module| bone_semantic::semantic_passes::check_module(&ws, module.id, module).map(|_| ()));
+        let res: std::result::Result<(), CompilerError> =
+            ws.modules.iter().try_for_each(|module| {
+                bone_semantic::semantic_passes::check_module(&ws, module.id, module).map(|_| ())
+            });
         if let Err(e) = res {
             eprintln!("{}", e.render(&sources));
             crate::ablation_report::exit_with_census(1);
@@ -813,7 +833,11 @@ pub fn bone_iter_inference(path: &str, iters: usize, warmup: usize) -> Result<()
     let mean = total / n;
     let var = samples.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / n;
     let stddev = var.sqrt();
-    let cv = if mean > 0.0 { stddev / mean * 100.0 } else { 0.0 };
+    let cv = if mean > 0.0 {
+        stddev / mean * 100.0
+    } else {
+        0.0
+    };
     let mut sorted = samples.clone();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let pct = |p: f64| -> f64 {
@@ -871,12 +895,18 @@ fn cascade_target<'a>(
         if session.warm_mids.contains(&module.id) || !module.file.as_str().contains(proj_marker) {
             continue;
         }
-        let file = files.iter().find(|f| f.path == module.file.as_str())
-            .ok_or_else(|| anyhow::anyhow!("no source file for cascade module `{}`", module.file))?;
+        let file = files
+            .iter()
+            .find(|f| f.path == module.file.as_str())
+            .ok_or_else(|| {
+                anyhow::anyhow!("no source file for cascade module `{}`", module.file)
+            })?;
         for (&key, &idx) in &module.struct_by_name {
             let def = &module.structs[idx];
             let (start, end) = def.name_span.offset_range;
-            let source_name = file.text.get(start..end)
+            let source_name = file
+                .text
+                .get(start..end)
                 .ok_or_else(|| anyhow::anyhow!("invalid source name span for `{key}`"))?;
             candidates.push(CascadeTarget {
                 key,
@@ -892,19 +922,32 @@ fn cascade_target<'a>(
     candidates.sort_by_key(|t| t.key);
     if let Some(name) = requested {
         let mut matches = candidates.into_iter().filter(|t| {
-            if name.contains("::") { t.key.as_str() == name } else { t.source_name == name }
+            if name.contains("::") {
+                t.key.as_str() == name
+            } else {
+                t.source_name == name
+            }
         });
-        let target = matches.next()
+        let target = matches
+            .next()
             .ok_or_else(|| anyhow::anyhow!("no project struct matches `{name}`"))?;
         let others: Vec<_> = matches.map(|t| t.key.to_string()).collect();
         if !others.is_empty() {
-            anyhow::bail!("ambiguous cascade type `{name}`: {}, {}; use a qualified key",
-                target.key, others.join(", "));
+            anyhow::bail!(
+                "ambiguous cascade type `{name}`: {}, {}; use a qualified key",
+                target.key,
+                others.join(", ")
+            );
         }
         Ok(target)
     } else {
-        candidates.into_iter().filter(|t| t.iface_deps > 0).max_by_key(|t| t.iface_deps)
-            .ok_or_else(|| anyhow::anyhow!("no project struct with interface dependents under `{proj_marker}`"))
+        candidates
+            .into_iter()
+            .filter(|t| t.iface_deps > 0)
+            .max_by_key(|t| t.iface_deps)
+            .ok_or_else(|| {
+                anyhow::anyhow!("no project struct with interface dependents under `{proj_marker}`")
+            })
     }
 }
 
@@ -949,8 +992,12 @@ pub fn bone_iter_cascade(path: &str, iters: usize, warmup: usize) -> Result<()> 
     let iface_deps = selected.iface_deps;
     let target = &selected.file.path;
     let orig = &selected.file.text;
-    let edited = field_edit(&selected)
-        .ok_or_else(|| anyhow::anyhow!("no field edit for `struct {}` ({tname})", selected.source_name))?;
+    let edited = field_edit(&selected).ok_or_else(|| {
+        anyhow::anyhow!(
+            "no field edit for `struct {}` ({tname})",
+            selected.source_name
+        )
+    })?;
 
     let iters = iters.max(1);
     let mut samples: Vec<f64> = Vec::with_capacity(iters);
@@ -1058,8 +1105,8 @@ pub fn bone_iter_reinfer(path: &str, iters: usize, warmup: usize) -> Result<()> 
         .find(|f| f.path.contains(&proj_marker) && f.text.contains(&format!("fn {fname}")))
         .map(|f| (f.path.clone(), f.text.clone()))
         .ok_or_else(|| anyhow::anyhow!("no project file defines `fn {fname}`"))?;
-    let edited =
-        sig_edit(&orig, &fname).ok_or_else(|| anyhow::anyhow!("no signature edit for `fn {fname}`"))?;
+    let edited = sig_edit(&orig, &fname)
+        .ok_or_else(|| anyhow::anyhow!("no signature edit for `fn {fname}`"))?;
 
     let iters = iters.max(1);
     let mut samples: Vec<f64> = Vec::with_capacity(iters);
@@ -1108,7 +1155,10 @@ pub fn bone_iter_reinfer(path: &str, iters: usize, warmup: usize) -> Result<()> 
     for (lbl, d) in &last_phases {
         eprintln!("    {lbl}: {:.3} ms", d.as_secs_f64() * 1000.0);
     }
-    let known: f64 = last_phases.iter().map(|(_, d)| d.as_secs_f64() * 1000.0).sum();
+    let known: f64 = last_phases
+        .iter()
+        .map(|(_, d)| d.as_secs_f64() * 1000.0)
+        .sum();
     eprintln!(
         "    (dependent check_module loop + parse/classify, residual: {:.3} ms)",
         (mean - known).max(0.0)
@@ -1228,13 +1278,16 @@ fn report_phase_timing(label: &str, agg: &BonePhaseTimes, iters: usize) {
     }
 }
 
-
 /// Trim a long absolute path to something readable in the per-file test line,
 /// keeping the last two components (`dir/file.rock`).
 pub fn short_path(path: &str) -> String {
     let p = Path::new(path);
     let file = p.file_name().and_then(|s| s.to_str()).unwrap_or(path);
-    match p.parent().and_then(|d| d.file_name()).and_then(|s| s.to_str()) {
+    match p
+        .parent()
+        .and_then(|d| d.file_name())
+        .and_then(|s| s.to_str())
+    {
         Some(dir) => format!("{}/{}", dir, file),
         None => file.to_string(),
     }
@@ -1261,7 +1314,11 @@ mod tests {
         }).collect();
         let new_session = || Session::new(vec![], files.clone(), &Default::default()).unwrap();
         let session = new_session();
-        assert!(session.diagnostics().is_empty(), "{:?}", session.diagnostics());
+        assert!(
+            session.diagnostics().is_empty(),
+            "{:?}",
+            session.diagnostics()
+        );
 
         let auto = cascade_target(&session, &files, "fixture/", None).unwrap();
         let bare = cascade_target(&session, &files, "fixture/", Some("Hub")).unwrap();
@@ -1272,20 +1329,53 @@ mod tests {
         assert_eq!(auto.source_name, "Hub");
         assert_eq!(auto.iface_deps, 2);
         assert_eq!(bare.iface_deps, auto.iface_deps);
-        let err = cascade_target(&session, &files, "fixture/", Some("Twin")).unwrap_err().to_string();
+        let err = cascade_target(&session, &files, "fixture/", Some("Twin"))
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("ambiguous"), "{err}");
-        for key in ["cascade::a::Twin", "cascade::b::Twin", "cascade::b::inner::Twin"] {
+        for key in [
+            "cascade::a::Twin",
+            "cascade::b::Twin",
+            "cascade::b::inner::Twin",
+        ] {
             assert!(err.contains(key), "{err}");
         }
         assert!(cascade_target(&session, &files, "fixture/", Some("Missing")).is_err());
-        assert!(cascade_target(&session, &files, "fixture/", Some("cascade::missing::Twin")).is_err());
+        assert!(
+            cascade_target(&session, &files, "fixture/", Some("cascade::missing::Twin")).is_err()
+        );
 
         for (requested, key, owner, dependents) in [
-            (None, "cascade::a::Hub", "fixture/a.rock", vec!["fixture/one.rock", "fixture/two.rock"]),
-            (Some("Hub"), "cascade::a::Hub", "fixture/a.rock", vec!["fixture/one.rock", "fixture/two.rock"]),
-            (Some("cascade::a::Twin"), "cascade::a::Twin", "fixture/a.rock", vec!["fixture/one.rock"]),
-            (Some("cascade::b::Twin"), "cascade::b::Twin", "fixture/b.rock", vec!["fixture/two.rock"]),
-            (Some("cascade::b::inner::Twin"), "cascade::b::inner::Twin", "fixture/b.rock", vec!["fixture/two.rock"]),
+            (
+                None,
+                "cascade::a::Hub",
+                "fixture/a.rock",
+                vec!["fixture/one.rock", "fixture/two.rock"],
+            ),
+            (
+                Some("Hub"),
+                "cascade::a::Hub",
+                "fixture/a.rock",
+                vec!["fixture/one.rock", "fixture/two.rock"],
+            ),
+            (
+                Some("cascade::a::Twin"),
+                "cascade::a::Twin",
+                "fixture/a.rock",
+                vec!["fixture/one.rock"],
+            ),
+            (
+                Some("cascade::b::Twin"),
+                "cascade::b::Twin",
+                "fixture/b.rock",
+                vec!["fixture/two.rock"],
+            ),
+            (
+                Some("cascade::b::inner::Twin"),
+                "cascade::b::inner::Twin",
+                "fixture/b.rock",
+                vec!["fixture/two.rock"],
+            ),
         ] {
             let mut session = new_session();
             let selected = cascade_target(&session, &files, "fixture/", requested).unwrap();
@@ -1298,28 +1388,55 @@ mod tests {
             assert_eq!(update.tier, UpdateTier::Interface, "{key}");
             assert!(!update.relowered.is_empty(), "{key}");
             for path in dependents {
-                let mid = session.ws.modules.iter().find(|m| m.file.as_str() == path).unwrap().id;
-                assert!(update.reinferred.iter().any(|(id, _)| *id == mid), "{key}: {path} must re-infer");
+                let mid = session
+                    .ws
+                    .modules
+                    .iter()
+                    .find(|m| m.file.as_str() == path)
+                    .unwrap()
+                    .id;
+                assert!(
+                    update.reinferred.iter().any(|(id, _)| *id == mid),
+                    "{key}: {path} must re-infer"
+                );
             }
             for module in session.ws.modules.iter() {
                 for (_, def) in module.structs.iter() {
-                    let has_probe = def.fields.iter().any(|f| f.name.as_str() == "__cascade_probe");
-                    assert_eq!(has_probe, def.name.as_str() == key, "{}: wrong declaration edited", def.name);
+                    let has_probe = def
+                        .fields
+                        .iter()
+                        .any(|f| f.name.as_str() == "__cascade_probe");
+                    assert_eq!(
+                        has_probe,
+                        def.name.as_str() == key,
+                        "{}: wrong declaration edited",
+                        def.name
+                    );
                 }
             }
-            assert!(session.diagnostics().is_empty(), "{:?}", session.diagnostics());
-            let restored = session.update_file(&selected.file.path, &selected.file.text).unwrap();
+            assert!(
+                session.diagnostics().is_empty(),
+                "{:?}",
+                session.diagnostics()
+            );
+            let restored = session
+                .update_file(&selected.file.path, &selected.file.text)
+                .unwrap();
             assert_eq!(restored.tier, UpdateTier::Interface, "{key}: restore");
             assert!(!restored.relowered.is_empty(), "{key}: restore");
-            assert!(session.diagnostics().is_empty(), "{:?}", session.diagnostics());
+            assert!(
+                session.diagnostics().is_empty(),
+                "{:?}",
+                session.diagnostics()
+            );
         }
     }
 
     // A program is REJECTED if the check fails (syntax, semantic-pass, or any
     // collected body/interface error).
     fn rejected(src: &str) -> bool {
-        let module = skull_parser::parse_module(src, ustr::Ustr::from("<verdict_test>"))
-            .expect("parse");
+        let module =
+            skull_parser::parse_module(src, ustr::Ustr::from("<verdict_test>")).expect("parse");
         check_with_stdlib([module]).is_err()
     }
 
@@ -1331,11 +1448,23 @@ mod tests {
     // interface_errors.
     #[test]
     fn interface_type_errors_are_rejected_by_the_verdict() {
-        assert!(rejected("fn f(x: Nonexistent) -> int { 1 }"), "unknown param type");
-        assert!(rejected("global gg: Nonexistent = 0"), "unknown global type");
-        assert!(rejected("struct S { x: Nonexistent }"), "unknown field type");
+        assert!(
+            rejected("fn f(x: Nonexistent) -> int { 1 }"),
+            "unknown param type"
+        );
+        assert!(
+            rejected("global gg: Nonexistent = 0"),
+            "unknown global type"
+        );
+        assert!(
+            rejected("struct S { x: Nonexistent }"),
+            "unknown field type"
+        );
         // sanity: a clean program is NOT rejected.
-        assert!(!rejected("fn ok(x: int) -> int { x }"), "clean program must pass");
+        assert!(
+            !rejected("fn ok(x: int) -> int { x }"),
+            "clean program must pass"
+        );
     }
 
     // `const` globals are read-only: a whole-global rebind (`=` or `+=`) is a
@@ -1345,11 +1474,23 @@ mod tests {
     // `__op_add` call the bare harness can't resolve) plus the mutable controls.
     #[test]
     fn const_globals_are_read_only() {
-        assert!(rejected("const FOO: int = 5\nfn f() { FOO = 6 }"), "rebind const");
-        assert!(rejected("const FOO: int = 5\nfn f() { FOO += 1 }"), "compound-assign const");
+        assert!(
+            rejected("const FOO: int = 5\nfn f() { FOO = 6 }"),
+            "rebind const"
+        );
+        assert!(
+            rejected("const FOO: int = 5\nfn f() { FOO += 1 }"),
+            "compound-assign const"
+        );
         // controls: mutable globals stay writable.
-        assert!(!rejected("global BAR: int = 5\nfn f() { BAR = 6 }"), "mutable global write");
-        assert!(!rejected("global BAR: int = 5\nfn f() { BAR += 1 }"), "mutable global compound");
+        assert!(
+            !rejected("global BAR: int = 5\nfn f() { BAR = 6 }"),
+            "mutable global write"
+        );
+        assert!(
+            !rejected("global BAR: int = 5\nfn f() { BAR += 1 }"),
+            "mutable global compound"
+        );
     }
 
     // A diagnostic can land in an INLINED stdlib body, whose modules are parsed
@@ -1366,14 +1507,15 @@ mod tests {
             .iter()
             .find(|f| f.name == "unified.rock")
             .expect("unified.rock is a stdlib module");
-        let offset = unified.contents.find(NEEDLE).expect("needle still in unified.rock");
+        let offset = unified
+            .contents
+            .find(NEEDLE)
+            .expect("needle still in unified.rock");
         let head = &unified.contents[..offset];
         let line = head.matches('\n').count();
         let col = offset - head.rfind('\n').map_or(0, |i| i + 1);
         let span = rock_core::Span {
-            file: ustr::Ustr::from(
-                rock_stdlib::stdlib_file_id("unified.rock").as_str(),
-            ),
+            file: ustr::Ustr::from(rock_stdlib::stdlib_file_id("unified.rock").as_str()),
             line_range: (line, line),
             col_range: (col, col + NEEDLE.len()),
             offset_range: (offset, offset + NEEDLE.len()),
@@ -1385,7 +1527,10 @@ mod tests {
             rendered.contains(NEEDLE),
             "the stdlib source line must render, not be dropped:\n{rendered}"
         );
-        assert!(rendered.contains("boxed here"), "the label must render:\n{rendered}");
+        assert!(
+            rendered.contains("boxed here"),
+            "the label must render:\n{rendered}"
+        );
     }
 
     #[test]
@@ -1402,7 +1547,10 @@ mod tests {
             .filter(|module| session.warm_mids.contains(&module.id))
             .map(|module| module.file.as_str().to_owned())
             .collect();
-        assert_eq!(actual, expected, "CLI and LSP must warm the same stdlib file ids");
+        assert_eq!(
+            actual, expected,
+            "CLI and LSP must warm the same stdlib file ids"
+        );
     }
 }
 
@@ -1413,4 +1561,3 @@ pub fn semantic_pass_with_aliases(
 ) -> std::result::Result<bone_semantic::inference::Workspace, CompilerError> {
     skull::pipeline::semantic_pass(modules, aliases, ClosureGate::Enforce)
 }
-

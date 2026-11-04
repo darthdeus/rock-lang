@@ -41,17 +41,25 @@ fn wide_nobox_vec_stays_flat_past_the_implicit_threshold() {
         body.contains(r#"repr = "strided""#),
         "wide nobox Vec left flat row storage:\n{body}"
     );
-    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "wide_nobox_vec"), "6 10");
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "wide_nobox_vec"),
+        "6 10"
+    );
 }
 
 /// `n` float fields after `pos`, so the element carries `n + 3` leaves
 /// (presence, `pos.x`, `pos.y`, then the floats).
 fn source(extra: usize) -> String {
     let names = ["a", "b", "c", "d"];
-    let fields: Vec<String> = (0..extra).map(|i| format!(", {}: float", names[i])).collect();
-    let inits: Vec<String> =
-        (0..extra).map(|i| format!(", {}: {}.0", names[i], i + 3)).collect();
-    let reads: Vec<String> = (0..extra).map(|i| format!(" {{V[0].{}}}", names[i])).collect();
+    let fields: Vec<String> = (0..extra)
+        .map(|i| format!(", {}: float", names[i]))
+        .collect();
+    let inits: Vec<String> = (0..extra)
+        .map(|i| format!(", {}: {}.0", names[i], i + 3))
+        .collect();
+    let reads: Vec<String> = (0..extra)
+        .map(|i| format!(" {{V[0].{}}}", names[i]))
+        .collect();
     format!(
         r#"
 nobox value NV2 {{ x: float, y: float }}

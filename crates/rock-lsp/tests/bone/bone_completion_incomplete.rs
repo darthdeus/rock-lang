@@ -9,7 +9,7 @@
 //! through the adapter the same way the server dispatches a request.
 
 use lsp_types::*;
-use rock_lsp::{do_completion_workspace, LspWorkspace};
+use rock_lsp::{LspWorkspace, do_completion_workspace};
 use std::str::FromStr;
 
 const SRC: &str = "\
@@ -43,7 +43,9 @@ fn bone_completion_is_marked_incomplete() {
         context: None,
     };
 
-    let resp = do_completion_workspace(&mut ws, &params).unwrap().expect("completion response");
+    let resp = do_completion_workspace(&mut ws, &params)
+        .unwrap()
+        .expect("completion response");
     match resp {
         CompletionResponse::List(list) => assert!(
             list.is_incomplete,

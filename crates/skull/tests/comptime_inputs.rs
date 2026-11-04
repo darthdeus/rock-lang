@@ -12,7 +12,10 @@ fn inputs_with_var(name: &str, value: &str) -> ComptimeInputs {
     let mut inputs = ComptimeInputs::default();
     inputs.vars.insert(
         ustr::Ustr::from(name),
-        ComptimeVarValue { value: value.to_string(), secret: false },
+        ComptimeVarValue {
+            value: value.to_string(),
+            secret: false,
+        },
     );
     inputs
 }
@@ -41,7 +44,10 @@ fn broken() -> string {
     let err = try_emit_module_with(src, ComptimeInputs::default())
         .expect_err("undeclared build var must reject");
     let msg = err.message.clone();
-    assert!(msg.contains("NOPE") && msg.contains("build.vars"), "error names var and section: {msg}");
+    assert!(
+        msg.contains("NOPE") && msg.contains("build.vars"),
+        "error names var and section: {msg}"
+    );
 }
 
 #[test]
@@ -53,7 +59,11 @@ fn broken(name: string) -> string {
 "#;
     let err = try_emit_module_with(src, inputs_with_var("CHANNEL", "x"))
         .expect_err("non-literal build_var arg must reject");
-    assert!(err.message.contains("literal"), "error names the literal requirement: {}", err.message);
+    assert!(
+        err.message.contains("literal"),
+        "error names the literal requirement: {}",
+        err.message
+    );
 }
 
 #[test]
@@ -69,7 +79,11 @@ fn dead_generic<T>(x: T) -> string {
 "#;
     let err = try_emit_module_with(src, ComptimeInputs::default())
         .expect_err("misuse in an uninstantiated generic must still reject");
-    assert!(err.message.contains("NOPE"), "error names the var: {}", err.message);
+    assert!(
+        err.message.contains("NOPE"),
+        "error names the var: {}",
+        err.message
+    );
 }
 
 #[test]
@@ -85,7 +99,10 @@ fn greeting() -> string {
     inputs.embed_root = Some(dir.path().to_path_buf());
     let lua = try_emit_module_with(src, inputs).expect("embed expands");
     let body = function_body(&lua, "greeting");
-    assert!(body.contains("hello-from-embed"), "file content inlined:\n{body}");
+    assert!(
+        body.contains("hello-from-embed"),
+        "file content inlined:\n{body}"
+    );
 }
 
 #[test]
@@ -99,7 +116,11 @@ fn broken() -> string {
     let mut inputs = ComptimeInputs::default();
     inputs.embed_root = Some(dir.path().to_path_buf());
     let err = try_emit_module_with(src, inputs).expect_err("missing embed file must reject");
-    assert!(err.message.contains("absent.txt"), "error names the path: {}", err.message);
+    assert!(
+        err.message.contains("absent.txt"),
+        "error names the path: {}",
+        err.message
+    );
 }
 
 #[test]
@@ -129,7 +150,11 @@ fn embed_resolves_against_the_calling_files_own_package() {
     // prerequisite. The calling
     // file's dir has a stick.toml; embed_root points somewhere else entirely.
     let pkg = tempfile::tempdir().unwrap();
-    std::fs::write(pkg.path().join("stick.toml"), "[package]\nname = \"libpkg\"\ntype = \"lib\"\n").unwrap();
+    std::fs::write(
+        pkg.path().join("stick.toml"),
+        "[package]\nname = \"libpkg\"\ntype = \"lib\"\n",
+    )
+    .unwrap();
     std::fs::write(pkg.path().join("payload.txt"), "from-the-library-package").unwrap();
     let lib_file = pkg.path().join("lib.rock");
     std::fs::write(&lib_file, "").unwrap();
@@ -142,12 +167,8 @@ fn payload() -> string {
 "#;
     let mut inputs = ComptimeInputs::default();
     inputs.embed_root = Some(elsewhere.path().to_path_buf());
-    let lua = crate::common::try_emit_module_with_file(
-        src,
-        lib_file.to_str().unwrap(),
-        inputs,
-    )
-    .expect("package-relative embed resolves");
+    let lua = crate::common::try_emit_module_with_file(src, lib_file.to_str().unwrap(), inputs)
+        .expect("package-relative embed resolves");
     assert!(
         lua.contains("from-the-library-package"),
         "embed must resolve against the calling file's package root"
@@ -155,7 +176,9 @@ fn payload() -> string {
 }
 
 fn memory_inputs(files: &[(&str, &str)]) -> ComptimeInputs {
-    let files = files.iter().map(|(path, text)| (path.to_string(), text.to_string()));
+    let files = files
+        .iter()
+        .map(|(path, text)| (path.to_string(), text.to_string()));
     ComptimeInputs {
         embed_files: bone_core::comptime_files::EmbedFiles(std::sync::Arc::new(
             bone_core::comptime_files::MemoryComptimeFiles::new(files),
@@ -177,7 +200,10 @@ fn greeting() -> string {
     let inputs = memory_inputs(&[("data/greeting.txt", "hello-from-memory")]);
     let lua = try_emit_module_with(src, inputs).expect("supplied embed expands");
     let body = function_body(&lua, "greeting");
-    assert!(body.contains("hello-from-memory"), "supplied content inlined:\n{body}");
+    assert!(
+        body.contains("hello-from-memory"),
+        "supplied content inlined:\n{body}"
+    );
 }
 
 #[test]
@@ -215,7 +241,10 @@ fn ws_with_inputs(
 fn reinferred_of(
     ws: &bone_semantic::inference::Workspace,
     name: &str,
-) -> (bone_semantic::prelude::ModuleId, bone_semantic::hir::BodyOwner) {
+) -> (
+    bone_semantic::prelude::ModuleId,
+    bone_semantic::hir::BodyOwner,
+) {
     for module in ws.modules.iter() {
         for (fid, f) in module.functions.iter() {
             if f.name.as_str() == name {
@@ -229,7 +258,10 @@ fn reinferred_of(
 fn global_reinferred_of(
     ws: &bone_semantic::inference::Workspace,
     name: &str,
-) -> (bone_semantic::prelude::ModuleId, bone_semantic::hir::BodyOwner) {
+) -> (
+    bone_semantic::prelude::ModuleId,
+    bone_semantic::hir::BodyOwner,
+) {
     for module in ws.modules.iter() {
         for (gid, global) in module.globals.iter() {
             if global.name.as_str() == name {
@@ -256,7 +288,10 @@ fn build_var_change_reaches_incremental_and_overlay() {
     let ws1 = ws_with_inputs(INCR_SRC, inputs_with_var("SHA", "first-sha-value"));
     let mid = skull::user_module_id(&ws1).unwrap();
     let (full1, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
-    assert!(full1.lua.contains("first-sha-value"), "control: full build inlines v1");
+    assert!(
+        full1.lua.contains("first-sha-value"),
+        "control: full build inlines v1"
+    );
 
     // Same source; only the resolved value moved. The edit the session saw is
     // an unrelated body, so only stale-input detection can re-emit `tag`.
@@ -264,18 +299,24 @@ fn build_var_change_reaches_incremental_and_overlay() {
     let edit = vec![reinferred_of(&ws2, "other")];
     let incremental = emit_incremental(&ws2, &mut cache, &edit).expect("emit_incremental");
     assert!(
-        incremental.lua.contains("second-sha-value") && !incremental.lua.contains("first-sha-value"),
+        incremental.lua.contains("second-sha-value")
+            && !incremental.lua.contains("first-sha-value"),
         "incremental assembly must carry the new value"
     );
-    let fresh = emit_full(&ws2, skull::user_module_id(&ws2).unwrap()).expect("fresh").0;
-    assert_eq!(incremental.lua, fresh.lua, "incremental != fresh after a var change");
+    let fresh = emit_full(&ws2, skull::user_module_id(&ws2).unwrap())
+        .expect("fresh")
+        .0;
+    assert_eq!(
+        incremental.lua, fresh.lua,
+        "incremental != fresh after a var change"
+    );
 
     // Overlay from a fresh cache: full at v1, overlay after the value moved.
     let ws1b = ws_with_inputs(INCR_SRC, inputs_with_var("SHA", "first-sha-value"));
     let (_, mut cache2) = emit_full(&ws1b, mid).expect("emit_full v1b");
     let ws3 = ws_with_inputs(INCR_SRC, inputs_with_var("SHA", "third-sha-value"));
-    let overlay = emit_overlay(&ws3, &mut cache2, &[reinferred_of(&ws3, "other")])
-        .expect("emit_overlay");
+    let overlay =
+        emit_overlay(&ws3, &mut cache2, &[reinferred_of(&ws3, "other")]).expect("emit_overlay");
     assert!(
         overlay.lua.contains("third-sha-value"),
         "the overlay must redefine the body reading the changed var:\n{}",
@@ -314,8 +355,13 @@ fn main() {
         .expect("emit_incremental");
     assert_eq!(incremental.lua.matches("all-second").count(), 3);
     assert!(!incremental.lua.contains("all-first"));
-    let fresh = emit_full(&ws2, skull::user_module_id(&ws2).unwrap()).expect("fresh").0;
-    assert_eq!(incremental.lua, fresh.lua, "incremental != fresh for all consumers");
+    let fresh = emit_full(&ws2, skull::user_module_id(&ws2).unwrap())
+        .expect("fresh")
+        .0;
+    assert_eq!(
+        incremental.lua, fresh.lua,
+        "incremental != fresh for all consumers"
+    );
 }
 
 #[test]
@@ -338,7 +384,10 @@ fn other() -> int {
     let ws1 = ws_with_inputs(src, inputs.clone());
     let mid = skull::user_module_id(&ws1).unwrap();
     let (full1, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
-    assert!(full1.lua.contains("embed-v1"), "control: full build embeds v1");
+    assert!(
+        full1.lua.contains("embed-v1"),
+        "control: full build embeds v1"
+    );
 
     std::fs::write(dir.path().join("data.txt"), "embed-v2").unwrap();
     let ws2 = ws_with_inputs(src, inputs);
@@ -348,8 +397,13 @@ fn other() -> int {
         incremental.lua.contains("embed-v2") && !incremental.lua.contains("embed-v1"),
         "incremental assembly must carry the edited file's bytes"
     );
-    let fresh = emit_full(&ws2, skull::user_module_id(&ws2).unwrap()).expect("fresh").0;
-    assert_eq!(incremental.lua, fresh.lua, "incremental != fresh after a file edit");
+    let fresh = emit_full(&ws2, skull::user_module_id(&ws2).unwrap())
+        .expect("fresh")
+        .0;
+    assert_eq!(
+        incremental.lua, fresh.lua,
+        "incremental != fresh after a file edit"
+    );
 }
 
 #[test]
@@ -374,8 +428,8 @@ fn other() -> int {
 
     std::fs::write(dir.path().join("data.txt"), "fn-embed-v2").unwrap();
     let ws2 = ws_with_inputs(src, inputs);
-    let overlay = emit_overlay(&ws2, &mut cache, &[reinferred_of(&ws2, "other")])
-        .expect("emit_overlay");
+    let overlay =
+        emit_overlay(&ws2, &mut cache, &[reinferred_of(&ws2, "other")]).expect("emit_overlay");
     assert!(
         overlay.lua.contains("fn-embed-v2"),
         "the overlay must redefine the body embedding the edited file:\n{}",
@@ -408,12 +462,21 @@ fn main() {
     let ws = ws_with_inputs(src, inputs);
     let mid = skull::user_module_id(&ws).unwrap();
     let (full, cache) = emit_full(&ws, mid).expect("emit_full");
-    assert!(full.lua.contains("global-embed-payload"), "control: the embed landed");
+    assert!(
+        full.lua.contains("global-embed-payload"),
+        "control: the embed landed"
+    );
 
     let canonical = payload.canonicalize().unwrap();
-    let files: Vec<_> = cache.comptime_file_hashes().into_iter().map(|(path, _)| path).collect();
+    let files: Vec<_> = cache
+        .comptime_file_hashes()
+        .into_iter()
+        .map(|(path, _)| path)
+        .collect();
     assert!(
-        files.iter().any(|f| std::path::Path::new(f.as_str()) == canonical),
+        files
+            .iter()
+            .any(|f| std::path::Path::new(f.as_str()) == canonical),
         "a global initializer's embed must join the watch set, got {files:?}"
     );
 }
@@ -435,7 +498,10 @@ fn global_const_build_var_change_reaches_incremental() {
     let ws1 = ws_with_inputs(GLOBAL_VAR_SRC, inputs_with_var("SHA", "first-sha-value"));
     let mid = skull::user_module_id(&ws1).unwrap();
     let (full1, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
-    assert!(full1.lua.contains("first-sha-value"), "control: full build inlines v1");
+    assert!(
+        full1.lua.contains("first-sha-value"),
+        "control: full build inlines v1"
+    );
 
     let ws2 = ws_with_inputs(GLOBAL_VAR_SRC, inputs_with_var("SHA", "second-sha-value"));
     let edit = vec![reinferred_of(&ws2, "other")];
@@ -457,8 +523,8 @@ fn global_const_build_var_change_reaches_the_overlay() {
 
     // The session saw only an unrelated body edit; the var moved underneath.
     let ws2 = ws_with_inputs(GLOBAL_VAR_SRC, inputs_with_var("SHA", "second-sha-value"));
-    let overlay = emit_overlay(&ws2, &mut cache, &[reinferred_of(&ws2, "other")])
-        .expect("emit_overlay");
+    let overlay =
+        emit_overlay(&ws2, &mut cache, &[reinferred_of(&ws2, "other")]).expect("emit_overlay");
     assert!(
         overlay.lua.contains("second-sha-value"),
         "the overlay must re-emit a const init whose build var moved:\n{}",
@@ -506,17 +572,25 @@ fn main() {
     );
     let first_canonical = first_path.canonicalize().unwrap();
     let second_canonical = second_path.canonicalize().unwrap();
-    let files: Vec<_> = cache.comptime_file_hashes().into_iter().map(|(path, _)| path).collect();
+    let files: Vec<_> = cache
+        .comptime_file_hashes()
+        .into_iter()
+        .map(|(path, _)| path)
+        .collect();
     assert!(
-        files.iter().any(|file| std::path::Path::new(file.as_str()) == second_canonical)
-            && !files.iter().any(|file| std::path::Path::new(file.as_str()) == first_canonical),
+        files
+            .iter()
+            .any(|file| std::path::Path::new(file.as_str()) == second_canonical)
+            && !files
+                .iter()
+                .any(|file| std::path::Path::new(file.as_str()) == first_canonical),
         "the overlay must publish the replacement global read set: {files:?}"
     );
 
     std::fs::write(&second_path, "second-v2").unwrap();
     let ws3 = ws_with_inputs(&v2, inputs);
-    let second = emit_overlay(&ws3, &mut cache, &[reinferred_of(&ws3, "other")])
-        .expect("new input overlay");
+    let second =
+        emit_overlay(&ws3, &mut cache, &[reinferred_of(&ws3, "other")]).expect("new input overlay");
     assert!(
         second.lua.contains("second-v2"),
         "a later change to the newly recorded input must reach the global initializer: {}",
@@ -547,8 +621,8 @@ fn main() {
 
     std::fs::write(dir.path().join("data.txt"), "overlay-embed-v2").unwrap();
     let ws2 = ws_with_inputs(src, inputs);
-    let overlay = emit_overlay(&ws2, &mut cache, &[reinferred_of(&ws2, "other")])
-        .expect("emit_overlay");
+    let overlay =
+        emit_overlay(&ws2, &mut cache, &[reinferred_of(&ws2, "other")]).expect("emit_overlay");
     assert!(
         overlay.lua.contains("overlay-embed-v2"),
         "the overlay must re-emit a const init whose embedded file changed:\n{}",

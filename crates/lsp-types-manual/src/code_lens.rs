@@ -13,9 +13,12 @@ pub struct CodeLensOptions {
     pub resolve_provider: Option<bool>,
 }
 
-impl_lsp_struct!(CodeLensOptions,
+impl_lsp_struct!(
+    CodeLensOptions,
     required {},
-    optional { resolve_provider: bool = "resolveProvider" }
+    optional {
+        resolve_provider: bool = "resolveProvider"
+    }
 );
 
 #[derive(Debug, Eq, PartialEq, Clone)]
@@ -27,8 +30,11 @@ pub struct CodeLensParams {
     pub partial_result_params: PartialResultParams,
 }
 
-impl_lsp_struct!(CodeLensParams,
-    required { text_document: TextDocumentIdentifier = "textDocument" },
+impl_lsp_struct!(
+    CodeLensParams,
+    required {
+        text_document: TextDocumentIdentifier = "textDocument"
+    },
     optional {},
     flatten {
         work_done_progress_params: WorkDoneProgressParams,
@@ -48,8 +54,11 @@ pub struct CodeLens {
     pub data: Option<Value>,
 }
 
-impl_lsp_struct!(CodeLens,
-    required { range: Range = "range" },
+impl_lsp_struct!(
+    CodeLens,
+    required {
+        range: Range = "range"
+    },
     optional {
         command: Command = "command",
         data: Value = "data",
@@ -61,7 +70,10 @@ pub struct CodeLensWorkspaceClientCapabilities {
     pub refresh_support: Option<bool>,
 }
 
-impl_lsp_struct!(CodeLensWorkspaceClientCapabilities,
+impl_lsp_struct!(
+    CodeLensWorkspaceClientCapabilities,
     required {},
-    optional { refresh_support: bool = "refreshSupport" }
+    optional {
+        refresh_support: bool = "refreshSupport"
+    }
 );

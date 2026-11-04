@@ -39,13 +39,22 @@ fn main() {
 #[test]
 fn uniform_values_expands_to_canonical_leaves() {
     let rejects = bone_rejections(CANONICAL_VALUES);
-    assert!(rejects.is_empty(), "uniform_values was rejected: {rejects:#?}");
+    assert!(
+        rejects.is_empty(),
+        "uniform_values was rejected: {rejects:#?}"
+    );
 
     let lua = emit_module(CANONICAL_VALUES);
     let body = main_body(&lua);
-    assert!(!body.contains("uniform_values("), "the compiler-owned call survived:\n{body}");
+    assert!(
+        !body.contains("uniform_values("),
+        "the compiler-owned call survived:\n{body}"
+    );
     for forbidden in ["std140", "offset", "padding", "binding"] {
-        assert!(!body.contains(forbidden), "canonical values leaked {forbidden}:\n{body}");
+        assert!(
+            !body.contains(forbidden),
+            "canonical values leaked {forbidden}:\n{body}"
+        );
     }
     for variant in ["Float", "Bool", "Int", "Uint"] {
         assert!(
@@ -122,13 +131,19 @@ fn main() {
         .find(|l| l.contains(r#"ffi.new("int"#))
         .and_then(|l| l.split_whitespace().next())
         .expect("the int view's local");
-    assert_ne!(fbuf, ibuf, "the fixture's two views must be distinct locals");
+    assert_ne!(
+        fbuf, ibuf,
+        "the fixture's two views must be distinct locals"
+    );
     assert!(
         body.contains(&format!("{fbuf}[(0)] = (1.5)")),
         "the float stores through the float view:\n{body}"
     );
     for store in [format!("{ibuf}[(1)] = "), format!("{ibuf}[(2)] = ")] {
-        assert!(body.contains(&store), "missing int-view store `{store}`:\n{body}");
+        assert!(
+            body.contains(&store),
+            "missing int-view store `{store}`:\n{body}"
+        );
     }
 }
 
@@ -144,7 +159,10 @@ fn main() {
     print(i[0])
 }
 "#;
-    let out = run_luajit(&format!("{}\nmain()\n", emit_module(src)), "uint_uniform_bits");
+    let out = run_luajit(
+        &format!("{}\nmain()\n", emit_module(src)),
+        "uint_uniform_bits",
+    );
     assert_eq!(out.split_whitespace().collect::<Vec<_>>(), ["-1"]);
 }
 
@@ -195,7 +213,10 @@ fn main() {
 /// nil local. The three controls below each drop one leg of that shape.
 #[test]
 fn a_nested_member_survives_a_local_inside_a_lambda() {
-    let out = run_luajit(&format!("{}\nmain()\n", emit_module(PROBE)), "probe_lambda_local");
+    let out = run_luajit(
+        &format!("{}\nmain()\n", emit_module(PROBE)),
+        "probe_lambda_local",
+    );
     assert_eq!(out.split_whitespace().collect::<Vec<_>>(), ["1", "5", "6"]);
 }
 
@@ -259,8 +280,10 @@ fn main() {
 #[test]
 fn control_a_local_packed_at_function_scope() {
     let out = run_luajit(
-        &format!("{}\nmain()\n", emit_module(
-            r#"
+        &format!(
+            "{}\nmain()\n",
+            emit_module(
+                r#"
 value ProbeU {
     scalar: float,
     params: Vec2,
@@ -276,7 +299,8 @@ fn main() {
     print(f[3])
 }
 "#,
-        )),
+            )
+        ),
         "probe_fnscope_local",
     );
     assert_eq!(out.split_whitespace().collect::<Vec<_>>(), ["1", "5", "6"]);
@@ -371,7 +395,9 @@ fn main() {
 "#;
 
 fn fn_body<'a>(lua: &'a str, name: &str) -> &'a str {
-    let at = lua.find(&format!("\nfunction {name}")).unwrap_or_else(|| panic!("{name} is emitted"));
+    let at = lua
+        .find(&format!("\nfunction {name}"))
+        .unwrap_or_else(|| panic!("{name} is emitted"));
     let rest = &lua[at + 1..];
     let end = rest.find("\nend").expect("function has an end");
     &rest[..end]
@@ -385,11 +411,17 @@ fn a_global_block_packs_one_leaf_at_a_time() {
         .lines()
         .find(|l| l.trim_start().starts_with("local "))
         .unwrap_or_else(|| panic!("no local declaration in:\n{body}"));
-    let registers = decl.split(',').filter(|n| n.trim().starts_with('r') || n.trim().starts_with("local r")).count();
+    let registers = decl
+        .split(',')
+        .filter(|n| n.trim().starts_with('r') || n.trim().starts_with("local r"))
+        .count();
     assert!(
         registers < 32,
         "{registers} registers for a 32-leaf block: every leaf is loaded before the first store:\n{body}"
     );
     let out = run_luajit(&format!("{lua}\nmain()\n"), "global_block_pack");
-    assert_eq!(out.split_whitespace().collect::<Vec<_>>(), ["1", "6", "16", "17", "20"]);
+    assert_eq!(
+        out.split_whitespace().collect::<Vec<_>>(),
+        ["1", "6", "16", "17", "20"]
+    );
 }

@@ -122,7 +122,10 @@ mod tests {
         let mut written = Vec::new();
         report
             .finish()
-            .write(("u.rock".to_string(), ariadne::Source::from("abc\n")), &mut written)
+            .write(
+                ("u.rock".to_string(), ariadne::Source::from("abc\n")),
+                &mut written,
+            )
             .unwrap();
 
         assert_eq!(
@@ -153,7 +156,10 @@ mod tests {
         let mut written = Vec::new();
         report
             .finish()
-            .write(("u.rock".to_string(), ariadne::Source::from("abc\n")), &mut written)
+            .write(
+                ("u.rock".to_string(), ariadne::Source::from("abc\n")),
+                &mut written,
+            )
             .unwrap();
 
         assert_eq!(

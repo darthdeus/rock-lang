@@ -5,7 +5,7 @@
 //! no arg) live HERE once; each backend only maps a chosen [`DecoArg`] to its
 //! own literal syntax + default token.
 
-use bone_semantic::hir::{Annotation, AnnoValue, BodyOwner, DecoratorDef};
+use bone_semantic::hir::{AnnoValue, Annotation, BodyOwner, DecoratorDef};
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;
 use comfy_la_arena::Idx;
@@ -34,7 +34,10 @@ pub fn select_decorator_args<'a>(
     ann: &'a Annotation,
 ) -> Result<Vec<DecoArg<'a>>, CompilerError> {
     let d = &ws.module(module).decorators[decorator];
-    let body = ws.module(module).bodies.get(&BodyOwner::Decorator(decorator));
+    let body = ws
+        .module(module)
+        .bodies
+        .get(&BodyOwner::Decorator(decorator));
     let mut out = Vec::with_capacity(d.param_decls.len());
     for (index, pd) in d.param_decls.iter().enumerate() {
         let pname = pd.name;
@@ -44,9 +47,9 @@ pub fn select_decorator_args<'a>(
             .find(|a| a.name.as_ref().map_or(false, |n| n.name == pname));
         if let Some(a) = named {
             out.push(DecoArg::Value(&a.value));
-        } else if body.is_some_and(|body| {
-            crate::lower::param_null_overrides_default(ws, body, index, pd.ty)
-        }) {
+        } else if body
+            .is_some_and(|body| crate::lower::param_null_overrides_default(ws, body, index, pd.ty))
+        {
             out.push(DecoArg::Omitted);
         } else if pd.has_default {
             out.push(DecoArg::Default);

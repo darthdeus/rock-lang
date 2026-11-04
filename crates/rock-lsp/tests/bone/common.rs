@@ -5,7 +5,7 @@
 #![allow(dead_code)] // not every module uses every helper.
 
 use lsp_types::*;
-use rock_lsp::{compute_code_actions_workspace, LspWorkspace};
+use rock_lsp::{LspWorkspace, compute_code_actions_workspace};
 use std::str::FromStr;
 
 /// Write `src` to `path` and open it on a fresh bone workspace.
@@ -65,7 +65,13 @@ pub fn apply_all(src: &str, action: &CodeAction) -> String {
     let edits = changes.values().next().expect("one file's edits");
     let mut spans: Vec<(usize, usize, &str)> = edits
         .iter()
-        .map(|te| (pos_to_offset(src, te.range.start), pos_to_offset(src, te.range.end), te.new_text.as_str()))
+        .map(|te| {
+            (
+                pos_to_offset(src, te.range.start),
+                pos_to_offset(src, te.range.end),
+                te.new_text.as_str(),
+            )
+        })
         .collect();
     spans.sort_by(|a, b| b.0.cmp(&a.0));
     let mut s = src.to_string();

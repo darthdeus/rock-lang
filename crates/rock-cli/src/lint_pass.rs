@@ -7,13 +7,13 @@
 //! build. `Error`-severity findings FAIL the build; `Warning`/`Advice` report
 //! only. Plan: the compiler contract.
 
+use bone_core::prelude::Instant;
 use bone_core::prelude::{FxHashMap, FxHashSet, ModuleId, Ustr};
 use bone_semantic::inference::Workspace;
 use rock_core::{CompilerError, SourceFiles, source_file_from_path_and_contents};
 use std::path::Path;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
-use bone_core::prelude::Instant;
 
 #[derive(Clone, Debug, Default)]
 pub struct LintPassCensus {
@@ -122,7 +122,10 @@ pub fn print_census(census: &LintPassCensus) {
             family.elapsed_ns as f64 / 1_000_000.0,
         );
     };
-    eprintln!("  lint census (ROCK_LINT_CENSUS=1): full_workspace_passes={}", census.lint.full_workspace_passes);
+    eprintln!(
+        "  lint census (ROCK_LINT_CENSUS=1): full_workspace_passes={}",
+        census.lint.full_workspace_passes
+    );
     family("flat/body-local", &census.lint.flat);
     family("inference-dependent", &census.lint.inference);
     family("suppression", &census.lint.suppression);
@@ -309,8 +312,7 @@ pub(crate) fn rollback_build_lints_cached(
 ) -> Result<(), String> {
     with_source_texts(sources, |texts| {
         let warm = skull::pipeline::warm_module_ids(ws, texts);
-        let is_bin =
-            scope == Scope::WholeProject && rock_host::stick::StickConfig::is_bin_at(root);
+        let is_bin = scope == Scope::WholeProject && rock_host::stick::StickConfig::is_bin_at(root);
         let owned = owned_files(texts, root);
         let owned_sources: FxHashMap<Ustr, &str> = texts
             .iter()
@@ -352,8 +354,7 @@ fn run_build_lints_cached_inner(
 ) -> Vec<CompilerError> {
     let (found, stats) = with_source_texts(sources, |texts| {
         let warm = skull::pipeline::warm_module_ids(ws, texts);
-        let is_bin =
-            scope == Scope::WholeProject && rock_host::stick::StickConfig::is_bin_at(root);
+        let is_bin = scope == Scope::WholeProject && rock_host::stick::StickConfig::is_bin_at(root);
         let owned = owned_files(texts, root);
         let owned_sources: FxHashMap<Ustr, &str> = texts
             .iter()
@@ -389,8 +390,14 @@ fn run_build_lints_cached_inner(
                 &crate::registry::lint_options(),
             );
             debug_assert_eq!(
-                ignored.iter().map(|f| (f.lint, f.error.message.as_str())).collect::<Vec<_>>(),
-                found.iter().map(|f| (f.lint, f.error.message.as_str())).collect::<Vec<_>>(),
+                ignored
+                    .iter()
+                    .map(|f| (f.lint, f.error.message.as_str()))
+                    .collect::<Vec<_>>(),
+                found
+                    .iter()
+                    .map(|f| (f.lint, f.error.message.as_str()))
+                    .collect::<Vec<_>>(),
                 "census oracle must match cached full rebuild",
             );
             record_lint_census(census);
@@ -509,7 +516,10 @@ pub fn single_file_scope(file: &str, src: &str) -> (SourceFiles, std::path::Path
         file.to_string(),
         src.to_string(),
     ));
-    let root = Path::new(file).parent().unwrap_or(Path::new(".")).to_path_buf();
+    let root = Path::new(file)
+        .parent()
+        .unwrap_or(Path::new("."))
+        .to_path_buf();
     (sources, root)
 }
 
@@ -535,8 +545,7 @@ pub fn findings_with(
 ) -> Vec<bone_lints::Finding> {
     with_source_texts(sources, |texts| {
         let warm = skull::pipeline::warm_module_ids(ws, texts);
-        let is_bin =
-            scope == Scope::WholeProject && rock_host::stick::StickConfig::is_bin_at(root);
+        let is_bin = scope == Scope::WholeProject && rock_host::stick::StickConfig::is_bin_at(root);
         // The REPORT set: this project's own files. A `stick.toml` DEPENDENCY
         // (`engine/engine` under a game) is scanned but never reported on -- its code
         // is not the author's to fix here, and a consumer must not fail a build on a
@@ -575,7 +584,11 @@ pub fn report_files(sources: &SourceFiles, root: &Path) -> FxHashSet<Ustr> {
 
 fn owned_files(texts: &FxHashMap<Ustr, &str>, root: &Path) -> FxHashSet<Ustr> {
     let owned = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    texts.keys().copied().filter(|f| Path::new(f.as_str()).starts_with(&owned)).collect()
+    texts
+        .keys()
+        .copied()
+        .filter(|f| Path::new(f.as_str()).starts_with(&owned))
+        .collect()
 }
 
 /// `12 lint warnings (8 unused_var, 4 unused_fn) -- run `rock lint <root>` for detail`.
@@ -588,8 +601,11 @@ fn summary_line(soft: &[bone_lints::Finding], root: &Path) -> String {
         }
     }
     counts.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
-    let detail =
-        counts.iter().map(|(name, n)| format!("{n} {name}")).collect::<Vec<_>>().join(", ");
+    let detail = counts
+        .iter()
+        .map(|(name, n)| format!("{n} {name}"))
+        .collect::<Vec<_>>()
+        .join(", ");
     format!(
         "{} lint warning(s) ({detail}) -- run `rock lint {}` for detail",
         soft.len(),
@@ -614,7 +630,12 @@ pub fn unused_fns_under(
     with_source_texts(sources, |texts| {
         let warm = skull::pipeline::warm_module_ids(ws, texts);
         let is_bin = rock_host::stick::StickConfig::is_bin_at(consumer);
-        let by_file = bone_lints::workspace_findings_by_file_with(ws, &warm, is_bin, &crate::registry::lint_options());
+        let by_file = bone_lints::workspace_findings_by_file_with(
+            ws,
+            &warm,
+            is_bin,
+            &crate::registry::lint_options(),
+        );
         let mut out = Vec::new();
         for (file, findings) in by_file {
             if !Path::new(file.as_str()).starts_with(report_root) {
@@ -642,7 +663,11 @@ fn with_source_texts<R>(
     sources: &SourceFiles,
     use_texts: impl FnOnce(&FxHashMap<Ustr, &str>) -> R,
 ) -> R {
-    let files = sources.files.iter().map(|file| file.borrow()).collect::<Vec<_>>();
+    let files = sources
+        .files
+        .iter()
+        .map(|file| file.borrow())
+        .collect::<Vec<_>>();
     let texts = files
         .iter()
         .map(|file| (Ustr::from(&file.file.to_id_path()), file.contents.as_str()))
@@ -667,9 +692,9 @@ fn with_source_texts<R>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rock_core::errors::CompilerErrorLevel;
-    use rock_core::CompilerError;
     use bone_core::prelude::Span;
+    use rock_core::CompilerError;
+    use rock_core::errors::CompilerErrorLevel;
 
     fn finding(lint: &'static str, level: CompilerErrorLevel) -> bone_lints::Finding {
         bone_lints::Finding {
@@ -728,7 +753,11 @@ mod tests {
         set_policy(LintReport::Summary);
         assert_eq!(policy(), LintReport::Summary);
         set_corpus_mode();
-        assert_eq!(policy(), LintReport::Off, "a corpus run silences the soft tiers");
+        assert_eq!(
+            policy(),
+            LintReport::Off,
+            "a corpus run silences the soft tiers"
+        );
         set_policy(LintReport::Full);
         assert_eq!(policy(), LintReport::Full);
     }

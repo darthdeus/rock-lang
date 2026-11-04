@@ -9,11 +9,11 @@
 //! on the LIVE workspace directly.
 
 use rock_tokenizer::TokenKind;
+use skull_parser::Idx;
 use skull_parser::ast::{
     Binding, BlockData, CallSyntax, ExprData, ExprKind, IfLetClause, ItemKind, Pattern,
     StatementKind,
 };
-use skull_parser::Idx;
 use ustr::Ustr;
 
 pub(crate) struct CursorAst {
@@ -126,10 +126,11 @@ impl CursorAst {
     /// fallback there.
     pub(crate) fn at(src: &str, offset: usize) -> Option<CursorAst> {
         let file = Ustr::from("<cursor>");
-        let mut candidates: Vec<(String, usize)> = crate::completion::classify::completion_munges(src, offset)
-            .into_iter()
-            .map(|m| (m, offset))
-            .collect();
+        let mut candidates: Vec<(String, usize)> =
+            crate::completion::classify::completion_munges(src, offset)
+                .into_iter()
+                .map(|m| (m, offset))
+                .collect();
         candidates.extend(token_replacement_munge(src, offset));
         // Sentinel + comma: a new arg typed BEFORE an existing expr
         // (`f(a, <cursor> (x) => ..)`) -- plain insertion juxtaposes the
@@ -169,9 +170,15 @@ impl CursorAst {
         let mut empty: Option<CursorAst> = None;
         for (cand, probe) in candidates {
             // Speculative cursor repairs may be invalid syntax; try the next repair.
-            let Ok(ast) = skull_parser::parse_module(&cand, file) else { continue };
+            let Ok(ast) = skull_parser::parse_module(&cand, file) else {
+                continue;
+            };
             let clean = ast.recovery_errors.is_empty();
-            let cx = CursorAst { ast, text: cand, probe };
+            let cx = CursorAst {
+                ast,
+                text: cand,
+                probe,
+            };
             let chain = cx.expr_chain();
             if chain.is_empty() {
                 if empty.is_none() {
@@ -270,7 +277,11 @@ impl CursorAst {
                 // Cursor mid-variant-ident: the munge glues the sentinel into
                 // one identifier, so the record literal parses whole and the
                 // record node itself is the innermost expr at the cursor.
-                ExprKind::EnumVariantRecord { enum_name, variant_name, .. } => {
+                ExprKind::EnumVariantRecord {
+                    enum_name,
+                    variant_name,
+                    ..
+                } => {
                     let (s, e) = variant_name.span.offset_range;
                     if s <= self.probe && self.probe < e {
                         return Some(enum_name.name.to_string());
@@ -293,7 +304,9 @@ impl CursorAst {
                         walk(sub, f);
                     }
                 }
-                Pattern::EnumVariant { args: Some(args), .. } => {
+                Pattern::EnumVariant {
+                    args: Some(args), ..
+                } => {
                     for sub in args {
                         walk(sub, f);
                     }
@@ -337,10 +350,16 @@ impl CursorAst {
         let mut found = None;
         self.walk_patterns(&mut |p| {
             let (base, vname) = match p {
-                Pattern::EnumVariant { enum_name: Some(base), variant_name, .. } => {
-                    (base, variant_name)
-                }
-                Pattern::Record { enum_name: Some(base), name: Some(vname), .. } => (base, vname),
+                Pattern::EnumVariant {
+                    enum_name: Some(base),
+                    variant_name,
+                    ..
+                } => (base, variant_name),
+                Pattern::Record {
+                    enum_name: Some(base),
+                    name: Some(vname),
+                    ..
+                } => (base, vname),
                 _ => return,
             };
             let (s, e) = vname.span.offset_range;
@@ -356,12 +375,21 @@ impl CursorAst {
     fn pattern_record(&self) -> Option<(String, String)> {
         let mut found = None;
         self.walk_patterns(&mut |p| {
-            let Pattern::Record { enum_name: Some(base), name: Some(vname), .. } = p else {
+            let Pattern::Record {
+                enum_name: Some(base),
+                name: Some(vname),
+                ..
+            } = p
+            else {
                 return;
             };
             let ve = vname.span.offset_range.1;
-            let Some(brace) = self.text[ve..].find('{').map(|i| ve + i) else { return };
-            let Some(close) = matching_brace(self.text.as_bytes(), brace) else { return };
+            let Some(brace) = self.text[ve..].find('{').map(|i| ve + i) else {
+                return;
+            };
+            let Some(close) = matching_brace(self.text.as_bytes(), brace) else {
+                return;
+            };
             if brace < self.probe && self.probe <= close {
                 found = Some((base.name.to_string(), vname.name.to_string()));
             }
@@ -373,7 +401,9 @@ impl CursorAst {
     /// (`struct S { dur: float = 0.|0 }`): `(struct, field, is_lambda_body)`.
     fn decl_field_default(&self) -> Option<(String, String, bool)> {
         for item in &self.ast.items {
-            let skull_parser::ast::ItemKind::Struct(sd) = &item.kind else { continue };
+            let skull_parser::ast::ItemKind::Struct(sd) = &item.kind else {
+                continue;
+            };
             for f in &sd.fields {
                 let Some(d) = f.default else { continue };
                 let v = self.expr(d);
@@ -393,10 +423,10 @@ impl CursorAst {
     /// Whether `v` is a lambda whose BODY block contains the cursor.
     fn lambda_body_contains(&self, v: &ExprData) -> bool {
         matches!(&v.kind, ExprKind::Lambda { body, .. }
-            if {
-                let (bs, be) = self.ast.blocks[*body].span.offset_range;
-                bs <= self.probe && self.probe < be
-            })
+        if {
+            let (bs, be) = self.ast.blocks[*body].span.offset_range;
+            bs <= self.probe && self.probe < be
+        })
     }
 
     /// Enclosing record literal (struct literal or `Enum::Variant { .. }`)
@@ -406,10 +436,15 @@ impl CursorAst {
     fn record_ctx(&self) -> Option<RecordCtx> {
         for &node in self.expr_chain().iter() {
             let (head, fields) = match &self.expr(node).kind {
-                ExprKind::StructLiteral { name, fields, .. } => {
-                    (RecordHead::Struct(name.name.to_string(), name.span.offset_range.1), fields)
-                }
-                ExprKind::EnumVariantRecord { enum_name, variant_name, fields } => (
+                ExprKind::StructLiteral { name, fields, .. } => (
+                    RecordHead::Struct(name.name.to_string(), name.span.offset_range.1),
+                    fields,
+                ),
+                ExprKind::EnumVariantRecord {
+                    enum_name,
+                    variant_name,
+                    fields,
+                } => (
                     RecordHead::EnumVariant(
                         enum_name.name.to_string(),
                         variant_name.name.to_string(),
@@ -439,7 +474,11 @@ impl CursorAst {
                     break;
                 }
             }
-            return Some(RecordCtx { head, brace, value_field });
+            return Some(RecordCtx {
+                head,
+                brace,
+                value_field,
+            });
         }
         None
     }
@@ -535,8 +574,10 @@ impl CursorAst {
             let ExprKind::BinOp { left, op, right } = &e.kind else {
                 continue;
             };
-            if !matches!(op, TokenKind::Equals | TokenKind::NotEquals | TokenKind::DoubleQuestionMark)
-            {
+            if !matches!(
+                op,
+                TokenKind::Equals | TokenKind::NotEquals | TokenKind::DoubleQuestionMark
+            ) {
                 continue;
             }
             let (vs, ve) = self.expr(*right).span.offset_range;
@@ -603,7 +644,9 @@ impl CursorAst {
             return false;
         }
         let body = self.ast.items.iter().find_map(|it| {
-            let ItemKind::Function(f) = &it.kind else { return None };
+            let ItemKind::Function(f) = &it.kind else {
+                return None;
+            };
             let b = f.body.rock_block()?;
             let (s, e) = self.ast.blocks[b].span.offset_range;
             (s <= self.probe && self.probe < e).then_some(b)
@@ -633,7 +676,10 @@ impl CursorAst {
             // Arm bodies / branch tails inherit the match/if slot; the scrutinee
             // and conditions do not (their spans hold no arm/branch block).
             ExprKind::Match { arms, .. } => arms.iter().any(|a| self.block_tail_has_cursor(a.body)),
-            ExprKind::If { branches, else_branch } => {
+            ExprKind::If {
+                branches,
+                else_branch,
+            } => {
                 branches.iter().any(|(_, b)| self.block_tail_has_cursor(*b))
                     || else_branch.is_some_and(|b| self.block_tail_has_cursor(b))
             }
@@ -687,7 +733,10 @@ impl CursorAst {
             {
                 return None;
             }
-            let ExprKind::FunctionCall { func, args, syntax, .. } = &self.expr(node).kind else {
+            let ExprKind::FunctionCall {
+                func, args, syntax, ..
+            } = &self.expr(node).kind
+            else {
                 continue;
             };
             // Operator calls (`a + |`) and the no-parens surface form are not
@@ -705,8 +754,7 @@ impl CursorAst {
                 // args ending at or before the probe. Guard: the probe must
                 // sit past the arg list's `(`, not in the callee region.
                 let func_end = self.expr(*func).span.offset_range.1;
-                let Some(paren) = self.text[func_end..].find('(').map(|i| func_end + i)
-                else {
+                let Some(paren) = self.text[func_end..].find('(').map(|i| func_end + i) else {
                     continue;
                 };
                 if self.probe <= paren {
@@ -772,7 +820,12 @@ impl CursorAst {
                 None => positional += 1,
             }
         }
-        Some(NamedArgSlot { callee, positional, named, spread_probes })
+        Some(NamedArgSlot {
+            callee,
+            positional,
+            named,
+            spread_probes,
+        })
     }
 
     /// TYPE-vs-expression slot: true when the innermost node containing the
@@ -816,7 +869,9 @@ impl CursorAst {
     /// Entity-type hint.
     pub(crate) fn param_type(&self) -> Option<(String, String)> {
         for item in &self.ast.items {
-            let skull_parser::ast::ItemKind::Function(fd) = &item.kind else { continue };
+            let skull_parser::ast::ItemKind::Function(fd) = &item.kind else {
+                continue;
+            };
             for p in &fd.params {
                 let (ts, te) = self.ast.types[p.ty].span.offset_range;
                 if ts <= self.probe && self.probe < te {
@@ -833,7 +888,9 @@ impl CursorAst {
     pub(crate) fn coroutine_first_generic_arg(&self) -> bool {
         use skull_parser::ast::TypeExprKind;
         self.ast.types.iter().any(|(_, t)| {
-            let TypeExprKind::App { ctor, args } = &t.kind else { return false };
+            let TypeExprKind::App { ctor, args } = &t.kind else {
+                return false;
+            };
             if ctor.name.as_str() != "Coroutine" {
                 return false;
             }
@@ -848,7 +905,9 @@ impl CursorAst {
     /// `if`/`while` (`if thing.foo.bar|`) -- the bool-field soft-boost
     /// context. `if a && thing.foo|` is not (the condition is the `&&`).
     pub(crate) fn bool_condition_chain(&self) -> bool {
-        let Some(&top) = self.expr_chain().first() else { return false };
+        let Some(&top) = self.expr_chain().first() else {
+            return false;
+        };
         if !matches!(
             self.expr(top).kind,
             ExprKind::FieldAccess(..) | ExprKind::SafeNavigation(..) | ExprKind::Ident(..)
@@ -860,9 +919,11 @@ impl CursorAst {
                 if branches.iter().any(|(c, _)| *c == top))
         });
         in_if
-            || self.ast.stmts.iter().any(|(_, st)| {
-                matches!(&st.kind, StatementKind::While(w) if w.condition == top)
-            })
+            || self
+                .ast
+                .stmts
+                .iter()
+                .any(|(_, st)| matches!(&st.kind, StatementKind::While(w) if w.condition == top))
     }
 
     /// The dotted receiver path when the cursor types a MEMBER
@@ -945,9 +1006,11 @@ impl CursorAst {
             return Some(match &r.kind {
                 // `a.b().m(|`: the receiver is a call -- its type is the last
                 // method's unique return type.
-                ExprKind::FunctionCall { func: rf, syntax: rs, .. }
-                    if matches!(rs, CallSyntax::Normal | CallSyntax::At) =>
-                {
+                ExprKind::FunctionCall {
+                    func: rf,
+                    syntax: rs,
+                    ..
+                } if matches!(rs, CallSyntax::Normal | CallSyntax::At) => {
                     match &self.expr(*rf).kind {
                         ExprKind::Ident(id) => ReceiverAnchor::ChainCall(id.name.to_string()),
                         ExprKind::FieldAccess(_, m) | ExprKind::SafeNavigation(_, m) => {
@@ -991,8 +1054,9 @@ mod gaps {
     #[test]
     fn qualified_base_in_a_match_arm_pattern() {
         // Patterns live outside the exprs arena -- the walk must cover them.
-        let (_, _, cx) =
-            cx("enum E { X, Y }\nfn t(e: E) -> int {\n  match e {\n    E::$0X => 1,\n    _ => 2,\n  }\n}\n");
+        let (_, _, cx) = cx(
+            "enum E { X, Y }\nfn t(e: E) -> int {\n  match e {\n    E::$0X => 1,\n    _ => 2,\n  }\n}\n",
+        );
         assert_eq!(cx.qualified_base(), Some("E".to_string()));
     }
 
@@ -1011,9 +1075,7 @@ mod gaps {
     fn qualified_base_in_a_record_variant_literal() {
         // `Effect::|Bandage { .. }` parses as an EnumVariantRecord EXPR --
         // needs its own arm (neither QualifiedIdent nor a pattern).
-        let (_, _, cx) = cx(
-            "enum E { B { d: int } }\nfn t() {\n  let v = E::$0B { d: 1 }\n}\n",
-        );
+        let (_, _, cx) = cx("enum E { B { d: int } }\nfn t() {\n  let v = E::$0B { d: 1 }\n}\n");
         assert_eq!(cx.qualified_base(), Some("E".to_string()));
     }
 
@@ -1023,9 +1085,8 @@ mod gaps {
         // sentinel munge breaks (juxtaposition / positional-after-named), so
         // the RAW parse wins the ladder -- and the cursor sits BETWEEN arg
         // nodes, inside only the call node itself.
-        let (_, _, cx) = cx(
-            "fn draw(a: int, b: int, c: int) {}\nfn t() {\n  draw(1, b: 2,$0 c: 3)\n}\n",
-        );
+        let (_, _, cx) =
+            cx("fn draw(a: int, b: int, c: int) {}\nfn t() {\n  draw(1, b: 2,$0 c: 3)\n}\n");
         assert_eq!(cx.call_arg(), Some(("draw".to_string(), 2, None)));
     }
 
@@ -1056,9 +1117,7 @@ mod gaps {
         // munge leaves an incomplete arm that recovery DROPS (empty chain).
         // The arm-completing rung (`<sentinel> => {}`) parses it as the
         // pattern it is.
-        let (_, _, cx) = cx(
-            "enum E { X, Y(int) }\nfn t(e: E) {\n  match e {\n    E::$0\n  }\n}\n",
-        );
+        let (_, _, cx) = cx("enum E { X, Y(int) }\nfn t(e: E) {\n  match e {\n    E::$0\n  }\n}\n");
         assert_eq!(cx.qualified_base(), Some("E".to_string()));
     }
 
@@ -1091,9 +1150,7 @@ mod gaps {
         // typed against the field's declared type; the byte scanner
         // type-directs there (it can't tell a decl from a literal) and the
         // behavior is worth keeping on purpose.
-        let (_, _, cx) = cx(
-            "struct S {\n  dur: float = 0.$00,\n  n: int = 1,\n}\n",
-        );
+        let (_, _, cx) = cx("struct S {\n  dur: float = 0.$00,\n  n: int = 1,\n}\n");
         assert_eq!(
             cx.struct_field_value(),
             Some(("S".to_string(), "dur".to_string(), false))
@@ -1115,17 +1172,14 @@ mod gaps {
 
     #[test]
     fn bool_condition_chain_true_for_a_whole_condition() {
-        let (_, _, cx) = cx(
-            "struct T { ok: bool }\nfn t(thing: T) {\n  if thing.o$0\n}\n",
-        );
+        let (_, _, cx) = cx("struct T { ok: bool }\nfn t(thing: T) {\n  if thing.o$0\n}\n");
         assert!(cx.bool_condition_chain());
     }
 
     #[test]
     fn bool_condition_chain_false_under_a_conjunction() {
-        let (_, _, cx) = cx(
-            "struct T { ok: bool }\nfn t(a: bool, thing: T) {\n  if a && thing.o$0\n}\n",
-        );
+        let (_, _, cx) =
+            cx("struct T { ok: bool }\nfn t(a: bool, thing: T) {\n  if a && thing.o$0\n}\n");
         assert!(!cx.bool_condition_chain());
     }
 
@@ -1137,7 +1191,6 @@ mod gaps {
         assert_eq!(cx.qualified_base(), Some("E".to_string()));
     }
 }
-
 
 #[cfg(test)]
 mod frontier_census {
@@ -1208,7 +1261,10 @@ mod tokenize_frontier {
         ];
         for src in cases {
             let got = CursorAst::at(src, src.len());
-            assert!(got.is_some(), "must classify (Some) for broken tail: {src:?}");
+            assert!(
+                got.is_some(),
+                "must classify (Some) for broken tail: {src:?}"
+            );
         }
     }
 }
@@ -1223,7 +1279,9 @@ mod type_position_matrix {
     fn classify(src: &str) -> bool {
         let at = src.find('|').expect("mark the cursor with `|`");
         let cleaned: String = src[..at].to_string() + &src[at + 1..];
-        CursorAst::at(&cleaned, at).expect("classifiable").is_type_position()
+        CursorAst::at(&cleaned, at)
+            .expect("classifiable")
+            .is_type_position()
     }
 
     #[test]
@@ -1234,9 +1292,18 @@ mod type_position_matrix {
         assert!(classify("fn f() -> F| {}"), "return type");
         assert!(classify("struct S { field: F| }"), "struct field type");
         assert!(classify("global g: F|"), "global annotation");
-        assert!(classify("fn t() {\n  let v: Vec<F|>\n}"), "generic argument");
-        assert!(classify("fn t() {\n  let m: Map<K, V|>\n}"), "later generic argument");
-        assert!(classify("fn t(y: int) {\n  let x = y as F|\n}"), "type cast");
+        assert!(
+            classify("fn t() {\n  let v: Vec<F|>\n}"),
+            "generic argument"
+        );
+        assert!(
+            classify("fn t() {\n  let m: Map<K, V|>\n}"),
+            "later generic argument"
+        );
+        assert!(
+            classify("fn t(y: int) {\n  let x = y as F|\n}"),
+            "type cast"
+        );
         assert!(classify("fn t() {\n  let a: [F|]\n}"), "array type element");
         assert!(classify("enum E { V(F|) }"), "tuple-variant payload");
     }
@@ -1245,14 +1312,26 @@ mod type_position_matrix {
     fn expression_positions() {
         assert!(!classify("fn t() {\n  let x = F|\n}"), "rhs of assignment");
         assert!(!classify("fn t() -> int {\n  return F|\n}"), "return value");
-        assert!(!classify("fn foo(n: int) {}\nfn t() {\n  foo(F|)\n}"), "call argument");
+        assert!(
+            !classify("fn foo(n: int) {}\nfn t() {\n  foo(F|)\n}"),
+            "call argument"
+        );
         assert!(
             !classify("struct Point { x: int }\nfn t() {\n  let p = Point { x: F| }\n}"),
             "struct-literal field value"
         );
-        assert!(!classify("fn t() {\n  let a = [F|]\n}"), "array literal element");
-        assert!(!classify("fn t(x: int) {\n  if x == F| {}\n}"), "comparison rhs");
-        assert!(!classify("fn t(v: int) {\n  match v { F| }\n}"), "match arm pattern");
+        assert!(
+            !classify("fn t() {\n  let a = [F|]\n}"),
+            "array literal element"
+        );
+        assert!(
+            !classify("fn t(x: int) {\n  if x == F| {}\n}"),
+            "comparison rhs"
+        );
+        assert!(
+            !classify("fn t(v: int) {\n  match v { F| }\n}"),
+            "match arm pattern"
+        );
         assert!(
             !classify("enum SpellState { Idle }\nfn t() {\n  let s = SpellState::F|\n}"),
             "after scope resolution"

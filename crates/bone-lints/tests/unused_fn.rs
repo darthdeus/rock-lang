@@ -44,7 +44,11 @@ fn fn_passed_as_value_is_not_flagged() {
     // Missing this false-flags every callback in the codebase.
     let src = "fn take(f: fn() -> ()) {}\n\
                fn main() {\n    take(cb)\n}\nfn cb() {}";
-    assert!(names(src).is_empty(), "cb is passed as a value, must not flag: got {:?}", names(src));
+    assert!(
+        names(src).is_empty(),
+        "cb is passed as a value, must not flag: got {:?}",
+        names(src)
+    );
 }
 
 #[test]
@@ -62,13 +66,19 @@ fn test_annotated_fn_is_a_root() {
 #[test]
 fn extern_fn_is_a_root() {
     let src = "extern fn c_thing() -> int";
-    assert!(names(src).is_empty(), "extern fn is called by name from FFI");
+    assert!(
+        names(src).is_empty(),
+        "extern fn is called by name from FFI"
+    );
 }
 
 #[test]
 fn nomangle_fn_is_a_root() {
     let src = "@nomangle\nfn called_from_lua() {}";
-    assert!(names(src).is_empty(), "@nomangle fn is called by original name from inline lua");
+    assert!(
+        names(src).is_empty(),
+        "@nomangle fn is called by original name from inline lua"
+    );
 }
 
 #[test]
@@ -90,7 +100,11 @@ fn fn_called_from_global_initializer_is_not_flagged() {
 #[test]
 fn allow_comment_above_suppresses() {
     let src = "fn main() {}\n// rock: allow(unused_fn)\nfn dead() {}";
-    assert_eq!(names(src), vec!["dead".to_string()], "raw finding still exists");
+    assert_eq!(
+        names(src),
+        vec!["dead".to_string()],
+        "raw finding still exists"
+    );
     let ws = semantic_pass(&mut [parse(src)]).expect("typechecks");
     assert!(
         filter_suppressed(unused_fns(&ws), src).is_empty(),
@@ -154,13 +168,21 @@ fn pure_alone_is_not_a_root() {
     // `@pure` describes how the fn compiles, not how it is entered. Rooting on
     // "has any annotation" would silently exempt every `@pure`/`@inline` helper.
     let src = "fn main() {}\n@pure\nfn dead(x: int) -> int {\n    return x\n}";
-    assert_eq!(names(src), vec!["dead".to_string()], "@pure says nothing about reachability");
+    assert_eq!(
+        names(src),
+        vec!["dead".to_string()],
+        "@pure says nothing about reachability"
+    );
 }
 
 #[test]
 fn inline_alone_is_not_a_root() {
     let src = "fn main() {}\n@inline inline(lua) fn dead() = \"\"";
-    assert_eq!(names(src), vec!["dead".to_string()], "@inline says nothing about reachability");
+    assert_eq!(
+        names(src),
+        vec!["dead".to_string()],
+        "@inline says nothing about reachability"
+    );
 }
 
 #[test]
@@ -168,7 +190,11 @@ fn a_decorator_is_still_a_root() {
     // A user `deco`'s machinery invokes the target, so it is entered from
     // outside the call graph -- unlike the implementation annotations above.
     let src = "deco init track {\n}\n\nfn main() {}\n@track\nfn hooked() {}";
-    assert!(names(src).is_empty(), "a decorated fn is a root: got {:?}", names(src));
+    assert!(
+        names(src).is_empty(),
+        "a decorated fn is a root: got {:?}",
+        names(src)
+    );
 }
 
 #[test]

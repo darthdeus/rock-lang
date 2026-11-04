@@ -1,17 +1,25 @@
 use std::time::Duration;
 
-pub fn run_lua_code(code: &str) -> std::result::Result<rock_host::lua_runner::LuaRun, rock_core::CompilerError> {
+pub fn run_lua_code(
+    code: &str,
+) -> std::result::Result<rock_host::lua_runner::LuaRun, rock_core::CompilerError> {
     run_lua_code_with_timeout(code, Some(Duration::from_millis(1800)))
 }
 
-pub fn run_lua_code_with_timeout(code: &str, timeout: Option<Duration>) -> std::result::Result<rock_host::lua_runner::LuaRun, rock_core::CompilerError> {
+pub fn run_lua_code_with_timeout(
+    code: &str,
+    timeout: Option<Duration>,
+) -> std::result::Result<rock_host::lua_runner::LuaRun, rock_core::CompilerError> {
     let command = rock_host::project::build_luajit_stdin_command();
-    let command = (crate::registry::RuntimeServices::registered().runtime_command)(command, crate::registry::RuntimeProcess::LuaStdin);
+    let command = (crate::registry::RuntimeServices::registered().runtime_command)(
+        command,
+        crate::registry::RuntimeProcess::LuaStdin,
+    );
     rock_host::lua_runner::run_lua_code_with_command(command, code, timeout)
 }
 
-use anyhow::Result;
 use crate::skull_backend::GameProgram;
+use anyhow::Result;
 
 /// Run an ordinary emitted program through the captured stdin evaluator.
 pub fn run_lua_program(lua: &GameProgram, emits_main: bool) -> Result<()> {

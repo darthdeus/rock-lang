@@ -1,4 +1,3 @@
-
 const GATE: &str = r#"
 inline(lua) fn plus_one(x: int) -> int = """return x + 1"""
 inline(js) fn plus_one(x: int) -> int = """return x + 1"""
@@ -31,7 +30,10 @@ fn run(src: &str, name: &str) -> (String, bool) {
         .args(["run", path.to_str().unwrap()])
         .output()
         .expect("spawn rock");
-    (String::from_utf8_lossy(&out.stdout).into_owned(), out.status.success())
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        out.status.success(),
+    )
 }
 
 #[test]

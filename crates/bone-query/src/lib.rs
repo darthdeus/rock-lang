@@ -10,7 +10,6 @@
 //!
 //! bone remains the pure engine; this crate consumes its public pipeline.
 
-
 pub mod modules_scope;
 pub mod package_aliases;
 pub mod query;
@@ -22,7 +21,7 @@ mod cursor_context;
 pub mod invariants;
 mod rank_key;
 pub use backend::*;
-pub use completion::match_policy::{match_policy, set_match_policy, MatchPolicy};
+pub use completion::match_policy::{MatchPolicy, match_policy, set_match_policy};
 pub use rank_key::explain_sort_text;
 
 mod ctags;

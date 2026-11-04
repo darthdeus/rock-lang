@@ -56,7 +56,11 @@ pub fn global_storage_keys(
             let names = physical_leaf_names(&plan, global.name);
             let multi_leaf = names.len() != 1;
             for (index, name) in names.into_iter().enumerate() {
-                let leaf = if multi_leaf { format!("leaf{index}") } else { "value".to_string() };
+                let leaf = if multi_leaf {
+                    format!("leaf{index}")
+                } else {
+                    "value".to_string()
+                };
                 if let Some(old) = keys.insert(name, storage_key(&identity, &leaf)) {
                     return Err(format!(
                         "global `{identity}` leaf `{name}` is already owned by {old}"
@@ -108,7 +112,9 @@ pub fn global_layout_id(ws: &Workspace, scx: &ScalarCtx) -> Result<String, Strin
             .map(|leaf| format!("{}:{}:{}", leaf.path, leaf.cty, leaf.byte_off))
             .collect::<Vec<_>>()
             .join(",");
-        rows.push(format!("value:{name};size={size};align={align};leaves=[{leaves}]"));
+        rows.push(format!(
+            "value:{name};size={size};align={align};leaves=[{leaves}]"
+        ));
     }
     rows.sort();
     let mut hash = 0xcbf29ce484222325u64;
@@ -136,8 +142,15 @@ pub fn static_cell_storage_keys(
     if cell.site.is_none() {
         return Err(format!("static `{}` has no source site", cell.cell));
     }
-    let identity = static_identity(&owner.logical_key(ws, interner), cell.logical_name, cell.ordinal);
-    Ok((storage_key(&identity, "value"), storage_key(&identity, "done")))
+    let identity = static_identity(
+        &owner.logical_key(ws, interner),
+        cell.logical_name,
+        cell.ordinal,
+    );
+    Ok((
+        storage_key(&identity, "value"),
+        storage_key(&identity, "done"),
+    ))
 }
 
 /// The storage key of every value cell and done-flag among `cells`, by cell
@@ -150,7 +163,8 @@ pub fn static_storage_slots<'a>(
     let mut slots = BTreeMap::new();
     for cell in cells {
         let (value, done) = static_cell_storage_keys(ws, interner, cell)?;
-        if slots.insert(cell.cell, value).is_some() || slots.insert(cell.done_flag, done).is_some() {
+        if slots.insert(cell.cell, value).is_some() || slots.insert(cell.done_flag, done).is_some()
+        {
             return Err(format!("duplicate static storage slot for `{}`", cell.cell));
         }
     }

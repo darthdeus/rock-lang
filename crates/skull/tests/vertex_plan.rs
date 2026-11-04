@@ -17,7 +17,7 @@
 use crate::common::ws_of;
 use skull_mir::gpu_layout::AttrKind;
 use skull_mir::lower::RepArena;
-use skull_mir::vertex_plan::{vertex_plan, AttrSlot, VertexPlan};
+use skull_mir::vertex_plan::{AttrSlot, VertexPlan, vertex_plan};
 use ustr::Ustr;
 
 // `ws_of` is a bare single-module workspace (no stdlib), and `attr_kind`
@@ -128,8 +128,13 @@ fn an_integer_attribute_rejects_the_float_unit_form() {
         .expect("int is a valid attribute kind");
     assert_eq!(p.slots[1].kind, AttrKind::I32);
 
-    let err = p.float_unit_sizes().expect_err("the float path must not accept an int attribute");
-    assert!(err.contains("id"), "the rejection must name the offending field, got: {err}");
+    let err = p
+        .float_unit_sizes()
+        .expect_err("the float path must not accept an int attribute");
+    assert!(
+        err.contains("id"),
+        "the rejection must name the offending field, got: {err}"
+    );
 
     // The all-float sibling still passes, so the rejection is about the int and
     // not about the form itself.
@@ -175,8 +180,14 @@ fn a_slot_off_its_cumulative_position_rejects_the_float_unit_view() {
     let err = synthetic
         .float_unit_sizes()
         .expect_err("a slot off its cumulative position must not yield a float-unit view");
-    assert!(err.contains("rot"), "the rejection must name the field, got: {err}");
-    assert!(err.contains("Synthetic"), "the rejection must name the struct, got: {err}");
+    assert!(
+        err.contains("rot"),
+        "the rejection must name the field, got: {err}"
+    );
+    assert!(
+        err.contains("Synthetic"),
+        "the rejection must name the struct, got: {err}"
+    );
     assert!(
         synthetic.float_unit_stride().is_err(),
         "the stride half of the same view must reject too, or a caller taking only \
@@ -217,7 +228,10 @@ fn trailing_padding_rejects_the_float_unit_view() {
     let err = padded
         .float_unit_sizes()
         .expect_err("attributes that do not span the stride must not yield a float-unit view");
-    assert!(err.contains("Padded"), "the rejection must name the struct, got: {err}");
+    assert!(
+        err.contains("Padded"),
+        "the rejection must name the struct, got: {err}"
+    );
     assert!(
         padded.float_unit_stride().is_err(),
         "the stride half must reject too -- it is the half that would be believed"
@@ -225,8 +239,10 @@ fn trailing_padding_rejects_the_float_unit_view() {
 
     // Positive control: a plan whose attributes exactly span its stride.
     let ws = ws_of(SHAPES);
-    assert!(vertex_plan(&ws, &RepArena::default(), Ustr::from("Grass"))
-        .expect("Grass")
-        .float_unit_sizes()
-        .is_ok());
+    assert!(
+        vertex_plan(&ws, &RepArena::default(), Ustr::from("Grass"))
+            .expect("Grass")
+            .float_unit_sizes()
+            .is_ok()
+    );
 }

@@ -23,7 +23,6 @@
 //! `tests/nobox_concrete_nullable_ops.rock`; the positive value coverage is
 //! `tests/nobox_nullable_merge.rock`.
 
-
 /// The reported repro, `materialize` and all.
 const PHI_WITH_MATERIALIZE: &str = r#"
 nobox value P { x: int, y: int }
@@ -140,5 +139,8 @@ fn a_nullable_nobox_local_with_no_phi_reports_absent() {
 /// `return null` is correct on BOTH paths.
 #[test]
 fn a_statement_position_return_null_reports_absent() {
-    assert_eq!(run(EARLY_RETURN_NULL, "phi_early_return"), "absent=true\npresent=5");
+    assert_eq!(
+        run(EARLY_RETURN_NULL, "phi_early_return"),
+        "absent=true\npresent=5"
+    );
 }

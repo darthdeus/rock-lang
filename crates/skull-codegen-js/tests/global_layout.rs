@@ -43,5 +43,8 @@ fn lua_and_js_open_the_same_global_layout() {
     let lua = skull::mir_emit::emit_workspace_mir(&ws, mid).expect("lua emit");
     let js = skull_codegen_js::emit::emit_program(&ws, mid).expect("js emit");
     assert_eq!(lua.global_layout, js.global_layout);
-    assert!(js.program.contains(&format!("__rock_globals_open({:?});", js.global_layout)));
+    assert!(
+        js.program
+            .contains(&format!("__rock_globals_open({:?});", js.global_layout))
+    );
 }

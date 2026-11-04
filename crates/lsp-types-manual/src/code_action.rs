@@ -39,7 +39,8 @@ pub struct CodeActionClientCapabilities {
     pub honors_change_annotations: Option<bool>,
 }
 
-impl_lsp_struct!(CodeActionClientCapabilities,
+impl_lsp_struct!(
+    CodeActionClientCapabilities,
     required {},
     optional {
         dynamic_registration: bool = "dynamicRegistration",
@@ -67,8 +68,11 @@ pub struct CodeActionLiteralSupport {
     pub code_action_kind: CodeActionKindLiteralSupport,
 }
 
-impl_lsp_struct!(CodeActionLiteralSupport,
-    required { code_action_kind: CodeActionKindLiteralSupport = "codeActionKind" },
+impl_lsp_struct!(
+    CodeActionLiteralSupport,
+    required {
+        code_action_kind: CodeActionKindLiteralSupport = "codeActionKind"
+    },
     optional {}
 );
 
@@ -98,7 +102,8 @@ pub struct CodeActionParams {
     pub partial_result_params: PartialResultParams,
 }
 
-impl_lsp_struct!(CodeActionParams,
+impl_lsp_struct!(
+    CodeActionParams,
     required {
         text_document: TextDocumentIdentifier = "textDocument",
         range: Range = "range",
@@ -265,8 +270,11 @@ pub struct CodeActionDisabled {
     pub reason: String,
 }
 
-impl_lsp_struct!(CodeActionDisabled,
-    required { reason: String = "reason" },
+impl_lsp_struct!(
+    CodeActionDisabled,
+    required {
+        reason: String = "reason"
+    },
     optional {}
 );
 

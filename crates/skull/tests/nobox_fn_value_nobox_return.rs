@@ -82,7 +82,10 @@ fn main() {
 fn safe_nav_function_field_call_preserves_nobox_result_lanes() {
     let lua = emit_module(SAFE_NAV_FN_FIELD_NBOX_RETURN);
     assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "fnfield_safe_nobox_multi_return"),
+        run_luajit(
+            &format!("{lua}\nmain()\n"),
+            "fnfield_safe_nobox_multi_return"
+        ),
         "true\nfalse"
     );
 }

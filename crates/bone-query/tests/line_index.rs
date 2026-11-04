@@ -4,7 +4,7 @@
 //! equivalence across line shapes, multibyte glyphs, boundary + mid-char + past-
 //! EOF offsets.
 
-use bone_query::{offset_to_position, LineIndex};
+use bone_query::{LineIndex, offset_to_position};
 
 #[test]
 fn line_index_matches_offset_to_position() {

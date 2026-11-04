@@ -13,19 +13,19 @@
 //! A configured preferred slot is outside the pool. A process must not hold a slot while it
 //! waits on another process that may need one.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
+use bone_core::prelude::Instant;
 #[cfg(test)]
 use std::cell::RefCell;
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{Seek, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use bone_core::prelude::Instant;
 
 pub const SLOT_DIR_ENV: &str = "ROCK_COMPILE_SLOT_DIR";
 pub const SLOTS_ENV: &str = "ROCK_COMPILE_SLOTS";
 pub const CLASS_ENV: &str = "ROCK_COMPILE_CLASS";
-pub use rock_host::process_management::{report_spawn_phase, SPAWN_PHASE_FILE_ENV};
+pub use rock_host::process_management::{SPAWN_PHASE_FILE_ENV, report_spawn_phase};
 
 #[cfg(test)]
 const AUTHOR_SLOT: &str = "priority-0";
@@ -51,14 +51,21 @@ pub struct SlotConfig {
 const COMPILE_PEAK_MIB: u64 = 4608;
 #[cfg(test)]
 #[derive(Clone, Copy)]
-pub(crate) enum CompileClass { Interactive, Batch }
+pub(crate) enum CompileClass {
+    Interactive,
+    Batch,
+}
 
 #[cfg(test)]
 impl SlotConfig {
     pub(crate) fn for_compiles(dir: &Path, compiles: u64, class: CompileClass) -> Self {
-        Self { dir: dir.to_path_buf(), pool_mib: compiles * COMPILE_PEAK_MIB,
+        Self {
+            dir: dir.to_path_buf(),
+            pool_mib: compiles * COMPILE_PEAK_MIB,
             full_compile_mib: COMPILE_PEAK_MIB,
-            preferred_slot: Some(AUTHOR_SLOT), try_preferred_slot: matches!(class, CompileClass::Interactive) }
+            preferred_slot: Some(AUTHOR_SLOT),
+            try_preferred_slot: matches!(class, CompileClass::Interactive),
+        }
     }
 }
 
@@ -129,7 +136,9 @@ impl Drop for CompileSlot {
                 }
             }
             // The unlock below still frees the slot; the next caller removes the file.
-            Err(error) => log::warn!(target: "COMPILE", "releasing compile slot {}: {error:#}", held.path.display()),
+            Err(error) => {
+                log::warn!(target: "COMPILE", "releasing compile slot {}: {error:#}", held.path.display())
+            }
         }
         // Closing releases the lock too; unlocking first also covers a
         // descriptor that leaked into a child.
@@ -151,7 +160,10 @@ pub fn acquire(what: &str) -> Result<CompileSlot> {
         Some(config) => acquire_with(&config, what)?,
         None => CompileSlot {
             held: None,
-            acquisition: SlotAcquisition { slot: None, waited: Duration::ZERO },
+            acquisition: SlotAcquisition {
+                slot: None,
+                waited: Duration::ZERO,
+            },
             marks_thread: false,
         },
     };
@@ -185,14 +197,24 @@ pub(crate) fn acquire_with(config: &SlotConfig, what: &str) -> Result<CompileSlo
     acquire_reserving(config, what, reserve, peak_key)
 }
 
-fn acquire_reserving(config: &SlotConfig, what: &str, reserve_mib: u64, peak_key: Option<String>) -> Result<CompileSlot> {
+fn acquire_reserving(
+    config: &SlotConfig,
+    what: &str,
+    reserve_mib: u64,
+    peak_key: Option<String>,
+) -> Result<CompileSlot> {
     report_spawn_phase("slot-wait");
     let started = Instant::now();
     fs_err::create_dir_all(&config.dir).context("creating the compile slot directory")?;
     let reserve_mib = reserve_mib.min(config.pool_mib);
     let peak_at_admission = peak_key.as_ref().and_then(|_| process_peak_mib());
     let held = |file, path: PathBuf, remove| Held {
-        file, path, remove, dir: config.dir.clone(), peak_key: peak_key.clone(), peak_at_admission,
+        file,
+        path,
+        remove,
+        dir: config.dir.clone(),
+        peak_key: peak_key.clone(),
+        peak_at_admission,
     };
     if let Some(preferred_slot) = config.preferred_slot.filter(|_| config.try_preferred_slot) {
         let path = config.dir.join(preferred_slot);
@@ -206,13 +228,17 @@ fn acquire_reserving(config: &SlotConfig, what: &str, reserve_mib: u64, peak_key
                 report_spawn_phase("compile");
                 return Ok(CompileSlot {
                     held: Some(held(file, path, false)),
-                    acquisition: SlotAcquisition { slot: Some(preferred_slot.to_string()), waited: started.elapsed() },
+                    acquisition: SlotAcquisition {
+                        slot: Some(preferred_slot.to_string()),
+                        waited: started.elapsed(),
+                    },
                     marks_thread: false,
                 });
             }
             Err(TryLockError::WouldBlock) => {}
             Err(TryLockError::Error(error)) => {
-                return Err(error).with_context(|| format!("locking compile slot {}", path.display()));
+                return Err(error)
+                    .with_context(|| format!("locking compile slot {}", path.display()));
             }
         }
     }
@@ -225,8 +251,17 @@ fn acquire_reserving(config: &SlotConfig, what: &str, reserve_mib: u64, peak_key
         let busy = {
             let _guard = QueueGuard::lock(&config.dir)?;
             let pool = PoolState::scan(config)?;
-            let position = pool.queue.iter().position(|entry| entry.name == ticket.name)
-                .ok_or_else(|| anyhow!("compile slot ticket {} vanished from {}", ticket.name, config.dir.display()))?;
+            let position = pool
+                .queue
+                .iter()
+                .position(|entry| entry.name == ticket.name)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "compile slot ticket {} vanished from {}",
+                        ticket.name,
+                        config.dir.display()
+                    )
+                })?;
             if position < admitted_prefix(config.pool_mib, pool.held_mib(), &pool.queue) {
                 let name = format!("{HELD_PREFIX}{}", ticket.name);
                 let (file, path) = ticket.admit(&config.dir.join(&name), what, reserve_mib)?;
@@ -240,7 +275,10 @@ fn acquire_reserving(config: &SlotConfig, what: &str, reserve_mib: u64, peak_key
                 report_spawn_phase("compile");
                 return Ok(CompileSlot {
                     held: Some(held(file, path, true)),
-                    acquisition: SlotAcquisition { slot: Some(name), waited },
+                    acquisition: SlotAcquisition {
+                        slot: Some(name),
+                        waited,
+                    },
                     marks_thread: false,
                 });
             }
@@ -269,11 +307,14 @@ fn acquire_reserving(config: &SlotConfig, what: &str, reserve_mib: u64, peak_key
 /// ones, and small requests share the pool whenever they are next in line.
 fn admitted_prefix(pool_mib: u64, held_mib: u64, queue: &[Entry]) -> usize {
     let mut used = held_mib;
-    queue.iter().take_while(|entry| {
-        let fits = used + entry.reserve_mib <= pool_mib;
-        used += entry.reserve_mib;
-        fits
-    }).count()
+    queue
+        .iter()
+        .take_while(|entry| {
+            let fits = used + entry.reserve_mib <= pool_mib;
+            used += entry.reserve_mib;
+            fits
+        })
+        .count()
 }
 
 /// The queue lock: every ticket, admission, release and stale removal happens
@@ -285,7 +326,8 @@ impl QueueGuard {
         let queue = dir.join(QUEUE_DIR);
         fs_err::create_dir_all(&queue).context("creating the compile slot queue")?;
         let file = open_slot(&queue.join("guard"))?;
-        file.lock().with_context(|| format!("locking the compile slot queue in {}", queue.display()))?;
+        file.lock()
+            .with_context(|| format!("locking the compile slot queue in {}", queue.display()))?;
         Ok(Self(file))
     }
 }
@@ -310,10 +352,17 @@ impl Ticket {
     fn enqueue(dir: &Path, what: &str, reserve_mib: u64) -> Result<Self> {
         let seq_path = dir.join(QUEUE_DIR).join("seq");
         let seq = match std::fs::read_to_string(&seq_path) {
-            Ok(text) => text.trim().parse::<u64>()
-                .with_context(|| format!("reading compile slot sequence {}: `{}`", seq_path.display(), text.trim()))?,
+            Ok(text) => text.trim().parse::<u64>().with_context(|| {
+                format!(
+                    "reading compile slot sequence {}: `{}`",
+                    seq_path.display(),
+                    text.trim()
+                )
+            })?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
-            Err(error) => return Err(error).with_context(|| format!("reading {}", seq_path.display())),
+            Err(error) => {
+                return Err(error).with_context(|| format!("reading {}", seq_path.display()));
+            }
         } + 1;
         // Replaced, not rewritten in place: a kill between truncate and write
         // would leave an empty sequence that every later enqueue refuses.
@@ -322,8 +371,13 @@ impl Ticket {
         let name = format!("{seq:012}");
         let path = dir.join(QUEUE_DIR).join(&name);
         let file = open_slot(&path)?;
-        file.lock().with_context(|| format!("locking compile slot ticket {}", path.display()))?;
-        let mut ticket = Self { name, path, file: Some(file) };
+        file.lock()
+            .with_context(|| format!("locking compile slot ticket {}", path.display()))?;
+        let mut ticket = Self {
+            name,
+            path,
+            file: Some(file),
+        };
         let file = ticket.file.as_mut().expect("just set");
         write_holder(file, what, reserve_mib, std::env::args())
             .with_context(|| format!("writing compile slot ticket {}", ticket.path.display()))?;
@@ -338,7 +392,8 @@ impl Ticket {
         }
         if let Err(error) = std::fs::rename(&self.path, held) {
             self.file = Some(file);
-            return Err(error).with_context(|| format!("moving compile slot ticket to {}", held.display()));
+            return Err(error)
+                .with_context(|| format!("moving compile slot ticket to {}", held.display()));
         }
         Ok((file, held.to_path_buf()))
     }
@@ -373,28 +428,49 @@ struct PoolState {
 
 impl PoolState {
     fn scan(config: &SlotConfig) -> Result<Self> {
-        let SlotConfig { dir, pool_mib, full_compile_mib, preferred_slot, .. } = config;
+        let SlotConfig {
+            dir,
+            pool_mib,
+            full_compile_mib,
+            preferred_slot,
+            ..
+        } = config;
         let pool_mib = *pool_mib;
-        let live = |dir: &Path, owned: &dyn Fn(&str) -> bool, removable: &dyn Fn(&str) -> bool| -> Result<Vec<Entry>> {
+        let live = |dir: &Path,
+                    owned: &dyn Fn(&str) -> bool,
+                    removable: &dyn Fn(&str) -> bool|
+         -> Result<Vec<Entry>> {
             let mut entries = Vec::new();
             for item in fs_err::read_dir(dir)? {
                 let item = item?;
                 let name = item.file_name().to_string_lossy().into_owned();
                 // Dot files include the AppleDouble `._*` files macOS writes on ExFAT.
-                if name.starts_with('.') || !owned(&name) || Some(name.as_str()) == *preferred_slot || !item.file_type()?.is_file() {
+                if name.starts_with('.')
+                    || !owned(&name)
+                    || Some(name.as_str()) == *preferred_slot
+                    || !item.file_type()?.is_file()
+                {
                     continue;
                 }
                 match live_record(&item.path())? {
                     Some(record) => {
-                        let reserve_mib = record_reserve(&record).unwrap_or(*full_compile_mib).min(pool_mib);
-                        entries.push(Entry { name, reserve_mib, record });
+                        let reserve_mib = record_reserve(&record)
+                            .unwrap_or(*full_compile_mib)
+                            .min(pool_mib);
+                        entries.push(Entry {
+                            name,
+                            reserve_mib,
+                            record,
+                        });
                     }
                     None if removable(&name) => {
                         log::warn!(target: "COMPILE", "removing compile slot file {} of a dead owner ({})",
                             item.path().display(), std::fs::read_to_string(item.path()).unwrap_or_default().trim());
                         if let Err(error) = std::fs::remove_file(item.path()) {
                             if error.kind() != std::io::ErrorKind::NotFound {
-                                return Err(error).with_context(|| format!("removing {}", item.path().display()));
+                                return Err(error).with_context(|| {
+                                    format!("removing {}", item.path().display())
+                                });
                             }
                         }
                     }
@@ -406,9 +482,15 @@ impl PoolState {
             Ok(entries)
         };
         let is_ticket = |name: &str| name.len() == 12 && name.bytes().all(|b| b.is_ascii_digit());
-        let holders = live(dir, &|_| true, &|name| name.strip_prefix(HELD_PREFIX).is_some_and(is_ticket))?;
+        let holders = live(dir, &|_| true, &|name| {
+            name.strip_prefix(HELD_PREFIX).is_some_and(is_ticket)
+        })?;
         let queue = live(&dir.join(QUEUE_DIR), &is_ticket, &|_| true)?;
-        Ok(Self { pool_mib, holders, queue })
+        Ok(Self {
+            pool_mib,
+            holders,
+            queue,
+        })
     }
 
     fn held_mib(&self) -> u64 {
@@ -416,12 +498,23 @@ impl PoolState {
     }
 
     fn describe(&self, position: usize) -> String {
-        let holders = self.holders.iter()
+        let holders = self
+            .holders
+            .iter()
             .map(|holder| format!("{} ({})", holder.name, holder.record.trim()))
             .collect::<Vec<_>>();
-        format!("{}; {} of {} MiB reserved; queue position {} of {}",
-            if holders.is_empty() { "no holders".to_string() } else { holders.join("; ") },
-            self.held_mib(), self.pool_mib, position + 1, self.queue.len())
+        format!(
+            "{}; {} of {} MiB reserved; queue position {} of {}",
+            if holders.is_empty() {
+                "no holders".to_string()
+            } else {
+                holders.join("; ")
+            },
+            self.held_mib(),
+            self.pool_mib,
+            position + 1,
+            self.queue.len()
+        )
     }
 }
 
@@ -431,20 +524,29 @@ fn live_record(path: &Path) -> Result<Option<String>> {
     let file = match OpenOptions::new().read(true).open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error).with_context(|| format!("opening compile slot {}", path.display())),
+        Err(error) => {
+            return Err(error).with_context(|| format!("opening compile slot {}", path.display()));
+        }
     };
     match file.try_lock() {
         Ok(()) => {
-            file.unlock().with_context(|| format!("unlocking probed compile slot {}", path.display()))?;
+            file.unlock()
+                .with_context(|| format!("unlocking probed compile slot {}", path.display()))?;
             Ok(None)
         }
-        Err(TryLockError::WouldBlock) => Ok(Some(std::fs::read_to_string(path).unwrap_or_default())),
-        Err(TryLockError::Error(error)) => Err(error).with_context(|| format!("probing compile slot {}", path.display())),
+        Err(TryLockError::WouldBlock) => {
+            Ok(Some(std::fs::read_to_string(path).unwrap_or_default()))
+        }
+        Err(TryLockError::Error(error)) => {
+            Err(error).with_context(|| format!("probing compile slot {}", path.display()))
+        }
     }
 }
 
 fn record_reserve(record: &str) -> Option<u64> {
-    record.split_whitespace().find_map(|field| field.strip_prefix("reserve_mib=")?.parse().ok())
+    record
+        .split_whitespace()
+        .find_map(|field| field.strip_prefix("reserve_mib=")?.parse().ok())
 }
 
 fn open_slot(path: &Path) -> Result<File> {
@@ -457,14 +559,23 @@ fn open_slot(path: &Path) -> Result<File> {
         .with_context(|| format!("opening compile slot {}", path.display()))
 }
 
-fn write_holder(file: &mut File, what: &str, reserve_mib: u64, args: impl IntoIterator<Item = String>) -> std::io::Result<()> {
+fn write_holder(
+    file: &mut File,
+    what: &str,
+    reserve_mib: u64,
+    args: impl IntoIterator<Item = String>,
+) -> std::io::Result<()> {
     let started = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| since.as_secs());
     let cmdline = crate::invocation_log::redact_var_values(args).join(" ");
     file.set_len(0)?;
     file.rewind()?;
-    writeln!(file, "pid={} start={started} for={what} reserve_mib={reserve_mib} cmd={cmdline}", std::process::id())
+    writeln!(
+        file,
+        "pid={} start={started} for={what} reserve_mib={reserve_mib} cmd={cmdline}",
+        std::process::id()
+    )
 }
 
 /// The peak-measurement key of a compile of `what`: its package name and the
@@ -475,9 +586,20 @@ fn package_key(what: &str) -> Option<String> {
     let manifest = Path::new(what).join("stick.toml");
     match rock_host::stick::StickConfig::from_path_optional(&manifest) {
         Ok(config) => config.map(|config| {
-            format!("{}.{}", config.package.name, crate::compile_measurements::command()).chars()
-                .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '_' })
-                .collect()
+            format!(
+                "{}.{}",
+                config.package.name,
+                crate::compile_measurements::command()
+            )
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect()
         }),
         Err(error) => {
             log::debug!(target: "COMPILE", "no package name for {what}, reserving a full compile: {error:#}");
@@ -492,7 +614,9 @@ fn package_key(what: &str) -> Option<String> {
 /// full compile.
 fn estimate_reserve(dir: &Path, key: Option<&str>, full_compile_mib: u64) -> u64 {
     key.and_then(|key| read_peaks(dir, key).into_iter().max())
-        .map_or(full_compile_mib, |peak| (peak + peak / 4).min(full_compile_mib))
+        .map_or(full_compile_mib, |peak| {
+            (peak + peak / 4).min(full_compile_mib)
+        })
 }
 
 fn read_peaks(dir: &Path, key: &str) -> Vec<u64> {
@@ -509,7 +633,9 @@ fn read_peaks(dir: &Path, key: &str) -> Vec<u64> {
     for line in text.lines() {
         match line.trim().parse() {
             Ok(peak) => peaks.push(peak),
-            Err(error) => log::warn!(target: "COMPILE", "ignoring compile peak `{line}` in {}: {error}", path.display()),
+            Err(error) => {
+                log::warn!(target: "COMPILE", "ignoring compile peak `{line}` in {}: {error}", path.display())
+            }
         }
     }
     peaks
@@ -519,7 +645,9 @@ fn read_peaks(dir: &Path, key: &str) -> Vec<u64> {
 /// slot was held; an earlier, larger peak bounds nothing about this compile.
 /// Called under the queue lock.
 fn record_peak(dir: &Path, key: &str, at_admission: Option<u64>, at_release: Option<u64>) {
-    let (Some(before), Some(peak)) = (at_admission, at_release) else { return };
+    let (Some(before), Some(peak)) = (at_admission, at_release) else {
+        return;
+    };
     if peak <= before {
         return;
     }
@@ -528,13 +656,17 @@ fn record_peak(dir: &Path, key: &str, at_admission: Option<u64>, at_release: Opt
     let keep = &peaks[peaks.len().saturating_sub(PEAK_SAMPLES)..];
     let text: String = keep.iter().map(|peak| format!("{peak}\n")).collect();
     let path = dir.join(PEAKS_DIR).join(key);
-    if let Err(error) = fs_err::create_dir_all(dir.join(PEAKS_DIR)).and_then(|()| fs_err::write(&path, text)) {
+    if let Err(error) =
+        fs_err::create_dir_all(dir.join(PEAKS_DIR)).and_then(|()| fs_err::write(&path, text))
+    {
         log::warn!(target: "COMPILE", "recording compile peak {peak} MiB for {key}: {error}");
     }
 }
 
 fn process_peak_mib() -> Option<u64> {
-    crate::allocator::process_memory()["peak_rss_bytes"].as_u64().map(|bytes| bytes / (1024 * 1024))
+    crate::allocator::process_memory()["peak_rss_bytes"]
+        .as_u64()
+        .map(|bytes| bytes / (1024 * 1024))
 }
 
 /// Run `compile` on a thread whose pool is full, and check it waits for the
@@ -553,8 +685,17 @@ pub(crate) fn assert_compile_waits_for_slot<T: Send + 'static>(
     });
     let ((result, acquisition), held_for) = finish_slot_waiter(held, worker, waiting);
     let acquisition = acquisition.expect("the compile took no slot");
-    assert!(acquisition.slot.as_deref().is_some_and(|slot| slot.starts_with(HELD_PREFIX)), "{acquisition:?}");
-    assert!(acquisition.waited >= held_for, "held after observing contention: {held_for:?}; {acquisition:?}");
+    assert!(
+        acquisition
+            .slot
+            .as_deref()
+            .is_some_and(|slot| slot.starts_with(HELD_PREFIX)),
+        "{acquisition:?}"
+    );
+    assert!(
+        acquisition.waited >= held_for,
+        "held after observing contention: {held_for:?}; {acquisition:?}"
+    );
     result
 }
 
@@ -587,7 +728,10 @@ pub(crate) fn finish_slot_waiter<T>(
     drop(held);
     let result = worker.join();
     observed.expect("the compile never reported slot contention");
-    assert!(!finished_while_held, "the compile ran while the pool was full");
+    assert!(
+        !finished_while_held,
+        "the compile ran while the pool was full"
+    );
     (result.unwrap(), held_for)
 }
 
@@ -602,14 +746,38 @@ mod tests {
         let path = dir.path().join("held-000000000001");
         let mut file = open_slot(&path).unwrap();
         file.lock().unwrap();
-        let args = ["rock", "package", "example", "--var", "TELEMETRY_TOKEN=holder-secret-1", "--var=OTHER=holder-secret-2"];
-        write_holder(&mut file, "package", 4608, args.iter().map(|arg| arg.to_string())).unwrap();
+        let args = [
+            "rock",
+            "package",
+            "example",
+            "--var",
+            "TELEMETRY_TOKEN=holder-secret-1",
+            "--var=OTHER=holder-secret-2",
+        ];
+        write_holder(
+            &mut file,
+            "package",
+            4608,
+            args.iter().map(|arg| arg.to_string()),
+        )
+        .unwrap();
         let record = std::fs::read_to_string(&path).unwrap();
-        assert!(!record.contains("holder-secret"), "holder record leaked a --var value: {record}");
-        assert!(record.contains("TELEMETRY_TOKEN") && record.contains("OTHER"), "holder record keeps the names: {record}");
+        assert!(
+            !record.contains("holder-secret"),
+            "holder record leaked a --var value: {record}"
+        );
+        assert!(
+            record.contains("TELEMETRY_TOKEN") && record.contains("OTHER"),
+            "holder record keeps the names: {record}"
+        );
         std::fs::create_dir(dir.path().join(QUEUE_DIR)).unwrap();
-        let busy = PoolState::scan(&pool(dir.path(), 4608)).unwrap().describe(0);
-        assert!(busy.contains("held-000000000001") && !busy.contains("holder-secret"), "{busy}");
+        let busy = PoolState::scan(&pool(dir.path(), 4608))
+            .unwrap()
+            .describe(0);
+        assert!(
+            busy.contains("held-000000000001") && !busy.contains("holder-secret"),
+            "{busy}"
+        );
     }
 
     fn config(dir: &Path, compiles: u64, class: CompileClass) -> SlotConfig {
@@ -617,7 +785,13 @@ mod tests {
     }
 
     fn pool(dir: &Path, pool_mib: u64) -> SlotConfig {
-        SlotConfig { dir: dir.to_path_buf(), pool_mib, full_compile_mib: COMPILE_PEAK_MIB, preferred_slot: Some(AUTHOR_SLOT), try_preferred_slot: false }
+        SlotConfig {
+            dir: dir.to_path_buf(),
+            pool_mib,
+            full_compile_mib: COMPILE_PEAK_MIB,
+            preferred_slot: Some(AUTHOR_SLOT),
+            try_preferred_slot: false,
+        }
     }
 
     /// Whether `name` is free right now, without waiting.
@@ -631,7 +805,8 @@ mod tests {
     }
 
     fn held_files(dir: &Path) -> Vec<String> {
-        let mut names: Vec<String> = std::fs::read_dir(dir).unwrap()
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
             .map(|item| item.unwrap().file_name().to_string_lossy().into_owned())
             .filter(|name| name.starts_with(HELD_PREFIX))
             .collect();
@@ -640,7 +815,8 @@ mod tests {
     }
 
     fn queued_tickets(dir: &Path) -> Vec<String> {
-        let mut names: Vec<String> = std::fs::read_dir(dir.join(QUEUE_DIR)).unwrap()
+        let mut names: Vec<String> = std::fs::read_dir(dir.join(QUEUE_DIR))
+            .unwrap()
             .map(|item| item.unwrap().file_name().to_string_lossy().into_owned())
             .filter(|name| name != "guard" && name != "seq")
             .collect();
@@ -653,16 +829,27 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config = config(dir.path(), 1, CompileClass::Batch);
         let first = acquire_with(&config, "first").unwrap();
-        assert_eq!(first.acquisition().slot.as_deref(), Some("held-000000000001"));
+        assert_eq!(
+            first.acquisition().slot.as_deref(),
+            Some("held-000000000001")
+        );
         let (waiter, waiting) = {
             let config = config.clone();
-            spawn_slot_waiter(move || acquire_with(&config, "second").map(|slot| slot.acquisition().clone()))
+            spawn_slot_waiter(move || {
+                acquire_with(&config, "second").map(|slot| slot.acquisition().clone())
+            })
         };
         let (second, held_for) = finish_slot_waiter(first, waiter, waiting);
         let second = second.unwrap();
         assert_eq!(second.slot.as_deref(), Some("held-000000000002"));
-        assert!(second.waited >= held_for, "held after observing contention: {held_for:?}; {second:?}");
-        assert!(held_files(dir.path()).is_empty() && queued_tickets(dir.path()).is_empty(), "released slots leave no files");
+        assert!(
+            second.waited >= held_for,
+            "held after observing contention: {held_for:?}; {second:?}"
+        );
+        assert!(
+            held_files(dir.path()).is_empty() && queued_tickets(dir.path()).is_empty(),
+            "released slots leave no files"
+        );
     }
 
     #[test]
@@ -680,14 +867,19 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(20));
                 drop(slot);
             });
-            waiting.recv_timeout(test_utils::HANG_BACKSTOP).expect("waiter never queued");
+            waiting
+                .recv_timeout(test_utils::HANG_BACKSTOP)
+                .expect("waiter never queued");
             workers.push(worker);
         }
         drop(held);
         for worker in workers {
             worker.join().unwrap();
         }
-        assert_eq!(*order.lock().unwrap(), ["first", "second", "third", "fourth"]);
+        assert_eq!(
+            *order.lock().unwrap(),
+            ["first", "second", "third", "fourth"]
+        );
     }
 
     #[test]
@@ -699,15 +891,26 @@ mod tests {
             let config = config.clone();
             // On a thread, so a pool that cannot share fails the test instead of hanging it.
             std::thread::spawn(move || {
-                let small: Vec<_> = (0..4).map(|_| acquire_reserving(&config, "small", 1000, None).unwrap()).collect();
+                let small: Vec<_> = (0..4)
+                    .map(|_| acquire_reserving(&config, "small", 1000, None).unwrap())
+                    .collect();
                 sender.send(small).unwrap();
             });
         }
-        let mut small = taken.recv_timeout(test_utils::HANG_BACKSTOP).expect("four small compiles did not fit together");
-        assert_eq!(held_files(dir.path()).len(), 4, "four small compiles hold the pool at once");
+        let mut small = taken
+            .recv_timeout(test_utils::HANG_BACKSTOP)
+            .expect("four small compiles did not fit together");
+        assert_eq!(
+            held_files(dir.path()).len(),
+            4,
+            "four small compiles hold the pool at once"
+        );
         let (waiter, waiting) = {
             let config = config.clone();
-            spawn_slot_waiter(move || acquire_reserving(&config, "fifth", 1000, None).map(|slot| slot.acquisition().clone()))
+            spawn_slot_waiter(move || {
+                acquire_reserving(&config, "fifth", 1000, None)
+                    .map(|slot| slot.acquisition().clone())
+            })
         };
         let (fifth, _) = finish_slot_waiter(small.pop().unwrap(), waiter, waiting);
         assert!(fifth.unwrap().slot.is_some());
@@ -729,11 +932,17 @@ mod tests {
                 drop(slot);
             });
             // The small request fits beside the holder, but the large one is ahead.
-            waiting.recv_timeout(test_utils::HANG_BACKSTOP).expect("waiter never queued");
+            waiting
+                .recv_timeout(test_utils::HANG_BACKSTOP)
+                .expect("waiter never queued");
             workers.push(worker);
         }
         std::thread::sleep(Duration::from_millis(300));
-        assert!(order.lock().unwrap().is_empty(), "a waiter passed the head: {:?}", order.lock().unwrap());
+        assert!(
+            order.lock().unwrap().is_empty(),
+            "a waiter passed the head: {:?}",
+            order.lock().unwrap()
+        );
         drop(held);
         for worker in workers {
             worker.join().unwrap();
@@ -749,17 +958,32 @@ mod tests {
         barrier.lock().unwrap();
         let (waiter, waiting) = {
             let config = config.clone();
-            spawn_slot_waiter(move || acquire_reserving(&config, "small", 1000, None).map(|slot| slot.acquisition().clone()))
+            spawn_slot_waiter(move || {
+                acquire_reserving(&config, "small", 1000, None)
+                    .map(|slot| slot.acquisition().clone())
+            })
         };
         let barrier = CompileSlot {
-            held: Some(Held { file: barrier, path: dir.path().join("batch-0"), remove: false,
-                dir: dir.path().to_path_buf(), peak_key: None, peak_at_admission: None }),
-            acquisition: SlotAcquisition { slot: None, waited: Duration::ZERO },
+            held: Some(Held {
+                file: barrier,
+                path: dir.path().join("batch-0"),
+                remove: false,
+                dir: dir.path().to_path_buf(),
+                peak_key: None,
+                peak_at_admission: None,
+            }),
+            acquisition: SlotAcquisition {
+                slot: None,
+                waited: Duration::ZERO,
+            },
             marks_thread: false,
         };
         let (small, _) = finish_slot_waiter(barrier, waiter, waiting);
         assert!(small.unwrap().slot.is_some());
-        assert!(dir.path().join("batch-0").exists(), "an unlocked foreign file is left alone");
+        assert!(
+            dir.path().join("batch-0").exists(),
+            "an unlocked foreign file is left alone"
+        );
     }
 
     #[test]
@@ -775,22 +999,37 @@ mod tests {
         let ticket = Ticket::enqueue(dir.path(), "compile", 0).unwrap();
         assert_eq!(ticket.name, "000000000002");
         assert_eq!(std::fs::read_to_string(&seq).unwrap(), "2\n");
-        assert_eq!(std::fs::read_to_string(&previous).unwrap(), "1\n", "seq was rewritten in place");
+        assert_eq!(
+            std::fs::read_to_string(&previous).unwrap(),
+            "1\n",
+            "seq was rewritten in place"
+        );
     }
 
     #[test]
     fn files_outside_the_naming_scheme_are_never_removed() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join(QUEUE_DIR)).unwrap();
-        let foreign = ["._held-000000000001", "queue/._guard", "queue/notes", "held-notes"];
+        let foreign = [
+            "._held-000000000001",
+            "queue/._guard",
+            "queue/notes",
+            "held-notes",
+        ];
         for name in foreign {
             std::fs::write(dir.path().join(name), "").unwrap();
         }
         std::fs::write(dir.path().join("queue/000000000001"), "pid=1").unwrap();
         let pool = PoolState::scan(&pool(dir.path(), 4608)).unwrap();
         assert!(pool.holders.is_empty() && pool.queue.is_empty());
-        assert!(foreign.iter().all(|name| dir.path().join(name).exists()), "a foreign file was removed");
-        assert!(!dir.path().join("queue/000000000001").exists(), "a dead ticket stays");
+        assert!(
+            foreign.iter().all(|name| dir.path().join(name).exists()),
+            "a foreign file was removed"
+        );
+        assert!(
+            !dir.path().join("queue/000000000001").exists(),
+            "a dead ticket stays"
+        );
     }
 
     #[test]
@@ -801,12 +1040,23 @@ mod tests {
         assert!(slot_is_free(dir.path(), AUTHOR_SLOT));
         let (waiter, waiting) = {
             let config = config.clone();
-            spawn_slot_waiter(move || acquire_with(&config, "batch").map(|slot| slot.acquisition().clone()))
+            spawn_slot_waiter(move || {
+                acquire_with(&config, "batch").map(|slot| slot.acquisition().clone())
+            })
         };
         let (acquisition, held_for) = finish_slot_waiter(held, waiter, waiting);
         let acquisition = acquisition.unwrap();
-        assert!(acquisition.slot.as_deref().is_some_and(|slot| slot.starts_with(HELD_PREFIX)), "{acquisition:?}");
-        assert!(acquisition.waited >= held_for, "held after observing contention: {held_for:?}; {acquisition:?}");
+        assert!(
+            acquisition
+                .slot
+                .as_deref()
+                .is_some_and(|slot| slot.starts_with(HELD_PREFIX)),
+            "{acquisition:?}"
+        );
+        assert!(
+            acquisition.waited >= held_for,
+            "held after observing contention: {held_for:?}; {acquisition:?}"
+        );
     }
 
     #[test]
@@ -816,10 +1066,16 @@ mod tests {
         let first = acquire_with(&config, "first").unwrap();
         assert_eq!(first.acquisition().slot.as_deref(), Some(AUTHOR_SLOT));
         let second = acquire_with(&config, "second").unwrap();
-        assert_eq!(second.acquisition().slot.as_deref(), Some("held-000000000001"));
+        assert_eq!(
+            second.acquisition().slot.as_deref(),
+            Some("held-000000000001")
+        );
         assert!(!slot_is_free(dir.path(), AUTHOR_SLOT));
         let third = acquire_with(&config, "third").unwrap();
-        assert_eq!(third.acquisition().slot.as_deref(), Some("held-000000000002"));
+        assert_eq!(
+            third.acquisition().slot.as_deref(),
+            Some("held-000000000002")
+        );
         drop(first);
         assert!(slot_is_free(dir.path(), AUTHOR_SLOT));
     }
@@ -835,8 +1091,13 @@ mod tests {
     fn a_thread_cannot_take_a_second_slot_while_holding_one() {
         set_thread_config(None);
         let outer = acquire("outer").unwrap();
-        let nested = acquire("inner").err().expect("a nested acquire would wait on itself");
-        assert!(format!("{nested:#}").contains("already holds"), "{nested:#}");
+        let nested = acquire("inner")
+            .err()
+            .expect("a nested acquire would wait on itself");
+        assert!(
+            format!("{nested:#}").contains("already holds"),
+            "{nested:#}"
+        );
         drop(outer);
         let _after = acquire("after").unwrap();
     }
@@ -844,23 +1105,52 @@ mod tests {
     #[test]
     fn reservations_follow_measured_package_peaks() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(estimate_reserve(dir.path(), None, COMPILE_PEAK_MIB), COMPILE_PEAK_MIB);
-        assert_eq!(estimate_reserve(dir.path(), Some("fixture"), COMPILE_PEAK_MIB), COMPILE_PEAK_MIB, "unmeasured");
+        assert_eq!(
+            estimate_reserve(dir.path(), None, COMPILE_PEAK_MIB),
+            COMPILE_PEAK_MIB
+        );
+        assert_eq!(
+            estimate_reserve(dir.path(), Some("fixture"), COMPILE_PEAK_MIB),
+            COMPILE_PEAK_MIB,
+            "unmeasured"
+        );
         record_peak(dir.path(), "fixture", Some(100), Some(400));
-        assert_eq!(estimate_reserve(dir.path(), Some("fixture"), COMPILE_PEAK_MIB), 500);
+        assert_eq!(
+            estimate_reserve(dir.path(), Some("fixture"), COMPILE_PEAK_MIB),
+            500
+        );
         record_peak(dir.path(), "fixture", Some(900), Some(900));
-        assert_eq!(read_peaks(dir.path(), "fixture"), [400], "a peak that did not rise bounds nothing");
+        assert_eq!(
+            read_peaks(dir.path(), "fixture"),
+            [400],
+            "a peak that did not rise bounds nothing"
+        );
         record_peak(dir.path(), "example", Some(50), Some(5000));
-        assert_eq!(estimate_reserve(dir.path(), Some("example"), COMPILE_PEAK_MIB), COMPILE_PEAK_MIB, "capped at a full compile");
+        assert_eq!(
+            estimate_reserve(dir.path(), Some("example"), COMPILE_PEAK_MIB),
+            COMPILE_PEAK_MIB,
+            "capped at a full compile"
+        );
         for _ in 0..PEAK_SAMPLES {
             record_peak(dir.path(), "fixture", Some(0), Some(80));
         }
-        assert_eq!(estimate_reserve(dir.path(), Some("fixture"), COMPILE_PEAK_MIB), 100, "old samples age out");
+        assert_eq!(
+            estimate_reserve(dir.path(), Some("fixture"), COMPILE_PEAK_MIB),
+            100,
+            "old samples age out"
+        );
 
         let package = tempfile::tempdir().unwrap();
         assert_eq!(package_key(package.path().to_str().unwrap()), None);
-        std::fs::write(package.path().join("stick.toml"), "[package]\nname = \"slot/probe\"\ntype = \"lib\"\n").unwrap();
-        assert_eq!(package_key(package.path().to_str().unwrap()).as_deref(), Some("slot_probe.other"));
+        std::fs::write(
+            package.path().join("stick.toml"),
+            "[package]\nname = \"slot/probe\"\ntype = \"lib\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            package_key(package.path().to_str().unwrap()).as_deref(),
+            Some("slot_probe.other")
+        );
     }
 
     const CHILD_DIR_ENV: &str = "ROCK_COMPILE_SLOT_TEST_CHILD_DIR";
@@ -871,7 +1161,9 @@ mod tests {
     #[test]
     #[ignore = "spawned by the dead-owner tests"]
     fn hold_slot_until_killed() {
-        let Some(dir) = std::env::var_os(CHILD_DIR_ENV) else { return };
+        let Some(dir) = std::env::var_os(CHILD_DIR_ENV) else {
+            return;
+        };
         let config = config(Path::new(&dir), 1, CompileClass::Batch);
         let _slot = if std::env::var_os(CHILD_MODE_ENV).is_some_and(|mode| mode == "queue") {
             let (_worker, waiting) = spawn_slot_waiter(move || acquire_with(&config, "child"));
@@ -889,14 +1181,22 @@ mod tests {
     fn spawn_child(dir: &Path, mode: &str) -> std::process::Child {
         use std::io::BufRead;
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "compile_slots::tests::hold_slot_until_killed", "--ignored", "--nocapture", "--test-threads=1"])
+            .args([
+                "--exact",
+                "compile_slots::tests::hold_slot_until_killed",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
             .env(CHILD_DIR_ENV, dir)
             .env(CHILD_MODE_ENV, mode)
             .stdout(std::process::Stdio::piped())
             .spawn()
             .unwrap();
         let stdout = child.stdout.take().unwrap();
-        let ready = std::io::BufReader::new(stdout).lines().any(|line| line.unwrap().trim() == "ready");
+        let ready = std::io::BufReader::new(stdout)
+            .lines()
+            .any(|line| line.unwrap().trim() == "ready");
         assert!(ready, "the child never reported its slot state");
         child
     }
@@ -907,7 +1207,10 @@ mod tests {
         let mut child = spawn_child(dir.path(), "hold");
         let held = held_files(dir.path());
         assert_eq!(held, ["held-000000000001"]);
-        assert!(!slot_is_free(dir.path(), &held[0]), "the child's slot is not locked");
+        assert!(
+            !slot_is_free(dir.path(), &held[0]),
+            "the child's slot is not locked"
+        );
         let holder = std::fs::read_to_string(dir.path().join(&held[0])).unwrap();
         assert!(holder.contains(&format!("pid={}", child.id())), "{holder}");
         child.kill().unwrap();
@@ -916,10 +1219,19 @@ mod tests {
         let (next, waiting) = spawn_slot_waiter(move || acquire_with(&config, "next"));
         // The observer's sender drops when the acquiring thread ends: a free
         // slot is taken on the first scan, without ever reporting contention.
-        assert!(matches!(waiting.recv_timeout(test_utils::HANG_BACKSTOP), Err(std::sync::mpsc::RecvTimeoutError::Disconnected)),
-            "the next compile waited behind the dead holder's slot");
+        assert!(
+            matches!(
+                waiting.recv_timeout(test_utils::HANG_BACKSTOP),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+            ),
+            "the next compile waited behind the dead holder's slot"
+        );
         let _next = next.join().unwrap().unwrap();
-        assert_eq!(held_files(dir.path()), ["held-000000000002"], "the dead holder's file is removed");
+        assert_eq!(
+            held_files(dir.path()),
+            ["held-000000000002"],
+            "the dead holder's file is removed"
+        );
     }
 
     #[test]
@@ -934,13 +1246,23 @@ mod tests {
         let (sender, admitted) = std::sync::mpsc::channel();
         let (_worker, waiting) = spawn_slot_waiter(move || {
             let slot = acquire_with(&config, "after the dead waiter");
-            sender.send(slot.map(|slot| slot.acquisition().clone())).unwrap();
+            sender
+                .send(slot.map(|slot| slot.acquisition().clone()))
+                .unwrap();
         });
-        waiting.recv_timeout(test_utils::HANG_BACKSTOP).expect("the next waiter never queued");
+        waiting
+            .recv_timeout(test_utils::HANG_BACKSTOP)
+            .expect("the next waiter never queued");
         drop(held);
-        let acquisition = admitted.recv_timeout(test_utils::HANG_BACKSTOP)
-            .expect("a dead waiter's ticket blocked the queue").unwrap();
+        let acquisition = admitted
+            .recv_timeout(test_utils::HANG_BACKSTOP)
+            .expect("a dead waiter's ticket blocked the queue")
+            .unwrap();
         assert_eq!(acquisition.slot.as_deref(), Some("held-000000000003"));
-        assert!(queued_tickets(dir.path()).is_empty(), "{:?}", queued_tickets(dir.path()));
+        assert!(
+            queued_tickets(dir.path()).is_empty(),
+            "{:?}",
+            queued_tickets(dir.path())
+        );
     }
 }

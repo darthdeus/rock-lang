@@ -59,7 +59,11 @@ fn main() { let _ = unmarked() }
 "#;
 
 fn node_available() -> bool {
-    crate::common::node().arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+    crate::common::node()
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 /// Whole-program JS for `name`: `push` is a stdlib callee, so emitting the root
@@ -67,7 +71,10 @@ fn node_available() -> bool {
 /// question is reached.
 fn emit_js(name: &str) -> Result<String, String> {
     let ws = ws_with(SRC);
-    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("test module");
     let fid = ws
         .module(mid)
         .functions
@@ -77,7 +84,13 @@ fn emit_js(name: &str) -> Result<String, String> {
         .expect("fn in <test>");
     skull_codegen_js::emit::emit_with_closure(
         &ws,
-        &[(FuncRef { module: mid, func: fid }, name.to_string())],
+        &[(
+            FuncRef {
+                module: mid,
+                func: fid,
+            },
+            name.to_string(),
+        )],
     )
     .map_err(|e| e.message)
 }
@@ -86,7 +99,10 @@ fn emit_js(name: &str) -> Result<String, String> {
 /// columns on the backend that has always had them.
 fn lua_mir(name: &str) -> String {
     let ws = ws_with(SRC);
-    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("test module");
     let fid = ws
         .module(mid)
         .functions
@@ -100,7 +116,9 @@ fn lua_mir(name: &str) -> String {
 /// Just `function <name>(` .. the next top-level `}`, so a body assertion is not
 /// fooled by the registry defs the same program carries.
 fn fn_body<'a>(js: &'a str, name: &str) -> &'a str {
-    let start = js.find(&format!("function {name}(")).expect("emitted fn is in the program");
+    let start = js
+        .find(&format!("function {name}("))
+        .expect("emitted fn is in the program");
     let rest = &js[start..];
     let end = rest.find("\n}").map(|e| e + 2).unwrap_or(rest.len());
     &rest[..end]
@@ -119,14 +137,21 @@ fn eval_int(name: &str, expect: i64) {
         skull_codegen_js::JS_TABLE_PRIM,
         skull_codegen_js::JS_STRUCTURAL_EQ,
     );
-    let out = crate::common::node().arg("-e").arg(&program).output().expect("spawn node");
+    let out = crate::common::node()
+        .arg("-e")
+        .arg(&program)
+        .output()
+        .expect("spawn node");
     assert!(
         out.status.success(),
         "node failed for `{name}`:\n--- program ---\n{program}\n--- stderr ---\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
     let s = String::from_utf8_lossy(&out.stdout);
-    let got: i64 = s.trim().parse().unwrap_or_else(|_| panic!("not an int: {s:?}\n{program}"));
+    let got: i64 = s
+        .trim()
+        .parse()
+        .unwrap_or_else(|_| panic!("not an int: {s:?}\n{program}"));
     assert_eq!(got, expect, "wrong result for `{name}`\n{program}");
 }
 
@@ -148,7 +173,10 @@ fn an_unmarked_element_still_columns_for_lua() {
 #[test]
 fn an_unmarked_element_columns_for_js() {
     let js = emit_js("unmarked").expect("[V2] must emit columns on JS");
-    assert!(js.contains("\"@vec\""), "expected the column header in the emitted JS:\n{js}");
+    assert!(
+        js.contains("\"@vec\""),
+        "expected the column header in the emitted JS:\n{js}"
+    );
     // The materializer legitimately names the element type, so scope this to the
     // body: it is the push/read path that must never build one.
     let body = fn_body(&js, "unmarked");
@@ -209,7 +237,10 @@ fn a_nobox_element_never_builds_an_element_object() {
         !js.contains("__ty: \"NV2\""),
         "column push boxed the element; the element object must never exist:\n{js}"
     );
-    assert!(js.contains("\"@vec\""), "expected the column header in the emitted JS:\n{js}");
+    assert!(
+        js.contains("\"@vec\""),
+        "expected the column header in the emitted JS:\n{js}"
+    );
     // Not even a materializer: every op that would call one is a spanned
     // rejection for a `nobox` element, so the guarantee has no escape hatch to
     // find in the emitted program.

@@ -11,8 +11,11 @@ pub struct FoldingRangeParams {
     pub partial_result_params: PartialResultParams,
 }
 
-impl_lsp_struct!(FoldingRangeParams,
-    required { text_document: TextDocumentIdentifier = "textDocument" },
+impl_lsp_struct!(
+    FoldingRangeParams,
+    required {
+        text_document: TextDocumentIdentifier = "textDocument"
+    },
     optional {},
     flatten {
         work_done_progress_params: WorkDoneProgressParams,
@@ -71,9 +74,12 @@ pub struct FoldingRangeCapability {
     pub collapsed_text: Option<bool>,
 }
 
-impl_lsp_struct!(FoldingRangeCapability,
+impl_lsp_struct!(
+    FoldingRangeCapability,
     required {},
-    optional { collapsed_text: bool = "collapsedText" }
+    optional {
+        collapsed_text: bool = "collapsedText"
+    }
 );
 
 #[derive(Debug, Eq, PartialEq, Clone, Default)]
@@ -85,7 +91,8 @@ pub struct FoldingRangeClientCapabilities {
     pub folding_range: Option<FoldingRangeCapability>,
 }
 
-impl_lsp_struct!(FoldingRangeClientCapabilities,
+impl_lsp_struct!(
+    FoldingRangeClientCapabilities,
     required {},
     optional {
         dynamic_registration: bool = "dynamicRegistration",
@@ -120,7 +127,8 @@ pub struct FoldingRange {
     pub collapsed_text: Option<String>,
 }
 
-impl_lsp_struct!(FoldingRange,
+impl_lsp_struct!(
+    FoldingRange,
     required {
         start_line: u32 = "startLine",
         end_line: u32 = "endLine",

@@ -43,8 +43,13 @@ struct Row {
 }
 
 pub enum Resolution {
-    Accept { label: String, rank_in_cmp: Option<u64> },
-    TypedOut { word: String },
+    Accept {
+        label: String,
+        rank_in_cmp: Option<u64>,
+    },
+    TypedOut {
+        word: String,
+    },
     Abandoned,
 }
 
@@ -82,11 +87,18 @@ fn parse_row(v: &serde_json::Value) -> Option<Row> {
         Some("dismiss") => Event::Dismiss,
         _ => return None,
     };
-    let prefix = v.get("prefix").and_then(|p| p.as_str()).unwrap_or("").to_string();
+    let prefix = v
+        .get("prefix")
+        .and_then(|p| p.as_str())
+        .unwrap_or("")
+        .to_string();
     let pos_line = v.pointer("/pos/line").and_then(|x| x.as_i64());
     let pos_col = v.pointer("/pos/character").and_then(|x| x.as_i64());
     // Pre-enrichment rows have no anchor; the identifier start is derivable.
-    let anchor_line = v.pointer("/anchor/line").and_then(|x| x.as_i64()).or(pos_line)?;
+    let anchor_line = v
+        .pointer("/anchor/line")
+        .and_then(|x| x.as_i64())
+        .or(pos_line)?;
     let anchor_col = v
         .pointer("/anchor/col")
         .and_then(|x| x.as_i64())
@@ -98,12 +110,18 @@ fn parse_row(v: &serde_json::Value) -> Option<Row> {
             entries
                 .iter()
                 .map(|e| TlEntry {
-                    prefix: e.get("prefix").and_then(|p| p.as_str()).unwrap_or("").to_string(),
+                    prefix: e
+                        .get("prefix")
+                        .and_then(|p| p.as_str())
+                        .unwrap_or("")
+                        .to_string(),
                     top: e
                         .get("top")
                         .and_then(|t| t.as_array())
                         .map(|ls| {
-                            ls.iter().filter_map(|l| l.as_str().map(str::to_string)).collect()
+                            ls.iter()
+                                .filter_map(|l| l.as_str().map(str::to_string))
+                                .collect()
                         })
                         .unwrap_or_default(),
                 })
@@ -122,17 +140,34 @@ fn parse_row(v: &serde_json::Value) -> Option<Row> {
             })
             .unwrap_or_default();
         if !top.is_empty() {
-            timeline.push(TlEntry { prefix: prefix.clone(), top });
+            timeline.push(TlEntry {
+                prefix: prefix.clone(),
+                top,
+            });
         }
     }
     Some(Row {
-        ts: v.get("ts").and_then(|t| t.as_str()).and_then(parse_ts).unwrap_or(0),
-        uri: v.get("uri").and_then(|u| u.as_str()).unwrap_or("").to_string(),
+        ts: v
+            .get("ts")
+            .and_then(|t| t.as_str())
+            .and_then(parse_ts)
+            .unwrap_or(0),
+        uri: v
+            .get("uri")
+            .and_then(|u| u.as_str())
+            .unwrap_or("")
+            .to_string(),
         anchor_line,
         anchor_col,
         event,
-        post_word: v.get("post_word").and_then(|w| w.as_str()).map(str::to_string),
-        chosen_label: v.pointer("/chosen/label").and_then(|l| l.as_str()).map(str::to_string),
+        post_word: v
+            .get("post_word")
+            .and_then(|w| w.as_str())
+            .map(str::to_string),
+        chosen_label: v
+            .pointer("/chosen/label")
+            .and_then(|l| l.as_str())
+            .map(str::to_string),
         rank_in_cmp: v.pointer("/chosen/rank_in_cmp").and_then(|r| r.as_u64()),
         timeline,
     })
@@ -163,7 +198,11 @@ fn resolve(rows: &[Row]) -> Resolution {
             rank_in_cmp: acc.rank_in_cmp,
         };
     }
-    let word = rows.iter().rev().find_map(|r| r.post_word.clone()).unwrap_or_default();
+    let word = rows
+        .iter()
+        .rev()
+        .find_map(|r| r.post_word.clone())
+        .unwrap_or_default();
     if word.is_empty() {
         Resolution::Abandoned
     } else {
@@ -249,7 +288,9 @@ fn analyze(rows: Vec<Row>) -> Report {
                     }
                 }
                 if ep.popups >= 2 {
-                    *struggle.entry(leading_ident(label).to_string()).or_default() += 1;
+                    *struggle
+                        .entry(leading_ident(label).to_string())
+                        .or_default() += 1;
                 }
             }
             Resolution::TypedOut { word } => {
@@ -267,10 +308,17 @@ fn analyze(rows: Vec<Row>) -> Report {
     hunted.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     let mut never_surfaced: Vec<_> = never.into_iter().collect();
     never_surfaced.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-    let mut repeat_struggle: Vec<_> =
-        struggle.into_iter().filter(|(_, n)| *n >= 2).collect();
+    let mut repeat_struggle: Vec<_> = struggle.into_iter().filter(|(_, n)| *n >= 2).collect();
     repeat_struggle.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-    Report { episodes, accepts, typed_out, abandoned, hunted, never_surfaced, repeat_struggle }
+    Report {
+        episodes,
+        accepts,
+        typed_out,
+        abandoned,
+        hunted,
+        never_surfaced,
+        repeat_struggle,
+    }
 }
 
 fn parse_files(paths: &[String]) -> Result<Vec<Row>> {
@@ -303,7 +351,11 @@ pub fn completion_episodes(paths: &[String]) -> Result<()> {
     writeln!(
         out,
         "episodes: {} from {} rows (accept {}, typed_out {}, abandoned {})",
-        rep.episodes.len(), n_rows, rep.accepts, rep.typed_out, rep.abandoned
+        rep.episodes.len(),
+        n_rows,
+        rep.accepts,
+        rep.typed_out,
+        rep.abandoned
     )?;
 
     // chars-to-top3 distribution over resolved episodes.
@@ -322,12 +374,18 @@ pub fn completion_episodes(paths: &[String]) -> Result<()> {
     }
     let mut buckets: Vec<_> = hist.into_iter().collect();
     buckets.sort();
-    writeln!(out, "\nchars-to-top3 ({resolved} resolved episodes, {never_n} never surfaced):")?;
+    writeln!(
+        out,
+        "\nchars-to-top3 ({resolved} resolved episodes, {never_n} never surfaced):"
+    )?;
     for (chars, n) in buckets {
         writeln!(out, "  {chars:>3} chars  {n}")?;
     }
 
-    writeln!(out, "\nnever surfaced (typed out, ground truth never in displayed top 3):")?;
+    writeln!(
+        out,
+        "\nnever surfaced (typed out, ground truth never in displayed top 3):"
+    )?;
     for (word, n) in rep.never_surfaced.iter().take(25) {
         writeln!(out, "  {n:>4}x  {word}")?;
     }
@@ -350,8 +408,13 @@ mod tests {
     use super::*;
 
     fn dismiss(
-        ts: &str, uri: &str, line: i64, col: i64, prefix: &str,
-        post_word: Option<&str>, timeline: serde_json::Value,
+        ts: &str,
+        uri: &str,
+        line: i64,
+        col: i64,
+        prefix: &str,
+        post_word: Option<&str>,
+        timeline: serde_json::Value,
     ) -> serde_json::Value {
         serde_json::json!({
             "event": "dismiss", "ts": ts, "uri": uri, "prefix": prefix,
@@ -373,14 +436,35 @@ mod tests {
             // Episode 1: two popups at the same anchor 2s apart; the user
             // types the word out; the eventual word enters displayed top-3
             // on the second popup at prefix len 3.
-            dismiss("2026-07-07T10:00:00", "file:///a.rock", 4, 10, "sp",
-                Some("spawn_mob"), tl("sp", &["speed", "space", "sprite"])),
-            dismiss("2026-07-07T10:00:02", "file:///a.rock", 4, 10, "spa",
-                Some("spawn_mob"), tl("spa", &["space", "spawn_mob(x)", "sparse"])),
+            dismiss(
+                "2026-07-07T10:00:00",
+                "file:///a.rock",
+                4,
+                10,
+                "sp",
+                Some("spawn_mob"),
+                tl("sp", &["speed", "space", "sprite"]),
+            ),
+            dismiss(
+                "2026-07-07T10:00:02",
+                "file:///a.rock",
+                4,
+                10,
+                "spa",
+                Some("spawn_mob"),
+                tl("spa", &["space", "spawn_mob(x)", "sparse"]),
+            ),
             // Episode 2: same anchor but past the gap -> NEW episode; the
             // accept was hunted to cmp index 4. Multi-popup (dismiss first).
-            dismiss("2026-07-07T10:01:00", "file:///a.rock", 4, 10, "mo",
-                None, tl("mo", &["mob", "move", "mode"])),
+            dismiss(
+                "2026-07-07T10:01:00",
+                "file:///a.rock",
+                4,
+                10,
+                "mo",
+                None,
+                tl("mo", &["mob", "move", "mode"]),
+            ),
             serde_json::json!({
                 "event": "accept", "ts": "2026-07-07T10:01:03",
                 "uri": "file:///a.rock", "prefix": "mob_k",
@@ -391,11 +475,25 @@ mod tests {
                                "top": ["mob_key", "mob_kind_data", "mob_count"] }],
             }),
             // Episode 3: different anchor, no post_word -> abandoned.
-            dismiss("2026-07-07T10:01:05", "file:///b.rock", 9, 2, "x",
-                None, serde_json::json!([])),
+            dismiss(
+                "2026-07-07T10:01:05",
+                "file:///b.rock",
+                9,
+                2,
+                "x",
+                None,
+                serde_json::json!([]),
+            ),
             // Episode 4: typed out, never in displayed top 3.
-            dismiss("2026-07-07T10:02:00", "file:///b.rock", 12, 0, "ta",
-                Some("target_cycle"), tl("ta", &["table", "tags", "take"])),
+            dismiss(
+                "2026-07-07T10:02:00",
+                "file:///b.rock",
+                12,
+                0,
+                "ta",
+                Some("target_cycle"),
+                tl("ta", &["table", "tags", "take"]),
+            ),
         ];
         let rep = analyze(rows_from(&vals));
 
@@ -405,8 +503,11 @@ mod tests {
 
         assert!(matches!(&rep.episodes[0].resolution,
             Resolution::TypedOut { word } if word == "spawn_mob"));
-        assert_eq!(rep.episodes[0].chars_to_top3, Some(3),
-            "spawn_mob(x) hits displayed top 3 at prefix `spa`");
+        assert_eq!(
+            rep.episodes[0].chars_to_top3,
+            Some(3),
+            "spawn_mob(x) hits displayed top 3 at prefix `spa`"
+        );
 
         assert!(matches!(&rep.episodes[1].resolution,
             Resolution::Accept { label, rank_in_cmp: Some(4) } if label == "mob_kind_data"));
@@ -433,7 +534,11 @@ mod tests {
         });
         let rep = analyze(rows_from(&[old_accept]));
         assert_eq!(rep.episodes.len(), 1);
-        assert_eq!(rep.episodes[0].chars_to_top3, Some(3), "lsp.top pseudo-timeline");
+        assert_eq!(
+            rep.episodes[0].chars_to_top3,
+            Some(3),
+            "lsp.top pseudo-timeline"
+        );
         assert!(rep.hunted.is_empty(), "rank 1 is not hunted");
     }
 
@@ -442,11 +547,28 @@ mod tests {
         let tl = serde_json::json!([]);
         let mk = |t: &str, t2: &str| {
             [
-                dismiss(t, "file:///a.rock", 1, 0, "gr", Some("grid_pos"), tl.clone()),
-                dismiss(t2, "file:///a.rock", 1, 0, "gri", Some("grid_pos"), tl.clone()),
+                dismiss(
+                    t,
+                    "file:///a.rock",
+                    1,
+                    0,
+                    "gr",
+                    Some("grid_pos"),
+                    tl.clone(),
+                ),
+                dismiss(
+                    t2,
+                    "file:///a.rock",
+                    1,
+                    0,
+                    "gri",
+                    Some("grid_pos"),
+                    tl.clone(),
+                ),
             ]
         };
-        let mut vals: Vec<serde_json::Value> = mk("2026-07-07T10:00:00", "2026-07-07T10:00:01").into();
+        let mut vals: Vec<serde_json::Value> =
+            mk("2026-07-07T10:00:00", "2026-07-07T10:00:01").into();
         vals.extend(mk("2026-07-07T11:00:00", "2026-07-07T11:00:01"));
         let rep = analyze(rows_from(&vals));
         assert_eq!(rep.episodes.len(), 2, "an hour apart = two episodes");

@@ -13,7 +13,11 @@
 use crate::common::{tool, ws_with};
 
 fn tool_available(tool_name: &str, arg: &str) -> bool {
-    tool(tool_name).arg(arg).output().map(|o| o.status.success()).unwrap_or(false)
+    tool(tool_name)
+        .arg(arg)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 fn both_backends_available(test: &str) -> bool {
@@ -27,15 +31,20 @@ fn both_backends_available(test: &str) -> bool {
 }
 
 fn write_temp(tag: &str, ext: &str, contents: &str) -> std::path::PathBuf {
-    let path = std::env::temp_dir()
-        .join(format!("skull_js_safenav_{}_{tag}.{ext}", std::process::id()));
+    let path = std::env::temp_dir().join(format!(
+        "skull_js_safenav_{}_{tag}.{ext}",
+        std::process::id()
+    ));
     std::fs::write(&path, contents).expect("write temp program");
     path
 }
 
 fn run_tool(tool_name: &str, tag: &str, ext: &str, prog: &str) -> String {
     let path = write_temp(tag, ext, prog);
-    let out = tool(tool_name).arg(&path).output().unwrap_or_else(|e| panic!("spawn {tool_name}: {e}"));
+    let out = tool(tool_name)
+        .arg(&path)
+        .output()
+        .unwrap_or_else(|e| panic!("spawn {tool_name}: {e}"));
     let _ = std::fs::remove_file(&path);
     assert!(
         out.status.success(),
@@ -48,8 +57,13 @@ fn run_tool(tool_name: &str, tag: &str, ext: &str, prog: &str) -> String {
 
 fn run_both(src: &str, tag: &str) -> (String, String) {
     let ws = ws_with(src);
-    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
-    let mut lua = skull::mir_emit::emit_workspace_mir(&ws, mid).expect("lua emit").lua;
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("test module");
+    let mut lua = skull::mir_emit::emit_workspace_mir(&ws, mid)
+        .expect("lua emit")
+        .lua;
     lua.push_str("\nmain()\n");
     let lua_out = run_tool("luajit", tag, "lua", &lua);
     let prog = skull_codegen_js::emit::emit_program(&ws, mid)
@@ -70,7 +84,10 @@ fn run_both(src: &str, tag: &str) -> (String, String) {
 fn check(src: &str, tag: &str, expect: &str) {
     let (lua_out, js_out) = run_both(src, tag);
     assert_eq!(lua_out, expect, "Lua oracle drifted for {tag}");
-    assert_eq!(js_out, expect, "JS diverged from Lua for {tag}\nLua:\n{lua_out}");
+    assert_eq!(
+        js_out, expect,
+        "JS diverged from Lua for {tag}\nLua:\n{lua_out}"
+    );
 }
 
 const READ_SRC: &str = r#"

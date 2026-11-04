@@ -68,10 +68,17 @@ pub fn concrete_calls(ws: &Workspace) -> (Vec<ConcreteCall>, usize) {
         if module.id == ModuleId::builtin() {
             continue;
         }
-        let Some(ir) = ws.inference(module.id) else { continue };
+        let Some(ir) = ws.inference(module.id) else {
+            continue;
+        };
         for (owner, inf) in ir.per_fn.iter() {
-            let BodyOwner::Function(caller_fid) = owner else { continue };
-            let caller = FuncRef { module: module.id, func: *caller_fid };
+            let BodyOwner::Function(caller_fid) = owner else {
+                continue;
+            };
+            let caller = FuncRef {
+                module: module.id,
+                func: *caller_fid,
+            };
             let (specs, rej) = concrete_calls_in_body(ws, inf);
             rejected += rej;
             for (func, key) in specs {

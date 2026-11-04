@@ -17,8 +17,8 @@
 //! keep working. Under instance-owned emission the boxed one owns a family per
 //! instantiation too -- there is no shared generic body to fall back to.
 
-use std::collections::BTreeSet;
 use crate::common;
+use std::collections::BTreeSet;
 
 /// One generic `co fn`, two column-stored instantiations with different element
 /// types AND different lengths, so a body serving both would have to answer both
@@ -123,8 +123,8 @@ fn main() {
 "#;
 
 fn run(src: &str, tag: &str) -> String {
-    let lua = common::try_emit_module(src)
-        .unwrap_or_else(|e| panic!("must emit ({tag}): {}", e.message));
+    let lua =
+        common::try_emit_module(src).unwrap_or_else(|e| panic!("must emit ({tag}): {}", e.message));
     common::run_luajit(&format!("{lua}\nmain()\n"), tag)
 }
 
@@ -161,8 +161,10 @@ fn two_column_instantiations_of_one_generic_coroutine_each_answer_their_own_leng
 fn each_column_instantiation_owns_its_own_step_symbol() {
     let lua = common::try_emit_module(TWO_COLUMN_INSTANCES)
         .unwrap_or_else(|e| panic!("must emit: {}", e.message));
-    let steps: Vec<String> =
-        step_definitions(&lua).into_iter().filter(|n| n.starts_with("walk")).collect();
+    let steps: Vec<String> = step_definitions(&lua)
+        .into_iter()
+        .filter(|n| n.starts_with("walk"))
+        .collect();
     let specialized: Vec<&String> = steps.iter().filter(|n| n.contains("_spec_")).collect();
     assert_eq!(
         specialized.len(),
@@ -188,7 +190,10 @@ fn a_non_generic_coroutine_over_a_column_vec_is_correct() {
 #[test]
 fn a_coroutine_keeps_a_multi_return_used_after_its_first_call() {
     assert_eq!(
-        run(COROUTINE_RETAINS_MULTI_RETURN_AFTER_INITIAL_CALL, "co_retained_multi"),
+        run(
+            COROUTINE_RETAINS_MULTI_RETURN_AFTER_INITIAL_CALL,
+            "co_retained_multi"
+        ),
         "3\n10"
     );
 }
@@ -252,10 +257,16 @@ fn a_generic_coroutine_over_boxed_elements_owns_a_family_per_instance() {
          exist -- defined {defined:?}, referenced {referenced:?}"
     );
 
-    let steps: Vec<String> =
-        step_definitions(&lua).into_iter().filter(|n| n.starts_with("walk")).collect();
+    let steps: Vec<String> = step_definitions(&lua)
+        .into_iter()
+        .filter(|n| n.starts_with("walk"))
+        .collect();
     let distinct: BTreeSet<&String> = steps.iter().collect();
-    assert_eq!(steps.len(), 2, "each instantiation must own a `__step`; got {steps:?}");
+    assert_eq!(
+        steps.len(),
+        2,
+        "each instantiation must own a `__step`; got {steps:?}"
+    );
     assert_eq!(
         steps.len(),
         distinct.len(),

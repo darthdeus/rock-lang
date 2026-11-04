@@ -240,7 +240,10 @@ fn arena_scan_returning_entity_keeps_leaves_until_a_boxed_sink() {
         1,
         "only the Found field sink may materialize a tagged Entity box:\n{main}"
     );
-    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "arena_nullable_entity_return"), "true 2 true true true");
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "arena_nullable_entity_return"),
+        "true 2 true true true"
+    );
 }
 
 const ARENA_ENTITY_IN_ENUM: &str = r#"
@@ -311,9 +314,26 @@ fn nullable_value_binding_return_keeps_presence_and_leaves() {
         0,
         "a nullable value binding and its return must not rebuild a Bag box:\n{pick}"
     );
-    assert!(!pick.contains("Bag_ct("), "nullable Bag uses the wrong storage tier:\n{pick}");
-    assert_eq!(pick.matches("__ty = \"Vec\"").count(), 1, "only the payload Vec may be allocated:\n{pick}");
-    assert_eq!(pick.matches('{').count(), 2, "only the Vec wrapper and its data table may be allocated:\n{pick}");
-    assert!(!pick.contains("__ty = \"Bag\""), "nullable return builds a raw Bag box:\n{pick}");
-    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "nullable_value_binding_return"), "1 1 true");
+    assert!(
+        !pick.contains("Bag_ct("),
+        "nullable Bag uses the wrong storage tier:\n{pick}"
+    );
+    assert_eq!(
+        pick.matches("__ty = \"Vec\"").count(),
+        1,
+        "only the payload Vec may be allocated:\n{pick}"
+    );
+    assert_eq!(
+        pick.matches('{').count(),
+        2,
+        "only the Vec wrapper and its data table may be allocated:\n{pick}"
+    );
+    assert!(
+        !pick.contains("__ty = \"Bag\""),
+        "nullable return builds a raw Bag box:\n{pick}"
+    );
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "nullable_value_binding_return"),
+        "1 1 true"
+    );
 }
