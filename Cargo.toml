@@ -161,6 +161,8 @@ unnecessary_map_or = "allow"
 [profile.dev]
 opt-level = 1
 debug = "line-tables-only"
+# "false" still enables local ThinLTO; skip it for faster development builds.
+lto = "off"
 
 [profile.dev.package."*"]
 opt-level = 1
