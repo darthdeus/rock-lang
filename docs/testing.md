@@ -11,6 +11,29 @@ CI uses Node 24 and LuaJIT 2.1.1785763465, pinned to commit
 formatting tests because they round exact ties differently. Check `rustc --version`,
 `cc --version`, `luajit -v` and `node --version` before diagnosing compiler failures.
 
+## Clippy and Rust formatting
+
+Install the components for the same stable toolchain used to build the compiler:
+
+```sh
+rustup component add clippy rustfmt
+cargo clippy --locked --workspace --all-targets
+```
+
+The workspace has existing Clippy warnings, so this command is not a
+warning-free gate. Fix the cause of a diagnostic rather than adding a blanket
+allowance. Crates inherit the shared lint policy through `[lints] workspace = true`.
+
+Check Rust formatting in the crate you are changing, using its declared edition:
+
+```sh
+rustfmt --check --edition 2024 crates/rock-cli/src/lib.rs
+```
+
+The repository is not uniformly rustfmt-clean. Keep formatting changes local to
+the work; do not apply a workspace-wide formatting rewrite. The Rust formatter
+is separate from `rock fmt`, which formats Rock source files.
+
 ## Use the compiler you are editing
 
 ```sh

@@ -1,9 +1,9 @@
 //! Run helper modes on the initial thread so the incoming binding is real.
 #[cfg(target_os = "linux")]
 mod linux {
+    use bone_core::prelude::{Duration, Instant};
     use std::path::Path;
     use std::process::{Child, Command, Stdio};
-    use std::time::{Duration, Instant};
 
     static REGISTRATIONS: rock_cli::registry::Registrations = rock_cli::registry::Registrations {
         early_entries: &[rock_cli::registry::EarlyEntry {

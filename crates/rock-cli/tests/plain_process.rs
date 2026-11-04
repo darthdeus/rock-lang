@@ -514,7 +514,7 @@ fn relocate(from: &str, exe: &Path) {
 /// still held by a sibling test's forked child (see `relocate`). A retry spans
 /// one fork-to-exec hop; the deadline keeps a genuine failure reportable.
 fn start_relocated(exe: &Path, root: &Path, args: &[&str]) -> Output {
-    use std::time::{Duration, Instant};
+    use bone_core::prelude::{Duration, Instant};
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         let started = Command::new(exe)

@@ -15,9 +15,9 @@
 use crate::bone_backend::{categorize, short_path};
 use crate::test_protocol::{parse_skull_markers, reason_histogram};
 use crate::Result;
+use bone_core::prelude::Instant;
 use colored::Colorize;
 use skull_mir::mir::FuncRef;
-use std::time::Instant;
 
 /// One unit's (file or package) outcome under the JS executor.
 /// Every reason one emission rejection carries: the emitter's primary plus its

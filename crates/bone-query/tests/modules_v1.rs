@@ -571,7 +571,7 @@ fn bare_completion_offers_what_the_tiers_bind_by_their_bound_names() {
     ] {
         let got = labels(&complete_in_main(&format!("let q = {typed}")));
         assert!(got.iter().any(|l| l == bound), "`{bound}` is bound in main.rock: {got:?}");
-        for key in got.iter().filter(|l| l.contains("::") && !l.contains("Kind::")) {
+        if let Some(key) = got.iter().find(|l| l.contains("::") && !l.contains("Kind::")) {
             panic!("a DefKey leaked into completion: {key}");
         }
     }
