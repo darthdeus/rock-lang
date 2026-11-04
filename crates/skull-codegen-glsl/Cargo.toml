@@ -1,4 +1,5 @@
 [package]
+autotests = false
 name = "skull-codegen-glsl"
 version = "0.1.0"
 edition = "2024"
@@ -30,3 +31,7 @@ rock-stdlib = { workspace = true }
 
 [lints]
 workspace = true
+
+[[test]]
+name = "skull_codegen_glsl_tests"
+path = "tests/main.rs"

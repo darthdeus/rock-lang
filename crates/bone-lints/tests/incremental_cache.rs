@@ -1,4 +1,4 @@
-mod support;
+use crate::support;
 use bone_lints::{
     IncrementalLintCache, LintCacheUpdate, LintOptions, TextEditDelta, UNUSED_VAR, lint_workspace,
 };

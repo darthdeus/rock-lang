@@ -16,7 +16,7 @@
 //! Each gate asserts its tier, the bodies re-inferred and re-lowered, and --
 //! through `edit` -- that the result equals a fresh build.
 
-mod common;
+use crate::common;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::Ordering;

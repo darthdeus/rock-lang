@@ -1,4 +1,5 @@
 [package]
+autotests = false
 name = "skull-mir"
 version = "0.1.0"
 edition = "2024"
@@ -32,3 +33,7 @@ skull-graph = { workspace = true }
 
 [lints]
 workspace = true
+
+[[test]]
+name = "skull_mir_tests"
+path = "tests/main.rs"

@@ -13,7 +13,7 @@
 use bone_semantic::prelude::*;
 use bone_incremental::session::{changed_names, item_prints, name_shapes, Session, UpdateResult, UpdateTier};
 
-mod common;
+use crate::common;
 use common::{mid_for, type_profile};
 
 fn parse_rock_with_file(src: &str, file: &str) -> Result<skull_parser::Ast, CompilerError> {

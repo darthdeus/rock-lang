@@ -143,6 +143,16 @@ The semantic fixture suite can also be narrowed to an existing file:
 cargo test --locked -p bone-semantic --test fixtures or_patterns
 ```
 
+The `bone-incremental`, `bone-lints`, `bone-query`, `skull`, `skull-codegen-glsl`,
+`skull-codegen-js` and `skull-mir` integration suites share a harness per suite
+instead of linking the compiler into a binary for every file. Register new
+integration-test modules in their `tests/main.rs`; automatic test-file discovery
+is disabled for these crates. Filter by module or test name, for example:
+
+```sh
+cargo test --locked -p bone-lints unused_var::
+```
+
 For new coverage, observe failure before implementing the change where possible.
 Check a runtime test by temporarily making its expected result wrong. Check an
 error case by replacing the invalid code with valid code, and separately by

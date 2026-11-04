@@ -1,4 +1,4 @@
-mod support;
+use crate::support;
 use bone_lints::{
     lint_workspace, Finding, LintOptions, ACTION_CALLERS, RAW_INPUT_CLASSIFICATION,
     RAW_INPUT_MIGRATION,

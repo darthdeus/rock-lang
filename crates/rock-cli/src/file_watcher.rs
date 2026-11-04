@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 #[cfg(not(target_os = "macos"))]
 use std::time::Duration;
+#[cfg(not(target_os = "macos"))]
 use bone_core::prelude::Instant;
 
 #[cfg(not(target_os = "macos"))]

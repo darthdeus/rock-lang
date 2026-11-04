@@ -2,7 +2,7 @@
 //! Lints that key on a declared name (`Task`, `main`) must read the declared
 //! segment, or they go silent (or noisy) the moment a package converts.
 
-mod support;
+use crate::support;
 use bone_lints::{lint_workspace, task_null_abandon, unused_fns, LintOptions, ACTION_CALLERS};
 use bone_semantic::prelude::*;
 
