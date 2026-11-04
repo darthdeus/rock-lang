@@ -3029,6 +3029,10 @@ impl BoneWorkspace {
             return None;
         }
 
+        #[expect(
+            clippy::mutable_key_type,
+            reason = "WorkspaceEdit Uri keys use immutable text for equality and hashing"
+        )]
         let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
         let mut idx_cache: HashMap<String, LineIndex> = HashMap::new();
         for site in sites {

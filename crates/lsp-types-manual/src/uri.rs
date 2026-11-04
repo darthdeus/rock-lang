@@ -65,6 +65,8 @@ impl Deref for Uri {
     if and when the respective implementations get merged upstream:
     https://github.com/yescallop/fluent-uri-rs/pull/9
 */
+// Parsed URI metadata may use interior cells, but map-key identity depends only
+// on the immutable owned text. Keep equality and hashing independent of metadata.
 impl PartialEq for Uri {
     fn eq(&self, other: &Self) -> bool {
         self.as_str() == other.as_str()

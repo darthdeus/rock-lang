@@ -371,6 +371,10 @@ fn main() {{
 /// The regime the budget fixtures need. Checked as its own test so a `K` or
 /// budget change that invalidates them says so directly.
 #[test]
+#[expect(
+    clippy::assertions_on_constants,
+    reason = "Keep fixture assumptions checked by this named runtime test"
+)]
 fn the_budget_fixtures_are_in_the_regime_they_claim() {
     let b = SIGNATURE_SCALAR_LANE_BUDGET;
     assert!(

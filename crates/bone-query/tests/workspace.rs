@@ -1126,6 +1126,10 @@ fn rename_newtype_edits_decl_and_ctor_in_file_only() {
     let edit = bone
         .rename(PATH, Position::new(0, 9), "Hp")
         .expect("newtype rename resolves");
+    #[expect(
+        clippy::mutable_key_type,
+        reason = "WorkspaceEdit Uri keys use immutable text for equality and hashing"
+    )]
     let changes = edit.changes.expect("changes");
     assert_eq!(changes.len(), 1, "edits stay in the user file: {changes:?}");
     let lines = rename_lines(&bone, Position::new(0, 9), "Hp", "Health".len());

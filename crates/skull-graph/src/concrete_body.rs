@@ -1575,6 +1575,10 @@ struct BuiltInstance {
     unique_slot_tyids: usize,
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Keep successful results inline rather than adding a per-instance allocation"
+)]
 enum InstanceResult {
     Gap(MissingBody),
     Built(BuiltInstance),
@@ -1947,6 +1951,10 @@ struct PreparedInstance {
     unique_slot_tyids: usize,
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Keep successful results inline rather than adding a per-instance allocation"
+)]
 enum PreparedInstanceResult {
     Gap(MissingBody),
     Ready(PreparedInstance),

@@ -49,6 +49,10 @@ pub fn run(src: &str, line: u32, ch: u32) -> Vec<CodeAction> {
 /// Apply a code action's single-file edit to `src` and return the result.
 pub fn apply(src: &str, action: &CodeAction) -> String {
     let edit = action.edit.as_ref().expect("action carries an edit");
+    #[expect(
+        clippy::mutable_key_type,
+        reason = "WorkspaceEdit Uri keys use immutable text for equality and hashing"
+    )]
     let changes = edit.changes.as_ref().expect("edit has changes");
     let edits = changes.values().next().expect("one file's edits");
     let te = &edits[0];
@@ -61,6 +65,10 @@ pub fn apply(src: &str, action: &CodeAction) -> String {
 /// earlier offsets stay valid) and return the result. For multi-edit actions.
 pub fn apply_all(src: &str, action: &CodeAction) -> String {
     let edit = action.edit.as_ref().expect("action carries an edit");
+    #[expect(
+        clippy::mutable_key_type,
+        reason = "WorkspaceEdit Uri keys use immutable text for equality and hashing"
+    )]
     let changes = edit.changes.as_ref().expect("edit has changes");
     let edits = changes.values().next().expect("one file's edits");
     let mut spans: Vec<(usize, usize, &str)> = edits
@@ -82,6 +90,10 @@ pub fn apply_all(src: &str, action: &CodeAction) -> String {
 }
 
 /// Byte offset in `src` of an LSP `(line, character)` position.
+#[expect(
+    clippy::explicit_counter_loop,
+    reason = "Preserve the u32 coordinate counter and its overflow behavior"
+)]
 pub fn pos_to_offset(src: &str, pos: Position) -> usize {
     let mut off = 0usize;
     for (l, line) in src.split_inclusive('\n').enumerate() {

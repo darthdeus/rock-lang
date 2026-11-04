@@ -12,6 +12,10 @@ use rock_lsp::compute_code_actions_workspace;
 
 fn new_text(action: &CodeAction) -> String {
     let edit = action.edit.as_ref().expect("action should carry an edit");
+    #[expect(
+        clippy::mutable_key_type,
+        reason = "WorkspaceEdit Uri keys use immutable text for equality and hashing"
+    )]
     let changes = edit.changes.as_ref().expect("edit should have changes");
     let edits = changes.values().next().expect("one file's edits");
     edits[0].new_text.clone()
