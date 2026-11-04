@@ -16,7 +16,7 @@ formatting tests because they round exact ties differently. Check `rustc --versi
 Install the components for the same stable toolchain used to build the compiler:
 
 ```sh
-rustup component add clippy rustfmt
+rustup component add clippy
 cargo clippy --locked --workspace --all-targets
 ```
 
@@ -24,15 +24,28 @@ The workspace has existing Clippy warnings, so this command is not a
 warning-free gate. Fix the cause of a diagnostic rather than adding a blanket
 allowance. Crates inherit the shared lint policy through `[lints] workspace = true`.
 
-Check Rust formatting in the crate you are changing, using its declared edition:
+Rust formatting uses the formatter shipped with Rust 1.99.1, independently of
+which stable compiler you use to build. Install it once, then format and check:
 
 ```sh
-rustfmt --check --edition 2024 crates/rock-cli/src/lib.rs
+rustup toolchain install 1.99.1 --profile minimal --component rustfmt
+cargo +1.99.1 fmt --all
+cargo +1.99.1 fmt --all -- --check
 ```
 
-The repository is not uniformly rustfmt-clean. Keep formatting changes local to
-the work; do not apply a workspace-wide formatting rewrite. The Rust formatter
-is separate from `rock fmt`, which formats Rock source files.
+The entire public Rust workspace, including upstream-derived crates, shares this
+baseline. The formatting workflow runs the check on pushes and pull requests;
+the full build/test workflow remains manual. Update the formatter version here,
+in `AGENTS.md` and in `.github/workflows/format.yml` together, keeping any resulting
+formatting sweep separate from semantic changes. The Rust formatter is separate
+from `rock fmt`, which formats Rock source files.
+
+The baseline formatting commit is recorded in `.git-blame-ignore-revs`. GitHub
+uses this file for blame; enable it for local Git blame with:
+
+```sh
+git config blame.ignoreRevsFile .git-blame-ignore-revs
+```
 
 ## Use the compiler you are editing
 

@@ -15,7 +15,8 @@ published the moment it is pushed.
   extended regex per line); it is never committed here.
 - Keep history linear. Commit coherent changes with messages that describe
   the change.
-- Use ASCII in code. Comment only the non-obvious why. Do not run `cargo fmt`
-  over the workspace.
+- Use ASCII in code. Comment only the non-obvious why. Keep Rust formatting
+  clean with `cargo +1.99.1 fmt --all`; CI checks the same pinned formatter.
+  Keep formatting-only changes separate from semantic changes.
 - Behavior changes start with a failing test.
 - Run tests for the crates you changed: `cargo test -p <crate>`.
