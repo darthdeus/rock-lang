@@ -20,7 +20,7 @@ impl Builder<'_> {
                 .into_iter()
                 .any(|s| matches!(self.body.statement_arena[s], Statement::Defer(_))) =>
             {
-                Some((|| {
+                Some({
                     self.defers.push(Vec::new());
                     let result = (|| {
                         if !self.lower_stmts(statements)? {
@@ -30,7 +30,7 @@ impl Builder<'_> {
                     })();
                     self.defers.pop();
                     result
-                })())
+                })
             }
             Expr::If {
                 cond,
@@ -397,7 +397,7 @@ impl Builder<'_> {
                     || self.nobox_global_place(e)?.is_some()
                 {
                     let r = self.lower_expr_repr(e)?.into_value();
-                    return Ok(self.pack_maybe_absent(r)?);
+                    return self.pack_maybe_absent(r);
                 }
                 Ok(self.emit_cur(Inst::Global(name)))
             }

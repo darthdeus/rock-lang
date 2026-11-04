@@ -352,9 +352,11 @@ impl<'a> DispatchCtx<'a> {
             let lookup_ns = lookup_start
                 .map(|start| start.elapsed().as_nanos() as u64)
                 .unwrap_or_default();
-            let nodes = interner_cold
-                .then(|| super::mono_ty_node_count(&ty))
-                .unwrap_or_default();
+            let nodes = if interner_cold {
+                super::mono_ty_node_count(&ty)
+            } else {
+                Default::default()
+            };
             cache.borrow_mut().insert(id, Rc::clone(&ty));
             if let Some(stats) = self.lower_attribution {
                 let mut stats = stats.borrow_mut();
@@ -386,9 +388,11 @@ impl<'a> DispatchCtx<'a> {
         if let Some(stats) = self.lower_attribution {
             let mut stats = stats.borrow_mut();
             stats.concrete_mono_shared_handle_requests += 1;
-            let nodes = interner_cold
-                .then(|| super::mono_ty_node_count(&ty))
-                .unwrap_or_default();
+            let nodes = if interner_cold {
+                super::mono_ty_node_count(&ty)
+            } else {
+                Default::default()
+            };
             stats.record_concrete_mono_derivation(
                 super::ConcreteMonoConsumer::Dispatch,
                 nodes,

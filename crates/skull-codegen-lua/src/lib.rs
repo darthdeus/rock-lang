@@ -4526,7 +4526,7 @@ fn wide_call_contributors(ws: &Workspace, func: &MirFunc, id: Idx<Inst>) -> Vec<
             ),
         ));
     }
-    lines.sort_by(|a, b| b.0.cmp(&a.0));
+    lines.sort_by_key(|x| std::cmp::Reverse(x.0));
     lines.truncate(3);
     lines.into_iter().map(|(_, line)| line).collect()
 }
@@ -5817,7 +5817,7 @@ impl Emitter<'_> {
     }
 
     fn write_u32_bin(&self, out: &mut String, op: &str, a: &Idx<Inst>, b: &Idx<Inst>) {
-        out.push_str("(");
+        out.push('(');
         self.write_bin(out, op, a, b);
         out.push_str(") % 4294967296");
     }

@@ -273,7 +273,8 @@ fn private_backends_are_omitted_before_source_discovery() {
     }
     let help = invoke(root.path(), &["--help"]);
     assert!(help.status.success());
-    for backend in ["c"] {
+    {
+        let backend = "c";
         assert!(
             text(&help).contains(&format!("{backend} (not in this build)")),
             "{}",

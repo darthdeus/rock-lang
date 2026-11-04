@@ -149,8 +149,7 @@ fn a_signature_edit_that_exports_a_private_type_is_refused() {
     let expected = "type `Hidden` in public API is not accessible";
 
     let fresh = Session::new(vec![], files(s1), &NsAliases::default())
-        .err()
-        .expect("a fresh build refuses it");
+        .expect_err("a fresh build refuses it");
     assert!(fresh.message.contains(expected), "{}", fresh.message);
 
     let mut session =

@@ -319,16 +319,11 @@ fn serves_target(b: bone_semantic::hir::FnBackend, target: bone_semantic::hir::F
     b == FnBackend::Any || b == target
 }
 
-/// `Some(k)` iff `name` is a GC-free `value` struct whose every flattened
-/// primitive leaf is `float` (recursively), where `k` is the leaf count; `None`
-/// otherwise (not such a struct, or any int/bool/enum leaf). The JS backend uses
-/// it to lower a `NativeBuffer<Vertex>` (all-float value struct, e.g. the vertex
-/// pool) to one flat `Float32Array(n * k)` -- JS has no per-struct ctype.
+mod parameter_demand;
 
 /// Value/enum REPRESENTATION analysis over a `Workspace` -- what a type looks
 /// like, as opposed to how a body lowers. Re-exported flat so the ~168 external
 /// `skull_mir::lower::*` call sites keep their paths.
-mod parameter_demand;
 mod shape;
 pub use shape::*;
 
@@ -2614,9 +2609,11 @@ impl Builder<'_> {
             .unwrap_or_default();
         let mut stats = self.lower_attribution.borrow_mut();
         stats.concrete_mono_shared_handle_requests += 1;
-        let nodes = interner_cold
-            .then(|| mono_ty_node_count(&ty))
-            .unwrap_or_default();
+        let nodes = if interner_cold {
+            mono_ty_node_count(&ty)
+        } else {
+            Default::default()
+        };
         cache.borrow_mut().insert(id, Rc::clone(&ty));
         stats.record_concrete_mono_derivation(consumer, nodes, 0, lookup_ns, cache_lookup_ns, 0);
         ty

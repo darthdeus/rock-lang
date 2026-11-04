@@ -535,8 +535,7 @@ fn a_block_over_the_gles_limit_is_rejected() {
 fn a_sampler_in_a_uniform_group_names_the_fix() {
     let ws = ws_of("value BadU { tint: Vec4, tex: Sampler2D }\nfn main() {}");
     let msg = skull_mir::gpu_layout::uniform_group_members(&ws, ustr::Ustr::from("BadU"))
-        .err()
-        .expect("a sampler field must reject")
+        .expect_err("a sampler field must reject")
         .message;
     assert!(
         msg.contains("sampler") && msg.contains("fn param"),

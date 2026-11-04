@@ -782,8 +782,7 @@ pub(crate) fn call_through_param_completions(
         }
     }
 
-    for si in 0..scoped_fns.len() {
-        let scoped = &scoped_fns[si];
+    for (si, scoped) in scoped_fns.iter().enumerate() {
         let cf = &index.fns[scoped.index];
         // Never autofill a call to the fn being defined -- a recursive self-call
         // is not what completing its own body means (a struct fill inside its own function body).
@@ -1252,7 +1251,7 @@ pub(crate) fn struct_literal_field_completions(
     // Fields already written between the `{` and the cursor (`name :`), to skip.
     let written = src.get(brace_open + 1..offset.min(src.len())).unwrap_or("");
     let present: std::collections::HashSet<String> = written
-        .split(|c: char| c == ',' || c == '{' || c == '}')
+        .split([',', '{', '}'])
         .filter_map(|seg| seg.split(':').next())
         .map(|n| n.trim().to_string())
         .filter(|n| !n.is_empty())

@@ -31,7 +31,7 @@ fn apply(src: &str, edits: Vec<TextEdit>) -> String {
             )
         })
         .collect();
-    spans.sort_by(|a, b| b.0.cmp(&a.0));
+    spans.sort_by_key(|x| std::cmp::Reverse(x.0));
     let mut s = src.to_string();
     for (start, end, text) in spans {
         s.replace_range(start..end, &text);

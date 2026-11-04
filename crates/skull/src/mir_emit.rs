@@ -4963,7 +4963,7 @@ fn all_roots_with_census(
     // Deterministic: `dependencies` is a hash set, so its iteration order is not.
     glue.sort_by_key(|f| (f.module.index(), f.func.into_raw()));
     roots.extend(glue.into_iter().filter(|f| seen.insert(*f)));
-    if let Some(census) = census.as_deref_mut() {
+    if let Some(census) = census {
         census.roots_reseeded += roots.len();
     }
     roots
@@ -5515,75 +5515,73 @@ fn shader_registration_lines(
                     });
             let (artifacts, census) =
                 collect_wgpu_projections(items, |key, (fullscreen, program_view)| {
-                    let emitted =
-                        (|| -> Result<(String, String, String, Vec<FuncRef>), CompilerError> {
-                            if fullscreen {
-                                let stage_view = program_view
-                                    .stages
-                                    .iter()
-                                    .find(|stage| {
-                                        stage.stage == skull_mir::shader_ir::ShaderStage::Fragment
-                                    })
-                                    .ok_or_else(|| {
-                                        CompilerError::new_no_location(format!(
-                                            "wgsl artifact {key} has no fragment stage view"
-                                        ))
-                                    })?;
-                                let input =
-                                    concrete_stage_input(stage_view, &program_view.concrete_plans);
-                                let neutral =
-                                    skull_codegen_shader::plan_fullscreen_fragment_from_concrete(
-                                        ws,
-                                        scx,
-                                        &input,
-                                        &skull_codegen_wgsl::WgslShaderPolicy,
-                                    )?;
-                                let abi = skull_codegen_wgsl::WgslAbiPlan::wgsl(
-                                    &neutral.interface,
-                                    bone_semantic::prelude::Span::default(),
-                                )?;
-                                let emission = skull_codegen_wgsl::emit_fullscreen_shader(
-                                    ws,
-                                    &neutral.ir,
-                                    &neutral.interface,
-                                    &abi,
-                                    bone_semantic::prelude::Span::default(),
-                                )?;
-                                Ok((
-                                    emission.source,
-                                    emission.abi.wire()?,
-                                    neutral.interface.semantic_wire(true),
-                                    emission.dependencies,
-                                ))
-                            } else {
-                                let glsl = skull_codegen_glsl::emit_shader_pipeline_with_view(
+                    (|| -> Result<(String, String, String, Vec<FuncRef>), CompilerError> {
+                        if fullscreen {
+                            let stage_view = program_view
+                                .stages
+                                .iter()
+                                .find(|stage| {
+                                    stage.stage == skull_mir::shader_ir::ShaderStage::Fragment
+                                })
+                                .ok_or_else(|| {
+                                    CompilerError::new_no_location(format!(
+                                        "wgsl artifact {key} has no fragment stage view"
+                                    ))
+                                })?;
+                            let input =
+                                concrete_stage_input(stage_view, &program_view.concrete_plans);
+                            let neutral =
+                                skull_codegen_shader::plan_fullscreen_fragment_from_concrete(
                                     ws,
                                     scx,
-                                    program_view,
-                                    profile,
+                                    &input,
+                                    &skull_codegen_wgsl::WgslShaderPolicy,
                                 )?;
-                                let abi = skull_codegen_wgsl::WgslAbiPlan::explicit(
-                                    &glsl.interface,
-                                    "vertex_main",
-                                    "fragment_main",
-                                    bone_semantic::prelude::Span::default(),
-                                )?;
-                                let emission = skull_codegen_wgsl::emit_explicit_shader(
-                                    ws,
-                                    &glsl.ir,
-                                    &glsl.interface,
-                                    &abi,
-                                    bone_semantic::prelude::Span::default(),
-                                )?;
-                                Ok((
-                                    emission.source,
-                                    emission.abi.wire()?,
-                                    glsl.interface.semantic_wire(false),
-                                    emission.dependencies,
-                                ))
-                            }
-                        })();
-                    emitted
+                            let abi = skull_codegen_wgsl::WgslAbiPlan::wgsl(
+                                &neutral.interface,
+                                bone_semantic::prelude::Span::default(),
+                            )?;
+                            let emission = skull_codegen_wgsl::emit_fullscreen_shader(
+                                ws,
+                                &neutral.ir,
+                                &neutral.interface,
+                                &abi,
+                                bone_semantic::prelude::Span::default(),
+                            )?;
+                            Ok((
+                                emission.source,
+                                emission.abi.wire()?,
+                                neutral.interface.semantic_wire(true),
+                                emission.dependencies,
+                            ))
+                        } else {
+                            let glsl = skull_codegen_glsl::emit_shader_pipeline_with_view(
+                                ws,
+                                scx,
+                                program_view,
+                                profile,
+                            )?;
+                            let abi = skull_codegen_wgsl::WgslAbiPlan::explicit(
+                                &glsl.interface,
+                                "vertex_main",
+                                "fragment_main",
+                                bone_semantic::prelude::Span::default(),
+                            )?;
+                            let emission = skull_codegen_wgsl::emit_explicit_shader(
+                                ws,
+                                &glsl.ir,
+                                &glsl.interface,
+                                &abi,
+                                bone_semantic::prelude::Span::default(),
+                            )?;
+                            Ok((
+                                emission.source,
+                                emission.abi.wire()?,
+                                glsl.interface.semantic_wire(false),
+                                emission.dependencies,
+                            ))
+                        }
+                    })()
                 })?;
             for (shader_key, (source, wire, semantic_wire, emission_dependencies)) in artifacts {
                 dependencies.extend(emission_dependencies);

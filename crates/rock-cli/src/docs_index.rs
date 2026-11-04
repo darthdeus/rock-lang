@@ -57,7 +57,7 @@ pub fn run(inputs: &[String], output: Option<&str>) -> Result<()> {
         identity.update(source.display_path.as_bytes());
         identity.update([0]);
         identity.update(file_hash.as_bytes());
-        identity.update([b'\n']);
+        identity.update(*b"\n");
         source_values.push(json!({
             "path": source.display_path,
             "sha256": file_hash,

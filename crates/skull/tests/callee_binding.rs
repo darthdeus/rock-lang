@@ -78,12 +78,10 @@ fn every_binding_line_follows_every_definition() {
 fn binding_lines_are_ordered_callees_before_callers() {
     let lua = emit(SRC);
     let position = |prefix: &str| -> usize {
-        let at = lua
-            .match_indices(&format!("\n{prefix}"))
+        lua.match_indices(&format!("\n{prefix}"))
             .map(|(i, _)| i)
             .find(|&i| lua[i + 1..].starts_with(prefix) && lua[i + 1..].contains(" = __rock_mk_"))
-            .unwrap_or_else(|| panic!("no binding line for `{prefix}`"));
-        at
+            .unwrap_or_else(|| panic!("no binding line for `{prefix}`"))
     };
     let mid_bind = position("mid_int = __rock_mk_");
     let top_bind = position("top_int = __rock_mk_");

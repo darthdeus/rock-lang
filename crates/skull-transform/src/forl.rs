@@ -786,9 +786,7 @@ fn try_match(ws: &Workspace, func: &MirFunc, h: Idx<Block>) -> Option<LoopMatch>
         };
         let mut h2 = Vec::new();
         let tgt = chase(func, gg, &mut h2);
-        let Some(jn) = joins.iter().find(|jn| jn.j == tgt) else {
-            return None;
-        };
+        let jn = joins.iter().find(|jn| jn.j == tgt)?;
         if !d_droppable(dg) || !flag_const(dg, jn.flag, false) {
             return None;
         }

@@ -1607,8 +1607,8 @@ mod modules_grammar_tests {
                     [stmt] => match &ast.stmts[*stmt].kind {
                         StatementKind::Let(l) => {
                             let v = l.value.expect("let has a value");
-                            let s = ast.expr_sexp(v);
-                            s
+
+                            ast.expr_sexp(v)
                         }
                         other => panic!("expected let, got {other:?}"),
                     },

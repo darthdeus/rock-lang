@@ -218,10 +218,13 @@ impl ContainerPlan {
             (ContainerFamily::Vec, _) if wide_nobox_struct => false,
             (ContainerFamily::Vec, Some(shape)) if column_eligible => {
                 let paths = crate::lower::value_leaf_paths(shape);
-                (paths.len() + usize::from(nullable) <= crate::lower::MAX_COLUMN_LEAVES
-                    || arena.get(element_rep).nobox())
-                .then(|| !paths.iter().any(|path| path.as_str() == "len"))
-                .unwrap_or(false)
+                if paths.len() + usize::from(nullable) <= crate::lower::MAX_COLUMN_LEAVES
+                    || arena.get(element_rep).nobox()
+                {
+                    !paths.iter().any(|path| path.as_str() == "len")
+                } else {
+                    false
+                }
             }
             (ContainerFamily::Map | ContainerFamily::Arena, Some(shape))
                 if !nullable && column_eligible =>

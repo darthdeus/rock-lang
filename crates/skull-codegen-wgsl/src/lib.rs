@@ -319,7 +319,7 @@ fn identifier(name: Ustr, what: &str, span: Span) -> Result<(), CompilerError> {
             format!("WGSL {what} `{name}` is not an identifier"),
         ));
     }
-    if WGSL_KEYWORDS.iter().any(|keyword| *keyword == s) {
+    if WGSL_KEYWORDS.contains(&s) {
         return Err(err(
             span,
             format!("WGSL {what} `{name}` is a reserved keyword"),
@@ -5954,6 +5954,48 @@ fn zero_value(ws: &Workspace, kind: ValueKind) -> String {
     }
 }
 
+fn format_float(value: f64) -> String {
+    let mut text = format!("{value}");
+    if !text.contains('.') && !text.contains('e') && !text.contains('E') {
+        text.push_str(".0");
+    }
+    text
+}
+
+fn mir_kind(inst: &Inst) -> &'static str {
+    match inst {
+        Inst::Global(_) => "global",
+        Inst::CallMulti { .. }
+        | Inst::CallValue { .. }
+        | Inst::CallValueMulti { .. }
+        | Inst::CallBoundMulti { .. } => "multi-value call",
+        Inst::MakeTuple(_)
+        | Inst::MakeVec(_)
+        | Inst::MakeVecColumns { .. }
+        | Inst::MakeVecColumnHeader { .. } => "aggregate",
+        Inst::MakeStruct { .. } | Inst::MakeEnum { .. } | Inst::MakeEnumDyn { .. } => {
+            "heap aggregate"
+        }
+        Inst::Index { .. } | Inst::Len { .. } | Inst::VecCheckedIndex { .. } => {
+            "container operation"
+        }
+        Inst::StoreField { .. } | Inst::StoreIndex { .. } | Inst::StoreGlobal { .. } => "mutation",
+        Inst::Lambda { .. } | Inst::MakeEnv { .. } => "closure",
+        Inst::FfiNewArray { .. } | Inst::FfiViewCast { .. } => "FFI operation",
+        Inst::BitAnd(..)
+        | Inst::BitOr(..)
+        | Inst::BitXor(..)
+        | Inst::Shl(..)
+        | Inst::Shr(..)
+        | Inst::BitNot(_) => "bitwise operation",
+        Inst::CoroSetInner(_)
+        | Inst::CoroHook { .. }
+        | Inst::MapNext { .. }
+        | Inst::ArrayPush { .. } => "coroutine/iteration operation",
+        _ => "unsupported operation",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{ResultKind, ValueKind, WgslIntrinsic, WgslOperator, swizzle_kind};
@@ -6056,47 +6098,5 @@ fn main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
         assert_eq!(swizzle_kind(ValueKind::Vec2, "z"), None);
         assert_eq!(swizzle_kind(ValueKind::Vec4, "xg"), None);
         assert_eq!(swizzle_kind(ValueKind::F32, "x"), None);
-    }
-}
-
-fn format_float(value: f64) -> String {
-    let mut text = format!("{value}");
-    if !text.contains('.') && !text.contains('e') && !text.contains('E') {
-        text.push_str(".0");
-    }
-    text
-}
-
-fn mir_kind(inst: &Inst) -> &'static str {
-    match inst {
-        Inst::Global(_) => "global",
-        Inst::CallMulti { .. }
-        | Inst::CallValue { .. }
-        | Inst::CallValueMulti { .. }
-        | Inst::CallBoundMulti { .. } => "multi-value call",
-        Inst::MakeTuple(_)
-        | Inst::MakeVec(_)
-        | Inst::MakeVecColumns { .. }
-        | Inst::MakeVecColumnHeader { .. } => "aggregate",
-        Inst::MakeStruct { .. } | Inst::MakeEnum { .. } | Inst::MakeEnumDyn { .. } => {
-            "heap aggregate"
-        }
-        Inst::Index { .. } | Inst::Len { .. } | Inst::VecCheckedIndex { .. } => {
-            "container operation"
-        }
-        Inst::StoreField { .. } | Inst::StoreIndex { .. } | Inst::StoreGlobal { .. } => "mutation",
-        Inst::Lambda { .. } | Inst::MakeEnv { .. } => "closure",
-        Inst::FfiNewArray { .. } | Inst::FfiViewCast { .. } => "FFI operation",
-        Inst::BitAnd(..)
-        | Inst::BitOr(..)
-        | Inst::BitXor(..)
-        | Inst::Shl(..)
-        | Inst::Shr(..)
-        | Inst::BitNot(_) => "bitwise operation",
-        Inst::CoroSetInner(_)
-        | Inst::CoroHook { .. }
-        | Inst::MapNext { .. }
-        | Inst::ArrayPush { .. } => "coroutine/iteration operation",
-        _ => "unsupported operation",
     }
 }

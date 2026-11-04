@@ -63,7 +63,7 @@ struct Role {
 
 fn string_arg(ann: &bone_semantic::hir::Annotation, name: &str) -> Option<Ustr> {
     ann.args.iter().find_map(|arg| {
-        (arg.name.as_ref().is_some_and(|n| n.name.as_str() == name)).then(|| match arg.value {
+        (arg.name.as_ref().is_some_and(|n| n.name.as_str() == name)).then_some(match arg.value {
             AnnoValue::String(value) => Some(value),
             _ => None,
         })?
@@ -120,9 +120,9 @@ fn artifact_definition_type(ws: &Workspace, return_ty: TyId) -> Option<TyId> {
     params.next().is_none().then_some(definition)
 }
 
-fn metadata<'a>(
-    decorator: &'a bone_semantic::hir::DecoratorDef,
-) -> Result<Option<&'a bone_semantic::hir::Annotation>, CompilerError> {
+fn metadata(
+    decorator: &bone_semantic::hir::DecoratorDef,
+) -> Result<Option<&bone_semantic::hir::Annotation>, CompilerError> {
     let mut found = decorator
         .annotations
         .iter()

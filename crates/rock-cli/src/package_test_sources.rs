@@ -310,7 +310,8 @@ pub(crate) fn select(sources: &SourceFiles, project_root: &Path) -> Result<Sourc
             .files
             .iter()
             .zip(selected)
-            .filter_map(|(file, selected)| selected.then(|| file.clone()))
+            .filter(|&(_, selected)| selected)
+            .map(|(file, _)| file.clone())
             .collect(),
         package_roots: sources.package_roots.clone(),
     })

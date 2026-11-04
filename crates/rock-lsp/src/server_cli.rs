@@ -392,8 +392,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("missing-dir").join("lsp.log");
         let err = open_debug_log(path.to_str().unwrap())
-            .err()
-            .expect("open must fail")
+            .expect_err("open must fail")
             .to_string();
         assert!(
             err.contains("ROCK_LSP_DEBUG") && err.contains("missing-dir"),

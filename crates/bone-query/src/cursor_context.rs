@@ -1008,17 +1008,15 @@ impl CursorAst {
                 // method's unique return type.
                 ExprKind::FunctionCall {
                     func: rf,
-                    syntax: rs,
+                    syntax: CallSyntax::Normal | CallSyntax::At,
                     ..
-                } if matches!(rs, CallSyntax::Normal | CallSyntax::At) => {
-                    match &self.expr(*rf).kind {
-                        ExprKind::Ident(id) => ReceiverAnchor::ChainCall(id.name.to_string()),
-                        ExprKind::FieldAccess(_, m) | ExprKind::SafeNavigation(_, m) => {
-                            ReceiverAnchor::ChainCall(m.name.to_string())
-                        }
-                        _ => ReceiverAnchor::End(r.span.offset_range.1),
+                } => match &self.expr(*rf).kind {
+                    ExprKind::Ident(id) => ReceiverAnchor::ChainCall(id.name.to_string()),
+                    ExprKind::FieldAccess(_, m) | ExprKind::SafeNavigation(_, m) => {
+                        ReceiverAnchor::ChainCall(m.name.to_string())
                     }
-                }
+                    _ => ReceiverAnchor::End(r.span.offset_range.1),
+                },
                 _ => ReceiverAnchor::End(r.span.offset_range.1),
             });
         }

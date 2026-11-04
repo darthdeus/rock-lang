@@ -96,9 +96,7 @@ fn body_cursor(text: &str) -> Option<usize> {
     let mut i = 0;
     while i < body.len() {
         // Advance to the next identifier start.
-        let Some(rel) = body[i..].find(|c: char| c.is_alphabetic() || c == '_') else {
-            return None;
-        };
+        let rel = body[i..].find(|c: char| c.is_alphabetic() || c == '_')?;
         let start = i + rel;
         let end = start
             + body[start..]

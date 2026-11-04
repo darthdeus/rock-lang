@@ -1491,8 +1491,7 @@ fn a_function_named_like_a_macro_is_refused_like_a_fresh_build() {
     let expected = "macro `twice` collides with a function named `twice`";
 
     let fresh = Session::new(warm(), files(user1), &NsAliases::default())
-        .err()
-        .expect("a fresh session refuses it");
+        .expect_err("a fresh session refuses it");
     assert!(fresh.message.contains(expected), "{}", fresh.message);
 
     let mut session =

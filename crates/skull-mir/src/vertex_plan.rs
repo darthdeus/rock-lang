@@ -76,7 +76,7 @@ impl VertexPlan {
     pub fn float_unit_stride(&self) -> Result<usize, String> {
         self.reject_integers()?;
         self.check_cumulative_offsets()?;
-        if self.byte_stride % COMPONENT_BYTES != 0 {
+        if !self.byte_stride.is_multiple_of(COMPONENT_BYTES) {
             return Err(format!(
                 "`{}` has a {}-byte stride, which is not a whole number of floats",
                 self.struct_name, self.byte_stride

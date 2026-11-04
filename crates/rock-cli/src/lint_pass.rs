@@ -462,7 +462,7 @@ fn present_soft(
     root: &Path,
     mode: LintReport,
     report_started: Instant,
-    mut timing: Option<&mut LintRouteTiming>,
+    timing: Option<&mut LintRouteTiming>,
 ) {
     let report_prepare_ns = report_started.elapsed().as_nanos();
     let mut summary_sort_ns = 0;
@@ -486,7 +486,7 @@ fn present_soft(
         }
     }
     record_report_census(report_prepare_ns, summary_sort_ns, render_ns);
-    if let Some(timing) = timing.as_deref_mut() {
+    if let Some(timing) = timing {
         timing.report_prepare_ns += report_prepare_ns;
         timing.summary_sort_ns += summary_sort_ns;
         timing.render_ns += render_ns;

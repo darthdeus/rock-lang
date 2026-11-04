@@ -235,13 +235,12 @@ pub(crate) fn aliases_for_session(
     let stubs: Vec<skull_parser::Ast> = files
         .iter()
         .filter(|f| f.package.is_some())
-        .map(|f| {
-            let mut ast = skull_parser::Ast::default();
-            ast.file = ustr::Ustr::from(f.path.as_str());
-            ast.dialect = f.dialect;
-            ast.package = f.package.clone();
-            ast.global_policy = f.global_policy;
-            ast
+        .map(|f| skull_parser::Ast {
+            file: ustr::Ustr::from(f.path.as_str()),
+            dialect: f.dialect,
+            package: f.package.clone(),
+            global_policy: f.global_policy,
+            ..Default::default()
         })
         .collect();
     aliases_for_modules(&stubs)
@@ -1293,6 +1292,14 @@ pub fn short_path(path: &str) -> String {
     }
 }
 
+/// The batch semantic pass with the API-closure gate the build enforces.
+pub fn semantic_pass_with_aliases(
+    modules: &mut [skull_parser::Ast],
+    aliases: &bone_core::modules::NsAliases,
+) -> std::result::Result<bone_semantic::inference::Workspace, CompilerError> {
+    skull::pipeline::semantic_pass(modules, aliases, ClosureGate::Enforce)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1552,12 +1559,4 @@ mod tests {
             "CLI and LSP must warm the same stdlib file ids"
         );
     }
-}
-
-/// The batch semantic pass with the API-closure gate the build enforces.
-pub fn semantic_pass_with_aliases(
-    modules: &mut [skull_parser::Ast],
-    aliases: &bone_core::modules::NsAliases,
-) -> std::result::Result<bone_semantic::inference::Workspace, CompilerError> {
-    skull::pipeline::semantic_pass(modules, aliases, ClosureGate::Enforce)
 }

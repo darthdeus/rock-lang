@@ -3332,8 +3332,7 @@ EXPECTED:\n\
         let path = dir.path().join("fixture.rock.lsp");
         std::fs::write(&path, fixture).unwrap();
         parse_lsp_test_file(&path)
-            .err()
-            .expect("the fixture must be rejected when it is parsed")
+            .expect_err("the fixture must be rejected when it is parsed")
             .to_string()
     }
 

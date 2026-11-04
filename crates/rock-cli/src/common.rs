@@ -721,7 +721,7 @@ mod tests {
             false,
             false,
         );
-        let error = result.err().expect("a panicked reader must fail the wait");
+        let error = result.expect_err("a panicked reader must fail the wait");
         assert!(error.to_string().contains("stderr"), "got: {error}");
     }
 

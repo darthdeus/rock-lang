@@ -49,7 +49,7 @@ fn legal_positions(c: BodyCtx, gamma: &Gamma) -> FxHashSet<Idx<Expr>> {
             // `advance(h.p, dt)` -- legal only when the callee takes LEAVES.
             Expr::Call { callee, args, .. } => {
                 if scalar_abi_callee(c, gamma, e, callee) {
-                    ok.extend(args.into_iter());
+                    ok.extend(args);
                 }
             }
 

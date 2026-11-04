@@ -371,7 +371,7 @@ impl ReachabilityIndex {
             };
 
             // Productive leaf: this edge's target IS a wanted type.
-            if want.iter().any(|w| *w == e.target) {
+            if want.contains(&e.target) {
                 let (is_method, takes_args) = match e.kind {
                     EdgeKind::Field => (false, false),
                     EdgeKind::Method { takes_args } => (true, takes_args),

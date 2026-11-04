@@ -1212,7 +1212,7 @@ impl Builder<'_> {
             // day a `@gpu_only` intrinsic returns a tuple.
             self.authorize_gpu_boundary_boxes(&func, &args);
             if let Some(shape) = &ret_tuple {
-                return Ok(self.emit_tuple_call_tree(e, func, args, shape, &dc)?);
+                return self.emit_tuple_call_tree(e, func, args, shape, &dc);
             }
             let call = self.emit_cur(Inst::Call { func, args });
             self.record_call(call, func, &dc)?;

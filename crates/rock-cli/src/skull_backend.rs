@@ -1051,12 +1051,9 @@ fn run_emitted_tests(
                     )
                 } else {
                     format!(
-                        "{}\n\n--- emitted lua (truncated) ---\n{}",
-                        format!(
-                            "{}{}",
-                            String::from_utf8_lossy(&run.output.stdout),
-                            String::from_utf8_lossy(&run.output.stderr)
-                        ),
+                        "{}{}\n\n--- emitted lua (truncated) ---\n{}",
+                        String::from_utf8_lossy(&run.output.stdout),
+                        String::from_utf8_lossy(&run.output.stderr),
                         excerpt
                     )
                 },
@@ -4783,7 +4780,7 @@ impl IncrementalProject {
                 .to_string();
             let commit_started = profile.is_some().then(Instant::now);
             self.cache.commit_body_edit_transaction();
-            if let (Some(started), Some(profile)) = (commit_started, profile.as_deref_mut()) {
+            if let (Some(started), Some(profile)) = (commit_started, profile) {
                 profile.transaction_commit_ns += started.elapsed().as_nanos();
             }
             let write_ms = t_write.elapsed().as_secs_f64() * 1000.0;

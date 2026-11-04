@@ -32,11 +32,6 @@ fn main() {
 }
 "#;
 
-/// Run `prog` under luajit, returning trimmed stdout (panics with stderr on a
-/// non-zero exit). Temp file keyed by pid + a caller tag so parallel tests
-/// (nextest is process-per-test, but be safe under `cargo test` threads too)
-/// never collide.
-
 /// SHAPE: the `on_killed` hook hoists to a shared top-level `worker__on_killed`
 /// and the ctor stores its compiler-owned slot -- no inline closure per
 /// construction.

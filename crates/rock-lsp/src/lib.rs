@@ -290,16 +290,15 @@ fn completion_options() -> CompletionOptions {
 
 /// Whole-document sync: the client sends full text on open and change.
 fn sync_options() -> TextDocumentSyncOptions {
-    let mut sync = TextDocumentSyncOptions::default();
-    sync.open_close = Some(true);
-    sync.change = Some(TextDocumentSyncKind::FULL);
-    sync.will_save = Some(false);
-    sync.will_save_wait_until = Some(false);
-    let save = SaveOptions {
-        include_text: Some(false),
-    };
-    sync.save = Some(TextDocumentSyncSaveOptions::SaveOptions(save));
-    sync
+    TextDocumentSyncOptions {
+        open_close: Some(true),
+        change: Some(TextDocumentSyncKind::FULL),
+        will_save: Some(false),
+        will_save_wait_until: Some(false),
+        save: Some(TextDocumentSyncSaveOptions::SaveOptions(SaveOptions {
+            include_text: Some(false),
+        })),
+    }
 }
 
 pub fn run_lsp_server() -> Result<()> {

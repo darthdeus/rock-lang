@@ -2329,653 +2329,6 @@ pub struct CoroLowered {
     pub step_own: crate::scope::Ownership,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn lower(src: &str, fn_name: &str) -> MirFunc {
-        let ast = skull_parser::parse_module(src, ustr::Ustr::from("<test>")).expect("parse");
-        let ws =
-            bone_semantic::semantic_passes::semantic_pass(&mut vec![ast]).expect("semantic_pass");
-        let mid = ws.module_ids[&ustr::Ustr::from("<test>")];
-        let (fid, _) = ws
-            .module(mid)
-            .functions
-            .iter()
-            .find(|(_, f)| f.name.as_str() == fn_name)
-            .expect("function");
-        let root = skull_mir::mir::FuncRef {
-            module: mid,
-            func: fid,
-        };
-        let interner = std::sync::Arc::new(skull_mir::monoty::MonoInterner::new());
-        let graph = skull_graph::instance_graph::build_in(
-            &ws,
-            vec![root],
-            false,
-            std::sync::Arc::clone(&interner),
-        );
-        let concrete = skull_graph::concrete_body::build(&ws, &graph);
-        let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(interner);
-        let plan = concrete
-            .plans
-            .get(&skull_mir::instance::Instance::base(root))
-            .expect("test fixture concrete plan");
-        skull_mir::lower::lower_instance_with_plans(&ws, &scx, plan, &concrete.plans)
-            .expect("lower")
-    }
-
-    #[test]
-    fn cleanup_load_root_keeps_the_written_cell() {
-        let mut unrooted = MirFunc::new(ustr::Ustr::from("cleanup_root"));
-        let cell = unrooted.new_cell(None);
-        let value = unrooted.emit(unrooted.entry, Inst::Const(Lit::Int(1)));
-        let store = unrooted.emit(unrooted.entry, Inst::Store { cell, value });
-        unrooted.set_term(unrooted.entry, Term::Return(Vec::new()));
-        let _ = cleanup(&mut unrooted);
-        assert!(!unrooted.blocks[unrooted.entry].insts.contains(&store));
-
-        let mut rooted = MirFunc::new(ustr::Ustr::from("cleanup_root"));
-        let cell = rooted.new_cell(None);
-        let value = rooted.emit(rooted.entry, Inst::Const(Lit::Int(1)));
-        let store = rooted.emit(rooted.entry, Inst::Store { cell, value });
-        rooted.inline_cleanup_load_cells.push(cell);
-        rooted.set_term(rooted.entry, Term::Return(Vec::new()));
-        let _ = cleanup(&mut rooted);
-        assert!(rooted.blocks[rooted.entry].insts.contains(&store));
-    }
-
-    #[test]
-    fn cleanup_prefilter_finds_only_aggregate_stores() {
-        let scalar = lower("fn f(x: int) -> int { return x }", "f");
-        assert!(!has_scalarizable_store(&scalar));
-
-        let aggregate = lower(
-            "struct Pair { a: int, b: int }\n\
-             fn f(flag: bool) -> int {\n\
-                 let p = Pair { a: 1, b: 2 }\n\
-                 if flag { return p.a }\n\
-                 return p.b\n\
-             }",
-            "f",
-        );
-        assert!(has_scalarizable_store(&aggregate), "{aggregate}");
-    }
-
-    #[test]
-    fn coroutine_transform_exposes_one_owned_frame_plan() {
-        let func = lower(
-            "co fn f(x: int) -> Coroutine<int> { let saved = x yield saved }",
-            "f",
-        );
-        let lowered = transform_coroutine(&func, None, false);
-        assert!(
-            !lowered.frame_plan.slots().is_empty(),
-            "the coroutine fixture must have a nonzero frame population"
-        );
-        assert_eq!(
-            lowered.frame_plan.slots().len(),
-            lowered.frame_plan.fields().len(),
-            "one frame plan must own both membership and physical slots"
-        );
-    }
-
-    #[test]
-    fn coroutine_demotes_a_local_confined_to_one_resume_segment() {
-        let func = lower(
-            "co fn f(x: int) -> Coroutine<int> {\n\
-                 yield 1\n\
-                 let after = x\n\
-             }",
-            "f",
-        );
-        let lowered = transform_coroutine(&func, None, false);
-        assert!(
-            lowered
-                .frame_plan
-                .fields()
-                .iter()
-                .all(|&cell| lowered.step.cells[cell].name != Some(ustr::Ustr::from("after"))),
-            "a local used only after the last yield must stay out of the frame:\n{}",
-            lowered.step
-        );
-    }
-
-    #[test]
-    fn coroutine_frame_cells_retain_types_across_conditional_yields() {
-        let func = lower(
-            "co fn f(flag: bool) -> Coroutine<int> {\n\
-                 if flag { yield 1 yield 2 } else { yield 10 yield 20 }\n\
-             }",
-            "f",
-        );
-        let lowered = transform_coroutine(&func, None, false);
-        let untyped: Vec<_> = lowered
-            .frame_plan
-            .fields()
-            .iter()
-            .copied()
-            .filter(|&cell| lowered.step.cells[cell].ty.is_none())
-            .map(|cell| (cell, lowered.step.cells[cell].name))
-            .collect();
-        assert!(
-            untyped.is_empty(),
-            "untyped frame cells: {untyped:?}\n{}",
-            lowered.step
-        );
-    }
-
-    #[test]
-    fn coroutine_frame_cells_retain_types_across_null_coalesce() {
-        let func = lower(
-            "co fn f(x: int?) -> Coroutine<int> {\n\
-                 yield x ?? -1\n\
-                 yield x ?? -2\n\
-             }",
-            "f",
-        );
-        let lowered = transform_coroutine(&func, None, false);
-        let untyped: Vec<_> = lowered
-            .frame_plan
-            .fields()
-            .iter()
-            .copied()
-            .filter(|&cell| lowered.step.cells[cell].ty.is_none())
-            .map(|cell| (cell, lowered.step.cells[cell].name))
-            .collect();
-        assert!(
-            untyped.is_empty(),
-            "untyped frame cells: {untyped:?}\n{}",
-            lowered.step
-        );
-    }
-
-    #[test]
-    fn coroutine_frame_cells_retain_types_across_tuple_destructure() {
-        let func = lower(
-            "fn pair() -> (int, int) { return (10, 20) }\n\
-             co fn f() -> Coroutine<int> {\n\
-                 let (a, b) = pair()\n\
-                 yield a\n\
-                 yield b\n\
-             }",
-            "f",
-        );
-        let lowered = transform_coroutine(&func, None, false);
-        let untyped: Vec<_> = lowered
-            .frame_plan
-            .fields()
-            .iter()
-            .copied()
-            .filter(|&cell| lowered.step.cells[cell].ty.is_none())
-            .map(|cell| (cell, lowered.step.cells[cell].name))
-            .collect();
-        assert!(
-            untyped.is_empty(),
-            "untyped frame cells: {untyped:?}\n{}",
-            lowered.step
-        );
-    }
-
-    #[test]
-    fn coroutine_frame_rematerializes_cross_block_constants_but_spills_a_live_global() {
-        let mut func = MirFunc::new(ustr::Ustr::from("f"));
-        func.is_coroutine = true;
-        func.resume_arg = Some(func.new_cell(Some(ustr::Ustr::from("__resume_arg"))));
-        let resume = func.new_block();
-        let then_bb = func.new_block();
-        let else_bb = func.new_block();
-        let global = func.emit(func.entry, Inst::Global(ustr::Ustr::from("SELF")));
-        let constant = func.emit(func.entry, Inst::Const(Lit::Int(7)));
-        func.set_term(
-            func.entry,
-            Term::Yield {
-                values: vec![constant],
-                resume,
-            },
-        );
-        func.emit(
-            resume,
-            Inst::StoreGlobal {
-                name: ustr::Ustr::from("SAVED"),
-                value: global,
-            },
-        );
-        let condition = func.emit(resume, Inst::IntLt(constant, constant));
-        func.set_term(
-            resume,
-            Term::Branch {
-                cond: condition,
-                then_bb,
-                else_bb,
-            },
-        );
-        func.set_term(then_bb, Term::Return(Vec::new()));
-        func.set_term(else_bb, Term::Return(Vec::new()));
-        let lowered = transform_coroutine(&func, None, false);
-        let spills = lowered.frame_plan.spill_values();
-        assert!(
-            spills
-                .iter()
-                .any(|value| matches!(lowered.step.insts[*value], Inst::Global(name) if name.as_str() == "SELF")),
-            "the evaluated global handle must retain its pre-branch identity:\n{}",
-            lowered.step
-        );
-        assert!(
-            spills
-                .iter()
-                .all(|value| !matches!(lowered.step.insts[*value], Inst::Const(_))),
-            "constants must not acquire frame fields: {spills:?}\n{}",
-            lowered.step
-        );
-    }
-
-    #[test]
-    fn closure_conversion_exposes_one_owned_environment_plan() {
-        let mut func = lower(
-            "fn f() -> int { let captured = 3; let g = () => captured; return g() }",
-            "f",
-        );
-        assert!(
-            func.insts
-                .iter()
-                .any(|(_, inst)| matches!(inst, Inst::Lambda { .. })),
-            "the closure fixture must have a nonzero lambda population"
-        );
-        convert_closures(&mut func, "f");
-        assert_eq!(
-            func.closure_env_plans.len(),
-            1,
-            "one lambda must have one env plan"
-        );
-        let plan = func
-            .closure_env_plans
-            .values()
-            .next()
-            .expect("closure env plan");
-        assert!(
-            !plan.captures().is_empty(),
-            "the closure environment must carry a capture"
-        );
-        assert!(
-            plan.env_cell().is_some(),
-            "a capturing closure must own an env cell"
-        );
-    }
-
-    #[test]
-    fn escaping_lambdas_get_distinct_owner_site_identities_and_census() {
-        let mut func = lower(
-            "fn f() -> int {\n\
-                 let captured = true\n\
-                 let a = () => captured\n\
-                 let b = () => captured\n\
-                 let c = () => 7\n\
-                 if a() { return 1 }\n\
-                 if b() { return 2 }\n\
-                 return c()\n\
-             }",
-            "f",
-        );
-        let owner = match func.code_identity.clone().expect("concrete owner") {
-            skull_mir::code_identity::CodeIdentity::Named(instance) => instance,
-            other => panic!("unexpected owner identity: {other:?}"),
-        };
-        convert_closures(&mut func, "f");
-        let artifact = skull_mir::code_identity::CodeArtifact::from_mir_tree(&func);
-        let lambdas: Vec<_> = artifact
-            .entries
-            .keys()
-            .filter_map(|identity| match identity {
-                skull_mir::code_identity::CodeIdentity::Lambda { enclosing, site }
-                    if *enclosing
-                        == skull_mir::code_identity::CodeOwner::Instance(owner.clone()) =>
-                {
-                    Some(*site)
-                }
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            lambdas.len(),
-            3,
-            "all escaping lambda bodies need identities"
-        );
-        assert_eq!(
-            lambdas
-                .iter()
-                .collect::<std::collections::BTreeSet<_>>()
-                .len(),
-            3,
-            "source sites, not ordinals, distinguish identical-looking lambdas"
-        );
-        assert_eq!(artifact.census.lambda_values, 3);
-        assert_eq!(artifact.census.capturing_lambdas, 2);
-        assert_eq!(artifact.census.capture_free_lambdas, 1);
-        assert!(
-            artifact.census.is_total(),
-            "identity census: {:?}",
-            artifact.census
-        );
-    }
-
-    #[test]
-    fn lambda_topology_rejects_insertion_but_body_edits_keep_identity() {
-        use skull_mir::code_identity::{
-            CaptureSchema, CodeArtifact, CodeCompatibility, CodeEntry, CodeIdentity, LambdaSiteId,
-            LambdaTopologyFingerprint,
-        };
-        use skull_mir::instance::Instance;
-
-        let owner = Instance::base(skull_mir::mir::FuncRef {
-            module: bone_semantic::prelude::ModuleId::builtin(),
-            func: comfy_la_arena::Idx::from_raw(comfy_la_arena::RawIdx::from_u32(0)),
-        });
-        let site_a = LambdaSiteId {
-            file: Ustr::from("f.rock"),
-            offset: 10,
-        };
-        let site_b = LambdaSiteId {
-            file: Ustr::from("f.rock"),
-            offset: 20,
-        };
-        let topology = LambdaTopologyFingerprint::from_sites(&[(site_a, 0), (site_b, 0)]);
-        let inserted = LambdaTopologyFingerprint::from_sites(&[
-            (site_a, 0),
-            (
-                LambdaSiteId {
-                    file: Ustr::from("f.rock"),
-                    offset: 15,
-                },
-                0,
-            ),
-            (site_b, 0),
-        ]);
-        let removed = LambdaTopologyFingerprint::from_sites(&[(site_b, 0)]);
-        let compat = |topology| CodeCompatibility {
-            call_abi: "params=[];result=none;lanes=0;scalar=false".to_string(),
-            capture: CaptureSchema::empty(),
-            frame: None,
-            lambda_topology: topology,
-        };
-        let id = CodeIdentity::Lambda {
-            enclosing: skull_mir::code_identity::CodeOwner::Instance(owner.clone()),
-            site: site_b,
-        };
-        let mut old = CodeArtifact::default();
-        old.insert(CodeEntry {
-            identity: id.clone(),
-            compatibility: compat(topology),
-            body_fingerprint: 1,
-            body_name: Some(Ustr::from("old")),
-            escaping: true,
-            capture_free: true,
-        });
-        let mut body_edit = CodeArtifact::default();
-        body_edit.insert(CodeEntry {
-            identity: id.clone(),
-            compatibility: compat(topology),
-            body_fingerprint: 2,
-            body_name: Some(Ustr::from("edited")),
-            escaping: true,
-            capture_free: true,
-        });
-        assert!(
-            old.compatible_overlay(&body_edit),
-            "body-only edit must retain the slot"
-        );
-        let mut topology_edit = CodeArtifact::default();
-        topology_edit.insert(CodeEntry {
-            identity: id,
-            compatibility: compat(inserted),
-            body_fingerprint: 3,
-            body_name: Some(Ustr::from("inserted")),
-            escaping: true,
-            capture_free: true,
-        });
-        assert!(
-            !old.compatible_overlay(&topology_edit),
-            "insertion before a lambda must fail closed"
-        );
-        let mut removal_edit = CodeArtifact::default();
-        removal_edit.insert(CodeEntry {
-            identity: CodeIdentity::Lambda {
-                enclosing: skull_mir::code_identity::CodeOwner::Instance(owner.clone()),
-                site: site_b,
-            },
-            compatibility: compat(removed),
-            body_fingerprint: 4,
-            body_name: Some(Ustr::from("removed")),
-            escaping: true,
-            capture_free: true,
-        });
-        assert!(
-            !old.compatible_overlay(&removal_edit),
-            "removing a lambda must fail closed"
-        );
-
-        let mut capture_edit = CodeArtifact::default();
-        let mut incompatible_capture = CaptureSchema::empty();
-        incompatible_capture.complete = false;
-        capture_edit.insert(CodeEntry {
-            identity: CodeIdentity::Lambda {
-                enclosing: skull_mir::code_identity::CodeOwner::Instance(owner),
-                site: site_b,
-            },
-            compatibility: CodeCompatibility {
-                capture: incompatible_capture,
-                ..compat(topology)
-            },
-            body_fingerprint: 5,
-            body_name: Some(Ustr::from("capture")),
-            escaping: true,
-            capture_free: false,
-        });
-        assert!(
-            !old.compatible_overlay(&capture_edit),
-            "incomplete capture schema must fail closed"
-        );
-    }
-
-    #[test]
-    fn owner_topology_ignores_non_lambda_entries_without_topology() {
-        use skull_mir::code_identity::{
-            CaptureSchema, CodeArtifact, CodeCompatibility, CodeEntry, CodeIdentity, CodeOwner,
-            LambdaSiteId, LambdaTopologyFingerprint,
-        };
-        use skull_mir::instance::Instance;
-
-        let owner = Instance::base(skull_mir::mir::FuncRef {
-            module: bone_semantic::prelude::ModuleId::builtin(),
-            func: comfy_la_arena::Idx::from_raw(comfy_la_arena::RawIdx::from_u32(0)),
-        });
-        let owner = CodeOwner::Instance(owner);
-        let topology = LambdaTopologyFingerprint::from_sites(&[(
-            LambdaSiteId {
-                file: Ustr::from("f.rock"),
-                offset: 10,
-            },
-            0,
-        )]);
-        let compat = |lambda_topology| CodeCompatibility {
-            call_abi: "unit".to_string(),
-            capture: CaptureSchema::empty(),
-            frame: None,
-            lambda_topology,
-        };
-        let mut old = CodeArtifact::default();
-        old.insert(CodeEntry {
-            identity: CodeIdentity::Lambda {
-                enclosing: owner.clone(),
-                site: LambdaSiteId {
-                    file: Ustr::from("f.rock"),
-                    offset: 10,
-                },
-            },
-            compatibility: compat(topology),
-            body_fingerprint: 1,
-            body_name: Some(Ustr::from("lambda_old")),
-            escaping: true,
-            capture_free: true,
-        });
-        old.insert(CodeEntry {
-            identity: CodeIdentity::Nested {
-                enclosing: owner.clone(),
-                site: LambdaSiteId {
-                    file: Ustr::from("f.rock"),
-                    offset: 20,
-                },
-                name: Ustr::from("nested"),
-            },
-            compatibility: compat(LambdaTopologyFingerprint::default()),
-            body_fingerprint: 2,
-            body_name: Some(Ustr::from("nested_old")),
-            escaping: true,
-            capture_free: true,
-        });
-        let mut next = CodeArtifact::default();
-        next.insert(CodeEntry {
-            identity: CodeIdentity::Lambda {
-                enclosing: owner.clone(),
-                site: LambdaSiteId {
-                    file: Ustr::from("f.rock"),
-                    offset: 10,
-                },
-            },
-            compatibility: compat(topology),
-            body_fingerprint: 3,
-            body_name: Some(Ustr::from("lambda_new")),
-            escaping: true,
-            capture_free: true,
-        });
-        next.insert(CodeEntry {
-            identity: CodeIdentity::Nested {
-                enclosing: owner,
-                site: LambdaSiteId {
-                    file: Ustr::from("f.rock"),
-                    offset: 20,
-                },
-                name: Ustr::from("nested"),
-            },
-            compatibility: compat(LambdaTopologyFingerprint::default()),
-            body_fingerprint: 4,
-            body_name: Some(Ustr::from("nested_new")),
-            escaping: true,
-            capture_free: true,
-        });
-        assert!(old.compatible_overlay(&next));
-    }
-
-    #[test]
-    fn named_values_are_counted_but_direct_calls_do_not_acquire_slots() {
-        let mut direct = lower(
-            "fn target(x: int) -> int { return x }\n\
-             fn f() -> int { return target(1) }",
-            "f",
-        );
-        convert_closures(&mut direct, "f");
-        let direct_artifact = skull_mir::code_identity::CodeArtifact::from_mir_tree(&direct);
-        assert_eq!(direct_artifact.census.named_values, 0);
-        assert_eq!(direct_artifact.census.direct_call_only, 1);
-
-        let mut value = lower(
-            "fn target(x: int) -> int { return x }\n\
-             fn f() -> int { let callback = target; return callback(1) }",
-            "f",
-        );
-        convert_closures(&mut value, "f");
-        let value_artifact = skull_mir::code_identity::CodeArtifact::from_mir_tree(&value);
-        assert_eq!(value_artifact.census.named_values, 1);
-        assert_eq!(
-            value_artifact.census.unresolved_body, 1,
-            "the per-body artifact must expose an unjoined target"
-        );
-        assert!(
-            !value_artifact.census.is_total(),
-            "a partial artifact must not report a total census"
-        );
-    }
-
-    #[test]
-    fn foreign_function_values_remain_explicit_boundaries() {
-        let func = lower(
-            "inline(lua) fn foreign(x: int) -> int = \"return x\"\n\
-             fn f() -> int { let callback = foreign; return callback(1) }",
-            "f",
-        );
-        assert!(func.code_value_identities.is_empty());
-        assert_eq!(
-            func.fn_value_symbols.len(),
-            1,
-            "the foreign value still has a boundary symbol"
-        );
-    }
-
-    #[test]
-    fn detached_coroutine_regions_are_ordinary_converted_functions() {
-        let mut source = lower("fn f() -> int { let add = (n: int) => n; add(1) }", "f");
-        let entry = source.entry();
-        let s_cell = source.new_cell(Some(Ustr::from("s")));
-        let frame = FrameInfo {
-            s_cell,
-            fields: HashSet::default(),
-            slots: HashMap::default(),
-        };
-        let aux = lower_detached_region(&source, entry, "f__detached", &frame);
-        assert!(
-            !aux.is_coroutine,
-            "detached body must be an ordinary MirFunc"
-        );
-        assert!(
-            !aux.nested_fns.is_empty(),
-            "detached lambda must own a nested MirFunc"
-        );
-        assert!(
-            aux.insts
-                .iter()
-                .any(|(_, inst)| matches!(inst, Inst::Global(_))),
-            "capture-free detached lambda must become a Global value"
-        );
-        assert!(
-            aux.insts
-                .iter()
-                .all(|(_, inst)| !matches!(inst, Inst::Lambda { .. })),
-            "detached conversion must leave no residual lambda"
-        );
-        erase_detached_lambdas(&mut source, [entry]);
-        assert!(
-            source
-                .insts
-                .iter()
-                .all(|(_, inst)| !matches!(inst, Inst::Lambda { .. })),
-            "the emitted artifact must have no detached residual lambda"
-        );
-    }
-
-    #[test]
-    fn detached_nested_closure_reaches_frame_only_capture_through_state() {
-        let mut source = lower(
-            "fn f(seed: int) -> int { let get = () => seed; return get() }",
-            "f",
-        );
-        let entry = source.entry();
-        let seed = source.params[0];
-        let s_cell = source.new_cell(Some(Ustr::from("s")));
-        let frame = FrameInfo {
-            s_cell,
-            fields: [seed].into_iter().collect(),
-            slots: [(seed, 0)].into_iter().collect(),
-        };
-        let aux = lower_detached_region(&source, entry, "f__detached", &frame);
-        let plan = aux
-            .closure_env_plans
-            .values()
-            .next()
-            .expect("nested closure must have an environment plan");
-        assert_eq!(plan.captures(), &[s_cell]);
-    }
-}
-
 /// FNV-1a 32 over the canonical layout string. 32-bit so the constant is
 /// exactly representable in a Lua number.
 fn fnv1a32(s: &str) -> u32 {
@@ -4553,5 +3906,651 @@ fn materialize_frame_inner(
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lower(src: &str, fn_name: &str) -> MirFunc {
+        let ast = skull_parser::parse_module(src, ustr::Ustr::from("<test>")).expect("parse");
+        let ws = bone_semantic::semantic_passes::semantic_pass(&mut [ast]).expect("semantic_pass");
+        let mid = ws.module_ids[&ustr::Ustr::from("<test>")];
+        let (fid, _) = ws
+            .module(mid)
+            .functions
+            .iter()
+            .find(|(_, f)| f.name.as_str() == fn_name)
+            .expect("function");
+        let root = skull_mir::mir::FuncRef {
+            module: mid,
+            func: fid,
+        };
+        let interner = std::sync::Arc::new(skull_mir::monoty::MonoInterner::new());
+        let graph = skull_graph::instance_graph::build_in(
+            &ws,
+            vec![root],
+            false,
+            std::sync::Arc::clone(&interner),
+        );
+        let concrete = skull_graph::concrete_body::build(&ws, &graph);
+        let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(interner);
+        let plan = concrete
+            .plans
+            .get(&skull_mir::instance::Instance::base(root))
+            .expect("test fixture concrete plan");
+        skull_mir::lower::lower_instance_with_plans(&ws, &scx, plan, &concrete.plans)
+            .expect("lower")
+    }
+
+    #[test]
+    fn cleanup_load_root_keeps_the_written_cell() {
+        let mut unrooted = MirFunc::new(ustr::Ustr::from("cleanup_root"));
+        let cell = unrooted.new_cell(None);
+        let value = unrooted.emit(unrooted.entry, Inst::Const(Lit::Int(1)));
+        let store = unrooted.emit(unrooted.entry, Inst::Store { cell, value });
+        unrooted.set_term(unrooted.entry, Term::Return(Vec::new()));
+        let _ = cleanup(&mut unrooted);
+        assert!(!unrooted.blocks[unrooted.entry].insts.contains(&store));
+
+        let mut rooted = MirFunc::new(ustr::Ustr::from("cleanup_root"));
+        let cell = rooted.new_cell(None);
+        let value = rooted.emit(rooted.entry, Inst::Const(Lit::Int(1)));
+        let store = rooted.emit(rooted.entry, Inst::Store { cell, value });
+        rooted.inline_cleanup_load_cells.push(cell);
+        rooted.set_term(rooted.entry, Term::Return(Vec::new()));
+        let _ = cleanup(&mut rooted);
+        assert!(rooted.blocks[rooted.entry].insts.contains(&store));
+    }
+
+    #[test]
+    fn cleanup_prefilter_finds_only_aggregate_stores() {
+        let scalar = lower("fn f(x: int) -> int { return x }", "f");
+        assert!(!has_scalarizable_store(&scalar));
+
+        let aggregate = lower(
+            "struct Pair { a: int, b: int }\n\
+             fn f(flag: bool) -> int {\n\
+                 let p = Pair { a: 1, b: 2 }\n\
+                 if flag { return p.a }\n\
+                 return p.b\n\
+             }",
+            "f",
+        );
+        assert!(has_scalarizable_store(&aggregate), "{aggregate}");
+    }
+
+    #[test]
+    fn coroutine_transform_exposes_one_owned_frame_plan() {
+        let func = lower(
+            "co fn f(x: int) -> Coroutine<int> { let saved = x yield saved }",
+            "f",
+        );
+        let lowered = transform_coroutine(&func, None, false);
+        assert!(
+            !lowered.frame_plan.slots().is_empty(),
+            "the coroutine fixture must have a nonzero frame population"
+        );
+        assert_eq!(
+            lowered.frame_plan.slots().len(),
+            lowered.frame_plan.fields().len(),
+            "one frame plan must own both membership and physical slots"
+        );
+    }
+
+    #[test]
+    fn coroutine_demotes_a_local_confined_to_one_resume_segment() {
+        let func = lower(
+            "co fn f(x: int) -> Coroutine<int> {\n\
+                 yield 1\n\
+                 let after = x\n\
+             }",
+            "f",
+        );
+        let lowered = transform_coroutine(&func, None, false);
+        assert!(
+            lowered
+                .frame_plan
+                .fields()
+                .iter()
+                .all(|&cell| lowered.step.cells[cell].name != Some(ustr::Ustr::from("after"))),
+            "a local used only after the last yield must stay out of the frame:\n{}",
+            lowered.step
+        );
+    }
+
+    #[test]
+    fn coroutine_frame_cells_retain_types_across_conditional_yields() {
+        let func = lower(
+            "co fn f(flag: bool) -> Coroutine<int> {\n\
+                 if flag { yield 1 yield 2 } else { yield 10 yield 20 }\n\
+             }",
+            "f",
+        );
+        let lowered = transform_coroutine(&func, None, false);
+        let untyped: Vec<_> = lowered
+            .frame_plan
+            .fields()
+            .iter()
+            .copied()
+            .filter(|&cell| lowered.step.cells[cell].ty.is_none())
+            .map(|cell| (cell, lowered.step.cells[cell].name))
+            .collect();
+        assert!(
+            untyped.is_empty(),
+            "untyped frame cells: {untyped:?}\n{}",
+            lowered.step
+        );
+    }
+
+    #[test]
+    fn coroutine_frame_cells_retain_types_across_null_coalesce() {
+        let func = lower(
+            "co fn f(x: int?) -> Coroutine<int> {\n\
+                 yield x ?? -1\n\
+                 yield x ?? -2\n\
+             }",
+            "f",
+        );
+        let lowered = transform_coroutine(&func, None, false);
+        let untyped: Vec<_> = lowered
+            .frame_plan
+            .fields()
+            .iter()
+            .copied()
+            .filter(|&cell| lowered.step.cells[cell].ty.is_none())
+            .map(|cell| (cell, lowered.step.cells[cell].name))
+            .collect();
+        assert!(
+            untyped.is_empty(),
+            "untyped frame cells: {untyped:?}\n{}",
+            lowered.step
+        );
+    }
+
+    #[test]
+    fn coroutine_frame_cells_retain_types_across_tuple_destructure() {
+        let func = lower(
+            "fn pair() -> (int, int) { return (10, 20) }\n\
+             co fn f() -> Coroutine<int> {\n\
+                 let (a, b) = pair()\n\
+                 yield a\n\
+                 yield b\n\
+             }",
+            "f",
+        );
+        let lowered = transform_coroutine(&func, None, false);
+        let untyped: Vec<_> = lowered
+            .frame_plan
+            .fields()
+            .iter()
+            .copied()
+            .filter(|&cell| lowered.step.cells[cell].ty.is_none())
+            .map(|cell| (cell, lowered.step.cells[cell].name))
+            .collect();
+        assert!(
+            untyped.is_empty(),
+            "untyped frame cells: {untyped:?}\n{}",
+            lowered.step
+        );
+    }
+
+    #[test]
+    fn coroutine_frame_rematerializes_cross_block_constants_but_spills_a_live_global() {
+        let mut func = MirFunc::new(ustr::Ustr::from("f"));
+        func.is_coroutine = true;
+        func.resume_arg = Some(func.new_cell(Some(ustr::Ustr::from("__resume_arg"))));
+        let resume = func.new_block();
+        let then_bb = func.new_block();
+        let else_bb = func.new_block();
+        let global = func.emit(func.entry, Inst::Global(ustr::Ustr::from("SELF")));
+        let constant = func.emit(func.entry, Inst::Const(Lit::Int(7)));
+        func.set_term(
+            func.entry,
+            Term::Yield {
+                values: vec![constant],
+                resume,
+            },
+        );
+        func.emit(
+            resume,
+            Inst::StoreGlobal {
+                name: ustr::Ustr::from("SAVED"),
+                value: global,
+            },
+        );
+        let condition = func.emit(resume, Inst::IntLt(constant, constant));
+        func.set_term(
+            resume,
+            Term::Branch {
+                cond: condition,
+                then_bb,
+                else_bb,
+            },
+        );
+        func.set_term(then_bb, Term::Return(Vec::new()));
+        func.set_term(else_bb, Term::Return(Vec::new()));
+        let lowered = transform_coroutine(&func, None, false);
+        let spills = lowered.frame_plan.spill_values();
+        assert!(
+            spills
+                .iter()
+                .any(|value| matches!(lowered.step.insts[*value], Inst::Global(name) if name.as_str() == "SELF")),
+            "the evaluated global handle must retain its pre-branch identity:\n{}",
+            lowered.step
+        );
+        assert!(
+            spills
+                .iter()
+                .all(|value| !matches!(lowered.step.insts[*value], Inst::Const(_))),
+            "constants must not acquire frame fields: {spills:?}\n{}",
+            lowered.step
+        );
+    }
+
+    #[test]
+    fn closure_conversion_exposes_one_owned_environment_plan() {
+        let mut func = lower(
+            "fn f() -> int { let captured = 3; let g = () => captured; return g() }",
+            "f",
+        );
+        assert!(
+            func.insts
+                .iter()
+                .any(|(_, inst)| matches!(inst, Inst::Lambda { .. })),
+            "the closure fixture must have a nonzero lambda population"
+        );
+        convert_closures(&mut func, "f");
+        assert_eq!(
+            func.closure_env_plans.len(),
+            1,
+            "one lambda must have one env plan"
+        );
+        let plan = func
+            .closure_env_plans
+            .values()
+            .next()
+            .expect("closure env plan");
+        assert!(
+            !plan.captures().is_empty(),
+            "the closure environment must carry a capture"
+        );
+        assert!(
+            plan.env_cell().is_some(),
+            "a capturing closure must own an env cell"
+        );
+    }
+
+    #[test]
+    fn escaping_lambdas_get_distinct_owner_site_identities_and_census() {
+        let mut func = lower(
+            "fn f() -> int {\n\
+                 let captured = true\n\
+                 let a = () => captured\n\
+                 let b = () => captured\n\
+                 let c = () => 7\n\
+                 if a() { return 1 }\n\
+                 if b() { return 2 }\n\
+                 return c()\n\
+             }",
+            "f",
+        );
+        let owner = match func.code_identity.clone().expect("concrete owner") {
+            skull_mir::code_identity::CodeIdentity::Named(instance) => instance,
+            other => panic!("unexpected owner identity: {other:?}"),
+        };
+        convert_closures(&mut func, "f");
+        let artifact = skull_mir::code_identity::CodeArtifact::from_mir_tree(&func);
+        let lambdas: Vec<_> = artifact
+            .entries
+            .keys()
+            .filter_map(|identity| match identity {
+                skull_mir::code_identity::CodeIdentity::Lambda { enclosing, site }
+                    if *enclosing
+                        == skull_mir::code_identity::CodeOwner::Instance(owner.clone()) =>
+                {
+                    Some(*site)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            lambdas.len(),
+            3,
+            "all escaping lambda bodies need identities"
+        );
+        assert_eq!(
+            lambdas
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            3,
+            "source sites, not ordinals, distinguish identical-looking lambdas"
+        );
+        assert_eq!(artifact.census.lambda_values, 3);
+        assert_eq!(artifact.census.capturing_lambdas, 2);
+        assert_eq!(artifact.census.capture_free_lambdas, 1);
+        assert!(
+            artifact.census.is_total(),
+            "identity census: {:?}",
+            artifact.census
+        );
+    }
+
+    #[test]
+    fn lambda_topology_rejects_insertion_but_body_edits_keep_identity() {
+        use skull_mir::code_identity::{
+            CaptureSchema, CodeArtifact, CodeCompatibility, CodeEntry, CodeIdentity, LambdaSiteId,
+            LambdaTopologyFingerprint,
+        };
+        use skull_mir::instance::Instance;
+
+        let owner = Instance::base(skull_mir::mir::FuncRef {
+            module: bone_semantic::prelude::ModuleId::builtin(),
+            func: comfy_la_arena::Idx::from_raw(comfy_la_arena::RawIdx::from_u32(0)),
+        });
+        let site_a = LambdaSiteId {
+            file: Ustr::from("f.rock"),
+            offset: 10,
+        };
+        let site_b = LambdaSiteId {
+            file: Ustr::from("f.rock"),
+            offset: 20,
+        };
+        let topology = LambdaTopologyFingerprint::from_sites(&[(site_a, 0), (site_b, 0)]);
+        let inserted = LambdaTopologyFingerprint::from_sites(&[
+            (site_a, 0),
+            (
+                LambdaSiteId {
+                    file: Ustr::from("f.rock"),
+                    offset: 15,
+                },
+                0,
+            ),
+            (site_b, 0),
+        ]);
+        let removed = LambdaTopologyFingerprint::from_sites(&[(site_b, 0)]);
+        let compat = |topology| CodeCompatibility {
+            call_abi: "params=[];result=none;lanes=0;scalar=false".to_string(),
+            capture: CaptureSchema::empty(),
+            frame: None,
+            lambda_topology: topology,
+        };
+        let id = CodeIdentity::Lambda {
+            enclosing: skull_mir::code_identity::CodeOwner::Instance(owner.clone()),
+            site: site_b,
+        };
+        let mut old = CodeArtifact::default();
+        old.insert(CodeEntry {
+            identity: id.clone(),
+            compatibility: compat(topology),
+            body_fingerprint: 1,
+            body_name: Some(Ustr::from("old")),
+            escaping: true,
+            capture_free: true,
+        });
+        let mut body_edit = CodeArtifact::default();
+        body_edit.insert(CodeEntry {
+            identity: id.clone(),
+            compatibility: compat(topology),
+            body_fingerprint: 2,
+            body_name: Some(Ustr::from("edited")),
+            escaping: true,
+            capture_free: true,
+        });
+        assert!(
+            old.compatible_overlay(&body_edit),
+            "body-only edit must retain the slot"
+        );
+        let mut topology_edit = CodeArtifact::default();
+        topology_edit.insert(CodeEntry {
+            identity: id,
+            compatibility: compat(inserted),
+            body_fingerprint: 3,
+            body_name: Some(Ustr::from("inserted")),
+            escaping: true,
+            capture_free: true,
+        });
+        assert!(
+            !old.compatible_overlay(&topology_edit),
+            "insertion before a lambda must fail closed"
+        );
+        let mut removal_edit = CodeArtifact::default();
+        removal_edit.insert(CodeEntry {
+            identity: CodeIdentity::Lambda {
+                enclosing: skull_mir::code_identity::CodeOwner::Instance(owner.clone()),
+                site: site_b,
+            },
+            compatibility: compat(removed),
+            body_fingerprint: 4,
+            body_name: Some(Ustr::from("removed")),
+            escaping: true,
+            capture_free: true,
+        });
+        assert!(
+            !old.compatible_overlay(&removal_edit),
+            "removing a lambda must fail closed"
+        );
+
+        let mut capture_edit = CodeArtifact::default();
+        let mut incompatible_capture = CaptureSchema::empty();
+        incompatible_capture.complete = false;
+        capture_edit.insert(CodeEntry {
+            identity: CodeIdentity::Lambda {
+                enclosing: skull_mir::code_identity::CodeOwner::Instance(owner),
+                site: site_b,
+            },
+            compatibility: CodeCompatibility {
+                capture: incompatible_capture,
+                ..compat(topology)
+            },
+            body_fingerprint: 5,
+            body_name: Some(Ustr::from("capture")),
+            escaping: true,
+            capture_free: false,
+        });
+        assert!(
+            !old.compatible_overlay(&capture_edit),
+            "incomplete capture schema must fail closed"
+        );
+    }
+
+    #[test]
+    fn owner_topology_ignores_non_lambda_entries_without_topology() {
+        use skull_mir::code_identity::{
+            CaptureSchema, CodeArtifact, CodeCompatibility, CodeEntry, CodeIdentity, CodeOwner,
+            LambdaSiteId, LambdaTopologyFingerprint,
+        };
+        use skull_mir::instance::Instance;
+
+        let owner = Instance::base(skull_mir::mir::FuncRef {
+            module: bone_semantic::prelude::ModuleId::builtin(),
+            func: comfy_la_arena::Idx::from_raw(comfy_la_arena::RawIdx::from_u32(0)),
+        });
+        let owner = CodeOwner::Instance(owner);
+        let topology = LambdaTopologyFingerprint::from_sites(&[(
+            LambdaSiteId {
+                file: Ustr::from("f.rock"),
+                offset: 10,
+            },
+            0,
+        )]);
+        let compat = |lambda_topology| CodeCompatibility {
+            call_abi: "unit".to_string(),
+            capture: CaptureSchema::empty(),
+            frame: None,
+            lambda_topology,
+        };
+        let mut old = CodeArtifact::default();
+        old.insert(CodeEntry {
+            identity: CodeIdentity::Lambda {
+                enclosing: owner.clone(),
+                site: LambdaSiteId {
+                    file: Ustr::from("f.rock"),
+                    offset: 10,
+                },
+            },
+            compatibility: compat(topology),
+            body_fingerprint: 1,
+            body_name: Some(Ustr::from("lambda_old")),
+            escaping: true,
+            capture_free: true,
+        });
+        old.insert(CodeEntry {
+            identity: CodeIdentity::Nested {
+                enclosing: owner.clone(),
+                site: LambdaSiteId {
+                    file: Ustr::from("f.rock"),
+                    offset: 20,
+                },
+                name: Ustr::from("nested"),
+            },
+            compatibility: compat(LambdaTopologyFingerprint::default()),
+            body_fingerprint: 2,
+            body_name: Some(Ustr::from("nested_old")),
+            escaping: true,
+            capture_free: true,
+        });
+        let mut next = CodeArtifact::default();
+        next.insert(CodeEntry {
+            identity: CodeIdentity::Lambda {
+                enclosing: owner.clone(),
+                site: LambdaSiteId {
+                    file: Ustr::from("f.rock"),
+                    offset: 10,
+                },
+            },
+            compatibility: compat(topology),
+            body_fingerprint: 3,
+            body_name: Some(Ustr::from("lambda_new")),
+            escaping: true,
+            capture_free: true,
+        });
+        next.insert(CodeEntry {
+            identity: CodeIdentity::Nested {
+                enclosing: owner,
+                site: LambdaSiteId {
+                    file: Ustr::from("f.rock"),
+                    offset: 20,
+                },
+                name: Ustr::from("nested"),
+            },
+            compatibility: compat(LambdaTopologyFingerprint::default()),
+            body_fingerprint: 4,
+            body_name: Some(Ustr::from("nested_new")),
+            escaping: true,
+            capture_free: true,
+        });
+        assert!(old.compatible_overlay(&next));
+    }
+
+    #[test]
+    fn named_values_are_counted_but_direct_calls_do_not_acquire_slots() {
+        let mut direct = lower(
+            "fn target(x: int) -> int { return x }\n\
+             fn f() -> int { return target(1) }",
+            "f",
+        );
+        convert_closures(&mut direct, "f");
+        let direct_artifact = skull_mir::code_identity::CodeArtifact::from_mir_tree(&direct);
+        assert_eq!(direct_artifact.census.named_values, 0);
+        assert_eq!(direct_artifact.census.direct_call_only, 1);
+
+        let mut value = lower(
+            "fn target(x: int) -> int { return x }\n\
+             fn f() -> int { let callback = target; return callback(1) }",
+            "f",
+        );
+        convert_closures(&mut value, "f");
+        let value_artifact = skull_mir::code_identity::CodeArtifact::from_mir_tree(&value);
+        assert_eq!(value_artifact.census.named_values, 1);
+        assert_eq!(
+            value_artifact.census.unresolved_body, 1,
+            "the per-body artifact must expose an unjoined target"
+        );
+        assert!(
+            !value_artifact.census.is_total(),
+            "a partial artifact must not report a total census"
+        );
+    }
+
+    #[test]
+    fn foreign_function_values_remain_explicit_boundaries() {
+        let func = lower(
+            "inline(lua) fn foreign(x: int) -> int = \"return x\"\n\
+             fn f() -> int { let callback = foreign; return callback(1) }",
+            "f",
+        );
+        assert!(func.code_value_identities.is_empty());
+        assert_eq!(
+            func.fn_value_symbols.len(),
+            1,
+            "the foreign value still has a boundary symbol"
+        );
+    }
+
+    #[test]
+    fn detached_coroutine_regions_are_ordinary_converted_functions() {
+        let mut source = lower("fn f() -> int { let add = (n: int) => n; add(1) }", "f");
+        let entry = source.entry();
+        let s_cell = source.new_cell(Some(Ustr::from("s")));
+        let frame = FrameInfo {
+            s_cell,
+            fields: HashSet::default(),
+            slots: HashMap::default(),
+        };
+        let aux = lower_detached_region(&source, entry, "f__detached", &frame);
+        assert!(
+            !aux.is_coroutine,
+            "detached body must be an ordinary MirFunc"
+        );
+        assert!(
+            !aux.nested_fns.is_empty(),
+            "detached lambda must own a nested MirFunc"
+        );
+        assert!(
+            aux.insts
+                .iter()
+                .any(|(_, inst)| matches!(inst, Inst::Global(_))),
+            "capture-free detached lambda must become a Global value"
+        );
+        assert!(
+            aux.insts
+                .iter()
+                .all(|(_, inst)| !matches!(inst, Inst::Lambda { .. })),
+            "detached conversion must leave no residual lambda"
+        );
+        erase_detached_lambdas(&mut source, [entry]);
+        assert!(
+            source
+                .insts
+                .iter()
+                .all(|(_, inst)| !matches!(inst, Inst::Lambda { .. })),
+            "the emitted artifact must have no detached residual lambda"
+        );
+    }
+
+    #[test]
+    fn detached_nested_closure_reaches_frame_only_capture_through_state() {
+        let mut source = lower(
+            "fn f(seed: int) -> int { let get = () => seed; return get() }",
+            "f",
+        );
+        let entry = source.entry();
+        let seed = source.params[0];
+        let s_cell = source.new_cell(Some(Ustr::from("s")));
+        let frame = FrameInfo {
+            s_cell,
+            fields: [seed].into_iter().collect(),
+            slots: [(seed, 0)].into_iter().collect(),
+        };
+        let aux = lower_detached_region(&source, entry, "f__detached", &frame);
+        let plan = aux
+            .closure_env_plans
+            .values()
+            .next()
+            .expect("nested closure must have an environment plan");
+        assert_eq!(plan.captures(), &[s_cell]);
     }
 }

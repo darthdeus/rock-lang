@@ -108,9 +108,7 @@ pub fn shift_module_after_edit(
                     sh.span(enum_name_span);
                     sh.span(variant_span);
                 }
-                Expr::Call {
-                    callee, args: _, ..
-                } => match callee {
+                Expr::Call { callee, .. } => match callee {
                     Callee::Unresolved { name: _, name_span } => sh.span(name_span),
                     Callee::Local(_) | Callee::Value(_) => {}
                 },

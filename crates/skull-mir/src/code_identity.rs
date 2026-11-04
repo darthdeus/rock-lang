@@ -1620,7 +1620,6 @@ mod tests {
         let incoming = CodeArtifact {
             entries: [(entry.identity.clone(), entry)].into_iter().collect(),
             census: CodeIdentityCensus::default(),
-            ..CodeArtifact::default()
         };
 
         owned.merge(incoming.clone());

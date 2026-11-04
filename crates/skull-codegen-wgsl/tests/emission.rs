@@ -1591,10 +1591,8 @@ fn canvas_orientation_masks_follow_every_declared_texture_slot() {
             .collect::<Vec<_>>()
             .join(" + ");
         let source = format!(
-            "{}\n{}",
-            HOST_VERTEX,
-            format!(
-                r#"
+            r#"{}
+
 struct OrientationTex {{ {fields} }}
 value OrientationVary {{ position: Vec4, tex_coord: Vec2 }}
 @shader(vertex)
@@ -1611,8 +1609,8 @@ fn sample_orientation(src: Sampler2D, coord: Vec2) -> Vec4 {{
 fn orientation_frag(vary: OrientationVary, @textures t: OrientationTex) -> Vec4 {{
     return {samples}
 }}
-"#
-            ),
+"#,
+            HOST_VERTEX,
         );
         let artifact = explicit_artifact_source(&source, "orientation_vert", "orientation_frag");
         assert_eq!(artifact.abi.textures.len(), count);

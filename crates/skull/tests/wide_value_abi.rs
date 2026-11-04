@@ -388,17 +388,17 @@ fn the_budget_fixtures_are_in_the_regime_they_claim() {
         "boxing one member must not be enough"
     );
     assert!(
-        2 + 3 * BUDGET_MEMBER + 1 <= b,
+        2 + 3 * BUDGET_MEMBER < b,
         "boxing two members must be enough"
     );
     assert!(
-        3 * BUDGET_MEMBER + BUDGET_NARROW * 2 + 1 > b
-            && 1 + 2 * BUDGET_MEMBER + BUDGET_NARROW * 2 + 1 <= b,
+        (1 + 2 * BUDGET_MEMBER + BUDGET_NARROW * 2 + 1..3 * BUDGET_MEMBER + BUDGET_NARROW * 2 + 1)
+            .contains(&b),
         "budget_mixed must need exactly one box"
     );
     assert!(
-        BUDGET_NOBOX_WIDE + 3 * BUDGET_MEMBER + 1 > b
-            && BUDGET_NOBOX_WIDE + 1 + 2 * BUDGET_MEMBER + 1 <= b,
+        (BUDGET_NOBOX_WIDE + 1 + 2 * BUDGET_MEMBER + 1..BUDGET_NOBOX_WIDE + 3 * BUDGET_MEMBER + 1)
+            .contains(&b),
         "budget_nobox_widest must need exactly one box"
     );
 }
@@ -414,7 +414,7 @@ fn a_signature_over_the_lane_budget_boxes_widest_first() {
         function_body(&lua, "budget_five")
     );
     assert!(
-        params.len() + 1 <= SIGNATURE_SCALAR_LANE_BUDGET,
+        params.len() < SIGNATURE_SCALAR_LANE_BUDGET,
         "the surviving lanes must fit the budget: {}",
         params.len() + 1
     );

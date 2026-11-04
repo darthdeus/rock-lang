@@ -363,9 +363,6 @@ pub fn module_tests_with_ids(
     Ok(out)
 }
 
-/// Emit the whole workspace: every stdlib module (leniently) followed by the
-/// user module (strict). skull emits only function definitions, so definition
-/// order doesn't matter for loading — all globals exist before anything runs.
 // --- emit-name helpers (pure; shared by the new-path `mir_emit` + scaffolding) ---
 
 /// The interned singleton global for a unit enum variant (`Color::Red` ->

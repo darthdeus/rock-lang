@@ -26,6 +26,11 @@ pub fn has_value_plan(sd: &bone_semantic::hir::StructDef) -> bool {
     sd.is_value && !bone_semantic::prelude::is_descriptor_key(sd.name)
 }
 
+/// `Some(k)` iff `name` is a GC-free `value` struct whose every flattened
+/// primitive leaf is `float` (recursively), where `k` is the leaf count; `None`
+/// otherwise (not such a struct, or any int/bool/enum leaf). The JS backend uses
+/// it to lower a `NativeBuffer<Vertex>` (all-float value struct, e.g. the vertex
+/// pool) to one flat `Float32Array(n * k)` -- JS has no per-struct ctype.
 pub fn value_struct_all_float_leaf_count(ws: &Workspace, name: Ustr) -> Option<usize> {
     all_float_leaf_count_rec(ws, name, &mut Vec::new())
 }

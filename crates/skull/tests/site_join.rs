@@ -750,11 +750,13 @@ fn main() { print("{build()}") }
 fn a_call_filed_under_the_wrong_operation_fails_accounting() {
     use skull::site_join::{SiteJoinCensus, Unjoined};
 
-    let mut c = SiteJoinCensus::default();
-    c.obligations_examined = 2;
-    c.joined = 1;
-    c.joined_non_generic = 1;
-    c.joined_rock = 1;
+    let mut c = SiteJoinCensus {
+        obligations_examined: 2,
+        joined: 1,
+        joined_non_generic: 1,
+        joined_rock: 1,
+        ..SiteJoinCensus::default()
+    };
     c.unjoined.insert(Unjoined::NoSite, 1);
     c.examined_by_op.insert("direct-call", 1);
     c.examined_by_op.insert("synthesized", 1);

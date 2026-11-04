@@ -600,7 +600,7 @@ impl Builder<'_> {
             .ok_or_else(|| gap("NativeBuffer element has no owned leaf address plan"))?;
         let dot = format!("{path}.");
         let hit: Vec<PlaceBundle> = plan
-            .into_iter()
+            .iter()
             .filter(|a| a.path.as_str() == path || a.path.as_str().starts_with(&dot))
             .cloned()
             .map(|address| container.place(address).map_err(|e| gap(e.message)))
@@ -1783,7 +1783,7 @@ impl Builder<'_> {
             Some(sub) => self.nested_field_leaves(field, sub, value)?,
             None => {
                 let shape = self.column_shape(elem)?;
-                if !value_leaf_paths(&shape).iter().any(|p| *p == field) {
+                if !value_leaf_paths(&shape).contains(&field) {
                     return Err(gap(format!(
                         "`{field}` is not a field of column-stored `[{}]`",
                         elem.name

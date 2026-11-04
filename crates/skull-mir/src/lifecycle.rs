@@ -197,7 +197,7 @@ pub fn scene_root_type_key(root_type: &MonoTy) -> Option<String> {
 fn string_arg(ann: &bone_semantic::hir::Annotation, name: &str) -> Option<Ustr> {
     ann.args.iter().find_map(|a| {
         (a.name.as_ref().is_some_and(|n| n.name.as_str() == name))
-            .then(|| match a.value {
+            .then_some(match a.value {
                 AnnoValue::String(s) => Some(s),
                 _ => None,
             })

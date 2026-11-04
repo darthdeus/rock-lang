@@ -2907,10 +2907,9 @@ impl BoneWorkspace {
             let scoped_index = match frag {
                 Some(frag) => {
                     let file = ws.module(mid).file;
-                    if !proj.scoped_call_through.contains_key(&file) {
-                        let scoped = build_scoped_call_through(ws, frag, ct);
-                        proj.scoped_call_through.insert(file, scoped);
-                    }
+                    proj.scoped_call_through
+                        .entry(file)
+                        .or_insert_with(|| build_scoped_call_through(ws, frag, ct));
                     proj.scoped_call_through.get(&file)
                 }
                 None => None,
@@ -4220,9 +4219,6 @@ fn semantic_name_map(ws: &Workspace) -> HashMap<Ustr, u32> {
     }
     names
 }
-
-/// Refine an identifier by its declared kind in the file's module (struct /
-/// enum / newtype / function), defaulting to `variable`.
 
 // ---------------------------------------------------------------------------
 // Coordinate-unit conversions (the single place these are gotten right)

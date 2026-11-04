@@ -161,7 +161,7 @@ pub(crate) fn struct_field_ty(
                 .fields
                 .iter()
                 .find(|f| f.name == field)
-                .ok_or_else(|| StructFieldError::MissingField {
+                .ok_or(StructFieldError::MissingField {
                     struct_name: Some(def.name),
                     field,
                     span,

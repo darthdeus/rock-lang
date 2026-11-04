@@ -329,7 +329,7 @@ fn lint_rejects(
     bone_lints::lint_workspace(ws, &warm, true, &sources, &crate::registry::lint_options())
         .iter()
         .find(|f| f.level() == rock_core::errors::CompilerErrorLevel::Error)
-        .map(|f| error_text(&[f.error.clone()]))
+        .map(|f| error_text(std::slice::from_ref(&f.error)))
 }
 
 /// Error-test cases the skull/bone successor DELIBERATELY accepts -- documented

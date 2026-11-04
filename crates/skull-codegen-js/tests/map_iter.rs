@@ -100,12 +100,12 @@ fn break_then_restart_same_map() {
         return;
     }
     // Advance once (break mid-loop), then a fresh null seed restarts from 'a'.
-    let got = node_run(&format!(
+    let got = node_run(
         "var m=new Map(); m.set('a',1); m.set('b',2); m.set('c',3); \
          var first=__map_next(m,null); \
-         var out=[],k=null; while(true){{k=__map_next(m,k); if(k===null)break; out.push(k);}} \
-         console.log(first+'|'+out.join(','));"
-    ));
+         var out=[],k=null; while(true){k=__map_next(m,k); if(k===null)break; out.push(k);} \
+         console.log(first+'|'+out.join(','));",
+    );
     assert_eq!(got, "a|a,b,c");
 }
 
@@ -118,13 +118,13 @@ fn nested_iteration_over_same_map() {
     // Outer and inner loops over the SAME map interleave through one cursor
     // cache; the rescan-on-mismatch keeps the outer walk correct after the inner
     // drains. Expect the full cross product in insertion order.
-    let got = node_run(&format!(
+    let got = node_run(
         "var m=new Map(); m.set('a',1); m.set('b',2); \
          var pairs=[]; var ko=null; \
-         while(true){{ko=__map_next(m,ko); if(ko===null)break; \
-           var ki=null; while(true){{ki=__map_next(m,ki); if(ki===null)break; pairs.push(ko+ki);}} }} \
-         console.log(pairs.join(','));"
-    ));
+         while(true){ko=__map_next(m,ko); if(ko===null)break; \
+           var ki=null; while(true){ki=__map_next(m,ki); if(ki===null)break; pairs.push(ko+ki);} } \
+         console.log(pairs.join(','));",
+    );
     assert_eq!(got, "aa,ab,ba,bb");
 }
 
@@ -136,11 +136,11 @@ fn deletion_during_iteration_follows_live_iterator() {
     }
     // Deleting a not-yet-visited key mid-walk drops it (live JS keys iterator,
     // backend-defined per doctrine).
-    let got = node_run(&format!(
+    let got = node_run(
         "var m=new Map(); m.set('a',1); m.set('b',2); m.set('c',3); \
-         var out=[],k=null; while(true){{k=__map_next(m,k); if(k===null)break; out.push(k); if(k==='a')m.delete('b');}} \
-         console.log(out.join(','));"
-    ));
+         var out=[],k=null; while(true){k=__map_next(m,k); if(k===null)break; out.push(k); if(k==='a')m.delete('b');} \
+         console.log(out.join(','));",
+    );
     assert_eq!(got, "a,c");
 }
 

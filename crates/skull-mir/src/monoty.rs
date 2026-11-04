@@ -501,7 +501,7 @@ pub fn resolve_newtype_chain(ws: &Workspace, ty: MonoTy) -> Result<MonoTy, Newty
             .modules
             .get(nid.module.index())
             .filter(|module| (nid.def.into_raw().into_u32() as usize) < module.newtypes.len())
-            .ok_or_else(|| NewtypeResolutionError::MissingDefinition(name))?;
+            .ok_or(NewtypeResolutionError::MissingDefinition(name))?;
         let def = &owner.newtypes[nid.def];
         if def.generics.len() != params.len() {
             return Err(NewtypeResolutionError::ArityMismatch {

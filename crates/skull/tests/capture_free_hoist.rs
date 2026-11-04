@@ -205,9 +205,7 @@ fn hoist_name_collision_with_user_fn_rejected() {
 fn foo() -> fn() { return () => { sink(1) } }
 fn main() {}
 "#;
-    let err = crate::common::try_emit_module(src)
-        .err()
-        .expect("the collision must be rejected");
+    let err = crate::common::try_emit_module(src).expect_err("the collision must be rejected");
     assert!(
         err.message.contains("foo_0__lambda0")
             && err.message.contains("compiler-reserved synthetic name"),

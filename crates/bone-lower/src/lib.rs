@@ -4107,7 +4107,7 @@ pub fn lower_annotations_with_ctx(
             (arg.name
                 .as_ref()
                 .is_some_and(|name| name.name.as_str() == "onchange"))
-            .then(|| match &arg.value {
+            .then_some(match &arg.value {
                 hir::AnnoValue::IdentList(names) => Some(names),
                 _ => None,
             })

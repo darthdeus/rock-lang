@@ -415,12 +415,9 @@ fn main() {}
     assert!(js.contains("factory: __rock_code_slot_pending_ref(\"named:<test>::make_alpha<>\")"));
     assert!(js.contains("factory: __rock_code_slot_pending_ref(\"named:<test>::make_beta<>\")"));
     let source = format!(
-        "var __G = {{}};\n{}\n{}\nconsole.log(__G.__ROCK_DEFINITION_PLAN.widgets.len + ':' + __G.__ROCK_DEFINITION_PLAN.widgets._data[0].key + ':' + __rock_call(__G.__ROCK_DEFINITION_PLAN.widgets._data[0].factory));",
-        format!(
-            "{}\n{}",
-            skull_codegen_js::JS_GLOBALS_RUNTIME,
-            skull_codegen_js::JS_CALL_HELPER
-        ),
+        "var __G = {{}};\n{}\n{}\n{}\nconsole.log(__G.__ROCK_DEFINITION_PLAN.widgets.len + ':' + __G.__ROCK_DEFINITION_PLAN.widgets._data[0].key + ':' + __rock_call(__G.__ROCK_DEFINITION_PLAN.widgets._data[0].factory));",
+        skull_codegen_js::JS_GLOBALS_RUNTIME,
+        skull_codegen_js::JS_CALL_HELPER,
         js
     );
     let output = node().args(["-e", &source]).output().expect("node");

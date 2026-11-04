@@ -116,19 +116,10 @@ pub enum RepUse {
     Boundary,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct RepUseFacts {
     pub tuple_spelled: bool,
     pub span: Option<Span>,
-}
-
-impl Default for RepUseFacts {
-    fn default() -> Self {
-        Self {
-            tuple_spelled: false,
-            span: None,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]

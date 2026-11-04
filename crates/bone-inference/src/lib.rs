@@ -571,19 +571,19 @@ pub fn check_function(
             } else if let Err(e) = validate_frame_ref_return(c, &mut gamma, body, ret_ty) {
                 gamma.body_errors.push(e);
             }
-        } else if {
+        } else {
             let body_ty = infer_expr(c, &mut gamma, body)?;
             let body_ty = resolve(&mut gamma, body_ty, f.span);
-            coerce(&mut gamma, body_ty, ret_ty, f.span).is_err()
-        } {
-            let ret_render = gamma.workspace.render(Some(&gamma.out), ret_ty);
-            gamma.body_errors.push(CompilerError::new_with_label(
-                f.name_span,
-                format!(
-                    "function `{}` must return `{}`, but its body has no return value",
-                    f.name, ret_render
-                ),
-            ));
+            if coerce(&mut gamma, body_ty, ret_ty, f.span).is_err() {
+                let ret_render = gamma.workspace.render(Some(&gamma.out), ret_ty);
+                gamma.body_errors.push(CompilerError::new_with_label(
+                    f.name_span,
+                    format!(
+                        "function `{}` must return `{}`, but its body has no return value",
+                        f.name, ret_render
+                    ),
+                ));
+            }
         }
     } else {
         // no declared return (or coroutine): the body tail is discarded

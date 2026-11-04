@@ -1534,5 +1534,5 @@ fn consume(value: Many) -> int {{ let whole = value; return whole.child0?.a ?? -
         count,
         "expansion must retain opaque children when scalar lanes exceed the budget"
     );
-    assert!(mir.params.len() + 1 <= budget);
+    assert!(mir.params.len() < budget);
 }

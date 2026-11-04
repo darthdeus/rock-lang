@@ -502,7 +502,7 @@ impl Builder<'_> {
             }
         }
         let v = self.lower_expr(value)?;
-        Ok(self.embed_leaf_reads(cname, v)?)
+        self.embed_leaf_reads(cname, v)
     }
 
     /// Every relative leaf path of embedded child `cname`, declaration order.

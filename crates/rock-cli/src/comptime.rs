@@ -887,8 +887,10 @@ mod source_fingerprint_tests {
                 .unwrap(),
             ];
             let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).unwrap();
-            let mut inputs = ComptimeInputs::default();
-            inputs.embed_root = Some(root);
+            let mut inputs = ComptimeInputs {
+                embed_root: Some(root),
+                ..Default::default()
+            };
             inputs.source_fingerprints.insert(
                 Ustr::from("REV"),
                 SourceFingerprint {

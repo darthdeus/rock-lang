@@ -702,7 +702,7 @@ impl UniformArrayBlockPlan {
 }
 
 fn round_up_u64(v: u64, align: u64) -> u64 {
-    (v + align - 1) / align * align
+    v.div_ceil(align) * align
 }
 
 /// The over-budget rejection, shared so every path that can produce an

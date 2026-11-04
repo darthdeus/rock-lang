@@ -2655,7 +2655,7 @@ impl<'a> Printer<'a> {
                 Doc::concat([
                     Doc::text(head),
                     Doc::text("{ "),
-                    Doc::join(Doc::text(", "), entries.into_iter()),
+                    Doc::join(Doc::text(", "), entries),
                     Doc::text(" }"),
                 ])
             }
