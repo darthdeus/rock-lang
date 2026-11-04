@@ -47,7 +47,6 @@ clap_complete = { workspace = true }
 anyhow = { workspace = true }
 colored = { workspace = true }
 serde_json = { workspace = true }
-basic-toml = "0.1"
 fs-err = { workspace = true }
 walkdir = { workspace = true }
 tempfile = "3.0"
@@ -72,13 +71,7 @@ libc = "0.2"
 [dev-dependencies]
 skull-codegen-shader = { workspace = true }
 skull-codegen-wgsl = { workspace = true }
-insta = { workspace = true }
-regex-lite = { workspace = true }
-syn = { version = "2", features = ["full"] }
-tempfile = "3.0"
 test-utils = { workspace = true }
-# web_smoke_tests: decode the headless-Chrome screenshot for the non-blank check.
-image = { version = "0.25", default-features = false, features = ["png"] }
 
 [lints]
 workspace = true

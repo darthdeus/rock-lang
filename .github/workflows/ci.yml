@@ -58,6 +58,9 @@ jobs:
           test -n "$ROCK_LANG_DENYLIST" || { echo "ROCK_LANG_DENYLIST secret is not set" >&2; exit 1; }
           git grep -I -h . -- . ':!crates/lsp-types-manual/Cargo.toml' ':!crates/lsp-types-manual/Cargo.toml.orig' > "$RUNNER_TEMP/public-content.txt"
           .githooks/check-public "$RUNNER_TEMP/public-content.txt"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
       - name: Show LuaJIT
         run: command -v luajit && luajit -v
       - name: Build workspace
@@ -68,9 +71,6 @@ jobs:
         run: rustup target add wasm32-unknown-unknown
       - name: Check wasm libraries
         run: cargo check --locked --lib --target wasm32-unknown-unknown -p skull-fmt -p skull -p skull-codegen-glsl -p skull-codegen-wgsl -p rock-stdlib -p bone-incremental -p bone-lints -p rock-lsp -p rock-wasm
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
       - name: Build the playground (wasm module and stdlib)
         run: playground/build.sh
       - name: Wasm smoke test against native output

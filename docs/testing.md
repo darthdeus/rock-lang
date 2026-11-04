@@ -4,6 +4,13 @@ Run these commands from the repository root. Rust and Cargo build the compiler;
 `luajit` runs the default backend's programs, and `node` runs the JS backend's
 programs. No installed `rock` binary is needed.
 
+Use a current stable Rust toolchain and a working C compiler/linker (the CLI
+builds bundled mimalloc). SDL2 is not needed for the default build or tests.
+CI uses Node 24 and LuaJIT 2.1.1785763465, pinned to commit
+`1edc3e52b67eaf6ce5f809be8e17d6862594b8bc`. Older LuaJIT builds can fail numeric
+formatting tests because they round exact ties differently. Check `rustc --version`,
+`cc --version`, `luajit -v` and `node --version` before diagnosing compiler failures.
+
 ## Use the compiler you are editing
 
 ```sh
