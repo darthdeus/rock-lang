@@ -18,6 +18,7 @@
 //!   - coroutine-op intrinsic templates (emit.rs:2530): `resume`/`result`/
 //!     `status`/`last_error`/`fire_hot_reload` render as `(function(c){..})(x)`
 //!     IIFEs at the CONSUMER call site.
+//!
 //! The fixed runtime preamble in `lib.rs` (`JS_CALL_HELPER`, `JS_STRUCTURAL_EQ`,
 //! `JS_CORO_RUNTIME`, ...) also holds `function(` helpers; it is prepended by the
 //! driver, never returned by `emit_with_closure`, so it is naturally out of

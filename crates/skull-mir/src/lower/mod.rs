@@ -865,6 +865,7 @@ impl NestedFn {
 ///     flattens both `tl__x` and `tl.x` to `r__tl__x`), or
 ///   - a leaf and a SIBLING param (`fn f(r: V2, r__x: float)` emits
 ///     `f(r__x, r__y, r__x)`).
+///
 /// Either way Lua binds the later one and the body silently reads the wrong
 /// value. Reject rather than emit the duplicate -- same discipline as
 /// [`crate::mangle::collision_errors`].
@@ -3922,7 +3923,7 @@ pub fn gc_value_c_boundary(ws: &Workspace, mid: ModuleId) -> Option<(String, Spa
             ) {
                 let normalized =
                     crate::monoty::convert_decl(ws, ty, &rustc_hash::FxHashMap::default())
-                        .map_err(|reason| crate::monoty::NewtypeResolutionError::Conversion(reason))
+                        .map_err(crate::monoty::NewtypeResolutionError::Conversion)
                         .and_then(|ty| gc_value_under_newtypes(ws, ty));
                 match normalized {
                     Ok(Some(n)) => {
@@ -4023,6 +4024,7 @@ fn struct_expand_rejection_for_call(
 /// - one-arg fullscreen `rock_shader(frag)`: `vert = None`, `key = "<frag>"` (a
 ///   bare name, never containing '+', so it can never collide with a pair key);
 ///   the driver runs `emit_shader_entry`.
+///
 /// `key` is the pipeline name const `pipeline()` looks up.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ShaderPair {
@@ -4919,7 +4921,7 @@ pub fn gpu_only_call_rejection(ws: &Workspace, mid: ModuleId) -> Option<Compiler
                 crate::intrinsics::expand_kind(f),
                 Some(ExpandKind::ShaderPipeline | ExpandKind::ComputeArtifact)
             ) {
-                shader_expansion_args.extend((*args).into_iter());
+                shader_expansion_args.extend(*args);
             }
         }
         for (e, expr) in body.expr_arena.iter() {

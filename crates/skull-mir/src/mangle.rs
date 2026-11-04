@@ -388,8 +388,10 @@ fn function_collision_error(
 /// error per illegal collision:
 ///   - two DISTINCT signatures producing the same mangled name, or
 ///   - a mangled name equal to a distinct exempt signature's bare emitted name
-/// (so a mangled fn can never shadow, or be shadowed by, an `extern`/`@nomangle`/
-/// `main`/`test_*` surface name). Same discipline as `mint_synthetic` /
+///     (so a mangled fn can never shadow, or be shadowed by, an `extern`/`@nomangle`/
+///     `main`/`test_*` surface name).
+///
+/// Same discipline as `mint_synthetic` /
 /// `is_reserved_lexical`: the compiler refuses the program rather than emit a
 /// name that would silently resolve to the wrong body. Keyed by mangled name for
 /// deterministic ordering across the rayon-scheduled emit.
@@ -462,7 +464,7 @@ pub fn collision_errors(ws: &Workspace) -> Vec<(String, CompilerError)> {
         type_keys.extend(m.enums.iter().map(|(_, d)| (d.name, d.name_span)));
         type_keys.extend(m.newtypes.iter().map(|(_, d)| (d.name, d.name_span)));
     }
-    type_keys.sort_by(|a, b| a.0.cmp(&b.0));
+    type_keys.sort_by_key(|a| a.0);
     type_keys.dedup_by(|a, b| a.0 == b.0);
     let mut type_owner: HashMap<ustr::Ustr, ustr::Ustr> = HashMap::new();
     for (key, span) in &type_keys {

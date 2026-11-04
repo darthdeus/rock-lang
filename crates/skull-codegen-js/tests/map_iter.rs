@@ -1,5 +1,6 @@
 //! MapNext on JS: the `Inst::MapNext` emit arm
-//! + the `__map_next` cursor-cached keys-iterator shim (`JS_MAP_ITER_RUNTIME`).
+//! and the `__map_next` cursor-cached keys-iterator shim (`JS_MAP_ITER_RUNTIME`).
+//!
 //! The emit-shape test needs no node; the shim behavior pins run the ACTUAL
 //! prelude const under node, node-gated with a skip-log.
 

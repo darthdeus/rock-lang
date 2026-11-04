@@ -4840,7 +4840,7 @@ pub(crate) fn bind_generic(
         TypeExpr::App { params: pp, .. } => {
             if let TypeExpr::App { params: ap, .. } = ty_of(ws, a_body, arg) {
                 if pp.len() == ap.len() {
-                    return pp.into_iter().zip(ap.into_iter()).find_map(|(pi, ai)| {
+                    return pp.into_iter().zip(ap).find_map(|(pi, ai)| {
                         bind_generic(
                             ws,
                             target,
@@ -5669,7 +5669,7 @@ mod tests {
             span.file = Ustr::from("/invalid\nspan.rock");
             assert!(bone.location_from_span(proj, &span).is_none());
             reached_assertion = true;
-            assert!(false, "intentional assertion failure to verify cleanup");
+            panic!("intentional assertion failure to verify cleanup");
         }));
         assert!(result.is_err());
         assert!(
@@ -5716,8 +5716,7 @@ mod tests {
             .text = broken.into();
         let check = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let cause = skull_parser::parse_module(broken, Ustr::from(sibling.as_str()))
-                .err()
-                .expect("hard parse fixture")
+                .expect_err("hard parse fixture")
                 .message;
             let hints = bone.inlay_hints(
                 &path,

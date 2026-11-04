@@ -13,6 +13,7 @@
 //!   4. glob bindings visible to the fragment, including what the globbed
 //!      modules re-export;
 //!   5. the compiler-owned std view (the standard library's own members).
+//!
 //! Values shadow; callables accumulate: the first tier that binds the name
 //! decides, except that in callee position a first tier that binds callables
 //! opens one family with the callables of every lower tier, which overload

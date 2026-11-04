@@ -1888,6 +1888,7 @@ fn emit_shader_program_with_view(
 ///   - single `@shader(fragment)` root (A1 fullscreen) and
 ///     `<vert_fn> <frag_fn>` (A2 pipeline, selected when a root is
 ///     `@shader(vertex)`): both take `[--profile 330core|300es]`.
+///
 /// A profile violation renders spanned against the source and exits non-zero.
 pub fn skull_shader(
     files: &[String],
@@ -2568,7 +2569,7 @@ fn write_allocation_report(
         anyhow::bail!("SKULL_ALLOCATION_REPORT must name an output file");
     }
     let path = std::path::Path::new(path);
-    rock_host::project::write_atomic(path, &report.render_text())
+    rock_host::project::write_atomic(path, report.render_text())
         .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))
 }
 

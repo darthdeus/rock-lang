@@ -4,7 +4,7 @@
 //!
 //! Two harnesses:
 //!   - `emit_entry`  : A1 fragment entry, reused to exercise the new GPU builtins
-//!                     (frag_coord/fwidth/discard) in isolation.
+//!     (frag_coord/fwidth/discard) in isolation.
 //!   - `emit_pipeline`: the A2 vertex+fragment pair -> one #ifdef file.
 
 use skull_codegen_glsl::GlslProfile;
@@ -62,8 +62,7 @@ fn emit_pipeline_profile(
 fn vector_scalar_bounds_are_splatted() {
     for width in [2, 3, 4] {
         let components = &['x', 'y', 'z', 'w'][..width];
-        let ctor = std::iter::repeat("tc.x")
-            .take(width)
+        let ctor = std::iter::repeat_n("tc.x", width)
             .collect::<Vec<_>>()
             .join(", ");
         let min = components

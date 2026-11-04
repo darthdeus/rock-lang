@@ -10,6 +10,7 @@
 //!     slots, whatever the identifier sits in), and
 //!   - right AFTER every `.` that follows an identifier char (empty-prefix
 //!     member completion).
+//!
 //! `--stride N` keeps every Nth position (default 10) so the corpus stays
 //! diffable-sized; stride 1 is the exhaustive gate.
 //!

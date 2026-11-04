@@ -613,6 +613,7 @@ pub enum Inst {
     ///   - `fn_ref = None` is a fn-less 1-field env used to BOX a mutable shared
     ///     capture (`{ v = .. }`): the box TABLE is the cell's value, the variable
     ///     is `.v` on it. An empty `fields` is the `{}` init of a fresh box.
+    ///
     /// `fields` carry captured cell values by field name (`c<raw>`); env
     /// reads/writes reuse [`Inst::Field`]/[`Inst::StoreField`] (no dedicated
     /// EnvGet/EnvSet -- they express it cleanly).

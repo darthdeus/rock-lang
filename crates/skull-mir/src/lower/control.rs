@@ -101,8 +101,8 @@ impl Builder<'_> {
                 // A mixed float compare (`x > 0`, `i < f`) promotes its int side --
                 // both Float* operands must arrive float (GLSL ES has no implicit
                 // int->float in a compare).
-                let lv = self.coerce_numeric_to_float(lv, lf.map_or(ArithTy::Str, |x| x), float);
-                let rv = self.coerce_numeric_to_float(rv, rf.map_or(ArithTy::Str, |x| x), float);
+                let lv = self.coerce_numeric_to_float(lv, lf.unwrap_or(ArithTy::Str), float);
+                let rv = self.coerce_numeric_to_float(rv, rf.unwrap_or(ArithTy::Str), float);
                 let inst = match (op, float, uint) {
                     (BinOp::Lt, false, true) => Inst::UintLt(lv, rv),
                     (BinOp::Lt, false, false) => Inst::IntLt(lv, rv),
@@ -387,8 +387,8 @@ impl Builder<'_> {
                 let lf = self.arith_ty(lhs);
                 let rf = self.arith_ty(rhs);
                 let float = lf == Some(ArithTy::Float) || rf == Some(ArithTy::Float);
-                let lv = self.coerce_numeric_to_float(lv, lf.map_or(ArithTy::Str, |x| x), float);
-                let rv = self.coerce_numeric_to_float(rv, rf.map_or(ArithTy::Str, |x| x), float);
+                let lv = self.coerce_numeric_to_float(lv, lf.unwrap_or(ArithTy::Str), float);
+                let rv = self.coerce_numeric_to_float(rv, rf.unwrap_or(ArithTy::Str), float);
                 Ok(self.emit_cur(if matches!(op, BinOp::Eq) {
                     Inst::Eq(lv, rv)
                 } else {
@@ -509,7 +509,7 @@ impl Builder<'_> {
     }
 
     /// `if` in STATEMENT position (value discarded): branch + arms-as-statements
-    /// + join, with NO result cell / store / load. Arms recurse statement-position
+    /// plus a join, with NO result cell / store / load. Arms recurse statement-position
     /// so nested if/block/match also skip their result cells.
     pub(crate) fn lower_if_stmt(
         &mut self,

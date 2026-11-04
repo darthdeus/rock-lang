@@ -3989,6 +3989,7 @@ fn fn_has_bounds(f: &bone_semantic::hir::Function) -> bool {
 /// contributed:
 /// - `direct_globals` / `direct_calls`: global-init ordering is stated over
 ///   declarations, and a specialization's ordering facts are its declaration's.
+///
 /// `statics` is NOT one of them. A specialized body's `static` cells are cells
 /// the emitted program uses, so leaving them out would leave them without a
 /// reload reset. With emission owned by the
@@ -4018,9 +4019,11 @@ fn emit_spec_chunk(
         None => skull_mir::lower::lower_instance_with_plans(ws, scx, plan, &concrete.plans)
             .map_err(|e| CompilerError::new_with_label(f.name_span, e.message))?,
     };
-    let mut times = PhaseTimes::default();
-    times.lower = tl.elapsed();
-    times.lower_work = mf.insts.len() > 0;
+    let mut times = PhaseTimes {
+        lower: tl.elapsed(),
+        lower_work: !mf.insts.is_empty(),
+        ..PhaseTimes::default()
+    };
     let mut attribution = UnitAttribution {
         owner: name.to_string(),
         examined: true,
@@ -4603,7 +4606,7 @@ fn unit_errors(units: &[UnitOut]) -> Vec<CompilerError> {
 
 /// Assemble the full Lua program: prelude + decorator defs + the function section
 /// (cached chunks for ordinary/coroutine bodies, regenerated externs/inline(lua))
-/// + dependency-ordered global inits + decorator applications. Everything except
+/// plus dependency-ordered global inits + decorator applications. Everything except
 /// the cached function chunks is regenerated here, so this is shared verbatim by
 /// the full and incremental paths and there is no stale prelude/ordering.
 ///
@@ -6435,9 +6438,9 @@ fn assemble(
         let (value_slot, done_slot) =
             skull_mir::global_storage::static_cell_storage_keys(ws, scx.interner(), sc)
                 .map_err(CompilerError::new_no_location)?;
-        let _ = write!(
+        let _ = writeln!(
             static_resets,
-            "__rock_static_prepare({value_slot:?}, {done_slot:?}, {key:?})\n"
+            "__rock_static_prepare({value_slot:?}, {done_slot:?}, {key:?})"
         );
     }
 
@@ -7460,9 +7463,9 @@ fn emit_full_in_with_mutation(
                 parallel_join(
                     || {
                         #[cfg(all(test, not(feature = "sequential")))]
-                        setup_scheduler
-                            .as_deref()
-                            .map(|scheduler| scheduler.wait(SetupLaneKind::CpuArtifact));
+                        if let Some(scheduler) = setup_scheduler.as_deref() {
+                            scheduler.wait(SetupLaneKind::CpuArtifact);
+                        }
                         let started = Instant::now();
                         let scx = skull_mir::lower::ScalarCtx::new(ws)
                             .sharing(std::sync::Arc::clone(graph.interner()));
@@ -7478,9 +7481,9 @@ fn emit_full_in_with_mutation(
                         let population = lua_view.instances.len() + lua_view.boundaries.len();
                         let finished = Instant::now();
                         #[cfg(all(test, not(feature = "sequential")))]
-                        setup_scheduler
-                            .as_deref()
-                            .map(|scheduler| scheduler.finish(SetupLaneKind::CpuArtifact));
+                        if let Some(scheduler) = setup_scheduler.as_deref() {
+                            scheduler.finish(SetupLaneKind::CpuArtifact);
+                        }
                         (
                             lua_view,
                             scx,
@@ -7493,9 +7496,9 @@ fn emit_full_in_with_mutation(
                     },
                     || {
                         #[cfg(all(test, not(feature = "sequential")))]
-                        setup_scheduler
-                            .as_deref()
-                            .map(|scheduler| scheduler.wait(SetupLaneKind::Shader));
+                        if let Some(scheduler) = setup_scheduler.as_deref() {
+                            scheduler.wait(SetupLaneKind::Shader);
+                        }
                         let started = Instant::now();
                         // The overload set lives in `cg` (computed once there);
                         // borrow it rather than rescanning the workspace.
@@ -7529,9 +7532,9 @@ fn emit_full_in_with_mutation(
                             .unwrap_or(0);
                         let finished = Instant::now();
                         #[cfg(all(test, not(feature = "sequential")))]
-                        setup_scheduler
-                            .as_deref()
-                            .map(|scheduler| scheduler.finish(SetupLaneKind::Shader));
+                        if let Some(scheduler) = setup_scheduler.as_deref() {
+                            scheduler.finish(SetupLaneKind::Shader);
+                        }
                         (
                             result.map(|(view, registrations, _)| (view, registrations)),
                             SetupLaneWindow {
@@ -7545,9 +7548,9 @@ fn emit_full_in_with_mutation(
             },
             || {
                 #[cfg(all(test, not(feature = "sequential")))]
-                setup_scheduler
-                    .as_deref()
-                    .map(|scheduler| scheduler.wait(SetupLaneKind::AbiWarm));
+                if let Some(scheduler) = setup_scheduler.as_deref() {
+                    scheduler.wait(SetupLaneKind::AbiWarm);
+                }
                 let started = Instant::now();
                 let mut abi_scx = skull_mir::lower::ScalarCtx::new(ws)
                     .sharing(std::sync::Arc::clone(graph.interner()));
@@ -7557,9 +7560,9 @@ fn emit_full_in_with_mutation(
                 let population = abi_scx.abi_plan_stats().warm_keys as usize;
                 let finished = Instant::now();
                 #[cfg(all(test, not(feature = "sequential")))]
-                setup_scheduler
-                    .as_deref()
-                    .map(|scheduler| scheduler.finish(SetupLaneKind::AbiWarm));
+                if let Some(scheduler) = setup_scheduler.as_deref() {
+                    scheduler.finish(SetupLaneKind::AbiWarm);
+                }
                 (
                     abi_scx,
                     SetupLaneWindow {
@@ -9227,9 +9230,9 @@ fn assemble_overlay(
                     sc,
                 )
                 .map_err(CompilerError::new_no_location)?;
-                let _ = write!(
+                let _ = writeln!(
                     static_resets,
-                    "__rock_static_prepare({value_slot:?}, {done_slot:?}, {:?})\n",
+                    "__rock_static_prepare({value_slot:?}, {done_slot:?}, {:?})",
                     static_cell_key(sc),
                 );
             }
