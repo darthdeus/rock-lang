@@ -4697,7 +4697,7 @@ impl<'a> WorklistState<'a> {
             })?;
             names.insert(key, name.clone());
         }
-        for (inst, _realized) in &view.realization {
+        for inst in view.realization.keys() {
             let name = view
                 .publications
                 .get(inst)

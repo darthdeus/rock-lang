@@ -685,7 +685,7 @@ fn planned_value_rec(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>) -> Op
             enum_plan
                 .slots
                 .iter()
-                .map(|(field, cty)| (*field, PlannedField::Primitive(*cty))),
+                .map(|(field, cty)| (*field, PlannedField::Primitive(cty))),
         );
         return Some(PlannedValue {
             name,

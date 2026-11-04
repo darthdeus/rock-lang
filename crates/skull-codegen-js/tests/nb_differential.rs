@@ -124,7 +124,7 @@ fn fixture_ws() -> Workspace {
 
 fn find_fn(ws: &Workspace, name: &str) -> FuncRef {
     let mut found = None;
-    for (_, &mid) in ws.module_ids.iter() {
+    for &mid in ws.module_ids.values() {
         for (fid, f) in ws.module(mid).functions.iter() {
             if f.name.as_str() == name && f.inline_body.is_none() {
                 assert!(found.is_none(), "ambiguous fn `{name}`");

@@ -50,7 +50,7 @@ fn convert_module(
         return (ok, bad);
     };
     let subst = MonoSubst::default();
-    for (_, inf) in ir.per_fn.iter() {
+    for inf in ir.per_fn.values() {
         let tys = inf
             .expr_types
             .iter()

@@ -809,7 +809,7 @@ mod tests {
         let mut modules = sources
             .iter()
             .map(|(file, src)| {
-                skull_parser::parse_module_clean(src, Ustr::from(*file)).expect("parse")
+                skull_parser::parse_module_clean(src, Ustr::from(file)).expect("parse")
             })
             .collect::<Vec<_>>();
         semantic_pass(&mut modules).expect("semantic")

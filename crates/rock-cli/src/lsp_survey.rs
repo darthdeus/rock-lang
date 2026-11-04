@@ -187,8 +187,8 @@ fn collect_stats(
     let mut call_tally: HashMap<(ModuleId, Idx<bone_semantic::prelude::hir::Function>), usize> =
         HashMap::new();
     for (_mid, inf) in ws.inferences_iter() {
-        for (_owner, bi) in inf.per_fn.iter() {
-            for (_e, callee) in bi.resolved_overload_calls.iter() {
+        for bi in inf.per_fn.values() {
+            for callee in bi.resolved_overload_calls.values() {
                 *call_tally.entry(*callee).or_default() += 1;
             }
         }

@@ -662,7 +662,7 @@ impl LintDependencyIndex {
                     .entry((module.id, BodyOwner::Function(fid)))
                     .or_default();
             }
-            for (owner, _) in module.bodies.iter() {
+            for owner in module.bodies.keys() {
                 let body_key = (module.id, *owner);
                 index.body_edges.entry(body_key).or_default();
                 if !matches!(owner, BodyOwner::Function(_)) {

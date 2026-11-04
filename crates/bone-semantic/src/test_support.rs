@@ -343,7 +343,7 @@ fn check_types_packages_inner(
         .collect();
     body_errs.sort_by_key(|e| e.location.offset);
     if let Some(e) = body_errs.first() {
-        return Err(render_err(&srcs, *e));
+        return Err(render_err(&srcs, e));
     }
 
     // Check `//^` markers in every file.

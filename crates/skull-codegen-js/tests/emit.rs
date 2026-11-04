@@ -160,7 +160,7 @@ fn vec_overload_rejects() {
     let ws = stdlib_ws();
     let mut lowered = 0;
     let mut reject_msgs: Vec<String> = Vec::new();
-    for (_, &mid) in ws.module_ids.iter() {
+    for &mid in ws.module_ids.values() {
         let module = ws.module(mid);
         for (fid, f) in module.functions.iter() {
             // Vec overloads only: skip the 3-float scalar fallback (it emits).
@@ -247,7 +247,7 @@ function nb_len(c0) {
 #[test]
 fn native_buffer_ctor_emits_object_literal() {
     let ws = stdlib_ws();
-    for (_, &mid) in ws.module_ids.iter() {
+    for &mid in ws.module_ids.values() {
         for (fid, f) in ws.module(mid).functions.iter() {
             if f.name.as_str() == "native_buffer_float" {
                 let mf = lower_test_ref(&ws, mid, fid);

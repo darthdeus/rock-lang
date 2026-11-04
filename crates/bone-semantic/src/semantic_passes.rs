@@ -820,7 +820,7 @@ fn compute_export_reachability(
 
     while let Some(mkey) = queue.pop_front() {
         if let Some(node) = pkg.node(mkey) {
-            for (_, &child_key) in &node.children {
+            for &child_key in node.children.values() {
                 if let Some(child_node) = pkg.node(child_key) {
                     if child_node.vis == Some(NsVisibility::Pub) {
                         if reachable_modules.insert(child_key) {

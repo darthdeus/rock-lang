@@ -115,7 +115,7 @@ pub fn report(label: &str) -> bool {
     // Per category, the widest offenders first: a fn reached from 300 call sites
     // is one defect, and sorting by site count is what makes the biggest single
     // cause visible rather than the alphabetically first one.
-    for (cat, _) in &by_cat {
+    for cat in by_cat.keys() {
         let mut rows: Vec<_> = distinct.iter().filter(|(c, ..)| c == cat).collect();
         rows.sort_by(|a, b| b.3.cmp(&a.3).then(a.1.cmp(&b.1)));
         println!("### `{}`", cat.name());

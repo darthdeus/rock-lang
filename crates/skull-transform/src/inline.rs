@@ -1242,55 +1242,52 @@ fn template_counts(func: &MirFunc, live: &LiveClosure) -> InlineCloneStats {
     let mut side = InlineSideTableStats::default();
     side.spec_bindings = side_family(
         func.spec_bindings.len(),
-        func.spec_bindings
-            .keys()
-            .filter(|id| live_inst(*id))
-            .count(),
+        func.spec_bindings.keys().filter(|id| live_inst(id)).count(),
     );
     side.callee_instances = side_family(
         func.callee_instances.len(),
         func.callee_instances
             .keys()
-            .filter(|id| live_inst(*id))
+            .filter(|id| live_inst(id))
             .count(),
     );
     side.abi_plans = side_family(
         func.call_abi_plans.len(),
         func.call_abi_plans
             .keys()
-            .filter(|id| live_inst(*id))
+            .filter(|id| live_inst(id))
             .count(),
     );
     side.representation_plans = side_family(
         func.call_rep_plans.len(),
         func.call_rep_plans
             .keys()
-            .filter(|id| live_inst(*id))
+            .filter(|id| live_inst(id))
             .count(),
     );
     side.closure_environment_plans = side_family(
         func.closure_env_plans.len(),
         func.closure_env_plans
             .keys()
-            .filter(|id| live_inst(*id))
+            .filter(|id| live_inst(id))
             .count(),
     );
     side.raw_bound_trees = side_family(
         func.bound_trees.len(),
-        func.bound_trees.keys().filter(|id| live_inst(*id)).count(),
+        func.bound_trees.keys().filter(|id| live_inst(id)).count(),
     );
     side.resolved_bound_trees = side_family(
         func.resolved_bound_trees.len(),
         func.resolved_bound_trees
             .keys()
-            .filter(|id| live_inst(*id))
+            .filter(|id| live_inst(id))
             .count(),
     );
     side.function_value_symbols = side_family(
         func.fn_value_symbols.len(),
         func.fn_value_symbols
             .keys()
-            .filter(|id| live_inst(*id))
+            .filter(|id| live_inst(id))
             .count(),
     );
     side.instruction_spans = side_family(
@@ -1300,7 +1297,7 @@ fn template_counts(func: &MirFunc, live: &LiveClosure) -> InlineCloneStats {
             .filter(|(id, _)| live_inst(id))
             .count(),
     );
-    let retained_call_sites = func.call_sites.keys().filter(|id| live_inst(*id)).count();
+    let retained_call_sites = func.call_sites.keys().filter(|id| live_inst(id)).count();
     side.call_sites = side_family(func.call_sites.len(), retained_call_sites);
     let retained_owners: HashSet<u32> = func
         .call_sites

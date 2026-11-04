@@ -5484,7 +5484,7 @@ pub(crate) fn completion_with_visible_bindings(
     // already come through `struct_by_name`.)
     if !expr_position {
         for name in BUILTIN_TYPE_NAMES {
-            let n = ustr::Ustr::from(*name);
+            let n = ustr::Ustr::from(name);
             if matches(name) && seen.insert(n) {
                 out.push(CompletionEntry {
                     name: n,

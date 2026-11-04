@@ -15,7 +15,7 @@ fn workspace(src: &str) -> Workspace {
 fn workspace_many(srcs: &[(&str, &str)]) -> Workspace {
     let mut asts = srcs
         .iter()
-        .map(|(file, src)| skull_parser::parse_module_clean(src, Ustr::from(*file)).expect("parse"))
+        .map(|(file, src)| skull_parser::parse_module_clean(src, Ustr::from(file)).expect("parse"))
         .collect::<Vec<_>>();
     semantic_pass(&mut asts).expect("semantic pass")
 }
@@ -28,7 +28,7 @@ fn sources(src: &str) -> FxHashMap<Ustr, &str> {
 
 fn sources_many<'a>(srcs: &'a [(&'a str, &'a str)]) -> FxHashMap<Ustr, &'a str> {
     srcs.iter()
-        .map(|(file, src)| (Ustr::from(*file), *src))
+        .map(|(file, src)| (Ustr::from(file), *src))
         .collect()
 }
 

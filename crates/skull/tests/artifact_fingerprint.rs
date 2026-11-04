@@ -8,7 +8,7 @@ fn inputs(values: &[(&str, &str)], volatile: &[&str]) -> ComptimeInputs {
     let mut out = ComptimeInputs::default();
     for (name, value) in values {
         out.vars.insert(
-            Ustr::from(*name),
+            Ustr::from(name),
             ComptimeVarValue {
                 value: (*value).to_string(),
                 secret: false,

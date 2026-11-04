@@ -73,7 +73,7 @@ fn failed_rebuild_users_keeps_workspace_consistent() {
 
     // The last-good workspace is still queryable -- every interned module
     // resolves without panicking.
-    for (_, &mid) in session.ws.module_ids.iter() {
+    for &mid in session.ws.module_ids.values() {
         let _ = session.ws.module(mid);
     }
 }

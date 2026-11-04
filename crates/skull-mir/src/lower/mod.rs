@@ -4800,9 +4800,9 @@ pub fn collect_shader_collection(ws: &Workspace) -> Result<ShaderCollection, Com
     let mut by_key: BTreeMap<String, ShaderPair> = BTreeMap::new();
     let mut callsites: HashSet<(ModuleId, BodyOwner)> = HashSet::new();
     let mut contributions = HashMap::new();
-    for (_, &mid) in ws.module_ids.iter() {
+    for &mid in ws.module_ids.values() {
         let module = ws.module(mid);
-        for (owner, _) in module.bodies.iter() {
+        for owner in module.bodies.keys() {
             let key = (mid, *owner);
             let (pairs, callsite) = collect_shader_body(ws, mid, *owner)?;
             if callsite {
@@ -4827,9 +4827,9 @@ pub fn collect_compute_collection(ws: &Workspace) -> Result<ComputeCollection, C
     let mut by_key = BTreeMap::<String, ComputeEntry>::new();
     let mut callsites = HashSet::new();
     let mut contributions = HashMap::new();
-    for (_, &mid) in ws.module_ids.iter() {
+    for &mid in ws.module_ids.values() {
         let module = ws.module(mid);
-        for (owner, _) in module.bodies.iter() {
+        for owner in module.bodies.keys() {
             let key = (mid, *owner);
             let (entries, callsite) = collect_compute_body(ws, mid, *owner)?;
             if callsite {
@@ -5029,7 +5029,7 @@ fn const_int(body: &Body, e: Idx<Expr>) -> Option<i64> {
 /// (non-literal) arguments are out of scope. Returns the offending arg's span.
 pub fn string_char_literal_out_of_range(ws: &Workspace, mid: ModuleId) -> Option<Span> {
     let module = ws.module(mid);
-    for (_owner, body) in module.bodies.iter() {
+    for body in module.bodies.values() {
         for (_e, expr) in body.expr_arena.iter() {
             let Expr::Call {
                 callee: Callee::Unresolved { name, .. },

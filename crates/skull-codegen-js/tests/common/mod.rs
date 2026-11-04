@@ -133,7 +133,7 @@ pub fn emit_user_err(ws: &bone_semantic::inference::Workspace, name: &str) -> St
 /// The Vec overloads (multi-value return) reject, so the first that emits is the
 /// scalar one.
 pub fn emit_scalar(ws: &bone_semantic::inference::Workspace, name: &str, arity: usize) -> String {
-    for (_, &mid) in ws.module_ids.iter() {
+    for &mid in ws.module_ids.values() {
         let module = ws.module(mid);
         for (fid, f) in module.functions.iter() {
             if f.name.as_str() != name
