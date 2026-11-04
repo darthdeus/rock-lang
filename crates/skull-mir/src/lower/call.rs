@@ -1502,10 +1502,11 @@ impl Builder<'_> {
                     let pidx = param_names.iter().position(|p| *p == fname).ok_or_else(|| {
                         gap(format!("spread field `{fname}` matches no parameter"))
                     })?;
-                    let owned = self.snapshot_opaque_value(r.value().clone())?;
-                    let bundle = ValueBundle::new(r.representation(), owned);
+                    let representation = r.representation();
+                    let owned = self.snapshot_opaque_value(r.into_value())?;
+                    let bundle = ValueBundle::new(representation, owned);
                     let slot = param_shapes.get(pidx).cloned().unwrap_or(RetSlot::Opaque);
-                    slots[pidx] = Some(self.snapshot_argument_slot(&bundle, &slot)?);
+                    slots[pidx] = Some(self.snapshot_argument_slot(bundle, &slot)?);
                 }
                 continue;
             }
@@ -1515,8 +1516,9 @@ impl Builder<'_> {
                 self.value_bundle_for_expr(a, ValueRepr::Scalar(place))?
             } else {
                 let r = self.lower_expr_repr(a)?;
-                let owned = self.snapshot_opaque_value(r.value().clone())?;
-                ValueBundle::new(r.representation(), owned)
+                let representation = r.representation();
+                let owned = self.snapshot_opaque_value(r.into_value())?;
+                ValueBundle::new(representation, owned)
             };
             let pidx = match self.body.arg_names.get(&a) {
                 Some(nm) => param_names
@@ -1541,7 +1543,7 @@ impl Builder<'_> {
             slots[pidx] = Some(if is_ref {
                 self.repr_to_slot_values_bundle(&r, &slot)?
             } else {
-                self.snapshot_argument_slot(&r, &slot)?
+                self.snapshot_argument_slot(r, &slot)?
             });
         }
         let hi = slots.iter().rposition(|s| s.is_some()).map_or(0, |i| i + 1);

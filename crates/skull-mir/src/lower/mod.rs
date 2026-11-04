@@ -3403,20 +3403,22 @@ impl Builder<'_> {
         }
         self.with_value_lending(lend, |s| {
             let r = s.lower_expr_repr(a)?;
-            s.snapshot_argument_slot(&r, slot)
+            s.snapshot_argument_slot(r, slot)
         })
     }
 
     pub(crate) fn snapshot_argument_slot(
         &mut self,
-        r: &ValueBundle,
+        r: ValueBundle,
         slot: &RetSlot,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
+        let representation = r.representation();
+        let value = r.into_value();
         let owned = match slot {
-            RetSlot::Leaves(shape) => self.own_opaque_parameter_children(r.value().clone(), shape)?,
-            _ => self.owned_value_children(r.value().clone())?,
+            RetSlot::Leaves(shape) => self.own_opaque_parameter_children(value, shape)?,
+            _ => self.owned_value_children(value)?,
         };
-        let r = ValueBundle::new(r.representation(), owned);
+        let r = ValueBundle::new(representation, owned);
         if !slot.splats() {
             return Ok(vec![self.pack_bundle(&r)?]);
         }
