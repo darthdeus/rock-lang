@@ -1971,6 +1971,25 @@ impl<'a> Printer<'a> {
             };
             return self.comma_block(entries, body, "(", ")");
         }
+        // A non-trailing block lambda can expand while formatting. Break its
+        // argument list with it so the next pass sees the same call layout.
+        if args[..args.len() - 1].iter().any(|arg| {
+            matches!(&self.ast.e(&arg.value).kind, ExprKind::Lambda { body, .. }
+                if self.block_has_braces(*body))
+        }) {
+            return Doc::group(Doc::concat([
+                Doc::text("("),
+                Doc::indent(Doc::concat([
+                    softline(),
+                    Doc::join(
+                        Doc::concat([Doc::text(","), line()]),
+                        args.iter().map(arg_doc),
+                    ),
+                ])),
+                softline(),
+                Doc::text(")"),
+            ]));
+        }
         // Single-line source: stay inline.
         Doc::concat([
             Doc::text("("),

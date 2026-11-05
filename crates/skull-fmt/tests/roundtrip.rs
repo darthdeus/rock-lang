@@ -102,3 +102,26 @@ fn v1_ascription_prints_parenthesized() {
         "infix spelling leaked into v1 output:\n{out}"
     );
 }
+
+#[test]
+fn closure_followed_by_another_argument_reaches_a_fixed_point() {
+    for source in [
+        "fn run() { invoke(() => { action() }, enabled: true) }",
+        "fn run() { invoke(() => { first(); second() }, enabled: true) }",
+        "fn run() { let result = invoke_callback(() => { perform_operation(context, configuration) }, report_failure) }",
+        "fn run() { let result = invoke_callback(() => { perform_operation(context, configuration) }, enabled: true) }",
+    ] {
+        let original = skull_parser::parse_module_clean(source, "<source>".into()).unwrap();
+        for max_line_length in [40, 100] {
+            let config = skull_fmt::FormatConfig {
+                max_line_length,
+                ..Default::default()
+            };
+            let once = skull_fmt::try_format(source, &config).expect("format source");
+            let twice = skull_fmt::try_format(&once, &config).expect("reparse formatted source");
+            assert_eq!(once, twice, "source: {source}");
+            let formatted = skull_parser::parse_module_clean(&once, "<formatted>".into()).unwrap();
+            assert_eq!(original.module_sexp(), formatted.module_sexp());
+        }
+    }
+}
