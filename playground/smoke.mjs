@@ -56,8 +56,6 @@ const mainJs = fs.readFileSync(path.join(dir, 'main.js'), 'utf8');
 const sample = mainJs.match(/const SAMPLE = `([^`]*)`/)[1];
 const gl = await post('compile', { file: 'main.rock', source: sample, target: 'gl' });
 check(gl.ok && gl.lua.length > 0 && gl.shaders.some((s) => s.language === 'glsl'), 'sample compiles to Lua and GLSL');
-const wgpu = await post('compile', { file: 'main.rock', source: sample, target: 'wgpu' });
-check(wgpu.ok && wgpu.shaders.some((s) => s.language === 'wgsl'), 'sample compiles to WGSL');
 const formatted = await post('format', { source: 'fn main(){print("hi")}' });
 check(formatted.ok && formatted.source.includes('fn main() {'), 'format');
 

@@ -2,7 +2,7 @@
 
 Rock is a statically typed language. You write `.rock` files, and the
 `rock` compiler checks them and runs them on LuaJIT; the same compiler
-also lowers `@shader` functions to GLSL and WGSL. This guide describes
+also lowers `@shader` functions to GLSL. This guide describes
 what the compiler accepts today, feature by feature, with runnable
 examples.
 
@@ -10,7 +10,7 @@ Every example in this guide is a file under
 [`examples/guide/`](../examples/guide/), kept in sync by an automated
 test: each fenced program below is one of those files byte for byte,
 each `NN_topic.rock` prints its `NN_topic.out` twin when run, and the
-shader examples compile to GLSL and WGSL. The commands in this guide
+shader examples compile to GLSL. The commands in this guide
 run from that directory of a clone:
 
 ```sh
@@ -720,8 +720,7 @@ fn tint(tc: Vec2) -> Vec4 {
 `rock shader` compiles entries to GLSL; it prints to stdout, or writes
 `--output file.glsl`. One root compiles a fullscreen fragment entry,
 two roots compile a vertex+fragment pipeline, anything else compiles a
-plain function library. The GLSL profile is `330core`. The same entries also
-lower to WGSL for the wgpu renderer.
+plain function library. The GLSL profile is `330core`.
 
 ## Backends
 

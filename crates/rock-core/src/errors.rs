@@ -126,12 +126,6 @@ pub enum CompilerErrorKind {
         message: String,
     },
 
-    /// A target projection knows this capability is unsupported, so its
-    /// artifact may be omitted without hiding an invariant or emitter error.
-    UnsupportedWgslProjection {
-        capability: String,
-    },
-
     /// A `nobox` value materialized implicitly. Distinct from a plain codegen
     /// rejection because it is a LANGUAGE GUARANTEE: the stdlib emit path may
     /// downgrade a codegen parity gap to a silent `skipped`, and must never

@@ -207,12 +207,6 @@ function __rock_code_slot_abort()
   _G.__rock_lifecycle_plan_pending = nil
   _G.__rock_definition_plan_pending = nil
   _G.__rock_definition_materializers_pending = nil
-  local discard_wgpu = rawget(_G, "__rock_wgpu_shader_discard_pending")
-  if discard_wgpu then
-    discard_wgpu()
-  elseif rawget(_G, "__rock_wgpu_shader_register") then
-    error("WGPU shader registrar has no discard hook", 0)
-  end
 end
 function __rock_code_slot_stage(key, body, abi)
   local old = _G.__rock_code_slots[key]
@@ -316,14 +310,6 @@ function __rock_code_slot_publish()
   local wire_due = nil
   if candidate_lifecycle_plan ~= nil then
     wire_due = __rock_lifecycle_wire_due(_G.__ROCK_LIFECYCLE_PLAN, candidate_lifecycle_plan)
-  end
-  -- The renderer owns the pending WGPU queue; these `@nomangle` hooks are
-  -- its only contract with the prelude.
-  local publish_wgpu = rawget(_G, "__rock_wgpu_shader_publish_pending")
-  if publish_wgpu then
-    if not publish_wgpu() then error("WGPU shader registration did not complete", 0) end
-  elseif rawget(_G, "__rock_wgpu_shader_register") then
-    error("WGPU shader registrar has no publish hook", 0)
   end
   local stage = _G.__rock_code_slot_pending
   if not stage then error("Rock code slot stage not open", 0) end

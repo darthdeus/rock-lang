@@ -3955,16 +3955,8 @@ pub fn ensure_renderer_feature(dir: &str) -> Result<()> {
 
 pub fn skull_renderer_target(dir: &str) -> Result<skull::mir_emit::RendererTarget> {
     let backend = skull_renderer_backend(dir)?;
-    if matches!(backend, rock_host::stick::RendererBackend::Wgpu)
-        && !cfg!(feature = "renderer-wgpu")
-    {
-        anyhow::bail!(
-            "the `wgpu` renderer was omitted from this build; enable the `renderer-wgpu` feature (rebuild with `cargo build -p rock-cli --bin rock --features renderer-wgpu`)"
-        );
-    }
     Ok(match backend {
         rock_host::stick::RendererBackend::Gl => skull::mir_emit::RendererTarget::Gl,
-        rock_host::stick::RendererBackend::Wgpu => skull::mir_emit::RendererTarget::Wgpu,
     })
 }
 
@@ -4587,7 +4579,6 @@ impl IncrementalProject {
         };
         let t_emit = Instant::now();
         let shape_started = profile.is_some().then(Instant::now);
-        let old_shader_contracts = self.cache.shader_registration_contracts();
         let shader_keys_changed = if full {
             self.cache
                 .shader_registration_keys_changed(self.project.workspace())
@@ -4637,11 +4628,6 @@ impl IncrementalProject {
                     anyhow::anyhow!("{}", render_project_err(self.project.sources(), &e))
                 })?;
                 crate::compile_measurements::emission(&emit);
-                if old_shader_contracts != c.shader_registration_contracts() {
-                    return Ok(SkullReload::FullRequired {
-                        reasons: vec!["shader registration ABI changed".to_string()],
-                    });
-                }
                 if self
                     .cache
                     .global_layout()
@@ -4727,12 +4713,6 @@ impl IncrementalProject {
                 profile.emit_overlay_ns += started.elapsed().as_nanos();
                 profile.affected_chunk_selection_ns +=
                     emit_phase_ns(&overlay.phases, "  affected selection");
-            }
-            if old_shader_contracts != self.cache.shader_registration_contracts() {
-                self.cache.commit_body_edit_transaction();
-                return Ok(SkullReload::FullRequired {
-                    reasons: vec!["shader registration ABI changed".to_string()],
-                });
             }
             if self
                 .cache

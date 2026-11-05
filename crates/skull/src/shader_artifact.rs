@@ -196,7 +196,7 @@ pub fn realize_shader_with_context_and_compute(
     // profile it does not have.
     let profile = match req.spec.shader? {
         ShaderTargetSpec::Glsl(p) => p,
-        ShaderTargetSpec::SpirV | ShaderTargetSpec::Wgsl | ShaderTargetSpec::Msl => return None,
+        ShaderTargetSpec::SpirV | ShaderTargetSpec::Msl => return None,
     };
 
     let root_decls: BTreeSet<DeclKey> = req

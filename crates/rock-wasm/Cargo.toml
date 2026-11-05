@@ -22,7 +22,7 @@ rock-lsp = { workspace = true }
 lsp-server = { workspace = true }
 anyhow = { workspace = true }
 rock-stdlib = { workspace = true }
-skull = { workspace = true, features = ["renderer-wgpu"] }
+skull = { workspace = true }
 skull-fmt = { workspace = true }
 skull-parser = { workspace = true }
 serde_json = { workspace = true }

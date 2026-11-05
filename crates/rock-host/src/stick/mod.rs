@@ -168,7 +168,7 @@ pub struct StickConfig {
     /// Optional runtime requirements, interpreted by the installed host.
     pub engine: Option<EngineConfig>,
     /// The renderer is a build-time choice, independent of optional engine
-    /// capabilities such as wgpu compute.
+    /// capabilities.
     pub renderer: Option<RendererConfig>,
     /// Declared compile-time inputs (`build_var(..)`) and release channels.
     /// Commands are run by the CLI once per session build, before compilation;
@@ -302,7 +302,6 @@ pub struct RendererConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RendererBackend {
     Gl,
-    Wgpu,
 }
 
 static RENDERER_OVERRIDE: OnceLock<Mutex<Option<RendererBackend>>> = OnceLock::new();
@@ -1122,9 +1121,8 @@ impl StickConfig {
             .unwrap_or("gl")
         {
             "gl" => Ok(RendererBackend::Gl),
-            "wgpu" => Ok(RendererBackend::Wgpu),
             backend => anyhow::bail!(
-                "stick.toml: unknown [renderer] backend {:?}. Known: \"gl\", \"wgpu\"",
+                "stick.toml: unknown [renderer] backend {:?}. Known: \"gl\"",
                 backend
             ),
         }
@@ -1865,15 +1863,14 @@ mod tests {
     }
 
     #[test]
-    fn renderer_defaults_to_gl_and_accepts_wgpu() {
+    fn renderer_defaults_to_gl_and_rejects_retired_wgpu() {
         let gl = StickConfig::new_from_str("[package]\nname = \"x\"\n").unwrap();
         assert_eq!(gl.renderer_backend().unwrap(), RendererBackend::Gl);
 
         let wgpu =
             StickConfig::new_from_str("[package]\nname = \"x\"\n[renderer]\nbackend = \"wgpu\"\n")
                 .unwrap();
-        assert_eq!(wgpu.renderer_backend().unwrap(), RendererBackend::Wgpu);
-        wgpu.validate_renderer().expect("wgpu is a known renderer");
+        assert!(wgpu.validate_renderer().is_err());
     }
 
     #[test]

@@ -62,9 +62,6 @@ const shader = fs.readFileSync(path.join(fixtureDir, 'shader.rock'), 'utf8');
 const gl = request({ op: 'compile', file: 'shader.rock', source: shader });
 check(gl.ok && gl.shaders.some((s) => s.language === 'glsl' && s.source.includes('void main')),
   'shader fixture reports its GLSL');
-const wgpu = request({ op: 'compile', file: 'shader.rock', source: shader, target: 'wgpu' });
-check(wgpu.ok && wgpu.shaders.some((s) => s.language === 'wgsl' && s.source.includes('@fragment')),
-  'shader fixture reports its WGSL for the wgpu target');
 
 const embed = request({
   op: 'compile', file: 'embed.rock',

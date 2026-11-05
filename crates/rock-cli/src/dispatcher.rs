@@ -61,13 +61,6 @@ impl CommandContext {
         if let Route::Omitted(message) = self.args.command.route {
             anyhow::bail!("{}", message);
         }
-        if matches!(self.args.renderer, Some(RendererBackend::Wgpu))
-            && !cfg!(feature = "renderer-wgpu")
-        {
-            anyhow::bail!(
-                "the `wgpu` renderer was omitted from this build; enable the `renderer-wgpu` feature (rebuild with `cargo build -p rock-cli --bin rock --features renderer-wgpu`)"
-            );
-        }
         Ok(())
     }
 

@@ -227,7 +227,7 @@ function registerProviders() {
 
 // --- Generated code ---------------------------------------------------------
 
-const TAB_TARGET = { lua: 'gl', glsl: 'gl', wgsl: 'wgpu' };
+const TAB_TARGET = { lua: 'gl', glsl: 'gl' };
 
 async function compile() {
   const response = await call('compile',

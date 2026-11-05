@@ -12,14 +12,13 @@ autobins = false
 path = "src/lib.rs"
 
 [features]
-default = ["renderer-wgpu", "backend-js"]
+default = ["backend-js"]
 # node execution of the JS-subset emitter (`rock --backend js`).
 backend-js = ["dep:skull-codegen-js"]
 # Shared Lua execution oracles for downstream compiler integration tests.
 test-support = ["dep:test-utils"]
 # Use sequential compiler passes for sampling without Rayon worker frames.
 sequential = ["bone-semantic/sequential", "skull/sequential", "bone-query/sequential"]
-renderer-wgpu = ["skull/renderer-wgpu"]
 
 [dependencies]
 test-utils = { workspace = true, optional = true }
@@ -70,7 +69,6 @@ libc = "0.2"
 
 [dev-dependencies]
 skull-codegen-shader = { workspace = true }
-skull-codegen-wgsl = { workspace = true }
 test-utils = { workspace = true }
 
 [lints]

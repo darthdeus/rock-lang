@@ -17,7 +17,6 @@ autotests = false
 # sampling profiler attributes codegen samples to one thread (clean flamegraphs).
 # Mirrors bone's `sequential`. Wired through rock-cli's `sequential` feature.
 sequential = ["skull-graph/sequential"]
-renderer-wgpu = ["dep:skull-codegen-wgsl"]
 
 [dependencies]
 bone-core = { workspace = true }
@@ -31,7 +30,6 @@ skull-codegen-lua = { workspace = true }
 # backend; skull-mir must not -- the layering constraint.
 skull-codegen-glsl = { workspace = true }
 skull-codegen-shader = { workspace = true }
-skull-codegen-wgsl = { workspace = true, optional = true }
 skull-transform = { workspace = true }
 skull-parser = { workspace = true }
 bone-lints = { workspace = true }
@@ -60,8 +58,3 @@ workspace = true
 [[test]]
 name = "skull_tests"
 path = "tests/main.rs"
-
-[[test]]
-name = "skull_wgpu_tests"
-path = "tests/main_wgpu.rs"
-required-features = ["renderer-wgpu"]

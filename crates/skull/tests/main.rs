@@ -308,8 +308,7 @@ mod vec_flat_enum_strided;
 mod vec_value_columns;
 #[path = "vertex_plan.rs"]
 mod vertex_plan;
-#[path = "wgpu_prelude_hooks.rs"]
-mod wgpu_prelude_hooks;
+
 #[path = "wide_value_abi.rs"]
 mod wide_value_abi;
 #[path = "wide_value_slot_budget.rs"]

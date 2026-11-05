@@ -2,7 +2,7 @@
 //!
 //! This crate stops at the logical artifact boundary. It lowers concrete shader
 //! instances, walks their reachable bodies, classifies the fullscreen entry and
-//! builds [`ShaderInterfacePlan`]. GLSL/WGSL policies only say which calls their
+//! builds [`ShaderInterfacePlan`]. Shader policies only say which calls their
 //! own emitters render inline; no target ABI, source text or backend crate enters
 //! the plan.
 
@@ -29,23 +29,17 @@ use skull_mir::shader_ir::{
     LogicalTextureGroup, LogicalUniformGroup, NominalType, ShaderIR, ShaderInstance,
     ShaderInterfacePlan, ShaderStage, ShaderStageIr, UniformRole,
 };
-use skull_parser::{CompilerError, CompilerErrorKind};
+use skull_parser::CompilerError;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use ustr::Ustr;
 
 /// The target-specific part of planning: whether a call is rendered inline by
 /// the backend rather than emitted as a helper body. The planner never asks
-/// how the call is spelled, so WGSL can plan without importing GLSL.
+/// how the call is spelled.
 pub trait ShaderPlannerPolicy {
     fn inline_call(&self, function: &Function) -> bool;
     fn backend_name(&self) -> &'static str;
-
-    /// Return a capability the target deliberately does not project. This is
-    /// the only planner rejection the selected-artifact driver may omit.
-    fn unsupported_capability(&self, _function: &Function) -> Option<String> {
-        None
-    }
 
     fn validate_concrete_signature(
         &self,
@@ -106,20 +100,6 @@ pub struct ShaderArtifactPlan {
 
 fn err(span: Span, message: impl Into<String>) -> CompilerError {
     CompilerError::new_with_label(span, message.into())
-}
-
-fn profile_err(
-    policy: &dyn ShaderPlannerPolicy,
-    function: &Function,
-    message: impl Into<String>,
-) -> CompilerError {
-    let error = err(function.name_span, message);
-    match policy.unsupported_capability(function) {
-        Some(capability) => {
-            error.with_kind(CompilerErrorKind::UnsupportedWgslProjection { capability })
-        }
-        None => error,
-    }
 }
 
 /// Resolve a root name to one function, preferring the caller's module.
@@ -653,9 +633,8 @@ fn visit_standalone_shader_instance(
             continue;
         }
         if function.is_extern || function.inline_body.is_some() {
-            return Err(profile_err(
-                policy,
-                function,
+            return Err(err(
+                function.name_span,
                 format!(
                     "shader profile: `{}` has no emittable body and no {} intrinsic mapping",
                     function.name,
@@ -700,9 +679,8 @@ fn checked_concrete_callees(
             continue;
         }
         if f.is_extern || f.inline_body.is_some() {
-            return Err(profile_err(
-                policy,
-                f,
+            return Err(err(
+                f.name_span,
                 format!(
                     "shader profile: `{}` has no emittable body and no {} intrinsic mapping",
                     f.name,
@@ -1231,7 +1209,7 @@ fn compute_storage_element(
         _ => Err(err(
             span,
             if atomic {
-                "AtomicStorageBuffer's element type is Rock uint (WGSL atomic<u32>)"
+                "AtomicStorageBuffer's element type is Rock uint"
             } else {
                 "the first compute storage element type must be Rock float, int or uint"
             },

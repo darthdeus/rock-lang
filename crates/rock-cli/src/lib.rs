@@ -317,8 +317,8 @@ impl Args {
                 .help("Output format for reports and module tools: \"pretty\" (default) or \"json\"."))
             .arg(Arg::new("type-validation").long("type-validation").action(ArgAction::SetTrue)
                 .help("Enable type validation warnings for unresolved types after inference"))
-            .arg(Arg::new("renderer").long("renderer").value_parser(["gl", "wgpu"])
-                .help("Select the renderer target for this invocation (`gl` or `wgpu`); manifest default remains unchanged"))
+            .arg(Arg::new("renderer").long("renderer").value_parser(["gl"])
+                .help("Select the renderer target for this invocation (`gl`); manifest default remains unchanged"))
             .arg(Arg::new("test-threads").long("test-threads").value_name("NUM")
                 .value_parser(clap::value_parser!(usize))
                 .help("Number of threads to use for running tests (default: number of CPU cores, use 1 for sequential)"))
@@ -434,7 +434,6 @@ impl Args {
                 .get_one::<String>("renderer")
                 .map(|value| match value.as_str() {
                     "gl" => RendererBackend::Gl,
-                    "wgpu" => RendererBackend::Wgpu,
                     _ => unreachable!("renderer value parser admitted an unknown value"),
                 }),
             test_threads: m.get_one::<usize>("test-threads").copied(),

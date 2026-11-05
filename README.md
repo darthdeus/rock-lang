@@ -92,7 +92,6 @@ expected compiler errors, backend comparison, filtering, and Rust test commands.
 - `rock fmt`, `rock lint` and `rock watch`.
 - A language server (`crates/rock-lsp`) and a Neovim plugin (`editors/nvim`).
 - A JavaScript backend (`--backend js`) and a browser playground (`playground/`).
-- `@shader` functions also compile to WGSL, for wgpu renderers.
 
 ## License
 

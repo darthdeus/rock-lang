@@ -99,12 +99,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "arrayvec"
-version = "0.7.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
-
-[[package]]
 name = "atomic_refcell"
 version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -170,7 +164,7 @@ dependencies = [
  "nonmax",
  "rayon",
  "rust-lapper",
- "rustc-hash 2.1.3",
+ "rustc-hash",
  "skull-parser",
  "smallvec",
  "tracing",
@@ -190,7 +184,7 @@ dependencies = [
  "rock-host",
  "rock-stdlib",
  "rust-lapper",
- "rustc-hash 2.1.3",
+ "rustc-hash",
  "skull-parser",
  "smallvec",
  "ustr",
@@ -204,7 +198,7 @@ dependencies = [
  "comfy-la-arena",
  "itertools 0.13.0",
  "rust-lapper",
- "rustc-hash 2.1.3",
+ "rustc-hash",
  "skull-parser",
  "smallvec",
  "tracing",
@@ -230,7 +224,7 @@ dependencies = [
  "comfy-la-arena",
  "itertools 0.13.0",
  "rust-lapper",
- "rustc-hash 2.1.3",
+ "rustc-hash",
  "skull-parser",
  "smallvec",
  "tracing",
@@ -274,7 +268,7 @@ dependencies = [
  "rock-core",
  "rock-stdlib",
  "rust-lapper",
- "rustc-hash 2.1.3",
+ "rustc-hash",
  "skull-parser",
  "smallvec",
  "test-utils",
@@ -321,12 +315,6 @@ name = "cfg-if"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
-
-[[package]]
-name = "cfg_aliases"
-version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
 
 [[package]]
 name = "chrono"
@@ -389,15 +377,6 @@ name = "clap_lex"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
-
-[[package]]
-name = "codespan-reporting"
-version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fe6d2e5af09e8c8ad56c969f2157a3d4238cebc7c55f0a517728c38f7b200f81"
-dependencies = [
- "unicode-width",
-]
 
 [[package]]
 name = "colorchoice"
@@ -494,12 +473,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "crunchy"
-version = "0.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
-
-[[package]]
 name = "crypto-common"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -546,12 +519,6 @@ dependencies = [
  "log",
  "regex",
 ]
-
-[[package]]
-name = "equivalent"
-version = "1.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "00d174d5400e5e8fd687ad1049e2f578285fa914201b1af7e8b112a4546bd826"
 
 [[package]]
 name = "errno"
@@ -609,12 +576,6 @@ checksum = "17c704e9dbe1ddd863da1e6ff3567795087b1eb201ce80d8fa81162e1516500d"
 dependencies = [
  "bitflags 1.3.2",
 ]
-
-[[package]]
-name = "foldhash"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "fs-err"
@@ -710,43 +671,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "half"
-version = "2.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ea2d84b969582b4b1864a92dc5d27cd2b77b622a8d79306834f1be5ba20d84b"
-dependencies = [
- "cfg-if",
- "crunchy",
- "num-traits",
- "zerocopy",
-]
-
-[[package]]
-name = "hashbrown"
-version = "0.16.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
-dependencies = [
- "foldhash",
-]
-
-[[package]]
-name = "hashbrown"
-version = "0.17.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
-
-[[package]]
 name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
-
-[[package]]
-name = "hexf-parse"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dfa686283ad6dd069f105e5ab091b04c62850d3e4cf5d67debad1933f55023df"
 
 [[package]]
 name = "iana-time-zone"
@@ -770,16 +698,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f31827a206f56af32e590ba56d5d2d085f558508192593743f16b2306495269f"
 dependencies = [
  "cc",
-]
-
-[[package]]
-name = "indexmap"
-version = "2.14.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cc4e190f5d26ca7051642629da2c52fc03bde85a03197c99408dcd291734c855"
-dependencies = [
- "equivalent",
- "hashbrown 0.17.1",
 ]
 
 [[package]]
@@ -874,12 +792,6 @@ name = "libc"
 version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
-
-[[package]]
-name = "libm"
-version = "0.2.16"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "libmimalloc-sys"
@@ -1016,31 +928,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "naga"
-version = "27.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "066cf25f0e8b11ee0df221219010f213ad429855f57c494f995590c861a9a7d8"
-dependencies = [
- "arrayvec",
- "bit-set",
- "bitflags 2.13.2",
- "cfg-if",
- "cfg_aliases",
- "codespan-reporting",
- "half",
- "hashbrown 0.16.1",
- "hexf-parse",
- "indexmap",
- "libm",
- "log",
- "num-traits",
- "once_cell",
- "rustc-hash 1.1.0",
- "thiserror",
- "unicode-ident",
-]
-
-[[package]]
 name = "nonmax"
 version = "0.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1111,7 +998,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
- "libm",
 ]
 
 [[package]]
@@ -1399,14 +1285,13 @@ dependencies = [
  "rock-lsp",
  "rock-stdlib",
  "rock-tokenizer",
- "rustc-hash 2.1.3",
+ "rustc-hash",
  "serde_json",
  "sha2",
  "skull",
  "skull-codegen-glsl",
  "skull-codegen-js",
  "skull-codegen-shader",
- "skull-codegen-wgsl",
  "skull-fmt",
  "skull-mir",
  "skull-parser",
@@ -1428,7 +1313,7 @@ dependencies = [
  "colored",
  "fs-err",
  "itertools 0.13.0",
- "rustc-hash 2.1.3",
+ "rustc-hash",
  "test-utils",
  "tracing",
  "ustr",
@@ -1448,7 +1333,7 @@ dependencies = [
  "rayon",
  "rock-core",
  "rock-stdlib",
- "rustc-hash 2.1.3",
+ "rustc-hash",
  "serde",
  "sha1",
  "sysinfo",
@@ -1541,12 +1426,6 @@ checksum = "5aafed57460ca80eb88c33989af3a31348dbde8e68f86f4fe2107c1a5fcd55b8"
 dependencies = [
  "num-traits",
 ]
-
-[[package]]
-name = "rustc-hash"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08d43f7aa6b08d49f382cde6a7982047c3426db949b1424bc4b7ec9ae12c6ce2"
 
 [[package]]
 name = "rustc-hash"
@@ -1760,11 +1639,10 @@ dependencies = [
  "rock-core",
  "rock-host",
  "rock-stdlib",
- "rustc-hash 2.1.3",
+ "rustc-hash",
  "skull-codegen-glsl",
  "skull-codegen-lua",
  "skull-codegen-shader",
- "skull-codegen-wgsl",
  "skull-graph",
  "skull-mir",
  "skull-parser",
@@ -1782,7 +1660,7 @@ dependencies = [
  "bone-semantic",
  "comfy-la-arena",
  "rock-stdlib",
- "rustc-hash 2.1.3",
+ "rustc-hash",
  "skull-codegen-lua",
  "skull-codegen-shader",
  "skull-graph",
@@ -1798,7 +1676,7 @@ dependencies = [
  "bone-semantic",
  "comfy-la-arena",
  "rock-stdlib",
- "rustc-hash 2.1.3",
+ "rustc-hash",
  "skull",
  "skull-graph",
  "skull-mir",
@@ -1817,7 +1695,7 @@ dependencies = [
  "log",
  "rock-host",
  "rock-stdlib",
- "rustc-hash 2.1.3",
+ "rustc-hash",
  "skull-graph",
  "skull-mir",
  "skull-parser",
@@ -1833,26 +1711,10 @@ dependencies = [
  "comfy-la-arena",
  "rock-host",
  "rock-stdlib",
- "rustc-hash 2.1.3",
+ "rustc-hash",
  "skull-graph",
  "skull-mir",
  "skull-parser",
- "ustr",
-]
-
-[[package]]
-name = "skull-codegen-wgsl"
-version = "0.1.0"
-dependencies = [
- "bone-semantic",
- "comfy-la-arena",
- "naga",
- "rock-stdlib",
- "skull-codegen-glsl",
- "skull-codegen-shader",
- "skull-mir",
- "skull-parser",
- "skull-wgsl-abi",
  "ustr",
 ]
 
@@ -1877,7 +1739,7 @@ dependencies = [
  "comfy-la-arena",
  "log",
  "rayon",
- "rustc-hash 2.1.3",
+ "rustc-hash",
  "skull-mir",
  "skull-parser",
  "ustr",
@@ -1891,7 +1753,7 @@ dependencies = [
  "bone-semantic",
  "comfy-la-arena",
  "rock-stdlib",
- "rustc-hash 2.1.3",
+ "rustc-hash",
  "skull-graph",
  "skull-parser",
  "ustr",
@@ -1918,17 +1780,13 @@ dependencies = [
  "bone-semantic",
  "comfy-la-arena",
  "log",
- "rustc-hash 2.1.3",
+ "rustc-hash",
  "skull-codegen-lua",
  "skull-graph",
  "skull-mir",
  "skull-parser",
  "ustr",
 ]
-
-[[package]]
-name = "skull-wgsl-abi"
-version = "0.1.0"
 
 [[package]]
 name = "slab"
@@ -2020,26 +1878,6 @@ name = "test-utils"
 version = "0.1.0"
 dependencies = [
  "regex-lite",
-]
-
-[[package]]
-name = "thiserror"
-version = "2.0.21"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09e52cb86a36cede5cb101bf8908837b3e4c6e5e59fe7fd85c23fb56200d189e"
-dependencies = [
- "thiserror-impl",
-]
-
-[[package]]
-name = "thiserror-impl"
-version = "2.0.21"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fe5197923287db20a58125f0bc85c062f7f2c892de97b18c356f9efb14b28524"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 3.0.9",
 ]
 
 [[package]]

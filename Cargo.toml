@@ -6,7 +6,6 @@ members = [
     "crates/skull-codegen-shader",
     "crates/skull-codegen-glsl",
     "crates/stone-glsl-runner",
-    "crates/skull-codegen-wgsl",
     "crates/skull-codegen-lua",
     "crates/skull-codegen-js",
     "crates/skull-transform",
@@ -33,7 +32,6 @@ members = [
     "crates/rock-tokenizer",
     "crates/skull-fmt",
     "crates/skull-parser",
-    "crates/skull-wgsl-abi",
     "crates/test-utils",
 ]
 
@@ -44,7 +42,6 @@ default-members = [
     "crates/skull",
     "crates/skull-codegen-shader",
     "crates/skull-codegen-glsl",
-    "crates/skull-codegen-wgsl",
     "crates/skull-codegen-lua",
     "crates/skull-codegen-js",
     "crates/skull-transform",
@@ -70,7 +67,6 @@ default-members = [
     "crates/rock-tokenizer",
     "crates/skull-fmt",
     "crates/skull-parser",
-    "crates/skull-wgsl-abi",
     "crates/test-utils",
 ]
 
@@ -87,10 +83,8 @@ regex-lite = "0.1"
 rock-log = { path = "crates/rock-log" }
 skull-fmt = { path = "crates/skull-fmt" }
 skull = { path = "crates/skull" }
-skull-wgsl-abi = { path = "crates/skull-wgsl-abi" }
 skull-codegen-shader = { path = "crates/skull-codegen-shader" }
 skull-codegen-glsl = { path = "crates/skull-codegen-glsl" }
-skull-codegen-wgsl = { path = "crates/skull-codegen-wgsl" }
 skull-codegen-lua = { path = "crates/skull-codegen-lua" }
 skull-codegen-js = { path = "crates/skull-codegen-js" }
 skull-transform = { path = "crates/skull-transform" }

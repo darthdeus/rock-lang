@@ -211,7 +211,7 @@ value Bvec3 { x: bool, y: bool, z: bool }
     error("rock_compute is a compile-time compute-artifact intrinsic (expanded at compile time)")
 """
 
-// The one compiler-owned logical value packet shared by GL, WebGL and wgpu.
+// The one compiler-owned logical value packet for shader inputs.
 // Its leaves contain values and kinds only; physical offsets and padding belong
 // to each backend's ABI projection.
 enum CanonicalUniformLeaf {

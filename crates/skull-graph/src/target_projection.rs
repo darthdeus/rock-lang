@@ -101,7 +101,6 @@ pub struct PlatformSpec {
 pub enum ShaderTargetSpec {
     Glsl(skull_mir::shader_ir::GlslProfile),
     SpirV,
-    Wgsl,
     Msl,
 }
 

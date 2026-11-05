@@ -28,8 +28,6 @@ use skull_codegen_lua::{CodegenCtx, emit_function, mangle_fn};
 use skull_mir::instance::Instance;
 use skull_mir::mir::{FuncRef, Inst, MirFunc, Term};
 use skull_parser::CompilerError;
-#[cfg(feature = "renderer-wgpu")]
-use skull_parser::CompilerErrorKind;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 use std::time::Duration;
@@ -583,7 +581,6 @@ pub struct ShaderSource {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShaderLanguage {
     Glsl,
-    Wgsl,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -3095,7 +3092,6 @@ pub struct IncrementalRepairStats {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RendererTarget {
     Gl,
-    Wgpu,
 }
 
 /// What an emitted program is for.
@@ -3141,59 +3137,6 @@ impl FullBuild<'_> {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct WgpuProjectionCensus {
-    pub examined: usize,
-    pub admitted: usize,
-    pub omitted: usize,
-    pub omissions: BTreeMap<String, String>,
-}
-
-#[cfg(feature = "renderer-wgpu")]
-enum WgpuProjection<T> {
-    Admitted(T),
-    Unsupported { capability: String },
-}
-
-#[cfg(feature = "renderer-wgpu")]
-fn classify_wgpu_projection<T>(
-    result: Result<T, CompilerError>,
-) -> Result<WgpuProjection<T>, CompilerError> {
-    match result {
-        Ok(value) => Ok(WgpuProjection::Admitted(value)),
-        Err(error) => match error.kind {
-            CompilerErrorKind::UnsupportedWgslProjection { capability } => {
-                Ok(WgpuProjection::Unsupported { capability })
-            }
-            _ => Err(error),
-        },
-    }
-}
-
-#[cfg(feature = "renderer-wgpu")]
-fn collect_wgpu_projections<T, K>(
-    items: impl IntoIterator<Item = (String, K)>,
-    mut project: impl FnMut(&str, K) -> Result<T, CompilerError>,
-) -> Result<(Vec<(String, T)>, WgpuProjectionCensus), CompilerError> {
-    let mut census = WgpuProjectionCensus::default();
-    let mut admitted = Vec::new();
-    for (key, input) in items {
-        census.examined += 1;
-        match classify_wgpu_projection(project(&key, input))? {
-            WgpuProjection::Admitted(value) => {
-                census.admitted += 1;
-                admitted.push((key, value));
-            }
-            WgpuProjection::Unsupported { capability } => {
-                census.omitted += 1;
-                census.omissions.insert(key, capability);
-            }
-        }
-    }
-    debug_assert_eq!(census.examined, census.admitted + census.omitted);
-    Ok((admitted, census))
-}
-
 #[derive(Default, Clone)]
 struct ShaderRegistrations {
     lua: String,
@@ -3209,8 +3152,6 @@ struct ShaderRegistrations {
     shader_root_set: FxHashSet<FuncRef>,
     roots: Vec<FuncRef>,
     keys: BTreeSet<String>,
-    abi_wires: BTreeMap<String, String>,
-    wgpu_projection_census: Option<WgpuProjectionCensus>,
 }
 
 #[derive(Clone, Default)]
@@ -5365,41 +5306,12 @@ fn identity_instance_rejection_error(
         .then(|| CompilerError::new_with_label(rejection.span, rejection.message.clone()))
 }
 
-/// `__rock_shader_register("<key>", <glsl>)` for every distinct `rock_shader`
-/// pair. Emitted at module-init time after
-/// the `@sim` registrations, at chunk top level, so a reload re-`dofile`s them
-/// with the new source (the hot-reload-parity invariant). Deterministic
-/// sorted-by-key order (from `collect_shader_pairs`) keeps re-emission
-/// byte-identical. The driver realizes the graph-owned shader view and passes
-/// it to GLSL; skull-mir still surfaces only the resolved `FuncRef`s. Selected
-/// WGPU projects every graph pair independently: GL registration remains
-/// unconditional, while a pair whose WGSL projection cannot represent its
-/// graph-owned interface is omitted from the WGPU artifact view and rejected
-/// by the runtime before effects.
-#[cfg(feature = "renderer-wgpu")]
-fn concrete_stage_input(
-    view: &skull_graph::shader::ShaderStageView,
-    concrete_plans: &std::sync::Arc<skull_mir::concrete::ConcretePlans>,
-) -> skull_codegen_shader::ConcreteStageInput {
-    skull_codegen_shader::ConcreteStageInput {
-        stage: view.stage,
-        entry: view.entry.clone(),
-        retained: view.retained.iter().cloned().collect(),
-        helpers: view.helpers.iter().cloned().collect(),
-        builtins: view.builtins.iter().cloned().collect(),
-        order: view.order.clone(),
-        dependencies: view.dependencies.clone(),
-        concrete_plans: std::sync::Arc::clone(concrete_plans),
-    }
-}
-
 fn shader_registration_lines(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
     collection: &skull_mir::lower::ShaderCollection,
     compute_collection: &skull_mir::lower::ComputeCollection,
     view: &crate::shader_artifact::ShaderArtifactView,
-    renderer_target: RendererTarget,
 ) -> Result<ShaderRegistrations, CompilerError> {
     let profile = skull_codegen_glsl::GlslProfile::Core330;
     if view.profile != profile || view.program_views.len() != collection.pairs.len() {
@@ -5410,10 +5322,6 @@ fn shader_registration_lines(
     let mut out = String::new();
     let mut sources = Vec::new();
     let mut dependencies = FxHashSet::default();
-    #[cfg(feature = "renderer-wgpu")]
-    let mut abi_wires = BTreeMap::new();
-    #[cfg(not(feature = "renderer-wgpu"))]
-    let abi_wires = BTreeMap::new();
     for (pair, program_view) in collection.pairs.iter().zip(&view.program_views) {
         // vert=None is the A3c single-arg fullscreen form -> the A1 single-entry
         // emitter (PIXEL body + fullscreen VERTEX passthrough).
@@ -5487,173 +5395,12 @@ fn shader_registration_lines(
                 .map(|entry| entry.key.clone()),
         )
         .collect();
-    #[cfg(feature = "renderer-wgpu")]
-    let mut wgpu_projection_census = None;
-    #[cfg(not(feature = "renderer-wgpu"))]
-    let wgpu_projection_census = None;
-    if renderer_target == RendererTarget::Wgpu {
-        #[cfg(not(feature = "renderer-wgpu"))]
-        return Err(CompilerError::new_no_location(
-            "the `wgpu` renderer was omitted from this build; enable the `renderer-wgpu` feature (rebuild with `cargo build -p rock-cli --bin rock --features renderer-wgpu`)".to_string(),
-        ));
-        #[cfg(feature = "renderer-wgpu")]
-        {
-            let items =
-                collection
-                    .pairs
-                    .iter()
-                    .zip(&view.program_views)
-                    .map(|(pair, program_view)| {
-                        (pair.key.clone(), (pair.vert.is_none(), program_view))
-                    });
-            let (artifacts, census) =
-                collect_wgpu_projections(items, |key, (fullscreen, program_view)| {
-                    (|| -> Result<(String, String, String, Vec<FuncRef>), CompilerError> {
-                        if fullscreen {
-                            let stage_view = program_view
-                                .stages
-                                .iter()
-                                .find(|stage| {
-                                    stage.stage == skull_mir::shader_ir::ShaderStage::Fragment
-                                })
-                                .ok_or_else(|| {
-                                    CompilerError::new_no_location(format!(
-                                        "wgsl artifact {key} has no fragment stage view"
-                                    ))
-                                })?;
-                            let input =
-                                concrete_stage_input(stage_view, &program_view.concrete_plans);
-                            let neutral =
-                                skull_codegen_shader::plan_fullscreen_fragment_from_concrete(
-                                    ws,
-                                    scx,
-                                    &input,
-                                    &skull_codegen_wgsl::WgslShaderPolicy,
-                                )?;
-                            let abi = skull_codegen_wgsl::WgslAbiPlan::wgsl(
-                                &neutral.interface,
-                                bone_semantic::prelude::Span::default(),
-                            )?;
-                            let emission = skull_codegen_wgsl::emit_fullscreen_shader(
-                                ws,
-                                &neutral.ir,
-                                &neutral.interface,
-                                &abi,
-                                bone_semantic::prelude::Span::default(),
-                            )?;
-                            Ok((
-                                emission.source,
-                                emission.abi.wire()?,
-                                neutral.interface.semantic_wire(true),
-                                emission.dependencies,
-                            ))
-                        } else {
-                            let glsl = skull_codegen_glsl::emit_shader_pipeline_with_view(
-                                ws,
-                                scx,
-                                program_view,
-                                profile,
-                            )?;
-                            let abi = skull_codegen_wgsl::WgslAbiPlan::explicit(
-                                &glsl.interface,
-                                "vertex_main",
-                                "fragment_main",
-                                bone_semantic::prelude::Span::default(),
-                            )?;
-                            let emission = skull_codegen_wgsl::emit_explicit_shader(
-                                ws,
-                                &glsl.ir,
-                                &glsl.interface,
-                                &abi,
-                                bone_semantic::prelude::Span::default(),
-                            )?;
-                            Ok((
-                                emission.source,
-                                emission.abi.wire()?,
-                                glsl.interface.semantic_wire(false),
-                                emission.dependencies,
-                            ))
-                        }
-                    })()
-                })?;
-            for (shader_key, (source, wire, semantic_wire, emission_dependencies)) in artifacts {
-                dependencies.extend(emission_dependencies);
-                abi_wires.insert(shader_key.clone(), wire.clone());
-                sources.push(ShaderSource {
-                    key: shader_key.clone(),
-                    language: ShaderLanguage::Wgsl,
-                    source: source.clone(),
-                });
-                let _ = writeln!(
-                    out,
-                    "__rock_wgpu_shader_register({}, {}, {}, {})",
-                    skull_codegen_lua::lua_string(&shader_key),
-                    skull_codegen_lua::lua_string(&source),
-                    skull_codegen_lua::lua_string(&wire),
-                    skull_codegen_lua::lua_string(&semantic_wire),
-                );
-            }
-            wgpu_projection_census = Some(census);
-        }
-    }
     if view.compute_views.len() != compute_collection.entries.len() {
         return Err(CompilerError::new_no_location(format!(
             "compute graph/view registration denominator differs: {} views for {} roots",
             view.compute_views.len(),
             compute_collection.entries.len()
         )));
-    }
-    let has_compute = !compute_collection.entries.is_empty();
-    if renderer_target == RendererTarget::Wgpu && has_compute {
-        #[cfg(not(feature = "renderer-wgpu"))]
-        return Err(CompilerError::new_no_location(
-            "the `wgpu` renderer was omitted from this build; enable the `renderer-wgpu` feature (rebuild with `cargo build -p rock-cli --bin rock --features renderer-wgpu`)".to_string(),
-        ));
-        #[cfg(feature = "renderer-wgpu")]
-        {
-            out.push_str("__rock_wgpu_compute_snapshot_begin()\n");
-            for (entry, compute_view) in compute_collection.entries.iter().zip(&view.compute_views)
-            {
-                let input = concrete_stage_input(&compute_view.stage, &compute_view.concrete_plans);
-                let neutral = skull_codegen_shader::plan_compute_from_concrete(
-                    ws,
-                    scx,
-                    &input,
-                    &skull_codegen_wgsl::WgslShaderPolicy,
-                )?;
-                dependencies.extend(neutral.dependencies);
-                let logical_entry = neutral.entry.inst.symbol(ws, &neutral.ir.interner);
-                let abi = skull_codegen_wgsl::WgslAbiPlan::compute(
-                    &neutral.interface,
-                    &format!("{logical_entry}_compute"),
-                    bone_semantic::prelude::Span::default(),
-                )?;
-                let emission = skull_codegen_wgsl::emit_compute_shader(
-                    ws,
-                    &neutral.ir,
-                    &neutral.interface,
-                    &abi,
-                    bone_semantic::prelude::Span::default(),
-                )?;
-                dependencies.extend(emission.dependencies);
-                let wire = emission.abi.wire()?;
-                abi_wires.insert(entry.key.clone(), wire.clone());
-                sources.push(ShaderSource {
-                    key: entry.key.clone(),
-                    language: ShaderLanguage::Wgsl,
-                    source: emission.source.clone(),
-                });
-                let _ = writeln!(
-                    out,
-                    "__rock_wgpu_compute_register({}, {}, {}, {})",
-                    skull_codegen_lua::lua_string(&entry.key),
-                    skull_codegen_lua::lua_string(&emission.source),
-                    skull_codegen_lua::lua_string(&wire),
-                    skull_codegen_lua::lua_string(&neutral.interface.semantic_wire(false)),
-                );
-            }
-            out.push_str("if not __rock_wgpu_compute_snapshot_end() then error(\"compiler compute snapshot failed\") end\n");
-        }
     }
     let mut shader_pair_users = BTreeMap::new();
     for pairs in collection.contributions.values() {
@@ -5704,8 +5451,6 @@ fn shader_registration_lines(
             .chain(compute_collection.entries.iter().map(|entry| entry.entry))
             .collect(),
         keys,
-        abi_wires,
-        wgpu_projection_census,
     })
 }
 
@@ -5725,7 +5470,6 @@ pub struct UnitComptimeReads {
 fn renderer_fingerprint_tag(target: RendererTarget) -> &'static str {
     match target {
         RendererTarget::Gl => "gl",
-        RendererTarget::Wgpu => "wgpu",
     }
 }
 
@@ -7513,7 +7257,6 @@ fn emit_full_in_with_mutation(
                                 &shader_collection,
                                 &compute_collection,
                                 &shader_view,
-                                renderer_target,
                             )?;
                             Ok::<_, CompilerError>((shader_view, shader_registrations, population))
                         })();
@@ -8130,17 +7873,6 @@ impl SkullEmitCache {
         Ok(current != self.shader_registrations.keys)
     }
 
-    /// The compiler-owned ABI contract for every WGPU artifact registered by
-    /// this cache. Body edits may replace source under the same contract; a
-    /// changed wire cannot be applied to a live registry/pipeline safely.
-    pub fn shader_registration_contracts(&self) -> BTreeMap<String, String> {
-        self.shader_registrations.abi_wires.clone()
-    }
-
-    pub fn wgpu_projection_census(&self) -> Option<&WgpuProjectionCensus> {
-        self.shader_registrations.wgpu_projection_census.as_ref()
-    }
-
     fn update_shader_registrations(
         &mut self,
         ws: &Workspace,
@@ -8330,14 +8062,8 @@ impl SkullEmitCache {
             &shader_scx,
             std::sync::Arc::clone(&self.concrete.plans),
         )?;
-        let registrations = shader_registration_lines(
-            ws,
-            &shader_scx,
-            &collection,
-            &compute_collection,
-            &view,
-            self.renderer_target,
-        )?;
+        let registrations =
+            shader_registration_lines(ws, &shader_scx, &collection, &compute_collection, &view)?;
         self.shader_view = view;
         self.shader_registrations = registrations;
         Ok(())
@@ -9778,35 +9504,6 @@ mod lua_definition_scope_tests {
         let mut out = String::new();
         definitions.append_to(&mut out);
         assert_eq!(out, source);
-    }
-}
-
-#[cfg(all(test, feature = "renderer-wgpu"))]
-mod wgpu_projection_tests {
-    use super::*;
-
-    #[test]
-    fn unexpected_emitter_failure_aborts_after_admission() {
-        let unexpected = CompilerError::new_no_location("unexpected WGSL emitter failure");
-        let mut visited = Vec::new();
-        let result = collect_wgpu_projections(
-            vec![
-                ("admitted".to_string(), true),
-                ("unexpected".to_string(), false),
-            ],
-            |key, _| {
-                visited.push(key.to_string());
-                if key == "admitted" {
-                    Ok("artifact")
-                } else {
-                    Err(unexpected.clone())
-                }
-            },
-        );
-        let error = result.expect_err("an unexpected emitter error must fail the collection");
-        assert_eq!(error.message, "unexpected WGSL emitter failure");
-        assert_eq!(error.kind, skull_parser::CompilerErrorKind::Generic);
-        assert_eq!(visited, ["admitted", "unexpected"]);
     }
 }
 
@@ -11399,11 +11096,6 @@ fn main() { let result = outer(1) }
             cpu_cache.lua_view().publisher_lanes,
             abi_cache.lua_view().publisher_lanes,
             "reversing setup scheduling changed publisher ABI identity"
-        );
-        assert_eq!(
-            cpu_cache.shader_registration_contracts(),
-            abi_cache.shader_registration_contracts(),
-            "reversing setup scheduling changed shader ABI identity"
         );
     }
 }

@@ -13,7 +13,7 @@
 //! instantiate a fresh module after a trap.
 //!
 //! Requests (`op`):
-//! - `compile` `{file, source, target?: "gl"|"wgpu", files?: {path: text}}`:
+//! - `compile` `{file, source, target?: "gl", files?: {path: text}}`:
 //!   `files` are what `embed_string` may read. Returns `lua`, `shaders` and
 //!   `diagnostics`, or `stage` and `diagnostics` on failure.
 //! - `format` `{source}`: returns `source`.
@@ -77,8 +77,7 @@ fn compile(request: &Value) -> Result<Value, String> {
     let source = str_field(request, "source")?;
     let renderer = match request.get("target").and_then(Value::as_str) {
         None | Some("gl") => RendererTarget::Gl,
-        Some("wgpu") => RendererTarget::Wgpu,
-        Some(other) => return Err(format!("unknown target `{other}` (gl, wgpu)")),
+        Some(other) => return Err(format!("unknown target `{other}` (gl)")),
     };
     let files = string_map(request, "files")?.unwrap_or_default();
     let mut host = PlaygroundHost {
@@ -106,7 +105,6 @@ fn compile(request: &Value) -> Result<Value, String> {
                 .map(|s| {
                     let language = match s.language {
                         ShaderLanguage::Glsl => "glsl",
-                        ShaderLanguage::Wgsl => "wgsl",
                     };
                     json!({"key": s.key, "language": language, "source": s.source})
                 })
