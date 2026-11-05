@@ -409,16 +409,7 @@ pub static GLSL: BackendSpec = BackendSpec {
     filter_rejection: Some("`rock test` filtering is supported only by the skull/bone test runner"),
 };
 
-pub static C: BackendSpec = BackendSpec {
-    backend: Backend::C,
-    name: "c",
-    tagline: "c is a native C executor (Clang)",
-    omitted: Some(OmittedBackend::Build),
-    operations: &[],
-    filter_rejection: None,
-};
-
-pub static BACKENDS: &[BackendSpec] = &[BONE, SKULL, JS, GLSL, C];
+pub static BACKENDS: &[BackendSpec] = &[BONE, SKULL, JS, GLSL];
 
 fn bone_compile(cx: &CommandContext) -> Result<()> {
     let file = cx.get_required_file("compile")?;

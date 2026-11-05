@@ -117,7 +117,6 @@ pub enum Backend {
     Skull,
     Js,
     Glsl,
-    C,
 }
 
 /// Resolve the effective backend for an invocation. An explicit choice (the
@@ -134,15 +133,11 @@ pub fn resolve_backend(explicit: Option<Backend>, _command: &CliCommand) -> Back
 pub struct Args {
     pub command: &'static CliCommand,
     pub files: Vec<String>,
-    pub required_tests: Vec<String>,
     /// Comma-separated test-name or source-path substrings from `--filter` or
     /// `ROCK_TEST_FILTER`; the skull test runner applies the parsed selection.
     pub test_filter: Option<String>,
     pub test_filter_explicit: bool,
-    pub show_passing: bool,
     pub skip_gpu: bool,
-    pub all_rejections: bool,
-    pub rejections_out: Option<String>,
     pub output: Option<String>,
     pub allocation_census: Option<String>,
     pub allocation_sites: Option<String>,
@@ -404,15 +399,11 @@ impl Args {
         let mut args = Args {
             command,
             files: many_str("files"),
-            required_tests: Default::default(),
             test_filter: test_filter
                 .clone()
                 .or_else(|| std::env::var("ROCK_TEST_FILTER").ok()),
             test_filter_explicit: test_filter.is_some(),
-            show_passing: Default::default(),
             skip_gpu: m.get_flag("skip-gpu"),
-            all_rejections: Default::default(),
-            rejections_out: Default::default(),
             output: m.get_one::<String>("output").cloned(),
             allocation_census: Default::default(),
             allocation_sites: Default::default(),

@@ -246,46 +246,15 @@ fn library_uses_plain_services_without_installation() {
 }
 
 #[test]
-fn private_backends_are_omitted_before_source_discovery() {
+fn retired_backend_is_rejected_before_source_discovery() {
     let root = tempfile::tempdir().unwrap();
-    for backend in ["c"] {
-        let spec = rock_cli::BackendSpec::named(backend).unwrap();
-        assert!(spec.omitted.is_some());
-        assert!(
-            spec.operations.is_empty(),
-            "plain CLI retained a private handler"
-        );
-        for command in ["compile", "test", "run"] {
-            let out = invoke(
-                root.path(),
-                &[command, "missing.rock", "--backend", backend],
-            );
-            assert!(!out.status.success());
-            assert!(
-                text(&out).contains(&format!(
-                    "the `{backend}` backend is not included in this build"
-                )),
-                "{}",
-                text(&out)
-            );
-            assert!(!text(&out).contains("monorepo"), "{}", text(&out));
-        }
+    assert!(rock_cli::BackendSpec::named("c").is_none());
+    for command in ["compile", "test", "run"] {
+        let out = invoke(root.path(), &[command, "missing.rock", "--backend", "c"]);
+        assert!(!out.status.success());
+        assert!(text(&out).contains("invalid value"), "{}", text(&out));
     }
-    let help = invoke(root.path(), &["--help"]);
-    assert!(help.status.success());
-    {
-        let backend = "c";
-        assert!(
-            text(&help).contains(&format!("{backend} (not in this build)")),
-            "{}",
-            text(&help)
-        );
-    }
-    assert!(rock_cli::CliCommand::named("mono-manifest").is_none());
-    assert!(
-        !root.path().join("tmp").exists(),
-        "omitted backend reached source discovery"
-    );
+    assert!(!root.path().join("tmp").exists());
 }
 
 #[cfg(feature = "backend-js")]
