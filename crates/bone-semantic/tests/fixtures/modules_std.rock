@@ -9,7 +9,6 @@
 // prelude: ArenaStore
 // prelude: ArenaValIter
 // prelude: ArtifactDefinition
-// prelude: AtomicStorageBuffer
 // prelude: Bvec3
 // prelude: CanonicalUniformLeaf
 // prelude: ChainIter
@@ -23,7 +22,6 @@
 // prelude: FlatVec
 // prelude: FlattenIter
 // prelude: FunctionCallInfo
-// prelude: GlobalInvocationId
 // prelude: HALF_PI
 // prelude: ISampler2D
 // prelude: JsonParser
@@ -66,7 +64,6 @@
 // prelude: StatSummary
 // prelude: StepByIter
 // prelude: Storage
-// prelude: StorageBuffer
 // prelude: StringBuilder
 // prelude: TAU
 // prelude: TWO_PI
@@ -81,7 +78,6 @@
 // prelude: Vec4
 // prelude: Vec4f
 // prelude: VecIter
-// prelude: WorkgroupArray
 // prelude: WriteFieldRef
 // prelude: ZipIter
 // prelude: __ARENA_DEAD_STORE
@@ -275,7 +271,6 @@
 // prelude: assert_true
 // prelude: at
 // prelude: atan2
-// prelude: atomic_add
 // prelude: borrow
 // prelude: build_var
 // prelude: bvec3
@@ -378,7 +373,6 @@
 // prelude: get_env_int
 // prelude: get_or_insert
 // prelude: get_os
-// prelude: global_invocation_id
 // prelude: gmatch
 // prelude: greater_than
 // prelude: grow
@@ -483,8 +477,6 @@
 // prelude: lerp
 // prelude: lines
 // prelude: linspace
-// prelude: local_invocation_id
-// prelude: local_invocation_index
 // prelude: log
 // prelude: log2
 // prelude: log_clear_now
@@ -541,7 +533,6 @@
 // prelude: next_float_components
 // prelude: next_unindexed
 // prelude: normalize
-// prelude: num_workgroups
 // prelude: on_close
 // prelude: on_hot_reload
 // prelude: on_killed
@@ -612,7 +603,6 @@
 // prelude: reuse_retained_entity
 // prelude: rev
 // prelude: ring_new
-// prelude: rock_compute
 // prelude: rock_shader
 // prelude: rotate
 // prelude: round
@@ -642,8 +632,6 @@
 // prelude: status
 // prelude: step_by
 // prelude: storage
-// prelude: storage_load
-// prelude: storage_store
 // prelude: string_char
 // prelude: string_match
 // prelude: substring
@@ -709,11 +697,6 @@
 // prelude: weak_cache_live
 // prelude: weak_cache_put
 // prelude: wiggle
-// prelude: workgroup_array
-// prelude: workgroup_barrier
-// prelude: workgroup_id
-// prelude: workgroup_load
-// prelude: workgroup_store
 // prelude: zero
 // prelude: zip
 

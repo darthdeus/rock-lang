@@ -1,0 +1,14 @@
+//- retired_compute_stage @fail=shader stage must be vertex or fragment
+@shader(compute)
+fn kernel() { }
+
+//- retired_workgroup_annotation @fail=unknown annotation
+@workgroup(8, 8, 1)
+fn kernel() { }
+
+//- retired_dispatch_annotation @fail=unknown annotation
+@dispatch(2)
+fn kernel() { }
+
+//- retired_storage_annotation @fail=unknown annotation
+fn kernel(@storage(read) input: int) { }

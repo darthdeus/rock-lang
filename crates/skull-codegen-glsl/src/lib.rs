@@ -4147,9 +4147,6 @@ impl ShaderAbiPlan {
             UniformRole::Engine => UNIFORM_BLOCK_BINDING_ENGINE,
             UniformRole::Stage(IrStage::Vertex) => UNIFORM_BLOCK_BINDING_VERTEX,
             UniformRole::Stage(IrStage::Fragment) => UNIFORM_BLOCK_BINDING_FRAGMENT,
-            UniformRole::Stage(IrStage::Compute) => {
-                panic!("compute uniform roles must be lowered through the compute ABI")
-            }
         }
     }
 
@@ -4158,19 +4155,10 @@ impl ShaderAbiPlan {
         match stage {
             IrStage::Vertex => UNIFORM_BLOCK_BINDING_VERTEX_ARRAYS,
             IrStage::Fragment => UNIFORM_BLOCK_BINDING_FRAGMENT_ARRAYS,
-            IrStage::Compute => {
-                panic!("compute array blocks must be lowered through the compute ABI")
-            }
         }
     }
 
     pub fn glsl(iface: &ShaderInterfacePlan, span: Span) -> Result<Self, CompilerError> {
-        if iface.compute.is_some() || iface.stages.contains(&IrStage::Compute) {
-            return Err(err(
-                span,
-                "GLSL graphics projection does not admit compute interfaces yet",
-            ));
-        }
         let binding = Self::binding_of;
         // std140 over the INTERFACE's members. The Workspace is not read here:
         // a layout is a function of the member list, which is what lets a
@@ -4266,7 +4254,6 @@ fn check_stage_sampler_budget(
     let name = match stage {
         IrStage::Vertex => "vertex",
         IrStage::Fragment => "fragment",
-        IrStage::Compute => "compute",
     };
     Err(err(
         span,
@@ -6126,7 +6113,6 @@ fn plan_shader_pipeline_inner(
             .chain(frag_array_group)
             .collect(),
         textures,
-        compute: None,
     };
 
     check_pipeline_collisions(&interface, vf.name_span)?;

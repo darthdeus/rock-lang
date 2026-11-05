@@ -3144,11 +3144,8 @@ struct ShaderRegistrations {
     dependencies: FxHashSet<FuncRef>,
     callsites: FxHashSet<(ModuleId, BodyOwner)>,
     shader_contributions: HashMap<(ModuleId, BodyOwner), Vec<skull_mir::lower::ShaderPair>>,
-    compute_contributions: HashMap<(ModuleId, BodyOwner), Vec<skull_mir::lower::ComputeEntry>>,
     shader_pair_users: BTreeMap<String, usize>,
     shader_pairs: BTreeMap<String, skull_mir::lower::ShaderPair>,
-    compute_entry_users: BTreeMap<String, usize>,
-    compute_entries: BTreeMap<String, skull_mir::lower::ComputeEntry>,
     shader_root_set: FxHashSet<FuncRef>,
     roots: Vec<FuncRef>,
     keys: BTreeSet<String>,
@@ -5105,16 +5102,6 @@ fn shader_programs(
         .collect()
 }
 
-fn compute_programs(
-    collection: &skull_mir::lower::ComputeCollection,
-) -> Vec<crate::shader_artifact::ComputeProgram> {
-    collection
-        .entries
-        .iter()
-        .map(|entry| crate::shader_artifact::ComputeProgram { entry: entry.entry })
-        .collect()
-}
-
 /// Every function that lies on a call cycle, read off the whole-program instance
 /// graph and projected onto declarations.
 ///
@@ -5159,11 +5146,10 @@ fn realize_shader_view(
     ws: &Workspace,
     graph: &crate::instance_graph::InstanceGraph,
     programs: &[crate::shader_artifact::ShaderProgram],
-    compute: &[crate::shader_artifact::ComputeProgram],
     scx: &skull_mir::lower::ScalarCtx,
     plans: std::sync::Arc<skull_mir::concrete::ConcretePlans>,
 ) -> Result<crate::shader_artifact::ShaderArtifactView, CompilerError> {
-    crate::shader_artifact::realize_shader_with_context_and_compute(
+    crate::shader_artifact::realize_shader_with_context_and_plans(
         ws,
         graph,
         &crate::shader_artifact::ShaderArtifactRequest {
@@ -5176,7 +5162,6 @@ fn realize_shader_view(
             programs,
         },
         scx,
-        compute,
         Some(plans),
     )
     .ok_or_else(|| CompilerError::new_no_location("GLSL shader view is unavailable".to_string()))
@@ -5310,7 +5295,6 @@ fn shader_registration_lines(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
     collection: &skull_mir::lower::ShaderCollection,
-    compute_collection: &skull_mir::lower::ComputeCollection,
     view: &crate::shader_artifact::ShaderArtifactView,
 ) -> Result<ShaderRegistrations, CompilerError> {
     let profile = skull_codegen_glsl::GlslProfile::Core330;
@@ -5388,20 +5372,7 @@ fn shader_registration_lines(
         .pairs
         .iter()
         .map(|pair| pair.key.clone())
-        .chain(
-            compute_collection
-                .entries
-                .iter()
-                .map(|entry| entry.key.clone()),
-        )
         .collect();
-    if view.compute_views.len() != compute_collection.entries.len() {
-        return Err(CompilerError::new_no_location(format!(
-            "compute graph/view registration denominator differs: {} views for {} roots",
-            view.compute_views.len(),
-            compute_collection.entries.len()
-        )));
-    }
     let mut shader_pair_users = BTreeMap::new();
     for pairs in collection.contributions.values() {
         for pair in pairs {
@@ -5413,43 +5384,17 @@ fn shader_registration_lines(
         .iter()
         .map(|pair| (pair.key.clone(), pair.clone()))
         .collect();
-    let mut compute_entry_users = BTreeMap::new();
-    for entries in compute_collection.contributions.values() {
-        for entry in entries {
-            *compute_entry_users.entry(entry.key.clone()).or_insert(0) += 1;
-        }
-    }
-    let compute_entries = compute_collection
-        .entries
-        .iter()
-        .map(|entry| (entry.key.clone(), entry.clone()))
-        .collect();
-    let shader_root_set = roots
-        .iter()
-        .chain(compute_collection.entries.iter().map(|entry| &entry.entry))
-        .copied()
-        .collect();
+    let shader_root_set = roots.iter().copied().collect();
     Ok(ShaderRegistrations {
         lua: out,
         sources: sources.into(),
         dependencies,
-        callsites: collection
-            .callsites
-            .iter()
-            .copied()
-            .chain(compute_collection.callsites.iter().copied())
-            .collect(),
+        callsites: collection.callsites.iter().copied().collect(),
         shader_contributions: collection.contributions.clone(),
-        compute_contributions: compute_collection.contributions.clone(),
         shader_pair_users,
         shader_pairs,
-        compute_entry_users,
-        compute_entries,
         shader_root_set,
-        roots: roots
-            .into_iter()
-            .chain(compute_collection.entries.iter().map(|entry| entry.entry))
-            .collect(),
+        roots: roots.into_iter().collect(),
         keys,
     })
 }
@@ -6940,11 +6885,7 @@ fn emit_full_in_with_mutation(
     // before the graph; their GLSL bodies are rendered only after the view owns
     // the retained instances.
     let (collections, roots) = parallel_join(
-        || {
-            let shaders = skull_mir::lower::collect_shader_collection(ws)?;
-            let compute = skull_mir::lower::collect_compute_collection(ws)?;
-            Ok::<_, CompilerError>((shaders, compute))
-        },
+        || skull_mir::lower::collect_shader_collection(ws),
         || {
             Ok::<_, CompilerError>(match build {
                 FullBuild::Program | FullBuild::OneShotProgram => {
@@ -6976,9 +6917,8 @@ fn emit_full_in_with_mutation(
             })
         },
     );
-    let (shader_collection, compute_collection) = collections?;
+    let shader_collection = collections?;
     let shader_programs = shader_programs(&shader_collection);
-    let compute_programs = compute_programs(&compute_collection);
     let shader_roots: Vec<FuncRef> = shader_programs
         .iter()
         .flat_map(|program| {
@@ -6987,7 +6927,6 @@ fn emit_full_in_with_mutation(
                 .into_iter()
                 .chain(std::iter::once(program.frag))
         })
-        .chain(compute_programs.iter().map(|program| program.entry))
         .collect();
     let (mut interface_roots, sim_roots) = roots?;
     let mut emission_roots = cached_roots(&interface_roots, &sim_roots, &shader_roots);
@@ -7244,7 +7183,6 @@ fn emit_full_in_with_mutation(
                                 ws,
                                 &graph,
                                 &shader_programs,
-                                &compute_programs,
                                 &shader_scx,
                                 shader_plans,
                             )?;
@@ -7255,7 +7193,6 @@ fn emit_full_in_with_mutation(
                                 ws,
                                 &shader_scx,
                                 &shader_collection,
-                                &compute_collection,
                                 &shader_view,
                             )?;
                             Ok::<_, CompilerError>((shader_view, shader_registrations, population))
@@ -7807,11 +7744,7 @@ impl SkullEmitCache {
         let graphics = skull_mir::lower::collect_shader_pairs(ws)?
             .into_iter()
             .map(|pair| pair.key);
-        let compute = skull_mir::lower::collect_compute_collection(ws)?
-            .entries
-            .into_iter()
-            .map(|entry| entry.key);
-        let current: BTreeSet<String> = graphics.chain(compute).collect();
+        let current: BTreeSet<String> = graphics.collect();
         Ok(current != self.shader_registrations.keys)
     }
 
@@ -7824,7 +7757,6 @@ impl SkullEmitCache {
         reinferred: &[(ModuleId, BodyOwner)],
     ) -> Result<bool, CompilerError> {
         let mut users = self.shader_registrations.shader_pair_users.clone();
-        let mut compute_users = self.shader_registrations.compute_entry_users.clone();
         for &(mid, owner) in reinferred {
             if let Some(previous) = self
                 .shader_registrations
@@ -7841,35 +7773,12 @@ impl SkullEmitCache {
                     }
                 }
             }
-            if let Some(previous) = self
-                .shader_registrations
-                .compute_contributions
-                .get(&(mid, owner))
-            {
-                for entry in previous {
-                    let count = compute_users
-                        .get_mut(&entry.key)
-                        .expect("compute key index lost a body contribution");
-                    *count -= 1;
-                    if *count == 0 {
-                        compute_users.remove(&entry.key);
-                    }
-                }
-            }
             let (shader, _) = skull_mir::lower::collect_shader_body(ws, mid, owner)?;
             for pair in shader {
                 *users.entry(pair.key).or_insert(0) += 1;
             }
-            let (compute, _) = skull_mir::lower::collect_compute_body(ws, mid, owner)?;
-            for entry in compute {
-                *compute_users.entry(entry.key).or_insert(0) += 1;
-            }
         }
-        let current: BTreeSet<String> = users
-            .keys()
-            .cloned()
-            .chain(compute_users.keys().cloned())
-            .collect();
+        let current: BTreeSet<String> = users.keys().cloned().collect();
         Ok(current != self.shader_registrations.keys)
     }
 
@@ -7890,7 +7799,6 @@ impl SkullEmitCache {
                             .contains(&FuncRef { module: mid, func: fid })
                 )
                 || skull_mir::lower::body_has_shader_pipeline_call(ws, mid, owner)
-                || skull_mir::lower::body_has_compute_artifact_call(ws, mid, owner)
         });
         if !affected {
             return Ok(false);
@@ -7904,16 +7812,10 @@ impl SkullEmitCache {
                 .shader_contributions
                 .remove(&key)
                 .unwrap_or_default();
-            let old_compute = self
-                .shader_registrations
-                .compute_contributions
-                .remove(&key)
-                .unwrap_or_default();
             roots_examined += old_shader
                 .iter()
                 .map(|pair| usize::from(pair.vert.is_some()) + 1)
                 .sum::<usize>();
-            roots_examined += old_compute.len();
             for pair in old_shader {
                 let users = self
                     .shader_registrations
@@ -7932,32 +7834,12 @@ impl SkullEmitCache {
                     self.shader_registrations.shader_root_set.remove(&pair.frag);
                 }
             }
-            for entry in old_compute {
-                let users = self
-                    .shader_registrations
-                    .compute_entry_users
-                    .get_mut(&entry.key)
-                    .expect("compute contribution index lost an existing key");
-                *users -= 1;
-                if *users == 0 {
-                    self.shader_registrations
-                        .compute_entry_users
-                        .remove(&entry.key);
-                    self.shader_registrations.compute_entries.remove(&entry.key);
-                    self.shader_registrations
-                        .shader_root_set
-                        .remove(&entry.entry);
-                }
-            }
 
             let (shader, shader_callsite) = skull_mir::lower::collect_shader_body(ws, mid, owner)?;
-            let (compute, compute_callsite) =
-                skull_mir::lower::collect_compute_body(ws, mid, owner)?;
             roots_derived += shader
                 .iter()
                 .map(|pair| usize::from(pair.vert.is_some()) + 1)
                 .sum::<usize>();
-            roots_derived += compute.len();
             for pair in &shader {
                 let users = self
                     .shader_registrations
@@ -7975,30 +7857,10 @@ impl SkullEmitCache {
                     self.shader_registrations.shader_root_set.insert(pair.frag);
                 }
             }
-            for entry in &compute {
-                let users = self
-                    .shader_registrations
-                    .compute_entry_users
-                    .entry(entry.key.clone())
-                    .or_insert(0);
-                *users += 1;
-                if *users == 1 {
-                    self.shader_registrations
-                        .compute_entries
-                        .insert(entry.key.clone(), entry.clone());
-                    self.shader_registrations
-                        .shader_root_set
-                        .insert(entry.entry);
-                }
-            }
             self.shader_registrations
                 .shader_contributions
                 .insert(key, shader);
-            self.shader_registrations
-                .compute_contributions
-                .insert(key, compute);
-            let callsite = shader_callsite || compute_callsite;
-            if callsite {
+            if shader_callsite {
                 self.shader_registrations.callsites.insert(key);
             } else {
                 self.shader_registrations.callsites.remove(&key);
@@ -8017,7 +7879,6 @@ impl SkullEmitCache {
             .shader_pairs
             .keys()
             .cloned()
-            .chain(self.shader_registrations.compute_entries.keys().cloned())
             .collect();
         self.repair_stats.shader_roots_examined = roots_examined;
         self.repair_stats.shader_roots_derived = roots_derived;
@@ -8041,29 +7902,16 @@ impl SkullEmitCache {
             contributions: self.shader_registrations.shader_contributions.clone(),
         };
         let programs = shader_programs(&collection);
-        let compute_collection = skull_mir::lower::ComputeCollection {
-            entries: self
-                .shader_registrations
-                .compute_entries
-                .values()
-                .cloned()
-                .collect(),
-            callsites: Vec::new(),
-            contributions: self.shader_registrations.compute_contributions.clone(),
-        };
-        let compute = compute_programs(&compute_collection);
         let shader_scx = skull_mir::lower::ScalarCtx::new_values_first_class(ws)
             .sharing(std::sync::Arc::clone(self.graph.interner()));
         let view = realize_shader_view(
             ws,
             &self.graph,
             &programs,
-            &compute,
             &shader_scx,
             std::sync::Arc::clone(&self.concrete.plans),
         )?;
-        let registrations =
-            shader_registration_lines(ws, &shader_scx, &collection, &compute_collection, &view)?;
+        let registrations = shader_registration_lines(ws, &shader_scx, &collection, &view)?;
         self.shader_view = view;
         self.shader_registrations = registrations;
         Ok(())

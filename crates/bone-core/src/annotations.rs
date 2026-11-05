@@ -116,42 +116,9 @@ fn validate_one(
             at(anno, pos, AnnoPos::FnItem)?;
             let ok = anno.args.len() == 1
                 && anno.args[0].name.is_none()
-                && matches!(anno.args[0].value, AnnoValue::Ident(_));
+                && matches!(&anno.args[0].value, AnnoValue::Ident(id) if matches!(id.name.as_str(), "vertex" | "fragment"));
             if !ok {
-                comp_error!(
-                    anno.span,
-                    "`@shader` takes exactly one stage argument: @shader(compute)"
-                );
-            }
-            Ok(())
-        }
-        "workgroup" => {
-            at(anno, pos, AnnoPos::FnItem)?;
-            let ok = anno.args.len() == 3
-                && anno.args[0].name.is_none()
-                && matches!(anno.args[0].value, AnnoValue::Int(_))
-                && anno.args[1].name.is_none()
-                && matches!(anno.args[1].value, AnnoValue::Int(_))
-                && anno.args[2].name.is_none()
-                && matches!(anno.args[2].value, AnnoValue::Int(_));
-            if !ok {
-                comp_error!(
-                    anno.span,
-                    "`@workgroup` takes exactly three integer sizes: @workgroup(64, 1, 1)"
-                );
-            }
-            Ok(())
-        }
-        "dispatch" => {
-            at(anno, pos, AnnoPos::FnItem)?;
-            let ok = anno.args.len() == 1
-                && anno.args[0].name.is_none()
-                && matches!(anno.args[0].value, AnnoValue::Int(_));
-            if !ok {
-                comp_error!(
-                    anno.span,
-                    "`@dispatch` takes exactly one integer dimension: @dispatch(1)"
-                );
+                comp_error!(anno.span, "shader stage must be vertex or fragment");
             }
             Ok(())
         }
@@ -239,19 +206,6 @@ fn validate_one(
         "attr" | "uniform" | "textures" | "engine" => {
             at(anno, pos, AnnoPos::Param)?;
             no_args(anno)
-        }
-        "storage" => {
-            at(anno, pos, AnnoPos::Param)?;
-            let ok = anno.args.len() == 1
-                && anno.args[0].name.is_none()
-                && matches!(anno.args[0].value, AnnoValue::Ident(_));
-            if !ok {
-                comp_error!(
-                    anno.span,
-                    "`@storage` takes one access argument: @storage(read_write)"
-                );
-            }
-            Ok(())
         }
         "flat" | "identity_storage" => {
             at(anno, pos, AnnoPos::StructField)?;

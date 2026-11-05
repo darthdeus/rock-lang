@@ -53,9 +53,6 @@ pub enum ExpandKind {
     /// pipeline key const `"<vert>+<frag>"`; the driver emits one top-level
     /// `__rock_shader_register(key, glsl)` per distinct pair.
     ShaderPipeline,
-    /// `@shader_expand fn rock_compute<F>(entry: F) -> string` -> the direct
-    /// compute entry key; the driver owns its retained artifact.
-    ComputeArtifact,
     /// `@vertex_expand fn f<T>(v: FlatVec<T>) -> int | [int]` -> the element's
     /// vertex layout as a literal: the stride for an `int` return, the
     /// per-attribute component counts for `[int]`. Both from one
@@ -103,7 +100,6 @@ pub fn expand_kind(f: &Function) -> Option<ExpandKind> {
     }
     if has_anno(f, "shader_expand") {
         return match f.name.as_str() {
-            "rock_compute" => Some(ExpandKind::ComputeArtifact),
             _ => Some(ExpandKind::ShaderPipeline),
         };
     }

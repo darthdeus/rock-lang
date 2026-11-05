@@ -904,20 +904,6 @@ impl Builder<'_> {
         Ok(ValueRepr::Scalar(inst))
     }
 
-    pub(crate) fn expand_compute_artifact(
-        &mut self,
-        call: Idx<Expr>,
-        arg_idxs: &[Idx<Expr>],
-    ) -> Result<ValueRepr, CompilerError> {
-        let entry = resolve_compute_entry(self.ws, self.body, call, arg_idxs)?;
-        let key = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(
-            self.ws.module(entry.module).functions[entry.func]
-                .name
-                .as_str(),
-        ))));
-        Ok(ValueRepr::Scalar(key))
-    }
-
     /// `@uniform_expand` -> one direct typed store per primitive leaf of `u`,
     /// at its std140 element index. No helper call per leaf, and no pack: the
     /// Group's leaves go straight from registers into the views.

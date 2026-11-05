@@ -4036,18 +4036,6 @@ pub struct ShaderCollection {
     pub contributions: HashMap<(ModuleId, BodyOwner), Vec<ShaderPair>>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ComputeEntry {
-    pub key: String,
-    pub entry: FuncRef,
-}
-
-pub struct ComputeCollection {
-    pub entries: Vec<ComputeEntry>,
-    pub callsites: Vec<(ModuleId, BodyOwner)>,
-    pub contributions: HashMap<(ModuleId, BodyOwner), Vec<ComputeEntry>>,
-}
-
 /// The `@shader(<stage>)` stage of `f`, else `None`.
 /// A local read of the annotation (skull-codegen-glsl has the same helper, but
 /// skull-mir must not depend on it -- the layering constraint).
@@ -4060,52 +4048,7 @@ fn shader_stage_of(f: &Function) -> Option<&'static str> {
         Some(bone_semantic::hir::AnnoValue::Ident(id)) if id.name.as_str() == "fragment" => {
             Some("fragment")
         }
-        Some(bone_semantic::hir::AnnoValue::Ident(id)) if id.name.as_str() == "compute" => {
-            Some("compute")
-        }
         _ => None,
-    }
-}
-
-pub fn resolve_compute_entry(
-    ws: &Workspace,
-    body: &Body,
-    call_expr: Idx<Expr>,
-    args: &[Idx<Expr>],
-) -> Result<FuncRef, CompilerError> {
-    let span = body.expr_spans[call_expr];
-    let reject = |message: String| CompilerError::new_with_label(span, message);
-    let [arg] = args else {
-        return Err(reject(
-            "`rock_compute` takes exactly one direct @shader(compute) reference".to_string(),
-        ));
-    };
-    let Expr::Global(name) = body.expr_arena[*arg] else {
-        return Err(reject(
-            "`rock_compute` argument must be a direct reference to a top-level @shader(compute) fn"
-                .to_string(),
-        ));
-    };
-    let fref = match ws.functions_by_name.get(&name).map(|list| list.as_slice()) {
-        Some([(module, func)]) => FuncRef {
-            module: *module,
-            func: *func,
-        },
-        _ => {
-            return Err(reject(format!(
-                "`rock_compute` argument `{name}` must be a direct reference to a unique top-level fn"
-            )));
-        }
-    };
-    let function = &ws.module(fref.module).functions[fref.func];
-    match shader_stage_of(function) {
-        Some("compute") => Ok(fref),
-        Some(stage) => Err(reject(format!(
-            "`rock_compute` expects a @shader(compute) fn here, but `{name}` is @shader({stage})"
-        ))),
-        None => Err(reject(format!(
-            "`rock_compute` argument `{name}` is not a @shader(compute) fn"
-        ))),
     }
 }
 
@@ -4140,23 +4083,7 @@ fn resolve_shader_arg(
     };
     let f = &ws.module(fref.module).functions[fref.func];
     match shader_stage_of(f) {
-        Some(stage) if stage == want_stage => {
-            if let Some(annotation) = f
-                .param_decls
-                .iter()
-                .flat_map(|param| param.annotations.iter())
-                .find(|annotation| annotation.is_builtin("storage"))
-            {
-                return Err(CompilerError::new_with_label(
-                    annotation.span,
-                    format!(
-                        "graphics entry `{}` cannot declare @storage resources; storage resources are compute-only",
-                        f.name
-                    ),
-                ));
-            }
-            Ok(fref)
-        }
+        Some(stage) if stage == want_stage => Ok(fref),
         Some(other) => Err(reject(format!(
             "`rock_shader` expects a `@shader({want_stage})` fn here, but `{name}` is `@shader({other})`"
         ))),
@@ -4529,7 +4456,6 @@ fn vertex_expand_rejection_for_call(
 struct ExpansionRejections {
     struct_pairs: Option<CompilerError>,
     shader_pipeline: Option<CompilerError>,
-    compute_artifact: Option<CompilerError>,
     vertex_layout: Option<CompilerError>,
     uniform_block: Option<CompilerError>,
     uniform_values: Option<CompilerError>,
@@ -4541,7 +4467,6 @@ impl ExpansionRejections {
         let slot = match kind {
             ExpandKind::StructPairs => &mut self.struct_pairs,
             ExpandKind::ShaderPipeline => &mut self.shader_pipeline,
-            ExpandKind::ComputeArtifact => &mut self.compute_artifact,
             ExpandKind::VertexLayout => &mut self.vertex_layout,
             ExpandKind::UniformBlock => &mut self.uniform_block,
             ExpandKind::UniformValues => &mut self.uniform_values,
@@ -4557,7 +4482,6 @@ impl ExpansionRejections {
     fn finish(self) -> Option<CompilerError> {
         self.struct_pairs
             .or(self.shader_pipeline)
-            .or(self.compute_artifact)
             .or(self.vertex_layout)
             .or(self.uniform_block)
             .or(self.uniform_values)
@@ -4573,7 +4497,6 @@ pub fn expansion_rejection(ws: &Workspace, mid: ModuleId) -> Option<CompilerErro
     let mut rejections = ExpansionRejections {
         struct_pairs: None,
         shader_pipeline: None,
-        compute_artifact: None,
         vertex_layout: None,
         uniform_block: None,
         uniform_values: None,
@@ -4606,7 +4529,6 @@ pub fn expansion_rejection(ws: &Workspace, mid: ModuleId) -> Option<CompilerErro
                 ExpandKind::ShaderPipeline => {
                     shader_expand_rejection_for_call(ws, body, e, &arg_idxs)
                 }
-                ExpandKind::ComputeArtifact => resolve_compute_entry(ws, body, e, &arg_idxs).err(),
                 ExpandKind::VertexLayout => {
                     vertex_expand_rejection_for_call(ws, body, e, f, &arg_idxs)
                 }
@@ -4665,36 +4587,6 @@ pub fn body_has_shader_pipeline_call(ws: &Workspace, mid: ModuleId, owner: BodyO
     })
 }
 
-pub fn body_has_compute_artifact_call(ws: &Workspace, mid: ModuleId, owner: BodyOwner) -> bool {
-    let module = ws.module(mid);
-    let Some(body) = module.bodies.get(&owner) else {
-        return false;
-    };
-    let inf = ws.inference(mid).and_then(|ir| ir.per_fn.get(&owner));
-    body.expr_arena.iter().any(|(e, expr)| {
-        let Expr::Call {
-            callee: Callee::Unresolved { name, .. },
-            ..
-        } = expr
-        else {
-            return false;
-        };
-        let resolved = match inf {
-            Some(inf) => resolve_call_fn(ws, inf, e, *name),
-            None => match ws.functions_by_name.get(name).map(|list| list.as_slice()) {
-                Some([single]) => Some(*single),
-                _ => None,
-            },
-        };
-        resolved.is_some_and(|(fmod, fid)| {
-            matches!(
-                crate::intrinsics::expand_kind(&ws.module(fmod).functions[fid]),
-                Some(ExpandKind::ComputeArtifact)
-            )
-        })
-    })
-}
-
 /// Collect the shader roots contributed by one body. Full construction calls
 /// this for every body; incremental repair calls it only for re-inferred
 /// bodies, so a body edit does not rediscover unrelated shader registrations.
@@ -4743,58 +4635,6 @@ pub fn collect_shader_body(
     Ok((by_key.into_values().collect(), callsite))
 }
 
-/// Collect the compute roots contributed by one body. See
-/// [`collect_shader_body`] for the locality contract.
-pub fn collect_compute_body(
-    ws: &Workspace,
-    mid: ModuleId,
-    owner: BodyOwner,
-) -> Result<(Vec<ComputeEntry>, bool), CompilerError> {
-    let module = ws.module(mid);
-    let Some(body) = module.bodies.get(&owner) else {
-        return Ok((Vec::new(), false));
-    };
-    let inf = ws.inference(mid).and_then(|ir| ir.per_fn.get(&owner));
-    let mut by_key = BTreeMap::new();
-    let mut callsite = false;
-    for (e, expr) in body.expr_arena.iter() {
-        let Expr::Call {
-            callee: Callee::Unresolved { name, .. },
-            args,
-            ..
-        } = expr
-        else {
-            continue;
-        };
-        let resolved = match inf {
-            Some(inf) => resolve_call_fn(ws, inf, e, *name),
-            None => match ws.functions_by_name.get(name).map(|list| list.as_slice()) {
-                Some([single]) => Some(*single),
-                _ => None,
-            },
-        };
-        let Some((fmod, fid)) = resolved else {
-            continue;
-        };
-        if !matches!(
-            crate::intrinsics::expand_kind(&ws.module(fmod).functions[fid]),
-            Some(ExpandKind::ComputeArtifact)
-        ) {
-            continue;
-        }
-        callsite = true;
-        let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
-        let entry = resolve_compute_entry(ws, body, e, &arg_idxs)?;
-        let key = ws.module(entry.module).functions[entry.func]
-            .name
-            .to_string();
-        by_key
-            .entry(key.clone())
-            .or_insert(ComputeEntry { key, entry });
-    }
-    Ok((by_key.into_values().collect(), callsite))
-}
-
 pub fn collect_shader_collection(ws: &Workspace) -> Result<ShaderCollection, CompilerError> {
     let mut by_key: BTreeMap<String, ShaderPair> = BTreeMap::new();
     let mut callsites: HashSet<(ModuleId, BodyOwner)> = HashSet::new();
@@ -4822,69 +4662,12 @@ pub fn collect_shader_collection(ws: &Workspace) -> Result<ShaderCollection, Com
     })
 }
 
-pub fn collect_compute_collection(ws: &Workspace) -> Result<ComputeCollection, CompilerError> {
-    let mut by_key = BTreeMap::<String, ComputeEntry>::new();
-    let mut callsites = HashSet::new();
-    let mut contributions = HashMap::new();
-    for &mid in ws.module_ids.values() {
-        let module = ws.module(mid);
-        for owner in module.bodies.keys() {
-            let key = (mid, *owner);
-            let (entries, callsite) = collect_compute_body(ws, mid, *owner)?;
-            if callsite {
-                callsites.insert(key);
-            }
-            for entry in &entries {
-                by_key
-                    .entry(entry.key.clone())
-                    .or_insert_with(|| entry.clone());
-            }
-            contributions.insert(key, entries);
-        }
-    }
-    Ok(ComputeCollection {
-        entries: by_key.into_values().collect(),
-        callsites: callsites.into_iter().collect(),
-        contributions,
-    })
-}
-
 /// Reject CPU-side calls to `@gpu_only` intrinsics and references to GPU-side
 /// functions as runtime fn values. Shader-pipeline expansion arguments are names,
 /// not runtime values, and remain legal.
 pub fn gpu_only_call_rejection(ws: &Workspace, mid: ModuleId) -> Option<CompilerError> {
     let module = ws.module(mid);
     let ir = ws.inference(mid)?;
-    for (_, function) in module.functions.iter() {
-        if function
-            .param_decls
-            .iter()
-            .any(|param| is_workgroup_array_type(ws, param.ty))
-        {
-            return Some(CompilerError::new_with_label(
-                function.name_span,
-                "WorkgroupArray is workgroup memory and cannot cross a function boundary"
-                    .to_string(),
-            ));
-        }
-        if function
-            .return_ty
-            .is_some_and(|ty| is_workgroup_array_type(ws, ty))
-        {
-            return Some(CompilerError::new_with_label(
-                function.name_span,
-                "WorkgroupArray is workgroup memory and cannot be returned".to_string(),
-            ));
-        }
-    }
-    for (_, global) in module.globals.iter() {
-        if is_workgroup_array_type(ws, global.ty) {
-            return Some(CompilerError::new_with_label(
-                global.span,
-                "WorkgroupArray is workgroup memory and cannot be stored globally".to_string(),
-            ));
-        }
-    }
     for (owner, body) in module.bodies.iter() {
         let Some(inf) = ir.per_fn.get(owner) else {
             continue;
@@ -4893,7 +4676,6 @@ pub fn gpu_only_call_rejection(ws: &Workspace, mid: ModuleId) -> Option<Compiler
             BodyOwner::Function(fid) => {
                 let function = &module.functions[*fid];
                 crate::intrinsics::is_gpu_context(function)
-                    || function_has_gpu_resource_param(ws, function)
             }
             _ => false,
         };
@@ -4916,7 +4698,7 @@ pub fn gpu_only_call_rejection(ws: &Workspace, mid: ModuleId) -> Option<Compiler
             let f = &ws.module(fmod).functions[fid];
             if matches!(
                 crate::intrinsics::expand_kind(f),
-                Some(ExpandKind::ShaderPipeline | ExpandKind::ComputeArtifact)
+                Some(ExpandKind::ShaderPipeline)
             ) {
                 shader_expansion_args.extend(*args);
             }
@@ -4931,8 +4713,7 @@ pub fn gpu_only_call_rejection(ws: &Workspace, mid: ModuleId) -> Option<Compiler
                         continue;
                     };
                     let f = &ws.module(fmod).functions[fid];
-                    if !crate::intrinsics::is_gpu_only(f) && !function_has_gpu_resource_param(ws, f)
-                    {
+                    if !crate::intrinsics::is_gpu_only(f) {
                         continue;
                     }
                     let fname = f.name;
@@ -4950,9 +4731,7 @@ pub fn gpu_only_call_rejection(ws: &Workspace, mid: ModuleId) -> Option<Compiler
                         continue;
                     };
                     let f = &ws.module(fmod).functions[fid];
-                    if !crate::intrinsics::is_gpu_context(f)
-                        && !function_has_gpu_resource_param(ws, f)
-                    {
+                    if !crate::intrinsics::is_gpu_context(f) {
                         continue;
                     }
                     let fname = f.name;
@@ -4974,39 +4753,6 @@ pub fn gpu_only_call_rejection(ws: &Workspace, mid: ModuleId) -> Option<Compiler
         }
     }
     None
-}
-
-fn function_has_gpu_resource_param(ws: &Workspace, function: &Function) -> bool {
-    function.param_decls.iter().any(|param| {
-        let TyId::Static(module, index) = param.ty else {
-            return false;
-        };
-        let TypeExpr::App {
-            ctor: TypeCtor::Nominal(name),
-            ..
-        } = ws.module(module).ty_arena[index]
-        else {
-            return false;
-        };
-        bone_semantic::prelude::is_intrinsic_key_in(
-            name,
-            &["StorageBuffer", "AtomicStorageBuffer", "WorkgroupArray"],
-        )
-    })
-}
-
-fn is_workgroup_array_type(ws: &Workspace, ty: TyId) -> bool {
-    let TyId::Static(module, index) = ty else {
-        return false;
-    };
-    let TypeExpr::App {
-        ctor: TypeCtor::Nominal(name),
-        ..
-    } = ws.module(module).ty_arena[index]
-    else {
-        return false;
-    };
-    bone_semantic::prelude::is_intrinsic_key(name, "WorkgroupArray")
 }
 
 fn const_int(body: &Body, e: Idx<Expr>) -> Option<i64> {

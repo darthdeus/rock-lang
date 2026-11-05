@@ -38,18 +38,6 @@ pub struct ShaderProgramView {
     pub concrete_plans: Arc<ConcretePlans>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct ComputeProgram {
-    pub entry: FuncRef,
-}
-
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct ComputeProgramView {
-    pub program: ComputeProgram,
-    pub stage: ShaderStageView,
-    pub concrete_plans: Arc<ConcretePlans>,
-}
-
 /// The graph-owned population for an explicit-root GLSL function library.
 /// Unlike [`ShaderProgramView`], this has no registered shader stages or
 /// interface contract: the caller supplies ordinary function roots and the

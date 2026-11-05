@@ -874,7 +874,6 @@ impl Builder<'_> {
                     Some(ExpandKind::StructPairs) => self.expand_struct_pairs(e, func, &arg_idxs),
                     Some(ExpandKind::Materialize) => self.expand_materialize(&arg_idxs),
                     Some(ExpandKind::ShaderPipeline) => self.expand_shader_pipeline(e, &arg_idxs),
-                    Some(ExpandKind::ComputeArtifact) => self.expand_compute_artifact(e, &arg_idxs),
                     Some(ExpandKind::VertexLayout) => self.expand_vertex_layout(e, func, &arg_idxs),
                     Some(ExpandKind::UniformBlock) => self.expand_uniform_block(e, func, &arg_idxs),
                     Some(ExpandKind::UniformValues) => {

@@ -44,13 +44,11 @@ use crate::monoty::MonoInterner;
 use bone_semantic::inference::Workspace;
 use std::sync::Arc;
 
-/// A logical pipeline stage. Compute joins this enum rather than arriving as a
-/// GLSL qualifier or a string (plan Stage 3).
+/// A graphics pipeline stage.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum ShaderStage {
     Vertex,
     Fragment,
-    Compute,
 }
 
 impl ShaderStage {
@@ -58,203 +56,7 @@ impl ShaderStage {
         match self {
             ShaderStage::Vertex => "vertex",
             ShaderStage::Fragment => "fragment",
-            ShaderStage::Compute => "compute",
         }
-    }
-}
-
-/// The scalar vocabulary needed by the first compiler-authored compute lane.
-/// It is a logical value kind, not a target storage or byte-layout decision.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
-pub enum ComputeValueKind {
-    F32,
-    I32,
-    U32,
-    /// A storage element whose access is governed by WGSL atomic rules.
-    /// Atomicity is an interface property, not a use-site reinterpretation of
-    /// an ordinary `u32` resource.
-    AtomicU32,
-    Bool,
-}
-
-impl ComputeValueKind {
-    fn code(self) -> u32 {
-        match self {
-            ComputeValueKind::F32 => 0,
-            ComputeValueKind::I32 => 1,
-            ComputeValueKind::U32 => 2,
-            ComputeValueKind::AtomicU32 => 3,
-            ComputeValueKind::Bool => 4,
-        }
-    }
-}
-
-/// Whether a compute resource is one value or an indexable homogeneous array.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
-pub enum ComputeResourceShape {
-    Scalar(ComputeValueKind),
-    Array(ComputeValueKind),
-}
-
-impl ComputeResourceShape {
-    fn code(self) -> (u32, ComputeValueKind) {
-        match self {
-            ComputeResourceShape::Scalar(kind) => (0, kind),
-            ComputeResourceShape::Array(kind) => (1, kind),
-        }
-    }
-}
-
-/// The logical address space of a compute resource. Physical bindings and
-/// layout remain the target ABI's responsibility.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
-pub enum ComputeAddressSpace {
-    Uniform,
-    Storage,
-}
-
-impl ComputeAddressSpace {
-    fn name(self) -> &'static str {
-        match self {
-            ComputeAddressSpace::Uniform => "uniform",
-            ComputeAddressSpace::Storage => "storage",
-        }
-    }
-}
-
-/// Access promised by a compute resource declaration.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
-pub enum ComputeAccess {
-    Read,
-    Write,
-    ReadWrite,
-}
-
-impl ComputeAccess {
-    fn name(self) -> &'static str {
-        match self {
-            ComputeAccess::Read => "read",
-            ComputeAccess::Write => "write",
-            ComputeAccess::ReadWrite => "read_write",
-        }
-    }
-}
-
-/// Builtins a compute body may consume. Their target spellings are emitter
-/// concerns; this list is the logical invocation contract.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
-pub enum ComputeBuiltin {
-    GlobalInvocationId,
-    LocalInvocationId,
-    WorkgroupId,
-    LocalInvocationIndex,
-    NumWorkgroups,
-}
-
-impl ComputeBuiltin {
-    fn name(self) -> &'static str {
-        match self {
-            ComputeBuiltin::GlobalInvocationId => "global_invocation_id",
-            ComputeBuiltin::LocalInvocationId => "local_invocation_id",
-            ComputeBuiltin::WorkgroupId => "workgroup_id",
-            ComputeBuiltin::LocalInvocationIndex => "local_invocation_index",
-            ComputeBuiltin::NumWorkgroups => "num_workgroups",
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
-pub struct ComputeWorkgroupSize {
-    pub x: u32,
-    pub y: u32,
-    pub z: u32,
-}
-
-impl ComputeWorkgroupSize {
-    pub fn is_valid(self) -> bool {
-        self.x != 0 && self.y != 0 && self.z != 0
-    }
-}
-
-/// How a runtime dispatch supplies its extent. The contract carries no
-/// backend command object or binding number.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
-pub enum ComputeDispatchContract {
-    Runtime { dimensions: u8 },
-    Fixed { x: u32, y: u32, z: u32 },
-}
-
-impl ComputeDispatchContract {
-    pub fn is_valid(self) -> bool {
-        match self {
-            ComputeDispatchContract::Runtime { dimensions } => (1..=3).contains(&dimensions),
-            ComputeDispatchContract::Fixed { x, y, z } => x != 0 && y != 0 && z != 0,
-        }
-    }
-}
-
-#[derive(Clone, PartialEq, Eq, Debug, Hash)]
-pub struct LogicalComputeResource {
-    pub name: Ustr,
-    pub shape: ComputeResourceShape,
-    pub address_space: ComputeAddressSpace,
-    pub access: ComputeAccess,
-}
-
-/// One compiler-owned workgroup-memory declaration. It is not a bindable
-/// resource: the neutral plan retains its element kind and fixed population so
-/// a target cannot reconstruct it from source text or a second side table.
-#[derive(Clone, PartialEq, Eq, Debug, Hash)]
-pub struct LogicalComputeWorkgroup {
-    pub name: Ustr,
-    pub kind: ComputeValueKind,
-    pub size: u32,
-}
-
-#[derive(Clone, PartialEq, Eq, Debug, Hash)]
-pub struct ComputeInterfacePlan {
-    pub resources: Vec<LogicalComputeResource>,
-    pub workgroup: Vec<LogicalComputeWorkgroup>,
-    pub builtins: Vec<ComputeBuiltin>,
-    pub workgroup_size: ComputeWorkgroupSize,
-    pub dispatch: ComputeDispatchContract,
-}
-
-impl ComputeInterfacePlan {
-    pub fn validate(&self) -> Result<(), &'static str> {
-        if !self.workgroup_size.is_valid() {
-            return Err("compute workgroup size must be non-zero");
-        }
-        if !self.dispatch.is_valid() {
-            return Err("compute dispatch contract is invalid");
-        }
-        if self.resources.iter().any(|resource| {
-            resource.address_space == ComputeAddressSpace::Uniform
-                && resource.access != ComputeAccess::Read
-        }) {
-            return Err("uniform compute resources are read-only");
-        }
-        if self.resources.iter().any(|resource| {
-            let atomic = matches!(
-                resource.shape,
-                ComputeResourceShape::Array(ComputeValueKind::AtomicU32)
-                    | ComputeResourceShape::Scalar(ComputeValueKind::AtomicU32)
-            );
-            atomic
-                && (resource.address_space != ComputeAddressSpace::Storage
-                    || resource.shape != ComputeResourceShape::Array(ComputeValueKind::AtomicU32)
-                    || resource.access != ComputeAccess::ReadWrite)
-        }) {
-            return Err("atomic compute resources must be read_write storage arrays");
-        }
-        if self
-            .workgroup
-            .iter()
-            .any(|memory| memory.size == 0 || matches!(memory.kind, ComputeValueKind::AtomicU32))
-        {
-            return Err("compute workgroup arrays must have a positive non-atomic element kind");
-        }
-        Ok(())
     }
 }
 
@@ -546,8 +348,6 @@ pub struct ShaderInterfacePlan {
     /// one list would tell the engine it owns units it does not. A program may
     /// not mix the two, which is a rejection rather than a precedence.
     pub bare_samplers: Vec<LogicalSampler>,
-    /// The logical compute contract when `stages` contains `Compute`.
-    pub compute: Option<ComputeInterfacePlan>,
     /// How the fragment stage's colour output is shaped.
     pub fragment_output: FragmentOutput,
     /// The fragment entry's output struct carries a `FragDepth: float` field
@@ -714,56 +514,6 @@ impl ShaderInterfacePlan {
             }
         }
 
-        match &self.compute {
-            Some(compute) => {
-                writeln!(out, "compute some").unwrap();
-                writeln!(
-                    out,
-                    "compute_workgroup {} {} {}",
-                    compute.workgroup_size.x, compute.workgroup_size.y, compute.workgroup_size.z
-                )
-                .unwrap();
-                match compute.dispatch {
-                    ComputeDispatchContract::Runtime { dimensions } => {
-                        writeln!(out, "compute_dispatch runtime {dimensions}").unwrap();
-                    }
-                    ComputeDispatchContract::Fixed { x, y, z } => {
-                        writeln!(out, "compute_dispatch fixed {x} {y} {z}").unwrap();
-                    }
-                }
-                writeln!(out, "compute_builtins {}", compute.builtins.len()).unwrap();
-                for builtin in &compute.builtins {
-                    writeln!(out, "compute_builtin {}", builtin.name()).unwrap();
-                }
-                writeln!(out, "compute_resources {}", compute.resources.len()).unwrap();
-                for resource in &compute.resources {
-                    let (shape, kind) = resource.shape.code();
-                    writeln!(
-                        out,
-                        "compute_resource {} {} {} {} {}",
-                        resource.name,
-                        resource.address_space.name(),
-                        resource.access.name(),
-                        shape,
-                        kind.code()
-                    )
-                    .unwrap();
-                }
-                writeln!(out, "compute_workgroup_arrays {}", compute.workgroup.len()).unwrap();
-                for memory in &compute.workgroup {
-                    writeln!(
-                        out,
-                        "compute_workgroup_array {} {} {}",
-                        memory.name,
-                        memory.kind.code(),
-                        memory.size
-                    )
-                    .unwrap();
-                }
-            }
-            None => {}
-        }
-
         match &self.textures {
             Some(group) => {
                 let struct_name = group
@@ -816,7 +566,6 @@ fn uniform_role_name(role: UniformRole) -> &'static str {
         UniformRole::Engine => "engine",
         UniformRole::Stage(ShaderStage::Vertex) => "vertex",
         UniformRole::Stage(ShaderStage::Fragment) => "fragment",
-        UniformRole::Stage(ShaderStage::Compute) => "compute",
     }
 }
 
