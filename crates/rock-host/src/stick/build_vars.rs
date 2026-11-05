@@ -177,7 +177,7 @@ pub fn resolve_build_vars(
 
 /// The platform names the runtime distinguishes; `--target-os` accepts
 /// exactly these.
-const TARGET_PLATFORMS: &[&str] = &["linux", "osx", "windows", "ios", "web"];
+const TARGET_PLATFORMS: &[&str] = &["linux", "osx", "windows"];
 
 fn validate_target_os(target: &str) -> Result<&str> {
     if TARGET_PLATFORMS.contains(&target) {
@@ -199,14 +199,10 @@ fn resolve_builtin(
     match name {
         "channel" => Ok(channel.to_string()),
         // An explicit target is the artifact truth (a Linux host packaging a
-        // Windows release must bake "windows"); channel inference and the
-        // packaging host are proxies used only when no target was declared.
+        // Windows release must bake "windows"); use the packaging host only
+        // when no target was declared.
         "platform" => Ok(if let Some(target) = target_os {
             target.to_string()
-        } else if channel == "web" {
-            "web".to_string()
-        } else if matches!(channel, "ios" | "ios-dev") {
-            "ios".to_string()
         } else {
             match std::env::consts::OS {
                 "macos" => "osx".to_string(),
@@ -378,26 +374,13 @@ mod tests {
     }
 
     #[test]
-    fn platform_builtin_tracks_web_and_ios_channels() {
+    fn platform_builtin_defaults_to_host() {
         let cfg = fixture(concat!(
             "[package]\nname = \"x\"\n",
-            "[build]\nchannels = [\"dev\", \"web\", \"ios-dev\"]\n",
+            "[build]\nchannels = [\"dev\"]\n",
             "[build.vars]\nPLATFORM = { builtin = \"platform\" }\n",
         ));
         let dir = tempfile::tempdir().unwrap();
-        let web =
-            resolve_build_vars(&cfg, dir.path(), Some("web"), None, &no_overrides(), None).unwrap();
-        assert_eq!(web.vars["PLATFORM"].value, "web");
-        let ios = resolve_build_vars(
-            &cfg,
-            dir.path(),
-            Some("ios-dev"),
-            None,
-            &no_overrides(),
-            None,
-        )
-        .unwrap();
-        assert_eq!(ios.vars["PLATFORM"].value, "ios");
         let host =
             resolve_build_vars(&cfg, dir.path(), Some("dev"), None, &no_overrides(), None).unwrap();
         let expected = match std::env::consts::OS {
@@ -449,12 +432,15 @@ mod tests {
             "[build.vars]\nPLATFORM = { builtin = \"platform\" }\n",
         ));
         let dir = tempfile::tempdir().unwrap();
-        let err = resolve_build_vars(&cfg, dir.path(), None, Some("win64"), &no_overrides(), None)
-            .expect_err("unknown target os must reject");
-        assert!(
-            format!("{err}").contains("win64"),
-            "error names the bad target: {err}"
-        );
+        for target in ["win64", "ios", "web"] {
+            let err =
+                resolve_build_vars(&cfg, dir.path(), None, Some(target), &no_overrides(), None)
+                    .expect_err("unsupported target os must reject");
+            assert!(
+                format!("{err}").contains(target),
+                "error names the bad target: {err}"
+            );
+        }
     }
 
     #[test]

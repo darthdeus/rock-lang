@@ -720,8 +720,8 @@ fn tint(tc: Vec2) -> Vec4 {
 `rock shader` compiles entries to GLSL; it prints to stdout, or writes
 `--output file.glsl`. One root compiles a fullscreen fragment entry,
 two roots compile a vertex+fragment pipeline, anything else compiles a
-plain function library. `--profile` picks `330core` (the default) or
-`300es`. The same entries also lower to WGSL for the wgpu renderer.
+plain function library. The GLSL profile is `330core`. The same entries also
+lower to WGSL for the wgpu renderer.
 
 ## Backends
 

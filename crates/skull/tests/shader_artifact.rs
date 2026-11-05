@@ -18,7 +18,7 @@ use bone_semantic::inference::Workspace;
 use skull::artifact::{self, ArtifactRequest};
 use skull::instance_graph::{self, InstanceGraph};
 use skull::shader_artifact::{self, ShaderArtifactRequest, ShaderProgram, ShaderRejection};
-use skull::target_projection::{JAVASCRIPT_WEB, LUAJIT_DESKTOP, LUAJIT_IOS};
+use skull::target_projection::{JAVASCRIPT_WEB, LUAJIT_DESKTOP};
 use ustr::Ustr;
 
 static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
@@ -105,30 +105,6 @@ fn the_shader_view_carries_the_typed_profile_from_the_axis() {
     )
     .expect("a target with a GLSL axis packages a shader artifact");
     assert_eq!(view.profile, skull_codegen_glsl::GlslProfile::Core330);
-
-    // A different axis VALUE is carried through, not normalized away: the view
-    // reports what the target packages.
-    let es = skull::target_projection::TargetSpec {
-        name: "luajit-es-probe",
-        shader: Some(skull::target_projection::ShaderTargetSpec::Glsl(
-            skull_codegen_glsl::GlslProfile::Es300,
-        )),
-        ..LUAJIT_DESKTOP
-    };
-    let es_view = shader_artifact::realize_shader(
-        &ws,
-        &g,
-        &ShaderArtifactRequest {
-            spec: es,
-            programs: &roots,
-        },
-    )
-    .expect("shader artifact");
-    assert_eq!(es_view.profile, skull_codegen_glsl::GlslProfile::Es300);
-    assert_eq!(
-        es_view.roots, view.roots,
-        "the profile changed WHICH shader instances are packaged"
-    );
 
     // CONTROL: no shader axis, no shader artifact. Native C now packages the
     // same Core330 side artifact as the other desktop GL targets.
@@ -408,12 +384,9 @@ fn main() { let key = rock_shader(uniform_frag) }
     assert!(ok.rejections.is_empty(), "{:?}", ok.render_rejections(&ws2));
 }
 
-/// The shader axis is one axis of a combination: two targets that differ ONLY
-/// in platform package the same shader artifact, which is what
-/// `in_game_shader_packaging_uses_the_runtime_adapted_source_profile` asserts
-/// about the fixtures and this asserts about the realized view.
+/// CPU target selection preserves the shared shader program.
 #[test]
-fn platform_does_not_change_the_shader_artifact() {
+fn cpu_target_does_not_change_the_shader_artifact() {
     let ws = check(REACHED);
     let (g, _) = graph_for(&ws);
     let roots = shader_roots(&ws);
@@ -429,15 +402,11 @@ fn platform_does_not_change_the_shader_artifact() {
         .expect("shader artifact")
     };
     let desktop = of(LUAJIT_DESKTOP);
-    let ios = of(LUAJIT_IOS);
     let web = of(JAVASCRIPT_WEB);
     assert!(
         !desktop.roots.is_empty(),
         "the fixture packages no shader entry"
     );
-    assert_eq!(desktop.profile, ios.profile);
-    assert_eq!(desktop.roots, ios.roots);
-    assert_eq!(desktop.helpers, ios.helpers);
     assert_eq!(desktop.helpers, web.helpers);
 }
 

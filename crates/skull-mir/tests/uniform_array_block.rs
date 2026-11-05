@@ -117,7 +117,7 @@ fn sprite_batchs_light_arrays_pay_stride_16_for_scalars() {
     assert_eq!(scalar_bytes, 1024);
 }
 
-// -- The GLES 3.0 budget, on the array block's OWN size.
+// -- The portable OpenGL budget, on the array block's OWN size.
 //
 // The budget is per BLOCK and the arrays get their own, so a stage's scalar
 // group is never added in. For outline's shape the block is `48 * N`: one more

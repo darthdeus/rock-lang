@@ -146,8 +146,7 @@ pub struct Args {
     pub output: Option<String>,
     pub allocation_census: Option<String>,
     pub allocation_sites: Option<String>,
-    /// For `rock shader` two-root pipeline form: GLSL profile (`330core` |
-    /// `300es`). Default `330core`. See `skull_backend::skull_shader`.
+    /// GLSL profile for `rock shader`; only `330core` is supported.
     pub profile: Option<String>,
     pub no_stdlib: bool,
     pub stdout: bool,
@@ -338,7 +337,7 @@ impl Args {
                 .action(ArgAction::Append)
                 .help("Override a declared [build.vars] entry for this invocation (repeatable)"))
             .arg(Arg::new("target-os").long("target-os").value_name("OS")
-                .help("Artifact target for the `platform` builtin (linux, osx, windows, ios, web). Cross-builds package on one OS for another; default infers from channel, then the host."))
+                .help("Artifact target for the `platform` builtin (linux, osx, windows). Cross-builds package on one OS for another; defaults to the host."))
             .arg(Arg::new("lua-line-directives").long("lua-line-directives").action(ArgAction::SetTrue)
                 .help("Number emitted Lua with Rock file:line through LuaJIT line directives, so errors, tracebacks and jit.util report Rock source. Needs a LuaJIT 2.1 from commit c41d727d (2026-10-20) or later. A development option: rejected with a --channel other than dev. Same as ROCK_SKULL_LINE_DIRECTIVES=1."))
             .arg(Arg::new("trace").long("trace").action(ArgAction::SetTrue)

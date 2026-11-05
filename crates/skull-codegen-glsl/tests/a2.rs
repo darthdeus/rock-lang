@@ -93,21 +93,20 @@ fn vector_scalar_bounds_are_splatted() {
         "#
         );
         let (ws, mid) = workspace(&src);
-        for profile in [GlslProfile::Core330, GlslProfile::Es300] {
-            let glsl = skull_codegen_glsl::emit_shader_entry(&ws, mid, "f", profile).expect("emit");
-            for expected in [
-                format!("clamp(a, vec{width}(0.0), vec{width}(6.0))"),
-                format!("min(a, vec{width}(6.0))"),
-                format!("max(a, vec{width}(0.0))"),
-                "clamp(a, a, a)".to_string(),
-                "min(a, a)".to_string(),
-                "max(a, a)".to_string(),
-                "min(tc.x, 6.0)".to_string(),
-                "max(tc.x, 0.0)".to_string(),
-                "clamp(tc.x, 0.0, 6.0)".to_string(),
-            ] {
-                assert!(glsl.contains(&expected), "missing {expected}:\n{glsl}");
-            }
+        let profile = GlslProfile::Core330;
+        let glsl = skull_codegen_glsl::emit_shader_entry(&ws, mid, "f", profile).expect("emit");
+        for expected in [
+            format!("clamp(a, vec{width}(0.0), vec{width}(6.0))"),
+            format!("min(a, vec{width}(6.0))"),
+            format!("max(a, vec{width}(0.0))"),
+            "clamp(a, a, a)".to_string(),
+            "min(a, a)".to_string(),
+            "max(a, a)".to_string(),
+            "min(tc.x, 6.0)".to_string(),
+            "max(tc.x, 0.0)".to_string(),
+            "clamp(tc.x, 0.0, 6.0)".to_string(),
+        ] {
+            assert!(glsl.contains(&expected), "missing {expected}:\n{glsl}");
         }
     }
 }
@@ -296,15 +295,6 @@ fn pipeline_scaffold_pixel_block() {
     );
     assert!(glsl.contains("void main()"), "got:\n{glsl}");
     assert!(glsl.contains("FragColor = ui_frag("), "got:\n{glsl}");
-}
-
-/// Both profiles emit; only the version line (and precision preamble) differ.
-#[test]
-fn pipeline_es300_profile() {
-    let glsl =
-        emit_pipeline_profile(UI_SRC, "ui_vert", "ui_frag", GlslProfile::Es300).expect("emit");
-    assert!(glsl.starts_with("#version 300 es\n"), "got:\n{glsl}");
-    assert!(glsl.contains("precision highp float;"), "got:\n{glsl}");
 }
 
 // --- pipeline rejects (spanned emit CompilerError) ---------------------------
@@ -534,21 +524,6 @@ fn mrt_fragment_outputs_by_field_order() {
     );
 }
 
-/// Both profiles emit the same MRT outputs (only the version/precision differ).
-#[test]
-fn mrt_fragment_es300() {
-    let glsl = emit_pipeline_profile(MRT_SRC, "vt", "fr", GlslProfile::Es300).expect("emit");
-    assert!(glsl.starts_with("#version 300 es\n"), "got:\n{glsl}");
-    assert!(
-        glsl.contains("layout(location = 0) out vec4 FragColor;"),
-        "got:\n{glsl}"
-    );
-    assert!(
-        glsl.contains("layout(location = 1) out vec4 FragId;"),
-        "got:\n{glsl}"
-    );
-}
-
 /// Single-Vec4 fragment return is unchanged by the MRT work.
 #[test]
 fn single_output_fragment_still_wraps() {
@@ -618,34 +593,33 @@ const FRAG_DEPTH_SRC: &str = r#"
 
 #[test]
 fn frag_depth_field_writes_gl_frag_depth_without_an_out_location() {
-    for p in [GlslProfile::Core330, GlslProfile::Es300] {
-        let glsl = emit_pipeline_profile(FRAG_DEPTH_SRC, "vt", "fr", p).expect("emit");
-        assert!(
-            glsl.contains("layout(location = 0) out vec4 FragColor;"),
-            "got:\n{glsl}"
-        );
-        assert!(
-            glsl.contains("layout(location = 1) out vec4 FragId;"),
-            "got:\n{glsl}"
-        );
-        assert!(
-            !glsl.contains("layout(location = 2)"),
-            "FragDepth must not take a location:\n{glsl}"
-        );
-        assert!(
-            !glsl.contains("out float FragDepth"),
-            "FragDepth is not an out:\n{glsl}"
-        );
-        assert!(
-            glsl.contains("gl_FragDepth = (Depth * 0.5);"),
-            "got:\n{glsl}"
-        );
-        assert_eq!(
-            glsl.matches("FragDepth = ").count(),
-            1,
-            "only gl_FragDepth is assigned:\n{glsl}"
-        );
-    }
+    let p = GlslProfile::Core330;
+    let glsl = emit_pipeline_profile(FRAG_DEPTH_SRC, "vt", "fr", p).expect("emit");
+    assert!(
+        glsl.contains("layout(location = 0) out vec4 FragColor;"),
+        "got:\n{glsl}"
+    );
+    assert!(
+        glsl.contains("layout(location = 1) out vec4 FragId;"),
+        "got:\n{glsl}"
+    );
+    assert!(
+        !glsl.contains("layout(location = 2)"),
+        "FragDepth must not take a location:\n{glsl}"
+    );
+    assert!(
+        !glsl.contains("out float FragDepth"),
+        "FragDepth is not an out:\n{glsl}"
+    );
+    assert!(
+        glsl.contains("gl_FragDepth = (Depth * 0.5);"),
+        "got:\n{glsl}"
+    );
+    assert_eq!(
+        glsl.matches("FragDepth = ").count(),
+        1,
+        "only gl_FragDepth is assigned:\n{glsl}"
+    );
 }
 
 #[test]
@@ -773,7 +747,7 @@ fn uniform_array_vertex_decl_and_at() {
         !glsl.contains("at("),
         "at() must not render as a call:\n{glsl}"
     );
-    // The loop-bound temp for min(int, int) must be int: ES300 has no implicit
+    // The loop-bound temp for min(int, int) must be int: GLSL has no implicit
     // int->float on assignment, so the float fallback fails to compile there.
     let line = glsl
         .lines()
@@ -1055,11 +1029,9 @@ fn reject_bvec_attribute() {
 }
 
 // --- R32I entity-id tier: int fragment outputs + ISampler2D ------------------
-// The GLES entity-id path: ids live in R32I
+// The integer entity-id path: ids live in R32I
 // attachments, so fragment entries write `int` outputs and readers sample an
-// `isampler2D` via texture_id(). ES300 note: isampler2D has NO default
-// precision in GLSL ES 3.00, so the declaration itself carries `highp`
-// (accepted-and-ignored on desktop GLSL).
+// `isampler2D` via texture_id().
 
 const INT_MRT_SRC: &str = r#"
     value QV   { aPos: Vec2, aEntityId: float }
@@ -1089,17 +1061,6 @@ fn mrt_int_output_field() {
         "got:\n{glsl}"
     );
     assert!(glsl.contains("FragId = "), "got:\n{glsl}");
-}
-
-/// Same outputs under ES300 (the profile whose driver this tier exists for).
-#[test]
-fn mrt_int_output_es300() {
-    let glsl = emit_pipeline_profile(INT_MRT_SRC, "vt", "fr", GlslProfile::Es300).expect("emit");
-    assert!(glsl.starts_with("#version 300 es\n"), "got:\n{glsl}");
-    assert!(
-        glsl.contains("layout(location = 1) out int FragId;"),
-        "got:\n{glsl}"
-    );
 }
 
 /// A single bare `int` fragment return is a lone `out int` (the silhouette
@@ -1151,17 +1112,6 @@ fn isampler_texture_id() {
     );
     assert!(glsl.contains("texture(ids, TexCoord).r"), "got:\n{glsl}");
     assert!(glsl.contains("vec2(textureSize(ids, 0))"), "got:\n{glsl}");
-}
-
-/// ES300 profile compiles the same isampler declaration (precision comes from
-/// the declaration-site `highp`, not the preamble).
-#[test]
-fn isampler_es300() {
-    let glsl = emit_pipeline_profile(ISAMPLER_SRC, "vt", "fr", GlslProfile::Es300).expect("emit");
-    assert!(
-        glsl.contains("uniform highp isampler2D ids;"),
-        "got:\n{glsl}"
-    );
 }
 
 /// ISampler2D is opaque like Sampler2D: illegal as a return type.
@@ -1907,7 +1857,7 @@ fn mrt_early_return_terminates_the_entry() {
 }
 
 // --- per-stage sampler budget ---------------------------------------------
-// GL 4.1 core (macOS) and GLES 3.0 guarantee 16 texture image units per
+// GL 4.1 core (macOS) guarantee 16 texture image units per
 // stage. Linux drivers allow more, so a shader over the budget linked there
 // and failed only on a Mac.
 

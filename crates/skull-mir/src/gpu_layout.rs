@@ -606,13 +606,10 @@ pub fn std140_block(
     }
 
     let size = round_up(offset, 16);
-    if size > GLES3_MAX_UNIFORM_BLOCK_SIZE {
+    if size > GL_MAX_UNIFORM_BLOCK_SIZE {
         let msg = format!(
-            "uniform block: `{struct_name}` needs {size} std140 bytes, over the {GLES3_MAX_UNIFORM_BLOCK_SIZE} \
-             an ES 3.0 driver is required to offer. The GLSL profile follows the runtime GL \
-             context, so this has to fit the tightest target the program can land on -- and \
-             nothing downstream would catch it, because `shader-validate`'s 300es leg links \
-             against the host driver's own (much larger) limit"
+            "uniform block: `{struct_name}` needs {size} std140 bytes, over the {GL_MAX_UNIFORM_BLOCK_SIZE} \
+             portable OpenGL uniform-block budget"
         );
         return Err(match span {
             Some(sp) => err(sp, msg),
@@ -715,7 +712,7 @@ fn oversized(block_name: Ustr, member: Ustr, span: Span, size: u64) -> CompilerE
         span,
         format!(
             "uniform array block: `{block_name}` needs {size} std140 bytes at `{member}`, over the \
-         {GLES3_MAX_UNIFORM_BLOCK_SIZE} an ES 3.0 driver is required to offer. Array stride is 16 \
+         {GL_MAX_UNIFORM_BLOCK_SIZE} portable OpenGL uniform-block budget. Array stride is 16 \
          for every element kind, so a `@size(N)` array costs `N * 16` whatever it holds -- the \
          budget is per BLOCK, and this one is the arrays alone"
         ),
@@ -795,7 +792,7 @@ pub fn uniform_array_block(
             stride,
         });
         offset += d.capacity as u64 * stride as u64;
-        if offset > GLES3_MAX_UNIFORM_BLOCK_SIZE as u64 {
+        if offset > GL_MAX_UNIFORM_BLOCK_SIZE as u64 {
             return Err(oversized(
                 block_name,
                 d.name,
@@ -809,7 +806,7 @@ pub fn uniform_array_block(
     // for both remaining checks.
     let last = decls[decls.len() - 1];
     let size = round_up_u64(offset, 16);
-    if size > GLES3_MAX_UNIFORM_BLOCK_SIZE as u64 {
+    if size > GL_MAX_UNIFORM_BLOCK_SIZE as u64 {
         return Err(oversized(block_name, last.name, last.span, size));
     }
 
@@ -824,14 +821,9 @@ pub fn uniform_array_block(
     })
 }
 
-/// The ES 3.0 guaranteed minimum for `MAX_UNIFORM_BLOCK_SIZE` (ES 3.0 spec table
-/// 6.31), and the budget a block is held to.
-///
-/// Not the host driver's limit, deliberately: a desktop GL implementation
-/// reports far more (65536 on the dev machine's NVIDIA driver), so a block
-/// between the two numbers compiles and links on every gate in this repo and
-/// fails only on a physical device. A size the block may REACH, not exceed.
-pub const GLES3_MAX_UNIFORM_BLOCK_SIZE: u32 = 16384;
+/// OpenGL 3.3's guaranteed MAX_UNIFORM_BLOCK_SIZE minimum. Keep shaders portable
+/// across drivers rather than accepting a larger limit on the build host.
+pub const GL_MAX_UNIFORM_BLOCK_SIZE: u32 = 16384;
 
 fn ty_expr(ws: &Workspace, ty: TyId) -> Option<TypeExpr> {
     match ty {

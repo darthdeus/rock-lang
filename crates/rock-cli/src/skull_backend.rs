@@ -1826,9 +1826,8 @@ pub(crate) fn parse_glsl_profile(s: Option<&str>) -> Result<skull_codegen_glsl::
     use skull_codegen_glsl::GlslProfile;
     match s {
         None | Some("330core") => Ok(GlslProfile::Core330),
-        Some("300es") => Ok(GlslProfile::Es300),
         Some(other) => {
-            anyhow::bail!("rock shader: unknown --profile `{other}` (valid: 330core, 300es)")
+            anyhow::bail!("rock shader: unknown --profile `{other}` (valid: 330core)")
         }
     }
 }
@@ -1884,7 +1883,7 @@ fn emit_shader_program_with_view(
 ///     rejects here (nothing for it to select).
 ///   - single `@shader(fragment)` root (A1 fullscreen) and
 ///     `<vert_fn> <frag_fn>` (A2 pipeline, selected when a root is
-///     `@shader(vertex)`): both take `[--profile 330core|300es]`.
+///     `@shader(vertex)`): both take `[--profile 330core]`.
 ///
 /// A profile violation renders spanned against the source and exits non-zero.
 pub fn skull_shader(

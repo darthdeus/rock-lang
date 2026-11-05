@@ -62,46 +62,44 @@ fn identifiers(source: &str) -> impl Iterator<Item = &str> {
 
 #[test]
 fn keyword_local_and_existing_suffix_stay_distinct_in_both_profiles() {
-    for profile in [GlslProfile::Es300, GlslProfile::Core330] {
-        let glsl = emit("local_frag", profile);
+    let profile = GlslProfile::Core330;
+    let glsl = emit("local_frag", profile);
+    assert!(
+        !identifiers(&glsl).any(|s| s == "sample"),
+        "keyword local:\n{glsl}"
+    );
+    let locals: Vec<_> = glsl
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("float ")?.strip_suffix(';'))
+        .collect();
+    assert_eq!(locals.len(), 2, "both locals must be emitted:\n{glsl}");
+    assert_ne!(locals[0], locals[1], "renamed locals alias:\n{glsl}");
+    for name in locals {
         assert!(
-            !identifiers(&glsl).any(|s| s == "sample"),
-            "keyword local:\n{glsl}"
+            glsl.contains(&format!("{name} = ")),
+            "local is never assigned:\n{glsl}"
         );
-        let locals: Vec<_> = glsl
-            .lines()
-            .filter_map(|line| line.trim().strip_prefix("float ")?.strip_suffix(';'))
-            .collect();
-        assert_eq!(locals.len(), 2, "both locals must be emitted:\n{glsl}");
-        assert_ne!(locals[0], locals[1], "renamed locals alias:\n{glsl}");
-        for name in locals {
-            assert!(
-                glsl.contains(&format!("{name} = ")),
-                "local is never assigned:\n{glsl}"
-            );
-            assert!(
-                glsl.lines()
-                    .any(|line| { line.contains("vec4(") && identifiers(line).any(|s| s == name) }),
-                "local read lost its binding:\n{glsl}"
-            );
-        }
+        assert!(
+            glsl.lines()
+                .any(|line| { line.contains("vec4(") && identifiers(line).any(|s| s == name) }),
+            "local read lost its binding:\n{glsl}"
+        );
     }
 }
 
 #[test]
 fn keyword_helper_parameter_is_renamed_in_both_profiles() {
-    for profile in [GlslProfile::Es300, GlslProfile::Core330] {
-        let glsl = emit("param_frag", profile);
+    let profile = GlslProfile::Core330;
+    let glsl = emit("param_frag", profile);
+    assert!(
+        glsl.contains("float keyword_helper_"),
+        "helper not reached:\n{glsl}"
+    );
+    // ES-only future keywords and desktop future keywords share the policy.
+    for keyword in ["sample", "packed", "resource"] {
         assert!(
-            glsl.contains("float keyword_helper_"),
-            "helper not reached:\n{glsl}"
+            !identifiers(&glsl).any(|s| s == keyword),
+            "keyword parameter {keyword}:\n{glsl}"
         );
-        // ES-only future keywords and desktop future keywords share the policy.
-        for keyword in ["sample", "packed", "resource"] {
-            assert!(
-                !identifiers(&glsl).any(|s| s == keyword),
-                "keyword parameter {keyword}:\n{glsl}"
-            );
-        }
     }
 }

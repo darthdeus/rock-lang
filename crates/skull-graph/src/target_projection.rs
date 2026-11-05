@@ -68,7 +68,7 @@ pub enum ExecutionBackend {
 }
 
 /// Where an artifact RUNS. An axis of its own: one execution backend is
-/// packaged for several platforms (luajit on desktop AND on iOS), and one
+/// packaged for several platforms, and one
 /// platform hosts several backends (the web runs JavaScript and WebAssembly).
 ///
 /// Plan S 20a's detailed payloads (os/arch, browser limits, API level) remain
@@ -78,7 +78,6 @@ pub enum ExecutionBackend {
 pub enum PlatformKind {
     Desktop,
     Web,
-    Ios,
     Android,
     Wasi,
 }
@@ -147,10 +146,6 @@ pub const WEB: PlatformSpec = PlatformSpec {
     caps: PlatformCapabilities {
         host_symbols: false,
     },
-};
-pub const IOS: PlatformSpec = PlatformSpec {
-    kind: PlatformKind::Ios,
-    caps: PlatformCapabilities { host_symbols: true },
 };
 pub const WASI: PlatformSpec = PlatformSpec {
     kind: PlatformKind::Wasi,
@@ -228,19 +223,11 @@ pub const WASM32: ExecutionTargetSpec = ExecutionTargetSpec {
 
 // --- the combinations --------------------------------------------------------
 //
-// Each is a literal over the axes above. In-game GLSL is packaged as Core330 on
-// every platform; the runtime GL context performs the GLES header adaptation.
+// Each is a literal over the axes above.
 
 pub const LUAJIT_DESKTOP: TargetSpec = TargetSpec {
     name: "luajit-desktop",
     platform: DESKTOP,
-    execution: LUAJIT,
-    shader: Some(GLSL_330),
-};
-
-pub const LUAJIT_IOS: TargetSpec = TargetSpec {
-    name: "luajit-ios",
-    platform: IOS,
     execution: LUAJIT,
     shader: Some(GLSL_330),
 };
@@ -268,7 +255,6 @@ pub const WASM32_WASI: TargetSpec = TargetSpec {
 
 pub const ALL: &[TargetSpec] = &[
     LUAJIT_DESKTOP,
-    LUAJIT_IOS,
     JAVASCRIPT_WEB,
     NATIVE_C64_DESKTOP,
     WASM32_WASI,

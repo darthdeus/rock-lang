@@ -4,19 +4,18 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Output};
 
-fn fixture(root: &Path, code: i32, partial: bool) -> std::path::PathBuf {
+fn fixture(root: &Path, code: i32) -> std::path::PathBuf {
     std::fs::write(
         root.join("probe.rock"),
         "@test(returns = 3)\nfn gpu_probe() -> int { return 3 }\n",
     )
     .unwrap();
     let runner = root.join("runner");
-    let available = if partial {
-        "if [ \"$2\" = 300es ]; then\n  input=$(cat)\n  if [ \"$input\" != '[]' ]; then printf '__SKULL__\\tVALUE\\tgpu_probe\\t3\\n'; fi\n  exit 0\nfi\n"
+    if code == 0 {
+        std::fs::write(&runner, "#!/bin/sh\ninput=$(cat)\nif [ \"$input\" != '[]' ]; then printf '__SKULL__\\tVALUE\\tgpu_probe\\t3\\n'; fi\n").unwrap();
     } else {
-        ""
-    };
-    std::fs::write(&runner, format!("#!/bin/sh\n{available}cat >/dev/null\necho 'no GL context: display or GL driver unavailable' >&2\nexit {code}\n")).unwrap();
+        std::fs::write(&runner, format!("#!/bin/sh\ncat >/dev/null\necho 'no GL context: display or GL driver unavailable' >&2\nexit {code}\n")).unwrap();
+    }
     std::fs::set_permissions(&runner, std::fs::Permissions::from_mode(0o755)).unwrap();
     runner
 }
@@ -50,10 +49,10 @@ fn text(output: &Output) -> String {
 }
 
 #[test]
-fn gpu_commands_require_every_profile_by_default() {
+fn gpu_commands_require_a_context_by_default() {
     for shader in [false, true] {
         let root = tempfile::tempdir().unwrap();
-        let runner = fixture(root.path(), 2, true);
+        let runner = fixture(root.path(), 2);
         let output = invoke(root.path(), &runner, shader, false);
         let message = text(&output);
         assert!(
@@ -73,7 +72,7 @@ fn gpu_commands_require_every_profile_by_default() {
 fn skip_gpu_explicitly_reports_unavailable_profiles() {
     for shader in [false, true] {
         let root = tempfile::tempdir().unwrap();
-        let runner = fixture(root.path(), 2, false);
+        let runner = fixture(root.path(), 2);
         let output = invoke(root.path(), &runner, shader, true);
         assert!(output.status.success(), "{}", text(&output));
         assert!(text(&output).contains("SKIPPED"), "{}", text(&output));
@@ -85,7 +84,7 @@ fn skip_gpu_keeps_runner_errors_hard() {
     for shader in [false, true] {
         let root = tempfile::tempdir().unwrap();
         for code in [3, 99] {
-            let runner = fixture(root.path(), code, false);
+            let runner = fixture(root.path(), code);
             let output = invoke(root.path(), &runner, shader, true);
             assert!(!output.status.success());
             assert!(
@@ -130,9 +129,9 @@ fn skip_gpu_is_limited_to_gpu_commands() {
 }
 
 #[test]
-fn skip_gpu_still_executes_available_profiles() {
+fn skip_gpu_still_executes_available_context() {
     let root = tempfile::tempdir().unwrap();
-    let runner = fixture(root.path(), 2, true);
+    let runner = fixture(root.path(), 0);
     let output = invoke(root.path(), &runner, false, true);
     assert!(output.status.success(), "{}", text(&output));
     assert!(
@@ -140,5 +139,5 @@ fn skip_gpu_still_executes_available_profiles() {
         "{}",
         text(&output)
     );
-    assert!(text(&output).contains("SKIPPED"), "{}", text(&output));
+    assert!(!text(&output).contains("SKIPPED"), "{}", text(&output));
 }

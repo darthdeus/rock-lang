@@ -1269,7 +1269,14 @@ fn main() { let n = host_tick(1) }
     );
     let (g, roots) = graph_for(&ws);
     let desktop = artifact::realize(&ws, &g, &ArtifactRequest::new(tp::LUAJIT_DESKTOP, &roots));
-    let ios = artifact::realize(&ws, &g, &ArtifactRequest::new(tp::LUAJIT_IOS, &roots));
+    let android = tp::TargetSpec {
+        platform: tp::PlatformSpec {
+            kind: tp::PlatformKind::Android,
+            ..tp::DESKTOP
+        },
+        ..tp::LUAJIT_DESKTOP
+    };
+    let android = artifact::realize(&ws, &g, &ArtifactRequest::new(android, &roots));
     let host_tick = |view: &artifact::ArtifactView| {
         view.boundaries
             .iter()
@@ -1285,13 +1292,13 @@ fn main() { let n = host_tick(1) }
 
     assert_ne!(
         host_tick(&desktop),
-        host_tick(&ios),
+        host_tick(&android),
         "two platform contracts collapsed to one execution-backend identity"
     );
 }
 
 #[test]
-fn in_game_shader_packaging_uses_the_runtime_adapted_source_profile() {
+fn shader_packaging_uses_the_desktop_source_profile() {
     use skull::target_projection as tp;
 
     assert_eq!(
@@ -1299,17 +1306,12 @@ fn in_game_shader_packaging_uses_the_runtime_adapted_source_profile() {
         Some(tp::ShaderTargetSpec::Glsl(
             skull_codegen_glsl::GlslProfile::Core330,
         )),
-        "in-game packaging no longer carries the runtime-adapted Core330 source"
-    );
-    assert_eq!(
-        tp::LUAJIT_IOS.shader,
-        tp::LUAJIT_DESKTOP.shader,
-        "iOS selected an ES profile at build time instead of runtime adaptation"
+        "shader packaging must carry Core330 source"
     );
     assert_eq!(
         tp::JAVASCRIPT_WEB.shader,
         tp::LUAJIT_DESKTOP.shader,
-        "web selected an ES profile at build time instead of runtime adaptation"
+        "shader packaging must use the supported source profile"
     );
 }
 
@@ -1453,12 +1455,6 @@ fn target_fixtures_are_combinations_of_shared_axes() {
         .enumerate()
         .flat_map(|(i, a)| tp::ALL.iter().skip(i + 1).map(move |b| (a, b)));
     let pairs: Vec<_> = pairs.collect();
-    assert!(
-        pairs
-            .iter()
-            .any(|(a, b)| a.execution == b.execution && a.platform != b.platform),
-        "no complete execution axis is packaged for two platforms"
-    );
     assert!(
         pairs
             .iter()

@@ -198,17 +198,13 @@ fn call_swizzle_texture_evaluates_once() {
                 return {result}
             }}"
         );
-        for profile in [
-            skull_codegen_glsl::GlslProfile::Core330,
-            skull_codegen_glsl::GlslProfile::Es300,
-        ] {
-            let glsl = emit_entry_profile(&src, "sampled", profile).expect("emit");
-            assert_eq!(
-                glsl.matches("texture(scene, tc)").count(),
-                1,
-                "{selection}:\n{glsl}"
-            );
-        }
+        let profile = skull_codegen_glsl::GlslProfile::Core330;
+        let glsl = emit_entry_profile(&src, "sampled", profile).expect("emit");
+        assert_eq!(
+            glsl.matches("texture(scene, tc)").count(),
+            1,
+            "{selection}:\n{glsl}"
+        );
     }
 }
 
@@ -223,19 +219,15 @@ fn fragment_call_swizzles_evaluate_each_call_once() {
             let warp = shade(uv).yx
             return v(base * tint, offset.x + offset.y + warp.x * warp.y)
         }";
-    for profile in [
-        skull_codegen_glsl::GlslProfile::Core330,
-        skull_codegen_glsl::GlslProfile::Es300,
+    let profile = skull_codegen_glsl::GlslProfile::Core330;
+    let glsl = emit_entry_profile(src, "sampled", profile).expect("emit");
+    for call in [
+        "texture(scene, tc)",
+        "texture(scene, uv)",
+        "shade_Vec2(tc)",
+        "shade_Vec2(uv)",
     ] {
-        let glsl = emit_entry_profile(src, "sampled", profile).expect("emit");
-        for call in [
-            "texture(scene, tc)",
-            "texture(scene, uv)",
-            "shade_Vec2(tc)",
-            "shade_Vec2(uv)",
-        ] {
-            assert_eq!(glsl.matches(call).count(), 1, "{call}:\n{glsl}");
-        }
+        assert_eq!(glsl.matches(call).count(), 1, "{call}:\n{glsl}");
     }
 }
 
@@ -490,7 +482,7 @@ fn nested_counted_loops() {
 
 /// A counted loop over a RUNTIME invariant bound folds the bound expression into
 /// the `for` header instead of a hoisted temp (`t = r + 1; for (; y < t; ..)`).
-/// The temp form miscompiles on a GLES/GL driver for the outline_detect kernel
+/// The temp form miscompiles on a GL driver for the outline_detect kernel
 /// (an outline classification shader) even though it is valid GLSL; the inlined bound
 /// is correct, and `r + 1` is loop-invariant (`r` is single-store), so re-reading
 /// it in the condition is sound. Mirrors the outline_detect neighbor-scan shape.
@@ -1234,36 +1226,6 @@ fn fragment_entry_uniforms_are_one_std140_block() {
     );
 }
 
-/// ES300 fullscreen entry: the profile header replaces the hardcoded 330
-/// version line, and BOTH stages carry the precision preamble (ES requires an
-/// explicit float precision in the fragment stage; the vertex declarations are
-/// harmless no-ops there).
-#[test]
-fn fragment_entry_es300_profile() {
-    let src = r#"
-        @shader(fragment)
-        fn blit(scene: Sampler2D, tc: Vec2) -> Vec4 {
-            return texture(scene, tc)
-        }
-    "#;
-    let glsl =
-        emit_entry_profile(src, "blit", skull_codegen_glsl::GlslProfile::Es300).expect("emit");
-    assert!(glsl.starts_with("#version 300 es\n"), "got:\n{glsl}");
-    let px = glsl.find("#ifdef PIXEL").expect("pixel block");
-    let vx = glsl.find("#ifdef VERTEX").expect("vertex block");
-    let pixel_block = &glsl[px..vx];
-    let vertex_block = &glsl[vx..];
-    assert!(
-        pixel_block.contains("precision highp float;"),
-        "got:\n{glsl}"
-    );
-    assert!(
-        vertex_block.contains("precision highp float;"),
-        "got:\n{glsl}"
-    );
-    assert!(!glsl.contains("330"), "no desktop version residue:\n{glsl}");
-}
-
 /// Entry with samplers only (no uniform struct) is legal.
 #[test]
 fn fragment_entry_sampler_only() {
@@ -1380,10 +1342,10 @@ fn a_nobox_value_local_stays_a_single_glsl_vec() {
     );
 }
 
-/// The stdlib `log2` maps to the GLSL builtin on both pinned profiles. The
+/// The stdlib `log2` maps to the GLSL builtin on the desktop profile. The
 /// library path is pinned in `reject.rs`; this pins the profiled entry path.
 #[test]
-fn log2_float_on_both_pinned_profiles() {
+fn log2_float_on_desktop_profile() {
     let src = r#"
         @shader(fragment)
         fn logfrag(scene: Sampler2D, tc: Vec2) -> Vec4 {
@@ -1391,28 +1353,24 @@ fn log2_float_on_both_pinned_profiles() {
             return v(log2(t.r + 1.0), log2(t.g + 1.0), log2(t.b + 1.0), t.a)
         }
     "#;
-    for profile in [
-        skull_codegen_glsl::GlslProfile::Core330,
-        skull_codegen_glsl::GlslProfile::Es300,
-    ] {
-        let glsl = emit_entry_profile(src, "logfrag", profile).expect("emit");
-        assert!(
-            glsl.contains("log2("),
-            "{profile:?} must use the log2 builtin:\n{glsl}"
-        );
-        assert!(
-            !glsl.contains("null"),
-            "{profile:?} must not mention null:\n{glsl}"
-        );
-    }
+    let profile = skull_codegen_glsl::GlslProfile::Core330;
+    let glsl = emit_entry_profile(src, "logfrag", profile).expect("emit");
+    assert!(
+        glsl.contains("log2("),
+        "{profile:?} must use the log2 builtin:\n{glsl}"
+    );
+    assert!(
+        !glsl.contains("null"),
+        "{profile:?} must not mention null:\n{glsl}"
+    );
 }
 
-/// `log2` over vector data on both pinned profiles. A direct `log2(vec)` call
+/// `log2` over vector data on the desktop profile. A direct `log2(vec)` call
 /// is a bone type error in every backend (the stdlib declares the float form
 /// only), so the pinnable shape is the per-component helper; the emitter's
 /// (name, arity) mapping itself is type-agnostic.
 #[test]
-fn log2_vector_components_on_both_pinned_profiles() {
+fn log2_vector_components_on_desktop_profile() {
     let src = r#"
         @pure fn log2v(c: Vec3) -> Vec3 {
             return v(log2(c.x + 1.0), log2(c.y + 1.0), log2(c.z + 1.0))
@@ -1424,28 +1382,24 @@ fn log2_vector_components_on_both_pinned_profiles() {
             return v(l, t.a)
         }
     "#;
-    for profile in [
-        skull_codegen_glsl::GlslProfile::Core330,
-        skull_codegen_glsl::GlslProfile::Es300,
-    ] {
-        let glsl = emit_entry_profile(src, "logfrag", profile).expect("emit");
-        assert!(
-            glsl.contains("vec3 log2v_Vec3(vec3 c) {"),
-            "{profile:?} must emit the vector helper:\n{glsl}"
-        );
-        assert_eq!(
-            glsl.matches("log2(").count(),
-            3,
-            "{profile:?} must map each component call:\n{glsl}"
-        );
-    }
+    let profile = skull_codegen_glsl::GlslProfile::Core330;
+    let glsl = emit_entry_profile(src, "logfrag", profile).expect("emit");
+    assert!(
+        glsl.contains("vec3 log2v_Vec3(vec3 c) {"),
+        "{profile:?} must emit the vector helper:\n{glsl}"
+    );
+    assert_eq!(
+        glsl.matches("log2(").count(),
+        3,
+        "{profile:?} must map each component call:\n{glsl}"
+    );
 }
 
 /// A helper with a float default, called with the argument omitted and
-/// supplied, on both pinned profiles. The call site carries the default value;
+/// supplied, on the desktop profile. The call site carries the default value;
 /// no nil guard survives into the GLSL.
 #[test]
-fn helper_float_default_is_carried_on_both_pinned_profiles() {
+fn helper_float_default_is_carried_on_desktop_profile() {
     let src = r#"
         @pure fn shade(c: Vec4, gain: float = 1.0) -> Vec4 {
             return v(c.r * gain, c.g * gain, c.b * gain, c.a)
@@ -1459,26 +1413,22 @@ fn helper_float_default_is_carried_on_both_pinned_profiles() {
             return shade(texture(scene, tc), 2.0)
         }
     "#;
-    for profile in [
-        skull_codegen_glsl::GlslProfile::Core330,
-        skull_codegen_glsl::GlslProfile::Es300,
-    ] {
-        let omitted = emit_entry_profile(src, "shadefrag", profile).expect("emit");
+    let profile = skull_codegen_glsl::GlslProfile::Core330;
+    let omitted = emit_entry_profile(src, "shadefrag", profile).expect("emit");
+    assert!(
+        omitted.contains("shade_Vec4_float(texture(scene, tc), 1.0)"),
+        "{profile:?} omitted call must carry the default:\n{omitted}"
+    );
+    let explicit = emit_entry_profile(src, "shadefrag_exp", profile).expect("emit");
+    assert!(
+        explicit.contains("shade_Vec4_float(texture(scene, tc), 2.0)"),
+        "{profile:?} explicit call must keep its argument:\n{explicit}"
+    );
+    for glsl in [&omitted, &explicit] {
         assert!(
-            omitted.contains("shade_Vec4_float(texture(scene, tc), 1.0)"),
-            "{profile:?} omitted call must carry the default:\n{omitted}"
+            !glsl.contains("null"),
+            "{profile:?} must not mention null:\n{glsl}"
         );
-        let explicit = emit_entry_profile(src, "shadefrag_exp", profile).expect("emit");
-        assert!(
-            explicit.contains("shade_Vec4_float(texture(scene, tc), 2.0)"),
-            "{profile:?} explicit call must keep its argument:\n{explicit}"
-        );
-        for glsl in [&omitted, &explicit] {
-            assert!(
-                !glsl.contains("null"),
-                "{profile:?} must not mention null:\n{glsl}"
-            );
-        }
     }
 }
 

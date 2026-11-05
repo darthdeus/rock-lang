@@ -12,7 +12,7 @@
 //! the whole content of "one target-neutral graph, several artifact views".
 //!
 //! **The profile is the axis's typed value.** `skull::mir_emit` picks
-//! `Core330` because the runtime GL context performs the GLES adaptation; that
+//! `Core330` for desktop OpenGL; that
 //! is a packaging decision, and a view that re-derived it could not report
 //! what a target actually carries.
 //!

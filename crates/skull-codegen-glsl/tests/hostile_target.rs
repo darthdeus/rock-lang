@@ -599,7 +599,7 @@ fn a_second_target_numbers_attribute_locations_differently() {
 /// `@textures` is one group per PROGRAM, but the GLSL declaration is per
 /// STAGE: each stage's `#ifdef` block is its own translation unit, so a stage
 /// that samples needs the `uniform sampler2D` in its own section. Vertex
-/// texture fetch is legal in GL 3.3 / GLES 3.0, and the vertex stage was
+/// texture fetch is legal in GL 3.3, and the vertex stage was
 /// emitting a reference to an identifier it never declared.
 ///
 /// The fixture has BOTH stages sampling the same group, so the assertion is

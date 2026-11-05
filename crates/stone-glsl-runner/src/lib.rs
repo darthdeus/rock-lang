@@ -11,7 +11,7 @@
 //! this is a transport for `__SKULL__` lines, nothing more (the seam contract).
 //!
 //! Protocol:
-//!   argv:  --profile 330core|300es
+//!   argv:  --profile 330core
 //!   stdin: [{ "name": "...", "vertex": "...", "fragment": "...",
 //!            "ret": "int"|"float"|"bool"|"compile" }, ...]
 //!   stdout (one per job):
@@ -52,9 +52,9 @@ pub fn run() {
         i += 1;
     }
     let profile = match profile {
-        Some(p @ ("330core" | "300es")) => p,
+        Some(p @ "330core") => p,
         _ => {
-            eprintln!("stone-glsl-runner: --profile must be 330core or 300es");
+            eprintln!("stone-glsl-runner: --profile must be 330core");
             std::process::exit(3);
         }
     };
@@ -166,10 +166,6 @@ impl GlCtx {
             "330core" => {
                 gl_attr.set_context_profile(sdl2::video::GLProfile::Core);
                 gl_attr.set_context_version(3, 3);
-            }
-            "300es" => {
-                gl_attr.set_context_profile(sdl2::video::GLProfile::GLES);
-                gl_attr.set_context_version(3, 0);
             }
             _ => return Err(format!("unknown profile `{profile}`")),
         }

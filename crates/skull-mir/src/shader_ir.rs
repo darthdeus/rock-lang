@@ -24,9 +24,7 @@
 use std::fmt::Write as _;
 use ustr::Ustr;
 
-/// Which GLSL dialect an artifact packages: the `#version`
-/// line plus the builtin/precision differences that follow from it. `Core330`
-/// is the desktop default; `Es300` is the mobile GLES target.
+/// The desktop GLSL dialect packaged by an artifact.
 ///
 /// It lives on the NEUTRAL side because it is a property of the TARGET, not of
 /// the emitter: `skull_graph::target_projection::ShaderTargetSpec` names it as
@@ -36,7 +34,6 @@ use ustr::Ustr;
 pub enum GlslProfile {
     #[default]
     Core330,
-    Es300,
 }
 
 use crate::gpu_layout::{ArrayMemberDecl, AttrKind, SamplerKind, WireKind};

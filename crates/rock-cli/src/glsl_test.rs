@@ -17,8 +17,8 @@
 //!      SKIP(reason); that per-profile histogram is the A1 fn-emission work
 //!      list.
 //!
-//! Both profiles (330 core + 300 es) run by default, with per-profile verdicts
-//! (`name [330core]` / `name [300es]`). The heavy lifting -- creating a headless
+//! The desktop profile (330 core) runs by default, with per-profile verdicts
+//! (`name [330core]`). The heavy lifting -- creating a headless
 //! GL context, compiling the shader, drawing to a 1x1 R32I/R32F target and
 //! reading the pixel back -- lives in the standalone external GLSL runner binary
 //! (spawned per unit+profile), so the `rock` compiler/LSP binary never links
@@ -42,15 +42,11 @@ use skull_mir::mir::FuncRef;
 /// territory (24-bit mantissa). int/bool stay exact regardless.
 const GLSL_FLOAT_REL_TOL: f64 = 1e-6;
 
-/// The two emission profiles run by default.
-const PROFILES: [(&str, GlslProfile); 2] = [
-    ("330core", GlslProfile::Core330),
-    ("300es", GlslProfile::Es300),
-];
+const PROFILES: [(&str, GlslProfile); 1] = [("330core", GlslProfile::Core330)];
 
 /// One profile's tallies over the whole run.
 pub struct GlslProfileSummary {
-    /// `"330core"` / `"300es"`.
+    /// `"330core"`.
     pub profile: &'static str,
     pub passed: usize,
     /// FAIL detail lines (a GL compile/link/render error, or a value mismatch).
@@ -74,7 +70,7 @@ pub struct GlslSuiteSummary {
 }
 
 impl GlslSuiteSummary {
-    /// The profile summary for a wire name (`"330core"` / `"300es"`).
+    /// The profile summary for a wire name (`"330core"`).
     pub fn profile(&self, name: &str) -> &GlslProfileSummary {
         self.per_profile
             .iter()
@@ -155,7 +151,7 @@ pub fn glsl_test_run(paths: &[String], print: bool, skip_gpu: bool) -> Result<Gl
     // once per profile: exit 2 requires an explicit GPU opt-out; any other
     // probe anomaly is a hard error.
     let runner = locate_runner()?;
-    let mut gl_available: [bool; 2] = [false, false];
+    let mut gl_available: [bool; PROFILES.len()] = [false; PROFILES.len()];
     for (i, (pname, _)) in PROFILES.iter().enumerate() {
         gl_available[i] = probe_gl(&runner, pname, skip_gpu)?;
     }
@@ -177,7 +173,7 @@ pub fn glsl_test_run(paths: &[String], print: bool, skip_gpu: bool) -> Result<Gl
             .collect(),
     };
     // Per-profile accumulated skip-reason strings (bucketed at the end).
-    let mut skip_reasons: [Vec<String>; 2] = [Vec::new(), Vec::new()];
+    let mut skip_reasons: [Vec<String>; PROFILES.len()] = [Vec::new()];
 
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
@@ -281,8 +277,12 @@ enum UnitOutcome {
 }
 
 /// One isolated test file: parse + bone type-check, discover `@test` fns, then
-/// emit + run the value tests under both profiles.
-fn build_file(file: &str, runner: &std::path::Path, gl_available: &[bool; 2]) -> UnitOutcome {
+/// emit + run the value tests under the desktop profile.
+fn build_file(
+    file: &str,
+    runner: &std::path::Path,
+    gl_available: &[bool; PROFILES.len()],
+) -> UnitOutcome {
     let src = match fs_err::read_to_string(file) {
         Ok(s) => s,
         Err(e) => {
@@ -328,7 +328,11 @@ fn build_file(file: &str, runner: &std::path::Path, gl_available: &[bool; 2]) ->
 
 /// A `stick.toml` package built as ONE workspace (tests included), mirroring
 /// the JS/luajit package path.
-fn build_package(dir: &str, runner: &std::path::Path, gl_available: &[bool; 2]) -> UnitOutcome {
+fn build_package(
+    dir: &str,
+    runner: &std::path::Path,
+    gl_available: &[bool; PROFILES.len()],
+) -> UnitOutcome {
     // Held through the tests: their shaders are emitted from the checked
     // workspace, which stays resident until the unit ends.
     let _slot = match crate::compile_slots::acquire(dir) {
@@ -404,12 +408,12 @@ fn compile_failure(file: &str, src: &str, errs: &[rock_core::CompilerError]) -> 
     }
 }
 
-/// Emit + GPU-run one unit's value tests under both profiles.
+/// Emit + GPU-run one unit's value tests under the desktop profile.
 fn run_tests(
     ws: &bone_semantic::inference::Workspace,
     tests: &[(FuncRef, skull::SkullTest)],
     runner: &std::path::Path,
-    gl_available: &[bool; 2],
+    gl_available: &[bool; PROFILES.len()],
 ) -> UnitOutcome {
     let mut outside_value_class = 0usize;
     // Value tests only (returns=). Non-value @tests are permanently outside the
@@ -619,11 +623,11 @@ fn spawn_runner(
 
 // --- A3: compile-validate registered render shaders on real GL contexts ---
 // (the compiler contract). The value-test corpus above proves the
-// EMITTER on GLES; this proves the shaders games actually register.
+// EMITTER on desktop GL; this proves the shaders games actually register.
 
 /// One profile's tallies over a `shader-validate` run.
 pub struct ValidateProfileSummary {
-    /// `"330core"` / `"300es"`.
+    /// `"330core"`.
     pub profile: &'static str,
     pub passed: usize,
     /// FAIL detail lines (driver compile/link log, or a harness breach).
@@ -694,7 +698,7 @@ pub fn shader_validate_run(
     skip_gpu: bool,
 ) -> Result<ValidateSummary> {
     let runner = locate_runner()?;
-    let mut gl_available: [bool; 2] = [false, false];
+    let mut gl_available: [bool; PROFILES.len()] = [false; PROFILES.len()];
     for (i, (pname, _)) in PROFILES.iter().enumerate() {
         gl_available[i] = probe_gl(&runner, pname, skip_gpu)?;
     }
@@ -965,7 +969,11 @@ mod tests {
         let dir = package.path().to_str().unwrap().to_owned();
         // No GL profile is available, so no runner is spawned.
         crate::compile_slots::assert_compile_waits_for_slot(move || {
-            super::build_package(&dir, std::path::Path::new("unused-runner"), &[false, false]);
+            super::build_package(
+                &dir,
+                std::path::Path::new("unused-runner"),
+                &[false; super::PROFILES.len()],
+            );
         });
     }
 }

@@ -348,16 +348,15 @@ fn bool_match_frag(tc: Vec2) -> Vec4 {
     );
     assert_agree("exhaustive bool-match entry", answers);
 
-    for profile in [GlslProfile::Core330, GlslProfile::Es300] {
-        let (ws, mid) = workspace(src);
-        let out = skull_codegen_glsl::emit_shader_entry(&ws, mid, "bool_match_frag", profile)
-            .expect("a valid bool-match entry must emit under every profile");
-        for arm in ["= 10;", "= 20;"] {
-            assert!(
-                out.contains(arm),
-                "arm `{arm}` must survive under {profile:?}; got:\n{out}"
-            );
-        }
+    let profile = GlslProfile::Core330;
+    let (ws, mid) = workspace(src);
+    let out = skull_codegen_glsl::emit_shader_entry(&ws, mid, "bool_match_frag", profile)
+        .expect("a valid bool-match entry must emit under every profile");
+    for arm in ["= 10;", "= 20;"] {
+        assert!(
+            out.contains(arm),
+            "arm `{arm}` must survive under {profile:?}; got:\n{out}"
+        );
     }
 }
 
@@ -370,7 +369,7 @@ fn bool_match_frag(tc: Vec2) -> Vec4 {
 /// is what this guards. Both sides of the boundary are driven, because the
 /// rejecting side alone cannot show the check admits anything.
 #[test]
-fn the_gles_block_budget_is_enforced_where_shaders_are_planned() {
+fn the_portable_block_budget_is_enforced_where_shaders_are_planned() {
     // Mat4 is 64 std140 bytes, the densest member a block can hold.
     let src = |n: usize| {
         let fields: Vec<String> = (0..n).map(|i| format!("m{i}: Mat4")).collect();

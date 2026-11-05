@@ -556,7 +556,7 @@ const GLSL_INTRINSICS: &[(&str, usize, &str)] = &[
     // Uniform-array indexing (decision 3): `at(arr, i)` on an UniformArray<T>
     // param renders as plain GLSL indexing of the declared uniform array.
     ("at", 2, "$1[$2]"),
-    // Bool-vector tier. isnan/isinf are GLES 3.00 builtins.
+    // Bool-vector tier. isnan/isinf are GLSL builtins.
     // `any` here is arity-1 (Bvec3 reduction) -- distinct from the iterator
     // `any` (arity-2, not a shader intrinsic). `greater_than`/`to_vec3` carry
     // portable Rock bodies for luajit/JS; these templates render the native
@@ -1650,7 +1650,7 @@ impl FnEmit<'_> {
         // `<expr>` is loop-invariant -- a const, or pure int arithmetic over cells
         // that are stored exactly once (their store dominates the preheader, so
         // re-reading in the folded condition yields the same value). Folding it
-        // is not just a cleanup: a GLES/GL driver miscompiles `t = radius + 1; for
+        // is not just a cleanup: a GL driver miscompiles `t = radius + 1; for
         // (; y < t; ..)` for a nested runtime-bounded kernel (the outline_detect
         // classify loop found no neighbors), while the inlined `y < (radius + 1)`
         // is correct; the counted-loop regression covers the emitted bound.
@@ -1907,7 +1907,7 @@ impl FnEmit<'_> {
                         Some(t) => t,
                         // Generic-return genType builtins (min<T>/max<T>/clamp/abs):
                         // GLSL's result type is the argument type. Load-bearing under
-                        // ES300, which has no implicit int->float on assignment.
+                        // GLSL, which requires the correct assignment type.
                         None if matches!(
                             declared_name(cf.name.as_str()),
                             "min" | "max" | "clamp" | "abs"
@@ -4127,7 +4127,7 @@ pub struct ShaderAbiPlan {
     /// either a large copy into every batch or partial-update state. Two blocks
     /// keep whole-block uploads and independent fingerprints.
     pub uniform_array_blocks: Vec<(u32, UniformArrayBlockPlan)>,
-    /// Sampler names in UNIT order -- unit N is index N. GLES 3.0 has no
+    /// Sampler names in UNIT order -- unit N is index N. GLSL 3.30 has no
     /// `layout(binding=)`, so the engine needs each name once to point the
     /// sampler uniform at its unit at link time; after that it binds by slot.
     pub texture_units: Vec<Ustr>,
@@ -4245,7 +4245,7 @@ fn attr_location_span(_k: AttrKind) -> u32 {
 }
 
 /// Texture image units every GLSL target guarantees per stage: GL 4.1 core
-/// (Apple's only desktop context) and GLES 3.0 both promise 16. Desktop Linux
+/// (Apple's only desktop context) guarantees 16. Desktop Linux
 /// drivers allow more, so a program over it linked there and failed to link
 /// on a Mac; checking at compile time makes every host refuse it.
 pub const GLSL_STAGE_SAMPLER_BUDGET: usize = 16;
@@ -4272,7 +4272,7 @@ fn check_stage_sampler_budget(
         span,
         format!(
             "shader `{entry}`: the {name} stage declares {count} samplers, over the \
-         {GLSL_STAGE_SAMPLER_BUDGET} texture units GL 4.1 core (macOS) and GLES 3.0 guarantee \
+         {GLSL_STAGE_SAMPLER_BUDGET} texture units GL 4.1 core (macOS) guarantee \
          per stage -- pack inputs into shared textures"
         ),
     ))
@@ -4686,12 +4686,9 @@ fn render_shader_entry(
         symbol_of_key(f.name)
     ));
 
-    // Both stages carry the profile's precision preamble: ES requires an
-    // explicit fragment float precision, and the vertex declarations are
-    // harmless no-ops (highp is already the vertex default).
-    let (version, precision) = profile_header(profile);
+    let version = profile_header(profile);
     let source = format!(
-        "{version}\n\n#ifdef PIXEL\n\n{precision}{px}\n#endif\n\n#ifdef VERTEX\n\n{precision}{FULLSCREEN_VERTEX}\n#endif\n"
+        "{version}\n\n#ifdef PIXEL\n\n{px}\n#endif\n\n#ifdef VERTEX\n\n{FULLSCREEN_VERTEX}\n#endif\n"
     );
     Ok(ShaderEmission {
         source,
@@ -4740,7 +4737,7 @@ struct VertexShape {
     /// both stages of a program name the same block.
     engine_group: Option<Ustr>,
     /// `@textures` group param indices -- see the field of the same name on
-    /// `FragShape`. Vertex texture fetch is legal in GL 3.3 / GLES 3.0.
+    /// `FragShape`. Vertex texture fetch is legal in GL 3.3.
     texture_params: Vec<usize>,
     /// The `@textures` group's struct name, if the stage declares one.
     texture_group: Option<Ustr>,
@@ -5617,8 +5614,7 @@ fn emit_vertex_stage(
         out.push_str(&uniform_array_block_decl(plan));
     }
     // Samplers are opaque and cannot live in a uniform block, so each stage
-    // declares the ones IT reads. Vertex texture fetch is legal in GL 3.3 /
-    // GLES 3.0, and a stage that samples without declaring emits a reference to
+    // declares the ones IT reads. Vertex texture fetch is legal in GL 3.3, and a stage that samples without declaring emits a reference to
     // an identifier the driver has never seen.
     for (n, t) in &resolved.samplers {
         let (n, t) = (n, *t);
@@ -6267,9 +6263,9 @@ fn render_shader_pipeline(
         &program,
     )?;
 
-    let (version, precision) = profile_header(profile);
+    let version = profile_header(profile);
     let source = format!(
-        "{version}\n\n#ifdef VERTEX\n\n{precision}{vertex_block}\n#endif\n\n#ifdef PIXEL\n\n{precision}{pixel_block}\n#endif\n"
+        "{version}\n\n#ifdef VERTEX\n\n{vertex_block}\n#endif\n\n#ifdef PIXEL\n\n{pixel_block}\n#endif\n"
     );
     let dependencies = vertex_dependencies
         .into_iter()
@@ -6353,15 +6349,10 @@ pub struct ValueTestShaders {
     pub ret: ValueTestRet,
 }
 
-/// The profile's `#version` line plus the fragment-stage precision preamble
-/// (ES needs an explicit float/int precision; core does not).
-fn profile_header(profile: GlslProfile) -> (&'static str, &'static str) {
+/// The desktop GLSL version line.
+fn profile_header(profile: GlslProfile) -> &'static str {
     match profile {
-        GlslProfile::Core330 => ("#version 330 core", ""),
-        GlslProfile::Es300 => (
-            "#version 300 es",
-            "precision highp float;\nprecision highp int;\n",
-        ),
+        GlslProfile::Core330 => "#version 330 core",
     }
 }
 
@@ -6415,14 +6406,14 @@ pub fn emit_value_test(
     let defs = emit_shader_library(ws, mid, std::slice::from_ref(&root.to_string()))?;
     let call = mangle_fn(ws, f);
 
-    let (version, precision) = profile_header(profile);
+    let version = profile_header(profile);
     let (out_ty, out_expr) = match ret {
         ValueTestRet::Int => ("int", format!("{call}()")),
         ValueTestRet::Float => ("float", format!("{call}()")),
         ValueTestRet::Bool => ("int", format!("({call}() ? 1 : 0)")),
     };
     let fragment = format!(
-        "{version}\n{precision}\n{defs}\nlayout(location = 0) out {out_ty} _rock_value_out;\n\
+        "{version}\n\n{defs}\nlayout(location = 0) out {out_ty} _rock_value_out;\n\
          void main() {{\n  _rock_value_out = {out_expr};\n}}\n"
     );
     // A fullscreen triangle from gl_VertexID -- no vertex buffers/attributes, so
@@ -7248,23 +7239,6 @@ mod value_test_shader {
             "{}",
             s.fragment
         );
-    }
-
-    #[test]
-    fn es_profile_carries_version_and_precision() {
-        let (ws, mid) = build_ws("fn t() -> float { return abs(-6.5) }");
-        let s = emit_value_test(&ws, mid, "t", GlslProfile::Es300).expect("emit");
-        assert!(
-            s.fragment.starts_with("#version 300 es\n"),
-            "{}",
-            s.fragment
-        );
-        assert!(
-            s.fragment.contains("precision highp float;"),
-            "{}",
-            s.fragment
-        );
-        assert!(s.vertex.starts_with("#version 300 es\n"), "{}", s.vertex);
     }
 
     #[test]

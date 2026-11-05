@@ -2434,10 +2434,7 @@ fn view_driven_specialized_chunks(
 /// Emit the whole workspace via the new (cell-model) path. `user_mid` is the
 /// entry module (kept for signature parity with the old `emit_workspace`; the
 /// new path is uniformly lenient across all modules today). Registered shaders
-/// always emit Core330: the profile is a property of the GL context, not the
-/// build, and the engine rewrites the version line + precision preamble for
-/// GLES at shader-compile time (the renderer GLES adapter) -- which is
-/// the only thing the two profiles differ by.
+/// emit Core330 for desktop OpenGL.
 pub fn emit_workspace_mir(ws: &Workspace, user_mid: ModuleId) -> Result<MirEmit, CompilerError> {
     emit_workspace_mir_in(ws, user_mid, None)
 }
@@ -5404,10 +5401,6 @@ fn shader_registration_lines(
     view: &crate::shader_artifact::ShaderArtifactView,
     renderer_target: RendererTarget,
 ) -> Result<ShaderRegistrations, CompilerError> {
-    // Always Core330. The profile is a property of the GL context, which a build
-    // cannot know: the engine rewrites #version + precision for GLES at
-    // shader-compile time (the renderer GLES adapter), and that header is
-    // the ONLY difference between the two profiles.
     let profile = skull_codegen_glsl::GlslProfile::Core330;
     if view.profile != profile || view.program_views.len() != collection.pairs.len() {
         return Err(CompilerError::new_no_location(

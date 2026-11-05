@@ -170,11 +170,6 @@ pub struct StickConfig {
     /// The renderer is a build-time choice, independent of optional engine
     /// capabilities such as wgpu compute.
     pub renderer: Option<RendererConfig>,
-    /// Optional iOS bundle settings. Read by deploy scripts when they write
-    /// Info.plist -- orientation is a
-    /// build-time property of the bundle, not something the running game can
-    /// choose, so it cannot live in `GameConfig`. Default: landscape.
-    pub ios: Option<IosConfig>,
     /// Declared compile-time inputs (`build_var(..)`) and release channels.
     /// Commands are run by the CLI once per session build, before compilation;
     /// the compiler only ever sees resolved values.
@@ -400,47 +395,6 @@ pub fn dependency_matches_channel(dep: &Dependency, channel: &str) -> bool {
         Dependency::Detailed(detailed) => {
             detailed.channels.is_empty() || detailed.channels.iter().any(|c| c == channel)
         }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct IosConfig {
-    /// `landscape` | `portrait` | `all`. None = unset, deploy uses landscape.
-    pub orientation: Option<String>,
-}
-
-impl<'de> serde::Deserialize<'de> for IosConfig {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct Vis;
-        impl<'de> serde::de::Visitor<'de> for Vis {
-            type Value = IosConfig;
-            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                write!(f, "IosConfig struct")
-            }
-            fn visit_map<A: serde::de::MapAccess<'de>>(
-                self,
-                mut map: A,
-            ) -> Result<IosConfig, A::Error> {
-                let mut orientation: Option<String> = None;
-                while let Some(key) = map.next_key::<String>()? {
-                    match key.as_str() {
-                        "orientation" => {
-                            orientation = Some(map.next_value()?);
-                        }
-                        other => {
-                            // Fail closed: a misspelled key here would silently
-                            // ship the default orientation, and the only symptom
-                            // is a phone that rotates when it shouldn't.
-                            return Err(serde::de::Error::custom(format!(
-                                "unknown key `{other}` in [ios]; known keys: orientation"
-                            )));
-                        }
-                    }
-                }
-                Ok(IosConfig { orientation })
-            }
-        }
-        d.deserialize_map(Vis)
     }
 }
 
@@ -963,7 +917,6 @@ impl<'de> serde::Deserialize<'de> for StickConfig {
                 let mut package: Option<Package> = None;
                 let mut engine: Option<EngineConfig> = None;
                 let mut renderer: Option<RendererConfig> = None;
-                let mut ios: Option<IosConfig> = None;
                 let mut build: Option<BuildConfig> = None;
                 let mut release: Option<ReleaseConfig> = None;
                 let mut assets: Option<AssetsConfig> = None;
@@ -994,9 +947,6 @@ impl<'de> serde::Deserialize<'de> for StickConfig {
                         "renderer" => {
                             renderer = map.next_value()?;
                         }
-                        "ios" => {
-                            ios = map.next_value()?;
-                        }
                         "language" => {
                             language = map.next_value()?;
                         }
@@ -1009,7 +959,7 @@ impl<'de> serde::Deserialize<'de> for StickConfig {
                         other => {
                             return Err(serde::de::Error::custom(format!(
                                 "unknown key `{other}` at top level; known keys: package, build, release, \
-                                 assets, sound, engine, renderer, ios, language, dependencies, source_groups"
+                                 assets, sound, engine, renderer, language, dependencies, source_groups"
                             )));
                         }
                     }
@@ -1019,7 +969,6 @@ impl<'de> serde::Deserialize<'de> for StickConfig {
                     package,
                     engine,
                     renderer,
-                    ios,
                     build,
                     release,
                     assets,
@@ -1183,33 +1132,6 @@ impl StickConfig {
 
     pub fn validate_renderer(&self) -> Result<()> {
         self.renderer_backend().map(|_| ())
-    }
-
-    /// Recognised values for `[ios] orientation` in bundle generation.
-    pub const KNOWN_IOS_ORIENTATIONS: [&'static str; 3] = ["landscape", "portrait", "all"];
-
-    /// The orientation the iOS bundle should pin, if the manifest sets one.
-    /// The deploy scripts default to landscape when this is None.
-    pub fn ios_orientation(&self) -> Option<&str> {
-        self.ios.as_ref()?.orientation.as_deref()
-    }
-
-    /// Reject a bad `[ios] orientation` at build time. Without this the deploy
-    /// script sees an unrecognised string; the failure mode is a phone that
-    /// rotates freely, which thrashes canvas re-init hard enough to look like
-    /// a hang.
-    pub fn validate_ios(&self) -> Result<()> {
-        let Some(orientation) = self.ios_orientation() else {
-            return Ok(());
-        };
-        if !Self::KNOWN_IOS_ORIENTATIONS.contains(&orientation) {
-            anyhow::bail!(
-                "stick.toml: unknown [ios] orientation {:?}. Known: {:?}",
-                orientation,
-                Self::KNOWN_IOS_ORIENTATIONS
-            );
-        }
-        Ok(())
     }
 
     /// Reject a malformed `[build]` section at load time: a var with zero or
@@ -1903,46 +1825,6 @@ mod tests {
     }
 
     #[test]
-    fn ios_orientation_round_trips() {
-        let cfg = StickConfig::new_from_str(
-            "[package]\nname = \"x\"\n[ios]\norientation = \"portrait\"\n",
-        )
-        .unwrap();
-        assert_eq!(cfg.ios_orientation(), Some("portrait"));
-        cfg.validate_ios().expect("portrait is a known orientation");
-    }
-
-    #[test]
-    fn ios_orientation_defaults_to_unset() {
-        let cfg = StickConfig::new_from_str("[package]\nname = \"x\"\n").unwrap();
-        assert_eq!(cfg.ios_orientation(), None);
-        cfg.validate_ios().expect("no ios section is fine");
-    }
-
-    #[test]
-    fn validate_ios_rejects_bad_orientation() {
-        // The deploy script would otherwise write an Info.plist with no
-        // recognised orientation and the phone rotates freely -- which thrashes
-        // canvas re-init hard enough to look like a hang.
-        let cfg = StickConfig::new_from_str(
-            "[package]\nname = \"x\"\n[ios]\norientation = \"sideways\"\n",
-        )
-        .unwrap();
-        let err = cfg
-            .validate_ios()
-            .expect_err("bad orientation must be rejected");
-        let msg = format!("{}", err);
-        assert!(
-            msg.contains("sideways"),
-            "error mentions the bad value: {msg}"
-        );
-        assert!(
-            msg.contains("portrait"),
-            "error suggests the known list: {msg}"
-        );
-    }
-
-    #[test]
     fn top_package_and_engine_reject_unknown_keys() {
         for (toml, key, table) in [
             (
@@ -1970,14 +1852,16 @@ mod tests {
     }
 
     #[test]
-    fn ios_section_rejects_unknown_key() {
-        // A misspelled key would ship the default orientation silently.
+    fn retired_ios_section_rejects() {
         let err = StickConfig::new_from_str(
-            "[package]\nname = \"x\"\n[ios]\norientaton = \"portrait\"\n",
+            "[package]\nname = \"x\"\n[ios]\norientation = \"portrait\"\n",
         )
-        .expect_err("unknown [ios] key must be rejected");
+        .expect_err("retired [ios] section must be rejected");
         let msg = format!("{}", err);
-        assert!(msg.contains("orientaton"), "error names the bad key: {msg}");
+        assert!(
+            msg.contains("unknown key `ios`"),
+            "error names the bad key: {msg}"
+        );
     }
 
     #[test]
