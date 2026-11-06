@@ -1,4 +1,0 @@
-enum SimpleOption {
-    None,
-    Some(int),
-}
