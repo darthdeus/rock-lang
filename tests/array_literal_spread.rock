@@ -1,0 +1,210 @@
+// `...` spread of struct values and tuples (literals, locals and call
+// results) inside array literals. Rejected spreads are in
+// tests/errors/types/struct_spread_heterogeneous.rock.err.
+
+// -- Struct spread --
+
+struct FixVec2 {
+    x: float,
+    y: float,
+}
+
+struct Color {
+    r: float,
+    g: float,
+    b: float,
+    a: float,
+}
+
+fn check_homogeneous_struct_spread() {
+    let pos = FixVec2 { x: 10.0, y: 20.0 }
+    let coords = [...pos, 0.0]  // [pos.x, pos.y, 0.0]
+
+    assert_eq(vec_len(coords), 3)
+    assert_eq(vec_get(coords, 0).unwrap(), 10.0)
+    assert_eq(vec_get(coords, 1).unwrap(), 20.0)
+    assert_eq(vec_get(coords, 2).unwrap(), 0.0)
+
+    let color = Color { r: 1.0, g: 0.5, b: 0.0, a: 1.0 }
+    let rgba = [...color]  // [color.r, color.g, color.b, color.a]
+
+    assert_eq(vec_len(rgba), 4)
+    assert_eq(vec_get(rgba, 0).unwrap(), 1.0)
+    assert_eq(vec_get(rgba, 1).unwrap(), 0.5)
+    assert_eq(vec_get(rgba, 2).unwrap(), 0.0)
+    assert_eq(vec_get(rgba, 3).unwrap(), 1.0)
+}
+
+fn check_mixed_struct_and_literal_spread() {
+    let pos = FixVec2 { x: 5.0, y: 15.0 }
+    let vertex = [0.0, ...pos, 25.0, 1.0]
+
+    assert_eq(vec_len(vertex), 5)
+    assert_eq(vec_get(vertex, 0).unwrap(), 0.0)   // literal
+    assert_eq(vec_get(vertex, 1).unwrap(), 5.0)   // pos.x
+    assert_eq(vec_get(vertex, 2).unwrap(), 15.0)  // pos.y
+    assert_eq(vec_get(vertex, 3).unwrap(), 25.0)  // literal
+    assert_eq(vec_get(vertex, 4).unwrap(), 1.0)   // literal
+}
+
+@test
+fn struct_spread_in_array_literal() {
+    check_homogeneous_struct_spread()
+    check_mixed_struct_and_literal_spread()
+}
+
+// -- Tuple literal spread --
+
+fn check_tuple_literal_spread() {
+    let array1 = [0.5, ...(1.0, 2.0), 3.0]
+    assert_eq(vec_len(array1), 4)
+    assert_eq(vec_get(array1, 0).unwrap(), 0.5)
+    assert_eq(vec_get(array1, 1).unwrap(), 1.0)
+    assert_eq(vec_get(array1, 2).unwrap(), 2.0)
+    assert_eq(vec_get(array1, 3).unwrap(), 3.0)
+
+    let array2 = [...(10.0, 20.0), ...(30.0, 40.0), 50.0]
+    assert_eq(vec_len(array2), 5)
+    assert_eq(vec_get(array2, 0).unwrap(), 10.0)
+    assert_eq(vec_get(array2, 1).unwrap(), 20.0)
+    assert_eq(vec_get(array2, 2).unwrap(), 30.0)
+    assert_eq(vec_get(array2, 3).unwrap(), 40.0)
+    assert_eq(vec_get(array2, 4).unwrap(), 50.0)
+}
+
+fn check_mixed_tuple_spreads() {
+    let mixed = [0.0, ...(1.0, 2.0), ...(3.0, 4.0), 5.0]
+    assert_eq(vec_len(mixed), 6)
+    assert_eq(vec_get(mixed, 0).unwrap(), 0.0)
+    assert_eq(vec_get(mixed, 1).unwrap(), 1.0)
+    assert_eq(vec_get(mixed, 2).unwrap(), 2.0)
+    assert_eq(vec_get(mixed, 3).unwrap(), 3.0)
+    assert_eq(vec_get(mixed, 4).unwrap(), 4.0)
+    assert_eq(vec_get(mixed, 5).unwrap(), 5.0)
+}
+
+fn check_three_element_tuple_literal() {
+    let array1 = [1.0, ...(2.0, 3.0, 4.0), 5.0]
+    assert_eq(vec_len(array1), 5)
+    assert_eq(vec_get(array1, 0).unwrap(), 1.0)
+    assert_eq(vec_get(array1, 1).unwrap(), 2.0)
+    assert_eq(vec_get(array1, 2).unwrap(), 3.0)
+    assert_eq(vec_get(array1, 3).unwrap(), 4.0)
+    assert_eq(vec_get(array1, 4).unwrap(), 5.0)
+}
+
+fn check_vertex_data_pattern() {
+    let x = 100.0
+    let y = 200.0
+    let z_depth = 0.5
+    let r = 1.0
+    let g = 0.5
+    let b = 0.0
+    let a = 1.0
+    let u = 0.0
+    let v = 1.0
+    let snap_value = 1.0
+
+    let vertices_old = [
+        x, y, z_depth, r, g, b, a, u, v, snap_value,
+        x + 10.0, y, z_depth, r, g, b, a, u + 0.1, v, snap_value,
+        x + 10.0, y + 10.0, z_depth, r, g, b, a, u + 0.1, v + 0.1, snap_value,
+        x, y + 10.0, z_depth, r, g, b, a, u, v + 0.1, snap_value
+    ]
+
+    let vertices_new = [
+        x, y, z_depth, ...(1.0, 0.5, 0.0, 1.0), u, v, snap_value,
+        x + 10.0, y, z_depth, ...(1.0, 0.5, 0.0, 1.0), u + 0.1, v, snap_value,
+        x + 10.0, y + 10.0, z_depth, ...(1.0, 0.5, 0.0, 1.0), u + 0.1, v + 0.1, snap_value,
+        x, y + 10.0, z_depth, ...(1.0, 0.5, 0.0, 1.0), u, v + 0.1, snap_value
+    ]
+
+    assert_eq(vec_len(vertices_old), 40)
+    assert_eq(vec_len(vertices_new), 40)
+
+    assert_eq(vec_get(vertices_new, 2).unwrap(), z_depth)  // z_depth in first vertex
+    assert_eq(vec_get(vertices_new, 3).unwrap(), r)        // red component
+    assert_eq(vec_get(vertices_new, 12).unwrap(), z_depth) // z_depth in second vertex
+    assert_eq(vec_get(vertices_new, 13).unwrap(), r)       // red component
+}
+
+@test
+fn tuple_literal_spread_in_array_literal() {
+    check_tuple_literal_spread()
+    check_mixed_tuple_spreads()
+    check_three_element_tuple_literal()
+    check_vertex_data_pattern()
+}
+
+// -- Tuple variable and call-result spread --
+
+@test
+fn homogeneous_tuple_spread_into_typed_array() {
+    let nums = (1, 2, 3)
+    let array: [int] = [...nums, 4]
+
+    assert_eq(vec_len(array), 4)
+    assert_eq(vec_get(array, 0).unwrap(), 1)
+    assert_eq(vec_get(array, 3).unwrap(), 4)
+}
+
+fn check_basic_tuple_var_spread() {
+    let x = (1, 2, 3)
+    let array = [0, ...x, 4]
+
+    assert_eq(vec_len(array), 5)
+    assert_eq(vec_get(array, 0).unwrap(), 0)
+    assert_eq(vec_get(array, 1).unwrap(), 1)
+    assert_eq(vec_get(array, 2).unwrap(), 2)
+    assert_eq(vec_get(array, 3).unwrap(), 3)
+    assert_eq(vec_get(array, 4).unwrap(), 4)
+}
+
+fn check_multiple_tuple_vars() {
+    let a = (10, 20)
+    let b = (30, 40)
+    let array = [...a, ...b, 50]
+
+    assert_eq(vec_len(array), 5)
+    assert_eq(vec_get(array, 0).unwrap(), 10)
+    assert_eq(vec_get(array, 1).unwrap(), 20)
+    assert_eq(vec_get(array, 2).unwrap(), 30)
+    assert_eq(vec_get(array, 3).unwrap(), 40)
+    assert_eq(vec_get(array, 4).unwrap(), 50)
+}
+
+fn check_mixed_var_and_literal() {
+    let t = (1.0, 2.0, 3.0)
+    let array = [0.0, ...t, ...(4.0, 5.0), 6.0]
+
+    assert_eq(vec_len(array), 7)
+    assert_eq(vec_get(array, 0).unwrap(), 0.0)
+    assert_eq(vec_get(array, 1).unwrap(), 1.0)
+    assert_eq(vec_get(array, 2).unwrap(), 2.0)
+    assert_eq(vec_get(array, 3).unwrap(), 3.0)
+    assert_eq(vec_get(array, 4).unwrap(), 4.0)
+    assert_eq(vec_get(array, 5).unwrap(), 5.0)
+    assert_eq(vec_get(array, 6).unwrap(), 6.0)
+}
+
+fn make_tuple() -> (int, int, int) {
+    (100, 200, 300)
+}
+
+fn check_function_return_tuple() {
+    let array = [...make_tuple(), 400]
+
+    assert_eq(vec_len(array), 4)
+    assert_eq(vec_get(array, 0).unwrap(), 100)
+    assert_eq(vec_get(array, 1).unwrap(), 200)
+    assert_eq(vec_get(array, 2).unwrap(), 300)
+    assert_eq(vec_get(array, 3).unwrap(), 400)
+}
+
+@test
+fn tuple_variable_spread_in_array_literal() {
+    check_basic_tuple_var_spread()
+    check_multiple_tuple_vars()
+    check_mixed_var_and_literal()
+    check_function_return_tuple()
+}
