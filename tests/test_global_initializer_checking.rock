@@ -1,20 +1,13 @@
 // Test that global initializers are properly type-checked
 
-// Test 1: Undefined variable in global initializer should fail
-// @test expected_error: undefined variable
-// global bad_global: int = undefined_variable
+// Rejected initializers are in tests/errors/global_initializers.rock.err.
 
-// Test 2: Type mismatch in global initializer should fail
-// @test expected_error: type mismatch
-// global wrong_type: int = "not an int"
-
-// Test 3: Valid global initializer should work
 global good_global: int = 42
 
-// Test 4: Typed global with a string initializer
+// Typed global with a string initializer
 global inferred_global: string = "hello"
 
-// Test 5: Global referencing another global should work
+// Global referencing another global should work
 global dependent_global: int = good_global + 10
 
 @test

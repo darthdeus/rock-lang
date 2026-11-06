@@ -1,0 +1,19 @@
+//! Error: global initializers are resolved and type-checked like any other
+//!        expression.
+//! Tags: globals, types
+
+//=== TEST CASE: undefined_name_UndefinedGlobal ===
+//! expect: Undefined global `undefined_variable`
+global bad_global: int = undefined_variable
+
+fn main() {
+    print("{bad_global}")
+}
+
+//=== TEST CASE: initializer_type_mismatch_TypeMismatch ===
+//! expect: type mismatch: expected `int`, found `string`
+global wrong_type: int = "not an int"
+
+fn main() {
+    print("{wrong_type}")
+}

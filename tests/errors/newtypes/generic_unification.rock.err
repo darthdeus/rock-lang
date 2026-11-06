@@ -1,0 +1,27 @@
+//! Error: a generic newtype constructor must unify its argument with the
+//!        wrapped type pattern; a conflicting or wrongly shaped argument is
+//!        rejected.
+//! Tags: newtypes, generics, inference
+
+//=== TEST CASE: map_key_value_conflict_TypeMismatch ===
+// Map<T, T> requires the key and value positions to bind the same T;
+// Map<int, string> binds T to two different types.
+//! expect: type mismatch: expected `int`, found `string`
+newtype Diag<T>(Map<T, T>)
+
+fn main() {
+    let m: Map<int, string> = map_new()
+    m[1] = "x"
+    let d = Diag(m)
+    print(d.0[1])
+}
+
+//=== TEST CASE: non_app_arg_for_app_pattern_TypeMismatch ===
+// The pattern is Entity<T>; a plain int cannot match a type application.
+//! expect: type mismatch: expected `Entity<T>`, found `int`
+newtype Wrap<T>(Entity<T>)
+
+fn main() {
+    let w = Wrap(42)
+    print(w)
+}

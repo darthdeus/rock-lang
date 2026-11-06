@@ -471,6 +471,5 @@ fn test_g_used_as_map_key() {
     print(m[GKey(1)])
 }
 
-// Negative adversarial cases live in standalone files
-// (`tests/newtype_generic_unification_reject_*.rock`) because
-// `@test(expect_failure = true)` requires the whole file to fail.
+// Rejected unifications are in
+// tests/errors/newtypes/generic_unification.rock.err.
