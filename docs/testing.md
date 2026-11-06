@@ -173,20 +173,26 @@ Run the Rust suites for every crate changed, for example:
 cargo test --locked -p bone-semantic -p bone-inference -p skull-mir
 ```
 
-The semantic fixture suite can also be narrowed to an existing file:
+The semantic fixture suite keeps its own `datatest-stable` binary and can be
+narrowed to an existing file:
 
 ```sh
 cargo test --locked -p bone-semantic --test fixtures or_patterns
 ```
 
-The `bone-incremental`, `bone-lints`, `bone-query`, `skull`, `skull-codegen-glsl`,
-`skull-codegen-js` and `skull-mir` integration suites share a harness per suite
-instead of linking the compiler into a binary for every file. Register new
+The `bone-incremental`, `bone-lints`, `bone-query`, `bone-semantic`, `rock-cli`,
+`skull`, `skull-codegen-glsl`, `skull-codegen-js`, `skull-fmt`, `skull-mir` and
+`skull-transform` integration suites share a harness per suite instead of
+linking the compiler into a binary for every file. Register new
 integration-test modules in their `tests/main.rs`; automatic test-file discovery
-is disabled for these crates. Filter by module or test name, for example:
+is disabled for these crates. Targets that need their own process or harness,
+such as `bone-semantic`'s `fixtures` and `rock-cli`'s `child_lifetime`, stay
+listed separately in the crate's `Cargo.toml`. Filter by module or test name, for
+example:
 
 ```sh
 cargo test --locked -p bone-lints unused_var::
+cargo test --locked -p bone-semantic --test bone_semantic_tests structural::
 ```
 
 For new coverage, observe failure before implementing the change where possible.
