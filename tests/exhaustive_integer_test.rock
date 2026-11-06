@@ -26,3 +26,54 @@ fn test_single_wildcard_exhaustive() {
     assert_eq(result, "other")
     print("Wildcard integer exhaustiveness test passed")
 }
+
+@test
+fn test_negative_ranges_exhaustive() {
+    let x = -5
+
+    let result = match x {
+        ..=-10 => "very_negative",
+        -9..=-1 => "negative",
+        0 => "zero",
+        1.. => "positive"
+    }
+
+    assert_eq(result, "negative")
+}
+
+@test
+fn test_or_pattern_ranges_exhaustive() {
+    let x = 2
+
+    let result = match x {
+        ..=1 | 3.. => "not_two",
+        2 => "two"
+    }
+
+    assert_eq(result, "two")
+}
+
+@test
+fn test_overlapping_ranges_exhaustive() {
+    let x = 7
+
+    let result = match x {
+        ..=10 => "low",
+        5.. => "high"
+    }
+
+    assert_eq(result, "low")
+}
+
+@test
+fn test_guarded_arm_with_binding_catch_all() {
+    let x = 12
+
+    let result = match x {
+        n if n > 10 => "big",
+        1..=10 => "small",
+        n => "other"
+    }
+
+    assert_eq(result, "big")
+}

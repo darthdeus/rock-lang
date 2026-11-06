@@ -1,0 +1,116 @@
+//! Error: a `match` on an integer must cover the whole domain. Without a
+//!        wildcard or binding arm, the unguarded literal and range arms have
+//!        to cover every value; otherwise an uncovered value reaches the
+//!        unreachable fallthrough block at runtime.
+//! Tags: patterns, match, exhaustiveness, integers
+
+//=== TEST CASE: single_range_NonExhaustive ===
+//! expect: Non-exhaustive match expression. Missing patterns: `..=0`, `11..`
+fn main() {
+    let x = 50
+    let result = match x {
+        1..=10 => "small"
+    }
+    print(result)
+}
+
+//=== TEST CASE: range_gap_NonExhaustive ===
+//! expect: Missing patterns: `6`
+fn main() {
+    let x = 6
+    let result = match x {
+        ..=0 => "low"
+        1..=5 => "mid"
+        7.. => "high"
+    }
+    print(result)
+}
+
+//=== TEST CASE: exclusive_end_gap_NonExhaustive ===
+//! expect: Missing patterns: `5`
+fn main() {
+    let x = 5
+    let result = match x {
+        ..=-1 => "negative"
+        0..5 => "small"
+        6.. => "large"
+    }
+    print(result)
+}
+
+//=== TEST CASE: overlapping_ranges_NonExhaustive ===
+//! expect: Missing patterns: `..=-1`, `21..`
+fn main() {
+    let x = 30
+    let result = match x {
+        0..=10 => "a"
+        5..=20 => "b"
+    }
+    print(result)
+}
+
+//=== TEST CASE: guarded_arm_does_not_cover_NonExhaustive ===
+//! expect: Missing patterns: `1..`
+fn main() {
+    let x = 3
+    let result = match x {
+        ..=0 => "low"
+        n if n > 0 => "high"
+    }
+    print(result)
+}
+
+//=== TEST CASE: guarded_range_does_not_cover_NonExhaustive ===
+//! expect: Missing patterns: `..=-1`
+fn main() {
+    let x = -3
+    let flag = false
+    let result = match x {
+        ..=-1 if flag => "negative"
+        0.. => "non-negative"
+    }
+    print(result)
+}
+
+//=== TEST CASE: literals_only_NonExhaustive ===
+//! expect: Missing patterns: `..=-1`, `3..`
+fn main() {
+    let x = 7
+    let result = match x {
+        0 => "zero"
+        1 => "one"
+        2 => "two"
+    }
+    print(result)
+}
+
+//=== TEST CASE: negative_ranges_NonExhaustive ===
+//! expect: Missing patterns: `0`
+fn main() {
+    let x = 0
+    let result = match x {
+        ..=-10 => "very negative"
+        -9..=-1 => "negative"
+        1.. => "positive"
+    }
+    print(result)
+}
+
+//=== TEST CASE: or_pattern_gap_NonExhaustive ===
+//! expect: Missing patterns: `2`
+fn main() {
+    let x = 2
+    let result = match x {
+        ..=1 | 3.. => "not two"
+    }
+    print(result)
+}
+
+//=== TEST CASE: statement_match_NonExhaustive ===
+//! expect: Missing patterns: `..=0`, `2..`
+fn main() {
+    let x = 4
+    match x {
+        1 => print("one")
+    }
+}
