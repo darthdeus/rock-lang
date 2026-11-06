@@ -1,0 +1,30 @@
+//! Error: a match over an enum must cover every variant or have a catch-all arm.
+//! Tags: patterns, enums, match, exhaustiveness
+
+//=== TEST CASE: missing_plain_variant_NonExhaustive ===
+//! expect: Non-exhaustive match expression. Missing patterns: Blue
+enum Color { Red, Green, Blue }
+
+fn main() {
+    let color = Color::Red
+    let name = match color {
+        Color::Red => "red",
+        Color::Green => "green"
+    }
+    print(name)
+}
+
+//=== TEST CASE: missing_generic_variant_NonExhaustive ===
+//! expect: Non-exhaustive match expression. Missing patterns: None
+enum Option<T> {
+    None,
+    Some(T),
+}
+
+fn main() {
+    let opt: Option<int> = Option::Some(42)
+    let value = match opt {
+        Option::Some(n) => n
+    }
+    print("{value}")
+}
