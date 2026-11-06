@@ -79,7 +79,7 @@ jobs:
       - name: Install wasm target
         run: rustup target add wasm32-unknown-unknown
       - name: Check wasm libraries
-        run: cargo check --locked --lib --target wasm32-unknown-unknown -p skull-fmt -p skull -p skull-codegen-glsl -p skull-codegen-wgsl -p rock-stdlib -p bone-incremental -p bone-lints -p rock-lsp -p rock-wasm
+        run: cargo check --locked --lib --target wasm32-unknown-unknown -p skull-fmt -p skull -p skull-codegen-glsl -p rock-stdlib -p bone-incremental -p bone-lints -p rock-lsp -p rock-wasm
       - name: Build the playground (wasm module and stdlib)
         run: playground/build.sh
       - name: Wasm smoke test against native output
