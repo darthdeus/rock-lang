@@ -1,0 +1,45 @@
+// @debug_impure — marks a function whose only side effect is debug
+// observation. A `@pure` function that calls a `@debug_impure` fn
+// gets demoted to NotPure AND emits a compiler WARNING (not error),
+// so adding `print(x)` to a pure helper for debugging doesn't break
+// compilation.
+//
+// This test: we cannot directly assert the warning from Rock, but
+// we can assert (a) compilation succeeds, (b) the demoted function
+// still behaves correctly at runtime, and (c) the annotation stops
+// the pure-verification from erroring.
+
+@debug_impure
+inline(lua) fn trace_int(n: int) = "-- trace {n}"
+
+// A `@pure` fn that calls `trace_int`. Without @debug_impure, this
+// would be a compile error because inline(lua) isn't verifiable. With
+// the annotation, compilation succeeds (the purity demotion is a
+// warning), and the function still computes correctly.
+@pure
+fn noisy_identity(n: int) -> int {
+    trace_int(n)
+    return n
+}
+
+@test(output = "7")
+fn test_debug_impure_demotes_but_compiles() {
+    let x = noisy_identity(7)
+    print(x)
+}
+
+// A chain where the `@pure` caller calls a plain helper that calls
+// `print`. This version tests that `@pure` on a fn directly invoking
+// `print` (stdlib-annotated @debug_impure) emits a warning and keeps
+// compiling. The demoted fn still works at runtime.
+@pure
+fn shout(n: int) -> int {
+    print("shout")
+    return n * 2
+}
+
+@test(output = "shout\n20")
+fn test_pure_with_print_debug_impure() {
+    let r = shout(10)
+    print(r)
+}

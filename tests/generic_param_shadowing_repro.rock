@@ -1,0 +1,81 @@
+// Generic parameter shadowing: function-local generic params should take
+// precedence over top-level struct/enum names.
+
+struct B<T> {
+    val: T,
+}
+
+// Before the fix, just declaring struct B<T> breaks because stdlib's
+// `inline(lua) fn transmute<A, B>(x: A) -> B` tries to resolve the
+// second B as the user struct (which requires <T>) instead of as the
+// function's own generic parameter.
+@test(output = "ok")
+fn test_just_declaring_struct_B() {
+    let b: B<int> = B { val: 5 }
+    print("ok")
+}
+
+// User-defined function where param name matches a user struct name.
+fn identity_param<B>(x: B) -> B {
+    return x
+}
+
+@test(output = "42")
+fn test_user_generic_param_shadows_struct() {
+    let r = identity_param(42)
+    print(r)
+}
+
+// Generic param shadows an enum.
+enum E {
+    Alpha,
+    Beta,
+}
+
+fn identity_E<E>(x: E) -> E {
+    return x
+}
+
+@test(output = "7")
+fn test_user_generic_param_shadows_enum() {
+    let r = identity_E(7)
+    print(r)
+}
+
+// Struct generic param shadows top-level struct.
+struct Node<B> {
+    v: B,
+}
+
+@test(output = "3")
+fn test_struct_generic_param_shadows_struct() {
+    let n: Node<int> = Node { v: 3 }
+    print(n.v)
+}
+
+// A struct's generic parameter shadowing a top-level *enum* name.
+// Regression: symbol-table lookup used to return the first match by name
+// without filtering by kind, so a generic param named `E` could mask enum `E`.
+struct Holder<E> {
+    e: E,
+}
+
+@test(output = "99")
+fn test_struct_generic_param_shadows_enum() {
+    let h: Holder<int> = Holder { e: 99 }
+    print(h.e)
+}
+
+// Enum-with-generic whose own generic param shares a name with a top-level
+// struct. Exercises `lookup_enum_symbol_by_name` vs generic params.
+enum Wrap<B> {
+    Value(B),
+}
+
+@test(output = "11")
+fn test_enum_generic_param_shadows_struct() {
+    let w: Wrap<int> = Wrap::Value(11)
+    match w {
+        Wrap::Value(v) => print(v),
+    }
+}

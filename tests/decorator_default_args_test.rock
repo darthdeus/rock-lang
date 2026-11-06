@@ -1,0 +1,58 @@
+// Test decorator with default arguments
+// This verifies deco init parameters with defaults work correctly
+
+global REGISTRATIONS: [string] = []
+
+// Decorator with default argument
+deco init register(priority: int = 100) {
+    vec_push(REGISTRATIONS, "priority({priority}): {target.name}")
+}
+
+// Use default priority
+@register
+fn system_default() {
+    print("default priority system")
+}
+
+// Use explicit priority
+@register(priority = 10)
+fn system_low_priority() {
+    print("low priority system")
+}
+
+@register(priority = 50)
+fn system_mid_priority() {
+    print("mid priority system")
+}
+
+@test
+fn test_default_args_work() {
+    assert(vec_len(REGISTRATIONS) == 3, "Expected 3 registrations")
+
+    let found_default = false
+    let found_low = false
+    let found_mid = false
+
+    for entry in REGISTRATIONS {
+        if entry.contains("priority(100): system_default") {
+            found_default = true
+        }
+        if entry.contains("priority(10): system_low_priority") {
+            found_low = true
+        }
+        if entry.contains("priority(50): system_mid_priority") {
+            found_mid = true
+        }
+    }
+
+    assert(found_default, "system_default should use default priority 100")
+    assert(found_low, "system_low_priority should have priority 10")
+    assert(found_mid, "system_mid_priority should have priority 50")
+}
+
+@test(output="default priority system\nlow priority system\nmid priority system")
+fn test_decorated_functions_work() {
+    system_default()
+    system_low_priority()
+    system_mid_priority()
+}

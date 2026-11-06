@@ -1,0 +1,140 @@
+struct BoundaryRow { count: int }
+nobox value BoundaryContext { row: BoundaryRow }
+
+fn boundary_entity_new() -> Entity<BoundaryRow> {
+    let rows: Arena<BoundaryRow> = arena_new()
+    return rows.insert(BoundaryRow { count: 0 })
+}
+
+fn boundary_static_tick() -> int {
+    static shell: Entity<BoundaryRow> = boundary_entity_new()
+    let row = shell.get().unwrap()
+    row.count += 1
+    return row.count
+}
+
+@test
+fn static_entity_keeps_one_owned_row() {
+    assert_eq(boundary_static_tick(), 1)
+    assert_eq(boundary_static_tick(), 2)
+}
+
+fn boundary_static_remember(entity: Entity<BoundaryRow>) -> Entity<BoundaryRow> {
+    static saved: Entity<BoundaryRow> = boundary_entity_new()
+    saved = entity
+    return saved
+}
+
+@test
+fn static_entity_does_not_extend_its_row_owner() {
+    let scene: Scene<Entity<BoundaryRow>> = scene_create((builder: SceneBuilder) => {
+        let rows: Arena<BoundaryRow> = builder.arena()
+        return rows.insert(BoundaryRow { count: 0 })
+    }).unwrap()
+    let entity = scene.get().unwrap()
+    let saved = boundary_static_remember(entity)
+    assert(saved.get() != null)
+    let _ = scene_close(scene)
+    let _ = __scene_drain_closed()
+    assert(saved.get() == null)
+    assert(boundary_static_remember(entity).get() == null)
+}
+
+fn boundary_context_tick(context: BoundaryContext) {
+    boundary_row_tick(context.row)
+}
+
+fn boundary_row_tick(row: BoundaryRow) {
+    row.count += 1
+}
+
+fn boundary_borrow_tick(row: BoundaryRow) {
+    boundary_generic_tick(BoundaryContext { row }, (c: BoundaryContext) => boundary_row_tick(c.row))
+}
+
+fn boundary_generic_tick<C>(context: C, step: fn(C) -> ()) {
+    step(context)
+}
+
+@test
+fn row_context_call_preserves_identity() {
+    let entity = boundary_entity_new()
+    let row = entity.get().unwrap()
+    boundary_context_tick(BoundaryContext { row })
+    boundary_borrow_tick(row)
+    assert_eq(entity.get().unwrap().count, 2)
+}
+
+fn boundary_choose(row: BoundaryRow, entity: Entity<BoundaryRow>, direct: bool) -> BoundaryRow {
+    return if direct { row } else { entity.get().unwrap() }
+}
+
+fn boundary_context_choose(context: BoundaryContext, entity: Entity<BoundaryRow>, direct: bool) -> BoundaryRow {
+    return boundary_generic_choose(context, (c: BoundaryContext) =>
+        if direct { c.row } else { entity.get().unwrap() })
+}
+
+fn boundary_generic_choose<C>(context: C, choose: fn(C) -> BoundaryRow) -> BoundaryRow {
+    return choose(context)
+}
+
+@test
+fn row_borrow_join_preserves_identity() {
+    let first = boundary_entity_new()
+    let second = boundary_entity_new()
+    let row = first.get().unwrap()
+    boundary_choose(row, second, true).count = 3
+    boundary_choose(row, second, false).count = 7
+    boundary_context_choose(BoundaryContext { row }, second, true).count += 1
+    boundary_context_choose(BoundaryContext { row }, second, false).count += 1
+    assert_eq(first.get().unwrap().count, 4)
+    assert_eq(second.get().unwrap().count, 8)
+}
+
+fn boundary_is_row(row: BoundaryRow, entity: Entity<BoundaryRow>) -> bool {
+    return same_ref(row, entity.get().unwrap())
+}
+
+fn boundary_context_is_row(context: BoundaryContext, entity: Entity<BoundaryRow>) -> bool {
+    return same_ref(context.row, entity.get().unwrap())
+}
+
+fn boundary_same_row<C>(context: C, compare: fn(C) -> bool) -> bool {
+    return compare(context)
+}
+
+@test
+fn same_ref_compares_arena_row_addresses() {
+    let first = boundary_entity_new()
+    let second = boundary_entity_new()
+    let row = first.get().unwrap()
+    assert(same_ref(row, first.get().unwrap()))
+    assert(!same_ref(row, second.get().unwrap()))
+    assert(boundary_is_row(row, first))
+    assert(!boundary_is_row(row, second))
+    assert(boundary_context_is_row(BoundaryContext { row }, first))
+    assert(!boundary_context_is_row(BoundaryContext { row }, second))
+    assert(boundary_same_row(BoundaryContext { row }, (c: BoundaryContext) => same_ref(c.row, row)))
+    let rows: Arena<BoundaryRow> = arena_new()
+    let selected = rows.insert(BoundaryRow { count: 0 })
+    let other = rows.insert(BoundaryRow { count: 0 })
+    for (entity, candidate) in rows {
+        assert_eq(same_ref(candidate, selected.get().unwrap()), entity == selected)
+        assert_eq(same_ref(candidate, other.get().unwrap()), entity == other)
+    }
+}
+
+@test
+fn same_ref_compares_scene_root_addresses() {
+    let first = scene_create((_builder: SceneBuilder) => BoundaryRow { count: 0 }).unwrap()
+    let second = scene_create((_builder: SceneBuilder) => BoundaryRow { count: 0 }).unwrap()
+    let row = first.get().unwrap()
+    assert(same_ref(row, first.get().unwrap()))
+    assert(!same_ref(row, second.get().unwrap()))
+    assert(same_ref(BoundaryContext { row }.row, row))
+    assert(same_ref(row, first.get()))
+    assert(!same_ref(row, second.get()))
+    let _ = scene_close(first)
+    assert(!same_ref(row, first.get()))
+    let _ = scene_close(second)
+}

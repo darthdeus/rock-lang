@@ -1,0 +1,114 @@
+// RED: a `nobox value` field typed `T?` with a `= null` declaration default
+// crashes at runtime when the struct literal omits the field. The default
+// injection peels the `?` and scalarizes `null` unconditionally, emitting
+//
+//     r0 = nil
+//     r1 = r0.r     -- attempt to index local 'r0' (a nil value)
+//
+// Discriminant: an explicit `tint: null` at the literal is correct, and a
+// plain (non-`nobox`) `value` field with the same `= null` default is
+// correct. Only the nobox declaration-default path is broken.
+//
+// Live repro: mag's `channel_outline` omits `Outline.occluded_color`
+// (`occluded_color: Color? = null`, stone/engine/rendering/outline.rock).
+
+nobox value NbColor { r: float, g: float }
+value BoxColor { r: float, g: float }
+
+struct NbHolder {
+    id: int,
+    tint: NbColor? = null,
+}
+
+struct NbHolderNoDefault {
+    id: int,
+    tint: NbColor?,
+}
+
+struct BoxHolder {
+    id: int,
+    tint: BoxColor? = null,
+}
+
+fn describe(t: NbColor?) -> string {
+    if t != null { return "some({t.r},{t.g})" }
+    return "null"
+}
+
+// The defect: field omitted, `= null` declaration default injected.
+@test(output = "1 null")
+fn nobox_null_default_omitted() {
+    let h = NbHolder { id: 1 }
+    print("{h.id} {describe(h.tint)}")
+}
+
+// Same, forced through a real fn return so the struct actually materializes.
+@test(output = "2 null")
+fn nobox_null_default_omitted_through_return() {
+    fn make() -> NbHolder { return NbHolder { id: 2 } }
+    let h = make()
+    print("{h.id} {describe(h.tint)}")
+}
+
+// Control: explicit `null` at the literal takes the correct path.
+@test(output = "3 null")
+fn nobox_explicit_null_at_literal() {
+    let h = NbHolder { id: 3, tint: null }
+    print("{h.id} {describe(h.tint)}")
+}
+
+// Control: a stored non-null nobox value round-trips through the field.
+@test(output = "4 some(1,2)")
+fn nobox_stored_value() {
+    fn make() -> NbHolderNoDefault {
+        return NbHolderNoDefault { id: 4, tint: NbColor { r: 1, g: 2 } }
+    }
+    let h = make()
+    print("{h.id} {describe(h.tint)}")
+}
+
+// Control: a stored explicit null round-trips through the field.
+@test(output = "5 null")
+fn nobox_stored_null() {
+    fn make() -> NbHolderNoDefault { return NbHolderNoDefault { id: 5, tint: null } }
+    let h = make()
+    print("{h.id} {describe(h.tint)}")
+}
+
+// Control: the nearest working shape -- same default, `value` instead of
+// `nobox value`. Passing today; it must stay passing after the fix.
+@test(output = "6 null")
+fn plain_value_null_default_omitted() {
+    let h = BoxHolder { id: 6 }
+    let present = if h.tint != null { "some" } else { "null" }
+    print("{h.id} {present}")
+}
+
+nobox value NbPair { r: float, g: float }
+
+struct NbDefaulted {
+    id: int,
+    tint: NbPair = NbPair { r: 7, g: 8 },
+    hint: NbPair? = NbPair { r: 9, g: 10 },
+}
+
+// The other two defaults on a `nobox` field: a non-nullable one, and a
+// nullable one whose default is a real value rather than `null`.
+@test(output = "7 7 8 9 10")
+fn nobox_value_default_omitted() {
+    let h = NbDefaulted { id: 7 }
+    let t = h.hint
+    if t != null {
+        print("{h.id} {h.tint.r} {h.tint.g} {t.r} {t.g}")
+    }
+}
+
+@test(output = "8 7 8 9 10")
+fn nobox_value_default_through_return() {
+    fn make() -> NbDefaulted { return NbDefaulted { id: 8 } }
+    let h = make()
+    let t = h.hint
+    if t != null {
+        print("{h.id} {h.tint.r} {h.tint.g} {t.r} {t.g}")
+    }
+}

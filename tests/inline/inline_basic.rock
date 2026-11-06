@@ -1,0 +1,40 @@
+// Adversarial tests: @inline — basic correctness
+//
+// Today @inline is a no-op annotation; these tests verify behavior is
+// correct whether inlining fires or not. Once the inline pass lands,
+// these must still pass byte-identically.
+
+@inline
+fn id(x: int) -> int {
+    return x
+}
+
+@inline
+fn add_one(x: int) -> int {
+    return x + 1
+}
+
+@inline
+fn trailing_expr(x: int, y: int) -> int {
+    x + y
+}
+
+@test(output = "42")
+fn test_identity() {
+    print(id(42))
+}
+
+@test(output = "6")
+fn test_simple_math() {
+    print(add_one(5))
+}
+
+@test(output = "7")
+fn test_trailing_expression_body() {
+    print(trailing_expr(3, 4))
+}
+
+@test(output = "100")
+fn test_chained_inline_calls() {
+    print(add_one(add_one(add_one(id(97)))))
+}

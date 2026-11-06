@@ -1,0 +1,20 @@
+//! Error: a function body must be a block or an inline string, never absent
+//! Tags: parser, fn, silent-fallback
+
+// `finish_fn_def` answered a missing body with `extern_body.unwrap_or(ExternC)`.
+// Only the `extern fn` caller passes `Some`, so every other bodyless form --
+// plain `fn`, `co fn`, `operator`, `inline(<backend>) fn` -- silently became an
+// extern C declaration that type-checked and then failed at RUNTIME with
+// "attempt to call global 'c' (a nil value)". The comment there claimed the
+// non-extern callers never reached it; they did.
+//
+// A bare `extern fn f() -> int` (no body, no `= "..."`) is still legal and is
+// covered positively in the extern suite -- this rejection is for the forms
+// that are NOT foreign declarations.
+
+//=== TEST CASE: plain_fn_without_a_body ===
+fn c(x: int) -> int
+
+fn main() {
+    let _ = c(1)
+}

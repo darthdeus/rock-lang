@@ -1,0 +1,138 @@
+// A `V?` whole-value read out of a mutable place copies its leaves when the
+// value is present and stays null when it is absent -- at every place root, not
+// just the struct field pinned by tests/value_nullable_read_aliasing.rock.
+// The absent cases are load-bearing: an absent value has no leaves, so an
+// unconditional split would index nil.
+
+value Pt { x: int, y: int }
+
+struct NB1 { p: Pt? }
+struct NB2 { p: Pt? }
+
+@test(output = "null")
+fn absent_field_read_stays_null() {
+    let a = NB1 { p: null }
+    let b = NB2 { p: a.p }
+    if b.p == null { print("null") } else { print("boxed") }
+}
+
+@test(output = "c=1 a=99")
+fn let_bound_nullable_field_copies() {
+    let a = NB1 { p: Pt { x: 1, y: 2 } }
+    let c = a.p
+    if a.p != null { a.p.x = 99 }
+    if c != null && a.p != null { print("c={c.x} a={a.p.x}") }
+}
+
+fn read_out_of_param(a: NB1) {
+    let b = NB2 { p: a.p }
+    if b.p != null && a.p != null {
+        b.p.x = 99
+        print("b={b.p.x} a={a.p.x}")
+    }
+}
+
+@test(output = "b=99 a=1")
+fn param_root_copies() {
+    read_out_of_param(NB1 { p: Pt { x: 1, y: 2 } })
+}
+
+global G_PT: Pt? = null
+
+// Through a fn so the read site sees the declared `Pt?`, not a refinement.
+fn set_g_pt(v: Pt?) {
+    G_PT = v
+}
+
+@test(output = "b=99 g=1")
+fn global_root_copies() {
+    set_g_pt(Pt { x: 1, y: 2 })
+    let b = NB2 { p: G_PT }
+    if b.p != null {
+        b.p.x = 99
+        if G_PT != null { print("b={b.p.x} g={G_PT.x}") }
+    }
+}
+
+@test(output = "null")
+fn absent_global_read_stays_null() {
+    set_g_pt(null)
+    let b = NB2 { p: G_PT }
+    if b.p == null { print("null") } else { print("boxed") }
+}
+
+@test(output = "b=99 e=1")
+fn vec_element_root_copies() {
+    let xs: [Pt?] = [Pt { x: 1, y: 2 }]
+    let b = NB2 { p: xs[0] }
+    if b.p != null {
+        b.p.x = 99
+        let e = xs[0]
+        if e != null { print("b={b.p.x} e={e.x}") }
+    }
+}
+
+@test(output = "b=99 m=1")
+fn map_value_root_copies() {
+    let m: Map<int, Pt?> = map_new()
+    m[7] = Pt { x: 1, y: 2 }
+    let b = NB2 { p: m[7] }
+    if b.p != null {
+        b.p.x = 99
+        let mv = m[7]
+        if mv != null { print("b={b.p.x} m={mv.x}") }
+    }
+}
+
+struct Owner { inner: NB1? }
+
+@test(output = "b=99 a=1")
+fn safenav_nullable_field_copies() {
+    let o = Owner { inner: NB1 { p: Pt { x: 1, y: 2 } } }
+    let b = NB2 { p: o.inner?.p }
+    if b.p != null && o.inner != null && o.inner.p != null {
+        b.p.x = 99
+        print("b={b.p.x} a={o.inner.p.x}")
+    }
+}
+
+@test(output = "null")
+fn safenav_absent_field_stays_null() {
+    let o = Owner { inner: NB1 { p: null } }
+    let b = NB2 { p: o.inner?.p }
+    if b.p == null { print("null") } else { print("boxed") }
+}
+
+@test(output = "null")
+fn safenav_absent_base_stays_null() {
+    let o = Owner { inner: null }
+    let b = NB2 { p: o.inner?.p }
+    if b.p == null { print("null") } else { print("boxed") }
+}
+
+struct NNB { p: Pt }
+struct OwnerNN { inner: NNB? }
+
+@test(output = "b=99 a=1")
+fn safenav_nonnullable_field_copies() {
+    let o = OwnerNN { inner: NNB { p: Pt { x: 1, y: 2 } } }
+    let b = NB2 { p: o.inner?.p }
+    if b.p != null && o.inner != null {
+        b.p.x = 99
+        print("b={b.p.x} a={o.inner.p.x}")
+    }
+}
+
+// A non-nullable field read through an owner already refined to non-null: the
+// non-nullable copy-out arm, the control for the arms above.
+@test(output = "b=99 a=1")
+fn nonnullable_field_of_refined_owner_copies() {
+    let o = OwnerNN { inner: NNB { p: Pt { x: 1, y: 2 } } }
+    if o.inner != null {
+        let b = NB2 { p: o.inner.p }
+        if b.p != null {
+            b.p.x = 99
+            print("b={b.p.x} a={o.inner.p.x}")
+        }
+    }
+}

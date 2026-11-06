@@ -1,0 +1,156 @@
+struct EqTag { n: int }
+value EqWeak<T> { owner: int, slot: int, generation: int }
+enum EqSignal { Mark(string) }
+value EqSignalHolder { signal: EqSignal }
+struct EqHandles {
+    entity: Entity<EqTag>,
+    arena: Arena<EqTag>,
+    scene: Scene<EqTag>,
+    builder: SceneBuilder,
+}
+
+fn entity_matches(xs: [Entity<EqTag>], target: Entity<EqTag>) -> int {
+    let matches = 0
+    for e in xs {
+        if e == target { matches += 1 }
+        if e != target { matches += 2 }
+    }
+    return matches
+}
+
+fn stored_handles_match(h: EqHandles, e: Entity<EqTag>, a: Arena<EqTag>,
+                        s: Scene<EqTag>, b: SceneBuilder) -> bool {
+    return h.entity == e && h.arena == a && h.scene == s && h.builder == b
+}
+
+fn generic_handle_matches<T>(xs: [T], target: T) -> int {
+    let matches = 0
+    for candidate in xs {
+        if candidate == target { matches += 1 }
+        if candidate != target { matches += 2 }
+    }
+    return matches
+}
+
+fn nullable_handle_contract<T>(value: T, other: T) {
+    let present: T? = value
+    let absent: T? = null
+    let xs: [T?] = [absent, present]
+    assert(generic_handle_matches(xs, absent) == 3)
+    assert(generic_handle_matches(xs, present) == 3)
+    assert(present == value && value == present)
+    assert(present != other && other != present)
+    assert(absent != value && value != absent)
+}
+
+@test
+fn nullable_handle_equality_preserves_presence() {
+    let e: Entity<EqTag> = Entity { _scene_id: 1, _arena_id: 2, _slot: 3, _generation: 4 }
+    let absent: Entity<EqTag>? = null
+    let present: Entity<EqTag>? = e
+    let xs: [Entity<EqTag>?] = [absent, present]
+    assert(generic_handle_matches(xs, absent) == 3)
+    assert(generic_handle_matches(xs, present) == 3)
+    assert(absent == null && absent != present)
+    assert(present == e && e == present)
+    assert(absent != e && e != absent)
+}
+
+@test
+fn equality_preserves_structural_enum_fields() {
+    let a = EqSignalHolder { signal: EqSignal::Mark("same") }
+    let b = EqSignalHolder { signal: EqSignal::Mark("same") }
+    assert(generic_handle_matches([a], b) == 1)
+    let c = EqSignalHolder { signal: EqSignal::Mark("other") }
+    assert(generic_handle_matches([a], c) == 2)
+}
+
+@test
+fn handles_compare_every_identity_lane() {
+    let e: Entity<EqTag> = Entity { _scene_id: 1, _arena_id: 2, _slot: 3, _generation: 4 }
+    assert(entity_matches([e, e], e) == 2)
+    for other in [
+        Entity { _scene_id: 9, _arena_id: 2, _slot: 3, _generation: 4 },
+        Entity { _scene_id: 1, _arena_id: 9, _slot: 3, _generation: 4 },
+        Entity { _scene_id: 1, _arena_id: 2, _slot: 9, _generation: 4 },
+        Entity { _scene_id: 1, _arena_id: 2, _slot: 3, _generation: 9 },
+    ] {
+        assert(!e.equals(other))
+        assert(entity_matches([other], e) == 2)
+    }
+    let a: Arena<EqTag> = Arena { _scene_id: 1, _arena_id: 2 }
+    let s: Scene<EqTag> = Scene { _scene_id: 1 }
+    let b = SceneBuilder { _scene_id: 1 }
+    let h = EqHandles { entity: e, arena: a, scene: s, builder: b }
+    assert(stored_handles_match(h, e, a, s, b))
+    assert(!stored_handles_match(h, e, Arena { _scene_id: 2, _arena_id: 2 }, s, b))
+    assert(!stored_handles_match(h, e, a, Scene { _scene_id: 2 }, b))
+    assert(!stored_handles_match(h, e, a, s, SceneBuilder { _scene_id: 2 }))
+    assert(generic_handle_matches([a], a) == 1)
+    assert(generic_handle_matches([s], Scene { _scene_id: 2 }) == 2)
+    assert(generic_handle_matches([b], SceneBuilder { _scene_id: 2 }) == 2)
+    let weak: EqWeak<int> = EqWeak { owner: 3, slot: 5, generation: 7 }
+    assert(generic_handle_matches([weak], weak) == 1)
+    assert(generic_handle_matches([weak], EqWeak { owner: 3, slot: 5, generation: 9 }) == 2)
+    nullable_handle_contract(a, Arena { _scene_id: 2, _arena_id: 2 })
+    nullable_handle_contract(s, Scene { _scene_id: 2 })
+    nullable_handle_contract(b, SceneBuilder { _scene_id: 2 })
+    nullable_handle_contract(weak, EqWeak { owner: 3, slot: 5, generation: 9 })
+}
+
+inline(lua) fn handle_alloc_begin() = """
+    _G.__handle_eq_jit_was_on = jit.status()
+    jit.off(); jit.flush()
+    collectgarbage('collect'); collectgarbage('stop')
+    _G.__handle_eq_kb = collectgarbage('count')
+"""
+
+inline(lua) fn handle_alloc_end() -> float = """
+    local bytes = (collectgarbage('count') - _G.__handle_eq_kb) * 1024
+    collectgarbage('restart')
+    if _G.__handle_eq_jit_was_on then jit.on() end
+    return bytes
+"""
+
+@test
+fn handle_comparisons_do_not_allocate_carriers() {
+    let e: Entity<EqTag> = Entity { _scene_id: 1, _arena_id: 2, _slot: 3, _generation: 4 }
+    let xs = [e]
+    let a: Arena<EqTag> = Arena { _scene_id: 1, _arena_id: 2 }
+    let s: Scene<EqTag> = Scene { _scene_id: 1 }
+    let b = SceneBuilder { _scene_id: 1 }
+    let h = EqHandles { entity: e, arena: a, scene: s, builder: b }
+    let arenas = [a]
+    let scenes = [s]
+    let builders = [b]
+    let weak: EqWeak<int> = EqWeak { owner: 3, slot: 5, generation: 7 }
+    let weaks = [weak]
+    let nullable: Entity<EqTag>? = e
+    let maybes: [Entity<EqTag>?] = [nullable, null]
+    let nullable_arena: Arena<EqTag>? = a
+    let nullable_scene: Scene<EqTag>? = s
+    let nullable_builder: SceneBuilder? = b
+    let nullable_weak: EqWeak<int>? = weak
+    let nullable_arenas: [Arena<EqTag>?] = [nullable_arena, null]
+    let nullable_scenes: [Scene<EqTag>?] = [nullable_scene, null]
+    let nullable_builders: [SceneBuilder?] = [nullable_builder, null]
+    let nullable_weaks: [EqWeak<int>?] = [nullable_weak, null]
+    handle_alloc_begin()
+    let matches = 0
+    for _ in 0..512 {
+        matches += entity_matches(xs, e)
+        if stored_handles_match(h, e, a, s, b) { matches += 1 }
+        matches += generic_handle_matches(arenas, a)
+        matches += generic_handle_matches(scenes, s)
+        matches += generic_handle_matches(builders, b)
+        matches += generic_handle_matches(weaks, weak)
+        matches += generic_handle_matches(maybes, nullable)
+        matches += generic_handle_matches(nullable_arenas, nullable_arena)
+        matches += generic_handle_matches(nullable_scenes, nullable_scene)
+        matches += generic_handle_matches(nullable_builders, nullable_builder)
+        matches += generic_handle_matches(nullable_weaks, nullable_weak)
+    }
+    let bytes = handle_alloc_end()
+    assert(matches == 10752)
+    assert(bytes < 4096.0, "handle comparisons must not materialize carriers")
+}

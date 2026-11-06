@@ -1,0 +1,134 @@
+// Adversarial tests: Safe navigation assignment edge cases
+
+struct Inner {
+    value: int,
+    name: string,
+}
+
+struct Middle {
+    inner: Inner?,
+}
+
+struct Outer {
+    middle: Middle?,
+}
+
+struct Deep {
+    outer: Outer?,
+}
+
+// --- Side effects in RHS when LHS is null ---
+
+global call_count: int = 0
+
+fn expensive() -> int {
+    call_count = call_count + 1
+    return 999
+}
+
+@test(output = "0 0")
+fn test_safenav_assign_null_skips_rhs() {
+    call_count = 0
+    let o: Outer? = null
+    o?.middle?.inner?.value = expensive()
+    print("{call_count} 0")
+}
+
+@test(output = "1 999")
+fn test_safenav_assign_present_calls_rhs() {
+    call_count = 0
+    let o = Outer { middle: Middle { inner: Inner { value: 0, name: "x" } } }
+    o.middle?.inner?.value = expensive()
+    let result = o.middle?.inner?.value ?? -1
+    print("{call_count} {result}")
+}
+
+// --- Compound assignment through safe nav ---
+
+@test(output = "15")
+fn test_safenav_compound_add() {
+    let o = Outer { middle: Middle { inner: Inner { value: 10, name: "x" } } }
+    o.middle?.inner?.value += 5
+    print(o.middle?.inner?.value ?? 0)
+}
+
+@test(output = "0")
+fn test_safenav_compound_add_null() {
+    let o = Outer { middle: null }
+    o.middle?.inner?.value += 5
+    print(o.middle?.inner?.value ?? 0)
+}
+
+@test(output = "5")
+fn test_safenav_compound_subtract() {
+    let o = Outer { middle: Middle { inner: Inner { value: 10, name: "x" } } }
+    o.middle?.inner?.value -= 5
+    print(o.middle?.inner?.value ?? 0)
+}
+
+// --- 4-level deep assignment ---
+
+@test(output = "42")
+fn test_deep_4_level_assign() {
+    let d = Deep {
+        outer: Outer {
+            middle: Middle {
+                inner: Inner { value: 0, name: "x" },
+            },
+        },
+    }
+    d.outer?.middle?.inner?.value = 42
+    print(d.outer?.middle?.inner?.value ?? 0)
+}
+
+@test(output = "0")
+fn test_deep_4_level_assign_null_outer() {
+    let d = Deep { outer: null }
+    d.outer?.middle?.inner?.value = 42
+    print(d.outer?.middle?.inner?.value ?? 0)
+}
+
+@test(output = "0")
+fn test_deep_4_level_assign_null_middle() {
+    let d = Deep {
+        outer: Outer { middle: null },
+    }
+    d.outer?.middle?.inner?.value = 42
+    print(d.outer?.middle?.inner?.value ?? 0)
+}
+
+// --- String field through safe nav ---
+
+@test(output = "updated")
+fn test_safenav_string_assign() {
+    let o = Outer { middle: Middle { inner: Inner { value: 0, name: "original" } } }
+    o.middle?.inner?.name = "updated"
+    print(o.middle?.inner?.name ?? "null")
+}
+
+@test(output = "null")
+fn test_safenav_string_assign_null_path() {
+    let o = Outer { middle: null }
+    o.middle?.inner?.name = "updated"
+    print(o.middle?.inner?.name ?? "null")
+}
+
+// --- Mixed safe nav on both sides ---
+
+@test(output = "10")
+fn test_safenav_both_sides() {
+    let src = Outer { middle: Middle { inner: Inner { value: 10, name: "x" } } }
+    let dst = Outer { middle: Middle { inner: Inner { value: 0, name: "y" } } }
+    let val = src.middle?.inner?.value ?? 0
+    dst.middle?.inner?.value = val
+    print(dst.middle?.inner?.value ?? -1)
+}
+
+@test(output = "0")
+fn test_safenav_both_sides_src_null() {
+    let src = Outer { middle: null }
+    let dst = Outer { middle: Middle { inner: Inner { value: 0, name: "y" } } }
+    let val2 = src.middle?.inner?.value ?? 0
+    dst.middle?.inner?.value = val2
+    print(dst.middle?.inner?.value ?? -1)
+}

@@ -1,0 +1,91 @@
+// Call-site struct spread `f(..props, name: v)` (plan M2).
+// Each field of the spread struct becomes a named arg at the spread's
+// position. The callee ABI is untouched (same params, default fill).
+
+struct AB { a: int, b: int }
+struct CD { c: int, d: int }
+value VXY { x: int, y: int }
+
+fn sum3(a: int, b: int, c: int) -> int { a + b + c }
+fn sumxy(x: int, y: int) -> int { x + y }
+fn sum4(a: int, b: int, c: int, d: int) -> int { a + b + c + d }
+fn label(prefix: string, a: int, b: int) -> string { "{prefix}:{a},{b}" }
+fn twoab(a: int, b: int) -> string { "{a} {b}" }
+fn with_default(a: int, b: int, c: int = 99) -> int { a + b + c }
+
+@test(output = "6")
+fn test_spread_table_basic() {
+    let p = AB { a: 1, b: 2 }
+    print(sum3(..p, c: 3))
+}
+
+@test(output = "30")
+fn test_spread_value_basic() {
+    let v = VXY { x: 10, y: 20 }
+    print(sumxy(..v))
+}
+
+// Positional args before the spread; spread fills the named tail.
+@test(output = "hi:1,2")
+fn test_spread_positional_mix() {
+    let p = AB { a: 1, b: 2 }
+    print(label("hi", ..p))
+}
+
+// Explicit named arg AFTER the spread overrides that field (rule 3).
+@test(output = "10 2")
+fn test_override_after_spread() {
+    let p = AB { a: 1, b: 2 }
+    print(twoab(..p, a: 10))
+}
+
+// Multiple disjoint spreads (rule 5: non-colliding).
+@test(output = "10")
+fn test_multiple_disjoint_spreads() {
+    let ab = AB { a: 1, b: 2 }
+    let cd = CD { c: 3, d: 4 }
+    print(sum4(..ab, ..cd))
+}
+
+// A param not covered by the spread falls back to its default.
+@test(output = "102")
+fn test_spread_leaves_default() {
+    let p = AB { a: 1, b: 2 }
+    print(with_default(..p))
+}
+
+// Spread of a struct literal (never materialized).
+@test(output = "6")
+fn test_spread_literal() {
+    print(sum3(..AB { a: 1, b: 2 }, c: 3))
+}
+
+// Spread of an opaque rvalue (fn return) -- evaluated once.
+fn make_ab() -> AB { AB { a: 4, b: 5 } }
+
+@test(output = "12")
+fn test_spread_rvalue() {
+    print(sum3(..make_ab(), c: 3))
+}
+
+// UFCS callee: the receiver fills the first param (never from a spread),
+// the spread fills the rest.
+fn combine(base: int, a: int, b: int) -> int { base + a + b }
+
+@test(output = "103")
+fn test_spread_ufcs() {
+    let p = AB { a: 1, b: 2 }
+    let base = 100
+    print(base.combine(..p))
+}
+
+// Spread into a callee with a value-struct param (scalar ABI path).
+value V2 { x: int, y: int }
+struct Holder { v: V2, k: int }
+fn use_v(v: V2, k: int) -> int { v.x + v.y + k }
+
+@test(output = "6")
+fn test_spread_value_param() {
+    let h = Holder { v: V2 { x: 1, y: 2 }, k: 3 }
+    print(use_v(..h))
+}

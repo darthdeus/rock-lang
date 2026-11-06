@@ -1,0 +1,19 @@
+//! Error: Lambda type inference error tests
+//! Tags: lambdas, type-inference, methods
+
+//=== TEST CASE: lambda_parameter_wrong_method_Generic ===
+struct Point {
+    x: int,
+    y: int,
+}
+
+fn main() {
+    let points = [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }]
+
+    // This should fail - Point doesn't match any `get` overload.
+    // (Before the unified get() accessors landed this produced a
+    // SymbolNotFound error; now `get` is a known symbol with several
+    // overloads for Vec/Map/HashMap/NativeBuffer, none of which match
+    // (Point, string) — so the error kind shifted to Generic.)
+    let result = points.map(p => p.get("x"))
+}

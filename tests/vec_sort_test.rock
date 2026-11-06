@@ -1,0 +1,104 @@
+// Test cases for sort function
+
+struct Person {
+    name: string,
+    age: int,
+}
+
+@test
+fn test_vec_sort_integers() {
+    let numbers = vec_new()
+    vec_push(numbers, 5)
+    vec_push(numbers, 2)
+    vec_push(numbers, 8)
+    vec_push(numbers, 1)
+    vec_push(numbers, 9)
+    vec_push(numbers, 3)
+
+    sort(numbers, x => x)
+
+    assert_eq(vec_get(numbers, 0).unwrap(), 1, "First element should be 1")
+    assert_eq(vec_get(numbers, 1).unwrap(), 2, "Second element should be 2")
+    assert_eq(vec_get(numbers, 2).unwrap(), 3, "Third element should be 3")
+    assert_eq(vec_get(numbers, 3).unwrap(), 5, "Fourth element should be 5")
+    assert_eq(vec_get(numbers, 4).unwrap(), 8, "Fifth element should be 8")
+    assert_eq(vec_get(numbers, 5).unwrap(), 9, "Sixth element should be 9")
+}
+
+@test
+fn test_vec_sort_by_age() {
+    let people = vec_new()
+    vec_push(people, Person { name: "Alice", age: 30 })
+    vec_push(people, Person { name: "Bob", age: 25 })
+    vec_push(people, Person { name: "Charlie", age: 35 })
+    vec_push(people, Person { name: "Diana", age: 20 })
+
+    sort(people, person => person.age)
+
+    assert_eq(vec_get(people, 0).unwrap().name, "Diana", "Youngest should be first")
+    assert_eq(vec_get(people, 0).unwrap().age, 20, "First person age should be 20")
+
+    assert_eq(vec_get(people, 1).unwrap().name, "Bob", "Second youngest should be second")
+    assert_eq(vec_get(people, 1).unwrap().age, 25, "Second person age should be 25")
+
+    assert_eq(vec_get(people, 2).unwrap().name, "Alice", "Third youngest should be third")
+    assert_eq(vec_get(people, 2).unwrap().age, 30, "Third person age should be 30")
+
+    assert_eq(vec_get(people, 3).unwrap().name, "Charlie", "Oldest should be last")
+    assert_eq(vec_get(people, 3).unwrap().age, 35, "Last person age should be 35")
+}
+
+@test
+fn test_vec_sort_empty_vector() {
+    // Annotated because nothing else pins the element type: the other cases
+    // constrain it by pushing, and an empty one leaves `T` completely
+    // unconstrained, which monomorphization rejects (plan S 0h).
+    let numbers: [int] = vec_new()
+    sort(numbers, x => x)
+    assert_eq(vec_len(numbers), 0, "Empty vector should remain empty")
+}
+
+@test
+fn test_vec_sort_single_element() {
+    let numbers = vec_new()
+    vec_push(numbers, 42)
+    sort(numbers, x => x)
+    assert_eq(vec_len(numbers), 1, "Single element vector should have length 1")
+    assert_eq(vec_get(numbers, 0).unwrap(), 42, "Single element should be unchanged")
+}
+
+@test
+fn test_vec_sort_already_sorted() {
+    let numbers = vec_new()
+    vec_push(numbers, 1)
+    vec_push(numbers, 2)
+    vec_push(numbers, 3)
+    vec_push(numbers, 4)
+    vec_push(numbers, 5)
+
+    sort(numbers, x => x)
+
+    assert_eq(vec_get(numbers, 0).unwrap(), 1, "First element should remain 1")
+    assert_eq(vec_get(numbers, 1).unwrap(), 2, "Second element should remain 2")
+    assert_eq(vec_get(numbers, 2).unwrap(), 3, "Third element should remain 3")
+    assert_eq(vec_get(numbers, 3).unwrap(), 4, "Fourth element should remain 4")
+    assert_eq(vec_get(numbers, 4).unwrap(), 5, "Fifth element should remain 5")
+}
+
+@test
+fn test_vec_sort_reverse_sorted() {
+    let numbers = vec_new()
+    vec_push(numbers, 5)
+    vec_push(numbers, 4)
+    vec_push(numbers, 3)
+    vec_push(numbers, 2)
+    vec_push(numbers, 1)
+
+    sort(numbers, x => x)
+
+    assert_eq(vec_get(numbers, 0).unwrap(), 1, "First element should be 1")
+    assert_eq(vec_get(numbers, 1).unwrap(), 2, "Second element should be 2")
+    assert_eq(vec_get(numbers, 2).unwrap(), 3, "Third element should be 3")
+    assert_eq(vec_get(numbers, 3).unwrap(), 4, "Fourth element should be 4")
+    assert_eq(vec_get(numbers, 4).unwrap(), 5, "Fifth element should be 5")
+}

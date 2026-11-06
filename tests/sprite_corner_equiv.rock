@@ -1,0 +1,65 @@
+value V2 { x: float, y: float }
+@inline @pure operator +(a: V2, b: V2) -> V2 { return V2 { x: a.x + b.x, y: a.y + b.y } }
+@inline @pure operator -(a: V2, b: V2) -> V2 { return V2 { x: a.x - b.x, y: a.y - b.y } }
+
+// OLD: branch rotation + temp-swap flips (verbatim original logic)
+fn old_corners(hw: float, hh: float, cx: float, cy: float, rot: float, fx: bool, fy: bool) -> [V2] {
+    let c = V2 { x: cx, y: cy }
+    let right0 = V2 { x: hw, y: 0.0 }
+    let up0 = V2 { x: 0.0, y: -hh }
+    let right = if rot != 0.0 {
+        V2 { x: right0.x * cos(rot) - right0.y * sin(rot), y: right0.x * sin(rot) + right0.y * cos(rot) }
+    } else { right0 }
+    let up = if rot != 0.0 {
+        V2 { x: up0.x * cos(rot) - up0.y * sin(rot), y: up0.x * sin(rot) + up0.y * cos(rot) }
+    } else { up0 }
+    let tl0 = c - right + up
+    let tr0 = c + right + up
+    let br0 = c + right - up
+    let bl0 = c - right - up
+    let xt = if fx { tr0 } else { tl0 }
+    let xtr = if fx { tl0 } else { tr0 }
+    let xb = if fx { br0 } else { bl0 }
+    let xbr = if fx { bl0 } else { br0 }
+    let tl = if fy { xb } else { xt }
+    let bl = if fy { xt } else { xb }
+    let tr = if fy { xbr } else { xtr }
+    let br = if fy { xtr } else { xbr }
+    return [tl, tr, br, bl]
+}
+
+// NEW: branch-free closed form (matches batch.rock rewrite)
+fn new_corners(hw: float, hh: float, cx: float, cy: float, rot: float, fx: bool, fy: bool) -> [V2] {
+    let cr = cos(rot)
+    let sr = sin(rot)
+    let right = V2 { x: hw * cr, y: hw * sr }
+    let up = V2 { x: hh * sr, y: -hh * cr }
+    let sx = if fx { -1.0 } else { 1.0 }
+    let sy = if fy { -1.0 } else { 1.0 }
+    let rx = V2 { x: right.x * sx, y: right.y * sx }
+    let uy = V2 { x: up.x * sy, y: up.y * sy }
+    let tl = V2 { x: cx - rx.x + uy.x, y: cy - rx.y + uy.y }
+    let tr = V2 { x: cx + rx.x + uy.x, y: cy + rx.y + uy.y }
+    let br = V2 { x: cx + rx.x - uy.x, y: cy + rx.y - uy.y }
+    let bl = V2 { x: cx - rx.x - uy.x, y: cy - rx.y - uy.y }
+    return [tl, tr, br, bl]
+}
+
+@test
+fn corners_equivalent() {
+    let rots = [0.0, 0.7853981633974483, 1.5707963267948966, 3.141592653589793, -1.2]
+    for r in rots {
+        for fx in [false, true] {
+            for fy in [false, true] {
+                let a = old_corners(3.0, 2.0, 10.0, 5.0, r, fx, fy)
+                let b = new_corners(3.0, 2.0, 10.0, 5.0, r, fx, fy)
+                for i in 0..4 {
+                    let dx = abs(a[i].x - b[i].x)
+                    let dy = abs(a[i].y - b[i].y)
+                    assert(dx < 0.0001)
+                    assert(dy < 0.0001)
+                }
+            }
+        }
+    }
+}

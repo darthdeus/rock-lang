@@ -1,0 +1,16 @@
+//! Error: removed global markers are unknown annotations
+//! Tags: annotations, registry, global
+
+//=== TEST CASE: removed_guarded_global_Generic ===
+@guarded global COUNTER: int = 0
+fn main() { COUNTER += 1 }
+
+//=== TEST CASE: removed_global_write_item_Generic ===
+global COUNTER: int = 0
+@global_write
+fn bump() { COUNTER += 1 }
+fn main() { bump() }
+
+//=== TEST CASE: removed_global_write_statement_Generic ===
+global COUNTER: int = 0
+fn main() { @global_write COUNTER += 1 }

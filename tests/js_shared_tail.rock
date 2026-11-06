@@ -1,0 +1,60 @@
+// Shared-branch-tail structuring corpus for the `--backend js` ratchet (T8c).
+// One @test per CFG-shape class the single `unstructured control flow (shared
+// branch tail)` reject used to conflate. Each test runs on both backends.
+//
+// Class A -- a loop INSIDE a lambda body (structure::analyze now roots at lambda
+// entries). The closure captures the outer accumulator by reference and owns its
+// own loop counter, which loop_capture_plan must NOT mis-flag as a per-iteration
+// capture.
+@test(returns = 15)
+fn shared_tail_lambda_body_loop() -> int {
+    let sum = 0
+    let run = () => {
+        let i = 1
+        while i <= 5 {
+            sum = sum + i
+            i = i + 1
+        }
+    }
+    run()
+    sum
+}
+
+// Class B -- an inlined iterator combinator TERMINAL chain. Post-inline the
+// `next()` skip-loop nests inside the for-loop, and a body block `continue`s the
+// OUTER loop: a multi-level jump the labeled-loop path structures.
+@test(returns = 10)
+fn shared_tail_combinator_chain() -> int {
+    let v = [1, 2, 3]
+    v.map(_ * 2).filter(_ > 2).reduce(0, (a, b) => a + b)
+}
+
+// Class C.1 -- multiple `continue` paths converging on a shared latch tail (the
+// T8a-regressed shape). A nested if/else where BOTH arms fall through to the same
+// accumulate block, which is NOT the branch's ipdom (the continue arms diverge to
+// the latch) -- so it is a doubly-reached forward tail, not a loop.
+@test(returns = 14)
+fn shared_tail_multiple_continues() -> int {
+    let v = [1, 2, 3, 4, 5, 6]
+    let sum = 0
+    for x in v {
+        if x % 2 == 0 {
+            if x % 4 == 0 { continue }
+        } else {
+            if x % 3 == 0 { continue }
+        }
+        sum = sum + x
+    }
+    sum
+}
+
+// Class C.2 -- an or-pattern success arm reached from N alternatives (a forward
+// shared tail with 2+ Goto predecessors).
+@test(returns = 42)
+fn shared_tail_or_pattern() -> int {
+    let x = 2
+    return match x {
+        1 | 2 | 3 => 42,
+        _ => 0,
+    }
+}

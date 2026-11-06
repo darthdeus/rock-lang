@@ -1,0 +1,24 @@
+@test(output = "0.25")
+fn test_fract_positive() {
+    print(fract(1.25))
+}
+
+@test(output = "0.75")
+fn test_fract_negative() {
+    print(fract(-1.25))
+}
+
+@test(output = "0")
+fn test_smoothstep_below() {
+    print(smoothstep(0.0, 1.0, -0.5))
+}
+
+@test(output = "1")
+fn test_smoothstep_above() {
+    print(smoothstep(0.0, 1.0, 2.0))
+}
+
+@test(output = "0.5")
+fn test_smoothstep_mid() {
+    print(smoothstep(0.0, 1.0, 0.5))
+}

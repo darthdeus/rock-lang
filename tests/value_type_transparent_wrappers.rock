@@ -1,0 +1,567 @@
+// Regression tests for the transparent-wrapper class of bug in the
+// value-type scalar-multi-return ABI. Commit 310b5a5a fixed the first
+// instance (`TypeAscription` around a value-returning call silently
+// truncating via Lua's multi-return rule in `let`-RHS). A follow-up
+// audit surfaced two more holes:
+//
+//   1. `generate_expr_emit` peeled Paren + TypeAscription but not `As`,
+//      so `let v = make_v2() as V2` hit the Single fallback, the
+//      repack-via-ctor didn't fire, and Lua truncated to the first
+//      scalar.
+//
+//   2. `arg_needs_multi_hoist` peeled only Paren, so a value-returning
+//      call wrapped in `::`, `as`, or any nesting thereof slipped the
+//      non-last-positional-arg hoist — same truncation, different seat.
+//      This also fed the FieldAccess path (`(make_rect() :: IRect).w`)
+//      because that arm delegates to `arg_needs_multi_hoist` to decide
+//      whether to pack-then-index.
+//
+// The fix routes both walker sites through `peel_transparent_wrappers`,
+// which peels Paren / TypeAscription unconditionally and `As` only when
+// it's an identity cast (same value struct on both sides — non-identity
+// `As` like float→int still needs its `math.floor` wrapper to survive).
+//
+// Each test below exercises one (wrapper, slot) pair. Runtime assertions
+// catch the miscompile: a truncated scalar-multi leaves the binding /
+// arg / field access reading `attempt to index a number value` or
+// returning a garbage primitive.
+
+value V2 {
+    x: int,
+    y: int,
+}
+
+value IRect {
+    x: int,
+    y: int,
+    w: int,
+    h: int,
+}
+
+fn make_v2() -> V2 {
+    return V2 { x: 10, y: 20 }
+}
+
+fn make_rect() -> IRect {
+    return IRect { x: 1, y: 2, w: 3, h: 4 }
+}
+
+fn __op_add(a: V2, b: V2) -> V2 {
+    return V2 { x: a.x + b.x, y: a.y + b.y }
+}
+
+fn take_rect_int(a: IRect, b: int) -> int {
+    return a.w + b
+}
+
+fn three_v2(a: V2, b: V2, c: int) -> int {
+    return a.x + b.x + c
+}
+
+struct Holder {
+    v: V2,
+    r: IRect,
+}
+
+// ---- let-RHS (the original 310b5a5a shape, expanded) ----
+
+@test fn let_rhs_ascription() {
+    let a = make_rect() :: IRect
+    assert_eq(a.w, 3)
+    assert_eq(a.h, 4)
+}
+
+@test fn let_rhs_paren() {
+    let b = (make_rect())
+    assert_eq(b.w, 3)
+    assert_eq(b.h, 4)
+}
+
+@test fn let_rhs_as() {
+    let c = make_rect() as IRect
+    assert_eq(c.w, 3)
+    assert_eq(c.h, 4)
+}
+
+@test fn let_rhs_chain_paren_ascription() {
+    let f = (make_rect() :: IRect)
+    assert_eq(f.w, 3)
+}
+
+@test fn let_rhs_chain_ascription_twice() {
+    let h = make_rect() :: IRect :: IRect
+    assert_eq(h.w, 3)
+}
+
+@test fn let_rhs_deeply_chained() {
+    let v = (((make_v2() :: V2) as V2) :: V2)
+    assert_eq(v.x, 10)
+    assert_eq(v.y, 20)
+}
+
+// ---- non-last call-arg (the hoist-in-non-last path) ----
+
+@test fn nonlast_arg_ascription() {
+    let r = take_rect_int(make_rect() :: IRect, 7)
+    assert_eq(r, 10)
+}
+
+@test fn nonlast_arg_paren() {
+    let r = take_rect_int((make_rect()), 7)
+    assert_eq(r, 10)
+}
+
+@test fn nonlast_arg_as() {
+    let r = take_rect_int(make_rect() as IRect, 7)
+    assert_eq(r, 10)
+}
+
+@test fn three_arg_slot1_ascription() {
+    let r = three_v2(make_v2() :: V2, make_v2(), 100)
+    assert_eq(r, 120)
+}
+
+@test fn three_arg_slot1_as() {
+    let r = three_v2(make_v2() as V2, make_v2(), 100)
+    assert_eq(r, 120)
+}
+
+@test fn three_arg_slot2_ascription() {
+    let r = three_v2(make_v2(), make_v2() :: V2, 100)
+    assert_eq(r, 120)
+}
+
+@test fn three_arg_slot2_as() {
+    let r = three_v2(make_v2(), make_v2() as V2, 100)
+    assert_eq(r, 120)
+}
+
+// ---- FieldAccess on wrapped value-returning call ----
+
+@test fn field_access_ascription() {
+    let w = (make_rect() :: IRect).w
+    assert_eq(w, 3)
+}
+
+@test fn field_access_paren() {
+    let w = (make_rect()).w
+    assert_eq(w, 3)
+}
+
+@test fn field_access_as() {
+    let w = (make_rect() as IRect).w
+    assert_eq(w, 3)
+}
+
+@test fn field_access_chain_ascription() {
+    let s = (make_rect() :: IRect).w + (make_rect() :: IRect).h
+    assert_eq(s, 7)
+}
+
+// ---- BinOp operand wrapped (scalar-ABI op overload in non-last slot) ----
+
+@test fn binop_lhs_ascription() {
+    let s = (make_v2() :: V2) + make_v2()
+    assert_eq(s.x, 20)
+    assert_eq(s.y, 40)
+}
+
+@test fn binop_rhs_ascription() {
+    let s = make_v2() + (make_v2() :: V2)
+    assert_eq(s.x, 20)
+    assert_eq(s.y, 40)
+}
+
+@test fn binop_lhs_as() {
+    let s = (make_v2() as V2) + make_v2()
+    assert_eq(s.x, 20)
+}
+
+@test fn binop_rhs_as() {
+    let s = make_v2() + (make_v2() as V2)
+    assert_eq(s.y, 40)
+}
+
+// ---- Struct-literal field (single-value slot) ----
+
+@test fn struct_literal_field_ascription() {
+    let h = Holder { v: make_v2() :: V2, r: make_rect() }
+    assert_eq(h.v.x, 10)
+    assert_eq(h.r.w, 3)
+}
+
+@test fn struct_literal_field_as() {
+    let h = Holder { v: make_v2() as V2, r: make_rect() as IRect }
+    assert_eq(h.v.y, 20)
+    assert_eq(h.r.h, 4)
+}
+
+// ---- If-expression with wrapped value-returning branch ----
+
+@test fn if_branch_ascription() {
+    let flag = true
+    let v = if flag { make_v2() :: V2 } else { make_v2() }
+    assert_eq(v.x, 10)
+    assert_eq(v.y, 20)
+}
+
+// ---- Assignment (reassign a local) ----
+
+@test fn reassign_ascription() {
+    let v = V2 { x: 0, y: 0 }
+    v = make_v2() :: V2
+    assert_eq(v.x, 10)
+    v = make_v2() as V2
+    assert_eq(v.y, 20)
+}
+
+// ---- More single-value slots surfaced by continued adversarial probing ----
+// These exercise paths outside generate_expr_emit / arg_needs_multi_hoist that
+// still needed peeling: the Nullable-let RHS pack (statements.rs) and the
+// single-expression lambda body pack (exprs.rs Lambda arm via generate_return).
+
+@test fn nullable_let_ascription() {
+    let v: V2? = make_v2() :: V2
+    if v != null {
+        assert_eq(v.x, 10)
+        assert_eq(v.y, 20)
+    }
+}
+
+@test fn nullable_let_as() {
+    let v: V2? = make_v2() as V2
+    if v != null {
+        assert_eq(v.x, 10)
+        assert_eq(v.y, 20)
+    }
+}
+
+@test fn lambda_body_ascription() {
+    let f = () => make_v2() :: V2
+    let v = f()
+    assert_eq(v.x, 10)
+    assert_eq(v.y, 20)
+}
+
+@test fn lambda_body_as() {
+    let f = () => make_v2() as V2
+    let v = f()
+    assert_eq(v.x, 10)
+    assert_eq(v.y, 20)
+}
+
+// ---- Tuple / array / Vec / Map element slots ----
+
+@test fn array_element_ascription() {
+    let xs = [make_v2() :: V2, make_v2()]
+    assert_eq(xs[0].x, 10)
+    assert_eq(xs[1].y, 20)
+}
+
+@test fn array_element_as() {
+    let xs = [make_v2() as V2, make_v2()]
+    assert_eq(xs[0].x, 10)
+}
+
+@test fn tuple_element_ascription() {
+    let t = (make_v2() :: V2, make_v2(), 42)
+    assert_eq(t.0.x, 10)
+    assert_eq(t.1.y, 20)
+    assert_eq(t.2, 42)
+}
+
+@test fn vec_push_ascription() {
+    let xs: [V2] = []
+    xs.push(make_v2() :: V2)
+    xs.push(make_v2() as V2)
+    assert_eq(xs[0].x, 10)
+    assert_eq(xs[1].y, 20)
+}
+
+@test fn map_write_ascription() {
+    let m: Map<int, V2> = map_new()
+    m[0] = make_v2() :: V2
+    m[1] = make_v2() as V2
+    assert_eq(m[0].x, 10)
+    assert_eq(m[1].y, 20)
+}
+
+// ---- Return stmt with wrapper ----
+
+fn _ret_asc() -> V2 { return make_v2() :: V2 }
+fn _ret_as() -> V2 { return make_v2() as V2 }
+
+@test fn return_ascription() {
+    let v = _ret_asc()
+    assert_eq(v.x, 10)
+    assert_eq(v.y, 20)
+}
+
+@test fn return_as() {
+    let v = _ret_as()
+    assert_eq(v.x, 10)
+    assert_eq(v.y, 20)
+}
+
+// ---- Match IIFE leaf ----
+
+@test fn match_leaf_ascription() {
+    let v = match 1 {
+        1 => make_v2() :: V2,
+        _ => make_v2(),
+    }
+    assert_eq(v.x, 10)
+    assert_eq(v.y, 20)
+}
+
+@test fn match_leaf_as() {
+    let v = match 1 {
+        1 => make_v2() as V2,
+        _ => make_v2(),
+    }
+    assert_eq(v.x, 10)
+    assert_eq(v.y, 20)
+}
+
+// ---- UFCS receiver wrapped ----
+
+fn _v2_sum(v: V2) -> int { return v.x + v.y }
+
+@test fn ufcs_receiver_ascription() {
+    let r = (make_v2() :: V2)._v2_sum()
+    assert_eq(r, 30)
+}
+
+@test fn ufcs_receiver_as() {
+    let r = (make_v2() as V2)._v2_sum()
+    assert_eq(r, 30)
+}
+
+// ---- BinOp result wrapped, flowing into various slots ----
+// Probes the "value-typed BinOp whose lowering is a scalarized user
+// operator fn" shape: the BinOp itself emits Multi, and then a wrapper
+// ascribes/casts that result before it lands in a single-value slot.
+
+@test fn binop_result_ascripted_let() {
+    let v = ((_v2_add(_v2_lit(1, 2), _v2_lit(3, 4))) :: V2)
+    assert_eq(v.x, 4)
+    assert_eq(v.y, 6)
+}
+
+@test fn binop_result_ascripted_nonlast_arg() {
+    let r = _v2_sum2((_v2_lit(1, 2) + _v2_lit(3, 4)) :: V2, 100)
+    assert_eq(r, 110)
+}
+
+@test fn binop_result_as_field_access() {
+    let x = ((_v2_lit(1, 2) + _v2_lit(3, 4)) as V2).x
+    assert_eq(x, 4)
+}
+
+@test fn nested_wrapper_around_binop_ascription() {
+    let a = ((make_v2() + make_v2()) :: V2) :: V2
+    assert_eq(a.x, 20)
+    assert_eq(a.y, 40)
+}
+
+// ---- Coroutine yielding wrapped value-returning call ----
+co fn _co_yields() -> Coroutine<V2> {
+    yield make_v2() :: V2
+    yield make_v2() as V2
+}
+
+@test fn coroutine_yield_wrapped() {
+    let c = _co_yields()
+    let a = c.resume()
+    let b = c.resume()
+    if a != null && b != null {
+        assert_eq(a.x, 10)
+        assert_eq(b.y, 20)
+    }
+}
+
+// ---- ?? coalesce with wrapped RHS ----
+fn _maybe_v2(yes: bool) -> V2? {
+    if yes { return make_v2() }
+    return null
+}
+
+@test fn coalesce_rhs_wrapped_ascription() {
+    let v = _maybe_v2(false) ?? (make_v2() :: V2)
+    assert_eq(v.x, 10)
+}
+
+@test fn coalesce_rhs_wrapped_as() {
+    let v = _maybe_v2(false) ?? (make_v2() as V2)
+    assert_eq(v.y, 20)
+}
+
+// ---- Closure passed to collection .map returning wrapped value ----
+@test fn vec_map_wrapped_return() {
+    let xs = [1, 2, 3]
+    let ys: [V2] = xs.iter().map(i => V2 { x: i, y: i * 2 } :: V2).collect()
+    assert_eq(ys[0].x, 1)
+    assert_eq(ys[1].y, 4)
+    assert_eq(ys[2].x, 3)
+}
+
+// Helpers used by the BinOp-result probes above.
+fn _v2_lit(x: int, y: int) -> V2 { return V2 { x: x, y: y } }
+fn _v2_add(a: V2, b: V2) -> V2 { return a + b }
+fn _v2_sum2(v: V2, k: int) -> int { return v.x + v.y + k }
+
+// ---- Negative tests: non-identity `As` must keep its wrapper. ----
+// The peel helper's identity-As branch deliberately excludes these
+// cases so float→int `math.floor` (and other numeric conversions
+// emitted in `generate_expr_core`) still surrounds the inner code.
+
+@test fn non_identity_as_float_to_int() {
+    let x = 5.7 as int
+    assert_eq(x, 5)
+}
+
+@test fn non_identity_as_in_call_arg() {
+    let r = _take_int(3.9 as int)
+    assert_eq(r, 3)
+}
+
+@test fn non_identity_as_chain() {
+    let r = (3.9 as int) as int
+    assert_eq(r, 3)
+}
+
+fn _take_int(i: int) -> int { return i }
+
+// ---- Nested value-struct (`value` containing `value` field) ----
+// Exercises the `has_nested` branch in `pack_value_expr` and the
+// recursive cdata ctor selection.
+
+value _Line { a: V2, b: V2 }
+
+fn _make_line() -> _Line {
+    return _Line { a: V2 { x: 1, y: 2 }, b: V2 { x: 3, y: 4 } }
+}
+
+@test fn nested_value_let_ascription() {
+    let l = _make_line() :: _Line
+    assert_eq(l.a.x, 1)
+    assert_eq(l.b.y, 4)
+}
+
+@test fn nested_value_field_as() {
+    let y = (_make_line() as _Line).b.y
+    assert_eq(y, 4)
+}
+
+@test fn nested_value_arg_nonlast() {
+    let r = _take_line_k(_make_line() :: _Line, 100)
+    assert_eq(r, 105)
+}
+
+fn _take_line_k(l: _Line, k: int) -> int { return l.a.x + l.b.y + k }
+
+// ---- Nested-value struct literal with value-returning field calls ----
+// Sibling class of the transparent-wrapper miscompile, surfaced during
+// adversarial probing: a `value`-struct literal whose fields are
+// themselves value structs (`value Path { start: V2, end: V2 }`) must
+// pack each field to a single cdata before feeding the outer
+// `__rock_create_c_struct_Path(...)` ctor. The outer ctor takes one
+// cdata per top-level field (selected by `pack_value_expr`'s `has_
+// nested` branch), not flat scalars — so emitting `return Path { start:
+// make_v2(), end: make_v2() }` as `return make_v2(), make_v2()` crashed
+// the caller's ctor with "cannot convert 'number' to 'struct …'" on
+// the bare case (even without any `::` / `as` wrapper). Fix routes each
+// value-struct field through `emit_value_arg_cdata` in the StructLiteral
+// arm. Tests cover bare + wrapped field exprs so regressions show up
+// regardless of wrapper presence.
+
+value _Path { start: V2, end: V2 }
+
+fn _make_path_bare() -> _Path {
+    return _Path { start: make_v2(), end: make_v2() }
+}
+
+fn _make_path_ascription() -> _Path {
+    return _Path { start: make_v2() :: V2, end: make_v2() }
+}
+
+fn _make_path_as() -> _Path {
+    return _Path { start: make_v2() as V2, end: make_v2() as V2 }
+}
+
+@test fn nested_struct_literal_bare_field_calls() {
+    let p = _make_path_bare()
+    assert_eq(p.start.x, 10)
+    assert_eq(p.end.y, 20)
+}
+
+@test fn nested_struct_literal_wrapped_field_ascription() {
+    let p = _make_path_ascription()
+    assert_eq(p.start.x, 10)
+    assert_eq(p.end.y, 20)
+}
+
+@test fn nested_struct_literal_wrapped_field_as() {
+    let p = _make_path_as()
+    assert_eq(p.start.x, 10)
+    assert_eq(p.end.y, 20)
+}
+
+// ---- Deep shapes: compound expressions, if/match in non-last args,
+// chained wrappers on lambda call results, three-level nested value
+// structs. All pass today on the fixed pipeline; here to pin them.
+
+@test fn deep_compound_mixed_wrappers() {
+    let v = (((make_v2() :: V2) + (make_v2() as V2)) :: V2)
+        + ((make_v2() as V2) :: V2)
+    assert_eq(v.x, 30)
+    assert_eq(v.y, 60)
+}
+
+@test fn if_expr_wrapped_in_nonlast() {
+    let flag = true
+    let r = _v2_sum2(if flag { make_v2() :: V2 } else { make_v2() }, 100)
+    assert_eq(r, 130)
+}
+
+@test fn match_expr_wrapped_in_nonlast() {
+    let k = 1
+    let r = _v2_sum2(match k {
+        1 => make_v2() :: V2,
+        _ => make_v2(),
+    }, 100)
+    assert_eq(r, 130)
+}
+
+@test fn lambda_call_result_wrapped() {
+    let f = () => make_v2()
+    let v = f() :: V2
+    assert_eq(v.x, 10)
+    assert_eq(v.y, 20)
+}
+
+@test fn lambda_call_result_as() {
+    let f = () => make_v2()
+    let v = f() as V2
+    assert_eq(v.x, 10)
+    assert_eq(v.y, 20)
+}
+
+// Numeric `As` coexisting with value-typed fields in a literal.
+@test fn mixed_identity_and_numeric_as_in_literal() {
+    let v = V2 { x: 5.7 as int, y: 3.9 as int } :: V2
+    assert_eq(v.x, 5)
+    assert_eq(v.y, 3)
+}
+
+// Three-level nested value struct with wrappers interleaved.
+value _Poly { p1: _Path, p2: _Path }
+
+@test fn three_level_nested_wrapped() {
+    let z = _Poly {
+        p1: _Path { start: make_v2() :: V2, end: make_v2() as V2 },
+        p2: _make_path_ascription() :: _Path,
+    }
+    assert_eq(z.p1.start.x, 10)
+    assert_eq(z.p2.end.y, 20)
+}

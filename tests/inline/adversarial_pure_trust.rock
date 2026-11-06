@@ -1,0 +1,44 @@
+// Adversarial tests for the `@pure` **trust boundary** when the body is
+// opaque (inline(lua)). The verifier treats `@pure` as trusted without
+// walking opaque bodies. A user who marks an effectful inline(lua) body `@pure`
+// violates the contract; the compiler treats it as pure.
+//
+// These tests pin the trust-boundary contract. They are *not* miscompile tests.
+// If Rock ever gains a stricter lua-purity checker, these tests would
+// need to flip.
+
+// ────────────────────────────────────────────────────────────────────
+// Case A: honestly-pure inline(lua). No side effect, referentially
+// transparent. Marked @pure. LICM/CSE may fire; runtime unchanged.
+// ────────────────────────────────────────────────────────────────────
+@pure @nomangle
+inline(lua) fn lua_abs(x: int) -> int = "return math.abs(x)"
+
+@test(output = "10")
+fn test_pure_inline_lua_honest() {
+    let sum = 0
+    for i in 0..5 {
+        sum = sum + lua_abs(0 - 2)
+    }
+    print(sum)
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Case B: honestly-pure inline(lua) used twice with same arg; CSE may
+// collapse. Result unchanged.
+// ────────────────────────────────────────────────────────────────────
+@test(output = "14")
+fn test_pure_inline_lua_cse() {
+    let x = 0 - 7
+    print(lua_abs(x) + lua_abs(x))
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Case C: bare call to honestly-pure inline(lua) is DCE'd. Runtime
+// unchanged — we didn't observe it anyway.
+// ────────────────────────────────────────────────────────────────────
+@test(output = "after")
+fn test_pure_inline_lua_dce_bare_call() {
+    lua_abs(99)
+    print("after")
+}

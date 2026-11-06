@@ -1,0 +1,77 @@
+// `Arena.clear()` keeps the Arena incarnation and drops the payload graph.
+// `next_generation` is a per-Arena monotonic issuance counter, so emptying the
+// columns still cannot reissue a generation a live handle already holds.
+
+struct Tag { v: int }
+
+@test(output = "0\ntrue\n0")
+fn clear_reuses_slot_zero_with_a_fresh_generation() {
+    let a: Arena<Tag> = arena_new()
+    let before = a.insert(Tag { v: 1 })
+    a.clear()
+    let after = a.insert(Tag { v: 2 })
+    print(after._slot)
+    print(after._generation > before._generation)
+    print(before._slot)
+}
+
+// The incarnation survives: same Arena ID either side of the clear, so nothing
+// downstream has to re-acquire the handle.
+@test(output = "true\ntrue")
+fn clear_preserves_the_arena_incarnation() {
+    let a: Arena<Tag> = arena_new()
+    let id = a._arena_id
+    let before = a.insert(Tag { v: 1 })
+    a.clear()
+    let after = a.insert(Tag { v: 2 })
+    print(a._arena_id == id)
+    print(before._arena_id == after._arena_id)
+}
+
+// Clearing must not mint a new Arena ID: repeated clears consume no ID space,
+// so the next Arena created is the immediate successor.
+@test(output = "1")
+fn clear_does_not_churn_arena_ids() {
+    let a: Arena<Tag> = arena_new()
+    let id = a._arena_id
+    for _i in 0..10 { a.clear() }
+    let b: Arena<Tag> = arena_new()
+    print(b._arena_id - id)
+}
+
+// An ID is retired, never recycled.
+@test(output = "true")
+fn destroyed_arena_ids_are_not_reused() {
+    let a: Arena<Tag> = arena_new()
+    let id = a._arena_id
+    arena_destroy(a)
+    let b: Arena<Tag> = arena_new()
+    print(b._arena_id > id)
+}
+
+// Every insertion advances the counter, reused slot or fresh, so a removed
+// slot's next occupant never carries a generation the old handle held.
+@test(output = "true\ntrue\n2")
+fn reused_slots_take_a_fresh_generation() {
+    let a: Arena<Tag> = arena_new()
+    let first = a.insert(Tag { v: 1 })
+    first.remove()
+    let second = a.insert(Tag { v: 2 })
+    print(second._slot == first._slot)
+    print(second._generation > first._generation)
+    print(a.get(second).unwrap().v)
+}
+
+// Clearing releases the rows: the storage is emptied, not merely marked free.
+@test(output = "0\n0\n1")
+fn clear_empties_the_backing_columns() {
+    let a: Arena<Tag> = arena_new()
+    for i in 0..5 { a.insert(Tag { v: i }) }
+    a.clear()
+    print(a.len())
+    let seen = 0
+    for (_e, _v) in a { seen += 1 }
+    print(seen)
+    a.insert(Tag { v: 9 })
+    print(a.len())
+}

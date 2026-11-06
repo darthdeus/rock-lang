@@ -1,0 +1,94 @@
+// `::` pushes the ascribed type into its operand as an expected type; `as` is a
+// checked explicit conversion. Rejections live in
+// tests/errors/checked_{ascription,cast}.rock.err.
+
+struct AscribedPoint { x: int, y: int }
+
+// Without the ascribed type reaching `p`, this parameter has nothing to infer
+// from -- the ascription is what makes the body's field access resolve.
+@test(output = "5")
+fn test_ascription_supplies_lambda_param_type() {
+    let f = ((p) => p.x) :: fn(AscribedPoint) -> int
+    print(f(AscribedPoint { x: 5, y: 6 }))
+}
+
+@test(output = "7")
+fn test_ascription_supplies_nested_lambda_param_type() {
+    let f = ((p) => p.y) :: fn(AscribedPoint) -> int
+    print(f(AscribedPoint { x: 6, y: 7 }))
+}
+
+@test(output = "true")
+fn test_bare_null_ascription() {
+    let n = (null :: int?)
+    print(n == null)
+}
+
+@test(output = "true")
+fn test_bare_null_ascription_struct() {
+    let p = (null :: AscribedPoint?)
+    print(p == null)
+}
+
+@test(output = "42")
+fn test_identity_ascription() {
+    let x = 42 :: int
+    print(x)
+}
+
+@test(output = "42")
+fn test_widening_ascription_int_to_float() {
+    let x = 42 :: float
+    print(x)
+}
+
+@test(output = "42")
+fn test_nullable_widening_ascription() {
+    let x = 42 :: int?
+    print(x ?? 0)
+}
+
+@test(output = "42\n3")
+fn test_numeric_conversions_survive() {
+    let up = 42 as float
+    print(up)
+    let down = 3.9 as int
+    print(down)
+}
+
+// `as` is not contextual: its operand must type itself. These are the nearest
+// accepted neighbours of the rejections in tests/errors/checked_cast.rock.err --
+// in each the operand is already resolved before the target is consulted.
+@test(output = "3")
+fn test_cast_operand_types_itself_array() {
+    let v = [1, 2, 3] as [int]
+    print(v.len())
+}
+
+@test(output = "42")
+fn test_cast_widens_resolved_source_to_nullable() {
+    let v = 42 as int?
+    print(v ?? 0)
+}
+
+@test(output = "42")
+fn test_cast_identity_on_resolved_source() {
+    let v = 42 as int
+    print(v)
+}
+
+// The contextual form of the rejected `((x) => x) as fn(int) -> int`.
+@test(output = "7")
+fn test_ascription_still_supplies_lambda_param_type() {
+    let f = ((x) => x) :: fn(int) -> int
+    print(f(7))
+}
+
+// `as` rejects `any -> Point` (tests/errors/checked_cast.rock.err); recovering a
+// concrete type out of `any` is `cast<T>`'s job, and it still works.
+@test(output = "5")
+fn test_cast_remains_the_any_escape_hatch() {
+    let erased: any = AscribedPoint { x: 5, y: 6 }
+    let p: AscribedPoint = cast(erased)
+    print(p.x)
+}

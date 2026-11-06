@@ -1,0 +1,44 @@
+// Nested enum-variant patterns in while-let. Before the refactor that
+// routed while-let through the shared `lower_pattern` helper, only the
+// flat `EnumVariant(Ident, ...)` shape was absorbed; nested patterns
+// (e.g. `L(J(x))`) panicked with `Unsupported("while-let pattern not
+// ident/_ (live, faithful)")`. Now while-let supports the full pattern
+// surface (Ident / Wildcard / EnumVariant / Tuple / Record / Literal
+// / Range / Or) via the shared helper.
+
+enum Inner { J(int), K }
+enum Outer { L(Inner), M(int) }
+
+@test
+fn test_nested_enum_match_extracts_inner() {
+    let e: Outer = Outer::L(Inner::J(42))
+    let captured = 0
+    while let L(J(x)) = e {
+        captured = x
+        e = Outer::M(0)  // make next iter not match
+    }
+    assert_eq(captured, 42)
+}
+
+@test
+fn test_nested_enum_no_match_skips_body() {
+    let e: Outer = Outer::L(Inner::K)
+    let entered = 0
+    while let L(J(x)) = e {
+        entered = entered + 1
+        e = Outer::M(0)
+    }
+    assert_eq(entered, 0)  // outer matches L but inner is K, not J
+}
+
+@test
+fn test_nested_enum_outer_mismatch_skips() {
+    let e: Outer = Outer::M(7)
+    let entered = 0
+    while let L(J(x)) = e {
+        entered = entered + 1
+        e = Outer::M(0)
+    }
+    assert_eq(entered, 0)  // outer is M, not L — short-circuits before
+                          // touching the slot that J would need
+}

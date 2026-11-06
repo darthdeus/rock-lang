@@ -1,0 +1,60 @@
+// Operator-overload dispatch by argument type (bone backend regression).
+//
+// The parser folds `a + b` into `__op_add(a, b)`, so a user-defined
+// `fn __op_add(V2, V2)` coexists with stdlib's numeric `__op_add(float, float)`
+// / `(int, int)` as overloads of the same name. Resolution MUST pick by
+// argument types: the inner `a.x + b.x` (float + float) in an overload body
+// has to hit the numeric op, not recurse into the struct overload.
+//
+// bone regressed here: resolve_callee returned ONLY local same-named fns when
+// the current module had any, shadowing stdlib's numeric ops. A `V2 + V2`
+// call site resolved fine (one local candidate, args match), but the float
+// `a.x + b.x` inside the body had only the struct overload visible ->
+// "type mismatch: expected `V2`, found `float`" / "No overload for `__op_add` (float, float)".
+// Real rock unions all same-named fns across files (one namespace) and selects
+// by arg type. No safe-nav / compound here on purpose, so this isolates the
+// dispatch bug without tripping the separate safe-nav compound-assign gap.
+
+struct V2 {
+    x: float,
+    y: float,
+}
+
+fn __op_add(a: V2, b: V2) -> V2 {
+    return V2 { x: a.x + b.x, y: a.y + b.y }
+}
+
+fn __op_sub(a: V2, b: V2) -> V2 {
+    return V2 { x: a.x - b.x, y: a.y - b.y }
+}
+
+fn __op_mul(a: V2, s: float) -> V2 {
+    return V2 { x: a.x * s, y: a.y * s }
+}
+
+// homogeneous overload: the call site picks V2+V2; the body's float adds hit
+// the numeric op.
+@test(output = "4 7")
+fn test_struct_add_with_inner_numeric() {
+    let a = V2 { x: 1.0, y: 2.0 }
+    let b = V2 { x: 3.0, y: 5.0 }
+    let c = a + b
+    print("{int(c.x)} {int(c.y)}")
+}
+
+// mixed-type overload V2 * float; the body's float muls hit the numeric op.
+@test(output = "6 10")
+fn test_struct_mul_scalar() {
+    let p = V2 { x: 3.0, y: 5.0 }
+    let q = p * 2.0
+    print("{int(q.x)} {int(q.y)}")
+}
+
+// the numeric ops must still resolve on their own when no struct operand is
+// involved (sanity that unioning didn't break primitive arithmetic).
+@test(output = "5")
+fn test_primitive_numeric_still_resolves() {
+    let x = 2.0
+    let y = 3.0
+    print("{int(x + y)}")
+}

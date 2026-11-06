@@ -1,0 +1,14 @@
+// Comment inside enum variant fields
+enum Shape {
+    Circle(float /* radius */),
+    Rect(float, /* width */ float /* height */),
+}
+
+@test(output = "ok")
+fn t() {
+    let s = Shape::Rect(3.0, 4.0)
+    match s {
+        Shape::Circle(_) => print("c"),
+        Shape::Rect(_, _) => print("ok"),
+    }
+}

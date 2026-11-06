@@ -1,0 +1,29 @@
+// Runtime guard for skull's closure capture-snapshot (codegen opt: snapshot a
+// loop-stored single-assignment captured cell by value, capture everything else
+// by reference with no IIFE). skull-diff only compares rock-vs-skull; an absolute
+// miscompile in BOTH needs an expected-output test, which this is.
+
+// Closures created in a loop must each capture THEIR iteration's value. If the
+// by-value snapshot were wrongly dropped, all closures would share the cell's
+// final value -> "2\n2\n2" instead of "0\n1\n2".
+@test(output = "0\n1\n2")
+fn test_loop_capture_distinct() {
+    let fns: [fn() -> int] = []
+    for i in 0..3 {
+        let a = i
+        fns.push(() => a)
+    }
+    for f in fns {
+        print(f())
+    }
+}
+
+// A closure created once (not in a loop) captures by reference -- no snapshot
+// needed; still correct.
+@test(output = "7")
+fn test_nonloop_capture() {
+    let x = 3
+    let y = 4
+    let f = () => x + y
+    print(f())
+}

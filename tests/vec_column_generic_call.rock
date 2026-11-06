@@ -1,0 +1,31 @@
+// A generic call over a COLUMN-stored element must reach that instantiation's
+// own specialized body, on every backend.
+//
+// The shared generic body reads a `_data` the column layout does not have, so
+// resolving such a call to it is wrong rather than slow. The nested-lambda case
+// is its own shape: a hoisted lambda is a separately emitted callable, and a
+// residual binding inside one is invisible to a walk of the enclosing body.
+
+nobox value NV2 { x: float, y: float }
+
+fn pick<T>(xs: [T], i: int, f: fn(T) -> float) -> float {
+    return f(xs[i])
+}
+
+fn run(f: fn() -> int) -> int { return f() }
+
+@test(output = "9\n1")
+fn test_column_element_generic_call() {
+    let a: [NV2] = [NV2 { x: 3.0, y: 1.0 }, NV2 { x: 9.0, y: 2.0 }]
+    print(int(pick(a, 1, v => v.x)))
+    print(int(pick(a, 0, v => v.y)))
+}
+
+@test(output = "9")
+fn test_column_element_generic_call_inside_a_hoisted_lambda() {
+    let n = run(() => {
+        let a: [NV2] = [NV2 { x: 3.0, y: 1.0 }, NV2 { x: 9.0, y: 2.0 }]
+        return int(pick(a, 1, v => v.x))
+    })
+    print(n)
+}

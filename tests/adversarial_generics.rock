@@ -1,0 +1,165 @@
+// Adversarial tests: Generics
+
+// --- Basic generic struct ---
+
+struct Pair<T> {
+    first: T,
+    second: T,
+}
+
+@test(output = "1 2")
+fn test_generic_struct_int() {
+    let p: Pair<int> = Pair { first: 1, second: 2 }
+    print("{p.first} {p.second}")
+}
+
+@test(output = "hello world")
+fn test_generic_struct_string() {
+    let p: Pair<string> = Pair { first: "hello", second: "world" }
+    print("{p.first} {p.second}")
+}
+
+// --- Generic function ---
+
+fn swap<T>(a: T, b: T) -> (T, T) {
+    return (b, a)
+}
+
+@test(output = "2 1")
+fn test_generic_function() {
+    let (a, b) = swap(1, 2)
+    print("{a} {b}")
+}
+
+@test(output = "world hello")
+fn test_generic_function_string() {
+    let (a, b) = swap("hello", "world")
+    print("{a} {b}")
+}
+
+// --- Generic with constraints ---
+
+fn max_of<T>(a: T, b: T) -> T {
+    if a > b { return a }
+    return b
+}
+
+@test(output = "5")
+fn test_generic_max() {
+    print(max_of(3, 5))
+}
+
+@test(output = "hello")
+fn test_generic_max_string() {
+    print(max_of("apple", "hello"))
+}
+
+// --- Nested generics ---
+
+struct Box<T> {
+    val: T,
+}
+
+@test(output = "42")
+fn test_nested_generic() {
+    let b: Box<Box<int>> = Box { val: Box { val: 42 } }
+    print(b.val.val)
+}
+
+// --- Generic vec operations ---
+
+fn first_element<T>(v: [T]) -> T? {
+    if v.len > 0 {
+        return v[0]
+    }
+    return null
+}
+
+@test(output = "42")
+fn test_generic_vec_function() {
+    let v = [42, 1, 2]
+    let f = first_element(v)
+    print(f ?? -1)
+}
+
+@test(output = "-1")
+fn test_generic_vec_empty() {
+    let v: [int] = []
+    let f = first_element(v)
+    print(f ?? -1)
+}
+
+// --- Generic with multiple type params ---
+
+struct KeyValue<K, V> {
+    key: K,
+    value: V,
+}
+
+@test(output = "name: Alice")
+fn test_multi_param_generic() {
+    let kv: KeyValue<string, string> = KeyValue { key: "name", value: "Alice" }
+    print("{kv.key}: {kv.value}")
+}
+
+// --- Generic function infers types ---
+
+fn make_pair<T>(a: T, b: T) -> Pair<T> {
+    return Pair { first: a, second: b }
+}
+
+@test(output = "10 20")
+fn test_generic_type_inference() {
+    let p = make_pair(10, 20)
+    print("{p.first} {p.second}")
+}
+
+// --- Generic with nullable ---
+
+fn safe_first<T>(v: [T]) -> T? {
+    if v.len > 0 {
+        return v[0]
+    }
+    return null
+}
+
+@test(output = "hello")
+fn test_generic_nullable_return() {
+    let v = ["hello", "world"]
+    print(safe_first(v) ?? "empty")
+}
+
+@test(output = "empty")
+fn test_generic_nullable_empty() {
+    let v: [string] = []
+    print(safe_first(v) ?? "empty")
+}
+
+// --- Vec of generic struct ---
+
+@test(output = "2")
+fn test_vec_of_generic() {
+    let boxes: [Box<int>] = [Box { val: 1 }, Box { val: 2 }]
+    print(boxes[1].val)
+}
+
+// --- Generic identity ---
+
+fn id<T>(x: T) -> T {
+    return x
+}
+
+@test(output = "42")
+fn test_generic_identity_int() {
+    print(id(42))
+}
+
+@test(output = "hello")
+fn test_generic_identity_string() {
+    print(id("hello"))
+}
+
+@test(output = "true")
+fn test_generic_identity_bool() {
+    print(id(true))
+}

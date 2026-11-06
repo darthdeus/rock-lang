@@ -1,0 +1,132 @@
+// Capturing closure semantics across snapshot and environment-record emission.
+//
+// Most cases PASS today (semantics preserved across the mechanism swap). The one
+// SENTINEL encodes today's goto-shaped-loop final-value bug and must be flipped
+// when P2.6 lands per-iteration loop-binding capture. See closure_loop_capture.rock
+// for the fresh-binding (`let a = i`) per-iteration case; here we capture the loop
+// var DIRECTLY, which is what distinguishes the loop shapes.
+
+// vec iteration: capturing the pattern var `x` is per-iteration today (the
+// binding is a fresh single-assignment cell, IIFE-snapshotted). Must stay
+// per-iteration after the record swap.
+@test(output = "10\n20\n30")
+fn test_vec_iter_capture_per_iteration() {
+    let xs = [10, 20, 30]
+    let fns: [fn() -> int] = []
+    for x in xs {
+        fns.push(() => x)
+    }
+    for f in fns { print(f()) }
+}
+
+// Map iteration: capturing the value `v` is per-iteration today (same fresh-
+// binding mechanism). Sum (600) is iteration-order-independent: per-iteration
+// gives 100+200+300; a final-value bug would give 3x the last value.
+@test(output = "600")
+fn test_map_iter_capture_per_iteration() {
+    let m = map_new()
+    m[1] = 100
+    m[2] = 200
+    m[3] = 300
+    let fns: [fn() -> int] = []
+    for (k, v) in m {
+        fns.push(() => v)
+    }
+    let total = 0
+    for f in fns { total = total + f() }
+    print(total)
+}
+
+// Shared mutable capture: two lambdas + the enclosing fn all observe ONE cell.
+// This is today's by-reference upvalue and the intended box semantics -- same
+// output before and after the swap.
+@test(output = "1\n11\n100")
+fn test_shared_mutable_capture() {
+    let n = 1
+    let get = () => n
+    let bump = () => { n = n + 10 }
+    print(get())
+    bump()
+    print(get())
+    n = 100
+    print(get())
+}
+
+// A capture observes a later mutation of the captured cell (by reference).
+@test(output = "5\n7")
+fn test_capture_sees_later_mutation() {
+    let x = 5
+    let f = () => x
+    print(f())
+    x = 7
+    print(f())
+}
+
+// Nested lambda capturing an enclosing-fn cell through the middle lambda.
+@test(output = "9")
+fn test_nested_lambda_captures_outer() {
+    let outer = make_nested(9)
+    let inner = outer()
+    print(inner())
+}
+
+fn make_nested(x: int) -> fn() -> fn() -> int {
+    return () => { return () => x }
+}
+
+@test(output = "len=3")
+fn test_iterator_chain_inside_lambda_body() {
+    let f = (xs: [int]) => xs.iter().collect()
+    let r = f([1, 2, 3])
+    print("len={r.len}")
+}
+
+// DECIDED SEMANTICS (plan "Capture classification"): a reassigned PARAM is one
+// mutable binding, not a fresh per-iteration one, so every capture shares its
+// box -- same rule as `test_shared_mutable_capture`, and consistent with the
+// out-of-loop `test_capture_sees_later_mutation`. This deliberately REPLACES
+// the pre-P2.5 behavior, where the loop-store IIFE snapshot made this case
+// per-iteration ("0\n10\n20"); per-iteration capture is reserved for loop
+// BINDINGS (`for x in ...`), which stay covered by the tests above.
+@test(output = "20\n20\n20")
+fn test_param_reassigned_in_loop_shares_one_box() {
+    print_make_fns(0)
+}
+
+fn print_make_fns(x: int) {
+    let fns: [fn() -> int] = []
+    for i in 0..3 {
+        x = i * 10
+        fns.push(() => x)
+    }
+    for f in fns { print(f()) }
+}
+
+// A counted RANGE loop whose counter `i` is captured DIRECTLY: each closure
+// captures ITS iteration's `i` -> "0\n1\n2". Capturing the counter defeats FORL
+// recognition into a goto loop with a shared-local counter; P2.6 classifies that
+// counter as a loop-binding by-value capture, so each env record snapshots that
+// iteration's value (per-iteration regression guard). Pre-P2.6 this was the
+// documented final-value sentinel ("3\n3\n3", goto-loop shared upvalue).
+@test(output = "0\n1\n2")
+fn test_range_counter_capture_per_iteration() {
+    let fns: [fn() -> int] = []
+    for i in 0..3 {
+        fns.push(() => i)
+    }
+    for f in fns { print(f()) }
+}
+
+// The `enumerate` index counter `i` is a DIFFERENT desugaring than a range
+// counter (a multi-store cursor incremented in the latch, bound to the user name),
+// but is likewise a loop-binding cell -- capturing it directly is per-iteration.
+// Guards R1's desugar-provenance tag on `lower_for_enumerate`'s split-mode index.
+@test(output = "0\n1\n2")
+fn test_enumerate_index_capture_per_iteration() {
+    let xs = [10, 20, 30]
+    let fns: [fn() -> int] = []
+    for (i, x) in enumerate(xs) {
+        fns.push(() => i)
+    }
+    for f in fns { print(f()) }
+}

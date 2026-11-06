@@ -1,0 +1,55 @@
+//! Error: `@uniform_expand fn f<T>(fv: Ptr<float>, iv: Ptr<int>, u: T)` packs a
+//!        `@uniform` group into a std140 block at its call site
+//!        Misuse is a spanned error at emit, never a call that reaches the fn's
+//!        error body.
+//!
+//!        The rejections: wrong arity, a third argument that is not a `value`
+//!        struct, and a group with no std140 form. Generic wrappers are admitted
+//!        and validated when their retained concrete instances reach the
+//!        expander.
+//! Tags: uniform_expand, gpu_layout, emit-time
+
+//=== TEST CASE: intrinsic_declared_with_wrong_arity ===
+value U { a: float }
+
+// The rejection is about the DECLARATION, not the call: a call that disagrees
+// with a well-declared intrinsic is bone's ordinary "missing required argument",
+// which would pass this file without reaching the expansion at all.
+//
+// One argument IS a legal shape -- it is the layout-fingerprint form, which is
+// how a call site says which of a program's blocks it means. What makes this
+// one malformed is the RETURN TYPE: the fingerprint form declares `-> int`, and
+// a 1-arg fn returning unit is a packer missing its two views. The shape is
+// keyed on the declared return type, the way `@vertex_expand` keys on its own.
+@uniform_expand inline(lua) fn packu<T>(u: T) = """
+    error("compiler-expanded")
+"""
+
+fn main() {
+    packu(U { a: 1.0 })
+}
+
+//=== TEST CASE: third_arg_not_a_value_struct ===
+@uniform_expand inline(lua) fn packu<T>(fv: Ptr<float>, iv: Ptr<int>, u: T) = """
+    error("compiler-expanded")
+"""
+
+fn main() {
+    let f = native_buffer_float(4)
+    let i = native_buffer_int(4)
+    packu(f.ptr, i.ptr, 7)
+}
+
+//=== TEST CASE: group_with_no_std140_form ===
+value Inner { a: float }
+value Outer { i: Inner, b: float }
+
+@uniform_expand inline(lua) fn packu<T>(fv: Ptr<float>, iv: Ptr<int>, u: T) = """
+    error("compiler-expanded")
+"""
+
+fn main() {
+    let f = native_buffer_float(8)
+    let i = native_buffer_int(8)
+    packu(f.ptr, i.ptr, Outer { i: Inner { a: 1.0 }, b: 2.0 })
+}

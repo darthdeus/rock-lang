@@ -1,0 +1,43 @@
+// A `@gpu_only` intrinsic takes a `nobox` value without an explicit
+// materialization. Boxing is a Lua-representation concept: these fns compile to
+// GLSL, where a `vec2` is a native value, and their Lua bodies only `error(...)`.
+// A CPU caller is separately rejected by `gpu_only_call_rejection`, so the only
+// callers that reach here are GPU contexts.
+//
+//
+// The box is AUTHORIZED at the boundary (emitted as an explicit materialization),
+// NOT by exempting the calling body -- see `tests/errors/nobox_shader_cpu_body.rock.err`
+// for the CPU-side box inside a `@shader` fn that must still reject.
+
+nobox value NV2 { x: float, y: float }
+
+// Declared here rather than using stdlib `texture`, whose param is `Vec2`:
+// reproducing through it would need stdlib's `Vec2` marked nobox.
+@intrinsic @gpu_only inline(lua) fn sample_nv2(s: Sampler2D, uv: NV2) -> Vec4 = """
+    error("sample_nv2() is GPU-only (shader fns are not CPU-callable)")
+"""
+
+@shader(fragment)
+fn nobox_sampler_frag(uTexture: Sampler2D, tc: NV2) -> Vec4 {
+    return sample_nv2(uTexture, tc)
+}
+
+@test(output = "ok")
+fn a_gpu_only_intrinsic_accepts_a_nobox_value() {
+    // Emission of the shader entry above is the assertion; it rejected before
+    // `@gpu_only` was exempted from the boxed-call-boundary check.
+    print("ok")
+}
+
+// `sample_nv2` above has no GLSL intrinsic-table mapping, so it exercises the
+// Lua rung only. `texture` IS mapped, so this one is the GPU-side proof: the
+// shader below is what actually has to survive `rock shader-validate`.
+@shader(fragment)
+fn mapped_intrinsic_frag(uTexture: Sampler2D, tc: Vec2) -> Vec4 {
+    return texture(uTexture, tc)
+}
+
+@test(output = "ok2")
+fn a_mapped_gpu_intrinsic_emits() {
+    print("ok2")
+}

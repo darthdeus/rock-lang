@@ -1,0 +1,117 @@
+// Boxed enums on the `--backend js` ratchet (T8e). A mixed enum (a GC-carrying
+// or recursive payload makes it non-cdata, so it does NOT scalarize to a value
+// struct) boxes as `{__variant, __ty, 0:.., 1:.., <field>:..}` -- native 0-based
+// positional keys, unlike luajit's 1-based table keys; the observable output is
+// unchanged. Unit variants of a mixed enum are interned singletons
+// (`__rock_enum_<E>_<V>`); a payload-free enum keeps its int repr with a names
+// table (`__rock_enum_<E>_names`) for `{x}` interpolation. Cross-backend corpus;
+// the node pins in crates/skull-codegen-js/tests/enum_boxes.rs are the JS oracle.
+
+// Recursive (non-cdata) enum: unit singleton + tuple variants.
+enum Node {
+    Nil,
+    Leaf(int),
+    Pair(int, Node),
+}
+
+fn node_sum(n: Node) -> int {
+    match n {
+        Nil => 0,
+        Leaf(x) => x,
+        Pair(x, rest) => x + node_sum(rest),
+    }
+}
+
+@test(returns = 6)
+fn test_recursive_tuple_enum() -> int {
+    let n = Node::Pair(1, Node::Pair(2, Node::Leaf(3)))
+    node_sum(n)
+}
+
+@test(returns = 0)
+fn test_unit_singleton_construct() -> int {
+    node_sum(Node::Nil)
+}
+
+@test(returns = 1)
+fn test_boxed_enum_eq() -> int {
+    let a = Node::Leaf(5)
+    let b = Node::Leaf(5)
+    let c = Node::Leaf(6)
+    if a == b && a != c { 1 } else { 0 }
+}
+
+@test(returns = 1)
+fn test_unit_singleton_eq() -> int {
+    let a = Node::Nil
+    let b = Node::Nil
+    if a == b { 1 } else { 0 }
+}
+
+// String payload forces non-cdata; a record variant exercises the `named` arm.
+enum Msg {
+    Ping,
+    Say(string),
+    At { x: int, y: int },
+}
+
+fn msg_code(m: Msg) -> int {
+    match m {
+        Ping => 1,
+        Say(_) => 2,
+        At { x, y } => x + y,
+    }
+}
+
+@test(returns = 1)
+fn test_unit_of_record_enum() -> int {
+    msg_code(Msg::Ping)
+}
+
+@test(returns = 2)
+fn test_string_payload_variant() -> int {
+    msg_code(Msg::Say("hello"))
+}
+
+@test(returns = 30)
+fn test_record_variant() -> int {
+    msg_code(Msg::At { x: 10, y: 20 })
+}
+
+// `inspect` of a boxed enum byte-matches luajit: positional payloads render as
+// luajit's 1-based `[N]` display over the native 0-based runtime keys. These
+// `assert_eq(inspect(..), "..")` byte-checks run on BOTH backends (unlike an
+// `@test(output=..)` whose `{`-bearing expectation drops to vacuous).
+@test
+fn test_inspect_tuple_variant() {
+    assert_eq(inspect(Node::Leaf(5)), "Node::Leaf {{ [1] = 5 }}")
+}
+
+@test
+fn test_inspect_nested_and_singleton() {
+    assert_eq(inspect(Node::Pair(1, Node::Nil)), "Node::Pair {{ [1] = 1, [2] = Node::Nil }}")
+}
+
+@test
+fn test_inspect_record_variant() {
+    assert_eq(inspect(Msg::At { x: 1, y: 2 }), "Msg::At {{ x = 1, y = 2 }}")
+}
+
+@test
+fn test_inspect_unit_and_string() {
+    assert_eq(inspect(Msg::Ping), "Msg::Ping")
+    assert_eq(inspect(Msg::Say("hi")), "Msg::Say {{ [1] = \"hi\" }}")
+}
+
+// Payload-free enum: int repr, `__rock_enum_<E>_names` drives `{x}` interpolation.
+enum Color { Red, Green, Blue }
+
+@test(output = "Color::Red\nColor::Green\nColor::Blue")
+fn test_payload_free_names() {
+    let r = Color::Red
+    let g = Color::Green
+    let b = Color::Blue
+    print("{r}")
+    print("{g}")
+    print("{b}")
+}

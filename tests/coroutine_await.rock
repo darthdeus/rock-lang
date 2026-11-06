@@ -1,0 +1,25 @@
+// `await` delegates to an inner coroutine: outer.Y == inner.Y, and the
+// expression value is inner's R.
+
+co fn inner_vals() -> Coroutine<int, int, ()> {
+    yield 1
+    yield 2
+    return 42
+}
+
+co fn outer_awaits() -> Coroutine<int, int, ()> {
+    yield 0
+    let r = await inner_vals()
+    print("inner-returned={r}")
+    yield 99
+    return r
+}
+
+@test(output = "0\n1\n2\ninner-returned=42\n99")
+fn test_await_delegation() {
+    let c = outer_awaits()
+    print(c.resume() ?? -1)  // 0
+    print(c.resume() ?? -1)  // 1
+    print(c.resume() ?? -1)  // 2
+    print(c.resume() ?? -1)  // inner-returned=42, then 99
+}

@@ -1,0 +1,321 @@
+// Comprehensive string and format tests ported from rock/tests/format_tests.rs and string_tests.rs
+// Tests string interpolation, format specifiers, precision, width, signs, and concatenation
+
+// Helper function for complex interpolation
+fn square(x: int) -> int { 
+    return x * x 
+}
+
+// Struct for complex expression test
+struct Point { 
+    x: int, 
+    y: int 
+}
+
+// Basic string interpolation tests
+@test(output = "42")
+fn simple_variable_interpolation() {
+    let x = 42
+    print("{x}")
+}
+
+@test(output = "42 and 3.14")
+fn multiple_variable_interpolation() {
+    let x = 42
+    let y = 3.14
+    print("{x} and {y}")
+}
+
+@test(output = "Hello, World!")
+fn mixed_literal_and_interpolation() {
+    let name = "World"
+    print("Hello, {name}!")
+}
+
+@test(output = "Sum: 8")
+fn expression_interpolation() {
+    let x = 5
+    let y = 3
+    print("Sum: {x + y}")
+}
+
+// Float precision format tests
+@test(output = "3.14")
+fn float_precision_basic() {
+    let pi = 3.14159265
+    print("{pi:.2}")
+}
+
+@test(output = "123\n123.5\n123.457\n123.456789")
+fn float_precision_various() {
+    let val = 123.456789
+    print("{val:.0}")
+    print("{val:.1}")
+    print("{val:.3}")
+    print("{val:.6}")
+}
+
+@test(output = "123.46")
+fn float_format_types() {
+    let x = 123.456
+    print("{x:.2f}")
+}
+
+// Width format tests. `{x:5}` right-aligns in width 5 -> the three leading
+// spaces are significant (the harness only strips TRAILING whitespace).
+@test(output = "   42\n042")
+fn integer_width_basic() {
+    let x = 42
+    print("{x:5}")
+    print("{x:03}")
+}
+
+// A single-hole interpolation's leading pad must survive to stdout (no
+// surrounding literal to protect it) -- guards the harness leading-strip fix.
+@test(output = "   42")
+fn integer_width_single_hole() {
+    let x = 42
+    print("{x:5}")
+}
+
+@test(output = "7\n07\n00007")
+fn integer_zero_padding() {
+    let x = 7
+    print("{x:01}")
+    print("{x:02}")
+    print("{x:05}")
+}
+
+@test(output = "3.14")
+fn width_with_precision() {
+    let x = 3.14159
+    print("{x:.2f}")
+}
+
+// Sign format tests
+@test(output = "+42\n-17")
+fn explicit_plus_sign() {
+    let pos = 42
+    let neg = -17
+    print("{pos:+}")
+    print("{neg:+}")
+}
+
+@test(output = "42\n-17")
+fn space_for_positive() {
+    let pos = 42
+    let neg = -17
+    print("{pos}")
+    print("{neg}")
+}
+
+@test(output = "+42\n00042")
+fn sign_with_width_and_padding() {
+    let x = 42
+    print("{x:+}")
+    print("{x:05}")
+}
+
+// Number base format tests
+@test(output = "ff\nFF\n0xff\n0XFF")
+fn hexadecimal_format() {
+    let x = 255
+    print("{x:x}")
+    print("{x:X}")
+    print("{x:#x}")
+    print("{x:#X}")
+}
+
+@test(output = "100\n0100")
+fn octal_format() {
+    let x = 64
+    print("{x:o}")
+    print("{x:#o}")
+}
+
+// Complex format tests
+@test(output = "00042\n3.14\n0x2a")
+fn combined_format_specifiers() {
+    let x = 42
+    let y = 3.14159
+    print("{x:05d}")
+    print("{y:.2f}")
+    print("{x:#x}")
+}
+
+@test(output = "Result: 16.000")
+fn nested_expressions_with_format() {
+    let x = 5
+    let y = 3
+    print("Result: {x * y + 1:.3f}")
+}
+
+@test(output = "Square of 7 is 0049")
+fn function_call_interpolation_with_format() {
+    let n = 7
+    print("Square of {n} is {square(n):04d}")
+}
+
+@test(output = "Distance: 25.00")
+fn complex_expression_interpolation() {
+    let p = Point { x: 3, y: 4 }
+    print("Distance: {(p.x * p.x + p.y * p.y):.2f}")
+}
+
+// String format tests
+@test(output = "Hello, Alice!")
+fn string_basic_interpolation() {
+    let name = "Alice"
+    let greeting = "Hello"
+    print("{greeting}, {name}!")
+}
+
+@test(output = "'       Bob'\n'  Bob'")
+fn string_with_width() {
+    let name = "Bob"
+    print("'{name:10s}'")
+    print("'{name:5s}'")
+}
+
+// Edge case tests
+@test(output = "start42middle42end")
+fn empty_interpolation_parts() {
+    let x = 42
+    print("start{x}middle{x}end")
+}
+
+@test(output = "123")
+fn only_interpolation() {
+    let x = 123
+    print("{x}")
+}
+
+@test(output = "Dec: 255, Hex: ff, Oct: 377")
+fn multiple_format_specifiers_same_variable() {
+    let x = 255
+    print("Dec: {x}, Hex: {x:x}, Oct: {x:o}")
+}
+
+// Plain string tests
+@test(output = "This is just a string")
+fn plain_string_no_interpolation() {
+    print("This is just a string")
+}
+
+@test(output = "Use curly braces for decoration")
+fn string_with_braces_but_no_variables() {
+    print("Use curly braces for decoration")
+}
+
+@test(output = "Value 42 in some text")
+fn mixed_interpolation_and_plain_braces() {
+    let x = 42
+    print("Value {x} in some text")
+}
+
+// String concatenation tests - migrated from string_tests.rs
+
+// Helper functions for concatenation tests
+fn print_message(msg: string) {
+    print(msg)
+}
+
+fn get_greeting(name: string) -> string {
+    return "Hello, " + name + "!"
+}
+
+fn get_prefix() -> string { return "pre" }
+fn get_suffix() -> string { return "fix" }
+
+// Basic string concatenation tests
+@test(output = "Hello World")
+fn test_string_concatenation_basic() {
+    let result = "Hello" + " " + "World"
+    print(result)
+}
+
+@test(output = "foobar")
+fn test_string_concatenation_with_variables() {
+    let a = "foo"
+    let b = "bar"
+    let result = a + b
+    print(result)
+}
+
+@test(output = "abcde")
+fn test_string_concatenation_chain() {
+    let result = "a" + "b" + "c" + "d" + "e"
+    print(result)
+}
+
+@test(output = "middle")
+fn test_string_concatenation_with_empty_strings() {
+    let empty = ""
+    let result = empty + "middle" + empty
+    print(result)
+}
+
+@test(output = "Language: Rock v1.0")
+fn test_string_concatenation_mixed_expressions() {
+    let name = "Rock"
+    let version = "1.0"
+    let info = "Language: " + name + " v" + version
+    print(info)
+}
+
+@test(output = "Hello World")
+fn test_string_concatenation_in_function_call() {
+    print_message("Hello" + " " + "World")
+}
+
+@test(output = "Hello World!")
+fn test_string_concatenation_with_parentheses() {
+    let result = ("Hello" + " ") + ("World" + "!")
+    print(result)
+}
+
+@test(output = "Start middle end")
+fn test_string_concatenation_assignment() {
+    let message = "Start"
+    let message2 = message + " middle"
+    let message3 = message2 + " end"
+    print(message3)
+}
+
+@test(output = "Hello, Rock!")
+fn test_string_concatenation_return_expression() {
+    let msg = get_greeting("Rock")
+    print(msg)
+}
+
+@test(output = "Match!")
+fn test_string_concatenation_in_if_condition() {
+    let prefix = "test"
+    let suffix = "ing"
+    if prefix + suffix == "testing" {
+        print("Match!")
+    }
+}
+
+@test(output = "hello world")
+fn test_string_concatenation_nullable_string() {
+    let maybe_string: string? = "hello"
+    if !is_null(maybe_string) {
+        let result = maybe_string + " world"
+        print(result)
+    }
+}
+
+@test(output = "Language: Rock (v1)")
+fn test_string_concatenation_with_string_interpolation() {
+    let name = "Rock"
+    let version = 1
+    let result = "Language: " + name + " (v{version})"
+    print(result)
+}
+
+@test(output = "pre-fix")
+fn test_string_concatenation_complex_expression() {
+    let result = get_prefix() + "-" + get_suffix()
+    print(result)
+}

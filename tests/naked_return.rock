@@ -1,0 +1,79 @@
+// Naked return tests - migrated from rock/tests/naked_return_tests.rs
+// Tests return statement behavior and early returns
+
+fn test_naked_return_helper1() {
+    return
+    print("should not execute")
+}
+
+@test(output = "done")
+fn test_naked_return_with_newline() {
+    test_naked_return_helper1()
+    print("done")
+}
+
+fn test_naked_return_helper2() {
+    if false {
+        return
+    }
+    return
+    print("should not execute")
+}
+
+@test(output = "done")
+fn test_naked_return_with_semicolon() {
+    test_naked_return_helper2()
+    print("done")
+}
+
+fn test_naked_return_helper3() -> int {
+    if true {
+        return 42
+    }
+    return 0
+}
+
+@test(output = "42")
+fn test_naked_return_at_end_of_block() {
+    print(test_naked_return_helper3())
+}
+
+fn test_naked_return_helper4() -> int {
+    return 42
+}
+
+@test(output = "42")
+fn test_return_with_value_same_line() {
+    print(test_naked_return_helper4())
+}
+
+// Note: test_return_with_value_requires_same_line expects compilation error
+// This would need a different test framework approach in Rock
+
+fn test_naked_return_helper5() {
+    print("before return")
+    return
+    print("after return")
+}
+
+@test(output = "before return")
+fn test_naked_return_in_void_function() {
+    test_naked_return_helper5()
+}
+
+fn test_naked_return_helper6(x: int) -> int {
+    if x < 0 {
+        return -1
+    }
+    if x == 0 {
+        return 0
+    }
+    return x
+}
+
+@test(output = "5\n0\n-1")
+fn test_multiple_returns_with_newlines() {
+    print(test_naked_return_helper6(5))
+    print(test_naked_return_helper6(0))
+    print(test_naked_return_helper6(-5))
+}

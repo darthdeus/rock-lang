@@ -1,0 +1,22 @@
+// Bug repro: implicit return may not work when followed by comments
+
+fn lookup_with_trailing_comments(m: Map<int, string>, key: int) -> string? {
+    if key < 0 { return null }
+
+    m.get(key)
+
+    // some old code
+    // that was commented out
+    // return null
+}
+
+@test
+fn test_implicit_return_with_trailing_comments() {
+    let m: Map<int, string> = map_new()
+    insert(m, 1, "hello")
+
+    let result = lookup_with_trailing_comments(m, 1)
+    assert(result != null, "Implicit return failed when followed by comments")
+    assert_eq(result.unwrap(), "hello")
+    print("implicit return with trailing comments works")
+}

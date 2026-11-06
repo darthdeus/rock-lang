@@ -1,0 +1,100 @@
+// A LEAF write through a container element (`buf[i].x = 5`, `v[i].x = 5`) is a
+// place write: the store must land on the element slot, not on a copy of it.
+// The place model legalized this shape; the
+// element-read COPY rule (tests/value_element_read_copy.rock) applies to whole-
+// value RVALUE reads only, so an assignment target's base must never pack.
+
+value Pt { x: int, y: int }
+value Inner { a: int, b: int }
+struct Wrap { pts: NativeBuffer<Pt> }
+
+fn nb_pt(n: int) -> NativeBuffer<Pt> {
+    return native_buffer_alloc(n)
+}
+
+fn vec_pt(seed: int) -> [Pt] {
+    return [Pt { x: seed, y: seed }]
+}
+
+@test(output = "99 1")
+fn test_nb_element_leaf_write() {
+    let buf = nb_pt(1)
+    buf[0] = Pt { x: 1, y: 1 }
+    buf[0].x = 99
+    print("{buf[0].x} {buf[0].y}")
+}
+
+@test(output = "99 1")
+fn test_vec_element_leaf_write() {
+    let v = vec_pt(1)
+    v[0].x = 99
+    print("{v[0].x} {v[0].y}")
+}
+
+// The whole base chain must stay a place: an element reached through a struct
+// field, written at a leaf.
+@test(output = "42")
+fn test_nested_base_chain_leaf_write() {
+    let w = Wrap { pts: nb_pt(2) }
+    w.pts[1] = Pt { x: 0, y: 0 }
+    w.pts[1].y = 42
+    print("{w.pts[1].y}")
+}
+
+@test(output = "7")
+fn test_element_leaf_compound_assign() {
+    let buf = nb_pt(1)
+    buf[0] = Pt { x: 5, y: 0 }
+    buf[0].x += 2
+    print("{buf[0].x}")
+}
+
+@test(output = "6")
+fn test_element_leaf_incdec() {
+    let buf = nb_pt(1)
+    buf[0] = Pt { x: 5, y: 0 }
+    buf[0].x++
+    print("{buf[0].x}")
+}
+
+// CONTROL: a whole-element store still replaces the slot, and a leaf read off
+// the element still reads the live slot (no copy obligation on a projection).
+@test(output = "3 4")
+fn test_whole_element_store_still_works() {
+    let buf = nb_pt(1)
+    buf[0] = Pt { x: 1, y: 1 }
+    buf[0] = Pt { x: 3, y: 4 }
+    print("{buf[0].x} {buf[0].y}")
+}
+
+// CONTROL: a leaf write through a plain struct FIELD (not an element) writes
+// through -- the field place path must not regress when element places are
+// fixed.
+struct Owner { p: Pt }
+
+fn mk_owner(seed: int) -> Owner {
+    return Owner { p: Pt { x: seed, y: seed } }
+}
+
+@test(output = "5 1")
+fn test_struct_field_leaf_write_still_writes_through() {
+    let o = mk_owner(1)
+    o.p.x = 5
+    print("{o.p.x} {o.p.y}")
+}
+
+// A nested value field reached through a struct field: `o.p.x = 5` one level
+// deeper still resolves to a place.
+struct Deep { inner: Inner }
+struct DeepOwner { d: Deep }
+
+fn mk_deep(seed: int) -> DeepOwner {
+    return DeepOwner { d: Deep { inner: Inner { a: seed, b: seed } } }
+}
+
+@test(output = "8 1")
+fn test_deep_field_leaf_write() {
+    let o = mk_deep(1)
+    o.d.inner.a = 8
+    print("{o.d.inner.a} {o.d.inner.b}")
+}

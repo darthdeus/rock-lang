@@ -1,0 +1,128 @@
+// A whole-value read of a value struct out of a MUTABLE PLACE (struct field,
+// global, container element) is a COPY, in both representation tiers. Under
+// mutable value semantics a later place write
+// through the owner must not be observable through the earlier binding.
+//
+// The element site was fixed for the FFI-clean tier in `7e232fdcd`; the field,
+// global and GC-tier element sites are covered here.
+//
+// Every owner is built through a ctor call on purpose, which keeps this file
+// on the whole-value-read path; the leaf-write-through-a-scalarized-local path
+// is tests/value_field_write_scalarized_local.rock.
+
+value Pt { x: int, y: int }            // C-mappable -> FFI-clean (cdata) tier
+value GcH { xs: [int], n: int }        // `xs` is not C-mappable -> GC (table) tier
+
+struct Owner { p: Pt, h: GcH }
+
+fn mk_owner(seed: int) -> Owner {
+    return Owner { p: Pt { x: seed, y: seed }, h: GcH { xs: [seed], n: seed } }
+}
+
+fn mk_pt(seed: int) -> Pt { return Pt { x: seed, y: seed } }
+fn mk_gc(seed: int) -> GcH { return GcH { xs: [seed], n: seed } }
+
+global G_OWNER: Owner = mk_owner(1)
+global G_PT: Pt = mk_pt(1)
+global G_GC: GcH = mk_gc(1)
+
+@test(output = "1 99")
+fn test_field_read_copies_ffi_clean() {
+    let o = mk_owner(1)
+    let copy = o.p
+    o.p.x = 99
+    print("{copy.x} {o.p.x}")
+}
+
+@test(output = "1 99")
+fn test_field_read_copies_gc() {
+    let o = mk_owner(1)
+    let copy = o.h
+    o.h.n = 99
+    print("{copy.n} {o.h.n}")
+}
+
+@test(output = "1 77")
+fn test_global_field_read_copies_ffi_clean() {
+    let copy = G_OWNER.p
+    G_OWNER.p.x = 77
+    print("{copy.x} {G_OWNER.p.x}")
+}
+
+@test(output = "1 77")
+fn test_global_field_read_copies_gc() {
+    let copy = G_OWNER.h
+    G_OWNER.h.n = 77
+    print("{copy.n} {G_OWNER.h.n}")
+}
+
+@test(output = "1 55")
+fn test_bare_global_read_copies_ffi_clean() {
+    let copy = G_PT
+    G_PT.x = 55
+    print("{copy.x} {G_PT.x}")
+}
+
+@test(output = "1 55")
+fn test_bare_global_read_copies_gc() {
+    let copy = G_GC
+    G_GC.n = 55
+    print("{copy.n} {G_GC.n}")
+}
+
+@test(output = "1 99")
+fn test_vec_element_read_copies_gc() {
+    let v: [GcH] = [mk_gc(1)]
+    let copy = v[0]
+    v[0].n = 99
+    print("{copy.n} {v[0].n}")
+}
+
+// A nested value field is snapshotted through its own leaves, not by its
+// pointer: a shallow expansion would copy the nested box's address and the write
+// would still be observable.
+value NestOuter { xs: [int], p: Pt }
+struct NestOwner { g: NestOuter }
+
+fn mk_nest(seed: int) -> NestOwner {
+    return NestOwner { g: NestOuter { xs: [seed], p: Pt { x: seed, y: seed } } }
+}
+
+@test(output = "1 99")
+fn test_nested_value_field_is_deep_copied() {
+    let o = mk_nest(1)
+    let copy = o.g
+    o.g.p.x = 99
+    print("{copy.p.x} {o.g.p.x}")
+}
+
+// A REFERENCE leaf stays SHARED: a GC leaf is one slot, so copying the wrapper
+// must not deep-copy the array it points at.
+@test(output = "7 7")
+fn test_copy_shares_reference_leaf() {
+    let o = mk_nest(1)
+    let copy = o.g
+    o.g.xs[0] = 7
+    print("{copy.xs[0]} {o.g.xs[0]}")
+}
+
+// CONTROL: a leaf PROJECTION off a place stays live and free -- copying whole
+// reads must not turn `o.p.x` into a read off a stale snapshot.
+@test(output = "42")
+fn test_leaf_projection_stays_live() {
+    let o = mk_owner(1)
+    o.p.x = 42
+    print("{o.p.x}")
+}
+
+// CONTROL: a function round-trip already copies (params/returns ride the scalar
+// ABI) -- it must keep doing so.
+fn ident_pt(p: Pt) -> Pt { return p }
+
+@test(output = "1 99")
+fn test_fn_roundtrip_still_copies() {
+    let o = mk_owner(1)
+    let copy = ident_pt(o.p)
+    o.p.x = 99
+    print("{copy.x} {o.p.x}")
+}

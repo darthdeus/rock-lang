@@ -1,0 +1,50 @@
+@test
+fn test_literal_and_range_mix() {
+    let x = 0
+    
+    // Mix of literals and ranges should work
+    let result = match x {
+        ..=-1 => "negative",
+        0 => "zero",
+        1..=5 => "small",
+        6.. => "large"  
+    }
+    
+    assert_eq(result, "zero")
+    print("Literal and range mix test passed")
+}
+
+@test
+fn test_adjacent_ranges() {
+    let score = 85
+    
+    // Adjacent ranges with no gaps
+    let grade = match score {
+        ..=-1 => "Invalid_negative",
+        0..=59 => "F",
+        60..=69 => "D", 
+        70..=79 => "C",
+        80..=89 => "B",
+        90..=100 => "A",
+        101.. => "Invalid_high"
+    }
+    
+    assert_eq(grade, "B")
+    print("Adjacent ranges test passed")
+}
+
+@test
+fn test_inclusive_vs_exclusive() {
+    let num = 10
+    
+    // Test both inclusive and exclusive ranges
+    let category = match num {
+        ..=-1 => "negative",
+        0..5 => "very_small",
+        5..=10 => "medium",
+        11.. => "large"
+    }
+    
+    assert_eq(category, "medium")
+    print("Inclusive vs exclusive ranges test passed")
+}

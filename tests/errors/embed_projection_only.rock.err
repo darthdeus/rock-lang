@@ -1,0 +1,119 @@
+//! Error: an `embed`ded field is PROJECTION-ONLY -- it has no independently
+//!        storable aggregate, so it cannot be BOUND, RETURNED, CAPTURED,
+//!        ERASED, or MATERIALIZED. Leaf reads, place writes, whole-field ctor
+//!        writes and scalar-ABI round-trips stay legal (positive coverage in
+//!        tests/embed_projection.rock).
+//! Tags: embed, projection-only, scalarization
+
+//=== TEST CASE: embed_whole_value_binding_Generic ===
+// THE headline case: illegal even where flattening would physically be a no-op.
+struct Pt { x: int, y: int }
+struct Holder { embed p: Pt, tag: int }
+
+fn main() {
+    let h = Holder { p: Pt { x: 1, y: 2 }, tag: 3 }
+    let q = h.p   // ERROR: binds the whole embedded field
+    print("{q.x}")
+}
+
+//=== TEST CASE: embed_whole_value_return_Generic ===
+struct Pt { x: int, y: int }
+struct Holder { embed p: Pt, tag: int }
+
+fn leak(h: Holder) -> Pt {
+    return h.p   // ERROR: returns the whole embedded field
+}
+
+fn main() {
+    let h = Holder { p: Pt { x: 1, y: 2 }, tag: 3 }
+    print("{leak(h).x}")
+}
+
+//=== TEST CASE: embed_closure_capture_Generic ===
+struct Pt { x: int, y: int }
+struct Holder { embed p: Pt, tag: int }
+
+fn main() {
+    let h = Holder { p: Pt { x: 1, y: 2 }, tag: 3 }
+    let f = () => h.p   // ERROR: captures the whole embedded field
+    print("{f().x}")
+}
+
+//=== TEST CASE: embed_collection_element_Generic ===
+struct Pt { x: int, y: int }
+struct Holder { embed p: Pt, tag: int }
+
+fn main() {
+    let h = Holder { p: Pt { x: 1, y: 2 }, tag: 3 }
+    let xs = [h.p]   // ERROR: an embedded field cannot be a collection element
+    print("{xs.len}")
+}
+
+//=== TEST CASE: embed_any_boundary_Generic ===
+struct Pt { x: int, y: int }
+struct Holder { embed p: Pt, tag: int }
+
+fn main() {
+    let h = Holder { p: Pt { x: 1, y: 2 }, tag: 3 }
+    let a: any = h.p   // ERROR: erasing an embedded field materializes it
+    print("{a}")
+}
+
+//=== TEST CASE: embed_non_scalar_abi_callee_Generic ===
+// A `@nomangle` / `extern` / inline callee receives a BOX, so it is not a
+// scalar-ABI consumer even though the syntax looks like the legal call form.
+struct Pt { x: int, y: int }
+struct Holder { embed p: Pt, tag: int }
+
+@nomangle inline(lua) fn sink_pt(p: Pt) -> int = """
+    return p.x
+"""
+
+fn main() {
+    let h = Holder { p: Pt { x: 1, y: 2 }, tag: 3 }
+    print("{sink_pt(h.p)}")   // ERROR: callee does not take leaves
+}
+
+//=== TEST CASE: embed_readable_field_ref_Generic ===
+// The extraction hole `WriteFieldRef` closed: `.p` may satisfy a write-only
+// selector, but a readable one hands out the whole value.
+struct Pt { x: int, y: int }
+struct Holder { embed p: Pt, tag: int }
+
+fn read_slot(f: ReadFieldRef<Holder, Pt>) {}
+
+fn main() {
+    read_slot(.p)   // ERROR: no readable selector for an embedded field
+}
+
+//=== TEST CASE: embed_full_field_ref_Generic ===
+struct Pt { x: int, y: int }
+struct Holder { embed p: Pt, tag: int }
+
+fn rw_slot(f: FieldRef<Holder, Pt>) {}
+
+fn main() {
+    rw_slot(.p)   // ERROR: FieldRef coerces onward to a readable selector
+}
+
+//=== TEST CASE: embed_nullable_let_binding_Generic ===
+// Presence is a leaf, so presence ops are projections -- but `?.let` binds the
+// whole value.
+struct Pt { x: int, y: int }
+struct Holder { embed p: Pt?, tag: int }
+
+fn main() {
+    let h = Holder { p: null, tag: 3 }
+    let r = h.p?.let { 1 }   // ERROR: binds the whole embedded field
+    print("{r}")
+}
+
+//=== TEST CASE: embed_nullable_coalesce_Generic ===
+struct Pt { x: int, y: int }
+struct Holder { embed p: Pt?, tag: int }
+
+fn main() {
+    let h = Holder { p: null, tag: 3 }
+    let q = h.p ?? Pt { x: 0, y: 0 }   // ERROR: coalesces the whole field
+    print("{q.x}")
+}

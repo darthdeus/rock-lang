@@ -1,0 +1,36 @@
+global stages: Map<int, [fn() -> ()]> = map_new()
+
+deco init update(stage: int) {
+    if !stages.contains(stage) {
+        let s: [fn() -> ()] = vec_new()
+        insert(stages, stage, s)
+    }
+
+    let stage_systems = get(stages, stage).unwrap()
+
+    vec_push(stage_systems, transmute(target.func))
+}
+
+@update(stage = 5)
+fn early_system() {
+    print("Stage 5 executed")
+}
+
+@update(stage = 10)
+fn late_system() {
+    print("Stage 10 executed")
+}
+
+@test(output="Stage 5 executed\nStage 10 executed")
+fn test_execution_order() {
+    let stages_5 = get(stages, 5).unwrap()
+    let stages_10 = get(stages, 10).unwrap()
+
+    for system in stages_5 {
+        system()
+    }
+
+    for system in stages_10 {
+        system()
+    }
+}

@@ -1,0 +1,89 @@
+// Test formatting struct fields with precision specifiers
+
+struct FixVec2 {
+    x: float,
+    y: float
+}
+
+struct Mixed {
+    name: string,
+    value: float,
+    count: int
+}
+
+@test
+fn test_struct_float_formatting() {
+    let pos = FixVec2 { x: 5.123123, y: 43240.432432 }
+
+    // Without format spec - full precision
+    let full = "{pos}"
+    assert(full.contains("5.123123"))
+    assert(full.contains("43240.432432"))
+
+    // With .1 precision - rounds to 1 decimal place
+    let one_decimal = "{pos:.1}"
+    assert(one_decimal.contains("5.1"))
+    assert(one_decimal.contains("43240.4"))
+    assert(!one_decimal.contains("5.123"))
+
+    // With .3 precision - rounds to 3 decimal places
+    let three_decimal = "{pos:.3}"
+    assert(three_decimal.contains("5.123"))
+    assert(three_decimal.contains("43240.432"))
+
+    // With .0 precision - rounds to whole numbers
+    let whole = "{pos:.0}"
+    assert(whole.contains("x = 5"))
+    assert(whole.contains("y = 43240"))
+}
+
+@test
+fn test_mixed_struct_formatting() {
+    let data = Mixed { name: "test", value: 3.14159, count: 42 }
+
+    // With precision - only affects float fields
+    let formatted = "{data:.2}"
+    assert(formatted.contains("name = \"test\""))
+    assert(formatted.contains("value = 3.14"))
+    assert(formatted.contains("count = 42"))
+}
+
+struct Container {
+    position: FixVec2,
+    label: string
+}
+
+@test
+fn test_nested_struct_formatting() {
+    let obj = Container {
+        position: FixVec2 { x: 1.23456, y: 9.87654 },
+        label: "object"
+    }
+
+    // Precision applies to nested structs too
+    let formatted = "{obj:.1}"
+    assert(formatted.contains("x = 1.2"))
+    assert(formatted.contains("y = 9.9"))
+    assert(formatted.contains("label = \"object\""))
+}
+
+@test
+fn test_array_of_floats_formatting() {
+    let values = [1.111, 2.222, 3.333]
+
+    // Precision applies to array elements within the Vec structure
+    let formatted = "{values:.1}"
+    assert(formatted.contains("1.1, 2.2, 3.3"))
+    assert(!formatted.contains("1.111"))
+    assert(!formatted.contains("2.222"))
+    assert(!formatted.contains("3.333"))
+}
+
+@test
+fn test_individual_field_formatting_still_works() {
+    let pos = FixVec2 { x: 5.123123, y: 43240.432432 }
+
+    // Individual field formatting should continue to work
+    assert("{pos.x:.1}" == "5.1")
+    assert("{pos.y:.2}" == "43240.43")
+}

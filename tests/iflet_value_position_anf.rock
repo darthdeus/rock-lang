@@ -1,0 +1,28 @@
+// Inc 8e: value-position `if let v = E { ... } else { ... }`.
+// Live (`statements.rs:1988-2035`) emits do/local-temp/null-check
+// shape; ANF lowers as `If{cond: t != nil, then: [let v = t; <then>],
+// else: <else>}`. Pinned via behavioral assertions; oracle gates
+// byte identity.
+
+fn maybe(have: bool, v: int) -> int? {
+    if have { v } else { null }
+}
+
+@test(output = "42")
+fn test_iflet_some_binds() {
+    let r = if let v = maybe(true, 42) { v } else { 0 }
+    print(r)
+}
+
+@test(output = "0")
+fn test_iflet_none_else() {
+    let r = if let v = maybe(false, 42) { v } else { 0 }
+    print(r)
+}
+
+@test(output = "100")
+fn test_iflet_wildcard() {
+    let r = if let _ = maybe(true, 5) { 100 } else { 0 }
+    print(r)
+}
+

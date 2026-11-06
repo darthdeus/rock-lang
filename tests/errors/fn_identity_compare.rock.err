@@ -1,0 +1,40 @@
+//! Error: `==`/`!=` on fn-typed values is rejected: capture-free lambdas
+//!        share one hoisted fn value and capturing lambdas become per-creation
+//!        records, so fn identity is representation-dependent and never
+//!        meaningful.
+//!        Comparing a nullable fn against `null` stays legal (refinement).
+//! Tags: closures, fn-values, equality
+
+//=== TEST CASE: lambda_values_eq_Generic ===
+fn mk() -> fn() -> int { return () => 42 }
+
+fn main() {
+    let a = mk()
+    let b = mk()
+    if a == b { print("same") }   // ERROR: fn identity comparison
+}
+
+//=== TEST CASE: lambda_values_noteq_Generic ===
+fn mk() -> fn() -> int { return () => 42 }
+
+fn main() {
+    let a = mk()
+    let b = mk()
+    if a != b { print("diff") }   // ERROR: fn identity comparison
+}
+
+//=== TEST CASE: named_fn_values_eq_Generic ===
+fn foo() -> int { return 1 }
+
+fn main() {
+    let a = foo
+    let b = foo
+    if a == b { print("same") }   // ERROR: fn identity comparison
+}
+
+//=== TEST CASE: nullable_fn_values_eq_Generic ===
+fn main() {
+    let a: (fn() -> int)? = null
+    let b: (fn() -> int)? = null
+    if a == b { print("same") }   // ERROR: fn identity comparison (nullable strips)
+}

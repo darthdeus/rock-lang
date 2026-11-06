@@ -1,0 +1,29 @@
+// CSE on UFCS (`x.method()`) calls — receiver lives in the call's
+// `obj` slot for `UniversalMethodCall`. Two calls against the same
+// invariant receiver should collapse to a single `let __cse_N = ...`;
+// distinct receivers should not.
+
+value V2 { x: float, y: float }
+
+@pure
+fn length_sq(p: V2) -> float {
+    return p.x * p.x + p.y * p.y
+}
+
+// Same receiver -> CSE collapses. point.length_sq() = 9 + 16 = 25.
+// total = 25 + 25 = 50.
+@test(output = "50")
+fn test_ufcs_cse_same_receiver() {
+    let point = V2 { x: 3.0, y: 4.0 }
+    let total = point.length_sq() + point.length_sq()
+    print(total as int)
+}
+
+// Different receivers -> no CSE. a = 25, b = 169. total = 194.
+@test(output = "194")
+fn test_ufcs_no_cse_different_receivers() {
+    let a = V2 { x: 3.0, y: 4.0 }
+    let b = V2 { x: 5.0, y: 12.0 }
+    let total = a.length_sq() + b.length_sq()
+    print(total as int)
+}

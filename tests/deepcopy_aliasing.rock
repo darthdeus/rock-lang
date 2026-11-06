@@ -1,0 +1,115 @@
+// deepcopy is aliasing-preserving and cycle-safe: one seen-map per copy,
+// `seen[src] = dst` recorded before recursing children. A snapshot must
+// preserve the object graph -- two references to one table (or one shared
+// capture box) copy to ONE table in the copy, and a cyclic table copies
+// without blowing the stack.
+
+struct Pair { get: fn() -> int, bump: fn() -> int }
+
+fn make_pair() -> Pair {
+    let n = 10
+    return Pair { get: () => n, bump: () => { n = n + 1 return n } }
+}
+
+// Two capturing lambdas share ONE boxed `n`. The copy's two records must
+// share ONE box too: bumping through the copy's bumper is visible through
+// the copy's getter (11), and the original is untouched (10).
+@test(output = "11\n10")
+fn shared_box_aliasing_preserved_in_copy() {
+    let orig = make_pair()
+    let copy = deepcopy(orig)
+    let _ = copy.bump()
+    print(copy.get())
+    print(orig.get())
+}
+
+struct Inner { v: int }
+struct State { a: Inner, b: Inner }
+
+
+struct Node { tag: int, next: Node? }
+
+
+// P2: a capturing co-fn lambda hoists to an
+// env record whose `c<S>` capture is the frame table itself, and the record
+// lives in a frame field -> the frame holds a record that points back at the
+// frame (a cycle). Two things must hold on deepcopy of the suspended handle:
+// (a) it TERMINATES (the seen-map breaks the frame<->record cycle), and
+// (b) the ALIAS is preserved -- the copy's record captures the COPY's frame
+//     (both map through the one seen entry), so a mutating lambda run via the
+//     copy hits the copy's state and never the original's.
+enum CoEv { Tick(int) }
+
+co fn dc_counter() -> Coroutine<CoEv> {
+    let n = 0
+    let bump = () => { n = n + 1  n }   // record stored in a frame field; captures `s`
+    yield CoEv::Tick(bump())
+    yield CoEv::Tick(bump())
+    yield CoEv::Tick(bump())
+    yield CoEv::Tick(bump())
+}
+
+fn dc_score(e: CoEv) -> int {
+    return match e {
+        CoEv::Tick(x) => x
+    }
+}
+
+fn dc_emit(e: CoEv?) {
+    if e != null { print("{dc_score(e)}") } else { print("-1") }
+}
+
+// orig#1 -> n:0->1 (Tick 1). deepcopy the suspended handle (holds the cyclic
+// record). copy#1,copy#2 advance the COPY's n (2, 3). orig#2 advances the
+// ORIGINAL's n independently (1->2). If aliasing were lost (copy's record still
+// captured the original's frame), the copy's bumps would mutate the original
+// and orig#2 would read 4 -- the last value is the discriminator.
+@test(output = "1\n2\n3\n2")
+fn cofn_cyclic_env_record_deepcopy_aliases_the_copy() {
+    let orig = dc_counter()
+    dc_emit(orig.resume())
+    let copy = deepcopy(orig)
+    dc_emit(copy.resume())
+    dc_emit(copy.resume())
+    dc_emit(orig.resume())
+}
+
+@test
+fn native_buffer_deepcopy_owns_its_storage() {
+    let original = native_buffer_int(2)
+    nb_set(original, 0, 10)
+    nb_set(original, 1, 20)
+    let copied = deepcopy(original)
+    nb_set(copied, 0, 99)
+    assert_eq(nb_get(original, 0), 10)
+    assert_eq(nb_get(copied, 0), 99)
+    assert_eq(nb_get(copied, 1), 20)
+}
+
+value DeepcopyDot { x: int }
+
+@test
+fn flat_vec_deepcopy_owns_its_storage_and_length() {
+    let original: FlatVec<DeepcopyDot> = flat_vec_new(2)
+    original.push(DeepcopyDot { x: 3 })
+    let copied = deepcopy(original)
+    copied.set(0, DeepcopyDot { x: 9 })
+    copied.push(DeepcopyDot { x: 11 })
+    assert_eq(original.get(0).x, 3)
+    assert_eq(original.len, 1)
+    assert_eq(copied.get(0).x, 9)
+    assert_eq(copied.get(1).x, 11)
+}
+
+struct DeepcopyBufferPair { a: NativeBuffer<int>, b: NativeBuffer<int> }
+
+@test
+fn native_buffer_deepcopy_preserves_shared_storage_aliases() {
+    let original = native_buffer_int(1)
+    nb_set(original, 0, 4)
+    let second: NativeBuffer<int> = NativeBuffer { ptr: original.ptr, len: original.len }
+    let copied = deepcopy(DeepcopyBufferPair { a: original, b: second })
+    nb_set(copied.a, 0, 8)
+    assert_eq(nb_get(copied.b, 0), 8)
+    assert_eq(nb_get(original, 0), 4)
+}

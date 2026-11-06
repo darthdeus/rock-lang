@@ -1,0 +1,19 @@
+value Stats {
+    draw_calls: int,
+    shader_switches: int,
+}
+
+// This extern(ffi) returns a value — compiler should generate
+// out-param wrapper: allocate Stats[1], call C with pointer, return [0]
+extern(ffi, "testlib") fn get_stats() -> Stats
+
+// Regular extern(ffi) without value return — unchanged behavior
+extern(ffi, "testlib") fn reset_stats()
+
+// Test that we can construct and use the struct normally
+@test
+fn test_struct_c_construction() {
+    let s = Stats { draw_calls: 5, shader_switches: 3 }
+    assert(s.draw_calls == 5)
+    assert(s.shader_switches == 3)
+}

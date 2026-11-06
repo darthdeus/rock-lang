@@ -1,0 +1,51 @@
+// RED repro for: value-returning Rock call used as non-last arg to a
+// callee that takes a packed cdata Vec-like value. Lua truncates the
+// multi-return to its first scalar, callee receives a number instead
+// of cdata, and crashes on field access.
+//
+// Mirrors the life-game crash at
+// `__op_div_Vec2_int(camera_world_viewport_size(), 2)`.
+
+value V2 {
+    x: float,
+    y: float,
+}
+
+// Rock fn returning a value type -> caller emits scalar multi-return.
+fn make_v2() -> V2 {
+    return V2 { x: 10.0, y: 20.0 }
+}
+
+// Callee takes V2 as a packed cdata (NOT scalarized). Achieve that by
+// declaring the body as inline(lua): inline(lua) bodies keep the cdata
+// ABI per the scalarize pass's body_is_rock gate.
+inline(lua) fn scale_v2_inline(v: V2, factor: float) -> V2 = """
+return __rock_create_struct("V2", { x = v.x * factor, y = v.y * factor })
+"""
+
+@test(output = "40\n80")
+fn test_nested_value_call_non_last_arg() {
+    // `make_v2()` in NON-LAST arg position. Callee `scale_v2_inline`
+    // expects a single cdata V2; without a pack, Lua truncates the
+    // multi-return from make_v2 to a single scalar (10.0) and the
+    // second arg (4.0) collides / the body crashes on v.x.
+    let r = scale_v2_inline(make_v2(), 4.0)
+    print("{r.x.floor()}")
+    print("{r.y.floor()}")
+}
+
+// Extra: Rock-to-Rock with a non-last arg of same shape. The callee
+// IS scalarized here so the "right" thing is to forward multi-return
+// of make_v2 into make_v2's slot followed by factor as another scalar
+// — no truncation, both scalars should flow through. Included to pin
+// down the scalarized-callee branch.
+fn scale_v2_rock(v: V2, factor: float) -> V2 {
+    return V2 { x: v.x * factor, y: v.y * factor }
+}
+
+@test(output = "40\n80")
+fn test_nested_value_call_non_last_arg_rock() {
+    let r = scale_v2_rock(make_v2(), 4.0)
+    print("{r.x.floor()}")
+    print("{r.y.floor()}")
+}

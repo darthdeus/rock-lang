@@ -1,0 +1,54 @@
+nobox value PresencePoint { x: int }
+nobox value PresenceLocation { region: string, point: PresencePoint }
+nobox value PresenceDef { id: string, location: PresenceLocation? = null }
+
+fn presence_description(location: PresenceLocation?) -> string {
+    if location != null {
+        return "{location.region}:{location.point.x}"
+    }
+    return "null"
+}
+
+@test(output = "omitted null\nexplicit null\npresent crypt:3")
+fn vec_loop_keeps_nested_nobox_presence() {
+    let defs: [PresenceDef] = [
+        PresenceDef { id: "omitted" },
+        PresenceDef { id: "explicit", location: null },
+        PresenceDef { id: "present", location: PresenceLocation {
+            region: "crypt", point: PresencePoint { x: 3 },
+        } },
+    ]
+    let count = 0
+    for def in defs {
+        print("{def.id} {presence_description(def.location)}")
+        count += 1
+    }
+    assert_eq(count, 3)
+}
+
+@test(output = "null\ncrypt:5")
+fn direct_field_keeps_nested_nobox_presence() {
+    let absent = PresenceDef { id: "absent" }
+    let present = PresenceDef { id: "present", location: PresenceLocation {
+        region: "crypt", point: PresencePoint { x: 5 },
+    } }
+    print(presence_description(absent.location))
+    print(presence_description(present.location))
+}
+
+@test(output = "null\ncrypt:7\n1 1")
+fn map_value_keeps_nested_nobox_presence() {
+    let defs: Map<string, PresenceDef> = map_new()
+    defs["absent"] = PresenceDef { id: "absent" }
+    defs["present"] = PresenceDef { id: "present", location: PresenceLocation {
+        region: "crypt", point: PresencePoint { x: 7 },
+    } }
+    print(presence_description(defs["absent"].location))
+    print(presence_description(defs["present"].location))
+    let absent = 0
+    let present = 0
+    for (key, def) in defs {
+        if def.location == null { absent += 1 } else { present += 1 }
+    }
+    print("{absent} {present}")
+}

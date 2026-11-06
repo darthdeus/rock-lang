@@ -1,0 +1,28 @@
+// PR-B: sustained per-yield feedback in a loop. Body asks N+1
+// questions, consumer answers each. Verifies the post-yield arm
+// prelude correctly threads `resume_arg` into `s.<lhs>` on every
+// state transition, not just the first.
+
+co fn accumulator() -> Coroutine<int, int, int> {
+    //                          ^Y   ^R   ^N
+    let total: int = 0
+    let i: int = 0
+    while i < 3 {
+        let v = yield i      // yields the iteration index, gets answer back
+        total = total + v
+        i = i + 1
+    }
+    return total
+}
+
+@test(output = "0\n1\n2\nfinal=60")
+fn test_resume_with_value_loop() {
+    let c = accumulator()
+    print(c.resume(0) ?? -1)   // yields 0 (i=0); arg=0 discarded (pre-first-yield)
+    print(c.resume(10) ?? -1)  // total += 10, yields 1
+    print(c.resume(20) ?? -1)  // total += 20, yields 2
+    let last = c.resume(30)    // total += 30 = 60, body returns
+    if last != null { print("unexpected={last.unwrap()}") }
+    let r = c.result()
+    if r != null { print("final={r.unwrap()}") } else { print("final=null") }
+}

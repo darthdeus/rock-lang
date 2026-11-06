@@ -1,0 +1,27 @@
+value Pair { x: int, y: int }
+value Outer { p: Pair, z: int }
+
+fn make_pair(n: int) -> Pair { return Pair { x: n + 5, y: n * 3 } }
+
+fn replace_nested(b: NativeBuffer<Outer>, f: (int) -> Pair, n: int) {
+    b[0].p = f(n)
+}
+
+fn replace_whole(b: NativeBuffer<Pair>, f: (int) -> Pair, n: int) {
+    b[0] = f(n)
+}
+
+@test fn boxed_result_nested_native_buffer_write() {
+    let b: NativeBuffer<Outer> = native_buffer_alloc(1)
+    b[0] = Outer { p: Pair { x: 1, y: 2 }, z: 77 }
+    replace_nested(b, make_pair, 7)
+    assert_eq(b[0].p.x, 12)
+    assert_eq(b[0].p.y, 21)
+}
+
+@test fn boxed_result_whole_native_buffer_write_control() {
+    let b: NativeBuffer<Pair> = native_buffer_alloc(1)
+    replace_whole(b, make_pair, 7)
+    assert_eq(b[0].x, 12)
+    assert_eq(b[0].y, 21)
+}

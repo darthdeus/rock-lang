@@ -1,0 +1,72 @@
+// Test nullable function types to ensure they work correctly
+// This test prevents regression of the tuple wrapping bug
+
+fn test_fn() {
+    print("test")
+}
+
+fn takes_function(f: fn() -> ()) {
+    f()
+}
+
+struct StructWithNullableFunction {
+    func: (fn() -> ())?,
+}
+
+@test(output = "test")
+fn test_nullable_function_variable() {
+    // Direct assignment without tuple syntax
+    let f: (fn() -> ())? = test_fn
+    f.unwrap()()
+}
+
+@test(output = "test")
+fn test_nullable_function_struct_field() {
+    // Struct field assignment without tuple syntax
+    let s = StructWithNullableFunction {
+        func: test_fn
+    }
+    s.func.unwrap()()
+}
+
+@test(output = "test")
+fn test_nullable_function_unwrap_and_pass() {
+    // Ensure unwrapped function can be passed to other functions
+    let f: (fn() -> ())? = test_fn
+    let unwrapped = f.unwrap()
+    takes_function(unwrapped)
+}
+
+@test(output = "null\ntest")
+fn test_nullable_function_null_case() {
+    // Test null case
+    let f: (fn() -> ())? = null
+    if f == null {
+        print("null")
+    }
+    
+    // Test non-null case  
+    f = test_fn
+    if f != null {
+        f.unwrap()()
+    }
+}
+
+// Test that parentheses work correctly for grouping
+@test(output = "42")
+fn test_parenthesized_expressions_not_tuples() {
+    // Single item in parentheses should not create a tuple
+    let x = (42)
+    print(x)
+}
+
+fn get_string() -> string { 
+    "hello" 
+}
+
+@test(output = "hello")
+fn test_parenthesized_function_call() {
+    // Function call result in parentheses should not create a tuple
+    let s = (get_string())
+    print(s)
+}

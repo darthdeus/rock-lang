@@ -1,0 +1,163 @@
+// Entity-tied coroutines.
+//
+// A coroutine whose lifetime is gated on an entity's liveness: if the
+// entity is removed (or its generation becomes stale) the poller kills
+// the coroutine and drops the entry before the next resume. This
+// encodes the "capture Entity<T> + refetch each frame" idiom as a
+// poller-level guarantee so coroutine bodies can assume their entity
+// is alive whenever they run.
+//
+// Standalone mini-poller (follows the engine_systems_test.rock pattern)
+// — the real integration lands in stone/engine/systems/coroutines.rock
+// once these tests go green.
+
+struct TiedEntry {
+    coroutine: Coroutine<int>,
+    alive_check: (() -> bool)? = null,
+}
+
+struct TiedPoller {
+    entries: Arena<TiedEntry> = arena_new(),
+}
+
+// Liveness gate: if the entity check fails, kill the coroutine (fires
+// on_killed) and drop the entry before the body ever runs this tick.
+// Otherwise resume; a nil yield means natural completion, so clean up.
+fn tied_poller_update(poller: TiedPoller) {
+    for (co_e, entry) in poller.entries {
+        let check = entry.alive_check
+        let dead = check != null && !check.unwrap()()
+
+        if dead {
+            kill(entry.coroutine)
+            co_e.remove()
+            ()
+        } else {
+            let v = resume(entry.coroutine)
+            if v == null {
+                kill(entry.coroutine)
+                co_e.remove()
+                ()
+            }
+        }
+    }
+}
+
+fn spawn_tied<T>(poller: TiedPoller, arena: Arena<T>, entity: Entity<T>, c: Coroutine<int>) {
+    let entry = TiedEntry {
+        coroutine: c,
+        alive_check: () => arena.contains(entity),
+    }
+    poller.entries.insert(entry)
+}
+
+// ---- test fixtures ----
+
+struct Mob {
+    hp: int,
+}
+
+co fn three_yields() -> Coroutine<int> {
+    yield 1
+    yield 2
+    yield 3
+}
+
+global KILLED: int = 0
+
+co fn with_on_killed() -> Coroutine<int> {
+    on_killed {
+        KILLED = KILLED + 1
+    }
+    yield 10
+    yield 20
+    yield 30
+}
+
+// ---- tests ----
+
+// Alive entity: tied coroutine resumes each tick until natural
+// completion, then the poller drops it.
+@test
+fn alive_entity_resumes_and_cleans_up_on_completion() {
+    let mobs: Arena<Mob> = arena_new()
+    let e = mobs.insert(Mob { hp: 10 })
+
+    let poller = TiedPoller {}
+    spawn_tied(poller, mobs, e, three_yields())
+
+    assert_eq(poller.entries.len(), 1)
+
+    // Three resumes cover the three yields.
+    tied_poller_update(poller)
+    tied_poller_update(poller)
+    tied_poller_update(poller)
+
+    // Fourth resume hits natural completion — entry should be removed.
+    tied_poller_update(poller)
+    assert_eq(poller.entries.len(), 0)
+}
+
+// Dead entity: poller kills the coroutine (fires on_killed) and drops
+// the entry on the very next update. The coroutine body never runs
+// against a stale entity.
+@test
+fn dead_entity_kills_coroutine_and_fires_on_killed() {
+    KILLED = 0
+    let mobs: Arena<Mob> = arena_new()
+    let e = mobs.insert(Mob { hp: 10 })
+
+    let poller = TiedPoller {}
+    spawn_tied(poller, mobs, e, with_on_killed())
+
+    // Kill the entity before any update runs.
+    mobs.remove(e)
+
+    tied_poller_update(poller)
+
+    assert_eq(KILLED, 1)
+    assert_eq(poller.entries.len(), 0)
+}
+
+// Generation staleness: a handle pointing at an entity that has been
+// removed (even if the slot is later reused) must count as dead.
+@test
+fn stale_entity_handle_kills_coroutine() {
+    KILLED = 0
+    let mobs: Arena<Mob> = arena_new()
+    let e1 = mobs.insert(Mob { hp: 10 })
+
+    let poller = TiedPoller {}
+    spawn_tied(poller, mobs, e1, with_on_killed())
+
+    // Remove then reinsert — e1 must now be stale even if slot reused.
+    mobs.remove(e1)
+    let e2 = mobs.insert(Mob { hp: 99 })
+
+    tied_poller_update(poller)
+
+    assert_eq(KILLED, 1)
+    assert_eq(poller.entries.len(), 0)
+}
+
+// Multiple tied entries are independent: killing one entity must not
+// disturb sibling coroutines.
+@test
+fn sibling_tied_coroutines_are_independent() {
+    KILLED = 0
+    let mobs: Arena<Mob> = arena_new()
+    let a = mobs.insert(Mob { hp: 1 })
+    let b = mobs.insert(Mob { hp: 2 })
+
+    let poller = TiedPoller {}
+    spawn_tied(poller, mobs, a, with_on_killed())
+    spawn_tied(poller, mobs, b, three_yields())
+
+    mobs.remove(a)
+
+    tied_poller_update(poller)
+
+    // a's coroutine was killed; b's resumed normally.
+    assert_eq(KILLED, 1)
+    assert_eq(poller.entries.len(), 1)
+}

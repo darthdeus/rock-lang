@@ -1,0 +1,61 @@
+global global_side_effect_called: bool = false
+
+fn global_side_effect_true() -> bool {
+    global_side_effect_called = true
+    return true
+}
+
+fn global_side_effect_false() -> bool {
+    global_side_effect_called = true
+    return false
+}
+
+@test
+fn test_short_circuit_and_false_left() {
+    global_side_effect_called = false
+
+    let result = false && global_side_effect_true()
+
+    assert_false(global_side_effect_called, "Side effect should not be called when left side is false")
+    assert_false(result, "Result should be false")
+}
+
+@test
+fn test_short_circuit_and_true_left() {
+    global_side_effect_called = false
+
+    let result = true && global_side_effect_false()
+
+    assert_true(global_side_effect_called, "Side effect should be called when left side is true")
+    assert_false(result, "Result should be false")
+}
+
+@test
+fn test_short_circuit_or_true_left() {
+    global_side_effect_called = false
+
+    let result = true || global_side_effect_false()
+
+    assert_false(global_side_effect_called, "Side effect should not be called when left side is true")
+    assert_true(result, "Result should be true")
+}
+
+@test
+fn test_short_circuit_or_false_left() {
+    global_side_effect_called = false
+
+    let result = false || global_side_effect_true()
+
+    assert_true(global_side_effect_called, "Side effect should be called when left side is false")
+    assert_true(result, "Result should be true")
+}
+
+@test
+fn test_complex_short_circuit_case() {
+    let layer: int? = null
+
+    // This should not crash - the right side should not be evaluated
+    let result = layer != null && layer.unwrap() > 0
+
+    assert_false(result, "Result should be false")
+}

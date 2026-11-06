@@ -1,0 +1,41 @@
+// Logic tests
+
+@test
+fn test_and_operator() {
+    assert_eq(true && true, true)
+    assert_eq(true && false, false)
+    assert_eq(false && true, false)
+    assert_eq(false && false, false)
+}
+
+@test
+fn test_or_operator() {
+    assert_eq(true || true, true)
+    assert_eq(true || false, true)
+    assert_eq(false || true, true)
+    assert_eq(false || false, false)
+}
+
+@test
+fn test_not_operator() {
+    assert_eq(!true, false)
+    assert_eq(!false, true)
+    assert_eq(!!true, true)
+}
+
+@test
+fn test_complex_logic() {
+    assert_eq(true && (false || true), true)
+    assert_eq((true || false) && (true && true), true)
+    assert_eq(!(true && false), true)
+}
+
+@test
+fn test_comparison_operators() {
+    assert(5 > 3)
+    assert(3 < 5)
+    assert(5 >= 5)
+    assert(5 <= 5)
+    assert(5 == 5)
+    assert(5 != 3)
+}

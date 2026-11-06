@@ -1,0 +1,61 @@
+// Dead-code elimination for unused @pure calls.
+//
+// A call to a `@pure` function whose result is discarded (bare
+// expression statement, or bound to `_`) can be dropped — pure by
+// definition means no observable side effect. Arguments themselves
+// must also be dup-safe (no side-effecting sub-expressions) so we're
+// not throwing away an unrelated effect buried in an arg.
+//
+// These @test(output = ...) programs primarily check that the DCE
+// doesn't change observable behavior. The "was it actually dropped"
+// grep-the-Lua check lives in the companion Rust test.
+
+@pure
+fn square(x: int) -> int { return x * x }
+
+@pure
+fn sum(a: int, b: int) -> int { return a + b }
+
+// Positive: pure call as bare-expression statement is dropped;
+// subsequent print still runs.
+@test(output = "ok")
+fn test_bare_pure_call_dropped() {
+    square(5)
+    print("ok")
+}
+
+// Positive: `let _ = pure_call(x)` is dropped.
+@test(output = "ok")
+fn test_let_underscore_pure_call_dropped() {
+    let _ = square(7)
+    print("ok")
+}
+
+// Negative: impure bare call is preserved (observable output).
+@test(output = "hi\ndone")
+fn test_impure_bare_call_preserved() {
+    print("hi")
+    print("done")
+}
+
+// Negative: pure call whose result is actually used is preserved.
+@test(output = "49")
+fn test_pure_call_with_use_preserved() {
+    let x = square(7)
+    print(x)
+}
+
+// Negative: pure call with impure arg — the arg itself has effects,
+// so we must NOT drop the call. Here the arg is another call to an
+// impure function (`print_and_return`). If DCE fires here, the
+// "side" print never happens.
+fn print_and_return(x: int) -> int {
+    print("side")
+    return x
+}
+
+@test(output = "side\nok")
+fn test_pure_call_with_impure_arg_preserved() {
+    sum(print_and_return(1), 2)
+    print("ok")
+}

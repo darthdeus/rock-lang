@@ -1,0 +1,108 @@
+// Arena identity and slot reuse.
+//
+// An `Entity<T>` is `{_scene_id, _arena_id, _slot, _generation}` and an
+// `Arena<T>` is `{_scene_id, _arena_id}`. Both are weak: they name an
+// incarnation in the Session Arena registry rather than holding the backing
+// columns. Every observer -- equality, `entity_key`, `get`, `contains` --
+// therefore distinguishes two Arenas whose slot and generation agree.
+//
+// `Arena.clear()` keeps the Arena incarnation and its monotonic generation
+// counter, so a pre-clear handle can never be reissued.
+
+struct Tag { v: int }
+
+// --- controls: same-Arena identity, which must keep working throughout ---
+
+@test(output = "true")
+fn same_arena_entity_copy_is_equal() {
+    let a: Arena<Tag> = arena_new()
+    let e = a.insert(Tag { v: 1 })
+    let copy = e
+    print(e.equals(copy))
+}
+
+@test(output = "1")
+fn matching_arena_get_succeeds() {
+    let a: Arena<Tag> = arena_new()
+    let e = a.insert(Tag { v: 1 })
+    print(a.get(e).unwrap().v)
+}
+
+@test(output = "2")
+fn entity_inserted_after_clear_resolves() {
+    let a: Arena<Tag> = arena_new()
+    a.insert(Tag { v: 1 })
+    a.clear()
+    let fresh = a.insert(Tag { v: 2 })
+    print(a.get(fresh).unwrap().v)
+}
+
+@test(output = "7")
+fn entity_remove_returns_removed_value() {
+    let a: Arena<Tag> = arena_new()
+    let e = a.insert(Tag { v: 7 })
+    let removed = e.remove()
+    print(removed.unwrap().v)
+}
+
+// --- cross-Arena identity ---
+
+@test(output = "false")
+fn cross_arena_entities_are_not_equal() {
+    let a1: Arena<Tag> = arena_new()
+    let a2: Arena<Tag> = arena_new()
+    let e1 = a1.insert(Tag { v: 1 })
+    let e2 = a2.insert(Tag { v: 2 })
+    print(e1.equals(e2))
+}
+
+@test(output = "false")
+fn cross_arena_entity_keys_differ() {
+    let a1: Arena<Tag> = arena_new()
+    let a2: Arena<Tag> = arena_new()
+    let e1 = a1.insert(Tag { v: 1 })
+    let e2 = a2.insert(Tag { v: 2 })
+    print(entity_key(e1) == entity_key(e2))
+}
+
+@test(output = "true")
+fn cross_arena_get_rejects_foreign_entity() {
+    let a1: Arena<Tag> = arena_new()
+    let a2: Arena<Tag> = arena_new()
+    let e1 = a1.insert(Tag { v: 1 })
+    a2.insert(Tag { v: 99 })
+    print(is_null(a2.get(e1)))
+}
+
+@test(output = "false")
+fn cross_arena_contains_rejects_foreign_entity() {
+    let a1: Arena<Tag> = arena_new()
+    let a2: Arena<Tag> = arena_new()
+    let e1 = a1.insert(Tag { v: 1 })
+    a2.insert(Tag { v: 99 })
+    print(a2.contains(e1))
+}
+
+// --- clear cannot revive ---
+
+@test(output = "true\nfalse")
+fn clear_retires_old_entities() {
+    let a: Arena<Tag> = arena_new()
+    let old = a.insert(Tag { v: 1 })
+    a.clear()
+    a.insert(Tag { v: 2 })
+    print(is_null(a.get(old)))
+    print(a.contains(old))
+}
+
+// The stale handle must not read the NEW occupant of its slot -- the failure
+// this pins is a silent alias onto an unrelated entity, not merely a live
+// lookup.
+@test(output = "true")
+fn clear_stale_entity_does_not_read_new_occupant() {
+    let a: Arena<Tag> = arena_new()
+    let old = a.insert(Tag { v: 1 })
+    a.clear()
+    a.insert(Tag { v: 2 })
+    print(is_null(a.get(old)))
+}

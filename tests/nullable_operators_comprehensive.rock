@@ -1,0 +1,270 @@
+// Nullable operators tests - migrated from rock/tests/nullable_operators_tests.rs
+// Tests nullable coalescence (??) and safe navigation (?.) operators
+
+// Struct definitions for tests
+struct Point { x: int, y: int }
+struct Counter { value: int }
+struct Inner { value: int }
+struct Outer { inner: Inner? }
+struct Tween { value: float, completed: bool }
+
+// Helper functions
+fn get_value(c: Counter) -> int { 
+    return c.value 
+}
+
+fn fixzero() -> Point { 
+    return Point { x: 0, y: 0 } 
+}
+
+fn update(t: Tween, dt: float) -> Tween {
+    return Tween { value: t.value + dt, completed: false }
+}
+
+fn complete(t: Tween) -> Tween {
+    return Tween { value: 1.0, completed: true }
+}
+
+// Basic nullable coalescence tests
+@test(output = "10\n42\n0")
+fn test_nullable_coalescence_basic() {
+    let x: int? = null
+    let y: int? = 42
+    let z: int? = 0
+
+    let x = x ?? 10
+    let y = y ?? 10
+    let z = z ?? 10
+
+    print(x)
+    print(y)
+    print(z)
+}
+
+@test(output = "42")
+fn test_nullable_coalescence_chained() {
+    let a: int? = null
+    let b: int? = null
+    let c: int? = 42
+
+    let val = a ?? b ?? c ?? 0
+    print(val)
+}
+
+@test(output = "10")
+fn test_nullable_coalescence_with_expressions() {
+    let x: int? = null
+    let fallback = 5
+    let result = x ?? fallback * 2
+
+    print(result)
+}
+
+// Safe navigation tests
+@test(output = "10\n-1")
+fn test_nullable_safe_navigation_field() {
+    let p_val = Point { x: 10, y: 20 }
+    let p: Point? = p_val
+    let null_p: Point? = null
+
+    let result1 = p?.x ?? -1
+    let result2 = null_p?.x ?? -1
+    
+    print(result1)
+    print(result2)
+}
+
+@test(output = "42\n-1")
+fn test_nullable_safe_navigation_method() {
+    let c_val = Counter { value: 42 }
+    let c: Counter? = c_val
+    let null_c: Counter? = null
+
+    // Method calls on nullable types need manual handling
+    let c_value: int? = if c != null { get_value(c) } else { null }
+    let null_c_value: int? = if null_c != null { get_value(null_c) } else { null }
+    print(c_value ?? -1)
+    print(null_c_value ?? -1)
+}
+
+@test(output = "42\n-1\n-1")
+fn test_nullable_safe_navigation_chained() {
+    let outer = Outer { inner: Inner { value: 42 } }
+    let null_outer: Outer? = null
+    let outer_null_inner = Outer { inner: null }
+
+    let result1 = outer.inner?.value ?? -1
+    let result2 = null_outer?.inner?.value ?? -1
+    let result3 = outer_null_inner.inner?.value ?? -1
+
+    print(result1)
+    print(result2)
+    print(result3)
+}
+
+// Nullable let tests
+@test(output = "0\n0\n-1\n-1")
+fn test_nullable_let_basic() {
+    let p_val = Point { x: 10, y: 20 }
+    let p: Point? = p_val
+    let null_p: Point? = null
+
+    let result1 = p?.let { fixzero() } ?? Point { x: -1, y: -1 }
+    let result2 = null_p?.let { fixzero() } ?? Point { x: -1, y: -1 }
+
+    print(result1.x)
+    print(result1.y)
+    print(result2.x)
+    print(result2.y)
+}
+
+@test(output = "84\n-1")
+fn test_nullable_let_with_parameter() {
+    let x: int? = 42
+    let null_x: int? = null
+
+    let result1 = x?.let { x * 2 } ?? -1
+    let result2 = null_x?.let { null_x * 2 } ?? -1
+
+    print(result1)
+    print(result2)
+}
+
+// Complex operator combinations
+@test(output = "42\n-1\n-1")
+fn test_nullable_operators_combined_complex() {
+    let outer = Outer { inner: Inner { value: 42 } }
+    let null_outer: Outer? = null
+    let outer_null_inner = Outer { inner: null }
+
+    let val1 = outer.inner?.value ?? -1
+    let val2 = null_outer?.inner?.value ?? -1
+    let val3 = outer_null_inner.inner?.value ?? -1
+
+    print(val1)
+    print(val2)
+    print(val3)
+}
+
+@test(output = "10\n20\n-1")
+fn test_nullable_operators_with_variables() {
+    let p = Point { x: 10, y: 20 }
+    let p_nullable: Point? = p
+    let null_p: Point? = null
+
+    let x = p_nullable?.x
+    let y = p_nullable?.y
+    let z = null_p?.x
+
+    print(x ?? -1)
+    print(y ?? -1)
+    print(z ?? -1)
+}
+
+// Assignment pattern tests
+@test(output = "0\n0\n-1\n-1")
+fn test_nullable_let_assignment_pattern() {
+    let p = Point { x: 10, y: 20 }
+    let p_nullable: Point? = p
+    let null_p: Point? = null
+
+    let result1 = p_nullable?.let { 
+        let z = fixzero()
+        z 
+    } ?? Point { x: -1, y: -1 }
+    
+    let result2 = null_p?.let { 
+        let z = fixzero()
+        z 
+    } ?? Point { x: -1, y: -1 }
+
+    print(result1.x)
+    print(result1.y)
+    print(result2.x)
+    print(result2.y)
+}
+
+// Method chaining tests
+@test(output = "1\ntrue\n0\nfalse")
+fn test_nullable_method_chaining() {
+    let tween = Tween { value: 0.5, completed: false }
+    let tween_opt: Tween? = tween
+    let null_tween: Tween? = null
+
+    let result1: Tween? = if tween_opt != null {
+        let updated = update(tween_opt, 1.0)
+        if updated.value >= 1.0 { complete(updated) } else { updated }
+    } else { null }
+
+    let result2: Tween? = if null_tween != null {
+        let updated = update(null_tween, 1.0)
+        if updated.value >= 1.0 { complete(updated) } else { updated }
+    } else { null }
+
+    if result1 != null {
+        print(result1.value)
+        print(result1.completed)
+    }
+
+    let default_tween = result2 ?? Tween { value: 0.0, completed: false }
+    print(default_tween.value)
+    print(default_tween.completed)
+}
+
+// Type inference tests
+@test(output = "10\n20.5\nhello\n42\n20.5\nworld")
+fn test_nullable_coalescence_type_inference() {
+    let x: int? = null
+    let y: float? = null  
+    let z: string? = null
+
+    let val1 = x ?? 10
+    let val2 = y ?? 20.5
+    let val3 = z ?? "hello"
+
+    let a: int? = 42
+    let b: float? = 20.5
+    let c: string? = "world"
+
+    let val4 = a ?? 0
+    let val5 = b ?? 0.0
+    let val6 = c ?? ""
+
+    print(val1)
+    print(val2)
+    print(val3)
+    print(val4)
+    print(val5)
+    print(val6)
+}
+
+// Operator precedence tests
+@test(output = "5")
+fn test_nullable_operators_precedence() {
+    let x: int? = null
+    let y: int? = 5
+
+    let result = x ?? y ?? 0 * 2
+    print(result)
+}
+
+@test(output = "10\n10")
+fn test_nullable_precedence_with_arithmetic() {
+    let x: int? = null
+    let y: int? = 10
+
+    let result1 = x ?? (5 + 5)
+    let result2 = y ?? (5 + 20)
+
+    print(result1)
+    print(result2)
+}
+
+@test(output = "true")
+fn test_nullable_comparison() {
+    let x: int? = 42
+    let y: int? = null
+
+    let result = (x ?? 0) > (y ?? 0)
+    print(result)
+}

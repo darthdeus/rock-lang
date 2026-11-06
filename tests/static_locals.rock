@@ -1,0 +1,135 @@
+// `static` local behavior: private per-declaration storage that persists across
+// calls, initialized on first reach.
+//
+// STATUS: these are the GREEN target for the feature. They exercise the
+// runtime semantics (one cell across calls, per-site distinct cells, per-fn
+// distinct cells, one cell across loop iterations, first-reach init, sibling
+// blocks distinct) and pass once the bone lowering/typecheck + skull codegen
+// land. Parser support is in place; see the plan doc for the remaining split.
+
+// --- One cell across calls ---
+
+fn counter() -> int {
+    static n = 0
+    n = n + 1
+    return n
+}
+
+@test(output = "1 2 3")
+fn test_static_persists_across_calls() {
+    let a = counter()
+    let b = counter()
+    let c = counter()
+    print("{a} {b} {c}")
+}
+
+// --- Two statics in one fn are distinct cells ---
+
+fn two_counters() -> string {
+    static a = 0
+    static b = 100
+    a = a + 1
+    b = b + 10
+    return "{a}:{b}"
+}
+
+@test(output = "1:110 2:120")
+fn test_two_statics_independent() {
+    let x = two_counters()
+    let y = two_counters()
+    print("{x} {y}")
+}
+
+// --- Same source name in two fns => distinct cells (owner-mangled) ---
+
+fn fa() -> int {
+    static n = 0
+    n = n + 1
+    return n
+}
+
+fn fb() -> int {
+    static n = 0
+    n = n + 1
+    return n
+}
+
+@test(output = "1 1 2 2")
+fn test_statics_per_fn_distinct() {
+    let a1 = fa()
+    let b1 = fb()
+    let a2 = fa()
+    let b2 = fb()
+    print("{a1} {b1} {a2} {b2}")
+}
+
+// --- A static in a loop body is ONE cell across all iterations AND calls ---
+
+fn loop_static() -> int {
+    static n = 0
+    for i in [0, 1, 2] {
+        static m = 0
+        m = m + 1
+        n = m
+    }
+    return n
+}
+
+@test(output = "3 6")
+fn test_static_in_loop_one_cell() {
+    let a = loop_static()   // m: 1,2,3 across iterations -> n = 3
+    let b = loop_static()   // m persists across calls: 4,5,6 -> n = 6
+    print("{a} {b}")
+}
+
+// --- First-reach: an untaken branch never inits; init runs once, never again ---
+
+global INIT_RUNS: int = 0
+
+fn make_val() -> int {
+    INIT_RUNS = INIT_RUNS + 1
+    return 42
+}
+
+fn maybe_static(take: bool) -> int {
+    if take {
+        static v = make_val()
+        return v
+    }
+    return -1
+}
+
+@test(output = "-1 0 42 1 42 1")
+fn test_first_reach_untaken_branch_never_inits() {
+    let a = maybe_static(false)   // branch not taken -> init never runs
+    let r1 = INIT_RUNS            // 0
+    let b = maybe_static(true)    // first reach -> init runs exactly once
+    let r2 = INIT_RUNS            // 1
+    let c = maybe_static(true)    // reached again -> init does NOT re-run
+    let r3 = INIT_RUNS            // still 1
+    print("{a} {r1} {b} {r2} {c} {r3}")
+}
+
+// --- Statics in sibling blocks are distinct cells (per-(owner,name) counter) ---
+
+fn sibling_blocks() -> int {
+    let total = 0
+    {
+        static a = 0
+        a = a + 1
+        total = total + a
+    }
+    {
+        static a = 0
+        a = a + 10
+        total = total + a
+    }
+    return total
+}
+
+@test(output = "11 22")
+fn test_sibling_block_statics_distinct() {
+    let r1 = sibling_blocks()   // a1: 0->1, a2: 0->10 => 11
+    let r2 = sibling_blocks()   // a1: 1->2, a2: 10->20 => 22 (each cell persists)
+    print("{r1} {r2}")
+}

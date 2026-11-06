@@ -1,0 +1,33 @@
+// Slice 1 of macro hygiene: idents that resolve to a Rock `global`
+// emit as `_G.<name>` so caller-scope Lua locals can't intercept them.
+
+global GH_GLOBAL: int = 100
+
+@test
+fn test_global_read_unshadowed() {
+    assert_eq(GH_GLOBAL, 100)
+}
+
+fn gh_read_global() -> int { return GH_GLOBAL }
+
+@test
+fn test_global_read_through_local_shadow() {
+    // A caller-scope local of the same name must NOT intercept the
+    // global when read from another fn's body. The receiver fn's
+    // bare `GH_GLOBAL` resolves to the def-site global and emits
+    // `_G.GH_GLOBAL`, so caller's `let GH_GLOBAL = 7` is invisible.
+    let GH_GLOBAL = 7
+    let _ = GH_GLOBAL  // local read in this scope is fine
+    assert_eq(gh_read_global(), 100)
+}
+
+macro gh_macro_read() -> int {
+    _G.GH_GLOBAL
+}
+
+@test
+fn test_macro_global_beats_caller_local() {
+    // rock: allow(unused_var, "intentional shadow — tests _G.GH_GLOBAL beats caller local")
+    let GH_GLOBAL = 7
+    assert_eq(gh_macro_read(), 100)
+}

@@ -1,0 +1,328 @@
+// The stdlib Vec surface over COLUMN storage, end to end.
+//
+// `[V2]` stores one array per leaf and has no `_data` backing at all, so every
+// entry point that touches the backing needs a column form. `get`/`set`/`pop`/
+// `clear`/`remove_at`/`swap_remove` reach storage one element at a time and ride
+// the three per-element boundary primitives; the ops below touch the backing AS
+// A WHOLE (allocate, measure, copy, shift, reorder, materialize) and each broke
+// at runtime with `_data` nil until it got a column form of its own.
+//
+// Shape coverage lives in `rock-lang/crates/skull/tests/vec_value_columns.rs`; this file
+// is the behavioral net. Values are asserted because a per-column decomposition
+// can emit column-shaped code and still desync the columns -- `insert_at` and
+// `sort` are exactly that risk, so both check a leaf the key never touched.
+
+value V2 { x: float, y: float }
+nobox value NP { x: float, y: float }
+// Declared so the leaf order (`w`, `tl.x`, `tl.y`) is NOT the alphabetical one
+// -- the discriminant for a sort that discovers its columns at runtime.
+nobox value NRect { w: float, tl: NP }
+value DataField { _data: float, x: float }
+enum Payload { A(int), B(int) }
+value WithPayload { payload: Payload, n: int }
+
+@nomangle inline(lua) fn column_header_repr(v: any) -> string = "return v[\"@vec\"].repr"
+@nomangle inline(lua) fn column_header_elem(v: any) -> string = "return v[\"@vec\"].elem"
+@nomangle inline(lua) fn column_header_cap(v: any) -> int = "return v[\"@vec\"].cap"
+@nomangle inline(lua) fn raw_v2_first_is_cdata(v: any) -> bool =
+    "return ffi.istype(_G.__ROCK_C_STRUCT[\"V2\"].name, v[1])"
+@nomangle inline(lua) fn raw_payload_first_is_cdata(v: any) -> bool =
+    "return ffi.istype(WithPayload_ct, v[1]) and ffi.istype(Payload_ct, v[1].payload)"
+@nomangle inline(lua) fn raw_v2_array() -> any =
+    "return { V2_ct(5, 6), V2_ct(7, 8) }"
+inline(lua) fn begin_materialization_count(ctor: string) = """
+    _G.__test_ctor_name = ctor
+    _G.__test_ctor = _G[ctor]
+    _G.__test_materializations = 0
+    _G[ctor] = function(...)
+        _G.__test_materializations = _G.__test_materializations + 1
+        return _G.__test_ctor(...)
+    end
+"""
+inline(lua) fn end_materialization_count() -> int = """
+    _G[_G.__test_ctor_name] = _G.__test_ctor
+    _G.__test_ctor = nil
+    _G.__test_ctor_name = nil
+    local count = _G.__test_materializations
+    _G.__test_materializations = nil
+    return count
+"""
+
+fn v2_from_lua_array() -> [V2] {
+    return __rock_vec_from_lua_array(raw_v2_array(), 2)
+}
+
+@test(output = "columns\nV2\n4\n4\n7")
+fn test_vec_new_with_capacity_then_push() {
+    let a: [V2] = vec_new_with_capacity(4)
+    print(column_header_repr(a))
+    print(column_header_elem(a))
+    print(column_header_cap(a))
+    print(a.capacity())
+    a.push(V2 { x: 7.0, y: 8.0 })
+    print(a[0].x)
+}
+
+@test(output = "2\n2\n1\n9\ntrue")
+fn test_clone_copies_every_column() {
+    let a: [V2] = [V2 { x: 1.0, y: 2.0 }, V2 { x: 3.0, y: 4.0 }]
+    let b = a.clone()
+    print(b.len)
+    print(column_header_cap(b))
+    print(b[0].x)
+    // The clone must not SHARE a column with the original, or this push would
+    // be visible through `a` too.
+    b.push(V2 { x: 9.0, y: 9.0 })
+    print(b[2].x)
+    print(a.len == 2)
+}
+
+@test(output = "3\n9\n90\n1\n10")
+fn test_insert_at_shifts_every_column_in_lockstep() {
+    let a: [V2] = [V2 { x: 1.0, y: 10.0 }, V2 { x: 2.0, y: 20.0 }]
+    a.insert_at(0, V2 { x: 9.0, y: 90.0 })
+    print(a.len)
+    print(a[0].x)
+    print(a[0].y)
+    // `y` must have shifted with `x`; a desync shows up here, not above.
+    print(a[1].x)
+    print(a[1].y)
+}
+
+@test(output = "1\n10\n2\n20\n3\n30")
+fn test_sort_permutes_every_column_in_lockstep() {
+    let a: [V2] = [V2 { x: 3.0, y: 30.0 }, V2 { x: 1.0, y: 10.0 }, V2 { x: 2.0, y: 20.0 }]
+    a.sort(v => v.x)
+    // The key only reads `x`; `y` must follow it. If the columns permute
+    // independently the x's sort and the y's do not travel with them.
+    for v in a {
+        print(v.x)
+        print(v.y)
+    }
+}
+
+@test(output = "true\n2")
+fn test_to_lua_array_materializes_elements() {
+    let a: [V2] = [V2 { x: 1.0, y: 2.0 }, V2 { x: 3.0, y: 4.0 }]
+    let raw = __rock_vec_to_lua_array(a)
+    print(raw_v2_first_is_cdata(raw))
+    print(a.len)
+}
+
+@test(output = "true")
+fn test_to_lua_array_materializes_nested_cdata_enum() {
+    let a: [WithPayload] = [WithPayload { payload: Payload::B(7), n: 3 }]
+    let raw = __rock_vec_to_lua_array(a)
+    print(raw_payload_first_is_cdata(raw))
+}
+
+@test(output = "Vec {{ V2 {{ x: 1, y: 2 }} }}")
+fn test_inspect_renders_logical_elements() {
+    // Without the column branch this renders the PHYSICAL layout --
+    // `Vec { _data = nil, len = 1, x = { 1 }, y = { 2 } }`.
+    let a: [V2] = [V2 { x: 1.0, y: 2.0 }]
+    print(inspect(a))
+}
+
+@test(output = "columns\nDataField\nVec {{ DataField {{ _data: 4, x: 9 }} }}")
+fn test_value_data_field_does_not_collide_with_vec_representation() {
+    let a: [DataField] = [DataField { _data: 4.0, x: 9.0 }]
+    print(column_header_repr(a))
+    print(column_header_elem(a))
+    print(inspect(a))
+}
+
+// All THREE sort paths -- boxed, column, and the `nobox` leaf form -- apply the
+// key the same number of times. The nobox arm is a separate helper, so without
+// it in this comparison a decorate-sort (n calls instead of 2*n*log n) or any
+// other changed invocation count would land unnoticed.
+@test(output = "true\ntrue")
+fn test_column_sort_preserves_key_callback_semantics() {
+    let column_calls = 0
+    let boxed_calls = 0
+    let nobox_calls = 0
+    let a: [V2] = [
+        V2 { x: 3.0, y: 0.0 },
+        V2 { x: 1.0, y: 0.0 },
+        V2 { x: 2.0, y: 0.0 },
+    ]
+    let b: [Wide] = [
+        Wide { a: 3, b: 0, c: 0, d: 0, e: 0 },
+        Wide { a: 1, b: 0, c: 0, d: 0, e: 0 },
+        Wide { a: 2, b: 0, c: 0, d: 0, e: 0 },
+    ]
+    let n: [NP] = [
+        NP { x: 3.0, y: 0.0 },
+        NP { x: 1.0, y: 0.0 },
+        NP { x: 2.0, y: 0.0 },
+    ]
+    a.sort(v => {
+        column_calls += 1
+        return v.x
+    })
+    b.sort(v => {
+        boxed_calls += 1
+        return v.a
+    })
+    n.sort(v => {
+        nobox_calls += 1
+        return v.x
+    })
+    print(nobox_calls == boxed_calls)
+    print(column_calls == boxed_calls)
+}
+
+@test(output = "3")
+fn test_column_sort_materializes_each_element_once() {
+    let a: [V2] = [
+        V2 { x: 3.0, y: 0.0 },
+        V2 { x: 1.0, y: 0.0 },
+        V2 { x: 2.0, y: 0.0 },
+    ]
+    begin_materialization_count("V2_ct")
+    a.sort(v => v.x)
+    print(end_materialization_count())
+}
+
+// The `nobox` twin of the two tests above. The mark changes the key fn's ABI --
+// a fn value taking a `nobox` value takes its LEAVES -- so the sort feeds the
+// columns straight to the key and builds nothing. The count is the point: `3`
+// here would mean the mark is being honored by a box the verifier waved through.
+@test(output = "0\n1\n10\n2\n20\n3\n30")
+fn test_nobox_column_sort_materializes_nothing() {
+    let a: [NP] = [NP { x: 3.0, y: 30.0 }, NP { x: 1.0, y: 10.0 }, NP { x: 2.0, y: 20.0 }]
+    begin_materialization_count("NP_ct")
+    a.sort(v => v.x)
+    print(end_materialization_count())
+    // The key reads only `x`; `y` must travel with it, same lockstep property
+    // the boxed sort has.
+    for v in a {
+        print(v.x)
+        print(v.y)
+    }
+}
+
+// A named top-level fn is the key form most at risk: it has a declared ABI of
+// its own, and the leaf sort works only because taking it as a value narrows
+// that ABI to the one the fn TYPE derives.
+fn np_x(v: NP) -> float { return v.x }
+
+@test(output = "1\n2\n3")
+fn test_nobox_column_sort_by_a_named_fn() {
+    let a: [NP] = [NP { x: 3.0, y: 0.0 }, NP { x: 1.0, y: 0.0 }, NP { x: 2.0, y: 0.0 }]
+    a.sort(np_x)
+    for v in a {
+        print(v.x)
+    }
+}
+
+// A nested leaf makes the column keys DOTTED, so the paths the sort hands the
+// key fn must be the ABI's leaf order rather than anything a runtime key walk
+// would produce.
+@test(output = "1\n7\n2\n6\n3\n5")
+fn test_nobox_column_sort_with_a_nested_leaf() {
+    // `y` ranks the rows differently from `x`, so a transposed leaf list sorts
+    // by the wrong column instead of quietly agreeing.
+    let a: [NRect] = [
+        NRect { w: 30.0, tl: NP { x: 3.0, y: 5.0 } },
+        NRect { w: 10.0, tl: NP { x: 1.0, y: 7.0 } },
+        NRect { w: 20.0, tl: NP { x: 2.0, y: 6.0 } },
+    ]
+    a.sort(v => v.tl.x)
+    for v in a {
+        print(v.tl.x)
+        print(v.tl.y)
+    }
+}
+
+@test(output = "columns\nV2\n2\n1\n4")
+fn test_spread_literal_keeps_column_representation() {
+    let a: [V2] = [...(
+        V2 { x: 1.0, y: 2.0 },
+        V2 { x: 3.0, y: 4.0 },
+    )]
+    print(column_header_repr(a))
+    print(column_header_elem(a))
+    print(a.len)
+    print(a[0].x)
+    print(a[1].y)
+}
+
+@test(output = "columns\nV2\n2\n5\n8")
+fn test_lua_array_bridge_builds_column_representation() {
+    let a = v2_from_lua_array()
+    print(column_header_repr(a))
+    print(column_header_elem(a))
+    print(a.len)
+    print(a[0].x)
+    print(a[1].y)
+}
+
+// An INELIGIBLE element keeps the boxed backing, so every op above must still
+// take the ordinary path. This is the control: a change that converted the
+// surface by breaking the boxed form would pass everything above and fail here.
+value Wide { a: int, b: int, c: int, d: int, e: int }
+nobox value WideNobox { a: int, b: int, c: int, d: int, e: int }
+
+@test(output = "2\n1\n3\n2")
+fn test_boxed_elements_keep_the_ordinary_path() {
+    let w: [Wide] = [Wide { a: 3, b: 0, c: 0, d: 0, e: 0 }, Wide { a: 1, b: 0, c: 0, d: 0, e: 0 }]
+    print(w.len)
+    w.sort(v => v.a)
+    print(w[0].a)
+    print(w[1].a)
+    let c = w.clone()
+    print(c.len)
+}
+
+@test
+fn test_wide_nobox_element_overwrite_round_trips() {
+    let w: [WideNobox] = []
+    w.push(WideNobox { a: 1, b: 2, c: 3, d: 4, e: 5 })
+    w[0] = WideNobox { a: 6, b: 7, c: 8, d: 9, e: 10 }
+    assert_eq(w[0].a, 6)
+    assert_eq(w[0].e, 10)
+}
+
+// A `nobox` element with a NULLABLE field puts real `nil` into that field's
+// columns, and `#` on a table with holes is undefined in Lua. Every helper that
+// sized itself with `#col` was therefore unsound exactly there: `clone` copied
+// nothing and `insert_at` shifted the sparse columns by a different amount than
+// the dense ones, desyncing the rows. The Vec tracks `len`; nothing may ask Lua.
+nobox value Inn { q: int, p: int }
+nobox value Holey { z: Inn?, y: int }
+
+fn holey_dump(v: [Holey]) -> string {
+    let s = ""
+    for i in 0..v.len {
+        let e = v[i]
+        s = s + "[{e.y}:{e.z?.q ?? -1}]"
+    }
+    return s
+}
+
+@test(output = "[1:-1][2:-1][3:33]\n[0:77][1:-1][2:-1][3:33]")
+fn test_nullable_column_insert_at_keeps_rows_together() {
+    let v: [Holey] = []
+    v.push(Holey { z: null, y: 1 })
+    v.push(Holey { z: null, y: 2 })
+    v.push(Holey { z: Inn { q: 33, p: 34 }, y: 3 })
+    print(holey_dump(v))
+    // The leading holes are what break a `#col`-sized shift: `y` moves by one
+    // and the `z` columns move by something else, so 33 lands on the wrong row.
+    v.insert_at(0, Holey { z: Inn { q: 77, p: 78 }, y: 0 })
+    print(holey_dump(v))
+}
+
+@test(output = "[1:-1][2:-1][3:33]\n[1:-1][2:-1][3:33]\n3")
+fn test_nullable_column_clone_copies_every_row() {
+    let v: [Holey] = []
+    v.push(Holey { z: null, y: 1 })
+    v.push(Holey { z: null, y: 2 })
+    v.push(Holey { z: Inn { q: 33, p: 34 }, y: 3 })
+    print(holey_dump(v))
+    let c = v.clone()
+    // A `#col`-sized copy stops at the first hole and drops 33 entirely.
+    print(holey_dump(c))
+    print(c.len)
+}

@@ -1,0 +1,246 @@
+// A `nobox` element behind a nullable: `[NP?]` stores a PRESENCE column beside
+// the leaf columns, so an absent element is a `false` presence slot rather than
+// a materialized box.
+//
+// The presence slot is a property of the DECLARED element type, read only where
+// that declaration is visible (the container's own element type). It is never
+// inferred from an expression's type -- a safe-nav result is an identical
+// `Nullable(T)` with no presence slot behind it.
+//
+// Column shape lives in `rock-lang/crates/skull/tests/vec_value_columns.rs`; this file is
+// the behavioral net. Values are asserted on BOTH sides of a null, because a
+// per-column decomposition can emit column-shaped code and still desync the
+// columns -- a presence column that shifts by a different amount than its leaf
+// siblings reads as a wrong-but-plausible value, not as a crash.
+
+nobox value NP { x: float, y: float }
+
+@nomangle inline(lua) fn column_header_repr(v: any) -> string = "return v[\"@vec\"].repr"
+@nomangle inline(lua) fn column_presence_at(v: any, i: int) -> bool = "return v[\"@p\"][i]"
+@nomangle inline(lua) fn column_leaf_at(v: any, path: string, i: int) -> float = "return v[path][i]"
+@nomangle inline(lua) fn column_leaf_is_nil(v: any, path: string, i: int) -> bool =
+    "return v[path][i] == nil"
+@nomangle inline(lua) fn column_keys(v: any) -> string = """
+    local ks = {}
+    for k, val in pairs(v) do
+        if k ~= "len" and k ~= "__ty" and k ~= "@vec" then ks[#ks + 1] = k end
+    end
+    table.sort(ks)
+    return table.concat(ks, ",")
+"""
+
+@test(output = "columns")
+fn test_nullable_column_is_column_stored() {
+    let a: [NP?] = [NP { x: 1.0, y: 2.0 }, null]
+    print(column_header_repr(a))
+}
+
+@test(output = "2\n1\ntrue")
+fn test_literal_with_a_null_element() {
+    let a: [NP?] = [NP { x: 1.0, y: 2.0 }, null]
+    print("{a.len}")
+    print("{a[0]?.x ?? 0.0}")
+    print("{a[1] == null}")
+}
+
+// The presence column IS the storage, not a derived read: an absent element
+// stores `false` presence with nil leaves, a present one `true` with real ones.
+@test(output = "true\n1\nfalse\ntrue")
+fn test_presence_column_storage() {
+    let a: [NP?] = [NP { x: 1.0, y: 2.0 }, null]
+    print("{column_presence_at(a, 1)}")
+    print("{column_leaf_at(a, "x", 1)}")
+    print("{column_presence_at(a, 2)}")
+    print("{column_leaf_is_nil(a, "x", 2)}")
+}
+
+@test(output = "3\ntrue\n5")
+fn test_push_null_then_push_value() {
+    let a: [NP?] = []
+    a.push(NP { x: 4.0, y: 5.0 })
+    a.push(null)
+    a.push(NP { x: 5.0, y: 6.0 })
+    print("{a.len}")
+    print("{a[1] == null}")
+    print("{a[2]?.x ?? 0.0}")
+}
+
+// A null between two values is the desync discriminant: both neighbours must
+// keep BOTH leaves, and the y leaf is one the presence slot never touches.
+@test(output = "1 2\nnull\n7 8")
+fn test_null_between_two_values_keeps_both_leaves() {
+    let a: [NP?] = [NP { x: 1.0, y: 2.0 }, null, NP { x: 7.0, y: 8.0 }]
+    for v in a {
+        if v == null {
+            print("null")
+        } else {
+            print("{v.x} {v.y}")
+        }
+    }
+}
+
+// --- the rest of the Vec surface the presence column unlocks ---
+//
+// Each of these went from rejecting to working with the column, and every one
+// of the shifting ops asserts a leaf on BOTH sides of the moved null: the
+// failure mode is not a crash but a presence column that shifts by a different
+// amount than its leaf siblings, which reads back as a plausible wrong value.
+
+@test(output = "false\ntrue")
+fn test_get_probes_presence() {
+    let a: [NP?] = [NP { x: 1.0, y: 2.0 }, null]
+    print("{a.get(0) == null}")
+    print("{a.get(1) == null}")
+}
+
+@test(output = "1\ntrue\n2")
+fn test_pop_returns_the_absent_element() {
+    let a: [NP?] = [NP { x: 1.0, y: 2.0 }, null]
+    let p = a.pop()
+    print("{a.len}")
+    print("{p == null}")
+    print("{a[0]?.y ?? 0.0}")
+}
+
+@test(output = "true\n8")
+fn test_set_both_directions() {
+    let a: [NP?] = [NP { x: 1.0, y: 2.0 }, null]
+    a.set(0, null)
+    a.set(1, NP { x: 7.0, y: 8.0 })
+    print("{a[0] == null}")
+    print("{a[1]?.y ?? 0.0}")
+}
+
+@test(output = "3\n2\ntrue\n4")
+fn test_insert_at_shifts_presence_with_its_leaves() {
+    let a: [NP?] = [NP { x: 1.0, y: 2.0 }, NP { x: 3.0, y: 4.0 }]
+    a.insert_at(1, null)
+    print("{a.len}")
+    print("{a[0]?.y ?? 0.0}")
+    print("{a[1] == null}")
+    print("{a[2]?.y ?? 0.0}")
+}
+
+@test(output = "2\n2\n6")
+fn test_remove_at_drops_the_null_row() {
+    let a: [NP?] = [NP { x: 1.0, y: 2.0 }, null, NP { x: 5.0, y: 6.0 }]
+    a.remove_at(1)
+    print("{a.len}")
+    print("{a[0]?.y ?? 0.0}")
+    print("{a[1]?.y ?? 0.0}")
+}
+
+@test(output = "2\n6\ntrue")
+fn test_swap_remove_moves_the_last_row_whole() {
+    let a: [NP?] = [NP { x: 1.0, y: 2.0 }, null, NP { x: 5.0, y: 6.0 }]
+    a.swap_remove(0)
+    print("{a.len}")
+    print("{a[0]?.y ?? 0.0}")
+    print("{a[1] == null}")
+}
+
+@test(output = "1\ntrue")
+fn test_clear_then_push_null() {
+    let a: [NP?] = [NP { x: 1.0, y: 2.0 }, null]
+    a.clear()
+    a.push(null)
+    print("{a.len}")
+    print("{a[0] == null}")
+}
+
+// The clone must not SHARE a column with the original -- presence included, or
+// a later push would be seen by both.
+@test(output = "2\n3\ntrue\n2")
+fn test_clone_copies_the_presence_column() {
+    let a: [NP?] = [NP { x: 1.0, y: 2.0 }, null]
+    let b = a.clone()
+    b.push(NP { x: 9.0, y: 9.0 })
+    print("{a.len}")
+    print("{b.len}")
+    print("{b[1] == null}")
+    print("{b[0]?.y ?? 0.0}")
+}
+
+// The key applies to the LEAVES (presence first), so the reorder has to carry
+// every column -- `y` is the one the key never reads.
+@test(output = "10\n30")
+fn test_sort_reorders_every_column() {
+    let a: [NP?] = [NP { x: 3.0, y: 30.0 }, NP { x: 1.0, y: 10.0 }]
+    a.sort(v => v?.x ?? 0.0)
+    print("{a[0]?.y ?? 0.0}")
+    print("{a[1]?.y ?? 0.0}")
+}
+
+@test(output = "0 false\n1 true")
+fn test_enumerate_binds_presence() {
+    let a: [NP?] = [NP { x: 1.0, y: 2.0 }, null]
+    for (i, v) in enumerate(a) {
+        print("{i} {v == null}")
+    }
+}
+
+// --- the leaf budget, on both sides ---
+//
+// The presence column SPENDS from `MAX_COLUMN_LEAVES` (4), because it is a
+// column like any other. That budget is the storage heuristic for UNMARKED
+// values only: a `nobox` element cannot fall back to a box, so it stays
+// column-stored past it. `[NP3?]` is 4 columns, at
+// the budget; `[NP4?]` is 5, past it, and still columns.
+
+nobox value NP3 { a: float, b: float, c: float }
+
+@test(output = "columns\n3\ntrue")
+fn test_three_leaf_payload_is_at_the_budget_and_still_columns() {
+    let v: [NP3?] = [NP3 { a: 1.0, b: 2.0, c: 3.0 }, null]
+    print(column_header_repr(v))
+    print("{v[0]?.c ?? 0.0}")
+    print("{v[1] == null}")
+}
+
+nobox value NP4 { a: float, b: float, c: float, d: float }
+
+@test(output = "columns\n4\ntrue")
+fn test_four_leaf_payload_is_past_the_budget_and_still_columns() {
+    let v: [NP4?] = [NP4 { a: 1.0, b: 2.0, c: 3.0, d: 4.0 }, null]
+    print(column_header_repr(v))
+    print("{v[0]?.d ?? 0.0}")
+    print("{v[1] == null}")
+}
+
+// --- top-level presence composed with a NESTED one ---
+//
+// The two presence columns are the SAME encoding at two levels, not two
+// schemes: `column_leaf_paths` prepends the one key that has no field name to
+// key on, and leaves `leaf_paths_rec`'s nested keys (the field's own undotted
+// name) exactly as they were. Both appear in one table, hence the key sweep.
+
+nobox value NV2c { x: float, y: float }
+nobox value Optc { pos: NV2c? }
+
+@test(output = "@p,pos,pos.x,pos.y")
+fn test_top_level_and_nested_presence_columns_coexist() {
+    let a: [Optc?] = [Optc { pos: NV2c { x: 1.0, y: 2.0 } }, null]
+    print(column_keys(a))
+}
+
+@test(output = "1\ntrue")
+fn test_read_through_both_presence_levels() {
+    let a: [Optc?] = [Optc { pos: NV2c { x: 1.0, y: 2.0 } }, null]
+    let e = a[0]
+    if e != null && e.pos != null {
+        print("{e.pos.x}")
+    }
+    print("{a[1] == null}")
+}
+
+// The CHAINED read through both presence levels. Was pinned as a gap in
+// `nobox_container_gaps.rock.err`; it turned out to be the same defect as the
+// plain `h?.v?.x` chain, not a column one -- storage was always correct here
+// (the key sweep above), only the read path packed. Both rows, so the absent
+// one exercises the top-level presence column rather than the nested one.
+@test(output = "1\n-1")
+fn test_chained_safe_nav_through_both_presence_levels() {
+    let a: [Optc?] = [Optc { pos: NV2c { x: 1.0, y: 2.0 } }, null]
+    print("{a[0]?.pos?.x ?? -1.0}")
+    print("{a[1]?.pos?.x ?? -1.0}")
+}

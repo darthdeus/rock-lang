@@ -1,0 +1,45 @@
+// GC-free value-struct corpus for the `--backend js` ratchet (T8b). An
+// all-scalar `value` struct used as a WHOLE value (compared with `==`, stored in
+// a Vec, returned/passed boxed) keeps a `MakeValueStruct` through cleanup; the JS
+// backend emits it as a plain `{__ty, ...}` object (same shape as a reference
+// struct) whose structural deep-eq matches luajit's byte-value equality for
+// all-scalar leaves. (A value struct read straight off its scalar-ABI leaves
+// already scalarizes through -- that is T8a; this corpus pins the boxed path.)
+// GC-carrying value structs stay rejected (reference-field eq needs type-aware
+// codegen) -- pinned in crates/skull-codegen-js/tests/value_structs.rs.
+
+value V { x: int, y: int }
+
+// Two distinct constructions with equal contents compare EQUAL (luajit byte-value
+// eq; JS structural deep-eq).
+@test(returns = 1)
+fn test_value_struct_eq_equal() -> int {
+    let a = V { x: 1, y: 2 }
+    let b = V { x: 1, y: 2 }
+    if a == b { 1 } else { 0 }
+}
+
+@test(returns = 0)
+fn test_value_struct_eq_unequal() -> int {
+    let a = V { x: 1, y: 2 }
+    let b = V { x: 1, y: 3 }
+    if a == b { 1 } else { 0 }
+}
+
+// A value struct stored whole in a Vec, then read back and projected.
+@test(returns = 5)
+fn test_value_struct_in_vec() -> int {
+    let xs = [V { x: 2, y: 3 }]
+    let e = xs[0]
+    e.x + e.y
+}
+
+// A nested all-scalar value struct compares by contents too.
+value Line { a: V, b: V }
+
+@test(returns = 1)
+fn test_nested_value_struct_eq() -> int {
+    let p = Line { a: V { x: 1, y: 2 }, b: V { x: 3, y: 4 } }
+    let q = Line { a: V { x: 1, y: 2 }, b: V { x: 3, y: 4 } }
+    if p == q { 1 } else { 0 }
+}

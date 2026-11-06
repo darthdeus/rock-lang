@@ -1,0 +1,56 @@
+// completed(): the natural-finish terminal (-3) is distinct from killed (-1)
+// and errored (-2). It is the only state where `result()` is trustworthy --
+// the combinator layer (`take_result` in stone) keys on it to refuse
+// fabricating a nil-typed-as-R for killed/errored children.
+
+global CP_LOG: [string] = []
+
+co fn cp_done() -> Coroutine<int, string> {
+    yield 1
+    return "done"
+}
+
+co fn cp_unit() -> Coroutine<int> {
+    yield 1
+    yield 2
+}
+
+co fn cp_boom() -> Coroutine<int> {
+    yield 1
+    error("boom-completed-probe")
+}
+
+@test(output = "pre:false done:true status:dead killed:false errored:false")
+fn test_completed_distinguishes_terminals() {
+    let c = cp_done()
+    resume(c)
+    let pre = completed(c)
+    resume(c)
+    let done = completed(c)
+    let s = status(c)
+
+    let k = cp_unit()
+    resume(k)
+    kill(k)
+    let killed = completed(k)
+
+    let e = cp_boom()
+    resume(e)
+    resume(e)
+    let errored = completed(e)
+    print("pre:{pre} done:{done} status:{s} killed:{killed} errored:{errored}")
+}
+
+co fn cp_falloff() -> Coroutine<int> {
+    yield 1
+}
+
+@test(output = "falloff:true kill-after:true")
+fn test_unit_falloff_is_completed_and_kill_is_noop() {
+    let c = cp_falloff()
+    resume(c)
+    resume(c)
+    let f = completed(c)
+    kill(c)
+    print("falloff:{f} kill-after:{completed(c)}")
+}

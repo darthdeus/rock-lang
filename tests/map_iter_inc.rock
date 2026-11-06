@@ -1,0 +1,49 @@
+// Map/Arena iteration sub-arc, slice 1: `for (k, v) in m` over a
+// Map -> `for k, v in pairs(m) do`, byte-identical to live
+// (loops.rs IterationStrategy::Map). Pins runtime behavior; must
+// pass with and without ROCK_ANF_FUNCTIONS=1.
+
+@test(output = "6\n3")
+fn test_map_sum_values() {
+    let m: Map<string, int> = map_new()
+    m["a"] = 1
+    m["b"] = 2
+    m["c"] = 3
+    let total = 0
+    let count = 0
+    for (k, v) in m {
+        total = total + v
+        count = count + 1
+    }
+    print("{total}")
+    print("{count}")
+}
+
+@test(output = "2")
+fn test_map_iter_with_continue() {
+    let m: Map<int, int> = map_new()
+    m[1] = 10
+    m[2] = 20
+    m[3] = 30
+    let seen = 0
+    for (k, v) in m {
+        if k == 2 {
+            continue
+        }
+        seen = seen + 1
+    }
+    print("{seen}")
+}
+
+@test(output = "100")
+fn test_map_iter_key_used() {
+    let m: Map<int, int> = map_new()
+    m[10] = 1
+    m[40] = 1
+    m[50] = 1
+    let ksum = 0
+    for (k, v) in m {
+        ksum = ksum + k
+    }
+    print("{ksum}")
+}

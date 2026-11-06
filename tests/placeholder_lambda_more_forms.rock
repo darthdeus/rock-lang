@@ -1,0 +1,97 @@
+// Repro: placeholder lambda recognition gaps beyond `.field` / `.0`.
+//
+// Each form below is a "chain rooted at `_`" that should desugar to
+// `x => <expr>`. The desugar helpers historically only recognised
+// FieldAccess + a handful of others, so safe-navigation, `as`-cast,
+// and `~` (bitwise not) fell through to ordinary ident resolution and
+// produced "Undefined variable '_'".
+//
+// See also `tests/placeholder_lambda_tuple_field.rock` for the
+// TupleIndex case (fix `0bbfbbba6`).
+
+struct Bag { v: int }
+struct Owner { pet: Bag? }
+
+// `_.pet` is nullable so `?.v` is required -> exercises SafeNavigation
+// inside the placeholder chain.
+@test(output = "1\n0\n3")
+fn placeholder_safe_nav() {
+    let xs: [Owner] = [
+        Owner { pet: Bag { v: 1 } },
+        Owner { pet: null },
+        Owner { pet: Bag { v: 3 } },
+    ]
+    let ys = xs.iter().map(_.pet?.v ?? 0).collect()
+    for y in ys { print(y) }
+}
+
+@test(output = "1\n2\n3")
+fn placeholder_as_cast() {
+    let xs: [float] = [1.5, 2.5, 3.5]
+    let ys = xs.iter().map(_ as int).collect()
+    for y in ys { print(y) }
+}
+
+@test(output = "-2\n-3\n-4")
+fn placeholder_bitnot() {
+    let xs: [int] = [1, 2, 3]
+    let ys = xs.iter().map(~_).collect()
+    for y in ys { print(y) }
+}
+
+// Adversarial chain combinations — each exercises a different mix of
+// FieldAccess / TupleIndex / SafeNavigation / unary / paren in one
+// chain rooted at `_`. Ensures the unified `chain_rooted_at_underscore`
+// predicate doesn't regress to recognising only one wrapper kind.
+
+struct Pair { a: int, b: int }
+struct Holder { t: (int, int) }
+
+@test(output = "10\n20")
+fn placeholder_tuple_then_field() {
+    // `(int, Pair).0` then `.a` — TupleIndex inside FieldAccess.
+    let xs: [(Pair, int)] = [(Pair { a: 10, b: 0 }, 99), (Pair { a: 20, b: 0 }, 99)]
+    let ys = xs.iter().map(_.0.a).collect()
+    for y in ys { print(y) }
+}
+
+@test(output = "5\n6")
+fn placeholder_field_then_tuple() {
+    // `.t` then `.0` — FieldAccess inside TupleIndex.
+    let xs: [Holder] = [Holder { t: (5, 0) }, Holder { t: (6, 0) }]
+    let ys = xs.iter().map(_.t.0).collect()
+    for y in ys { print(y) }
+}
+
+@test(output = "-10\n-20")
+fn placeholder_neg_chain() {
+    // Unary minus over a chain.
+    let xs: [Pair] = [Pair { a: 10, b: 0 }, Pair { a: 20, b: 0 }]
+    let ys = xs.iter().map(-_.a).collect()
+    for y in ys { print(y) }
+}
+
+@test(output = "11\n21")
+fn placeholder_paren_binop_field() {
+    // Paren-wrapped chain stays recognised.
+    let xs: [Pair] = [Pair { a: 10, b: 0 }, Pair { a: 20, b: 0 }]
+    let ys = xs.iter().map((_.a) + 1).collect()
+    for y in ys { print(y) }
+}
+
+// Multiple `_` in one expression all bind to the SAME fresh parameter
+// (not Scala-style fresh-per-occurrence). `_.a + _.b` ≡ `x => x.a + x.b`.
+@test(output = "12\n34")
+fn placeholder_multi_same_param() {
+    let xs: [Pair] = [Pair { a: 10, b: 2 }, Pair { a: 30, b: 4 }]
+    let ys = xs.iter().map(_.a + _.b).collect()
+    for y in ys { print(y) }
+}
+
+// Three references is fine too.
+@test(output = "13\n35")
+fn placeholder_multi_three_refs() {
+    let xs: [Pair] = [Pair { a: 10, b: 2 }, Pair { a: 30, b: 4 }]
+    let ys = xs.iter().map(_.a + _.b + (_.b - _.b + 1)).collect()
+    for y in ys { print(y) }
+}

@@ -1,0 +1,43 @@
+//! Annotation registry violations at ITEM position
+//! Unknown name, bad arity, and disallowed
+//! position -- each rejects with a spanned CompilerError from the registry
+//! validation (fn items in function building, non-fn items in module lowering).
+//! Tags: annotations, registry, item
+
+//=== TEST CASE: unknown_annotation_name_on_item_Generic ===
+// Unknown name -> reject (kills the typo class).
+@totally_unknown_anno
+fn helper() -> int { 1 }
+
+fn main() { print("{helper()}") }
+
+//=== TEST CASE: bad_arity_on_item_Generic ===
+// `@ignore` takes no args; supplying one is an arity violation.
+@ignore(5)
+fn tagged() -> int { 2 }
+
+fn main() { print("{tagged()}") }
+
+//=== TEST CASE: disallowed_position_on_item_Generic ===
+// `@instance` is a param-only annotation; on a fn item it is a
+// disallowed-position violation.
+@instance
+fn shade() -> int { 3 }
+
+fn main() { print("{shade()}") }
+
+//=== TEST CASE: uniform_on_item_Generic ===
+// `@uniform` is a param-only role marker (GLSL vertex inputs); on a fn item
+// it is a disallowed-position violation.
+@uniform
+fn vertex_stage() -> int { 4 }
+
+fn main() { print("{vertex_stage()}") }
+
+//=== TEST CASE: nomangle_on_enum_Generic ===
+// `@nomangle` keeps a fn's or a struct's declared symbol; an enum's symbol
+// feeds its variant singletons and names tables, which it does not cover.
+@nomangle
+enum Signal { On, Off }
+
+fn main() { print("{Signal::On}") }

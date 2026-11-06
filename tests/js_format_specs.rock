@@ -1,0 +1,50 @@
+// String-interpolation format-spec corpus for the `--backend js` ratchet (T8d).
+// Two surfaces: the `{x:spec}` helper calls (__rock_fmt_pad / _grouping /
+// _binary / _percent) and the `Format`/`FormatDyn` MIR nodes that lower a printf
+// conversion (`string.format(spec, value)`). The JS printf port __rock_sprintf
+// matches C/luajit byte-for-byte incl. round-half-to-even (`%.0f` of 2.5 -> 2,
+// 3.5 -> 4, where JS toFixed diverges). Pins
+// crates/skull-codegen-js/tests/format_specs.rs.
+
+// Padding: right / left / centered fill.
+@test(output = "[  42]|[42  ]|[ 42 ]")
+fn test_pad() { let x = 42; print("[{x:>4}]|[{x:<4}]|[{x:^4}]") }
+
+// Digit grouping (needs the %d Format node before grouping).
+@test(output = "1,234,567")
+fn test_grouping() { let x = 1234567; print("{x:,}") }
+
+// Binary, positive and negative.
+@test(output = "101|-101")
+fn test_binary() { let a = 5; let b = -5; print("{a:b}|{b:b}") }
+
+// Percent with explicit precision.
+@test(output = "12.34%")
+fn test_percent() { let x = 0.1234; print("{x:.2%}") }
+
+// Fixed-point printf: precision, width, half-even ties.
+@test(output = "3.14")
+fn test_fixed() { let x = 3.14159; print("{x:.2f}") }
+
+@test(output = "2|4")
+fn test_fixed_half_even() {
+    let a = 2.5
+    let b = 3.5
+    print("{a:.0f}|{b:.0f}")
+}
+
+// Integer width / zero-pad / hex (bracketed so the harness trim keeps the pad).
+@test(output = "[   42]|00042|ff")
+fn test_int_specs() {
+    let x = 42
+    let h = 255
+    print("[{x:5d}]|{x:05d}|{h:x}")
+}
+
+// A negative fixed-point keeps its sign and precision.
+@test(output = "-1.50")
+fn test_neg_fixed() { let x = -1.5; print("{x:.2f}") }
+
+// format_float builds "%W.Df" at runtime (bracketed to keep the width pad).
+@test(output = "[  3.14]")
+fn test_format_float_dyn() { print("[{format_float(3.14159, 6, 2)}]") }

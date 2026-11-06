@@ -1,0 +1,22 @@
+@test
+fn test_should_pass() {
+    assert(1 + 1 == 2)
+}
+
+@ignore
+@test
+fn test_should_be_ignored() {
+    assert(false, "This test should be ignored and not fail")
+}
+
+@ignore
+@test(output = "Hello World")
+fn test_output_ignored() {
+    print("This should not run")
+}
+
+@test
+fn test_another_pass() {
+    let x = 5
+    assert(x == 5)
+}

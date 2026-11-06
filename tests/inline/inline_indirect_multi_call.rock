@@ -1,0 +1,29 @@
+// @inline body containing an INDIRECT multi-return call: `f(x)` where `f` is
+// a fn-value param and the fn type returns a tuple lowers to
+// `CallValueMulti { dests }`. The inliner's clone must remap those dest cells
+// into the caller (`remap_clone`), like CallMulti/CallBoundMulti dests.
+
+fn make_pair(x: int) -> (int, int) {
+    return (x + 1, x * 2)
+}
+
+@inline
+fn call_pair(f: fn(int) -> (int, int), x: int) -> int {
+    let (a, b) = f(x)
+    return a + b
+}
+
+@test(output = "31")
+fn test_inline_indirect_multi_return() {
+    print(call_pair(make_pair, 10))
+}
+
+// Caller locals live in low-numbered cells -- exactly what stale callee dest
+// ids would corrupt. Pin that they survive the splice.
+@test(output = "7 9 31")
+fn test_caller_locals_survive_splice() {
+    let keep_a = 7
+    let keep_b = 9
+    let r = call_pair(make_pair, 10)
+    print("{keep_a} {keep_b} {r}")
+}

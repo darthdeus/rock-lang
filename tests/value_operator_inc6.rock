@@ -1,0 +1,74 @@
+// Value-ABI Inc 6: now-reachable value-struct operator overloads.
+// `v1 + v2` dispatches to `__op_add_V2_V2(...)` with the
+// operands splatted to scalars (and the value-struct multi-return
+// multi-assigned), exactly the live scalar ABI. Mixed value/scalar
+// operands keep the non-value operand as a single arg. Pins runtime
+// behavior; must pass with and without ROCK_ANF_FUNCTIONS=1.
+//
+// NOTE: the *triple* direct chain `a + b + c` is a separate
+// pre-existing live operator-inliner bug — see
+// tests/operator_chain_sentinel.rock. The let-broken form
+// (`let t = a + b; t + c`) is correct and exercised here.
+
+value V2 { x: int, y: int }
+
+operator +(a: V2, b: V2) -> V2 {
+    return V2 { x: a.x + b.x, y: a.y + b.y }
+}
+
+operator -(a: V2, b: V2) -> V2 {
+    return V2 { x: a.x - b.x, y: a.y - b.y }
+}
+
+operator *(v: V2, s: int) -> V2 {
+    return V2 { x: v.x * s, y: v.y * s }
+}
+
+fn add(a: V2, b: V2) -> V2 {
+    return a + b
+}
+
+fn sub(a: V2, b: V2) -> V2 {
+    return a - b
+}
+
+fn chain_let(a: V2, b: V2, c: V2) -> V2 {
+    let t = a + b
+    return t + c
+}
+
+@test(output = "11\n22")
+fn test_param_operands() {
+    let p = add(V2 { x: 10, y: 20 }, V2 { x: 1, y: 2 })
+    print("{p.x}")
+    print("{p.y}")
+}
+
+@test(output = "4\n6")
+fn test_literal_operands() {
+    let q = add(V2 { x: 1, y: 2 }, V2 { x: 3, y: 4 })
+    print("{q.x}")
+    print("{q.y}")
+}
+
+@test(output = "8\n12")
+fn test_mixed_value_scalar() {
+    let m = V2 { x: 2, y: 3 } * 4
+    print("{m.x}")
+    print("{m.y}")
+}
+
+@test(output = "6\n6")
+fn test_let_broken_chain() {
+    let cl = chain_let(V2 { x: 1, y: 1 }, V2 { x: 2, y: 2 }, V2 { x: 3, y: 3 })
+    print("{cl.x}")
+    print("{cl.y}")
+}
+
+@test(output = "9\n3")
+fn test_sub_then_let_add() {
+    let d = sub(V2 { x: 10, y: 5 }, V2 { x: 1, y: 2 })
+    let e = add(d, V2 { x: 0, y: 0 })
+    print("{e.x}")
+    print("{e.y}")
+}

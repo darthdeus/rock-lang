@@ -1,0 +1,36 @@
+//! Error: numeric-presentation flags have no meaning on a structural
+//!        rendering, so a composite carrying one is rejected rather than
+//!        silently formatted without it. Width / alignment / fill DO apply
+//!        to a composite (they pad the rendering) -- see
+//!        tests/format_specifier_adversarial.rock.
+//! Tags: interpolation, format-specifier, composite
+
+//=== TEST CASE: composite_explicit_sign_Rejected ===
+struct P { x: int }
+
+fn main() {
+    let p = P { x: 1 }
+    print("{p:+12}")   // ERROR: sign is meaningless on a structural rendering
+}
+
+//=== TEST CASE: composite_zero_pad_Rejected ===
+struct P { x: int }
+
+fn main() {
+    let p = P { x: 1 }
+    print("{p:012}")   // ERROR: zero-pad is meaningless on a structural rendering
+}
+
+//=== TEST CASE: composite_grouping_Rejected ===
+struct P { x: int }
+
+fn main() {
+    let p = P { x: 1 }
+    print("{p:_}")   // ERROR: digit grouping is meaningless on a structural rendering
+}
+
+//=== TEST CASE: array_zero_pad_Rejected ===
+fn main() {
+    let xs = [1, 2]
+    print("{xs:08}")   // ERROR: zero-pad is meaningless on a structural rendering
+}

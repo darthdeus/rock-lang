@@ -1,0 +1,67 @@
+// `==` on a struct with a fn-typed field stays legal, but a closure env record
+// compares as an opaque LEAF by IDENTITY (rawequal) -- never by walking its
+// capture fields. A record is a callable value, not a data table, so it is the
+// one leaf class that compares by identity (same correction step 8 made for
+// inspect + serialization). Regular struct/enum/vec structural eq is unchanged.
+
+struct CbHolder { cb: fn(int) -> int, tag: int }
+
+fn make(n: int) -> CbHolder { return CbHolder { cb: (x) => x + n, tag: 1 } }
+
+// 1. Same closure instance stored twice compares equal (identity leaf: the same
+//    record IS the same record).
+@test(output = "true")
+fn test_same_instance_equal() {
+    let h = make(5)
+    let a = CbHolder { cb: h.cb, tag: 7 }
+    let b = CbHolder { cb: h.cb, tag: 7 }
+    print(a == b)
+}
+
+// 2. Separate creations with equal captures are NOT equal -- distinct closure
+//    instances, compared by identity.
+@test(output = "false")
+fn test_separate_creations_not_equal() {
+    print(make(5) == make(5))
+}
+
+// 3. Boxed mutable capture, separate creations -> not equal (distinct boxes,
+//    distinct records; identity leaf never walks into the box).
+struct Counter { bump: fn() -> int, tag: int }
+fn make_counter() -> Counter {
+    let n = 0
+    return Counter { bump: () => { n = n + 1; return n }, tag: 1 }
+}
+@test(output = "false")
+fn test_boxed_capture_not_equal() {
+    print(make_counter() == make_counter())
+}
+
+// 4. Record nested deeper (struct -> vec -> struct -> fn field): the identity
+//    leaf rule still applies through the structural walk.
+struct Inner { cb: fn(int) -> int }
+struct Outer { rows: [Inner], tag: int }
+fn make_outer(n: int) -> Outer {
+    return Outer { rows: [Inner { cb: (x) => x + n }], tag: 1 }
+}
+@test(output = "false")
+fn test_nested_record_not_equal() {
+    print(make_outer(5) == make_outer(5))
+}
+@test(output = "true")
+fn test_nested_same_instance_equal() {
+    let o = make_outer(5)
+    let a = Outer { rows: o.rows, tag: 9 }
+    let b = Outer { rows: o.rows, tag: 9 }
+    print(a == b)
+}
+
+// 5. A capture-free lambda field from the SAME creation site compares equal:
+//    P3 shares one hoisted fn value per site, so two references to it are the
+//    same value. This is decided P3 semantics, not a bug.
+struct CfHolder { cb: fn() -> int, tag: int }
+fn make_capfree() -> CfHolder { return CfHolder { cb: () => 42, tag: 1 } }
+@test(output = "true")
+fn test_capfree_same_site_equal() {
+    print(make_capfree() == make_capfree())
+}

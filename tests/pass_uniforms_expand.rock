@@ -1,0 +1,92 @@
+// pass_uniforms expansion: `@struct_expand fn f<T>(u: T) ->
+// [(string, E)]` expands at skull codegen into the literal pairs list -- one
+// (field_name, Variant(u.field)) per field in declaration order, the variant
+// chosen structurally by payload type. LOCAL types only: the feature must not
+// depend on the engine's UniformValue.
+
+value V2 { x: float, y: float }
+
+// Boxed enum (the Vv(V2) payload disqualifies the cdata representation), so a
+// value here is the `{__variant}` box -- the UniformValue shape.
+enum U {
+    F(float),
+    I(int),
+    Vv(V2),
+}
+
+value AU { alpha: float, count: int, pos: V2 }
+value BU { flag: int, f2: float }
+value DU { a: float = 7.0, b: int = 3 }
+
+@struct_expand inline(lua) fn upairs<T>(u: T) -> [(string, U)] = """
+    error("upairs must be compiler-expanded")
+"""
+
+fn describe(p: (string, U)) -> string {
+    let v = match p.1 {
+        U::F(f) => "F:{f.floor()}",
+        U::I(i) => "I:{i}",
+        U::Vv(vv) => "V:{vv.x.floor()},{vv.y.floor()}",
+    }
+    return "{p.0}={v}"
+}
+
+// Declaration-order pairs, a nested-value (V2) field, an int field, and two
+// instantiations of the generic at different structs.
+@test(output = "alpha=F:2\ncount=I:4\npos=V:2,3\nflag=I:9\nf2=F:5")
+fn test_struct_expand_order_and_instantiations() {
+    let a = upairs(AU { alpha: 2.0, count: 4, pos: V2 { x: 2.0, y: 3.0 } })
+    for p in a { print(describe(p)) }
+    let b = upairs(BU { flag: 9, f2: 5.0 })
+    for p in b { print(describe(p)) }
+}
+
+// A literal omitting defaulted fields still expands ALL fields.
+@test(output = "a=F:7\nb=I:3")
+fn test_struct_expand_defaults() {
+    let ps = upairs(DU {})
+    for p in ps { print(describe(p)) }
+}
+
+global BUMPS: int = 0
+
+fn bumped() -> float {
+    BUMPS = BUMPS + 1
+    return 2.0
+}
+
+// A side-effecting field initializer runs exactly once (the arg is lowered a
+// single time to a value group; field reads project the group, never re-eval).
+@test(output = "1")
+fn test_struct_expand_no_double_eval() {
+    let ps = upairs(AU { alpha: bumped(), count: 4, pos: V2 { x: 2.0, y: 3.0 } })
+    if ps.len() != 3 { print("BADLEN:{ps.len()}") }
+    print("{BUMPS}")
+}
+
+// A cdata-eligible enum (shared-slot scalar payloads) must also expand -- its
+// values use the `<Enum>_ct` cdata representation, not the boxed `{__variant}`
+// table. `One(int)`/`Both(int, int)` share slot `_0: int`, so the enum is cdata;
+// only the single-payload `One` matches an int field.
+enum M {
+    One(int),
+    Both(int, int),
+}
+
+value MU { n: int }
+
+@struct_expand inline(lua) fn mpairs<T>(u: T) -> [(string, M)] = """
+    error("mpairs must be compiler-expanded")
+"""
+
+@test(output = "n=One:8")
+fn test_struct_expand_cdata_enum() {
+    let ps = mpairs(MU { n: 8 })
+    for p in ps {
+        let v = match p.1 {
+            M::One(a) => "One:{a}",
+            M::Both(a, b) => "Both:{a},{b}",
+        }
+        print("{p.0}={v}")
+    }
+}

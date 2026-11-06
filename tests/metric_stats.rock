@@ -1,0 +1,163 @@
+// Unit tests for the unified `Metric` windowed-statistics type (stdlib).
+// Covers basic aggregation, single-sample and all-equal edges, ring
+// eviction (trailing window), and percentile ordering. Sister coverage:
+// the allocation gate in benchmarks/stats/metric_alloc.rock asserts
+// metric_add does not allocate.
+
+@test(output = "n=5 min=1 max=5 mean=3")
+fn test_metric_basic() {
+    let m = metric_new("t", 16)
+    metric_add(m, 1.0)
+    metric_add(m, 2.0)
+    metric_add(m, 3.0)
+    metric_add(m, 4.0)
+    metric_add(m, 5.0)
+    let mn = m.min as int
+    let mx = m.max as int
+    let me = m.mean as int
+    print("n={m.count} min={mn} max={mx} mean={me}")
+}
+
+@test(output = "n=1 min=7 max=7 mean=7 std=0")
+fn test_metric_single() {
+    let m = metric_new("t", 16)
+    metric_add(m, 7.0)
+    let mn = m.min as int
+    let mx = m.max as int
+    let me = m.mean as int
+    let sd = m.stddev as int
+    print("n={m.count} min={mn} max={mx} mean={me} std={sd}")
+}
+
+@test(output = "mean=4 std=0 p50=4 p99=4")
+fn test_metric_all_equal() {
+    let m = metric_new("t", 8)
+    metric_add(m, 4.0)
+    metric_add(m, 4.0)
+    metric_add(m, 4.0)
+    metric_add(m, 4.0)
+    let me = m.mean as int
+    let sd = m.stddev as int
+    let p50 = m.p50 as int
+    let p99 = m.p99 as int
+    print("mean={me} std={sd} p50={p50} p99={p99}")
+}
+
+// Window cap 3: after 1,2,3,4,5 the live window is {3,4,5}.
+@test(output = "n=3 min=3 max=5 mean=4")
+fn test_metric_eviction() {
+    let m = metric_new("t", 3)
+    metric_add(m, 1.0)
+    metric_add(m, 2.0)
+    metric_add(m, 3.0)
+    metric_add(m, 4.0)
+    metric_add(m, 5.0)
+    let mn = m.min as int
+    let mx = m.max as int
+    let me = m.mean as int
+    print("n={m.count} min={mn} max={mx} mean={me}")
+}
+
+// Eviction must keep `sorted` correct when a non-extreme value is evicted.
+// cap 3: 5,9,1 -> window {1,5,9}; add 2 evicts oldest (5) -> window {1,2,9}.
+@test(output = "n=3 min=1 max=9 p50=2")
+fn test_metric_eviction_unordered() {
+    let m = metric_new("t", 3)
+    metric_add(m, 5.0)
+    metric_add(m, 9.0)
+    metric_add(m, 1.0)
+    metric_add(m, 2.0)
+    let mn = m.min as int
+    let mx = m.max as int
+    let p50 = m.p50 as int
+    print("n={m.count} min={mn} max={mx} p50={p50}")
+}
+
+// Percentiles are monotonic and bracketed by min/max.
+@test(output = "ordered=true")
+fn test_metric_percentile_order() {
+    let m = metric_new("t", 64)
+    for i in 0..50 {
+        metric_add(m, (i * 3 % 17) as float)
+    }
+    let ok = m.min <= m.p50 && m.p50 <= m.p90 && m.p90 <= m.p99 && m.p99 <= m.max
+    print("ordered={ok}")
+}
+
+// metric_recent walks the insertion-order ring newest-first (i=0 = newest).
+@test(output = "recent 0=5 1=4 4=1")
+fn test_metric_recent_order() {
+    let m = metric_new("t", 16)
+    for i in 1..6 {
+        metric_add(m, i as float)
+    }
+    let r0 = metric_recent(m, 0) as int
+    let r1 = metric_recent(m, 1) as int
+    let r4 = metric_recent(m, 4) as int
+    print("recent 0={r0} 1={r1} 4={r4}")
+}
+
+// After ring wrap (cap 3, add 1..5 -> window {3,4,5}), newest-first still
+// reads 5,4,3 -- exercises the modular index past the buffer boundary.
+@test(output = "recent 0=5 1=4 2=3")
+fn test_metric_recent_wrap() {
+    let m = metric_new("t", 3)
+    for i in 1..6 {
+        metric_add(m, i as float)
+    }
+    let r0 = metric_recent(m, 0) as int
+    let r1 = metric_recent(m, 1) as int
+    let r2 = metric_recent(m, 2) as int
+    print("recent 0={r0} 1={r1} 2={r2}")
+}
+
+// metric_reset zeroes count/head/summary in place; a re-add after reset
+// starts a fresh window with no stale samples bleeding through.
+@test(output = "before n=5 mean=3 | after n=0 mean=0 | readd n=1 mean=9")
+fn test_metric_reset() {
+    let m = metric_new("t", 16)
+    for i in 1..6 {
+        metric_add(m, i as float)
+    }
+    let b_n = m.count
+    let b_mean = m.mean as int
+    metric_reset(m)
+    let a_n = m.count
+    let a_mean = m.mean as int
+    metric_add(m, 9.0)
+    let r_n = m.count
+    let r_mean = m.mean as int
+    print("before n={b_n} mean={b_mean} | after n={a_n} mean={a_mean} | readd n={r_n} mean={r_mean}")
+}
+
+@test(output = "snap mean=3 p99=5 n=5")
+fn test_metric_snapshot() {
+    let m = metric_new("t", 16)
+    for i in 1..6 {
+        metric_add(m, i as float)
+    }
+    let s = metric_snapshot(m)
+    let me = s.mean as int
+    let p99 = s.p99 as int
+    print("snap mean={me} p99={p99} n={s.n}")
+}
+
+@test(output = "rolling mean=true std=true")
+fn test_metric_rolling_totals() {
+    let cap = 120
+    let samples = 10000
+    let m = metric_new("rolling", cap)
+    for i in 0..samples {
+        metric_add(m, (i % 257) as float)
+    }
+    let sum = 0.0
+    let sum_sq = 0.0
+    for i in (samples - cap)..samples {
+        let x = (i % 257) as float
+        sum += x
+        sum_sq += x * x
+    }
+    let mean = sum / (cap as float)
+    let stddev = sqrt(max(0.0, sum_sq / (cap as float) - mean * mean))
+    print("rolling mean={abs(m.mean - mean) < 0.0001} std={abs(m.stddev - stddev) < 0.0001}")
+}

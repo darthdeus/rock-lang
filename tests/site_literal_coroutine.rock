@@ -1,0 +1,38 @@
+// Probe: macro + co fn + __SITE__. Validates the migration pattern
+// for sim.rock's `co fn key/click/etc.` wrappers — each becomes a
+// macro forwarding to a renamed `_impl` co fn.
+//
+// Coroutine signature here: `Coroutine<Y, R, A>` = yield Y, return R,
+// resume arg A. Following tests/coroutine_resume_with_value_yield_star.rock.
+
+global SITES_SEEN: [string] = []
+
+co fn _key_impl(name: string, site: string) -> Coroutine<int, (), int> {
+    SITES_SEEN.push(site + ":" + name)
+    let _x = yield 1
+    let _y = yield 2
+}
+
+macro key(name: expr) -> Coroutine<int, (), int> {
+    _key_impl(name, __SITE__)
+}
+
+co fn driver() -> Coroutine<int, (), int> {
+    await key("hi")
+}
+
+@test
+fn test_macro_wrapping_co_fn_captures_caller_site() {
+    SITES_SEEN = []
+    let c = driver()
+    c.resume(0)
+    c.resume(10)
+    c.resume(20)
+    assert(SITES_SEEN.len() == 1, "expected 1 site, got {SITES_SEEN.len()}")
+    let s = SITES_SEEN[0]
+    assert(s.contains("site_literal_coroutine.rock"), "file: {s}")
+    // The user's `await key(...)` call sits inside driver at line 21.
+    assert(s.contains(":21"), "expected caller line :21, got: {s}")
+    assert(!s.contains(":17"), "must not see macro body line :17: {s}")
+    assert(s.contains(":hi"), "got: {s}")
+}

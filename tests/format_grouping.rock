@@ -1,0 +1,62 @@
+// Grouping separator: `,` and `_` insert a separator every 3 digits in
+// numeric output. Python 3 / PEP 3101 convention. Placement in the
+// format spec matches Python: [...width][,_|_][.precision][type].
+
+@test
+fn test_grouping_comma_inferred() {
+    let n = 1000000
+    assert_eq("{n:,}", "1,000,000")
+}
+
+@test
+fn test_grouping_comma_d() {
+    let n = 1000000
+    assert_eq("{n:,d}", "1,000,000")
+}
+
+@test
+fn test_grouping_comma_float() {
+    let x = 1234.5
+    assert_eq("{x:,.2f}", "1,234.50")
+}
+
+@test
+fn test_grouping_comma_negative() {
+    let n = -1000000
+    assert_eq("{n:,d}", "-1,000,000")
+}
+
+@test
+fn test_grouping_comma_small() {
+    // Values under 1000 get no separator.
+    let n = 42
+    assert_eq("{n:,d}", "42")
+    let m = 999
+    assert_eq("{m:,d}", "999")
+}
+
+@test
+fn test_grouping_comma_exact_1000() {
+    let n = 1000
+    assert_eq("{n:,d}", "1,000")
+}
+
+@test
+fn test_grouping_underscore_hex() {
+    let n = 0xdeadbeef
+    assert_eq("{n:_x}", "dead_beef")
+}
+
+@test
+fn test_grouping_underscore_decimal() {
+    let n = 1000000
+    assert_eq("{n:_d}", "1_000_000")
+}
+
+@test
+fn test_grouping_with_width() {
+    let n = 1000
+    // Grouping is applied before padding; the resulting "1,000" has
+    // length 5, padded to 10 with leading spaces.
+    assert_eq("[{n:10,d}]", "[     1,000]")
+}

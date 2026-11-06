@@ -1,0 +1,59 @@
+// Raw string prefix `r"..."`: no escape processing, no interpolation.
+// Useful for regex, GLSL, SQL, JSON templates — anywhere `{{` and `\"`
+// escaping gets noisy. The tokenizer reads bytes 1:1 until the closing
+// quote; the parser emits `ExprKind::String` without the interpolation
+// splitter, so `{x}` is not evaluated.
+//
+// Formatter behavior: `r"..."` is unfolded to a regular string with the
+// appropriate escapes. This is tested under rock-lang/crates/skull-fmt/tests/fmt/ and relies on
+// item #1's `{{`/`}}` re-escape for semantic equivalence.
+
+@test
+fn test_raw_skips_interpolation() {
+    let s = r"{x}"
+    assert_eq(s, "{{x}}")
+}
+
+@test
+fn test_raw_skips_format_spec() {
+    let s = r"{x:02d}"
+    assert_eq(s, "{{x:02d}}")
+}
+
+@test
+fn test_raw_preserves_backslash_n() {
+    let s = r"\n"
+    assert_eq(s, "\\n")  // literal two chars, not a newline
+}
+
+@test
+fn test_raw_preserves_backslashes() {
+    let s = r"C:\path\to\file"
+    assert_eq(s, "C:\\path\\to\\file")
+}
+
+@test
+fn test_raw_empty() {
+    let s = r""
+    assert_eq(s, "")
+}
+
+@test
+fn test_raw_with_regular_interpolated_nearby() {
+    let name = "Alice"
+    let pattern = r"\d+"
+    assert_eq("hi {name}, regex: {pattern}", "hi Alice, regex: \\d+")
+}
+
+@test
+fn test_raw_triple_quoted() {
+    let shader = r"""
+vec4 frag(vec2 uv) {
+    return vec4(uv, 0.0, 1.0);
+}
+"""
+    assert_eq(
+        shader,
+        "\nvec4 frag(vec2 uv) {{\n    return vec4(uv, 0.0, 1.0);\n}}\n"
+    )
+}

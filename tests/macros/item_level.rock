@@ -1,0 +1,78 @@
+// Item-level macros: bodies that emit `fn` / `inline(lua) fn` / `extern fn` /
+// `struct` declarations spliced into the caller's module.
+//
+// Status: RED — the parser does not yet allow item declarations inside a
+// macro body, and expansion walks function/operator bodies only (not
+// module-level invocations).
+
+// === Single fn emitted into the caller's module (no substitution) ===
+
+macro emit_const_42() {
+    fn item_macro_const_42() -> int { 42 }
+}
+
+emit_const_42()
+
+@test
+fn test_item_macro_emits_fn() {
+    assert(item_macro_const_42() == 42, "macro-emitted fn callable")
+}
+
+// === Multiple items in one macro body, mixed inline(lua)/regular fn ===
+
+macro emit_pair() {
+    fn item_macro_pair_a() -> int { 1 }
+    fn item_macro_pair_b() -> int { 2 }
+}
+
+emit_pair()
+
+@test
+fn test_item_macro_multiple_items() {
+    assert(item_macro_pair_a() + item_macro_pair_b() == 3, "both emitted fns callable")
+}
+
+// === Item-level macro with a normal fn body coexisting (item siblings
+// in the same module compile cleanly). ===
+
+fn item_macro_helper() -> int { 100 }
+
+macro emit_uses_helper() {
+    fn item_macro_uses_helper() -> int { item_macro_helper() + 1 }
+}
+
+emit_uses_helper()
+
+@test
+fn test_item_macro_can_call_module_fn() {
+    assert(item_macro_uses_helper() == 101, "emitted fn references caller-module fn")
+}
+
+// === `ty` fragment substitution into param + return type positions ===
+
+macro decl_identity(ElemType: ty) {
+    fn item_macro_identity(x: ElemType) -> ElemType { x }
+}
+
+decl_identity(int)
+
+@test
+fn test_item_macro_ty_substitution() {
+    assert(item_macro_identity(7) == 7, "ty subst: int identity passes through")
+}
+
+// === `ident` + `ty` substitution against a user struct ===
+
+struct ItemMacroBuf { val: int }
+
+macro decl_reader(BufType: ident, ElemType: ty) {
+    fn item_macro_read_buf(b: BufType) -> ElemType { b.val }
+}
+
+decl_reader(ItemMacroBuf, int)
+
+@test
+fn test_item_macro_ident_and_ty_substitution() {
+    let b = ItemMacroBuf { val: 99 }
+    assert(item_macro_read_buf(b) == 99, "ident+ty subst on a user struct")
+}

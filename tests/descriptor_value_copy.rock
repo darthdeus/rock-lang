@@ -1,0 +1,88 @@
+// A `value` holding a stdlib descriptor copies the whole descriptor: a `Ptr<T>`
+// keeps its referent and a `NativeBuffer` of value elements keeps its leaf views.
+
+value V2 {
+    x: float,
+    y: float,
+}
+
+fn nb_v2(n: int) -> NativeBuffer<V2> {
+    let fresh: NativeBuffer<V2> = native_buffer_alloc(n)
+    return NativeBuffer { ptr: fresh.ptr, len: fresh.len }
+}
+
+value PtrHolder {
+    p: Ptr<float>,
+    n: int,
+}
+
+value BufHolder {
+    buf: NativeBuffer<V2>,
+    tag: int,
+}
+
+fn rewrap(h: PtrHolder) -> NativeBuffer<float> {
+    return NativeBuffer { ptr: h.p, len: h.n }
+}
+
+fn bump(h: BufHolder) {
+    h.buf[1] = V2 { x: h.buf[1].x + 1.0, y: h.buf[1].y + 2.0 }
+}
+
+@test(output = "2.5")
+fn ptr_in_value_survives_copy() {
+    let buf = native_buffer_float(4)
+    buf[2] = 2.5
+    let h = PtrHolder { p: buf.ptr, n: buf.len }
+    let copy = h
+    let again = rewrap(copy)
+    print("{again[2]}")
+}
+
+@test(output = "4 7")
+fn native_buffer_in_value_keeps_leaf_views() {
+    let h = BufHolder { buf: nb_v2(2), tag: 1 }
+    h.buf[1] = V2 { x: 3.0, y: 5.0 }
+    let copy = h
+    bump(copy)
+    print("{h.buf[1].x} {copy.buf[1].y}")
+}
+
+@test(output = "9")
+fn native_buffer_copied_through_local_keeps_views() {
+    let a = nb_v2(3)
+    let b = a
+    b[2] = V2 { x: 9.0, y: 0.0 }
+    print("{a[2].x}")
+}
+
+struct BufOwner {
+    nb: NativeBuffer<V2>,
+}
+
+global OWNED: NativeBuffer<float> = native_buffer_float(4)
+
+@test(output = "2 1 1")
+fn field_write_does_not_reach_a_copy() {
+    let o = BufOwner { nb: nb_v2(2) }
+    o.nb[1] = V2 { x: 1.0, y: 0.0 }
+    let before = o.nb
+    o.nb.len = 1
+    print("{before.len} {o.nb.len} {o.nb[0].x + before[1].x}")
+}
+
+@test(output = "4 3")
+fn global_field_write_does_not_reach_a_copy() {
+    let before = OWNED
+    OWNED.len = 3
+    print("{before.len} {OWNED.len}")
+}
+
+@test(output = "7")
+fn ptr_field_write_refreshes_leaf_views() {
+    let o = BufOwner { nb: nb_v2(1) }
+    let other = nb_v2(1)
+    other[0] = V2 { x: 7.0, y: 0.0 }
+    o.nb.ptr = other.ptr
+    print("{o.nb[0].x}")
+}

@@ -1,0 +1,45 @@
+// Cross-backend Vec `==`-after-drain pin (T8f). luajit's __op_eq walks `_data`
+// via pairs (present keys, len-bounded), so a drained tail nil is invisible; the
+// JS __op_eq compared `_data` as a dense array (`.length`-sensitive), so a
+// popped/cleared Vec did NOT equal a fresh literal of the same contents -- a
+// silent pre-existing divergence the corpus never exercised. A len-aware Vec
+// branch in JS __op_eq fixes it. Byte-checked bools, so both backends gate on
+// the same expectations; RED on JS before the branch, green on both after.
+
+@test(output = "true")
+fn pop_then_eq() {
+    let a = [1, 2, 3]
+    let _ = a.pop()
+    print("{a == [1, 2]}")
+}
+
+@test(output = "true")
+fn clear_then_eq() {
+    let a = [1, 2, 3]
+    a.clear()
+    let empty: [int] = []
+    print("{a == empty}")
+}
+
+@test(output = "true")
+fn remove_at_then_eq() {
+    let a = [1, 2, 3, 4]
+    let _ = a.remove_at(1)
+    print("{a == [1, 3, 4]}")
+}
+
+@test(output = "true")
+fn swap_remove_then_eq() {
+    let a = [1, 2, 3, 4]
+    let _ = a.swap_remove(1)
+    print("{a == [1, 4, 3]}")
+}
+
+// A genuine inequality must still read false after a drain (guards against a
+// len-only compare that ignores contents).
+@test(output = "false")
+fn pop_then_neq_contents() {
+    let a = [1, 2, 3]
+    let _ = a.pop()
+    print("{a == [1, 9]}")
+}

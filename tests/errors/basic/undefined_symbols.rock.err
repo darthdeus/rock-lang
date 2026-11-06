@@ -1,0 +1,23 @@
+//! Error: Basic undefined symbol tests
+//! Tags: basic, symbols
+
+//=== TEST CASE: undefined_function_SymbolNotFound ===
+fn main() {
+    undefined_function()
+}
+
+//=== TEST CASE: undefined_variable_Generic ===
+fn main() {
+    let x = undefined_var
+}
+
+// Regression: an undefined variable used as an OPERATOR argument must
+// still surface a diagnostic. The `__op_*` arg-inference path used to
+// `Err(_) => continue` (silently skip the check), so a broken `x + y`
+// produced wrong types while the same shape in a regular call errored.
+// The operators-as-functions arc rewrote that arm to propagate via `?`;
+// this pins the symmetry so it cannot silently regress.
+//=== TEST CASE: undefined_in_operator_arg_Generic ===
+fn main() {
+    let r = undefined_thing + 1
+}

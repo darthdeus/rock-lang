@@ -1,0 +1,48 @@
+// Adversarial tests: struct scalarization — conditional binding blocks scalarization
+//
+// V1 requires the local be bound from a direct struct literal. If the
+// binding is the result of a conditional expression, function call, or
+// match arm, scalarization must NOT fire (phi-merging is out of scope
+// for V1). Runtime correctness is what we verify here.
+
+struct IVec2 {
+    x: int,
+    y: int,
+}
+
+@test(output = "5 10")
+fn test_if_expression_binding() {
+    let cond = true
+    let p = if cond { IVec2 { x: 5, y: 10 } } else { IVec2 { x: -1, y: -1 } }
+    print("{p.x} {p.y}")
+}
+
+@test(output = "7 8")
+fn test_nullable_coalesce_binding() {
+    let opt: IVec2? = IVec2 { x: 7, y: 8 }
+    let p = opt ?? IVec2 { x: 0, y: 0 }
+    print("{p.x} {p.y}")
+}
+
+fn returns_ivec2() -> IVec2 {
+    return IVec2 { x: 13, y: 17 }
+}
+
+@test(output = "13 17")
+fn test_function_return_binding_not_literal() {
+    let p = returns_ivec2()
+    print("{p.x} {p.y}")
+}
+
+@test(output = "4 5")
+fn test_match_arm_binding() {
+    let kind = 1
+    // Rock match arms need struct literals wrapped in a block/parens
+    // when they'd otherwise parse ambiguously with pattern braces.
+    let p = match kind {
+        0 => { IVec2 { x: 0, y: 0 } },
+        1 => { IVec2 { x: 4, y: 5 } },
+        _ => { IVec2 { x: -1, y: -1 } },
+    }
+    print("{p.x} {p.y}")
+}

@@ -1,0 +1,78 @@
+// Lambdas/closures sub-arc: `ExprKind::Lambda` -> `AnfComp::Lambda`
+// (a real Lua `function(params) … end` expression; body via the
+// fn-body taxonomy; Lua lexical capture-by-reference). Pins runtime
+// behavior; must pass with and without ROCK_ANF_FUNCTIONS=1.
+
+fn apply(f: fn(int) -> int, x: int) -> int {
+    return f(x)
+}
+
+fn make_adder(n: int) -> fn(int) -> int {
+    return (x: int) => x + n
+}
+
+fn sum_mapped(xs: [int], f: fn(int) -> int) -> int {
+    let total = 0
+    for v in xs {
+        total = total + f(v)
+    }
+    return total
+}
+
+@test(output = "11")
+fn test_simple_lambda() {
+    let add1 = (x: int) => x + 1
+    print(add1(10))
+}
+
+@test(output = "105\n15")
+fn test_capture_enclosing_local() {
+    let k = 100
+    let cap = (y: int) => y + k
+    print(cap(5))
+
+    let base = 10
+    let add = (x: int) => x + base
+    print(add(5))
+}
+
+@test(output = "12")
+fn test_lambda_as_arg() {
+    print(apply((n: int) => n * 3, 4))
+}
+
+@test(output = "7\n9")
+fn test_multi_stmt_lambda_body() {
+    let f = (x: int) => {
+        let y = x * 2
+        y + 1
+    }
+    print(f(3))
+    print(f(4))
+}
+
+@test(output = "8")
+fn test_returned_closure() {
+    let add5 = make_adder(5)
+    print(add5(3))
+}
+
+@test(output = "12")
+fn test_lambda_through_higher_order() {
+    print(sum_mapped([1, 2, 3], (v: int) => v * 2))
+}
+
+@test(output = "8")
+fn test_lambda_with_internal_loop() {
+    let sum_to = (n: int) => {
+        let s = 0
+        for i in 0..n {
+            if i == 2 {
+                continue
+            }
+            s = s + i
+        }
+        s
+    }
+    print(sum_to(5))
+}

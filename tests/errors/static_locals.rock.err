@@ -1,0 +1,73 @@
+//! Error: `static` local rejects.
+//!        Each case pins an intended compile error. Once the rejects land,
+//!        remove the TODO and finalize each `_<Kind>` suffix (a substring of
+//!        the real error's Debug kind).
+//! Tags: static, rejects
+
+//=== TEST CASE: static_in_pure_fn_writes_globals_Generic ===
+// A `static` declaration writes its cell + done-flag (both globals), so any
+// `static` inside a `@pure` fn is rejected with no new rule.
+@pure
+fn p() -> int {
+    static n = 0
+    n = n + 1
+    return n
+}
+fn main() { let _ = p() }
+
+//=== TEST CASE: static_in_co_fn_hard_reject_Generic ===
+// HARD REJECT: a coroutine yields/resumes interleaved; a shared scratch cell
+// across yields silently corrupts. Syntactic reject.
+co fn gen() -> Coroutine<int> {
+    static scratch = 0
+    scratch = scratch + 1
+    yield scratch
+}
+fn main() { let c = gen()  let _ = c.resume() }
+
+//=== TEST CASE: static_init_reads_param_Generic ===
+// The initializer runs once, not per call -- a param read would silently
+// snapshot the first reaching call's value. Rejected.
+fn draw(count: int) -> int {
+    static scratch = count
+    return scratch
+}
+fn main() { let _ = draw(10) }
+
+//=== TEST CASE: static_init_reads_local_Generic ===
+// Same rule for an enclosing local.
+fn f() -> int {
+    let base = 7
+    static v = base + 1
+    return v
+}
+fn main() { let _ = f() }
+
+//=== TEST CASE: static_init_reads_sibling_static_Generic ===
+// A static initializer may not read another static (init-order hazard).
+fn f() -> int {
+    static a = 1
+    static b = a + 1
+    return b
+}
+fn main() { let _ = f() }
+
+//=== TEST CASE: static_init_reads_local_shadowing_global_Generic ===
+// Must ERROR on the local read, NOT silently bind the like-named global. This
+// is why enforcement is resolve-then-reject, not module-scope re-resolution.
+global base: int = 100
+fn f() -> int {
+    let base = 7
+    static v = base + 1   // binds the local `base` -> rejected (not the global)
+    return v
+}
+fn main() { let _ = f() }
+
+//=== TEST CASE: static_mangled_cell_name_unresolvable_from_source_Generic ===
+// The generated `__static_*` cell must not be resolvable from Rock source
+// (privacy is a property, not a convention).
+fn f() -> int {
+    static n = 0
+    return __static_f_n
+}
+fn main() { let _ = f() }

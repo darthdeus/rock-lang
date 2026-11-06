@@ -1,0 +1,295 @@
+// Comprehensive tests for basic data structures
+// Tests Maps, arrays, and other collections with various operations
+
+// Test Map basic operations
+@test
+fn test_map_basic_operations() {
+    let map: Map<string, int> = map_new()
+
+    // Test empty map
+    assert $ map.len() == 0
+    assert $ get(map, "nonexistent") == null
+
+    // Test insertion
+    insert(map, "one", 1)
+    insert(map, "two", 2)
+    insert(map, "three", 3)
+
+    assert $ map.len() == 3
+    assert $ get(map, "one") == 1
+    assert $ get(map, "two") == 2
+    assert $ get(map, "three") == 3
+
+    // Test overwrite
+    insert(map, "one", 100)
+    assert $ get(map, "one") == 100
+    assert $ map.len() == 3 // Length should not change
+
+    // Test removal
+    remove(map, "two")
+    assert $ map.len() == 2
+    assert $ get(map, "two") == null
+    assert $ get(map, "one") == 100
+    assert $ get(map, "three") == 3
+}
+
+// Test Map with different key types (if supported)
+@test
+fn test_map_string_keys_comprehensive() {
+    let inventory: Map<string, int> = map_new()
+
+    // Test various string keys
+    insert(inventory, "sword", 1)
+    insert(inventory, "health_potion", 5)
+    insert(inventory, "magic-staff", 1)
+    insert(inventory, "gold coin", 50)
+    insert(inventory, "", 999) // empty string key
+
+    assert $ inventory.len() == 5
+
+    // Test iteration covers all items
+    let total_items = 0
+    let key_count = 0
+
+    for (item_name, quantity) in inventory {
+        total_items = total_items + quantity
+        key_count = key_count + 1
+
+        // Validate each key-value pair
+        if item_name == "sword" {
+            assert quantity == 1
+        } else if item_name == "health_potion" {
+            assert quantity == 5
+        } else if item_name == "magic-staff" {
+            assert quantity == 1
+        } else if item_name == "gold coin" {
+            assert quantity == 50
+        } else if item_name == "" {
+            assert quantity == 999
+        } else {
+            error("Unexpected item: " + item_name)
+        }
+    }
+
+    assert total_items == 1056 // 1+5+1+50+999
+    assert key_count == 5
+}
+
+// Test array operations and iteration
+@test
+fn test_array_operations() {
+    let numbers = [10, 20, 30, 40, 50]
+
+    assert $ vec_len(numbers) == 5
+    assert $ numbers[0] == 10
+    assert $ numbers[1] == 20
+    assert $ numbers[4] == 50
+
+    // Test array iteration with index
+    let sum = 0
+    let index_sum = 0
+    let count = 0
+
+    for (i, num) in enumerate(numbers) {
+        sum = sum + num
+        index_sum = index_sum + i
+        count = count + 1
+    }
+
+    assert sum == 150
+    assert count == 5
+    // Note: index_sum will depend on whether we use 0-based or 1-based indexing in Lua pairs
+}
+
+// Test complex nested data structures
+struct Room {
+    name: string,
+    items: [string],
+    connections: Map<string, string>,
+}
+
+@test
+fn test_complex_nested_structures() {
+    let dungeon: Map<string, Room> = map_new()
+
+    // Create room 1
+    let items1 = ["sword", "key"]
+    let connections1: Map<string, string> = map_new()
+    insert(connections1, "north", "room2")
+    insert(connections1, "east", "room3")
+
+    insert(dungeon, "room1", Room {
+        name: "Starting Room",
+        items: items1,
+        connections: connections1
+    })
+
+    // Create room 2
+    let items2 = ["potion", "gold"]
+    let connections2: Map<string, string> = map_new()
+    insert(connections2, "south", "room1")
+
+    insert(dungeon, "room2", Room {
+        name: "Treasure Room",
+        items: items2,
+        connections: connections2
+    })
+
+    // Test traversal
+    let total_rooms = 0
+    let total_items = 0
+    let total_connections = 0
+
+    for (room_id, room) in dungeon {
+        total_rooms = total_rooms + 1
+        total_items = total_items + vec_len(room.items)
+
+        for (direction, target) in room.connections {
+            total_connections = total_connections + 1
+        }
+    }
+
+    assert total_rooms == 2
+    assert total_items == 4 // 2 + 2
+    assert total_connections == 3 // 2 + 1
+}
+
+// Test Map with null/optional values
+// Note: In Lua backend, setting a value to null removes the key from the map
+@test
+fn test_map_with_nullable_values() {
+    let optional_map: Map<string, int?> = map_new()
+
+    insert(optional_map, "has_value", 42)
+    insert(optional_map, "zero_value", 0)
+    // Note: inserting null in Lua removes the key, so we skip it
+    // insert(optional_map, "no_value", null)
+
+    // Only 2 entries since null removes keys in Lua
+    assert $ optional_map.len() == 2
+
+    let non_null_count = 0
+    let zero_count = 0
+
+    for (key, value) in optional_map {
+        if value == 0 {
+            zero_count = zero_count + 1
+            assert key == "zero_value"
+        } else {
+            non_null_count = non_null_count + 1
+            assert key == "has_value"
+            assert value == 42
+        }
+    }
+
+    assert non_null_count == 1
+    assert zero_count == 1
+
+    // Test that getting a non-existent key returns null
+    assert $ get(optional_map, "no_value") == null
+    assert $ get(optional_map, "nonexistent") == null
+}
+
+// Test iteration order consistency (Maps typically don't guarantee order)
+@test
+fn test_map_iteration_consistency() {
+    let test_map: Map<string, int> = map_new()
+
+    // Add items in a specific order
+    insert(test_map, "z", 1)
+    insert(test_map, "a", 2)
+    insert(test_map, "m", 3)
+
+    let first_run = ""
+    let second_run = ""
+
+    // First iteration
+    for (key, value) in test_map {
+        first_run = first_run + key
+    }
+
+    // Second iteration should be consistent
+    for (key, value) in test_map {
+        second_run = second_run + key
+    }
+
+    // Order should be consistent between runs
+    assert first_run == second_run
+    assert $ first_run.len() == 3
+
+    // All keys should be present
+    assert $ first_run == "zam" || first_run == "zma" || first_run == "azm" || first_run == "amz" || first_run == "mza" || first_run == "maz"
+}
+
+// Test large collections performance/behavior
+@test
+fn test_large_collections() {
+    let large_map: Map<string, int> = map_new()
+
+    // Add 100 items
+    for i in 0..100 {
+        let key = "item_" + to_string(i)
+        insert(large_map, key, i * 2)
+    }
+
+    assert $ large_map.len() == 100
+
+    // Verify a few specific items
+    assert $ get(large_map, "item_0") == 0
+    assert $ get(large_map, "item_50") == 100
+    assert $ get(large_map, "item_99") == 198
+
+    // Iterate through all items
+    let count = 0
+    let sum = 0
+
+    for (key, value) in large_map {
+        count = count + 1
+        sum = sum + value
+
+        // Basic validation
+        assert $ key.len() > 5 // "item_" prefix + number
+        assert $ value >= 0
+        assert $ value < 200
+    }
+
+    assert count == 100
+    assert sum == 9900 // sum of 0*2 + 1*2 + ... + 99*2 = 2 * (0+1+...+99) = 2 * 4950
+}
+
+// Test edge cases with special characters in keys
+@test
+fn test_special_character_keys() {
+    let special_map: Map<string, string> = map_new()
+
+    insert(special_map, "normal", "value1")
+    insert(special_map, "with spaces", "value2")
+    insert(special_map, "with-dashes", "value3")
+    insert(special_map, "with_underscores", "value4")
+    insert(special_map, "with.dots", "value5")
+    insert(special_map, "123numbers", "value6")
+    insert(special_map, "UPPERCASE", "value7")
+
+    assert $ special_map.len() == 7
+
+    // Test retrieval
+    assert $ get(special_map, "normal") == "value1"
+    assert $ get(special_map, "with spaces") == "value2"
+    assert $ get(special_map, "with-dashes") == "value3"
+    assert $ get(special_map, "with_underscores") == "value4"
+    assert $ get(special_map, "with.dots") == "value5"
+    assert $ get(special_map, "123numbers") == "value6"
+    assert $ get(special_map, "UPPERCASE") == "value7"
+
+    // Test iteration includes all special keys
+    let keys_found = 0
+
+    for (key, value) in special_map {
+        keys_found = keys_found + 1
+        assert $ key.len() > 0
+        assert $ value.len() > 0
+        assert $ value.starts_with("value")
+    }
+
+    assert keys_found == 7
+}

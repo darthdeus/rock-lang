@@ -1,0 +1,61 @@
+// `@vertex_expand` expansion:
+// `fn f<T>(buf: FlatVec<T>) -> int` expands to the element's stride in floats,
+// `-> [int]` to its per-attribute component counts. Both are compiler-replaced
+// at the call site; the `inline(lua)` bodies exist only to fail loudly if one
+// is ever reached.
+//
+// THREE DIFFERENT LAYOUTS on purpose. The engine's only consumer (bitgun grass)
+// is `[2,1,1,1]` with stride 5, so an expander HARDCODED to those numbers would
+// satisfy the grass call site, its pixel oracle and `final_grade` alike -- the
+// same coincidence trap the derivation's own unit tests are shaped around
+// (`rock-lang/crates/skull/tests/vertex_plan.rs`). Distinct element types are what pin
+// the expansion to the element rather than to the one consumer.
+//
+// `Vec2`/`Vec3`/`Vec4` are the stdlib ones deliberately: `attr_kind` recognizes
+// vector attributes by nominal NAME, so a local look-alike is not a vector
+// attribute at all.
+
+value VA { pos: Vec2f, rot: f32 }
+value VB { rot: f32, pos: Vec2f, scale: f32 }
+value VC { a: Vec4f, b: Vec3f, c: f32 }
+
+@vertex_expand inline(lua) fn vstride<T>(buf: FlatVec<T>) -> int = """
+    error("vstride must be compiler-expanded")
+"""
+
+@vertex_expand inline(lua) fn vsizes<T>(buf: FlatVec<T>) -> [int] = """
+    error("vsizes must be compiler-expanded")
+"""
+
+fn join(xs: [int]) -> string {
+    let s = ""
+    for n in xs { s = "{s}{n}," }
+    return s
+}
+
+// VB is VA reordered plus a field: same components in a different order, which
+// a component-count-only model would get right and an offset model must too.
+@test(output = "VA 3 2,1,\nVB 4 1,2,1,\nVC 8 4,3,1,")
+fn test_vertex_expand_derives_the_element_layout() {
+    let a: FlatVec<VA> = flat_vec_new()
+    print("VA {vstride(a)} {join(vsizes(a))}")
+
+    let b: FlatVec<VB> = flat_vec_new()
+    print("VB {vstride(b)} {join(vsizes(b))}")
+
+    let c: FlatVec<VC> = flat_vec_new()
+    print("VC {vstride(c)} {join(vsizes(c))}")
+}
+
+// The two halves come from one `vertex_plan`, so the stride must equal the sum
+// of the component counts -- the same equality `stone-rs`'s `validate_layout`
+// enforces at mesh creation, asserted here at the source level.
+@test(output = "sum=3 stride=3\nsum=4 stride=4\nsum=8 stride=8")
+fn test_vertex_expand_halves_agree() {
+    let a: FlatVec<VA> = flat_vec_new()
+    print("sum={vsizes(a).sum()} stride={vstride(a)}")
+    let b: FlatVec<VB> = flat_vec_new()
+    print("sum={vsizes(b).sum()} stride={vstride(b)}")
+    let c: FlatVec<VC> = flat_vec_new()
+    print("sum={vsizes(c).sum()} stride={vstride(c)}")
+}

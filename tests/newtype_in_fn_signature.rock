@@ -1,0 +1,122 @@
+// Generic newtype in function signature positions (param + return).
+// Pre-fix: rejected with "Type constructor 'Box' not found" because the
+// App-arm arity check in compilation_storage{,/symbols}.rs only matched
+// Struct/Enum, never Newtype. Generic struct in the same positions
+// always worked, exposing the divergence.
+
+newtype Box<T>(T)
+newtype DualBox<T, U>((T, U))
+
+// ---- Concrete type-arg in signature ----
+
+fn make_int_box(x: int) -> Box<int> {
+    Box(x)
+}
+
+fn unwrap_int_box(b: Box<int>) -> int {
+    let Box(v) = b
+    v
+}
+
+@test(output = "42")
+fn test_concrete_typearg_return_and_param() {
+    let b = make_int_box(42)
+    print(unwrap_int_box(b))
+}
+
+// ---- Generic type-arg in signature (fn's own generic) ----
+
+fn make_box<T>(x: T) -> Box<T> {
+    Box(x)
+}
+
+fn unwrap_box<T>(b: Box<T>) -> T {
+    let Box(v) = b
+    v
+}
+
+@test(output = "99")
+fn test_generic_typearg_through_polymorphic_fn() {
+    let b = make_box(99)
+    print(unwrap_box(b))
+}
+
+@test(output = "hello")
+fn test_generic_typearg_string_specialization() {
+    let b = make_box("hello")
+    print(unwrap_box(b))
+}
+
+// ---- Multi-generic in signature ----
+
+fn make_dual<T, U>(a: T, b: U) -> DualBox<T, U> {
+    DualBox((a, b))
+}
+
+@test(output = "7\nname")
+fn test_multi_generic_typearg_in_signature() {
+    let d = make_dual(7, "name")
+    let DualBox(pair) = d
+    print(pair.0)
+    print(pair.1)
+}
+
+// ---- App-wrapped (composes the two earlier fixes from this branch) ----
+
+newtype Handle<T>(Entity<T>)
+
+fn wrap_handle<T>(e: Entity<T>) -> Handle<T> {
+    Handle(e)
+}
+
+@test(output = "21")
+fn test_app_wrapped_through_fn_signature() {
+    let a: Arena<int> = arena_new()
+    let e = insert(a, 21)
+    let h = wrap_handle(e)
+    print(h.0.get() ?? 0)
+}
+
+// ---- Adversarial: newtype nested in other types in fn signatures ----
+
+fn returns_vec_of_box<T>(x: T) -> [Box<T>] {
+    [Box(x)]
+}
+
+@test(output = "5")
+fn test_newtype_inside_vec_return() {
+    let v = returns_vec_of_box(5)
+    print(v[0].0)
+}
+
+fn make_map_with_box() -> Map<string, Box<int>> {
+    let m: Map<string, Box<int>> = map_new()
+    m["k"] = Box(7)
+    return m
+}
+
+@test(output = "7")
+fn test_newtype_inside_map_return() {
+    let m = make_map_with_box()
+    print(m["k"].0)
+}
+
+fn maybe_box(b: bool) -> Box<int>? {
+    if b { Box(1) } else { null }
+}
+
+@test(output = "ok")
+fn test_newtype_nullable_in_signature() {
+    let b = maybe_box(true)
+    if b != null { print("ok") }
+}
+
+fn tuple_with_box<T>(x: T) -> (int, Box<T>) {
+    (1, Box(x))
+}
+
+@test(output = "9")
+fn test_newtype_inside_tuple_return() {
+    let (_, b) = tuple_with_box(9)
+    print(b.0)
+}

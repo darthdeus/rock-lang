@@ -1,0 +1,22 @@
+// Regression: codegen used the *caller's* module id when looking up the
+// mangled name of a function used as a value, so any cross-module fn-ref
+// fell through to the unmangled name and became a nil-call at runtime.
+// Reproduced via stdlib inline(lua) fns referenced from a user module.
+// Fix: use `fn_id.0.module_id()` (defining module) — see exprs.rs Ident
+// and FunctionRef arms.
+
+struct FnBox {
+    f: fn(float) -> int,
+}
+
+@test
+fn fn_ref_cross_module_let_binding() {
+    let f: fn(float) -> int = float_to_int
+    assert(f(2.7) == 2)
+}
+
+@test
+fn fn_ref_cross_module_struct_field() {
+    let b = FnBox { f: float_to_int }
+    assert(b.f(3.4) == 3)
+}

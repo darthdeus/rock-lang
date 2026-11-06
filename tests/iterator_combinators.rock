@@ -1,0 +1,494 @@
+// Slice 6 acceptance: lazy iterator combinators over `I: Iterator<T>` bounds
+// Chains desugar through the
+// protocol, mono-by-inlining substitutes the placeholder `next` calls, and the
+// whole spine flattens at the `for` loop. Coverage: chain results, LAZINESS
+// ORDER (side-effecting lambdas observe interleaving, not phases),
+// break/continue through a chain, empty/all-filtered chains, zip length = min,
+// enumerate parity with the builtin, user iterators through combinators, and
+// bound propagation through a user-written bounded fn.
+
+// A user iterator (container + cursor) to prove combinators aren't Vec-only.
+struct Countdown {
+    from: int,
+}
+
+struct CountdownIter {
+    cur: int,
+}
+
+fn iter(c: Countdown) -> CountdownIter {
+    return CountdownIter { cur: c.from }
+}
+
+fn next(it: CountdownIter) -> (bool, int) {
+    if it.cur <= 0 { return (false, 0) }
+    let v = it.cur
+    it.cur = it.cur - 1
+    return (true, v)
+}
+
+// A user-written bounded generic fn: consumes any Iterator<int> with a `for`
+// (bound propagation: the loop's `next` is a placeholder resolved per call).
+fn sum_it<I: Iterator<int>>(it: I) -> int {
+    let total = 0
+    for x in it {
+        total += x
+    }
+    return total
+}
+
+@test
+fn map_over_vec() {
+    let v = [1, 2, 3]
+    let total = 0
+    for x in v.iter().map(x => x * 2) {
+        total += x
+    }
+    assert_eq(total, 12)
+}
+
+@test
+fn materialized_unsigned_range_is_a_vec() {
+    let r = (1 as uint)..(4 as uint)
+    assert_eq(r.len, 3)
+    assert_eq(r[0], 1 as uint)
+    assert_eq(r[1], 2 as uint)
+    assert_eq(r[2], 3 as uint)
+}
+
+@test
+fn filter_over_vec() {
+    let v = [1, 2, 3, 4, 5, 6]
+    let total = 0
+    for x in v.iter().filter(x => x % 2 == 0) {
+        total += x
+    }
+    assert_eq(total, 12) // 2 + 4 + 6
+}
+
+@test
+fn map_then_filter_chain() {
+    let v = [1, 2, 3, 4, 5]
+    let out: [int] = []
+    for x in v.iter().map(x => x * 3).filter(x => x % 2 == 1) {
+        out.push(x)
+    }
+    assert_eq(out.len, 3)
+    assert_eq(out[0], 3)
+    assert_eq(out[1], 9)
+    assert_eq(out[2], 15)
+}
+
+@test
+fn filter_then_map_chain() {
+    let v = [1, 2, 3, 4]
+    let out: [int] = []
+    for x in v.iter().filter(x => x > 2).map(x => x + 100) {
+        out.push(x)
+    }
+    assert_eq(out.len, 2)
+    assert_eq(out[0], 103)
+    assert_eq(out[1], 104)
+}
+
+@test
+fn laziness_interleaves_not_phases() {
+    // A lazy chain visits map(1), filter(1), map(2), filter(2), ... -- an eager
+    // one would run all maps before any filter. The trace pins interleaving.
+    let v = [1, 2]
+    let trace: [string] = []
+    for x in v.iter().map(x => { trace.push("m{x}"); x }).filter(x => { trace.push("f{x}"); true }) {
+        trace.push("b{x}")
+    }
+    assert_eq(trace.len, 6)
+    assert_eq(trace[0], "m1")
+    assert_eq(trace[1], "f1")
+    assert_eq(trace[2], "b1")
+    assert_eq(trace[3], "m2")
+    assert_eq(trace[4], "f2")
+    assert_eq(trace[5], "b2")
+}
+
+@test
+fn laziness_break_stops_upstream() {
+    // Breaking after the first element must not pull further elements through
+    // the upstream map.
+    let v = [1, 2, 3, 4]
+    let pulled = 0
+    for x in v.iter().map(x => { pulled += 1; x }) {
+        break
+    }
+    assert_eq(pulled, 1)
+}
+
+@test
+fn break_through_chain() {
+    let v = [1, 2, 3, 4, 5]
+    let seen = 0
+    for x in v.iter().map(x => x * 2) {
+        if x >= 6 { break }
+        seen += 1
+    }
+    assert_eq(seen, 2) // 2, 4
+}
+
+@test
+fn continue_through_chain() {
+    let v = [1, 2, 3, 4, 5]
+    let total = 0
+    for x in v.iter().map(x => x + 1) {
+        if x % 2 == 0 { continue }
+        total += x
+    }
+    assert_eq(total, 8) // 3 + 5
+}
+
+@test
+fn empty_chain_runs_zero_times() {
+    let v: [int] = []
+    let count = 0
+    for x in v.iter().map(x => x * 2).filter(x => true) {
+        count += 1
+    }
+    assert_eq(count, 0)
+}
+
+@test
+fn all_filtered_chain_runs_zero_times() {
+    let v = [1, 2, 3]
+    let count = 0
+    for x in v.iter().filter(x => x > 100) {
+        count += 1
+    }
+    assert_eq(count, 0)
+}
+
+@test
+fn filter_skips_leading_run() {
+    // The fetch-outside skip loop must skip a leading reject run, not just
+    // interior holes.
+    let v = [1, 1, 1, 2, 3]
+    let out: [int] = []
+    for x in v.iter().filter(x => x > 1) {
+        out.push(x)
+    }
+    assert_eq(out.len, 2)
+    assert_eq(out[0], 2)
+    assert_eq(out[1], 3)
+}
+
+@test
+fn enumerate_chain_matches_builtin() {
+    // `.iter().enumerate()` (EnumIter) must agree with the builtin
+    // `enumerate(vec)` template.
+    let v = [10, 20, 30]
+    let a: [string] = []
+    for (i, x) in v.iter().enumerate() {
+        a.push("{i}:{x}")
+    }
+    let b: [string] = []
+    for (i, x) in enumerate(v) {
+        b.push("{i}:{x}")
+    }
+    assert_eq(a.len, b.len)
+    assert_eq(a[0], b[0])
+    assert_eq(a[1], b[1])
+    assert_eq(a[2], b[2])
+}
+
+@test
+fn enumerate_after_filter_counts_yielded() {
+    // The index counts YIELDED elements (post-filter), not source positions.
+    let v = [5, 10, 15, 20]
+    let out: [string] = []
+    for (i, x) in v.iter().filter(x => x % 10 == 0).enumerate() {
+        out.push("{i}={x}")
+    }
+    assert_eq(out.len, 2)
+    assert_eq(out[0], "0=10")
+    assert_eq(out[1], "1=20")
+}
+
+@test
+fn zip_length_is_min() {
+    let a = [1, 2, 3, 4]
+    let b = [10, 20]
+    let out: [int] = []
+    for (x, y) in zip(a.iter(), b.iter()) {
+        out.push(x + y)
+    }
+    assert_eq(out.len, 2)
+    assert_eq(out[0], 11)
+    assert_eq(out[1], 22)
+}
+
+@test
+fn zip_over_mapped_chains() {
+    let a = [1, 2, 3]
+    let b = [1, 2, 3]
+    let total = 0
+    for (x, y) in zip(a.iter().map(x => x * 10), b.iter()) {
+        total += x + y
+    }
+    assert_eq(total, 66) // (10+1) + (20+2) + (30+3)
+}
+
+@test
+fn take_while_stops_at_first_reject() {
+    let v = [1, 2, 3, 10, 2, 1]
+    let out: [int] = []
+    for x in v.iter().take_while(x => x < 5) {
+        out.push(x)
+    }
+    assert_eq(out.len, 3)
+    assert_eq(out[0], 1)
+    assert_eq(out[1], 2)
+    assert_eq(out[2], 3)
+}
+
+@test
+fn combinators_over_user_iterator() {
+    // Countdown 5..1 -> filter evens -> map squared: 16, 4.
+    let out: [int] = []
+    for x in (Countdown { from: 5 }).iter().filter(x => x % 2 == 0).map(x => x * x) {
+        out.push(x)
+    }
+    assert_eq(out.len, 2)
+    assert_eq(out[0], 16)
+    assert_eq(out[1], 4)
+}
+
+@test
+fn bare_user_iterator_identity() {
+    // A next-able cursor iterates AS ITSELF (identity rule, no `iter` overload
+    // for CountdownIter).
+    let total = 0
+    for x in (CountdownIter { cur: 3 }) {
+        total += x
+    }
+    assert_eq(total, 6)
+}
+
+@test
+fn bounded_fn_consumes_vec_iter() {
+    let v = [1, 2, 3, 4]
+    assert_eq(sum_it(v.iter()), 10)
+}
+
+@test
+fn bounded_fn_consumes_chain() {
+    // Bound propagation: sum_it's placeholder `next` resolves through the
+    // chain's tree at this call.
+    let v = [1, 2, 3]
+    assert_eq(sum_it(v.iter().map(x => x * 2)), 12)
+}
+
+@test
+fn bounded_fn_consumes_user_iterator() {
+    assert_eq(sum_it((Countdown { from: 4 }).iter()), 10)
+}
+
+@test
+fn chain_result_stored_then_iterated() {
+    // The chain value in a local (not inline in the `for` head) still drives
+    // the loop through the protocol.
+    let v = [1, 2, 3]
+    let it = v.iter().map(x => x + 1)
+    let total = 0
+    for x in it {
+        total += x
+    }
+    assert_eq(total, 9)
+}
+
+@test
+fn nested_map_chain() {
+    let v = [1, 2]
+    let out: [int] = []
+    for x in v.iter().map(x => x + 1).map(x => x * 10).map(x => x - 5) {
+        out.push(x)
+    }
+    assert_eq(out.len, 2)
+    assert_eq(out[0], 15)
+    assert_eq(out[1], 25)
+}
+
+@test
+fn vec_map_filter_collect() {
+    let v = [1, 2, 3]
+    let doubled = v.iter().map(x => x * 2).collect()
+    assert_eq(doubled.len, 3)
+    assert_eq(doubled[0], 2)
+    let kept = v.iter().filter(x => x > 1).collect()
+    assert_eq(kept.len, 2)
+}
+
+// enumerate/zip yield tuple ELEMENTS (`(bool, (int, T))` / `(bool, (A, B))`),
+// so their outputs satisfy `Iterator<..>` and re-wrap / terminate like any
+// other iterator. `for (a, b)` destructuring is unchanged (tuple element).
+
+@test
+fn enumerate_chains_into_combinators() {
+    let v = [10, 20, 30]
+    let r = v.iter().enumerate().filter(p => p.0 > 0).map(p => p.1).collect()
+    assert_eq(r.len, 2)
+    assert_eq(r[0], 20)
+    assert_eq(r[1], 30)
+}
+
+@test
+fn enumerate_terminal_find() {
+    let v = ["a", "b", "c"]
+    let hit = v.iter().enumerate().find(p => p.1 == "b")
+    assert(hit != null)
+    if hit != null {
+        assert_eq(hit.0, 1)
+    }
+}
+
+@test
+fn zip_chains_into_combinators_and_terminals() {
+    let a = [1, 2, 3]
+    let b = ["x", "y", "z"]
+    assert(a.iter().zip(b.iter()).any(p => p.0 == 2 && p.1 == "y"))
+    let pairs = a.iter().zip(b.iter()).filter(p => p.0 > 1).collect()
+    assert_eq(pairs.len, 2)
+    for (n, s) in pairs {
+        assert(n > 1)
+    }
+}
+
+@test
+fn enumerate_zip_compose() {
+    let a = [10, 20]
+    let b = [1, 2]
+    let total = a.iter().zip(b.iter()).enumerate().reduce(0, (acc, p) => acc + p.0 + p.1.0 + p.1.1)
+    // i=0: 10+1, i=1: 20+2 -> 0+11 + 1+22 = 34
+    assert_eq(total, 34)
+}
+
+// --- skip / step_by / take / chain / count / min_by / max_by / sum / flatten ---
+// Order-sensitive checks fold the sequence into one int (acc*10 + x) so a
+// wrong element OR a wrong order both fail. Each also exercises the user
+// Countdown iterator where it adds coverage the Vec path can't.
+
+@inline
+fn digits<I: Iterator<int>>(it: I) -> int {
+    let acc = 0
+    for x in it { acc = acc * 10 + x }
+    return acc
+}
+
+@test
+fn skip_basic() {
+    assert_eq(digits([1, 2, 3, 4, 5].iter().skip(2)), 345)
+}
+
+@test
+fn skip_all_and_zero() {
+    assert_eq([1, 2].iter().skip(5).count(), 0)   // skip past end -> empty
+    assert_eq(digits([7, 8].iter().skip(0)), 78)  // skip 0 -> unchanged
+}
+
+@test
+fn skip_user_iter() {
+    // Countdown { from: 5 } yields 5,4,3,2,1; skip 2 -> 3,2,1
+    assert_eq(digits((Countdown { from: 5 }).iter().skip(2)), 321)
+}
+
+@test
+fn step_by_basic() {
+    // 0..10 step 3 -> 0,3,6,9
+    assert_eq(digits((0..10).iter().step_by(3)), 369)
+    assert_eq(digits((0..4).iter().step_by(1)), 123)   // step 1 -> 1,2,3 (0 folds out)
+}
+
+@test
+fn step_by_after_skip() {
+    // 0..10 skip 2 -> 2..9, step 3 -> 2,5,8
+    assert_eq(digits((0..10).iter().skip(2).step_by(3)), 258)
+}
+
+@test
+fn take_basic() {
+    assert_eq(digits((1..100).iter().take(3)), 123)
+    assert_eq([1, 2, 3].iter().take(9).count(), 3)  // take past end clamps
+    assert_eq([1, 2, 3].iter().take(0).count(), 0)
+}
+
+@test
+fn take_is_lazy() {
+    // take must STOP pulling, not drain then slice: an infinite-ish user
+    // source (Countdown 1000) with take(3) still terminates.
+    assert_eq((Countdown { from: 1000 }).iter().take(3).count(), 3)
+}
+
+@test
+fn chain_basic() {
+    assert_eq(digits([1, 2].iter().chain([7, 8].iter())), 1278)
+}
+
+@test
+fn chain_with_empty() {
+    let empty: [int] = []
+    assert_eq(digits(empty.iter().chain([5, 6].iter())), 56)
+    assert_eq(digits([5, 6].iter().chain(empty.iter())), 56)
+}
+
+@test
+fn count_basic() {
+    assert_eq([9, 8, 7, 6].iter().count(), 4)
+    assert_eq((1..10).iter().filter(x => x % 2 == 1).count(), 5)  // 1,3,5,7,9
+}
+
+@test
+fn min_by_basic() {
+    assert_eq([3, 1, 2].iter().min_by(x => x + 0.0) ?? -1, 1)
+    assert_eq([5].iter().min_by(x => x + 0.0) ?? -1, 5)
+    let empty: [int] = []
+    assert_eq(empty.iter().min_by(x => x + 0.0) ?? -1, -1)  // empty -> null
+}
+
+@test
+fn max_by_and_negated_min_key() {
+    assert_eq([3, 1, 2].iter().max_by(x => x + 0.0) ?? -1, 3)
+    assert_eq([3, 1, 2].iter().min_by(x => -(x + 0.0)) ?? -1, 3)
+}
+
+@test
+fn sum_basic() {
+    assert_eq([1, 2, 3].iter().sum(), 6)
+    let empty: [int] = []
+    assert_eq(empty.iter().sum(), 0)
+    assert_eq((1..10).iter().filter(x => x % 2 == 1).sum(), 25)  // 1+3+5+7+9
+}
+
+@test
+fn sum_f_basic() {
+    let s = [1.5, 2.5].iter().sum_f()
+    assert(s > 3.9999 && s < 4.0001, "float sum: {s}")
+}
+
+@test
+fn flatten_basic() {
+    let xs = [[1, 2], [3, 4], [5, 6]]
+    assert_eq(digits(xs.iter().map(r => r.iter()).flatten()), 123456)
+}
+
+@test
+fn flatten_skips_empty_inners() {
+    let xs: [[int]] = [[], [], [9], [], [4]]
+    assert_eq(digits(xs.iter().map(r => r.iter()).flatten()), 94)
+}
+
+@test
+fn flat_map_expands() {
+    // each n -> 0..n : 1->[0], 2->[0,1], 3->[0,1,2] -> 0,0,1,0,1,2 (leading 0s fold)
+    assert_eq(digits([1, 2, 3].iter().flat_map(n => (0..n).iter())), 1012)
+}
+
+@test
+fn flat_map_then_terminal() {
+    // flatten composes with a terminal: total items across all inners
+    assert_eq([1, 2, 3].iter().flat_map(n => (0..n).iter()).count(), 6)
+}

@@ -1,0 +1,9 @@
+// A v1 consumer reaches the library through real module paths and an import.
+use witness_lib::greet;
+
+fn main() {
+    let g = greet("v1")
+    print("v1 greeting: {g.text}")
+    print("v1 answer: {witness_lib::answer()}")
+    print("v1 sauce: {witness_lib::sauce()}")
+}

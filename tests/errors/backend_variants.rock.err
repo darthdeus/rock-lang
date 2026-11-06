@@ -1,0 +1,31 @@
+//! Error: per-backend decl (`inline(js)`/`extern(js)`) rejection paths.
+//!        (1) A JS-only decl called from lua-reachable code has no luajit
+//!            binding: bone accepts (its typecheck is backend-agnostic), then
+//!            skull's lua emission rejects at call lowering (`resolve_funcref`
+//!            backend select, target=Lua). (2) A genuine same-name
+//!            same-signature same-backend duplicate is NOT collapsed and still
+//!            ties -> "Ambiguous overload" at the call. (3) An unknown inline
+//!            backend name is a fail-closed parse rejection.
+//! Tags: backends, extern-js, inline-js, overloads, stone-web
+
+//=== TEST CASE: js_only_extern_called_from_lua_Generic ===
+extern(js) fn js_only() -> int
+
+fn main() {
+    print("{js_only()}")
+}
+
+//=== TEST CASE: same_backend_duplicate_still_ties_Ambiguous ===
+inline(lua) fn dup(x: int) -> int = """return x + 1"""
+inline(lua) fn dup(x: int) -> int = """return x + 2"""
+
+fn main() {
+    print("{dup(1)}")
+}
+
+//=== TEST CASE: unknown_inline_backend_Generic ===
+inline(wasm) fn nope(x: int) -> int = """return x"""
+
+fn main() {
+    print("{nope(1)}")
+}

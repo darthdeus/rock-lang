@@ -1,0 +1,188 @@
+// Adversarial tests: Newtypes
+
+// --- Basic newtype ---
+
+newtype UserId(int)
+newtype Score(int)
+newtype Name(string)
+
+@test(output = "42")
+fn test_newtype_construct_access() {
+    let id = UserId(42)
+    print(id.0)
+}
+
+@test(output = "100")
+fn test_newtype_score() {
+    let s = Score(100)
+    print(s.0)
+}
+
+// --- Newtype arithmetic ---
+
+@test(output = "30")
+fn test_newtype_addition() {
+    let a = Score(10)
+    let b = Score(20)
+    let c = a + b
+    print(c.0)
+}
+
+@test(output = "5")
+fn test_newtype_subtraction() {
+    let a = Score(15)
+    let b = Score(10)
+    let c = a - b
+    print(c.0)
+}
+
+// --- Newtype comparison ---
+
+@test(output = "true")
+fn test_newtype_equality() {
+    let a = UserId(1)
+    let b = UserId(1)
+    print(a == b)
+}
+
+@test(output = "false")
+fn test_newtype_inequality() {
+    let a = UserId(1)
+    let b = UserId(2)
+    print(a == b)
+}
+
+@test(output = "true")
+fn test_newtype_ordering() {
+    let a = Score(10)
+    let b = Score(20)
+    print(a < b)
+}
+
+// --- Newtype destructuring ---
+
+@test(output = "42")
+fn test_newtype_destructure() {
+    let id = UserId(42)
+    let UserId(val) = id
+    print(val)
+}
+
+// --- Generic newtype ---
+
+newtype Wrapper<T>(T)
+
+@test(output = "hello")
+fn test_generic_newtype_string() {
+    let w: Wrapper<string> = Wrapper("hello")
+    print(w.0)
+}
+
+@test(output = "42")
+fn test_generic_newtype_int() {
+    let w: Wrapper<int> = Wrapper(42)
+    print(w.0)
+}
+
+// --- Newtype in struct field ---
+
+struct Player {
+    id: UserId,
+    name: string,
+    score: Score,
+}
+
+@test(output = "1 Hero 100")
+fn test_newtype_in_struct() {
+    let p = Player { id: UserId(1), name: "Hero", score: Score(100) }
+    print("{p.id.0} {p.name} {p.score.0}")
+}
+
+// --- Newtype as function parameter ---
+
+fn double_score(s: Score) -> Score {
+    return Score(s.0 * 2)
+}
+
+@test(output = "200")
+fn test_newtype_function_param() {
+    let s = Score(100)
+    let doubled = double_score(s)
+    print(doubled.0)
+}
+
+// --- Nested newtypes ---
+
+newtype WrappedId(UserId)
+
+@test(output = "42")
+fn test_nested_newtype() {
+    let w = WrappedId(UserId(42))
+    print(w.0.0)
+}
+
+// Also works with intermediate variable
+@test(output = "42")
+fn test_nested_newtype_via_var() {
+    let w = WrappedId(UserId(42))
+    let inner = w.0
+    print(inner.0)
+}
+
+// --- Newtype with nullable ---
+
+@test(output = "42")
+fn test_nullable_newtype_present() {
+    let id: UserId? = UserId(42)
+    if id != null {
+        print(id.0)
+    }
+}
+
+@test(output = "fallback")
+fn test_nullable_newtype_null() {
+    let id: UserId? = null
+    if id == null {
+        print("fallback")
+    }
+}
+
+@test(output = "0")
+fn test_nullable_newtype_safenav() {
+    let id: UserId? = null
+    let val = id?.0 ?? 0
+    print(val)
+}
+
+@test(output = "42")
+fn test_nullable_newtype_safenav_present() {
+    let id: UserId? = UserId(42)
+    let val = id?.0 ?? 0
+    print(val)
+}
+
+// --- Newtype in vec ---
+
+@test(output = "3")
+fn test_newtype_in_vec() {
+    let ids: [UserId] = [UserId(1), UserId(2), UserId(3)]
+    print(ids.len)
+}
+
+// --- Newtype string formatting ---
+
+@test(output = "id: 42")
+fn test_newtype_in_interpolation() {
+    let id = UserId(42)
+    print("id: {id.0}")
+}
+
+// Newtypes-of-primitive in `{x}` interpolation: render as
+// `Name(inner)` — fast and diagnostic-readable, without routing
+// through `inspect()` (which walked `pairs()` on every per-frame
+// call).
+@test(output = "user=UserId(42)")
+fn test_newtype_interp_implicit() {
+    let id = UserId(42)
+    print("user={id}")
+}

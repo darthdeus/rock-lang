@@ -1,0 +1,210 @@
+// Phase-4 adversarial coverage for value types.
+//
+// Probes sites that earlier adversarial phases did not cover:
+//   1. Arena of value structs — insert/get/iter/filter
+//   2. Coroutine `yield <value_call>` and `yield <value_local>`
+//   3. FunctionRef to a scalarized fn with value-typed params
+//   4. defer { value_call().field }
+//   5. Operator-overload chains
+//   6. Ternary / if-expr leaves at more contexts (regression guards)
+//
+// Every case that takes a value-returning Rock call (`make_v2(...)`) into a
+// Lua single-value context is at risk of multi-return truncation.
+
+value V2 {
+    x: int,
+    y: int,
+}
+
+fn make_v2(a: int, b: int) -> V2 {
+    return V2 { x: a, y: b }
+}
+
+fn v2_sum(v: V2) -> int {
+    return v.x + v.y
+}
+
+fn v2_scale(v: V2, k: int) -> V2 {
+    return V2 { x: v.x * k, y: v.y * k }
+}
+
+// --- 1. Arena of value structs ---------------------------------------------
+
+@test(output = "3\n7\n10")
+fn test_arena_value_insert_get() {
+    let a: Arena<V2> = arena_new()
+    let e1 = a.insert(V2 { x: 1, y: 2 })
+    let e2 = a.insert(make_v2(3, 4))
+    let e3 = a.insert(v2_scale(V2 { x: 1, y: 1 }, 5))
+    let v1 = e1.get() ?? V2 { x: 0, y: 0 }
+    let v2 = e2.get() ?? V2 { x: 0, y: 0 }
+    let v3 = e3.get() ?? V2 { x: 0, y: 0 }
+    print(v2_sum(v1))
+    print(v2_sum(v2))
+    print(v2_sum(v3))
+}
+
+@test(output = "21")
+fn test_arena_value_for_iter() {
+    let a: Arena<V2> = arena_new()
+    a.insert(V2 { x: 1, y: 2 })
+    a.insert(V2 { x: 3, y: 4 })
+    a.insert(V2 { x: 5, y: 6 })
+    let sum = 0
+    for (_, v) in a {
+        sum = sum + v.x + v.y
+    }
+    print(sum)
+}
+
+// --- 2. Coroutine yield of value types ------------------------------------
+
+co fn yield_value_call() -> Coroutine<V2> {
+    yield make_v2(1, 2)
+    yield make_v2(10, 20)
+}
+
+@test(output = "3\n30")
+fn test_yield_value_call() {
+    let c = yield_value_call()
+    let a = c.resume() ?? V2 { x: 0, y: 0 }
+    let b = c.resume() ?? V2 { x: 0, y: 0 }
+    print(v2_sum(a))
+    print(v2_sum(b))
+}
+
+co fn yield_value_literal() -> Coroutine<V2> {
+    yield V2 { x: 7, y: 8 }
+    yield V2 { x: 100, y: 200 }
+}
+
+@test(output = "15\n300")
+fn test_yield_value_literal() {
+    let c = yield_value_literal()
+    let a = c.resume() ?? V2 { x: 0, y: 0 }
+    let b = c.resume() ?? V2 { x: 0, y: 0 }
+    print(v2_sum(a))
+    print(v2_sum(b))
+}
+
+co fn yield_value_local() -> Coroutine<V2> {
+    let v = V2 { x: 5, y: 6 }
+    yield v
+    let w = make_v2(50, 60)
+    yield w
+}
+
+@test(output = "11\n110")
+fn test_yield_value_local() {
+    let c = yield_value_local()
+    let a = c.resume() ?? V2 { x: 0, y: 0 }
+    let b = c.resume() ?? V2 { x: 0, y: 0 }
+    print(v2_sum(a))
+    print(v2_sum(b))
+}
+
+// --- 3. FunctionRef to fn with value-typed params -------------------------
+
+@test(output = "30\n200\n7")
+fn test_fn_ref_value_param() {
+    let f: fn(V2) -> int = v2_sum
+    let g: fn(V2, int) -> V2 = v2_scale
+    print(f(V2 { x: 10, y: 20 }))
+    let scaled = g(V2 { x: 10, y: 10 }, 10)
+    print(scaled.x + scaled.y)
+    // Also verify: fn-ref called on a value-returning Rock call as an arg
+    let h: fn(V2) -> int = v2_sum
+    print(h(make_v2(3, 4)))
+}
+
+// --- 4. defer with value-returning call -----------------------------------
+// defer body runs on scope exit. Its body may contain value calls; the
+// return value is discarded but side effects / scalar semantics must not
+// truncate.
+
+fn global_sum() -> int {
+    return __global_side_effect()
+}
+
+// Side-effect accumulator via inline(lua) globals.
+inline(lua) fn __reset_side_effect() = """
+    _G.__v_phase4_acc = 0
+"""
+
+inline(lua) fn __global_side_effect() -> int = """
+    return _G.__v_phase4_acc or 0
+"""
+
+fn record_sum(v: V2) -> V2 {
+    // Side effect: add to accumulator, return v unchanged.
+    __add_to_acc(v.x + v.y)
+    return v
+}
+
+inline(lua) fn __add_to_acc(n: int) = """
+    _G.__v_phase4_acc = (_G.__v_phase4_acc or 0) + n
+"""
+
+@test(output = "7")
+fn test_defer_value_call() {
+    __reset_side_effect()
+    {
+        defer { record_sum(make_v2(3, 4)) }
+    }
+    print(global_sum())
+}
+
+// --- 5. Operator-overload chains (3-deep) ---------------------------------
+
+fn __op_add(a: V2, b: V2) -> V2 {
+    return V2 { x: a.x + b.x, y: a.y + b.y }
+}
+
+fn __op_mul(a: V2, k: int) -> V2 {
+    return V2 { x: a.x * k, y: a.y * k }
+}
+
+@test(output = "19")
+fn test_op_chain_4_terms() {
+    // (a + b) * 2 + c
+    let a = V2 { x: 1, y: 2 }
+    let b = V2 { x: 3, y: 1 }
+    let c = V2 { x: 2, y: 3 }
+    let r = (a + b) * 2 + c
+    print(r.x + r.y)
+}
+
+// --- 6. Generics with value types -----------------------------------------
+// A generic fn with `T: value` or an unconstrained T receiving a value
+// struct uses cdata ABI (generic monomorphizations always keep cdata).
+// Verifies the stdlib pattern used by Vec<V2>, Arena<V2>, etc.
+
+fn box_first<T>(items: [T]) -> T? {
+    if items.len() > 0 {
+        return items[0]
+    }
+    return null
+}
+
+@test(output = "5")
+fn test_generic_passthrough_value() {
+    let xs: [V2] = [V2 { x: 2, y: 3 }, V2 { x: 10, y: 20 }]
+    let first = box_first(xs) ?? V2 { x: 0, y: 0 }
+    print(first.x + first.y)
+}
+
+// --- 8. Defer body with binop-returning-value consumed by side effect -----
+// Exercises a binop chain inside a defer block (a new statement context)
+// to catch IIFE-wrap or state-hoist regressions.
+
+@test(output = "17")
+fn test_defer_value_binop_chain() {
+    __reset_side_effect()
+    {
+        defer {
+            record_sum(make_v2(1, 2))                       // +3
+            record_sum(v2_scale(V2 { x: 1, y: 1 }, 7) * 1)  // +14
+        }
+    }
+    print(global_sum())
+}

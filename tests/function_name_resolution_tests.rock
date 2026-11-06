@@ -1,0 +1,55 @@
+// Function name resolution tests - migrated from rock/tests/function_name_resolution_test.rs
+// Tests function resolution, overloading, generics, method calls, and stdlib functions
+
+// Shared struct definition
+struct FixVec2 {
+    x: float,
+    y: float,
+}
+
+// Helper functions
+fn double(x: string, suffix: string) -> string {
+    return "{x}{x}{suffix}"
+}
+
+fn add(a: int, b: int) -> int {
+    return a + b
+}
+
+fn add(a: float, b: float) -> float {
+    return a + b
+}
+
+fn identity<T>(x: T) -> T {
+    return x
+}
+
+fn length(v: FixVec2) -> float {
+    return (v.x * v.x + v.y * v.y).sqrt()
+}
+
+// Test cases
+@test(output = "hihiho")
+fn test_non_overloaded_function_resolution() {
+    print("hi".double("ho"))
+}
+
+@test(output = "3\n4")
+fn test_overloaded_function_resolution() {
+    print(add(1, 2))
+    print(add(1.5, 2.5))
+}
+
+@test(output = "42\nhello")
+fn test_generic_function_resolution() {
+    print(identity(42))
+    print(identity("hello"))
+}
+
+@test(output = "2")
+fn test_stdlib_function_resolution() {
+    let v = vec_new()
+    vec_push(v, 10)
+    vec_push(v, 20)
+    print(vec_len(v))
+}

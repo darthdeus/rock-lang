@@ -1,0 +1,43 @@
+//! Error: `yield` inside a plain lambda body must be rejected by the
+//!        semantic checker. The lambda is its own non-coroutine fn —
+//!        a `yield` inside it has no enclosing coroutine to suspend.
+//!        Closure-yield coloring `co (T) -> R` is not shipped.
+//!
+//!        Pre-fix: the semantic context propagated the enclosing co
+//!        fn's `coroutine_yield_type` into the lambda body, so the
+//!        Yield arm silently accepted. Then ANF lowering tripped on
+//!        `UnsupportedExpr("Yield")` inside the recursively-lowered
+//!        lambda body, surfacing as a confusing codegen-level message.
+//! Tags: coroutines, lambdas
+
+//=== TEST CASE: yield_with_value_in_lambda_Generic ===
+co fn gen() -> Coroutine<int> {
+    let f = () => yield 5
+    f()
+}
+fn main() {
+    let c = gen()
+    let _ = c.resume()
+}
+
+//=== TEST CASE: bare_yield_in_lambda_Generic ===
+co fn gen() -> Coroutine<int> {
+    let f = () => yield
+    f()
+    yield 1
+}
+fn main() {
+    let c = gen()
+    let _ = c.resume()
+}
+
+//=== TEST CASE: yield_in_lambda_passed_to_map_Generic ===
+co fn gen() -> Coroutine<int> {
+    let xs: [int] = [1, 2, 3]
+    let _ys = xs.map(x => yield x)
+    yield 0
+}
+fn main() {
+    let c = gen()
+    let _ = c.resume()
+}

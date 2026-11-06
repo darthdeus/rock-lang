@@ -1,0 +1,61 @@
+struct CloneEvent { path: string }
+
+global CLONE_LOG: [CloneEvent] = []
+
+fn record_clone(path: string) {
+    let owned = path.clone_into(CLONE_LOG.storage)
+    CLONE_LOG.push(CloneEvent { path: owned })
+}
+
+@test
+fn clone_into_copies_a_dynamic_string_into_a_global_owner() {
+    let suffix = 17
+    record_clone("sound-{suffix}")
+    let event = CLONE_LOG[0]
+    assert(event.path == "sound-17")
+}
+
+fn main() { record_clone("main") }
+
+fn clone_points_destination(points: [Vec2]) -> Storage {
+    points.push(Vec2 { x: 5.0, y: 6.0 })
+    return CLONE_LOG.storage
+}
+
+@test
+fn clone_into_copies_column_vectors_after_evaluating_the_destination() {
+    let points = [Vec2 { x: 1.0, y: 2.0 }, Vec2 { x: 3.0, y: 4.0 }]
+    let copied = points.clone_into(clone_points_destination(points))
+    assert_eq(copied.len(), 3)
+    assert_eq(copied[2].x, 5.0)
+    points[0] = Vec2 { x: 9.0, y: 10.0 }
+    assert_eq(copied[0].x, 1.0)
+    copied.push(Vec2 { x: 11.0, y: 12.0 })
+    assert_eq(points.len(), 3)
+    assert_eq(copied.len(), 4)
+}
+
+@test
+fn clone_into_preserves_nullable_column_presence_without_aliasing() {
+    let points: [Vec2?] = [null, Vec2 { x: 3.0, y: 4.0 }]
+    let copied = points.clone_into(CLONE_LOG.storage)
+    points[0] = Vec2 { x: 1.0, y: 2.0 }
+    copied[1] = null
+    assert(copied[0] == null)
+    assert(points[1] != null)
+    assert_eq(points[1].unwrap().x, 3.0)
+}
+
+fn clone_points_destination_call(points: [Vec2], destination: fn([Vec2]) -> Storage) -> Storage {
+    return destination(points)
+}
+
+@test
+fn clone_into_evaluates_an_indirect_destination_before_copying_columns() {
+    let points = [Vec2 { x: 1.0, y: 2.0 }]
+    let copied = points.clone_into(clone_points_destination_call(points, clone_points_destination))
+    assert_eq(copied.len(), 2)
+    assert_eq(copied[1].x, 5.0)
+    points[1] = Vec2 { x: 9.0, y: 10.0 }
+    assert_eq(copied[1].x, 5.0)
+}

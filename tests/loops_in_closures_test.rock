@@ -1,0 +1,352 @@
+// Loops (for/while, continue/break/return, nested, captured vars) inside
+// closures execute correctly. Assertions raise on mismatch.
+
+// Helper function to simulate common closure patterns
+fn with_callback(callback: () -> ()) {
+    callback()
+}
+
+fn with_callback_returning<T>(callback: () -> T) -> T {
+    return callback()
+}
+
+fn assert_eq_int(actual: int, expected: int, test_name: string) {
+    assert(actual == expected, "{test_name}: expected {expected}, got {actual}")
+}
+
+fn assert_eq_bool(actual: bool, expected: bool, test_name: string) {
+    assert(actual == expected, "{test_name}: expected {expected}, got {actual}")
+}
+
+// ============================================================================
+// BASIC FOR LOOPS IN CLOSURES
+// ============================================================================
+
+@test
+fn test_for_in_loop_in_closure() {
+    let items = [1, 2, 3]
+    let sum = 0
+
+    with_callback(() => {
+        for item in items {
+            sum = sum + item
+        }
+    })
+
+    assert_eq_int(sum, 6, "for-in loop in closure")
+}
+
+@test
+fn test_range_for_loop_in_closure() {
+    let count = 0
+
+    with_callback(() => {
+        for i in 0..5 {
+            count = count + 1
+        }
+    })
+
+    assert_eq_int(count, 5, "range for loop in closure")
+}
+
+@test
+fn test_while_loop_in_closure() {
+    let count = 0
+
+    with_callback(() => {
+        let i = 0
+        while i < 5 {
+            count = count + 1
+            i = i + 1
+        }
+    })
+
+    assert_eq_int(count, 5, "while loop in closure (should work)")
+}
+
+// ============================================================================
+// LOOPS WITH CONTINUE IN CLOSURES
+// ============================================================================
+
+@test
+fn test_for_loop_with_continue_in_closure() {
+    let items = [1, 2, 3, 4, 5]
+    let sum = 0
+
+    with_callback(() => {
+        for item in items {
+            if item == 3 {
+                continue
+            }
+            sum = sum + item
+        }
+    })
+
+    assert_eq_int(sum, 12, "for loop with continue in closure")
+}
+
+@test
+fn test_while_loop_with_continue_in_closure() {
+    let sum = 0
+
+    with_callback(() => {
+        let i = 0
+        while i < 5 {
+            i = i + 1
+            if i == 3 {
+                continue
+            }
+            sum = sum + i
+        }
+    })
+
+    assert_eq_int(sum, 12, "while loop with continue in closure")
+}
+
+// ============================================================================
+// LOOPS WITH BREAK IN CLOSURES
+// ============================================================================
+
+@test
+fn test_for_loop_with_break_in_closure() {
+    let items = [1, 2, 3, 4, 5]
+    let sum = 0
+
+    with_callback(() => {
+        for item in items {
+            if item == 4 {
+                break
+            }
+            sum = sum + item
+        }
+    })
+
+    assert_eq_int(sum, 6, "for loop with break in closure")
+}
+
+@test
+fn test_while_loop_with_break_in_closure() {
+    let count = 0
+
+    with_callback(() => {
+        while true {
+            count = count + 1
+            if count == 3 {
+                break
+            }
+        }
+    })
+
+    assert_eq_int(count, 3, "while loop with break in closure")
+}
+
+// ============================================================================
+// NESTED CLOSURES WITH LOOPS
+// ============================================================================
+
+@test
+fn test_loop_in_nested_closure() {
+    let sum = 0
+
+    with_callback(() => {
+        with_callback(() => {
+            for i in 1..4 {
+                sum = sum + i
+            }
+        })
+    })
+
+    assert_eq_int(sum, 6, "for loop in nested closure")
+}
+
+@test
+fn test_loop_in_deeply_nested_closure() {
+    let sum = 0
+
+    with_callback(() => {
+        with_callback(() => {
+            with_callback(() => {
+                for i in 1..4 {
+                    sum = sum + i
+                }
+            })
+        })
+    })
+
+    assert_eq_int(sum, 6, "for loop in deeply nested closure")
+}
+
+// ============================================================================
+// NESTED LOOPS INSIDE CLOSURES
+// ============================================================================
+
+@test
+fn test_nested_for_loops_in_closure() {
+    let sum = 0
+
+    with_callback(() => {
+        for i in 0..3 {
+            for j in 0..3 {
+                sum = sum + 1
+            }
+        }
+    })
+
+    assert_eq_int(sum, 9, "nested for loops in closure")
+}
+
+@test
+fn test_mixed_nested_loops_in_closure() {
+    let sum = 0
+
+    with_callback(() => {
+        for i in 0..3 {
+            let j = 0
+            while j < 3 {
+                sum = sum + 1
+                j = j + 1
+            }
+        }
+    })
+
+    assert_eq_int(sum, 9, "mixed nested loops (for+while) in closure")
+}
+
+// ============================================================================
+// LOOPS MODIFYING CAPTURED VARIABLES
+// ============================================================================
+
+@test
+fn test_loop_modifying_outer_array_in_closure() {
+    let arr = [0, 0, 0]
+
+    with_callback(() => {
+        for i in 0..3 {
+            arr[i] = i + 1
+        }
+    })
+
+    assert_eq_int(arr[0], 1, "loop modifying array[0] in closure")
+    assert_eq_int(arr[1], 2, "loop modifying array[1] in closure")
+    assert_eq_int(arr[2], 3, "loop modifying array[2] in closure")
+}
+
+@test
+fn test_loop_with_captured_iteration_variable() {
+    let results = []
+
+    for i in 0..3 {
+        with_callback(() => {
+            for j in 0..2 {
+                vec_push(results, i * 10 + j)
+            }
+        })
+    }
+
+    assert_eq_int(results.len(), 6, "captured iteration variable - result count")
+    if results.len() == 6 {
+        assert_eq_int(results[0], 0, "captured iteration variable - results[0]")
+        assert_eq_int(results[2], 10, "captured iteration variable - results[2]")
+        assert_eq_int(results[4], 20, "captured iteration variable - results[4]")
+    }
+}
+
+// ============================================================================
+// DIRECT CLOSURE ASSIGNMENTS
+// ============================================================================
+
+@test
+fn test_for_loop_in_assigned_closure() {
+    let sum = 0
+    let closure = () => {
+        for i in 1..4 {
+            sum = sum + i
+        }
+    }
+
+    closure()
+
+    assert_eq_int(sum, 6, "for loop in assigned closure")
+}
+
+@test
+fn test_loop_in_closure_array() {
+    let sum = 0
+    let closure1 = () => { for i in 1..3 { sum = sum + i } }
+    let closure2 = () => { for i in 3..5 { sum = sum + i } }
+
+    closure1()
+    assert_eq_int(sum, 3, "first closure")
+
+    closure2()
+    assert_eq_int(sum, 10, "second closure")
+}
+
+// ============================================================================
+// LOOPS WITH RETURN STATEMENTS
+// ============================================================================
+
+@test
+fn test_loop_with_return_in_closure() {
+    let result = with_callback_returning(() => {
+        for i in 0..10 {
+            if i == 5 {
+                return i
+            }
+        }
+        return -1
+    })
+
+    assert_eq_int(result, 5, "for loop with return in closure")
+}
+
+// ============================================================================
+// EDGE CASES
+// ============================================================================
+
+@test
+fn test_empty_loop_in_closure() {
+    let executed = false
+
+    with_callback(() => {
+        for i in 0..0 {
+            executed = true
+        }
+    })
+
+    assert_eq_bool(executed, false, "empty range loop in closure")
+}
+
+@test
+fn test_loop_over_empty_array_in_closure() {
+    let executed = false
+    let empty: [int] = []
+
+    with_callback(() => {
+        for item in empty {
+            executed = true
+        }
+    })
+
+    assert_eq_bool(executed, false, "loop over empty array in closure")
+}
+
+@test
+fn test_multiple_loops_in_same_closure() {
+    let sum1 = 0
+    let sum2 = 0
+
+    with_callback(() => {
+        for i in 0..3 {
+            sum1 = sum1 + i
+        }
+
+        for i in 0..4 {
+            sum2 = sum2 + i
+        }
+    })
+
+    assert_eq_int(sum1, 3, "first loop in closure with multiple loops")
+    assert_eq_int(sum2, 6, "second loop in closure with multiple loops")
+}
+

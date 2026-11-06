@@ -1,0 +1,13 @@
+//! A stored function returning a nobox value has a fixed leaf return ABI.
+//! A nullable return adds a presence slot, so the value needs a lambda adapter.
+
+//=== TEST CASE: bound_callback_nullable_nobox_return ===
+fn accepts_nullable_position(callback: () -> Vec2?) -> Vec2 {
+    return callback().unwrap()
+}
+
+fn main() {
+    let callback: () -> Vec2 = () => v(7.0, 9.0)
+    let position = accepts_nullable_position(callback) // ERROR: incompatible return ABI
+    print("{position.x}")
+}

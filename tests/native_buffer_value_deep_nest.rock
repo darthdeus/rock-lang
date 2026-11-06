@@ -1,0 +1,39 @@
+// Adversarial: 3 levels of value-struct nesting in a single literal.
+// Verifies that `collect_value_struct_leaves` recurses correctly past
+// depth 2 — the bench only exercises 2 levels (Vertex.pos.x).
+
+@intrinsic @inline inline(lua) fn put(s: string) = "io.write(s)"
+
+value V2 { x: float, y: float }
+value Pair { a: V2, b: V2 }
+value Quad { lo: Pair, hi: Pair }
+
+@nomangle inline(lua) fn __nb_alloc_Quad(n: int) -> Ptr<Quad> = 'return ffi.new("Quad[?]", n)'
+
+fn nb_quad(n: int) -> NativeBuffer<Quad> {
+    return NativeBuffer { ptr: __nb_alloc_Quad(n), len: n }
+}
+
+@test(output = "1,2,3,4,5,6,7,8")
+fn test_three_level_nest() {
+    let buf = nb_quad(1)
+    buf[0] = Quad {
+        lo: Pair {
+            a: V2 { x: 1.0, y: 2.0 },
+            b: V2 { x: 3.0, y: 4.0 },
+        },
+        hi: Pair {
+            a: V2 { x: 5.0, y: 6.0 },
+            b: V2 { x: 7.0, y: 8.0 },
+        },
+    }
+    let q = buf[0]
+    put("{q.lo.a.x}"); put(",")
+    put("{q.lo.a.y}"); put(",")
+    put("{q.lo.b.x}"); put(",")
+    put("{q.lo.b.y}"); put(",")
+    put("{q.hi.a.x}"); put(",")
+    put("{q.hi.a.y}"); put(",")
+    put("{q.hi.b.x}"); put(",")
+    put("{q.hi.b.y}")
+}

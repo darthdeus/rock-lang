@@ -1,0 +1,36 @@
+value OptionalArrayPoint { x: int, y: int }
+struct OptionalArrayHolder { points: [OptionalArrayPoint?] }
+
+fn optional_array_first(points: [OptionalArrayPoint?]) -> int {
+    return points[0].unwrap().x
+}
+
+@test
+fn c_optional_array_literal_local_store() {
+    let source = [OptionalArrayPoint { x: 1, y: 2 }]
+    let points: [OptionalArrayPoint?] = [source[0]]
+    source[0].x = 9
+    assert_eq(points.len(), 1)
+    assert_eq(points[0].unwrap().x, 1)
+    assert_eq(points[0].unwrap().y, 2)
+}
+
+@test
+fn c_optional_array_literal_keeps_null_entries() {
+    let points: [OptionalArrayPoint?] = [null, OptionalArrayPoint { x: 3, y: 4 }, null]
+    assert_eq(points.len(), 3)
+    assert_eq(points[0], null)
+    assert_eq(points[1].unwrap().x, 3)
+    assert_eq(points[2], null)
+}
+
+@test
+fn c_optional_array_literal_field_store() {
+    let holder = OptionalArrayHolder { points: [OptionalArrayPoint { x: 5, y: 6 }] }
+    assert_eq(holder.points[0].unwrap().x, 5)
+}
+
+@test
+fn c_optional_array_literal_argument_store() {
+    assert_eq(optional_array_first([OptionalArrayPoint { x: 7, y: 8 }]), 7)
+}

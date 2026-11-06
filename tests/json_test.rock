@@ -1,0 +1,607 @@
+// Tests for the pure-Rock JSON library (stone/engine/json.rock).
+
+// ---------------------------------------------------------------------------
+// Encoder
+
+@test
+fn test_encode_null() {
+    assert_eq(json_encode(json_null()), "null")
+}
+
+@test
+fn test_encode_bool() {
+    assert_eq(json_encode(json_bool(true)), "true")
+    assert_eq(json_encode(json_bool(false)), "false")
+}
+
+@test
+fn test_encode_int() {
+    assert_eq(json_encode(json_int(0)), "0")
+    assert_eq(json_encode(json_int(42)), "42")
+    assert_eq(json_encode(json_int(-7)), "-7")
+}
+
+@test
+fn test_encode_float_whole_renders_as_int() {
+    // Whole-valued floats lose the trailing .0 — keeps round-trips compact.
+    assert_eq(json_encode(json_float(1.0)), "1")
+    assert_eq(json_encode(json_float(-3.0)), "-3")
+}
+
+@test
+fn test_encode_float_fractional() {
+    assert_eq(json_encode(json_float(1.5)), "1.5")
+    assert_eq(json_encode(json_float(-2.25)), "-2.25")
+}
+
+@test
+fn test_encode_float_nan_inf_become_null() {
+    let nan = 0.0 / 0.0
+    let inf = 1.0 / 0.0
+    let ninf = -1.0 / 0.0
+    assert_eq(json_encode(json_float(nan)), "null")
+    assert_eq(json_encode(json_float(inf)), "null")
+    assert_eq(json_encode(json_float(ninf)), "null")
+}
+
+@test
+fn test_encode_string_basic() {
+    assert_eq(json_encode(json_str("hello")), "\"hello\"")
+    assert_eq(json_encode(json_str("")), "\"\"")
+}
+
+@test
+fn test_encode_string_plain_prefix() {
+    let prefix = "ordinary".repeat(1000)
+    assert_eq(encode_string(prefix), "\"" + prefix + "\"")
+    assert_eq(encode_string(prefix + "\nend"), "\"" + prefix + "\\nend\"")
+    assert_eq(encode_string(prefix + "\"end"), "\"" + prefix + "\\\"end\"")
+    assert_eq(encode_string(prefix + "\\end"), "\"" + prefix + "\\\\end\"")
+}
+
+@test
+fn test_encode_string_escapes() {
+    assert_eq(json_encode(json_str("a\"b")), "\"a\\\"b\"")
+    assert_eq(json_encode(json_str("a\\b")), "\"a\\\\b\"")
+    assert_eq(json_encode(json_str("a\nb")), "\"a\\nb\"")
+    assert_eq(json_encode(json_str("a\tb")), "\"a\\tb\"")
+    assert_eq(json_encode(json_str("a\rb")), "\"a\\rb\"")
+}
+
+fn json_decode_str(src: string) -> string {
+    return json_as_str(json_decode(src) ?? json_null()) ?? "DECODE-FAILED"
+}
+
+// The decode side of the same five escapes. It went untested while encode was
+// covered, and `\r` decoded to the letter `r` for as long as that was true.
+@test
+fn test_decode_string_escape_units() {
+    let bs = string_char(92)
+    let q = string_char(34)
+    assert_eq(json_decode_str(q + "a" + bs + "rb" + q), "a\rb")
+    assert_eq(json_decode_str(q + "a" + bs + "nb" + q), "a\nb")
+    assert_eq(json_decode_str(q + "a" + bs + "tb" + q), "a\tb")
+    assert_eq(json_decode_str(q + "a" + bs + bs + "b" + q), "a\\b")
+    assert_eq(json_decode_str(q + "a" + bs + q + "b" + q), "a\"b")
+    // The unit, not just the length: a CR and the letter `r` both give len 3.
+    assert_eq(json_decode_str(q + "a" + bs + "rb" + q).unit_at(1), 13)
+}
+
+@test
+fn test_encode_string_control_char() {
+    // 0x01 -> 
+    let s = string_char(1)
+    assert_eq(json_encode(json_str(s)), "\"\\u0001\"")
+}
+
+@test
+fn test_encode_array_empty() {
+    let a: [JsonValue] = []
+    assert_eq(json_encode(json_array(a)), "[]")
+}
+
+@test
+fn test_encode_array_simple() {
+    let a: [JsonValue] = [json_int(1), json_int(2), json_int(3)]
+    assert_eq(json_encode(json_array(a)), "[1,2,3]")
+}
+
+@test
+fn test_encode_array_mixed() {
+    let a: [JsonValue] = [json_int(1), json_str("x"), json_bool(true), json_null()]
+    assert_eq(json_encode(json_array(a)), "[1,\"x\",true,null]")
+}
+
+@test
+fn test_encode_object_empty() {
+    let m: Map<string, JsonValue> = map_new()
+    assert_eq(json_encode(json_object(m)), "{{}}")
+}
+
+@test
+fn test_encode_object_sorted_keys() {
+    // Encoder sorts keys for deterministic output.
+    let m: Map<string, JsonValue> = map_new()
+    insert(m, "b", json_int(2))
+    insert(m, "a", json_int(1))
+    insert(m, "c", json_int(3))
+    assert_eq(json_encode(json_object(m)), "{{\"a\":1,\"b\":2,\"c\":3}}")
+}
+
+@test
+fn test_encode_nested() {
+    let inner: Map<string, JsonValue> = map_new()
+    insert(inner, "x", json_int(10))
+    let outer: Map<string, JsonValue> = map_new()
+    insert(outer, "inner", json_object(inner))
+    insert(outer, "list", json_array([json_int(1), json_int(2)]))
+    assert_eq(json_encode(json_object(outer)), "{{\"inner\":{{\"x\":10}},\"list\":[1,2]}}")
+}
+
+// ---------------------------------------------------------------------------
+// Decoder
+
+@test
+fn test_decode_null() {
+    let v = json_decode("null")
+    assert(v != null, "decode null")
+    assert(json_is_null(v.unwrap()), "is null")
+}
+
+@test
+fn test_decode_bool() {
+    let t = json_decode("true")
+    assert(t != null, "decode true")
+    assert_eq(json_as_bool(t.unwrap()) ?? false, true)
+    let f = json_decode("false")
+    assert(f != null, "decode false")
+    assert_eq(json_as_bool(f.unwrap()) ?? true, false)
+}
+
+@test
+fn test_decode_int() {
+    let v = json_decode("42")
+    assert(v != null, "decode int")
+    assert_eq(json_as_int(v.unwrap()) ?? 0, 42)
+    let n = json_decode("-7")
+    assert_eq(json_as_int(n.unwrap()) ?? 0, -7)
+}
+
+@test
+fn test_decode_float() {
+    let v = json_decode("3.14")
+    assert(v != null, "decode float")
+    let f = json_as_float(v.unwrap()) ?? 0.0
+    assert(f > 3.13 && f < 3.15, "float ~ 3.14")
+}
+
+@test
+fn test_decode_float_exponent() {
+    let v = json_decode("1e3")
+    assert(v != null, "decode 1e3")
+    assert_eq(json_as_float(v.unwrap()) ?? 0.0, 1000.0)
+    let n = json_decode("-2.5e-2")
+    let f = json_as_float(n.unwrap()) ?? 0.0
+    assert(f > -0.0251 && f < -0.0249, "approx -0.025")
+}
+
+@test
+fn test_decode_string_basic() {
+    let v = json_decode("\"hello\"")
+    assert(v != null, "decode string")
+    assert_eq(json_as_str(v.unwrap()) ?? "", "hello")
+}
+
+@test
+fn test_decode_string_escapes() {
+    let v = json_decode("\"a\\\"b\\nc\\\\d\"")
+    assert(v != null, "decode escapes")
+    assert_eq(json_as_str(v.unwrap()) ?? "", "a\"b\nc\\d")
+}
+
+@test
+fn test_decode_string_escaped_quotes() {
+    let v = json_decode("\"a\\\"b\\\"c\\\"d\"")
+    assert(v != null, "decode escaped quotes")
+    assert_eq(json_as_str(v.unwrap()) ?? "", "a\"b\"c\"d")
+}
+
+@test
+fn test_decode_string_mixed_escaped_runs() {
+    let v = json_decode("\"alpha\\\"bravo\\u0043delta\\\\echo\\nfoxtrot\"")
+    assert(v != null, "decode mixed escaped runs")
+    assert_eq(json_as_str(v.unwrap()) ?? "", "alpha\"bravoCdelta\\echo\nfoxtrot")
+}
+
+@test
+fn test_decode_string_unicode_escape() {
+    // A = "A"
+    let v = json_decode("\"\\u0041\"")
+    assert(v != null, "decode unicode")
+    assert_eq(json_as_str(v.unwrap()) ?? "", "A")
+}
+
+@test
+fn test_decode_array_empty() {
+    let v = json_decode("[]")
+    assert(v != null, "decode []")
+    let arr = json_as_array(v.unwrap()) ?? []
+    assert_eq(arr.len(), 0)
+}
+
+@test
+fn test_decode_array_simple() {
+    let v = json_decode("[1, 2, 3]")
+    assert(v != null, "decode array")
+    let arr = json_as_array(v.unwrap()) ?? []
+    assert_eq(arr.len(), 3)
+    assert_eq(json_as_int(arr[0]) ?? 0, 1)
+    assert_eq(json_as_int(arr[1]) ?? 0, 2)
+    assert_eq(json_as_int(arr[2]) ?? 0, 3)
+}
+
+@test
+fn test_decode_object_simple() {
+    let v = json_decode("{{\"a\":1,\"b\":\"x\"}}")
+    assert(v != null, "decode object")
+    let m = json_as_object(v.unwrap())
+    assert(m != null, "is object")
+    let mm = m.unwrap()
+    assert_eq(json_as_int(mm["a"]) ?? 0, 1)
+    assert_eq(json_as_str(mm["b"]) ?? "", "x")
+}
+
+@test
+fn test_decode_whitespace() {
+    let v = json_decode("  {{  \"a\"  :  [  1  ,  2  ]  }}  ")
+    assert(v != null, "decode with whitespace")
+    let arr = json_as_array(json_field(v.unwrap(), "a") ?? json_null())
+    assert(arr != null, "got array")
+    assert_eq(arr.unwrap().len(), 2)
+}
+
+@test
+fn test_decode_whitespace_at_every_value_boundary() {
+    let nl = string_char(10)
+    let tab = string_char(9)
+    let cr = string_char(13)
+    let left = string_char(123)
+    let right = string_char(125)
+    let src = join([
+        nl, left, tab, "\"a\"", cr, ":", nl, "[", tab, "true", ",", cr,
+        left, "\"b\"", " :", nl, "null", right, nl, "]", nl, right, tab,
+    ], "")
+    let v = json_decode(src)
+    assert(v != null, "whitespace around every value boundary")
+    let arr = json_as_array(json_field(v.unwrap(), "a") ?? json_null()) ?? []
+    assert_eq(arr.len(), 2)
+    assert(json_as_bool(arr[0]) ?? false, "whitespace before a boolean")
+    assert(json_is_null(json_field(arr[1], "b") ?? json_null()),
+        "whitespace before a nested null")
+}
+
+@test
+fn test_decode_nested() {
+    let v = json_decode("{{\"outer\":{{\"inner\":[1,true,null,\"s\"]}}}}")
+    assert(v != null, "decode nested")
+    let outer = v.unwrap()
+    let inner_obj = json_field(outer, "outer") ?? json_null()
+    let inner_arr = json_field(inner_obj, "inner") ?? json_null()
+    let arr = json_as_array(inner_arr) ?? []
+    assert_eq(arr.len(), 4)
+    assert_eq(json_as_int(arr[0]) ?? 0, 1)
+    assert_eq(json_as_bool(arr[1]) ?? false, true)
+    assert(json_is_null(arr[2]), "third is null")
+    assert_eq(json_as_str(arr[3]) ?? "", "s")
+}
+
+// ---------------------------------------------------------------------------
+// Errors
+
+@test
+fn test_decode_empty_string_fails() {
+    assert(json_decode("") == null, "empty input fails")
+}
+
+@test
+fn test_decode_garbage_fails() {
+    assert(json_decode("xyz") == null, "garbage fails")
+    assert(json_decode("[1,") == null, "unterminated array fails")
+    assert(json_decode("{{\"a\":") == null, "unterminated object fails")
+    assert(json_decode("\"unterminated") == null, "unterminated string fails")
+}
+
+@test
+fn test_decode_trailing_garbage_fails() {
+    assert(json_decode("1 2") == null, "trailing token fails")
+    assert(json_decode("[1,2]xyz") == null, "trailing garbage after array fails")
+}
+
+@test
+fn test_decode_truncated_unicode_fails() {
+    assert(json_decode("\"\\u00\"") == null, "short unicode escape fails")
+    assert(json_decode("\"\\uZZZZ\"") == null, "non-hex unicode fails")
+}
+
+// ---------------------------------------------------------------------------
+// Roundtrip
+
+@test
+fn test_roundtrip_scalar() {
+    roundtrip_assert(json_int(123))
+    roundtrip_assert(json_float(1.5))
+    roundtrip_assert(json_str("hello world"))
+    roundtrip_assert(json_bool(true))
+    roundtrip_assert(json_null())
+}
+
+@test
+fn test_roundtrip_array() {
+    let v = json_array([json_int(1), json_str("x"), json_null()])
+    roundtrip_assert(v)
+}
+
+@test
+fn test_roundtrip_object() {
+    let m: Map<string, JsonValue> = map_new()
+    insert(m, "a", json_int(1))
+    insert(m, "name", json_str("rock"))
+    insert(m, "ok", json_bool(true))
+    roundtrip_assert(json_object(m))
+}
+
+@test
+fn test_roundtrip_special_strings() {
+    roundtrip_assert(json_str(""))
+    roundtrip_assert(json_str("with \"quotes\" inside"))
+    roundtrip_assert(json_str("line1\nline2\tindented"))
+    roundtrip_assert(json_str("backslash: \\ end"))
+}
+
+fn roundtrip_assert(v: JsonValue) {
+    let encoded = json_encode(v)
+    let decoded = json_decode(encoded)
+    assert(decoded != null, "roundtrip of {encoded}: decode failed")
+    let re_encoded = json_encode(decoded.unwrap())
+    assert_eq(re_encoded, encoded)
+}
+
+// ---------------------------------------------------------------------------
+// Pretty encoder
+
+// Scalars and all-scalar containers stay on one line (no expansion).
+@test
+fn test_pretty_scalar_inline() {
+    assert_eq(json_encode_pretty(json_int(42)), "42")
+    let m: Map<string, JsonValue> = map_new()
+    insert(m, "x", json_int(1))
+    insert(m, "y", json_int(2))
+    assert_eq(json_encode_pretty(json_object(m)), "{{\"x\":1,\"y\":2}}")
+}
+
+// A container with nested containers expands one child per line, indented,
+// while the leaf objects stay compact.
+@test
+fn test_pretty_nested_expands() {
+    let a: Map<string, JsonValue> = map_new()
+    insert(a, "type", json_str("wall"))
+    insert(a, "x", json_int(0))
+    let root: Map<string, JsonValue> = map_new()
+    insert(root, "tiles", json_array([json_object(a)]))
+    let expected = "{{\n  \"tiles\": [\n    {{\"type\":\"wall\",\"x\":0}}\n  ]\n}}"
+    assert_eq(json_encode_pretty(json_object(root)), expected)
+}
+
+// An item nesting an object expands by default; under a key named in
+// `compact_items_of` it stays one compact line, and other keys still expand.
+@test
+fn test_pretty_compact_items_of() {
+    let link: Map<string, JsonValue> = map_new()
+    insert(link, "name", json_str("a"))
+    let item: Map<string, JsonValue> = map_new()
+    insert(item, "link", json_object(link))
+    insert(item, "x", json_int(1))
+    let root: Map<string, JsonValue> = map_new()
+    insert(root, "rows", json_array([json_object(item)]))
+    insert(root, "other", json_array([json_object(item)]))
+    let expanded = "[\n    {{\n      \"link\": {{\"name\":\"a\"}},\n      \"x\": 1\n    }}\n  ]"
+    let v = json_object(root)
+    assert_eq(json_encode_pretty(v),
+        "{{\n  \"other\": {expanded},\n  \"rows\": {expanded}\n}}")
+    assert_eq(json_encode_pretty(v, ["rows"]),
+        "{{\n  \"other\": {expanded},\n  \"rows\": [\n    {{\"link\":{{\"name\":\"a\"}},\"x\":1}}\n  ]\n}}")
+}
+
+// Pretty output must decode back to the same value as compact output.
+@test
+fn test_pretty_roundtrips() {
+    let a: Map<string, JsonValue> = map_new()
+    insert(a, "type", json_str("wall"))
+    insert(a, "x", json_int(3))
+    let root: Map<string, JsonValue> = map_new()
+    insert(root, "version", json_int(3))
+    insert(root, "tiles", json_array([json_object(a)]))
+    let v = json_object(root)
+    let pretty = json_encode_pretty(v)
+    let decoded = json_decode(pretty)
+    assert(decoded != null, "pretty decode failed: {pretty}")
+    assert_eq(json_encode(decoded.unwrap()), json_encode(v))
+}
+
+// ---------------------------------------------------------------------------
+// Nesting depth
+//
+// Malformed input is data, not a programmer error: a document nested past the
+// limit must decode to null, not abort the process. The limit is deliberately
+// far below both backends' stack ceilings -- measured, LuaJIT overflows around
+// 4500 and the JS backend between 900 and 1000, and the JS figure shrinks as
+// the caller's own stack grows. Deepest JSON anywhere in this repo is 5.
+
+fn json_nested_arrays(depth: int) -> string {
+    let parts: [string] = []
+    for _i in 0..depth { parts.push("[") }
+    parts.push("1")
+    for _i in 0..depth { parts.push("]") }
+    return join(parts, "")
+}
+
+fn json_nested_objects(depth: int) -> string {
+    let parts: [string] = []
+    for _i in 0..depth { parts.push("{{\"a\":") }
+    parts.push("1")
+    for _i in 0..depth { parts.push("}}") }
+    return join(parts, "")
+}
+
+@test
+fn test_json_nesting_within_limit_decodes() {
+    let v = json_decode(json_nested_arrays(200))
+    assert(v != null, "200 nested arrays must decode -- well inside the limit")
+    let o = json_decode(json_nested_objects(200))
+    assert(o != null, "200 nested objects must decode -- well inside the limit")
+}
+
+// The limit must bound NESTING, not the number of containers in the document.
+// A document far wider than the limit but only two deep is the common real
+// shape -- mag's level.json is 6315 sibling tile objects -- and it must decode.
+// Every conformance case is tiny, so nothing else in the suite can see this:
+// dropping the depth decrement leaves the whole corpus green while making a
+// real save file undecodable.
+@test
+fn test_json_wide_shallow_document_decodes() {
+    let wide = json_max_depth() * 4
+    let parts: [string] = []
+    parts.push("[")
+    for i in 0..wide {
+        if i > 0 { parts.push(",") }
+        parts.push("{{\"x\":1}}")
+    }
+    parts.push("]")
+
+    let decoded = json_decode(join(parts, ""))
+    assert(decoded != null,
+        "{wide} sibling objects at depth 2 must decode -- the limit bounds nesting, not width")
+    let arr = json_as_array(decoded.unwrap())
+    assert(arr != null, "wide document must decode as an array")
+    assert_eq(arr.unwrap().len(), wide, "every sibling object must survive the parse")
+}
+
+// The limit is exactly where json_max_depth() says it is. Without this, the
+// 200-accepts / 5000-rejects pair above would pass for any limit in between.
+@test
+fn test_json_nesting_limit_boundary() {
+    let limit = json_max_depth()
+    assert(json_decode(json_nested_arrays(limit)) != null,
+        "{limit} nested arrays is at the limit and must decode")
+    assert(json_decode(json_nested_arrays(limit + 1)) == null,
+        "{limit + 1} nested arrays is past the limit and must reject")
+    assert(json_decode(json_nested_objects(limit)) != null,
+        "{limit} nested objects is at the limit and must decode")
+    assert(json_decode(json_nested_objects(limit + 1)) == null,
+        "{limit + 1} nested objects is past the limit and must reject")
+}
+
+@test
+fn test_json_nesting_past_limit_rejects_without_crashing() {
+    // Before the depth limit these overflowed the interpreter stack and took
+    // the process down instead of returning null.
+    assert(json_decode(json_nested_arrays(5000)) == null,
+        "5000 nested arrays must reject, not crash")
+    assert(json_decode(json_nested_objects(5000)) == null,
+        "5000 nested objects must reject, not crash")
+}
+
+// ---------------------------------------------------------------------------
+// Number grammar
+//
+// JSON's number is `[-] int [frac] [exp]` where int is a lone 0 or a nonzero
+// digit run, and frac/exp each need at least one digit. Scanning permissively
+// and leaving the verdict to parse_float accepts several shapes the grammar
+// forbids, because Lua's tonumber is happy with them.
+
+@test
+fn test_json_number_grammar_rejects() {
+    // Leading zeros.
+    assert(json_decode("[-01]") == null, "-01: leading zero")
+    assert(json_decode("[012]") == null, "012: leading zero")
+    assert(json_decode("[-012]") == null, "-012: leading zero")
+    // Absent integer part.
+    assert(json_decode("[-.5]") == null, "-.5: no integer part")
+    assert(json_decode("[.5]") == null, ".5: no integer part")
+    // Decimal point with no digits after it.
+    assert(json_decode("[1.]") == null, "1.: no fractional digits")
+    assert(json_decode("[-2.]") == null, "-2.: no fractional digits")
+    assert(json_decode("[2.e3]") == null, "2.e3: no fractional digits")
+    assert(json_decode("[2.e+3]") == null, "2.e+3: no fractional digits")
+    assert(json_decode("[2.e-3]") == null, "2.e-3: no fractional digits")
+    assert(json_decode("[0.e1]") == null, "0.e1: no fractional digits")
+    // Exponent with no digits.
+    assert(json_decode("[1e]") == null, "1e: no exponent digits")
+    assert(json_decode("[1e+]") == null, "1e+: no exponent digits")
+    // Input that ends inside the number. The bare-sign document is the only
+    // way to reach the end-of-input guard after the sign -- in "[-]" the sign
+    // is followed by a byte, so that path is never taken and a mutation there
+    // survives the whole corpus.
+    assert(json_decode("-") == null, "bare minus is not a document")
+    assert(json_decode("[-]") == null, "minus with no digits")
+    assert(json_decode("-.") == null, "minus then point, no digits")
+}
+
+// The rejections above must not take valid numbers with them -- a narrowed
+// gate is only correct if what should pass still reaches the other side.
+@test
+fn test_json_number_grammar_admits() {
+    assert(json_decode("[0]") != null, "0")
+    assert(json_decode("[-0]") != null, "-0")
+    assert(json_decode("[0.5]") != null, "0.5")
+    assert(json_decode("[0e1]") != null, "0e1")
+    assert(json_decode("[0e+1]") != null, "0e+1")
+    assert(json_decode("[1]") != null, "1")
+    assert(json_decode("[-1]") != null, "-1")
+    assert(json_decode("[123]") != null, "123")
+    assert(json_decode("[1.5]") != null, "1.5")
+    assert(json_decode("[-1.5e-3]") != null, "-1.5e-3")
+    assert(json_decode("[1E2]") != null, "1E2 (capital exponent)")
+    assert(json_decode("[1.0e+2]") != null, "1.0e+2")
+
+    // Values survive the stricter scan intact.
+    assert_eq(jv_int(json_decode("123"), 0), 123, "123 decodes to 123")
+    assert_eq(jv_float(json_decode("-1.5"), 0.0), -1.5, "-1.5 decodes to -1.5")
+    assert_eq(jv_float(json_decode("1.5e2"), 0.0), 150.0, "1.5e2 decodes to 150")
+}
+
+// ---------------------------------------------------------------------------
+// Unescaped control characters
+//
+// JSON requires every byte below 0x20 inside a string to be escaped. The
+// ordinary-character run breaks only on `"` and `\`, so a raw newline or tab
+// used to pass straight through.
+
+@test
+fn test_json_string_rejects_raw_control_bytes() {
+    let nl = string_char(10)
+    let tab = string_char(9)
+    let ctrl = string_char(1)
+    assert(json_decode("[\"a{nl}b\"]") == null, "raw newline in string")
+    assert(json_decode("[\"a{tab}b\"]") == null, "raw tab in string")
+    assert(json_decode("[\"a{ctrl}b\"]") == null, "raw 0x01 in string")
+    assert(json_decode("{{\"k{nl}\":1}}") == null, "raw newline in key")
+}
+
+@test
+fn test_json_string_admits_escaped_and_high_bytes() {
+    // The escaped forms of the same characters stay legal.
+    let v = json_decode("[\"a\\nb\", \"c\\td\", \"e\\u0001f\"]")
+    assert(v != null, "escaped control characters must decode")
+    let arr = json_as_array(v.unwrap()) ?? []
+    assert_eq(arr.len(), 3, "all three escaped strings decode")
+    assert_eq(json_as_str(arr[0]) ?? "", "a{string_char(10)}b", "\\n unescapes to a newline")
+
+    // 0x20 is the first legal raw byte and must not be caught by the check.
+    assert(json_decode("[\" \"]") != null, "0x20 space is legal raw")
+    // 0x7F (DEL) is above the control range and legal raw -- JSONTestSuite's
+    // y_string_unescaped_char_delete requires it.
+    assert(json_decode("[\"{string_char(127)}\"]") != null, "0x7F DEL is legal raw")
+    // High bytes carrying UTF-8 must still pass through untouched.
+    assert(json_decode("[\"é\"]") != null, "UTF-8 multibyte is legal raw")
+}

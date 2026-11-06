@@ -1,0 +1,231 @@
+// Adversarial tests: Safe navigation in unexpected expression positions
+
+struct FixVec2 {
+    x: float,
+    y: float,
+}
+
+struct Player {
+    name: string,
+    pos: FixVec2,
+    health: int,
+}
+
+struct World {
+    player: Player?,
+    boss: Player?,
+}
+
+fn make_world() -> World {
+    return World {
+        player: Player { name: "Hero", pos: FixVec2 { x: 1.0, y: 2.0 }, health: 100 },
+        boss: Player { name: "Dragon", pos: FixVec2 { x: 5.0, y: 6.0 }, health: 500 },
+    }
+}
+
+fn make_empty_world() -> World {
+    return World { player: null, boss: null }
+}
+
+// --- ?. as function argument ---
+
+fn show_int(x: int) {
+    print(x)
+}
+
+@test(output = "100")
+fn test_safenav_as_arg() {
+    let w = make_world()
+    show_int(w.player?.health ?? 0)
+}
+
+@test(output = "0")
+fn test_safenav_null_as_arg() {
+    let w = make_empty_world()
+    show_int(w.player?.health ?? 0)
+}
+
+// --- ?. in array literal ---
+
+@test(output = "2")
+fn test_safenav_in_array() {
+    let w = make_world()
+    let names: [string?] = [w.player?.name, w.boss?.name]
+    let count = 0
+    for n in names {
+        if n != null {
+            count = count + 1
+        }
+    }
+    print(count)
+}
+
+@test(output = "0")
+fn test_safenav_null_in_array() {
+    let w = make_empty_world()
+    let names: [string?] = [w.player?.name, w.boss?.name]
+    let count = 0
+    for n in names {
+        if n != null {
+            count = count + 1
+        }
+    }
+    print(count)
+}
+
+// --- ?. in binary operators ---
+
+@test(output = "3")
+fn test_safenav_in_addition() {
+    let w = make_world()
+    let sum = (w.player?.pos?.x ?? 0.0) + (w.player?.pos?.y ?? 0.0)
+    print(sum)
+}
+
+@test(output = "0")
+fn test_safenav_null_in_addition() {
+    let w = make_empty_world()
+    let sum = (w.player?.pos?.x ?? 0.0) + (w.player?.pos?.y ?? 0.0)
+    print(sum)
+}
+
+// --- ?. on function call result ---
+
+fn maybe_player() -> Player? {
+    return Player { name: "Test", pos: FixVec2 { x: 0.0, y: 0.0 }, health: 50 }
+}
+
+fn no_player() -> Player? {
+    return null
+}
+
+@test(output = "Test")
+fn test_safenav_on_fn_result() {
+    let name = maybe_player()?.name ?? "none"
+    print(name)
+}
+
+@test(output = "none")
+fn test_safenav_on_null_fn_result() {
+    let name = no_player()?.name ?? "none"
+    print(name)
+}
+
+// --- ?.let bindings ---
+
+@test(output = "Hero")
+fn test_let_safenav_via_var() {
+    let w = make_world()
+    let p = w.player
+    let result = p?.let { p.name } ?? "none"
+    print(result)
+}
+
+@test(output = "none")
+fn test_let_safenav_null() {
+    let w = make_empty_world()
+    let p = w.player
+    let result = p?.let { "something" } ?? "none"
+    print(result)
+}
+
+// --- ?. with method calls (UFCS) ---
+
+fn health_status(p: Player) -> string {
+    if p.health > 50 {
+        return "healthy"
+    }
+    return "wounded"
+}
+
+// Path refinement strips nullable for function args after null check
+@test(output = "healthy")
+fn test_safenav_ufcs() {
+    let w = make_world()
+    if w.player != null {
+        print(health_status(w.player))
+    }
+}
+
+// Also works with local variable (original workaround)
+@test(output = "healthy")
+fn test_safenav_ufcs_via_var() {
+    let w = make_world()
+    let p = w.player
+    if p != null {
+        print(health_status(p))
+    }
+}
+
+// --- ?. chained deep (4 levels) ---
+
+struct A {
+    b: B?,
+}
+struct B {
+    c: C?,
+}
+struct C {
+    d: D?,
+}
+struct D {
+    value: int,
+}
+
+@test(output = "42")
+fn test_4_level_safenav() {
+    let a = A { b: B { c: C { d: D { value: 42 } } } }
+    print(a.b?.c?.d?.value ?? 0)
+}
+
+@test(output = "0")
+fn test_4_level_safenav_null_at_b() {
+    let a = A { b: null }
+    print(a.b?.c?.d?.value ?? 0)
+}
+
+@test(output = "0")
+fn test_4_level_safenav_null_at_c() {
+    let a = A { b: B { c: null } }
+    print(a.b?.c?.d?.value ?? 0)
+}
+
+@test(output = "0")
+fn test_4_level_safenav_null_at_d() {
+    let a = A { b: B { c: C { d: null } } }
+    print(a.b?.c?.d?.value ?? 0)
+}
+
+// --- ?. in comparison ---
+
+@test(output = "true")
+fn test_safenav_in_comparison() {
+    let w = make_world()
+    let is_alive = (w.player?.health ?? 0) > 0
+    print(is_alive)
+}
+
+@test(output = "false")
+fn test_safenav_null_in_comparison() {
+    let w = make_empty_world()
+    let is_alive = (w.player?.health ?? 0) > 0
+    print(is_alive)
+}
+
+// --- ?. in string interpolation (via variable) ---
+
+@test(output = "Hero has 100 hp")
+fn test_safenav_interpolation_via_var() {
+    let w = make_world()
+    let name = w.player?.name ?? "unknown"
+    let hp = w.player?.health ?? 0
+    print("{name} has {hp} hp")
+}
+
+@test(output = "unknown has 0 hp")
+fn test_safenav_null_interpolation_via_var() {
+    let w = make_empty_world()
+    let name = w.player?.name ?? "unknown"
+    let hp = w.player?.health ?? 0
+    print("{name} has {hp} hp")
+}

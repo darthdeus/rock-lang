@@ -1,0 +1,91 @@
+// Reflection follows the LOGICAL form. An embedded field is DECLARED as `f`
+// while its physical keys are `f.x`/`f.y`, so anything driven off the raw table
+// would render `f = nil` next to leaked `f.x` keys. `inspect` reconstructs the
+// child from its leaves instead, and physical keys never surface.
+
+struct Pt { x: int, y: int }
+struct Holder { embed p: Pt, tag: int }
+
+@test(output = "Holder {{ p = Pt {{ x = 1, y = 2 }}, tag = 3 }}")
+fn test_inspect_renders_the_logical_child() {
+    let h = Holder { p: Pt { x: 1, y: 2 }, tag: 3 }
+    print("{inspect(h)}")
+}
+
+// Interpolating a struct renders structurally through the same path.
+@test(output = "Holder {{ p = Pt {{ x = 4, y = 5 }}, tag = 6 }}")
+fn test_interpolation_renders_the_logical_child() {
+    let h = Holder { p: Pt { x: 4, y: 5 }, tag: 6 }
+    print("{h}")
+}
+
+// A leaf write is visible logically -- reflection reads the leaves, not a
+// stale child box.
+@test(output = "Holder {{ p = Pt {{ x = 9, y = 2 }}, tag = 3 }}")
+fn test_inspect_after_a_leaf_write() {
+    let h = Holder { p: Pt { x: 1, y: 2 }, tag: 3 }
+    h.p.x = 9
+    print("{inspect(h)}")
+}
+
+struct Inner { c: int }
+struct Mid { embed b: Inner, m: int }
+struct Outer { embed a: Mid, o: int }
+
+@test(output = "Outer {{ a = Mid {{ b = Inner {{ c = 1 }}, m = 2 }}, o = 3 }}")
+fn test_inspect_nested_embed() {
+    let t = Outer { a: Mid { b: Inner { c: 1 }, m: 2 }, o: 3 }
+    print("{inspect(t)}")
+}
+
+// Nullable embed is presence-gated: absent reads as null, present renders the
+// child. The presence slot itself is never shown.
+struct Slot { embed q: Pt?, tag: int }
+
+@test(output = "Slot {{ q = Pt {{ x = 5, y = 6 }}, tag = 1 }}")
+fn test_inspect_nullable_present() {
+    let s = Slot { q: Pt { x: 5, y: 6 }, tag: 1 }
+    print("{inspect(s)}")
+}
+
+@test(output = "Slot {{ q = nil, tag = 1 }}")
+fn test_inspect_nullable_absent() {
+    let s = Slot { q: null, tag: 1 }
+    print("{inspect(s)}")
+}
+
+// CONTROL: a plain (non-embed) struct field still renders as the boxed child it
+// is, so the tests above pin the embed path and not inspect at large.
+struct PlainHolder { p: Pt, tag: int }
+
+@test(output = "PlainHolder {{ p = Pt {{ x = 1, y = 2 }}, tag = 3 }}")
+fn test_inspect_plain_struct_field_control() {
+    let h = PlainHolder { p: Pt { x: 1, y: 2 }, tag: 3 }
+    print("{inspect(h)}")
+}
+
+// SENTINEL -- a flattened enum FIELD still does not reconstruct logically.
+//
+// The bug: an enum field is stored flattened, as the physical keys `sig.#`
+// (discriminant) and `sig.0` (payload), so the declared name `sig` indexes
+// nothing and reflection renders it as nil. The embed path above rebuilds its
+// child from the leaves; the flattened-enum path has no equivalent, because
+// this mixed, non-cdata enum is absent from `__ROCK_TYPE_TABLE`, so there is no
+// variant/payload metadata to rebuild from. Cdata-eligible enums are registered
+// separately for column materialization and logical serialization.
+//
+// This assertion is INVERTED: it passes today BECAUSE the bug exists. The raw
+// `sig.#`/`sig.0` keys no longer leak into the output -- that half is fixed by
+// the physical-key filter -- but the value itself is still lost.
+//
+// When this fails, the reconstruction landed: flip the expected output to
+// `FlatHolder {{ other = 1, sig = Sig::B("x") }}` and delete this comment.
+enum Sig { A, B(string) }
+struct FlatHolder { sig: Sig, other: int }
+
+fn show_flat(h: FlatHolder) { print("{inspect(h)}") }
+
+@test(output = "FlatHolder {{ other = 1, sig = nil }}")
+fn test_flat_enum_field_reflection_sentinel() {
+    show_flat(FlatHolder { sig: Sig::B("x"), other: 1 })
+}

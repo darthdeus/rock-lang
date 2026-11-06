@@ -1,0 +1,144 @@
+// Adversarial tests for mixed-type operator overloads (Vec2 + int, int + Vec2,
+// multiple overloads of the same operator coexisting, compound assignments
+// using mixed overloads).
+//
+// Definition and call-site symbols share skull-mir::mangle; mixed operands
+// must target the same `__op_add_int_V2` symbol.
+
+struct V2 {
+    x: float,
+    y: float,
+}
+
+// ---------- Multiple `+` overloads on the same struct -----------------------
+
+fn __op_add(a: V2, b: V2) -> V2 {
+    return V2 { x: a.x + b.x, y: a.y + b.y }
+}
+
+fn __op_add(a: V2, b: int) -> V2 {
+    return V2 { x: a.x + float(b), y: a.y + float(b) }
+}
+
+fn __op_add(a: V2, b: float) -> V2 {
+    return V2 { x: a.x + b, y: a.y + b }
+}
+
+// ---------- Sanity: V2 + V2 still picks the right overload ------------------
+@test(output = "4	7")
+fn test_v2_plus_v2_among_many_overloads() {
+    let a = V2 { x: 1.0, y: 2.0 }
+    let b = V2 { x: 3.0, y: 5.0 }
+    let c = a + b
+    print(int(c.x), int(c.y))
+}
+
+// ---------- Vec2 + int (struct on left, primitive on right) -----------------
+@test(output = "11	12")
+fn test_v2_plus_int() {
+    let a = V2 { x: 1.0, y: 2.0 }
+    let c = a + 10
+    print(int(c.x), int(c.y))
+}
+
+// ---------- Vec2 + float (struct on left, different primitive) --------------
+@test(output = "4	5")
+fn test_v2_plus_float() {
+    let a = V2 { x: 1.5, y: 2.5 }
+    let c = a + 2.5
+    print(int(c.x), int(c.y))
+}
+
+// ---------- Compound `+=` with mixed Vec2 + int overload --------------------
+@test(output = "11	12")
+fn test_v2_compound_plus_int() {
+    let p = V2 { x: 1.0, y: 2.0 }
+    p += 10
+    print(int(p.x), int(p.y))
+}
+
+// ---------- Compound `+=` with mixed Vec2 + float overload ------------------
+@test(output = "4	5")
+fn test_v2_compound_plus_float() {
+    let p = V2 { x: 1.5, y: 2.5 }
+    p += 2.5
+    print(int(p.x), int(p.y))
+}
+
+// ---------- Primitive on the LEFT: int + Vec2 -------------------------------
+// This exercises the suspected double-underscore mangling bug.
+fn __op_add(a: int, b: V2) -> V2 {
+    return V2 { x: float(a) + b.x, y: float(a) + b.y }
+}
+
+@test(output = "11	12")
+fn test_int_plus_v2() {
+    let b = V2 { x: 1.0, y: 2.0 }
+    let c = 10 + b
+    print(int(c.x), int(c.y))
+}
+
+// ---------- Multiple mixed overloads of different ops -----------------------
+fn __op_sub(a: V2, b: int) -> V2 {
+    return V2 { x: a.x - float(b), y: a.y - float(b) }
+}
+
+fn __op_mul(a: V2, b: int) -> V2 {
+    return V2 { x: a.x * float(b), y: a.y * float(b) }
+}
+
+@test(output = "5	6")
+fn test_v2_minus_int() {
+    let a = V2 { x: 15.0, y: 16.0 }
+    let c = a - 10
+    print(int(c.x), int(c.y))
+}
+
+@test(output = "20	40")
+fn test_v2_times_int() {
+    let a = V2 { x: 10.0, y: 20.0 }
+    let c = a * 2
+    print(int(c.x), int(c.y))
+}
+
+// ---------- Nested mixed expression: `(V2 + int) + V2` ----------------------
+@test(output = "12	13")
+fn test_nested_mixed_expression() {
+    let a = V2 { x: 1.0, y: 2.0 }
+    let b = V2 { x: 1.0, y: 1.0 }
+    let c = (a + 10) + b
+    print(int(c.x), int(c.y))
+}
+
+// ---------- Compound RHS uses a mixed overload: `p += a * 2` ----------------
+// p, a are V2; `a * 2` selects __op_mul(V2, int) -> V2; then `p += V2` selects
+// __op_add(V2, V2) -> V2. Verifies the fix works when the compound RHS is
+// itself a mixed overload call.
+@test(output = "21	42")
+fn test_compound_with_mixed_rhs() {
+    let p = V2 { x: 1.0, y: 2.0 }
+    let a = V2 { x: 10.0, y: 20.0 }
+    p += a * 2
+    print(int(p.x), int(p.y))
+}
+
+// ---------- Compound `+=` with int on RHS, deep safe-nav target -------------
+struct M1 { v: V2 }
+struct M2 { m1: M1? }
+
+@test(output = "11	12")
+fn test_compound_safenav_with_mixed_rhs() {
+    let m: M2? = M2 { m1: M1 { v: V2 { x: 1.0, y: 2.0 } } }
+    m?.m1?.v += 10
+    if m != null && m.m1 != null {
+        print(int(m.m1.v.x), int(m.m1.v.y))
+    }
+}
+
+// ---------- Vec-indexed compound `+=` with mixed primitive RHS --------------
+@test(output = "11	12")
+fn test_vec_index_compound_mixed_rhs() {
+    let xs: [V2] = [V2 { x: 1.0, y: 2.0 }]
+    xs[0] += 10
+    print(int(xs[0].x), int(xs[0].y))
+}

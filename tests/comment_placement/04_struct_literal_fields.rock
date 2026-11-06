@@ -1,0 +1,12 @@
+// Comment inside struct literal
+struct Point { x: int, y: int }
+
+@test(output = "3")
+fn t() {
+    let p = Point {
+        // x field
+        x: 1,
+        /* y field */ y: 2, // trailing
+    }
+    print(p.x + p.y)
+}

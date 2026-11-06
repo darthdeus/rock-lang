@@ -1,0 +1,65 @@
+// Multi-value ABI + loop-capture corpus for the `--backend js` ratchet (T7). A
+// scalarized tuple return packs into a JS array the CallMulti caller
+// destructures; an iterator `for` loop uses the same multi-return `next`. A
+// closure created in a loop captures THAT iteration's value (per-iteration `let`
+// inside the loop body). Every @test runs green on both backends. (Value structs
+// and closures capturing a loop counter/cursor stay deferred -> skip, not here.)
+
+fn minmax(a: int, b: int) -> (int, int) {
+    if a < b { (a, b) } else { (b, a) }
+}
+
+@test(output = "3 7")
+fn test_tuple_return_destructure() {
+    let (lo, hi) = minmax(7, 3)
+    print("{lo} {hi}")
+}
+
+@test(output = "60")
+fn test_for_in_pushed_vec() {
+    let xs: [int] = []
+    xs.push(10)
+    xs.push(20)
+    xs.push(30)
+    let sum = 0
+    for x in xs {
+        sum = sum + x
+    }
+    print("{sum}")
+}
+
+// A closure created per loop iteration captures that iteration's element -- the
+// per-iteration binding, NOT the shared final value.
+@test(output = "10\n20\n30")
+fn test_closure_per_iteration_element() {
+    let xs = [10, 20, 30]
+    let fns: [fn() -> int] = []
+    for x in xs {
+        fns.push(() => x)
+    }
+    for f in fns {
+        print("{f()}")
+    }
+}
+
+// A `let` copy of the loop variable, captured -- also per-iteration.
+@test(output = "0\n1\n2")
+fn test_closure_per_iteration_copy() {
+    let fns: [fn() -> int] = []
+    for i in 0..3 {
+        let a = i
+        fns.push(() => a)
+    }
+    for f in fns {
+        print("{f()}")
+    }
+}
+
+// A closure NOT in a loop captures by reference (shared, correct).
+@test(output = "7")
+fn test_nonloop_capture_shared() {
+    let x = 3
+    let y = 4
+    let f = () => x + y
+    print("{f()}")
+}

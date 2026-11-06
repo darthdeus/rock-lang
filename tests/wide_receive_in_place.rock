@@ -1,0 +1,135 @@
+// A multi-return receive is read in place, not copied into a second set of
+// locals (single_receive_cells in skull-codegen-lua). Every qualifying receive
+// is, whatever its width. Each test is a shape that must not qualify, or must
+// still read the latest value.
+nobox value W { a: float, b: float, c: float, d: float, e: float, f: float }
+
+fn mk(x: float) -> W {
+    return W { a: x, b: x + 1.0, c: x + 2.0, d: x + 3.0, e: x + 4.0, f: x + 5.0 }
+}
+
+fn bump(w: W) -> W {
+    return W { a: w.a + 10.0, b: w.b, c: w.c, d: w.d, e: w.e, f: w.f + 10.0 }
+}
+
+// Load before the receive in the same block, used after it.
+@test(returns = 106)
+fn early_load_then_receive() -> int {
+    let w = mk(1.0)
+    let old = w.a
+    w = mk(100.0)
+    return (old + w.f) as int
+}
+
+// Parameter cells as the receive destination, read before and after.
+fn param_receive(w: W) -> float {
+    let before = w.f
+    w = mk(50.0)
+    return before + w.a
+}
+
+@test(returns = 56)
+fn param_receive_reads_old_then_new() -> int {
+    return param_receive(mk(1.0)) as int
+}
+
+// Receive in a loop body; a value read from it survives to the next iteration
+// through a cell.
+@test(returns = 18)
+fn loop_receive_carry() -> int {
+    let acc = 0.0
+    let prev = 0.0
+    let i = 0
+    while i < 3 {
+        let w = mk(float(i))
+        acc += prev
+        prev = w.f
+        i += 1
+    }
+    return (acc + prev) as int
+}
+
+// Two receives into the same cells in different branches.
+@test(returns = 13)
+fn branch_receives() -> int {
+    let w = mk(0.0)
+    if w.a < 1.0 {
+        w = mk(2.0)
+    } else {
+        w = mk(7.0)
+    }
+    return (w.a + w.f + w.c) as int
+}
+
+// A closure captures the received cells after the receive.
+@test(returns = 5)
+fn closure_capture_after_receive() -> int {
+    let w = mk(2.0)
+    let f = () => w.f
+    w = mk(0.0)
+    return (f() + w.a) as int
+}
+
+// Receive, then receive again through a chain; each read is of the latest.
+@test(returns = 38)
+fn chain() -> int {
+    let w = mk(1.0)
+    let s = w.a
+    w = bump(w)
+    s += w.a
+    w = bump(w)
+    s += w.f
+    return s as int
+}
+
+// Read in place used as a numeric loop bound.
+@test(returns = 6)
+fn loop_bound() -> int {
+    let w = mk(1.0)
+    let n = 0
+    for i in 0..(w.f as int) {
+        n += 1
+    }
+    return n
+}
+
+// Aliasing across a second wide receive into different cells.
+@test(returns = 65)
+fn two_wide_values() -> int {
+    let w1 = mk(1.0)
+    let w2 = mk(10.0)
+    let s = w1.f + w2.a
+    let w3 = mk(w1.a + w2.f)
+    return (s + w3.a + w3.f + w1.a + w2.b) as int
+}
+
+// A struct field store of a wide value received in place.
+struct Holder { w: W }
+
+@test(returns = 8)
+fn stored_into_struct() -> int {
+    let w = mk(3.0)
+    let h = Holder { w }
+    w = mk(0.0)
+    return (h.w.f + w.a) as int
+}
+
+// Coroutine: receive in a coroutine body, read after a yield.
+co fn co(out: [float]) -> Coroutine<int, int, ()> {
+    let w = mk(4.0)
+    out.push(w.a)
+    yield 1
+    out.push(w.f)
+    return 0
+}
+
+@test(returns = 13)
+fn coroutine_receive() -> int {
+    let out: [float] = []
+    let c = co(out)
+    let _ = c.resume()
+    let _ = c.resume()
+    let s = 0.0
+    for v in out { s += v }
+    return s as int
+}

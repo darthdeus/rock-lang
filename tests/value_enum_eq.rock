@@ -1,0 +1,102 @@
+// Payload enums retain their own structural equality inside a value struct.
+struct EqTile { x: int, y: int }
+enum EqMarch { None, Tile(EqTile), Landmark(int) }
+value EqSpec { march: EqMarch, label: string }
+value EqOuter { spec: EqSpec, n: int }
+
+fn eq_none() -> EqMarch { EqMarch::None }
+fn eq_tile(x: int) -> EqMarch { EqMarch::Tile(EqTile { x: x, y: 2 }) }
+fn eq_landmark(n: int) -> EqMarch { EqMarch::Landmark(n) }
+fn eq_spec(m: EqMarch) -> EqSpec { EqSpec { march: m, label: "same" } }
+
+@test(output = "true true false false")
+fn enum_equality_control() {
+    print("{eq_none() == eq_none()} {eq_tile(1) == eq_tile(1)} {eq_tile(1) == eq_tile(3)} {eq_tile(1) == eq_landmark(1)}")
+}
+
+@test(output = "true")
+fn value_enum_unit_eq() {
+    print(eq_spec(eq_none()) == eq_spec(eq_none()))
+}
+
+@test(output = "true false true")
+fn value_enum_tile_eq() {
+    let a = eq_spec(eq_tile(1))
+    let b = eq_spec(eq_tile(1))
+    let c = eq_spec(eq_tile(3))
+    print("{a == b} {a == c} {a != c}")
+}
+
+@test(output = "true false false")
+fn value_enum_int_eq() {
+    let a = eq_spec(eq_landmark(7))
+    let b = eq_spec(eq_landmark(7))
+    let c = eq_spec(eq_landmark(8))
+    print("{a == b} {a == c} {a == eq_spec(eq_none())}")
+}
+
+@test(output = "true false")
+fn nested_value_enum_eq() {
+    let a = EqOuter { spec: eq_spec(eq_tile(1)), n: 9 }
+    let b = EqOuter { spec: eq_spec(eq_tile(1)), n: 9 }
+    let c = EqOuter { spec: eq_spec(eq_tile(3)), n: 9 }
+    print("{a == b} {a == c}")
+}
+
+// This path reaches enum slots through an inline child of a GC value box.
+nobox value EqInline { march: EqMarch }
+value EqEmbedded { child: EqInline, label: string }
+
+@test(output = "true false")
+fn inline_child_enum_eq() {
+    let a = EqEmbedded { child: EqInline { march: eq_tile(1) }, label: "same" }
+    let b = EqEmbedded { child: EqInline { march: eq_tile(1) }, label: "same" }
+    let c = EqEmbedded { child: EqInline { march: eq_tile(3) }, label: "same" }
+    print("{a == b} {a == c}")
+}
+
+// Two global reads are copied leaf Groups; the enum payload still compares
+// structurally, not by its table's identity.
+global EQ_G1: EqSpec = EqSpec { march: eq_tile(1), label: "same" }
+global EQ_G2: EqSpec = EqSpec { march: eq_tile(1), label: "same" }
+
+@test(output = "true false")
+fn global_value_enum_eq() {
+    print("{EQ_G1 == EQ_G2} {EQ_G1 == eq_spec(eq_tile(3))}")
+}
+
+// A stored absent inline child keeps a nil presence leaf; a literal `null`
+// child carries `false`. Neither raw leaf decides equality.
+nobox value EqPoint { x: int }
+enum EqKind { Empty, Named(string) }
+value EqParent { child: EqPoint?, kind: EqKind, label: string }
+nobox value EqMid { child: EqPoint? }
+value EqGrand { mid: EqMid, kind: EqKind, label: string }
+global EQ_ABSENT: EqParent = EqParent { child: null, kind: EqKind::Named("same"), label: "same" }
+global EQ_PRESENT: EqParent = EqParent { child: EqPoint { x: 1 }, kind: EqKind::Named("same"), label: "same" }
+global EQ_GRAND: EqGrand = EqGrand { mid: EqMid { child: null }, kind: EqKind::Empty, label: "same" }
+
+@test(output = "true true false false")
+fn absent_inline_child_eq() {
+    let a = EQ_ABSENT == EqParent { child: null, kind: EqKind::Named("same"), label: "same" }
+    let b = EqParent { child: null, kind: EqKind::Named("same"), label: "same" } == EQ_ABSENT
+    let c = EQ_ABSENT != EqParent { child: null, kind: EqKind::Named("same"), label: "same" }
+    let d = EqParent { child: null, kind: EqKind::Named("same"), label: "same" } != EQ_ABSENT
+    print("{a} {b} {c} {d}")
+}
+
+@test(output = "true false false true")
+fn present_inline_child_eq() {
+    let a = EQ_PRESENT == EqParent { child: EqPoint { x: 1 }, kind: EqKind::Named("same"), label: "same" }
+    let b = EQ_PRESENT == EqParent { child: EqPoint { x: 2 }, kind: EqKind::Named("same"), label: "same" }
+    let c = EQ_PRESENT == EqParent { child: null, kind: EqKind::Named("same"), label: "same" }
+    let d = EQ_PRESENT != EqParent { child: null, kind: EqKind::Named("same"), label: "same" }
+    print("{a} {b} {c} {d}")
+}
+
+@test(output = "true false")
+fn absent_inline_grandchild_eq() {
+    let a = EQ_GRAND == EqGrand { mid: EqMid { child: null }, kind: EqKind::Empty, label: "same" }
+    let b = EQ_GRAND != EqGrand { mid: EqMid { child: null }, kind: EqKind::Empty, label: "same" }
+    print("{a} {b}")
+}

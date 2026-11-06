@@ -1,0 +1,108 @@
+// H2 Shapes 1/2/3 + H3 R3: nullable value struct (`V2?`) routing.
+//
+// A nullable value is one Lua value at runtime (cdata-or-nil), never
+// scalarized. ANF previously rejected this at R2 (`is_value_typed`
+// peels `Nullable`), forcing the whole fn to live for these shapes.
+//
+// Per-shape intercepts via `lower_nullable_value_obj` helper:
+//   - SafeNavigation base: obj?.field where obj: V2?
+//   - Null-coalesce LHS: maybe_v2() ?? fallback
+//   - Scalar-ABI call arg: sum2(v) where v: V2?
+//   - Nullable value return: fn -> V2? body returns a value or null
+
+value V2 { x: int, y: int }
+
+fn make_v2(x: int, y: int) -> V2 {
+    return V2 { x: x, y: y }
+}
+
+fn sum2(v: V2) -> int {
+    return v.x + v.y
+}
+
+fn maybe_v2(on: bool) -> V2? {
+    if on { return make_v2(3, 7) }
+    return null
+}
+
+@test(output = "3")
+fn test_h2_safenav_some() {
+    let a = maybe_v2(true)?.x ?? -1
+    print(a)
+}
+
+@test(output = "-1")
+fn test_h2_safenav_none() {
+    let a = maybe_v2(false)?.x ?? -1
+    print(a)
+}
+
+@test(output = "10")
+fn test_h2_coalesce_lhs_some() {
+    let v = maybe_v2(true) ?? make_v2(100, 200)
+    print(sum2(v))
+}
+
+@test(output = "300")
+fn test_h2_coalesce_lhs_none() {
+    let v = maybe_v2(false) ?? make_v2(100, 200)
+    print(sum2(v))
+}
+
+@test(output = "3")
+fn test_h2_scalar_arg_some() {
+    let v: V2? = make_v2(1, 2)
+    if v != null {
+        print(sum2(v))
+    }
+}
+
+@test(output = "10")
+fn test_h3_nullable_value_return() {
+    let v = maybe_v2(true)
+    if v != null {
+        print(sum2(v))
+    } else {
+        print(-1)
+    }
+}
+
+// A BOXED tuple slot can be observed for nil-ness, so an absent nullable value
+// element has to land there as `nil` rather than as the ctor `pack` builds
+// regardless of presence. The reference-struct twin was always correct and
+// bounds the class; emitted-shape coverage in
+// `rock-lang/crates/skull/tests/nullable_value_in_tuple_sentinel.rs`.
+value TupV2 { x: float, y: float }
+struct TupS2 { x: float, y: float }
+
+fn tup_value_absent(m: Map<int, TupV2>, k: int) -> bool {
+    let t = (m.get(k), 1)
+    return t.0 == null
+}
+
+fn tup_struct_absent(m: Map<int, TupS2>, k: int) -> bool {
+    let t = (m.get(k), 1)
+    return t.0 == null
+}
+
+@test
+fn an_absent_value_in_a_boxed_tuple_reads_as_absent() {
+    let mv: Map<int, TupV2> = map_new()
+    mv[1] = TupV2 { x: 1.0, y: 2.0 }
+    assert(!tup_value_absent(mv, 1))
+    assert(tup_value_absent(mv, 9))
+
+    let ms: Map<int, TupS2> = map_new()
+    ms[1] = TupS2 { x: 1.0, y: 2.0 }
+    assert(!tup_struct_absent(ms, 1))
+    assert(tup_struct_absent(ms, 9))
+}
+
+@test(output = "7 1 3 5")
+fn a_present_value_in_a_boxed_tuple_round_trips() {
+    let m: Map<int, TupV2> = map_new()
+    m[1] = TupV2 { x: 7.0, y: 2.0 }
+    let t = (m.get(1), 1)
+    let plain = (TupV2 { x: 3.0, y: 4.0 }, 5)
+    print("{t.0.unwrap().x} {t.1} {plain.0.x} {plain.1}")
+}

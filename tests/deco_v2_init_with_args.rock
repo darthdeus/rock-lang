@@ -1,0 +1,51 @@
+// Test init decorator (no arguments, basic registration)
+
+global UPDATE_SYSTEMS: [string] = []
+
+// Init decorator without arguments
+deco init update {
+    vec_push(UPDATE_SYSTEMS, target.name)
+}
+
+@update
+fn input_system(dt: float) {
+    print("input: {dt}")
+}
+
+@update
+fn physics_system(dt: float) {
+    print("physics: {dt}")
+}
+
+@update
+fn render_system(dt: float) {
+    print("render: {dt}")
+}
+
+@test
+fn test_init_count() {
+    assert(vec_len(UPDATE_SYSTEMS) == 3, "should have 3 registered systems")
+}
+
+@test
+fn test_init_names() {
+    let found_input = false
+    let found_physics = false
+    let found_render = false
+
+    for sys in UPDATE_SYSTEMS {
+        if sys == "input_system" {
+            found_input = true
+        }
+        if sys == "physics_system" {
+            found_physics = true
+        }
+        if sys == "render_system" {
+            found_render = true
+        }
+    }
+
+    assert(found_input, "input_system should be registered")
+    assert(found_physics, "physics_system should be registered")
+    assert(found_render, "render_system should be registered")
+}

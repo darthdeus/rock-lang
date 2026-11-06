@@ -1,0 +1,36 @@
+enum SimpleOption {
+    None,
+    Some(int),
+}
+
+@test
+fn test_while_let_nullable_simple() {
+    let x: int? = 3
+    let hits = 0
+    while let v = x {
+        hits = hits + 1
+        if v <= 1 {
+            x = null
+        } else {
+            x = v - 1
+        }
+    }
+    assert_eq(hits, 3)
+}
+
+@test
+fn test_while_let_enum_countdown() {
+    let current = SimpleOption::Some(3)
+    let sum = 0
+
+    while let SimpleOption::Some(n) = current {
+        sum = sum + n
+        if n <= 1 {
+            current = SimpleOption::None
+        } else {
+            current = SimpleOption::Some(n - 1)
+        }
+    }
+
+    assert_eq(sum, 6)
+}

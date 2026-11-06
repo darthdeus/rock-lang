@@ -1,0 +1,26 @@
+//! Error: a GC-carrying `value` struct (immutable Lua table -- any field not
+//!        C-mappable, or a generic value struct) used in an `extern` signature
+//!        must be rejected at emit. It has no `ffi.cdef` typedef, so the extern
+//!        C ABI cannot name it. This replaces the old silent skip-then-crash
+//!        (unfuck backlog #51); FFI-clean value structs (all fields int/float/
+//!        bool or nested FFI-clean value structs) stay boundary-legal.
+//! Tags: value-struct, gc-carrying, extern, c-boundary, emit-time
+
+//=== TEST CASE: gc_value_extern_param_Generic ===
+value Bag { xs: [int], n: int }
+
+extern fn c_takes_bag(b: Bag) -> int
+
+fn main() {
+    print("{c_takes_bag(Bag { xs: [1], n: 2 })}")
+}
+
+//=== TEST CASE: gc_value_extern_return_Generic ===
+value Pair<T> { a: T, b: T }
+
+extern fn c_makes_pair() -> Pair<int>
+
+fn main() {
+    let p = c_makes_pair()
+    print("{p.a}")
+}

@@ -1,0 +1,38 @@
+// Regression guard for get_script_path() in stone/engine/lib.rock.
+//
+// get_script_path() returns debug.getinfo(...).source with the Lua chunk
+// marker stripped. The old code did an unconditional `source:sub(2)`,
+// assuming the `@` file-load prefix is always present. It is NOT present
+// in fire/embedded builds, where mlua names the chunk after its own
+// #[track_caller] location (e.g. "fire/src/main.rs:283:9", no marker) --
+// so sub(2) ate the leading "f" and the hot-reload log printed
+// "watched script ire/src/main.rs:283:9 not found".
+//
+// This redeclares the pure strip logic (tests/ can't reach stone engine)
+// the same way fkey_keycode_string_test.rock guards sdl_keycode_to_string.
+
+fn strip_lua_chunk_marker(source: string) -> string {
+    // Lua chunk names: "@file" => file load, "=text" => verbatim source.
+    // Anything else (a bare mlua call-site name) has no marker to strip.
+    if source.starts_with("@") || source.starts_with("=") {
+        return source.substring(1, source.len())
+    }
+    return source
+}
+
+@test
+fn strips_at_prefix_for_file_loaded_chunk() {
+    // dev path: rock stone loads a real tmp/main.lua => "@/tmp/main.lua"
+    assert_eq(strip_lua_chunk_marker("@/tmp/main.lua"), "/tmp/main.lua")
+}
+
+@test
+fn strips_equals_prefix_for_verbatim_chunk() {
+    assert_eq(strip_lua_chunk_marker("=stdin"), "stdin")
+}
+
+@test
+fn leaves_unmarked_chunk_name_intact() {
+    // fire path: mlua call-site chunk name, no marker. Must NOT lose the "f".
+    assert_eq(strip_lua_chunk_marker("fire/src/main.rs:283:9"), "fire/src/main.rs:283:9")
+}

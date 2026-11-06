@@ -1,0 +1,26 @@
+// @pure functions may read `const` globals: consts are rebind-rejected
+// (assignment, compound assignment, incdec) and re-initialized
+// unconditionally on hot reload, so a const read is referentially
+// transparent within any window @pure is reasoned about. Only MUTABLE
+// global reads break purity.
+
+const SCALE: float = 2.0
+const BASE: int = 10
+
+@pure fn scaled(x: float) -> float {
+    return x * SCALE
+}
+
+@pure fn shifted(x: int) -> int {
+    return x + BASE
+}
+
+@test
+fn pure_fn_reads_const_float() {
+    assert_eq(scaled(3.0), 6.0)
+}
+
+@test
+fn pure_fn_reads_const_int() {
+    assert_eq(shifted(5), 15)
+}

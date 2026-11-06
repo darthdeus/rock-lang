@@ -1,0 +1,32 @@
+//! Error: `let` binding requires an initializer (uninitialized `let x: T` removed)
+//! Tags: let, bindings
+
+//=== TEST CASE: let_no_init_simple_Generic ===
+// Uninitialized `let x: T` is disallowed — declare and assign in one
+// step (`let x = <value>`). Previously allowed (pre-declare a slot,
+// assign later); removed.
+fn test() -> int {
+    let x: int   // ERROR: `let` binding requires an initializer
+    x = 5
+    x
+}
+fn main() { let _ = test() }
+
+//=== TEST CASE: let_no_init_tuple_Generic ===
+fn test() {
+    let (x, y): (int, int)   // ERROR: `let` binding requires an initializer
+    x = 1
+    y = 2
+    print("{x} {y}")
+}
+fn main() { test() }
+
+//=== TEST CASE: let_no_init_value_struct_Generic ===
+value V2i { x: int, y: int }
+
+fn test() {
+    let v: V2i   // ERROR: `let` binding requires an initializer
+    v = V2i { x: 1, y: 2 }
+    print("{v.x} {v.y}")
+}
+fn main() { test() }

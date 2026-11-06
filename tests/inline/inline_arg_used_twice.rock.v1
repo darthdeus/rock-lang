@@ -1,0 +1,52 @@
+// Adversarial tests: @inline — argument used multiple times in body
+//
+// CRITICAL: if the body references a param N times, the arg expression
+// must still evaluate ONLY ONCE. Naive textual substitution would
+// re-evaluate — the pass must bind args to fresh locals.
+
+global side_effect_count: int = 0
+
+fn bump() -> int {
+    side_effect_count = side_effect_count + 1
+    return 7
+}
+
+@inline
+fn square(x: int) -> int {
+    return x * x
+}
+
+@inline
+fn uses_three_times(x: int) -> int {
+    return x + x + x
+}
+
+@inline
+fn deep_use(x: int) -> int {
+    // Param used in several positions at once
+    return (x * 2) + (x * 3) + x
+}
+
+@test(output = "49 1")
+fn test_square_evaluates_arg_once() {
+    side_effect_count = 0
+    let r = square(bump())
+    print("{r} {side_effect_count}")
+    // square(7) = 49, side_effect_count must be 1 not 2
+}
+
+@test(output = "21 1")
+fn test_three_uses_still_one_evaluation() {
+    side_effect_count = 0
+    let r = uses_three_times(bump())
+    print("{r} {side_effect_count}")
+    // 7+7+7 = 21, side_effect_count = 1
+}
+
+@test(output = "42 1")
+fn test_deep_uses_one_evaluation() {
+    side_effect_count = 0
+    let r = deep_use(bump())
+    print("{r} {side_effect_count}")
+    // 7*2 + 7*3 + 7 = 14+21+7 = 42, side_effect_count = 1
+}

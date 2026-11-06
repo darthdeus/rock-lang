@@ -1,0 +1,25 @@
+//! Error: functional-update `Ty { ..base }` rejects wrong-nominal bases and
+//!        more than one base (struct-spread plan M1, rules 5 + 6).
+//! Tags: struct-spread, functional-update
+
+//=== TEST CASE: update_wrong_nominal_base_MismatchedType ===
+// Rule 6: the base must have the SAME nominal type as the literal.
+struct A { x: int, y: int }
+struct B { x: int, y: int }
+
+fn main() {
+    let a = A { x: 1, y: 2 }
+    let b = B { ..a, y: 9 }   // ERROR: base is `A`, literal is `B`
+    print(b.x)
+}
+
+//=== TEST CASE: update_two_bases_Generic ===
+// Rule 5: two same-type bases both supply every field (collision).
+struct P { x: int, y: int }
+
+fn main() {
+    let a = P { x: 1, y: 2 }
+    let b = P { x: 3, y: 4 }
+    let c = P { ..a, ..b }   // ERROR: at most one base allowed
+    print(c.x)
+}

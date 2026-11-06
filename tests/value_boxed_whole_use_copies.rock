@@ -1,0 +1,182 @@
+// A whole-value use of a `value` held as ONE box is a copy, like every other
+// whole-value use.
+// `Wide` has 50 payload leaves, over `WIDE_VALUE_PAYLOAD_LEAF_CUT` (48), so it
+// crosses Rock calls boxed and a local bound to
+// a call result holds that box. Narrow values reach the same shape through an
+// opaque call (a closure) -- the `narrow_*` tests.
+//
+// Each test stores a whole value into a place, writes a leaf through that place,
+// and reads the value back through every other name for it.
+//
+// Sibling coverage: tests/value_whole_read_copies.rock (copy-on-read out of a
+// place), tests/value_semantics_decision_points.rock (capture by cell).
+
+value Wide {
+    f0: int,
+    f1: int,
+    f2: int,
+    f3: int,
+    f4: int,
+    f5: int,
+    f6: int,
+    f7: int,
+    f8: int,
+    f9: int,
+    f10: int,
+    f11: int,
+    f12: int,
+    f13: int,
+    f14: int,
+    f15: int,
+    f16: int,
+    f17: int,
+    f18: int,
+    f19: int,
+    f20: int,
+    f21: int,
+    f22: int,
+    f23: int,
+    f24: int,
+    f25: int,
+    f26: int,
+    f27: int,
+    f28: int,
+    f29: int,
+    f30: int,
+    f31: int,
+    f32: int,
+    f33: int,
+    f34: int,
+    f35: int,
+    f36: int,
+    f37: int,
+    f38: int,
+    f39: int,
+    f40: int,
+    f41: int,
+    f42: int,
+    f43: int,
+    f44: int,
+    f45: int,
+    f46: int,
+    f47: int,
+    f48: int,
+    f49: int
+}
+
+value Narrow { a: int, b: int }
+
+struct HW { w: Wide }
+struct HN { n: Narrow }
+
+fn mkw(n: int) -> Wide { return Wide { f0: n, f1: n, f2: n, f3: n, f4: n, f5: n, f6: n, f7: n, f8: n, f9: n, f10: n, f11: n, f12: n, f13: n, f14: n, f15: n, f16: n, f17: n, f18: n, f19: n, f20: n, f21: n, f22: n, f23: n, f24: n, f25: n, f26: n, f27: n, f28: n, f29: n, f30: n, f31: n, f32: n, f33: n, f34: n, f35: n, f36: n, f37: n, f38: n, f39: n, f40: n, f41: n, f42: n, f43: n, f44: n, f45: n, f46: n, f47: n, f48: n, f49: n } }
+fn mkn(n: int) -> Narrow { return Narrow { a: n, b: n } }
+
+fn stash(h1: HW, h2: HW, w: Wide) -> int {
+    h1.w = w
+    h2.w = w
+    h1.w.f0 = 99
+    return h2.w.f0 + w.f0
+}
+
+fn cap(n: int) -> () -> Wide {
+    let w = mkw(n)
+    return () => w
+}
+
+fn id(w: Wide) -> Wide { return w }
+
+fn store_into(h: HW, w: Wide) { h.w = w }
+
+@test(output = "2")
+fn wide_param_stored_twice() {
+    let w = mkw(1)
+    print(stash(HW { w: mkw(0) }, HW { w: mkw(0) }, w))
+}
+
+@test(output = "1 1 1")
+fn wide_local_into_two_ctors() {
+    let w = mkw(1)
+    let h1 = HW { w: w }
+    let h2 = HW { w: w }
+    h1.w.f0 = 99
+    print("{h2.w.f0} {w.f0} {h1.w.f0 - 98}")
+}
+
+@test(output = "3")
+fn wide_closure_result_into_ctor() {
+    let f = cap(3)
+    let h = HW { w: f() }
+    h.w.f0 = 99
+    print(f().f0)
+}
+
+@test(output = "1 1")
+fn wide_local_array_literal() {
+    let w = mkw(1)
+    let a = [w, w]
+    a[0].f0 = 99
+    print("{a[1].f0} {w.f0}")
+}
+
+@test(output = "1 1")
+fn wide_local_pushed_twice() {
+    let w = mkw(1)
+    let xs: [Wide] = []
+    xs.push(w)
+    xs.push(w)
+    xs[0].f0 = 99
+    print("{xs[1].f0} {w.f0}")
+}
+
+@test(output = "1")
+fn wide_param_stored_by_callee() {
+    let w = mkw(1)
+    let h = HW { w: mkw(0) }
+    store_into(h, w)
+    h.w.f0 = 99
+    print(w.f0)
+}
+
+@test(output = "1")
+fn wide_param_returned_then_stored() {
+    let w = mkw(1)
+    let h = HW { w: id(w) }
+    h.w.f0 = 99
+    print(w.f0)
+}
+
+@test(output = "1")
+fn narrow_closure_result_local_into_ctor() {
+    let w = mkn(1)
+    let f = () => w
+    let p = f()
+    let h = HN { n: p }
+    h.n.a = 99
+    print(p.a)
+}
+
+// A local built by a ctor is scalarized and rebuilt at each escape; reassigning
+// it a box it did not build must keep that true.
+@test(output = "3 3")
+fn wide_built_local_reassigned_a_borrowed_box() {
+    let f = cap(3)
+    let w = mkw(1)
+    w = f()
+    let h1 = HW { w: w }
+    let h2 = HW { w: w }
+    h1.w.f0 = 99
+    print("{h2.w.f0} {f().f0}")
+}
+
+@test(output = "1 1")
+fn narrow_built_local_reassigned_a_borrowed_box() {
+    let src = mkn(1)
+    let f = () => src
+    let n = Narrow { a: 0, b: 0 }
+    n = f()
+    let h1 = HN { n: n }
+    let h2 = HN { n: n }
+    h1.n.a = 99
+    print("{h2.n.a} {f().a}")
+}

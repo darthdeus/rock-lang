@@ -1,0 +1,25 @@
+//! Error: Arena iteration tuple access error tests
+//! Tags: arena, tuples, type_mismatches
+
+//=== TEST CASE: tuple_first_on_non_tuple_Generic ===
+struct Mob {
+    health: int
+}
+
+global mobs: Arena<Mob> = arena_new()
+
+fn test() {
+    insert(mobs, Mob { health: 100 })
+
+    for mob_item in mobs {
+        let entity = tuple_first(mob_item)  // OK: mob_item is (Entity<Mob>, Mob)
+        let mob = tuple_second(mob_item)    // OK: extracts Mob from tuple
+
+        // This should be an error - mob is Mob type, not tuple
+        let wrong = tuple_first(mob)  // ERROR: Cannot unify types: Mob vs tuple
+    }
+}
+
+fn main() {
+    test()
+}

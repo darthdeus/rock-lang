@@ -1,0 +1,289 @@
+// Dynamic width / precision in format specifiers: `{v:{w}.{p}f}`.
+// Width and precision positions accept either a decimal literal or a
+// `{expr}` sub-expression. Expressions must evaluate to `int`.
+//
+// Test plan — one test per distinct code path:
+//   - Basic shapes: dyn width only, dyn precision only, both dynamic
+//   - Mixed static/dynamic (both orderings)
+//   - Alignment / fill paths (fast vs slow padding)
+//   - All numeric format types × dynamic width
+//   - Float / exp / general / percent with dynamic precision
+//   - String precision truncation
+//   - Expression shapes (ident, arithmetic, function call, struct field,
+//     if-expression, global ident) — each triggers different passes
+//   - Edge cases: width=0, precision=0, width smaller than content
+//   - Integration with sign, grouping, zero-pad, literal `{{`
+//   - Multiple interpolations in same string
+//   - Real-world: label padding with runtime-computed column
+
+// ---------------------------------------------------------------------
+// Basic shapes
+// ---------------------------------------------------------------------
+
+@test
+fn test_dyn_width_string() {
+    let s = "hi"
+    let w = 5
+    assert_eq("[{s:{w}}]", "[   hi]")
+}
+
+@test
+fn test_dyn_width_int() {
+    let n = 42
+    let w = 6
+    assert_eq("[{n:{w}}]", "[    42]")
+}
+
+@test
+fn test_dyn_width_float() {
+    let x = 3.14
+    let w = 10
+    assert_eq("[{x:{w}f}]", "[  3.140000]")
+}
+
+@test
+fn test_dyn_precision_float() {
+    let x = 3.14159
+    let p = 3
+    assert_eq("[{x:.{p}f}]", "[3.142]")
+}
+
+@test
+fn test_dyn_precision_string_truncate() {
+    let s = "abcdef"
+    let p = 3
+    assert_eq("[{s:.{p}}]", "[abc]")
+}
+
+@test
+fn test_dyn_width_and_precision_float() {
+    let x = 3.14159
+    let w = 10
+    let p = 2
+    assert_eq("[{x:{w}.{p}f}]", "[      3.14]")
+}
+
+// ---------------------------------------------------------------------
+// Mixed static / dynamic — ensure neither ordering breaks
+// ---------------------------------------------------------------------
+
+@test
+fn test_dyn_width_static_precision() {
+    let x = 3.14159
+    let w = 12
+    assert_eq("[{x:{w}.3f}]", "[       3.142]")
+}
+
+@test
+fn test_static_width_dyn_precision() {
+    let x = 3.14159
+    let p = 4
+    assert_eq("[{x:10.{p}f}]", "[    3.1416]")
+}
+
+// ---------------------------------------------------------------------
+// Alignment and fill with dynamic width — covers both the
+// string.format("%-Ns", ...) fast path (disabled when dynamic) and the
+// __rock_fmt_pad slow path.
+// ---------------------------------------------------------------------
+
+@test
+fn test_dyn_width_left_align() {
+    let s = "hi"
+    let w = 6
+    assert_eq("[{s:<{w}}]", "[hi    ]")
+}
+
+@test
+fn test_dyn_width_center_align() {
+    let s = "hi"
+    let w = 6
+    assert_eq("[{s:^{w}}]", "[  hi  ]")
+}
+
+@test
+fn test_dyn_width_custom_fill() {
+    let s = "42"
+    let w = 6
+    assert_eq("[{s:*^{w}}]", "[**42**]")
+}
+
+// ---------------------------------------------------------------------
+// Every numeric format type × dynamic width — each hits a separate
+// branch in apply_format_specifier.
+// ---------------------------------------------------------------------
+
+@test
+fn test_dyn_width_hex() {
+    let n = 255
+    let w = 6
+    assert_eq("[{n:{w}x}]", "[    ff]")
+}
+
+@test
+fn test_dyn_width_octal() {
+    let n = 8
+    let w = 4
+    assert_eq("[{n:{w}o}]", "[  10]")
+}
+
+@test
+fn test_dyn_width_binary() {
+    let n = 5
+    let w = 6
+    assert_eq("[{n:{w}b}]", "[   101]")
+}
+
+@test
+fn test_dyn_width_char() {
+    let code = 65
+    let w = 4
+    assert_eq("[{code:{w}c}]", "[   A]")
+}
+
+// ---------------------------------------------------------------------
+// Dynamic precision on each non-integer numeric type
+// ---------------------------------------------------------------------
+
+@test
+fn test_dyn_precision_exponential() {
+    let x = 12345.678
+    let p = 2
+    assert_eq("[{x:.{p}e}]", "[1.23e+04]")
+}
+
+@test
+fn test_dyn_precision_general() {
+    let x = 0.000123
+    let p = 2
+    assert_eq("[{x:.{p}g}]", "[0.00012]")
+}
+
+@test
+fn test_dyn_precision_percent() {
+    let x = 0.5
+    let p = 1
+    assert_eq("[{x:.{p}%}]", "[50.0%]")
+}
+
+// ---------------------------------------------------------------------
+// Expression shapes — each triggers different pipeline passes
+// (scalarize, inline, bidirectional).
+// ---------------------------------------------------------------------
+
+@test
+fn test_dyn_width_arithmetic() {
+    let s = "hi"
+    let base = 3
+    assert_eq("[{s:{base + 2}}]", "[   hi]")
+}
+
+@test
+fn test_dyn_precision_function_call() {
+    let x = 3.14159
+    assert_eq("[{x:.{get_two()}f}]", "[3.14]")
+}
+
+fn get_two() -> int {
+    return 2
+}
+
+@test
+fn test_dyn_width_struct_field_scalarized() {
+    // Exercises scalarize_pass visiting width/precision exprs — `cfg` is
+    // split into `cfg__w` / `cfg__p` in Lua, and the sub-expression must
+    // pick up the rewritten field access.
+    let cfg = Cfg { w: 7, p: 2 }
+    let x = 1.5
+    assert_eq("[{x:{cfg.w}.{cfg.p}f}]", "[   1.50]")
+}
+
+struct Cfg { w: int, p: int }
+
+@test
+fn test_dyn_precision_if_expression() {
+    let x = 3.14
+    let narrow = true
+    assert_eq("[{x:.{if narrow { 2 } else { 5 }}f}]", "[3.14]")
+}
+
+global NAME_COL: int = 12
+
+@test
+fn test_dyn_width_global() {
+    let label = "hi"
+    assert_eq("[{label:<{NAME_COL}}]", "[hi          ]")
+}
+
+// ---------------------------------------------------------------------
+// Edges
+// ---------------------------------------------------------------------
+
+@test
+fn test_dyn_width_zero_no_pad() {
+    let s = "hi"
+    assert_eq("[{s:{0}}]", "[hi]")
+}
+
+@test
+fn test_dyn_precision_zero_rounds() {
+    let x = 9.7
+    assert_eq("[{x:.{0}f}]", "[10]")
+}
+
+@test
+fn test_dyn_width_smaller_than_content() {
+    // Width is a minimum — content longer than width passes through.
+    let s = "hello world"
+    let w = 3
+    assert_eq("[{s:{w}}]", "[hello world]")
+}
+
+// ---------------------------------------------------------------------
+// Integration with other format-spec features
+// ---------------------------------------------------------------------
+
+@test
+fn test_dyn_width_with_sign_flag() {
+    let n = 5
+    let w = 4
+    assert_eq("[{n: {w}d}]", "[   5]")
+}
+
+@test
+fn test_dyn_width_with_grouping() {
+    let n = 1000000
+    let w = 12
+    assert_eq("[{n:{w},d}]", "[   1,000,000]")
+}
+
+@test
+fn test_zero_pad_with_dyn_width_falls_back_to_space_pad() {
+    // Dynamic width disables the zero-pad fast path (can't bake a
+    // runtime expression into string.format's literal format). We pad
+    // with spaces instead — a documented tradeoff.
+    let n = 42
+    let w = 6
+    assert_eq("[{n:0{w}d}]", "[    42]")
+}
+
+@test
+fn test_literal_brace_alongside_dynamic() {
+    let x = 3.14
+    let p = 2
+    assert_eq("{{prefix}}:{x:.{p}f}", "{{prefix}}:3.14")
+}
+
+// ---------------------------------------------------------------------
+// Multiple interpolations in same string (ensures brace-depth tracking
+// in the interp splitter works — an inner `}` must not terminate the
+// outer interpolation).
+// ---------------------------------------------------------------------
+
+@test
+fn test_multiple_dynamic_interp() {
+    let a = "foo"
+    let b = 42
+    let w = 6
+    assert_eq("[{a:<{w}}][{b:>{w}d}]", "[foo   ][    42]")
+}

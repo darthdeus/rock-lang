@@ -1,0 +1,55 @@
+// First end-to-end exercise of the declarative macro system.
+//
+// Status: tests 1 + 2 GREEN via the existing @inline pass. Test 3 (variadic
+// recursion) is RED and parked — needs list-substitution + splat-expansion
+// in the inline pass.
+
+// === Single-shape expansion (GREEN) ===
+
+macro double(x: expr) -> int {
+    x + x
+}
+
+@test
+fn test_macro_simple_expansion() {
+    let result = double(5)
+    assert(result == 10, "double(5) should expand to 5 + 5 == 10")
+}
+
+// === Overload-dispatched arms (GREEN) ===
+
+macro greet() -> string {
+    "hello"
+}
+
+macro greet(name: ident) -> string {
+    "hello, {name}"
+}
+
+@test
+fn test_macro_overload_arms() {
+    assert(greet() == "hello", "zero-arg overload")
+    let world = "world"
+    assert(greet(world) == "hello, world", "ident-arg overload")
+}
+
+// === Variadic + overload-recursion ===
+// Variadic macros expand recursively at compile time. Each `sum_of(...rest)`
+// call has its splat expanded and the
+// matching overload selected by post-splat arity (variadic for ≥1,
+// base case for 0).
+
+macro sum_of() -> int {
+    0
+}
+
+macro sum_of(x: expr, rest: ...expr) -> int {
+    x + sum_of(...rest)
+}
+
+@test
+fn test_macro_variadic() {
+    assert(sum_of() == 0, "empty variadic")
+    assert(sum_of(1) == 1, "one arg")
+    assert(sum_of(1, 2, 3, 4) == 10, "four args via recursive overload")
+}

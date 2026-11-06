@@ -1,0 +1,128 @@
+// Comprehensive if expression tests ported from rock/tests/if_expr_tests.rs
+// Tests if expressions, nested conditions, assignments, and complex blocks
+
+// Helper functions for conditional tests
+fn max_of_two(a: int, b: int) -> int {
+    if a > b { return a } else { return b }
+}
+
+fn foo() -> bool {
+    if true {
+        return true
+    }
+    return false
+}
+
+@test(output = "true")
+fn if_without_else_in_function() {
+    print(foo())
+}
+
+@test(output = "5")
+fn test_basic_if_expressions_1() {
+    let a = true
+    print(if a { 5 } else { 6 })
+}
+
+@test(output = "1")
+fn test_basic_if_expressions_2() {
+    let x = 10
+    print(if x > 0 { 1 } else { -1 })
+}
+
+@test(output = "42")
+fn test_basic_if_expressions_3() {
+    print(if true { 42 } else { 0 })
+}
+
+@test(output = "42")
+fn test_basic_if_expressions_4() {
+    print(if false { 0 } else { 42 })
+}
+
+@test(output = "5")
+fn test_if_expr_in_assignments_1() {
+    let a = true
+    let x = if a { 5 } else { 6 }
+    print(x)
+}
+
+@test(output = "100")
+fn test_if_expr_in_assignments_2() {
+    let condition = true
+    let x: int = if condition { 100 } else { 200 }
+    print(x)
+}
+
+@test(output = "5")
+fn test_if_expr_in_assignments_3() {
+    let a = true
+    let b = false
+    let x = if a { 1 } else { 2 }
+    let y = if b { 3 } else { 4 }
+    print(x + y)
+}
+
+@test(output = "2")
+fn test_nested_if_expressions_1() {
+    let a = true
+    let b = false
+    print(if a { if b { 1 } else { 2 } } else { 3 })
+}
+
+@test(output = "1")
+fn test_nested_if_expressions_2() {
+    let x = true
+    print(if (if x { true } else { false }) { 1 } else { 0 })
+}
+
+@test(output = "10")
+fn test_if_expr_with_complex_blocks() {
+    let condition = true
+    print(if condition { let temp = 5; temp * 2 } else { 0 })
+}
+
+@test(output = "debug mode")
+fn test_if_expr_in_function_calls_1() {
+    let debug = true
+    print(if debug { "debug mode" } else { "release mode" })
+}
+
+@test(output = "3")
+fn test_if_expr_in_function_calls_2() {
+    let a = false
+    let b = true
+    print(max_of_two(if a { 1 } else { 2 }, if b { 3 } else { 4 }))
+}
+
+@test(output = "8")
+fn test_if_expr_in_binary_operations_1() {
+    let a = true
+    let b = false
+    print((if a { 5 } else { 10 }) + (if b { 2 } else { 3 }))
+}
+
+@test(output = "true")
+fn test_if_expr_in_binary_operations_2() {
+    let x = true
+    print((if x { 1 } else { 2 }) == 1)
+}
+
+@test(output = "two")
+fn test_if_else_if_expressions_1() {
+    let x = 2
+    print(if x == 1 { "one" } else if x == 2 { "two" } else { "other" })
+}
+
+@test(output = "B")
+fn test_if_else_if_expressions_2() {
+    let score = 85
+    print(if score >= 90 { "A" } else if score >= 80 { "B" } else if score >= 70 { "C" } else { "F" })
+}
+
+@test(output = "success")
+fn test_if_expr_return_types_2() {
+    let has_error = false
+    let message = if has_error { "failed" } else { "success" }
+    print(message)
+}

@@ -1,0 +1,25 @@
+//! Error: a function with NO return-type annotation returns `()` (unit), so an
+//!        explicit `return <value>` is a type error -- you cannot return a value
+//!        from a unit fn. Pre-fix bone left `declared_ret_ty` = None for an
+//!        un-annotated top-level fn and the `Expr::Return` arm only coerced when
+//!        it was `Some`, so `return make()` (a `Trail`) was silently accepted.
+//!        The un-annotated tail is still discarded (`fn f() { compute() }` is a
+//!        side-effecting call, not a return); only an explicit `return <value>`
+//!        rejects. A NESTED un-annotated fn stays inferred-return (v1), so its
+//!        `return` is unchecked -- this rule governs the top-level body only.
+//! Tags: return-type, unit, type-mismatch
+
+//=== TEST CASE: return_value_from_unannotated_fn_Generic ===
+struct Trail { x: int }
+
+fn make() -> Trail {
+    return Trail { x: 1 }
+}
+
+fn no_annotation() {
+    return make()
+}
+
+fn main() {
+    no_annotation()
+}

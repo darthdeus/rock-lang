@@ -1,0 +1,29 @@
+// Bucket B coverage: value-position `??` returning non-flat value.
+
+value V2 {
+    x: float,
+    y: float,
+}
+
+value Seg {
+    a: V2,
+    b: V2,
+}
+
+fn maybe_seg(want: bool) -> Seg? {
+    if want {
+        Seg { a: V2 { x: 1, y: 2 }, b: V2 { x: 3, y: 4 } }
+    } else {
+        null
+    }
+}
+
+@test(output = "9\n9\n9\n9")
+fn test_value_coalesce_nested() {
+    let fallback = Seg { a: V2 { x: 9, y: 9 }, b: V2 { x: 9, y: 9 } }
+    let s: Seg = maybe_seg(false) ?? fallback
+    print("{s.a.x.floor()}")
+    print("{s.a.y.floor()}")
+    print("{s.b.x.floor()}")
+    print("{s.b.y.floor()}")
+}

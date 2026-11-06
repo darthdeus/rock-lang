@@ -1,0 +1,185 @@
+// Comprehensive coverage tests for all features built in the arenas branch.
+// Each test is labeled with the feature it covers.
+
+struct Inner { value: int }
+struct Outer { inner: Inner?, name: string }
+struct Mob { name: string, health: int }
+struct Container { data: Mob? }
+
+fn double(x: int) -> int { return x * 2 }
+fn get_hp(mob: Mob) -> int { return mob.health }
+
+// -- Arena slot reuse --
+
+@test(output = "0\n1")
+fn arena_slot_reuse_verified() {
+    let a: Arena<int> = arena_new()
+    let e1 = a.insert(10)
+    a.remove(e1)
+    let e2 = a.insert(20)
+    print(e2._slot)
+    print(arena_slot_count(a))
+}
+
+// -- Arena O(1) len across all operations --
+
+@test(output = "0\n3\n2\n0")
+fn arena_len_all_ops() {
+    let a: Arena<int> = arena_new()
+    print(a.len())
+    a.insert(1)
+    a.insert(2)
+    let e = a.insert(3)
+    print(a.len())
+    a.remove(e)
+    print(a.len())
+    a.clear()
+    print(a.len())
+}
+
+// -- .0/.1 on nullable tuples --
+
+@test(output = "Orc\ntrue\ntrue\ntrue")
+fn nullable_tuple_dot_all_cases() {
+    let mobs: Arena<Mob> = arena_new()
+    mobs.insert(Mob { name: "Orc", health: 100 })
+
+    print(mobs.pairs().find(_.1.name == "Orc")?.1.unwrap().name)
+    print(mobs.pairs().find(_.1.name == "Ghost")?.1 == null)
+    print(mobs.pairs().find(_.1.name == "Orc")?.0 != null)
+    print(mobs.pairs().find(_.1.name == "Ghost")?.0 == null)
+}
+
+// -- projecting tuple fields out of a vec via .map(_.N) --
+
+@test(output = "1\n2\na\nb")
+fn vec_tuple_dot_both() {
+    let pairs: [(int, string)] = [(1, "a"), (2, "b")]
+    for x in pairs.iter().map(_.0).collect() { print(x) }
+    for x in pairs.iter().map(_.1).collect() { print(x) }
+}
+
+@test(output = "0\n0")
+fn vec_tuple_dot_empty() {
+    let empty: [(int, string)] = []
+    print(vec_len(empty.iter().map(_.0).collect()))
+    print(vec_len(empty.iter().map(_.1).collect()))
+}
+
+@test(output = "Goblin\nOrc")
+fn vec_tuple_dot1_from_filter() {
+    let mobs: Arena<Mob> = arena_new()
+    mobs.insert(Mob { name: "Goblin", health: 30 })
+    mobs.insert(Mob { name: "Orc", health: 100 })
+    for mob in mobs.pairs().filter(_.1.health > 0).map(_.1).collect() { print(mob.name) }
+}
+
+@test(output = "2")
+fn vec_tuple_dot0_from_map() {
+    let mobs: Arena<Mob> = arena_new()
+    mobs.insert(Mob { name: "A", health: 10 })
+    mobs.insert(Mob { name: "B", health: 20 })
+    print(vec_len(mobs.pairs().map(p => (p.0, p.1.health)).map(_.0).collect()))
+}
+
+// -- ?.method() --
+
+@test(output = "100\ntrue")
+fn safenav_method_struct() {
+    let mob: Mob? = Mob { name: "Orc", health: 100 }
+    print(mob?.get_hp())
+    let mob2: Mob? = null
+    print(mob2?.get_hp() == null)
+}
+
+@test(output = "0")
+fn safenav_method_coalesce() {
+    let x: int? = null
+    print(x?.double() ?? 0)
+}
+
+// -- ?. + ?? combined --
+
+@test(output = "hello\ndefault\n0")
+fn safenav_coalesce_combos() {
+    let f: Outer? = Outer { inner: null, name: "hello" }
+    print(f?.name ?? "default")
+    let f2: Outer? = null
+    print(f2?.name ?? "default")
+    print(f2?.inner?.value ?? 0)
+}
+
+// -- ?.let --
+
+@test(output = "10\ntrue")
+fn safenav_let_basic() {
+    let x: int? = 5
+    print(x?.let { x * 2 })
+    let y: int? = null
+    print(y?.let { y * 2 } == null)
+}
+
+// -- ?.0 / ?.1 --
+
+@test(output = "Orc\ntrue")
+fn safenav_tuple_index() {
+    let mobs: Arena<Mob> = arena_new()
+    mobs.insert(Mob { name: "Orc", health: 100 })
+    print(mobs.pairs().find(_.1.name == "Orc")?.1.unwrap().name)
+    print(mobs.pairs().find(_.1.name == "Ghost")?.1 == null)
+}
+
+// -- Full chain: find -> ?.1 -> ?.field -> ?? --
+
+@test(output = "Orc\ndefault\n100\n0")
+fn full_chain_all_features() {
+    let mobs: Arena<Mob> = arena_new()
+    mobs.insert(Mob { name: "Orc", health: 100 })
+
+    print(mobs.pairs().find(_.1.name == "Orc")?.1?.name ?? "default")
+    print(mobs.pairs().find(_.1.name == "Ghost")?.1?.name ?? "default")
+    print(mobs.pairs().find(_.1.name == "Orc")?.1?.get_hp() ?? 0)
+    print(mobs.pairs().find(_.1.name == "Ghost")?.1?.get_hp() ?? 0)
+}
+
+// -- filter .0 remove all --
+
+@test(output = "0")
+fn filter_dot0_remove_all() {
+    let mobs: Arena<Mob> = arena_new()
+    mobs.insert(Mob { name: "A", health: 10 })
+    mobs.insert(Mob { name: "B", health: 20 })
+    for e in mobs.pairs().filter(_.1.health > 0).map(_.0).collect() { e.remove() }
+    print(mobs.len())
+}
+
+// -- find + remove + find again --
+
+@test(output = "true\ntrue")
+fn find_remove_find() {
+    let mobs: Arena<Mob> = arena_new()
+    mobs.insert(Mob { name: "Orc", health: 100 })
+    let e = mobs.pairs().find(_.1.name == "Orc")?.0
+    print(e != null)
+    e.unwrap().remove()
+    print(mobs.pairs().find(_.1.name == "Orc") == null)
+}
+
+// -- Nullable struct field with ?. --
+
+@test(output = "42\n0")
+fn nullable_field_safenav() {
+    let c = Container { data: Mob { name: "X", health: 42 } }
+    print(c.data?.health ?? 0)
+    let c2 = Container { data: null }
+    print(c2.data?.health ?? 0)
+}
+
+// -- find on empty arena --
+
+@test(output = "true\ntrue")
+fn find_empty() {
+    let mobs: Arena<Mob> = arena_new()
+    print(mobs.pairs().find(_.1.health > 0) == null)
+    print(mobs.pairs().find(_.1.health > 0)?.1 == null)
+}

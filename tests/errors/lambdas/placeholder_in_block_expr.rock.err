@@ -1,0 +1,38 @@
+//! Error: `_` placeholder inside a block expression must be rejected
+//!        at compile time. The inner per-`_` desugar would otherwise
+//!        produce a stuck lambda that gets bound to a name and used
+//!        in a non-callable position, surfacing as a confusing late
+//!        LuaJIT runtime error.
+//! Tags: lambdas, placeholders
+
+//=== TEST CASE: placeholder_in_block_let_init_Generic ===
+// Original repro: inner `_.a` desugars to a lambda, gets bound to `z`,
+// then `z + 1` fails at runtime with "attempt to perform arithmetic
+// on a function value".
+struct Pair { a: int, b: int }
+fn main() {
+    let xs: [Pair] = [Pair { a: 10, b: 0 }, Pair { a: 20, b: 0 }]
+    let _ys = xs.map({ let z = _.a; z + 1 })
+}
+
+//=== TEST CASE: placeholder_in_single_expr_block_Generic ===
+// `xs.map({ _.a })` happened to work today (inner `_.a` becomes a
+// lambda, block tail evaluates to it). Banning it is a fair price for
+// a clean rule — and writing `xs.map(_.a)` directly is shorter anyway.
+struct Pair2 { a: int }
+fn main() {
+    let xs: [Pair2] = [Pair2 { a: 1 }]
+    let _ys = xs.map({ _.a })
+}
+
+//=== TEST CASE: placeholder_in_multi_stmt_block_Generic ===
+// Multiple statements with `_` somewhere in the middle.
+struct Pair3 { a: int, b: int }
+fn main() {
+    let xs: [Pair3] = [Pair3 { a: 1, b: 2 }]
+    let _ys = xs.map({
+        let unused = 0
+        let z = _.a
+        z + unused
+    })
+}

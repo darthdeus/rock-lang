@@ -1,0 +1,26 @@
+//! Error: an unconstrained lambda param that no use in the body ever pins
+//!        has no type -- defer-to-use does not invent one. The local
+//!        `*(UnpinnedW, int)` overload ties with stdlib `*(int, int)`, so `x * 2` cannot
+//!        pick eagerly, and with no later call the param stays unresolved.
+//! Tags: lambdas, inference, defer-to-use
+
+//=== TEST CASE: unpinned_lambda_param_mul_Generic ===
+struct UnpinnedW { a: float }
+
+operator *(l: UnpinnedW, r: int) -> UnpinnedW {
+    return UnpinnedW { a: l.a }
+}
+
+fn main() {
+    let f = x => x * 2
+    print("never calls f")
+}
+
+//=== TEST CASE: unpinned_placeholder_field_Generic ===
+struct UnpinnedP { x: int }
+struct UnpinnedQ { x: float }
+
+fn main() {
+    let get_x = _.x
+    print("never calls get_x")
+}

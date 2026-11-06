@@ -1,0 +1,29 @@
+// Controls for the nullable coalesce join: scalar and boxed value payloads.
+
+value BoxedPair { x: int, y: int }
+
+fn maybe_int(present: bool) -> int? {
+    if present { return 11 }
+    return null
+}
+
+fn maybe_boxed_pair(present: bool) -> BoxedPair? {
+    if present { return BoxedPair { x: 2, y: 4 } }
+    return null
+}
+
+@test(output = "11")
+fn scalar_payload_control() {
+    let value = maybe_int(false) ?? if let inner = maybe_int(true) { inner } else { null }
+    if value != null { print(value) } else { print("null") }
+}
+
+@test(output = "2 4")
+fn boxed_value_payload_control() {
+    let value = maybe_boxed_pair(false) ?? if let inner = maybe_boxed_pair(true) { inner } else { null }
+    if value != null {
+        print("{value.x} {value.y}")
+    } else {
+        print("null")
+    }
+}

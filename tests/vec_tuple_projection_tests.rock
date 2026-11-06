@@ -1,0 +1,77 @@
+struct Mob { name: string, health: int }
+
+// -- projecting tuple fields out of a vec via .iter().map(_.N) --
+
+@test(output = "1\n2\n3")
+fn vec_dot0_basic() {
+    let pairs: [(int, string)] = [(1, "a"), (2, "b"), (3, "c")]
+    let firsts = pairs.iter().map(_.0).collect()
+    for x in firsts {
+        print(x)
+    }
+}
+
+@test(output = "a\nb\nc")
+fn vec_dot1_basic() {
+    let pairs: [(int, string)] = [(1, "a"), (2, "b"), (3, "c")]
+    let seconds = pairs.iter().map(_.1).collect()
+    for x in seconds {
+        print(x)
+    }
+}
+
+@test(output = "Goblin\nOrc")
+fn vec_dot1_from_arena_filter() {
+    let mobs: Arena<Mob> = arena_new()
+    mobs.insert(Mob { name: "Goblin", health: 30 })
+    mobs.insert(Mob { name: "Orc", health: 100 })
+
+    // pairs() yields (Entity<Mob>, Mob); .map(_.1) gives [Mob]
+    let names = mobs.pairs().filter(_.1.health > 0).map(_.1).collect()
+    for mob in names {
+        print(mob.name)
+    }
+}
+
+@test(output = "2")
+fn vec_dot0_from_arena_filter() {
+    let mobs: Arena<Mob> = arena_new()
+    mobs.insert(Mob { name: "Goblin", health: 30 })
+    mobs.insert(Mob { name: "Orc", health: 100 })
+
+    let entities = mobs.pairs().filter(_.1.health > 0).map(_.0).collect()
+    print(vec_len(entities))
+}
+
+@test(output = "Goblin\nOrc")
+fn vec_dot1_from_arena_map() {
+    let mobs: Arena<Mob> = arena_new()
+    mobs.insert(Mob { name: "Goblin", health: 30 })
+    mobs.insert(Mob { name: "Orc", health: 100 })
+
+    // pairs() into a tuple-valued map keeps the entity paired; .map(_.1) projects it out
+    let names = mobs.pairs().map(p => (p.0, p.1.name)).map(_.1).collect()
+    for name in names {
+        print(name)
+    }
+}
+
+// -- Type correctness --
+
+@test(output = "2")
+fn dot0_len() {
+    let mobs: Arena<Mob> = arena_new()
+    mobs.insert(Mob { name: "Goblin", health: 30 })
+    mobs.insert(Mob { name: "Orc", health: 100 })
+
+    print(vec_len(mobs.pairs().filter(_.1.health > 0).map(_.0).collect()))
+}
+
+// -- Edge cases --
+
+@test(output = "0")
+fn vec_dot0_empty() {
+    let pairs: [(int, string)] = []
+    let firsts = pairs.iter().map(_.0).collect()
+    print(vec_len(firsts))
+}

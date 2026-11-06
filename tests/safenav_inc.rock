@@ -1,0 +1,48 @@
+// Small-tail: `obj?.field` safe-navigation desugars to the IIFE-free
+// `If` shape (`t = obj; if t == nil then nil else t.field`), the
+// same AnfComp::If `??` uses — byte-faithful to live
+// generate_safe_navigation minus the IIFE. Chains and the `?? d`
+// coalesce compose. `?.let` / nullable-base `id?.0` stay separate.
+// Must pass with and without ROCK_ANF_FUNCTIONS=1.
+
+struct Inner { v: int }
+struct Outer { inner: Inner? }
+
+fn deep(o: Outer?) -> int {
+    return o?.inner?.v ?? -1
+}
+
+fn shallow(i: Inner?) -> int {
+    return i?.v ?? 0
+}
+
+@test(output = "42\n-1\n-1")
+fn test_chained_safenav() {
+    let a = Outer { inner: Inner { v: 42 } }
+    print("{deep(a)}")
+    let b = Outer { inner: null }
+    print("{deep(b)}")
+    let c: Outer? = null
+    print("{deep(c)}")
+}
+
+@test(output = "9\n0")
+fn test_single_safenav() {
+    let i = Inner { v: 9 }
+    print("{shallow(i)}")
+    let n: Inner? = null
+    print("{shallow(n)}")
+}
+
+fn pick(i: Inner?) -> int {
+    return i?.v ?? 99
+}
+
+@test(output = "5\n99")
+fn test_safenav_present_via_param() {
+    let p = Inner { v: 5 }
+    let r = pick(p)
+    print("{r}")
+    let n: Inner? = null
+    print("{pick(n)}")
+}

@@ -1,0 +1,37 @@
+// FLIPPED:
+// what used to be a behavior-pin (`same(mk(), mk())` -> "true"/"false" leaking
+// step-8b fn identity through a generic wrapper) is now a COMPILE ERROR, pinned
+// in tests/errors/fn_identity_generic.rock.err. This file keeps the GREEN
+// guards: the same generic wrapper over NON-fn types still compiles and runs,
+// so the call-site eq-check only fires when a `==`-compared type param resolves
+// to a fn type.
+
+fn same<T>(a: T, b: T) -> bool { return a == b }
+
+struct P { x: int }
+value V { n: int }
+
+@test(output = "true")
+fn test_same_int_through_generic() {
+    print("{same(1, 1)}")
+}
+
+@test(output = "false")
+fn test_same_string_through_generic() {
+    print("{same(\"a\", \"b\")}")
+}
+
+@test(output = "true")
+fn test_same_struct_through_generic() {
+    // the point is only that the generic compiles for a struct type param;
+    // structs compare by identity, so the same binding compared to itself is true.
+    let p = P { x: 1 }
+    print("{same(p, p)}")
+}
+
+@test(output = "true")
+fn test_same_value_through_generic() {
+    let a = V { n: 3 }
+    let b = V { n: 3 }
+    print("{same(a, b)}")
+}

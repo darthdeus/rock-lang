@@ -1,0 +1,9 @@
+pub value Rect {
+    pub x: float,
+    pub y: float,
+    pub w: float,
+    pub h: float,
+    pub z: int = 0,
+    pub ctx: int = 0,
+    pub ref_h: float = 0.0,
+}

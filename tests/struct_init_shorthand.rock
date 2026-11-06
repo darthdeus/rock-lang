@@ -1,0 +1,19 @@
+struct Point {
+    x: int
+    y: int
+}
+
+@test(output = "3 7")
+fn test_shorthand_field() {
+    let x = 3
+    let y = 7
+    let p = Point { x, y }
+    print("{p.x} {p.y}")
+}
+
+@test(output = "5 5")
+fn test_mixed_shorthand_and_explicit() {
+    let x = 5
+    let p = Point { x, y: 5 }
+    print("{p.x} {p.y}")
+}

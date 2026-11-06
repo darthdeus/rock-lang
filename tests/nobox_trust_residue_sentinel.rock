@@ -1,0 +1,64 @@
+// SENTINELS -- the `nobox` trust residue, in its two SILENT shapes.
+//
+// An opaque `inline(lua)` body can reach a nobox value by a route that appears
+// nowhere in its signature, so no signature check can close it. Most such routes
+// announce themselves (a boxed idiom against columnar storage dies on a nil key,
+// and a smuggled box in a leaf slot eventually throws in LuaJIT's float
+// formatting or arithmetic). These two do NOT, which is why they are pinned here
+// and the loud ones are not.
+//
+// PINNED BEHAVIOR (BUG) in both tests below. When either stops holding, the fix
+// landed: flip the assertion to the correct value named in each comment, update
+// the comment, and ship both in the same commit.
+//
+// Measured live, not presumed: the matrix's trust-boundary section used to say
+// "container and field writes are presumed to be the same class, untested". That
+// presumption was false in both directions -- containers are mostly loud, field
+// writes are silent, and a Map store an opaque body performs actually WORKS.
+
+nobox value TrustV2 { x: float, y: float }
+
+struct TrustHolder { p: TrustV2, tag: int }
+
+global TRUST_HOLDER: TrustHolder = TrustHolder { p: TrustV2 { x: 1.0, y: 1.0 }, tag: 1 }
+
+@nomangle inline(lua) fn trust_poke_field_and_sibling() = """
+    TRUST_HOLDER.p = TrustV2_ct(9.0, 9.0)
+    TRUST_HOLDER.tag = 99
+"""
+
+// The shape most likely to fool an author. The body sets a nobox field AND a
+// neighbouring scalar; the scalar lands, the nobox field write VANISHES. Nothing
+// reports the dropped write, so checking `tag` and seeing 99 reads as "the body
+// works". The field write is silent because the global's leaves are flattened to
+// `["p.x"]` / `["p.y"]` keys -- assigning `.p` sets a key nobody reads.
+//
+// CORRECT would be `p.x == 9.0` (the write taking effect) or a loud rejection.
+@test(returns = 1099)
+fn nobox_field_write_from_an_opaque_body_vanishes_while_its_sibling_lands_sentinel() -> int {
+    trust_poke_field_and_sibling()
+    // 1 * 1000 + 99 == 1099 pins BOTH halves: the stale field and the live tag.
+    // Encoding them together is what makes the PARTIAL success visible -- either
+    // half alone would look like a plain pass or a plain failure.
+    return int(TRUST_HOLDER.p.x) * 1000 + TRUST_HOLDER.tag
+}
+
+global TRUST_MAP: Map<string, TrustV2> = map_new()
+
+// NOT a sentinel -- this is the positive test that replaced one. Before Map value
+// storage landed, an opaque body could perform `M["a"] = TrustV2_ct(9.0, 9.0)`
+// and a Rock read would unbox the smuggled cdata correctly, because the emitted
+// read was representation-agnostic. That made an opaque body a WORKING back door
+// for a store the compiler refused.
+//
+// The column spine closed it from both ends: the Rock store below is now
+// supported outright (no `materialize`), and the smuggled raw-table write is no
+// longer readable -- it fails loudly with `Map key not found` rather than
+// silently returning nothing, because the spine lookup never finds a key the
+// back door never registered. A back door that now announces itself is the
+// outcome we want, so there is nothing left to pin.
+@test(returns = 9)
+fn a_nobox_map_store_needs_no_materialize() -> int {
+    TRUST_MAP["a"] = TrustV2 { x: 9.0, y: 9.0 }
+    return int(TRUST_MAP["a"].x)
+}

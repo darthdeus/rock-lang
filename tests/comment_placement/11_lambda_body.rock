@@ -1,0 +1,6 @@
+// Comment inside lambda body expression
+@test(output = "6")
+fn t() {
+    let f = x => /* double */ x * 2
+    print(f(3))
+}

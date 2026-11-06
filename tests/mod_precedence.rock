@@ -1,0 +1,84 @@
+// `%` must bind with `*` and `/`, not below `+`/`-` and the comparisons.
+//
+// It did not: `rock-tokenizer`'s infix_bp put Mod at 21, which is under
+// `==`/`!=` (19) only, and below `<<`/`>>` (23), the comparisons (25), `+`/`-`
+// (31) and `*`/`/` (35). So `a + b % c` parsed as `(a + b) % c`, `a % b * c` as
+// `a % (b * c)`, and `a % b < c` as `a % (b < c)` -- a modulo of a bool, which
+// the typechecker rejected, so that shape simply could not be written. Only
+// `a * b % c` came out right, by the accident of `*` already binding tighter.
+//
+// Same table and same class of defect as `nullable_coalesce_precedence.rock`.
+//
+// The guards at the bottom pin the other side, so lowering the level cannot
+// silently drag `%` back under the operators it must stay above.
+
+@test
+fn mod_binds_tighter_than_plus_and_minus() {
+    // 10 - (7 % 4) = 10 - 3 = 7. The old table read this as (10 - 7) % 4 = 3.
+    assert_eq(10 - 7 % 4, 7)
+    assert_eq(10 + 7 % 4, 13)
+    // And on the left, where the old table swallowed the whole sum:
+    // 7 % (4 + 2) = 1 under the old reading, (7 % 4) + 2 = 5 under this one.
+    assert_eq(7 % 4 + 2, 5)
+    assert_eq(7 % 4 - 1, 2)
+}
+
+@test
+fn mod_is_left_associative_with_mul_and_div() {
+    // (7 % 4) * 3 = 9. The old table read this as 7 % (4 * 3) = 7.
+    assert_eq(7 % 4 * 3, 9)
+    // (20 / 3) % 4, integer-divided: 6 % 4 = 2. Right either way, and that is
+    // the point -- it is the one shape the old table got right, so it guards
+    // against a fix that overshoots.
+    assert_eq(20 ./ 3 % 4, 2)
+    assert_eq(7 * 4 % 5, 3)
+    // Left-associative among themselves.
+    assert_eq(23 % 7 % 3, 2)
+}
+
+@test
+fn mod_binds_tighter_than_the_comparisons() {
+    // Not expressible at all before the fix: `7 % 4 < 2` parsed as
+    // `7 % (4 < 2)`, and int % bool is a type error.
+    assert_eq(7 % 4 < 2, false)
+    assert_eq(7 % 4 > 2, true)
+    assert_eq(7 % 4 >= 3, true)
+    assert_eq(2 < 7 % 4, true)
+}
+
+@test
+fn mod_binds_tighter_than_the_shifts() {
+    // (7 % 4) << 2 = 12; `7 % (4 << 2)` = 7 under the old table.
+    assert_eq(7 % 4 << 2, 12)
+    // And on the right: the modulo is the SHIFT DISTANCE, not something applied
+    // to the shifted value. 24 >> (2 % 5) = 24 >> 2 = 6, where the old table
+    // read it as (24 >> 2) % 5 = 1.
+    assert_eq(24 >> 2 % 5, 6)
+}
+
+// --- guards on the other side ---
+
+@test
+fn mod_still_binds_looser_than_equality_and_logic() {
+    // `==` must still see the whole modulo as its operand.
+    assert_eq(7 % 4 == 3, true)
+    assert_eq(7 % 4 != 3, false)
+    assert_eq(8 % 4 == 0 && 9 % 4 == 1, true)
+    assert_eq(7 % 4 == 0 || 7 % 3 == 1, true)
+}
+
+@test
+fn mod_still_binds_looser_than_field_and_call() {
+    let v = [9, 8, 7]
+    // Indexing and calls stay tighter, so the modulo takes the whole postfix.
+    assert_eq(v[1] % 3, 2)
+    assert_eq(v.len() % 2, 1)
+}
+
+// The float form takes the same path through the parser, so it moves with the
+// integer one rather than being a separate case.
+@test
+fn mod_precedence_holds_for_floats() {
+    assert_eq(10.0 - 7.0 % 4.0, 7.0)
+    assert_eq(7.0 % 4.0 * 3.0, 9.0)
+}

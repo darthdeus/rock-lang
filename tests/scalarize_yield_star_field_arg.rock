@@ -1,0 +1,61 @@
+// REPRO (currently failing): a value-typed LOCAL inside a `co fn` body,
+// whose field is passed as an argument to a `await`-delegated `co fn`,
+// is not scalarized in the delegated call -- ScalarizePass.rewrite_expr
+// has no YieldDelegate arm, so `p.x` survives un-rewritten and the
+// generated step fn references a nonexistent local `p`. The coroutine
+// dies (index nil), swallowed by the driver pcall.
+//
+// Must be a value LOCAL inside the co fn body (scalarized by the shared
+// ScalarizePass), NOT a value param (handled separately by the
+// coroutine's own param-scalarization, which is not buggy).
+//
+//
+// Control (locals) passes; repro (field args) fails until the fix lands.
+
+value V2 {
+    x: int,
+    y: int,
+}
+
+co fn inner_leg() -> Coroutine<int> {
+    yield 7
+}
+
+co fn middle(a: int, b: int) -> Coroutine<int> {
+    await inner_leg()
+    yield a + b
+}
+
+// Control: bind the value-local's fields to plain locals first.
+co fn outer_locals() -> Coroutine<int> {
+    let p = V2 { x: 2, y: 3 }
+    let a = p.x
+    let b = p.y
+    await middle(a, b)
+    yield 99
+}
+
+// Repro: pass the value-local's fields straight into the delegated call.
+co fn outer_fields() -> Coroutine<int> {
+    let p = V2 { x: 2, y: 3 }
+    await middle(p.x, p.y)
+    yield 99
+}
+
+@test(output = "7\n5\n99\n-1")
+fn scalarize_yield_star_local_arg() {
+    let c = outer_locals()
+    print(c.resume() ?? -1)   // 7  (inner_leg)
+    print(c.resume() ?? -1)   // 5  (middle's a+b after delegation)
+    print(c.resume() ?? -1)   // 99 (outer after delegation)
+    print(c.resume() ?? -1)   // -1 (done)
+}
+
+@test(output = "7\n5\n99\n-1")
+fn scalarize_yield_star_field_arg() {
+    let c = outer_fields()
+    print(c.resume() ?? -1)   // 7
+    print(c.resume() ?? -1)   // 5
+    print(c.resume() ?? -1)   // 99
+    print(c.resume() ?? -1)   // -1
+}

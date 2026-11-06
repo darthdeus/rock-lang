@@ -1,0 +1,150 @@
+// JSONTestSuite conformance corpus for stdlib/json.rock.
+//
+// Cases are the vendored `test_parsing` set from nst/JSONTestSuite (MIT;
+// tests/fixtures/json_conformance/LICENSE). They are read from disk rather
+// than embedded as literals: a number of cases carry invalid UTF-8, lone
+// surrogates or raw control characters that would not survive escaping into
+// a Rock string, and a case that fails to escape correctly is a test of the
+// wrong bytes.
+//
+// manifest.txt is the asserted denominator -- the harness reads it instead of
+// listing a directory, so a case file that disappears fails the run rather
+// than shrinking it. Regenerate with
+// scripts/gen_json_conformance_manifest.py.
+//
+// Prefix meaning: y_ must be accepted, n_ must be rejected, i_ is
+// implementation-defined (counted, not asserted).
+
+inline(lua) fn json_conf_read_file(path: string) -> string? = """
+    local f = io.open(path, "rb")
+    if not f then return nil end
+    local data = f:read("*a")
+    local closed = f:close()
+    if not closed then return nil end
+    return data
+"""
+
+struct JsonConfCase {
+    expect: string,
+    name: string,
+}
+
+fn json_conf_dir() -> string {
+    return "tests/fixtures/json_conformance/"
+}
+
+fn json_conf_load_manifest() -> [JsonConfCase] {
+    let raw = json_conf_read_file("{json_conf_dir()}manifest.txt")
+    assert(raw != null, "conformance manifest unreadable -- run rock test from the repo root")
+    let out: [JsonConfCase] = []
+    for line in raw.unwrap().split("\n") {
+        if line.len() == 0 { continue }
+        if line.starts_with("#") { continue }
+        let cols = line.split("\t")
+        assert_eq(cols.len(), 2, "malformed manifest line: {line}")
+        out.push(JsonConfCase { expect: cols[0], name: cols[1] })
+    }
+    return out
+}
+
+// Cases where json_decode disagrees with the corpus. Empty: the parser is
+// fully conformant on all 318.
+//
+// This is the pinning point for a divergence that cannot be fixed on the spot
+// Adding a name here makes the run green while the
+// bug exists; test_json_conformance_corpus then fails either way round --
+// "NEW conformance divergence" for a name that is missing, "stale sentinel"
+// for one that no longer diverges.
+fn json_conf_diverging_cases() -> [string] {
+    return []
+}
+
+@test
+fn test_json_conformance_manifest_shape() {
+    let cases = json_conf_load_manifest()
+    assert_eq(cases.len(), 318, "corpus size changed -- regenerate the manifest")
+
+    let accept = 0
+    let reject = 0
+    let either = 0
+    for c in cases {
+        if c.expect == "accept" {
+            accept = accept + 1
+        } else if c.expect == "reject" {
+            reject = reject + 1
+        } else if c.expect == "either" {
+            either = either + 1
+        } else {
+            assert(false, "unknown expectation {c.expect} for {c.name}")
+        }
+    }
+    assert_eq(accept, 95, "y_ case count")
+    assert_eq(reject, 188, "n_ case count")
+    assert_eq(either, 35, "i_ case count")
+}
+
+// The two deepest structure cases (50,000 and 100,000 levels) used to abort
+// the process on a stack overflow and had to sit outside the loop. json_decode
+// now rejects them via json_max_depth(), so they run with everything else --
+// which is what makes this a gate against the crash coming back.
+@test
+fn test_json_conformance_deep_structure_cases_reject() {
+    let deep = [
+        "n_structure_100000_opening_arrays.json",
+        "n_structure_open_array_object.json",
+    ]
+    for name in deep {
+        let src = json_conf_read_file("{json_conf_dir()}cases/{name}")
+        assert(src != null, "deep case file {name} is missing")
+        assert(json_decode(src.unwrap()) == null,
+            "{name} must reject via the depth limit, not overflow the stack")
+    }
+}
+
+@test
+fn test_json_conformance_corpus() {
+    let cases = json_conf_load_manifest()
+
+    let declared: Map<string, bool> = map_new()
+    for name in json_conf_diverging_cases() { declared.insert(name, true) }
+
+    let observed: Map<string, bool> = map_new()
+    let examined = 0
+    let either_seen = 0
+    let diverged = 0
+
+    for c in cases {
+        let src = json_conf_read_file("{json_conf_dir()}cases/{c.name}")
+        assert(src != null, "missing case file: {c.name}")
+        examined = examined + 1
+
+        let decoded = json_decode(src.unwrap())
+        let got = if decoded == null { "reject" } else { "accept" }
+
+        if c.expect == "either" {
+            either_seen = either_seen + 1
+            continue
+        }
+        let reader = json_reader_decode(src.unwrap())
+        let reader_verdict = if reader == null { "reject" } else { "accept" }
+        assert_eq(reader_verdict, c.expect, "source reader conformance: {c.name}")
+        if got != c.expect {
+            observed.insert(c.name, true)
+            diverged = diverged + 1
+        }
+    }
+
+    assert_eq(examined, 318, "examined population -- every case in the manifest")
+    assert_eq(either_seen, 35, "implementation-defined cases reached")
+
+    for name in observed.keys() {
+        assert(declared.contains(name),
+            "NEW conformance divergence: {name} -- the parser changed behavior on a case it used to get right")
+    }
+    for name in json_conf_diverging_cases() {
+        assert(observed.contains(name),
+            "stale sentinel: {name} now conforms -- delete it from json_conf_diverging_cases()")
+    }
+    assert_eq(diverged, 0,
+        "every y_ case must be accepted and every n_ case rejected -- pin a name in json_conf_diverging_cases() only for a bug being deferred")
+}

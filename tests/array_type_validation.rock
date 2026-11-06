@@ -1,0 +1,258 @@
+// Array type validation tests migrated from rock/tests/type_system_tests.rs array_tests module
+// Tests array indexing, type validation, global arrays, and array operations
+// Covers array construction, indexing operations, type checking, and assignment patterns
+
+// ============================================
+// Basic Array Construction and Access Tests
+// ============================================
+
+@test(output = "1\\n2\\n3")
+fn test_array_indexing_int() {
+    let x = [1, 2, 3]
+    print(x[0])
+    print(x[1])
+    print(x[2])
+}
+
+@test(output = "a\\nb")
+fn test_array_indexing_string() {
+    let strs = ["a", "b"]
+    print(strs[0])
+    print(strs[1])
+}
+
+// ============================================
+// Array Type Validation Tests
+// ============================================
+
+@test(output = "array construction")
+fn test_global_array_declaration() {
+    let things: [bool] = [true, false, true]
+    print("array construction")
+}
+
+@test(output = "5")
+fn test_empty_array_with_type_hint() {
+    let x: [int] = []
+    vec_push(x, 5)
+    print(x[0])
+}
+
+global items: [bool] = []
+
+@test(output = "subtype assignment")
+fn test_global_array_subtype_assignment() {
+    items = [true, false]
+    print("subtype assignment")
+}
+
+// ============================================
+// Array Construction Patterns
+// ============================================
+
+@test(output = "3\\ntrue")
+fn test_array_length_and_content() {
+    let nums = [10, 20, 30]
+    print(vec_len(nums))
+    print(vec_len(nums) == 3)
+}
+
+@test(output = "mixed content")
+fn test_any_array_mixed_content() {
+    let x: [any] = []
+    vec_push(x, 1 :: any)
+    vec_push(x, "two" :: any)
+    vec_push(x, true :: any)
+    print("mixed content")
+}
+
+// ============================================
+// Array Indexing and Bounds
+// ============================================
+
+@test(output = "42\\n84")
+fn test_array_indexing_computation() {
+    let values = [42, 84, 126]
+    let index = 0
+    print(values[index])
+    index = 1
+    print(values[index])
+}
+
+@test(output = "first\\nlast")
+fn test_array_string_indexing() {
+    let words = ["first", "middle", "last"]
+    print(words[0])
+    print(words[2])
+}
+
+// ============================================
+// Array Modification Tests
+// ============================================
+
+@test(output = "1\\n2\\n100")
+fn test_array_element_assignment() {
+    let nums = [1, 2, 3]
+    print(nums[0])
+    print(nums[1])
+    nums[2] = 100
+    print(nums[2])
+}
+
+@test(output = "0\\n1\\n2\\n3\\n4")
+fn test_array_push_operations() {
+    let nums: [int] = []
+    
+    for i in 0..5 {
+        vec_push(nums, i)
+    }
+    
+    for num in nums {
+        print(num)
+    }
+}
+
+// ============================================
+// Complex Array Operations
+// ============================================
+
+@test(output = "5\\n25")
+fn test_nested_array_operations() {
+    let matrix = [[1, 2], [3, 4], [5, 6]]
+    let row = matrix[2]
+    print(row[0])
+    print(row[0] * row[0])
+}
+
+@test(output = "filtered array")
+fn test_array_with_functional_operations() {
+    let numbers = [1, 2, 3, 4, 5]
+    let evens = numbers.iter().filter(x => x % 2 == 0).collect()
+    
+    if vec_len(evens) == 2 {
+        print("filtered array")
+    }
+}
+
+// ============================================
+// Type Safety and Edge Cases
+// ============================================
+
+@test(output = "type safety maintained")
+fn test_array_type_consistency() {
+    let ints: [int] = [1, 2, 3]
+    let strings: [string] = ["a", "b", "c"]
+    
+    // Arrays maintain their types
+    if vec_len(ints) == 3 && vec_len(strings) == 3 {
+        print("type safety maintained")
+    }
+}
+
+@test(output = "nullable arrays work")
+fn test_nullable_array_elements() {
+    // Test that we can declare nullable arrays
+    let nullable_ints: [int?] = []
+    
+    // Push some nullable values
+    let val1: int? = 1
+    let val2: int? = null
+    
+    vec_push(nullable_ints, val1)
+    vec_push(nullable_ints, val2)
+    
+    if vec_len(nullable_ints) == 2 {
+        print("nullable arrays work")
+    }
+}
+
+// ============================================
+// Array Iteration and Processing
+// ============================================
+
+@test(output = "6\\n8\\n10")
+fn test_array_map_operation() {
+    let nums = [3, 4, 5]
+    let doubled = nums.iter().map(x => x * 2).collect()
+    
+    for val in doubled {
+        print(val)
+    }
+}
+
+@test(output = "sum: 15")
+fn test_array_reduce_operation() {
+    let nums = [1, 2, 3, 4, 5]
+    let sum = nums.iter().reduce(0, (acc, x) => acc + x)
+    print("sum: " + to_string(sum))
+}
+
+// ============================================
+// Global Array Tests
+// ============================================
+
+@test(output = "array declaration works")
+fn test_array_declaration() {
+    // Test simple array declaration and usage
+    let data: [int] = []
+    vec_push(data, 100)
+    vec_push(data, 200)
+    
+    if vec_len(data) == 2 {
+        print("array declaration works")
+    }
+}
+
+// ============================================
+// Error Handling Patterns
+// ============================================
+
+@test(output = "safe access")
+fn test_safe_array_access() {
+    let nums = [1, 2, 3]
+    let maybe_val = vec_get(nums, 1)
+    
+    if !is_null(maybe_val) {
+        print("safe access")
+    }
+}
+
+@test(output = "bounds checking")
+fn test_array_bounds_checking() {
+    let items = ["a", "b", "c"]
+    let out_of_bounds = vec_get(items, 10)
+    
+    if is_null(out_of_bounds) {
+        print("bounds checking")
+    }
+}
+
+// ============================================
+// Documentation of Error Cases
+// ============================================
+
+// The following demonstrate compile-time error cases for array operations.
+// Since Rock's @test system focuses on runtime validation,
+// these are documented as examples that should NOT compile.
+
+// EXAMPLE 1: Wrong index type
+// let x = [1, 2, 3]
+// let val = x["string"]  // ERROR: Cannot index array with string, expected int
+
+// EXAMPLE 2: Indexing non-array type
+// let x = 5
+// let val = x[0]  // ERROR: Cannot index non-array type int
+
+// EXAMPLE 3: Type mismatch in array assignment
+// let ints: [int] = ["string"]  // ERROR: Cannot assign string to int array
+
+// EXAMPLE 4: Accessing undefined array element (runtime error)
+// let x = [1, 2, 3]
+// let val = x[10]  // RUNTIME ERROR: Index out of bounds
+
+// EXAMPLE 5: Type inference failure with empty array
+// let x = []  // ERROR: Cannot infer element type for empty array without type hint
+// let val = x[0]
+
+// EXAMPLE 6: Mixed type array without any annotation
+// let mixed = [1, "string"]  // ERROR: Array elements must have consistent type

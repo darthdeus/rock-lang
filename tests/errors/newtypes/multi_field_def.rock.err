@@ -1,0 +1,11 @@
+//! Error: a newtype wraps exactly one type. A multi-field def is rejected at
+//!        the DECLARATION, whether or not it is ever constructed -- wrap a
+//!        tuple (`newtype Pair((int, string))`) or use a struct.
+//! Tags: newtypes, declarations
+
+//=== TEST CASE: multi_field_newtype_def_rejected ===
+newtype Bad(int, string)
+
+fn main() {
+    print("never constructed")
+}

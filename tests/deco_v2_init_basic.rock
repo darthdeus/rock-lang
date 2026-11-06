@@ -1,0 +1,42 @@
+// Test basic init decorator functionality
+
+// Simple array of names for registration
+global REGISTERED_NAMES: [string] = []
+
+// Basic init decorator for registration
+deco init register {
+    vec_push(REGISTERED_NAMES, target.name)
+}
+
+@register
+fn system_a() {
+    print("system_a running")
+}
+
+@register
+fn system_b() {
+    print("system_b running")
+}
+
+fn not_registered() {
+    print("not registered")
+}
+
+@test
+fn test_init_registration() {
+    // Init decorators run at module load time, so systems should already be registered
+    assert(vec_len(REGISTERED_NAMES) == 2, "should have 2 registered systems")
+}
+
+@test
+fn test_init_captures_name() {
+    let first = vec_get(REGISTERED_NAMES, 0).unwrap()
+    let second = vec_get(REGISTERED_NAMES, 1).unwrap()
+
+    // Order might vary, but both names should be present
+    let has_a = first == "system_a" || second == "system_a"
+    let has_b = first == "system_b" || second == "system_b"
+
+    assert(has_a, "system_a should be registered")
+    assert(has_b, "system_b should be registered")
+}

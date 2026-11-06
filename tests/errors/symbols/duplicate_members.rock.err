@@ -1,0 +1,52 @@
+//! Error: Duplicate member names within one type definition
+//! Tags: symbols, duplicates, structs, enums
+
+//=== TEST CASE: duplicate_struct_field_Generic ===
+struct Foo {
+    x: int,
+    x: float
+}
+
+fn main() {
+    print("duplicate struct field must not compile")
+}
+
+//=== TEST CASE: duplicate_value_struct_field_Generic ===
+value P {
+    x: int,
+    x: int
+}
+
+fn main() {
+    print("duplicate value-struct field must not compile (two `x` in the C layout)")
+}
+
+//=== TEST CASE: duplicate_enum_variant_Generic ===
+enum Ev {
+    Tick,
+    Tick
+}
+
+fn main() {
+    print("duplicate enum variant must not compile")
+}
+
+//=== TEST CASE: duplicate_enum_variant_mixed_payload_Generic ===
+enum Ev {
+    Tick(int),
+    Tick
+}
+
+fn main() {
+    print("same variant name with different payloads is still a duplicate")
+}
+
+//=== TEST CASE: duplicate_record_payload_field_Generic ===
+enum Shape {
+    Rect { w: int, w: int },
+    Dot
+}
+
+fn main() {
+    print("duplicate field in a record payload must not compile")
+}

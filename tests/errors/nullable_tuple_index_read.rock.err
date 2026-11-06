@@ -1,0 +1,18 @@
+//! Error: Reading a tuple element off a nullable base must use ?. for safety
+//! Tags: nullable, tuple, safenav, soundness
+
+//=== TEST CASE: nullable_tuple_index_read_Generic ===
+// `t.0` where `t: (int, int)?` would index `nil` at runtime if `t` is
+// null. Plain `.N` on a nullable base is rejected exactly like plain
+// `.field` on a nullable struct (`nullable_field_access.rock.err`);
+// the nil-safe form is `?.0`. After the TupleIndex->FieldAccess
+// unification, `.0` is a FieldAccess with a numeric field name and a
+// nullable base is rejected in `infer_tuple_index`.
+fn maybe_tup() -> (int, int)? { (1, 2) }
+
+fn test() -> int {
+    let t = maybe_tup()
+    t.0  // ERROR: Cannot index tuple element of nullable type
+}
+
+fn main() { let _ = test() }

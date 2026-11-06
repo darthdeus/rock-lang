@@ -1,0 +1,81 @@
+// `table_unset` corpus for the `--backend js` ratchet (T8d). `table_unset(t, k)`
+// is the stdlib `inline(lua)` primitive `t[k] = nil` backing Map.remove and the
+// Vec drain ops (pop / remove_at / swap_remove / clear). On JS it dispatches on
+// `instanceof Map` -- `map.delete(k)` vs `delete arr[k]` -- so a removed Map key
+// reads back as nil and a popped Vec slot becomes a hole the tracked `.len`
+// skips. Pins the node runtime `__table_unset` (crates/skull-codegen-js/tests/
+// table_unset.rs). Map iteration (MapNext) stays out of scope, so no test here
+// iterates a Map.
+
+// A removed Map key reads back as nil; siblings survive.
+@test(returns = 1)
+fn test_map_remove() -> int {
+    let m = map_new()
+    m[1] = 10
+    m[2] = 20
+    m[3] = 30
+    m.remove(2)
+    let gone = if m.get(2) == null { 1 } else { 0 }
+    let a = m[1]
+    let c = m[3]
+    if gone == 1 && a == 10 && c == 30 { 1 } else { 0 }
+}
+
+// Map.remove returns the old value.
+@test(returns = 20)
+fn test_map_remove_returns_old() -> int {
+    let m = map_new()
+    m[2] = 20
+    let old = m.remove(2)
+    old ?? 0
+}
+
+// Removing an absent key is a no-op that returns null.
+@test(returns = 0)
+fn test_map_remove_absent() -> int {
+    let m = map_new()
+    m[1] = 10
+    let old = m.remove(99)
+    old ?? 0
+}
+
+// Vec.pop drains the last slot via table_unset; len shrinks.
+@test(returns = 32)
+fn test_vec_pop() -> int {
+    let xs = [1, 2, 3]
+    let last = xs.pop() ?? 0
+    last * 10 + xs.len
+}
+
+// Vec.remove_at shifts survivors down and drains the tail slot.
+@test(returns = 2132)
+fn test_vec_remove_at() -> int {
+    let xs = [10, 20, 30]
+    let removed = xs.remove_at(1) ?? 0
+    removed * 100 + xs[0] * 10 + xs[1] + xs.len
+}
+
+// Vec.swap_remove moves the tail into the hole then drains the tail.
+@test(returns = 1)
+fn test_vec_swap_remove() -> int {
+    let xs = [10, 20, 30, 40]
+    xs.swap_remove(0)
+    xs.len - 2
+}
+
+// Vec.clear table_unsets every slot in a counted loop, then len = 0.
+@test(returns = 0)
+fn test_vec_clear() -> int {
+    let xs = [1, 2, 3, 4, 5]
+    xs.clear()
+    xs.len
+}
+
+// clear then push reuses the array; the drained holes do not leak.
+@test(returns = 68)
+fn test_vec_clear_then_push() -> int {
+    let xs = [1, 2, 3]
+    xs.clear()
+    xs.push(7)
+    xs[0] * 10 + xs.len - 3
+}

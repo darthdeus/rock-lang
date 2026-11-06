@@ -1,0 +1,96 @@
+// Behavior tests for `let x = { ... trailing_expr }` lowering.
+// The codegen for this shape no longer allocates a Lua closure wrapper
+// (IIFE); observable semantics must be unchanged.
+
+@test(output = "3")
+fn test_let_block_rvalue_simple() {
+    let x = {
+        let t = 1
+        t + 2
+    }
+    print(x)
+}
+
+@test(output = "6")
+fn test_let_block_rvalue_multiple_lets() {
+    let x = {
+        let a = 1
+        let b = 2
+        let c = 3
+        a + b + c
+    }
+    print(x)
+}
+
+@test(output = "5")
+fn test_let_block_rvalue_with_trailing_if() {
+    let x = {
+        let t = 5
+        if t > 0 { t } else { 0 }
+    }
+    print(x)
+}
+
+@test(output = "6")
+fn test_let_block_rvalue_nested() {
+    let x = {
+        let t = {
+            let u = 1
+            u + 1
+        }
+        t * 3
+    }
+    print(x)
+}
+
+@test(output = "15")
+fn test_let_if_then_arm_is_block() {
+    let c = true
+    let x = if c { let t = 10; t + 5 } else { 7 }
+    print(x)
+}
+
+@test(output = "7")
+fn test_let_if_else_arm_taken_over_block() {
+    let c = false
+    let x = if c { let t = 10; t + 5 } else { 7 }
+    print(x)
+}
+
+// Block locals must not leak into the surrounding scope — the inner `t`
+// here is scoped to the block, so the outer `t` keeps its value.
+@test(output = "1\n99")
+fn test_let_block_rvalue_scope_isolation() {
+    let t = 99
+    let x = {
+        let t = 1
+        t
+    }
+    print(x)
+    print(t)
+}
+
+// Side-effect ordering and single-execution through a block rvalue.
+global BLOCK_CALLS: int = 0
+
+fn bump_block() -> int {
+    BLOCK_CALLS = BLOCK_CALLS + 1
+    10
+}
+
+@test(output = "20\n1")
+fn test_let_block_rvalue_single_eval() {
+    BLOCK_CALLS = 0
+    let x = {
+        let v = bump_block()
+        v * 2
+    }
+    print(x)
+    print(BLOCK_CALLS)
+}
+
+// Note: an @inline fn with a multi-statement body like
+// `side_effect(); return r` now splices as a Block expression at the
+// call site, which this lowering handles. See
+// `tests/inline/inline_multistmt.rock` for that coverage. Bodies that
+// still bind locals (`let t = ...; t * 2`) remain rejected by V0.

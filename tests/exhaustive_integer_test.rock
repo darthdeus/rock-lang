@@ -1,0 +1,28 @@
+@test 
+fn test_exhaustive_integer_coverage() {
+    let x = 5
+    
+    // This should be exhaustive - covers all integers
+    let result = match x {
+        ..=0 => "negative_or_zero",
+        1..=10 => "small_positive", 
+        11.. => "large_positive"
+    }
+    
+    assert_eq(result, "small_positive")
+    print("Exhaustive integer coverage test passed")
+}
+
+@test
+fn test_single_wildcard_exhaustive() {
+    let x = 42
+    
+    // Wildcard should make any integer match exhaustive
+    let result = match x {
+        1..=10 => "small",
+        _ => "other"
+    }
+    
+    assert_eq(result, "other")
+    print("Wildcard integer exhaustiveness test passed")
+}

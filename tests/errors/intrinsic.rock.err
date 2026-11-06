@@ -1,0 +1,27 @@
+//! Error: `@native_required` marks an `@intrinsic` fn that a backend MUST map
+//!        natively -- the portable Rock-fallback rung is skipped, so a missing
+//!        native mapping can never silently degrade to a slow portable loop
+//!        The emitter rejects: a `@native_required`
+//!        fn that is not also `@intrinsic` (the marker is meaningless alone), and
+//!        a `@native_required @intrinsic` fn whose only body is a Rock body (the
+//!        luajit mapping is the `inline(lua)` body; a Rock body is a fallback, and
+//!        native-required has no fallback to fall back from).
+//! Tags: intrinsic, native_required, emit-time
+
+//=== TEST CASE: native_required_without_intrinsic_Generic ===
+@native_required inline(lua) fn spin(x: int) -> int = """
+    return x
+"""
+
+fn main() {
+    let _ = spin(1)
+}
+
+//=== TEST CASE: native_required_no_luajit_mapping_Generic ===
+@native_required @intrinsic fn spun(x: int) -> int {
+    return x
+}
+
+fn main() {
+    let _ = spun(1)
+}

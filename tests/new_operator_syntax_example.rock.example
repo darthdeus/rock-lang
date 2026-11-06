@@ -1,0 +1,52 @@
+// Example of the new unified operator syntax
+
+// Built-in operators for Lua backend
+operator(lua) +(a: int, b: int) -> int = "return a + b"
+operator(lua) -(a: int, b: int) -> int = "return a - b"
+operator(lua) *(a: int, b: int) -> int = "return a * b"
+operator(lua) /(a: int, b: int) -> float = "return a / b"
+
+// String concatenation
+operator(lua) +(a: string, b: string) -> string = "return a .. b"
+
+// Comparison operators
+operator(lua) ==(a: int, b: int) -> bool = "return a == b"
+
+// Logical operators
+operator(lua) &&(a: bool, b: bool) -> bool = "return a and b"
+
+// User-defined types and operators
+struct FixVec2 {
+    x: float,
+    y: float
+}
+
+// User-defined operators
+operator +(a: FixVec2, b: FixVec2) -> FixVec2 {
+    return FixVec2 { x: a.x + b.x, y: a.y + b.y }
+}
+
+operator *(a: FixVec2, scalar: float) -> FixVec2 {
+    return FixVec2 { x: a.x * scalar, y: a.y * scalar }
+}
+
+operator ==(a: FixVec2, b: FixVec2) -> bool {
+    return a.x == b.x && a.y == b.y
+}
+
+// Test function
+fn main() {
+    // Test built-in operators
+    let a = 5 + 3
+    let b = "Hello, " + "World!"
+
+    // Test user-defined operators
+    let v1 = FixVec2 { x: 1.0, y: 2.0 }
+    let v2 = FixVec2 { x: 3.0, y: 4.0 }
+    let v3 = v1 + v2
+    let v4 = v1 * 2.0
+
+    if v3 == FixVec2 { x: 4.0, y: 6.0 } {
+        print("Vector addition works!")
+    }
+}

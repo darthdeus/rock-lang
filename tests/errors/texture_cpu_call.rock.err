@@ -1,0 +1,69 @@
+//! Error: GPU-only intrinsics -- a direct CPU-side call is rejected at emit
+//! Tags: intrinsics, gpu_only, shader
+
+//=== TEST CASE: texture_direct_cpu_call_Generic ===
+fn use_texture() -> Vec4 {
+    let s = Sampler2D { __handle: 0 }
+    return texture(s, v(0.0, 0.0))
+}
+
+fn main() {
+    let _ = use_texture()
+}
+
+//=== TEST CASE: texture_size_direct_cpu_call_Generic ===
+fn use_texture_size() -> Vec2 {
+    let s = Sampler2D { __handle: 0 }
+    return texture_size(s)
+}
+
+fn main() {
+    let _ = use_texture_size()
+}
+
+//=== TEST CASE: fwidth_direct_cpu_call_Generic ===
+// The A2a fragment builtins are @gpu_only too -- a CPU call is a hard error.
+fn use_fwidth() -> float {
+    return fwidth(1.0)
+}
+
+fn main() {
+    let _ = use_fwidth()
+}
+
+//=== TEST CASE: frag_coord_direct_cpu_call_Generic ===
+fn use_frag_coord() -> Vec4 {
+    return frag_coord()
+}
+
+fn main() {
+    let _ = use_frag_coord()
+}
+
+//=== TEST CASE: at_direct_cpu_call_Generic ===
+fn use_at() -> float {
+    let arr = cast<UniformArray<float>>(0)
+    return at(arr, 0)
+}
+
+fn main() {
+    let _ = use_at()
+}
+
+//=== TEST CASE: vertex_id_direct_cpu_call_Generic ===
+fn use_vertex_id() -> int {
+    return vertex_id()
+}
+
+fn main() {
+    let _ = use_vertex_id()
+}
+
+//=== TEST CASE: discard_direct_cpu_call_Generic ===
+fn use_discard() {
+    discard()
+}
+
+fn main() {
+    use_discard()
+}

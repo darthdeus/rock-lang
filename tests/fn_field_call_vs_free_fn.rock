@@ -1,0 +1,57 @@
+// A call through a fn-typed field is chosen by call syntax: method syntax
+// (`t.sprite()`, `t?.sprite()`) calls the field, a call written by name
+// (`sprite(t)`) calls the function, even when the first argument's struct has
+// a fn-typed field of that name.
+
+struct FieldCallTile {
+    sprite: fn() -> int,
+    pair: fn() -> (int, int)?,
+}
+
+fn sprite(t: FieldCallTile) -> int {
+    100
+}
+
+fn pair(t: FieldCallTile) -> (int, int)? {
+    (100, 200)
+}
+
+fn field_call_tile() -> FieldCallTile {
+    FieldCallTile { sprite: () => 7, pair: () => null }
+}
+
+fn field_call_nav(t: FieldCallTile?) -> int {
+    t?.sprite() ?? -1
+}
+
+@test
+fn a_call_by_name_calls_the_function_not_the_field() {
+    let t = field_call_tile()
+    assert_eq(sprite(t), 100)
+}
+
+@test
+fn method_syntax_calls_the_field_over_the_function() {
+    let t = field_call_tile()
+    assert_eq(t.sprite(), 7)
+    assert_eq(field_call_nav(t), 7)
+    assert_eq(field_call_nav(null), -1)
+}
+
+@test
+fn a_nullable_tuple_call_by_name_calls_the_function() {
+    let t = field_call_tile()
+    let got = pair(t)
+    assert(got != null, "pair(t) must call the function, which returns a pair")
+    if let (a, b) = pair(t) {
+        assert_eq(a + b, 300)
+    } else {
+        assert(false, "pair(t) must call the function, not the null field")
+    }
+}
+
+@test
+fn a_nullable_tuple_method_call_calls_the_field() {
+    let t = field_call_tile()
+    assert(t.pair() == null, "t.pair() must call the field, which returns null")
+}

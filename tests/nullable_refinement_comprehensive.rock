@@ -1,0 +1,320 @@
+// Comprehensive nullable type refinement tests
+// Migrated from rock/tests/type_system_tests.rs nullable_if_tests module
+// Tests smart casting of nullable types in conditional branches
+
+// ============================================
+// Helper structures and functions
+// ============================================
+
+struct Item {
+    file: string,
+    last_modified: int,
+}
+
+fn file_modtime(_p: string) -> int? {
+    return 5
+}
+
+// ============================================
+// Basic Nullable Refinement Tests
+// ============================================
+
+@test(output = "4")
+fn basic_if_nullable() {
+    let x: int? = 3
+    
+    if x != null {
+        let y = x + 1   // x is refined to int here
+        print(y)
+    }
+    
+    x = null  // outer x is still int?
+}
+
+@test(output = "4")
+fn if_else_nullable_then() {
+    let x: int? = 3
+    if x != null {
+        let y = x + 1   // x is int in then branch
+        print(y)
+    } else {
+        let y = x       // x is int? in else branch (never executed)
+        print("null")
+    }
+    
+    x = null  // outer x is still int?
+}
+
+@test(output = "4")
+fn if_else_nullable_else() {
+    let x: int? = 3
+    if x == null {
+        let y = x       // x is int? in then branch (never executed)
+        print("null")
+    } else {
+        let y = x + 1   // x is int in else branch
+        print(y)
+    }
+    
+    x = null  // outer x is still int?
+}
+
+// ============================================
+// Nested Refinement Tests
+// ============================================
+
+@test(output = "updated 5", type_holes = [[0, "int"]])
+fn nullable_refine_nested_else() {
+    let item = Item{ file: "foo", last_modified: 0 }
+    let last_modified = file_modtime(item.file)
+    
+    if last_modified == null {
+        print("not found")
+    } else {
+        // Verify that `last_modified` is refined from `int?` to `int`
+        let refined_last_modified: ? = last_modified
+        
+        if last_modified > item.last_modified {
+            item.last_modified = last_modified   // assign requires int
+            print("updated {last_modified}")
+        }
+    }
+}
+
+@test(output = "11", type_holes = [[0, "int"], [1, "int"], [2, "int"]])
+fn double_refinement_chain() {
+    let x: int? = 10
+    
+    if x != null {          // x : int in this branch
+        let x_refined_once: ? = x  // [0]
+        if x > 5 {          // still int
+            let x_refined_twice: ? = x  // [1]
+            print(x + 1)
+        }
+    }
+    
+    let x_reverted: ? = x  // [2] - should revert to int? after scope
+    x = null  // outer x is still int?
+}
+
+// ============================================
+// Complex Refinement Scenarios
+// ============================================
+
+@test(output = "5\n10", type_holes = [[0, "int"], [1, "int"]])
+fn refinement_with_multiple_variables() {
+    let a: int? = 5
+    let b: int? = 10
+    
+    if a != null && b != null {
+        // Both a and b are refined to int here
+        let a_refined: ? = a  // [0]
+        let b_refined: ? = b  // [1]
+        print(a)
+        print(b)
+    }
+}
+
+@test(output = "15", type_holes = [[0, "int"]])
+fn refinement_in_nested_scopes() {
+    let x: int? = 10
+    
+    if x != null {
+        let x_refined: ? = x  // [0]
+        let y = x + 5  // x is refined to int
+        print(y)
+    }
+}
+
+@test(output = "safe: 42")
+fn refinement_with_string_interpolation() {
+    let value: int? = 42
+    
+    if value != null {
+        print("safe: {value}")  // value is refined to int
+    } else {
+        print("null value")
+    }
+}
+
+// ============================================
+// Refinement with Different Operators
+// ============================================
+
+@test(output = "not null")
+fn refinement_with_is_null() {
+    let x: int? = 5
+    
+    if !is_null(x) {
+        print("not null")  // x is refined to int
+    } else {
+        print("is null")
+    }
+}
+
+@test(output = "value is 7")
+fn refinement_with_negated_equality() {
+    let x: int? = 7
+    
+    if !(x == null) {
+        print("value is {x}")  // x is refined to int
+    }
+}
+
+// ============================================
+// Safe Navigation with Refinement
+// ============================================
+
+struct Point {
+    x: int,
+    y: int,
+}
+
+@test(output = "10")
+fn refinement_with_safe_navigation() {
+    let p_val = Point { x: 10, y: 20 }
+    let p: Point? = p_val
+    
+    if p != null {
+        print(p.x)  // p is refined to Point here
+    }
+}
+
+@test(output = "30")
+fn refinement_complex_field_access() {
+    let p_val = Point { x: 10, y: 20 }
+    let p: Point? = p_val
+    
+    if p != null {
+        let sum = p.x + p.y  // p is refined to Point
+        print(sum)
+    }
+}
+
+// ============================================
+// Refinement in Loops
+// ============================================
+
+@test(output = "1\n2\n3")
+fn refinement_in_while_loop() {
+    let counter: int? = 1
+
+    // Note: intra-&& refinement is not yet supported, so we use
+    // a nested null check pattern instead of `counter != null && counter <= 3`
+    while counter != null {
+        if counter > 3 { break }
+        print(counter)  // counter is refined to int
+        counter = counter + 1
+        if counter > 3 {
+            counter = null
+        }
+    }
+}
+
+// ============================================
+// Refinement with Function Calls
+// ============================================
+
+fn process_value(x: int) -> int {
+    return x * 2
+}
+
+@test(output = "20")
+fn refinement_with_function_call() {
+    let value: int? = 10
+    
+    if value != null {
+        let result = process_value(value)  // value is refined to int
+        print(result)
+    }
+}
+
+// ============================================
+// Advanced Refinement Patterns
+// ============================================
+
+@test(output = "both non-null")
+fn refinement_compound_conditions() {
+    let a: int? = 5
+    let b: int? = 10
+    
+    if a != null && b != null {
+        print("both non-null")
+    } else {
+        print("at least one null")
+    }
+}
+
+@test(output = "either null")
+fn refinement_or_conditions() {
+    let a: int? = 5
+    let b: int? = null
+    
+    if a == null || b == null {
+        print("either null")
+    } else {
+        print("both non-null")
+    }
+}
+
+@test(output = "modified: 15")
+fn refinement_with_mutation() {
+    let x: int? = 10
+
+    if x != null {
+        x = x + 5    // x is refined to int, can be used in arithmetic
+        print("modified: {x}")
+    }
+}
+
+// Moved from nullable_shadowing_tests.rock: shadowing inside refinement blocks
+
+struct ShadowFoo { value: int }
+
+@test(output = "10")
+fn shadow_int_replaces_refined_var() {
+    let x: ShadowFoo? = ShadowFoo { value: 1 }
+    if x != null {
+        let x = 10
+        print(x)
+    }
+}
+
+@test(output = "true")
+fn shadow_with_null_value() {
+    let x: ShadowFoo? = ShadowFoo { value: 1 }
+    if x != null {
+        let x: ShadowFoo? = null
+        print(x == null)
+    }
+}
+
+@test(output = "99\n5")
+fn shadow_does_not_affect_outer_binding() {
+    let x: ShadowFoo? = ShadowFoo { value: 5 }
+    if x != null {
+        let x = 99
+        print(x)
+    }
+    print(x?.value ?? -1)
+}
+
+@test(output = "1\n42")
+fn refined_access_then_shadow() {
+    let x: ShadowFoo? = ShadowFoo { value: 1 }
+    if x != null {
+        print(x.value)
+        let x = 42
+        print(x)
+    }
+}
+
+@test(output = "hello\n7")
+fn shadow_string_then_int() {
+    let x: ShadowFoo? = ShadowFoo { value: 7 }
+    if x != null {
+        let x = "hello"
+        print(x)
+    }
+    print(x?.value ?? -1)
+}

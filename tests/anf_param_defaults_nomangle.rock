@@ -1,0 +1,69 @@
+// Sentinel: @nomangle fn param defaults emit through ANF.
+// Pre-port: lived in `generate_expr_as_restricted` (live emitter).
+// Post-port: routes through `try_emit_anf_value_pair` so the default
+// expression benefits from the same lowering as a normal fn body.
+//
+// Same code path is exercised by stdlib's `__rock_range(min, max,
+// step: int = 1)` consumed across bitgun/stone — those keep us green
+// in practice, but this is the explicit pin.
+
+@nomangle
+fn defaulted_int(a: int, b: int = 7) -> int {
+    return a + b
+}
+
+@nomangle
+fn defaulted_string(prefix: string = "hi:", name: string = "world") -> string {
+    return prefix + " " + name
+}
+
+value V2 { x: int, y: int }
+
+@nomangle
+fn defaulted_value(v: V2 = V2 { x: 3, y: 4 }) -> int {
+    return v.x + v.y
+}
+
+@test(output = "15")
+fn anf_param_default_int_omitted() {
+    print(defaulted_int(8))
+}
+
+// The above tests pass even if the body-side default check is broken,
+// because Rock call sites inject defaults. The body-side `if x == nil
+// then ... end` is a safety net for callers that bypass mangling
+// (raw Lua, FFI). Exercise it by calling from inline(lua) with the
+// default omitted.
+
+@nomangle inline(lua) fn call_defaulted_int_raw_lua() -> int =
+    "return defaulted_int(8)"
+
+@test(output = "15")
+fn anf_param_default_int_body_check_fires() {
+    print(call_defaulted_int_raw_lua())
+}
+
+@test(output = "10")
+fn anf_param_default_int_passed() {
+    print(defaulted_int(8, 2))
+}
+
+@test(output = "hi: world")
+fn anf_param_default_string_omitted() {
+    print(defaulted_string())
+}
+
+@test(output = "yo: rock")
+fn anf_param_default_string_passed() {
+    print(defaulted_string("yo:", "rock"))
+}
+
+@test(output = "7")
+fn anf_param_default_value_struct_omitted() {
+    print(defaulted_value())
+}
+
+@test(output = "20")
+fn anf_param_default_value_struct_passed() {
+    print(defaulted_value(V2 { x: 8, y: 12 }))
+}

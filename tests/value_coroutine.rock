@@ -1,0 +1,97 @@
+// RED test for value-typed locals + params in stackless coroutines.
+//
+// A `co fn` that uses a value-typed local or parameter must still work.
+// Today the stackless_coroutine pass hoists each local as one state-slot
+// (`s.v`) and emits writebacks of the single name `v`. For a value type
+// like Vec2 the caller passes scalarized args (`v__x, v__y`) and Rock
+// field-access lowers through scalarized locals (`v__x`), so the
+// hoisting must expand to per-field state slots.
+
+value V2 {
+    x: int,
+    y: int,
+}
+
+// Value-typed parameter, read across yield.
+co fn co_val_param(p: V2) -> Coroutine<int> {
+    yield p.x
+    yield p.y
+    yield p.x + p.y
+}
+
+@test(output = "3\n4\n7")
+fn test_value_param() {
+    let c = co_val_param(V2 { x: 3, y: 4 })
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+}
+
+// Value-typed local, re-bound between yields.
+co fn co_val_local() -> Coroutine<int> {
+    let v = V2 { x: 1, y: 10 }
+    yield v.x
+    yield v.y
+    let v2 = V2 { x: 100, y: 1000 }
+    yield v2.x + v2.y
+}
+
+@test(output = "1\n10\n1100")
+fn test_value_local() {
+    let c = co_val_local()
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+}
+
+// Multiple value params plus mixed with primitives.
+co fn co_multi(a: V2, n: int, b: V2) -> Coroutine<int> {
+    yield a.x + b.x
+    yield n
+    yield a.y * b.y
+}
+
+@test(output = "4\n7\n60")
+fn test_value_multi_params() {
+    let c = co_multi(V2 { x: 1, y: 2 }, 7, V2 { x: 3, y: 30 })
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+}
+
+// Value param read across loop iterations (exercises hoist + writeback path).
+co fn co_loop(v: V2) -> Coroutine<int> {
+    let i = 0
+    while i < 3 {
+        yield v.x + i
+        i = i + 1
+    }
+}
+
+@test(output = "10\n11\n12")
+fn test_value_param_in_loop() {
+    let c = co_loop(V2 { x: 10, y: 99 })
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+}
+
+// Value param referenced inside an if-branch that also yields.
+co fn co_branch(v: V2, pick: bool) -> Coroutine<int> {
+    if pick {
+        yield v.x
+    } else {
+        yield v.y
+    }
+    yield v.x + v.y
+}
+
+@test(output = "1\n3\n2\n3")
+fn test_value_param_in_branch() {
+    let c1 = co_branch(V2 { x: 1, y: 2 }, true)
+    print(c1.resume() ?? -1)
+    print(c1.resume() ?? -1)
+    let c2 = co_branch(V2 { x: 1, y: 2 }, false)
+    print(c2.resume() ?? -1)
+    print(c2.resume() ?? -1)
+}

@@ -1,0 +1,492 @@
+struct FixVec2 { x: int, y: int }
+
+
+@test(output = "15")
+fn arena_insert_and_lookup() {
+    let m: Arena<FixVec2> = arena_new()
+    let e = m.insert(FixVec2 { x: 5, y: 10 })
+    let v: FixVec2 = m.get(e).unwrap()
+    print(v.x + v.y)
+}
+
+@test(output = "0")
+fn empty_arena_len_is_zero() {
+    let a: Arena<int> = arena_new()
+    print(a.len())
+}
+
+struct P { x: int, y: int }
+
+@test(output = "3")
+fn insert_get_roundtrip() {
+    let a: Arena<P> = arena_new()
+    let e = a.insert(P { x: 1, y: 2 })
+    let p = a.get(e).unwrap()
+    print(p.x + p.y)
+}
+
+@test(output = "true\nfoo\nfalse")
+fn contains_and_remove() {
+    let m: Arena<string> = arena_new()
+    let e = m.insert("foo")
+
+    print(m.contains(e))
+    let s = m.remove(e)
+
+    print(s)
+    print(m.contains(e))
+}
+
+@test(output = "2\n1\n0")
+fn len_tracks_inserts_and_remove() {
+    let a: Arena<int> = arena_new()
+    let e1 = a.insert(1)
+    let e2 = a.insert(2)
+
+    print(a.len())
+    a.remove(e1)
+
+    print(a.len())
+    a.clear()
+
+    print(a.len())
+}
+
+struct V2 { x: int, y: int }
+
+@test(output = "5")
+fn inferred_arena_type_from_first_insert() {
+    let a = arena_new()
+    let e = a.insert(V2 { x: 5, y: 7 })
+
+    let g = a.get(e)
+    print(g?.x)
+}
+
+@test(output = "true")
+fn nullable_get_when_missing() {
+    let a: Arena<int> = arena_new()
+    let e = a.insert(42)
+    a.remove(e)
+
+    let v = a.get(e)
+    print(v == null)
+}
+
+// Skip cross_arena_entity_is_type_error - type error test
+
+@test(output = "count: 0")
+fn arena_iteration_empty() {
+    let a: Arena<int> = arena_new()
+    let count = 0
+    for (entity, item) in a {
+        count = count + 1
+    }
+    print("count: {count}")
+}
+
+@test(output = "values: 10,20,30\ncount: 3")
+fn arena_iteration_simple_insert() {
+    let a: Arena<int> = arena_new()
+    a.insert(10)
+    a.insert(20)
+    a.insert(30)
+
+    let values = vec_new()
+    for (_, item) in a {
+        vec_push(values, item)
+    }
+
+    print("values: {values[0]},{values[1]},{values[2]}")
+    print("count: {vec_len(values)}")
+}
+
+@test(output = "after remove bar: 2\nafter remove foo: 1\nafter remove baz: 0")
+fn arena_iteration_with_removals() {
+    let a: Arena<string> = arena_new()
+    let e1 = a.insert("foo")
+    let e2 = a.insert("bar")
+    let e3 = a.insert("baz")
+
+    a.remove(e2)
+    let count1 = 0
+    for (_, item) in a {
+        count1 = count1 + 1
+    }
+    print("after remove bar: {count1}")
+
+    a.remove(e1)
+    let count2 = 0
+    for (_, item) in a {
+        count2 = count2 + 1
+    }
+    print("after remove foo: {count2}")
+
+    a.remove(e3)
+    let count3 = 0
+    for (_, item) in a {
+        count3 = count3 + 1
+    }
+    print("after remove baz: {count3}")
+}
+
+@test(output = "initial count: 2\nafter reinsertion count: 2")
+fn arena_iteration_after_reinsertion() {
+    let a: Arena<int> = arena_new()
+    let e1 = a.insert(1)
+    let e2 = a.insert(2)
+
+    let count1 = 0
+    for (_, item) in a {
+        count1 = count1 + 1
+    }
+    print("initial count: {count1}")
+
+    a.remove(e1)                     // free slot 0
+    let e3 = a.insert(3)             // should re-use slot 0
+
+    let count2 = 0
+    for (_, item) in a {
+        count2 = count2 + 1
+    }
+    print("after reinsertion count: {count2}")
+}
+
+@test(output = "before clear: 2\nafter clear: 0")
+fn arena_iteration_after_clear() {
+    let a: Arena<int> = arena_new()
+    a.insert(100)
+    a.insert(200)
+
+    let count1 = 0
+    for (_, item) in a {
+        count1 = count1 + 1
+    }
+    print("before clear: {count1}")
+
+    a.clear()
+
+    let count2 = 0
+    for (_, item) in a {
+        count2 = count2 + 1
+    }
+    print("after clear: {count2}")
+}
+
+@test(output = "true")
+fn arena_random_empty() {
+    let a: Arena<int> = arena_new()
+    let result = a.random()
+    print(result == null)
+}
+
+@test(output = "true")
+fn arena_random_single_item() {
+    let a: Arena<string> = arena_new()
+    a.insert("hello")
+    let result = a.random()
+
+    let (_, data) = result.unwrap()
+    print(data == "hello")
+}
+
+@test(output = "true\ntrue\ntrue")
+fn arena_random_multiple_items() {
+    let a: Arena<int> = arena_new()
+    a.insert(10)
+    a.insert(20)
+    a.insert(30)
+
+    for _ in 0..3 {
+        let result = a.random()
+        let (entity, data) = result.unwrap()
+
+        let fetched = a.get(entity).unwrap()
+        print(fetched == data)
+    }
+}
+
+// Regression: `random` used to call `random_int(0, len - 1)` which
+// returns values in [0, len - 2], silently making the last element
+// unreachable. This test samples enough times that hitting every item
+// becomes statistically certain if the selection is actually uniform.
+@test(output = "true")
+fn arena_random_covers_all_items() {
+    let a: Arena<int> = arena_new()
+    a.insert(10)
+    a.insert(20)
+    a.insert(30)
+
+    random_seed(12345)
+    let saw_10 = false
+    let saw_20 = false
+    let saw_30 = false
+    for _ in 0..200 {
+        let (_, data) = a.random().unwrap()
+        if data == 10 { saw_10 = true }
+        if data == 20 { saw_20 = true }
+        if data == 30 { saw_30 = true }
+    }
+    print(saw_10 && saw_20 && saw_30)
+}
+
+@test(output = "true\nfalse")
+fn arena_random_after_removal() {
+    let a: Arena<int> = arena_new()
+    let e1 = a.insert(100)
+    let e2 = a.insert(200)
+    let e3 = a.insert(300)
+
+    a.remove(e2)
+
+    let result = a.random()
+    print(result != null)
+
+    a.clear()
+    let empty_result = a.random()
+    print(empty_result != null)
+}
+
+// -- Slot reuse tests (verify free_indices works) --
+
+@test(output = "e1 index: 0\ne3 index: 0\ne3 gen: 2")
+fn slot_reuse_after_remove() {
+    let a: Arena<int> = arena_new()
+    let e1 = a.insert(10)
+    let e2 = a.insert(20)
+
+    print("e1 index: {e1._slot}")
+
+    a.remove(e1)                    // free slot 0
+    let e3 = a.insert(30)           // should reuse slot 0
+
+    print("e3 index: {e3._slot}")   // must be 0, not 2
+    // Generations are issued per ARENA, not per slot: e1 took 0, e2 took 1, so
+    // the slot-0 reuse takes 2. A per-slot counter is what lets `clear()` -- which
+    // drops the generation column with everything else -- reissue a live handle.
+    print("e3 gen: {e3._generation}")
+}
+
+@test(output = "reused: 1\nreused: 0\nnew: 3")
+fn slot_reuse_lifo_order() {
+    let a: Arena<string> = arena_new()
+    let e0 = a.insert("a")
+    let e1 = a.insert("b")
+    let e2 = a.insert("c")
+
+    a.remove(e0)  // free stack: [0]
+    a.remove(e1)  // free stack: [0, 1]
+
+    // free_indices is a stack (LIFO): last pushed (1) is popped first
+    let r1 = a.insert("d")   // pops 1
+    let r2 = a.insert("e")   // pops 0
+    let r3 = a.insert("f")   // no free slots, appends at index 3
+
+    print("reused: {r1._slot}")
+    print("reused: {r2._slot}")
+    print("new: {r3._slot}")
+}
+
+@test(output = "stale get: true\nfresh get: 42")
+fn generation_prevents_stale_access() {
+    let a: Arena<int> = arena_new()
+    let e1 = a.insert(10)    // slot 0, gen 0
+    a.remove(e1)              // free slot 0
+    let e2 = a.insert(42)    // reuse slot 0, gen 1
+
+    // Stale handle (e1, gen 0) must not see new data
+    let stale = a.get(e1)
+    print("stale get: {stale == null}")
+
+    // Fresh handle (e2, gen 1) works
+    let fresh = a.get(e2).unwrap()
+    print("fresh get: {fresh}")
+}
+
+struct ReusePayload { n: int }
+
+// A reused slot keeps its POSITION and bumps its generation, which is what
+// invalidates the stale handle. (This used to also assert the entry TABLE was
+// mutated in place; under bookkeeping SoA there is no per-entry table to have
+// an identity, and the slot columns are written directly.)
+@test(output = "10\n20\n0\n1\ntrue\n1")
+fn slot_reuse_writes_the_same_slot_and_bumps_generation() {
+    let a: Arena<ReusePayload> = arena_new()
+    let stale = a.insert(ReusePayload { n: 10 })
+    let removed = stale.remove().unwrap()
+    let fresh = a.insert(ReusePayload { n: 20 })
+
+    print(removed.n)
+    print(fresh.get().unwrap().n)
+    print(fresh._slot)
+    print(fresh._generation)
+    print(stale.get() == null)
+    print(arena_slot_count(a))
+}
+
+@test(output = "len after churn: 1\nentries count: 1")
+fn slot_reuse_prevents_unbounded_growth() {
+    let a: Arena<int> = arena_new()
+
+    // Insert and remove 100 times in a loop
+    for i in 0..100 {
+        let e = a.insert(i)
+        a.remove(e)
+    }
+
+    // After all that churn, insert one item
+    let final_e = a.insert(999)
+    print("len after churn: {a.len()}")
+
+    // the slot columns should be size 1, not 100 (all slots reused)
+    print("entries count: {arena_slot_count(a)}")
+}
+
+// -- UFCS style tests --
+
+struct Mob { name: string, health: int }
+
+@test(output = "2\nGoblin: 50\nOrc: 100\n1")
+fn ufcs_arena_game_pattern() {
+    let mobs: Arena<Mob> = arena_new()
+    let goblin = mobs.insert(Mob { name: "Goblin", health: 50 })
+    let orc = mobs.insert(Mob { name: "Orc", health: 100 })
+
+    print(mobs.len())
+
+    for (_, mob) in mobs {
+        print("{mob.name}: {mob.health}")
+    }
+
+    goblin.remove()
+    print(mobs.len())
+}
+
+@test(output = "found: Orc\nnot found")
+fn ufcs_entity_get_after_remove() {
+    let mobs: Arena<Mob> = arena_new()
+    let e1 = mobs.insert(Mob { name: "Goblin", health: 30 })
+    let e2 = mobs.insert(Mob { name: "Orc", health: 80 })
+
+    e1.remove()
+
+    let m1 = e1.get()
+    let m2 = e2.get()
+
+    if m2 != null {
+        print("found: {m2.unwrap().name}")
+    }
+    if m1 == null {
+        print("not found")
+    }
+}
+
+@test(output = "true\ntrue\nfalse")
+fn entity_key_identity() {
+    let mobs: Arena<Mob> = arena_new()
+    let a = mobs.insert(Mob { name: "A", health: 1 })
+    let b = mobs.insert(Mob { name: "B", health: 1 })
+
+    print("{a.entity_key() == a.entity_key()}")
+    print("{a.entity_key() != b.entity_key()}")
+
+    a.remove()
+    let c = mobs.insert(Mob { name: "C", health: 1 })
+    print("{a.entity_key() == c.entity_key()}")
+}
+
+// `Arena<P>` for a `nobox P` used to reject at `arena_entry_new`: the per-entry
+// wrapper was a plain struct, so storing a `P` in it was a box. Bookkeeping SoA
+// deletes the wrapper, and `data` is then an ordinary `[P]` -- column storage,
+// which already worked. The unlock is by DELETION, not by a new mechanism.
+nobox value NoboxSlot { x: float, y: float }
+
+@test(output = "3\n4\n1\ntrue\n7")
+fn arena_of_a_nobox_value() {
+    let a: Arena<NoboxSlot> = arena_new()
+    let e = a.insert(NoboxSlot { x: 3.0, y: 4.0 })
+    let got = e.get().unwrap()
+    print(got.x)
+    print(got.y)
+    print(a.len())
+
+    // Generational invalidation must still hold with the element in columns.
+    let stale = e
+    a.remove(e)
+    print(stale.get() == null)
+
+    let reused = a.insert(NoboxSlot { x: 7.0, y: 8.0 })
+    print(reused.get().unwrap().x)
+}
+
+// Same column storage without the mark keeps the boxed element path covered.
+value ColumnSlot { x: float, y: float }
+
+@test(output = "3\n30")
+fn arena_of_a_column_value_iterates() {
+    let a: Arena<ColumnSlot> = arena_new()
+    a.insert(ColumnSlot { x: 1.0, y: 10.0 })
+    let mid = a.insert(ColumnSlot { x: 5.0, y: 50.0 })
+    a.insert(ColumnSlot { x: 2.0, y: 20.0 })
+    a.remove(mid)
+
+    let sx = 0.0
+    let sy = 0.0
+    for (_, v) in a {
+        sx = sx + v.x
+        sy = sy + v.y
+    }
+    print(sx)
+    print(sy)
+}
+
+@test(output = "3\n30")
+fn arena_of_a_nobox_value_iterates() {
+    let a: Arena<NoboxSlot> = arena_new()
+    a.insert(NoboxSlot { x: 1.0, y: 10.0 })
+    let mid = a.insert(NoboxSlot { x: 5.0, y: 50.0 })
+    a.insert(NoboxSlot { x: 2.0, y: 20.0 })
+    a.remove(mid)
+
+    let sx = 0.0
+    let sy = 0.0
+    for (_, v) in a {
+        sx = sx + v.x
+        sy = sy + v.y
+    }
+    print(sx)
+    print(sy)
+}
+
+struct NoboxSlotIter { i: int }
+
+@inline
+fn next(it: NoboxSlotIter) -> (bool, NoboxSlot) {
+    if it.i >= 2 { return (false, phantom()) }
+    let x = float(it.i + 1)
+    it.i += 1
+    return (true, NoboxSlot { x: x, y: x * 10.0 })
+}
+
+@test(output = "3\n30")
+fn user_iterator_of_a_nobox_value_exhausts() {
+    let sx = 0.0
+    let sy = 0.0
+    for v in (NoboxSlotIter { i: 0 }) {
+        sx += v.x
+        sy += v.y
+    }
+    print(sx)
+    print(sy)
+}
+
+@inline
+fn nested_nobox_phantom() -> (bool, (int, NoboxSlot)) {
+    return (false, phantom())
+}
+
+@test(output = "false")
+fn nested_tuple_nobox_phantom_returns_nil_leaves() {
+    let (ok, (_n, _v)) = nested_nobox_phantom()
+    print(ok)
+}

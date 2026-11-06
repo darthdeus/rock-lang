@@ -1,0 +1,14 @@
+//! Error: A `.field` arg still rejects when the winning overload's slot is not FieldRef
+//! Tags: field_ref, overloads
+
+//=== TEST CASE: field_ref_picked_slot_not_fieldref_Generic ===
+struct Mob { health: int }
+
+fn probe(a: int, b: int) -> int { return a + b }
+fn probe(a: string, b: int) -> int { return b }
+
+fn main() {
+    let m = Mob { health: 1 }
+    let r = probe(1, .health)
+    print("{r}")
+}

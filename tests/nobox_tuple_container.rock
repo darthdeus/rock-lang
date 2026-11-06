@@ -1,0 +1,88 @@
+// A `nobox` value inside a TUPLE inside a container -- matrix row 13, and the
+// shape of both remaining in-tree `materialize` sites (`bitgun/map.rock`'s
+// `[(Vec2, IRect)]` tile pushes).
+//
+// The tuple box stores the nobox part's LEAVES splat, so no `Vec2` is ever
+// materialized. Layout comes from the declared tuple type via the same
+// `TupleRetShape` slot list the multi-return wire uses, so producer and reader
+// derive it independently and cannot disagree.
+//
+// The containers are globals so the vec escapes: a local one is scalarized away
+// and the push never reaches the element repr at all.
+
+value IR4 { x: int, y: int, w: int, h: int }
+
+global PAIRS: [(Vec2, int)] = []
+global TILES: [(Vec2, IR4)] = []
+global NESTED: [((Vec2, int), int)] = []
+
+fn add_pair(v: Vec2, n: int) {
+    PAIRS.push((v, n))
+}
+
+fn add_tile(p: Vec2, s: IR4) {
+    TILES.push((p, s))
+}
+
+@test
+fn a_nobox_part_rides_the_tuple_box_as_leaves() {
+    add_pair(Vec2 { x: 1.0, y: 2.0 }, 7)
+    let (p, n) = PAIRS[0]
+    assert_eq(p.x, 1.0)
+    assert_eq(p.y, 2.0)
+    assert_eq(n, 7)
+}
+
+// Both parts value-shaped, and 6 leaves total -- over MAX_COLUMN_LEAVES, so this
+// is genuinely the boxed path and not columns in disguise.
+@test
+fn two_value_parts_round_trip() {
+    add_tile(Vec2 { x: 3.0, y: 4.0 }, IR4 { x: 5, y: 6, w: 7, h: 8 })
+    let (p, s) = TILES[0]
+    assert_eq(p.x, 3.0)
+    assert_eq(s.w, 7)
+    assert_eq(s.h, 8)
+}
+
+// Slot PROJECTION, not just destructure -- the other read site.
+@test
+fn slot_projection_reads_the_widened_box() {
+    add_tile(Vec2 { x: 9.0, y: 10.0 }, IR4 { x: 1, y: 2, w: 3, h: 4 })
+    let t = TILES[TILES.len - 1]
+    assert_eq(t.0.y, 10.0)
+    assert_eq(t.1.x, 1)
+}
+
+// A nested tuple: the inner slot list has to compose into the outer one.
+@test
+fn a_nested_tuple_composes_its_slots() {
+    NESTED.push(((Vec2 { x: 11.0, y: 12.0 }, 13), 14))
+    let (inner, outer) = NESTED[0]
+    let (v, n) = inner
+    assert_eq(v.x, 11.0)
+    assert_eq(n, 13)
+    assert_eq(outer, 14)
+}
+
+// The element survives a rewrite in place, so the widened layout is not
+// write-once.
+@test
+fn a_stored_element_can_be_overwritten() {
+    PAIRS.push((Vec2 { x: 20.0, y: 21.0 }, 22))
+    let last = PAIRS.len - 1
+    PAIRS.set(last, (Vec2 { x: 30.0, y: 31.0 }, 32))
+    let (p, n) = PAIRS[last]
+    assert_eq(p.x, 30.0)
+    assert_eq(n, 32)
+}
+
+// Iteration reads the same boxes the pushes wrote.
+@test
+fn iteration_agrees_with_indexing() {
+    add_tile(Vec2 { x: 3.0, y: 4.0 }, IR4 { x: 5, y: 6, w: 7, h: 8 })
+    let seen = 0.0
+    for (p, s) in TILES {
+        seen = seen + p.x + s.w
+    }
+    assert_eq(seen > 0.0, true)
+}

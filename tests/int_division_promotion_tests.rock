@@ -1,0 +1,32 @@
+@test
+fn test_int_division_direct_assignment_works() {
+    let result: int = 5 ./ 2
+    assert_eq(result, 2)
+}
+
+@test
+fn test_float_division_works() {
+    let result: float = 5.0 / 2
+    assert_eq(result, 2.5)
+}
+
+@test
+fn test_mixed_division_works() {
+    let result1: float = 5 / 2.0
+    assert_eq(result1, 2.5)
+
+    let result2: float = 5.0 / 2
+    assert_eq(result2, 2.5)
+}
+
+@test
+fn test_other_int_operations_still_promote() {
+    let result1: float = 5 + 2
+    assert_eq(result1, 7.0)
+
+    let result2: float = 5 - 2
+    assert_eq(result2, 3.0)
+
+    let result3: float = 5 * 2
+    assert_eq(result3, 10.0)
+}

@@ -1,0 +1,271 @@
+// Nullable type behavior: syntax, struct fields, params, returns,
+// assignment promotion, inference, unwrap. Compile-time rejection
+// cases are in tests/errors/types/nullable_assignment.rock.err.
+
+struct Opt {
+    val: int?
+}
+
+struct OptAny {
+    val: any?
+}
+
+struct S {}
+
+fn process(maybe_int: int?) {
+    print("processed")
+}
+
+fn get_opt() -> int? {
+    return 5
+}
+
+fn get_opt_null() -> int? {
+    return null
+}
+
+// ============================================
+// Basic nullable type syntax + assignment
+// ============================================
+
+@test(output = "5")
+fn test_optional_type_syntax_int() {
+    let x: int? = null
+    x = 5
+    print(x)
+}
+
+@test(output = "hello")
+fn test_optional_type_syntax_string() {
+    let x: string? = null
+    x = "hello"
+    print(x)
+}
+
+@test(output = "true")
+fn test_optional_array_type_syntax() {
+    let x: [int]? = null
+    print(x == null)
+}
+
+@test(output = "0")
+fn test_optional_type_in_array() {
+    let x: [int?] = []
+    print(x.len())
+}
+
+// ============================================
+// Increment/decrement operators
+// ============================================
+
+@test(output = "6\\n5\\n6\\n6")
+fn test_inc_dec_operators() {
+    let x = 5
+    print(++x)  // 6 (x becomes 6)
+    print(--x)  // 5 (x becomes 5)
+    print(++x)  // 6 (x becomes 6)
+    print(x--)  // 6 (returns current value, then x becomes 5)
+}
+
+// ============================================
+// Nullable struct fields
+// ============================================
+
+@test(output = "true")
+fn test_optional_struct_type() {
+    let x: S? = null
+    print(x == null)
+}
+
+@test(output = "5\\ntrue")
+fn test_optional_in_struct_field() {
+    let o = Opt { val: 5 }
+    print(o.val)
+    o.val = null
+    print(o.val == null)
+}
+
+@test(output = "5")
+fn test_any_struct_field() {
+    let o = OptAny { val: 5 }
+    print(o.val)
+}
+
+@test(output = "true\\n5")
+fn test_optional_in_struct_field_assignment() {
+    let o = Opt { val: null }
+    print(o.val == null)
+    o.val = 5
+    print(o.val)
+}
+
+@test(output = "true")
+fn test_optional_in_struct_field_assign_null() {
+    let o = Opt { val: null }
+    print(o.val == null)
+}
+
+// ============================================
+// Nullable function params / returns
+// ============================================
+
+@test(output = "processed\\nprocessed")
+fn test_optional_in_function_param() {
+    process(5)
+    process(null)
+}
+
+@test(output = "5\\nnull returned")
+fn test_optional_in_function_return() {
+    let result = get_opt()
+    print(result)
+
+    let null_result = get_opt_null()
+    if null_result == null {
+        print("null returned")
+    }
+}
+
+// ============================================
+// Assignment / promotion
+// ============================================
+
+@test(output = "5")
+fn test_assign_t_to_optional_t() {
+    let opt_x: int? = null
+    opt_x = 5
+    print(opt_x)
+}
+
+@test(output = "true")
+fn test_assign_null_to_optional_t() {
+    let opt_x: int? = 5
+    opt_x = null
+    print(opt_x == null)
+}
+
+// ============================================
+// Type inference with nullable
+// ============================================
+
+@test(output = "5")
+fn test_optional_inference() {
+    let opt_x: int? = null
+    opt_x = 5
+    print(opt_x)
+}
+
+@test(output = "true")
+fn test_optional_null_reassignment() {
+    let opt_x: int? = 5
+    opt_x = null
+    print(opt_x == null)
+}
+
+@test(output = "5")
+fn test_nullable_variable_inference() {
+    let opt_val: int? = 5
+    let inferred = opt_val
+    print(inferred)
+}
+
+@test(output = "true")
+fn test_null_inference() {
+    let n = null
+    let inferred_any = n
+    print(inferred_any == null)
+}
+
+@test(output = "5")
+fn test_function_return_inference() {
+    let inferred_opt = get_opt()
+    print(inferred_opt)
+}
+
+// ============================================
+// Unwrap
+// ============================================
+
+@test(output = "5")
+fn test_unwrap_in_simple_return() {
+    let x: int? = 5
+    print(x.unwrap())
+}
+
+@test(output = "5")
+fn test_unwrap_assigned_to_new_var() {
+    let x: int? = 5
+    let y = x.unwrap()
+    print(y)
+}
+
+@test(output = "5")
+fn test_unwrap_inside_if_without_shadow() {
+    let x: int? = 5
+    let result = if true {
+        x.unwrap()
+    } else {
+        6
+    }
+    print(result)
+}
+
+@test(output = "5")
+fn test_unwrap_inside_if_with_shadowing() {
+    let x: int? = 5
+    let result = if true {
+        let z = x.unwrap()
+        z
+    } else {
+        6
+    }
+    print(result)
+}
+
+// ============================================
+// Complex patterns
+// ============================================
+
+@test(output = "42")
+fn test_nullable_chaining() {
+    let opt_struct = Opt { val: 42 }
+    print(opt_struct.val)
+}
+
+@test(output = "42")
+fn test_conditional_nullable_assignment() {
+    let x: int? = null
+    if true {
+        x = 42
+    }
+    if x != null {
+        print(x)
+    }
+}
+
+@test(output = "5\\nhello\\ntrue")
+fn test_multiple_nullable_types() {
+    let int_opt: int? = 5
+    let str_opt: string? = "hello"
+    let bool_opt: bool? = true
+
+    print(int_opt)
+    print(str_opt)
+    print(bool_opt)
+}
+
+@test(output = "42")
+fn test_nested_nullable_operations() {
+    let container = Opt { val: 42 }
+    if container.val != null {
+        let unwrapped = container.val.unwrap()
+        print(unwrapped)
+    }
+}
+
+@test(output = "true")
+fn test_nullable_comparisons() {
+    let x: int? = 5
+    let y: int? = null
+    print(x != null && y == null)
+}

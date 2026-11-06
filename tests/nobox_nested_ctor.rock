@@ -1,0 +1,166 @@
+// A `nobox` field nested in a `value` struct must not box when the parent
+// materializes. luajit flattens the ctor to a generated leaf-taking form
+// (`E5_lct`); JS rebuilds the nested object from the same dotted leaf list.
+// Cross-backend on purpose -- the two representations must agree.
+// Emitted-shape assertions: rock-lang/crates/skull/tests/nobox_nested_ctor.rs
+
+nobox value NV2 { x: float, y: float }
+value E5 { pos: NV2, a: float, b: float, c: float }
+value Box2 { lo: NV2, hi: NV2 }
+value Outer { b: Box2, a: float, c: float }
+
+@test(output = "1 2 3 4 5")
+fn nested_nobox_ctor_round_trips() {
+    let xs: [E5] = []
+    xs.push(E5 { pos: NV2 { x: 1.0, y: 2.0 }, a: 3.0, b: 4.0, c: 5.0 })
+    let e = xs[0]
+    print("{e.pos.x} {e.pos.y} {e.a} {e.b} {e.c}")
+}
+
+@test(output = "1 2 3 4 5 6")
+fn two_level_nesting_round_trips() {
+    let xs: [Outer] = []
+    xs.push(Outer { b: Box2 { lo: NV2 { x: 1.0, y: 2.0 }, hi: NV2 { x: 3.0, y: 4.0 } }, a: 5.0, c: 6.0 })
+    let o = xs[0]
+    print("{o.b.lo.x} {o.b.lo.y} {o.b.hi.x} {o.b.hi.y} {o.a} {o.c}")
+}
+
+// An opaque nested operand (read off an existing value) is decomposed, not
+// rejected -- the trigger is a literal nested ctor.
+@test(output = "6 7 1 2")
+fn an_opaque_nested_operand_is_decomposed() {
+    let g = E5 { pos: NV2 { x: 1.0, y: 2.0 }, a: 0.0, b: 0.0, c: 0.0 }
+    let h = E5 { pos: NV2 { x: 6.0, y: 7.0 }, a: 0.0, b: 0.0, c: 0.0 }
+    let xs: [E5] = []
+    xs.push(h)
+    xs.push(g)
+    print("{xs[0].pos.x} {xs[0].pos.y} {xs[1].pos.x} {xs[1].pos.y}")
+}
+
+// A ctor result crossing a function boundary. NOTE: this does NOT reproduce the
+// terminator-remap bug -- it passes with that remap disabled. That bug (a `Term`
+// left pointing at the replaced ctor, which regalloc reads as an unassigned
+// value index and panics on) reproduces only at game scale, A/B'd on mag with
+// `Vec2` marked. Reducing it to a unit test is an open coverage gap.
+fn make_e5(k: float) -> E5 {
+    return E5 { pos: NV2 { x: k, y: k + 1.0 }, a: 3.0, b: 4.0, c: 5.0 }
+}
+
+@test(output = "1 2 3")
+fn a_flattened_ctor_can_reach_a_terminator() {
+    let e = make_e5(1.0)
+    print("{e.pos.x} {e.pos.y} {e.a}")
+}
+
+// A dot->underscore identifier mapping is NOT injective: `pos.inner` and a
+// sibling field literally named `pos_inner` collide, and Lua lets the later
+// duplicate parameter shadow the earlier -- writing one leaf's value into the
+// other with no diagnostic. Names must come from position, not the path.
+nobox value Inner { inner: float }
+// 5 leaves, so the Vec keeps boxed elements and the LEAF CTOR is used --
+// at 4 or fewer this takes the columns path and never exercises `_lct`.
+value Collide { pos: Inner, pos_inner: float, a: float, b: float, c: float }
+
+@test(output = "1 2 3 4 5")
+fn colliding_leaf_and_sibling_names_do_not_alias() {
+    let xs: [Collide] = []
+    xs.push(Collide { pos: Inner { inner: 1.0 }, pos_inner: 2.0, a: 3.0, b: 4.0, c: 5.0 })
+    let c = xs[0]
+    print("{c.pos.inner} {c.pos_inner} {c.a} {c.b} {c.c}")
+}
+
+// An explicit `materialize` operand inside a ctor that flattens for a DIFFERENT
+// field is read through, so its box is elided. Deliberate -- a value struct has
+// no identity, so the elision is unobservable -- and pinned here so the choice
+// is a decision rather than an accident. The VALUES must still be exact.
+value Pair2 { lo: NV2, hi: NV2, w: float }
+
+@test(output = "1 3 5")
+fn an_explicit_materialize_operand_survives() {
+    let xs: [Pair2] = []
+    xs.push(Pair2 { lo: NV2 { x: 1.0, y: 2.0 }, hi: materialize(NV2 { x: 3.0, y: 4.0 }), w: 5.0 })
+    let p = xs[0]
+    print("{p.lo.x} {p.hi.x} {p.w}")
+}
+
+// PLACEMENT SWEEP. Coverage is per-`cleanup`-site, and a site left on plain
+// `cleanup` fails closed (a spurious rejection), so the same flattenable ctor
+// has to be exercised from each body kind that gets its own cleanup+validate
+// pair: a coroutine, a nested fn, and a lambda.
+
+@test(output = "1 2 3")
+fn a_flattenable_ctor_inside_a_nested_fn() {
+    fn build(k: float) -> E5 {
+        return E5 { pos: NV2 { x: k, y: k + 1.0 }, a: 3.0, b: 0.0, c: 0.0 }
+    }
+    let e = build(1.0)
+    print("{e.pos.x} {e.pos.y} {e.a}")
+}
+
+@test(output = "1 2 3")
+fn a_flattenable_ctor_inside_a_lambda() {
+    let build = (k: float) => E5 { pos: NV2 { x: k, y: k + 1.0 }, a: 3.0, b: 0.0, c: 0.0 }
+    let e = build(1.0)
+    print("{e.pos.x} {e.pos.y} {e.a}")
+}
+
+co fn emit_e5() -> Coroutine<float> {
+    let e = E5 { pos: NV2 { x: 1.0, y: 2.0 }, a: 3.0, b: 0.0, c: 0.0 }
+    yield e.pos.x
+    yield e.pos.y
+    yield e.a
+}
+
+@test(output = "1 2 3")
+fn a_flattenable_ctor_inside_a_coroutine() {
+    let c = emit_e5()
+    let out: [float] = []
+    for v in c { out.push(v) }
+    print("{out[0]} {out[1]} {out[2]}")
+}
+
+// A lambda body inside a co fn: the one site still on plain `cleanup`
+// (`coroutine_emit.rs`) runs on bodies the arena-level pass already normalized,
+// so the ctor flattens here too. Called DIRECTLY -- reaching the same lambda
+// through a fn VALUE rejects at the indirect call, which is the separate
+// fn-value gap and not this.
+co fn emit_e5_via_lambda() -> Coroutine<float> {
+    let build = (k: float) => E5 { pos: NV2 { x: k, y: k + 1.0 }, a: 3.0, b: 0.0, c: 0.0 }
+    let e = build(1.0)
+    yield e.pos.x
+    yield e.pos.y
+    yield e.a
+}
+
+@test(output = "1 2 3")
+fn a_flattenable_ctor_inside_a_coroutine_lambda() {
+    let c = emit_e5_via_lambda()
+    let out: [float] = []
+    for v in c { out.push(v) }
+    print("{out[0]} {out[1]} {out[2]}")
+}
+
+// A REFERENCE struct field holding a `nobox` whose own field is `nobox`. The
+// nobox field is spliced into the parent's table as dotted leaves, so the
+// nested value has no cdata to live inside and must contribute its own leaves
+// too. `mk` takes a param so the ctor cannot fold away before it is lowered.
+nobox value RNV { x: int, y: int }
+nobox value RMid { v: RNV }
+struct RefOuter { m: RMid, tag: int }
+
+fn mk_ref_outer(k: int) -> RefOuter {
+    return RefOuter { m: RMid { v: RNV { x: k, y: k * 2 } }, tag: k + 1 }
+}
+
+@test(output = "3 6 4")
+fn reference_struct_field_holding_a_nested_nobox() {
+    let o = mk_ref_outer(3)
+    print("{o.m.v.x} {o.m.v.y} {o.tag}")
+}
+
+@test(output = "5 10")
+fn a_nested_nobox_field_binds_to_a_local() {
+    let o = mk_ref_outer(5)
+    let m = o.m
+    print("{m.v.x} {m.v.y}")
+}

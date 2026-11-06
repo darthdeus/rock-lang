@@ -1,0 +1,79 @@
+// Test cross-module decorator resolution
+// This verifies that decorators defined in one file work when used in another file
+// (simulated here by defining decorator before usage in same compilation unit)
+
+// Decorator registry - simulates being in a separate "systems" module
+global CROSS_MODULE_REGISTRY: [string] = []
+
+// Simple decorator - would be in systems.rock in real usage
+deco init cross_module_decorator {
+    vec_push(CROSS_MODULE_REGISTRY, "registered: {target.name}")
+}
+
+// Parameterized decorator - tests arg + deco across modules
+deco init cross_module_with_arg(tag: string) {
+    vec_push(CROSS_MODULE_REGISTRY, "registered({tag}): {target.name}")
+}
+
+// These functions simulate being in a different file (e.g., game.rock)
+// In real multi-file projects, the decorators above would be in a different .rock file
+
+@cross_module_decorator
+fn system_a() {
+    print("system_a executed")
+}
+
+@cross_module_decorator
+fn system_b() {
+    print("system_b executed")
+}
+
+@cross_module_with_arg(tag = "physics")
+fn physics_system() {
+    print("physics_system executed")
+}
+
+@cross_module_with_arg(tag = "render")
+fn render_system() {
+    print("render_system executed")
+}
+
+@test
+fn test_cross_module_registration() {
+    // Verify all 4 systems were registered
+    assert(vec_len(CROSS_MODULE_REGISTRY) == 4, "Expected 4 registrations, got {vec_len(CROSS_MODULE_REGISTRY)}")
+
+    // Check each registration
+    let found_a = false
+    let found_b = false
+    let found_physics = false
+    let found_render = false
+
+    for entry in CROSS_MODULE_REGISTRY {
+        if entry.contains("registered: system_a") {
+            found_a = true
+        }
+        if entry.contains("registered: system_b") {
+            found_b = true
+        }
+        if entry.contains("registered(physics): physics_system") {
+            found_physics = true
+        }
+        if entry.contains("registered(render): render_system") {
+            found_render = true
+        }
+    }
+
+    assert(found_a, "system_a should be registered")
+    assert(found_b, "system_b should be registered")
+    assert(found_physics, "physics_system should be registered with tag")
+    assert(found_render, "render_system should be registered with tag")
+}
+
+@test(output="system_a executed\nsystem_b executed\nphysics_system executed\nrender_system executed")
+fn test_decorated_functions_work() {
+    system_a()
+    system_b()
+    physics_system()
+    render_system()
+}

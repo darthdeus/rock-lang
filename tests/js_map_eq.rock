@@ -1,0 +1,70 @@
+// Map equality behind an eq walk (the JS `__op_eq` Map hole, T8g(d)).
+//
+// A JS `Map` has no own enumerable keys, so a generic key-walk deep-eq
+// (`Object.keys(map)` is `[]`) compared EVERY pair of Maps equal -- unequal
+// Maps behind a struct field, or compared directly, read as `==`. luajit walks
+// Map contents via its `pairs` loop. The JS `__op_eq` now compares Maps by size
+// then per-key `.get` (order-free). This corpus pins the split on BOTH backends.
+
+// ----- Directly compared Maps.
+
+@test(output = "false")
+fn map_diff_value_ne() {
+    let a = map_new()
+    a[1] = 10
+    let b = map_new()
+    b[1] = 20
+    print(a == b)
+}
+
+@test(output = "false")
+fn map_diff_size_ne() {
+    let a = map_new()
+    a[1] = 10
+    let b = map_new()
+    b[1] = 10
+    b[2] = 20
+    print(a == b)
+}
+
+@test(output = "true")
+fn map_equal_eq() {
+    let a = map_new()
+    a[1] = 10
+    a[2] = 20
+    let b = map_new()
+    b[2] = 20
+    b[1] = 10
+    print(a == b)   // insertion order differs -> still equal (order-free compare)
+}
+
+// ----- String keys.
+
+@test(output = "true false")
+fn map_string_keys() {
+    let a = map_new()
+    a["x"] = 1
+    let b = map_new()
+    b["x"] = 1
+    let c = map_new()
+    c["x"] = 2
+    print("{a == b} {a == c}")
+}
+
+// ----- Map behind a reference-struct field (the eq-walk path).
+
+struct Holder {
+    m: Map<int, int>,
+    tag: int,
+}
+
+@test(output = "true false")
+fn map_struct_field() {
+    let a = Holder { m: map_new(), tag: 9 }
+    a.m[1] = 10
+    let b = Holder { m: map_new(), tag: 9 }
+    b.m[1] = 10
+    let c = Holder { m: map_new(), tag: 9 }
+    c.m[1] = 99
+    print("{a == b} {a == c}")
+}

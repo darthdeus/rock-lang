@@ -1,0 +1,75 @@
+// A LAMBDA LITERAL written directly at a nullable fn-value param. The lambda
+// unifies its own expr type with the param, so its type node is
+// `Nullable(Function(..))`, not `Function(..)`. `fn_value_abi` is keyed on the
+// type and read by BOTH ends, so without a nullable peel both agree the return
+// is opaque and the body packs the `nobox` return.
+//
+// Nullability lives on the REFERENCE, not on the call ABI: a fn value is either
+// absent or a callable with exactly the arity and leaf ABI its type spells.
+//
+// The PRESENT arm answers correctly whether or not presence is threaded, so it
+// cannot separate a correct peel from one that manufactures a presence slot --
+// the ABSENT arm below is the discriminating control, and the reason it passes
+// `null` explicitly rather than only exercising a real lambda.
+
+fn src() -> Vec2 { return v(1.0, 2.0) }
+
+fn call_or(f: (() -> Vec2)?, dx: float) -> float {
+    if f != null { return f.unwrap()().x }
+    return dx
+}
+
+@test fn lambda_literal_at_a_nullable_fn_value_param() {
+    assert_eq(call_or(() => src(), -1.0), 1.0)
+}
+
+@test fn absent_arm_of_a_nullable_fn_value_param() {
+    assert_eq(call_or(null, -1.0), -1.0)
+}
+
+// The three shapes that already worked, kept as controls so a fix that moves
+// the ABI for all fn values shows up here rather than only in a game.
+fn call_plain(f: () -> Vec2) -> float { return f().x }
+
+@test fn lambda_literal_at_a_plain_fn_value_param() {
+    assert_eq(call_plain(() => src()), 1.0)
+}
+
+@test fn lambda_bound_to_a_local_then_passed() {
+    let f: () -> Vec2 = () => src()
+    assert_eq(call_or(f, -1.0), 1.0)
+}
+
+@test fn named_fn_at_a_nullable_fn_value_param() {
+    assert_eq(call_or(src, -1.0), 1.0)
+}
+
+// A nobox value in PARAM position through the same nullable reference, since
+// `fn_value_abi` splats params as well as the return.
+fn scale(p: Vec2) -> Vec2 { return v(p.x * 2.0, p.y * 2.0) }
+
+fn apply_or(f: ((Vec2) -> Vec2)?, p: Vec2) -> float {
+    if f != null { return f.unwrap()(p).x }
+    return -1.0
+}
+
+@test fn nobox_param_through_a_nullable_fn_value() {
+    assert_eq(apply_or((q) => scale(q), v(3.0, 4.0)), 6.0)
+    assert_eq(apply_or(null, v(3.0, 4.0)), -1.0)
+}
+
+// A hand-written `@scalar_abi` body is the one definition whose ABI is NOT
+// narrowed to what the type yields, so it is where the two ends most easily
+// disagree. At a nullable reference it used to reach the boxed ABI and reject;
+// the peel makes both ends read leaves. The VALUE is asserted, not just that it
+// compiles -- a leaf-order or arity slip emits fine and answers wrong.
+// The unmarked-value twin of this shape must still REJECT:
+// `skull/tests/value_scalarize.rs::unmarked_value_through_a_nullable_fn_value_still_rejects`.
+@scalar_abi inline(lua) fn mk_v() -> Vec2 = """
+    return 1.0, 2.0
+"""
+
+@test fn scalar_abi_body_through_a_nullable_fn_value() {
+    assert_eq(call_or(mk_v, -1.0), 1.0)
+    assert_eq(call_or(null, -1.0), -1.0)
+}

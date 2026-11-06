@@ -1,0 +1,68 @@
+@test
+fn test_as_operator_precedence_with_division() {
+    // Test that 'as' has higher precedence than division
+    // 1 / 2 as float should parse as 1 / (2 as float) = 0.5
+    // not as (1 / 2) as float = 0.0
+    let result = 1 / 2 as float
+    assert_eq(result, 0.5)
+    let result = 1 / (2 as float)
+    assert_eq(result, 0.5)
+}
+
+@test
+fn test_as_operator_precedence_left_side() {
+    // Test that 'as' still works correctly on the left side
+    // 1 as float / 2 should parse as (1 as float) / 2 = 0.5
+    let result = 1 as float / 2
+    assert_eq(result, 0.5)
+}
+
+@test
+fn test_as_operator_precedence_with_multiplication() {
+    // Test that 'as' has higher precedence than multiplication
+    // 2 * 3 as float should parse as 2 * (3 as float) = 6.0
+    let result = 2 * 3 as float
+    assert_eq(result, 6.0)
+}
+
+@test
+fn test_as_operator_precedence_with_addition() {
+    // Test that 'as' has higher precedence than addition
+    // 5 + 2 as float should parse as 5 + (2 as float) = 7.0
+    let result = 5 + 2 as float
+    assert_eq(result, 7.0)
+}
+
+@test
+fn test_as_operator_precedence_with_subtraction() {
+    // Test that 'as' has higher precedence than subtraction
+    // 10 - 3 as float should parse as 10 - (3 as float) = 7.0
+    let result = 10 - 3 as float
+    assert_eq(result, 7.0)
+}
+
+@test
+fn test_as_operator_complex_expression() {
+    // Test complex expression with multiple operators
+    // 1 + 2 * 3 as float / 2 should parse as 1 + (2 * (3 as float) / 2) = 4.0
+    let result = 1 + 2 * 3 as float / 2
+    assert_eq(result, 4.0)
+}
+
+@test
+fn test_as_operator_with_parentheses() {
+    // Test that explicit parentheses still work correctly
+    // (1 + 2) as float * 3 should parse as ((1 + 2) as float) * 3 = 9.0
+    let result = (1 + 2) as float * 3
+    assert_eq(result, 9.0)
+}
+
+@test
+fn test_as_operator_int_to_float_casting() {
+    // Test integer division vs float division
+    let int_div = 5 ./ 2  // Should be 2 (integer division)
+    let float_div = 5 / 2 as float  // Should be 2.5 (5 / (2 as float))
+
+    assert_eq(int_div, 2)
+    assert_eq(float_div, 2.5)
+}

@@ -1,0 +1,67 @@
+// Phase 4: early return inside co fn body.
+//
+// return inside co fn transitions to terminal state, subsequent resumes
+// return null. Fails on Phase 1-3 lowering; greens when Phase 4 lands.
+
+// ---- return inside co fn body ----
+co fn early_return(flag: bool) -> Coroutine<int> {
+    yield 1
+    if flag {
+        return;
+    }
+    yield 2
+    yield 3
+}
+
+@test(output = "1\nnull")
+fn test_early_return_true() {
+    let c = early_return(true)
+    print(c.resume() ?? -1)
+    let r = c.resume()
+    if r == null { print("null") } else { print(r.unwrap()) }
+}
+
+@test(output = "1\n2\n3")
+fn test_early_return_false() {
+    let c = early_return(false)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+}
+
+// ---- return before any yield ----
+co fn return_first(flag: bool) -> Coroutine<int> {
+    if flag {
+        return;
+    }
+    yield 42
+}
+
+@test(output = "null")
+fn test_return_before_any_yield() {
+    let c = return_first(true)
+    let r = c.resume()
+    if r == null { print("null") } else { print(r.unwrap()) }
+}
+
+// ---- return inside nested loop ----
+co fn return_in_loop(n: int) -> Coroutine<int> {
+    let i = 0
+    while i < n {
+        yield i
+        if i >= 2 {
+            return;
+        }
+        i = i + 1
+    }
+}
+
+@test(output = "0\n1\n2\nnull")
+fn test_return_in_loop() {
+    let c = return_in_loop(10)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    let r = c.resume()
+    if r == null { print("null") } else { print(r.unwrap()) }
+}

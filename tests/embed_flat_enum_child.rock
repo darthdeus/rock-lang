@@ -1,0 +1,134 @@
+// An `embed` child holding a NON-ffi-clean enum field (a payload the C layout
+// can't take -- here a closure) keeps that field FLAT under the composed key:
+// `f.active.#`, `f.active.0`. One encoding across ctor, store and read.
+//
+// The three paths used to disagree -- the ctor boxed the enum under `f.active`,
+// the store wrote sub-slots beside it, and a read rebuilt the child carrying
+// the stale box, so every match on the field fell through to nil with no error.
+// An ffi-clean enum never reproduced it (one cdata under one key, so read and
+// store agreed by accident), which is why the controls below carry the scope:
+// boxed-child and top-level placements of the same enum, and a scalar leaf of
+// the same embedded child.
+//
+// `Task.active: Wait` is this shape (`Wait::Until(() -> bool, int)`), so it is
+// also the stage-3 layout gate.
+
+enum Waitish {
+    Frame,
+    Secs(float),
+    Until(() -> bool, int),
+}
+
+struct Framed {
+    handle: int,
+    active: Waitish,
+    last: int = -1,
+}
+
+struct EmbedOwner {
+    embed f: Framed,
+    tag: int,
+}
+
+struct BoxedOwner {
+    f: Framed,
+    tag: int,
+}
+
+struct DirectOwner {
+    active: Waitish,
+}
+
+global EMB: EmbedOwner = EmbedOwner { f: Framed { handle: 1, active: Waitish::Frame }, tag: 0 }
+global BOX: BoxedOwner = BoxedOwner { f: Framed { handle: 1, active: Waitish::Frame }, tag: 0 }
+global DIR: DirectOwner = DirectOwner { active: Waitish::Frame }
+
+fn arm_embedded() { EMB.f.active = Waitish::Secs(1.5) }
+fn arm_boxed() { BOX.f.active = Waitish::Secs(1.5) }
+fn arm_direct() { DIR.active = Waitish::Secs(1.5) }
+
+fn arm_embedded_closure(n: int) { EMB.f.active = Waitish::Until(() => n > 3, n) }
+
+fn read_embedded() -> int {
+    return match EMB.f.active {
+        Waitish::Secs(s) => int(s * 10.0),
+        Waitish::Until(p, k) => if p() { k } else { -k },
+        Waitish::Frame => -1,
+    }
+}
+
+fn read_boxed() -> int {
+    return match BOX.f.active {
+        Waitish::Secs(s) => int(s * 10.0),
+        Waitish::Until(p, k) => if p() { k } else { -k },
+        Waitish::Frame => -1,
+    }
+}
+
+fn read_direct() -> int {
+    return match DIR.active {
+        Waitish::Secs(s) => int(s * 10.0),
+        Waitish::Until(p, k) => if p() { k } else { -k },
+        Waitish::Frame => -1,
+    }
+}
+
+inline(lua) fn raw_subslot_tag(o: EmbedOwner) -> string = """
+    return tostring(o["f.active.#"])
+"""
+
+// The encoding the bug split in two: nothing may sit under the composed key.
+inline(lua) fn raw_composed_key_absent(o: EmbedOwner) -> bool = """
+    return o["f.active"] == nil
+"""
+
+@test
+fn embedded_child_flat_enum_roundtrips() {
+    arm_embedded()
+    assert_eq(read_embedded(), 15)
+}
+
+@test
+fn embedded_child_flat_enum_closure_payload_roundtrips() {
+    arm_embedded_closure(7)
+    assert_eq(read_embedded(), 7)
+    arm_embedded_closure(2)
+    assert_eq(read_embedded(), -2)
+}
+
+@test
+fn embedded_child_flat_enum_uses_one_encoding() {
+    arm_embedded()
+    assert_eq(raw_subslot_tag(EMB), "Secs")
+    assert_eq(raw_composed_key_absent(EMB), true)
+}
+
+@test
+fn ctor_writes_the_flat_encoding_too() {
+    // The ctor was the other half of the split: it boxed the enum under the
+    // composed key, so a never-stored field read stale from construction.
+    let fresh = EmbedOwner { f: Framed { handle: 2, active: Waitish::Secs(0.9) }, tag: 5 }
+    assert_eq(raw_subslot_tag(fresh), "Secs")
+    assert_eq(raw_composed_key_absent(fresh), true)
+}
+
+@test
+fn boxed_child_flat_enum_roundtrips_control() {
+    arm_boxed()
+    assert_eq(read_boxed(), 15)
+}
+
+@test
+fn direct_flat_enum_roundtrips_control() {
+    arm_direct()
+    assert_eq(read_direct(), 15)
+}
+
+@test
+fn embedded_scalar_leaf_roundtrips_control() {
+    // Scopes the fix: the non-enum leaves of the same embedded child were
+    // always fine, so this is flat-enum sub-slot composition, not embed
+    // storage at large.
+    EMB.f.handle = 21
+    assert_eq(EMB.f.handle, 21)
+}

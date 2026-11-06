@@ -1,0 +1,20 @@
+// A macro call binds a named argument to the parameter it NAMES, so the order
+// the labels are written in does not change the result. Subtraction is the
+// discriminator: it is not commutative, so positional binding of `sub2(b: 3,
+// a: 10)` gives 3 - 10 == -7 and by-name binding gives 10 - 3 == 7.
+//
+// The rest of the rule (defaults, mixing, UFCS, rejection) is in
+// named_args.rock and tests/errors/macro_named_arg.rock.err.
+
+macro sub2(a: expr, b: expr) -> int { a - b }
+
+@test(output = "7")
+fn test_macro_named_args_bind_by_name_not_position() {
+    print(sub2(b: 3, a: 10))
+}
+
+// The same call written positionally still means what it says.
+@test(output = "-7")
+fn test_macro_positional_args_are_unaffected() {
+    print(sub2(3, 10))
+}

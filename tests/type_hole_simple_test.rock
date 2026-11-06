@@ -1,0 +1,23 @@
+// Simple test to verify type hole numbering
+
+@test(type_holes = [[0, "int"]])
+fn test_single_hole() {
+    let x: ? = 42  // hole 0
+    assert_eq(x, 42)
+}
+
+@test(type_holes = [[1, "int"], [2, "string"]])
+fn test_two_holes() {
+    let x: ? = 42       // hole 1 (since hole 0 was used in previous test)
+    let y: ? = "hello"  // hole 2
+    assert_eq(x, 42)
+    assert_eq(y, "hello")
+}
+
+@test(output = "42\nhello", type_holes = [[3, "int"], [4, "string"]])
+fn test_holes_with_output() {
+    let x: ? = 42       // hole 3
+    let y: ? = "hello"  // hole 4
+    print(x)
+    print(y)
+}

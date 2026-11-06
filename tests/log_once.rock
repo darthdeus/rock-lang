@@ -1,0 +1,295 @@
+// Tests for log_once / log_throttled / log_reset_dedup / log_dedup_count.
+//
+// Design:
+//   - log_once(category, msg) — fires the first time at a given call site,
+//     suppresses every subsequent call from that same site.
+//   - log_throttled(category, msg, interval_sec) — fires at most once per
+//     interval at a given call site. Wraps log_throttled_with_now(os.clock()).
+//   - log_throttled_with_now(now_sec, ...) — testable seam: takes a synthetic
+//     timestamp instead of reading os.clock(). Used directly in tests below
+//     so timing is deterministic.
+//   - log_reset_dedup() — clears both dedup and throttle state. Tests call
+//     this at the start to be self-contained.
+//   - log_dedup_count() — number of unique sites currently remembered.
+//
+// log_* are macros that inject `__SITE__` per call site. The 3-arg
+// overload accepts an explicit site key — tests exercising multiple
+// lines pass it so calls share a dedup key.
+
+// ============================================================
+// log_once
+// ============================================================
+
+// dedup_count reflects the number of unique sites remembered.
+// log_once also prints, so the expected output is the [DC] line plus the count.
+@test(output = "[DC] x\n1")
+fn test_log_dedup_count_one_site() {
+    log_reset_dedup()
+    log_set_level(0)
+    for _i in 0..10 {
+        log_once("DC", "x")
+    }
+    print(log_dedup_count())
+}
+
+// ============================================================
+// log_throttled — tested via the mockable seam log_throttled_with_now
+// ============================================================
+
+// Two distinct sites are independent: both fire immediately, both then suppressed.
+@test(output = "[A] a\n[B] b")
+fn test_log_throttled_distinct_sites_independent() {
+    log_reset_dedup()
+    log_set_level(0)
+    log_throttled_with_now(0.0, "A", "a", 1.0, "key-a")
+    log_throttled_with_now(0.0, "B", "b", 1.0, "key-b")
+    log_throttled_with_now(0.5, "A", "a", 1.0, "key-a")  // suppressed
+    log_throttled_with_now(0.5, "B", "b", 1.0, "key-b")  // suppressed
+}
+
+// Edge case: now == last + interval should fire (>=, not >).
+@test(output = "[E] go\n[E] go")
+fn test_log_throttled_boundary_fires() {
+    log_reset_dedup()
+    log_set_level(0)
+    log_throttled_with_now(0.0, "E", "go", 0.5, "boundary")
+    log_throttled_with_now(0.5, "E", "go", 0.5, "boundary")
+}
+
+// Edge case: now < last + interval (just barely) is suppressed.
+@test(output = "[E] go")
+fn test_log_throttled_just_under_boundary_suppressed() {
+    log_reset_dedup()
+    log_set_level(0)
+    log_throttled_with_now(0.0, "E", "go", 0.5, "boundary")
+    log_throttled_with_now(0.499, "E", "go", 0.5, "boundary")
+}
+
+// ============================================================
+// B3 (adversarial): edge-case interval values for log_throttled
+//
+// The throttle predicate is `(now - last) < interval`. With:
+//   - interval == 0.0  →  any non-negative delta is NOT < 0, so every call
+//                          fires. Useful as "no throttle".
+//   - interval == -1.0 →  same: any non-negative delta is NOT < -1, so every
+//                          call fires. Negative intervals are effectively the
+//                          same as 0.0 — no suppression.
+//   - interval == NaN  →  IEEE 754: every comparison with NaN is false. So
+//                          `(delta) < NaN` is false, and every call fires.
+//                          (If the comparison were the other direction it
+//                          could suppress forever — pinned here as "fires".)
+//
+// FINDING: NaN-as-interval does NOT cause silent forever-suppression because
+// the implementation puts NaN on the right-hand side of `<`, where any
+// comparison is false. If the predicate were ever rewritten as
+// `(now - last) >= interval` (negated), NaN would flip to suppress-forever.
+// Severity: documented behavior, not a bug.
+// ============================================================
+
+@test(output = "[Z] go\n[Z] go\n[Z] go")
+fn test_log_throttled_zero_interval_fires_every_call() {
+    log_reset_dedup()
+    log_set_level(0)
+    log_throttled_with_now(0.0, "Z", "go", 0.0, "zero-key")
+    log_throttled_with_now(0.0, "Z", "go", 0.0, "zero-key")
+    log_throttled_with_now(0.0, "Z", "go", 0.0, "zero-key")
+}
+
+@test(output = "[N] go\n[N] go\n[N] go")
+fn test_log_throttled_negative_interval_fires_every_call() {
+    log_reset_dedup()
+    log_set_level(0)
+    log_throttled_with_now(0.0, "N", "go", -1.0, "neg-key")
+    log_throttled_with_now(0.0, "N", "go", -1.0, "neg-key")
+    log_throttled_with_now(0.0, "N", "go", -1.0, "neg-key")
+}
+
+// Construct NaN as 0.0 / 0.0 in Rock. Rock has no nan() literal, but float
+// division is available.
+@test(output = "[NAN] go\n[NAN] go\n[NAN] go")
+fn test_log_throttled_nan_interval_fires_every_call() {
+    log_reset_dedup()
+    log_set_level(0)
+    let nan: float = 0.0 / 0.0
+    log_throttled_with_now(0.0, "NAN", "go", nan, "nan-key")
+    log_throttled_with_now(1.0, "NAN", "go", nan, "nan-key")
+    log_throttled_with_now(2.0, "NAN", "go", nan, "nan-key")
+}
+
+// ============================================================
+// B9 (adversarial): log_once dedup key is the call site, NOT
+// (call_site, message). A single textual call site that emits
+// different messages on each invocation is still a single dedup
+// entry — only the first message ever prints.
+//
+// FINDING: this behavior is intentional. The
+// pin here is to keep us honest if anyone later "improves" dedup
+// to key on (site, msg) — that change would silently break the
+// established suppression contract for varying interpolated
+// messages and warrants its own discussion. Catching the
+// behavioral change at test time makes that visible.
+// ============================================================
+
+@test(output = "[M] i=0")
+fn test_log_once_dedup_is_site_only_not_message() {
+    log_reset_dedup()
+    log_set_level(0)
+    for i in 0..5 {
+        log_once("M", "i={i}")
+    }
+}
+
+// ============================================================
+// Forwarding wrapper preserves outermost call site for dedup
+// ============================================================
+
+// Wrapper macro: __SITE__ resolves to the *user's* call site (where
+// `forward_once(...)` is written), not the macro body or any helper —
+// so 10 iterations all share one dedup key.
+macro forward_once(category: expr, msg: expr) {
+    log_once(category, msg, __SITE__)
+}
+
+@test(output = "[F] msg")
+fn test_log_once_through_wrapper_dedupes_by_outer_site() {
+    log_reset_dedup()
+    log_set_level(0)
+    for _i in 0..10 {
+        forward_once("F", "msg")
+    }
+}
+
+// ============================================================
+// log_throttled now-source seam: log_set_now / log_clear_now
+// ============================================================
+
+// When the engine sets the now-source, log_throttled uses it instead of
+// os.clock(). Drive it like a fake clock and confirm interval gating works.
+@test(output = "[NS] tick\n[NS] tick\n[NS] tick")
+fn test_log_throttled_uses_engine_now_source() {
+    log_reset_dedup()
+    log_set_level(0)
+
+    log_set_now(0.0)
+    log_throttled("NS", "tick", 1.0, "ns-key")  // fires (first call)
+
+    log_set_now(0.5)
+    log_throttled("NS", "tick", 1.0, "ns-key")  // suppressed (< 1.0s)
+
+    log_set_now(1.0)
+    log_throttled("NS", "tick", 1.0, "ns-key")  // fires
+
+    log_set_now(2.5)
+    log_throttled("NS", "tick", 1.0, "ns-key")  // fires
+
+    log_clear_now()
+}
+
+// When no override is set, log_throttled falls back to os.clock(). We can't
+// assert on the timestamp value, but we can confirm the call doesn't crash
+// and emits at least the first line.
+@test(output = "[FB] only-once")
+fn test_log_throttled_falls_back_to_os_clock() {
+    log_reset_dedup()
+    log_set_level(0)
+    log_clear_now()  // ensure no leftover override from other tests
+
+    // First call always fires (no prior timestamp recorded).
+    log_throttled("FB", "only-once", 9999.0, "fb-key")
+    // Huge interval ensures os.clock() can't have advanced enough between
+    // these two consecutive calls to fire again.
+    log_throttled("FB", "only-once", 9999.0, "fb-key")
+}
+
+
+// ============================================================
+// log_suppression_summary / the reset contract
+// ============================================================
+
+// A reset clears everything a suppression is recorded in -- the dedup and
+// throttle stamps, the counts and last messages the summary reads, and the
+// once-per-process latch that stops the summary running twice. Half a reset
+// is worse than none: the summary would then report totals for sites the
+// caller believes it cleared. The two backends had drifted here, one clearing
+// two tables and the other five.
+@test(output = "[A] first")
+fn test_log_reset_dedup_clears_what_the_summary_reads() {
+    log_reset_dedup()
+    log_set_level(0)
+
+    log_once("A", "first", "key-a")
+    log_once("A", "first", "key-a")  // suppressed, and counted
+
+    log_reset_dedup()
+    log_suppression_summary()  // nothing left to report
+}
+
+// The other half: the latch is cleared too, so a summary can run again after
+// a reset -- and it reports the total, which is the whole reason a suppressed
+// site is counted rather than forgotten.
+@test(output = "[B] second\n[B] suppressed x3 at key-b: second")
+fn test_log_suppression_summary_reports_a_suppressed_total() {
+    log_reset_dedup()
+    log_set_level(0)
+
+    log_once("B", "second", "key-b")
+    log_once("B", "second", "key-b")
+    log_once("B", "second", "key-b")
+
+    log_suppression_summary()
+}
+
+@test(output = "[LEVEL] error\n[LEVEL] warn")
+fn test_log_level_filters_portable_sink() {
+    log_reset_dedup()
+    log_set_level(1)
+
+    log_error("LEVEL", "error")
+    log_warn("LEVEL", "warn")
+    log_info("LEVEL", "info")
+    log_debug("LEVEL", "debug")
+    log_trace("LEVEL", "trace")
+}
+
+@test(output = "[A] a\n[B] b\n[C] c\n[D] d\n[E] e\n[B] suppressed x4 at key-b: b\n[C] suppressed x3 at key-c: c\n[A] suppressed x2 at key-a: a\n[D] suppressed x2 at key-d: d\n[E] suppressed x2 at key-e: e")
+fn test_log_suppression_summary_orders_by_count_then_site() {
+    log_reset_dedup()
+    log_set_level(0)
+
+    for _i in 0..2 { log_once("A", "a", "key-a") }
+    for _i in 0..4 { log_once("B", "b", "key-b") }
+    for _i in 0..3 { log_once("C", "c", "key-c") }
+    for _i in 0..2 { log_once("D", "d", "key-d") }
+    for _i in 0..2 { log_once("E", "e", "key-e") }
+
+    log_suppression_summary()
+}
+
+// ============================================================
+// Levels: a deduplicated or throttled site is not an error by construction
+// ============================================================
+
+// A warning site obeys the level gate that an error site ignores: under
+// error-only logging it is silent, and so is its suppression summary line.
+@test(output = "[E] kept")
+fn test_log_warn_once_is_gated_by_the_warn_level() {
+    log_reset_dedup()
+    log_set_level(0)
+    log_warn_once("W", "dropped", "warn-key")
+    log_warn_once("W", "dropped", "warn-key")
+    log_once("E", "kept", "error-key")
+    log_warn_throttled_with_now(0.0, "WT", "dropped", 1.0, "warn-throttle-key")
+    log_suppression_summary()
+}
+
+@test(output = "[W] shown\n[WT] tick\n[WT] tick\n[WT] suppressed x3 at warn-throttle-key: tick\n[W] suppressed x2 at warn-key: shown")
+fn test_log_warn_once_and_throttled_fire_at_the_warn_level() {
+    log_reset_dedup()
+    log_set_level(1)
+    log_warn_once("W", "shown", "warn-key")
+    log_warn_once("W", "shown", "warn-key")
+    log_warn_throttled_with_now(0.0, "WT", "tick", 1.0, "warn-throttle-key")
+    log_warn_throttled_with_now(0.5, "WT", "tick", 1.0, "warn-throttle-key")
+    log_warn_throttled_with_now(1.0, "WT", "tick", 1.0, "warn-throttle-key")
+    log_suppression_summary()
+}

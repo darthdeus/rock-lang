@@ -1,0 +1,16 @@
+// A `..` struct spread inside a macro body expands at the caller's types
+// (plan M2 / macro-hygiene). The spread is resolved after expansion.
+
+struct AB { a: int, b: int }
+
+fn sum2(a: int, b: int) -> int { a + b }
+
+macro bundled(p: expr) {
+    sum2(..p)
+}
+
+@test(output = "3")
+fn test_spread_in_macro() {
+    let props = AB { a: 1, b: 2 }
+    print(bundled(props))
+}

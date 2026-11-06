@@ -67,6 +67,8 @@ jobs:
         run: cargo build --locked --workspace
       - name: Test workspace
         run: cargo test --locked --workspace
+      - name: Test language corpus
+        run: cargo run --locked -p rock-cli --bin rock -- test tests/
       - name: Test diagnostic and CLI output with forced colors
         env:
           ROCK_FORCE_COLOR: "1"

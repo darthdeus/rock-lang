@@ -1,0 +1,52 @@
+//! Error: `@struct_expand fn f<T>(u: T) -> [(string, E)]` is compiler-expanded
+//!        at emit. The expander rejects with a spanned error when an argument is
+//!        not a value struct, a field's type has no payload-unique variant of the
+//!        target enum, a field type matches two
+//!        variants (ambiguous), and a return type that is not `[(string, <enum>)]`.
+//! Tags: struct_expand, pass_uniforms, emit-time
+
+//=== TEST CASE: arg_not_value_struct_Generic ===
+enum E { F(float), I(int) }
+
+@struct_expand inline(lua) fn epairs<T>(u: T) -> [(string, E)] = """
+    error("compiler-expanded")
+"""
+
+fn main() {
+    let _ = epairs(3)
+}
+
+//=== TEST CASE: field_type_no_matching_variant_Generic ===
+enum E { F(float), I(int) }
+value S { flag: bool }
+
+@struct_expand inline(lua) fn epairs<T>(u: T) -> [(string, E)] = """
+    error("compiler-expanded")
+"""
+
+fn main() {
+    let _ = epairs(S { flag: true })
+}
+
+//=== TEST CASE: ambiguous_variant_payload_Generic ===
+enum Dup { A(float), B(float) }
+value S { x: float }
+
+@struct_expand inline(lua) fn dpairs<T>(u: T) -> [(string, Dup)] = """
+    error("compiler-expanded")
+"""
+
+fn main() {
+    let _ = dpairs(S { x: 1.0 })
+}
+
+//=== TEST CASE: return_type_not_pairs_Generic ===
+value S { x: float }
+
+@struct_expand inline(lua) fn bad<T>(u: T) -> int = """
+    error("compiler-expanded")
+"""
+
+fn main() {
+    let _ = bad(S { x: 1.0 })
+}

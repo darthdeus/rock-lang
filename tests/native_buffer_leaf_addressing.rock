@@ -1,0 +1,356 @@
+// Leaf addressing for a `NativeBuffer<T>` / `FlatVec<T>` whose `T` is an
+// FFI-clean value struct: every element access reads/writes the leaves through
+// typed views, so the element never materializes. That is what lets a `nobox`
+// field live in one -- the sink that blocked match3
+// (`make_world_text_vertex`, stone/engine/rendering/batch.rock).
+//
+// (no `_ct(` on the buffer path) live in rock-lang/crates/skull/tests/, since a value
+// assertion cannot see a surviving ctor.
+
+nobox value NV {
+    x: float,
+    y: float,
+}
+
+// A nobox value NESTED inside a non-nobox one, headed into native storage --
+// the reduced `Vertex { pos: Vec2, uv: Vec2, .. }` shape.
+value Vert {
+    pos: NV,
+    uv: NV,
+    id: int,
+    w: float,
+}
+
+// Deeper than one level (S1), and a mixed-width leaf set (S2: int + float).
+value Inner {
+    a: float,
+    n: int,
+}
+
+value Outer {
+    lo: Inner,
+    hi: Inner,
+    tag: int,
+}
+
+fn vert_buffer(n: int) -> NativeBuffer<Vert> {
+    return native_buffer_alloc(n)
+}
+
+fn outer_buffer(n: int) -> NativeBuffer<Outer> {
+    return native_buffer_alloc(n)
+}
+
+fn make_vert(a: float, b: float, id: int) -> Vert {
+    return Vert { pos: NV { x: a, y: b }, uv: NV { x: b, y: a }, id: id, w: 1.5 }
+}
+
+// W1 literal RHS, W2 call RHS, R1 whole read, R2 nested field
+// read, R3 leaf read.
+@test(output = "1 2 2 1 7 1.5\n3 4 4 3 9 1.5\n3 4")
+fn test_whole_element_store_and_read() {
+    let buf = vert_buffer(2)
+    buf[0] = Vert { pos: NV { x: 1.0, y: 2.0 }, uv: NV { x: 2.0, y: 1.0 }, id: 7, w: 1.5 }
+    buf[1] = make_vert(3.0, 4.0, 9)
+
+    let a = buf[0]
+    print("{a.pos.x.floor()} {a.pos.y.floor()} {a.uv.x.floor()} {a.uv.y.floor()} {a.id} {a.w}")
+    let b = buf[1]
+    print("{b.pos.x.floor()} {b.pos.y.floor()} {b.uv.x.floor()} {b.uv.y.floor()} {b.id} {b.w}")
+
+    // R2: a nested value field read whole, then projected.
+    let p = buf[1].pos
+    print("{p.x.floor()} {p.y.floor()}")
+}
+
+// W3 nested field write, W4 leaf write, W5 leaf compound assign + incdec.
+@test(output = "10 20 5 2.5\n11 20 6 3.5")
+fn test_field_and_leaf_writes() {
+    let buf = vert_buffer(1)
+    buf[0] = make_vert(0.0, 0.0, 0)
+
+    buf[0].pos = NV { x: 10.0, y: 20.0 }   // W3
+    buf[0].id = 5                          // W4
+    buf[0].w = 2.5                         // W4
+    print("{buf[0].pos.x.floor()} {buf[0].pos.y.floor()} {buf[0].id} {buf[0].w}")
+
+    buf[0].pos.x++                         // W5 incdec on a nested leaf
+    buf[0].id++                            // W5 incdec on a top leaf
+    buf[0].w += 1.0                        // W5 compound assign
+    print("{buf[0].pos.x.floor()} {buf[0].pos.y.floor()} {buf[0].id} {buf[0].w}")
+}
+
+// R5 element-to-element copy, both within and across buffers.
+@test(output = "3 4 9\n3 4 9")
+fn test_element_copy() {
+    let src = vert_buffer(2)
+    let dst = vert_buffer(2)
+    src[1] = make_vert(3.0, 4.0, 9)
+    dst[0] = src[1]      // across buffers
+    src[0] = src[1]      // within one buffer
+    print("{dst[0].pos.x.floor()} {dst[0].pos.y.floor()} {dst[0].id}")
+    print("{src[0].pos.x.floor()} {src[0].pos.y.floor()} {src[0].id}")
+}
+
+// S1 depth > 1, S2 mixed leaf widths in one struct.
+@test(output = "1 2 3 4 5\n1 9 3 4 5")
+fn test_deep_nesting_mixed_widths() {
+    let buf = outer_buffer(1)
+    buf[0] = Outer { lo: Inner { a: 1.0, n: 2 }, hi: Inner { a: 3.0, n: 4 }, tag: 5 }
+    let o = buf[0]
+    print("{o.lo.a.floor()} {o.lo.n} {o.hi.a.floor()} {o.hi.n} {o.tag}")
+
+    buf[0].lo.n = 9
+    print("{buf[0].lo.a.floor()} {buf[0].lo.n} {buf[0].hi.a.floor()} {buf[0].hi.n} {buf[0].tag}")
+}
+
+// R4 a whole element passed through a call boundary (the `FlatVec.sort` key_fn
+// shape), returning a leaf.
+fn vert_key(v: Vert) -> float {
+    return v.pos.x + v.uv.y
+}
+
+@test(output = "8")
+fn test_element_through_call_boundary() {
+    let buf = vert_buffer(1)
+    buf[0] = make_vert(4.0, 1.0, 0)
+    print("{vert_key(buf[0]).floor()}")
+}
+
+// S2 -- float, int AND bool in ONE element, which is the case that forces three
+// distinct views over the same storage at three different element strides.
+// Splitting the widths across separate structs would never exercise that.
+value Flags {
+    on: bool,
+    n: int,
+    hit: bool,
+    v: float,
+}
+
+fn flags_buffer(n: int) -> NativeBuffer<Flags> {
+    return native_buffer_alloc(n)
+}
+
+@test(output = "true 7 false 3\nfalse 9 true 4\ntrue 9 true 4")
+fn test_all_three_leaf_widths_in_one_element() {
+    let buf = flags_buffer(2)
+    buf[0] = Flags { on: true, n: 7, hit: false, v: 3.0 }
+    buf[1] = Flags { on: false, n: 9, hit: true, v: 4.0 }
+    print("{buf[0].on} {buf[0].n} {buf[0].hit} {buf[0].v.floor()}")
+    print("{buf[1].on} {buf[1].n} {buf[1].hit} {buf[1].v.floor()}")
+
+    // A single-leaf write must not disturb neighbours of a DIFFERENT width --
+    // the failure mode when a view's stride or offset is computed in the wrong
+    // element size.
+    buf[1].on = true
+    print("{buf[1].on} {buf[1].n} {buf[1].hit} {buf[1].v.floor()}")
+}
+
+// S3 -- a payload-free enum is an `int` leaf.
+enum Kind {
+    Ground,
+    Air,
+    Water,
+}
+
+value Tagged {
+    kind: Kind,
+    pos: NV,
+}
+
+fn tagged_buffer(n: int) -> NativeBuffer<Tagged> {
+    return native_buffer_alloc(n)
+}
+
+@test(output = "true 1 2\ntrue 5 6")
+fn test_payload_free_enum_leaf() {
+    let buf = tagged_buffer(2)
+    buf[0] = Tagged { kind: Kind::Air, pos: NV { x: 1.0, y: 2.0 } }
+    buf[1] = Tagged { kind: Kind::Water, pos: NV { x: 5.0, y: 6.0 } }
+    print("{buf[0].kind == Kind::Air} {buf[0].pos.x.floor()} {buf[0].pos.y.floor()}")
+    print("{buf[1].kind == Kind::Water} {buf[1].pos.x.floor()} {buf[1].pos.y.floor()}")
+}
+
+// A nested value field with exactly ONE primitive leaf. Its whole-field write
+// has `hit.len() == 1` exactly like a true scalar leaf does, but the hit's path
+// is `spin.turns`, not `spin` -- so a hit-COUNT discriminant lowers the RHS as a
+// scalar and writes the whole `Spin` cdata through the float view. Every other
+// nested field in this file spans 2+ leaves, which is why the count worked
+// everywhere else. Path equality is the property that separates the two.
+value Spin {
+    turns: float,
+}
+
+value Wheel {
+    spin: Spin,
+    id: int,
+}
+
+@test(output = "7 3\n11 3")
+fn test_single_leaf_nested_field_whole_write() {
+    let buf: NativeBuffer<Wheel> = native_buffer_alloc(1)
+    buf[0] = Wheel { spin: Spin { turns: 7.0 }, id: 3 }
+    print("{buf[0].spin.turns.floor()} {buf[0].id}")
+
+    // The whole-field write: one leaf, but an AGGREGATE right-hand side.
+    buf[0].spin = Spin { turns: 11.0 }
+    print("{buf[0].spin.turns.floor()} {buf[0].id}")
+}
+
+// The DCE exemption that lets an unused leaf load die (`index_read_is_checked`,
+// skull-transform) rests on the element's bounds check being HOISTED into
+// `__nb_checked_index` rather than riding on each leaf `Index`. If that ever
+// stops holding, the exemption silently deletes the error -- so assert the
+// check survives, including when only ONE field of the element is read and the
+// other leaf loads are the ones being eliminated.
+@intrinsic @nomangle inline(lua) fn try_call(f: fn()) -> bool = """
+    local ok, err = pcall(f)
+    return not ok
+"""
+
+@test
+fn leaf_read_still_bounds_checks() {
+    let buf = vert_buffer(2)
+    buf[0] = make_vert(1.0, 2.0, 7)
+
+    let errored = try_call(() => {
+        let _x = buf[5].pos.x
+    })
+    assert(errored)
+
+    let neg = try_call(() => {
+        let _x = buf[-1].pos.x
+    })
+    assert(neg)
+
+    // In range still reads.
+    assert(buf[0].id == 7)
+}
+
+// S3 (part 2) -- a CDATA PAYLOAD enum is a nested aggregate of its own
+// (`{ int __tag; <prim> _slot; }`), so it contributes a `__tag` leaf plus one
+// leaf per payload slot. Distinct from the payload-free case above, which is a
+// bare int. Record payloads give the slots distinct NAMES; tuple payloads would
+// both land on `_0` with conflicting types, making the enum GC-carrying rather
+// than cdata-eligible and taking it off this path entirely.
+enum Hit {
+    Miss,
+    Damage { amount: int },
+    Heal { hp: float },
+}
+
+value Event {
+    hit: Hit,
+    at: NV,
+}
+
+fn event_buffer(n: int) -> NativeBuffer<Event> {
+    return native_buffer_alloc(n)
+}
+
+@test(output = "5 1 2\n3 4")
+fn test_cdata_payload_enum_leaves() {
+    let buf = event_buffer(2)
+    buf[0] = Event { hit: Hit::Damage { amount: 5 }, at: NV { x: 1.0, y: 2.0 } }
+    buf[1] = Event { hit: Hit::Heal { hp: 2.5 }, at: NV { x: 3.0, y: 4.0 } }
+
+    match buf[0].hit {
+        Hit::Damage { amount } => print("{amount} {buf[0].at.x.floor()} {buf[0].at.y.floor()}"),
+        _ => print("wrong variant"),
+    }
+    print("{buf[1].at.x.floor()} {buf[1].at.y.floor()}")
+}
+
+// A whole write to the nested ENUM field. It spans 3 leaves (`hit.__tag`,
+// `hit._amount`, `hit._hp`), so it takes the aggregate branch -- which must
+// resolve the RHS through `value_shape` (that already handles a cdata enum via
+// its `enum_value_shape` fallback) rather than demanding a value STRUCT. The
+// read side is covered above; only a write exercises this.
+@test(output = "5 1 2\n9 1 2\n3")
+fn test_whole_write_to_a_nested_enum_field() {
+    let buf = event_buffer(1)
+    buf[0] = Event { hit: Hit::Damage { amount: 5 }, at: NV { x: 1.0, y: 2.0 } }
+    match buf[0].hit {
+        Hit::Damage { amount } => print("{amount} {buf[0].at.x.floor()} {buf[0].at.y.floor()}"),
+        _ => print("wrong variant"),
+    }
+
+    buf[0].hit = Hit::Damage { amount: 9 }
+    match buf[0].hit {
+        Hit::Damage { amount } => print("{amount} {buf[0].at.x.floor()} {buf[0].at.y.floor()}"),
+        _ => print("wrong variant"),
+    }
+
+    // A whole write to a DIFFERENT variant must carry that variant's tag, not
+    // just overwrite the payload slot in place.
+    buf[0].hit = Hit::Heal { hp: 3.5 }
+    match buf[0].hit {
+        Hit::Heal { hp } => print("{hp.floor()}"),
+        _ => print("wrong variant"),
+    }
+}
+
+// S4 -- a GENERIC element. Inside a non-specialized generic body the element
+// type is an opaque `T` with no leaf list, so the boxed representation must
+// stand; the leaf path is only eligible where `T` resolves concretely.
+fn first_of<T>(buf: NativeBuffer<T>) -> T {
+    return buf[0]
+}
+
+@test(output = "3 4")
+fn test_generic_element_falls_back() {
+    let buf = vert_buffer(1)
+    buf[0] = make_vert(3.0, 4.0, 0)
+    let v = first_of(buf)
+    print("{v.pos.x.floor()} {v.pos.y.floor()}")
+}
+
+// R6 -- `.ptr` must stay a real `Ptr<Vert>` into the SAME bytes the leaf writes
+// produced, since that is what the FFI/GL upload path hands to C. Reading it
+// back through the raw pointer is the check that leaf addressing did not
+// quietly change storage.
+@nomangle inline(lua) fn __vert_pos_x_via_ptr(p: Ptr<Vert>, i: int) -> float = "return p[i].pos.x"
+
+@test(output = "3 7")
+fn test_raw_pointer_sees_leaf_writes() {
+    let buf = vert_buffer(2)
+    buf[0] = make_vert(3.0, 0.0, 0)
+    buf[1] = make_vert(7.0, 0.0, 0)
+    print("{__vert_pos_x_via_ptr(buf.ptr, 0).floor()} {__vert_pos_x_via_ptr(buf.ptr, 1).floor()}")
+}
+
+// S4 -- an element type that is NOT an FFI-clean value struct keeps the existing
+// representation. `NativeBuffer<float>` is the primitive path; it must be
+// untouched by any of this.
+@test(output = "1 2")
+fn test_primitive_element_is_unaffected() {
+    let buf = native_buffer_float(2)
+    buf[0] = 1.0
+    buf[1] = 2.0
+    print("{buf[0].floor()} {buf[1].floor()}")
+}
+
+// W6 the FlatVec surface over a nobox-carrying element: push (writes at len),
+// get/set, grow (the internal element-copy loop), sort, clear.
+// `sort` is deliberately ABSENT: its `key_fn: (T) -> float` passes a whole
+// element through an INDIRECT call, which packs, and for a nobox field that is
+// a guarantee violation. That is a different sink with no NativeBuffer in it --
+// pinned by tests/errors/nobox_indirect_call_arg.rock.err, and it lands with
+// the fn-value path.
+@test(output = "3\n9 1 5\n7 1 3\n0")
+fn test_flat_vec_surface() {
+    let fv: FlatVec<Vert> = flat_vec_new(1)   // cap 1 forces a grow
+    fv.push(make_vert(9.0, 0.0, 1))
+    fv.push(make_vert(1.0, 0.0, 2))
+    fv.push(make_vert(5.0, 0.0, 3))
+    print("{fv.len}")
+    print("{fv.get(0).pos.x.floor()} {fv.get(1).pos.x.floor()} {fv.get(2).pos.x.floor()}")
+
+    // set writes a whole element back over an existing slot.
+    fv.set(0, make_vert(7.0, 0.0, 1))
+    fv.set(2, make_vert(3.0, 0.0, 3))
+    print("{fv.get(0).pos.x.floor()} {fv.get(1).pos.x.floor()} {fv.get(2).pos.x.floor()}")
+
+    fv.clear()
+    print("{fv.len}")
+}

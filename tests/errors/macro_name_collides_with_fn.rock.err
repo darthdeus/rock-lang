@@ -1,0 +1,16 @@
+//! Error: a macro name colliding with a function name is rejected
+//! Tags: macros, uniqueness
+
+// A macro name must be unique against function names across the whole module
+// set: `foo(...)` in call position is ambiguous when both a `macro foo` and a
+// `fn foo` exist (expansion would silently claim the call and shadow the fn).
+// Macro overloads (same name, different arity) stay legal; a same-named LOCAL
+// binding legally shadows a macro (tests/macros/shadowing.rock).
+
+//=== TEST CASE: macro_shadows_same_named_fn_Compiler ===
+macro foo(x: expr) -> int { x }
+fn foo(x: int) -> int { return x }
+
+fn main() {
+    let _ = foo(1)
+}

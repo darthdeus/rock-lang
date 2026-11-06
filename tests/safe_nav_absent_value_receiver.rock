@@ -1,0 +1,71 @@
+// A safe-nav receiver that is an UNBOXED nullable value must be tested by its
+// PRESENCE tag, not by packing it and comparing the box to nil.
+//
+// A ctor is statically non-nil, so the packed comparison const-folded to
+// "present" and deleted the miss arm: `?.method()` called the method with nil
+// leaves and died inside the ctor, and `?.let` returned the hit value on a miss.
+// `?.field` was already correct -- it projects a leaf and never packs -- which
+// is what made this look like a method/let quirk rather than one receiver rule
+// that two of the three forms did not share.
+//
+// Nothing here is `nobox`: a plain unmarked `value` out of a Map reproduces all
+// of it, which is the wider exposure. The `struct` twin was always correct and
+// is the control.
+
+value NV2 { x: float, y: float }
+
+struct SV2 { x: float, y: float }
+
+fn mag(v: NV2) -> float { return v.x + v.y }
+
+fn smag(v: SV2) -> float { return v.x + v.y }
+
+fn by_field(m: Map<int, NV2>, k: int) -> float { return m.get(k)?.x ?? -1.0 }
+
+fn by_method(m: Map<int, NV2>, k: int) -> float { return m.get(k)?.mag() ?? -1.0 }
+
+fn by_let(m: Map<int, NV2>, k: int) -> float { return m.get(k)?.let { 5.0 } ?? -1.0 }
+
+fn s_by_method(m: Map<int, SV2>, k: int) -> float { return m.get(k)?.smag() ?? -1.0 }
+
+fn seeded() -> Map<int, NV2> {
+    let m: Map<int, NV2> = map_new()
+    m[1] = NV2 { x: 1.0, y: 2.0 }
+    return m
+}
+
+@test(returns = 1.0)
+fn safe_nav_field_hits() -> float { return by_field(seeded(), 1) }
+
+@test(returns = -1.0)
+fn safe_nav_field_misses() -> float { return by_field(seeded(), 9) }
+
+@test(returns = 3.0)
+fn safe_nav_method_hits() -> float { return by_method(seeded(), 1) }
+
+// Was a runtime CRASH: the method ran on the miss path with nil leaves.
+@test(returns = -1.0)
+fn safe_nav_method_misses() -> float { return by_method(seeded(), 9) }
+
+@test(returns = 5.0)
+fn safe_nav_let_hits() -> float { return by_let(seeded(), 1) }
+
+// Was `5` -- the hit value on a miss.
+@test(returns = -1.0)
+fn safe_nav_let_misses() -> float { return by_let(seeded(), 9) }
+
+// The control: a reference struct receiver is a real box, so `== nil` was always
+// the right test for it. It must stay that way.
+@test(returns = 3.0)
+fn a_struct_receiver_hits() -> float {
+    let m: Map<int, SV2> = map_new()
+    m[1] = SV2 { x: 1.0, y: 2.0 }
+    return s_by_method(m, 1)
+}
+
+@test(returns = -1.0)
+fn a_struct_receiver_misses() -> float {
+    let m: Map<int, SV2> = map_new()
+    m[1] = SV2 { x: 1.0, y: 2.0 }
+    return s_by_method(m, 9)
+}

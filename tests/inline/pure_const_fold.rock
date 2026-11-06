@@ -1,0 +1,79 @@
+// Compile-time constant folding through @pure calls. A @pure fn with
+// a single `return <expr>;` body whose args are all literal constants
+// evaluates to a literal at compile time. Runtime output is
+// unchanged from pre-folding behavior — the tests below assert
+// runtime correctness; the `compile` test under rock/tests exercises
+// the "the call is actually gone from the generated Lua" side.
+
+@pure
+fn triple(x: int) -> int {
+    return x + x + x
+}
+
+@test(output = "15")
+fn test_triple_folds() {
+    let r = triple(5)
+    print(r)
+}
+
+@pure
+fn linear(a: int, b: int, x: int) -> int {
+    return a * x + b
+}
+
+@test(output = "23")
+fn test_multi_arg_folds() {
+    let r = linear(4, 3, 5)
+    print(r)
+}
+
+// Nested pure calls: outer call's arg is itself a foldable pure
+// call. Post-order walk evaluates inside-out: `triple(2)` → 6,
+// then `linear(6, 1, 3)` → 19.
+@test(output = "19")
+fn test_nested_pure_calls_fold() {
+    let r = linear(triple(2), 1, 3)
+    print(r)
+}
+
+// Unary minus + bit-not + bool ops also evaluate.
+@pure
+fn boolish(a: bool, b: bool) -> bool {
+    return a && b
+}
+
+@test(output = "true")
+fn test_bool_folds() {
+    let r = boolish(true, true)
+    print(r)
+}
+
+// Non-const arg defeats folding: the call stays as-is, still
+// evaluates correctly at runtime.
+@pure
+fn square(x: int) -> int {
+    return x * x
+}
+
+@test(output = "49")
+fn test_non_const_arg_no_fold() {
+    let n = 7
+    let r = square(n)
+    print(r)
+}
+
+// Division by zero in the folded path: the evaluator bails
+// (returns None from eval_binop) so the original call survives
+// intact. Runtime behavior is Lua's — not our concern here.
+// The positive side: zero divisors from live data don't poison
+// compile-time folding for other calls.
+@pure
+fn maybe_div(a: int, b: int) -> int {
+    return a ./ b
+}
+
+@test(output = "5")
+fn test_div_folds() {
+    let r = maybe_div(20, 4)
+    print(r)
+}

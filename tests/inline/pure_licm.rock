@@ -1,0 +1,145 @@
+// Loop-invariant code motion for @pure calls. A pure call whose
+// arguments are all loop-invariant gets hoisted out of the loop
+// into a `let __licm_N = ...` in the enclosing block. Runtime
+// output is unchanged; the grep-the-Lua check lives in the
+// companion Rust test if/when we add one.
+
+@pure
+fn square_plus(x: int) -> int {
+    return x * x + x
+}
+
+// `square_plus(limit)` doesn't depend on `i` → hoisted to a single
+// pre-loop let. Sum = 10 * (10*10 + 10) = 1100.
+@test(output = "1100")
+fn test_hoist_pure_call_out_of_for() {
+    let limit = 10
+    let sum = 0
+    for i in 0..10 {
+        sum = sum + square_plus(limit)
+    }
+    print(sum)
+}
+
+@pure
+fn add(a: int, b: int) -> int { return a + b }
+
+// One arg is the loop var → NOT hoistable; call runs per iteration.
+// Sum(10+i) for i in 0..10 = 100 + 45 = 145.
+@test(output = "145")
+fn test_non_invariant_arg_no_hoist() {
+    let limit = 10
+    let sum = 0
+    for i in 0..10 {
+        sum = sum + add(limit, i)
+    }
+    print(sum)
+}
+
+// While loop: same rules. limit*10 = 1100.
+@test(output = "1100")
+fn test_while_loop_hoist() {
+    let limit = 10
+    let sum = 0
+    let i = 0
+    while i < 10 {
+        sum = sum + square_plus(limit)
+        i = i + 1
+    }
+    print(sum)
+}
+
+// Nested pure calls: `add(square_plus(limit), 1)` — outer is pure,
+// its first arg is another pure call whose own arg is invariant.
+// The whole thing hoists as one chunk.
+@test(output = "1110")
+fn test_nested_pure_call_hoists() {
+    let limit = 10
+    let sum = 0
+    for i in 0..10 {
+        sum = sum + add(square_plus(limit), 1)
+    }
+    print(sum)  // 10 * (110 + 1) = 1110
+}
+
+// Assignment to a captured local inside the loop → variant set picks
+// it up; a call on it can't hoist. Sum = square_plus(0..9 cumulative)
+// = square_plus at x = 45 (after i=9 iteration), but each iteration
+// sums a DIFFERENT value of square_plus(state) since state changes.
+// Iterate: state0=0, add square_plus(0)=0, state1=1; state=1+1=2,
+// add square_plus(2)=6 ... actually this is a trap test, skip.
+
+// Test that a non-pure call inside the loop stays untouched even if
+// its args are invariant. `print` is @debug_impure (demoted, not
+// pure), so no hoist.
+@test(output = "42\n42\n42")
+fn test_non_pure_call_not_hoisted() {
+    let x = 42
+    for i in 0..3 {
+        print(x)
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Follow-ups from initial LICM (787b4675 park note)
+// ─────────────────────────────────────────────────────────────
+
+@pure
+fn abs_i(x: int) -> int {
+    return if x < 0 { 0 - x } else { x }
+}
+
+// Nested loops: `abs_i(x)` is invariant w.r.t. BOTH inner and outer
+// loops. After cascading fixpoint, the hoisted let lands ABOVE the
+// OUTER loop (not just between outer/inner).
+// sum = 3*3*abs(5) = 45.
+@test(output = "45")
+fn test_nested_loop_cascading_hoist() {
+    let x = 0 - 5
+    let sum = 0
+    for i in 0..3 {
+        for j in 0..3 {
+            sum = sum + abs_i(x)
+        }
+    }
+    print(sum)
+}
+
+// UFCS method-style pure call: receiver is a loop-invariant local,
+// args are invariant. Should hoist as a unit.
+@pure
+fn length_sq(p: V2) -> float {
+    return p.x * p.x + p.y * p.y
+}
+
+value V2 { x: float, y: float }
+
+@test(output = "25")
+fn test_ufcs_method_hoist() {
+    let point = V2 { x: 3.0, y: 4.0 }
+    let sum = 0.0
+    for i in 0..1 {
+        sum = sum + point.length_sq()
+    }
+    print(sum as int)
+}
+
+
+// Value-struct return type: `@pure` fn returns V2. Should hoist
+// (value types are byte-equal / dup-safe).
+@pure
+fn make_v2(a: float, b: float) -> V2 {
+    return V2 { x: a, y: b }
+}
+
+@test(output = "5")
+fn test_value_struct_return_hoists() {
+    let a = 2.0
+    let b = 3.0
+    let sum = 0.0
+    for i in 0..1 {
+        let v = make_v2(a, b)
+        sum = sum + v.x + v.y
+    }
+    print(sum as int)
+}

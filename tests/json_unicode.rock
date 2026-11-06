@@ -1,0 +1,96 @@
+// Surrogate pair for the emoji at U+1F600 must decode to a 4-byte UTF-8 sequence.
+@test
+fn test_json_surrogate_pair_emoji() {
+    let decoded = json_decode("\"\\ud83d\\ude00\"")
+    assert(decoded != null)
+    let s = json_as_str(decoded.unwrap())
+    assert(s != null)
+    let result = s.unwrap()
+    assert_eq(result.len(), 4)
+    assert_eq(result.unit_at(0), 0xF0)
+    assert_eq(result.unit_at(1), 0x9F)
+    assert_eq(result.unit_at(2), 0x98)
+    assert_eq(result.unit_at(3), 0x80)
+}
+
+@test
+fn test_from_codepoint_1byte_boundary() {
+    let a = from_codepoint(0x7F)
+    assert_eq(a.len(), 1)
+    assert_eq(a.unit_at(0), 0x7F)
+
+    let b = from_codepoint(0x80)
+    assert_eq(b.len(), 2)
+    assert_eq(b.unit_at(0), 0xC2)
+    assert_eq(b.unit_at(1), 0x80)
+}
+
+@test
+fn test_from_codepoint_2byte_boundary() {
+    let a = from_codepoint(0x7FF)
+    assert_eq(a.len(), 2)
+    assert_eq(a.unit_at(0), 0xDF)
+    assert_eq(a.unit_at(1), 0xBF)
+
+    let b = from_codepoint(0x800)
+    assert_eq(b.len(), 3)
+    assert_eq(b.unit_at(0), 0xE0)
+    assert_eq(b.unit_at(1), 0xA0)
+    assert_eq(b.unit_at(2), 0x80)
+}
+
+@test
+fn test_from_codepoint_3byte_boundary() {
+    let a = from_codepoint(0xFFFF)
+    assert_eq(a.len(), 3)
+    assert_eq(a.unit_at(0), 0xEF)
+    assert_eq(a.unit_at(1), 0xBF)
+    assert_eq(a.unit_at(2), 0xBF)
+
+    let b = from_codepoint(0x10000)
+    assert_eq(b.len(), 4)
+    assert_eq(b.unit_at(0), 0xF0)
+    assert_eq(b.unit_at(1), 0x90)
+    assert_eq(b.unit_at(2), 0x80)
+    assert_eq(b.unit_at(3), 0x80)
+}
+
+@test
+fn test_from_codepoint_max() {
+    let a = from_codepoint(0x10FFFF)
+    assert_eq(a.len(), 4)
+    assert_eq(a.unit_at(0), 0xF4)
+    assert_eq(a.unit_at(1), 0x8F)
+    assert_eq(a.unit_at(2), 0xBF)
+    assert_eq(a.unit_at(3), 0xBF)
+}
+
+@intrinsic @nomangle inline(lua) fn try_call(f: fn()) -> bool = """
+    local ok, err = pcall(f)
+    return not ok
+"""
+
+@test
+fn test_from_codepoint_negative_errors() {
+    assert(try_call(() => { let _x = from_codepoint(-1) }))
+}
+
+@test
+fn test_from_codepoint_above_max_errors() {
+    assert(try_call(() => { let _x = from_codepoint(0x110000) }))
+}
+
+@test
+fn test_from_codepoint_surrogate_errors() {
+    assert(try_call(() => { let _x = from_codepoint(0xD800) }))
+    assert(try_call(() => { let _x = from_codepoint(0xDFFF) }))
+}
+
+// Malformed input is data, not a programmer error: a lone surrogate escape
+// must yield a decode failure (null), never a runtime error.
+@test
+fn test_json_lone_surrogate_fails_soft() {
+    assert(json_decode("\"\\ud83d\"") == null)
+    assert(json_decode("\"\\ude00\"") == null)
+    assert(json_decode("\"\\ud83dx\"") == null)
+}

@@ -1,0 +1,43 @@
+// NativeBuffer<T: value> — verifies that the existing NativeBuffer
+// infrastructure composes with user-supplied per-type allocators and
+// accessors for value struct types. Matches the pattern documented in
+// stdlib/unified.rock alongside the primitive variants.
+//
+// This is the "phase 1" answer for value-typed NativeBuffer support
+// Compile-time cdef emission comes for
+// free via the value-struct pipeline; indexing / assignment compile to
+// direct cdata ops; the per-T allocator + accessors are a handful of
+// lines of stdlib-style inline(lua).
+
+value V2 {
+    x: float,
+    y: float,
+}
+
+@nomangle inline(lua) fn __nb_alloc_V2(n: int) -> Ptr<V2> = 'return ffi.new("V2[?]", n)'
+
+fn native_buffer_v2(n: int) -> NativeBuffer<V2> {
+    return NativeBuffer { ptr: __nb_alloc_V2(n), len: n }
+}
+
+// buf[i] / buf[i] = v already compile correctly via the existing
+// NativeBuffer indexing path. Helpers below mirror the `nb_get` / `nb_set`
+// shape used by the primitive variants.
+
+inline(lua) fn nb_get(b: NativeBuffer<V2>, i: int) -> V2 = "return b.ptr[i]"
+inline(lua) fn nb_set(b: NativeBuffer<V2>, i: int, v: V2) = "b.ptr[i] = v"
+
+@test(output = "3\n7\n11\n13")
+fn test_native_buffer_value() {
+    let buf = native_buffer_v2(4)
+    nb_set(buf, 0, V2 { x: 3, y: 7 })
+    nb_set(buf, 1, V2 { x: 11, y: 13 })
+
+    let a = nb_get(buf, 0)
+    print("{a.x.floor()}")
+    print("{a.y.floor()}")
+
+    let b = nb_get(buf, 1)
+    print("{b.x.floor()}")
+    print("{b.y.floor()}")
+}

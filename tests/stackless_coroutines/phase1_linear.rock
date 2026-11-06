@@ -1,0 +1,111 @@
+// Phase 1: linear coroutine bodies.
+//
+// Top-level yield statements only. No control flow inside co fn bodies.
+// All tests must pass with the stackless state-machine lowering active.
+
+// ---- Linear yield chain ----
+co fn linear() -> Coroutine<int> {
+    yield 1
+    yield 2
+    yield 3
+}
+
+@test(output = "1\n2\n3")
+fn test_linear_chain() {
+    let c = linear()
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+}
+
+// ---- Local state persists across yields ----
+co fn accumulator(step: int) -> Coroutine<int> {
+    let sum = 0
+    sum = sum + step
+    yield sum
+    sum = sum + step
+    yield sum
+    sum = sum + step
+    yield sum
+}
+
+@test(output = "5\n10\n15")
+fn test_local_state_persistence() {
+    let c = accumulator(5)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+}
+
+// ---- Value param mutation inside yielded expression ----
+value Counter {
+    n: int,
+}
+
+co fn mutate_counter(c: Counter) -> Coroutine<int> {
+    c = Counter { n: c.n + 1 }
+    yield c.n
+    c = Counter { n: c.n + 10 }
+    yield c.n
+    c = Counter { n: c.n + 100 }
+    yield c.n
+}
+
+@test(output = "1\n11\n111")
+fn test_struct_param_mutation() {
+    let counter = Counter { n: 0 }
+    let c = mutate_counter(counter)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+}
+
+// ---- Exhaustion returns null ----
+co fn two_values() -> Coroutine<int> {
+    yield 42
+    yield 99
+}
+
+@test(output = "42\n99\nnull")
+fn test_exhaustion_returns_null() {
+    let c = two_values()
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    let r = c.resume()
+    if r == null { print("null") } else { print(r.unwrap()) }
+}
+
+// ---- Multiple independent instances ----
+@test(output = "1\n100\n2\n200")
+fn test_independent_instances() {
+    let a = accumulator(1)
+    let b = accumulator(100)
+    print(a.resume() ?? -1)
+    print(b.resume() ?? -1)
+    print(a.resume() ?? -1)
+    print(b.resume() ?? -1)
+}
+
+// ---- Zero yields ----
+co fn no_yields() -> Coroutine<int> {
+    // empty body
+}
+
+@test(output = "null")
+fn test_zero_yields_returns_null_immediately() {
+    let c = no_yields()
+    let r = c.resume()
+    if r == null { print("null") } else { print(r.unwrap()) }
+}
+
+// ---- Body with side effects but no yield ----
+co fn side_effect_only() -> Coroutine<int> {
+    print("ran")
+}
+
+@test(output = "ran\nnull")
+fn test_side_effects_no_yield() {
+    let c = side_effect_only()
+    let r = c.resume()
+    if r == null { print("null") } else { print(r.unwrap()) }
+}

@@ -1,0 +1,258 @@
+// Phase 9 cleanup: `for` loop desugar in co fn bodies.
+//
+// `for x in iter { yield ... }` was previously rejected with a Phase 3
+// NYI error. The stackless codegen now desugars it to the iterator-
+// protocol while-loop pattern:
+//
+//   let __it = <iter_fn>(iter)
+//   while true {
+//       let x_opt = __it()
+//       if x_opt == null { break }
+//       let x = x_opt.unwrap()
+//       <body>
+//   }
+//
+// Current support: Vec<T> with non-nullable T (the common case). Other
+// strategies (Arena, Map, Range) still error for now —
+// users can rewrite to while manually.
+
+// ---- Simple Vec iteration ----
+co fn yield_each(items: [int]) -> Coroutine<int> {
+    for v in items {
+        yield v * 10
+    }
+}
+
+@test(output = "10\n20\n30\nnull")
+fn test_for_vec_simple() {
+    let c = yield_each([1, 2, 3])
+    print(c.resume() ?? -99)
+    print(c.resume() ?? -99)
+    print(c.resume() ?? -99)
+    let r = c.resume()
+    if r == null { print("null") } else { print(r.unwrap()) }
+}
+
+// ---- Empty Vec: zero iterations ----
+co fn yield_each_empty(items: [int]) -> Coroutine<int> {
+    for v in items {
+        yield v
+    }
+}
+
+@test(output = "null")
+fn test_for_vec_empty() {
+    let c = yield_each_empty([])
+    let r = c.resume()
+    if r == null { print("null") } else { print(r.unwrap()) }
+}
+
+// ---- Break inside for ----
+co fn yield_until_five(items: [int]) -> Coroutine<int> {
+    for v in items {
+        if v >= 5 { break }
+        yield v
+    }
+}
+
+@test(output = "1\n3\nnull")
+fn test_for_break() {
+    let c = yield_until_five([1, 3, 5, 7])
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    let r = c.resume()
+    if r == null { print("null") } else { print(r.unwrap()) }
+}
+
+// ---- Range iteration (numeric) ----
+co fn yield_range(lo: int, hi: int) -> Coroutine<int> {
+    for i in lo..hi {
+        yield i * 10
+    }
+}
+
+@test(output = "20\n30\n40\nnull")
+fn test_for_range_basic() {
+    let c = yield_range(2, 5)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    let r = c.resume()
+    if r == null { print("null") } else { print(r.unwrap()) }
+}
+
+// ---- Range with continue ----
+co fn yield_range_skip_even(lo: int, hi: int) -> Coroutine<int> {
+    for i in lo..hi {
+        if i % 2 == 0 { continue }
+        yield i
+    }
+}
+
+@test(output = "1\n3\nnull")
+fn test_for_range_continue() {
+    let c = yield_range_skip_even(0, 4)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    let r = c.resume()
+    if r == null { print("null") } else { print(r.unwrap()) }
+}
+
+// ---- Empty range: lo >= hi ----
+co fn yield_range_empty() -> Coroutine<int> {
+    for i in 5..5 {
+        yield i
+    }
+}
+
+@test(output = "null")
+fn test_for_range_empty() {
+    let c = yield_range_empty()
+    let r = c.resume()
+    if r == null { print("null") } else { print(r.unwrap()) }
+}
+
+// ---- Vec iteration inside a coroutine ----
+global VEC_GLOBAL: [int] = [10, 20, 30]
+
+co fn yield_from_vec() -> Coroutine<int> {
+    for v in VEC_GLOBAL {
+        yield v + 1
+    }
+}
+
+@test(output = "11\n21\n31\nnull")
+fn test_for_vec() {
+    let c = yield_from_vec()
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    let r = c.resume()
+    if r == null { print("null") } else { print(r.unwrap()) }
+}
+
+// ---- Arena iteration (yields {entity, data}) ----
+struct Mob { name: string, hp: int }
+global ARENA: Arena<Mob> = arena_new()
+
+co fn yield_mob_hps() -> Coroutine<int> {
+    for pair in ARENA {
+        yield pair.1.hp
+    }
+}
+
+@test(output = "10\n20\nnull")
+fn test_for_arena() {
+    ARENA.clear()
+    ARENA.insert(Mob { name: "a", hp: 10 })
+    ARENA.insert(Mob { name: "b", hp: 20 })
+    let c = yield_mob_hps()
+    print(c.resume() ?? -99)
+    print(c.resume() ?? -99)
+    let r = c.resume()
+    if r == null { print("null") } else { print(r.unwrap()) }
+}
+
+// ---- Vec<T?> with nullable elements: numeric-indexed iteration ----
+co fn yield_with_nullable(items: [int?]) -> Coroutine<int> {
+    for v in items {
+        if v == null {
+            yield -1
+        } else {
+            yield v.unwrap() * 10
+        }
+    }
+}
+
+@test(output = "10\n-1\n30\nnull")
+fn test_for_vec_nullable() {
+    let arr: [int?] = [1, null, 3]
+    let c = yield_with_nullable(arr)
+    print(c.resume() ?? -99)
+    print(c.resume() ?? -99)
+    print(c.resume() ?? -99)
+    let r = c.resume()
+    if r == null { print("null") } else { print(r.unwrap()) }
+}
+
+// ---- Vec enumerated with tuple binding ----
+co fn yield_indexed(items: [int]) -> Coroutine<int> {
+    for (i, v) in enumerate(items) {
+        yield i * 100 + v
+    }
+}
+
+@test(output = "10\n120\n230\nnull")
+fn test_for_vec_enumerated() {
+    let c = yield_indexed([10, 20, 30])
+    // i=0 v=10 -> 10, i=1 v=20 -> 120, i=2 v=30 -> 230
+    print(c.resume() ?? -99)
+    print(c.resume() ?? -99)
+    print(c.resume() ?? -99)
+    let r = c.resume()
+    if r == null { print("null") } else { print(r.unwrap()) }
+}
+
+// ---- Map with tuple binding ----
+// Map iteration order is unspecified by Lua (pairs is unordered), so we
+// yield the *running total* instead of individual values and check only
+// the end state — that way the test doesn't depend on hash order.
+global COLORS: Map<string, int> = map_new()
+
+co fn yield_color_total() -> Coroutine<int> {
+    let total = 0
+    for (_k, v) in COLORS {
+        total = total + v
+    }
+    yield total
+}
+
+@test(output = "3")
+fn test_for_map() {
+    COLORS.clear()
+    insert(COLORS, "red", 1)
+    insert(COLORS, "green", 2)
+    let c = yield_color_total()
+    print(c.resume() ?? -99)
+}
+
+// ---- Vec enumerated with single binding (yields tuple {idx, val}) ----
+co fn yield_indexed_single(items: [int]) -> Coroutine<int> {
+    for pair in enumerate(items) {
+        yield pair.0 * 100 + pair.1
+    }
+}
+
+@test(output = "10\n120\n230\nnull")
+fn test_for_vec_enumerated_single_binding() {
+    let c = yield_indexed_single([10, 20, 30])
+    print(c.resume() ?? -99)
+    print(c.resume() ?? -99)
+    print(c.resume() ?? -99)
+    let r = c.resume()
+    if r == null { print("null") } else { print(r.unwrap()) }
+}
+
+// ---- Arena enumerated with tuple binding ----
+struct MobE { id: int }
+global ARENA_E: Arena<MobE> = arena_new()
+
+co fn yield_arena_indexed() -> Coroutine<int> {
+    for (i, pair) in enumerate(ARENA_E) {
+        yield i * 10 + pair.1.id
+    }
+}
+
+@test(output = "1\n12\n23\nnull")
+fn test_for_arena_enumerated() {
+    ARENA_E.clear()
+    ARENA_E.insert(MobE { id: 1 })
+    ARENA_E.insert(MobE { id: 2 })
+    ARENA_E.insert(MobE { id: 3 })
+    let c = yield_arena_indexed()
+    print(c.resume() ?? -99)
+    print(c.resume() ?? -99)
+    print(c.resume() ?? -99)
+    let r = c.resume()
+    if r == null { print("null") } else { print(r.unwrap()) }
+}

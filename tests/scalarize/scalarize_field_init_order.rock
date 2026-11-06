@@ -1,0 +1,82 @@
+// Adversarial tests: struct scalarization — field-init evaluation
+//
+// Rock evaluates named-field initializers at some well-defined ordering
+// that is an implementation detail of the current codegen (currently
+// FxHashMap iteration order in `generate_struct_lit_expr`). Scalarization
+// must preserve WHATEVER the current semantics are — same observable
+// order, same count of evaluations (exactly once each), same final
+// values bound to the fields.
+//
+// Rather than asserting a specific source-vs-declaration order (which
+// is NOT documented as stable behavior), we verify the two invariants
+// that genuinely matter for correctness:
+//
+//   (a) Each field initializer executes exactly once.
+//   (b) The final value of each field matches its initializer's result.
+
+struct IRect {
+    x: int,
+    y: int,
+    w: int,
+    h: int,
+}
+
+global counter: int = 0
+global fire_count_x: int = 0
+global fire_count_y: int = 0
+global fire_count_w: int = 0
+global fire_count_h: int = 0
+
+fn tick_x() -> int {
+    fire_count_x = fire_count_x + 1
+    counter = counter + 1
+    return counter
+}
+
+fn tick_y() -> int {
+    fire_count_y = fire_count_y + 1
+    counter = counter + 1
+    return counter
+}
+
+fn tick_w() -> int {
+    fire_count_w = fire_count_w + 1
+    counter = counter + 1
+    return counter
+}
+
+fn tick_h() -> int {
+    fire_count_h = fire_count_h + 1
+    counter = counter + 1
+    return counter
+}
+
+@test(output = "all-once sum=10")
+fn test_each_initializer_fires_exactly_once() {
+    counter = 0
+    fire_count_x = 0
+    fire_count_y = 0
+    fire_count_w = 0
+    fire_count_h = 0
+
+    let r = IRect {
+        x: tick_x(),
+        y: tick_y(),
+        w: tick_w(),
+        h: tick_h(),
+    }
+
+    // Each tick fires exactly once.
+    let all_once = fire_count_x == 1 && fire_count_y == 1 && fire_count_w == 1 && fire_count_h == 1
+
+    // Final field values: each tick returns counter's value at fire
+    // time. Whichever order they fire in, the sum of the four field
+    // values must equal 1+2+3+4 = 10 (no duplication, no skips).
+    let sum = r.x + r.y + r.w + r.h
+
+    if all_once {
+        print("all-once sum={sum}")
+    } else {
+        print("BUG: x={fire_count_x} y={fire_count_y} w={fire_count_w} h={fire_count_h}")
+    }
+}

@@ -1,0 +1,196 @@
+value AliasPoint { x: int, y: int }
+value AliasWrap { p: AliasPoint, n: int }
+struct AliasHolder { a: AliasPoint, b: AliasPoint, o: AliasPoint? = null, w: AliasWrap? = null }
+
+fn alias_store_twice(e: AliasPoint?, h: AliasHolder) {
+    if let v = e {
+        h.a = v
+        h.b = v
+    }
+}
+
+fn alias_store_optional(e: AliasPoint?, h: AliasHolder) { h.o = e }
+
+@test
+fn storing_one_value_twice_copies() {
+    let h = AliasHolder { a: AliasPoint { x: 0, y: 0 }, b: AliasPoint { x: 0, y: 0 } }
+    alias_store_twice(AliasPoint { x: 1, y: 2 }, h)
+    h.a.x = 5
+    assert_eq(h.b.x, 1, "value stores alias")
+}
+
+@test
+fn field_param_field_store_copies() {
+    let src = AliasHolder { a: AliasPoint { x: 0, y: 0 }, b: AliasPoint { x: 0, y: 0 },
+        o: AliasPoint { x: 3, y: 4 } }
+    let dst = AliasHolder { a: AliasPoint { x: 0, y: 0 }, b: AliasPoint { x: 0, y: 0 } }
+    alias_store_optional(src.o, dst)
+    alias_store_twice(dst.o, dst)
+    dst.a.x = 9
+    assert_eq(dst.b.x, 3, "value stores alias across a parameter")
+}
+
+@test
+fn optional_field_if_let_store_twice_copies() {
+    let h = AliasHolder { a: AliasPoint { x: 0, y: 0 }, b: AliasPoint { x: 0, y: 0 }, o: AliasPoint { x: 1, y: 2 } }
+    if let v = h.o {
+        h.a = v
+        h.b = v
+    }
+    h.a.x = 5
+    assert_eq(h.b.x, 1, "stores alias")
+}
+
+@test
+fn map_optional_value_if_let_store_twice_copies() {
+    let m: Map<string, AliasPoint?> = map_new()
+    m["k"] = AliasPoint { x: 1, y: 2 }
+    let h = AliasHolder { a: AliasPoint { x: 0, y: 0 }, b: AliasPoint { x: 0, y: 0 } }
+    if let v = m["k"] {
+        h.a = v
+        h.b = v
+    }
+    h.a.x = 5
+    assert_eq(h.b.x, 1, "stores alias")
+}
+
+@test
+fn map_get_if_let_store_twice_copies() {
+    let m: Map<string, AliasPoint> = map_new()
+    m["k"] = AliasPoint { x: 1, y: 2 }
+    let h = AliasHolder { a: AliasPoint { x: 0, y: 0 }, b: AliasPoint { x: 0, y: 0 } }
+    if let v = m.get("k") {
+        h.a = v
+        h.b = v
+    }
+    h.a.x = 5
+    assert_eq(h.b.x, 1, "stores alias")
+}
+
+@test
+fn optional_array_element_if_let_store_twice_copies() {
+    let xs: [AliasPoint?] = [AliasPoint { x: 1, y: 2 }, null]
+    let h = AliasHolder { a: AliasPoint { x: 0, y: 0 }, b: AliasPoint { x: 0, y: 0 } }
+    if let v = xs[0] {
+        h.a = v
+        h.b = v
+    }
+    h.a.x = 5
+    assert_eq(h.b.x, 1, "stores alias")
+}
+
+@test
+fn optional_array_for_loop_if_let_store_twice_copies() {
+    let xs: [AliasPoint?] = [AliasPoint { x: 1, y: 2 }]
+    let h = AliasHolder { a: AliasPoint { x: 0, y: 0 }, b: AliasPoint { x: 0, y: 0 } }
+    for e in xs {
+        if let v = e {
+            h.a = v
+            h.b = v
+        }
+    }
+    h.a.x = 5
+    assert_eq(h.b.x, 1, "stores alias")
+}
+
+@test
+fn coalesced_optional_field_store_twice_copies() {
+    let h = AliasHolder { a: AliasPoint { x: 0, y: 0 }, b: AliasPoint { x: 0, y: 0 }, o: AliasPoint { x: 1, y: 2 } }
+    let v = h.o ?? AliasPoint { x: 9, y: 9 }
+    h.a = v
+    h.b = v
+    h.a.x = 5
+    assert_eq(h.b.x, 1, "stores alias")
+}
+
+@test
+fn optional_wrapper_field_store_twice_copies() {
+    let h = AliasHolder { a: AliasPoint { x: 0, y: 0 }, b: AliasPoint { x: 0, y: 0 }, w: AliasWrap { p: AliasPoint { x: 1, y: 2 }, n: 0 } }
+    if let w = h.w {
+        h.a = w.p
+        h.b = w.p
+    }
+    h.a.x = 5
+    assert_eq(h.b.x, 1, "stores alias")
+}
+
+@test
+fn closure_captured_optional_if_let_store_twice_copies() {
+    let h = AliasHolder { a: AliasPoint { x: 0, y: 0 }, b: AliasPoint { x: 0, y: 0 }, o: AliasPoint { x: 1, y: 2 } }
+    let o = h.o
+    let f = () => {
+        if let v = o {
+            h.a = v
+            h.b = v
+        }
+        return 0
+    }
+    f()
+    h.a.x = 5
+    assert_eq(h.b.x, 1, "stores alias")
+}
+
+@test
+fn unwrap_store_twice_copies() {
+    let h = AliasHolder { a: AliasPoint { x: 0, y: 0 }, b: AliasPoint { x: 0, y: 0 }, o: AliasPoint { x: 1, y: 2 } }
+    let v = h.o.unwrap()
+    h.a = v
+    h.b = v
+    h.a.x = 5
+    assert_eq(h.b.x, 1, "stores alias")
+}
+
+@test
+fn optional_field_to_optional_field_copies() {
+    let s = AliasHolder { a: AliasPoint { x: 0, y: 0 }, b: AliasPoint { x: 0, y: 0 }, o: AliasPoint { x: 1, y: 2 } }
+    let d = AliasHolder { a: AliasPoint { x: 0, y: 0 }, b: AliasPoint { x: 0, y: 0 } }
+    d.o = s.o
+    if let x = d.o {
+        d.a = x
+    }
+    d.a.x = 5
+    let sx = s.o.unwrap().x
+    assert_eq(sx, 1, "stores alias")
+}
+
+@test
+fn optional_wrapper_store_then_write_copies() {
+    let h = AliasHolder { a: AliasPoint { x: 0, y: 0 }, b: AliasPoint { x: 0, y: 0 }, w: AliasWrap { p: AliasPoint { x: 1, y: 2 }, n: 0 } }
+    let g = AliasHolder { a: AliasPoint { x: 0, y: 0 }, b: AliasPoint { x: 0, y: 0 } }
+    if let x = h.w {
+        g.w = x
+    }
+    if let gw = g.w {
+        g.a = gw.p
+    }
+    g.a.x = 5
+    let hx = h.w.unwrap().p.x
+    assert_eq(hx, 1, "stores alias")
+}
+
+@test
+fn optional_field_if_let_store_into_field_keeps_source() {
+    let h = AliasHolder { a: AliasPoint { x: 0, y: 0 }, b: AliasPoint { x: 0, y: 0 }, o: AliasPoint { x: 1, y: 2 } }
+    if let v = h.o {
+        h.a = v
+    }
+    h.a.x = 5
+    let sx = h.o.unwrap().x
+    assert_eq(sx, 1, "stores alias")
+}
+
+value AliasLabel { text: string, n: int }
+struct AliasLabelHolder { a: AliasLabel, b: AliasLabel }
+
+fn alias_label_store_twice(v: AliasLabel, h: AliasLabelHolder) {
+    h.a = v
+    h.b = v
+}
+
+@test
+fn gc_tier_plain_value_store_twice_copies() {
+    let h = AliasLabelHolder { a: AliasLabel { text: "a", n: 0 }, b: AliasLabel { text: "b", n: 0 } }
+    alias_label_store_twice(AliasLabel { text: "x", n: 1 }, h)
+    h.a.n = 5
+    assert_eq(h.b.n, 1, "gc-tier value stores alias")
+}

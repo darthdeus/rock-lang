@@ -1,0 +1,40 @@
+// Adversarial tests: @inline — default arguments
+//
+// Default args are injected at call sites (446cc7fb). The inline pass
+// must see the fully-substituted arg list, not the body's `= default`
+// markers.
+
+@inline
+fn with_default(x: int, k: int = 10) -> int {
+    return x + k
+}
+
+@inline
+fn multiple_defaults(a: int = 1, b: int = 2, c: int = 3) -> int {
+    return a * 100 + b * 10 + c
+}
+
+@test(output = "15")
+fn test_default_used() {
+    print(with_default(5))
+}
+
+@test(output = "7")
+fn test_default_overridden() {
+    print(with_default(5, 2))
+}
+
+@test(output = "123")
+fn test_all_defaults() {
+    print(multiple_defaults())
+}
+
+@test(output = "923")
+fn test_partial_override() {
+    print(multiple_defaults(9))
+}
+
+@test(output = "957")
+fn test_named_override() {
+    print(multiple_defaults(9, c: 7, b: 5))
+}

@@ -1,0 +1,109 @@
+// Regression test for method calls with named arguments
+// Previously, named arguments in method calls were placed in wrong positions
+// causing runtime errors like "attempt to index local 'color' (a number value)"
+
+struct Color {
+    r: float,
+    g: float,
+    b: float,
+    a: float
+}
+
+fn color(r: float, g: float, b: float, a: float) -> Color {
+    return Color { r: r, g: g, b: b, a: a }
+}
+
+struct Shape {
+    x: float,
+    y: float,
+    width: float,
+    height: float
+}
+
+// Function with multiple default arguments that can be called as a method
+fn shape_draw(shape: Shape, tint: Color = color(1.0, 0.0, 0.0, 0.5), duration: float? = null, border: float = 0.0) -> string {
+    // Return a string representation to verify arguments are in correct positions
+    return "tint.r={tint.r}, border={border}"
+}
+
+@test
+fn test_method_call_with_named_arg_skipping_defaults() {
+    let s = Shape { x: 10.0, y: 20.0, width: 30.0, height: 40.0 }
+
+    // Call with named argument, skipping earlier defaults
+    // This should use default tint and duration, but set border to 5.0
+    let result = s.shape_draw(border: 5.0)
+    assert(result == "tint.r=1, border=5", "Expected default color and border=5, got: {result}")
+}
+
+@test
+fn test_method_call_with_multiple_named_args() {
+    let s = Shape { x: 1.0, y: 2.0, width: 3.0, height: 4.0 }
+
+    // Call with multiple named arguments in different order
+    let result = s.shape_draw(border: 2.5, tint: color(0.5, 0.5, 0.5, 1.0))
+    assert(result == "tint.r=0.5, border=2.5", "Expected custom color and border, got: {result}")
+}
+
+@test
+fn test_method_call_with_mixed_positional_and_named() {
+    let s = Shape { x: 0.0, y: 0.0, width: 10.0, height: 10.0 }
+
+    // Mix positional and named arguments
+    let green = color(0.0, 1.0, 0.0, 1.0)
+    let result = s.shape_draw(green, border: 3.0)
+    assert(result == "tint.r=0, border=3", "Expected green color and border=3, got: {result}")
+}
+
+// Test with more complex default expressions
+fn complex_default() -> Color {
+    return color(0.25, 0.25, 0.25, 0.75)
+}
+
+fn shape_draw_complex(shape: Shape, effect: Color = complex_default(), intensity: float = 1.0, radius: float = 0.0) -> string {
+    return "effect.a={effect.a}, intensity={intensity}, radius={radius}"
+}
+
+@test
+fn test_method_with_complex_default_expression() {
+    let s = Shape { x: 5.0, y: 5.0, width: 15.0, height: 15.0 }
+
+    // Skip complex default, set only radius
+    let result = s.shape_draw_complex(radius: 7.5)
+    assert(result == "effect.a=0.75, intensity=1, radius=7.5", "Expected default effect and intensity, custom radius, got: {result}")
+
+    // Set intensity, skip others
+    let result2 = s.shape_draw_complex(intensity: 0.5)
+    assert(result2 == "effect.a=0.75, intensity=0.5, radius=0", "Expected default effect, custom intensity, default radius, got: {result2}")
+}
+
+// Test that verifies the original bug is fixed
+struct DebugShape {
+    id: int
+}
+
+fn debug_draw(shape: DebugShape, highlight: Color = color(1.0, 0.0, 0.0, 0.5), time: float? = null, inset: float = 0.0) -> bool {
+    // This mirrors the original bug scenario
+    // If arguments are in wrong positions, highlight.r would be a number (inset value)
+    // causing "attempt to index local 'highlight' (a number value)"
+    if highlight.r > 0.5 {
+        return true
+    }
+    return false
+}
+
+@test
+fn test_original_bug_scenario() {
+    let shape = DebugShape { id: 42 }
+
+    // This was the failing case: calling with only inset named argument
+    // Previously would generate: debug_draw(shape, 0.2, nil, 0)
+    // Now correctly generates: debug_draw(shape, color(1,0,0,0.5), nil, 0.2)
+    let result = shape.debug_draw(inset: 0.2)
+    assert(result == true, "Should return true for default red color (r=1.0)")
+
+    // Test with custom color that returns false
+    let blue = color(0.0, 0.0, 1.0, 1.0)
+    let result2 = shape.debug_draw(blue, inset: 0.1)
+    assert(result2 == false, "Should return false for blue color (r=0.0)")
+}

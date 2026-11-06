@@ -1,0 +1,13 @@
+//! Error: a string-interpolation hole whose expression fails to parse must be
+//!        REJECTED with a spanned error, never silently demoted to literal
+//!        brace text. `{add2(2,}` is an unterminated call; the old parser
+//!        emitted the raw text `{add2(2,}` and compiled clean -- silent wrong
+//!        output. "Reject, don't fall back."
+//! Tags: string-interpolation, parser, reject-dont-fall-back
+
+//=== TEST CASE: unterminated_call_in_hole_Generic ===
+fn add2(a: int, b: int) -> int { return a + b }
+
+fn main() {
+    print("{add2(2,}")
+}

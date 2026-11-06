@@ -1,0 +1,152 @@
+// Or-patterns in match arms.
+
+enum Faction {
+    Hostile,
+    AggressiveSummon,
+    Pet,
+    Neutral,
+}
+
+enum Color {
+    Red(int),
+    Blue(int),
+    Green(int),
+    Other,
+}
+
+fn is_friendly(f: Faction) -> bool {
+    match f {
+        Faction::Hostile | Faction::AggressiveSummon => false,
+        Faction::Pet | Faction::Neutral => true,
+    }
+}
+
+@test
+fn test_unit_variants_or() {
+    assert_eq(is_friendly(Faction::Hostile), false)
+    assert_eq(is_friendly(Faction::AggressiveSummon), false)
+    assert_eq(is_friendly(Faction::Pet), true)
+    assert_eq(is_friendly(Faction::Neutral), true)
+}
+
+@test
+fn test_or_with_wildcard_fallback() {
+    let f = Faction::Pet
+    let r = match f {
+        Faction::Hostile | Faction::Neutral => 1,
+        _ => 2,
+    }
+    assert_eq(r, 2)
+}
+
+@test
+fn test_or_three_alts() {
+    let n = 3
+    let s = match n {
+        1 | 2 | 3 => "small",
+        _ => "big",
+    }
+    assert_eq(s, "small")
+}
+
+@test
+fn test_or_mixes_payload_variants_no_bindings() {
+    let c = Color::Blue(7)
+    let s = match c {
+        Color::Red(_) | Color::Blue(_) | Color::Green(_) => "rgb",
+        Color::Other => "other",
+    }
+    assert_eq(s, "rgb")
+}
+
+@test
+fn test_or_with_guard() {
+    // With n=3 the first arm's pattern matches AND the guard holds, so the
+    // guarded branch wins over the unguarded `1|2|3` fallback below.
+    let n = 3
+    let s = match n {
+        1 | 2 | 3 if n > 2 => "two or three",
+        1 | 2 | 3 => "one or two",
+        _ => "other",
+    }
+    assert_eq(s, "two or three")
+    // Guard fails -> falls through to the unguarded or-pattern.
+    let m = 1
+    let t = match m {
+        1 | 2 | 3 if m > 2 => "two or three",
+        1 | 2 | 3 => "one or two",
+        _ => "other",
+    }
+    assert_eq(t, "one or two")
+    // Pattern misses entirely -> wildcard.
+    let k = 99
+    let u = match k {
+        1 | 2 | 3 if k > 2 => "two or three",
+        1 | 2 | 3 => "one or two",
+        _ => "other",
+    }
+    assert_eq(u, "other")
+}
+
+// First, middle, last position of or-pattern in arm list.
+@test
+fn test_or_pattern_position() {
+    let n = 2
+    // Or at first arm.
+    let a = match n {
+        1 | 2 => "ab",
+        3 => "c",
+        _ => "z",
+    }
+    assert_eq(a, "ab")
+    // Or in the middle.
+    let b = match n {
+        0 => "0",
+        1 | 2 | 3 => "small",
+        _ => "big",
+    }
+    assert_eq(b, "small")
+    // Or as last non-wildcard arm.
+    let c = match n {
+        0 => "0",
+        1 | 2 | 3 => "small",
+        _ => "other",
+    }
+    assert_eq(c, "small")
+}
+
+// Range alternation.
+@test
+fn test_or_with_ranges() {
+    let n = 7
+    let s = match n {
+        1..=5 | 10..=20 => "in-band",
+        _ => "out",
+    }
+    assert_eq(s, "out")
+    let m = 12
+    let t = match m {
+        1..=5 | 10..=20 => "in-band",
+        _ => "out",
+    }
+    assert_eq(t, "in-band")
+}
+
+// Nested match with or-patterns in both inner and outer.
+@test
+fn test_nested_match_or_patterns() {
+    let outer = Faction::Pet
+    let inner = Faction::Neutral
+    let s = match outer {
+        Faction::Hostile | Faction::AggressiveSummon => "agro",
+        Faction::Pet | Faction::Neutral => match inner {
+            Faction::Hostile | Faction::AggressiveSummon => "friendly-vs-agro",
+            Faction::Pet | Faction::Neutral => "friendly-vs-friendly",
+        },
+    }
+    assert_eq(s, "friendly-vs-friendly")
+}
+
+fn main() {
+    print("or-patterns")
+}

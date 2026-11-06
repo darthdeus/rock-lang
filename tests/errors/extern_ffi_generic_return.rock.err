@@ -1,0 +1,22 @@
+//! Error: an `extern(ffi, "lib")` wrapper's return representation is decided
+//!        from the DECLARED Rock type -- the `ffi.cdef` lives in an opaque
+//!        `inline(lua)` body, so the declaration is the only contract the
+//!        compiler has. A generic parameter is not a contract: nothing about
+//!        `T` says whether the C callee hands back a number, a BOXED 64-bit
+//!        integer or a struct, so there is no representation to give it. An
+//!        UNBOUND one, specifically: `-> Boxed<int>` binds `T` and compiles.
+//!        Rejected at emit rather than emitting a passthrough wrapper, which is
+//!        the same fail-open that let 64-bit handles cross the FFI boundary as
+//!        cdata into a Rock `int`.
+//!
+//!        The concrete-return externs stay legal and are exercised by
+//!        `tests/extern_fn_value.rock`; this rejects only the
+//!        shape that has no representation to pick.
+//! Tags: extern, ffi, generics, c-boundary, emit-time
+
+//=== TEST CASE: extern_ffi_generic_return ===
+extern(ffi, "m") fn opaque_ret<T>() -> T
+
+fn main() {
+    print("unreachable")
+}

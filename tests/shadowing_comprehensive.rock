@@ -1,0 +1,312 @@
+// Comprehensive shadowing tests - covers advanced scenarios not in shadowing_basic.rock
+// Migrated from rock/tests/type_system_tests.rs shadowing_tests module
+// Tests loop shadowing, type shadowing, closure captures, arrays, and deep nesting
+
+// ============================================
+// Helper Function and Struct Definitions
+// ============================================
+
+fn f() -> int { return 1 }
+fn f(x: int) -> int { print(x); return 0 }
+
+struct Point { x: int, y: int }
+struct Counter { value: int }
+struct CounterWithCount {
+    count: int
+}
+struct FixVec2 {
+    x: int,
+    y: int,
+}
+struct Data {
+    value: int
+}
+struct Container<T> {
+    value: T
+}
+
+fn increment(c: Counter) -> int {
+    return c.value + 1
+}
+
+fn test_isolation() -> int {
+    let x = 6
+    let y = x * 2
+    return y
+}
+
+fn foo() -> int {
+    let x = 5
+    if true {
+        let x = x + 10
+        return x
+    }
+    return x
+}
+
+global g: int = 50
+
+// ============================================
+// Loop Shadowing Tests
+// ============================================
+
+@test(output = "1\n2\n1")
+fn test_while_loop_shadowing() {
+    let x = 1
+    let count = 0
+    while count < 2 {
+        let x = x + count
+        print(x)
+        count = count + 1
+    }
+    print(x)
+}
+
+@test(output = "11\n12\n13\n10")
+fn test_for_loop_shadowing() {
+    let x = 10
+    for i in [1, 2, 3] {
+        let x = x + i
+        print(x)
+    }
+    print(x)
+}
+
+@test(output = "11\n12\n13\n10")
+fn test_array_iteration_shadowing() {
+    let arr = [1, 2, 3]
+    let x = 10
+    
+    for item in arr {
+        let x = x + item
+        print(x)
+    }
+    
+    print(x)
+}
+
+// ============================================
+// Type Shadowing Tests
+// ============================================
+
+@test(output = "hello\n42")
+fn test_different_type_shadowing() {
+    let x = 42
+    if true {
+        let x = "hello"
+        print(x)
+    }
+    print(x)
+}
+
+
+// ============================================
+// Function and Closure Shadowing Tests
+// ============================================
+
+@test(output = "47\n42")
+fn test_lambda_capture_shadowing() {
+    let x = 42
+    let f = (y: int) => {
+        let x = x + y
+        return x
+    }
+    
+    print(f(5))
+    print(x)
+}
+
+@test(output = "11\n1")
+fn test_function_capture_shadowing() {
+    let x = 1
+    let f = () => {
+        let x = x + 10
+        return x
+    }
+    
+    print(f())
+    print(x)
+}
+
+@test(output = "43\n1\n10")
+fn test_function_overload_shadowing() {
+    let run = true
+    while run {
+        let f = 42
+        f = f + 1
+        print(f)
+        run = false
+    }
+
+    print(f())
+    let result = f(10)
+}
+
+// ============================================
+// Deep Nesting and Complex Expression Tests
+// ============================================
+
+@test(output = "5\n6\n2\n1")
+fn test_multiple_level_shadowing() {
+    let x = 1
+    if true {
+        let x = x + 1
+        if true {
+            let x = x * 3
+            if true {
+                let x = x - 1
+                print(x)
+            }
+            print(x)
+        }
+        print(x)
+    }
+    print(x)
+}
+
+@test(output = "2")
+fn test_nested_scope_shadowing() {
+    let x = 0
+    if true {
+        let x = x + 1
+        if true {
+            let x = x * 2
+            print(x)
+        } else {
+            print(x)
+        }
+    }
+}
+
+@test(output = "16\n8\n8\n5\n3")
+fn test_complex_expression_shadowing() {
+    let x = 5
+    let y = 3
+    
+    if x > y {
+        let result = x + y
+        if result > 7 {
+            let x = result * 2
+            let y = x - result
+            print(x)
+            print(y)
+        }
+        print(result)
+    }
+    
+    print(x)
+    print(y)
+}
+
+// ============================================
+// Struct Field Interaction Tests
+// ============================================
+
+@test(output = "105\n100")
+fn test_struct_field_shadowing() {
+    let point = Point { x: 5, y: 10 }
+    let x = 100
+    
+    if true {
+        let x = point.x + x
+        print(x)
+    }
+    print(x)
+}
+
+@test(output = "11\n5")
+fn test_method_call_shadowing() {
+    let counter = Counter { value: 10 }
+    let value = 5
+    
+    if true {
+        let value = increment(counter)
+        print(value)
+    }
+    
+    print(value)
+}
+
+// ============================================
+// Function Call Isolation Tests
+// ============================================
+
+@test(output = "12\n1")
+fn test_function_call_isolation() {
+    let x = 1
+    print(test_isolation())
+    print(x)
+}
+
+// ============================================
+// Operator Context Shadowing Tests
+// ============================================
+
+@test(output = "75\n5")
+fn test_operator_context_shadowing() {
+    let x = 10
+    let y = 5
+    
+    if x > y {
+        let x = x * y
+        let y = x ./ 2
+        print(x + y)
+    }
+    
+    print(x - y)
+}
+
+// ============================================
+// Advanced If Statement Variations
+// ============================================
+
+@test(output = "2")
+fn test_if_block_with_arithmetic() {
+    let x = 1
+    if true {
+        let x = x + 1
+        print(x)
+    } else {
+        print(x)
+    }
+}
+
+@test(output = "15")
+fn test_function_scope_if_shadowing() {
+    print(foo())
+}
+
+@test(output = "20\n10")
+fn test_else_block_shadowing() {
+    let x = 10
+    if false {
+        print(x)
+    } else {
+        let x = x * 2
+        print(x)
+    }
+    print(x)
+}
+
+// ============================================
+// Global Shadowing Tests
+// ============================================
+
+@test(output = "50\n15\n50")
+fn test_global_shadowing() {
+    print(g)  // Should print the global 'g'
+    if true {
+        let g = 15  // Local 'g' shadows the global 'g' within this scope
+        print(g)    // Should print the local 'g'
+    }
+    print(g)  // Should print the global 'g' again after the local scope ends
+}
+
+// ============================================
+// Additional Shadowing Tests from shadowing_tests.rs  
+// ============================================
+
+// TODO: Complete migration of shadowing_tests.rs
+// Currently only basic shadowing tests are implemented.
+// The remaining 30+ tests need helper functions moved to top level
+// since Rock doesn't support nested function definitions.

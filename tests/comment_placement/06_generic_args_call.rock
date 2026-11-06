@@ -1,0 +1,10 @@
+// Comment inside generic argument list in a type expression
+struct Box<T> { value: T }
+
+fn make_box() -> Box</* inner type */ int> {
+    let b: Box<int> = Box { value: 42 }
+    return b
+}
+
+@test(output = "42")
+fn t() { print(make_box().value) }

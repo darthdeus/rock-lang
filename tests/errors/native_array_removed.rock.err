@@ -1,0 +1,17 @@
+//! Error: native-array `![...]` syntax is removed; both the literal and the type position must reject
+//! Tags: native-array, removed
+
+//=== TEST CASE: native_array_literal_Generic ===
+fn main() {
+    let xs = ![1, 2, 3]
+    print(xs[0])
+}
+
+//=== TEST CASE: native_array_type_position_Generic ===
+fn f(xs: ![int]) -> int {
+    return xs[0]
+}
+
+fn main() {
+    print(f(![10, 20]))
+}

@@ -1,0 +1,30 @@
+// The bitwise family, pinned on both backends. luajit lowers these to `bit.*`,
+// whose results are SIGNED 32-bit; the JS emitter has to reproduce that range,
+// not just the operation.
+//
+// The negative cases are the whole point. `>>` is the LOGICAL shift on both
+// (`bit.rshift`, JS `>>>`), but JS `>>>` yields an UNSIGNED 32-bit value, so a
+// naive mapping returns 4294967295 for `-1 >> 0` where luajit returns -1.
+
+@test
+fn bitwise_and_or_xor() {
+    assert(0xF0 & 0x3C == 0x30, "and")
+    assert(0xF0 | 0x0C == 0xFC, "or")
+    assert(0xF0 ^ 0x3C == 0xCC, "xor")
+}
+
+@test
+fn shifts_on_positives() {
+    assert(1 << 4 == 16, "shl")
+    assert(256 >> 4 == 16, "shr")
+    assert(1 << 31 == -2147483648, "shl into the sign bit wraps to 32-bit signed")
+}
+
+@test
+fn bitwise_results_stay_signed_32_bit() {
+    assert(-1 >> 0 == -1, "logical shift by 0 keeps the signed value")
+    assert(-1 >> 1 == 2147483647, "logical shift by 1 zero-fills the sign bit")
+    assert(-16 >> 4 == 268435455, "logical shift of a negative zero-fills")
+    assert(~0 == -1, "bitnot")
+    assert(-1 & 0xFF == 0xFF, "and against a negative")
+}

@@ -1,0 +1,56 @@
+//! Error: @inline body that mutates a parameter is rejected
+//! Tags: inline, validation, soundness
+
+//=== TEST CASE: inline_assigns_whole_param_Generic ===
+// Writing to the param itself rebinds the local copy inside the splice,
+// but if the arg is a non-dup-safe expression, previous behavior would
+// silently evaluate it at the assignment site too. Reject outright.
+@inline
+fn rebind(x: int) -> int {
+    x = x + 1
+    return x
+}
+
+fn main() {
+    let r = rebind(10)
+}
+
+//=== TEST CASE: inline_assigns_param_field_Generic ===
+// Field assignment through a struct param is observable via the caller's
+// reference and would re-evaluate the arg when the arg is a call.
+struct Point { x: int, y: int }
+
+@inline
+fn set_x(p: Point) -> int {
+    p.x = 99
+    return p.x
+}
+
+fn main() {
+    let p = Point { x: 1, y: 2 }
+    let r = set_x(p)
+}
+
+//=== TEST CASE: inline_compound_assigns_param_Generic ===
+// Compound assignment is a mutation too.
+@inline
+fn bump(x: int) -> int {
+    x += 1
+    return x
+}
+
+fn main() {
+    let r = bump(5)
+}
+
+//=== TEST CASE: inline_increments_param_Generic ===
+// Pre/post increment is a mutation.
+@inline
+fn post_inc(x: int) -> int {
+    x++
+    return x
+}
+
+fn main() {
+    let r = post_inc(5)
+}

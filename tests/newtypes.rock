@@ -1,0 +1,476 @@
+// Newtype tests - migrated from rock/tests/newtype_tests.rs
+// Tests newtype definition, construction, pattern matching, and operations
+
+// All newtype definitions at top level
+newtype UserId(int)
+newtype Email(string)
+newtype Id<T>(T)
+newtype Box<T>(T)
+newtype Score(int)
+newtype Distance(int)
+newtype Temperature(int)
+newtype Meters(float)
+newtype Count(int)
+
+struct User {
+    id: UserId,
+    name: string,
+}
+
+@test(output = "parsed")
+fn test_newtype_parsing() {
+    let user = UserId(42)
+    let email = Email("test@example.com")
+    print("parsed")
+}
+
+@test(output = "parsed")
+fn test_generic_newtype_parsing() {
+    let id = Id(42)
+    let boxed = Box("hello")
+    print("parsed")
+}
+
+@test(output = "42")
+fn test_newtype_pattern_matching() {
+    let user_id = UserId(42)
+    let UserId(id) = user_id
+    print(id)
+}
+
+@test(output = "42")
+fn test_generic_newtype_usage() {
+    let boxed_int = Box(42)
+    let boxed_str = Box("hello")
+    let Box(val) = boxed_int
+    print(val)
+}
+
+@test(output = "42")
+fn test_newtype_field_access() {
+    let user_id = UserId(42)
+    print(user_id.0)
+}
+
+fn get_id(user: UserId) -> int {
+    let UserId(id) = user
+    id
+}
+
+@test(output = "42")
+fn test_newtype_function_parameter() {
+    let result = get_id(UserId(42))
+    print(result)
+}
+
+@test(output = "42")
+fn test_newtype_in_struct() {
+    let user = User { id: UserId(42), name: "Alice" }
+    let UserId(id_val) = user.id
+    print(id_val)
+}
+
+@test(output = "true")
+fn test_newtype_implicit_equality() {
+    let id1 = UserId(42)
+    let id2 = UserId(42)
+    print(id1 == id2)
+}
+
+@test(output = "true\ntrue\ntrue\ntrue")
+fn test_newtype_implicit_comparison() {
+    let score1 = Score(100)
+    let score2 = Score(200)
+    print(score1 < score2)
+    print(score2 > score1)
+    print(score1 <= score2)
+    print(score2 >= score1)
+}
+
+@test(output = "15\n5\n50")
+fn test_newtype_implicit_arithmetic() {
+    let d1 = Distance(10)
+    let d2 = Distance(5)
+    let sum = d1 + d2
+    let diff = d1 - d2
+    let product = d1 * d2
+    print(sum.0)
+    print(diff.0)
+    print(product.0)
+}
+
+@test(output = "-25")
+fn test_newtype_implicit_unary_operators() {
+    let temp = Temperature(25)
+    let neg_temp = -temp
+    print(neg_temp.0)
+}
+
+@test(output = "8")
+fn test_newtype_float_arithmetic() {
+    let m1 = Meters(5.5)
+    let m2 = Meters(2.5)
+    let sum = m1 + m2
+    print(sum.0)
+}
+
+@test(output = "true")
+fn test_newtype_mixed_type_comparison() {
+    let count = Count(10)
+    print(count == Count(10))
+}
+
+// Test accessing newtype internals via pattern matching (Rock side)
+@test(output = "42\\ninner")
+fn test_newtype_via_pattern_matching() {
+    let user_id = UserId(42)
+    let UserId(value) = user_id
+    print(value)
+    // Verify it's working
+    let UserId(id) = user_id
+    if id == 42 {
+        print("inner")
+    }
+}
+
+// ============================================================================
+// Division and modulo operators
+// ============================================================================
+
+// Integer newtypes use integer division (math.floor)
+@test(output = "2")
+fn test_newtype_int_division() {
+    let d1 = Distance(10)
+    let d2 = Distance(4)
+    let quotient = d1 ./ d2
+    print(quotient.0)
+}
+
+@test(output = "2.5")
+fn test_newtype_float_division() {
+    let m1 = Meters(5.0)
+    let m2 = Meters(2.0)
+    let result = m1 / m2
+    print(result.0)
+}
+
+@test(output = "2")
+fn test_newtype_modulo() {
+    let d1 = Distance(10)
+    let d2 = Distance(4)
+    let remainder = d1 % d2
+    print(remainder.0)
+}
+
+// ============================================================================
+// Nested newtype tests
+// ============================================================================
+
+newtype Wrapper(UserId)
+
+@test(output = "42")
+fn test_nested_newtype_construction() {
+    let w = Wrapper(UserId(42))
+    let inner = w.0
+    print(inner.0)
+}
+
+@test(output = "42")
+fn test_nested_newtype_destructuring() {
+    let w = Wrapper(UserId(42))
+    let Wrapper(inner) = w
+    let UserId(id) = inner
+    print(id)
+}
+
+// ============================================================================
+// Newtype as function return
+// ============================================================================
+
+fn create_user_id(n: int) -> UserId {
+    UserId(n)
+}
+
+@test(output = "100")
+fn test_newtype_function_return() {
+    let id = create_user_id(100)
+    print(id.0)
+}
+
+fn transform_user_id(id: UserId) -> UserId {
+    let UserId(n) = id
+    UserId(n * 2)
+}
+
+@test(output = "84")
+fn test_newtype_transform_function() {
+    let original = UserId(42)
+    let doubled = transform_user_id(original)
+    print(doubled.0)
+}
+
+// ============================================================================
+// Newtype wrapping a generic-instantiated type (regression: was rejected with
+// "Trying to convert a non-concrete ResolvedTypeExpr ... App { ... }")
+// ============================================================================
+
+newtype EntityIntWrap(Entity<int>)
+newtype IntListWrap([int])
+newtype StrIntMapWrap(Map<string, int>)
+newtype NestedAppWrap([Map<string, int>])
+
+@test(output = "42")
+fn test_newtype_wraps_entity_construction_and_field() {
+    let a: Arena<int> = arena_new()
+    let e = insert(a, 42)
+    let w = EntityIntWrap(e)
+    let v = w.0.get() ?? 0
+    print(v)
+}
+
+@test(output = "7")
+fn test_newtype_wraps_entity_destructure() {
+    let a: Arena<int> = arena_new()
+    let e = insert(a, 7)
+    let w = EntityIntWrap(e)
+    let EntityIntWrap(inner) = w
+    print(inner.get() ?? 0)
+}
+
+@test(output = "3")
+fn test_newtype_wraps_vec_construction() {
+    let xs = [10, 20, 30]
+    let w = IntListWrap(xs)
+    print(w.0.len())
+}
+
+@test(output = "10\n20\n30")
+fn test_newtype_wraps_vec_iter() {
+    let w = IntListWrap([10, 20, 30])
+    for v in w.0 {
+        print(v)
+    }
+}
+
+@test(output = "99")
+fn test_newtype_wraps_map_construction_and_access() {
+    let m: Map<string, int> = map_new()
+    m["k"] = 99
+    let w = StrIntMapWrap(m)
+    print(w.0["k"])
+}
+
+@test(output = "1")
+fn test_newtype_wraps_nested_app() {
+    let m: Map<string, int> = map_new()
+    m["a"] = 1
+    let w = NestedAppWrap([m])
+    print(w.0[0]["a"])
+}
+
+fn return_entity_wrap(e: Entity<int>) -> EntityIntWrap {
+    EntityIntWrap(e)
+}
+
+@test(output = "55")
+fn test_newtype_wraps_entity_through_function() {
+    let a: Arena<int> = arena_new()
+    let e = insert(a, 55)
+    let w = return_entity_wrap(e)
+    print(w.0.get() ?? 0)
+}
+
+// A newtype-over-int as a Map key works natively (the key is the raw int).
+newtype RoomIdW(int)
+
+@test(output = "south")
+fn test_newtype_key_param_still_works() {
+    let rooms: Map<RoomIdW, string> = map_new()
+    insert(rooms, RoomIdW(1), "south")
+    assert_eq(get(rooms, RoomIdW(1)).unwrap(), "south")
+    print(rooms[RoomIdW(1)])
+}
+
+// Newtype whose wrapped type is itself a generic newtype instantiation
+newtype BoxedInt(Box<int>)
+
+@test(output = "13")
+fn test_newtype_wraps_user_generic_newtype_instantiation() {
+    let b = BoxedInt(Box(13))
+    let Box(v) = b.0
+    print(v)
+}
+
+// ============================================================================
+// Generic newtype wrapping App-shaped patterns — requires pattern-vs-arg
+// unification, not naive `T = type_of(arg_0)`. Was rejected with
+// "Type mismatch: expected Entity<int>, found int" because subst was
+// T = Entity<int>, so wrapped pattern Entity<T> instantiated to
+// Entity<Entity<int>>, then compared against arg Entity<int>.
+// ============================================================================
+
+newtype GEntity<T>(Entity<T>)
+newtype GList<T>([T])
+newtype GStrMap<T>(Map<string, T>)
+newtype GMap<K, V>(Map<K, V>)
+newtype GNullable<T>(T?)
+newtype GMapSameTwice<T>(Map<T, T>)
+newtype GUnused<T>(int)
+newtype GNestedApp<T>([Entity<T>])
+newtype GDeepNested<T>([Map<string, T>])
+newtype GNullableApp<T>(Entity<T>?)
+
+@test(output = "100")
+fn test_g_entity_unifies() {
+    let a: Arena<int> = arena_new()
+    let e = insert(a, 100)
+    let g = GEntity(e)
+    print(g.0.get() ?? 0)
+}
+
+@test(output = "3")
+fn test_g_list_unifies() {
+    let g = GList([1, 2, 3])
+    print(g.0.len())
+}
+
+@test(output = "42")
+fn test_g_str_map_unifies() {
+    let m: Map<string, int> = map_new()
+    m["a"] = 42
+    let g = GStrMap(m)
+    print(g.0["a"])
+}
+
+@test(output = "7")
+fn test_g_map_multi_generic() {
+    let m: Map<string, int> = map_new()
+    m["k"] = 7
+    let g = GMap(m)
+    print(g.0["k"])
+}
+
+@test(output = "9")
+fn test_g_nullable_with_nullable_arg() {
+    let x: int? = 9
+    let g = GNullable(x)
+    print(g.0 ?? 0)
+}
+
+@test(output = "5")
+fn test_g_nullable_promotes_non_null() {
+    let g = GNullable(5)
+    print(g.0 ?? 0)
+}
+
+@test(output = "1")
+fn test_g_map_same_twice_consistent() {
+    let m: Map<int, int> = map_new()
+    m[10] = 1
+    let g = GMapSameTwice(m)
+    print(g.0[10])
+}
+
+// `int` wrapping with an unused T — T stays free, but construction must
+// not crash. Use ascription to fix the type arg; otherwise T is an
+// unconstrained TypeVar that downstream uses can pin.
+@test(output = "77")
+fn test_g_unused_generic_constructs() {
+    let g: GUnused<int> = GUnused(77)
+    print(g.0)
+}
+
+@test(output = "11")
+fn test_g_nested_app() {
+    let a: Arena<int> = arena_new()
+    let e = insert(a, 11)
+    let g = GNestedApp([e])
+    print(g.0[0].get() ?? 0)
+}
+
+@test(output = "55")
+fn test_g_deeply_nested_app() {
+    let m: Map<string, int> = map_new()
+    m["k"] = 55
+    let g = GDeepNested([m])
+    print(g.0[0]["k"])
+}
+
+@test(output = "21")
+fn test_g_nullable_app_with_non_null() {
+    let a: Arena<int> = arena_new()
+    let e = insert(a, 21)
+    let g = GNullableApp(e)
+    let inner = g.0 ?? return
+    print(inner.get() ?? 0)
+}
+
+// Pattern destructure recovers the unified T
+@test(output = "44")
+fn test_g_entity_pattern_destructure() {
+    let a: Arena<int> = arena_new()
+    let e = insert(a, 44)
+    let g = GEntity(e)
+    let GEntity(inner) = g
+    print(inner.get() ?? 0)
+}
+
+// Ascription drives Check mode through the ctor
+@test(output = "88")
+fn test_g_entity_ascribed_return() {
+    let a: Arena<int> = arena_new()
+    let e = insert(a, 88)
+    let g: GEntity<int> = GEntity(e)
+    print(g.0.get() ?? 0)
+}
+
+// ---- Adversarial cases found by hacker-probe round ----
+
+// Tuple-wrapped pattern. Without a Tuple arm in
+// try_constrain_generic_params, the wrapped (T, int) pattern would
+// leave T unconstrained — instantiate would then fail with
+// "No substitution found for generic parameter T at index 0".
+newtype GTuple<T>((T, int))
+
+@test(output = "13")
+fn test_g_tuple_wrapped() {
+    let g = GTuple((13, 99))
+    let (a, _) = g.0
+    print(a)
+}
+
+// Function-type wrapped — fn(T) -> T is App-shaped, unifies via App arm
+newtype GFn<T>(fn(T) -> T)
+
+@test(output = "21")
+fn test_g_fn_wrapped() {
+    let id = (x: int) => x
+    let f = GFn(id)
+    let g = f.0
+    print(g(21))
+}
+
+// Triple-nested App: [Map<string, [T]>]
+newtype GTripleNest<T>([Map<string, [T]>])
+
+@test(output = "42")
+fn test_g_triple_nested() {
+    let m: Map<string, [int]> = map_new()
+    m["k"] = [42, 43]
+    let g = GTripleNest([m])
+    print(g.0[0]["k"][0])
+}
+
+// Generic newtype used as a Map key (native key, no unwrap)
+newtype GKey<T>(T)
+
+@test(output = "south")
+fn test_g_used_as_map_key() {
+    let m: Map<GKey<int>, string> = map_new()
+    m[GKey(1)] = "south"
+    print(m[GKey(1)])
+}
+
+// Negative adversarial cases live in standalone files
+// (`tests/newtype_generic_unification_reject_*.rock`) because
+// `@test(expect_failure = true)` requires the whole file to fail.

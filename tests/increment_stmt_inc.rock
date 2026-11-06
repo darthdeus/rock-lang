@@ -1,0 +1,74 @@
+// Small-tail: `x++` / `x--` in statement position desugars to the
+// compound-assign `x = x + 1` / `x = x - 1` (value discarded), the
+// same ANF shape `x += 1` already lowers. Value-position / non-
+// simple-lvalue increments stay reject-to-live. Pins runtime
+// behavior; must pass with and without ROCK_ANF_FUNCTIONS=1.
+
+@test(output = "5")
+fn test_postincrement_in_while() {
+    let i = 0
+    while i < 5 {
+        i++
+    }
+    print("{i}")
+}
+
+@test(output = "4")
+fn test_postincrement_in_for() {
+    let s = 0
+    for k in 0..4 {
+        s++
+    }
+    print("{s}")
+}
+
+@test(output = "7")
+fn test_postdecrement() {
+    let d = 10
+    d--
+    d--
+    d--
+    print("{d}")
+}
+
+@test(output = "3\n2")
+fn test_pre_and_post_mixed() {
+    let a = 2
+    a++
+    print("{a}")
+    let b = 3
+    b--
+    print("{b}")
+}
+
+// Value-position: post returns the pre-increment value; pre returns
+// the post-increment value. Both also mutate the lvalue.
+@test(output = "2 3")
+fn test_postincrement_value_position() {
+    let x = 2
+    let y = x++
+    print("{y} {x}")
+}
+
+@test(output = "3 3")
+fn test_preincrement_value_position() {
+    let x = 2
+    let y = ++x
+    print("{y} {x}")
+}
+
+@test(output = "9 9")
+fn test_predecrement_value_position() {
+    let x = 10
+    let y = --x
+    print("{y} {x}")
+}
+
+fn _inc_id(n: int) -> int { n }
+
+@test(output = "10 9")
+fn test_postdecrement_in_call_arg() {
+    let x = 10
+    let r = _inc_id(x--)
+    print("{r} {x}")
+}

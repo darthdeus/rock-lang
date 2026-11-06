@@ -1,0 +1,42 @@
+// Small-tail: a struct literal that omits fields with declaration
+// defaults — ANF now injects the defaults (live structs.rs
+// __rock_create_struct default-fill), lowering each like a provided
+// value. Pins runtime behavior; must pass with and without
+// ROCK_ANF_FUNCTIONS=1.
+
+struct Cfg {
+    width: int,
+    height: int = 100,
+    label: string = "untitled",
+    scale: float = 1.5,
+}
+
+@test(output = "10\n100\nuntitled")
+fn test_omit_all_defaults() {
+    let c = Cfg { width: 10 }
+    print("{c.width}")
+    print("{c.height}")
+    print("{c.label}")
+}
+
+@test(output = "10\n42\nuntitled")
+fn test_override_one_default() {
+    let c = Cfg { width: 10, height: 42 }
+    print("{c.width}")
+    print("{c.height}")
+    print("{c.label}")
+}
+
+@test(output = "3")
+fn test_default_float_used() {
+    let c = Cfg { width: 1 }
+    print("{(c.scale * 2.0).floor()}")
+}
+
+@test(output = "2\n9\nhi")
+fn test_provide_all_no_injection() {
+    let c = Cfg { width: 2, height: 9, label: "hi", scale: 2.0 }
+    print("{c.width}")
+    print("{c.height}")
+    print("{c.label}")
+}

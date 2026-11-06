@@ -1,0 +1,184 @@
+// Advanced generic inference tests migrated from rock/tests/generic_tests.rs
+// Tests complex generic inference, nullable generics, type inference validation, and edge cases
+// This covers the advanced tests not included in generics_comprehensive.rock
+
+// ============================================
+// Core Generic Function Definitions
+// ============================================
+
+fn id<T>(x: T) -> T { 
+    return x 
+}
+
+fn create<T>() -> T? {
+    return null
+}
+
+fn maybe_id<T>(x: T?) -> T? {
+    return x
+}
+
+fn first<T>(arr: [T]) -> T? {
+    if vec_len(arr) > 0 {
+        return arr[0]
+    } else {
+        return null
+    }
+}
+
+struct Box<T> { 
+    item: T 
+}
+
+fn unbox<T>(b: Box<T>) -> T { 
+    return b.item 
+}
+
+// ============================================
+// Generic Inference with Type Holes Tests
+// ============================================
+
+@test(output = "5", type_holes = [[0, "int"]])
+fn test_generic_id_int() {
+    let res: ? = id(5)
+    print(res)
+}
+
+@test(output = "hello")
+fn test_generic_id_string() {
+    print(id("hello"))
+}
+
+@test(output = "true")
+fn test_generic_id_bool() {
+    print(id(true))
+}
+
+@test(output = "5")
+fn test_generic_id_any() {
+    let val: any = 5
+    print(id(val))
+}
+
+// ============================================
+// Generic Creation with Type Inference Tests
+// ============================================
+
+@test(type_holes = [[0, "int"]])
+fn test_generic_create_infer_int() {
+    let n: ? = create()
+    let typed_n: int? = n
+}
+
+@test(output = "0")
+fn test_generic_create_infer_string() {
+    let s: string? = create()
+    print(0)
+}
+
+// ============================================
+// Nullable Generic Type Tests
+// ============================================
+
+@test(output = "5")
+fn test_maybe_id_int() {
+    let res = maybe_id(5)
+    print(res)
+}
+
+// ============================================
+// Struct Generic Type Inference Tests
+// ============================================
+
+@test(output = "10", type_holes = [[0, "int"]])
+fn test_generic_struct_type_inference() {
+    let b = Box { item: 10 }
+    let item: ? = b.item
+    print(item)
+}
+
+@test(output = "7")
+fn test_nested_generic_struct() {
+    let b = Box { item: Box { item: 7 } }
+    print(b.item.item)
+}
+
+@test(output = "42", type_holes = [[0, "int"]])
+fn test_generic_function_with_struct() {
+    let b = Box { item: 42 }
+    let result: ? = unbox(b)
+    print(result)
+}
+
+@test(output = "6", type_holes = [[0, "int"]])
+fn test_generic_inference_from_variable() {
+    let x: ? = id(5)
+    print(x + 1)
+}
+
+// ============================================
+// Array Generic Inference Tests  
+// ============================================
+
+@test(output = "0")
+fn test_first_with_typed_empty_array() {
+    let empty_bools: [bool] = []
+    let res = first(empty_bools)
+    print(0)
+}
+
+// ============================================
+// Negative Tests - Error Cases
+// ============================================
+
+// These tests demonstrate compile-time error cases.
+// Since Rock's @test system focuses on runtime validation,
+// these are documented as examples that should NOT compile.
+
+// EXAMPLE 1: Generic struct with undefined type parameter
+// struct Bad<T> { field: U }  // ERROR: U is not defined
+
+// EXAMPLE 2: Generic function with undefined return type
+// fn bad<T>(x: T) -> U { return x }  // ERROR: U is not defined
+
+// EXAMPLE 3: Duplicate generic type parameters
+// fn dup<T, T>(x: T) -> T { return x }  // ERROR: Duplicate T
+
+// EXAMPLE 4: Generic function argument mismatch
+// print(id(3, 4))  // ERROR: id expects 1 argument, got 2
+
+// EXAMPLE 5: Return type mismatch in nullable context
+// fn is_key_down(key: string) -> bool {
+//     return get(keys_down, key)  // ERROR: get returns bool?, function expects bool
+// }
+
+// EXAMPLE 6: Invalid nullable operation
+// fn is_key_down_negated(key: string) -> bool {
+//     return !get(keys_down, key)  // ERROR: ! cannot operate on bool?
+// }
+
+// ============================================
+// Syntax Definition Tests (Valid Parsing)
+// ============================================
+
+// ============================================
+// Complex Generic Type Scenarios
+// ============================================
+
+@test(output = "0")
+fn test_complex_generic_inference_scenario() {
+    // This tests the most complex inference patterns
+    // that the compiler should handle correctly
+    
+    // Multi-level generic inference
+    let nested_box = Box { item: Box { item: "test" } }
+    let inner_content = unbox(unbox(nested_box))
+    
+    // Generic function chaining
+    let value = id(id(id(42)))
+    
+    // Mixed generic and concrete types
+    let maybe_value = maybe_id(id("hello"))
+    
+    print(0)
+}

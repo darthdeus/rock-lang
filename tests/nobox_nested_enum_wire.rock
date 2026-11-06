@@ -1,0 +1,49 @@
+enum Payload { Damage(float), Text(string) }
+enum Subject { None, Mob(int) }
+enum Source { Player, Named(string) }
+
+nobox value Event {
+    payload: Payload,
+    subject: Subject,
+    source: Source,
+    label: string,
+}
+
+fn make_event(n: int) -> Event {
+    return Event {
+        payload: Payload::Damage(n as float),
+        subject: Subject::Mob(n),
+        source: Source::Named("player"),
+        label: "hit",
+    }
+}
+
+fn consume_event(event: Event) -> int {
+    let amount = match event.payload {
+        Payload::Damage(value) => value as int,
+        Payload::Text(text) => text.len(),
+    }
+    let subject = match event.subject {
+        Subject::None => 0,
+        Subject::Mob(id) => id,
+    }
+    let source = match event.source {
+        Source::Player => 0,
+        Source::Named(name) => name.len(),
+    }
+    return amount + subject + source + event.label.len()
+}
+
+fn retain_payload(event: Event) -> [Payload] { return [event.payload] }
+
+@test fn nested_enums_round_trip_across_the_nobox_wire() {
+    assert_eq(consume_event(make_event(4)), 17)
+}
+
+@test fn nested_enum_materializes_at_a_vector_escape() {
+    let retained = retain_payload(make_event(8))
+    assert_eq(match retained[0] {
+        Payload::Damage(value) => value as int,
+        Payload::Text(text) => text.len(),
+    }, 8)
+}

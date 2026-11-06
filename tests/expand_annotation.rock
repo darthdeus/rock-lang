@@ -1,0 +1,39 @@
+// `@inline inline(lua)` splices the lua body at every call site with
+// parameter names substituted by the actual argument expressions, and
+// emits no live wrapper (the function is dead-code DCE'd by LuaJIT).
+
+// Zero-arg: literal expression spliced verbatim.
+// debug.traceback("", 2) is stack-depth-sensitive — wrapping it in a
+// real call frame would shift the level. Splicing keeps it correct.
+@inline inline(lua) fn get_traceback() -> string = 'return debug.traceback("", 2)'
+
+// One-arg: the parameter name is substituted with the argument expression.
+@inline inline(lua) fn expand_tostr(x: int) -> string = "return tostring(x)"
+
+@test
+fn test_expand_zero_arg() {
+    let tb = get_traceback()
+    assert(tb.len() > 0, "traceback should be non-empty")
+}
+
+@test
+fn test_expand_one_arg() {
+    let s = expand_tostr(99)
+    assert_eq(s, "99", "tostring(x) should give \"99\"")
+}
+
+// inline-lua splice + macro + __SITE__ composition: a macro shim
+// injects __SITE__, the splice fn receives a plain string and the
+// substituted body lands at the call expression's location.
+@inline inline(lua) fn _site_paren_impl(s: string) -> string = "return (s)"
+macro site_paren() -> string {
+    _site_paren_impl(__SITE__)
+}
+
+@test
+fn test_expand_with_macro_and_site_literal() {
+    // The macro expands at the call line below, injecting
+    // "expand_annotation.rock:<line>" as the impl arg.
+    let s = site_paren()
+    assert(s.contains("expand_annotation.rock:37"), "got: {s}")
+}

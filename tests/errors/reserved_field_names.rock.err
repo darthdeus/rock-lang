@@ -1,0 +1,90 @@
+//! Error: Struct fields named after runtime marker keys must be rejected.
+//!        `__fn` (closure env records), `__ty` (struct type tag), and
+//!        `__variant` (enum boxes) are duck-typed by the runtimes: eq,
+//!        inspect, deepcopy, and call dispatch branch on their presence,
+//!        and `__rock_create_struct` overwrites `__ty` outright. A user
+//!        field with one of these names silently misbehaves (JS eq
+//!        degrades to identity; Lua clobbers the field value). Other
+//!        `__`-prefixed names stay legal (stdlib iterator structs use
+//!        `__inner`/`__pred`/...).
+//! Tags: structs, value-structs, reserved-names
+
+//=== TEST CASE: struct_field_fn_Generic ===
+struct Sneaky {
+    __fn: int,
+}
+
+fn main() {
+    let a = Sneaky { __fn: 1 }
+    print("{a.__fn}")
+}
+
+//=== TEST CASE: struct_field_ty_Generic ===
+struct Tagged {
+    __ty: string,
+}
+
+fn main() {
+    let a = Tagged { __ty: "x" }
+    print(a.__ty)
+}
+
+//=== TEST CASE: struct_field_variant_Generic ===
+struct Var {
+    __variant: int,
+}
+
+fn main() {
+    let a = Var { __variant: 2 }
+    print("{a.__variant}")
+}
+
+//=== TEST CASE: value_struct_field_fn_Generic ===
+value VSneaky {
+    __fn: int,
+}
+
+fn main() {
+    let a = VSneaky { __fn: 1 }
+    print("{a.__fn}")
+}
+
+//=== TEST CASE: value_struct_field_ty_Generic ===
+value VTagged {
+    __ty: int,
+}
+
+fn main() {
+    let a = VTagged { __ty: 3 }
+    print("{a.__ty}")
+}
+
+//=== TEST CASE: value_struct_field_variant_Generic ===
+value VVar {
+    __variant: int,
+}
+
+fn main() {
+    let a = VVar { __variant: 2 }
+    print("{a.__variant}")
+}
+
+//=== TEST CASE: enum_record_variant_field_variant_Generic ===
+enum E {
+    A { __variant: int },
+}
+
+fn main() {
+    let e = E::A { __variant: 1 }
+    print("ok")
+}
+
+//=== TEST CASE: enum_record_variant_field_fn_Generic ===
+enum F {
+    B { __fn: int },
+}
+
+fn main() {
+    let f = F::B { __fn: 1 }
+    print("ok")
+}

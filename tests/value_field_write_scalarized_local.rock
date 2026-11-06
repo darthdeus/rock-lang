@@ -1,0 +1,114 @@
+// A value-field leaf write through a struct local that SROA scalarizes.
+// The struct never escapes, so `scalarize_struct_cells` peels it and the value
+// field's ctor is copy-propagated to its operands; a `store_field` onto that
+// ctor writes to a temporary while reads fold to the ORIGINAL operand, so the
+// write is silently lost (const case) or emits a ctor call in statement
+// position (non-const case, which does not even parse).
+//
+// Sibling coverage: tests/value_place_leaf_write.rock (container elements),
+// tests/value_whole_read_copies.rock (copy-on-read out of a place).
+
+value Pt { x: int, y: int }
+value Inner { a: int }
+value Outer { i: Inner, b: int }
+struct Holder { p: Pt }
+struct Deep { o: Outer }
+
+fn seed(n: int) -> int { return n }
+
+// --- the write must be observable through the local ---
+
+@test(output = "5")
+fn scalarized_local_const_init_leaf_write() {
+    let h = Holder { p: Pt { x: 1, y: 2 } }
+    h.p.x = 5
+    print("{h.p.x}")
+}
+
+@test(output = "5")
+fn scalarized_local_runtime_init_leaf_write() {
+    let s = seed(1)
+    let h = Holder { p: Pt { x: s, y: 2 } }
+    h.p.x = 5
+    print("{h.p.x}")
+}
+
+@test(output = "11")
+fn scalarized_local_compound_assign() {
+    let s = seed(1)
+    let h = Holder { p: Pt { x: s, y: 2 } }
+    h.p.x = h.p.x + 10
+    print("{h.p.x}")
+}
+
+@test(output = "2")
+fn scalarized_local_inc() {
+    let s = seed(1)
+    let h = Holder { p: Pt { x: s, y: 2 } }
+    h.p.x++
+    print("{h.p.x}")
+}
+
+// The untouched sibling leaf must survive the write.
+@test(output = "5 2")
+fn scalarized_local_other_leaf_survives() {
+    let h = Holder { p: Pt { x: 1, y: 2 } }
+    h.p.x = 5
+    print("{h.p.x} {h.p.y}")
+}
+
+@test(output = "9 2")
+fn scalarized_local_nested_value_leaf_write() {
+    let d = Deep { o: Outer { i: Inner { a: 1 }, b: 2 } }
+    d.o.i.a = 9
+    print("{d.o.i.a} {d.o.b}")
+}
+
+// A whole-field replacement was always correct; it must stay so.
+@test(output = "7 8")
+fn scalarized_local_whole_field_replace() {
+    let h = Holder { p: Pt { x: 1, y: 2 } }
+    h.p = Pt { x: 7, y: 8 }
+    print("{h.p.x} {h.p.y}")
+}
+
+// Two independent locals must not share storage.
+@test(output = "5 1")
+fn scalarized_locals_do_not_alias() {
+    let a = Holder { p: Pt { x: 1, y: 2 } }
+    let b = Holder { p: Pt { x: 1, y: 2 } }
+    a.p.x = 5
+    print("{a.p.x} {b.p.x}")
+}
+
+// --- controls: shapes that already worked ---
+
+fn read_x(h: Holder) -> int { return h.p.x }
+
+@test(output = "7")
+fn escaping_local_leaf_write_control() {
+    let s = seed(1)
+    let h = Holder { p: Pt { x: s, y: 2 } }
+    h.p.x = 7
+    print("{read_x(h)}")
+}
+
+@test(output = "5")
+fn param_held_leaf_write_control() {
+    let h = Holder { p: Pt { x: seed(1), y: 2 } }
+    print("{param_write(h)}")
+}
+
+fn param_write(h: Holder) -> int {
+    h.p.x = 5
+    return h.p.x
+}
+
+// A read-only scalarized local must still scalarize (no write, nothing to pin
+// but the value); this is the shape the optimization exists for.
+@test(output = "1")
+fn scalarized_local_read_only_control() {
+    let s = seed(1)
+    let h = Holder { p: Pt { x: s, y: 2 } }
+    print("{h.p.x}")
+}

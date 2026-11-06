@@ -1,0 +1,49 @@
+// Value-ABI tail: reading a *cdata-backed* value back to scalars.
+// A value struct stored in a regular struct field (or returned by a
+// generic/cdata-ABI call) is ONE Lua cdata at runtime; consuming it
+// as scalars unpacks per-field `cd.f` (byte-faithful to live
+// value_types.rs Multi(["h.v.x",...])). Pins runtime behavior; must
+// pass with and without ROCK_ANF_FUNCTIONS=1.
+
+value V2 { x: int, y: int }
+struct Holder { v: V2, tag: int }
+
+fn dist2(p: V2) -> int {
+    return p.x * p.x + p.y * p.y
+}
+
+fn get_v(h: Holder) -> V2 {
+    return h.v
+}
+
+@test(output = "3-4")
+fn test_cdata_subfield_read() {
+    let h = Holder { v: V2 { x: 3, y: 4 }, tag: 9 }
+    print("{h.v.x}-{h.v.y}")
+}
+
+@test(output = "7")
+fn test_cdata_to_scalar_local() {
+    let h = Holder { v: V2 { x: 3, y: 4 }, tag: 0 }
+    let p = h.v
+    print("{p.x + p.y}")
+}
+
+@test(output = "25")
+fn test_cdata_into_scalar_abi_arg() {
+    let h = Holder { v: V2 { x: 3, y: 4 }, tag: 0 }
+    print("{dist2(h.v)}")
+}
+
+@test(output = "5")
+fn test_cdata_returned_then_read() {
+    let h = Holder { v: V2 { x: 5, y: 12 }, tag: 0 }
+    let g = get_v(h)
+    print("{g.x}")
+}
+
+@test(output = "169")
+fn test_cdata_field_chain_into_call() {
+    let h = Holder { v: V2 { x: 5, y: 12 }, tag: 0 }
+    print("{dist2(get_v(h))}")
+}

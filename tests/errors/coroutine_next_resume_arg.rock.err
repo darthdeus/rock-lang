@@ -1,0 +1,18 @@
+//! Error: a `Coroutine<Y, R, N>` with `N != ()` is NOT iterable -- the
+//!        stdlib `next` adapter is only defined for `N = ()`, because a
+//!        `for` head cannot supply the resume-arg the body's `let x = yield V`
+//!        expects. The mismatch rejects at the loop naturally (no `next`
+//!        overload fits), never a silent wrong-arity resume.
+//! Tags: coroutines, generators, iterator, resume
+
+//=== TEST CASE: resume_taking_coroutine_not_iterable_Rejected ===
+co fn echo() -> Coroutine<int, (), int> {
+    let x = yield 1
+    yield x
+}
+
+fn main() {
+    for v in echo() {
+        print(v)
+    }
+}

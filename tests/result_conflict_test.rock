@@ -1,0 +1,15 @@
+// This file also defines Result but with different fields
+// Without #script, this would conflict with script_with_result.rock
+
+struct Result<T, E> {
+    ok: T?
+    err: E?
+}
+
+@test(output = "Ok: 456")
+fn test_different_result() {
+    let r: Result<int, string> = Result{ ok: 456, err: null };
+    if r.ok != null {
+        print("Ok: 456");
+    }
+}

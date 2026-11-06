@@ -1,0 +1,155 @@
+// Inspect tests - migrated from rock/tests/inspect_tests.rs
+// Tests the inspect() function for debugging and pretty-printing values
+
+struct Person {
+    name: string,
+    age: int,
+}
+
+@test(output = "\"hello\"\n42\ntrue")
+fn test_inspect_simple_types() {
+    print(inspect("hello"))
+    print(inspect(42))
+    print(inspect(true))
+}
+
+@test(output = "Vec {{ 1, 2, 3 }}")
+fn test_inspect_vec() {
+    let vec = vec_new()
+    vec_push(vec, 1)
+    vec_push(vec, 2)
+    vec_push(vec, 3)
+    print(inspect(vec))
+}
+
+@test(output = "{{ city = \"NYC\", name = \"test\" }}")
+fn test_inspect_map() {
+    let map = map_new()
+    insert(map, "name", "test")
+    insert(map, "city", "NYC")
+    print(inspect(map))
+}
+
+@test(output = "Person {{ age = 30, name = \"Alice\" }}")
+fn test_inspect_struct() {
+    let person = Person { name: "Alice", age: 30 }
+    print(inspect(person))
+}
+
+@test(output = "Vec len: 2\nString: \"test\"\nNumber: 42")
+fn test_inspect_mixed_data() {
+    let vec = vec_new()
+    vec_push(vec, "hello")
+    vec_push(vec, "world")
+
+    print("Vec len: {inspect(vec_len(vec))}")
+    print("String: {inspect('test')}")
+    print("Number: {inspect(42)}")
+}
+
+// Compact formatting tests - structs with 1-2 fields should be single-line
+
+struct Point {
+    x: int,
+    y: int,
+}
+
+struct Single {
+    value: string,
+}
+
+struct Triple {
+    a: int,
+    b: int,
+    c: int,
+}
+
+enum Color {
+    Red,
+    Green,
+    Blue,
+    Custom { r: int, g: int },
+}
+
+@test(output = "Point {{ x = 10, y = 20 }}")
+fn test_inspect_compact_two_fields() {
+    let point = Point { x: 10, y: 20 }
+    print(inspect(point))
+}
+
+@test(output = "Single {{ value = \"hello\" }}")
+fn test_inspect_compact_one_field() {
+    let single = Single { value: "hello" }
+    print(inspect(single))
+}
+
+@test(output = "Triple {{\n  a = 1,\n  b = 2,\n  c = 3\n}}")
+fn test_inspect_multiline_three_fields() {
+    let triple = Triple { a: 1, b: 2, c: 3 }
+    print(inspect(triple))
+}
+
+@test(output = "Color::Red")
+fn test_inspect_enum_unit_variant() {
+    let color = Color::Red
+    print(inspect(color))
+}
+
+@test(output = "Color::Custom {{ g = 128, r = 255 }}")
+fn test_inspect_enum_record_variant_compact() {
+    let color = Color::Custom { r: 255, g: 128 }
+    print(inspect(color))
+}
+
+@test(output = "{{ 1, 2, 3 }}")
+fn test_inspect_tuple_compact() {
+    let tuple = (1, 2, 3)
+    print(inspect(tuple))
+}
+
+struct NestedCompact {
+    point: Point,
+    name: string,
+}
+
+@test(output = "NestedCompact {{ name = \"test\", point = Point {{ x = 5, y = 10 }} }}")
+fn test_inspect_nested_compact() {
+    let nested = NestedCompact { point: Point { x: 5, y: 10 }, name: "test" }
+    print(inspect(nested))
+}
+// A `nobox` field nested in a value struct: the ctor FLATTENS to the dotted
+// leaf form (`flatten_nobox_nested_ctors`), so an inspect renderer that looks
+// fields up by DECLARED name no longer finds `pos`. Both backends must still
+// render the declared shape -- otherwise marking a math type `nobox` silently
+// converts every print of a struct containing it into a JS skip, which deletes
+// coverage rather than reporting a gap.
+nobox value InspNV { x: float, y: float }
+value InspE5 { pos: InspNV, a: float, b: float, c: float }
+
+@test(output = "InspE5 {{ pos: InspNV {{ x: 1, y: 2 }}, a: 3, b: 4, c: 5 }}")
+fn test_inspect_flattened_nobox_value_struct() {
+    let xs: [InspE5] = []
+    xs.push(InspE5 { pos: InspNV { x: 1.0, y: 2.0 }, a: 3.0, b: 4.0, c: 5.0 })
+    print(inspect(xs[0]))
+}
+
+// A flat enum threads a `nobox` record payload as widened positional leaves,
+// so the box carries no field names of its own. `inspect` must still name the
+// variant and the payload's DECLARED fields, read from the enum's variant
+// descriptor and the payload's type-table entry -- never the `[1]`/`[2]` slots.
+nobox value InspP2 { x: float, y: float }
+
+enum InspU { V2(InspP2), F(float) }
+
+@test(output = "InspU::V2 {{ x = 1, y = 2 }}")
+fn test_inspect_flat_enum_nobox_record_payload() {
+    let u = InspU::V2(InspP2 { x: 1.0, y: 2.0 })
+    print(inspect(u))
+}
+
+// Control: a scalar tuple payload has no declared field names, so it keeps
+// the established positional rendering.
+@test(output = "InspU::F {{ [1] = 7 }}")
+fn test_inspect_flat_enum_scalar_payload_stays_positional() {
+    print(inspect(InspU::F(7.0)))
+}

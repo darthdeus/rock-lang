@@ -1,0 +1,27 @@
+//! Error: Type mismatch error tests
+//! Tags: types, mismatches
+
+//=== TEST CASE: string_to_int_mismatch_MismatchedType ===
+fn main() {
+    let x: int = "hello"  // This should fail - type mismatch
+}
+
+//=== TEST CASE: int_to_string_mismatch_MismatchedType ===
+fn main() {
+    let s: string = 42
+}
+
+//=== TEST CASE: array_element_mismatch_MismatchedType ===
+fn main() {
+    let numbers: [int] = [1, 2, "three"]
+}
+
+//=== TEST CASE: default_param_type_mismatch_MismatchedType ===
+// Error: int parameter cannot have string default
+fn bad_func(x: int = "hello") {
+    print(x)
+}
+
+fn main() {
+    bad_func()
+}

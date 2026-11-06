@@ -1,0 +1,28 @@
+//! Error: `for x in <T>` over a non-builtin type with no iter/next protocol
+//!        must be rejected. The fallthrough resolves iter(T)->It,
+//!        next(It)->(bool,E); when no such fns exist the loop stays a compile
+//!        error. These pin that the
+//!        rejection survives; diagnostics should name what is missing (iter vs
+//!        next).
+//! Tags: iterators, for-loop
+
+//=== TEST CASE: no_iter_fn_for_struct_Generic ===
+struct Thing { n: int }
+fn main() {
+    for x in (Thing { n: 1 }) {
+        let _ = x
+    }
+}
+
+//=== TEST CASE: iter_but_no_next_Generic ===
+struct Bag { n: int }
+struct BagIter { bag: Bag, i: int }
+fn iter(b: Bag) -> BagIter {
+    return BagIter { bag: b, i: 0 }
+}
+fn main() {
+    // `iter(Bag)` resolves to BagIter, but there is no `next(BagIter)` -> reject.
+    for x in (Bag { n: 1 }) {
+        let _ = x
+    }
+}

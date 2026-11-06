@@ -1,0 +1,69 @@
+// String-primitive corpus for the `--backend js` ratchet (T8d). The host-bodied
+// string ops (string.find / substring / unit_at / upper / lower / string_char)
+// get checked JS intrinsic bindings (JS_INTRINSICS): indexOf / slice / charCodeAt
+// / toUpperCase / toLowerCase / fromCharCode. ASCII only -- unit_at is a UTF-16
+// unit on JS, a byte on luajit, equal in the ASCII range. The Layer-2 string
+// algorithms (split / replace / contains / starts_with / ends_with / trim) are
+// pure Rock over these primitives and co-emit. Pins
+// crates/skull-codegen-js/tests/string_primitives.rs.
+
+// find returns the 0-based index of the first match, or -1.
+@test(output = "1")
+fn test_find() { print(tostring("hello".find("e"))) }
+
+@test(output = "3")
+fn test_find_from() { print(tostring("abcabc".find("a", 1))) }
+
+@test(output = "-1")
+fn test_find_miss() { print(tostring("abc".find("z"))) }
+
+// substring(start, end) is a 0-based, end-exclusive slice.
+@test(output = "ell")
+fn test_substring() { print("hello".substring(1, 4)) }
+
+@test(output = "")
+fn test_substring_empty() { print("hello".substring(2, 2)) }
+
+// unit_at returns the ASCII code (0 out of bounds).
+@test(output = "101")
+fn test_unit_at() { print(tostring("e".unit_at(0))) }
+
+@test(output = "0")
+fn test_unit_at_oob() { print(tostring("e".unit_at(5))) }
+
+@test(output = "HELLO")
+fn test_upper() { print("hello".upper()) }
+
+@test(output = "world")
+fn test_lower() { print("WORLD".lower()) }
+
+@test(output = "A")
+fn test_string_char() { print(string_char(65)) }
+
+// split over a Layer-2 consumer.
+@test(output = "a|b|c")
+fn test_split() {
+    let parts = "a,b,c".split(",")
+    print(join(parts, "|"))
+}
+
+@test(output = "1")
+fn test_split_count() {
+    let parts = "a,b,c,d".split(",")
+    print(tostring(parts.len - 3))
+}
+
+@test(output = "x-y-z")
+fn test_replace() { print("x.y.z".replace(".", "-")) }
+
+@test(returns = 1)
+fn test_contains() -> int { if "hello".contains("ell") { 1 } else { 0 } }
+
+@test(returns = 1)
+fn test_starts_with() -> int { if "hello".starts_with("he") { 1 } else { 0 } }
+
+@test(returns = 1)
+fn test_ends_with() -> int { if "hello".ends_with("lo") { 1 } else { 0 } }
+
+@test(output = "trimmed")
+fn test_trim() { print("  trimmed  ".trim()) }

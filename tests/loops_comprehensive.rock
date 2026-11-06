@@ -1,0 +1,378 @@
+// Comprehensive loop tests ported from rock/tests/loop_tests.rs
+// Tests basic loops, continue, break, nested loops, and for/while loops
+
+@test(output = "3")
+fn loop_basic_break() {
+    let i = 0
+
+    loop {
+        i = i + 1
+        if i == 3 {
+            break
+        }
+    }
+
+    print(i)
+}
+
+@test(output = "9")
+fn loop_continue_and_sum() {
+    let i = 0
+    let sum = 0
+
+    loop {
+        i = i + 1
+        if i % 2 != 0 {
+            sum = sum + i
+            if i >= 5 {
+                break
+            }
+        }
+    }
+
+    print(sum)
+}
+
+@test(output = "3\n2")
+fn loop_nested() {
+    let outer = 0
+    let inner = 0
+
+    loop {
+        outer = outer + 1
+        inner = 0
+
+        loop {
+            inner = inner + 1
+            if inner == 2 {
+                break
+            }
+        }
+
+        if outer == 3 {
+            break
+        }
+    }
+
+    print(outer)
+    print(inner)
+}
+
+@test(output = "9")
+fn continue_in_loop_basic() {
+    let sum = 0
+    let i = 0
+
+    loop {
+        i = i + 1
+        if i % 2 == 0 {
+            continue
+        }
+        sum = sum + i
+        if i >= 5 {
+            break
+        }
+    }
+
+    print(sum)
+}
+
+@test(output = "9")
+fn continue_in_while_loop() {
+    let sum = 0
+    let i = 0
+
+    while i < 5 {
+        i = i + 1
+        if i % 2 == 0 {
+            continue
+        }
+        sum = sum + i
+    }
+
+    print(sum)
+}
+
+@test(output = "9")
+fn continue_in_for_loop() {
+    let sum = 0
+    let arr = [1, 2, 3, 4, 5]
+
+    // TODO: Tuple destructuring in for loops needs work
+    // For now, use simple iteration
+    for x in arr {
+        if x % 2 == 0 {
+            continue
+        }
+        sum = sum + x
+    }
+
+    print(sum)
+}
+
+// ============================================
+// Additional Continue Statement Tests
+// ============================================
+
+@test(output = "3\n8")
+fn continue_nested_loops_inner() {
+    let outer_sum = 0
+    let inner_sum = 0
+    let i = 0
+
+    loop {
+        i = i + 1
+        let j = 0
+
+        loop {
+            j = j + 1
+            if j % 2 == 0 {
+                continue
+            }
+            inner_sum = inner_sum + j
+            if j >= 3 {
+                break
+            }
+        }
+
+        outer_sum = outer_sum + i
+        if i >= 2 {
+            break
+        }
+    }
+
+    print(outer_sum)
+    print(inner_sum)
+}
+
+@test(output = "1\n3")
+fn continue_simple() {
+    let i = 0
+
+    loop {
+        i = i + 1
+        if i == 2 {
+            continue
+        }
+        print(i)
+        if i >= 3 {
+            break
+        }
+    }
+}
+
+@test(output = "22")
+fn continue_multiple_conditions() {
+    let sum = 0
+    let i = 0
+
+    loop {
+        i = i + 1
+
+        if i >= 10 {
+            break
+        }
+
+        if i % 3 == 0 {
+            continue
+        }
+
+        if i % 5 == 0 {
+            continue
+        }
+
+        sum = sum + i
+    }
+
+    print(sum)
+}
+
+@test(output = "9\n5")
+fn continue_after_statements() {
+    let sum = 0
+    let count = 0
+    let i = 0
+
+    loop {
+        i = i + 1
+        count = count + 1
+
+        if i % 2 == 0 {
+            continue
+        }
+
+        sum = sum + i
+
+        if i >= 5 {
+            break
+        }
+    }
+
+    print(sum)
+    print(count)
+}
+
+// ============================================
+// Additional For Loop Tests
+// ============================================
+
+@test(output = "6")
+fn vec_iteration_basic() {
+    let vec = vec_new()
+    vec_push(vec, 1)
+    vec_push(vec, 2)
+    vec_push(vec, 3)
+
+    let sum = 0
+
+    for x in vec {
+        sum += x
+    }
+
+    print(sum)
+}
+
+@test(output = "60")
+fn arena_tuple_iteration() {
+    let arena = arena_new()
+    insert(arena, 10)
+    insert(arena, 20)
+    insert(arena, 30)
+
+    let sum = 0
+
+    for (entity, value) in arena {
+        sum += value  // Back to original working code
+    }
+
+    print(sum)
+}
+
+@test(output = "6")
+fn map_tuple_iteration() {
+    let map = map_new()
+    insert(map, "a", 1)
+    insert(map, "b", 2)
+    insert(map, "c", 3)
+
+    let sum = 0
+
+    for (key, value) in map {
+        sum += value
+    }
+
+    print(sum)
+}
+
+// ============================================
+// Type Assertion Tests for Collections
+// ============================================
+
+@test(output = "6", type_holes = [[0, "int"]])
+fn vec_iteration_type_check() {
+    let vec = vec_new()
+    vec_push(vec, 1)
+    vec_push(vec, 2)
+    vec_push(vec, 3)
+
+    let sum = 0
+
+    for x in vec {
+        let x_typed: ? = x  // [0] - Should be int
+        sum += x
+    }
+
+    print(sum)
+}
+
+// TODO: Arena iteration type checking needs investigation
+// The basic functionality works, but the type semantics are unclear
+
+@test(output = "6", type_holes = [[0, "int"]])
+fn map_iteration_type_check() {
+    let map = map_new()
+    insert(map, "a", 1)
+    insert(map, "b", 2)
+    insert(map, "c", 3)
+
+    let sum = 0
+
+    for (key, value) in map {
+        let value_typed: ? = value  // [0] - Should be int
+        sum += value
+    }
+
+    print(sum)
+}
+
+@test(output = "6", type_holes = [[0, "int"]])
+fn array_iteration_type_check() {
+    let arr = [1, 2, 3]
+
+    let sum = 0
+
+    for x in arr {
+        let x_typed: ? = x  // [0] - Should be int
+        sum += x
+    }
+
+    print(sum)
+}
+
+// ============================================
+// Additional Advanced Loop Tests
+// ============================================
+
+@test(output = "18")
+fn nested_loops_with_continue_complex() {
+    let outer = 0
+    let result = 0
+
+    loop {
+        outer = outer + 1
+        if outer >= 3 {
+            break
+        }
+
+        let inner = 0
+        loop {
+            inner = inner + 1
+            if inner == 2 {
+                continue  // inner continue
+            }
+            result = result + inner
+            if inner >= 3 {
+                break
+            }
+        }
+
+        if outer == 1 {
+            continue  // outer continue
+        }
+        result = result + 10
+    }
+
+    print(result)
+}
+
+@test(output = "12378")
+fn continue_with_complex_expression() {
+    let result = 0
+    let i = 0
+
+    loop {
+        i = i + 1
+
+        if i > 3 && i < 7 {
+            continue
+        }
+
+        result = result * 10 + i
+
+        if i >= 8 {
+            break
+        }
+    }
+
+    print(result)
+}

@@ -1,0 +1,46 @@
+// Struct functional update `Ty { ..base, field: v }` (plan M1).
+// Base must be the same nominal type; explicit fields override, unwritten
+// fields copy from base. Works for `struct` and `value` types.
+
+struct Point { x: int, y: int, z: int }
+
+value VPoint { x: int, y: int, z: int }
+
+@test(output = "1 20 3")
+fn test_update_override_one_field() {
+    let base = Point { x: 1, y: 2, z: 3 }
+    let p = Point { ..base, y: 20 }
+    print("{p.x} {p.y} {p.z}")
+}
+
+@test(output = "1 2 3")
+fn test_update_no_overrides_copies_all() {
+    let base = Point { x: 1, y: 2, z: 3 }
+    let p = Point { ..base }
+    print("{p.x} {p.y} {p.z}")
+}
+
+@test(output = "10 20 30")
+fn test_update_override_multiple() {
+    let base = Point { x: 1, y: 2, z: 3 }
+    let p = Point { ..base, x: 10, y: 20, z: 30 }
+    print("{p.x} {p.y} {p.z}")
+}
+
+@test(output = "1 99 3")
+fn test_value_struct_update() {
+    let base = VPoint { x: 1, y: 2, z: 3 }
+    let p = VPoint { ..base, y: 99 }
+    print("{p.x} {p.y} {p.z}")
+}
+
+// Base is an opaque rvalue (fn return), not a path -- one temp, field reads.
+fn make() -> Point {
+    Point { x: 5, y: 6, z: 7 }
+}
+
+@test(output = "5 6 700")
+fn test_update_rvalue_base() {
+    let p = Point { ..make(), z: 700 }
+    print("{p.x} {p.y} {p.z}")
+}

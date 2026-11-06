@@ -1,0 +1,109 @@
+nobox value RefFrame { items: [int]?, cursor: int }
+@test fn reference_vector_lifecycle() {
+    let values: [RefFrame] = []
+    values.push(RefFrame { items: null, cursor: 1 })
+    values.push(RefFrame { items: [7], cursor: 2 })
+    assert(values.len() == 2)
+    assert(values[0].items == null)
+    assert(values[1].items.unwrap()[0] == 7)
+    let popped = values.pop().unwrap()
+    assert(popped.cursor == 2)
+    assert(popped.items.unwrap()[0] == 7)
+    values.clear()
+    assert(values.len() == 0)
+}
+
+inline(lua) fn reference_vector_watch(items: [int]) = """
+_G.__reference_vector_weak = setmetatable({items}, {__mode = 'v'})
+"""
+
+inline(lua) fn reference_vector_payload_released() -> bool = """
+collectgarbage('collect')
+collectgarbage('collect')
+return _G.__reference_vector_weak[1] == nil
+"""
+
+fn reference_vector_seed(values: [RefFrame]) {
+    let items = [7]
+    reference_vector_watch(items)
+    values.push(RefFrame { items, cursor: 1 })
+}
+
+fn reference_vector_discard(values: [RefFrame]) { let _ = values.pop() }
+
+@test fn reference_vector_releases_removed_payloads() {
+    let values: [RefFrame] = []
+    reference_vector_seed(values)
+    assert(!reference_vector_payload_released())
+    reference_vector_discard(values)
+    assert(reference_vector_payload_released())
+    reference_vector_seed(values)
+    values.clear()
+    assert(reference_vector_payload_released())
+}
+
+fn reference_map_seed(values: Map<int, RefFrame>) {
+    let items = [9]
+    reference_vector_watch(items)
+    values[1] = RefFrame { items, cursor: 3 }
+}
+fn reference_map_discard(values: Map<int, RefFrame>) { let _ = values.remove(1) }
+
+@test fn reference_map_releases_removed_payloads() {
+    let values: Map<int, RefFrame> = map_new()
+    reference_map_seed(values)
+    assert(!reference_vector_payload_released())
+    reference_map_discard(values)
+    assert(reference_vector_payload_released())
+    reference_map_seed(values)
+    values.clear()
+    assert(reference_vector_payload_released())
+}
+
+@test fn reference_vector_sparse_operations() {
+    let values: [RefFrame] = []
+    values.push(RefFrame { items: null, cursor: 1 })
+    values.push(RefFrame { items: null, cursor: 3 })
+    assert(values.capacity() >= values.len())
+    values.insert_at(1, RefFrame { items: [8], cursor: 2 })
+    let copy = values.clone()
+    values.set(1, RefFrame { items: null, cursor: 9 })
+    assert(copy[1].items.unwrap()[0] == 8)
+    assert(copy.remove_at(0).unwrap().cursor == 1)
+    assert(copy[0].cursor == 2)
+    assert(copy.swap_remove(0).unwrap().cursor == 2)
+    assert(copy[0].cursor == 3)
+}
+
+fn reference_arena_seed(values: Arena<RefFrame>) -> Entity<RefFrame> {
+    let items = [11]
+    reference_vector_watch(items)
+    return values.insert(RefFrame { items, cursor: 4 })
+}
+fn reference_arena_discard(value: Entity<RefFrame>) { let _ = value.remove() }
+
+fn reference_arena_reuse(values: Arena<RefFrame>) {
+    assert(values.reuse_retained().unwrap().items.unwrap()[0] == 11)
+}
+
+@test fn reference_arena_preserves_retained_payloads() {
+    let values: Arena<RefFrame> = arena_new()
+    reference_arena_discard(reference_arena_seed(values))
+    assert(!reference_vector_payload_released())
+    reference_arena_reuse(values)
+    values.clear()
+    assert(reference_vector_payload_released())
+}
+
+nobox value ReferenceBool { flag: bool?, label: string }
+@test fn reference_vector_preserves_false_and_null() {
+    let values: [ReferenceBool] = []
+    values.push(ReferenceBool { flag: false, label: "false" })
+    values.push(ReferenceBool { flag: null, label: "absent" })
+    assert(values[0].flag != null)
+    assert(!values[0].flag.unwrap())
+    assert(values[1].flag == null)
+    values.sort(v => v.label)
+    assert(values[0].flag == null)
+    assert(values[1].flag != null)
+}

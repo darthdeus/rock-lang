@@ -1,0 +1,11 @@
+@test 
+fn test_non_exhaustive_integer() {
+    let x = 5
+    
+    // This should fail - missing coverage for numbers outside 1-10
+    let result = match x {
+        1..=10 => "small"
+    }
+    
+    print("This should not compile")
+}

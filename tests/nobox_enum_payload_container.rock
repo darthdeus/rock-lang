@@ -1,0 +1,59 @@
+// A `nobox` payload inside an enum ELEMENT of a container. The enum box stores
+// the payload SPLAT (`{__variant, x, y}`), so nothing materializes -- the same
+// treatment the payload already got when the enum sat inside a tuple element.
+//
+// The container is a global so the vec escapes: a local one is scalarized away
+// and the push never reaches the element repr at all.
+
+enum Payload {
+    V2(Vec2),
+    FloatArray([float]),
+}
+
+global BOXED: [Payload] = []
+global PAIRS: [(string, Payload)] = []
+
+fn push_v2(v: Vec2) {
+    BOXED.push(Payload::V2(v))
+}
+
+fn push_pair(k: string, v: Vec2) {
+    PAIRS.push((k, Payload::V2(v)))
+}
+
+@test
+fn a_bare_enum_element_stores_its_payload_splat() {
+    push_v2(Vec2 { x: 3.0, y: 4.0 })
+    match BOXED[0] {
+        Payload::V2(v) => {
+            assert_eq(v.x, 3.0)
+            assert_eq(v.y, 4.0)
+        },
+        Payload::FloatArray(a) => assert_eq(a.len, -1),
+    }
+}
+
+@test
+fn an_enum_inside_a_tuple_element_agrees_with_the_bare_one() {
+    push_pair("k", Vec2 { x: 5.0, y: 6.0 })
+    let (k, p) = PAIRS[0]
+    assert_eq(k, "k")
+    match p {
+        Payload::V2(v) => {
+            assert_eq(v.x, 5.0)
+            assert_eq(v.y, 6.0)
+        },
+        Payload::FloatArray(a) => assert_eq(a.len, -1),
+    }
+}
+
+// The ctor in a boxed context is the discriminant: an inline ctor and a
+// param-fed value must take the same route, since only one of them used to.
+@test
+fn an_inline_ctor_in_the_push_takes_the_same_route() {
+    BOXED.push(Payload::V2(Vec2 { x: 7.0, y: 8.0 }))
+    match BOXED[BOXED.len - 1] {
+        Payload::V2(v) => assert_eq(v.x + v.y, 15.0),
+        Payload::FloatArray(a) => assert_eq(a.len, -1),
+    }
+}

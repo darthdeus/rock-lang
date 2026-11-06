@@ -1,0 +1,45 @@
+// The stdlib `@uniform_expand` packer reached through an ordinary generic fn.
+// Its retained concrete instance supplies the layout to the expander.
+//
+// Packs into two hand-built views and reads the bytes back, so the std140
+// layout is proven without a shader, a registry or GL. Offsets are LITERAL,
+// read off the rules -- see rock-lang/crates/skull-mir/tests/uniform_block.rs.
+
+value BloomBlurU { radius: float, direction: Vec2, resolution: float }
+
+fn pack_into<T>(fbuf: NativeBuffer<float>, ibuf: NativeBuffer<int>, u: T) {
+    pack_uniform_block(fbuf.ptr, ibuf.ptr, u)
+}
+
+@test
+fn generic_fn_packs_at_std140_offsets() {
+    let f = native_buffer_float(8)
+    let i = native_buffer_int(8)
+    let u = BloomBlurU { radius: 1.5, direction: v(2.5, 3.5), resolution: 4.5 }
+
+    pack_into(f, i, u)
+
+    // std140 puts `direction` at byte 8, not byte 4: element 1 is the hole the
+    // lone leading float opens, and it must still hold its initial zero.
+    assert(f[0] == 1.5, "radius at element 0")
+    assert(f[1] == 0.0, "element 1 is std140's hole, never written")
+    assert(f[2] == 2.5, "direction.x at element 2")
+    assert(f[3] == 3.5, "direction.y at element 3")
+    assert(f[4] == 4.5, "resolution at element 4")
+}
+
+value Flags { scale: float, on: bool, count: int }
+
+@test
+fn int_and_bool_members_land_in_the_int_view() {
+    let f = native_buffer_float(8)
+    let i = native_buffer_int(8)
+
+    pack_into(f, i, Flags { scale: 9.5, on: true, count: 7 })
+
+    assert(f[0] == 9.5, "the float rides the float view")
+    // A block bool is 32 bits on the wire, so it stores as an int beside
+    // `count` rather than as a byte.
+    assert(i[1] == 1, "bool -> 1 through the int view at element 1")
+    assert(i[2] == 7, "count through the int view at element 2")
+}

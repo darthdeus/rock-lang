@@ -1,0 +1,70 @@
+// Macro arguments bind by LABEL when one is given, exactly as a fn call does.
+//
+// The expander used to read only `FunctionCallArg.value` and bind by position,
+// so `m(1, c: 3)` put 3 in the SECOND parameter and said nothing -- a silent
+// mis-binding at any call that skips a defaulted param. An unknown label was
+// accepted the same way. A fn with the identical signature honours the label,
+// so the two call forms disagreed depending on whether the callee happened to
+// be a macro.
+
+fn _bind3(a: int, b: int, c: int) -> string {
+    return "{a}/{b}/{c}"
+}
+
+macro bind3(a: expr, b: expr = 20, c: expr = 30) -> string {
+    _bind3(a, b, c)
+}
+
+// The control: same shape, but a fn. Every assertion below must hold for both.
+fn bind3_fn(a: int, b: int = 20, c: int = 30) -> string {
+    return "{a}/{b}/{c}"
+}
+
+@test
+fn label_skips_a_defaulted_param() {
+    assert(bind3(1, c: 3) == "1/20/3", "macro: {bind3(1, c: 3)}")
+    assert(bind3_fn(1, c: 3) == "1/20/3", "fn: {bind3_fn(1, c: 3)}")
+}
+
+@test
+fn labels_may_be_given_out_of_order() {
+    assert(bind3(1, c: 3, b: 2) == "1/2/3", "macro: {bind3(1, c: 3, b: 2)}")
+    assert(bind3_fn(1, c: 3, b: 2) == "1/2/3", "fn: {bind3_fn(1, c: 3, b: 2)}")
+}
+
+@test
+fn positional_and_labelled_mix() {
+    assert(bind3(1, 2, c: 3) == "1/2/3", "macro: {bind3(1, 2, c: 3)}")
+    assert(bind3_fn(1, 2, c: 3) == "1/2/3", "fn: {bind3_fn(1, 2, c: 3)}")
+}
+
+@test
+fn all_positional_is_unchanged() {
+    assert(bind3(1, 2, 3) == "1/2/3", "macro: {bind3(1, 2, 3)}")
+    assert(bind3(1) == "1/20/30", "macro: {bind3(1)}")
+    assert(bind3(1, 2) == "1/2/30", "macro: {bind3(1, 2)}")
+}
+
+// A label naming the first parameter binds it, leaving the rest on defaults.
+@test
+fn label_may_name_the_first_param() {
+    assert(bind3(a: 7) == "7/20/30", "macro: {bind3(a: 7)}")
+}
+
+// UFCS puts the receiver in the first slot positionally; labels still apply to
+// the parameters after it.
+struct Box { n: int }
+
+fn _boxed(b: Box, k: int, j: int) -> string {
+    return "{b.n}:{k}:{j}"
+}
+
+macro boxed(b: expr, k: expr = 5, j: expr = 9) -> string {
+    _boxed(b, k, j)
+}
+
+@test
+fn ufcs_receiver_plus_label() {
+    let b = Box { n: 1 }
+    assert(b.boxed(j: 3) == "1:5:3", "got {b.boxed(j: 3)}")
+}

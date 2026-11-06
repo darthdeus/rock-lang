@@ -1,0 +1,170 @@
+// Test for engine system decorators
+
+// ============================================================================
+// System Registries (copy from systems.rock for standalone testing)
+// ============================================================================
+
+struct InitSystem {
+    func: fn() -> (),
+    name: string,
+}
+
+struct UpdateSystem {
+    func: fn() -> (),
+    name: string,
+    stage: int,
+}
+
+struct ResetSystem {
+    func: fn() -> (),
+    name: string,
+}
+
+global INIT_SYSTEMS: [InitSystem] = []
+global UPDATE_SYSTEMS: [UpdateSystem] = []
+global RESET_SYSTEMS: [ResetSystem] = []
+
+global DEFAULT_UPDATE_STAGE: int = 100
+
+// ============================================================================
+// Decorators
+// ============================================================================
+
+deco init init {
+    INIT_SYSTEMS.push(InitSystem {
+        func: transmute(target.func),
+        name: transmute(target.name),
+    })
+}
+
+deco init update(stage: int = 100) {
+    UPDATE_SYSTEMS.push(UpdateSystem {
+        func: transmute(target.func),
+        name: transmute(target.name),
+        stage: stage,
+    })
+}
+
+deco init reset {
+    RESET_SYSTEMS.push(ResetSystem {
+        func: transmute(target.func),
+        name: transmute(target.name),
+    })
+}
+
+// ============================================================================
+// System Runners
+// ============================================================================
+
+fn run_init_systems() {
+    for system in INIT_SYSTEMS {
+        system.func()
+    }
+}
+
+fn run_update_systems() {
+    sort(UPDATE_SYSTEMS, (s) => s.stage)
+    for system in UPDATE_SYSTEMS {
+        system.func()
+    }
+}
+
+fn run_reset_systems() {
+    for system in RESET_SYSTEMS {
+        system.func()
+    }
+}
+
+// ============================================================================
+// Test Systems
+// ============================================================================
+
+global INIT_LOG: [string] = []
+global UPDATE_LOG: [string] = []
+global RESET_LOG: [string] = []
+
+@init
+fn init_physics() {
+    INIT_LOG.push("physics")
+}
+
+@init
+fn init_graphics() {
+    INIT_LOG.push("graphics")
+}
+
+@update(stage = 0)
+fn update_input() {
+    UPDATE_LOG.push("input")
+}
+
+@update(stage = 10)
+fn update_physics() {
+    UPDATE_LOG.push("physics")
+}
+
+@update(stage = 20)
+fn update_ai() {
+    UPDATE_LOG.push("ai")
+}
+
+@update
+fn update_render() {
+    UPDATE_LOG.push("render")
+}
+
+@reset
+fn reset_physics() {
+    RESET_LOG.push("physics")
+}
+
+@reset
+fn reset_world() {
+    RESET_LOG.push("world")
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+@test
+fn test_init_systems_registered() {
+    assert_eq(vec_len(INIT_SYSTEMS), 2)
+}
+
+@test
+fn test_update_systems_registered() {
+    assert_eq(vec_len(UPDATE_SYSTEMS), 4)
+}
+
+@test
+fn test_reset_systems_registered() {
+    assert_eq(vec_len(RESET_SYSTEMS), 2)
+}
+
+@test
+fn test_init_systems_run() {
+    clear(INIT_LOG)
+    run_init_systems()
+    assert_eq(vec_len(INIT_LOG), 2)
+}
+
+@test
+fn test_update_systems_run_in_stage_order() {
+    clear(UPDATE_LOG)
+    run_update_systems()
+
+    // Should run in stage order: input(0), physics(10), ai(20), render(100)
+    assert_eq(vec_len(UPDATE_LOG), 4)
+    assert_eq(UPDATE_LOG[0], "input")
+    assert_eq(UPDATE_LOG[1], "physics")
+    assert_eq(UPDATE_LOG[2], "ai")
+    assert_eq(UPDATE_LOG[3], "render")
+}
+
+@test
+fn test_reset_systems_run() {
+    clear(RESET_LOG)
+    run_reset_systems()
+    assert_eq(vec_len(RESET_LOG), 2)
+}

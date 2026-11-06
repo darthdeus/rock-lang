@@ -1,0 +1,123 @@
+// The five operations a nullable `nobox` value must support when its shape is
+// CONCRETE. They are the premises of specialization-time cell splitting -- the
+// model where a logical `E?` destination becomes {presence cell, leaf cells} once
+// the shape is known, so a null test reads presence, a field read reads a leaf,
+// and a merge stores per-cell instead of rebuilding an aggregate.
+//
+// The point of pinning them HERE, against concrete types, is that cell splitting
+// claims to be scalarization run LATER rather than a new capability. That claim
+// is only true for the operations that already work with the shape in hand. Four
+// do, and this file is what keeps them working.
+//
+// The fifth -- a value-position merge of a present arm and `null` -- does NOT,
+// and is pinned as a crash by `rock-lang/crates/skull/tests/nobox_nullable_phi_return_sentinel.rs`.
+// The controls below bound it: the defect needs a value-position merge AND
+// nullability AND the mark, all three. Remove any one and it works, which is
+// what `merge_of_two_present_arms`, `unmarked_nullable_merge` and
+// `statement_position_returns_do_not_merge` each demonstrate.
+
+nobox value P { x: float, y: float }
+
+value Q { x: float, y: float }
+
+// --- premise 1: an unused element costs nothing and still type-checks ---
+
+fn ignores(p: P?) -> int { return 42 }
+
+@test(returns = 84)
+fn unused_nullable_param() -> int {
+    return ignores(P { x: 1.0, y: 2.0 }) + ignores(null)
+}
+
+// --- premise 2: a null test reads presence ---
+
+fn is_absent(p: P?) -> bool { return p == null }
+
+@test(returns = 1)
+fn null_test_reads_presence() -> int {
+    let present_says_absent = is_absent(P { x: 1.0, y: 2.0 })
+    let absent_says_absent = is_absent(null)
+    return if !present_says_absent && absent_says_absent { 1 } else { 0 }
+}
+
+// --- premise 3: a refined field read reads the leaf ---
+
+fn get_x(p: P?) -> float {
+    if p != null { return p.x }
+    return -1.0
+}
+
+@test(returns = 6)
+fn refined_field_read_reads_the_leaf() -> int {
+    return (get_x(P { x: 7.0, y: 2.0 }) + get_x(null)) as int
+}
+
+// --- premise 4: a nullable nobox value crosses a fn-value boundary ---
+
+fn apply(f: (P?) -> bool, p: P?) -> bool { return f(p) }
+
+@test(returns = 1)
+fn nullable_crosses_a_fn_value_param() -> int {
+    let g = (p: P?) => p == null
+    return if !apply(g, P { x: 1.0, y: 2.0 }) && apply(g, null) { 1 } else { 0 }
+}
+
+// A lambda RETURNED as a fn value at a nullable nobox return, with no merge in
+// its body. `nobox_fn_value_nullable_return_sentinel` pins the failing form of
+// this, whose lambda body is `present => if present { P { .. } } else { null }`
+// -- a value-position merge. So the fn-value path is NOT sufficient on its own
+// to break the ABI; this passes with the merge removed and nothing else changed.
+fn identity_maker() -> (P?) -> P? { return (p: P?) => p }
+
+@test(returns = 8)
+fn returned_lambda_without_a_merge_keeps_its_arity() -> int {
+    let g = identity_maker()
+    let got = g(P { x: 7.0, y: 2.0 })?.x ?? -1.0
+    return (got + if g(null) == null { 1.0 } else { 0.0 }) as int
+}
+
+// --- premise 5's controls: each removes ONE conjunct of the crash ---
+
+// No merge at all.
+fn absent_without_merge() -> P? {
+    let v: P? = null
+    return v
+}
+
+@test(returns = 1)
+fn no_merge_is_correct() -> int {
+    return if absent_without_merge() == null { 1 } else { 0 }
+}
+
+// A branch, but the arms RETURN rather than producing a merged value.
+fn pick_by_return(present: bool) -> P? {
+    if present { return P { x: 5.0, y: 6.0 } }
+    return null
+}
+
+@test(returns = 1)
+fn statement_position_returns_do_not_merge() -> int {
+    return if pick_by_return(true) != null && pick_by_return(false) == null { 1 } else { 0 }
+}
+
+// A value-position merge on a marked but NON-nullable value: no presence leaf.
+fn pick_present(a: bool) -> P {
+    let v: P = if a { P { x: 5.0, y: 6.0 } } else { P { x: 1.0, y: 2.0 } }
+    return v
+}
+
+@test(returns = 6)
+fn merge_of_two_present_arms() -> int {
+    return (pick_present(true).x + pick_present(false).x) as int
+}
+
+// A value-position merge on a nullable but UNMARKED value: no leaf realization.
+fn pick_unmarked(present: bool) -> Q? {
+    let v: Q? = if present { Q { x: 5.0, y: 6.0 } } else { null }
+    return v
+}
+
+@test(returns = 1)
+fn unmarked_nullable_merge() -> int {
+    return if pick_unmarked(true) != null && pick_unmarked(false) == null { 1 } else { 0 }
+}

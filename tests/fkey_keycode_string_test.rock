@@ -1,0 +1,49 @@
+// Regression guard for two bugs that together made F-keys appear dead in
+// stone games (see stone/engine/lib.rock:sdl_keycode_to_string and
+// :get_stone_event_key):
+//
+//   1. F1..F12 produce SDL keycodes SDLK_F1..SDLK_F12 = 0x4000003A..0x40000045,
+//      which must map to "f1".."f12" so is_key_pressed("f7") can match.
+//
+//   2. StoneEvent.key is a C-enum field, which LuaJIT FFI hands back as cdata
+//      int64. Without tonumber() at the boundary, arithmetic on that cdata
+//      stays in int64-land and string interpolation produces "f7LL", which
+//      silently mismatches any is_key_pressed("f7") call downstream.
+
+global SDLK_F1: int = 0x4000003A
+global SDLK_F12: int = 0x40000045
+
+fn sdl_keycode_to_string(keycode: int) -> string {
+    if keycode >= SDLK_F1 && keycode <= SDLK_F12 {
+        let f_num = keycode - SDLK_F1 + 1
+        return "f{f_num}"
+    }
+    return "{keycode}"
+}
+
+@test
+fn fkey_string_mapping() {
+    assert_eq(sdl_keycode_to_string(SDLK_F1), "f1")
+    assert_eq(sdl_keycode_to_string(SDLK_F1 + 6), "f7")
+    assert_eq(sdl_keycode_to_string(SDLK_F12), "f12")
+}
+
+// Simulate reading an FFI enum field. Without tonumber() the value is cdata
+// int64 and tostring() appends an "LL" suffix.
+inline(lua) fn cdata_int_tostring() -> string = """
+    local event = ffi.new("struct { int64_t key; }")
+    event.key = 42
+    return tostring(event.key)
+"""
+
+inline(lua) fn coerced_int_tostring() -> string = """
+    local event = ffi.new("struct { int64_t key; }")
+    event.key = 42
+    return tostring(tonumber(event.key))
+"""
+
+@test
+fn cdata_leaks_LL_suffix_without_tonumber() {
+    assert_eq(cdata_int_tostring(), "42LL")
+    assert_eq(coerced_int_tostring(), "42")
+}

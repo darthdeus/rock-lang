@@ -1,0 +1,147 @@
+// Regression test for same-type == specialization when one or both
+// operands are nullable. The guard must not dereference a nil operand.
+
+enum Color { Red, Green, Blue }
+
+enum Shape {
+    Empty,
+    Dot(int),
+    Rect(int, int),
+}
+
+struct Point { x: int, y: int }
+
+@test
+fn test_nullable_unit_enum_both_null() {
+    let a: Color? = null
+    let b: Color? = null
+    assert_eq(a == b, true)
+    assert_eq(a != b, false)
+}
+
+@test
+fn test_nullable_unit_enum_one_null() {
+    let a: Color? = null
+    let b: Color? = Color::Red
+    assert_eq(a == b, false)
+    assert_eq(a != b, true)
+    assert_eq(b == a, false)
+    assert_eq(b != a, true)
+}
+
+@test
+fn test_nullable_unit_enum_both_set() {
+    let a: Color? = Color::Red
+    let b: Color? = Color::Red
+    let c: Color? = Color::Green
+    assert_eq(a == b, true)
+    assert_eq(a == c, false)
+}
+
+@test
+fn test_nullable_enum_vs_literal() {
+    let a: Color? = Color::Red
+    assert_eq(a == Color::Red, true)
+    assert_eq(a == Color::Blue, false)
+    let n: Color? = null
+    assert_eq(n == Color::Red, false)
+}
+
+@test
+fn test_nullable_payloaded_enum_both_null() {
+    let a: Shape? = null
+    let b: Shape? = null
+    assert_eq(a == b, true)
+    assert_eq(a != b, false)
+}
+
+@test
+fn test_nullable_payloaded_enum_one_null() {
+    let a: Shape? = null
+    let b: Shape? = Shape::Dot(5)
+    assert_eq(a == b, false)
+    assert_eq(a != b, true)
+}
+
+@test
+fn test_nullable_payloaded_enum_both_set_equal() {
+    let a: Shape? = Shape::Dot(5)
+    let b: Shape? = Shape::Dot(5)
+    assert_eq(a == b, true)
+}
+
+@test
+fn test_nullable_payloaded_enum_both_set_diff() {
+    let a: Shape? = Shape::Dot(5)
+    let b: Shape? = Shape::Dot(6)
+    assert_eq(a == b, false)
+    assert_eq(a != b, true)
+}
+
+@test
+fn test_nullable_vs_non_nullable_payloaded() {
+    let a: Shape? = Shape::Dot(5)
+    let b: Shape = Shape::Dot(5)
+    assert_eq(a == b, true)
+    assert_eq(b == a, true)
+    let n: Shape? = null
+    assert_eq(n == b, false)
+    assert_eq(b == n, false)
+}
+
+@test
+fn test_nullable_struct_both_null() {
+    let a: Point? = null
+    let b: Point? = null
+    assert_eq(a == b, true)
+}
+
+@test
+fn test_nullable_struct_one_null() {
+    let a: Point? = null
+    let b: Point? = Point { x: 1, y: 2 }
+    assert_eq(a == b, false)
+    assert_eq(a != b, true)
+}
+
+@test
+fn test_nullable_struct_both_set_equal() {
+    let a: Point? = Point { x: 1, y: 2 }
+    let b: Point? = Point { x: 1, y: 2 }
+    assert_eq(a == b, true)
+}
+
+@test
+fn test_nullable_struct_both_set_diff() {
+    let a: Point? = Point { x: 1, y: 2 }
+    let b: Point? = Point { x: 1, y: 3 }
+    assert_eq(a == b, false)
+    assert_eq(a != b, true)
+}
+
+@test
+fn test_nullable_struct_vs_non_nullable() {
+    let a: Point? = Point { x: 5, y: 5 }
+    let b: Point = Point { x: 5, y: 5 }
+    assert_eq(a == b, true)
+    assert_eq(b == a, true)
+}
+
+// Side-effect safety: the guarded form must evaluate each operand exactly
+// once even if it's a function call.
+global __call_count: int = 0
+
+fn side_effect_pt() -> Point? {
+    __call_count = __call_count + 1
+    Point { x: 1, y: 2 }
+}
+
+@test
+fn test_nullable_side_effect_once() {
+    __call_count = 0
+    let p: Point? = Point { x: 1, y: 2 }
+    let result = side_effect_pt() == p
+    assert_eq(result, true)
+    // IIFE guard must evaluate side_effect_pt() exactly once.
+    assert_eq(__call_count, 1)
+}

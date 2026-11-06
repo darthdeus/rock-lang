@@ -1,0 +1,7 @@
+@test
+fn leading_minus_continues_a_single_call_argument() {
+    let a = 10.0
+    let b = 1.0
+    assert_eq(abs(a
+        - b), 9.0)
+}

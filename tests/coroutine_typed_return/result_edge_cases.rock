@@ -1,0 +1,92 @@
+// PR-γ: edge cases for `.result()` semantics. These tests pin
+// today's behavior so it doesn't drift if/when the ResumeResult<Y, R>
+// enum surface lands.
+
+// ----- Case 1: result() before terminal (still suspended) -----
+//
+// While the coroutine is mid-yield, no terminal `return expr` has
+// fired, so `__return` is unset and `.result()` returns null.
+
+co fn two_steps() -> Coroutine<int, string> {
+    yield 1
+    yield 2
+    return "done"
+}
+
+@test(output = "null null done")
+fn test_result_progression() {
+    let c = two_steps()
+    let _y1 = c.resume()
+    let r_after_first = c.result()
+    let _y2 = c.resume()
+    let r_after_second = c.result()
+    let _drain = c.resume() // drives terminal
+    let r_after_term = c.result()
+    let p1 = if r_after_first != null { "{r_after_first}" } else { "null" }
+    let p2 = if r_after_second != null { "{r_after_second}" } else { "null" }
+    let p3 = if r_after_term != null { "{r_after_term}" } else { "null" }
+    print("{p1} {p2} {p3}")
+}
+
+// ----- Case 2: kill mid-yield -> result() stays null -----
+//
+// Kill is not completion. A killed coroutine has __state == -1 but no
+// __return write, so `.result()` returns null. This sentinel
+// guards against any future change that conflates kill and return.
+
+co fn produces_after_yield() -> Coroutine<int, string> {
+    yield 1
+    return "would-have-returned"
+}
+
+@test(output = "null")
+fn test_kill_does_not_set_result() {
+    let c = produces_after_yield()
+    let _y = c.resume()
+    c.kill()
+    let r = c.result()
+    if r != null { print("{r}") } else { print("null") }
+}
+
+// ----- Case 3: unit-R coroutine - result() always null -----
+//
+// For R = () (today's universe), there's no observation channel.
+// `.result()` exists on every Coroutine handle but always returns
+// null since no `return expr` can fire (bare-return / fall-off
+// don't write __return).
+
+co fn plain_unit() -> Coroutine<int> {
+    yield 1
+    yield 2
+}
+
+@test(output = "null")
+fn test_unit_coroutine_result_is_null() {
+    let c = plain_unit()
+    let _drain1 = c.resume()
+    let _drain2 = c.resume()
+    let _drain3 = c.resume()
+    let r = c.result()
+    if r != null { print("stashed") } else { print("null") }
+}
+
+// ----- Case 4: explicit Coroutine<int, ()> + return value -----
+//
+// User explicitly opted into R = () but wrote `return` (bare).
+// Same as fall-off: __return stays unset, .result() returns null.
+// Guards against the unit-elision check in the type checker
+// shifting unintentionally.
+
+co fn explicit_unit() -> Coroutine<int, ()> {
+    yield 1
+    return
+}
+
+@test(output = "null")
+fn test_explicit_unit_bare_return() {
+    let c = explicit_unit()
+    let _y = c.resume()
+    let _drain = c.resume()
+    let r = c.result()
+    if r != null { print("stashed") } else { print("null") }
+}

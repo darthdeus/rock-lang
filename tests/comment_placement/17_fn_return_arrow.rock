@@ -1,0 +1,6 @@
+// Comment around -> in function signature
+fn five() /* returns */ -> int { return 5 }
+fn six() -> /* int here */ int { return 6 }
+
+@test(output = "11")
+fn t() { print(five() + six()) }

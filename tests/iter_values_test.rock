@@ -1,0 +1,17 @@
+@test
+fn test_iter_values() {
+    let vec = vec_new()
+    vec_push(vec, 1)
+    vec_push(vec, 2)
+    vec_push(vec, 3)
+
+    let values = vec_new()
+    for item in vec {
+        vec_push(values, item)
+    }
+
+    assert(vec_get(values, 0) == 1)
+    assert(vec_get(values, 1) == 2)
+    assert(vec_get(values, 2) == 3)
+    assert(vec_len(values) == 3)
+}

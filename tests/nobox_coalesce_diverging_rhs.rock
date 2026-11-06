@@ -1,0 +1,40 @@
+// `??` whose RHS DIVERGES: the absent arm has no value to store, so neither
+// coalesce arm may splat leaves into its result cells. The value form used to
+// emit `(nil).x` before the `return` and fault at run time; the tuple form
+// stored nil slots, which did not fault only because slot conversion projects
+// no fields. Both arms are guarded on the same rule.
+
+fn maybe_v2() -> Vec2? { return null }
+
+fn coalesce_return(flag: bool) -> float {
+    let p = maybe_v2() ?? return -1.0
+    return p.x
+}
+
+@test fn value_coalesce_with_diverging_rhs() {
+    assert(coalesce_return(true) == -1.0)
+}
+
+fn maybe_pair() -> (Vec2, float)? { return null }
+
+fn coalesce_tuple_return() -> float {
+    let (p, f) = maybe_pair() ?? return -1.0
+    return p.x + f
+}
+
+@test fn tuple_coalesce_with_diverging_rhs() {
+    assert(coalesce_tuple_return() == -1.0)
+}
+
+// The PRESENT arm still has to reach its leaves -- a guard that skipped the
+// stores unconditionally would pass the tests above and break this one.
+fn some_v2() -> Vec2? { return v(3.0, 4.0) }
+
+fn coalesce_present() -> float {
+    let p = some_v2() ?? return -1.0
+    return p.x + p.y
+}
+
+@test fn present_arm_still_reads_its_leaves() {
+    assert(coalesce_present() == 7.0)
+}

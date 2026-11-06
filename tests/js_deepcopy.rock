@@ -1,0 +1,67 @@
+// JS backend deepcopy (T8d): the recursive `__rock_deepcopy_value` clone
+// (stdlib/unified.rock). On JS the shapes are plain objects (structs / env
+// records / boxes), arrays (a Vec's 1-indexed `_data`), Map, and TypedArray (a
+// NativeBuffer's `.ptr`); primitives and bare functions pass through by
+// identity. A `seen` map preserves the object graph -- shared references copy to
+// ONE object, and a cycle copies without recursing forever. Runs under BOTH
+// executors so the aliasing/cycle semantics are luajit-checked.
+
+struct Inner { v: int }
+struct State { a: Inner, b: Inner }
+
+// A shared inner struct copies ONCE: mutating via `a` shows through `b`; the
+// original is untouched.
+@test(output = "99\n99\n1")
+fn shared_ref_copies_once() {
+    let inner = Inner { v: 1 }
+    let s = State { a: inner, b: inner }
+    let c = deepcopy(s)
+    c.a.v = 99
+    print(c.a.v)
+    print(c.b.v)
+    print(s.a.v)
+}
+
+struct Node { tag: int, next: Node? }
+
+// A self-referential struct copies without hanging; the copy's cycle points
+// into the COPY.
+@test(output = "5\n5\n1")
+fn cycle_copies_without_hanging() {
+    let n = Node { tag: 1, next: null }
+    n.next = n
+    let c = deepcopy(n)
+    c.tag = 5
+    print(c.tag)
+    if c.next != null {
+        print(c.next.tag)
+    }
+    print(n.tag)
+}
+
+// A deep-copied Vec is independent of the original.
+@test(output = "10\n1")
+fn vec_copy_is_independent() {
+    let v = [1, 2, 3]
+    let c = deepcopy(v)
+    c.set(0, 10)
+    print(c[0])
+    print(v[0])
+}
+
+// A deep-copied Map is independent of the original.
+@test(output = "20\n2")
+fn map_copy_is_independent() {
+    let m = map_new()
+    m["k"] = 2
+    let c = deepcopy(m)
+    c["k"] = 20
+    print(c["k"])
+    print(m["k"])
+}
+
+// A primitive passes through unchanged.
+@test(returns = 42)
+fn primitive_passthrough() -> int {
+    return deepcopy(42)
+}

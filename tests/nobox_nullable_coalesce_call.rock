@@ -1,0 +1,29 @@
+// Regression witness for if-let coalesce: the nullable bound
+// and result are different nobox values, and the taken arm calls a constructor.
+
+nobox value IVec2 { x: int, y: int }
+nobox value Place { x: int, y: int }
+
+fn maybe_grid(present: bool) -> IVec2? {
+    if present { return IVec2 { x: 4, y: 6 } }
+    return null
+}
+
+fn maybe_place(present: bool) -> Place? {
+    if present { return Place { x: 1, y: 2 } }
+    return null
+}
+
+fn make_place(grid: IVec2) -> Place {
+    return Place { x: grid.x, y: grid.y }
+}
+
+@test(output = "4 6")
+fn coalesce_iflet_call_changes_nobox_type() {
+    let place = maybe_place(false) ?? if let grid = maybe_grid(true) {
+        make_place(grid)
+    } else {
+        null
+    }
+    if place == null { print("missing") } else { print("{place.x} {place.y}") }
+}

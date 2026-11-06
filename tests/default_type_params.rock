@@ -1,0 +1,78 @@
+// Default type params: trailing generics on struct/enum/newtype may carry
+// `= T` defaults, filled from the right at use sites. v1 defaults are a
+// builtin type or a bare named type; fn generics reject defaults.
+
+struct Marker {
+    tag: int,
+}
+
+struct Pair<T, U = int> {
+    a: T,
+    b: U,
+}
+
+struct Holder<T = Marker> {
+    v: T,
+}
+
+enum Opt<T = string> {
+    Val(T),
+    Nothing,
+}
+
+newtype Boxed<T = bool>(T)
+
+fn second(p: Pair<string>) -> int {
+    p.b
+}
+
+@test(output = "42")
+fn test_struct_default_fills_trailing() {
+    let p: Pair<string> = Pair { a: "x", b: 42 }
+    print(p.b)
+}
+
+@test(output = "41")
+fn test_fn_param_position_pads() {
+    let p: Pair<string> = Pair { a: "y", b: 41 }
+    print(second(p))
+}
+
+@test(output = "1.5")
+fn test_explicit_args_still_work() {
+    let p: Pair<string, float> = Pair { a: "x", b: 1.5 }
+    print(p.b)
+}
+
+@test(output = "7")
+fn test_bare_name_when_all_defaulted() {
+    let h: Holder = Holder { v: Marker { tag: 7 } }
+    print(h.v.tag)
+}
+
+@test(output = "9")
+fn test_named_default_explicit_still_works() {
+    let h: Holder<Marker> = Holder { v: Marker { tag: 9 } }
+    print(h.v.tag)
+}
+
+@test(output = "hi")
+fn test_enum_default() {
+    let o: Opt = Opt::Val("hi")
+    match o {
+        Opt::Val(s) => print(s),
+        Opt::Nothing => print("none"),
+    }
+}
+
+@test(output = "true")
+fn test_newtype_default() {
+    let b: Boxed = Boxed(true)
+    print(b.0)
+}
+
+@test(output = "fallback")
+fn test_nullable_of_defaulted_app() {
+    let p: Pair<string>? = null
+    print(p?.a ?? "fallback")
+}

@@ -1,0 +1,7 @@
+// Block comment inside fn param list
+fn add(a: int, /* the addend */ b: int) -> int {
+    return a + b
+}
+
+@test(output = "3")
+fn t() { print(add(1, 2)) }

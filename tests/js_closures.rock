@@ -1,0 +1,71 @@
+// Closure / lambda corpus for the `--backend js` ratchet (T5). Every @test here
+// must emit + run green under node AND on luajit. Exercises the closure
+// capabilities the JS emitter grew: indirect calls (CallValue), inline arrows,
+// lexical capture (by reference), captured-cell mutation, re-entrant calls, and
+// capture-free hoisting (same-site lambda identity, luajit P3 parity). No
+// iterator combinators / lambda-body loops here -- those stay on the skip list.
+
+fn apply(f: (int) -> int, x: int) -> int { f(x) }
+
+// Indirect call through a fn-typed param + inline arrow arg.
+@test(output = "6")
+fn test_hof_inline_arrow() {
+    print(apply(y => y + 1, 5))
+}
+
+// A capturing arrow reads an enclosing param by name (lexical upvalue).
+@test(output = "17")
+fn test_capture_enclosing() {
+    let n = 7
+    let g = (x: int) => x + n
+    print(g(10))
+}
+
+// The same lambda invoked twice with different args -- fresh each call.
+@test(output = "25")
+fn test_reentrant() {
+    let sq = (x: int) => x * x
+    print(sq(3) + sq(4))
+}
+
+// Mutating a captured cell: one shared binding accumulates across calls.
+@test(output = "7")
+fn test_capture_mutation() {
+    let sum = 0
+    let add = (x: int) => { sum = sum + x }
+    add(3)
+    add(4)
+    print(sum)
+}
+
+// Returning a closure and calling it later.
+fn adder(n: int) -> (int) -> int { (x: int) => x + n }
+@test(output = "13")
+fn test_returned_closure() {
+    let add10 = adder(10)
+    print(add10(3))
+}
+
+// A branch inside the lambda body (if-diamond structuring, no loop).
+@test(output = "1")
+fn test_lambda_branch() {
+    let sign = (x: int) => if x >= 0 { 1 } else { 0 - 1 }
+    print(sign(42))
+}
+
+// Capture-free lambda used through a fn-typed struct field: same-site instances
+// compare `==` because the value is hoisted and shared.
+struct Holder { cb: fn() -> int, tag: int }
+fn make() -> Holder { Holder { cb: () => 42, tag: 1 } }
+@test(output = "true")
+fn test_capture_free_identity() {
+    print(make() == make())
+}
+
+// A closure passed to a helper that calls it twice.
+fn twice(f: (int) -> int, x: int) -> int { f(x) + f(x) }
+@test(output = "20")
+fn test_closure_called_twice_in_callee() {
+    let base = 4
+    print(twice(x => x + base, 6))
+}

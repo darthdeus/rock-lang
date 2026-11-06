@@ -1,0 +1,99 @@
+// Phase 6: closures capturing hoisted scalars across yield boundaries.
+//
+// The key invariant: any closure created inside a co fn body that captures
+// a hoisted local must see MUTATIONS of that local, even if the closure
+// was created in one state arm and invoked later (in another arm, or
+// asynchronously after a yield).
+//
+// The field-only lowering (matching C# state machines) satisfies this by
+// storing hoisted locals exclusively on the state struct `s`, and
+// rewriting all body references from `x` to `s.x`. Closures capture `s`
+// rather than a per-arm Lua local binding.
+
+// ---- Closure captures scalar, invoked after yield ----
+co fn capture_scalar() -> Coroutine<int> {
+    let count = 0
+    let reporter = () => count
+    yield 0
+    count = count + 1
+    yield reporter()        // Must yield 1 — closure sees updated count.
+}
+
+@test(output = "0\n1")
+fn test_closure_sees_updated_scalar() {
+    let c = capture_scalar()
+    print(c.resume() ?? -99)
+    print(c.resume() ?? -99)
+}
+
+// ---- Closure mutates captured scalar, caller observes ----
+co fn mutable_closure() -> Coroutine<int> {
+    let count = 0
+    let bump = () => { count = count + 10 }
+    yield count             // 0
+    bump()                  // count := 10 via closure
+    yield count             // 10
+    bump()                  // count := 20
+    bump()                  // count := 30
+    yield count             // 30
+}
+
+@test(output = "0\n10\n30")
+fn test_closure_mutates_captured_scalar() {
+    let c = mutable_closure()
+    print(c.resume() ?? -99)
+    print(c.resume() ?? -99)
+    print(c.resume() ?? -99)
+}
+
+// ---- Multiple closures sharing captured scalar ----
+// Two closures capture the same hoisted local. Mutations via one are
+// visible via the other. This is the canonical "counter + reader"
+// pattern seen in practice.
+co fn shared_capture() -> Coroutine<int> {
+    let n = 100
+    let reader = () => n
+    let bumper = () => { n = n + 1 }
+
+    yield reader()          // 100
+    bumper()
+    yield reader()          // 101
+    bumper()
+    bumper()
+    yield reader()          // 103
+}
+
+@test(output = "100\n101\n103")
+fn test_multiple_closures_share_state() {
+    let c = shared_capture()
+    print(c.resume() ?? -99)
+    print(c.resume() ?? -99)
+    print(c.resume() ?? -99)
+}
+
+// ---- Closure invoked across MULTIPLE yield boundaries ----
+// Stress test: a single closure captures a scalar, and is invoked
+// repeatedly across many state transitions. Must see the latest value
+// each time.
+co fn long_lived_closure() -> Coroutine<int> {
+    let x = 0
+    let snapshot = () => x
+
+    x = 1
+    yield snapshot()        // 1
+    x = 2
+    yield snapshot()        // 2
+    x = 10
+    yield snapshot()        // 10
+    x = x * 5
+    yield snapshot()        // 50
+}
+
+@test(output = "1\n2\n10\n50")
+fn test_closure_across_many_yields() {
+    let c = long_lived_closure()
+    print(c.resume() ?? -99)
+    print(c.resume() ?? -99)
+    print(c.resume() ?? -99)
+    print(c.resume() ?? -99)
+}

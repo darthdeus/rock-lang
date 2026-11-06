@@ -1,0 +1,46 @@
+// Small-tail: a call omitting trailing params that have defaults —
+// ANF now injects the defaults at the call site (live
+// build_function_arguments default-fill), each lowered like a
+// provided positional arg. Variadic / non-defaulted gaps stay
+// reject-to-live. Pins runtime behavior; must pass with and without
+// ROCK_ANF_FUNCTIONS=1.
+
+fn greet(name: string, greeting: string = "hello", excl: int = 1) -> string {
+    let s = "{greeting}, {name}"
+    let bangs = ""
+    let i = 0
+    while i < excl {
+        bangs = "{bangs}!"
+        i = i + 1
+    }
+    return "{s}{bangs}"
+}
+
+fn add(a: int, b: int = 10, c: int = 100) -> int {
+    return a + b + c
+}
+
+@test(output = "hello, world!")
+fn test_omit_two_defaults() {
+    print(greet("world"))
+}
+
+@test(output = "hi, bob!")
+fn test_omit_one_default() {
+    print(greet("bob", "hi"))
+}
+
+@test(output = "yo, sam!!!")
+fn test_provide_all() {
+    print(greet("sam", "yo", 3))
+}
+
+@test(output = "111")
+fn test_numeric_defaults() {
+    print(add(1))
+}
+
+@test(output = "123")
+fn test_numeric_partial() {
+    print(add(1, 22))
+}

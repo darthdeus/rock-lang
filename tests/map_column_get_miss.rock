@@ -1,0 +1,125 @@
+// `Map<K, V>.get` at a column-eligible V that is NOT marked `nobox`.
+//
+// Column storage is selected by `vec_column_elem` (all-scalar, <= 4 leaves), not
+// by the `nobox` mark. `map_column_get_repr`
+// returns a `V?` whose presence is the SPINE, so the absent arm has nil leaves;
+// any consumer that packs that Group into a `<V>_ct` cdata before asking the
+// null question converts a nil leaf and faults. The `nobox` twins in
+// `tests/nobox_map_value.rock` cannot see this: the mark routes `== null`
+// through the presence-aware arm, so they never reach the packing consumer.
+
+value GetCell { a: int, b: int }
+value GetCellF { x: float, y: float }
+
+@test fn map_column_get_miss_on_a_fresh_map() {
+    let m: Map<string, GetCell> = map_new()
+    assert(m.get("nope") == null)
+}
+
+@test fn map_column_get_miss_beside_a_live_key() {
+    let m: Map<string, GetCell> = map_new()
+    m["a"] = GetCell { a: 1, b: 2 }
+    assert(m.get("nope") == null)
+}
+
+@test fn map_column_get_miss_bound_to_a_local() {
+    let m: Map<string, GetCell> = map_new()
+    m["a"] = GetCell { a: 1, b: 2 }
+    let f = m.get("nope")
+    assert(f == null)
+}
+
+// The freed slot keeps its stale leaves; presence must still come from the spine.
+@test fn map_column_get_miss_after_remove() {
+    let m: Map<string, GetCell> = map_new()
+    m["a"] = GetCell { a: 7, b: 8 }
+    m.remove("a")
+    let f = m.get("a")
+    assert(f == null)
+    assert(m.get("a") == null)
+}
+
+@test fn map_column_get_miss_after_clear() {
+    let m: Map<string, GetCell> = map_new()
+    m["a"] = GetCell { a: 7, b: 8 }
+    m.clear()
+    let f = m.get("a")
+    assert(f == null)
+    assert_eq(m.len(), 0)
+}
+
+// The present control: the same shapes must still read real leaves.
+@test fn map_column_get_present_control() {
+    let m: Map<string, GetCell> = map_new()
+    m["a"] = GetCell { a: 1, b: 2 }
+    assert(m.get("a") != null)
+    let f = m.get("a")
+    assert(f != null)
+    assert_eq(f.unwrap().a, 1)
+    assert_eq(f.unwrap().b, 2)
+}
+
+// Refine-then-use: the absent arm must not be entered, and reaching the check
+// must not have read a leaf.
+@test fn map_column_get_miss_refined_use() {
+    let m: Map<string, GetCell> = map_new()
+    m["a"] = GetCell { a: 1, b: 2 }
+    let f = m.get("nope")
+    let seen = 0
+    if f != null {
+        seen = f.a
+    }
+    assert_eq(seen, 0)
+    let g = m.get("a")
+    if g != null {
+        seen = g.a
+    }
+    assert_eq(seen, 1)
+}
+
+// A miss reaching the other nil-observable consumers.
+@test fn map_column_get_miss_through_coalesce() {
+    let m: Map<string, GetCell> = map_new()
+    m["a"] = GetCell { a: 1, b: 2 }
+    let d = m.get("nope") ?? GetCell { a: 9, b: 9 }
+    assert_eq(d.a, 9)
+    let p = m.get("a") ?? GetCell { a: 9, b: 9 }
+    assert_eq(p.a, 1)
+}
+
+@test fn map_column_get_miss_through_safe_nav() {
+    let m: Map<string, GetCell> = map_new()
+    m["a"] = GetCell { a: 1, b: 2 }
+    assert(m.get("nope")?.a == null)
+    assert(m.get("a")?.a == 1)
+}
+
+// Float leaves take the same path -- the fault is the pack, not the leaf type.
+@test fn map_column_get_miss_float_leaves() {
+    let m: Map<string, GetCellF> = map_new()
+    m["a"] = GetCellF { x: 1.0, y: 2.0 }
+    let f = m.get("nope")
+    assert(f == null)
+    let g = m.get("a")
+    assert(g != null)
+    assert_eq(g.unwrap().x, 1.0)
+}
+
+// contains / index / remove must be unaffected by any fix here.
+@test fn map_column_get_miss_does_not_disturb_the_neighbours() {
+    let m: Map<string, GetCell> = map_new()
+    m["a"] = GetCell { a: 1, b: 2 }
+    m["b"] = GetCell { a: 3, b: 4 }
+    assert(!m.contains("nope"))
+    assert(m.get("nope") == null)
+    assert(m.contains("a"))
+    assert_eq(m["b"].a, 3)
+    let old = m.remove("a")
+    assert(old != null)
+    assert_eq(old.unwrap().a, 1)
+    assert(m.get("a") == null)
+    m["c"] = GetCell { a: 5, b: 6 }
+    assert_eq(m["c"].a, 5)
+    assert_eq(m["b"].a, 3)
+    assert_eq(m.len(), 2)
+}

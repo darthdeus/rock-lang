@@ -1,0 +1,12 @@
+// Comments inside a function call argument list
+fn add3(a: int, b: int, c: int) -> int { return a + b + c }
+
+@test(output = "6")
+fn t() {
+    let r = add3(
+        /* first */ 1,
+        2, // second
+        /* third */ 3 /* end */
+    )
+    print(r)
+}

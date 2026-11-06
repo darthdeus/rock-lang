@@ -1,0 +1,24 @@
+// Placeholder lambdas should access tuple fields via `.0` / `.1`, like
+// explicit lambdas and struct-field placeholder access.
+
+@test(output = "1\n2\n3")
+fn placeholder_tuple_field_zero() {
+    let pairs: [(int, string)] = [(1, "a"), (2, "b"), (3, "c")]
+    let nums = pairs.iter().map(_.0).collect()
+    for n in nums { print(n) }
+}
+
+@test(output = "a\nb\nc")
+fn placeholder_tuple_field_one() {
+    let pairs: [(int, string)] = [(1, "a"), (2, "b"), (3, "c")]
+    let strs = pairs.iter().map(_.1).collect()
+    for s in strs { print(s) }
+}
+
+// Control: explicit lambda form -- this is the workaround we know works.
+@test(output = "1\n2\n3")
+fn explicit_lambda_tuple_field_zero_control() {
+    let pairs: [(int, string)] = [(1, "a"), (2, "b"), (3, "c")]
+    let nums = pairs.iter().map(p => p.0).collect()
+    for n in nums { print(n) }
+}

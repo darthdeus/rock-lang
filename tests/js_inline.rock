@@ -1,0 +1,27 @@
+// Shared-pipeline corpus for the `--backend js` ratchet (T8a). The JS path now
+// runs the same per-body transform sequence the luajit path runs (lower ->
+// inline -> cleanup -> recover_counted_loops -> residual-bound-call validation),
+// so an `@inline`/`@pure` callee is spliced (not co-emitted) and a call omitting
+// a defaulted param is a legal shorter call shape (was the arity-guard false
+// positive). Every @test runs green on both backends. (An iterator combinator
+// TERMINAL chain also inlines now, but its post-inline `while` lowers to a
+// shared-branch-tail the JS relooper defers to T8c -- pinned as a sentinel in
+// crates/skull-codegen-js/tests/inline_pipeline.rs, not here.)
+
+@inline fn dbl(x: int) -> int { x * 2 }
+
+@test(returns = 6)
+fn test_inline_call() -> int { dbl(3) }
+
+@pure fn sq(x: int) -> int { x * x }
+
+@test(returns = 9)
+fn test_pure_call() -> int { sq(3) }
+
+fn ranged(a: int, b: int, step: int = 1) -> int { a + b + step }
+
+// `step` omitted -> a 2-arg call to a 3-param callee. Legal (callee fills the
+// default from `nil`); pre-T8a the arity guard rejected it as a value-struct
+// ABI mismatch.
+@test(returns = 6)
+fn test_defaulted_param() -> int { ranged(2, 3) }

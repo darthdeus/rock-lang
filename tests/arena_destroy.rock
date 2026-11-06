@@ -1,0 +1,115 @@
+// `arena_destroy` is the primitive Scene teardown will call: it retires one
+// Arena incarnation from the Session registry. Reads through a dead handle
+// answer "not there"; mutations through one reject loudly, because a write
+// that silently does nothing is indistinguishable from a write that worked.
+
+struct Tag { v: int }
+
+@nomangle inline(lua) fn raises(f: fn()) -> bool = """
+    local ok, err = pcall(f)
+    return not ok
+"""
+
+@nomangle inline(js) fn raises(f: fn()) -> bool = """
+    try { __rock_call(f); return false; } catch (e) { return true; }
+"""
+
+@test(output = "true\nfalse")
+fn destroy_is_reported_once() {
+    let a: Arena<Tag> = arena_new()
+    print(arena_destroy(a))
+    print(arena_destroy(a))
+}
+
+@test(output = "true\nfalse\ntrue\ntrue")
+fn destroy_invalidates_entity_handles() {
+    let a: Arena<Tag> = arena_new()
+    let e = a.insert(Tag { v: 1 })
+    arena_destroy(a)
+    print(is_null(a.get(e)))
+    print(a.contains(e))
+    print(is_null(e.get()))
+    print(is_null(e.remove()))
+}
+
+@test(output = "0\n0")
+fn destroyed_arena_is_empty_and_iterates_nothing() {
+    let a: Arena<Tag> = arena_new()
+    a.insert(Tag { v: 1 })
+    a.insert(Tag { v: 2 })
+    arena_destroy(a)
+    print(a.len())
+    let seen = 0
+    for (_e, _v) in a { seen += 1 }
+    print(seen)
+}
+
+@test(output = "true\ntrue")
+fn destroyed_arena_rejects_mutation() {
+    let a: Arena<Tag> = arena_new()
+    arena_destroy(a)
+    print(raises(() => { let _e = a.insert(Tag { v: 1 }) }))
+    print(raises(() => { a.clear() }))
+}
+
+// The live control beside the rejection: destroying one Arena leaves an
+// unrelated one untouched, including one holding the same element type at the
+// same slot and generation.
+@test(output = "9\n1\ntrue")
+fn destroy_spares_another_arena() {
+    let dead: Arena<Tag> = arena_new()
+    let live: Arena<Tag> = arena_new()
+    let dead_e = dead.insert(Tag { v: 5 })
+    let live_e = live.insert(Tag { v: 9 })
+    arena_destroy(dead)
+    print(live.get(live_e).unwrap().v)
+    print(live.len())
+    print(is_null(live.get(dead_e)))
+}
+
+// A replacement Arena takes a fresh ID, so no handle from the retired
+// incarnation resolves through it even at an identical slot and generation.
+@test(output = "true\nfalse\n7")
+fn replacement_arena_does_not_revive_old_handles() {
+    let old: Arena<Tag> = arena_new()
+    let stale = old.insert(Tag { v: 1 })
+    arena_destroy(old)
+
+    let fresh: Arena<Tag> = arena_new()
+    let e = fresh.insert(Tag { v: 7 })
+    print(is_null(fresh.get(stale)))
+    print(fresh.contains(stale))
+    print(fresh.get(e).unwrap().v)
+}
+
+@test(output = "true\ntrue\ntrue\ntrue")
+fn retired_arena_storage_is_bounded_and_ids_stay_unique() {
+    let anchor: Arena<Tag> = arena_new()
+    let anchor_entity = anchor.insert(Tag { v: 99 })
+    let storage_limit = arena_registry_storage_bound()
+    let previous_id = -1
+    let ids_stay_monotonic = true
+    let stale_handles_stay_dead = true
+    let anchor_stays_live = true
+    for i in 0..4096 {
+        let retired: Arena<Tag> = arena_new()
+        let stale = retired.insert(Tag { v: i })
+        if retired._arena_id <= previous_id { ids_stay_monotonic = false }
+        previous_id = retired._arena_id
+        arena_destroy(retired)
+
+        let replacement: Arena<Tag> = arena_new()
+        let fresh = replacement.insert(Tag { v: i + 1 })
+        if !is_null(replacement.get(stale)) { stale_handles_stay_dead = false }
+        if replacement.get(fresh).unwrap().v != i + 1 {
+            stale_handles_stay_dead = false
+        }
+        if anchor.get(anchor_entity).unwrap().v != 99 { anchor_stays_live = false }
+        arena_destroy(replacement)
+    }
+    print(arena_registry_storage_bound() <= storage_limit + 33)
+    print(ids_stay_monotonic)
+    print(stale_handles_stay_dead)
+    print(anchor_stays_live)
+    arena_destroy(anchor)
+}

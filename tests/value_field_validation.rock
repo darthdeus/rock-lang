@@ -1,0 +1,34 @@
+// This file tests that value rejects non-C-compatible field types
+
+// Valid: all C-compatible fields
+value ValidStruct {
+    x: int,
+    y: float,
+    active: bool,
+}
+
+@test
+fn test_valid_struct_c() {
+    let v = ValidStruct { x: 1, y: 2.0, active: true }
+    assert(v.x == 1)
+    assert(v.y == 2.0)
+    assert(v.active == true)
+}
+
+// Valid: nested value
+value Inner {
+    a: float,
+    b: float,
+}
+
+value Outer {
+    pos: Inner,
+    scale: float,
+}
+
+@test
+fn test_nested_c_structs() {
+    let o = Outer { pos: Inner { a: 1.0, b: 2.0 }, scale: 3.0 }
+    assert(o.pos.a == 1.0)
+    assert(o.scale == 3.0)
+}

@@ -1,0 +1,47 @@
+// PR-A smoke: Coroutine<Y, R, N> arity-3 form parses + typechecks.
+// N is inert today (PR-B will give it semantics); this test only
+// verifies the type system accepts the new arity and the existing
+// arity-1/arity-2 forms continue to work alongside it.
+
+co fn arity_one_explicit_unit() -> Coroutine<int, (), ()> {
+    yield 1
+}
+
+co fn arity_two_explicit_unit_n() -> Coroutine<int, string, ()> {
+    yield 1
+    return "done"
+}
+
+co fn arity_one_implicit() -> Coroutine<int> {
+    yield 1
+}
+
+co fn arity_two_implicit() -> Coroutine<int, string> {
+    yield 1
+    return "done"
+}
+
+@test(output = "1\nnull\n1\nresult=done\n1\nnull\n1\nresult=done")
+fn test_coroutine_arity_three_forms_unify() {
+    let a = arity_one_explicit_unit()
+    print(a.resume() ?? -1)         // 1
+    let r1 = a.resume()
+    if r1 == null { print("null") } else { print(r1.unwrap()) }  // null
+
+    let b = arity_two_explicit_unit_n()
+    print(b.resume() ?? -1)         // 1
+    let _r2 = b.resume()
+    let rb = b.result()
+    if rb == null { print("null") } else { print("result={rb.unwrap()}") }  // result=done
+
+    let c = arity_one_implicit()
+    print(c.resume() ?? -1)         // 1
+    let r3 = c.resume()
+    if r3 == null { print("null") } else { print(r3.unwrap()) }  // null
+
+    let d = arity_two_implicit()
+    print(d.resume() ?? -1)         // 1
+    let _r4 = d.resume()
+    let rd = d.result()
+    if rd == null { print("null") } else { print("result={rd.unwrap()}") }  // result=done
+}

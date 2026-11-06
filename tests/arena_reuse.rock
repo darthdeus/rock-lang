@@ -1,0 +1,38 @@
+struct ReusedSlot { x: int, y: int }
+
+@test(output = "true 7 9")
+fn arena_reuse_reactivates_the_retained_payload() {
+    let a: Arena<ReusedSlot> = arena_new()
+    a.insert(ReusedSlot { x: 1, y: 2 }).remove()
+
+    let payload = a.reuse_retained().unwrap()
+    payload.x = 7
+    payload.y = 9
+
+    let got_x = 0
+    let got_y = 0
+    for (_, got) in a {
+        got_x = got.x
+        got_y = got.y
+    }
+    print("{a.len() == 1} {got_x} {got_y}")
+}
+
+@test(output = "true")
+fn arena_reuse_reports_an_empty_free_list() {
+    let a: Arena<ReusedSlot> = arena_new()
+    print("{a.reuse_retained() == null}")
+}
+
+@test(output = "true true 11 13")
+fn arena_reuse_entity_issues_a_fresh_handle_for_the_retained_payload() {
+    let a: Arena<ReusedSlot> = arena_new()
+    let old = a.insert(ReusedSlot { x: 1, y: 2 })
+    old.remove()
+
+    let reused = a.reuse_retained_entity().unwrap()
+    let payload = reused.get().unwrap()
+    payload.x = 11
+    payload.y = 13
+    print("{old.get() == null} {a.contains(reused)} {payload.x} {payload.y}")
+}

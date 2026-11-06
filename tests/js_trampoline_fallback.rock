@@ -1,0 +1,104 @@
+// T8h: bodies the JS structurer rejects as a "shared branch tail" fall back to
+// the block trampoline (`for(;;) switch(__bb)`), which accepts arbitrary CFGs.
+// The three shapes tail-dup structurally cannot absorb: a shared arm holding a
+// nested loop, an over-cap shared arm, and an unstructurable body returning a
+// tuple (the ported multi-value return arm). All pass on luajit; on JS they
+// skip at base with the shared-branch-tail reject, then pass via the fallback.
+
+// --- Nested-loop shared tail: an or-pattern success arm containing a while
+//     loop. dup_region rejects a loop header in the region, so the structured
+//     path bails; the trampoline dispatches the loop as block edges.
+fn nested_loop_tail(sel: int) -> int {
+    let out = match sel {
+        1 | 2 | 3 => {
+            let acc = 0
+            let i = 0
+            while i < 5 {
+                acc = acc + i
+                i = i + 1
+            }
+            acc
+        }
+        _ => 100
+    }
+    return out + sel
+}
+
+@test(output = "12")
+fn test_nested_loop_tail() {
+    print(nested_loop_tail(2))
+}
+
+@test(output = "107")
+fn test_nested_loop_tail_default() {
+    print(nested_loop_tail(7))
+}
+
+// --- Over-cap shared tail: an or-pattern arm whose straight-line body exceeds
+//     the tail-dup inst cap (32). No loop, but too large to duplicate.
+fn over_cap_tail(sel: int) -> int {
+    let out = match sel {
+        1 | 2 | 3 => {
+            let v0 = sel + 1
+            let v1 = v0 + 2
+            let v2 = v1 + 3
+            let v3 = v2 + 4
+            let v4 = v3 + 5
+            let v5 = v4 + 6
+            let v6 = v5 + 7
+            let v7 = v6 + 1
+            let v8 = v7 + 2
+            let v9 = v8 + 3
+            let v10 = v9 + 4
+            let v11 = v10 + 5
+            let v12 = v11 + 6
+            let v13 = v12 + 7
+            let v14 = v13 + 1
+            let v15 = v14 + 2
+            v15
+        }
+        _ => 0
+    }
+    return out
+}
+
+@test(output = "61")
+fn test_over_cap_tail() {
+    print(over_cap_tail(2))
+}
+
+@test(output = "0")
+fn test_over_cap_tail_default() {
+    print(over_cap_tail(9))
+}
+
+// --- Multi-value return through the fallback: an unstructurable body (nested
+//     loop in a shared arm) that returns a tuple. The structured multi-value
+//     return arm is ported into the trampoline term printer.
+fn unstructurable_pair(sel: int) -> (int, int) {
+    let s = match sel {
+        1 | 2 | 3 => {
+            let acc = 0
+            let i = 0
+            while i < 4 {
+                acc = acc + i
+                i = i + 1
+            }
+            acc
+        }
+        _ => 0
+    }
+    return (s, s + 1)
+}
+
+@test(output = "6 7")
+fn test_tuple_return_through_fallback() {
+    let (a, b) = unstructurable_pair(2)
+    print("{a} {b}")
+}
+
+@test(output = "0 1")
+fn test_tuple_return_default() {
+    let (a, b) = unstructurable_pair(9)
+    print("{a} {b}")
+}

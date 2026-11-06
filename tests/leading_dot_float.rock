@@ -1,0 +1,32 @@
+// Leading-dot floats: `.5` lexes as `0.5` in expression-start position, while
+// `.0` after a value stays a tuple/field index (`w.0`). See Phase 4 of
+
+@test
+fn test_leading_dot_literal() {
+    let a = .35
+    assert_eq(a, 0.35)
+}
+
+@test
+fn test_leading_dot_annotated() {
+    let b: float = .5
+    assert_eq(b, 0.5)
+}
+
+@test
+fn test_leading_dot_in_list() {
+    let xs = [.1, .25, .5]
+    assert_eq(xs[0] + xs[1] + xs[2], 0.85)
+}
+
+@test
+fn test_leading_dot_after_operator() {
+    assert_eq(2.0 + .5, 2.5)
+}
+
+@test
+fn test_tuple_index_still_works() {
+    let w = (3, 7)
+    assert_eq(w.0, 3)
+    assert_eq(w.1, 7)
+}

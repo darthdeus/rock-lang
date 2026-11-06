@@ -1,0 +1,46 @@
+// Adversarial tests: @inline — `for` / `while` loops inside @inline body (L6).
+
+@inline
+fn sum_vec(xs: [int]) -> int {
+    let total = 0
+    for x in xs {
+        total = total + x
+    }
+    return total
+}
+
+@test(output = "15")
+fn test_sum_vec_basic() {
+    let xs = [1, 2, 3, 4, 5]
+    let r = sum_vec(xs)
+    print(r)
+}
+
+// Caller has `x` and `total` in scope — body locals must rename so the
+// enclosing scope's values are preserved across the splice.
+@test(output = "99 500 15")
+fn test_sum_vec_caller_collision() {
+    let x = 99
+    let total = 500
+    let xs = [1, 2, 3, 4, 5]
+    let r = sum_vec(xs)
+    print("{x} {total} {r}")
+}
+
+// `while` loop with body-local.
+@inline
+fn count_down_sum(n: int) -> int {
+    let acc = 0
+    let i = n
+    while i > 0 {
+        acc = acc + i
+        i = i - 1
+    }
+    return acc
+}
+
+@test(output = "15")
+fn test_while_loop() {
+    let r = count_down_sum(5)
+    print(r)
+}

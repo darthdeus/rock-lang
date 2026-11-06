@@ -1,0 +1,56 @@
+// A flat inner enum shares its tag and payload slots with its parent, so the
+// nested arm must read those slots directly. This fixture mixes scalar and
+// struct payload variants; the string-payload and wider-position shapes live in
+// nested_flat_enum_string_payload.rock and nested_flat_enum_pattern.rock.
+
+nobox value MixedPatternPlace { space: int, x: int, y: int }
+struct MixedPatternSpec { name: string }
+enum MixedPatternOccupant { None, Prop(int, int), Fixture(MixedPatternSpec) }
+enum MixedPatternSubject { None, Object(MixedPatternPlace, MixedPatternOccupant) }
+
+fn mixed_pattern_subject(occupant: MixedPatternOccupant) -> MixedPatternSubject {
+    return MixedPatternSubject::Object(MixedPatternPlace { space: 1, x: 11, y: 10 }, occupant)
+}
+
+@test
+fn nested_flat_enum_separate_match_control() {
+    let subject = mixed_pattern_subject(MixedPatternOccupant::Prop(0, 1))
+    let result = match subject {
+        MixedPatternSubject::Object(place, occupant) => match occupant {
+            MixedPatternOccupant::Prop(id, orient) => place.x == 11 && id == 0 && orient == 1,
+            _ => false,
+        },
+        _ => false,
+    }
+    assert(result, "the constructed payload survives separate matches")
+}
+
+@test
+fn nested_flat_enum_binds_mixed_payload() {
+    let result = match mixed_pattern_subject(MixedPatternOccupant::Prop(0, 1)) {
+        MixedPatternSubject::Object(place, MixedPatternOccupant::Prop(id, orient)) => place.x == 11 && id == 0 && orient == 1,
+        _ => false,
+    }
+    // REGRESSION GUARD (was a pinned bug until the flat-enum nested read landed):
+    // a nested flat enum shares the parent's slots, so the inner pattern must read
+    // the tag and payload slots directly instead of treating the tag as a box.
+    assert_eq(result, true, "nested mixed-enum pattern binds its flattened payload")
+}
+
+co fn nested_mixed_pattern_coroutine() -> Coroutine<int> {
+    yield 0
+    match mixed_pattern_subject(MixedPatternOccupant::Prop(0, 1)) {
+        MixedPatternSubject::Object(place, MixedPatternOccupant::Prop(id, orient)) => {
+            yield if place.x == 11 && id == 0 && orient == 1 { 1 } else { -1 }
+        },
+        _ => { yield -2 },
+    }
+}
+
+@test
+fn nested_flat_enum_mixed_payload_after_yield() {
+    let c = nested_mixed_pattern_coroutine()
+    assert_eq(c.resume() ?? -9, 0)
+    // Same nested shape after suspension: the resumed frame rebuilds the same slots.
+    assert_eq(c.resume() ?? -9, 1)
+}

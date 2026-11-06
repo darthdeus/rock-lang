@@ -1,0 +1,45 @@
+// M2 step-1 probe, kept as a regression: a `co fn` returning a multi-field
+// value, resumed to completion, both leaves read back through `.result()`.
+// Both tuple and value-struct returns box as a SINGLE value through the
+// `__return` field (transform stashes `vs.first()` of a one-leaf terminal;
+// tuples/value-structs never scalarize to >=2 leaves at the co-fn return
+// boundary), so neither backend truncates. Passes on luajit and JS.
+
+co fn two_out() -> Coroutine<int, (int, int)> {
+    yield 1
+    return (42, 99)
+}
+
+@test(output = "42 99")
+fn test_multivalue_tuple_co_return() {
+    let c = two_out()
+    let _y = c.resume()
+    let _drain = c.resume()
+    let r = c.result()
+    if r != null {
+        let (a, b) = r
+        print("{a} {b}")
+    } else {
+        print("null")
+    }
+}
+
+value Pair { a: int, b: int }
+
+co fn make_pair() -> Coroutine<int, Pair> {
+    yield 1
+    return Pair { a: 42, b: 99 }
+}
+
+@test(output = "42 99")
+fn test_value_struct_co_return() {
+    let c = make_pair()
+    let _y = c.resume()
+    let _drain = c.resume()
+    let r = c.result()
+    if r != null {
+        print("{r.a} {r.b}")
+    } else {
+        print("null")
+    }
+}

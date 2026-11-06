@@ -1,0 +1,288 @@
+// Test edge cases and negative scenarios for pattern matching
+
+enum Option<T> {
+    None,
+    Some(T),
+}
+
+enum Result<T, E> {
+    Ok(T),
+    Err(E),
+}
+
+enum Complex {
+    Unit,
+    Tuple(int, string),
+    Record { x: float, y: float },
+    Mixed(int, name: string, active: bool),
+}
+
+// Test wildcard patterns
+@test
+fn test_wildcard_pattern() {
+    let opt: Option<int> = Option::Some(42)
+    
+    let result = match opt {
+        _ => "matched wildcard"
+    }
+    
+    assert_eq(result, "matched wildcard")
+    print("Wildcard pattern test passed")
+}
+
+// Test literal patterns
+@test
+fn test_literal_patterns() {
+    let num = 42
+    
+    let result = match num {
+        0 => "zero",
+        42 => "forty-two",
+        100 => "hundred",
+        _ => "other"
+    }
+    
+    assert_eq(result, "forty-two")
+    
+    // String literals
+    let str = "hello"
+    let greeting = match str {
+        "hello" => "hi",
+        "goodbye" => "bye",
+        _ => "unknown"
+    }
+    assert_eq(greeting, "hi")
+    
+    // Boolean literals
+    let flag = true
+    let status = match flag {
+        true => "on",
+        false => "off",
+    }
+    assert_eq(status, "on")
+    
+    print("Literal pattern tests passed")
+}
+
+// Test nested enum patterns
+@test
+fn test_nested_enum_patterns() {
+    let result: Result<Option<int>, string> = Result::Ok(Option::Some(42))
+    
+    let value = match result {
+        Result::Ok(Option::Some(n)) => n,
+        Result::Ok(Option::None) => 0,
+        Result::Err(e) => -1,
+    }
+    
+    assert_eq(value, 42)
+    
+    // Test with None
+    let none_opt: Option<int> = Option::None
+    let result2: Result<Option<int>, string> = Result::Ok(none_opt)
+    let value2 = match result2 {
+        Result::Ok(Option::Some(n)) => n,
+        Result::Ok(Option::None) => 0,
+        Result::Err(e) => -1,
+    }
+    assert_eq(value2, 0)
+    
+    print("Nested enum pattern tests passed")
+}
+
+// Test pattern variable binding
+@test
+fn test_pattern_variable_binding() {
+    let complex = Complex::Tuple(42, "test")
+    
+    match complex {
+        Complex::Tuple(n, s) => {
+            assert_eq(n, 42)
+            assert_eq(s, "test")
+        },
+        _ => assert(false),
+    }
+    
+    // Test with record variant
+    let point = Complex::Record { x: 3.14, y: 2.71 }
+    match point {
+        Complex::Record { x, y } => {
+            assert_eq(x, 3.14)
+            assert_eq(y, 2.71)
+        },
+        _ => assert(false),
+    }
+    
+    print("Pattern variable binding tests passed")
+}
+
+// Single variant enum for exhaustiveness testing
+enum Single {
+    Only,
+}
+
+// Bool-like enum
+enum Toggle {
+    On,
+    Off,
+}
+
+// Test exhaustiveness edge cases
+@test
+fn test_exhaustiveness_edge_cases() {
+    // Single variant enum should be exhaustive with just that variant
+    let single = Single::Only
+    let result = match single {
+        Single::Only => "matched"
+    }
+    assert_eq(result, "matched")
+    
+    // Bool-like enum
+    let toggle = Toggle::On
+    let state = match toggle {
+        Toggle::On => true,
+        Toggle::Off => false,
+    }
+    assert(state)
+    
+    print("Exhaustiveness edge case tests passed")
+}
+
+// Test pattern matching with different types
+@test
+fn test_pattern_type_checking() {
+    let opt_int: Option<int> = Option::Some(42)
+    let opt_string: Option<string> = Option::Some("hello")
+    
+    // Each should match correctly with its type
+    let int_result = match opt_int {
+        Option::None => 0,
+        Option::Some(n) => n,
+    }
+    assert_eq(int_result, 42)
+    
+    let string_result = match opt_string {
+        Option::None => "",
+        Option::Some(s) => s,
+    }
+    assert_eq(string_result, "hello")
+    
+    print("Pattern type checking tests passed")
+}
+
+// Test enum equality with complex variants
+@test
+fn test_complex_enum_equality() {
+    let c1 = Complex::Tuple(42, "test")
+    let c2 = Complex::Tuple(42, "test")
+    let c3 = Complex::Tuple(43, "test")
+    
+    assert(c1 == c2)
+    assert(c1 != c3)
+    
+    let r1 = Complex::Record { x: 1.0, y: 2.0 }
+    let r2 = Complex::Record { x: 1.0, y: 2.0 }
+    let r3 = Complex::Record { x: 1.0, y: 3.0 }
+    
+    assert(r1 == r2)
+    assert(r1 != r3)
+    
+    // Different variants
+    assert(c1 != r1)
+    
+    print("Complex enum equality tests passed")
+}
+
+// Test with nullable enum values
+@test
+fn test_nullable_enum_patterns() {
+    // For now, test simpler nullable scenarios
+    let maybe_int: int? = 42
+    
+    // Test if-let with nullable
+    if let x = maybe_int {
+        assert_eq(x, 42)
+    } else {
+        assert(false)
+    }
+    
+    // Test with null
+    let null_int: int? = null
+    let found = if let x = null_int {
+        false
+    } else {
+        true
+    }
+    assert(found)
+    
+    // Test nullable handling works correctly
+    // Note: Nullable enums are a complex case that needs more work
+    let some_value = Option::Some(42)
+    let none_value: Option<int> = Option::None
+    
+    // Verify basic enum equality works
+    assert(some_value == Option::Some(42))
+    assert(none_value == Option::None)
+    
+    print("Nullable enum pattern tests passed")
+}
+
+// Tree enum for nested pattern testing
+enum Tree<T> {
+    Leaf(T),
+    Branch(Tree<T>, Tree<T>),
+}
+
+// Test deeply nested patterns
+@test
+fn test_deeply_nested_patterns() {
+    let tree: Tree<int> = Tree::Branch(
+        Tree::Leaf(1),
+        Tree::Branch(
+            Tree::Leaf(2),
+            Tree::Leaf(3)
+        )
+    )
+    
+    // Match on the structure
+    match tree {
+        Tree::Branch(Tree::Leaf(a), Tree::Branch(Tree::Leaf(b), Tree::Leaf(c))) => {
+            assert_eq(a, 1)
+            assert_eq(b, 2)
+            assert_eq(c, 3)
+        },
+        _ => assert(false),
+    }
+    
+    print("Deeply nested pattern tests passed")
+}
+
+// Helper function for pattern matching in function returns
+fn extract_or_default(opt: Option<int>) -> int {
+    match opt {
+        Option::Some(n) => n,
+        Option::None => 0,
+    }
+}
+
+// Test pattern matching in different contexts
+@test
+fn test_pattern_contexts() {
+    let values = [Option::Some(1), Option::None, Option::Some(2)]
+    
+    // Pattern matching in loops
+    let sum = 0
+    for opt in values {
+        match opt {
+            Option::Some(n) => sum = sum + n,
+            Option::None => {},
+        }
+    }
+    assert_eq(sum, 3)
+    
+    // Pattern matching in function returns
+    assert_eq(extract_or_default(Option::Some(42)), 42)
+    assert_eq(extract_or_default(Option::None), 0)
+    
+    print("Pattern context tests passed")
+}

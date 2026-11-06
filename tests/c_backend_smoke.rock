@@ -1,0 +1,92 @@
+fn sum_to(n: int) -> int {
+    let acc = 0
+    let i = 0
+    while i < n {
+        acc = acc + i
+        i = i + 1
+    }
+    return acc
+}
+
+fn identity<T>(value: T) -> T { return value }
+
+value CPair { left: int, right: int }
+
+enum CNumber { None, Int(int), Pair(int, int) }
+
+fn swap(value: CPair) -> CPair {
+    return CPair { left: value.right, right: value.left }
+}
+
+fn quotient_remainder(value: int, divisor: int) -> (int, int) {
+    return (value ./ divisor, value % divisor)
+}
+
+fn maybe_pair(present: bool) -> (int, int)? {
+    if present { return (4, 2) }
+    return null
+}
+
+@test(returns = 10)
+fn c_loop_and_call() -> int { return sum_to(5) }
+
+@test(returns = true)
+fn c_bool_branch() -> bool {
+    if sum_to(4) == 6 { return true }
+    return false
+}
+
+@test(returns = -3)
+fn c_floor_division() -> int { return -7 ./ 3 }
+
+@test(returns = 2)
+fn c_floor_modulo() -> int { return -7 % 3 }
+
+@test(returns = 9)
+fn c_monomorphized_call() -> int { return identity(9) }
+
+@test(returns = 47)
+fn c_value_struct_call() -> int {
+    let value = swap(CPair { left: 7, right: 4 })
+    return value.left * 10 + value.right
+}
+
+@test(returns = 32)
+fn c_tuple_multi_result() -> int {
+    let (quotient, remainder) = quotient_remainder(17, 5)
+    return quotient * 10 + remainder
+}
+
+@test(returns = 42)
+fn c_tagged_nullable() -> int {
+    let pair = maybe_pair(true)
+    if pair == null { return -1 }
+    return pair.0 * 10 + pair.1
+}
+
+@test(returns = 8)
+fn c_math_and_borrowed_strings() -> int {
+    let text = "abcdef"
+    if text.substring(1, 4) != "bcd" { return -1 }
+    return (sqrt(9.0) as int) + text.len() + text.find("bc") - 2
+}
+
+@test(returns = 9)
+fn c_enum_pattern() -> int {
+    let number = CNumber::Pair(4, 5)
+    return match number {
+        None => 0,
+        Int(value) => value,
+        Pair(left, right) => left + right,
+    }
+}
+
+fn main() {
+    if c_loop_and_call() != 10 { let _ = 1 ./ 0 }
+    if c_monomorphized_call() != 9 { let _ = 1 ./ 0 }
+    if c_value_struct_call() != 47 { let _ = 1 ./ 0 }
+    if c_tuple_multi_result() != 32 { let _ = 1 ./ 0 }
+    if c_tagged_nullable() != 42 { let _ = 1 ./ 0 }
+    if c_math_and_borrowed_strings() != 8 { let _ = 1 ./ 0 }
+    if c_enum_pattern() != 9 { let _ = 1 ./ 0 }
+}

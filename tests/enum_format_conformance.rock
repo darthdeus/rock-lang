@@ -1,0 +1,153 @@
+// Structural, type-qualified, one-line text that does not depend on the
+// layout the compiler picks for the enum or on where the value is stored.
+
+value MobId { scene_id: int, arena_id: int, slot: int, generation: int }
+
+enum Step { Accepted, Blocked }
+enum Admission { Movement(Step), Denied(int) }
+enum Pair { P(int, float), Q(bool) }
+enum DamageSource { Mob(MobId), Environment }
+enum Msg { Text(string), Named { x: int, label: string }, Real(float) }
+enum Maybe { Some(int?), NoneYet }
+
+struct Tag { v: int }
+nobox value Clock { row: Entity<Tag> }
+enum Held { Clock(Clock), Row(Entity<Tag>), Pool(Arena<Tag>) }
+
+struct Host { src: DamageSource, msg: Msg, step: Step }
+
+// A nested flat enum's tag and a payload-free enum share one slot.
+enum MoveAd { Finished, Movement(Step) }
+enum MeleeAd { Accepted, NoDuel }
+enum Res { Wait, Move(MoveAd), Melee(MeleeAd) }
+
+fn dispatch(i: int) -> Res {
+    if i == 0 { return Res::Wait }
+    if i == 1 { return Res::Melee(MeleeAd::NoDuel) }
+    return Res::Move(MoveAd::Movement(Step::Blocked))
+}
+
+@test
+fn unit_variant() {
+    let s = Step::Blocked
+    assert_eq(tostring(s), "Step::Blocked")
+    assert_eq("{s}", "Step::Blocked")
+    assert_eq("{DamageSource::Environment}", "DamageSource::Environment")
+}
+
+@test
+fn positional_scalars() {
+    assert_eq(tostring(Pair::P(3, 1.5)), "Pair::P(3, 1.5)")
+    assert_eq("{Pair::P(-7, 0.25)}", "Pair::P(-7, 0.25)")
+    assert_eq("{Pair::Q(true)}", "Pair::Q(true)")
+    assert_eq("{Admission::Denied(12)}", "Admission::Denied(12)")
+}
+
+@test
+fn floats_use_the_scalar_formatter() {
+    let x = 2.0
+    assert_eq("{Msg::Real(x)}", "Msg::Real({x})")
+    assert_eq("{Msg::Real(0.1)}", "Msg::Real({0.1})")
+}
+
+@test
+fn strings_quote_and_escape() {
+    assert_eq(tostring(Msg::Text("hi")), "Msg::Text(\"hi\")")
+    let q = Msg::Text("a\"b\\c")
+    assert_eq("{q}", "Msg::Text(\"a\\\"b\\\\c\")")
+    let ws = Msg::Text("l1\nl2\tt\r")
+    assert_eq("{ws}", "Msg::Text(\"l1\\nl2\\tt\\r\")")
+    let esc = Msg::Text("\u{1B}")
+    assert_eq("{esc}", "Msg::Text(\"\\u{{1B}}\")")
+}
+
+@test
+fn nested_enum() {
+    assert_eq(tostring(Admission::Movement(Step::Accepted)), "Admission::Movement(Step::Accepted)")
+    assert_eq("{Admission::Movement(Step::Blocked)}", "Admission::Movement(Step::Blocked)")
+}
+
+@test
+fn value_record_payload() {
+    let d = DamageSource::Mob(MobId { scene_id: 1, arena_id: 2, slot: 3, generation: 4 })
+    assert_eq(tostring(d), "DamageSource::Mob(MobId {{ scene_id: 1, arena_id: 2, slot: 3, generation: 4 }})")
+    assert_eq("{d}", "DamageSource::Mob(MobId {{ scene_id: 1, arena_id: 2, slot: 3, generation: 4 }})")
+}
+
+@test
+fn named_field_variant() {
+    let m = Msg::Named { x: 5, label: "n" }
+    assert_eq(tostring(m), "Msg::Named {{ x: 5, label: \"n\" }}")
+    assert_eq("{m}", "Msg::Named {{ x: 5, label: \"n\" }}")
+}
+
+@test
+fn nullable_payload_present() {
+    let n: int? = 4
+    assert_eq("{Maybe::Some(n)}", "Maybe::Some(4)")
+    assert_eq("{Maybe::NoneYet}", "Maybe::NoneYet")
+}
+
+@test
+fn nullable_payload_absent() {
+    let n: int? = null
+    assert_eq("{Maybe::Some(n)}", "Maybe::Some(null)")
+    assert_eq(tostring(Maybe::Some(n)), "Maybe::Some(null)")
+}
+
+@test
+fn handles_print_identity() {
+    let a: Arena<Tag> = arena_new()
+    let e = a.insert(Tag { v: 1 })
+    let ident = "scene={e._scene_id}, arena={e._arena_id}, slot={e._slot}, generation={e._generation}"
+    assert_eq("{Held::Row(e)}", "Held::Row(Entity<Tag>({ident}))")
+    let held = Held::Clock(Clock { row: e })
+    assert_eq("{held}", "Held::Clock(Clock {{ row: Entity<Tag>({ident}) }})")
+    assert_eq("{Held::Pool(a)}", "Held::Pool(Arena<Tag>(scene={a._scene_id}, arena={a._arena_id}))")
+    // The text names the incarnation; it does not resolve the handle.
+    a.remove(e)
+    assert_eq("{Held::Row(e)}", "Held::Row(Entity<Tag>({ident}))")
+}
+
+@test
+fn stored_enums_format_the_same() {
+    let h = Host {
+        src: DamageSource::Mob(MobId { scene_id: 9, arena_id: 8, slot: 7, generation: 6 }),
+        msg: Msg::Named { x: 1, label: "q" },
+        step: Step::Accepted,
+    }
+    assert_eq("{h.src}", "DamageSource::Mob(MobId {{ scene_id: 9, arena_id: 8, slot: 7, generation: 6 }})")
+    assert_eq(tostring(h.msg), "Msg::Named {{ x: 1, label: \"q\" }}")
+    assert_eq("{h.step}", "Step::Accepted")
+    let xs = [Pair::P(1, 2.5), Pair::Q(false)]
+    assert_eq("{xs[0]}", "Pair::P(1, 2.5)")
+    assert_eq(tostring(xs[1]), "Pair::Q(false)")
+    assert_eq(to_string(xs[0]), "Pair::P(1, 2.5)")
+}
+
+@test
+fn nested_enum_shares_a_slot() {
+    assert_eq("{dispatch(2)}", "Res::Move(MoveAd::Movement(Step::Blocked))")
+    assert_eq("{dispatch(1)}", "Res::Melee(MeleeAd::NoDuel)")
+    let expected = Res::Wait
+    assert_eq("{expected}", "Res::Wait")
+    assert_eq(tostring(dispatch(0)), "Res::Wait")
+}
+
+// A flat enum's null is its nil tag. Each case returns its text from a
+// helper, so a formatter that falls off its variant tests returns no string
+// instead of ending the @test early.
+fn absent_source_text(src: DamageSource?) -> string { return tostring(src) }
+fn absent_source_interp(src: DamageSource?) -> string { return "{src}" }
+
+struct Witness { suspect: DamageSource? }
+
+@test
+fn nullable_flat_enum_formats_null() {
+    assert(absent_source_text(null) == "nil", "tostring of an absent flat enum")
+    assert(absent_source_interp(null) == "nil", "interpolation of an absent flat enum")
+    let present = DamageSource::Mob(MobId { scene_id: 1, arena_id: 2, slot: 3, generation: 4 })
+    assert(absent_source_text(present) == "DamageSource::Mob(MobId {{ scene_id: 1, arena_id: 2, slot: 3, generation: 4 }})")
+    let w = Witness { suspect: null }
+    assert(absent_source_text(w.suspect) == "nil", "an absent stored flat enum")
+}

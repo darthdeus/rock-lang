@@ -1,0 +1,134 @@
+// Sized-storage NativeBuffer phantom variants. Same runtime shape as
+// NativeBuffer, distinct Rock types — passing NativeBufferU8 where
+// NativeBufferI16 is expected is a compile error.
+
+@test
+fn u8_buffer_roundtrip() {
+    let pixels = native_buffer_u8(4)
+    pixels[0] = 255
+    pixels[1] = 128
+    pixels[2] = 64
+    pixels[3] = 0
+    assert(pixels[0] == 255)
+    assert(pixels[1] == 128)
+    assert(pixels[2] == 64)
+    assert(pixels[3] == 0)
+    assert(pixels.len == 4)
+}
+
+@test
+fn u8_buffer_truncates_overflow() {
+    // uint8_t truncates values > 255. 256 -> 0, 257 -> 1, -1 -> 255.
+    // This is expected LuaJIT ffi conversion behavior.
+    let buf = native_buffer_u8(3)
+    buf[0] = 256
+    buf[1] = 257
+    buf[2] = -1
+    assert(buf[0] == 0)
+    assert(buf[1] == 1)
+    assert(buf[2] == 255)
+}
+
+@test
+fn i8_buffer_signed_range() {
+    // int8_t range is -128..=127. Values outside wrap.
+    let buf = native_buffer_i8(3)
+    buf[0] = 127
+    buf[1] = -128
+    buf[2] = 128  // overflow: wraps to -128
+    assert(buf[0] == 127)
+    assert(buf[1] == -128)
+    assert(buf[2] == -128)
+}
+
+@test
+fn u16_buffer_indices() {
+    let indices = native_buffer_u16(6)
+    for i in 0..6 {
+        indices[i] = i * 10
+    }
+    let sum = 0
+    for v in indices {
+        sum = sum + v
+    }
+    assert(sum == 150)  // 0 + 10 + 20 + 30 + 40 + 50
+}
+
+@test
+fn i16_buffer_audio_style() {
+    // int16_t range: -32768..=32767. Realistic audio sample values.
+    let samples = native_buffer_i16(4)
+    samples[0] = 32767
+    samples[1] = -32768
+    samples[2] = 0
+    samples[3] = 12345
+    assert(samples[0] == 32767)
+    assert(samples[1] == -32768)
+    assert(samples[2] == 0)
+    assert(samples[3] == 12345)
+}
+
+@test
+fn u32_buffer_packed_colors() {
+    // uint32_t for packed 0xRRGGBBAA colors.
+    let colors = native_buffer_u32(2)
+    colors[0] = 0xFF0000FF  // red, full alpha
+    colors[1] = 0x00FF00FF  // green
+    assert(colors[0] == 0xFF0000FF)
+    assert(colors[1] == 0x00FF00FF)
+}
+
+@test
+fn phantom_variants_have_distinct_types() {
+    // Signature demands NativeBufferU8. Must be called with matching variant.
+    let pixels = native_buffer_u8(4)
+    pixels[0] = 42
+    let sum = sum_u8_buffer(pixels)
+    assert(sum == 42)
+}
+
+// Takes a specific phantom variant. Would be a compile error to call
+// with native_buffer_i16(...) or native_buffer_u32(...) instead.
+fn sum_u8_buffer(buf: NativeBufferU8) -> int {
+    let s = 0
+    for v in buf {
+        s = s + v
+    }
+    return s
+}
+
+@test
+fn get_safe_variant_per_phantom() {
+    let buf = native_buffer_u8(3)
+    buf[0] = 10
+    buf[2] = 30
+    assert(buf.get(0) == 10)
+    assert(buf.get(2) == 30)
+    assert(buf.get(3) == null)
+    assert(buf.get(-1) == null)
+}
+
+@test
+fn compound_assignment_works() {
+    let buf = native_buffer_u16(2)
+    buf[0] = 100
+    buf[0] += 50
+    buf[0] *= 2
+    assert(buf[0] == 300)
+}
+
+@test
+fn enumerate_phantom_variant() {
+    let buf = native_buffer_u8(3)
+    buf[0] = 5
+    buf[1] = 10
+    buf[2] = 15
+    let idx_sum = 0
+    let val_sum = 0
+    for (i, v) in enumerate(buf) {
+        idx_sum = idx_sum + i
+        val_sum = val_sum + v
+    }
+    assert(idx_sum == 3)  // 0+1+2
+    assert(val_sum == 30) // 5+10+15
+}

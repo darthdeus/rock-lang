@@ -1,0 +1,54 @@
+// Lambdas in const/global initializers: stored in a struct field, directly in
+// a global, in array literals, capturing an initializer local, and with a
+// nested lambda in the body.
+
+struct Counter { value: int = 4 }
+struct Queries { read: fn(Counter) -> int, double: fn(int) -> int }
+struct Op { name: string, apply: fn(int) -> int }
+
+fn double(value: int) -> int { return value * 2 }
+
+const QUERIES: Queries = Queries {
+    read: (counter: Counter) => counter.value + 1,
+    double: double,
+}
+
+global BASE: int = 10
+global SQUARE: fn(int) -> int = (x: int) => x * x
+const OPS: [Op] = [
+    Op { name: "inc", apply: (x: int) => x + 1 },
+    Op { name: "base", apply: (x: int) => x + BASE },
+]
+const STEPS: [fn(int) -> int] = [(x: int) => x * 3, (x: int) => x - 2]
+const OFFSET_BY: fn(int) -> int = {
+    let offset = 3
+    (value: int) => value + offset
+}
+const TWICE_PLUS_ONE: fn(int) -> int = (a: int) => {
+    let twice = (b: int) => b * 2
+    return twice(a) + 1
+}
+
+@test(output = "10")
+fn test_const_struct_lambda_field() {
+    print(QUERIES.double(QUERIES.read(Counter {})))
+}
+
+@test(output = "49 6 15 10")
+fn test_global_lambda_direct_and_in_arrays() {
+    print("{SQUARE(7)} {OPS[0].apply(5)} {OPS[1].apply(5)} {STEPS[1](STEPS[0](4))}")
+}
+
+@test(output = "25")
+fn test_global_lambda_reads_current_global() {
+    let saved = BASE
+    BASE = 20
+    let result = OPS[1].apply(5)
+    BASE = saved
+    print(result)
+}
+
+@test(output = "7 9")
+fn test_global_lambda_capture_and_nested_lambda() {
+    print("{OFFSET_BY(4)} {TWICE_PLUS_ONE(4)}")
+}

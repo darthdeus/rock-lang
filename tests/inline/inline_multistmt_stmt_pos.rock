@@ -1,0 +1,50 @@
+// Regression: multi-statement @inline spliced at statement position
+// must not trip Lua's "ambiguous syntax (function call x new statement)"
+// parser rule.
+//
+// Before the let-stmt emitter appended `;`, the previous line
+// `local x = <struct_ctor>(...)`  ran together with a following IIFE
+// `(function()...)()` into one ambiguous function-call chain.
+
+global SIDE: int = 0
+
+fn bump() -> int {
+    SIDE = SIDE + 1
+    return 0
+}
+
+struct R { x: int, y: int }
+
+@inline
+fn tap(r: R) -> R {
+    bump()
+    return r
+}
+
+@test(output = "2")
+fn test_let_struct_then_multistmt_inline() {
+    SIDE = 0
+    let r = R { x: 1, y: 2 }
+    tap(r)
+    tap(r)
+    print(SIDE)
+}
+
+// Also exercise the `let x = something_else(); (function(){})()` form
+// generically — any let that ends with a call followed by a
+// statement-position IIFE.
+@inline
+fn run_once(n: int) -> int {
+    bump()
+    return n
+}
+
+@test(output = "4")
+fn test_let_call_then_multistmt_inline_stmts() {
+    SIDE = 0
+    let n = bump()
+    run_once(1)
+    run_once(2)
+    run_once(3)
+    print(SIDE)
+}

@@ -1,0 +1,252 @@
+// Tests for if let: single binding, chains (&&), value expressions, and scope.
+//
+//   if let x = expr { body }
+//   if let x = expr && let y = x.field { body }
+//   if let x = expr && x.value > 0 { body }
+//   if cond && let x = expr { body }
+//   if let _ = expr { body }
+
+struct Item { value: int }
+struct Container { item: Item? }
+struct Outer { inner: Container? }
+
+fn get_item(v: int) -> Item? { return Item { value: v } }
+fn get_null_item() -> Item? { return null }
+fn get_container(v: int) -> Container? { return Container { item: Item { value: v } } }
+fn get_null_container() -> Container? { return null }
+
+// ==============================
+// Single binding
+// ==============================
+
+@test(output = "5")
+fn basic_nonnull() {
+    if let x = get_item(5) {
+        print(x.value)
+    }
+}
+
+@test(output = "missing")
+fn basic_null_else() {
+    if let x = get_null_item() {
+        print(x.value)
+    } else {
+        print("missing")
+    }
+}
+
+// Wildcard _ is a liveness-only check — value is not bound
+@test(output = "exists")
+fn discard_binding() {
+    if let _ = get_item(99) { print("exists") }
+}
+
+@test(output = "")
+fn discard_binding_null() {
+    if let _ = get_null_item() { print("exists") }
+}
+
+// ==============================
+// Value expression context
+// Distinct from statement use: the if let produces a value.
+// ==============================
+
+@test
+fn value_expr_nonnull() {
+    let x: int? = 42
+    let result = if let y = x { y + 1 } else { 0 }
+    assert_eq(result, 43)
+}
+
+@test
+fn value_expr_null() {
+    let x: int? = null
+    let result = if let y = x { y + 1 } else { 0 }
+    assert_eq(result, 0)
+}
+
+@test
+fn value_expr_nested() {
+    let x: int? = 5
+    let y: int? = 10
+    let result = if let a = x {
+        if let b = y { a + b } else { a }
+    } else {
+        0
+    }
+    assert_eq(result, 15)
+}
+
+// ==============================
+// Scope and shadowing
+// ==============================
+
+// Inner binding shadows outer; outer is unaffected after block
+@test(output = "99\n42")
+fn shadows_outer() {
+    let x: Item? = Item { value: 42 }
+    if let x = get_item(99) {
+        print(x.value)
+    }
+    print(x?.value ?? -1)
+}
+
+// Binding does not leak out of the if let block
+@test(output = "42\n42")
+fn binding_not_in_scope_after() {
+    let x: Item? = Item { value: 42 }
+    if let item = x { print(item.value) }
+    print(x?.value ?? -1)
+}
+
+// ==============================
+// Nested if let
+// ==============================
+
+@test(output = "1\n2")
+fn nested_both_nonnull() {
+    let a: Item? = Item { value: 1 }
+    let b: Item? = Item { value: 2 }
+    if let x = a {
+        print(x.value)
+        if let y = b { print(y.value) }
+    }
+}
+
+@test(output = "1")
+fn nested_inner_null() {
+    let a: Item? = Item { value: 1 }
+    let b: Item? = null
+    if let x = a {
+        print(x.value)
+        if let y = b { print(y.value) }
+    }
+}
+
+// ==============================
+// Safe navigation in value expr
+// ==============================
+
+@test(output = "7")
+fn with_safe_nav() {
+    let o: Outer? = Outer { inner: Container { item: Item { value: 7 } } }
+    if let c = o?.inner {
+        print(c.item?.value ?? -1)
+    }
+}
+
+@test(output = "")
+fn with_safe_nav_null() {
+    let o: Outer? = Outer { inner: null }
+    if let c = o?.inner {
+        print(c.item?.value ?? -1)
+    }
+}
+
+// ==============================
+// Chain: two bindings
+// First-null and second-null are distinct: first exits before evaluating second.
+// ==============================
+
+@test(output = "42")
+fn chain_both_nonnull() {
+    if let c = get_container(42) && let item = c.item {
+        print(item.value)
+    }
+}
+
+@test(output = "nope")
+fn chain_first_null() {
+    if let c = get_null_container() && let item = c.item {
+        print(item.value)
+    } else {
+        print("nope")
+    }
+}
+
+@test(output = "nope")
+fn chain_second_null() {
+    let c: Container? = Container { item: null }
+    if let container = c && let item = container.item {
+        print(item.value)
+    } else {
+        print("nope")
+    }
+}
+
+// Both bindings visible in the body
+@test(output = "42 42")
+fn chain_both_in_scope() {
+    let c: Container? = Container { item: Item { value: 42 } }
+    if let container = c && let item = container.item {
+        print("{container.item?.value ?? -1} {item.value}")
+    }
+}
+
+// ==============================
+// Chain: binding + condition
+// ==============================
+
+@test(output = "42")
+fn chain_condition_passes() {
+    if let x = get_item(42) && x.value > 0 {
+        print(x.value)
+    }
+}
+
+@test(output = "nope")
+fn chain_condition_fails() {
+    if let x = get_item(-1) && x.value > 0 {
+        print(x.value)
+    } else {
+        print("nope")
+    }
+}
+
+// ==============================
+// Chain: condition before binding
+// ==============================
+
+@test(output = "42")
+fn chain_cond_then_binding() {
+    let flag = true
+    if flag && let x = get_item(42) {
+        print(x.value)
+    }
+}
+
+@test(output = "nope")
+fn chain_cond_false_skips() {
+    let flag = false
+    if flag && let x = get_item(42) {
+        print(x.value)
+    } else {
+        print("nope")
+    }
+}
+
+// ==============================
+// Three-clause chain
+// ==============================
+
+@test(output = "42")
+fn three_clause_all_pass() {
+    if let c = get_container(42) && let item = c.item && item.value > 0 {
+        print(item.value)
+    }
+}
+
+@test(output = "")
+fn three_clause_condition_fails() {
+    if let c = get_container(-5) && let item = c.item && item.value > 0 {
+        print(item.value)
+    }
+}
+
+@test(output = "42")
+fn three_clause_cond_first() {
+    let flag = true
+    if flag && let c = get_container(42) && let item = c.item {
+        print(item.value)
+    }
+}

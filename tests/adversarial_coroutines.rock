@@ -1,0 +1,196 @@
+// Adversarial tests: Coroutines
+// Note: .resume() returns T? since coroutine may be exhausted
+
+// --- Basic yield/resume ---
+
+co fn count_three(start: int) -> Coroutine<int> {
+    yield start
+    yield start + 1
+    yield start + 2
+}
+
+@test(output = "10 11 12")
+fn test_basic_coroutine() {
+    let c = count_three(10)
+    let a = c.resume() ?? -1
+    let b = c.resume() ?? -1
+    let d = c.resume() ?? -1
+    print("{a} {b} {d}")
+}
+
+// --- Multiple independent instances ---
+
+@test(output = "1 100 2 101")
+fn test_independent_instances() {
+    let a = count_three(1)
+    let b = count_three(100)
+    let r1 = a.resume() ?? -1  // 1
+    let r2 = b.resume() ?? -1  // 100
+    let r3 = a.resume() ?? -1  // 2
+    let r4 = b.resume() ?? -1  // 101
+    print("{r1} {r2} {r3} {r4}")
+}
+
+// --- Infinite generator with loop ---
+
+co fn naturals() -> Coroutine<int> {
+    let n = 0
+    loop {
+        yield n
+        n = n + 1
+    }
+}
+
+@test(output = "0 1 2 3 4")
+fn test_infinite_generator() {
+    let gen = naturals()
+    let out = ""
+    let first = true
+    let i = 0
+    while i < 5 {
+        if !first { out = out + " " }
+        first = false
+        out = out + "{gen.resume() ?? -1}"
+        i = i + 1
+    }
+    print(out)
+}
+
+// --- Coroutine with string yield ---
+
+co fn greetings() -> Coroutine<string> {
+    yield "hello"
+    yield "world"
+    yield "!"
+}
+
+@test(output = "hello world !")
+fn test_string_coroutine() {
+    let g = greetings()
+    print("{g.resume() ?? "?"} {g.resume() ?? "?"} {g.resume() ?? "?"}")
+}
+
+// --- Coroutine with conditional yield ---
+
+co fn evens_up_to(limit: int) -> Coroutine<int> {
+    let i = 0
+    while i < limit {
+        if i % 2 == 0 {
+            yield i
+        }
+        i = i + 1
+    }
+}
+
+@test(output = "0 2 4")
+fn test_conditional_yield() {
+    let e = evens_up_to(6)
+    let out = ""
+    let first = true
+    let i = 0
+    while i < 3 {
+        if !first { out = out + " " }
+        first = false
+        out = out + "{e.resume() ?? -1}"
+        i = i + 1
+    }
+    print(out)
+}
+
+// --- Coroutine with accumulating state ---
+
+co fn running_sum() -> Coroutine<int> {
+    let sum = 0
+    let i = 1
+    loop {
+        sum = sum + i
+        yield sum
+        i = i + 1
+    }
+}
+
+@test(output = "1 3 6 10 15")
+fn test_accumulator_coroutine() {
+    let a = running_sum()
+    let out = ""
+    let first = true
+    let i = 0
+    while i < 5 {
+        if !first { out = out + " " }
+        first = false
+        out = out + "{a.resume() ?? -1}"
+        i = i + 1
+    }
+    print(out)
+}
+
+// --- Coroutine yielding bool ---
+
+co fn bool_seq() -> Coroutine<bool> {
+    yield true
+    yield false
+    yield true
+}
+
+@test(output = "true false true")
+fn test_bool_coroutine() {
+    let b = bool_seq()
+    print("{b.resume() ?? false} {b.resume() ?? true} {b.resume() ?? false}")
+}
+
+// --- Exhausted coroutine returns null ---
+
+co fn two_items() -> Coroutine<int> {
+    yield 1
+    yield 2
+}
+
+@test(output = "1 2 exhausted")
+fn test_exhausted_coroutine() {
+    let c = two_items()
+    let a = c.resume()
+    let b = c.resume()
+    let d = c.resume()  // Should be null
+    let a_str = "{a ?? -1}"
+    let b_str = "{b ?? -1}"
+    let d_str = "exhausted"
+    if d != null {
+        d_str = "{d}"
+    }
+    print("{a_str} {b_str} {d_str}")
+}
+
+// --- Resume after exhaustion returns null (not crash) ---
+
+@test(output = "null null")
+fn test_resume_after_exhaustion() {
+    let c = two_items()
+    c.resume()
+    c.resume()
+    // Now exhausted — should return null, not crash
+    let a = c.resume()
+    let b = c.resume()
+    let out = ""
+    if a == null { out = "null" } else { out = "{a}" }
+    out = out + " "
+    if b == null { out = out + "null" } else { out = out + "{b}" }
+    print(out)
+}
+
+// --- Bool coroutine exhaustion returns null, not false ---
+
+co fn single_bool() -> Coroutine<bool> {
+    yield false
+}
+
+@test(output = "false null")
+fn test_bool_coroutine_exhaustion() {
+    let c = single_bool()
+    let a = c.resume()   // false (valid value)
+    let b = c.resume()   // null (exhausted)
+    let a_str = "null"
+    if a != null { a_str = "{a}" }
+    let b_str = "null"
+    if b != null { b_str = "{b}" }
+    print("{a_str} {b_str}")
+}

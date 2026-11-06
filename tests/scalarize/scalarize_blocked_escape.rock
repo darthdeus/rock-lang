@@ -1,0 +1,82 @@
+// Adversarial tests: struct scalarization — non-firing when struct escapes
+//
+// Each test is behavioral: the struct escapes (returned, passed,
+// captured, stored, mutated, compared), so scalarization must NOT
+// fire. Shape/emission is checked by Rust shape tests. Here we only
+// verify runtime correctness.
+
+struct FixVec2 {
+    x: float,
+    y: float,
+}
+
+struct IVec2 {
+    x: int,
+    y: int,
+}
+
+// --- (1) Escape via return ---
+
+fn make_vec(x: float, y: float) -> FixVec2 {
+    let v = FixVec2 { x: x, y: y }
+    return v
+}
+
+@test(output = "7 8")
+fn test_escape_return() {
+    let r = make_vec(7.0, 8.0)
+    print("{r.x as int} {r.y as int}")
+}
+
+// --- (2) Escape via pass-as-arg to non-@inline fn ---
+
+fn consume(p: FixVec2) -> float {
+    return p.x + p.y
+}
+
+@test(output = "10")
+fn test_escape_pass_arg() {
+    let p = FixVec2 { x: 4.0, y: 6.0 }
+    print(consume(p) as int)
+}
+
+// --- (3) Escape via closure capture ---
+
+@test(output = "9")
+fn test_escape_closure_capture() {
+    let p = IVec2 { x: 4, y: 5 }
+    let get_sum = () => p.x + p.y
+    print(get_sum())
+}
+
+// --- (4) Escape via storage in a collection ---
+
+@test(output = "4")
+fn test_escape_store_in_vec() {
+    let xs: [FixVec2] = []
+    let p = FixVec2 { x: 1.0, y: 3.0 }
+    xs.push(p)
+    print((xs[0].x + xs[0].y) as int)
+}
+
+// --- (5) Not-eligible: mutation ---
+
+@test(output = "99 2")
+fn test_blocked_mutation() {
+    let p = IVec2 { x: 1, y: 2 }
+    p.x = 99
+    print("{p.x} {p.y}")
+}
+
+// --- (6) Not-eligible: compared with == ---
+
+@test(output = "equal")
+fn test_blocked_compared() {
+    let a = IVec2 { x: 1, y: 2 }
+    let b = IVec2 { x: 1, y: 2 }
+    if a == b {
+        print("equal")
+    } else {
+        print("differ")
+    }
+}

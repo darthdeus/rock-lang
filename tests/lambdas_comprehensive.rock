@@ -1,0 +1,728 @@
+// Lambda tests - migrated from rock/tests/lambda_tests.rs
+// Tests lambda expressions, closures, and higher-order functions
+
+// Helper struct definitions
+struct S { field: int }
+struct Point { x: int, y: int }
+struct Inner { value: int }
+struct Outer { inner: Inner }
+struct TestStruct { value: float }
+struct Data { value: int, name: string }
+struct Counter { count: int }
+struct State { flag: bool, value: int }
+struct Accumulator { total: int }
+struct Container { data: int }
+struct ChainData { step1: int, step2: int, step3: int }
+struct Target { value: int }
+
+// Helper functions
+fn apply2(f: (int, int) -> int, a: int, b: int) -> int {
+    return f(a, b)
+}
+
+fn apply2_bool(f: (int, int) -> bool, a: int, b: int) -> bool {
+    return f(a, b)
+}
+
+fn apply2_string(f: (string, string) -> string, a: string, b: string) -> string {
+    return f(a, b)
+}
+
+fn apply2_float(f: (float, float) -> float, a: float, b: float) -> float {
+    return f(a, b)
+}
+
+fn apply1(f: (int) -> int, x: int) -> int {
+    return f(x)
+}
+
+fn apply(f: (int) -> int, v: int) -> int { 
+    return f(v) 
+}
+
+fn apply_binary_op(f: (int, int) -> int, a: int, b: int) -> int {
+    return f(a, b)
+}
+
+fn double(s: S) -> int { 
+    return s.field * 2 
+}
+
+fn apply_modifier(modifier_fn: (int) -> ()) {
+    modifier_fn(100)
+}
+
+fn use_fn(f: (int, int) -> int) -> int {
+    return f(10, 20)
+}
+
+fn map_point(p: Point, f: (int) -> int) -> Point {
+    return Point { x: f(p.x), y: f(p.y) }
+}
+
+fn process(f: (Data) -> int, d: Data) -> int {
+    return f(d)
+}
+
+fn add_one(x: int) -> int { 
+    return x + 1 
+}
+
+fn double_val(x: int) -> int { 
+    return x * 2 
+}
+
+fn call_twice(f: (int) -> int) {
+    let _ = f(0)
+    let _ = f(0)
+}
+
+// Lambda syntax tests
+@test(output = "12")
+fn test_lambda_typed_params() {
+    let add = (a: int, b: int) => { return a + b }
+    print(add(5, 7))
+}
+
+@test(output = "10")
+fn test_lambda_single_param_no_parens() {
+    let f = x => x * 2
+    print(f(5))
+}
+
+@test(output = "7")
+fn test_lambda_single_param_field_access_annotated() {
+    let s = S { field: 7 }
+    let f = (x: S) => x.field
+    print(f(s))
+}
+
+@test(output = "7")
+fn test_lambda_single_param_field_access_inferred() {
+    let s = S { field: 7 }
+    let f = x => x.field
+    print(f(s))
+}
+
+@test(output = "42")
+fn test_lambda_zero_param() {
+    let f = () => 42
+    print(f())
+}
+
+@test(output = "14")
+fn test_lambda_nested_single_expr() {
+    let add = (x, y) => x + y
+    let twice = x => x * 2
+    let composed = x => twice(add(x, 3))
+    print(composed(4))
+}
+
+@test(output = "12")
+fn test_lambda_as_function_arg() {
+    print(apply2((x, y) => x * y, 3, 4))
+}
+
+@test(output = "10")
+fn test_lambda_placeholder_field() {
+    let s = S { field: 10 }
+    let f = _.field
+    print(f(s))
+}
+
+@test(output = "10")
+fn test_lambda_placeholder_expr() {
+    let f = _ + 1
+    print(f(9))
+}
+
+@test(output = "10")
+fn test_lambda_placeholder_method_call() {
+    let s = S { field: 5 }
+    let f = _.double()
+    print(f(s))
+}
+
+@test(output = "42")
+fn test_lambda_placeholder_chained_field() {
+    let outer = Outer { inner: Inner { value: 42 } }
+    let f = _.inner.value
+    print(f(outer))
+}
+
+@test(output = "14\n7\n3")
+fn test_lambda_placeholder_arithmetic() {
+    let double = _ * 2
+    let subtract_five = _ - 5
+    let divide_by_three = _ ./ 3
+
+    print(double(7))
+    print(subtract_five(12))
+    print(divide_by_three(9))
+}
+
+@test(output = "6")
+fn test_lambda_trailing_comma() {
+    let f = (x: int, ) => x + 1
+    print(f(5))
+}
+
+// Basic lambda tests
+@test(output = "8")
+fn test_lambda_literal_basic_capture() {
+    let b = 5
+    let x = (a: int) => { return a + b }
+    print(x(3))
+}
+
+@test(output = "14")
+fn test_lambda_literal_as_param() {
+    print(apply((x: int) => { return x * 2 }, 7))
+}
+
+@test(output = "5")
+fn test_lambda_basic_param_infer() {
+    let f = (x) => x + 1
+    print(f(4))
+}
+
+@test(output = "5")
+fn test_lambda_param_and_return_infer() {
+    let f = (x) => { return x + 1 }
+    print(f(4))
+}
+
+@test(output = "5")
+fn test_lambda_infer_from_annotated_var() {
+    let f: (float) -> float = (x) => { return x * 2.0 }
+    print(f(2.5))
+}
+
+// Implicit return tests
+@test(output = "5")
+fn test_lambda_implicit_return() {
+    let f = (x: int) => { x + 2 }
+    print(f(3))
+}
+
+// No braces single expression tests
+@test(output = "6")
+fn test_lambda_no_braces_simple_expr() {
+    let f = x => x + 1
+    print(f(5))
+}
+
+@test(output = "7")
+fn test_lambda_no_braces_two_params_annotated() {
+    let sub = (a: int, b) => a - b
+    print(sub(10, 3))
+}
+
+@test(output = "7")
+fn test_lambda_no_braces_two_params_inferred() {
+    let sub = (a, b) => a - b
+    print(sub(10, 3))
+}
+
+@test(output = "1")
+fn test_lambda_no_braces_mixed_default_and_infer() {
+    let f: (float) -> float = (x) => x / 2.0
+    print(f(2.0))
+}
+
+@test(output = "25")
+fn test_lambda_no_braces_complex_expr() {
+    let p = Point { x: 3, y: 4 }
+    let distance_from_origin = (pt: Point) => pt.x * pt.x + pt.y * pt.y
+    print(distance_from_origin(p))
+}
+
+// Advanced lambda features
+@test(output = "8")
+fn test_lambda_curry_function() {
+    let add = (x: int) => (y: int) => x + y
+    let add_five = add(5)
+    print(add_five(3))
+}
+
+@test(output = "6\n8")
+fn test_lambda_multiple_assignment() {
+    let f1 = x => x + 1
+    let f2 = f1
+
+    print(f1(5))
+    print(f2(7))
+}
+
+// Higher-order function tests
+@test(output = "15")
+fn test_lambda_add_as_param() {
+    let result = apply_binary_op((x, y) => x + y, 10, 5)
+    print(result)
+}
+
+@test(output = "12")
+fn test_lambda_multiply_as_param() {
+    let result = apply_binary_op((x, y) => x * y, 4, 3)
+    print(result)
+}
+
+@test(output = "12")
+fn test_lambda_subtract_as_param() {
+    let result = apply_binary_op((a, b) => a - b, 20, 8)
+    print(result)
+}
+
+@test(output = "22")
+fn test_lambda_complex_expression_as_param() {
+    let result = apply_binary_op((x, y) => x * 2 + y * 3, 5, 4)
+    print(result)
+}
+
+@test(output = "14")
+fn test_lambda_with_block_as_param() {
+    let result = apply_binary_op((x, y) => {
+        let sum = x + y
+        return sum * 2
+    }, 3, 4)
+    print(result)
+}
+
+// Lambda assignment and mutation tests
+@test(output = "99")
+fn test_lambda_assignment_to_captured_variable() {
+    let obj = TestStruct { value: 10.0 }
+
+    let modifier = (v: float) => {
+        obj.value = v
+    }
+
+    modifier(99.0)
+    print(obj.value)
+}
+
+// Global for test_lambda_assignment_to_global
+global test_global: float = 0
+
+@test(output = "42")
+fn test_lambda_assignment_to_global() {
+    test_global = 0  // Reset for test
+
+    let setter = (v: float) => {
+        test_global = v
+    }
+
+    setter(42.0)
+    print(test_global)
+}
+
+@test(output = "5\n7")
+fn test_lambda_multiple_assignments() {
+    let p = Point { x: 0, y: 0 }
+
+    let set_point = (new_x: int, new_y: int) => {
+        p.x = new_x
+        p.y = new_y
+    }
+
+    set_point(5, 7)
+    print(p.x)
+    print(p.y)
+}
+
+@test(output = "8")
+fn test_lambda_assignment_with_computation() {
+    let counter = Counter { count: 0 }
+
+    let increment_by = (amount: int) => {
+        counter.count = counter.count + amount
+    }
+
+    increment_by(5)
+    increment_by(3)
+    print(counter.count)
+}
+
+@test(output = "15\n30")
+fn test_lambda_assignment_then_return() {
+    let data = Data { value: 10, name: "" }
+
+    let modify_and_return = (new_val: int) => {
+        data.value = new_val
+        return data.value * 2
+    }
+
+    let result = modify_and_return(15)
+    print(data.value)
+    print(result)
+}
+
+@test(output = "true\n42\nfalse\n42")
+fn test_lambda_assignment_in_conditional() {
+    let state = State { flag: false, value: 0 }
+
+    let conditional_set = (should_set: bool, val: int) => {
+        if should_set {
+            state.flag = true
+            state.value = val
+        } else {
+            state.flag = false
+        }
+    }
+
+    conditional_set(true, 42)
+    print(state.flag)
+    print(state.value)
+
+    conditional_set(false, 99)
+    print(state.flag)
+    print(state.value)
+}
+
+@test(output = "42")
+fn test_lambda_assignment_nested_fields() {
+    let obj = Outer { inner: Inner { value: 1 } }
+
+    let set_nested = (new_val: int) => {
+        obj.inner.value = new_val
+    }
+
+    set_nested(42)
+    print(obj.inner.value)
+}
+
+@test(output = "21")
+fn test_lambda_assignment_with_capture_and_params() {
+    let acc = Accumulator { total: 0 }
+    let multiplier = 3
+
+    let add_scaled = (value: int) => {
+        acc.total = acc.total + (value * multiplier)
+    }
+
+    add_scaled(5)  // 0 + (5 * 3) = 15
+    add_scaled(2)  // 15 + (2 * 3) = 21
+    print(acc.total)
+}
+
+@test(output = "100")
+fn test_lambda_assignment_passed_to_function() {
+    let container = Container { data: 0 }
+
+    let setter = (val: int) => {
+        container.data = val
+    }
+
+    apply_modifier(setter)
+    print(container.data)
+}
+
+@test(output = "10\n20\n30")
+fn test_lambda_assignment_chained_calls() {
+    let data = ChainData { step1: 0, step2: 0, step3: 0 }
+
+    let set_step1 = (val: int) => {
+        data.step1 = val
+    }
+
+    let set_step2 = (val: int) => {
+        data.step2 = val
+    }
+
+    let set_step3 = (val: int) => {
+        data.step3 = val
+    }
+
+    set_step1(10)
+    set_step2(20)
+    set_step3(30)
+
+    print(data.step1)
+    print(data.step2)
+    print(data.step3)
+}
+
+@test(output = "5\n10\n15")
+fn test_lambda_assignment_in_array_context() {
+    let target = Target { value: 0 }
+
+    let setter0 = (val: int) => { target.value = val }
+    let setter1 = (val: int) => { target.value = val * 2 }
+    let setter2 = (val: int) => { target.value = val * 3 }
+
+    setter0(5)
+    print(target.value)  // 5
+
+    setter1(5)
+    print(target.value)  // 10
+
+    setter2(5)
+    print(target.value)  // 15
+}
+
+// Side effects tests
+// Global for test_lambda_side_effects_basic
+global side_effect_counter: int = 0
+
+@test(output = "3")
+fn test_lambda_side_effects_basic() {
+    side_effect_counter = 0  // Reset for test
+
+    let increment_counter = () => {
+        side_effect_counter = side_effect_counter + 1
+    }
+
+    increment_counter()
+    increment_counter()
+    increment_counter()
+
+    print(side_effect_counter)
+}
+
+// Global for test_lambda_side_effects_with_parameters
+global accumulator: int = 0
+
+@test(output = "Added 5, total now: 5\nAdded 10, total now: 15\nFinal: 15")
+fn test_lambda_side_effects_with_parameters() {
+    accumulator = 0  // Reset for test
+
+    let add_to_accumulator = (value: int) => {
+        accumulator = accumulator + value
+        print("Added {value}, total now: {accumulator}")
+    }
+
+    add_to_accumulator(5)
+    add_to_accumulator(10)
+    print("Final: {accumulator}")
+}
+
+// Global for test_lambda_side_effects_in_higher_order_function
+global call_count: int = 0
+
+@test(output = "2")
+fn test_lambda_side_effects_in_higher_order_function() {
+    call_count = 0  // Reset for test
+
+    let counter = (x: int) => {
+        call_count = call_count + 1
+        return 0
+    }
+
+    call_twice(counter)
+    print(call_count)
+}
+
+// Global for test_lambda_side_effects_mixed_with_returns
+global log_entries: int = 0
+
+@test(output = "7\n11\n2")
+fn test_lambda_side_effects_mixed_with_returns() {
+    log_entries = 0  // Reset for test
+
+    let logged_add = (a: int, b: int) => {
+        log_entries = log_entries + 1
+        return a + b
+    }
+
+    let result1 = logged_add(3, 4)
+    let result2 = logged_add(5, 6)
+
+    print(result1)
+    print(result2)
+    print(log_entries)
+}
+
+// Capture scenarios tests
+@test(output = "10\n3.14\ntrue\nhello")
+fn test_lambda_capture_primitive_types() {
+    let x = 10
+    let y = 3.14
+    let z = true
+    let s = "hello"
+
+    let capturer = () => {
+        print(x)
+        print(y)
+        print(z)
+        print(s)
+    }
+
+    capturer()
+}
+
+@test(output = "42\ntest")
+fn test_lambda_capture_struct_by_value() {
+    let data = Data { value: 42, name: "test" }
+
+    let printer = () => {
+        print(data.value)
+        print(data.name)
+    }
+
+    printer()
+}
+
+@test(output = "6")
+fn test_lambda_capture_multiple_variables() {
+    let a = 1
+    let b = 2
+    let c = 3
+
+    let summer = () => {
+        return a + b + c
+    }
+
+    print(summer())
+}
+
+@test(output = "30")
+fn test_lambda_capture_in_nested_scope() {
+    let outer = 10
+    let inner = 20
+    let lambda = () => { return outer + inner }
+    print(lambda())
+}
+
+@test(output = "15\n25")
+fn test_lambda_capture_function_parameters() {
+    let create_adder = (base: int) => {
+        return () => { return base + 5 }
+    }
+
+    let add_to_10 = create_adder(10)
+    let add_to_20 = create_adder(20)
+
+    print(add_to_10())
+    print(add_to_20())
+}
+
+// Parameter inference tests
+@test(output = "ok")
+fn test_lambda_inference_with_all_operators() {
+    // Test addition
+    assert(apply2((x, y) => x + y, 5, 6) == 11)
+
+    // Test subtraction
+    assert(apply2((x, y) => x - y, 10, 3) == 7)
+
+    // Test multiplication
+    assert(apply2((x, y) => x * y, 4, 5) == 20)
+
+    // Test comparison
+    assert(apply2_bool((x, y) => x > y, 5, 3))
+    assert(!apply2_bool((x, y) => x > y, 3, 5))
+    assert(apply2_bool((x, y) => x == y, 5, 5))
+
+    print("ok")
+}
+
+@test(output = "ok")
+fn test_lambda_inference_edge_cases() {
+    // Single parameter using operator twice
+    assert(apply1((x) => x + x, 5) == 10)
+
+    // String concatenation
+    assert(apply2_string((x, y) => "{x}{y}", "hello", "world") == "helloworld")
+
+    // Float operations - need to annotate at least one param
+    assert(apply2_float((x: float, y) => x + y, 1.5, 2.5) == 4.0)
+
+    print("ok")
+}
+
+@test(output = "ok")
+fn test_lambda_in_different_contexts() {
+    // Lambda stored in variable first
+    let add = (x, y) => x + y
+    assert(use_fn(add) == 30)
+
+    // Lambda stored in variables (work around array indexing)
+    let add_func = (x, y) => x + y
+    let mul_func = (x, y) => x * y
+    let sub_func = (x, y) => x - y
+
+    assert(add_func(5, 3) == 8)
+    assert(mul_func(5, 3) == 15)
+    assert(sub_func(5, 3) == 2)
+
+    print("ok")
+}
+
+@test(output = "ok")
+fn test_lambda_with_struct_field_access() {
+    let p = Point { x: 10, y: 20 }
+
+    // Annotated version
+    let p1 = map_point(p, (v: int) => v * 2)
+    assert(p1.x == 20)
+    assert(p1.y == 40)
+
+    // Unannotated version
+    let p2 = map_point(p, (v) => v * 3)
+    assert(p2.x == 30)
+    assert(p2.y == 60)
+
+    // Field access on untyped parameter
+    let result = process((d) => d.value, Data { value: 42, name: "" })
+    assert(result == 42)
+
+    print("ok")
+}
+
+@test(output = "ok")
+fn test_lambda_function_composition() {
+    let composed = (x: int) => add_one(double_val(x))
+    assert(composed(5) == 11) // (5 * 2) + 1 = 11
+
+    print("ok")
+}
+
+@test(output = "ok")
+fn test_lambda_partial_annotation_patterns() {
+    // First param annotated
+    assert(apply2((x: int, y) => x + y, 5, 6) == 11)
+
+    // Second param annotated
+    assert(apply2((x, y: int) => x + y, 5, 6) == 11)
+
+    // Both annotated
+    assert(apply2((x: int, y: int) => x + y, 5, 6) == 11)
+
+    // Neither annotated
+    assert(apply2((x, y) => x + y, 5, 6) == 11)
+
+    print("ok")
+}
+
+@test(output = "ok")
+fn test_lambda_single_vs_multiple_param_usage() {
+    // Each param used once
+    assert(apply2((x, y) => x + y, 5, 6) == 11)
+
+    // One param used multiple times
+    assert(apply2((x, y) => x + x + y, 5, 6) == 16)
+
+    // Both params used multiple times
+    assert(apply2((x, y) => x * x + y * y, 3, 4) == 25)
+
+    // With local variable
+    assert(apply2((x, y) => {
+        let sum = x + y
+        return sum * 2
+    }, 5, 6) == 22)
+
+    print("ok")
+}
+
+@test(output = "ok")
+fn test_lambda_without_operators() {
+    // Just return parameter
+    assert(apply2((x, y) => x, 5, 6) == 5)
+    assert(apply2((x, y) => y, 5, 6) == 6)
+
+    // With if expression
+    assert(apply2((x, y) => if x > y { x } else { y }, 5, 6) == 6)
+    assert(apply2((x, y) => if x > y { x } else { y }, 6, 5) == 6)
+
+    print("ok")
+}

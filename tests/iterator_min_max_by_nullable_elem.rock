@@ -1,0 +1,66 @@
+// `min_by`/`max_by` used `best == null` as their "nothing seen yet" sentinel.
+// At a NULLABLE element type that sentinel is also a legal element: `T?` at
+// `T = E?` is one nullable, so an absent element assigned to `best` reads as
+// "nothing seen yet" and every later element overwrites it. The result was the
+// LAST element, whatever the key said.
+//
+// Nothing to do with `nobox`, values or column storage -- `[int?]` is the
+// smallest repro, and the flat controls below pin that the discriminant is the
+// element's nullability alone.
+//
+// Only `max_by_over_a_nullable_element` was RED: the collision needs the absent
+// row to WIN its comparison, poison `best`, and then be beaten again. The two
+// `min_by` cases passed on the broken code because the absent row lost its
+// comparison outright -- they are kept because "the answer happened to be right"
+// is exactly what an assertion has to keep being true through a rewrite.
+
+value BV { x: float, y: float }
+
+fn ki(v: int?) -> float {
+    if v != null { return v as float }
+    return 100.0
+}
+
+@test(returns = 1)
+fn min_by_over_a_nullable_element() -> int {
+    let a: [int?] = [3, null, 1, 2]
+    return ki(a.min_by(ki)) as int
+}
+
+@test(returns = 100)
+fn max_by_over_a_nullable_element() -> int {
+    // The absent row has the LARGEST key here, so a sentinel collision and a
+    // correct answer cannot agree: `null` must win.
+    let a: [int?] = [3, null, 1, 2]
+    return ki(a.max_by(ki)) as int
+}
+
+// The absent row is LAST, so "returns the last element" and "returns the
+// keyed extreme" differ in the opposite direction from the tests above.
+@test(returns = 1)
+fn absent_last_still_finds_the_min() -> int {
+    let a: [int?] = [3, 1, 2, null]
+    return ki(a.min_by(ki)) as int
+}
+
+// --- controls: a non-nullable element never had the collision ---
+
+@test(returns = 1)
+fn min_by_over_a_flat_element() -> int {
+    let a: [int] = [3, 1, 2]
+    return a.min_by(_ as float) ?? -1
+}
+
+@test(returns = 1)
+fn min_by_over_a_flat_value_element() -> int {
+    let a: [BV] = [BV { x: 3.0, y: 0.0 }, BV { x: 1.0, y: 0.0 }]
+    return (a.min_by(_.x)?.x ?? -1.0) as int
+}
+
+// An EMPTY source still returns null -- the flag replaces the sentinel, it does
+// not remove the answer.
+@test(returns = 1)
+fn empty_source_returns_null() -> int {
+    let a: [int?] = []
+    return if a.min_by(ki) == null && a.max_by(ki) == null { 1 } else { 0 }
+}

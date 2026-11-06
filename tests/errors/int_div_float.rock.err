@@ -1,0 +1,10 @@
+//! Error: `./` is integer floor division, defined on `(int, int) -> int`
+//!        only. A float operand has no matching overload and must be
+//!        rejected.
+//! Tags: operators, int-div, float-div
+
+//=== TEST CASE: int_div_float_operand_unify ===
+fn main() {
+    let x = 3.0 ./ 2
+    print(x)
+}

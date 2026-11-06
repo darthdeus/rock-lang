@@ -1,0 +1,124 @@
+// Terminal defers: in a co fn, dying counts as exiting every open scope --
+// a registered defer fires exactly once on natural completion (the scope-exit
+// splice), on kill() (via __rock_coroutine_run_defers), and on error incl.
+// hot-reload stamp-kills (the ctor error branch). LIFO, per-body pcall'd.
+
+global LOG: [string] = []
+
+co fn worker_done() -> Coroutine<int> {
+    defer { LOG.push("defer-done") }
+    yield 1
+    yield 2
+}
+
+co fn worker_killed() -> Coroutine<int> {
+    defer { LOG.push("defer-killed") }
+    yield 1
+    yield 2
+}
+
+co fn worker_error() -> Coroutine<int> {
+    defer { LOG.push("defer-error") }
+    yield 1
+    error("boom")
+}
+
+fn contains_str(xs: [string], s: string) -> bool {
+    for x in xs {
+        if x == s { return true }
+    }
+    return false
+}
+
+// error(msg, 0) -- no position prefix, so log lines asserted below are stable
+// across codegen changes.
+inline(lua) fn raise_plain(msg: string) = """error(msg, 0)"""
+
+fn note(s: string) {
+    LOG.push(s)
+}
+
+// Bare-expression form (`defer f(x)`, no braces/parens) -- parser-level sugar
+// over the same machinery.
+co fn bare_defer() -> Coroutine<int> {
+    defer note("bare")
+    yield 1
+    yield 2
+}
+
+@test(output = "bare:1")
+fn test_bare_expression_defer_fires_on_kill() {
+    LOG = []
+    let c = bare_defer()
+    resume(c)
+    kill(c)
+    print("bare:{count_str(LOG, "bare")}")
+}
+
+co fn scoped() -> Coroutine<int> {
+    if true {
+        defer { LOG.push("inner-scope") }
+        yield 1
+    }
+    yield 2
+}
+
+// A defer whose scope already exited (splice ran, flag cleared) must NOT
+// re-run when the coroutine is later killed mid-flight.
+@test(output = "inner:1")
+fn test_scope_exited_defer_does_not_rerun_on_kill() {
+    LOG = []
+    let c = scoped()
+    resume(c)
+    resume(c)
+    kill(c)
+    print("inner:{count_str(LOG, "inner-scope")}")
+}
+
+co fn multi() -> Coroutine<int> {
+    defer { LOG.push("first") }
+    defer { raise_plain("defer-boom") }
+    defer { LOG.push("third") }
+    yield 1
+    yield 2
+}
+
+// Terminal defers run LIFO; a raising defer is pcall'd + logged and the
+// REMAINING defers still run (failure isolation).
+@test(output = "[CO] coroutine defer failed during cleanup: defer-boom\nthird first n:2")
+fn test_terminal_defers_lifo_and_failure_isolation() {
+    LOG = []
+    let c = multi()
+    resume(c)
+    kill(c)
+    print("{LOG[0]} {LOG[1]} n:{LOG.len}")
+}
+
+fn count_str(xs: [string], s: string) -> int {
+    let n = 0
+    for x in xs {
+        if x == s { n += 1 }
+    }
+    return n
+}
+
+@test(output = "done:true killed:true error:true")
+fn test_co_defer_terminal_coverage() {
+    let a = worker_done()
+    resume(a)
+    resume(a)
+    resume(a)
+
+    let b = worker_killed()
+    resume(b)
+    kill(b)
+
+    let c = worker_error()
+    resume(c)
+    resume(c)
+
+    let d = contains_str(LOG, "defer-done")
+    let k = contains_str(LOG, "defer-killed")
+    let e = contains_str(LOG, "defer-error")
+    print("done:{d} killed:{k} error:{e}")
+}

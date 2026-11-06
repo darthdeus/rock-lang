@@ -1,0 +1,61 @@
+// Test file to demonstrate parallel test execution
+
+@test
+fn test_addition() {
+    assert_eq(2 + 2, 4)
+}
+
+@test
+fn test_multiplication() {
+    assert_eq(3 * 4, 12)
+}
+
+@test
+fn test_subtraction() {
+    assert_eq(10 - 5, 5)
+}
+
+@test
+fn test_division() {
+    assert_eq(20 ./ 4, 5)
+}
+
+// String concat test removed for now
+
+@test
+fn test_boolean_and() {
+    assert_eq(true && true, true)
+    assert_eq(true && false, false)
+}
+
+@test
+fn test_boolean_or() {
+    assert_eq(true || false, true)
+    assert_eq(false || false, false)
+}
+
+@test
+fn test_comparison() {
+    assert(5 > 3)
+    assert(3 < 5)
+    assert(5 >= 5)
+    assert(5 <= 5)
+}
+
+@test
+fn test_list_operations() {
+    let list = [1, 2, 3]
+    assert_eq(list[0], 1)
+    assert_eq(list[1], 2)
+    assert_eq(list[2], 3)
+}
+
+@test
+fn test_loop() {
+    let sum = 0
+    for i in 1..5 {  // With exclusive upper bound: 1+2+3+4
+        sum = sum + i
+    }
+    // 1..5 is exclusive of upper bound, so 1+2+3+4 = 10
+    assert_eq(sum, 10)
+}

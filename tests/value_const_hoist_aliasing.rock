@@ -1,0 +1,61 @@
+// An all-constant value-struct ctor is hoisted to ONE shared module const
+// (`__skull_kc_*`, skull-codegen-lua `collect_const_hoists`), and identical
+// literals dedupe onto the same const. That is sound only while values are
+// immutable -- the place model repealed the
+// premise by legalizing leaf writes through mutable storage, so a hoisted
+// constant that reaches a mutable place must be materialized fresh per
+// construction or the write corrupts every other holder of that constant.
+
+value Pt { x: int, y: int }
+struct Owner { p: Pt }
+
+fn mk() -> Owner { return Owner { p: Pt { x: 1, y: 1 } } }
+
+global G: Owner = mk()
+
+// Two independently-constructed owners share nothing observable: a place write
+// through one must not reach the other.
+@test(output = "5 1")
+fn test_const_field_write_does_not_alias_sibling() {
+    let a = mk()
+    let b = mk()
+    a.p.x = 5
+    print("{a.p.x} {b.p.x}")
+}
+
+// The same across a construction that happened at global-init time.
+@test(output = "1")
+fn test_const_field_write_does_not_reach_global() {
+    let local = mk()
+    local.p.x = 7
+    print("{G.p.x}")
+}
+
+// Distinct value structs that happen to share a literal shape must not dedupe
+// onto one another either.
+value Other { x: int, y: int }
+struct OtherOwner { o: Other }
+
+fn mk_other() -> OtherOwner { return OtherOwner { o: Other { x: 1, y: 1 } } }
+
+@test(output = "9 1")
+fn test_const_write_does_not_cross_types() {
+    let a = mk()
+    let b = mk_other()
+    a.p.x = 9
+    print("{a.p.x} {b.o.x}")
+}
+
+// CONTROL: a constant value used only for READS still behaves (the hoist stays
+// legal there -- nothing can write through it).
+value RO { a: int, b: int }
+
+fn ro_sum() -> int {
+    let r = RO { a: 2, b: 3 }
+    return r.a + r.b
+}
+
+@test(output = "5 5")
+fn test_read_only_constant_still_works() {
+    print("{ro_sum()} {ro_sum()}")
+}

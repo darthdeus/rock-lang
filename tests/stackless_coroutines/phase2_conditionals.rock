@@ -1,0 +1,113 @@
+// Phase 2: yield inside `if`/`else` branches.
+//
+// These tests will FAIL COMPILATION on the Phase 1 lowering (which
+// rejects any control flow inside co fn). They turn green when Phase 2
+// (conditional-yield lowering) lands.
+
+// ---- yield in if-arm only (not else) ----
+co fn yield_in_if_only(flag: bool) -> Coroutine<int> {
+    if flag {
+        yield 1
+    }
+    yield 2
+}
+
+@test(output = "1\n2")
+fn test_yield_in_if_only_true() {
+    let c = yield_in_if_only(true)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+}
+
+@test(output = "2")
+fn test_yield_in_if_only_false() {
+    let c = yield_in_if_only(false)
+    print(c.resume() ?? -1)
+}
+
+// ---- yield in both arms of if/else ----
+co fn yield_in_both(flag: bool) -> Coroutine<int> {
+    if flag {
+        yield 100
+    } else {
+        yield 200
+    }
+    yield 999
+}
+
+@test(output = "100\n999")
+fn test_yield_both_arms_true() {
+    let c = yield_in_both(true)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+}
+
+@test(output = "200\n999")
+fn test_yield_both_arms_false() {
+    let c = yield_in_both(false)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+}
+
+// ---- Multiple yields per arm ----
+co fn multi_yield_per_arm(flag: bool) -> Coroutine<int> {
+    if flag {
+        yield 1
+        yield 2
+    } else {
+        yield 10
+        yield 20
+    }
+}
+
+@test(output = "1\n2")
+fn test_multi_yield_per_arm_true() {
+    let c = multi_yield_per_arm(true)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+}
+
+@test(output = "10\n20")
+fn test_multi_yield_per_arm_false() {
+    let c = multi_yield_per_arm(false)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+}
+
+// ---- Nested if with yields at multiple depths ----
+co fn nested_if(a: int, b: int) -> Coroutine<int> {
+    if a > 0 {
+        yield 1
+        if b > 0 {
+            yield 2
+        } else {
+            yield 3
+        }
+        yield 4
+    }
+    yield 5
+}
+
+@test(output = "1\n2\n4\n5")
+fn test_nested_if_both_positive() {
+    let c = nested_if(1, 1)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+}
+
+@test(output = "1\n3\n4\n5")
+fn test_nested_if_only_a_positive() {
+    let c = nested_if(1, 0)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+}
+
+@test(output = "5")
+fn test_nested_if_neither_positive() {
+    let c = nested_if(0, 0)
+    print(c.resume() ?? -1)
+}

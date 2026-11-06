@@ -1,0 +1,29 @@
+// `.iter()` over `[T?]` must yield every element, including nulls —
+// a nil-sentinel iteration would silently truncate at the first null.
+
+struct Bag { v: int }
+
+@test(output = "1\n0\n3")
+fn map_yields_for_null_elements() {
+    let xs: [Bag?] = [Bag { v: 1 }, null, Bag { v: 3 }]
+    let ys = xs.iter().map(b => if b != null { b.v } else { 0 }).collect()
+    for y in ys { print(y) }
+}
+
+@test(output = "2")
+fn filter_inspects_null_elements() {
+    let xs: [Bag?] = [Bag { v: 1 }, null, Bag { v: 3 }]
+    // Predicate gets to see all three; filter should keep the 2 non-nulls.
+    let kept = xs.iter().filter(b => b != null).collect()
+    print(kept.len())
+}
+
+// Sentinel: also the user-level for loop on `[T?]` (already worked, but
+// belongs in the same file so future regressions get noticed together).
+@test(output = "1\nnull\n3")
+fn for_over_nullable() {
+    let xs: [Bag?] = [Bag { v: 1 }, null, Bag { v: 3 }]
+    for x in xs {
+        if x != null { print(x.v) } else { print("null") }
+    }
+}

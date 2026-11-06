@@ -1,0 +1,44 @@
+//! Error: nullable value-struct can't implicitly unwrap to non-null
+//! Tags: nullable, value, soundness, bucket-c-upstream
+//!
+//! These tests pin the SEMANTIC checks that make the Bucket-C ANF
+//! guards at `rock-codegen/src/anf/lower.rs` (sites tagged "H3 R3
+//! nullable cdata value-returning call") structurally unreachable.
+//! If semantic ever stops rejecting these shapes, ANF would fire its
+//! defensive `Unsupported` reject and the test below would FAIL
+//! differently (panic instead of compile-error) — surfacing the
+//! lost upstream guard.
+
+//=== TEST CASE: let_nullable_value_call_into_non_null_Generic ===
+value V2 { x: int, y: int }
+
+fn make() -> V2? { return V2 { x: 1, y: 2 } }
+
+fn test() {
+    let v: V2 = make()  // ERROR: Type mismatch: found V2?, expected V2
+}
+
+fn main() { test() }
+
+//=== TEST CASE: nullable_value_call_as_arg_Generic ===
+value V2 { x: int, y: int }
+
+fn make() -> V2? { return V2 { x: 1, y: 2 } }
+fn use_v(v: V2) -> int { v.x + v.y }
+
+fn test() {
+    let r = use_v(make())  // ERROR: Type mismatch: found V2?, expected V2
+}
+
+fn main() { test() }
+
+//=== TEST CASE: nullable_value_field_unsafe_access_Generic ===
+value V2 { x: int, y: int }
+
+fn make() -> V2? { return V2 { x: 1, y: 2 } }
+
+fn test() {
+    let r = make().x  // ERROR: Cannot use '.' to access field 'x' on nullable type
+}
+
+fn main() { test() }

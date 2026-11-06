@@ -1,0 +1,78 @@
+// `vec_push`'s parameter contract, split by what each parameter names
+//
+// The RECEIVER names the vec layout: `[T]` says "this body reads `_data`", so a
+// column-stored receiver must never reach it -- `column_push` routes around it.
+// The PAYLOAD names no layout: `item` is stored opaquely and never indexed, so
+// it carries `@repr(opaque)`. Without that contract a pushed COLUMN vec read as
+// a layout violation (`[[Vec2]]` -- mag's `hand_l` and `path`). It keeps the
+// type `T` because that is the inference edge giving `vec_new()` its element;
+// `any`/`any?` compiles here and breaks `tests/coroutines.rock`.
+//
+// Both backends: the payload case is where Lua and JS diverged, because Lua
+// intercepts `push` and JS did not specialize it.
+
+value PushCell { a: int, b: int }
+
+// The payload is a COLUMN vec inside a BOXED outer vec. The outer's element is
+// a Vec, not a scalar value struct, so the outer stays boxed and its body is
+// the boxed one -- while the pushed inner vec is column-stored.
+@test fn push_a_column_vec_into_a_boxed_outer() {
+    let outer: [[PushCell]] = []
+    let inner: [PushCell] = [PushCell { a: 1, b: 2 }]
+    outer.push(inner)
+    assert_eq(outer.len, 1)
+    assert_eq(outer[0].len, 1)
+    assert_eq(outer[0][0].a, 1)
+    assert_eq(outer[0][0].b, 2)
+}
+
+@test fn push_two_column_vecs_stay_distinct() {
+    let outer: [[PushCell]] = []
+    let x: [PushCell] = [PushCell { a: 1, b: 1 }]
+    let y: [PushCell] = [PushCell { a: 2, b: 2 }]
+    outer.push(x)
+    outer.push(y)
+    assert_eq(outer.len, 2)
+    assert_eq(outer[0][0].a, 1)
+    assert_eq(outer[1][0].a, 2)
+}
+
+// The receiver itself column-stored: `column_push` handles it, the boxed body is
+// never entered.
+@test fn push_onto_a_column_receiver() {
+    let xs: [PushCell] = []
+    xs.push(PushCell { a: 7, b: 8 })
+    xs.push(PushCell { a: 9, b: 10 })
+    assert_eq(xs.len, 2)
+    assert_eq(xs[0].a, 7)
+    assert_eq(xs[1].b, 10)
+}
+
+// The ordinary boxed and scalar pushes -- the denominator. Without these, a
+// change that broke every push would leave the column cases green.
+@test fn push_scalars_and_boxed_elements() {
+    let ns: [int] = []
+    ns.push(1)
+    ns.push(2)
+    assert_eq(ns.len, 2)
+    assert_eq(ns[1], 2)
+
+    let ss: [string] = []
+    ss.push("a")
+    assert_eq(ss[0], "a")
+
+    let nested: [[int]] = []
+    nested.push([1, 2, 3])
+    assert_eq(nested[0].len, 3)
+    assert_eq(nested[0][2], 3)
+}
+
+// A column vec reaching the payload position through a deeper nesting.
+@test fn push_a_column_vec_through_a_second_level() {
+    let outer: [[[PushCell]]] = []
+    let mid: [[PushCell]] = []
+    let inner: [PushCell] = [PushCell { a: 5, b: 6 }]
+    mid.push(inner)
+    outer.push(mid)
+    assert_eq(outer[0][0][0].a, 5)
+}

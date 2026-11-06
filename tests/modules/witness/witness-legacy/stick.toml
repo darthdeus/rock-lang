@@ -1,0 +1,11 @@
+[package]
+name = "witness-legacy"
+version = "0.1.0"
+type = "bin"
+
+[dependencies]
+witness-lib = { path = "../witness-lib" }
+
+[build]
+channels = ["dev"]
+default_channel = "dev"

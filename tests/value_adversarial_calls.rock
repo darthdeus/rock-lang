@@ -1,0 +1,200 @@
+// Adversarial tests for value-type call-arg codegen. Each case tries to
+// break the per-slot ABI / non-last multi-return / nullable handling in
+// a realistic way.
+
+value V2 {
+    x: float,
+    y: float,
+}
+
+value V3 {
+    r: float,
+    g: float,
+    b: float,
+}
+
+// ----- Returning helpers (Rock, scalarized multi-return). -----
+
+fn make_v2(a: float, b: float) -> V2 {
+    return V2 { x: a, y: b }
+}
+
+fn make_v3(r: float, g: float, b: float) -> V3 {
+    return V3 { r: r, g: g, b: b }
+}
+
+fn sum3(v: V3) -> float {
+    return v.r + v.g + v.b
+}
+
+// A Rock fn that takes (V2, V2, float) — two scalarized value params +
+// one scalar, exercising multiple non-last value-call args.
+fn plus2(a: V2, b: V2, bias: float) -> V2 {
+    return V2 { x: a.x + b.x + bias, y: a.y + b.y + bias }
+}
+
+// Scalarized callee with a scalar param in non-last position (ordering
+// stress).
+fn mix(bias: float, v: V2) -> V2 {
+    return V2 { x: v.x + bias, y: v.y + bias }
+}
+
+// cdata-ABI callee via inline(lua). Accepts packed cdata args.
+inline(lua) fn shift_v2_inline(v: V2, dx: float, dy: float) -> V2 = """
+return __rock_create_struct("V2", { x = v.x + dx, y = v.y + dy })
+"""
+
+// Nullable-param cdata callee — must receive packed cdata (or nil).
+fn maybe_scale(v: V2?, k: float) -> float {
+    if v != null {
+        return v.x * k + v.y * k
+    }
+    return 0
+}
+
+// ----- 1. Nested call in non-last positional slot, scalarized callee.
+
+@test(output = "40\n80")
+fn adv_non_last_scalarized_rock() {
+    let r = plus2(make_v2(10.0, 20.0), make_v2(20.0, 50.0), 10.0)
+    print("{r.x.floor()}")
+    print("{r.y.floor()}")
+}
+
+// ----- 2. Two value-returning calls in non-last slots (both hoist). -----
+
+@test(output = "40\n80")
+fn adv_two_non_last_scalarized_calls() {
+    // make_v2(a, b) + make_v2(c, d) both need hoisting; the outer call
+    // wraps in one IIFE with two local decls.
+    let r = plus2(make_v2(10.0, 20.0), make_v2(20.0, 50.0), 10.0)
+    print("{r.x.floor()}")
+    print("{r.y.floor()}")
+}
+
+// ----- 3. Value-returning call as LAST positional arg, scalarized. -----
+
+@test(output = "30\n60")
+fn adv_last_positional_scalarized() {
+    // make_v2 is the LAST positional slot — Lua last-arg rule preserves
+    // multi-return. No hoisting needed.
+    let r = mix(10.0, make_v2(20.0, 50.0))
+    print("{r.x.floor()}")
+    print("{r.y.floor()}")
+}
+
+// ----- 4. Value-returning call into cdata-ABI inline(lua) callee. -----
+
+@test(output = "11\n23")
+fn adv_cdata_callee_gets_packed() {
+    let r = shift_v2_inline(make_v2(10.0, 20.0), 1.0, 3.0)
+    print("{r.x.floor()}")
+    print("{r.y.floor()}")
+}
+
+// ----- 5. Nullable value-typed param receives a value literal. -----
+
+@test(output = "90")
+fn adv_nullable_param_literal_pack() {
+    let r = maybe_scale(V2 { x: 10, y: 20 }, 3.0)
+    print("{r.floor()}")
+}
+
+// ----- 6. Nullable value-typed param receives null. -----
+
+@test(output = "0")
+fn adv_nullable_param_null() {
+    let r = maybe_scale(null, 3.0)
+    print("{r.floor()}")
+}
+
+// ----- 7. Nullable value-typed param receives a Rock value-call result.
+
+@test(output = "30")
+fn adv_nullable_param_from_call() {
+    let r = maybe_scale(make_v2(5.0, 5.0), 3.0)
+    print("{r.floor()}")
+}
+
+// ----- 8. Cascading scalarized calls — triple nesting.
+
+@test(output = "70\n130")
+fn adv_triple_nested_scalarized() {
+    // plus2(plus2(make_v2(1,2), make_v2(10,20), 5), make_v2(50,100), 5)
+    // Innermost: 1+10+5, 2+20+5 = 16, 27
+    // Middle: 16+50+5, 27+100+5 = 71, 132
+    // outer adds bias 5
+    let r = plus2(plus2(make_v2(1, 2), make_v2(10, 20), 5), make_v2(50, 100), 5)
+    print("{(r.x - 1).floor()}")
+    print("{(r.y - 2).floor()}")
+}
+
+// ----- 9. Field access on value-returning call (existing, sanity).
+
+@test(output = "10")
+fn adv_field_on_call() {
+    print("{make_v2(10, 20).x.floor()}")
+}
+
+// ----- 10. Multi-field value struct (3 fields) — non-last scalarized.
+
+@test(output = "30")
+fn adv_three_field_non_last() {
+    print("{sum3(make_v3(5.0, 10.0, 15.0)).floor()}")
+}
+
+// ----- 11. Named-arg call where the value-call is non-last positional.
+
+fn tagged(label: string, v: V2, scale: float) -> float {
+    return v.x * scale + v.y * scale
+}
+
+@test(output = "90")
+fn adv_named_arg_with_value_call() {
+    // `v: make_v2(...)` passed positionally (slot 1, non-last). Scale
+    // is named. Tests that emission handles named-arg ordering with a
+    // value-returning call in the preceding positional slot.
+    let out = tagged("hi", make_v2(10, 20), scale: 3)
+    print("{out.floor()}")
+}
+
+// ----- 12. If-expression IIFE with a value-returning Rock call in a
+// branch, fed into a scalarized-ABI arg slot. Regression: the IIFE's
+// `return make_v3(...)` used to emit raw scalars (multi-return) and
+// the outer `local __arg_hoist_N = <iife>()` truncated to the first
+// scalar. Then `__arg_hoist_N.r` crashed with "attempt to index a
+// number value".
+
+fn sum3_scaled(v: V3, scale: float) -> float {
+    return (v.r + v.g + v.b) * scale
+}
+
+@test(output = "36")
+fn adv_if_iife_else_value_call() {
+    let flag = false
+    let out = sum3_scaled(
+        if flag { V3 { r: 1, g: 1, b: 1 } } else { make_v3(3.0, 4.0, 5.0) },
+        3.0,
+    )
+    print("{out.floor()}")
+}
+
+@test(output = "9")
+fn adv_if_iife_then_value_call() {
+    let flag = true
+    let out = sum3_scaled(
+        if flag { make_v3(1.0, 1.0, 1.0) } else { V3 { r: 9, g: 9, b: 9 } },
+        3.0,
+    )
+    print("{out.floor()}")
+}
+
+@test(output = "27")
+fn adv_if_iife_both_value_calls() {
+    let flag = false
+    let out = sum3_scaled(
+        if flag { make_v3(1.0, 1.0, 1.0) } else { make_v3(2.0, 3.0, 4.0) },
+        3.0,
+    )
+    print("{out.floor()}")
+}

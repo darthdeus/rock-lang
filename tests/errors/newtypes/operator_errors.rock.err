@@ -1,0 +1,44 @@
+//! Error: Newtype operator error tests
+//! Tags: newtypes, operators
+
+//=== TEST CASE: newtype_eq_with_int_IncompatibleNewtypeOperation ===
+newtype UserId(int)
+
+fn main() {
+    let user_id = UserId(42)
+    if user_id == 42 {
+        print("Equal")
+    }
+}
+
+//=== TEST CASE: newtype_ne_with_int_IncompatibleNewtypeOperation ===
+newtype UserId(int)
+
+fn main() {
+    let user_id = UserId(42)
+    if user_id != 10 {
+        print("Not equal")
+    }
+}
+
+//=== TEST CASE: int_eq_with_newtype_IncompatibleNewtypeOperation ===
+newtype UserId(int)
+
+fn main() {
+    let user_id = UserId(42)
+    if 42 == user_id {
+        print("Equal")
+    }
+}
+
+//=== TEST CASE: different_newtypes_comparison_IncompatibleNewtypeOperation ===
+newtype UserId(int)
+newtype Score(int)
+
+fn main() {
+    let id = UserId(1)
+    let score = Score(1)
+    if id == score {
+        print("Equal")
+    }
+}

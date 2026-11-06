@@ -1,0 +1,60 @@
+value PlaceJsonContext { names: [string] }
+struct PlaceJsonWorld { context: PlaceJsonContext }
+nobox value JsonPlace { index: int, x: int, y: int }
+
+fn place_json(context: PlaceJsonContext, place: JsonPlace) -> JsonValue {
+    let out: Map<string, JsonValue> = map_new()
+    out["name"] = json_str(context.names[place.index])
+    out["grid"] = json_array([json_int(place.x), json_int(place.y)])
+    return json_object(out)
+}
+
+fn encode_place<W>(context: W, place: JsonPlace,
+                   encode: fn(W, JsonPlace) -> JsonValue,
+                   fields: Map<string, JsonValue> = map_new()) -> JsonValue {
+    fields["place"] = encode(context, place)
+    return json_object(fields)
+}
+
+fn world_place_json(world: PlaceJsonWorld, place: JsonPlace) -> JsonValue {
+    return place_json(world.context, place)
+}
+
+@test
+fn c_place_json_callback_builds_into_a_supplied_map() {
+    let context = PlaceJsonContext { names: ["first", "second"] }
+    let fields: Map<string, JsonValue> = map_new()
+    fields["keep"] = json_int(73)
+    let encoded = encode_place(context, JsonPlace { index: 1, x: 4, y: 9 }, place_json, fields)
+    let place = json_field(encoded, "place").unwrap()
+    assert(json_as_str(json_field(place, "name").unwrap()).unwrap() == "second")
+    let grid = json_as_array(json_field(place, "grid").unwrap()).unwrap()
+    assert(grid.len() == 2)
+    assert(json_as_int(grid[0]).unwrap() == 4 && json_as_int(grid[1]).unwrap() == 9)
+    assert(json_as_int(json_field(encoded, "keep").unwrap()).unwrap() == 73)
+    assert(json_as_int(fields["keep"]).unwrap() == 73)
+}
+
+@test
+fn c_place_json_callback_builds_into_a_default_map() {
+    let context = PlaceJsonContext { names: ["first", "second"] }
+    let encoded = encode_place(context, JsonPlace { index: 0, x: 2, y: 3 }, place_json)
+    let place = json_field(encoded, "place").unwrap()
+    assert(json_as_str(json_field(place, "name").unwrap()).unwrap() == "first")
+    let grid = json_as_array(json_field(place, "grid").unwrap()).unwrap()
+    assert(json_as_int(grid[0]).unwrap() == 2 && json_as_int(grid[1]).unwrap() == 3)
+}
+
+@test
+fn c_place_json_callback_borrows_an_arena_world() {
+    let worlds: Arena<PlaceJsonWorld> = arena_new()
+    let handle = worlds.insert(PlaceJsonWorld {
+        context: PlaceJsonContext { names: ["arena"] },
+    })
+    let encoded = encode_place(handle.get().unwrap(),
+        JsonPlace { index: 0, x: 5, y: 6 }, world_place_json)
+    let place = json_field(encoded, "place").unwrap()
+    assert(json_as_str(json_field(place, "name").unwrap()).unwrap() == "arena")
+    let grid = json_as_array(json_field(place, "grid").unwrap()).unwrap()
+    assert(json_as_int(grid[0]).unwrap() == 5 && json_as_int(grid[1]).unwrap() == 6)
+}

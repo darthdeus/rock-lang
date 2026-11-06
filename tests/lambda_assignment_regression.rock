@@ -1,0 +1,269 @@
+// Regression tests for lambda assignment bug
+//
+// This tests that assignment expressions in single-expression lambdas
+// are properly executed, not just evaluated for their return value.
+
+struct Mutable {
+    value: int? = null,
+    flag: bool = false,
+    name: string = "",
+}
+
+struct Container {
+    item: Mutable,
+    count: int = 0,
+}
+
+@test
+fn test_single_expr_lambda_basic_assignment() {
+    let obj = Mutable {}
+    let assign_lambda = (v: int) => obj.value = v
+
+    let result = assign_lambda(42)
+
+    // Assignment should have happened
+    assert_eq(obj.value, 42)
+    // Assignment expressions return unit
+}
+
+@test
+fn test_single_expr_lambda_multiple_calls() {
+    let obj = Mutable {}
+    let assign = (v: int) => obj.value = v
+
+    assign(1)
+    assert_eq(obj.value, 1)
+
+    assign(2)
+    assert_eq(obj.value, 2)
+
+    assign(3)
+    assert_eq(obj.value, 3)
+}
+
+@test
+fn test_single_expr_lambda_different_fields() {
+    let obj = Mutable {}
+
+    let assign_value = (v: int) => obj.value = v
+    let assign_flag = (f: bool) => obj.flag = f
+    let assign_name = (n: string) => obj.name = n
+
+    assign_value(99)
+    assign_flag(true)
+    assign_name("test")
+
+    assert_eq(obj.value, 99)
+    assert_eq(obj.flag, true)
+    assert_eq(obj.name, "test")
+}
+
+@test
+fn test_single_expr_lambda_nested_assignment() {
+    let container = Container { item: Mutable {} }
+
+    let assign_nested = (v: int) => container.item.value = v
+    let assign_count = (c: int) => container.count = c
+
+    assign_nested(123)
+    assign_count(456)
+
+    assert_eq(container.item.value, 123)
+    assert_eq(container.count, 456)
+}
+
+@test
+fn test_single_expr_lambda_closure() {
+    let obj = Mutable {}
+
+    // Lambda captures obj from outer scope
+    let setter = (x: int) => obj.value = x
+
+    setter(777)
+    assert_eq(obj.value, 777)
+}
+
+// Test assignment lambdas stored in data structures
+@test
+fn test_single_expr_lambda_in_array() {
+    let obj1 = Mutable {}
+    let obj2 = Mutable {}
+    let obj3 = Mutable {}
+
+    let setters = [
+        (v: int) => obj1.value = v,
+        (v: int) => obj2.value = v,
+        (v: int) => obj3.value = v,
+    ]
+
+    // Call each setter with index * 10
+    for (i, setter) in enumerate(setters) {
+        setter(i * 10)
+    }
+
+    assert_eq(obj1.value, 0)
+    assert_eq(obj2.value, 10)
+    assert_eq(obj3.value, 20)
+}
+
+@test
+fn test_single_expr_lambda_tuple_param() {
+    let obj = Mutable {}
+
+    let assign_from_tuple = (t: (int, bool)) => obj.value = t.0
+
+    assign_from_tuple((999, false))
+    assert_eq(obj.value, 999)
+}
+
+// Test that multi-line lambdas still work correctly
+@test
+fn test_multi_line_lambda_assignment() {
+    let obj = Mutable {}
+
+    let assign_multi = (v: int) => {
+        obj.value = v
+    }
+
+    let result = assign_multi(42)
+    assert_eq(obj.value, 42)
+}
+
+@test
+fn test_mixed_lambda_styles() {
+    let obj = Mutable {}
+
+    let single_expr = (v: int) => obj.value = v
+    let multi_line = (v: int) => {
+        obj.value = v
+    }
+
+    single_expr(100)
+    assert_eq(obj.value, 100)
+
+    multi_line(200)
+    assert_eq(obj.value, 200)
+}
+
+// Test assignment in higher-order functions
+fn apply_setter(setter: (int) -> (), value: int) {
+    setter(value)
+}
+
+@test
+fn test_single_expr_lambda_higher_order() {
+    let obj = Mutable {}
+
+    apply_setter((v: int) => obj.value = v, 333)
+    assert_eq(obj.value, 333)
+}
+
+@test
+fn test_single_expr_lambda_with_operators() {
+    let counter = Container { item: Mutable {}, count: 10 }
+
+    let increment = (n: int) => counter.count = counter.count + n
+    let multiply = (n: int) => counter.count = counter.count * n
+
+    increment(5)
+    assert_eq(counter.count, 15)
+
+    multiply(2)
+    assert_eq(counter.count, 30)
+}
+
+// Test assignment returning from function
+fn make_setter(target: Mutable) -> (int) -> () {
+    return (v: int) => target.value = v
+}
+
+@test
+fn test_single_expr_lambda_return_behavior() {
+    let obj = Mutable {}
+    let setter = make_setter(obj)
+
+    setter(42)
+    assert_eq(obj.value, 42)
+}
+
+@test
+fn test_single_expr_lambda_array_assignment() {
+    let values = [0, 0, 0]
+
+    let set_first = (v: int) => values[0] = v
+    let set_second = (v: int) => values[1] = v
+    let set_third = (v: int) => values[2] = v
+
+    set_first(10)
+    set_second(20)
+    set_third(30)
+
+    assert_eq(values[0], 10)
+    assert_eq(values[1], 20)
+    assert_eq(values[2], 30)
+}
+
+@test
+fn test_single_expr_lambda_nullable_assignment() {
+    let obj = Mutable { value: null }
+
+    let set_some = (v: int) => obj.value = v
+    let set_none = () => obj.value = null
+
+    set_some(42)
+    assert_eq(obj.value, 42)
+
+    set_none()
+    assert_eq(obj.value, null)
+}
+
+// Test assignment in conditional context
+fn conditional_set(cond: bool, setter: (int) -> (), value: int) {
+    if cond {
+        setter(value)
+    }
+}
+
+@test
+fn test_single_expr_lambda_conditional() {
+    let obj = Mutable {}
+
+    conditional_set(true, (v: int) => obj.value = v, 100)
+    assert_eq(obj.value, 100)
+
+    conditional_set(false, (v: int) => obj.value = v, 200)
+    assert_eq(obj.value, 100) // Should not have changed
+}
+
+@test
+fn test_single_expr_lambda_non_assignment() {
+    // These should still work as before
+    let add = (a: int, b: int) => a + b
+    let multiply = (x: int) => x * 2
+    let compare = (a: int, b: int) => a > b
+
+    assert_eq(add(2, 3), 5)
+    assert_eq(multiply(4), 8)
+    assert_eq(compare(5, 3), true)
+}
+
+@test
+fn test_single_expr_lambda_side_effects() {
+    let counter = Container { item: Mutable {}, count: 0 }
+    let obj = Mutable {}
+
+    // This lambda has a side effect (incrementing counter)
+    // while doing the assignment
+    let assign_with_count = (v: int) => obj.value = {
+        counter.count = counter.count + 1
+        v
+    }
+
+    assign_with_count(10)
+    assert_eq(obj.value, 10)
+    assert_eq(counter.count, 1)
+
+    assign_with_count(20)
+    assert_eq(obj.value, 20)
+    assert_eq(counter.count, 2)
+}

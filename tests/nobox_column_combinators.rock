@@ -1,0 +1,136 @@
+// The lazy combinator pipeline over a COLUMN-stored `[Vec2]` (`nobox value`).
+// The repack's transient
+// box pinned alive by an unfoldable presence test, and an element rebuild that
+// could only express a flat value (which is what `zip` needed). Values, not
+// statuses: each test returns the computed answer.
+
+value BV2 { x: float, y: float }
+
+@test(returns = 3)
+fn map_over_a_column_vec() -> int {
+    let a: [Vec2] = [Vec2 { x: 1.0, y: 1.0 }, Vec2 { x: 2.0, y: 2.0 }]
+    return a.map(_.x).sum_f() as int
+}
+
+@test(returns = 1)
+fn filter_over_a_column_vec() -> int {
+    let a: [Vec2] = [Vec2 { x: 1.0, y: 1.0 }, Vec2 { x: 2.0, y: 2.0 }]
+    return a.filter(_.x > 1.0).count()
+}
+
+@test(returns = 206)
+fn collect_from_a_column_vec() -> int {
+    let a: [Vec2] = [Vec2 { x: 1.0, y: 1.0 }, Vec2 { x: 2.0, y: 5.0 }, Vec2 { x: -3.0, y: 9.0 }]
+    let b = a.filter(_.x > 0.0).collect()
+    // len in the hundreds digit, the surviving element's y in the units:
+    // a collect that dropped or duplicated a row moves the first, one that
+    // rebuilt the element off the wrong column moves the second.
+    return b.len * 100 + (b[0].y + b[1].y) as int
+}
+
+@test(returns = 3)
+fn reduce_over_a_column_vec() -> int {
+    let a: [Vec2] = [Vec2 { x: 1.0, y: 1.0 }, Vec2 { x: 2.0, y: 2.0 }]
+    return a.map(_.x).reduce(0.0, (acc, v) => acc + v) as int
+}
+
+// No fn value anywhere in the chain: `skip` proves the defect was the combinator
+// wrapper, not the lambda that map/filter happen to carry.
+@test(returns = 9)
+fn skip_over_a_column_vec() -> int {
+    let a: [Vec2] = [Vec2 { x: 1.0, y: 1.0 }, Vec2 { x: 2.0, y: 5.0 }, Vec2 { x: 7.0, y: 9.0 }]
+    let total = 0.0
+    for v in a.skip(1) { total = total + v.x }
+    return total as int
+}
+
+// A chain, so the element crosses two wrapper `next`s before the terminal.
+@test(returns = 8)
+fn chained_combinators_over_a_column_vec() -> int {
+    let a: [Vec2] = [Vec2 { x: 1.0, y: 1.0 }, Vec2 { x: 2.0, y: 2.0 }, Vec2 { x: 6.0, y: 6.0 }]
+    return a.filter(_.x > 1.0).map(_.y).sum_f() as int
+}
+
+// The element must survive the pipeline WHOLE, not just as a projected field.
+// A top-level fn rather than a lambda on purpose: a LAMBDA returning a `nobox`
+// value is a separate open gap that
+// would mask this one.
+fn swap(v: Vec2) -> Vec2 { return Vec2 { x: v.y, y: v.x } }
+
+@test(returns = 8)
+fn element_survives_a_map_to_itself() -> int {
+    let a: [Vec2] = [Vec2 { x: 1.0, y: 3.0 }, Vec2 { x: 2.0, y: 2.0 }]
+    let b = a.map(swap).collect()
+    return (b[0].x * 2.0 + b[1].y) as int
+}
+
+// `zip` was a SECOND defect: its element is a TUPLE of two `nobox` values, which
+// the splice's element rebuild could only express flat. The `for`-position form
+// always worked, so the discriminant is the placeholder splice, not `zip`.
+@test(returns = 2)
+fn zip_over_a_column_vec_counts() -> int {
+    let a: [Vec2] = [Vec2 { x: 1.0, y: 1.0 }, Vec2 { x: 2.0, y: 2.0 }]
+    return a.zip(a).count()
+}
+
+// A wrapper BEHIND the zip, so the pair element crosses the placeholder splice
+// inside `SkipIter.next` and is then read whole. Each side contributes a
+// different field, so a swapped or duplicated leaf moves the answer.
+@test(returns = 24)
+fn zip_over_a_column_vec_carries_both_elements() -> int {
+    let a: [Vec2] = [Vec2 { x: 1.0, y: 3.0 }, Vec2 { x: 2.0, y: 4.0 }]
+    let b: [Vec2] = [Vec2 { x: 10.0, y: 5.0 }, Vec2 { x: 20.0, y: 6.0 }]
+    let t = 0.0
+    for (p, q) in a.zip(b).skip(1) { t = t + p.y + q.x }
+    return t as int
+}
+
+// `enumerate` in a CHAIN also carries a tuple element -- the same rebuild.
+@test(returns = 13)
+fn enumerate_chain_over_a_column_vec() -> int {
+    let a: [Vec2] = [Vec2 { x: 1.0, y: 1.0 }, Vec2 { x: 2.0, y: 2.0 }]
+    let t = 0.0
+    for (i, v) in a.iter().enumerate() { t = t + i as float * 10.0 + v.x }
+    return t as int
+}
+
+// The rest of the combinator surface, enumerated rather than assumed: unlocking
+// one shape makes its neighbours reachable all at once, and none of them had
+// coverage before because none of them could compile.
+fn pair_of(v: Vec2) -> VecIter<Vec2> { return [v, v].iter() }
+
+@test(returns = 2226663)
+fn the_remaining_combinators_over_a_column_vec() -> int {
+    let a: [Vec2] = [Vec2 { x: 1.0, y: 1.0 }, Vec2 { x: 2.0, y: 2.0 }, Vec2 { x: 3.0, y: 3.0 }]
+    let n = a.take_while(_.x < 3.0).count()
+    n = n * 10 + a.take(2).count()
+    n = n * 10 + a.step_by(2).count()
+    n = n * 10 + a.chain(a.iter()).count()
+    n = n * 10 + a.flat_map(pair_of).count()
+    n = n * 10 + a.map(_.x).sum_f() as int
+    return n * 10 + (a.max_by(_.x)?.y ?? 0.0) as int
+}
+
+// The unmarked twin: the same pipeline over a boxed `value` keeps working.
+@test(returns = 3)
+fn unmarked_value_pipeline_still_works() -> int {
+    let a: [BV2] = [BV2 { x: 1.0, y: 1.0 }, BV2 { x: 2.0, y: 2.0 }]
+    return a.map(_.x).sum_f() as int
+}
+
+// `a.enumerate()` with no explicit `.iter()`. Was pinned as a container gap: the
+// EAGER `Vec<T>.enumerate` built a `[(int, Vec2)]`, a vec of tuples with no
+// column form. That overload is deleted, so the receiver coerces to the lazy
+// iterator one and the column is never materialized.
+@test(returns = 2)
+fn bare_enumerate_on_a_column_vec_counts() -> int {
+    let a: [Vec2] = [Vec2 { x: 1.0, y: 1.0 }, Vec2 { x: 2.0, y: 2.0 }]
+    return a.enumerate().count()
+}
+
+// 0 + 1.0 (index 0, y=1.0) + 1 + 4.0 (index 1, y=4.0)
+@test(returns = 6.0)
+fn bare_enumerate_on_a_column_vec_reads_its_element() -> float {
+    let a: [Vec2] = [Vec2 { x: 1.0, y: 1.0 }, Vec2 { x: 2.0, y: 4.0 }]
+    return a.enumerate().reduce(0.0, (acc, p) => acc + (p.0 as float) + p.1.y)
+}

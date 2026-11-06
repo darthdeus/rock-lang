@@ -1,0 +1,65 @@
+// Unified `.get(key) -> T?` accessor across collection types. Every
+// indexable collection now exposes both:
+//   x[i]      -> T   (direct; errors or UB on miss depending on type)
+//   x.get(i)  -> T?  (safe; null on miss, same semantics everywhere)
+
+@test
+fn vec_get_ufcs() {
+    let v = [10, 20, 30]
+    assert(v.get(0) == 10)
+    assert(v.get(1) == 20)
+    assert(v.get(2) == 30)
+    assert(v.get(3) == null)
+    assert(v.get(-1) == null)
+}
+
+@test
+fn native_buffer_get_float() {
+    let b = native_buffer_float(3)
+    b[0] = 1.5
+    b[1] = 2.5
+    b[2] = 3.5
+    assert(b.get(0) == 1.5)
+    assert(b.get(2) == 3.5)
+    assert(b.get(3) == null)
+    assert(b.get(-1) == null)
+}
+
+@test
+fn native_buffer_get_int() {
+    let b = native_buffer_int(4)
+    b[0] = 11
+    b[1] = 22
+    b[3] = 44
+    assert(b.get(0) == 11)
+    assert(b.get(3) == 44)
+    assert(b.get(4) == null)
+    assert(b.get(-1) == null)
+}
+
+@test
+fn map_get_ufcs() {
+    let m: Map<string, int> = map_new()
+    insert(m, "hp", 100)
+    insert(m, "mp", 50)
+    assert(m.get("hp") == 100)
+    assert(m.get("mp") == 50)
+    assert(m.get("missing") == null)
+}
+
+@test
+fn get_chains_with_null_coalesce() {
+    // The `T?` return plays well with `??` and `?.let`.
+    let v = [10, 20, 30]
+    let m: Map<string, int> = map_new()
+    insert(m, "answer", 42)
+
+    let x = v.get(100) ?? -1
+    assert(x == -1)
+
+    let y = m.get("answer") ?? 0
+    assert(y == 42)
+
+    let z = m.get("missing") ?? 0
+    assert(z == 0)
+}

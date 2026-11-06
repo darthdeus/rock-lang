@@ -1,0 +1,50 @@
+// Literal promotion complex tests - migrated from rock/tests/literal_promotion_complex_test.rs  
+// Tests complex arithmetic with literal promotion, particularly float/int division
+
+// Shared struct definitions for testing
+struct UiRect {
+    x: float,
+    y: float,
+    w: float,
+    h: float,
+}
+
+struct FixVec2 {
+    x: float,
+    y: float,
+}
+
+// Helper functions for FixVec2 operations
+fn vec2(x: float, y: float) -> FixVec2 {
+    return FixVec2 { x: x, y: y }
+}
+
+fn center_x(r: UiRect) -> float {
+    return r.x + r.w / 2
+}
+
+fn center(r: UiRect) -> FixVec2 {
+    return vec2(r.x + r.w / 2, r.y + r.h / 2)
+}
+
+@test(output = "60")
+fn test_float_field_int_literal_division() {
+    let rect = UiRect { x: 10.0, y: 20.0, w: 100.0, h: 200.0 }
+    let result = center_x(rect)
+    print(result)
+}
+
+@test(output = "60")
+fn test_complex_arithmetic_chain() {
+    let x: float = 10.0
+    let w: float = 100.0
+    let result = x + w / 2
+    print(result)
+}
+
+@test(output = "60")
+fn test_vec2_like_construction() {
+    let rect = UiRect { x: 10.0, y: 20.0, w: 100.0, h: 200.0 }
+    let c = center(rect)
+    print(c.x)
+}

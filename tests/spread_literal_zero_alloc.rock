@@ -1,0 +1,29 @@
+// A spread of a struct literal is never materialized (plan M3): its field
+// exprs lower directly as the named args. This pins that each field expr is
+// evaluated EXACTLY ONCE, in literal/source order (side effects preserved).
+
+global ORDER: string = ""
+
+fn tick(tag: string, val: int) -> int {
+    ORDER = "{ORDER}{tag}"
+    val
+}
+
+struct AB { a: int, b: int }
+
+fn use2(a: int, b: int) -> string { "{a},{b}" }
+
+@test(output = "10,20 order=ab")
+fn test_spread_literal_eval_order() {
+    ORDER = ""
+    let r = use2(..AB { a: tick("a", 10), b: tick("b", 20) })
+    print("{r} order={ORDER}")
+}
+
+// Fields written out of declared order still evaluate in SOURCE order.
+@test(output = "10,20 order=ba")
+fn test_spread_literal_source_order() {
+    ORDER = ""
+    let r = use2(..AB { b: tick("b", 20), a: tick("a", 10) })
+    print("{r} order={ORDER}")
+}

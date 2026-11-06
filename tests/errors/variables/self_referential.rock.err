@@ -1,0 +1,46 @@
+//! Error: Self-referential variable binding tests
+//! Tags: variables, scoping, self-reference
+
+//=== TEST CASE: basic_self_reference_Generic ===
+fn main() {
+    // This should fail - variable cannot reference itself in its own initializer
+    let x = x
+}
+
+//=== TEST CASE: self_reference_with_method_Generic ===
+fn main() {
+    // This should fail - variable cannot reference itself even with method call
+    let y = y.unwrap()
+}
+
+//=== TEST CASE: self_reference_with_type_annotation_Generic ===
+fn main() {
+    // This should fail - type annotation doesn't change the scoping rules
+    let z: int = z + 1
+}
+
+//=== TEST CASE: tuple_destructuring_self_reference_Generic ===
+fn main() {
+    // Even in tuple destructuring, variables shouldn't see themselves
+    let (x, y) = (x, 2)
+}
+
+//=== TEST CASE: self_reference_with_function_call_Generic ===
+fn identity(x: int) -> int {
+    return x
+}
+
+fn main() {
+    // This should fail - variable cannot reference itself even through function calls
+    let y = identity(y)
+}
+
+//=== TEST CASE: self_reference_complex_function_call_Generic ===
+fn scene_change(scene: int, transition_type: int) -> int {
+    return scene + transition_type
+}
+
+fn main() {
+    // This is the exact pattern from the original bug report
+    let menu_scene = scene_change(menu_scene, 1)
+}

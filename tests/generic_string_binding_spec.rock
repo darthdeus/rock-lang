@@ -1,0 +1,45 @@
+// A generic bound to `string` inside a SPECIALIZED body. The specialization is
+// forced by the value-struct leaf in the other slot; `S`'s slot then carries
+// `MonoTy::String`, and the substituted type node is what every shape query in
+// the body reads.
+//
+// The node for that binding used to be the RECOVERY builtin, because the tree it
+// came from had one `Prim` arm and a catch-all. Nothing here can tell the two
+// apart -- every operation legal on a generic in a SHARED body reads a
+// constructor, not a leaf -- so this is a compile-and-run control, and the
+// discriminating assertion is the unit test on `mono_type_node` itself.
+
+value SpecPoint { x: float, y: float }
+
+@inline
+fn second<P, S>(p: P, s: S) -> S {
+    return s
+}
+
+@inline
+fn hold<P, S>(p: P, s: S) -> [S] {
+    let out: [S] = []
+    out.push(s)
+    return out
+}
+
+@test(output = "hi")
+fn test_generic_string_binding_returns_its_value() {
+    let s = second(SpecPoint { x: 1.0, y: 2.0 }, "hi")
+    print(s)
+}
+
+@test(output = "hi")
+fn test_generic_string_binding_through_a_container() {
+    let held = hold(SpecPoint { x: 3.0, y: 4.0 }, "hi")
+    print(held[0])
+}
+
+// The control: the same values spelled out concretely, so a green above is
+// about the BINDING rather than about strings working at all.
+@test(output = "hi")
+fn test_concrete_string_control() {
+    let v: [string] = []
+    v.push("hi")
+    print(v[0])
+}

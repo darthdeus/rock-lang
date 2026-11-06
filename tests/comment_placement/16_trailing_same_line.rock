@@ -1,0 +1,7 @@
+// Trailing line comments
+@test(output = "3")
+fn t() {
+    let a = 1 // first
+    let b = 2 // second
+    print(a + b) // sum
+}

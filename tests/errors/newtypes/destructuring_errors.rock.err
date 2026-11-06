@@ -1,0 +1,43 @@
+//! Error: Newtype destructuring error tests
+//! Tags: newtypes, destructuring, patterns
+
+//=== TEST CASE: arity_mismatch_too_many_Generic ===
+newtype UserId(int)
+
+fn main() {
+    let user_id = UserId(42)
+    let UserId(a, b) = user_id
+    print(a)
+}
+
+//=== TEST CASE: arity_mismatch_too_few_Generic ===
+newtype Point2D(float, float)
+
+fn main() {
+    let point = Point2D(1.0, 2.0)
+    let Point2D(x) = point
+    print(x)
+}
+
+//=== TEST CASE: destructure_struct_with_newtype_Generic ===
+newtype UserId(int)
+
+struct User {
+    id: int,
+    name: string,
+}
+
+fn main() {
+    let user = User { id: 42, name: "Alice" }
+    let UserId(x) = user
+    print(x)
+}
+
+//=== TEST CASE: destructure_int_with_newtype_Generic ===
+newtype UserId(int)
+
+fn main() {
+    let x = 42
+    let UserId(id) = x
+    print(id)
+}

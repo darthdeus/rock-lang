@@ -1,0 +1,10 @@
+// Comment between `if` and condition, and before `{`
+@test(output = "yes")
+fn t() {
+    let x = 5
+    if /* positive? */ x > 0 /* yes it is */ {
+        print("yes")
+    } else {
+        print("no")
+    }
+}

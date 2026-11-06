@@ -1,0 +1,17 @@
+value GcAliasLabel { text: string, n: int }
+struct GcAliasHolder { a: GcAliasLabel, b: GcAliasLabel }
+
+fn gc_alias_store_twice(e: GcAliasLabel?, h: GcAliasHolder) {
+    if let v = e {
+        h.a = v
+        h.b = v
+    }
+}
+
+@test
+fn storing_one_gc_value_twice_copies() {
+    let h = GcAliasHolder { a: GcAliasLabel { text: "a", n: 0 }, b: GcAliasLabel { text: "b", n: 0 } }
+    gc_alias_store_twice(GcAliasLabel { text: "x", n: 1 }, h)
+    h.a.n = 5
+    assert_eq(h.b.n, 1, "GC value stores copy independently")
+}

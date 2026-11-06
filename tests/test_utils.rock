@@ -1,0 +1,11 @@
+#test-util
+
+// This test utility file is visible to all #test files
+
+fn assert_contains(text: string, substring: string) {
+    assert(text.contains(substring));
+}
+
+fn test_helper_function() -> int {
+    return 42;
+}

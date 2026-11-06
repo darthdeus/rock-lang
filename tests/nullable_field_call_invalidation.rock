@@ -1,0 +1,12 @@
+value RoutePlace { x: int }
+struct RouteRow { goal: RoutePlace? = null }
+fn clear_route_goal(row: RouteRow) { row.goal = null }
+
+@test
+fn nullable_field_assignment_is_invalidated_through_an_alias() {
+    let row = RouteRow {}
+    let alias = row
+    row.goal = RoutePlace { x: 7 }
+    clear_route_goal(alias)
+    assert(row.goal == null)
+}

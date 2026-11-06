@@ -1,0 +1,30 @@
+// A value struct whose leaf names are AMBIGUOUS under the scalar ABI's `__`
+// join (`tl__x` the field vs `tl.x` the nested path) is perfectly legal as long
+// as the ambiguity never reaches a NAMED parameter list. An ordinary Rock fn
+// emits its params as positional `c<N>` cells, so the leaves stay addressable
+// and every read computes the right field -- including through a fn value,
+// where the ABI is derived from the fn type rather than the callee's decl.
+//
+// The rejection is scoped to `inline(lua)` bodies, which are the only emission
+// that names leaves; those cases live in
+// tests/errors/value_leaf_name_collision.rock.err. This file is the control
+// that fails if that rejection ever widens back to the declaration.
+
+nobox value P { x: float, y: float }
+nobox value R { tl: P, tl__x: float }
+
+fn apply(f: (R) -> float, r: R) -> float { return f(r) }
+
+@test fn ambiguous_leaves_read_correctly_through_a_fn_value() {
+    let r = R { tl: P { x: 1.0, y: 20.0 }, tl__x: 300.0 }
+    assert_eq(apply((a) => a.tl.x + a.tl.y + a.tl__x, r), 321.0)
+    assert_eq(apply((a) => a.tl__x, r), 300.0)
+    assert_eq(apply((a) => a.tl.x, r), 1.0)
+}
+
+@test fn ambiguous_leaves_read_correctly_at_a_direct_call() {
+    let r = R { tl: P { x: 1.0, y: 20.0 }, tl__x: 300.0 }
+    assert_eq(r.tl.x, 1.0)
+    assert_eq(r.tl.y, 20.0)
+    assert_eq(r.tl__x, 300.0)
+}

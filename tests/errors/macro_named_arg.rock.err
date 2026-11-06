@@ -1,0 +1,33 @@
+//! Error: a macro argument label must name a parameter of that macro, once
+//! Tags: macros, named-args
+
+// Macro args bind by label when one is given (tests/macros/named_args.rock).
+// A label naming no parameter is a typo, not a positional arg -- the expander
+// used to drop the label and bind by position, so `three(1, zzz: 3)` silently
+// became `three(1, 3)`. A fn call rejects all three shapes below.
+//
+// Every case passes an arg count the macro's arity ACCEPTS, so a rejection can
+// only come from the label rule. Written with 3 params for that reason: at
+// 2 params the duplicate cases are 3 args, which no overload matches, and they
+// would be rejected on arity while the label rule did nothing.
+
+//=== TEST CASE: unknown_label_Rejected ===
+macro three(a: expr, b: expr = 2, c: expr = 3) -> int { a + b + c }
+
+fn main() {
+    let _ = three(1, zzz: 3)   // ERROR: no parameter named `zzz`
+}
+
+//=== TEST CASE: label_repeated_Rejected ===
+macro three(a: expr, b: expr = 2, c: expr = 3) -> int { a + b + c }
+
+fn main() {
+    let _ = three(1, b: 3, b: 4)   // ERROR: `b` given twice
+}
+
+//=== TEST CASE: label_duplicates_a_positional_Rejected ===
+macro three(a: expr, b: expr = 2, c: expr = 3) -> int { a + b + c }
+
+fn main() {
+    let _ = three(1, 2, a: 3)   // ERROR: `a` already filled positionally
+}

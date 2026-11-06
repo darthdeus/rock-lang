@@ -1,0 +1,29 @@
+// Adversarial tests: @inline — generics and monomorphization
+//
+// Each monomorphization is a separate concrete fn after type-checking.
+// Inlining must work per-monomorphization, not confuse them.
+
+@inline
+fn id<T>(x: T) -> T {
+    return x
+}
+
+@test(output = "42")
+fn test_generic_int() {
+    print(id(42))
+}
+
+@test(output = "3")
+fn test_generic_float() {
+    print(id(3.14) as int)
+}
+
+@test(output = "hello")
+fn test_generic_string() {
+    print(id("hello"))
+}
+
+@test(output = "5 5")
+fn test_multiple_monos_same_call() {
+    print("{id(5)} {id(5)}")
+}

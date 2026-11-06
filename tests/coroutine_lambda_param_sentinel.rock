@@ -1,0 +1,23 @@
+// Regression guard (P1): a lambda WITH
+// PARAMS inside a `co fn` body reads its ARGUMENT, not a frame field. The lambda
+// hoists to a top-level fn whose params are its own plain locals; only captured
+// co-fn state goes through the frame (via the record's `s` capture). Formerly a
+// sentinel pinning the nil-param miscompile (the transform swept the param cell
+// into the frame; `add(5)` computed `nil + 100` and the coroutine died silently).
+
+enum LEv { Tick(int) }
+
+global PARAM_R: int = 0
+
+co fn worker_lam() -> Coroutine<LEv> {
+    let add = (n: int) => n + 100
+    PARAM_R = add(5)
+    yield LEv::Tick(1)
+}
+
+@test(output = "105")
+fn test_cofn_lambda_with_param() {
+    let c = worker_lam()
+    let _ = c.resume()
+    print("{PARAM_R}")
+}

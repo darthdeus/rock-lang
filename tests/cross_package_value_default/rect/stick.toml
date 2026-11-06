@@ -1,0 +1,11 @@
+[package]
+name = "rect"
+version = "0.1.0"
+type = "lib"
+
+[language]
+modules = "v1"
+
+[build]
+channels = ["dev"]
+default_channel = "dev"

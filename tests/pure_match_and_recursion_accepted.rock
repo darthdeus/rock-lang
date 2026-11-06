@@ -1,0 +1,33 @@
+// `@pure` correctly accepts genuinely side-effect-free bodies that rock's
+// verifier wrongly rejected as its own implementation limitations: a match with
+// a binding pattern, and direct self-recursion. Both are pure. These cases used
+// to live (inverted) in tests/errors/pure_verification.rock.err because rock
+// false-rejected them; under the all-in-bone pivot we fix toward correct, not
+// rock-parity.
+
+enum Opt { Some(int), None }
+
+@pure
+fn pure_match(o: Opt) -> int {
+    return match o {
+        Some(v) => v,
+        None => 0,
+    }
+}
+
+@pure
+fn pure_recursion(n: int) -> int {
+    if n <= 0 { return 0 }
+    return pure_recursion(n - 1) + n
+}
+
+@test(output = "42\n0")
+fn test_pure_match_binding_is_pure() {
+    print(pure_match(Opt::Some(42)))
+    print(pure_match(Opt::None))
+}
+
+@test(output = "15")
+fn test_pure_self_recursion_is_pure() {
+    print(pure_recursion(5))
+}

@@ -1,0 +1,57 @@
+struct RefTestPlayer {
+    hp: int,
+}
+
+fn ref_test_set_hp(player: ref RefTestPlayer, hp: int) {
+    player.hp = hp
+}
+
+fn ref_test_read_hp(player: ref RefTestPlayer) -> int {
+    return player.hp
+}
+
+@test
+fn ref_parameter_borrows_a_struct_place() {
+    let player = RefTestPlayer { hp: 10 }
+    ref_test_set_hp(player, 42)
+    assert_eq(ref_test_read_hp(player), 42)
+}
+
+@test
+fn entity_borrow_resolves_a_frame_reference() {
+    let players: Arena<RefTestPlayer> = arena_new()
+    let entity = players.insert(RefTestPlayer { hp: 7 })
+    let player = entity.borrow().unwrap()
+
+    ref_test_set_hp(player, 99)
+
+    assert_eq(player.ref_test_read_hp(), 99)
+    assert_eq(entity.get().unwrap().hp, 99)
+}
+
+value RefTestNamedCell { name: string, w: int }
+value RefTestListCell { xs: [int], w: int }
+value RefTestMaybeCell { w: int? }
+
+fn ref_test_bump_named(c: ref RefTestNamedCell) { c.w += 1 }
+fn ref_test_bump_list(c: ref RefTestListCell) { c.w += 1 }
+fn ref_test_set_maybe(c: ref RefTestMaybeCell) { c.w = 9 }
+
+@test
+fn borrow_of_a_table_stored_value_element_writes_through() {
+    let named: Arena<RefTestNamedCell> = arena_new()
+    let a = named.insert(RefTestNamedCell { name: "x", w: 5 })
+    ref_test_bump_named(named.borrow(a).unwrap())
+    ref_test_bump_named(a.borrow().unwrap())
+    assert_eq(named.get(a).unwrap().w, 7)
+
+    let lists: Arena<RefTestListCell> = arena_new()
+    let b = lists.insert(RefTestListCell { xs: [], w: 5 })
+    ref_test_bump_list(lists.borrow(b).unwrap())
+    assert_eq(lists.get(b).unwrap().w, 6)
+
+    let maybes: Arena<RefTestMaybeCell> = arena_new()
+    let c = maybes.insert(RefTestMaybeCell { w: 5 })
+    ref_test_set_maybe(maybes.borrow(c).unwrap())
+    assert_eq(maybes.get(c).unwrap().w ?? 0, 9)
+}

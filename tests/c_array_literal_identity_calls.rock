@@ -1,0 +1,46 @@
+struct ArrayPanel {
+    actions: [int],
+    vertical: bool = false,
+}
+
+fn array_panel(actions: [int], vertical: bool = false) -> ArrayPanel {
+    return ArrayPanel { actions, vertical }
+}
+
+fn default_array_panels() -> [ArrayPanel] {
+    return [
+        array_panel([11, 12]),
+        array_panel([21], true),
+        ArrayPanel { actions: [31, 32, 33], vertical: true },
+    ]
+}
+
+@test
+fn array_literal_mixes_identity_calls_and_constructor() {
+    let panels = default_array_panels()
+    assert_eq(panels.len, 3)
+    assert_eq(panels[0].actions[1], 12)
+    assert_eq(panels[0].vertical, false)
+    assert_eq(panels[1].actions[0], 21)
+    assert_eq(panels[1].vertical, true)
+    assert_eq(panels[2].actions.len, 3)
+    assert_eq(panels[2].actions[2], 33)
+    assert_eq(panels[2].vertical, true)
+}
+
+fn reversed_array_panels() -> [ArrayPanel] {
+    return [
+        ArrayPanel { actions: [41], vertical: true },
+        array_panel([51, 52]),
+    ]
+}
+
+@test
+fn array_literal_mixes_constructor_and_identity_call() {
+    let panels = reversed_array_panels()
+    assert_eq(panels.len, 2)
+    assert_eq(panels[0].actions[0], 41)
+    assert_eq(panels[0].vertical, true)
+    assert_eq(panels[1].actions[1], 52)
+    assert_eq(panels[1].vertical, false)
+}

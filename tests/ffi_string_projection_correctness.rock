@@ -1,0 +1,76 @@
+// Correctness check for ffi.string projection as a Lua table key.
+// Verifies value semantics: fresh struct instances with equal bytes hit
+// the same key, and different bytes hit different keys.
+
+value TestKey {
+    x: int,
+    y: int,
+}
+
+@nomangle inline(lua) fn __new_t() -> any = "return {}"
+@nomangle inline(lua) fn __new_scratch() -> any = "return ffi.new('int64_t[1]')"
+
+@nomangle inline(lua) fn __insert(t: any, scratch: any, k: TestKey, v: int) = """
+    local kptr = ffi.cast("TestKey*", scratch)
+    kptr[0] = k
+    t[ffi.string(scratch, 8)] = v
+"""
+
+@nomangle inline(lua) fn __get(t: any, scratch: any, k: TestKey) -> int? = """
+    local kptr = ffi.cast("TestKey*", scratch)
+    kptr[0] = k
+    return t[ffi.string(scratch, 8)]
+"""
+
+@nomangle inline(lua) fn __size(t: any) -> int = """
+    local c = 0; for _ in pairs(t) do c = c + 1 end; return c
+"""
+
+@test
+fn test_ffi_string_fresh_instances_collide() {
+    let t = __new_t()
+    let s = __new_scratch()
+    __insert(t, s, TestKey { x: 7, y: 8 }, 42)
+    let v = __get(t, s, TestKey { x: 7, y: 8 })
+    assert_eq(v.unwrap(), 42)
+}
+
+@test
+fn test_ffi_string_different_bytes_different_bucket() {
+    let t = __new_t()
+    let s = __new_scratch()
+    __insert(t, s, TestKey { x: 1, y: 2 }, 100)
+    __insert(t, s, TestKey { x: 2, y: 1 }, 200)
+    assert_eq(__size(t), 2)
+    assert_eq(__get(t, s, TestKey { x: 1, y: 2 }).unwrap(), 100)
+    assert_eq(__get(t, s, TestKey { x: 2, y: 1 }).unwrap(), 200)
+}
+
+@test
+fn test_ffi_string_zero_and_negative_bytes() {
+    // Keys with NUL bytes and negative values — ffi.string is length-bound,
+    // not NUL-terminated, so NULs are fine. Negative ints → 0xffff.. bytes.
+    let t = __new_t()
+    let s = __new_scratch()
+    __insert(t, s, TestKey { x: 0, y: 0 }, 1)      // all NUL bytes
+    __insert(t, s, TestKey { x: -1, y: -1 }, 2)    // all FF bytes
+    __insert(t, s, TestKey { x: 0, y: -1 }, 3)     // mixed
+    assert_eq(__size(t), 3)
+    assert_eq(__get(t, s, TestKey { x: 0, y: 0 }).unwrap(), 1)
+    assert_eq(__get(t, s, TestKey { x: -1, y: -1 }).unwrap(), 2)
+    assert_eq(__get(t, s, TestKey { x: 0, y: -1 }).unwrap(), 3)
+}
+
+@test
+fn test_ffi_string_large_map() {
+    let t = __new_t()
+    let s = __new_scratch()
+    for i in 0..10000 {
+        __insert(t, s, TestKey { x: i, y: i * 2 + 1 }, i * 100)
+    }
+    assert_eq(__size(t), 10000)
+    for j in 0..10000 {
+        let v = __get(t, s, TestKey { x: j, y: j * 2 + 1 })
+        assert_eq(v.unwrap(), j * 100)
+    }
+}

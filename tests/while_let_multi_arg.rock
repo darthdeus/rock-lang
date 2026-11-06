@@ -1,0 +1,24 @@
+// `while let A(x, y) = e` — multi-arg enum-variant pattern in
+// while-let. Each ident leaf binds to `t[i+1]` (1-based raw index into
+// the variant payload). Mirrors live's `generate_pattern_bindings` for
+// the `EnumVariant` case in `pattern_matching.rs`.
+
+enum E { A(int, int), B }
+
+@test(output = "5 6")
+fn test_while_let_multi_arg() {
+    let e: E = E::A(5, 6);
+    while let A(x, y) = e {
+        print("{x} {y}");
+        e = E::B;
+    }
+}
+
+@test(output = "10")
+fn test_while_let_wildcard_arg() {
+    let e: E = E::A(10, 20);
+    while let A(x, _) = e {
+        print("{x}");
+        e = E::B;
+    }
+}

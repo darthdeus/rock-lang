@@ -1,0 +1,38 @@
+// Adversarial tests for the L4 "@inline mutates param" hard error
+// (commit fa3c3e5a). Main goldens are in
+// `tests/errors/inline_param_mutation.rock.err`. Here we check the
+// *interaction* with V0's body restrictions:
+//
+// V0 `@inline` bodies are restricted to expression statements + a
+// trailing expression or bare `return <expr>`. That restriction already
+// rules out shadow-copy bypass (`let x = x + 1; ...`) at parse/validate
+// time. So L4's job is to catch direct mutation of a param in the
+// forms V0 DOES allow — which is effectively only `return <expr>` and
+// bare expression statements.
+//
+// Bypass attempts that we confirm ARE rejected live in the .err
+// companion. Here we confirm the benign positive cases compile.
+
+// Simple param-read + return. No mutation. Must compile.
+@inline
+fn read_only(x: int) -> int {
+    return x + 1
+}
+
+@test(output = "11")
+fn test_inline_read_only_param() {
+    print(read_only(10))
+}
+
+// Call chain through @inline. Param read, used twice in body.
+@inline
+fn use_twice(x: int) -> int {
+    return x * x + x
+}
+
+@test(output = "12")
+fn test_inline_param_used_twice() {
+    // 3*3 + 3 = 12. Uses `x` twice; inline pass must ensure arg
+    // dup-safety (literal `3` is trivially dup-safe).
+    print(use_twice(3))
+}

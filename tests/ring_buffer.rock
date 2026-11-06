@@ -1,0 +1,117 @@
+@test
+fn test_ring_new_empty() {
+    let rb: RingBuffer<int> = ring_new(4)
+    assert_eq(rb.len(), 0, "new ring is empty")
+    assert_eq(rb.cap, 4, "cap is fixed at construction")
+}
+
+@test
+fn test_ring_fill_under_cap() {
+    let rb: RingBuffer<int> = ring_new(4)
+    rb.push(1)
+    rb.push(2)
+    rb.push(3)
+    assert_eq(rb.len(), 3, "len tracks pushes under cap")
+
+    let out = rb.iter().collect()
+    assert_eq(out.len, 3, "iter yields all elements")
+    assert_eq(out[0], 1, "iter is oldest-first")
+    assert_eq(out[1], 2, "insertion order kept")
+    assert_eq(out[2], 3, "newest last")
+}
+
+@test
+fn test_ring_wraps_overwriting_oldest() {
+    let rb: RingBuffer<int> = ring_new(3)
+    rb.push(1)
+    rb.push(2)
+    rb.push(3)
+    rb.push(4)
+    rb.push(5)
+    assert_eq(rb.len(), 3, "len caps at capacity")
+
+    let out = rb.iter().collect()
+    assert_eq(out[0], 3, "oldest survivor first")
+    assert_eq(out[1], 4, "wrap keeps order")
+    assert_eq(out[2], 5, "newest last after wrap")
+}
+
+@test
+fn test_ring_ago_newest_first() {
+    let rb: RingBuffer<int> = ring_new(4)
+    rb.push(10)
+    rb.push(20)
+    rb.push(30)
+    assert_eq(rb.ago(0), 30, "ago(0) is newest")
+    assert_eq(rb.ago(1), 20, "ago(1) is one back")
+    assert_eq(rb.ago(2), 10, "ago(len-1) is oldest")
+}
+
+@test
+fn test_ring_ago_after_wrap() {
+    let rb: RingBuffer<int> = ring_new(3)
+    rb.push(1)
+    rb.push(2)
+    rb.push(3)
+    rb.push(4)
+    rb.push(5)
+    assert_eq(rb.ago(0), 5, "ago(0) newest after wrap")
+    assert_eq(rb.ago(1), 4, "ago(1) after wrap")
+    assert_eq(rb.ago(2), 3, "ago(len-1) oldest after wrap")
+}
+
+@test
+fn test_ring_clear_and_reuse() {
+    let rb: RingBuffer<int> = ring_new(3)
+    rb.push(1)
+    rb.push(2)
+    rb.clear()
+    assert_eq(rb.len(), 0, "clear empties")
+
+    rb.push(7)
+    rb.push(8)
+    assert_eq(rb.len(), 2, "reusable after clear")
+    assert_eq(rb.ago(0), 8, "newest after reuse")
+    let out = rb.iter().collect()
+    assert_eq(out[0], 7, "order intact after reuse")
+}
+
+@test
+fn test_ring_for_loop() {
+    let rb: RingBuffer<int> = ring_new(3)
+    rb.push(2)
+    rb.push(4)
+    rb.push(6)
+    rb.push(8)
+
+    let sum = 0
+    for x in rb {
+        sum += x
+    }
+    assert_eq(sum, 18, "for iterates oldest-to-newest survivors")
+}
+
+@test
+fn test_ring_combinators() {
+    let rb: RingBuffer<int> = ring_new(4)
+    rb.push(1)
+    rb.push(2)
+    rb.push(3)
+
+    let doubled = rb.iter().map(_ * 2).collect()
+    assert_eq(doubled[0], 2, "map over ring iter")
+    assert_eq(doubled[2], 6, "map keeps order")
+
+    assert(rb.any(_ == 2), "implicit iter coercion at bounded param")
+    assert(!rb.any(_ == 9), "any false case")
+}
+
+@test
+fn test_ring_structs() {
+    let rb: RingBuffer<Vec2> = ring_new(2)
+    rb.push(v(1, 2))
+    rb.push(v(3, 4))
+    rb.push(v(5, 6))
+    assert_eq(rb.ago(0).x, 5, "struct elements work")
+    assert_eq(rb.ago(1).y, 4, "oldest survivor")
+}

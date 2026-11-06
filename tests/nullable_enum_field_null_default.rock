@@ -1,0 +1,41 @@
+struct Canvas {
+    handle: int,
+    width: float,
+    height: float,
+}
+
+enum Source {
+    Image(int),
+    Canvas(Canvas),
+}
+
+struct Draw {
+    id: int,
+    source: Source? = null,
+}
+
+fn source_name(source: Source?) -> string {
+    if source == null { return "null" }
+    return match source.unwrap() {
+        Source::Image(_) => "image"
+        Source::Canvas(_) => "canvas"
+    }
+}
+
+@test(output = "1 null")
+fn nullable_payload_enum_null_default_is_constructed() {
+    let draw = Draw { id: 1 }
+    print("{draw.id} {source_name(draw.source)}")
+}
+
+@test(output = "2 image")
+fn nullable_payload_enum_value_control() {
+    let draw = Draw { id: 2, source: Source::Image(7) }
+    print("{draw.id} {source_name(draw.source)}")
+}
+
+@test(output = "3 null")
+fn nullable_payload_enum_explicit_null_control() {
+    let draw = Draw { id: 3, source: null }
+    print("{draw.id} {source_name(draw.source)}")
+}

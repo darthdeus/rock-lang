@@ -1,0 +1,246 @@
+// Test bitwise AND operator
+@test
+fn test_bitwise_and() {
+    assert_eq(5 & 3, 1)          // 0b101 & 0b011 = 0b001
+    assert_eq(0xFF & 0x0F, 0x0F) // 255 & 15 = 15
+    assert_eq(7 & 4, 4)          // 0b111 & 0b100 = 0b100
+    assert_eq(0 & 0xFF, 0)       // 0 & anything = 0
+    assert_eq(42 & 42, 42)       // x & x = x
+}
+
+// Test bitwise OR operator
+@test
+fn test_bitwise_or() {
+    assert_eq(5 | 3, 7)          // 0b101 | 0b011 = 0b111
+    assert_eq(0xF0 | 0x0F, 0xFF) // 240 | 15 = 255
+    assert_eq(1 | 2 | 4, 7)      // Multiple OR operations
+    assert_eq(0 | 0, 0)          // 0 | 0 = 0
+    assert_eq(42 | 0, 42)        // x | 0 = x
+}
+
+// Test bitwise XOR operator
+@test
+fn test_bitwise_xor() {
+    assert_eq(5 ^ 3, 6)          // 0b101 ^ 0b011 = 0b110
+    assert_eq(0xFF ^ 0xFF, 0)    // x ^ x = 0
+    assert_eq(0xFF ^ 0x0F, 0xF0) // 255 ^ 15 = 240
+    assert_eq(7 ^ 7, 0)          // Any number XOR itself = 0
+    assert_eq(42 ^ 0, 42)        // x ^ 0 = x
+}
+
+// Test bitwise NOT operator
+@test
+fn test_bitwise_not() {
+    assert_eq(~0, -1)            // NOT 0 = -1 (two's complement)
+    assert_eq(~1, -2)            // NOT 1 = -2
+    assert_eq(~(-1), 0)          // NOT -1 = 0
+    assert_eq(~~42, 42)          // Double NOT = identity
+}
+
+// Test left shift operator
+@test
+fn test_left_shift() {
+    assert_eq(1 << 0, 1)         // 1 shifted left by 0 = 1
+    assert_eq(1 << 1, 2)         // 1 shifted left by 1 = 2
+    assert_eq(1 << 2, 4)         // 1 shifted left by 2 = 4
+    assert_eq(1 << 3, 8)         // 1 shifted left by 3 = 8
+    assert_eq(5 << 2, 20)        // 5 shifted left by 2 = 20
+    assert_eq(0xFF << 8, 0xFF00) // 255 shifted left by 8 = 65280
+}
+
+// Test right shift operator
+@test
+fn test_right_shift() {
+    assert_eq(8 >> 1, 4)         // 8 shifted right by 1 = 4
+    assert_eq(8 >> 2, 2)         // 8 shifted right by 2 = 2
+    assert_eq(8 >> 3, 1)         // 8 shifted right by 3 = 1
+    assert_eq(20 >> 2, 5)        // 20 shifted right by 2 = 5
+    assert_eq(0xFF00 >> 8, 0xFF) // 65280 shifted right by 8 = 255
+    assert_eq(1 >> 1, 0)         // 1 shifted right by 1 = 0
+}
+
+// Test binary literals
+@test
+fn test_binary_literals() {
+    assert_eq(0b0, 0)            // Binary zero
+    assert_eq(0b1, 1)            // Binary one
+    assert_eq(0b10, 2)           // Binary two
+    assert_eq(0b1010, 10)        // Binary ten
+    assert_eq(0b11111111, 255)   // Binary 255
+    assert_eq(0b10101010, 170)   // Binary 170
+
+    // Test with underscores for readability
+    assert_eq(0b1010_1010, 170)
+    assert_eq(0b1111_1111_1111_1111, 65535)
+}
+
+// Test hexadecimal literals
+@test
+fn test_hex_literals() {
+    assert_eq(0x0, 0)            // Hex zero
+    assert_eq(0x1, 1)            // Hex one
+    assert_eq(0xA, 10)           // Hex A = 10
+    assert_eq(0xF, 15)           // Hex F = 15
+    assert_eq(0xFF, 255)         // Hex FF = 255
+    assert_eq(0x10, 16)          // Hex 10 = 16
+    assert_eq(0x100, 256)        // Hex 100 = 256
+
+    // Test with underscores for readability
+    assert_eq(0xDEAD_BEEF, 3735928559)
+    assert_eq(0xFF_FF, 65535)
+}
+
+// Test complex expressions combining multiple operators
+@test
+fn test_complex_expressions() {
+    // Test precedence: bitwise operators should work correctly with parentheses
+    assert_eq((5 & 3) | 4, 5)    // (0b101 & 0b011) | 0b100 = 0b001 | 0b100 = 0b101 = 5
+    assert_eq((1 << 2) | (1 << 0), 5) // 4 | 1 = 5
+    assert_eq((0xFF & 0x0F) << 4, 0xF0) // (255 & 15) << 4 = 15 << 4 = 240
+
+    // Test with variables
+    let a = 0b10101010  // 170
+    let b = 0b11001100  // 204
+    assert_eq(a & b, 0b10001000)  // 136
+    assert_eq(a | b, 0b11101110)  // 238
+    assert_eq(a ^ b, 0b01100110)  // 102
+}
+
+// Helper functions for bit manipulation patterns
+fn set_bit(n: int, pos: int) -> int {
+    return n | (1 << pos)
+}
+
+fn clear_bit(n: int, pos: int) -> int {
+    return n & ~(1 << pos)
+}
+
+fn toggle_bit(n: int, pos: int) -> int {
+    return n ^ (1 << pos)
+}
+
+fn check_bit(n: int, pos: int) -> bool {
+    return (n & (1 << pos)) != 0
+}
+
+fn test_mask_low_bits(x: int) -> int {
+    return x & 0b1111
+}
+
+fn extract_red(color: int) -> int {
+    return (color & 0xFF0000) >> 16
+}
+
+fn extract_green(color: int) -> int {
+    return (color & 0x00FF00) >> 8
+}
+
+fn extract_blue(color: int) -> int {
+    return color & 0x0000FF
+}
+
+// Test bit manipulation patterns commonly used in programming
+@test
+fn test_bit_manipulation_patterns() {
+    let n1 = set_bit(0, 0)    // Set bit 0: n = 1
+    assert_eq(n1, 1)
+
+    let n2 = set_bit(n1, 2)    // Set bit 2: n = 5 (0b101)
+    assert_eq(n2, 5)
+
+    assert_eq(check_bit(n2, 0), true)   // Bit 0 is set
+    assert_eq(check_bit(n2, 1), false)  // Bit 1 is not set
+    assert_eq(check_bit(n2, 2), true)   // Bit 2 is set
+
+    let n3 = clear_bit(n2, 0)  // Clear bit 0: n = 4 (0b100)
+    assert_eq(n3, 4)
+
+    let n4 = toggle_bit(n3, 1) // Toggle bit 1: n = 6 (0b110)
+    assert_eq(n4, 6)
+}
+
+// Test that bitwise operations work with different integer values
+@test
+fn test_edge_cases() {
+    // Test with zero
+    assert_eq(0 & 42, 0)
+    assert_eq(0 | 42, 42)
+    assert_eq(0 ^ 42, 42)
+    assert_eq(0 << 5, 0)
+    assert_eq(0 >> 5, 0)
+
+    // Test with negative numbers (two's complement)
+    assert_eq(-1 & 5, 5)         // -1 has all bits set, so -1 & x = x
+    assert_eq(-1 | 5, -1)        // -1 | anything = -1
+
+    // Test with powers of 2
+    assert_eq(16 & 15, 0)        // 0b10000 & 0b01111 = 0
+    assert_eq(16 | 15, 31)       // 0b10000 | 0b01111 = 0b11111 = 31
+    assert_eq(16 ^ 15, 31)       // 0b10000 ^ 0b01111 = 0b11111 = 31
+}
+
+// Every op is 32-bit: operands coerce to int32, a shift count masks to 5 bits,
+// and the result comes back SIGNED. `>>` shifts in zeros (it is not arithmetic),
+// so a negative left operand goes positive. These are the cases where a backend
+// can silently disagree -- JS `>>` and `>>>` would each get some of them right.
+@test
+fn test_int32_wraparound_and_sign() {
+    assert_eq(-1 >> 1, 2147483647)  // zeros shift in, not the sign bit
+    assert_eq(-8 >> 1, 2147483644)
+    assert_eq(-1 >> 0, -1)          // a 0-shift must still come back signed
+    assert_eq(1 << 31, -2147483648) // the sign bit is a sign, not a magnitude
+    assert_eq(1 << 32, 1)           // shift count masks to 5 bits
+    assert_eq(~0xFFFFFFFF, 0)       // operands coerce to int32 first
+    assert_eq(0xFFFFFFFF ^ 0, -1)
+    assert_eq(0xFF00 >> 8 << 8, 0xFF00)
+}
+
+// Test operator precedence with other operators
+@test
+fn test_operator_precedence() {
+    // Use parentheses to be explicit about intended precedence
+    assert_eq((2 + 3) & 7, 5)    // 5 & 7 = 5
+    assert_eq((2 * 3) | 1, 7)    // 6 | 1 = 7
+    assert_eq((8 ./ 2) ^ 3, 7)    // 4 ^ 3 = 7
+    assert_eq(8 ./ (2 ^ 3), 8)    // 8 / 1 = 8 (since 2 ^ 3 = 1)
+
+    // Test bitwise operator precedence among themselves
+    // & has higher precedence than |, so this should be 5 | (3 & 1) = 5 | 1 = 5
+    // But if the result is 1, then it's being parsed as (5 | 3) & 1 = 7 & 1 = 1
+    assert_eq((5 | 3) & 1, 1)    // Explicit grouping: 7 & 1 = 1
+    assert_eq(5 | (3 & 1), 5)    // Explicit grouping: 5 | 1 = 5
+}
+
+// Test that binary literals work in all contexts
+@test
+fn test_binary_literals_in_context() {
+    // Test binary literals in function calls
+    let masked_low = test_mask_low_bits(0b11110000)
+    let masked_high = test_mask_low_bits(0b11111111)
+    assert_eq(masked_low, 0)
+    assert_eq(masked_high, 15)
+
+    // Test binary literals in expressions
+    let result1 = 0b1010 & 0b1100  // 10 & 12 = 8
+    assert_eq(result1, 8)
+
+    let result2 = 0b1111 | 0b0000  // 15 | 0 = 15
+    assert_eq(result2, 15)
+}
+
+// Test hex literals in all contexts
+@test
+fn test_hex_literals_in_context() {
+    // Test hex literals with bit operations
+    let purple = 0xFF00FF  // Red + Blue
+    assert_eq(extract_red(purple), 255)
+    assert_eq(extract_green(purple), 0)
+    assert_eq(extract_blue(purple), 255)
+
+    // Test hex literals in expressions
+    let result1 = 0xFF & 0x0F   // 255 & 15 = 15
+    assert_eq(result1, 15)
+
+    let result2 = 0xF0 | 0x0F   // 240 | 15 = 255
+    assert_eq(result2, 255)
+}

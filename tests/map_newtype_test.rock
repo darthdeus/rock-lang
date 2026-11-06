@@ -1,0 +1,102 @@
+// Test Map operations with newtype keys to ensure compile-time unwrapping works
+
+newtype UserId(int)
+newtype ProductId(string)
+
+@test
+fn test_map_with_int_newtype_keys() {
+    let users: Map<UserId, string> = map_new()
+
+    let user1 = UserId(42)
+    let user2 = UserId(24)
+
+    insert(users, user1, "Alice")
+    insert(users, user2, "Bob")
+
+    assert_eq(get(users, user1).unwrap(), "Alice")
+    assert_eq(get(users, user2).unwrap(), "Bob")
+
+    assert(users.contains(user1))
+    assert(users.contains(user2))
+    assert(!users.contains(UserId(99)))
+
+    assert_eq(users.len(), 2)
+
+    // Test removal
+    let removed = remove(users, user1)
+    assert_eq(removed.unwrap(), "Alice")
+    assert(!users.contains(user1))
+    assert_eq(users.len(), 1)
+}
+
+@test
+fn test_map_with_string_newtype_keys() {
+    let products: Map<ProductId, float> = map_new()
+
+    let prod1 = ProductId("PROD-001")
+    let prod2 = ProductId("PROD-002")
+
+    insert(products, prod1, 29.99)
+    insert(products, prod2, 49.99)
+
+    assert_eq(get(products, prod1).unwrap(), 29.99)
+    assert_eq(get(products, prod2).unwrap(), 49.99)
+
+    assert(products.contains(prod1))
+    assert(products.contains(prod2))
+    assert(!products.contains(ProductId("PROD-999")))
+
+    assert_eq(products.len(), 2)
+}
+
+@test
+fn test_map_newtype_value_equality() {
+    // Test that newtypes with same wrapped value work correctly
+    let scores: Map<UserId, int> = map_new()
+
+    let id1 = UserId(100)
+    insert(scores, id1, 95)
+
+    // Create another UserId with same value
+    let id2 = UserId(100)
+
+    // Should get the same value because of value equality
+    assert_eq(get(scores, id2).unwrap(), 95)
+    assert(scores.contains(id2))
+
+    // Update using id2
+    insert(scores, id2, 98)
+
+    // Should see updated value with id1
+    assert_eq(get(scores, id1).unwrap(), 98)
+}
+
+@test
+fn test_map_operations_ordering() {
+    // Test that all Map operations correctly handle newtype keys
+    let data: Map<UserId, string> = map_new()
+
+    let ids = [UserId(1), UserId(2), UserId(3), UserId(4), UserId(5)]
+    let names = ["One", "Two", "Three", "Four", "Five"]
+
+    // Insert all
+    let i = 0
+    while i < 5 {
+        insert(data, ids[i], names[i])
+        i = i + 1
+    }
+
+    // Verify all
+    let j = 0
+    while j < 5 {
+        assert_eq(get(data, ids[j]).unwrap(), names[j])
+        j = j + 1
+    }
+
+    // Test that the map has the expected size
+    assert_eq(data.len(), 5)
+
+    // Note: keys/values with newtype keys that come from complex expressions
+    // (like array indexing) won't work properly due to sorting limitations.
+    // This is a known limitation when using newtypes as Map keys with complex expressions.
+}

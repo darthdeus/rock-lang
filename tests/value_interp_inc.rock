@@ -1,0 +1,41 @@
+// Value-ABI tail: value-struct interpolands are ALREADY absorbed
+// (no dedicated code, an Inc-6-style finding) — the Inc 4b
+// `value_ctor_name` pack intercept turns a `"{v}"` value interpoland
+// into a single `V2_ct(...)` cdata atom and the existing
+// `interp_kind` Composite path renders `inspect(...)`, byte-faithful
+// to live `generate_interpolated_string_arm`. This guard pins that
+// behavior under both backends. (Expected strings avoid literal `{`
+// since that is interpolation syntax in a Rock @test annotation.)
+
+value V2 { x: int, y: int }
+value Seg { a: V2, b: V2 }
+
+fn show(v: V2) -> string {
+    return "{v}"
+}
+
+@test(output = "true")
+fn test_value_param_interpoland_renders() {
+    let s = show(V2 { x: 3, y: 7 })
+    print(s.contains("x: 3"))
+}
+
+@test(output = "true")
+fn test_value_literal_interpoland_renders() {
+    let a = V2 { x: 1, y: 2 }
+    let s = "{a}"
+    print(s.contains("y: 2"))
+}
+
+@test(output = "true")
+fn test_nested_value_interpoland_renders() {
+    let g = Seg { a: V2 { x: 1, y: 2 }, b: V2 { x: 3, y: 4 } }
+    let s = "{g}"
+    print(s.contains("Seg"))
+}
+
+@test(output = "3-7")
+fn test_value_field_interpolands() {
+    let v = V2 { x: 3, y: 7 }
+    print("{v.x}-{v.y}")
+}

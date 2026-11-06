@@ -1,0 +1,22 @@
+//! Error: a user fn whose body cannot emit is a HARD spanned error, not the
+//!        lenient silent-skip (which shipped the caller as a missing global
+//!        that died as a runtime nil call). Here `rec<T>` calls itself at `[T]`,
+//!        so every call needs a body for a strictly deeper type and the chain
+//!        never closes -- changing-instance recursion, a plan S 0h REJECT.
+//!
+//!        The fixture is chosen for PERMANENCE: it is unemittable by decision
+//!        rather than by an unclosed gap. The previous one (a self-recursive
+//!        `Iterator`-bounded fn) stopped being unemittable when D-1 gave bounded
+//!        bodies standalone emission, and this test failed open until it was
+//!        noticed.
+//! Tags: monomorphization, recursion, emit-time, reject-dont-fallback
+
+//=== TEST CASE: polymorphic_recursion ===
+fn rec<T>(x: T, n: int) -> int {
+    if n <= 0 { return 0 }
+    return rec([x], n - 1)
+}
+
+fn main() {
+    print("{rec(1, 3)}")
+}

@@ -1,0 +1,45 @@
+// A function-typed field on the receiver wins over a same-named UFCS function.
+// A UFCS candidate whose self type does not match the receiver is rejected
+// rather than being called with the wrong value.
+//
+struct SentinelOther {
+    n: int,
+}
+
+// Records whether the unrelated UFCS function ran.
+global SENTINEL_UFCS_HIT: bool = false
+
+fn sentinel_lit(self: SentinelOther) -> bool {
+    SENTINEL_UFCS_HIT = true
+    return true
+}
+
+struct SentinelHolder {
+    sentinel_lit: () -> bool,
+}
+
+fn sentinel_says_false() -> bool {
+    return false
+}
+
+@test
+fn a_fn_field_wins_over_a_same_named_ufcs_free_fn() {
+    SENTINEL_UFCS_HIT = false
+    let h = SentinelHolder { sentinel_lit: sentinel_says_false }
+
+    // The field returns false. The free fn returns true and sets the flag.
+    let got = h.sentinel_lit()
+
+    assert(!got, "h.sentinel_lit() must call the function-typed field")
+    assert(!SENTINEL_UFCS_HIT, "a mismatched UFCS function must not run")
+}
+
+// The control: with no same-named free function in scope, a closure field is
+// called correctly. Without this, the sentinel above could be pinning "closure
+// fields never work" rather than "UFCS shadows them".
+@test
+fn a_closure_field_with_no_shadow_is_called_normally() {
+    let h = SentinelHolder { sentinel_lit: sentinel_says_false }
+    let direct = h.sentinel_lit
+    assert(!direct(), "reading the field and calling it uses the field")
+}

@@ -1,0 +1,89 @@
+// Yield-channel threading (Parts 1-4). A `co fn` that yields a flat enum should
+// thread the yield value as scalars through yield -> resume -> consumer, with no
+// re-box at the yield point. `resume()` returns `Ev?` (nil = done), which threads
+// via the tag=nil sentinel from Part 0. Behavior identical to boxed; holds BEFORE
+// and AFTER the yield-channel arc.
+
+enum Ev {
+    Tick(int),
+    Pair(int, int),
+    Done,
+    Act(() -> ()),      // closure payload -> Ev is non-cdata (boxed/flat)
+}
+
+co fn stream(n: int) -> Coroutine<Ev> {
+    let i = 0
+    while i < n {
+        yield Ev::Tick(i)
+        yield Ev::Pair(i, i)
+        i = i + 1
+    }
+    yield Ev::Done
+}
+
+fn score(e: Ev) -> int {
+    return match e {
+        Ev::Tick(x) => x
+        Ev::Pair(a, b) => a + b
+        Ev::Done => 100
+        Ev::Act(_) => -1
+    }
+}
+
+@test
+fn test_yield_flat_enum() {
+    let c = stream(2)
+    let sum = 0
+    let count = 0
+    let running = true
+    while running {
+        let e = c.resume()
+        if e != null {
+            count = count + 1
+            sum = sum + score(e)
+        } else {
+            running = false
+        }
+    }
+    // Tick(0), Pair(0,0), Tick(1), Pair(1,1), Done = 0 + 0 + 1 + 2 + 100 = 103; 5 yields
+    assert_eq(sum, 103)
+    assert_eq(count, 5)
+}
+
+@test
+fn test_yield_empty() {
+    let c = stream(0)
+    // stream(0): just Done
+    let e = c.resume()
+    if e != null {
+        assert_eq(score(e), 100)
+    }
+    let d = c.resume()
+    assert_eq(d == null, true)
+}
+
+// A payload-free variant yielded in a loop: the singleton-vs-rebox case.
+co fn ticks(n: int) -> Coroutine<Ev> {
+    let i = 0
+    while i < n {
+        yield Ev::Done
+        i = i + 1
+    }
+}
+
+@test
+fn test_yield_payload_free() {
+    let c = ticks(3)
+    let count = 0
+    let running = true
+    while running {
+        let e = c.resume()
+        if e != null {
+            count = count + 1
+            assert_eq(score(e), 100)
+        } else {
+            running = false
+        }
+    }
+    assert_eq(count, 3)
+}

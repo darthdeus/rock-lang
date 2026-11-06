@@ -1,0 +1,17 @@
+struct NullablePlaceCounter { n: int = 0 }
+
+struct NullablePlaceHolder { inner: NullablePlaceCounter? = null }
+
+fn nullable_place_bump(holder: NullablePlaceHolder) {
+    let counter = holder.inner ?? return
+    counter.n += 1
+}
+
+@test
+fn nullable_identity_field_unwrap_mutates_the_owner() {
+    let holder = NullablePlaceHolder { inner: NullablePlaceCounter {} }
+    nullable_place_bump(holder)
+    nullable_place_bump(holder)
+    let counter = holder.inner ?? return
+    assert(counter.n == 2, "both bumps reach the held counter")
+}

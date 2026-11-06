@@ -1,0 +1,62 @@
+// Regression: inside a generic function body, `a == b` on generic-typed
+// values must dispatch through __op_eq (structural equality) so that
+// when instantiated with a struct type, two separately-constructed
+// instances with the same fields compare equal.
+//
+// Previously emitted plain Lua `==` (reference equality), so struct-keyed
+// HashMap lookups always missed on freshly-built keys.
+
+struct Key { x: int, y: int }
+
+fn find<T>(xs: [T], target: T) -> int {
+    let i = 0
+    for v in xs {
+        if v == target { return i }
+        i = i + 1
+    }
+    return -1
+}
+
+@test(output = "1")
+fn test_struct_eq_in_generic_fn() {
+    let v: [Key] = vec_new()
+    v.push(Key { x: 0, y: 0 })
+    v.push(Key { x: 5, y: 7 })
+    v.push(Key { x: 9, y: 9 })
+    // Fresh Key value, same fields as xs[1]
+    print(v.find(Key { x: 5, y: 7 }))
+}
+
+struct Node<T> {
+    val: T,
+}
+
+fn contains_node<T>(xs: [Node<T>], target: Node<T>) -> bool {
+    for n in xs {
+        if n == target { return true }
+    }
+    return false
+}
+
+@test(output = "true")
+fn test_generic_struct_eq_in_generic_fn() {
+    let v: [Node<int>] = vec_new()
+    v.push(Node { val: 1 })
+    v.push(Node { val: 2 })
+    print(contains_node(v, Node { val: 2 }))
+}
+
+// Baseline: primitive types should still work (__op_eq handles them fast).
+@test(output = "2")
+fn test_primitive_eq_in_generic_fn() {
+    let v: [int] = vec_new()
+    v.push(10); v.push(20); v.push(30)
+    print(v.find(30))
+}
+
+@test(output = "0")
+fn test_string_eq_in_generic_fn() {
+    let v: [string] = vec_new()
+    v.push("alpha"); v.push("beta")
+    print(v.find("alpha"))
+}

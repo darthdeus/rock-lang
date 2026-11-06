@@ -1,0 +1,26 @@
+// Transitive `@debug_impure` demotion. A compiler test asserts the warning
+// (Rock tests can't inspect the warning channel). This file pins the
+// runtime contract: a pure chain reaching `print` still compiles and
+// still behaves correctly after each link is demoted.
+//
+@pure
+fn leaf(n: int) -> int {
+    print("leaf")
+    return n
+}
+
+@pure
+fn mid(n: int) -> int {
+    return leaf(n) + 1
+}
+
+@pure
+fn outer(n: int) -> int {
+    return mid(n) * 2
+}
+
+@test(output = "leaf\n12")
+fn test_transitive_chain_demoted_and_runs() {
+    let r = outer(5)
+    print(r)
+}

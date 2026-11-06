@@ -1,0 +1,30 @@
+//! Annotation registry violations at PARAMETER position
+//! Unknown name, disallowed position, and bad
+//! arg kind -- each rejects with a spanned CompilerError from the registry
+//! validation during function building.
+//! Tags: annotations, registry, param
+
+//=== TEST CASE: unknown_annotation_name_on_param_Generic ===
+// Unknown name on a parameter -> reject.
+fn helper(@totally_unknown_anno a: int) -> int { a }
+
+fn main() { print("{helper(1)}") }
+
+//=== TEST CASE: disallowed_position_on_param_Generic ===
+// `@nomangle` is a fn-item annotation; on a parameter it is a
+// disallowed-position violation.
+fn keep(@nomangle a: int) -> int { a }
+
+fn main() { print("{keep(2)}") }
+
+//=== TEST CASE: bad_arg_kind_on_param_Generic ===
+// `@size` expects an int; a string is a bad arg-kind violation.
+fn sized(@size("nope") a: int) -> int { a }
+
+fn main() { print("{sized(3)}") }
+
+//=== TEST CASE: bad_arity_on_attr_param_Generic ===
+// `@attr` is a nullary role marker; supplying an arg is an arity violation.
+fn shade(@attr(1) a: int) -> int { a }
+
+fn main() { print("{shade(4)}") }

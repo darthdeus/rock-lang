@@ -1,0 +1,40 @@
+// Regression: NativeBuffer<T: value> write where the RHS is a Rock fn
+// returning a value struct via scalar-ABI. Pre-fix, the codegen path
+// for `buf[i] = expr` used the raw expression-emit form, so the
+// scalarized multi-return `(3, 7)` got truncated to its first scalar
+// at the cdata-write site (`buf.ptr[i] = 3`), crashing with "cannot
+// convert 'number' to 'struct N'". Map / HashMap had the same bug
+// and were fixed; NativeBuffer was missed.
+//
+// Fix: emit_value_arg_cdata in the NativeBuffer write branch when
+// not a compound op.
+
+value V2 {
+    x: float,
+    y: float,
+}
+
+@nomangle inline(lua) fn __nb_alloc_V2(n: int) -> Ptr<V2> = 'return ffi.new("V2[?]", n)'
+
+fn native_buffer_v2(n: int) -> NativeBuffer<V2> {
+    return NativeBuffer { ptr: __nb_alloc_V2(n), len: n }
+}
+
+fn make_v2(a: float, b: float) -> V2 {
+    return V2 { x: a, y: b }
+}
+
+@test(output = "3\n7\n11\n13")
+fn test_native_buffer_value_scalar_rhs() {
+    let buf = native_buffer_v2(2)
+    buf[0] = make_v2(3.0, 7.0)
+    buf[1] = make_v2(11.0, 13.0)
+
+    let a = buf[0]
+    print("{a.x.floor()}")
+    print("{a.y.floor()}")
+
+    let b = buf[1]
+    print("{b.x.floor()}")
+    print("{b.y.floor()}")
+}

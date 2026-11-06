@@ -1,0 +1,29 @@
+//! Error: Null used with non-nullable types
+//! Tags: types, null, nullable
+
+//=== TEST CASE: struct_field_null_NullAssignmentToNonNullable ===
+struct Foo { x: int }
+
+fn main() {
+    let f = Foo { x: null }
+}
+
+//=== TEST CASE: null_coalesce_non_nullable_lhs_Generic ===
+fn main() {
+    let x: int = 5
+    let y = x ?? 0
+}
+
+//=== TEST CASE: safe_nav_field_non_nullable_Generic ===
+struct Bar { val: int }
+
+fn main() {
+    let b: Bar = Bar { val: 1 }
+    let v = b?.val
+}
+
+//=== TEST CASE: safe_nav_method_non_nullable_Generic ===
+fn main() {
+    let x: int = 5
+    let s = x?.to_string()
+}

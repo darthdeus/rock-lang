@@ -1,0 +1,192 @@
+// A `ref` parameter to a stored `value` whose field is a `nobox` value. Reads
+// and writes through the ref reach the stored row's own representation of the
+// child (dotted leaf keys and a presence tag on a table parent) instead of
+// packing the child into a box. Covers a nullable child (read, non-null write,
+// null write), a non-nullable child on a cdata and on a GC-table parent, a
+// nobox child nested inside a nullable nobox child, and a nested nobox child of
+// a cdata parent. A cdata parent nests a non-inline child, so its whole-field
+// write goes leaf-wise through the stored child, with or without a ref.
+
+nobox value RnId {
+    value: int,
+}
+
+nobox value RnPair {
+    a: RnId,
+    b: int,
+}
+
+value RnBinding {
+    id: int,
+    live: RnId? = null,
+}
+
+value RnPlain {
+    id: int,
+    live: RnId,
+}
+
+value RnGcPlain {
+    tags: [int] = [],
+    live: RnId,
+}
+
+value RnNested {
+    id: int,
+    pair: RnPair? = null,
+}
+
+value RnDeep {
+    id: int,
+    pair: RnPair,
+}
+
+struct RnRow {
+    binding: RnBinding,
+    plain: RnPlain,
+    gc: RnGcPlain,
+    nested: RnNested,
+    deep: RnDeep,
+}
+
+fn rn_row(id: int) -> RnRow {
+    return RnRow {
+        binding: RnBinding { id: id },
+        plain: RnPlain { id: id, live: RnId { value: id } },
+        gc: RnGcPlain { live: RnId { value: id } },
+        nested: RnNested { id: id },
+        deep: RnDeep { id: id, pair: RnPair { a: RnId { value: id }, b: id } },
+    }
+}
+
+fn rn_resume(binding: ref RnBinding, mob: RnId) -> bool {
+    if binding.live != null { return false }
+    binding.live = mob
+    return true
+}
+
+fn rn_suspend(binding: ref RnBinding) -> bool {
+    if binding.live == null { return false }
+    binding.live = null
+    return true
+}
+
+fn rn_live_value(binding: ref RnBinding) -> int {
+    if let live = binding.live {
+        return live.value
+    }
+    return -1
+}
+
+fn rn_bump_plain(p: ref RnPlain) -> int {
+    let cur = p.live
+    p.live = RnId { value: cur.value + 1 }
+    return cur.value
+}
+
+fn rn_bump_gc(p: ref RnGcPlain) -> int {
+    let cur = p.live
+    p.live = RnId { value: cur.value + 10 }
+    p.tags.push(cur.value)
+    return cur.value
+}
+
+fn rn_set_pair(n: ref RnNested, v: int) {
+    n.pair = RnPair { a: RnId { value: v }, b: v * 2 }
+}
+
+fn rn_pair_a(n: ref RnNested) -> int {
+    if let pair = n.pair {
+        return pair.a.value + pair.b
+    }
+    return -1
+}
+
+fn rn_clear_pair(n: ref RnNested) {
+    n.pair = null
+}
+
+fn rn_swap_deep(d: ref RnDeep) -> int {
+    let old = d.pair
+    d.pair = RnPair { a: RnId { value: old.b }, b: old.a.value }
+    return old.a.value * 10 + old.b
+}
+
+@test
+fn ref_nullable_nobox_field_read_write_and_clear_reach_the_row() {
+    let rows: [RnRow] = []
+    rows.push(rn_row(1))
+    let row = rows[0]
+    assert_eq(rn_live_value(row.binding), -1)
+    assert(rn_resume(row.binding, RnId { value: 7 }))
+    assert_eq(rows[0].binding.live.unwrap().value, 7)
+    assert_eq(rn_live_value(rows[0].binding), 7)
+    assert(!rn_resume(rows[0].binding, RnId { value: 8 }))
+    assert_eq(rows[0].binding.live.unwrap().value, 7)
+    assert(rn_suspend(row.binding))
+    assert(rows[0].binding.live == null)
+    assert_eq(rn_live_value(row.binding), -1)
+    assert(!rn_suspend(row.binding))
+}
+
+@test
+fn ref_nobox_field_copy_taken_before_write_keeps_the_old_value() {
+    let rows: [RnRow] = []
+    rows.push(rn_row(2))
+    assert(rn_resume(rows[0].binding, RnId { value: 3 }))
+    let before = rows[0].binding
+    assert(rn_suspend(rows[0].binding))
+    assert_eq(before.live.unwrap().value, 3)
+    assert(rows[0].binding.live == null)
+}
+
+@test
+fn ref_non_nullable_nobox_field_on_scalar_and_gc_parents() {
+    let rows: [RnRow] = []
+    rows.push(rn_row(4))
+    let row = rows[0]
+    assert_eq(rn_bump_plain(row.plain), 4)
+    assert_eq(rn_bump_plain(rows[0].plain), 5)
+    assert_eq(rows[0].plain.live.value, 6)
+    assert_eq(rn_bump_gc(row.gc), 4)
+    assert_eq(rows[0].gc.live.value, 14)
+    assert_eq(rows[0].gc.tags.len(), 1)
+}
+
+@test
+fn ref_nested_nobox_in_nullable_nobox_field() {
+    let rows: [RnRow] = []
+    rows.push(rn_row(5))
+    let row = rows[0]
+    assert_eq(rn_pair_a(row.nested), -1)
+    rn_set_pair(row.nested, 3)
+    assert_eq(rows[0].nested.pair.unwrap().a.value, 3)
+    assert_eq(rn_pair_a(rows[0].nested), 9)
+    rn_clear_pair(row.nested)
+    assert(rows[0].nested.pair == null)
+    assert_eq(rn_pair_a(row.nested), -1)
+}
+
+@test
+fn ref_nested_nobox_field_of_a_cdata_parent() {
+    let rows: [RnRow] = []
+    rows.push(rn_row(6))
+    rows[0].deep.pair = RnPair { a: RnId { value: 1 }, b: 2 }
+    let row = rows[0]
+    assert_eq(rn_swap_deep(row.deep), 12)
+    assert_eq(rows[0].deep.pair.a.value, 2)
+    assert_eq(rows[0].deep.pair.b, 1)
+    assert_eq(rn_swap_deep(rows[0].deep), 21)
+    assert_eq(rows[0].deep.pair.a.value, 1)
+}
+
+@test
+fn direct_whole_nobox_field_write_on_a_cdata_parent() {
+    let rows: [RnRow] = []
+    rows.push(rn_row(8))
+    let row = rows[0]
+    let cur = row.plain.live
+    row.plain.live = RnId { value: cur.value + 1 }
+    assert_eq(rows[0].plain.live.value, 9)
+    assert_eq(cur.value, 8)
+}

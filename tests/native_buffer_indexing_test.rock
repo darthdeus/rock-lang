@@ -1,0 +1,101 @@
+// Compiler-level NativeBuffer<T>: buf[i] / buf[i] = v desugar to
+// buf.ptr[i] / buf.ptr[i] = v with 0-based indexing and no bounds check.
+
+@test
+fn index_read_float() {
+    let buf = native_buffer_float(3)
+    nb_set(buf, 0, 1.5)
+    nb_set(buf, 1, -2.5)
+    nb_set(buf, 2, 3.5)
+    assert(buf[0] == 1.5)
+    assert(buf[1] == -2.5)
+    assert(buf[2] == 3.5)
+}
+
+@test
+fn index_write_float() {
+    let buf = native_buffer_float(3)
+    buf[0] = 10.5
+    buf[1] = 20.5
+    buf[2] = 30.5
+    assert(nb_get(buf, 0) == 10.5)
+    assert(nb_get(buf, 1) == 20.5)
+    assert(nb_get(buf, 2) == 30.5)
+}
+
+@test
+fn index_read_int() {
+    let buf = native_buffer_int(3)
+    buf[0] = 11
+    buf[1] = 22
+    buf[2] = 33
+    assert(buf[0] == 11)
+    assert(buf[1] == 22)
+    assert(buf[2] == 33)
+}
+
+@test
+fn compound_assign() {
+    let buf = native_buffer_float(2)
+    buf[0] = 5.0
+    buf[1] = 10.0
+    buf[0] = buf[0] + 1.5
+    buf[1] = buf[1] * 2.0
+    assert(buf[0] == 6.5)
+    assert(buf[1] == 20.0)
+}
+
+@test
+fn round_trip_through_index() {
+    let n = 100
+    let buf = native_buffer_float(n)
+    for i in 0..n {
+        buf[i] = (i * 2) as float
+    }
+    let sum = 0.0
+    for i in 0..n {
+        sum = sum + buf[i]
+    }
+    // 2*(0+1+...+99) = 2 * 99*100/2 = 9900
+    assert(sum == 9900.0)
+}
+
+@test
+fn iterate_for_v_in_buf() {
+    let buf = native_buffer_float(5)
+    for i in 0..5 {
+        buf[i] = (i + 1) as float
+    }
+    let sum = 0.0
+    for v in buf {
+        sum = sum + v
+    }
+    assert(sum == 15.0)
+}
+
+@test
+fn iterate_enumerate_tuple() {
+    let buf = native_buffer_int(4)
+    buf[0] = 10
+    buf[1] = 20
+    buf[2] = 30
+    buf[3] = 40
+    let sum_vals = 0
+    let sum_idx = 0
+    for (i, v) in enumerate(buf) {
+        sum_idx = sum_idx + i
+        sum_vals = sum_vals + v
+    }
+    assert(sum_idx == 6)    // 0+1+2+3
+    assert(sum_vals == 100) // 10+20+30+40
+}
+
+@test
+fn iterate_empty_buffer() {
+    let buf = native_buffer_float(0)
+    let count = 0
+    for _v in buf {
+        count = count + 1
+    }
+    assert(count == 0)
+}

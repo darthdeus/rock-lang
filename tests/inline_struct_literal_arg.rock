@@ -1,0 +1,103 @@
+// V0.7 field-level substitution for struct-literal args.
+//
+// When an @inline fn takes a flat struct param and the body only reads
+// its fields (never uses the whole value, never mutates), and the
+// caller passes a struct literal as the arg, the inline pass should
+// substitute per-field — avoiding the "cannot duplicate struct literal"
+// error that the opaque dup-safety check would otherwise raise.
+
+struct IVec2 { x: int, y: int }
+struct IRect { x: int, y: int, w: int, h: int }
+
+@inline
+fn sum_xy(v: IVec2) -> int {
+    return v.x + v.y
+}
+
+@inline
+fn make_v(a: int, b: int) -> IVec2 {
+    return IVec2 { x: a, y: b }
+}
+
+// --- Direct struct-literal arg ---
+
+@test(output = "7")
+fn test_direct_struct_literal_arg() {
+    // sum_xy uses v.x and v.y — only field reads. Arg is a struct
+    // literal whose fields are Int literals (dup-safe). Should
+    // field-substitute without materializing IVec2.
+    print(sum_xy(IVec2 { x: 3, y: 4 }))
+}
+
+// --- Composed @inline chain producing a struct literal ---
+
+@test(output = "7")
+fn test_chained_inline_struct_arg() {
+    // make_v inlines to `IVec2 { x: 3, y: 4 }`, then sum_xy sees that
+    // struct literal and field-substitutes it.
+    print(sum_xy(make_v(3, 4)))
+}
+
+// --- Multiple uses of the same field ---
+
+@inline
+fn quadrupled(v: IVec2) -> int {
+    // v.x used 4 times, v.y used 4 times. Each field init (a, b) is
+    // an Ident in the caller — dup-safe. Field-substitution should
+    // duplicate each ident 4 times without complaint.
+    return v.x + v.x + v.x + v.x + v.y + v.y + v.y + v.y
+}
+
+@test(output = "40")
+fn test_multiple_uses_per_field() {
+    let a = 3
+    let b = 7
+    print(quadrupled(IVec2 { x: a, y: b }))
+}
+
+// --- Partial field use (unused field, side-effect-free init) ---
+
+@inline
+fn only_x(v: IVec2) -> int {
+    return v.x
+}
+
+@test(output = "99")
+fn test_unused_field_is_dropped() {
+    // v.y is never read; its init must be side-effect-free for V0.7
+    // to drop it. Integer literal is trivially side-effect-free.
+    print(only_x(IVec2 { x: 99, y: 42 }))
+}
+
+// --- Larger struct + arithmetic in init ---
+
+@inline
+fn rect_area(r: IRect) -> int {
+    return r.w * r.h
+}
+
+@test(output = "12")
+fn test_rect_area_field_substitution() {
+    // Arg is IRect literal. r.x and r.y are unused (literal inits —
+    // side-effect-free). r.w and r.h are each read once — dup-safety
+    // not required.
+    print(rect_area(IRect { x: 0, y: 0, w: 3, h: 4 }))
+}
+
+// --- Fallback: bare use of param forces whole-value path ---
+
+struct Wrap { n: int }
+
+@inline
+fn identity_wrap(w: Wrap) -> Wrap {
+    // Returns `w` bare — forces whole-value substitution.
+    return w
+}
+
+@test(output = "5")
+fn test_bare_use_falls_back_to_whole_value() {
+    // Arg is a bare Ident (dup-safe under the whole-value path).
+    let w = Wrap { n: 5 }
+    let r = identity_wrap(w)
+    print(r.n)
+}

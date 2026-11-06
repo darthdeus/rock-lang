@@ -1,0 +1,33 @@
+// Regression oracle: a multi-name group's RHS is evaluated once, then
+// fanned out to both fields. The counter makes duplicate evaluation visible.
+
+@intrinsic @inline inline(lua) fn put(s: string) = "io.write(s)"
+
+value V2_se {
+    x: float,
+    y: float,
+}
+
+@nomangle inline(lua) fn __nb_alloc_V2_se(n: int) -> Ptr<V2_se> = 'return ffi.new("V2_se[?]", n)'
+
+fn nb_v2_se(n: int) -> NativeBuffer<V2_se> {
+    return NativeBuffer { ptr: __nb_alloc_V2_se(n), len: n }
+}
+
+@nomangle inline(lua) fn bump_counter() -> float = """
+    _G.__se_count = (_G.__se_count or 0) + 1
+    return _G.__se_count
+"""
+
+@nomangle inline(lua) fn init_counter() = "_G.__se_count = 0"
+@nomangle inline(lua) fn read_counter() -> float = "return _G.__se_count or 0"
+
+@test(output = "count=1")
+fn test_multi_field_group_single_eval() {
+    init_counter()
+    let buf = nb_v2_se(1)
+    // `x + y: bump_counter()` MUST run bump_counter() exactly once.
+    buf[0] = V2_se { x + y: bump_counter() }
+    put("count=")
+    put("{read_counter()}")
+}

@@ -1,0 +1,261 @@
+// Stress tests: tuple destructuring + enums + match interactions
+//
+// Tests the boundary between pattern matching on enums and tuple types,
+// especially nested combinations.
+
+enum Option<T> {
+    None,
+    Some(T),
+}
+
+enum Result<T, E> {
+    Ok(T),
+    Err(E),
+}
+
+// ============================================================
+// 1. Match on enum with tuple payload
+// ============================================================
+
+// FIXED: Nested tuple destructuring in match arms now works.
+
+@test(output = "point: 10, 20")
+fn test_match_enum_tuple_payload() {
+    let opt: Option<(int, int)> = Option::Some((10, 20))
+    let result = match opt {
+        Some((x, y)) => "point: {x}, {y}",
+        None => "nothing",
+    }
+    print(result)
+}
+
+@test(output = "nothing")
+fn test_match_enum_tuple_payload_none() {
+    let opt: Option<(int, int)> = Option::None
+    let result = match opt {
+        Some((x, y)) => "point: {x}, {y}",
+        None => "nothing",
+    }
+    print(result)
+}
+
+// ============================================================
+// 2. Match extracting tuple, then destructure
+// ============================================================
+
+@test(output = "hello 42")
+fn test_match_extract_then_destructure() {
+    let opt: Option<(string, int)> = Option::Some(("hello", 42))
+    let val = match opt {
+        Some(pair) => pair,
+        None => ("default", 0),
+    }
+    let (s, n) = val
+    print("{s} {n}")
+}
+
+// ============================================================
+// 3. Nullable tuple elements
+// ============================================================
+
+@test(output = "5 default")
+fn test_nullable_tuple_elements() {
+    let a: int? = 5
+    let b: string? = null
+    let pair = (a ?? 0, b ?? "default")
+    let (x, y) = pair
+    print("{x} {y}")
+}
+
+// ============================================================
+// 4. Tuple of enums
+// ============================================================
+
+@test(output = "both: 1, hello")
+fn test_tuple_of_enums() {
+    let pair: (Option<int>, Option<string>) = (Option::Some(1), Option::Some("hello"))
+    let (a, b) = pair
+    let a_str = match a {
+        Some(x) => "{x}",
+        None => "none",
+    }
+    let b_str = match b {
+        Some(s) => s,
+        None => "none",
+    }
+    print("both: {a_str}, {b_str}")
+}
+
+// ============================================================
+// 5. Result with tuple ok value
+// ============================================================
+
+@test(output = "ok: 10, 20")
+fn test_result_tuple_ok() {
+    let r: Result<(int, int), string> = Result::Ok((10, 20))
+    let msg = match r {
+        Ok((x, y)) => "ok: {x}, {y}",
+        Err(e) => "err: {e}",
+    }
+    print(msg)
+}
+
+@test(output = "err: failed")
+fn test_result_tuple_err() {
+    let r: Result<(int, int), string> = Result::Err("failed")
+    let msg = match r {
+        Ok((x, y)) => "ok: {x}, {y}",
+        Err(e) => "err: {e}",
+    }
+    print(msg)
+}
+
+// ============================================================
+// 6. Nested enum in match
+// ============================================================
+
+@test(output = "inner: 42")
+fn test_nested_option_match() {
+    let nested: Option<Option<int>> = Option::Some(Option::Some(42))
+    let result = match nested {
+        Some(inner) => {
+            match inner {
+                Some(x) => "inner: {x}",
+                None => "inner none",
+            }
+        },
+        None => "outer none",
+    }
+    print(result)
+}
+
+// ============================================================
+// 7. For loop over vec of enums
+// ============================================================
+
+@test(output = "1 skip 3")
+fn test_for_loop_vec_enums() {
+    let items: [Option<int>] = [Option::Some(1), Option::None, Option::Some(3)]
+    let out = ""
+    let first = true
+    for item in items {
+        if !first { out = out + " " }
+        first = false
+        out = out + match item {
+            Some(x) => "{x}",
+            None => "skip",
+        }
+    }
+    print(out)
+}
+
+// ============================================================
+// 8. Match with wildcard on tuple
+// ============================================================
+
+@test(output = "first is 1")
+fn test_match_tuple_wildcard() {
+    let t = (1, "hello", true)
+    // Can't match on tuple directly in Rock, but can destructure
+    let (a, _, _) = t
+    print("first is {a}")
+}
+
+// ============================================================
+// 9. Enum wrapping struct
+// ============================================================
+
+struct Point { x: int, y: int }
+
+@test(output = "point at 3, 4")
+fn test_enum_wrapping_struct() {
+    let opt: Option<Point> = Option::Some(Point { x: 3, y: 4 })
+    let msg = match opt {
+        Some(p) => "point at {p.x}, {p.y}",
+        None => "no point",
+    }
+    print(msg)
+}
+
+// ============================================================
+// 10. if let with tuple in option
+// ============================================================
+
+@test(output = "got 10 and 20")
+fn test_if_let_tuple_option() {
+    let opt: Option<(int, int)> = Option::Some((10, 20))
+    let val = match opt {
+        Some(pair) => {
+            let (a, b) = pair
+            "got {a} and {b}"
+        },
+        None => "nothing",
+    }
+    print(val)
+}
+
+// ============================================================
+// 11. Nullable enum
+// ============================================================
+
+@test(output = "has value: 42")
+fn test_nullable_enum() {
+    let opt: Option<int>? = Option::Some(42)
+    if opt != null {
+        let msg = match opt {
+            Some(x) => "has value: {x}",
+            None => "none variant",
+        }
+        print(msg)
+    }
+}
+
+@test(output = "null")
+fn test_nullable_enum_null() {
+    let opt: Option<int>? = null
+    if opt != null {
+        print("not null")
+    } else {
+        print("null")
+    }
+}
+
+// ============================================================
+// 12. Vec of tuples with enum elements
+// ============================================================
+
+@test(output = "A:1 B:none")
+fn test_vec_tuple_enum() {
+    let items: [(string, Option<int>)] = [("A", Option::Some(1)), ("B", Option::None)]
+    let out = ""
+    let first = true
+    for item in items {
+        if !first { out = out + " " }
+        first = false
+        let (name, val) = item
+        out = out + name + ":" + match val {
+            Some(x) => "{x}",
+            None => "none",
+        }
+    }
+    print(out)
+}
+
+// ============================================================
+// 13. Generic enum with different instantiations in same array
+// ============================================================
+
+@test(output = "42 hello")
+fn test_generic_enum_instantiations() {
+    let a: Option<int> = Option::Some(42)
+    let b: Option<string> = Option::Some("hello")
+    let a_str = match a {
+        Some(x) => "{x}",
+        None => "none",
+    }
+    let b_str = match b {
+        Some(s) => s,
+        None => "none",
+    }
+    print("{a_str} {b_str}")
+}

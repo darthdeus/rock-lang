@@ -1,0 +1,9 @@
+// A legacy consumer sees the v1 library's public ROOT exports by their bare
+// names through the compatibility projection (spec 3.2). It writes no paths and
+// no imports.
+fn main() {
+    let g = greet("legacy")
+    print("legacy greeting: {g.text}")
+    print("legacy answer: {answer()}")
+    print("legacy sauce: {sauce()}")
+}

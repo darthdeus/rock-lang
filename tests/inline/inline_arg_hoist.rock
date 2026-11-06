@@ -1,0 +1,78 @@
+// Adversarial tests: @inline — argument hoisting for multi-use params
+//
+// When a param is read multiple times in the body and the caller passes
+// a non-duplication-safe arg (function call, BinOp, etc.), the splice
+// must evaluate the arg exactly once. Previous V0 behavior was to
+// hard-error; this suite verifies the new behavior: inject a fresh
+// let-binding above the call so the arg runs once and every body-side
+// reference reads through the bound local.
+
+global CALLS: int = 0
+
+fn produce(n: int) -> int {
+    CALLS = CALLS + 1
+    return n
+}
+
+// Body reads `x` three times → requires hoisting when arg is a call.
+@inline
+fn triple(x: int) -> int {
+    return x + x + x
+}
+
+@test(output = "30 1")
+fn test_hoist_plain_call() {
+    CALLS = 0
+    let r = triple(produce(10))
+    print("{r} {CALLS}")
+}
+
+struct Color { r: int, g: int, b: int, a: int }
+
+fn make_color(r: int, g: int, b: int, a: int) -> Color {
+    CALLS = CALLS + 1
+    return Color { r: r, g: g, b: b, a: a }
+}
+
+// Body reads `c.r`, `c.g`, `c.b`, `c.a` — field accesses on a call arg.
+// When the arg is a struct literal, the field-level path handles this
+// without a hoist. When the arg is a call, the field-level path can't
+// fire and we need to hoist the whole value once.
+@inline
+fn color_sum(c: Color) -> int {
+    return c.r + c.g + c.b + c.a
+}
+
+@test(output = "10 1")
+fn test_hoist_call_with_field_reads() {
+    CALLS = 0
+    let r = color_sum(make_color(1, 2, 3, 4))
+    print("{r} {CALLS}")
+}
+
+// Mixed: one param needs hoisting, another is already dup-safe (literal).
+@inline
+fn mix(x: int, mult: int) -> int {
+    return x * mult + x
+}
+
+@test(output = "33 1")
+fn test_hoist_mixed_params() {
+    CALLS = 0
+    let r = mix(produce(3), 10)
+    print("{r} {CALLS}")
+}
+
+// Nested hoisting: @inline of @inline, each with multi-use params.
+@inline
+fn double(x: int) -> int {
+    return x + x
+}
+
+@test(output = "12 1")
+fn test_hoist_nested_inline() {
+    CALLS = 0
+    // triple(2) = 6, double(6) = 12, produce called once.
+    let r = double(triple(produce(2)))
+    print("{r} {CALLS}")
+}

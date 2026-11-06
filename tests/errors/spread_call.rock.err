@@ -1,0 +1,48 @@
+//! Error: call-site struct spread `f(..op)` rejects unmatched fields,
+//!        named/spread and spread/spread collisions, and non-struct operands
+//!        (struct-spread plan M2, rules 2-5).
+//! Tags: struct-spread, call-spread
+
+//=== TEST CASE: spread_unmatched_field_Generic ===
+// Rule 2: every field of the spread struct must name a callee param.
+struct ABC { a: int, b: int, c: int }
+
+fn takes_ab(a: int, b: int) -> int { a + b }
+
+fn main() {
+    let p = ABC { a: 1, b: 2, c: 3 }
+    print(takes_ab(..p))   // ERROR: field `c` names no parameter
+}
+
+//=== TEST CASE: spread_named_before_spread_collision_Generic ===
+// Rule 4: an explicit named arg BEFORE a spread that also supplies it errors.
+struct AB { a: int, b: int }
+
+fn takes_ab2(a: int, b: int) -> int { a + b }
+
+fn main() {
+    let p = AB { a: 1, b: 2 }
+    print(takes_ab2(a: 9, ..p))   // ERROR: `a` given before the spread
+}
+
+//=== TEST CASE: spread_spread_collision_Generic ===
+// Rule 5: two spreads supplying the same param collide.
+struct AB2 { a: int, b: int }
+struct AC { a: int, c: int }
+
+fn takes_abc(a: int, b: int, c: int) -> int { a + b + c }
+
+fn main() {
+    let x = AB2 { a: 1, b: 2 }
+    let y = AC { a: 8, c: 3 }
+    print(takes_abc(..x, ..y))   // ERROR: both spreads supply `a`
+}
+
+//=== TEST CASE: spread_non_struct_operand_Generic ===
+// The spread operand must be a nominal struct with statically known fields.
+fn takes_a(a: int) -> int { a }
+
+fn main() {
+    let n = 5
+    print(takes_a(..n))   // ERROR: `int` is not a struct
+}

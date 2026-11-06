@@ -1,0 +1,93 @@
+struct FixVec2 { x: float, y: float }
+struct Mob { name: string, health: int, pos: FixVec2 }
+
+fn double(x: int) -> int { return x * 2 }
+
+// -- Basic patterns --
+
+@test(output = "true")
+fn field_comparison() {
+    let mobs: Arena<Mob> = arena_new()
+    mobs.insert(Mob { name: "Orc", health: 100, pos: FixVec2 { x: 1.0, y: 2.0 } })
+    print(mobs.values().any(_.health > 50))
+}
+
+@test(output = "true")
+fn string_equality() {
+    let mobs: Arena<Mob> = arena_new()
+    mobs.insert(Mob { name: "Orc", health: 100, pos: FixVec2 { x: 1.0, y: 2.0 } })
+    print(mobs.values().any(_.name == "Orc"))
+}
+
+// -- Nested field access --
+
+@test(output = "true")
+fn nested_field() {
+    let mobs: Arena<Mob> = arena_new()
+    mobs.insert(Mob { name: "Orc", health: 100, pos: FixVec2 { x: 5.0, y: 2.0 } })
+    print(mobs.values().any(_.pos.x > 3.0))
+}
+
+// -- Arithmetic --
+
+@test(output = "200")
+fn field_multiply() {
+    let mobs: Arena<Mob> = arena_new()
+    mobs.insert(Mob { name: "Orc", health: 100, pos: FixVec2 { x: 1.0, y: 2.0 } })
+    for hp in mobs.values().map(_.health * 2).collect() { print(hp) }
+}
+
+@test(output = "110")
+fn field_add() {
+    let mobs: Arena<Mob> = arena_new()
+    mobs.insert(Mob { name: "Orc", health: 100, pos: FixVec2 { x: 1.0, y: 2.0 } })
+    for hp in mobs.values().map(_.health + 10).collect() { print(hp) }
+}
+
+// -- Unary operators --
+
+@test(output = "-100")
+fn unary_minus_field() {
+    let mobs: Arena<Mob> = arena_new()
+    mobs.insert(Mob { name: "Orc", health: 100, pos: FixVec2 { x: 1.0, y: 2.0 } })
+    for hp in mobs.values().map(-_.health).collect() { print(hp) }
+}
+
+@test(output = "true")
+fn unary_not() {
+    let flags = [true, false, true]
+    print(flags.iter().any(!_))
+}
+
+// -- Method calls --
+
+@test(output = "true")
+fn method_in_comparison() {
+    let nums = [1, 2, 3, 4, 5]
+    print(nums.iter().any(_.double() > 8))
+}
+
+@test(output = "20")
+fn chained_method() {
+    let nums = [5]
+    let mapped = nums.iter().map(_.double().double()).collect()
+    print(mapped[0])
+}
+
+// -- _ as function argument --
+
+@test(output = "10")
+fn underscore_as_arg() {
+    let nums = [5]
+    let mapped = nums.iter().map(double(_)).collect()
+    print(mapped[0])
+}
+
+// -- Parenthesized --
+
+@test(output = "true")
+fn parenthesized() {
+    let mobs: Arena<Mob> = arena_new()
+    mobs.insert(Mob { name: "Orc", health: 100, pos: FixVec2 { x: 1.0, y: 2.0 } })
+    print(mobs.values().any((_.health) > 50))
+}

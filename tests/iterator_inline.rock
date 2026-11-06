@@ -1,0 +1,140 @@
+// Slice 4 behavior gate: @inline user iterators driven by real `for` loops.
+// The emit-shape gate (skull-codegen-lua `for_user_iter_inline_is_zero_alloc`)
+// proves the cursor struct scalarizes to per-field locals (no table); this
+// proves the inlined + scalarized loop still computes correctly, incl. the
+// by-ref cursor mutation persisting across iterations and break/continue.
+
+struct Counter { n: int }
+struct CounterIter { cur: int, n: int }
+
+@inline
+fn iter(c: Counter) -> CounterIter { return CounterIter { cur: 0, n: c.n } }
+
+@inline
+fn next(it: CounterIter) -> (bool, int) {
+    if it.cur >= it.n { return (false, 0) }
+    let v = it.cur
+    it.cur = it.cur + 1
+    return (true, v)
+}
+
+@test
+fn inline_iter_sums() {
+    let total = 0
+    for x in (Counter { n: 5 }) { total += x }
+    assert_eq(total, 10) // 0+1+2+3+4
+}
+
+@test
+fn inline_iter_empty() {
+    let count = 0
+    for x in (Counter { n: 0 }) { count += 1 }
+    assert_eq(count, 0)
+}
+
+@test
+fn inline_iter_break() {
+    let seen = 0
+    for x in (Counter { n: 100 }) {
+        if x == 4 { break }
+        seen += 1
+    }
+    assert_eq(seen, 4) // 0,1,2,3
+}
+
+@test
+fn inline_iter_continue() {
+    let sum = 0
+    for x in (Counter { n: 6 }) {
+        if x == 2 { continue }
+        sum += x
+    }
+    assert_eq(sum, 13) // 0+1+3+4+5
+}
+
+@test
+fn inline_iter_nested() {
+    let pairs = 0
+    for a in (Counter { n: 3 }) {
+        for b in (Counter { n: 4 }) { pairs += 1 }
+    }
+    assert_eq(pairs, 12)
+}
+
+// Tuple-element @inline iterator: next -> (bool, int, int).
+struct Squares { n: int }
+struct SquaresIter { i: int, n: int }
+
+@inline
+fn iter(s: Squares) -> SquaresIter { return SquaresIter { i: 0, n: s.n } }
+
+@inline
+fn next(it: SquaresIter) -> (bool, int, int) {
+    if it.i >= it.n { return (false, 0, 0) }
+    let i = it.i
+    it.i = it.i + 1
+    return (true, i, i * i)
+}
+
+@test
+fn inline_iter_tuple_element() {
+    let sum_i = 0
+    let sum_sq = 0
+    for (i, sq) in (Squares { n: 4 }) {
+        sum_i += i
+        sum_sq += sq
+    }
+    assert_eq(sum_i, 6)   // 0+1+2+3
+    assert_eq(sum_sq, 14) // 0+1+4+9
+}
+
+// Slice-5 foundation: a Vec-DATA-backed iterator driven through the `for`
+// desugar. Proves the shape the author's builtin-swap (delete for_elem_ty's
+// Array arm -> route [T] through iter/next) will activate for real `[T]`:
+// the cursor scalarizes and the yielded element is the real Vec entry (by-ref
+// mutation persists). Uses a wrapper type so the slice-3 routing fires today.
+struct IntBag { items: [int] }
+struct IntBagIter { items: [int], i: int }
+
+@inline
+fn iter(b: IntBag) -> IntBagIter { return IntBagIter { items: b.items, i: 0 } }
+
+@inline
+fn next(it: IntBagIter) -> (bool, int) {
+    if it.i >= it.items.len { return (false, 0) }
+    let v = it.items[it.i]
+    it.i = it.i + 1
+    return (true, v)
+}
+
+@test
+fn vec_backed_iter_sums() {
+    let b = IntBag { items: [3, 4, 5, 6] }
+    let total = 0
+    for x in b { total += x }
+    assert_eq(total, 18)
+}
+
+// Value elements yield copies; iteration cannot implicitly alias Vec storage.
+value Health { hp: int }
+struct Party { members: [Health] }
+struct PartyIter { members: [Health], i: int }
+
+@inline
+fn iter(p: Party) -> PartyIter { return PartyIter { members: p.members, i: 0 } }
+
+@inline
+fn next(it: PartyIter) -> (bool, Health) {
+    if it.i >= it.members.len { return (false, phantom()) }
+    let m = it.members[it.i]
+    it.i = it.i + 1
+    return (true, m)
+}
+
+@test
+fn vec_backed_value_iter_reads() {
+    let p = Party { members: [Health { hp: 10 }, Health { hp: 20 }] }
+    let total = 0
+    for m in p { total += m.hp }
+    assert_eq(total, 30)
+}

@@ -1,0 +1,264 @@
+struct Mob { name: string, health: int }
+
+// === Arrays ===
+
+@test(output = "0:a\n1:b\n2:c")
+fn enumerate_array() {
+    for (i, v) in enumerate(["a", "b", "c"]) {
+        print("{i}:{v}")
+    }
+}
+
+@test(output = "done")
+fn enumerate_empty_array() {
+    for (i, v) in enumerate([]) {
+        print("should not print")
+    }
+    print("done")
+}
+
+// === Vectors ===
+
+@test(output = "0:10\n1:20")
+fn enumerate_vec_basic() {
+    let v: [int] = vec_new()
+    vec_push(v, 10)
+    vec_push(v, 20)
+    for (i, x) in enumerate(v) {
+        print("{i}:{x}")
+    }
+}
+
+@test(output = "done")
+fn enumerate_empty_vec() {
+    let v: [int] = vec_new()
+    for (i, x) in enumerate(v) {
+        print("should not print")
+    }
+    print("done")
+}
+
+// === Arenas ===
+
+@test(output = "0:A\n1:B")
+fn enumerate_arena_basic() {
+    let mobs: Arena<Mob> = arena_new()
+    mobs.insert(Mob { name: "A", health: 10 })
+    mobs.insert(Mob { name: "B", health: 20 })
+    for (i, pair) in enumerate(mobs) {
+        print("{i}:{pair.1.name}")
+    }
+}
+
+@test(output = "0:A")
+fn enumerate_arena_with_removal() {
+    let mobs: Arena<Mob> = arena_new()
+    mobs.insert(Mob { name: "A", health: 10 })
+    let e2 = mobs.insert(Mob { name: "B", health: 20 })
+    mobs.remove(e2)
+    for (i, pair) in enumerate(mobs) {
+        print("{i}:{pair.1.name}")
+    }
+}
+
+@test(output = "done")
+fn enumerate_arena_empty() {
+    let mobs: Arena<Mob> = arena_new()
+    for (i, pair) in enumerate(mobs) {
+        print("should not print")
+    }
+    print("done")
+}
+
+// === Vec of tuples: destructuring vs enumerate ===
+
+@test(output = "1:a\n2:b")
+fn vec_tuple_destructure_default() {
+    let items: [(int, string)] = [(1, "a"), (2, "b")]
+    for (num, str) in items {
+        print("{num}:{str}")
+    }
+}
+
+@test(output = "0:1:a\n1:2:b")
+fn vec_tuple_enumerate_nested() {
+    let items: [(int, string)] = [(1, "a"), (2, "b")]
+    for (i, (num, str)) in enumerate(items) {
+        print("{i}:{num}:{str}")
+    }
+}
+
+@test(output = "0:(1,a)\n1:(2,b)")
+fn vec_tuple_enumerate_single() {
+    let items: [(int, string)] = [(1, "a"), (2, "b")]
+    for (i, tuple) in enumerate(items) {
+        print("{i}:({tuple.0},{tuple.1})")
+    }
+}
+
+// === Single binding ===
+
+@test(output = "(1,a)")
+fn vec_tuple_single_binding() {
+    let items: [(int, string)] = [(1, "a")]
+    for item in items {
+        print("({item.0},{item.1})")
+    }
+}
+
+@test(output = "10")
+fn array_single_binding() {
+    for item in [10] {
+        print(item)
+    }
+}
+
+// === Nested tuple destructuring ===
+
+@test(output = "1-2:a\n3-4:b")
+fn nested_tuple_destructure() {
+    let items: [((int, int), string)] = [((1, 2), "a"), ((3, 4), "b")]
+    for ((x, y), s) in items {
+        print("{x}-{y}:{s}")
+    }
+}
+
+@test(output = "0:1-2:a\n1:3-4:b")
+fn nested_tuple_enumerate() {
+    let items: [((int, int), string)] = [((1, 2), "a"), ((3, 4), "b")]
+    for (i, ((x, y), s)) in enumerate(items) {
+        print("{i}:{x}-{y}:{s}")
+    }
+}
+
+// === Deep nesting ===
+
+@test(output = "1,2,3,4,5")
+fn four_level_destructure() {
+    let items: [(((int, int), int), (int, int))] = [(((1, 2), 3), (4, 5))]
+    for (((a, b), c), (d, e)) in items {
+        print("{a},{b},{c},{d},{e}")
+    }
+}
+
+@test(output = "0:1,2,3,4,5")
+fn four_level_enumerate() {
+    let items: [(((int, int), int), (int, int))] = [(((1, 2), 3), (4, 5))]
+    for (i, (((a, b), c), (d, e))) in enumerate(items) {
+        print("{i}:{a},{b},{c},{d},{e}")
+    }
+}
+
+// === Maps ===
+
+@test(output = "2\ntrue\ntrue")
+fn enumerate_map_basic() {
+    let m: Map<string, int> = map_new()
+    insert(m, "a", 1)
+    insert(m, "b", 2)
+    let count = 0
+    let found_a = false
+    let found_b = false
+    for (i, (k, v)) in enumerate(m) {
+        if k == "a" && v == 1 { found_a = true }
+        if k == "b" && v == 2 { found_b = true }
+        count += 1
+    }
+    print(count)
+    print(found_a)
+    print(found_b)
+}
+
+@test(output = "done")
+fn enumerate_map_empty() {
+    let m: Map<string, int> = map_new()
+    for (i, (k, v)) in enumerate(m) {
+        print("should not print")
+    }
+    print("done")
+}
+
+// === Range ===
+
+@test(output = "0\n1\n2")
+fn range_basic() {
+    for i in 0..3 { print(i) }
+}
+
+// === Arena without enumerate (normal iteration) ===
+
+@test(output = "A:10\nB:20")
+fn arena_normal_iteration() {
+    let mobs: Arena<Mob> = arena_new()
+    mobs.insert(Mob { name: "A", health: 10 })
+    mobs.insert(Mob { name: "B", health: 20 })
+    for (e, mob) in mobs {
+        print("{mob.name}:{mob.health}")
+    }
+}
+
+@test(output = "A\nB")
+fn arena_underscore_entity() {
+    let mobs: Arena<Mob> = arena_new()
+    mobs.insert(Mob { name: "A", health: 10 })
+    mobs.insert(Mob { name: "B", health: 20 })
+    for (_, mob) in mobs {
+        print(mob.name)
+    }
+}
+
+// === Non-for uses ===
+//
+// On a VEC, `enumerate` is a lazy `EnumIter` (the eager overload is deleted), so
+// a caller wanting the materialized `[(int, T)]` spells `.collect()`. Arena and
+// Map keep their eager overloads -- Map has no `iter()` to coerce through, and
+// Arena's lazy element hits a pre-existing nested-tuple split bug. See the note
+// at the `enumerate` declarations in `stdlib/unified.rock`.
+
+@test(output = "acc=63 len=3")
+fn nonfor_enumerate_vec() {
+    let v = [10, 20, 30]
+    let it = enumerate(v).collect()
+    let acc = 0
+    for (i, x) in it {
+        acc = acc + i + x
+    }
+    print("acc={acc} len={it.len()}")
+}
+
+@test(output = "0:A:10\n1:B:20")
+fn nonfor_enumerate_arena() {
+    let mobs: Arena<Mob> = arena_new()
+    mobs.insert(Mob { name: "A", health: 10 })
+    mobs.insert(Mob { name: "B", health: 20 })
+    let it = enumerate(mobs)
+    for (i, pair) in it {
+        let (e, mob) = pair
+        print("{i}:{mob.name}:{mob.health}")
+    }
+}
+
+@test(output = "one=1 two=2 idxsum=1")
+fn nonfor_enumerate_map() {
+    let m: Map<string, int> = map_new()
+    m["one"] = 1
+    m["two"] = 2
+    let it = enumerate(m)
+    let one = 0
+    let two = 0
+    let idxsum = 0
+    for (i, kv) in it {
+        let (k, v) = kv
+        if k == "one" { one = v }
+        if k == "two" { two = v }
+        idxsum = idxsum + i
+    }
+    print("one={one} two={two} idxsum={idxsum}")
+}
+
+@test(output = "2:2\n1:1\n0:0")
+fn nonfor_rev_of_enumerate_vec() {
+    for (i, x) in rev(enumerate([0, 1, 2]).collect()) {
+        print("{i}:{x}")
+    }
+}

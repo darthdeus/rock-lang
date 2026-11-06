@@ -1,0 +1,64 @@
+// Regression tests for the P2.6 loop-binding misclassification bugs
+// Root cause, all three:
+// The old loop-binding scope heuristic detected loop counters STRUCTURALLY (a 4-inst `load; const 1; add; store` block whose goto
+// target branches on the slot), with no desugar provenance -- so user-written
+// `while` counters and even non-loop if-join shapes classified as per-iteration
+// loop bindings. The fix (R1) replaced the heuristic with desugar-provenance tags
+// on `MirFunc::loop_binding_cells`; R2 reordered `boxed_cells` so a lambda-written
+// cell boxes before the loop-binding exemption applies. The decided semantics
+// (plan "Capture classification"): a reassigned `let` is ONE shared binding (box);
+// per-iteration is reserved for `for` bindings.
+
+// A while-loop counter captured under an `if`: with the old structural detector
+// the increment matched a latch and `x` wrongly snapshotted per-iteration
+// ("0\n1\n2"). Correct (shared box): every closure sees the final counter.
+@test(output = "3\n3\n3")
+fn test_while_counter_capture_under_if() {
+    let fns: [fn() -> int] = []
+    let x = 0
+    while x < 3 {
+        if x >= 0 {
+            fns.push(() => x)
+        }
+        x = x + 1
+    }
+    for f in fns { print(f()) }
+}
+
+// NON-LOOP shape: an if-join `x = x + 1` followed by an `if x < 10` matched the
+// old latch/header pattern, so the capture wrongly snapshotted by value and the
+// post-capture `x = 100` was invisible ("1"). Correct (shared box): "100".
+@test(output = "100")
+fn test_nonloop_ifjoin_capture() {
+    for g in make_fns(true) { print(g()) }
+}
+
+fn make_fns(cond: bool) -> [fn() -> int] {
+    let fns: [fn() -> int] = []
+    let x = 0
+    if cond { x = x + 1 }
+    if x < 10 { fns.push(() => x) }
+    x = 100
+    return fns
+}
+
+// WRITE path: a lambda that MUTATES the misclassified counter used to write into
+// its record's private by-value field -- the mutation was silently dropped and
+// the loop ran on the un-bumped counter ("3"). Correct (shared box): the bump is
+// visible, first iteration jumps x to 10, increment to 11, loop exits -> "11".
+@test(output = "11")
+fn test_while_counter_lambda_write_visible() {
+    print(run_bump(true))
+}
+
+fn run_bump(cond: bool) -> int {
+    let x = 0
+    while x < 3 {
+        if cond {
+            let bump = () => { x = x + 10 }
+            bump()
+        }
+        x = x + 1
+    }
+    return x
+}

@@ -1,0 +1,42 @@
+// Contextual `value` keyword — introduces an immutable struct,
+// equivalent to the transitional `@value struct ...`. Also confirms
+// that `value` remains a plain identifier in every other position.
+
+value V2 {
+    x: float,
+    y: float,
+}
+
+value R {
+    x: int,
+    y: int,
+    w: int,
+    h: int,
+}
+
+// `value` as a param name, local binding, and field name — all stay
+// as plain identifiers.
+struct Box {
+    value: int,
+}
+
+fn id_param(value: int) -> int {
+    return value
+}
+
+fn id_local() -> int {
+    let value = 7
+    return value
+}
+
+@test(output = "12\n7\n42\n1\n2")
+fn test_value_keyword_and_ident() {
+    let b = Box { value: 12 }
+    print("{b.value}")
+    print("{id_local()}")
+    print("{id_param(42)}")
+
+    let v = V2 { x: 1, y: 2 }
+    print("{v.x.floor()}")
+    print("{v.y.floor()}")
+}

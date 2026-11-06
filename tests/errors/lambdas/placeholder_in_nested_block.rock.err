@@ -1,0 +1,36 @@
+//! Error: `_` placeholder inside Let/For/While statements of an explicit
+//!        lambda body must be detected (walker visits all stmt kinds).
+//! Tags: lambdas, placeholders
+
+//=== TEST CASE: placeholder_in_explicit_lambda_let_init_Generic ===
+// `_` inside the Let init of an explicit lambda's block. The walker
+// historically only visited Expression+Return stmts, so the inner `_`
+// silently desugared to its own lambda and the explicit-lambda guard
+// never fired. Now `lambda_contains_placeholder` walks Let too.
+fn main() {
+    let xs = [1, 2, 3]
+    let _ys = vec_map(xs, y => { let z = _ + y; z })
+}
+
+//=== TEST CASE: placeholder_in_explicit_lambda_for_body_Generic ===
+// Same shape, but the `_` is inside a For-stmt body within the explicit
+// lambda. Walker now visits For too.
+fn main() {
+    let xs: [[int]] = [[1, 2], [3, 4]]
+    let _ys = vec_map(xs, y => {
+        let acc = 0
+        for v in y { let _bad = _ + v }
+        acc
+    })
+}
+
+//=== TEST CASE: placeholder_in_explicit_lambda_while_body_Generic ===
+// `_` inside a While-stmt body of an explicit lambda. Walker visits While.
+fn main() {
+    let xs = [1, 2, 3]
+    let _ys = vec_map(xs, y => {
+        let i = 0
+        while i < 1 { let _bad = _ + y; i = i + 1 }
+        y
+    })
+}

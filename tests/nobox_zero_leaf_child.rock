@@ -1,0 +1,78 @@
+// A `nobox` value with NO data leaves contributes exactly ONE leaf to its parent:
+// its presence tag, keyed on the field's own name with no child appended
+// (`leaf_names_rec`). So the parent's canonical leaf-path sequence is TEXTUALLY
+// IDENTICAL to its declared field list -- `["m","a","b","c","d"]` either way.
+//
+// Any rule that recognizes the flattened ctor by punctuation cannot tell the two
+// apart, and neither can one that compares against the owned representation
+// plan's leaf paths: that sequence is a validator, not a discriminator. The
+// parent must carry more than
+// four leaves so it exceeds the column budget and a real ctor call survives to
+// emission; at four or fewer, column storage means no ctor is emitted and the
+// choice is never made.
+
+nobox value Marker {}
+
+value Tagged { m: Marker?, a: float, b: float, c: float, d: float }
+
+// The unmarked control: `Marker` unflattened, so `Tagged2` is stored by its
+// declared fields and the ctor choice is trivially right. Every assertion below
+// has a twin here.
+value Marker2 {}
+
+value Tagged2 { m: Marker2?, a: float, b: float, c: float, d: float }
+
+@test(returns = 1)
+fn present_zero_leaf_child_reads_present() -> int {
+    let m: Map<string, Tagged> = map_new()
+    m["k"] = Tagged { m: Marker {}, a: 1.0, b: 2.0, c: 3.0, d: 4.0 }
+    return if m["k"].m != null { 1 } else { 0 }
+}
+
+@test(returns = 1)
+fn absent_zero_leaf_child_reads_absent() -> int {
+    let m: Map<string, Tagged> = map_new()
+    m["k"] = Tagged { m: null, a: 1.0, b: 2.0, c: 3.0, d: 4.0 }
+    return if m["k"].m == null { 1 } else { 0 }
+}
+
+// The presence tag sits at leaf 0, ahead of every data leaf. A ctor emitted
+// against the wrong signature shifts the whole list, so the scalars are what
+// catch a shift that both null tests above would still read correctly.
+@test(returns = 1234)
+fn sibling_scalars_survive_the_present_ctor() -> int {
+    let m: Map<string, Tagged> = map_new()
+    m["k"] = Tagged { m: Marker {}, a: 1.0, b: 2.0, c: 3.0, d: 4.0 }
+    let t = m["k"]
+    return (t.a * 1000.0 + t.b * 100.0 + t.c * 10.0 + t.d) as int
+}
+
+@test(returns = 1234)
+fn sibling_scalars_survive_the_absent_ctor() -> int {
+    let m: Map<string, Tagged> = map_new()
+    m["k"] = Tagged { m: null, a: 1.0, b: 2.0, c: 3.0, d: 4.0 }
+    let t = m["k"]
+    return (t.a * 1000.0 + t.b * 100.0 + t.c * 10.0 + t.d) as int
+}
+
+@test(returns = 1)
+fn control_unmarked_present_reads_present() -> int {
+    let m: Map<string, Tagged2> = map_new()
+    m["k"] = Tagged2 { m: Marker2 {}, a: 1.0, b: 2.0, c: 3.0, d: 4.0 }
+    return if m["k"].m != null { 1 } else { 0 }
+}
+
+@test(returns = 1)
+fn control_unmarked_absent_reads_absent() -> int {
+    let m: Map<string, Tagged2> = map_new()
+    m["k"] = Tagged2 { m: null, a: 1.0, b: 2.0, c: 3.0, d: 4.0 }
+    return if m["k"].m == null { 1 } else { 0 }
+}
+
+@test(returns = 1234)
+fn control_unmarked_scalars_survive() -> int {
+    let m: Map<string, Tagged2> = map_new()
+    m["k"] = Tagged2 { m: Marker2 {}, a: 1.0, b: 2.0, c: 3.0, d: 4.0 }
+    let t = m["k"]
+    return (t.a * 1000.0 + t.b * 100.0 + t.c * 10.0 + t.d) as int
+}

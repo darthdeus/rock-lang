@@ -1,0 +1,8 @@
+// Comment between fn params
+fn add(a: int, // line comment between
+       b: int) -> int {
+    return a + b
+}
+
+@test(output = "3")
+fn t() { print(add(1, 2)) }

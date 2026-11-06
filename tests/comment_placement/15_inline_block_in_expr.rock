@@ -1,0 +1,6 @@
+// Block comment mid-expression
+@test(output = "7")
+fn t() {
+    let x = 1 + /* add two */ 2 + 4
+    print(x)
+}

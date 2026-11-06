@@ -1,0 +1,48 @@
+//! Error: every synthetic top-level Lua name skull mints -- `<fn>__lambda<k>`,
+//!        and the coroutine machinery `<co>__step`/`__resume`/`__advance`/
+//!        `__defer<k>` + `__on_killed`/`__on_resume`/`__on_hot_reload` -- goes
+//!        through the one `CodegenCtx::mint_synthetic` choke point, which rejects
+//!        a collision with a user fn OR global (a spanned CompilerError, not a
+//!        panic / silent clobber). A plain fn's own emitted name always
+//!        carries a parameter or `_0` arity suffix, so it can never BE a bare
+//!        synthetic name; the colliding definition is a global or an explicitly
+//!        bare `@nomangle` fn, and embeds the mangled enclosing symbol
+//!        (`f_0__lambda0`, `worker_0__step`). These are
+//!        valid bone identifiers; only skull's generated synthetic names
+//!        makes them collide, so the rejection is EMIT-time and this suite runs
+//!        skull emission on the bone-accepted case. The positive controls stay in
+//!        rock-lang/crates/skull/tests/synthetic_name_collision.rs.
+//! Tags: skull, codegen, synthetic-name, emit-time
+
+//=== TEST CASE: global_vs_lambda_Generic ===
+global f_0__lambda0: int = 5
+fn f() { let g = () => 3 print("{g()}") }
+fn main() { f() }
+
+//=== TEST CASE: nomangle_fn_vs_lambda_Generic ===
+@nomangle fn f_0__lambda0() -> int { return 7 }
+fn f() { let g = () => 3 print("{g()}") }
+fn main() { f() }
+
+//=== TEST CASE: nomangle_fn_vs_capturing_lambda_Generic ===
+// A CAPTURING lambda (env record) routes through the same mint_synthetic guard
+// as the capture-free one.
+@nomangle fn cap_int__lambda0() -> int { return 7 }
+fn cap(x: int) -> fn() -> int { return () => x }
+fn main() { let f = cap(5) print("{f()}") }
+
+//=== TEST CASE: nomangle_fn_vs_hook_Generic ===
+@nomangle fn worker_0__on_killed() -> int { return 999 }
+co fn worker() -> Coroutine<int> {
+    on_killed { }
+    yield 1
+}
+fn main() { let w = worker() }
+
+//=== TEST CASE: nomangle_fn_vs_step_Generic ===
+@nomangle fn worker_0__step() -> int { return 1 }
+co fn worker() -> Coroutine<int> {
+    yield 1
+    yield 2
+}
+fn main() { let w = worker() }

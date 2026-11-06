@@ -1,0 +1,57 @@
+// Tests for the StructLit{f:v, ...}.f → v peephole.
+//
+// The peephole must preserve semantics: a positive case with pure
+// field inits folds to just the named field's init, and a negative
+// case where a sibling init has an observable side effect must NOT
+// drop that effect — the whole access stays intact (the struct gets
+// materialized and projected through).
+
+struct Rect { w: int, h: int }
+
+@test(output = "4")
+fn test_struct_lit_field_peephole_basic() {
+    // Positive: both initializers are primitive literals (trivially
+    // dup-safe), so the access collapses to `4`.
+    print(Rect { w: 4, h: 5 }.w)
+}
+
+@test(output = "20")
+fn test_struct_lit_field_peephole_in_binop() {
+    // Positive: two separate peepholes inside a BinOp.
+    print(Rect { w: 4, h: 5 }.w * Rect { w: 4, h: 5 }.h)
+}
+
+@pure
+fn double(x: int) -> int {
+    return x + x
+}
+
+@test(output = "6")
+fn test_struct_lit_field_peephole_pure_call_init() {
+    // Positive: sibling init is a pure call (dup-safe per the oracle),
+    // so the peephole still fires and we just get the named init.
+    print(Rect { w: double(3), h: 100 }.w)
+}
+
+// Side-effecting helper used for the negative case. Non-pure: mutates
+// a global counter, so `is_dup_safe_at_call_site` rejects duplicating
+// it — and by extension rejects the peephole, because dropping the
+// sibling would elide the increment.
+global SIDE_EFFECT_COUNT: int = 0
+
+fn bump() -> int {
+    SIDE_EFFECT_COUNT = SIDE_EFFECT_COUNT + 1
+    return 99
+}
+
+@test(output = "4
+1")
+fn test_struct_lit_field_peephole_side_effect_preserved() {
+    // Negative: `bump()` in the sibling `h` field has an observable
+    // side effect. The peephole must NOT fire — the whole struct must
+    // materialize so `bump()` runs. After the access we observe both
+    // the value (`4`) and the side effect (counter == 1).
+    let v = Rect { w: 4, h: bump() }.w
+    print(v)
+    print(SIDE_EFFECT_COUNT)
+}

@@ -1,0 +1,50 @@
+// Struct destructuring patterns in `match`. Mirrors how enum
+// record-variant patterns work, but for plain structs.
+
+struct Point {
+    x: int,
+    y: int,
+}
+
+struct Wrapper {
+    inner: Point,
+    tag: int,
+}
+
+@test(output = "30")
+fn struct_match_shorthand() {
+    let p = Point { x: 10, y: 20 }
+    let sum = match p {
+        Point { x, y } => x + y,
+    }
+    print(sum)
+}
+
+@test(output = "10\n20")
+fn struct_match_explicit_binding() {
+    let p = Point { x: 10, y: 20 }
+    match p {
+        Point { x: a, y: b } => {
+            print(a)
+            print(b)
+        }
+    }
+}
+
+@test(output = "30")
+fn struct_match_with_rest() {
+    let p = Point { x: 10, y: 20 }
+    let v = match p {
+        Point { x, .. } => x + 20,
+    }
+    print(v)
+}
+
+@test(output = "42")
+fn struct_match_nested() {
+    let w = Wrapper { inner: Point { x: 5, y: 7 }, tag: 30 }
+    let total = match w {
+        Wrapper { inner: Point { x, y }, tag } => x + y + tag,
+    }
+    print(total)
+}

@@ -1,0 +1,296 @@
+// Match-3 Logic Tests
+// Run with: cargo run --bin rock test match3/match3_tests.rock
+//
+// These tests duplicate the core data + logic from main.rock so they can
+// run standalone. When you change logic in main.rock, update here too.
+
+// -- Types (normally from engine, defined here for standalone tests) --
+
+struct IVec2 {
+    x: int,
+    y: int,
+}
+
+// -- Constants --
+
+global GRID_W: int = 8
+global GRID_H: int = 8
+global NUM_TILE_TYPES: int = 6
+
+// The grid is a flat array of ints, -1 means empty
+global grid: [int] = []
+
+// -- Grid Helpers --
+
+fn grid_get(x: int, y: int) -> int {
+    if x < 0 || x >= GRID_W || y < 0 || y >= GRID_H {
+        return -1
+    }
+    return grid[y * GRID_W + x]
+}
+
+fn grid_set(x: int, y: int, tile: int) {
+    if x >= 0 && x < GRID_W && y >= 0 && y < GRID_H {
+        grid[y * GRID_W + x] = tile
+    }
+}
+
+fn is_adjacent(a: IVec2, b: IVec2) -> bool {
+    let dx = abs(a.x - b.x)
+    let dy = abs(a.y - b.y)
+    return (dx == 1 && dy == 0) || (dx == 0 && dy == 1)
+}
+
+// -- Match Detection --
+
+fn find_matches() -> [IVec2] {
+    let matches: [IVec2] = []
+
+    // Horizontal scan: walk each row left to right
+    for y in 0..GRID_H {
+        let run_start = 0
+        let run_tile = grid_get(0, y)
+        for x in 1..GRID_W {
+            let tile = grid_get(x, y)
+            if tile != run_tile || tile == -1 {
+                if run_tile != -1 && (x - run_start) >= 3 {
+                    for rx in run_start..x {
+                        matches.push(IVec2 { x: rx, y: y })
+                    }
+                }
+                run_start = x
+                run_tile = tile
+            }
+        }
+        if run_tile != -1 && (GRID_W - run_start) >= 3 {
+            for rx in run_start..GRID_W {
+                matches.push(IVec2 { x: rx, y: y })
+            }
+        }
+    }
+
+    // Vertical scan: walk each column top to bottom
+    for x in 0..GRID_W {
+        let run_start = 0
+        let run_tile = grid_get(x, 0)
+        for y in 1..GRID_H {
+            let tile = grid_get(x, y)
+            if tile != run_tile || tile == -1 {
+                if run_tile != -1 && (y - run_start) >= 3 {
+                    for ry in run_start..y {
+                        matches.push(IVec2 { x: x, y: ry })
+                    }
+                }
+                run_start = y
+                run_tile = tile
+            }
+        }
+        if run_tile != -1 && (GRID_H - run_start) >= 3 {
+            for ry in run_start..GRID_H {
+                matches.push(IVec2 { x: x, y: ry })
+            }
+        }
+    }
+
+    return matches
+}
+
+fn has_matches() -> bool {
+    return find_matches().len() > 0
+}
+
+// -- Swap --
+
+fn swap_tiles(a: IVec2, b: IVec2) {
+    let tmp = grid_get(a.x, a.y)
+    grid_set(a.x, a.y, grid_get(b.x, b.y))
+    grid_set(b.x, b.y, tmp)
+}
+
+// -- Gravity --
+
+fn apply_gravity() {
+    for x in 0..GRID_W {
+        let write_y = GRID_H - 1
+        for read_y_inv in 0..GRID_H {
+            let read_y = GRID_H - 1 - read_y_inv
+            let tile = grid_get(x, read_y)
+            if tile != -1 {
+                grid_set(x, write_y, tile)
+                if write_y != read_y {
+                    grid_set(x, read_y, -1)
+                }
+                write_y = write_y - 1
+            }
+        }
+    }
+}
+
+// -- Test Helpers --
+
+fn setup_empty_board() {
+    grid = []
+    for i in 0..(GRID_W * GRID_H) {
+        grid.push(-1)
+    }
+}
+
+// ============================================================
+// Tests
+// ============================================================
+
+@test
+fn test_grid_get_set() {
+    setup_empty_board()
+    grid_set(3, 4, 5)
+    assert_eq(grid_get(3, 4), 5)
+    assert_eq(grid_get(0, 0), -1)
+}
+
+@test
+fn test_grid_bounds() {
+    setup_empty_board()
+    assert_eq(grid_get(-1, 0), -1)
+    assert_eq(grid_get(GRID_W, 0), -1)
+    assert_eq(grid_get(0, -1), -1)
+    assert_eq(grid_get(0, GRID_H), -1)
+}
+
+@test
+fn test_is_adjacent() {
+    assert_true(is_adjacent(IVec2 { x: 0, y: 0 }, IVec2 { x: 1, y: 0 }))
+    assert_true(is_adjacent(IVec2 { x: 0, y: 0 }, IVec2 { x: 0, y: 1 }))
+    assert_false(is_adjacent(IVec2 { x: 0, y: 0 }, IVec2 { x: 1, y: 1 }))
+    assert_false(is_adjacent(IVec2 { x: 0, y: 0 }, IVec2 { x: 2, y: 0 }))
+    assert_false(is_adjacent(IVec2 { x: 0, y: 0 }, IVec2 { x: 0, y: 0 }))
+}
+
+// -- Match detection tests --
+// These will fail until find_matches() is implemented
+
+@test
+fn test_horizontal_match_3() {
+    setup_empty_board()
+    grid_set(2, 3, 1)
+    grid_set(3, 3, 1)
+    grid_set(4, 3, 1)
+    let matches = find_matches()
+    assert_true(matches.len() >= 3, "Should find 3+ tiles in horizontal match")
+}
+
+@test
+fn test_vertical_match_3() {
+    setup_empty_board()
+    grid_set(5, 1, 2)
+    grid_set(5, 2, 2)
+    grid_set(5, 3, 2)
+    let matches = find_matches()
+    assert_true(matches.len() >= 3, "Should find 3+ tiles in vertical match")
+}
+
+@test
+fn test_no_match_alternating() {
+    setup_empty_board()
+    grid_set(0, 0, 1)
+    grid_set(1, 0, 2)
+    grid_set(2, 0, 1)
+    grid_set(3, 0, 2)
+    let matches = find_matches()
+    assert_eq(matches.len(), 0, "Alternating tiles should not match")
+}
+
+@test
+fn test_match_4() {
+    setup_empty_board()
+    grid_set(0, 0, 3)
+    grid_set(1, 0, 3)
+    grid_set(2, 0, 3)
+    grid_set(3, 0, 3)
+    let matches = find_matches()
+    assert_true(matches.len() >= 4, "4-in-a-row should match all 4")
+}
+
+@test
+fn test_match_5() {
+    setup_empty_board()
+    grid_set(1, 4, 4)
+    grid_set(2, 4, 4)
+    grid_set(3, 4, 4)
+    grid_set(4, 4, 4)
+    grid_set(5, 4, 4)
+    let matches = find_matches()
+    assert_true(matches.len() >= 5, "5-in-a-row should match all 5")
+}
+
+@test
+fn test_two_separate_matches() {
+    setup_empty_board()
+    // Horizontal match at row 0
+    grid_set(0, 0, 1)
+    grid_set(1, 0, 1)
+    grid_set(2, 0, 1)
+    // Vertical match at col 6
+    grid_set(6, 4, 3)
+    grid_set(6, 5, 3)
+    grid_set(6, 6, 3)
+    let matches = find_matches()
+    assert_true(matches.len() >= 6, "Should find both matches (6+ tiles)")
+}
+
+@test
+fn test_cross_match() {
+    setup_empty_board()
+    // Horizontal: (1,2), (2,2), (3,2)
+    // Vertical:   (2,1), (2,2), (2,3)
+    // Tile at (2,2) is shared
+    grid_set(1, 2, 1)
+    grid_set(2, 2, 1)
+    grid_set(3, 2, 1)
+    grid_set(2, 1, 1)
+    grid_set(2, 3, 1)
+    let matches = find_matches()
+    // 5 unique positions in the cross
+    assert_true(matches.len() >= 5, "Cross should find at least 5 tiles")
+}
+
+// -- Gravity tests --
+
+@test
+fn test_gravity_simple() {
+    setup_empty_board()
+    // Column 3: tile at top, empties below, tiles at bottom
+    for y in 0..GRID_H {
+        grid_set(3, y, -1) // clear column
+    }
+    grid_set(3, 0, 5)  // tile at top
+    grid_set(3, 7, 2)  // tile at bottom
+    apply_gravity()
+    assert_eq(grid_get(3, 7), 2, "Bottom tile stays")
+    assert_eq(grid_get(3, 6), 5, "Top tile drops to just above bottom")
+    assert_eq(grid_get(3, 0), -1, "Original position is empty")
+}
+
+@test
+fn test_gravity_preserves_order() {
+    setup_empty_board()
+    for y in 0..GRID_H {
+        grid_set(0, y, -1)
+    }
+    grid_set(0, 0, 1) // top
+    grid_set(0, 2, 2) // middle (with gap)
+    grid_set(0, 4, 3) // lower (with gap)
+    apply_gravity()
+    assert_eq(grid_get(0, 7), 3, "Bottom-most value")
+    assert_eq(grid_get(0, 6), 2, "Middle value")
+    assert_eq(grid_get(0, 5), 1, "Top value")
+}
+
+@test
+fn test_swap_tiles() {
+    setup_empty_board()
+    grid_set(0, 0, 1)
+    grid_set(1, 0, 2)
+    swap_tiles(IVec2 { x: 0, y: 0 }, IVec2 { x: 1, y: 0 })
+    assert_eq(grid_get(0, 0), 2)
+    assert_eq(grid_get(1, 0), 1)
+}

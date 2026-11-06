@@ -1,0 +1,65 @@
+// A handle resolves only while its row is live: these hold for every read
+// path that shares the liveness test (`Entity.get`, `Arena.get/contains/
+// borrow/remove`, the weak cache), across remove, slot reuse, clear, destroy
+// and a foreign owner.
+struct LiveRow { value: int }
+
+fn absent(arena: Arena<LiveRow>, entity: Entity<LiveRow>) -> bool {
+    return entity.get() == null && arena.get(entity) == null
+        && !arena.contains(entity) && arena.borrow(entity) == null
+}
+
+@test(output = "true true\ntrue true 2")
+fn a_removed_handle_stays_absent_through_slot_reuse() {
+    let arena: Arena<LiveRow> = arena_new()
+    let first = arena.insert(LiveRow { value: 1 })
+    let _ = arena.insert(LiveRow { value: 9 })
+    let _ = arena.remove(first)
+    print("{absent(arena, first)} {arena.remove(first) == null}")
+
+    let reused = arena.insert(LiveRow { value: 2 })
+    print("{reused._slot == first._slot && reused._generation != first._generation} {absent(arena, first)} {reused.get().unwrap().value}")
+}
+
+@test(output = "true\ntrue 3")
+fn a_retained_slot_reuse_leaves_the_old_handle_absent() {
+    let arena: Arena<LiveRow> = arena_new()
+    let old = arena.insert(LiveRow { value: 3 })
+    old.remove()
+    print("{absent(arena, old)}")
+    let fresh = arena.reuse_retained_entity().unwrap()
+    print("{absent(arena, old)} {fresh.get().unwrap().value}")
+}
+
+@test(output = "true\ntrue")
+fn clear_and_destroy_leave_handles_absent() {
+    let arena: Arena<LiveRow> = arena_new()
+    let before_clear = arena.insert(LiveRow { value: 4 })
+    arena.clear()
+    let after_clear = arena.insert(LiveRow { value: 5 })
+    print("{absent(arena, before_clear)}")
+    let _ = arena_destroy(arena)
+    print("{absent(arena, after_clear)}")
+}
+
+@test(output = "true false")
+fn a_handle_naming_another_scene_is_absent() {
+    let arena: Arena<LiveRow> = arena_new()
+    let live = arena.insert(LiveRow { value: 6 })
+    let foreign: Entity<LiveRow> = Entity {
+        _scene_id: live._scene_id + 1, _arena_id: live._arena_id,
+        _slot: live._slot, _generation: live._generation,
+    }
+    print("{foreign.get() == null} {live.get() == null}")
+}
+
+@test(output = "7 true")
+fn the_weak_cache_drops_a_removed_owner() {
+    let arena: Arena<LiveRow> = arena_new()
+    let owner = arena.insert(LiveRow { value: 7 })
+    weak_cache_put("arena_liveness", owner, 7)
+    let cached: int? = weak_cache_get("arena_liveness", owner)
+    owner.remove()
+    let stale: int? = weak_cache_get("arena_liveness", owner)
+    print("{cached.unwrap()} {stale == null}")
+}

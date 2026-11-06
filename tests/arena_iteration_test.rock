@@ -1,0 +1,51 @@
+struct Prefab {
+    name: string,
+    sprite: SpriteInfo,
+}
+
+struct SpriteInfo {
+    source: string,
+}
+
+@test
+fn test_arena_iteration_like_game() {
+    let arena: Arena<Prefab> = arena_new()
+
+    let prefab = Prefab {
+        name: "test_prefab",
+        sprite: SpriteInfo { source: "test.png" }
+    }
+    let entity = arena.insert(prefab)
+
+    let count = 0
+    for (e, p) in arena {
+        // Test field access on both e and p
+        assert(e._slot >= 0, "Entity should have valid index")
+        assert_eq(p.name, "test_prefab", "Prefab name should match")
+        assert_eq(p.sprite.source, "test.png", "Sprite source should match")
+        count += 1
+    }
+
+    assert_eq(count, 1, "Should have iterated over 1 item")
+}
+
+@test
+fn test_without_for_loop() {
+    let arena: Arena<Prefab> = arena_new()
+
+    let prefab = Prefab {
+        name: "test_prefab",
+        sprite: SpriteInfo { source: "test.png" }
+    }
+    let entity = arena.insert(prefab)
+
+    let found = false
+    for (e, p) in arena {
+        assert_eq(p.name, "test_prefab", "Prefab name should match")
+        assert_eq(p.sprite.source, "test.png", "Sprite source should match")
+        found = true
+        break // Only check the first one
+    }
+
+    assert(found, "Should have found at least one item")
+}

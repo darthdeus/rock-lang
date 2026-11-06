@@ -1,0 +1,74 @@
+// Bug: implicit return not working in certain contexts.
+// Simple cases (literals, if/else) work, but UFCS method calls
+// as the last expression may not return their value.
+
+fn lookup_free(m: Map<int, string>, key: int) -> string? {
+    // Free function call - does this work?
+    get(m, key)
+}
+
+fn lookup_ufcs(m: Map<int, string>, key: int) -> string? {
+    // UFCS method call - does this work?
+    m.get(key)
+}
+
+fn lookup_with_early_return(m: Map<int, string>, key: int) -> string? {
+    if key < 0 { return null }
+    // Implicit return after early return guard
+    m.get(key)
+}
+
+struct Wrapper {
+    value: int,
+}
+
+fn lookup_arena_style(a: Arena<Wrapper>, key: int) -> Wrapper? {
+    // Simulates the actual pattern: arena entity lookup
+    let e = a.pairs().find(_.1.value == key)
+    if e == null { return null }
+    e.unwrap().1
+}
+
+@test
+fn test_implicit_return_free_fn() {
+    let m: Map<int, string> = map_new()
+    insert(m, 1, "hello")
+
+    let result = lookup_free(m, 1)
+    assert(result != null, "Expected non-null from free fn implicit return")
+    assert_eq(result.unwrap(), "hello")
+    print("free fn implicit return works")
+}
+
+@test
+fn test_implicit_return_ufcs() {
+    let m: Map<int, string> = map_new()
+    insert(m, 1, "hello")
+
+    let result = lookup_ufcs(m, 1)
+    assert(result != null, "Expected non-null from UFCS implicit return")
+    assert_eq(result.unwrap(), "hello")
+    print("UFCS implicit return works")
+}
+
+@test
+fn test_implicit_return_after_early_return() {
+    let m: Map<int, string> = map_new()
+    insert(m, 1, "hello")
+
+    let result = lookup_with_early_return(m, 1)
+    assert(result != null, "Expected non-null after early return guard")
+    assert_eq(result.unwrap(), "hello")
+    print("implicit return after early return works")
+}
+
+@test
+fn test_implicit_return_arena_style() {
+    let a: Arena<Wrapper> = arena_new()
+    a.insert(Wrapper { value: 42 })
+
+    let result = lookup_arena_style(a, 42)
+    assert(result != null, "Expected non-null from arena lookup")
+    assert_eq(result.unwrap().value, 42)
+    print("arena-style implicit return works")
+}

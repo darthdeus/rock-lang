@@ -1,0 +1,10 @@
+// Comment between pattern and =>
+@test(output = "one")
+fn t() {
+    let x = 1
+    let s = match x {
+        1 /* pattern for 1 */ => "one",
+        _ => "other",
+    }
+    print(s)
+}

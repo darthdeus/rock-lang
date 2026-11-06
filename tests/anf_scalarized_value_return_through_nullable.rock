@@ -1,0 +1,57 @@
+// RETURN-SLOT analog of the patched call-arg bug.
+//
+// Bug shape: a function `fn f(v: V?, fb: V) -> V { if v != null { v }
+// else { fb } }` whose body joins over a Nullable scrutinee. The join
+// classifier picks `Nullable(V)` and emits both arms as `V_ct(...)`
+// packed cdata stored in a single non-scalar local. The function's
+// return slot is *scalar-multi* per the Rock value-return ABI (caller
+// does `local __a__x, __a__y = f(...)`), so __a__y reads nil and the
+// downstream pack via `V_ct(__a__x, nil)` crashes at runtime.
+//
+// This sentinel fails today on `b6e4ac2be`. The eca638b24 fix patched
+// the call-arg site (`lower_nullable_value_obj` Ident arm); the
+// return-slot has the same Nullable-peel mismatch but a different
+// lowering site. Closing it is part of Phase 2 (`PackValue` IR op) +
+// Phase 3 (id-keyed registry) of the master refactor — at that point
+// both axes share the structural pack-vs-scalar decision and a single
+// fix closes both.
+//
+// Diagnostic: discovered by the adversarial-hunt agent
+// (`a6c50ea1a3f4aa889`) on 2026-05-24. Findings saved at
+// /tmp/adversarial_findings.md.
+
+// rock: allow(unused)
+
+value V2 { x: float, y: float }
+
+fn make_v2(x: float, y: float) -> V2 { return V2 { x: x, y: y } }
+
+// Return-slot mode-(a') guard: a fn returning `V` whose body joins
+// over a Nullable scrutinee via REFINEMENT (bare `v` after the
+// null-check narrows V? to V). The if-expression's resolved type is
+// `Nullable(V)` despite the refinement; the body packs to one cdata
+// while the scalar-ABI return is multi-value. Lowering must splat the
+// cdata at the return boundary — `lower_block_inner`'s FnBody/If arm
+// detects (return_scalarized && is_value_typed) and unpacks via
+// `unpack_cdata_value`.
+fn opt_or_fn(v: V2?, fb: V2) -> V2 {
+    if v != null { v } else { fb }
+}
+
+fn takes_v(v: V2) -> float { return v.x + v.y }
+
+@test(output = "30")
+fn return_slot_some() {
+    let m: V2? = V2 { x: 10.0, y: 20.0 }
+    let fb = V2 { x: 1.0, y: 1.0 }
+    let r = opt_or_fn(m, fb)
+    print(takes_v(r))
+}
+
+@test(output = "2")
+fn return_slot_none() {
+    let m: V2? = null
+    let fb = V2 { x: 1.0, y: 1.0 }
+    let r = opt_or_fn(m, fb)
+    print(takes_v(r))
+}

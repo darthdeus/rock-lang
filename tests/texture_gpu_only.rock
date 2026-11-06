@@ -1,0 +1,16 @@
+// texture() is GPU-only. CPU calls and fn-value references are compile errors
+// (tests/errors/texture_cpu_call.rock.err and skull's GPU-only fn-value test).
+// A @shader(fragment) fn calling texture() still compiles because shader bodies
+// pass through the Lua backend; bitgun's heat_shimmer is the live case.
+
+// Positive control: compiled (never executed) under the default lua backend --
+// its @shader annotation exempts the texture() call from the CPU-call reject.
+@shader(fragment)
+fn gpu_only_test_frag(s: Sampler2D, tc: Vec2) -> Vec4 {
+    return texture(s, tc)
+}
+
+@test
+fn test_shader_caller_compiles() {
+    assert(1 + 1 == 2)
+}

@@ -1,0 +1,224 @@
+// Adversarial tests probing the `@pure` oracle's trust boundary and its
+// interactions with CSE / DCE / LICM / const-fold / struct-lit peephole.
+//
+// Each test documents what it attacks and whether the compiler catches the
+// attack (rejects / handles correctly) or manifests a miscompile/silent
+// mis-handling. Pin them as regression guards regardless.
+
+// ────────────────────────────────────────────────────────────────────
+// ATTACK 1: @pure fn whose body is a `match` with an impure arm.
+// Verifier walks match arms in check_block_pure; if it missed the arm,
+// the call would be treated as pure. A test with observable side effect
+// in an arm would leak if accepted. We EXPECT rejection via the .err
+// companion — but confirm *runtime behavior when the `_` arm is taken*
+// by making the arm pure (param-only). This variant uses match with all
+// pure arms → verifier accepts → runtime is fine.
+// ────────────────────────────────────────────────────────────────────
+enum Sign { Neg, Zero, Pos }
+
+@pure
+fn sign_of(n: int) -> int {
+    if n < 0 { return 0 - 1 }
+    if n > 0 { return 1 }
+    return 0
+}
+
+// Invariant: CSE/LICM should treat sign_of as pure (no-op side-effects).
+// Use the result three times; if the oracle is wrong we'd observe nothing
+// bad here (fn is actually pure), but this pins the structural pattern.
+@test(output = "3")
+fn test_pure_match_body() {
+    let n = 7
+    let a = sign_of(n)
+    let b = sign_of(n)
+    let c = sign_of(n)
+    print(a + b + c)
+}
+
+// ────────────────────────────────────────────────────────────────────
+// ATTACK 2: long transitive `@debug_impure` chain A -> B -> C -> D -> E
+// -> print. The fixpoint demotion must propagate through all 5 layers.
+// Runtime must still produce the observable print. If demotion fails at
+// some layer, the middle layer could be wrongly classified pure and
+// CSE/DCE would collapse/drop the outer call.
+// ────────────────────────────────────────────────────────────────────
+@pure fn l5(n: int) -> int { print("leaf5"); return n }
+@pure fn l4(n: int) -> int { return l5(n) }
+@pure fn l3(n: int) -> int { return l4(n) }
+@pure fn l2(n: int) -> int { return l3(n) }
+@pure fn l1(n: int) -> int { return l2(n) }
+
+// If the chain is correctly demoted, the bare call emits "leaf5". DCE
+// would drop it if ANY layer fails to demote.
+@test(output = "leaf5\nok")
+fn test_long_debug_impure_chain_not_dropped() {
+    l1(1)
+    print("ok")
+}
+
+// Also: two calls with same arg. If demotion fails, CSE would collapse
+// them into one and we'd see "leaf5" only once. Correct behavior is
+// two "leaf5" lines.
+@test(output = "leaf5\nleaf5\ndone")
+fn test_long_debug_impure_chain_not_cse_collapsed() {
+    let a = l1(42)
+    let b = l1(42)
+    print("done")
+}
+
+// ────────────────────────────────────────────────────────────────────
+// ATTACK 3: mutual recursion between two `@pure` fns that each reach
+// a demoted leaf. The fixpoint has to reach a stable set across both.
+// ────────────────────────────────────────────────────────────────────
+@pure fn ping(n: int) -> int {
+    if n <= 0 { return 0 }
+    print("ping")
+    return pong(n - 1)
+}
+@pure fn pong(n: int) -> int {
+    if n <= 0 { return 0 }
+    return ping(n - 1)
+}
+// Note: self/mutual recursion is currently not verified as pure (per
+// existing .err goldens). Both fns SHOULD be rejected → a compile error.
+// We don't @test this — see errors/ golden. But we need a site that
+// exercises it: commented out so the file still compiles for tests.
+// (If @pure on recursion is later accepted, we'd need a runtime test.)
+
+// ────────────────────────────────────────────────────────────────────
+// ATTACK 4: DCE dropping bare pure call whose arg is a pure call
+// reaching a demoted leaf. The arg IS dup-safe (the chain is "@pure")
+// but it has an observable demoted effect. With transitive demotion,
+// l1(42) is NOT classified pure (taint propagates), so neither the
+// outer nor the inner call is droppable.
+// ────────────────────────────────────────────────────────────────────
+@pure fn identity_int(n: int) -> int { return n }
+
+@test(output = "leaf5\nafter")
+fn test_dce_preserves_demoted_arg() {
+    identity_int(l1(99))
+    print("after")
+}
+
+// ────────────────────────────────────────────────────────────────────
+// ATTACK 5: LICM hoisting a @pure call that takes a loop-invariant
+// local BUT the local is shadowed by a block-scope let with the same
+// name inside the loop. Hoist site must use the outer binding's value,
+// but the call INSIDE the loop reads the inner shadow. These are
+// different semantic bindings; if LICM hoists blindly on name match,
+// output changes.
+// ────────────────────────────────────────────────────────────────────
+@pure fn double_it(x: int) -> int { return x * 2 }
+
+// Outer `x` = 10, inner shadow `x` = 3 inside loop body. The call uses
+// the INNER x (= 3), so result is 6 per iteration. Sum = 6 * 4 = 24.
+// If LICM hoists double_it(x) using outer x, we'd see 20 * 4 = 80.
+@test(output = "24")
+fn test_licm_respects_shadow() {
+    let x = 10
+    let sum = 0
+    for i in 0..4 {
+        let x = 3
+        sum = sum + double_it(x)
+    }
+    print(sum)
+}
+
+// ────────────────────────────────────────────────────────────────────
+// ATTACK 6: LICM in a zero-trip loop. The hoisted call runs pre-loop;
+// a pure call has no observable effect so moving it from "never runs"
+// to "runs once" is observationally equivalent. Verify nothing crashes
+// and the sum stays 0.
+// ────────────────────────────────────────────────────────────────────
+@pure fn div_safe(a: int, b: int) -> int {
+    return if b == 0 { 0 } else { a ./ b }
+}
+
+@test(output = "0")
+fn test_licm_zero_trip_loop_safe() {
+    let limit = 5
+    let sum = 0
+    for i in 10..10 {   // zero trips
+        sum = sum + div_safe(100, limit)
+    }
+    print(sum)
+}
+
+// ────────────────────────────────────────────────────────────────────
+// ATTACK 7: CSE dedup in the presence of an assignment to a different
+// name. CSE must be value-based, not syntax-based. The two calls have
+// identical args — dedup is correct and the intervening `y = y + 1`
+// doesn't touch `x`. Pin that CSE fires correctly here.
+// ────────────────────────────────────────────────────────────────────
+@pure fn sq(x: int) -> int { return x * x }
+
+@test(output = "50")
+fn test_cse_ignores_unrelated_assign() {
+    let x = 5
+    let y = 0
+    let a = sq(x)
+    y = y + 1
+    let b = sq(x)
+    print(a + b)
+}
+
+// ────────────────────────────────────────────────────────────────────
+// ATTACK 8: StructLit peephole with a side-effecting arg to a DIFFERENT
+// field. `Point { x: 3, y: side() }.x` should NOT reduce to `3` because
+// `side()` is observable. Peephole predicate requires ALL inits dup-safe.
+// Catches the predicate: bare call to impure fn is not dup-safe, so
+// peephole REJECTS and `side()` runs.
+// ────────────────────────────────────────────────────────────────────
+value Pt { x: int, y: int }
+
+fn side() -> int {
+    print("boom")
+    return 0
+}
+
+@test(output = "boom\n3")
+fn test_struct_lit_peephole_preserves_other_field_effect() {
+    let p_x = Pt { x: 3, y: side() }.x
+    print(p_x)
+}
+
+// ────────────────────────────────────────────────────────────────────
+// ATTACK 9: nested cascading LICM where the inner loop hoist lands
+// between outer and inner, but the outer loop REASSIGNS the invariant
+// before the inner starts. Correct behavior: inner hoist runs each
+// outer iteration with the current value.
+// Outer i sets x = i*10; inner hoist of double_it(x) must recompute
+// each outer iter. Sums: iter0 x=0, double=0, inner sum 0; iter1 x=10,
+// double=20, sum 60 (3 iters); iter2 x=20, double=40, sum 120. Total 180.
+// ────────────────────────────────────────────────────────────────────
+@test(output = "180")
+fn test_licm_outer_reassigns_invariant() {
+    let x = 0
+    let total = 0
+    for i in 0..3 {
+        x = i * 10
+        for j in 0..3 {
+            total = total + double_it(x)
+        }
+    }
+    print(total)
+}
+
+// ────────────────────────────────────────────────────────────────────
+// ATTACK 10: const-fold a @pure fn that returns a value struct. Const
+// fold should only fire for literal-scalar results; value structs are
+// fine to return but NOT foldable to a literal — the call stays as a
+// call, and LICM picks it up. Verify nothing crashes and the numbers
+// are right.
+// ────────────────────────────────────────────────────────────────────
+value IV { a: int, b: int }
+
+@pure fn mk_iv(a: int, b: int) -> IV {
+    return IV { a: a, b: b }
+}
+
+@test(output = "30")
+fn test_const_fold_value_struct_return() {
+    let v = mk_iv(10, 20)
+    print(v.a + v.b)
+}

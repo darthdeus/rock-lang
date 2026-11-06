@@ -1,0 +1,5 @@
+@test(output = "hello\n42")
+fn c_output_smoke() {
+    print("hello")
+    print(42)
+}

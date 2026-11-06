@@ -1,0 +1,60 @@
+// A generic bounded fn forwarding its `I: Iterator<T>` receiver into another
+// bounded terminal that takes a fn-value argument, with the closure constructed
+// in the forwarding fn's own body. The whole chain must monomorphize by
+// inlining -- these used
+// to be silently dropped at emit and die as nil calls at runtime.
+
+fn fwd_reduce<I: Iterator<int>>(it: I) -> int {
+    return it.reduce(0, (acc, x) => acc + x)
+}
+
+fn fwd_any<I: Iterator<int>>(it: I) -> bool {
+    return it.any(x => x > 2)
+}
+
+fn fwd_all<I: Iterator<int>>(it: I) -> bool {
+    return it.all(x => x > 0)
+}
+
+fn fwd_find<I: Iterator<int>>(it: I) -> int {
+    let r = it.find(x => x > 1)
+    return r ?? -1
+}
+
+fn fwd_chained<I: Iterator<int>>(it: I) -> int {
+    return it.skip(1).reduce(0, (acc, x) => acc + x)
+}
+
+// Capturing lambda: the closure reads the forwarding fn's own param.
+fn fwd_capture<I: Iterator<int>>(it: I, floor: int) -> int {
+    return it.reduce(0, (acc, x) => acc + (if x > floor { x } else { 0 }))
+}
+
+@test
+fn test_fwd_reduce() {
+    assert(fwd_reduce([1, 2, 3].iter()) == 6, "reduce through a bounded forwarder")
+}
+
+@test
+fn test_fwd_any_all() {
+    assert(fwd_any([1, 2, 3].iter()), "any through a bounded forwarder")
+    assert(!fwd_any([1, 2].iter()), "any: no element passes")
+    assert(fwd_all([1, 2, 3].iter()), "all through a bounded forwarder")
+    assert(!fwd_all([0, 2].iter()), "all: zero fails the pred")
+}
+
+@test
+fn test_fwd_find() {
+    assert(fwd_find([1, 2, 3].iter()) == 2, "find through a bounded forwarder")
+    assert(fwd_find([1].iter()) == -1, "find miss coalesces")
+}
+
+@test
+fn test_fwd_chained_combinator() {
+    assert(fwd_chained([1, 2, 3].iter()) == 5, "skip(1) then reduce")
+}
+
+@test
+fn test_fwd_capturing_lambda() {
+    assert(fwd_capture([1, 2, 3, 4].iter(), 2) == 7, "closure capturing the outer param")
+}

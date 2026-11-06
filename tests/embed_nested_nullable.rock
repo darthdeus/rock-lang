@@ -1,0 +1,136 @@
+// A NULLABLE embed nested inside an embedded child. The inner field owns a
+// presence slot at its own declared name under the composed path
+// (`child.inner`), exactly as a top-level nullable embed does.
+//
+// The parent-literal path used to route a nullable inner embed through the
+// non-nullable leaf builder, so it wrote no presence slot and lowered
+// `inner: null` as a leaf-wise read off nil -- `(nil).v` -- which crashed the
+// chunk at runtime. Both halves now go through the same nullable-aware pair the
+// whole-field store uses.
+
+struct Leaf {
+    v: int,
+}
+
+struct Mid {
+    embed inner: Leaf?,
+    m: int,
+}
+
+struct Top {
+    embed child: Mid?,
+    t: int,
+}
+
+global T: Top = Top { child: null, t: 0 }
+
+fn fill_present() { T.child = Mid { inner: Leaf { v: 7 }, m: 1 } }
+fn fill_absent() { T.child = Mid { inner: null, m: 2 } }
+fn clear_child() { T.child = null }
+
+fn probe_inner() -> int { return T.child?.inner?.v ?? -1 }
+fn probe_m() -> int { return T.child?.m ?? -1 }
+fn inner_is_null() -> bool { return T.child?.inner == null }
+
+inline(lua) fn inner_presence_absent(o: Top) -> bool = """
+    return o["child.inner"] == nil
+"""
+
+@test
+fn nested_nullable_absent_inner_does_not_crash() {
+    // The `(nil).v` lowering killed the chunk at load; reaching this at all is
+    // the assertion.
+    fill_absent()
+    assert_eq(probe_m(), 2)
+    assert_eq(probe_inner(), -1)
+}
+
+@test
+fn nested_nullable_present_inner_roundtrips() {
+    fill_present()
+    assert_eq(probe_inner(), 7)
+    assert_eq(probe_m(), 1)
+}
+
+@test
+fn nested_nullable_presence_slot_tracks_the_inner_field() {
+    fill_present()
+    assert_eq(inner_presence_absent(T), false)
+    fill_absent()
+    assert_eq(inner_presence_absent(T), true)
+}
+
+@test
+fn clearing_the_outer_child_clears_the_inner_leaves() {
+    fill_present()
+    clear_child()
+    assert_eq(probe_inner(), -1)
+    assert_eq(probe_m(), -1)
+}
+
+@test
+fn nested_nullable_inner_null_compare() {
+    // `T.child?.inner == null` reads TRUE when the inner field is absent. The
+    // safe-nav arm composes through `physical_field` rather than reading off the
+    // re-materialized base, so the compare consults the real presence slot
+    // (`T["child.inner"]`) and never builds a child at all.
+    //
+    // The reconstruction is correct on its own now too (mechanism K), which
+    // `nested_nullable_survives_a_materialized_child` covers -- this one stays as
+    // the guard for the no-rebuild path.
+    fill_absent()
+    assert_eq(inner_is_null(), true)
+}
+
+@test
+fn outer_null_compare_control() {
+    // Scopes the sentinel to the NESTED case: `== null` on a TOP-LEVEL nullable
+    // embed is correct in both directions. This also keeps the sentinel honest
+    // -- an `inner_is_null` stuck at false would satisfy it, but not this.
+    clear_child()
+    assert_eq(T.child == null, true)
+    fill_absent()
+    assert_eq(T.child == null, false)
+}
+
+fn inner_is_null_of(m: Mid?) -> bool { return m?.inner == null }
+fn inner_v_of(m: Mid?) -> int { return m?.inner?.v ?? -1 }
+
+@test
+fn nested_nullable_survives_a_materialized_child() {
+    // The whole child crossing a call boundary is the consumer that reads the
+    // REBUILT box, where the safe-nav path composes through `physical_field` and
+    // never builds one. It miscompiled in BOTH directions: the rebuild boxed
+    // `inner` under its own name, so an absent inner came back non-nil, and a
+    // present inner's leaf came back nil because the callee reads `["inner.v"]`.
+    fill_absent()
+    assert_eq(inner_is_null_of(T.child), true)
+    assert_eq(inner_v_of(T.child), -1)
+    fill_present()
+    assert_eq(inner_is_null_of(T.child), false)
+    assert_eq(inner_v_of(T.child), 7)
+}
+
+inline(lua) fn slot_keys(m: Mid) -> string = """
+    local ks = {}
+    for k, _ in pairs(m) do if k ~= "__ty" then ks[#ks + 1] = tostring(k) end end
+    table.sort(ks)
+    return table.concat(ks, ",")
+"""
+
+// The embed field itself cannot reach an `inline(lua)` callee (that takes a whole
+// struct); by the time it is a param it is an ordinary materialized value.
+fn slot_keys_of(m: Mid?) -> string {
+    if m == null { return "null" }
+    return slot_keys(m)
+}
+
+@test
+fn a_rebuilt_child_carries_the_canonical_flat_slots() {
+    // Names the SHAPE, not just the values it happens to read back: a rebuilt
+    // `Mid` must key its embedded inner exactly as `Mid { .. }` does -- a dotted
+    // leaf plus a presence tag at the field's own name -- or the two
+    // representations diverge again for whatever consumer reads a different slot.
+    fill_present()
+    assert_eq(slot_keys_of(T.child), "inner,inner.v,m")
+}

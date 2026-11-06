@@ -1,0 +1,46 @@
+// Adversarial: aliasing across nested levels. A nested literal field
+// reads from the slot being written. Pass-1 must capture leaves before
+// any slot mutation occurs.
+
+@intrinsic @inline inline(lua) fn put(s: string) = "io.write(s)"
+
+value V2 {
+    x: float,
+    y: float,
+}
+
+value Pair {
+    first: V2,
+    second: V2,
+}
+
+@nomangle inline(lua) fn __nb_alloc_Pair(n: int) -> Ptr<Pair> = 'return ffi.new("Pair[?]", n)'
+
+fn nb_pair(n: int) -> NativeBuffer<Pair> {
+    return NativeBuffer { ptr: __nb_alloc_Pair(n), len: n }
+}
+
+@test(output = "f.x=3\nf.y=4\ns.x=1\ns.y=2")
+fn test_swap_via_nested() {
+    let buf = nb_pair(1)
+    buf[0] = Pair { first: V2 { x: 1.0, y: 2.0 }, second: V2 { x: 3.0, y: 4.0 } }
+    // Swap first <-> second leaf-by-leaf via slot reads. Pack-then-copy
+    // semantics expected: result is fully swapped.
+    buf[0] = Pair {
+        first: V2 { x: buf[0].second.x, y: buf[0].second.y },
+        second: V2 { x: buf[0].first.x, y: buf[0].first.y },
+    }
+    let r = buf[0]
+    put("f.x=")
+    put("{r.first.x}")
+    put("\n")
+    put("f.y=")
+    put("{r.first.y}")
+    put("\n")
+    put("s.x=")
+    put("{r.second.x}")
+    put("\n")
+    put("s.y=")
+    put("{r.second.y}")
+    put("\n")
+}

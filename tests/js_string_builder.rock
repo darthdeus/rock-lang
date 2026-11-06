@@ -1,0 +1,53 @@
+// StringBuilder corpus for the `--backend js` ratchet (T8d). The three
+// `@intrinsic inline(lua)` accumulator ops (sb_new / sb_push / sb_build) map to
+// a JS array: `[]`, `.push(s)`, `.join("")`. `join` (stdlib/strings.rock) is
+// pure Rock over them and co-emits. Pins the node templates
+// (crates/skull-codegen-js/tests/string_builder.rs).
+
+// Direct StringBuilder: new, push several fragments, build.
+@test(output = "foobarbaz")
+fn test_sb_direct() {
+    let sb = sb_new()
+    sb_push(sb, "foo")
+    sb_push(sb, "bar")
+    sb_push(sb, "baz")
+    print(sb_build(sb))
+}
+
+// An empty builder builds the empty string.
+@test(output = "")
+fn test_sb_empty() {
+    let sb = sb_new()
+    print(sb_build(sb))
+}
+
+// join over a Vec of strings with a separator (co-emits sb_*).
+@test(output = "a, b, c")
+fn test_join_sep() {
+    let parts = ["a", "b", "c"]
+    print(join(parts, ", "))
+}
+
+// join of a single element emits no separator.
+@test(output = "solo")
+fn test_join_single() {
+    let parts = ["solo"]
+    print(join(parts, "-"))
+}
+
+// join of an empty Vec is the empty string.
+@test(output = "")
+fn test_join_empty() {
+    let parts: [string] = []
+    print(join(parts, ","))
+}
+
+// A builder loop accumulates in order.
+@test(output = "0123")
+fn test_sb_loop() {
+    let sb = sb_new()
+    for i in 0..4 {
+        sb_push(sb, tostring(i))
+    }
+    print(sb_build(sb))
+}

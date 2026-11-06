@@ -1,0 +1,64 @@
+// The shapes that EMIT, paired one-for-one with the rejecting shapes that
+// identify the remaining sink classes.
+// Each fn here is the control half of a discriminant: its twin -- a tuple
+// crossing a phi, a tuple pushed into a collection, an `else if` chain, a
+// nullable tuple return, the same fn under @nomangle -- rejects at emit today.
+// Together they say WHICH property forces materialization, which a rejection
+// span alone cannot.
+
+nobox value NV2 { x: float, y: float }
+
+fn nsb_mk(x: float, y: float) -> NV2 { return NV2 { x: x, y: y } }
+
+// Twin rejects: `@nomangle` on the same fn.
+@inline fn nsb_inline_ctor(x: float, y: float) -> NV2 { return NV2 { x: x, y: y } }
+
+// Twin rejects: `xs.push((p, 1.0))`.
+fn nsb_tuple_local(p: NV2) -> float {
+    let t = (p, 1.0)
+    return t.0.x + t.1
+}
+
+// Twin rejects: the same return type as `(NV2, float)?`.
+fn nsb_tuple_ret(p: NV2) -> (NV2, float) {
+    return (p, 3.0)
+}
+
+// Twin rejects: a third arm spelled as `else if`, which nests the phi.
+fn nsb_phi_two_arm(c: bool) -> float {
+    let p = if c { nsb_mk(1.0, 2.0) } else { nsb_mk(3.0, 4.0) }
+    return p.x
+}
+
+enum NsbFam { A, B, C }
+
+// Twin rejects: the same three arms yielding a TUPLE.
+fn nsb_phi_flat_match(f: NsbFam) -> float {
+    let p = match f {
+        NsbFam::A => nsb_mk(1.0, 2.0),
+        NsbFam::B => nsb_mk(2.0, 3.0),
+        NsbFam::C => nsb_mk(3.0, 4.0),
+    }
+    return p.x
+}
+
+// Twin rejects: `let (a, b) = if c { (nsb_mk(..), 1.0) } else { .. }` -- the
+// phi must not YIELD the tuple; producing an element of one is fine.
+fn nsb_phi_inside_tuple(c: bool) -> float {
+    let t = (if c { nsb_mk(1.0, 2.0) } else { nsb_mk(3.0, 4.0) }, 2.0)
+    return t.0.y
+}
+
+@test fn nobox_shape_boundaries() {
+    assert_eq(nsb_inline_ctor(1.0, 2.0).y, 2.0)
+    assert_eq(nsb_tuple_local(nsb_mk(1.0, 2.0)), 2.0)
+
+    let (rv, rf) = nsb_tuple_ret(nsb_mk(1.0, 2.0))
+    assert_eq(rv.x, 1.0)
+    assert_eq(rf, 3.0)
+
+    assert_eq(nsb_phi_two_arm(true), 1.0)
+    assert_eq(nsb_phi_two_arm(false), 3.0)
+    assert_eq(nsb_phi_flat_match(NsbFam::C), 3.0)
+    assert_eq(nsb_phi_inside_tuple(true), 2.0)
+}

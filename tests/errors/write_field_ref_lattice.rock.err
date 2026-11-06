@@ -1,0 +1,77 @@
+//! Error: the field-ref capability lattice, on the real compile path.
+//!        `FieldRef` is the TOP and coerces DOWN to both single-capability
+//!        formers; `ReadFieldRef` and `WriteFieldRef` are INCOMPARABLE, and a
+//!        write-capable selector is INVARIANT in its field type.
+//! Tags: field_ref, write_field_ref, lattice, invariance
+
+//=== TEST CASE: write_field_ref_to_read_field_ref_Generic ===
+// The extraction hole `WriteFieldRef` exists to close: a write-only selector
+// must not reach a readable one, or an embedded field's whole value reads out.
+struct Mob { health: int, attack_co: int? }
+
+fn take_read(f: ReadFieldRef<Mob, int?>) {}
+
+fn main() {
+    let f: WriteFieldRef<Mob, int?> = .attack_co
+    take_read(f)   // ERROR: WriteFieldRef grants no whole-value read
+}
+
+//=== TEST CASE: write_field_ref_to_field_ref_Generic ===
+struct Mob { health: int, attack_co: int? }
+
+fn take_full(f: FieldRef<Mob, int?>) {}
+
+fn main() {
+    let f: WriteFieldRef<Mob, int?> = .attack_co
+    take_full(f)   // ERROR: a write-only selector is not a full field ref
+}
+
+//=== TEST CASE: read_field_ref_to_write_field_ref_Generic ===
+struct Mob { health: int, attack_co: int? }
+
+fn take_write(f: WriteFieldRef<Mob, int?>) {}
+
+fn main() {
+    let f: ReadFieldRef<Mob, int?> = .attack_co
+    take_write(f)   // ERROR: read-only does not grant write
+}
+
+//=== TEST CASE: write_field_ref_widen_to_nullable_Generic ===
+// INVARIANCE. `unify`'s `(_, Nullable)` arm widens on the right, so without the
+// explicit check a non-null `int` field satisfies a `<_, int?>` selector and
+// `field_set(m, f, null)` writes nil into a field typed `int`.
+struct Mob { health: int }
+
+fn take_write(f: WriteFieldRef<Mob, int?>) {}
+
+fn main() {
+    take_write(.health)   // ERROR: writable selectors are invariant in V
+}
+
+//=== TEST CASE: field_ref_widen_to_nullable_Generic ===
+struct Mob { health: int }
+
+fn take_full(f: FieldRef<Mob, int?>) {}
+
+fn main() {
+    take_full(.health)   // ERROR: writable selectors are invariant in V
+}
+
+//=== TEST CASE: write_field_ref_value_struct_Immutable ===
+// The write capability refuses a `value` struct T, same rule as `FieldRef`.
+value Pt { x: int, y: int }
+
+fn take_write(f: WriteFieldRef<Pt, int>) {}
+
+fn main() {
+    take_write(.x)   // ERROR: value struct fields are immutable
+}
+
+//=== TEST CASE: write_field_ref_arity_Generic ===
+struct Mob { health: int, attack_co: int? }
+
+fn take_write(f: WriteFieldRef<Mob>) {}   // ERROR: needs <Struct, FieldType>
+
+fn main() {
+    take_write(.attack_co)
+}

@@ -1,0 +1,218 @@
+// Adversarial coverage for the sigil-form macro call (`foo!(...)`) and
+// its UFCS variant (`xs.foo!(args)`). Exercises argument-list edges
+// (empty, trailing comma, mixed ty+expr fragments), nesting (macros
+// inside macros, types inside types), and parser-precedence boundary
+// cases that the precedence gate (`min_bp <= 49`) is supposed to
+// handle. Sentinel tests at the bottom pin known limitations.
+
+// === Sigil prefix form: argument-list edges ===
+
+macro emit_zero(Name: ident) {
+    fn Name() -> int { return 0 }
+}
+
+emit_zero!(zero_a)
+emit_zero!(zero_b,)  // trailing comma
+emit_zero(zero_c)    // sigil-less still works
+
+@test
+fn test_arg_list_edges() {
+    assert(zero_a() == 0, "sigil prefix, no trailing comma")
+    assert(zero_b() == 0, "sigil prefix, trailing comma")
+    assert(zero_c() == 0, "sigil-less, sanity")
+}
+
+// === Mixed `ty` + `expr` fragments in one sigil call ===
+
+macro decl_with_init(Name: ident, Elem: ty, init: expr) {
+    struct Name { v: Elem = init }
+}
+
+decl_with_init!(MixA, int, 7)
+decl_with_init!(MixB, string, "hi")
+decl_with_init!(MixC, Box3<int>, Box3 { v: 99 })
+
+struct Box3<T> { v: T }
+
+@test
+fn test_mixed_ty_expr_args() {
+    let a = MixA { }
+    let b = MixB { }
+    let c = MixC { }
+    assert(a.v == 7, "ty=int, expr=7")
+    assert(b.v == "hi", "ty=string, expr=\"hi\"")
+    assert(c.v.v == 99, "ty=Box3<int>, expr=Box3 literal")
+}
+
+// === Nested sigil macro calls in expression position ===
+
+macro doubl(x: expr) { x * 2 }
+macro tripl(x: expr) { x * 3 }
+
+@test
+fn test_nested_sigil_calls() {
+    let r = doubl!(tripl!(5))
+    assert(r == 30, "doubl!(tripl!(5)) == 30")
+
+    let s = doubl!(doubl!(doubl!(1)))
+    assert(s == 8, "triple-nested sigil")
+}
+
+// === UFCS sigil chain ===
+
+macro inc(x: expr) { x + 1 }
+
+@test
+fn test_ufcs_chain_with_field_path() {
+    let r = (((1).inc!()).inc!()).inc!()
+    assert(r == 4, "chained UFCS sigil increments")
+}
+
+// === UFCS sigil with multiple args: receiver becomes first arg ===
+
+macro macro_lerp(a: expr, b: expr, t: expr) {
+    a + (b - a) * t
+}
+
+@test
+fn test_ufcs_multi_arg_macro_lerp() {
+    let r = (10).macro_lerp!(20, 1)  // 10 + (20-10)*1 = 20
+    assert(r == 20, "x.macro_lerp!(b, t) == macro_lerp!(x, b, t)")
+}
+
+// === UFCS receiver is a complex expression (paren-protected) ===
+
+@test
+fn test_ufcs_complex_receiver() {
+    let r = ((2 + 3)).inc!()
+    assert(r == 6, "(complex).inc!() applies to whole expression")
+}
+
+// === UFCS with sigil-mode type-shaped arg combined ===
+//
+// `Container: ty` substitutes into the StructLiteral name slot, which
+// only accepts Ident-shaped types. Passing a generic struct's bare name
+// (`Box4`, not `Box4<int>`) lets inference pick the type arg. Generic
+// type args at the struct-literal name slot are a separate (deferred)
+// limitation — see sentinel below.
+
+struct Box4<T> { v: T }
+
+macro store_in(receiver: expr, Container: ident) {
+    Container { v: receiver }
+}
+
+@test
+fn test_ufcs_with_ident_type_arg() {
+    let r = (5).store_in!(Box4)
+    assert(r.v == 5, "x.store_in!(Box4) == store_in!(x, Box4)")
+}
+
+// === Block-expression as macro arg (sigil mode falls through to parse_expr) ===
+
+macro pick(x: expr) { x }
+
+@test
+fn test_block_expr_as_sigil_arg() {
+    let r = pick!({ let y = 7; y + 1 })
+    assert(r == 8, "block expression as sigil-form arg")
+}
+
+// === Parenthesized comparison in sigil arg (Ident < ... carve-out
+// must not eat parens-wrapped comparisons) ===
+
+macro select(c: expr) {
+    c
+}
+
+@test
+fn test_paren_comparison_in_sigil_arg() {
+    let a = 3
+    let b = 7
+    let r = select!((a < b))
+    assert(r == true, "paren-wrapped comparison stays an expression")
+}
+
+// === Sigil call inside a regular function-call arg ===
+
+fn add(x: int, y: int) -> int { return x + y }
+
+@test
+fn test_sigil_inside_regular_call() {
+    let r = add(doubl!(3), tripl!(2))
+    assert(r == 12, "sigil call as regular fn arg")
+}
+
+// === Sigil call inside an array literal ===
+
+@test
+fn test_sigil_inside_array_literal() {
+    let xs = [doubl!(1), doubl!(2), doubl!(3)]
+    assert(xs[0] + xs[1] + xs[2] == 12, "sigil calls inside array literal")
+}
+
+// === Hygiene through sigil form: macro body locals don't leak ===
+
+macro with_local(x: expr) {
+    let __hyg_witness = x + 100
+    __hyg_witness
+}
+
+@test
+fn test_hygiene_through_sigil() {
+    let __hyg_witness = 1
+    let r = with_local!(5)
+    assert(r == 105, "macro local renamed")
+    assert(__hyg_witness == 1, "outer local untouched after sigil call")
+}
+
+// === Hygiene through UFCS sigil ===
+
+@test
+fn test_hygiene_through_ufcs_sigil() {
+    let __hyg_witness = 2
+    let r = (5).with_local!()
+    assert(r == 105, "UFCS sigil expansion renames macro body local")
+    assert(__hyg_witness == 2, "outer local untouched after UFCS sigil")
+}
+
+// === Empty arg list ===
+
+macro answer() { 42 }
+
+@test
+fn test_empty_sigil_args() {
+    let r = answer!()
+    assert(r == 42, "sigil call with zero args")
+}
+
+// === Regular fn called with sigil form falls through to ordinary
+// fn dispatch (sigil is a parser hint, not a macro-only marker) ===
+
+fn plain_fn(x: int) -> int { return x + 100 }
+
+@test
+fn test_sigil_on_regular_fn() {
+    let r = plain_fn!(5)
+    assert(r == 105, "sigil-form on a regular fn falls through to fn dispatch")
+}
+
+@test
+fn test_ufcs_sigil_on_regular_fn() {
+    let r = (5).plain_fn!()
+    assert(r == 105, "UFCS sigil on a regular fn desugars to fn(receiver)")
+}
+
+// === Sigil call where macro returns a complex expression ===
+
+macro pair_struct(a: expr, b: expr) {
+    Pair3 { left: a, right: b }
+}
+
+struct Pair3 { left: int, right: int }
+
+@test
+fn test_sigil_returns_struct_literal() {
+    let p = pair_struct!(3, 4)
+    assert(p.left == 3 && p.right == 4, "sigil expansion produces struct literal")
+}

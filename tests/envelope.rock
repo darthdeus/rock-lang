@@ -1,0 +1,56 @@
+const STEP: float = 1.0 / 60.0
+
+@test
+fn test_envelope_attack_timing() {
+    let e = envelope(0.2, 0.5)
+    assert_eq(e.value, 0, "starts at zero")
+
+    for _i in 0..6 { e.step_by(1.0, STEP) }
+    assert(e.value > 0.45 && e.value < 0.55, "half attack after 0.1s")
+
+    for _i in 0..12 { e.step_by(1.0, STEP) }
+    assert_eq(e.value, 1.0, "reaches goal exactly, no asymptotic tail")
+}
+
+@test
+fn test_envelope_release_slower_than_attack() {
+    let e = envelope(0.1, 0.5)
+    for _i in 0..12 { e.step_by(1.0, STEP) }
+    assert_eq(e.value, 1.0, "attacked to full")
+
+    for _i in 0..6 { e.step_by(0.0, STEP) }
+    assert(e.value > 0.75 && e.value < 0.85, "release at its own rate")
+
+    for _i in 0..60 { e.step_by(0.0, STEP) }
+    assert_eq(e.value, 0.0, "releases to exactly zero")
+}
+
+@test
+fn test_envelope_partial_goal_holds() {
+    let e = envelope(0.2, 0.4)
+    for _i in 0..120 { e.step_by(0.25, STEP) }
+    assert_eq(e.value, 0.25, "sustains a partial goal from below")
+
+    for _i in 0..120 { e.step_by(1.0, STEP) }
+    for _i in 0..120 { e.step_by(0.25, STEP) }
+    assert_eq(e.value, 0.25, "settles onto a partial goal from above")
+}
+
+@test
+fn test_envelope_retarget_is_continuous() {
+    let e = envelope(0.2, 0.2)
+    for _i in 0..3 { e.step_by(1.0, STEP) }
+    let mid = e.value
+    assert(mid > 0.2 && mid < 0.3, "mid-attack")
+
+    e.step_by(0.0, STEP)
+    assert(e.value < mid, "flip to release moves down from current value")
+    assert(mid - e.value < 0.1, "no pop on retarget")
+}
+
+@test
+fn test_envelope_step_returns_value() {
+    let e = envelope(0.1, 0.1)
+    let r = e.step_by(1.0, STEP)
+    assert_eq(r, e.value, "step_by returns the new value")
+}

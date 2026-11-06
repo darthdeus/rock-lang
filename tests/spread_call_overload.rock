@@ -1,0 +1,21 @@
+// Call-site spread selecting among overloads (plan M2, step 5). The spread
+// expands to typed named args BEFORE candidate matching, so the operand's
+// field types pick the overload.
+
+struct IntPair { a: int, b: int }
+struct StrPair { a: string, b: string }
+
+fn combine2(a: int, b: int) -> string { "int:{a + b}" }
+fn combine2(a: string, b: string) -> string { "str:{a}{b}" }
+
+@test(output = "int:3")
+fn test_spread_selects_int_overload() {
+    let p = IntPair { a: 1, b: 2 }
+    print(combine2(..p))
+}
+
+@test(output = "str:xy")
+fn test_spread_selects_str_overload() {
+    let p = StrPair { a: "x", b: "y" }
+    print(combine2(..p))
+}

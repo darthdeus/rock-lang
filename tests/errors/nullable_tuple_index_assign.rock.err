@@ -1,0 +1,17 @@
+//! Error: Assignment through tuple index on nullable type
+//! Tags: nullable, tuple, safenav, soundness
+
+//=== TEST CASE: nullable_tuple_index_write_Generic ===
+// `t.0 = v` where `t: (int, int)?` would crash at runtime if `t` is
+// null (live emits invalid Lua; typed-ANF rejects). Refine via
+// null-check first or use a non-nullable tuple. Per CLAUDE.md
+// "NEVER swallow errors": semantic surfaces this so it never reaches
+// codegen.
+fn maybe_tup() -> (int, int)? { (1, 2) }
+
+fn test() {
+    let t = maybe_tup()
+    t.0 = 99  // ERROR: Cannot assign through tuple index on nullable type
+}
+
+fn main() { test() }

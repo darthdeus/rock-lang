@@ -1,0 +1,86 @@
+// Arena and Entity are scalar logical handles, so they travel through ordinary
+// containers without special casing. These pin that an identity that survives
+// a struct field, a Vec element, an enum payload, a Map value, and another
+// Arena's row is the SAME identity -- a copy through storage must not become a
+// second incarnation, and must not lose the Arena it names.
+
+struct Tag { v: int }
+
+struct Holder {
+    arena: Arena<Tag>,
+    who: Entity<Tag>,
+}
+
+// A nested Arena: the outer rows own inner Arenas. Under weak handles this is
+// two flat registry entries, not a reference cycle.
+struct Room {
+    actors: Arena<Tag>,
+}
+
+enum Slot {
+    Empty,
+    Filled(Entity<Tag>),
+}
+
+@test(output = "3\n3\ntrue")
+fn arena_and_entity_survive_a_struct_field() {
+    let a: Arena<Tag> = arena_new()
+    let e = a.insert(Tag { v: 3 })
+    let h = Holder { arena: a, who: e }
+    print(h.arena.get(h.who).unwrap().v)
+    print(h.who.get().unwrap().v)
+    print(h.who.equals(e))
+}
+
+@test(output = "true\ntrue\n2")
+fn entities_survive_a_vec() {
+    let a: Arena<Tag> = arena_new()
+    let stored: [Entity<Tag>] = vec_new()
+    vec_push(stored, a.insert(Tag { v: 1 }))
+    vec_push(stored, a.insert(Tag { v: 2 }))
+    print(a.get(stored[0]).unwrap().v == 1)
+    print(a.get(stored[1]).unwrap().v == 2)
+    print(vec_len(stored))
+}
+
+@test(output = "true\n5")
+fn entity_survives_an_enum_payload() {
+    let a: Arena<Tag> = arena_new()
+    let e = a.insert(Tag { v: 5 })
+    let s = Slot::Filled(e)
+    match s {
+        Slot::Empty => { print("false") }
+        Slot::Filled(inner) => {
+            print(inner.equals(e))
+            print(inner.get().unwrap().v)
+        }
+    }
+}
+
+@test(output = "8\ntrue")
+fn entity_survives_a_map_value() {
+    let a: Arena<Tag> = arena_new()
+    let e = a.insert(Tag { v: 8 })
+    let m: Map<string, Entity<Tag>> = map_new()
+    m["hero"] = e
+    print(m["hero"].get().unwrap().v)
+    print(m["hero"].equals(e))
+}
+
+// Two Arenas nested inside a third, each holding a slot-0 generation-0 entity.
+// The rows are indistinguishable; only the Arena identity separates them.
+@test(output = "10\n20\ntrue\ntrue")
+fn nested_arenas_stay_distinct() {
+    let rooms: Arena<Room> = arena_new()
+    let a: Arena<Tag> = arena_new()
+    let b: Arena<Tag> = arena_new()
+    let ea = a.insert(Tag { v: 10 })
+    let eb = b.insert(Tag { v: 20 })
+    let ra = rooms.insert(Room { actors: a })
+    let rb = rooms.insert(Room { actors: b })
+
+    print(rooms.get(ra).unwrap().actors.get(ea).unwrap().v)
+    print(rooms.get(rb).unwrap().actors.get(eb).unwrap().v)
+    print(is_null(rooms.get(ra).unwrap().actors.get(eb)))
+    print(is_null(rooms.get(rb).unwrap().actors.get(ea)))
+}

@@ -1,0 +1,95 @@
+// JSON numbers are locale-independent by spec: `.` is the decimal separator
+// whatever LC_NUMERIC says. The decoder reaches the host's C number parser, and
+// the C one (`strtod`) reads the locale while luajit's `tonumber` does not --
+// so a process that calls setlocale would otherwise decode `1.5` as `1`,
+// silently, for every float in every document.
+//
+// Sibling coverage: tests/json_number_exact.rock asserts decoded == the host
+// parser on the same literal; this file asserts that equality survives a
+// hostile locale.
+
+// Returns the locale actually installed, or null when the host does not have
+// it. A machine without a comma-decimal locale must fail, not silently pass:
+// every assertion below would hold trivially in the C locale.
+inline(lua) fn set_numeric_locale(name: string) -> string? = """
+    return os.setlocale(name, "numeric")
+"""
+
+fn with_hostile_locale(body: fn() -> ()) -> bool {
+    let names = [
+        "de_DE.UTF-8", "fr_FR.UTF-8", "cs_CZ.UTF-8", "cs_CZ.utf8",
+        "de_DE", "fr_FR",
+    ]
+    let installed = false
+    for n in names {
+        if installed { continue }
+        if set_numeric_locale(n) != null {
+            installed = true
+            body()
+        }
+    }
+    set_numeric_locale("C")
+    return installed
+}
+
+@test
+fn test_decode_float_ignores_numeric_locale() {
+    let ran = with_hostile_locale(
+        () => {
+            // `{{`/`}}` are escaped braces: a bare `{` in a Rock literal starts an
+            // interpolation, so the JSON would never reach the decoder.
+            let v = json_decode("{{\"a\":1.5}}")
+            assert(v != null, "1.5 object decodes under a hostile locale")
+            let f = json_as_float(json_field(v.unwrap(), "a").unwrap())
+            assert(f != null, "field a is a float")
+            // The defect this file exists for truncates at the '.' and yields 1.
+            assert(f.unwrap() == 1.5, "1.5 must decode as 1.5, not {f.unwrap()}")
+        }
+    )
+    assert(ran, "no comma-decimal locale on this host -- the arm proved nothing")
+}
+
+@test
+fn test_decode_number_forms_ignore_numeric_locale() {
+    let ran = with_hostile_locale(
+        () => {
+            let cases = [
+                ("[0.5]", 0.5),
+                ("[-3.25]", -3.25),
+                ("[1.0e2]", 100.0),
+                ("[-3.25e2]", -325.0),
+                ("[2.5E-2]", 0.025),
+                ("[123.456]", 123.456),
+            ]
+            for c in cases {
+                let (src, want) = c
+                let v = json_decode(src)
+                assert(v != null, "{src} decodes")
+                let arr = json_as_array(v.unwrap())
+                assert(arr != null, "{src} is an array")
+                let got = json_as_float(arr.unwrap()[0])
+                assert(got != null, "{src} element is a float")
+                assert(got.unwrap() == want, "{src} -> {got.unwrap()}, want {want}")
+            }
+        }
+    )
+    assert(ran, "no comma-decimal locale on this host -- the arm proved nothing")
+}
+
+// The control: integers have no decimal separator, so they are the arm that
+// must pass even with the defect present. If this one ever goes red the cause
+// is not the locale.
+@test
+fn test_decode_int_under_hostile_locale() {
+    let ran = with_hostile_locale(
+        () => {
+            let v = json_decode("[42,-7,0]")
+            assert(v != null, "int array decodes")
+            let arr = json_as_array(v.unwrap()).unwrap()
+            assert(json_as_int(arr[0]).unwrap() == 42, "42")
+            assert(json_as_int(arr[1]).unwrap() == -7, "-7")
+            assert(json_as_int(arr[2]).unwrap() == 0, "0")
+        }
+    )
+    assert(ran, "no comma-decimal locale on this host -- the arm proved nothing")
+}

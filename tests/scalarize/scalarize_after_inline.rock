@@ -1,0 +1,76 @@
+// Adversarial tests: @inline + scalarize integration
+//
+// The marquee case. An @inline fn returns a struct literal; the call
+// site binds it to a local that never escapes. After the inline pass
+// expands the body into the caller, the struct literal is call-site
+// local, and scalarization fires.
+//
+// Runtime behavior must be identical whether neither pass runs, only
+// @inline runs, or both run.
+
+struct FixVec2 {
+    x: float,
+    y: float,
+}
+
+struct IVec2 {
+    x: int,
+    y: int,
+}
+
+@inline
+fn make_v(x: float, y: float) -> FixVec2 {
+    return FixVec2 { x: x, y: y }
+}
+
+@inline
+fn ivec(x: int, y: int) -> IVec2 {
+    return IVec2 { x: x, y: y }
+}
+
+// V0 single-expression body. V1 will allow the natural two-let form.
+@inline
+fn tile_center(gx: int, gy: int) -> FixVec2 {
+    return FixVec2 {
+        x: (gx as float + 0.5) - (gy as float + 0.5),
+        y: -((gx as float + 0.5) + (gy as float + 0.5)),
+    }
+}
+
+@test(output = "3 4")
+fn test_inline_returned_vec_locally_scalarizable() {
+    let p = make_v(3.0, 4.0)
+    print("{p.x as int} {p.y as int}")
+}
+
+@test(output = "1 2")
+fn test_inline_nested_struct_returns() {
+    // tile_center(1, 0) = v((1.5-0.5), -(1.5+0.5)) = v(1.0, -2.0)
+    let q = tile_center(1, 0)
+    let qx = q.x as int           // 1
+    let qy_abs = if q.y < 0.0 { -q.y as int } else { q.y as int }  // 2
+    print("{qx} {qy_abs}")
+}
+
+@test(output = "8 11")
+fn test_composed_inline_with_local_math() {
+    let a = make_v(3.0, 4.0)
+    let b = make_v(5.0, 7.0)
+    let s = FixVec2 { x: a.x + b.x, y: a.y + b.y }
+    print("{s.x as int} {s.y as int}")
+}
+
+@test(output = "20 30")
+fn test_inline_in_hot_loop_shape() {
+    // Micro-analogue of the floors_walls loop.
+    let xs = 0
+    let ys = 0
+    for i in 0..5 {
+        let grid = ivec(i * 2, i * 3)
+        let p = FixVec2 { x: grid.x as float, y: grid.y as float }
+        xs = xs + p.x as int
+        ys = ys + p.y as int
+    }
+    // xs = 0+2+4+6+8 = 20; ys = 0+3+6+9+12 = 30
+    print("{xs} {ys}")
+}

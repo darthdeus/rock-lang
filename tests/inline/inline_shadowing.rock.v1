@@ -1,0 +1,48 @@
+// Adversarial tests: @inline — local name shadowing
+//
+// When an @inline body has `let x = ...` and the caller already has
+// `let x = ...`, inlining must rename the body's local to avoid
+// clobbering the caller's.
+
+@inline
+fn uses_local_named_x(a: int) -> int {
+    let x = a * 10
+    let y = x + 1
+    return y
+}
+
+@inline
+fn uses_local_named_as_param(a: int) -> int {
+    // Local named the same as a parameter in another inline fn
+    let a = 999  // shadows param
+    return a
+}
+
+@test(output = "5 51")
+fn test_caller_x_not_clobbered() {
+    let x = 5
+    let r = uses_local_named_x(x)
+    print("{x} {r}")
+    // Caller's x must still be 5, r = 5*10+1 = 51
+}
+
+@test(output = "42 999")
+fn test_param_shadowing_inside_body() {
+    let a = 42
+    let r = uses_local_named_as_param(a)
+    print("{a} {r}")
+    // Caller's a must still be 42 after the call
+}
+
+@inline
+fn double_let(x: int) -> int {
+    let t = x + 1
+    let t = t * 2  // shadow inside body
+    return t
+}
+
+@test(output = "12")
+fn test_body_local_shadows_itself() {
+    // (5+1)*2 = 12
+    print(double_let(5))
+}

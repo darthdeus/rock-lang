@@ -1,0 +1,74 @@
+// Defer-to-use inference for unconstrained lambda params
+// The local `*(DeferW, int)` overload
+// ties with stdlib `*(int, int)` at fit cost 0, so `x * 2` on an unpinned
+// lambda param must defer until the use site pins it -- mirroring the stdlib
+// Vec2 collision without depending on the Vec2 move.
+
+struct DeferW { a: float }
+
+operator *(l: DeferW, r: int) -> DeferW {
+    return DeferW { a: l.a }
+}
+
+operator +(l: DeferW, r: int) -> DeferW {
+    return DeferW { a: l.a }
+}
+
+struct DeferP { x: int }
+struct DeferQ { x: float }
+
+@test
+fn test_defer_mul_pinned_by_int_call() {
+    let f = x => x * 2
+    assert_eq(f(5), 10)
+    assert_eq(f(7), 14)
+}
+
+@test
+fn test_defer_mul_pinned_by_struct_call() {
+    let f = x => x * 2
+    let w = f(DeferW { a: 3.5 })
+    assert_eq(w.a, 3.5)
+}
+
+@test
+fn test_defer_placeholder_mul() {
+    let d = _ * 2
+    assert_eq(d(21), 42)
+}
+
+@test
+fn test_defer_chained_ops() {
+    let f = x => x * 2 + 1
+    assert_eq(f(5), 11)
+}
+
+@test
+fn test_defer_field_projection() {
+    let get_x = _.x
+    let p = DeferP { x: 3 }
+    assert_eq(get_x(p), 3)
+}
+
+@test
+fn test_defer_two_params() {
+    let m = (a, b) => a * b
+    assert_eq(m(6, 7), 42)
+}
+
+@test
+fn test_defer_lambda_arg_before_pinning_arg() {
+    let r = defer_apply(x => x * 2, 5)
+    assert_eq(r, 10)
+}
+
+fn defer_apply<T, U>(f: fn(T) -> U, v: T) -> U {
+    return f(v)
+}
+
+@test
+fn test_defer_use_inside_later_lambda() {
+    let twice = x => x * 2
+    let composed = y => twice(y + 1)
+    assert_eq(composed(4), 10)
+}

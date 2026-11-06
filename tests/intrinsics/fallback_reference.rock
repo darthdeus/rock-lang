@@ -1,0 +1,47 @@
+// Conformance: the REFERENCE semantics of the intrinsics that have BOTH a
+// portable Rock fallback body AND a backend native mapping (min/max/clamp/lerp/
+// smoothstep/round/sign/fract -- GLSL maps them, the Rock body is the portable
+// reference). These run the Rock fallback on luajit and pin the values a native
+// mapping must reproduce EXACTLY -- the
+// reference half of the differential (native-vs-fallback) harness. Semantics
+// pinned where hosts disagree: floored min/max, half-way `round` = floor(x+0.5),
+// three-way `sign`, `fract` = x - floor(x).
+
+@test(output = "3 5")
+fn min_max_pick() {
+    print("{min(3, 5)} {max(3, 5)}")
+}
+
+@test(output = "0 5 3")
+fn clamp_below_above_inside() {
+    print("{clamp(-2.0, 0.0, 5.0)} {clamp(9.0, 0.0, 5.0)} {clamp(3.0, 0.0, 5.0)}")
+}
+
+@test(output = "10")
+fn lerp_midpoint() {
+    print("{lerp(0.0, 20.0, 0.5)}")
+}
+
+// smoothstep is 0 below edge0, 1 above edge1, and 0.5 at the midpoint.
+@test(output = "0 1 0.5")
+fn smoothstep_endpoints_and_mid() {
+    print("{smoothstep(0.0, 1.0, -1.0)} {smoothstep(0.0, 1.0, 2.0)} {smoothstep(0.0, 1.0, 0.5)}")
+}
+
+// round pins floor(x + 0.5) (a native round() with implementation-defined
+// half-way behavior must match): 2.5 -> 3, -2.5 -> -2.
+@test(output = "3 -2")
+fn round_half_way() {
+    print("{round(2.5)} {round(-2.5)}")
+}
+
+@test(output = "1 0 -1")
+fn sign_three_way_int() {
+    print("{sign(7)} {sign(0)} {sign(-4)}")
+}
+
+// fract = x - floor(x), always in [0, 1) even for negatives: fract(-0.25) = 0.75.
+@test(output = "0.25 0.75")
+fn fract_positive_and_negative() {
+    print("{fract(1.25)} {fract(-0.25)}")
+}

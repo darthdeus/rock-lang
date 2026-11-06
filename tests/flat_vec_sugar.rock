@@ -1,0 +1,35 @@
+// fv[i] unified-indexing + `for v in fv` sugar over FlatVec<T: value>.
+// fv[i] indexes the buf storage (debug capacity-checked; fv.get is the
+// len-checked accessor); `for` is a numeric loop over 0..fv.len.
+
+value SV2 { x: float, y: float }
+
+@test
+fn flat_vec_index_read_write() {
+    let fv: FlatVec<SV2> = flat_vec_new(4)
+    fv.push(SV2 { x: 1.0, y: 2.0 })
+    fv.push(SV2 { x: 3.0, y: 4.0 })
+    fv[0] = SV2 { x: 9.0, y: 8.0 }
+    let a = fv[0]
+    let b = fv[1]
+    assert_eq(a.x, 9.0)
+    assert_eq(a.y, 8.0)
+    assert_eq(b.x, 3.0)
+    assert_eq(fv.len, 2)
+}
+
+@test
+fn flat_vec_for_iterates_len_not_capacity() {
+    let fv: FlatVec<SV2> = flat_vec_new(8)
+    fv.push(SV2 { x: 1.0, y: 10.0 })
+    fv.push(SV2 { x: 2.0, y: 20.0 })
+    fv.push(SV2 { x: 3.0, y: 30.0 })
+    let sx = 0.0
+    let n = 0
+    for v in fv {
+        sx = sx + v.x
+        n = n + 1
+    }
+    assert_eq(sx, 6.0)
+    assert_eq(n, 3)
+}

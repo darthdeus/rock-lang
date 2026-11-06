@@ -1,0 +1,126 @@
+// `xs[i].<field> = v` where `<field>` is a whole nested value field of a
+// column-stored or strided element: every leaf under that field is written,
+// and sibling fields and other elements are left alone.
+nobox value Cell { x: int, y: int }
+value Ankh { place: Cell, id: int }
+// Four leaves, so `[Deep]` stays column-stored.
+nobox value Mid { inner: Cell, k: int }
+value Deep { outer: Mid, id: int }
+value Loose { at: Cell?, n: int }
+// A Vec leaf keeps `[Bag]` off columns: its elements are boxed tables.
+value Bag { place: Cell, items: [int] }
+// Over the column leaf limit, so `[Wide]` is strided.
+nobox value Wide { place: Cell, a: int, b: int, c: int }
+
+global cell_calls: int = 0
+
+fn next_cell(x: int, y: int) -> Cell {
+    cell_calls = cell_calls + 1
+    Cell { x: x, y: y }
+}
+
+@test
+fn test_nested_field_write_through_vec_column() {
+    let out: [Ankh] = []
+    out.push(Ankh { place: Cell { x: 1, y: 2 }, id: 7 })
+    out.push(Ankh { place: Cell { x: 5, y: 6 }, id: 8 })
+    out[0].place = Cell { x: 3, y: 4 }
+    assert_eq(out[0].place.x, 3, "place.x written")
+    assert_eq(out[0].place.y, 4, "place.y written")
+    assert_eq(out[0].id, 7, "sibling id kept")
+    assert_eq(out[1].place.x, 5, "other element place.x kept")
+    assert_eq(out[1].place.y, 6, "other element place.y kept")
+    assert_eq(out[1].id, 8, "other element id kept")
+}
+
+@test
+fn test_nested_field_write_evaluates_value_once() {
+    let out: [Ankh] = [Ankh { place: Cell { x: 0, y: 0 }, id: 1 }]
+    cell_calls = 0
+    out[0].place = next_cell(9, 10)
+    assert_eq(cell_calls, 1, "value lowered once")
+    assert_eq(out[0].place.x, 9, "place.x from call")
+    assert_eq(out[0].place.y, 10, "place.y from call")
+}
+
+@test
+fn test_nested_field_write_from_another_element() {
+    let out: [Ankh] = [
+        Ankh { place: Cell { x: 1, y: 2 }, id: 1 },
+        Ankh { place: Cell { x: 3, y: 4 }, id: 2 },
+    ]
+    let c = out[1].place
+    out[0].place = c
+    out[1].place = Cell { x: 11, y: 12 }
+    assert_eq(out[0].place.x, 3, "copied x")
+    assert_eq(out[0].place.y, 4, "copied y")
+    assert_eq(out[1].place.x, 11, "rewritten x")
+    assert_eq(out[1].place.y, 12, "rewritten y")
+}
+
+@test
+fn test_field_of_field_write_through_vec_column() {
+    let ds: [Deep] = []
+    ds.push(Deep { outer: Mid { inner: Cell { x: 1, y: 2 }, k: 3 }, id: 4 })
+    ds.push(Deep { outer: Mid { inner: Cell { x: 5, y: 6 }, k: 7 }, id: 8 })
+    ds[0].outer.inner = Cell { x: 10, y: 20 }
+    assert_eq(ds[0].outer.inner.x, 10, "outer.inner.x written")
+    assert_eq(ds[0].outer.inner.y, 20, "outer.inner.y written")
+    assert_eq(ds[0].outer.k, 3, "outer.k kept")
+    assert_eq(ds[0].id, 4, "id kept")
+
+    ds[1].outer = Mid { inner: Cell { x: -1, y: -2 }, k: -3 }
+    assert_eq(ds[1].outer.inner.x, -1, "outer.inner.x written")
+    assert_eq(ds[1].outer.inner.y, -2, "outer.inner.y written")
+    assert_eq(ds[1].outer.k, -3, "outer.k written")
+    assert_eq(ds[1].id, 8, "id kept after outer write")
+    assert_eq(ds[0].outer.inner.x, 10, "other element kept")
+    assert_eq(ds[0].outer.k, 3, "other element k kept")
+}
+
+@test
+fn test_nested_field_write_through_boxed_vec() {
+    let bs: [Bag] = [Bag { place: Cell { x: 1, y: 2 }, items: [7, 8] }]
+    bs[0].place = Cell { x: 3, y: 4 }
+    bs[0].items = [9]
+    assert_eq(bs[0].place.x, 3, "place.x written")
+    assert_eq(bs[0].place.y, 4, "place.y written")
+    assert_eq(bs[0].items.len(), 1, "items replaced")
+    assert_eq(bs[0].items[0], 9, "items value")
+}
+
+@test
+fn test_nested_field_write_through_strided_vec() {
+    let ws: [Wide] = [
+        Wide { place: Cell { x: 1, y: 2 }, a: 3, b: 4, c: 5 },
+        Wide { place: Cell { x: 6, y: 7 }, a: 8, b: 9, c: 10 },
+    ]
+    ws[1].place = Cell { x: 60, y: 70 }
+    assert_eq(ws[1].place.x, 60, "place.x written")
+    assert_eq(ws[1].place.y, 70, "place.y written")
+    assert_eq(ws[1].a, 8, "a kept")
+    assert_eq(ws[1].b, 9, "b kept")
+    assert_eq(ws[1].c, 10, "c kept")
+    assert_eq(ws[0].place.x, 1, "other element place.x kept")
+    assert_eq(ws[0].place.y, 2, "other element place.y kept")
+}
+
+@test
+fn test_nullable_nested_field_write_through_vec_column() {
+    let xs: [Loose] = [Loose { at: null, n: 1 }, Loose { at: Cell { x: 1, y: 2 }, n: 2 }]
+    xs[0].at = Cell { x: 5, y: 6 }
+    xs[1].at = null
+    assert_eq(xs[0].at?.x ?? -1, 5, "at.x written")
+    assert_eq(xs[0].at?.y ?? -1, 6, "at.y written")
+    assert(xs[1].at == null, "at cleared")
+    assert_eq(xs[0].n, 1, "n kept")
+    assert_eq(xs[1].n, 2, "n kept")
+
+    let present: Cell? = xs[0].at
+    let absent: Cell? = xs[1].at
+    xs[1].at = present
+    xs[0].at = absent
+    assert(xs[0].at == null, "absent copied")
+    assert_eq(xs[1].at?.x ?? -1, 5, "present x copied")
+    assert_eq(xs[1].at?.y ?? -1, 6, "present y copied")
+}

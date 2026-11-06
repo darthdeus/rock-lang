@@ -1,0 +1,64 @@
+// NativeBuffer<T> iteration inside a `co fn` body exercises the
+// stackless-coroutine for-loop codegen (emit_for_native_buffer +
+// emit_for_native_buffer_enumerated_{single,tuple}).
+
+co fn yield_each_value(buf: NativeBuffer<int>) -> Coroutine<int> {
+    for v in buf {
+        yield v
+    }
+}
+
+@test(output = "11\n22\n33\nnull")
+fn coroutine_for_v_in_buf() {
+    let buf = native_buffer_int(3)
+    buf[0] = 11
+    buf[1] = 22
+    buf[2] = 33
+    let c = yield_each_value(buf)
+    print(c.resume() ?? -99)
+    print(c.resume() ?? -99)
+    print(c.resume() ?? -99)
+    let r = c.resume()
+    if r == null { print("null") } else { print(r.unwrap()) }
+}
+
+co fn yield_with_index(buf: NativeBuffer<int>) -> Coroutine<int> {
+    for (i, v) in enumerate(buf) {
+        yield i * 100 + v
+    }
+}
+
+@test(output = "11\n122\n233\nnull")
+fn coroutine_enumerate_tuple() {
+    let buf = native_buffer_int(3)
+    buf[0] = 11
+    buf[1] = 22
+    buf[2] = 33
+    let c = yield_with_index(buf)
+    print(c.resume() ?? -99)
+    print(c.resume() ?? -99)
+    print(c.resume() ?? -99)
+    let r = c.resume()
+    if r == null { print("null") } else { print(r.unwrap()) }
+}
+
+co fn yield_break_early(buf: NativeBuffer<int>) -> Coroutine<int> {
+    for v in buf {
+        if v >= 100 { break }
+        yield v
+    }
+}
+
+@test(output = "1\n5\nnull")
+fn coroutine_break_inside_for() {
+    let buf = native_buffer_int(4)
+    buf[0] = 1
+    buf[1] = 5
+    buf[2] = 200
+    buf[3] = 7
+    let c = yield_break_early(buf)
+    print(c.resume() ?? -99)
+    print(c.resume() ?? -99)
+    let r = c.resume()
+    if r == null { print("null") } else { print(r.unwrap()) }
+}

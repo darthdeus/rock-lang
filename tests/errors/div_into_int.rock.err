@@ -1,0 +1,16 @@
+//! Error: `/` is float division; its `float` result cannot fill an
+//!        int-shaped hole. Use `./` for integer floor division.
+//! Tags: operators, float-div, int-div
+
+//=== TEST CASE: div_result_into_int_param_unify ===
+fn foo(x: int) {}
+
+fn main() {
+    foo(3 / 4)   // ERROR: expected int, got float (use ./)
+}
+
+//=== TEST CASE: div_result_into_int_let_unify ===
+fn main() {
+    let x: int = 3 / 4   // ERROR: expected int, got float (use ./)
+    print(x)
+}

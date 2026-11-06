@@ -1,0 +1,44 @@
+//! Error: formatting an enum whose payload the structural formatter cannot
+//!        print (identity struct, container, callback) is rejected at compile
+//!        time instead of printing a table address.
+//! Tags: interpolation, enum, formatting
+
+//=== TEST CASE: enum_identity_struct_payload_interp_Generic ===
+struct Body { hp: int }
+enum Owner { Of(Body), Nobody }
+
+fn main() {
+    let o = Owner::Of(Body { hp: 1 })
+    print("{o}")
+}
+
+//=== TEST CASE: enum_vec_payload_tostring_Generic ===
+enum Bag { Items([int]), Empty }
+
+fn main() {
+    print(tostring(Bag::Items([1, 2])))
+}
+
+//=== TEST CASE: enum_callback_payload_interp_Generic ===
+enum Hook { Call(fn() -> int), Idle }
+
+fn main() {
+    let h = Hook::Call(() => 1)
+    print("{h}")
+}
+
+//=== TEST CASE: value_record_with_vec_field_in_enum_Generic ===
+value Wrap { xs: [int] }
+enum Holder { W(Wrap) }
+
+fn main() {
+    print("{Holder::W(Wrap { xs: [1] })}")
+}
+
+//=== TEST CASE: value_record_with_vec_field_top_level_Generic ===
+value Bag { xs: [int], n: int }
+
+fn main() {
+    let b = Bag { xs: [1], n: 5 }
+    print("{b}")
+}

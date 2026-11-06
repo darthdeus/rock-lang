@@ -1,0 +1,79 @@
+// T4 collections/struct/equality conformance.
+// Runs on both luajit and the JS backend; the host compares each returned scalar
+// against the pinned literal, so a divergent Vec layout, a field-blind structural
+// eq, or ceil-instead-of-floor integer division would fail here.
+
+struct Pt { x: int, y: int }
+
+fn vec_sum() -> int {
+    let xs = [10, 20, 30]
+    xs.push(40)
+    let total = 0
+    for i in 0..xs.len() {
+        total = total + xs[i]
+    }
+    return total + xs.len()
+}
+
+fn vec_index() -> int {
+    let xs = vec_new()
+    xs.push(7)
+    xs.push(9)
+    return xs[0] + xs[1] * 100
+}
+
+fn struct_field() -> int {
+    let p = Pt { x: 3, y: 5 }
+    p.x = p.x + 10
+    return p.x * 100 + p.y
+}
+
+fn struct_eq_same() -> bool {
+    return Pt { x: 1, y: 2 } == Pt { x: 1, y: 2 }
+}
+
+fn struct_eq_diff_y() -> bool {
+    // field-sensitive: differ only in y
+    return Pt { x: 1, y: 2 } == Pt { x: 1, y: 9 }
+}
+
+fn map_roundtrip() -> int {
+    let m: Map<int, int> = map_new()
+    m[1] = 100
+    m[2] = 200
+    return m[1] + m[2]
+}
+
+fn idiv_floor() -> int {
+    // Lua `//`-style floored division: -7 idiv 2 = -4, not -3 (trunc)
+    return __op_idiv(-7, 2)
+}
+
+fn imod_floored() -> int {
+    // floored modulo: -7 % 5 = 3
+    return -7 % 5
+}
+
+@test(returns = 104)
+fn t_vec_sum() -> int { return vec_sum() }
+
+@test(returns = 907)
+fn t_vec_index() -> int { return vec_index() }
+
+@test(returns = 1305)
+fn t_struct_field() -> int { return struct_field() }
+
+@test(returns = true)
+fn t_struct_eq_same() -> bool { return struct_eq_same() }
+
+@test(returns = false)
+fn t_struct_eq_diff_y() -> bool { return struct_eq_diff_y() }
+
+@test(returns = 300)
+fn t_map_roundtrip() -> int { return map_roundtrip() }
+
+@test(returns = -4)
+fn t_idiv_floor() -> int { return idiv_floor() }
+
+@test(returns = 3)
+fn t_imod_floored() -> int { return imod_floored() }

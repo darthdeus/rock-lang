@@ -1,0 +1,34 @@
+//! Error: a `co fn` whose declared result R is a concrete non-unit,
+//!        non-nullable type must not be able to FALL OFF the end of its body:
+//!        bone coerces only explicit `return <expr>` statements to R (a
+//!        coroutine's body tail is discarded, never coerced), so a reachable
+//!        fall-off would stamp the completed terminal with `__return` nil --
+//!        and `result()`/`take_result` would hand out a nil typed as R. The
+//!        rejection is EMIT-time (skull-mir `lower_root`), on the bone-accepted
+//!        program. Unit R (the default), nullable R (nil is a legal value), and
+//!        generic R (unknown at the shared lowering) all stay admitted; a body
+//!        whose end is unreachable (every path returns / `while true`) is fine.
+//! Tags: skull, coroutine, emit-time, fall-off
+
+//=== TEST CASE: falloff_int_result ===
+co fn gen() -> Coroutine<int, string> {
+    yield 1
+}
+fn main() {
+    let c = gen()
+    resume(c)
+}
+
+//=== TEST CASE: falloff_after_conditional_return ===
+// One arm returns, the other falls through to the end -- the fall-off is
+// reachable, so it still rejects.
+co fn maybe(flag: bool) -> Coroutine<int, int> {
+    yield 1
+    if flag {
+        return 7
+    }
+}
+fn main() {
+    let c = maybe(true)
+    resume(c)
+}

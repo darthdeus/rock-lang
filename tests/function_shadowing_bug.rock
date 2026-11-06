@@ -1,0 +1,89 @@
+// Regression test for function shadowing bug
+// This test demonstrates the issue where declaring a variable with the same name
+// as a function and trying to call that function in the initialization causes
+// the variable to shadow itself, resulting in "attempt to call nil value" error
+
+fn get_value() -> int {
+    return 42
+}
+
+fn get_string() -> string {
+    return "hello"
+}
+
+// This should cause a compilation error or runtime error
+// The variable 'get_value' shadows the function before it's fully initialized
+@test
+fn test_function_shadowing_with_same_name() {
+    // This line causes the bug: variable shadows the function it's trying to call
+    let get_value = get_value()
+
+    assert_eq(get_value, 42)
+}
+
+// Another case with a different type
+@test
+fn test_function_shadowing_string() {
+    // Same issue with string return type
+    let get_string = get_string()
+
+    assert_eq(get_string, "hello")
+}
+
+// This pattern works fine - different variable name
+@test
+fn test_no_shadowing_different_name() {
+    let value = get_value()
+    assert_eq(value, 42)
+
+    let str = get_string()
+    assert_eq(str, "hello")
+}
+
+// More complex case - shadowing in nested scope
+@test
+fn test_nested_scope_shadowing() {
+    let outer = get_value()
+    assert_eq(outer, 42)
+
+    {
+        // This should also trigger the bug in the nested scope
+        let get_value = get_value()
+        assert_eq(get_value, 42)
+    }
+}
+
+// Test with function that takes parameters
+fn add(a: int, b: int) -> int {
+    return a + b
+}
+
+@test
+fn test_function_with_params_shadowing() {
+    // This should also cause the shadowing bug
+    let add = add(1, 2)
+    assert_eq(add, 3)
+}
+
+// Edge case: shadowing with a function that returns a function
+fn get_function() -> fn() -> int {
+    return () => 100
+}
+
+@test
+fn test_function_returning_function_shadowing() {
+    // This might behave differently
+    let get_function = get_function()
+    let result = get_function()
+    assert_eq(result, 100)
+}
+
+// Test with global function
+global global_func: fn() -> int = () => 200
+
+@test
+fn test_global_function_shadowing() {
+    // Shadowing a global function
+    let global_func = global_func()
+    assert_eq(global_func, 200)
+}

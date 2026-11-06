@@ -1,0 +1,232 @@
+// Value-test forms of the scalar intrinsic conformance surface
+// (fallback_reference.rock's siblings): `@test(returns = <literal>)` pins the
+// returned scalar, compared host-side (int/bool exact, float 1e-12 relative).
+// Cross-backend by construction -- these run
+// under both the luajit and JS executors, and are the day-one members of the
+// GLSL-transferable value-test class.
+
+@test(returns = 3)
+fn v_min_picks_smaller() -> int {
+    return min(3, 5)
+}
+
+@test(returns = 5)
+fn v_max_picks_larger() -> int {
+    return max(3, 5)
+}
+
+@test(returns = 0.0)
+fn v_clamp_below() -> float {
+    return clamp(-2.0, 0.0, 5.0)
+}
+
+@test(returns = 5.0)
+fn v_clamp_above() -> float {
+    return clamp(9.0, 0.0, 5.0)
+}
+
+@test(returns = 10.0)
+fn v_lerp_midpoint() -> float {
+    return lerp(0.0, 20.0, 0.5)
+}
+
+@test(returns = 0.5)
+fn v_smoothstep_mid() -> float {
+    return smoothstep(0.0, 1.0, 0.5)
+}
+
+// round pins floor(x + 0.5): half-way rounds toward +inf, so -2.5 -> -2.
+@test(returns = 3.0)
+fn v_round_half_up() -> float {
+    return round(2.5)
+}
+
+@test(returns = -2.0)
+fn v_round_half_negative() -> float {
+    return round(-2.5)
+}
+
+@test(returns = -1)
+fn v_sign_negative() -> int {
+    return sign(-4)
+}
+
+// fract = x - floor(x), in [0, 1) even for negatives.
+@test(returns = 0.75)
+fn v_fract_negative() -> float {
+    return fract(-0.25)
+}
+
+@test(returns = 6.5)
+fn v_abs_float() -> float {
+    return abs(-6.5)
+}
+
+@test(returns = true)
+fn v_clamp_is_idempotent() -> bool {
+    return clamp(3.0, 0.0, 5.0) == clamp(clamp(3.0, 0.0, 5.0), 0.0, 5.0)
+}
+
+// Swizzle reads: component select, rgba alias, repetition, and a swizzle result
+// consumed by tier-0 vec math.
+@test(returns = 3.0)
+fn v_swizzle_chain_component() -> float {
+    let p = v(1.0, 2.0, 3.0)
+    return p.zyx.x
+}
+
+@test(returns = 0.25)
+fn v_swizzle_rgba_alias() -> float {
+    let c = v(0.5, 0.75, 0.25, 1.0)
+    return c.bgr.x
+}
+
+@test(returns = 5.0)
+fn v_swizzle_result_in_vec_math() -> float {
+    let p = v(3.0, 4.0)
+    return p.yx.length()
+}
+
+@test(returns = 8.0)
+fn v_swizzle_repeat_sum() -> float {
+    let p = v(2.0, 7.0)
+    let q = p.xxxx
+    return q.x + q.y + q.z + q.w
+}
+
+// Componentwise vec math + mixed ctors (stdlib/vec.rock): shared tier-0
+// bodies, so these pin CPU/GPU agreement for the whole family.
+@test(returns = 6.0)
+fn v_vec_clamp_scalar_bounds() -> float {
+    let l = v(2.0, 9.5, 7.0)
+    let c = l.clamp(0.0, 6.0)
+    return c.y
+}
+
+@test(returns = 3.0)
+fn v_vec_min_max() -> float {
+    let a = v(1.0, 5.0)
+    let b = v(4.0, 2.0)
+    return a.min(b).x + a.max(b).y - 3.0
+}
+
+// fract(1.25) = 0.25; fract(-0.25) = 0.75 (floor-based, in [0,1) for negatives).
+@test(returns = 1.0)
+fn v_vec_fract() -> float {
+    let p = v(1.25, -0.25)
+    return p.fract().x + p.fract().y
+}
+
+@test(returns = -3.0)
+fn v_vec_floor_negative() -> float {
+    return v(-2.5, 0.5).floor().x
+}
+
+@test(returns = 1.0)
+fn v_mixed_ctor_vec4_from_vec3() -> float {
+    let rgb = v(0.2, 0.4, 0.6)
+    let c = v(rgb, 1.0)
+    return c.w
+}
+
+@test(returns = 7.0)
+fn v_mixed_ctor_vec3_from_vec2() -> float {
+    let p = v(3.0, 4.0)
+    return v(p, 7.0).z
+}
+
+// Scalar-broadcast subtraction, mirroring the scalar `+` overload set.
+@test(returns = 1.0)
+fn v_vec2_scalar_sub() -> float {
+    return (v(3.0, 4.0) - 2.0).x
+}
+
+@test(returns = 0.5)
+fn v_vec3_scalar_sub() -> float {
+    return (v(1.0, 2.0, 3.0) - 0.5).x
+}
+
+@test(returns = 2.0)
+fn v_vec4_scalar_sub() -> float {
+    return (v(1.0, 2.0, 3.0, 4.0) - 2.0).w
+}
+
+@test(returns = 1.0)
+fn v_exp_zero() -> float {
+    return exp(0.0)
+}
+
+@test(returns = 2.718281828459045)
+fn v_exp_one() -> float {
+    return exp(1.0)
+}
+
+// Componentwise division, completing the Vec3/Vec4 `*` mirror (Vec2 had it).
+@test(returns = 3.0)
+fn v_vec3_div_vec3() -> float {
+    return (v(4.0, 9.0, 16.0) / v(2.0, 3.0, 4.0)).y
+}
+
+@test(returns = 2.0)
+fn v_vec4_div_vec4() -> float {
+    return (v(2.0, 4.0, 6.0, 8.0) / v(1.0, 2.0, 3.0, 4.0)).w
+}
+
+// --- bool-vector tier: isnan/isinf/bvec3/any/greater_than/
+// to_vec3. Cross-backend by construction; on GLSL these force the emitter's
+// Bvec3 machinery (nominal type, ctor, field->Bool typing, the vec3(bvec) cast).
+
+@test(returns = false)
+fn v_isnan_finite() -> bool {
+    return isnan(1.5)
+}
+
+@test(returns = false)
+fn v_isinf_finite() -> bool {
+    return isinf(1.5)
+}
+
+// The positive isnan/isinf cases are NOT corpus rows: the value-test harness has
+// no runtime inputs, so `0.0/0.0` / `1.0/0.0` are compile-time constants the GL
+// driver folds to finite values before isnan/isinf run (folds to 0.0 here). The
+// TRUE nan/inf path is validated by the nonfinite pixel sim, where the values
+// flow through an rgba16f texel and cannot be folded away.
+
+// Bvec3 construction + a direct component read: the read must type as Bool, not
+// the "Vec component" Float fallback (the easy-to-miss ty_of Field site).
+@test(returns = true)
+fn v_bvec_field_or() -> bool {
+    let b = bvec3(false, true, false)
+    return b.x || b.y || b.z
+}
+
+@test(returns = false)
+fn v_any_all_false() -> bool {
+    return any(bvec3(false, false, false))
+}
+
+@test(returns = true)
+fn v_any_one_true() -> bool {
+    return any(bvec3(false, true, false))
+}
+
+@test(returns = true)
+fn v_greater_than_reduces() -> bool {
+    return any(greater_than(v(1.0, 2.0, 3.0), v(0.0, 9.0, 9.0)))
+}
+
+@test(returns = false)
+fn v_greater_than_none() -> bool {
+    return any(greater_than(v(1.0, 2.0, 3.0), v(9.0, 9.0, 9.0)))
+}
+
+// bool->float cast: to_vec3(bvec) selects 1.0/0.0 per channel (GLSL vec3(bvec)).
+@test(returns = 1.0)
+fn v_to_vec3_true_channel() -> float {
+    return to_vec3(bvec3(true, false, false)).x
+}
+
+@test(returns = 0.0)
+fn v_to_vec3_false_channel() -> float {
+    return to_vec3(bvec3(true, false, false)).z
+}

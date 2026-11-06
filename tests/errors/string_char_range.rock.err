@@ -1,0 +1,19 @@
+//! Error: `string_char(code)` with a literal argument outside ASCII 0..=127 must
+//!        be rejected at emit. `string_char` is `string.char` on luajit -- a
+//!        literal like `string_char(233)` emits a lone high UTF-8 byte (invalid
+//!        on its own) and would mean a different code unit on a UTF-16 backend;
+//!        a negative literal aborts `string.char` at runtime. Portable only for
+//!        0..=127; for code points use `from_codepoint`.
+//! Tags: string_char, portability, emit-time
+
+//=== TEST CASE: string_char_above_ascii_Generic ===
+fn main() {
+    let s = string_char(233)
+    print("{s}")
+}
+
+//=== TEST CASE: string_char_negative_Generic ===
+fn main() {
+    let s = string_char(-1)
+    print("{s}")
+}

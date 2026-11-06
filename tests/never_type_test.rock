@@ -1,0 +1,310 @@
+// Tests for the Never (bottom) type and return/break/continue as expressions.
+// Goal: enable patterns like `let g = G ?? return` and
+// `let x = if c { 5 } else { return }`.
+
+global G_INT: int? = 42
+
+@test(output = "42")
+fn coalesce_with_return_taken_path() {
+    let g = G_INT ?? return
+    print(g)
+}
+
+@test(output = "before")
+fn coalesce_with_return_diverging_path() {
+    let x: int? = null
+    // `print("before")` + sentinel `print("FAIL...")` on the post-divergence
+    // line: if `return` lowers to a no-op, the FAIL line runs and the actual
+    // output ends up "before\nFAIL...", mismatching the expected.
+    print("before")
+    let g = x ?? return
+    print("FAIL: passed return")
+}
+
+@test(output = "5")
+fn if_else_return() {
+    let cond = true
+    let x = if cond { 5 } else { return }
+    print(x)
+}
+
+@test(output = "before")
+fn if_else_return_diverging_path() {
+    let cond = false
+    print("before")
+    let x = if cond { 5 } else { return }
+    print("FAIL: passed return")
+}
+
+// `let x = E1 op E2` where one operand is a divergent if-expression.
+// Codegen hoists the divergent operand to a temp before emitting the binop.
+@test(output = "6")
+fn binop_divergent_right_taken() {
+    let x = 1 + if true { 5 } else { return }
+    print(x)
+}
+
+@test(output = "before")
+fn binop_divergent_right_diverging() {
+    print("before")
+    let x = 1 + if false { 5 } else { return }
+    print("FAIL: passed return, x={x}")
+}
+
+@test(output = "6")
+fn binop_divergent_left_taken() {
+    let x = if true { 5 } else { return } + 1
+    print(x)
+}
+
+// `let arr = [..., if c { v } else { return }, ...]` — array literal
+// element, codegen hoists divergent element to a temp and builds Vec
+// inline (no IIFE).
+@test(output = "1")
+fn array_lit_divergent_taken() {
+    let arr = [1, if true { 2 } else { return }, 3]
+    print(arr[0])
+}
+
+@test(output = "before")
+fn array_lit_divergent_diverging() {
+    print("before")
+    let arr = [1, if false { 2 } else { return }, 3]
+    print("FAIL: passed return")
+}
+
+// `let t = (1, if c { v } else { return }, 3)` — tuple element.
+@test(output = "1\n2\n3")
+fn tuple_divergent_taken() {
+    let t = (1, if true { 2 } else { return }, 3)
+    print(t.0)
+    print(t.1)
+    print(t.2)
+}
+
+@test(output = "before")
+fn tuple_divergent_diverging() {
+    print("before")
+    let t = (1, if false { 2 } else { return }, 3)
+    print("FAIL: passed return")
+}
+
+// `let x = arr[if c { i } else { return }]` — index expression.
+@test(output = "20")
+fn index_divergent_taken() {
+    let arr = [10, 20, 30]
+    let x = arr[if true { 1 } else { return }]
+    print(x)
+}
+
+@test(output = "before")
+fn index_divergent_diverging() {
+    print("before")
+    let arr = [10, 20, 30]
+    let x = arr[if false { 1 } else { return }]
+    print("FAIL: passed return")
+}
+
+// `print(if c { v } else { return })` — function-call argument. Both
+// statement-level (last in fn body, routed via `generate_ast_function_body`)
+// and let-bound forms.
+@test(output = "42")
+fn fncall_arg_divergent_taken() {
+    print(if true { 42 } else { return })
+}
+
+@test(output = "before")
+fn fncall_arg_divergent_diverging() {
+    print("before")
+    print(if false { 42 } else { return })
+}
+
+@test(output = "0\n1\n2")
+fn coalesce_with_break() {
+    for i in 0..10 {
+        let v: int? = if i < 3 { i } else { null }
+        let g = v ?? break
+        print(g)
+    }
+}
+
+@test(output = "0\n1\n2")
+fn coalesce_with_continue() {
+    for i in 0..5 {
+        let v: int? = if i < 3 { i } else { null }
+        let g = v ?? continue
+        print(g)
+    }
+}
+
+// Shapes the per-form arms didn't cover, only reachable now that ANF
+// hoists divergent sub-expressions at any depth in the value-position
+// expression tree.
+
+// `f(g(if c { ... } else { return }))` — divergent if nested two levels
+// deep under function calls. The inner call `add_one` is itself a
+// FunctionCall arg, so under the old per-form arms the divergent if
+// would only get hoisted if the OUTER FunctionCall arm walked deep
+// enough — which it didn't (`expr_has_divergent_if` is shallow).
+fn add_one(x: int) -> int { x + 1 }
+
+@test(output = "43")
+fn nested_fncall_divergent_taken() {
+    print(add_one(add_one(if true { 41 } else { return })))
+}
+
+@test(output = "before")
+fn nested_fncall_divergent_diverging() {
+    print("before")
+    print(add_one(add_one(if false { 41 } else { return })))
+    print("FAIL: passed return")
+}
+
+// Divergent if inside a struct literal field. Struct literals weren't
+// in the old per-form set; ANF generalizes to any value-position child.
+struct Pair { a: int, b: int }
+
+@test(output = "1 7")
+fn struct_lit_divergent_taken() {
+    let p = Pair { a: 1, b: if true { 7 } else { return } }
+    print("{p.a} {p.b}")
+}
+
+@test(output = "before")
+fn struct_lit_divergent_diverging() {
+    print("before")
+    let p = Pair { a: 1, b: if false { 7 } else { return } }
+    print("FAIL: passed return")
+}
+
+// Divergent if inside a function-call argument that's itself nested
+// inside another expression — the divergent if is NOT a direct child
+// of any single per-form arm's parent (BinOp -> FunctionCall -> If),
+// only ANF's tree-walk finds it.
+@test(output = "43")
+fn binop_with_nested_fncall_divergent_taken() {
+    let x = 1 + add_one(if true { 41 } else { return })
+    print(x)
+}
+
+@test(output = "before")
+fn binop_with_nested_fncall_divergent_diverging() {
+    print("before")
+    let x = 1 + add_one(if false { 41 } else { return })
+    print("FAIL: x={x}")
+}
+
+// Match / IfLet / IfLetChain in value position with a divergent arm.
+// Both at the top of a `let x = …` (the new arms in
+// `generate_expr_into_local`) and nested inside another expression (ANF
+// hoists the Match/IfLet/IfLetChain via `expr_has_divergent_if`).
+
+enum Maybe { Some(int), None }
+
+@test(output = "42")
+fn match_top_level_taken() {
+    let y = Maybe::Some(42)
+    let x = match y {
+        Maybe::Some(v) => v
+        Maybe::None => { return }
+    }
+    print(x)
+}
+
+@test(output = "before")
+fn match_top_level_diverging() {
+    let y = Maybe::None
+    print("before")
+    let x = match y {
+        Maybe::Some(v) => v
+        Maybe::None => { return }
+    }
+    print("FAIL: x={x}")
+}
+
+@test(output = "43")
+fn match_nested_in_binop_taken() {
+    let y = Maybe::Some(42)
+    let x = 1 + match y {
+        Maybe::Some(v) => v
+        Maybe::None => { return }
+    }
+    print(x)
+}
+
+@test(output = "before")
+fn match_nested_in_binop_diverging() {
+    let y = Maybe::None
+    print("before")
+    let x = 1 + match y {
+        Maybe::Some(v) => v
+        Maybe::None => { return }
+    }
+    print("FAIL: x={x}")
+}
+
+global IFLET_Y: int? = 42
+
+@test(output = "42")
+fn if_let_top_level_taken() {
+    let x = if let v = IFLET_Y { v } else { return }
+    print(x)
+}
+
+@test(output = "84")
+fn if_let_nested_in_binop_taken() {
+    let x = 42 + if let v = IFLET_Y { v } else { return }
+    print(x)
+}
+
+@test(output = "before")
+fn if_let_nested_in_binop_diverging() {
+    let y: int? = null
+    print("before")
+    let x = 42 + if let v = y { v } else { return }
+    print("FAIL: x={x}")
+}
+
+@test(output = "42")
+fn if_let_chain_top_level_taken() {
+    let x = if let v = IFLET_Y && v > 0 { v } else { return }
+    print(x)
+}
+
+@test(output = "84")
+fn if_let_chain_nested_in_binop_taken() {
+    let x = 42 + if let v = IFLET_Y && v > 0 { v } else { return }
+    print(x)
+}
+
+@test(output = "before")
+fn if_let_chain_nested_in_binop_diverging() {
+    let y: int? = 0
+    print("before")
+    let x = 42 + if let v = y && v > 0 { v } else { return }
+    print("FAIL: x={x}")
+}
+
+// Paren-wrapped divergent if. `peel_transparent_wrappers` (used by
+// emit_value_arg_cdata) drops Paren on the way into BinOp operand
+// codegen, so the early-out in generate_expr_core sees the *inner* If's
+// id, not the Paren's. The ANF prep peels Paren before pushing into
+// the side-table so both keys match.
+@test(output = "6")
+fn paren_wrapped_divergent_if_taken() {
+    let x = (if true { 5 } else { return }) + 1
+    print(x)
+}
+
+@test(output = "5")
+fn two_paren_wrapped_divergent_ifs_taken() {
+    let x = (if true { 2 } else { return }) + (if true { 3 } else { return })
+    print(x)
+}
+
+@test(output = "before")
+fn paren_wrapped_divergent_if_diverging() {
+    print("before")
+    let x = (if false { 5 } else { return }) + 1
+    print("FAIL: x={x}")
+}

@@ -1,0 +1,416 @@
+// DEFER ON ERROR: an ordinary fn's pending
+// defers run when an error propagates out of their scope, LIFO, and the
+// original error is re-raised. Block exit, `return`, `break` and `continue`
+// run the defers of every scope they leave.
+
+global LOG: string = ""
+
+inline(lua) fn raised(check: fn() -> ()) -> string? = """
+    local ok, err = pcall(check)
+    if ok then return nil end
+    return tostring(err)
+"""
+
+inline(lua) fn has(s: string?, sub: string) -> bool = """
+    return s ~= nil and string.find(s, sub, 1, true) ~= nil
+"""
+
+inline(lua) fn before(s: string?, a: string, b: string) -> bool = """
+    if s == nil then return false end
+    local i = string.find(s, a, 1, true)
+    local j = string.find(s, b, 1, true)
+    return i ~= nil and j ~= nil and i < j
+"""
+
+// Runtime cleanup-stack depth; 0 when every registration was unwound.
+inline(lua) fn defer_depth() -> int = """
+    return rawget(_G, "__rock_defer_top") or -1
+"""
+
+inline(lua) fn throw_value() = """
+    _G.__defer_probe_err = _G.__defer_probe_err or { probe = true }
+    error(_G.__defer_probe_err)
+"""
+
+inline(lua) fn raised_same_value(check: fn() -> ()) -> bool = """
+    _G.__defer_probe_err = _G.__defer_probe_err or { probe = true }
+    local ok, err = pcall(check)
+    return (not ok) and rawequal(err, _G.__defer_probe_err)
+"""
+
+inline(lua) fn traceback_of(check: fn() -> ()) -> string = """
+    local ok, tb = xpcall(check, __rock_traceback)
+    if ok then return "no error" end
+    return tostring(tb)
+"""
+
+fn fails_after_defer() {
+    defer { LOG = LOG + "d1;" }
+    assert(false, "boom")
+}
+
+@test(output = "d1; true 0")
+fn assert_failure_runs_pending_defer() {
+    LOG = ""
+    let r = raised(() => fails_after_defer())
+    print("{LOG} {has(r, "boom")} {defer_depth()}")
+}
+
+fn nested_loop_fail() {
+    defer { LOG = LOG + "outer;" }
+    let i = 0
+    while i < 3 {
+        defer { LOG = LOG + "it{i};" }
+        i = i + 1
+        if true {
+            defer { LOG = LOG + "blk{i};" }
+            if i == 2 {
+                assert(false, "loop boom")
+            }
+        }
+    }
+}
+
+@test(output = "blk1;it1;blk2;it2;outer; true 0")
+fn error_in_nested_scopes_and_loop_unwinds_every_scope() {
+    LOG = ""
+    let r = raised(() => nested_loop_fail())
+    print("{LOG} {has(r, "loop boom")} {defer_depth()}")
+}
+
+fn break_continue() {
+    let i = 0
+    while i < 4 {
+        defer { LOG = LOG + "b{i};" }
+        i = i + 1
+        if i == 1 {
+            continue
+        }
+        if i == 3 {
+            break
+        }
+    }
+    LOG = LOG + "end;"
+}
+
+@test(output = "b1;b2;b3;end; 0")
+fn break_and_continue_run_loop_body_defers() {
+    LOG = ""
+    break_continue()
+    print("{LOG} {defer_depth()}")
+}
+
+fn for_break() {
+    for k in 0..5 {
+        defer { LOG = LOG + "f{k};" }
+        if k == 1 {
+            break
+        }
+    }
+}
+
+@test(output = "f0;f1; 0")
+fn break_out_of_for_runs_body_defer() {
+    LOG = ""
+    for_break()
+    print("{LOG} {defer_depth()}")
+}
+
+fn early_return(n: int) -> int {
+    defer { LOG = LOG + "r;" }
+    if n > 0 {
+        defer { LOG = LOG + "rn;" }
+        return n
+    }
+    return 0
+}
+
+fn caller_fails_after_return() {
+    defer { LOG = LOG + "c;" }
+    let v = early_return(1)
+    LOG = LOG + "v{v};"
+    assert(false, "after")
+}
+
+@test(output = "rn;r;v1;c; true 0")
+fn returned_defers_do_not_rerun_on_a_later_error() {
+    LOG = ""
+    let r = raised(() => caller_fails_after_return())
+    print("{LOG} {has(r, "after")} {defer_depth()}")
+}
+
+fn cleanup_raises() {
+    defer { LOG = LOG + "first;" }
+    defer { assert(false, "cleanup boom") }
+    defer { LOG = LOG + "third;" }
+    assert(false, "original")
+}
+
+@test(output = "third;first; true true 0")
+fn raising_defer_keeps_original_error_and_runs_the_rest() {
+    LOG = ""
+    let r = raised(() => cleanup_raises())
+    print("{LOG} {before(r, "original", "cleanup boom")} {!has(r, "cleanup boom: original")} {defer_depth()}")
+}
+
+fn throws_value() {
+    defer { LOG = LOG + "v;" }
+    throw_value()
+}
+
+@test(output = "v; true 0")
+fn non_string_error_value_is_reraised_unchanged() {
+    LOG = ""
+    let same = raised_same_value(() => throws_value())
+    print("{LOG} {same} {defer_depth()}")
+}
+
+fn traced_origin(n: int) {
+    if n == 0 {
+        assert(false, "deep")
+    }
+    traced_origin(n - 1)
+}
+
+fn traced() {
+    defer { LOG = LOG + "t;" }
+    traced_origin(2)
+}
+
+@test(output = "t; true 0")
+fn traceback_names_the_original_raise_site() {
+    LOG = ""
+    let tb = traceback_of(() => traced())
+    print("{LOG} {has(tb, "traced_origin")} {defer_depth()}")
+}
+
+fn early_fail(fail: bool) {
+    if fail {
+        assert(false, "early")
+    }
+    defer { LOG = LOG + "never;" }
+}
+
+@test(output = "[] true 0")
+fn unregistered_defer_does_not_run() {
+    LOG = ""
+    let r = raised(() => early_fail(true))
+    print("[{LOG}] {has(r, "early")} {defer_depth()}")
+}
+
+fn mutated_capture() {
+    let x = 1
+    defer { LOG = LOG + "x{x};" }
+    x = 2
+    assert(false, "m")
+}
+
+@test(output = "x2; 0")
+fn defer_on_error_sees_the_current_binding_value() {
+    LOG = ""
+    let r = raised(() => mutated_capture())
+    print("{LOG} {defer_depth()}")
+}
+
+fn inner_caught() {
+    defer { LOG = LOG + "o;" }
+    let r = raised(() => fails_after_defer())
+    defer { LOG = LOG + "p;" }
+    LOG = LOG + "mid;"
+}
+
+@test(output = "d1;mid;p;o; 0")
+fn caught_inner_error_leaves_outer_defers_balanced() {
+    LOG = ""
+    inner_caught()
+    print("{LOG} {defer_depth()}")
+}
+
+fn recurse(n: int) {
+    defer { LOG = LOG + "r{n};" }
+    if n == 0 {
+        assert(false, "bottom")
+    }
+    recurse(n - 1)
+}
+
+@test(output = "r0;r1;r2; true 0")
+fn recursive_frames_each_unwind_their_own_defers() {
+    LOG = ""
+    let r = raised(() => recurse(2))
+    print("{LOG} {has(r, "bottom")} {defer_depth()}")
+}
+
+fn lambda_and_nested_fn() {
+    let f = () => {
+        defer { LOG = LOG + "lam;" }
+        assert(false, "lam boom")
+    }
+    let r = raised(f)
+    fn nested() {
+        defer { LOG = LOG + "nest;" }
+        assert(false, "nest boom")
+    }
+    let r2 = raised(() => nested())
+    LOG = LOG + "{has(r, "lam boom")} {has(r2, "nest boom")};"
+}
+
+@test(output = "lam;nest;true true; 0")
+fn lambda_and_nested_fn_defers_run_on_error() {
+    LOG = ""
+    lambda_and_nested_fn()
+    print("{LOG} {defer_depth()}")
+}
+
+fn pair(a: int) -> (int, int) {
+    defer { LOG = LOG + "pr;" }
+    return (a, a + 1)
+}
+
+fn scaled(a: float, b: int = 3) -> float {
+    defer { LOG = LOG + "sc;" }
+    return a * b
+}
+
+@test(output = "pr;sc; 4 5 6 0")
+fn protected_fns_return_every_value() {
+    LOG = ""
+    let (x, y) = pair(4)
+    let s = scaled(2.0)
+    print("{LOG} {x} {y} {s} {defer_depth()}")
+}
+
+// A lambda body is an ordinary fn even inside a co fn: its defer unwinds on
+// error like any other ordinary-fn defer.
+co fn co_with_failing_lambda() -> Coroutine<int> {
+    let f = () => {
+        defer { LOG = LOG + "lam;" }
+        assert(false, "lamerr")
+    }
+    let r = raised(f)
+    LOG = LOG + "caught:{has(r, "lamerr")};"
+    yield 1
+}
+
+@test(output = "lam;caught:true; 0")
+fn lambda_in_co_fn_unwinds_its_defer() {
+    LOG = ""
+    let c = co_with_failing_lambda()
+    resume(c)
+    print("{LOG} {defer_depth()}")
+}
+
+inline(lua) fn throw_msg(m: string) = """
+    error(m, 0)
+"""
+
+fn same_first_origin(n: int) {
+    if n == 0 {
+        throw_msg("same msg")
+    }
+    same_first_origin(n - 1)
+    LOG = LOG + "unreached;"
+}
+
+fn same_first() {
+    defer { LOG = LOG + "f;" }
+    same_first_origin(1)
+}
+
+fn same_second_origin(n: int) {
+    if n == 0 {
+        throw_msg("same msg")
+    }
+    same_second_origin(n - 1)
+    LOG = LOG + "unreached;"
+}
+
+// A caught error leaves no record behind: a later error with an equal value
+// reports its own raise site. The origins avoid tail calls, which drop the
+// frame names a traceback shows.
+@test(output = "f; true false")
+fn equal_error_after_a_caught_one_reports_its_own_site() {
+    LOG = ""
+    let _ = raised(() => same_first())
+    let tb = traceback_of(() => {
+        same_second_origin(1)
+        LOG = LOG + "unreached;"
+    })
+    print("{LOG} {has(tb, "same_second_origin")} {has(tb, "same_first_origin")}")
+}
+
+fn cleanup_helper_raises() {
+    defer { LOG = LOG + "h;" }
+    throw_msg("helper boom")
+}
+
+fn original_site(n: int) {
+    if n == 0 {
+        throw_msg("orig")
+    }
+    original_site(n - 1)
+    LOG = LOG + "unreached;"
+}
+
+fn cleanup_calls_raising_fn() {
+    defer { cleanup_helper_raises() }
+    original_site(1)
+}
+
+fn cleanup_catches_raising_fn() {
+    defer { let _ = raised(() => cleanup_helper_raises()) }
+    original_site(1)
+}
+
+// A cleanup that runs (and raises inside) another protected fn keeps the
+// original error's raise site.
+@test(output = "h;h; true true true")
+fn cleanup_calling_a_raising_fn_keeps_the_original_trace() {
+    LOG = ""
+    let raising = traceback_of(() => cleanup_calls_raising_fn())
+    let catching = traceback_of(() => cleanup_catches_raising_fn())
+    print("{LOG} {has(raising, "original_site")} {has(raising, "helper boom")} {has(catching, "original_site")}")
+}
+
+inline(lua) fn throw_unprintable() = """
+    error(setmetatable({}, { __tostring = function() error("formatting failure") end }))
+"""
+
+fn unprintable_cleanup_error() {
+    defer { LOG = LOG + "remaining;" }
+    defer { throw_unprintable() }
+    throw_msg("original")
+}
+
+// A cleanup error that cannot be formatted neither replaces the original
+// error nor stops the remaining cleanups.
+@test(output = "remaining; true 0")
+fn unprintable_cleanup_error_keeps_unwinding() {
+    LOG = ""
+    let r = raised(() => unprintable_cleanup_error())
+    print("{LOG} {has(r, "original")} {defer_depth()}")
+}
+
+inline(lua) fn capture_log(check: fn() -> ()) -> string = """
+    local saved = rawget(_G, "__rock_log_sink")
+    local seen = {}
+    _G.__rock_log_sink = function(level, category, msg)
+        seen[#seen + 1] = category .. ":" .. msg
+    end
+    pcall(check)
+    _G.__rock_log_sink = saved
+    return table.concat(seen, "|")
+"""
+
+fn value_error_with_raising_cleanup() {
+    defer { throw_msg("cleanup boom") }
+    throw_value()
+}
+
+// A non-string error cannot carry the cleanup's message, so the cleanup error
+// goes to the shared log sink instead of being dropped.
+@test(output = "true true")
+fn cleanup_error_under_a_value_error_is_logged() {
+    let logged = capture_log(() => value_error_with_raising_cleanup())
+    print("{has(logged, "DEFER:")} {has(logged, "cleanup boom")}")
+}

@@ -1,0 +1,57 @@
+//! Error: Field access on nullable type must use ?. for safety
+//! Tags: nullable, safenav, soundness
+
+//=== TEST CASE: nullable_field_on_struct_Generic ===
+struct Foo { x: int }
+
+fn test() {
+    let f: Foo? = null
+    let result = f.x  // ERROR: Cannot use '.' to access field 'x' on nullable type
+}
+
+fn main() { test() }
+
+//=== TEST CASE: nullable_field_nested_Generic ===
+struct Inner { value: int }
+struct Outer { inner: Inner? }
+
+fn test() {
+    let o = Outer { inner: null }
+    let result = o.inner.value  // ERROR: Cannot use '.' to access field 'value' on nullable type
+}
+
+fn main() { test() }
+
+//=== TEST CASE: nullable_field_chain_Generic ===
+struct Chain { value: int = 0, next: Chain? = null }
+
+fn test() {
+    let c = Chain { next: Chain { value: 42 } }
+    let result = c.next.value  // ERROR: Cannot use '.' to access field 'value' on nullable type
+}
+
+fn main() { test() }
+
+//=== TEST CASE: divergence_refinement_of_global_unsound_Generic ===
+// D4: divergence-based narrowing
+// A global refinement must NOT survive an intervening effect: a non-@pure
+// call may reassign the global, so a use AFTER such a call is unrefined and
+// `g_div.x` must error. (bone DOES refine a global after `if g == null {
+// return }` when nothing reassigns it -- see
+// bone-semantic/tests/fixtures/global_nullable_refine.rock; rock never
+// refines a global at all. Both reject THIS case: the impure call drops the
+// refinement.)
+struct GFoo { x: int }
+global g_div: GFoo? = GFoo { x: 1 }
+
+fn impure() -> int { 0 }
+
+fn use_global_div() -> int {
+    if g_div == null {
+        return 0
+    }
+    impure()
+    g_div.x  // ERROR: Cannot use '.' to access field 'x' on nullable type
+}
+
+fn main() { use_global_div() }

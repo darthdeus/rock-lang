@@ -1,0 +1,61 @@
+// Hand-written iterator protocol in the shape the for-loop desugar will emit
+// Pins the backend prerequisites:
+// generic cursor struct, field mutation through a param, (bool, E) tuple
+// return with phantom(), tuple destructuring in let, loop/break.
+
+struct ManualVecIter<T> {
+    vec: [T],
+    i: int,
+}
+
+fn manual_iter<T>(v: [T]) -> ManualVecIter<T> {
+    return ManualVecIter { vec: v, i: 0 }
+}
+
+fn manual_next<T>(it: ManualVecIter<T>) -> (bool, T) {
+    if it.i >= it.vec.len {
+        return (false, phantom())
+    }
+    let x = it.vec[it.i]
+    it.i = it.i + 1
+    return (true, x)
+}
+
+@test
+fn manual_protocol_sums_vec() {
+    let v = [10, 20, 30]
+    let it = manual_iter(v)
+    let total = 0
+    loop {
+        let (ok, x) = manual_next(it)
+        if !ok { break }
+        total += x
+    }
+    assert_eq(total, 60)
+}
+
+@test
+fn manual_protocol_empty_vec() {
+    let v: [int] = []
+    let it = manual_iter(v)
+    let count = 0
+    loop {
+        let (ok, x) = manual_next(it)
+        if !ok { break }
+        count += 1
+    }
+    assert_eq(count, 0)
+}
+
+@test
+fn manual_protocol_string_elems() {
+    let v = ["a", "b", "c"]
+    let it = manual_iter(v)
+    let joined = ""
+    loop {
+        let (ok, x) = manual_next(it)
+        if !ok { break }
+        joined += x
+    }
+    assert_eq(joined, "abc")
+}

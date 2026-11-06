@@ -1,0 +1,32 @@
+// Thin `@inline inline(lua)` shims over Lua stdlib symbols
+// (math.*, string.*) — splice the call at each use site.
+
+@inline inline(lua) fn my_sin(x: float) -> float = "math.sin(x)"
+@inline inline(lua) fn my_cos(x: float) -> float = "math.cos(x)"
+@inline inline(lua) fn my_sqrt(x: float) -> float = "math.sqrt(x)"
+@inline inline(lua) fn my_abs_f(x: float) -> float = "math.abs(x)"
+@inline inline(lua) fn my_upper(s: string) -> string = "string.upper(s)"
+@inline inline(lua) fn my_lower(s: string) -> string = "string.lower(s)"
+
+// No-return-type form (statement-only call).
+@inline inline(lua) fn my_seed(n: int) = "math.randomseed(n)"
+
+@test
+fn test_lua_annotation_math() {
+    assert_eq(my_sin(0.0), 0.0, "sin(0) == 0")
+    assert_eq(my_cos(0.0), 1.0, "cos(0) == 1")
+    assert_eq(my_sqrt(9.0), 3.0, "sqrt(9) == 3")
+    assert_eq(my_abs_f(-4.5), 4.5, "abs(-4.5) == 4.5")
+}
+
+@test
+fn test_lua_annotation_string() {
+    assert_eq(my_upper("abc"), "ABC", "upper")
+    assert_eq(my_lower("XYZ"), "xyz", "lower")
+}
+
+@test
+fn test_lua_annotation_void() {
+    my_seed(42)
+    print("seeded")
+}

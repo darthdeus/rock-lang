@@ -1,0 +1,28 @@
+// `co` is a contextual keyword: reserved only in `co fn`, a plain
+// identifier everywhere else, so coroutine values can be bound to `co`.
+
+co fn counter() -> Coroutine<int> {
+    yield 1
+    yield 2
+    yield 3
+}
+
+@test(output = "co=42\n1\n2\n3")
+fn co_is_usable_as_identifier() {
+    let co = 42
+    print("co={co}")
+    let coro = counter()
+    print(coro.resume())
+    print(coro.resume())
+    print(coro.resume())
+}
+
+struct HasCo {
+    co: int,
+}
+
+@test(output = "field=7")
+fn co_is_usable_as_field_name() {
+    let h = HasCo { co: 7 }
+    print("field={h.co}")
+}

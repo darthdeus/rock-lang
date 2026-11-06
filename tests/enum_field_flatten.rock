@@ -1,0 +1,76 @@
+// Behavioral oracle for universal enum scalarization / struct-field flattening.
+// A non-cdata enum (closure variant) stored in
+// a regular struct field must construct, reassign, match, and compare structurally
+// the same whether the field is boxed (status quo) or flattened into the parent
+// table. These assertions must hold BEFORE and AFTER the codegen change.
+
+enum Sig {
+    Idle,
+    Num(int),
+    Pair(int, int),
+    Act(() -> ()),   // closure payload -> Sig is non-cdata
+}
+
+struct Holder {
+    sig: Sig,
+}
+
+fn read(h: Holder) -> int {
+    return match h.sig {
+        Sig::Idle => 0
+        Sig::Num(x) => x
+        Sig::Pair(a, b) => a + b
+        Sig::Act(_) => -1
+    }
+}
+
+@test
+fn test_construct_each_variant() {
+    assert_eq(read(Holder { sig: Sig::Idle }), 0)
+    assert_eq(read(Holder { sig: Sig::Num(7) }), 7)
+    assert_eq(read(Holder { sig: Sig::Pair(3, 4) }), 7)
+    assert_eq(read(Holder { sig: Sig::Act(() => {}) }), -1)
+}
+
+@test
+fn test_reassign_field() {
+    let h = Holder { sig: Sig::Idle }
+    assert_eq(read(h), 0)
+    h.sig = Sig::Num(11)
+    assert_eq(read(h), 11)
+    h.sig = Sig::Pair(5, 6)
+    assert_eq(read(h), 11)
+    h.sig = Sig::Idle
+    assert_eq(read(h), 0)
+}
+
+@test
+fn test_structural_eq_on_field() {
+    let h = Holder { sig: Sig::Num(5) }
+    // Structural, NOT reference: a fresh ctor compares equal.
+    assert_eq(h.sig == Sig::Num(5), true)
+    assert_eq(h.sig == Sig::Num(6), false)
+    assert_eq(h.sig == Sig::Idle, false)
+    assert_eq(h.sig != Sig::Num(5), false)
+    h.sig = Sig::Pair(1, 2)
+    assert_eq(h.sig == Sig::Pair(1, 2), true)
+    assert_eq(h.sig == Sig::Pair(2, 1), false)
+}
+
+@test
+fn test_field_copy_between_holders() {
+    let a = Holder { sig: Sig::Pair(8, 9) }
+    let b = Holder { sig: Sig::Idle }
+    b.sig = a.sig            // copy from another (flattened/boxed) field
+    assert_eq(read(b), 17)
+    assert_eq(b.sig == a.sig, true)
+}
+
+@test
+fn test_if_let_on_field() {
+    let h = Holder { sig: Sig::Num(42) }
+    let got = if let Sig::Num(x) = h.sig { x } else { -1 }
+    assert_eq(got, 42)
+    let miss = if let Sig::Pair(a, b) = h.sig { a + b } else { -1 }
+    assert_eq(miss, -1)
+}

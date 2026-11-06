@@ -1,0 +1,127 @@
+// A nested enum whose parent is on the FLAT plan spreads its own tag and payload
+// leaves into the parent's slots. These cover the shapes a nested pattern has to
+// read out of those slots: a non-first position, named (record) payload slots,
+// three levels of nesting, and the same shapes after a coroutine suspension.
+//
+// A `string` payload keeps every enum here off the cdata plan (a string is not
+// C-layout-mappable), so each one is genuinely flat rather than scalarized.
+
+enum InnerLeaf { Empty, Pair(int, int), Named(string) }
+enum SlotHolder { Nothing, Held(int, InnerLeaf, int) }
+
+fn slot_holder(leaf: InnerLeaf) -> SlotHolder {
+    return SlotHolder::Held(7, leaf, 9)
+}
+
+@test
+fn nested_flat_enum_in_non_first_position() {
+    let result = match slot_holder(InnerLeaf::Pair(3, 4)) {
+        SlotHolder::Held(lead, InnerLeaf::Pair(x, y), trail) => lead * 1000 + x * 100 + y * 10 + trail,
+        _ => -1,
+    }
+    // lead=7 and trail=9 prove the slots on either side of the widened position
+    // are still addressed by slot, not by payload position.
+    assert_eq(result, 7349)
+}
+
+@test
+fn nested_flat_enum_rejects_a_sibling_variant() {
+    // The inner tag test has to still gate the arm: a `Named` payload must not
+    // fall into the `Pair` arm and bind the neighbouring slots.
+    let result = match slot_holder(InnerLeaf::Named("nope")) {
+        SlotHolder::Held(lead, InnerLeaf::Pair(x, y), trail) => lead * 1000 + x * 100 + y * 10 + trail,
+        SlotHolder::Held(lead, InnerLeaf::Named(s), trail) => lead + trail,
+        _ => -1,
+    }
+    assert_eq(result, 16)
+}
+
+@test
+fn nested_flat_enum_unit_variant_arm() {
+    let result = match slot_holder(InnerLeaf::Empty) {
+        SlotHolder::Held(_, InnerLeaf::Pair(x, y), _) => x + y,
+        SlotHolder::Held(lead, InnerLeaf::Empty, trail) => lead * 10 + trail,
+        _ => -1,
+    }
+    assert_eq(result, 79)
+}
+
+enum RectLike { Blank, Sized { w: int, h: int }, Label(string) }
+enum RectHolder { NoRect, SomeRect(RectLike, int) }
+
+fn rect_holder(r: RectLike) -> RectHolder {
+    return RectHolder::SomeRect(r, 5)
+}
+
+@test
+fn nested_flat_enum_with_named_fields() {
+    let result = match rect_holder(RectLike::Sized { w: 12, h: 3 }) {
+        RectHolder::SomeRect(RectLike::Sized { w, h }, n) => w * 100 + h * 10 + n,
+        _ => -1,
+    }
+    assert_eq(result, 1235)
+}
+
+@test
+fn nested_flat_enum_named_fields_reject_sibling() {
+    let result = match rect_holder(RectLike::Label("x")) {
+        RectHolder::SomeRect(RectLike::Sized { w, h }, n) => w * 100 + h * 10 + n,
+        RectHolder::SomeRect(RectLike::Label(s), n) => n,
+        _ => -1,
+    }
+    assert_eq(result, 5)
+}
+
+enum L3 { Zero3, Two3(int, int), Text3(string) }
+enum L2 { Zero2, Wrap2(L3, int) }
+enum L1 { Zero1, Top1(int, L2) }
+
+fn three_levels(inner: L3) -> L1 {
+    return L1::Top1(1, L2::Wrap2(inner, 6))
+}
+
+@test
+fn nested_flat_enum_three_levels() {
+    let result = match three_levels(L3::Two3(2, 3)) {
+        L1::Top1(a, L2::Wrap2(L3::Two3(x, y), b)) => a * 1000 + x * 100 + y * 10 + b,
+        _ => -1,
+    }
+    assert_eq(result, 1236)
+}
+
+@test
+fn nested_flat_enum_three_levels_reject_innermost() {
+    let result = match three_levels(L3::Text3("deep")) {
+        L1::Top1(a, L2::Wrap2(L3::Two3(x, y), b)) => a * 1000 + x * 100 + y * 10 + b,
+        L1::Top1(a, L2::Wrap2(L3::Text3(s), b)) => a + b,
+        _ => -1,
+    }
+    assert_eq(result, 7)
+}
+
+co fn nested_flat_enum_after_yield() -> Coroutine<int> {
+    yield 0
+    match slot_holder(InnerLeaf::Pair(3, 4)) {
+        SlotHolder::Held(lead, InnerLeaf::Pair(x, y), trail) => {
+            yield lead * 1000 + x * 100 + y * 10 + trail
+        },
+        _ => { yield -1 },
+    }
+    match three_levels(L3::Two3(2, 3)) {
+        L1::Top1(a, L2::Wrap2(L3::Two3(x, y), b)) => { yield a * 1000 + x * 100 + y * 10 + b },
+        _ => { yield -2 },
+    }
+    match rect_holder(RectLike::Sized { w: 12, h: 3 }) {
+        RectHolder::SomeRect(RectLike::Sized { w, h }, n) => { yield w * 100 + h * 10 + n },
+        _ => { yield -3 },
+    }
+}
+
+@test
+fn nested_flat_enum_patterns_survive_suspension() {
+    let c = nested_flat_enum_after_yield()
+    assert_eq(c.resume() ?? -9, 0)
+    assert_eq(c.resume() ?? -9, 7349)
+    assert_eq(c.resume() ?? -9, 1236)
+    assert_eq(c.resume() ?? -9, 1235)
+}

@@ -1,0 +1,140 @@
+// Advanced recursive enum tests
+
+// Import basic recursive types
+enum List<T> {
+    Nil,
+    Cons(T, List<T>),
+}
+
+enum Tree<T> {
+    Leaf,
+    Node(T, Tree<T>, Tree<T>),
+}
+
+// JSON-like data structure
+enum Json {
+    Null,
+    Bool(bool),
+    Number(float),
+    String(string),
+    Array([Json]),
+    Object(Map<string, Json>),
+}
+
+// Mutually recursive types
+enum Statement {
+    Let(string, Expression),
+    If(Expression, Block),
+    Return(Expression),
+}
+
+enum Expression {
+    Literal(int),
+    Variable(string),
+    Block(Block),
+}
+
+enum Block {
+    Statements([Statement]),
+}
+
+@test
+fn test_json_construction() {
+    // Create a simple JSON object
+    let obj = map_new()
+    insert(obj, "name", Json::String("Rock"))
+    insert(obj, "version", Json::Number(1.0))
+    
+    let features = vec_new()
+    vec_push(features, Json::String("enums"))
+    vec_push(features, Json::String("generics"))
+    vec_push(features, Json::String("recursion"))
+    insert(obj, "features", Json::Array(features))
+    
+    let json = Json::Object(obj)
+    
+    // Pattern match to verify
+    match json {
+        Object(obj) => {
+            let name_json = get(obj, "name")
+            if name_json != null {
+                match name_json {
+                    Json::String(name) => assert_eq(name, "Rock"),
+                    _ => assert(false, "Expected name to be a string"),
+                }
+            } else {
+                assert(false, "Expected name key to exist")
+            }
+        },
+        _ => assert(false, "Expected an object"),
+    }
+    
+    print("JSON-like structure works")
+}
+
+fn count_list<T>(list: List<T>) -> int {
+    match list {
+        Nil => 0,
+        Cons(_, tail) => 1 + count_list(tail),
+    }
+}
+
+@test
+fn test_deeply_nested_list() {
+    // Create a deeply nested list
+    let deep = List::Cons(1, 
+        List::Cons(2, 
+            List::Cons(3, 
+                List::Cons(4, 
+                    List::Cons(5, List::Nil)))))
+    
+    assert_eq(count_list(deep), 5)
+    print("Deeply nested list works")
+}
+
+fn list_map<T, U>(list: List<T>, f: (T) -> U) -> List<U> {
+    match list {
+        Nil => List::Nil,
+        Cons(head, tail) => List::Cons(f(head), list_map(tail, f)),
+    }
+}
+
+@test
+fn test_list_map() {
+    let numbers = List::Cons(1, List::Cons(2, List::Cons(3, List::Nil)))
+    let doubled = list_map(numbers, x => x * 2)
+    
+    // Verify first element is doubled
+    match doubled {
+        Cons(head, _) => assert_eq(head, 2),
+        Nil => assert(false, "List should not be empty"),
+    }
+    
+    print("List map function works")
+}
+
+fn tree_fold<T, U>(tree: Tree<T>, leaf_val: U, node_fn: (T, U, U) -> U) -> U {
+    match tree {
+        Leaf => leaf_val,
+        Node(value, left, right) => {
+            let left_result = tree_fold(left, leaf_val, node_fn)
+            let right_result = tree_fold(right, leaf_val, node_fn)
+            node_fn(value, left_result, right_result)
+        }
+    }
+}
+
+@test
+fn test_tree_fold() {
+    // Create a tree with values
+    let tree = Tree::Node(10,
+        Tree::Node(5, Tree::Leaf, Tree::Leaf),
+        Tree::Node(15, Tree::Leaf, Tree::Leaf)
+    )
+    
+    // Sum all values in the tree
+    let sum = tree_fold(tree, 0, (val, left, right) => val + left + right)
+    assert_eq(sum, 30)
+    
+    print("Tree fold works")
+}

@@ -1,0 +1,84 @@
+//! Error: Complex type mismatch scenarios
+//! Tags: types, structs, complex
+
+//=== TEST CASE: struct_to_struct_mismatch_MismatchedType ===
+struct Point { x: int, y: int }
+struct Color { r: int, g: int, b: int }
+
+// Error: Point parameter cannot have Color default
+fn bad_func(p: Point = Color { r: 255, g: 0, b: 0 }) {
+    print("This should not compile")
+}
+
+fn main() {
+    bad_func()
+}
+
+//=== TEST CASE: array_type_mismatch_MismatchedType ===
+// Error: int array parameter cannot have string array default
+fn bad_func(arr: [int] = ["hello", "world"]) {
+    print("This should not compile")
+}
+
+fn main() {
+    bad_func()
+}
+
+//=== TEST CASE: null_to_non_nullable_NullAssignmentToNonNullable ===
+struct Point { x: int, y: int }
+
+// Error: Cannot assign null to non-nullable type
+fn bad_func(p: Point = null) {
+    print("This should not compile")
+}
+
+fn main() {
+    bad_func()
+}
+
+//=== TEST CASE: function_type_default_mismatch_Generic ===
+fn dummy_int() -> int {
+    return 42
+}
+
+fn dummy_string() -> string {
+    return "hello"
+}
+
+// Error: Function returning string cannot be default for function returning int
+fn bad_func(f: fn() -> int = dummy_string) {
+    print(f())
+}
+
+fn main() {
+    bad_func()
+}
+
+//=== TEST CASE: enum_variant_default_mismatch_MismatchedType ===
+enum Result<T, E> {
+    Ok(T),
+    Err(E)
+}
+
+// Error: Result<string, string> cannot be default for Result<int, string>
+fn bad_func(r: Result<int, string> = Result::Ok("not an int")) {
+    print("This should not compile")
+}
+
+fn main() {
+    bad_func()
+}
+
+//=== TEST CASE: generic_struct_default_mismatch_MismatchedType ===
+struct Box<T> {
+    value: T
+}
+
+// Error: Box<string> cannot be default for Box<int>
+fn bad_func(b: Box<int> = Box { value: "hello" }) {
+    print("This should not compile")
+}
+
+fn main() {
+    bad_func()
+}

@@ -1,0 +1,37 @@
+// Whole-value reads of a `NativeBuffer<T: value>` / `FlatVec<T>` element COPY;
+// they must not bind an interior cdata reference into the array
+//
+// Demonstrated with WHOLESALE element replacement (`buf[i] = V2 {..}`), a legal
+// place write under both the immutability and mutable-value-semantics models --
+// so this test survives the Phase B value-field-write rejection. If `let v =
+// buf[i]` bound the slot reference, replacing the slot afterwards would be
+// observed through `v`; a copy is unaffected.
+
+value V2 { x: float, y: float }
+
+@nomangle inline(lua) fn __nb_alloc_V2(n: int) -> Ptr<V2> = 'return ffi.new("V2[?]", n)'
+
+fn nb_v2(n: int) -> NativeBuffer<V2> {
+    return NativeBuffer { ptr: __nb_alloc_V2(n), len: n }
+}
+
+// A whole-value read bound to a local is a COPY: mutating the source slot
+// wholesale does not reach through the earlier binding.
+@test(output = "1")
+fn test_nb_value_read_copies() {
+    let buf = nb_v2(1)
+    buf[0] = V2 { x: 1.0, y: 2.0 }
+    let v = buf[0]                      // whole-value read -> copy
+    buf[0] = V2 { x: 99.0, y: 99.0 }    // replace the slot wholesale
+    print("{v.x.floor()}")             // 1 (copy), not 99 (aliased slot)
+}
+
+// A leaf projection off the read still reads the live slot directly (no copy
+// obligation): reading buf[0].x AFTER the replace sees the new value.
+@test(output = "99")
+fn test_nb_leaf_read_is_live() {
+    let buf = nb_v2(1)
+    buf[0] = V2 { x: 1.0, y: 2.0 }
+    buf[0] = V2 { x: 99.0, y: 99.0 }
+    print("{buf[0].x.floor()}")
+}

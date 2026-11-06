@@ -1,0 +1,62 @@
+// Essential type hole tests - core functionality migrated from Rust
+// Tests the most important type inference scenarios with type holes
+
+// Basic type hole inference
+@test(type_holes = [[0, "int"], [1, "string"], [2, "int"]])
+fn test_basic_type_hole_inference() -> int {
+    let x: ? = 42
+    let y: ? = "hello"
+    let z: ? = x + 1
+    return z
+}
+
+// Generic function type hole
+fn identity<T>(x: T) -> T { 
+    return x 
+}
+
+@test(type_holes = [[3, "int"]])
+fn test_generic_type_hole() -> int {
+    let result: ? = identity(42)
+    return result
+}
+
+// Struct type hole
+struct Point {
+    x: int,
+    y: int,
+}
+
+@test(type_holes = [[4, "Point"]])
+fn test_struct_type_hole() -> Point {
+    let p: ? = Point { x: 10, y: 20 }
+    return p
+}
+
+// Array type hole
+@test(type_holes = [[5, "[string]"]])
+fn test_array_type_hole() -> [string] {
+    let arr: ? = ["hello", "world"]
+    return arr
+}
+
+// Function return type hole
+fn get_number() -> int {
+    return 42
+}
+
+@test(type_holes = [[6, "int"]])
+fn test_function_return_type_hole() -> int {
+    let x: ? = get_number()
+    return x
+}
+
+// Multiple holes in one function
+@test(type_holes = [[7, "int"], [8, "float"], [9, "bool"], [10, "[int]"]])
+fn test_multiple_type_holes() -> bool {
+    let a: ? = 10
+    let b: ? = 20.5
+    let c: ? = true
+    let d: ? = [1, 2, 3]
+    return c
+}

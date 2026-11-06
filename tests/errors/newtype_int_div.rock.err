@@ -1,0 +1,14 @@
+//! Error: an int-wrapped newtype gets `./` (integer floor division) and
+//!        NOT `/` (float division) -- consistent with core ints after the
+//!        float-div migration. A newtype wanting float `/` unwraps first.
+//!        Float newtypes keep `/`.
+//! Tags: newtypes, operators, float-div, int-div
+
+//=== TEST CASE: int_newtype_slash_rejected_unify ===
+newtype Distance(int)
+
+fn main() {
+    let a = Distance(10)
+    let b = Distance(4)
+    print((a / b).0)   // ERROR: int newtype has `./`, not `/`
+}

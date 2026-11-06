@@ -1,0 +1,80 @@
+//! TODO: `@consume` affine usage check not implemented yet
+//!. Each case double-consumes a single-shot
+//! cursor binding and must become a two-label compile error ("already
+//! consumed here / used again here"). Today they compile and the second
+//! consumption silently yields nothing. Flip these to live cases when the
+//! check lands (requires the stdlib cursor structs to carry `@consume`).
+//! Tags: iterators, consume, affine
+
+//=== TEST CASE: double_for_over_cursor_Generic ===
+fn main() {
+    let v = [1, 2, 3]
+    let it = v.iter()
+    let a = 0
+    for x in it { a += x }
+    let b = 0
+    for x in it { b += x }
+    print("{a} {b}")
+}
+
+//=== TEST CASE: for_then_terminal_Generic ===
+fn main() {
+    let v = [1, 2, 3]
+    let it = v.map(x => x * 2)
+    let a = 0
+    for x in it { a += x }
+    let r = it.collect()
+    print("{a} {r.len}")
+}
+
+//=== TEST CASE: wrap_then_use_Generic ===
+fn main() {
+    let v = [1, 2, 3]
+    let it = v.iter()
+    let doubled = it.map(x => x * 2)
+    let a = 0
+    for x in it { a += x }
+    let b = 0
+    for x in doubled { b += x }
+    print("{a} {b}")
+}
+
+//=== TEST CASE: copy_then_use_Generic ===
+fn main() {
+    let v = [1, 2, 3]
+    let it = v.iter()
+    let alias = it
+    let a = 0
+    for x in alias { a += x }
+    let b = 0
+    for x in it { b += x }
+    print("{a} {b}")
+}
+
+//=== TEST CASE: loop_reuse_of_outer_cursor_Generic ===
+fn main() {
+    let v = [1, 2, 3]
+    let it = v.iter()
+    let total = 0
+    for round in 0..2 {
+        for x in it { total += x }
+    }
+    print("{total}")
+}
+
+//=== TEST CASE: user_consume_struct_double_use_Generic ===
+@consume
+struct Ticket {
+    id: int,
+}
+
+fn punch(t: Ticket) -> int {
+    return t.id
+}
+
+fn main() {
+    let t = Ticket { id: 7 }
+    let a = punch(t)
+    let b = punch(t)
+    print("{a} {b}")
+}

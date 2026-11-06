@@ -1,0 +1,139 @@
+// Scalarization stage-0, Phase C: the four value-semantics decision points
+// All four are
+// decided; each is pinned here to the rule that was chosen, not merely to
+// what the tree happens to do.
+
+value Pt { x: int, y: int }
+
+// --- C1: closure capture of a value local -- DECISION: capture BY CELL ---
+//
+// A local that is REASSIGNED after capture is captured by cell, so the closure
+// observes the post-reassignment value. This is Rock's uniform rule, not a
+// value-struct behavior: `int` and reference structs do exactly the same thing
+// (pinned below). Capture-by-copy was considered for "value consistency" and
+// REJECTED on that ground -- it would make `value` the one type whose capture
+// rule differs, and the difference is invisible at the capture site
+// (`() => p.x` would mean two things depending on `p`'s declaration).
+@test(output = "9")
+fn c1_value_capture_then_reassign_is_by_cell() {
+    let p = Pt { x: 1, y: 2 }
+    let f = () => p.x
+    p = Pt { x: 9, y: 9 }
+    print("{f()}")
+}
+
+// The consistency argument itself, pinned: the same shape over `int` and over a
+// reference struct. If any of these three diverge, the uniform rule is broken.
+struct RefPt { x: int }
+
+@test(output = "9")
+fn c1_int_capture_then_reassign_is_by_cell() {
+    let i = 1
+    let f = () => i
+    i = 9
+    print("{f()}")
+}
+
+@test(output = "9")
+fn c1_ref_struct_capture_then_reassign_is_by_cell() {
+    let r = RefPt { x: 1 }
+    let f = () => r.x
+    r = RefPt { x: 9 }
+    print("{f()}")
+}
+
+// A value local captured WITHOUT later reassignment snapshots by value (stable
+// under both the current and proposed models).
+@test(output = "1")
+fn c1_value_capture_single_assign() {
+    let p = Pt { x: 1, y: 2 }
+    let f = () => p.x
+    print("{f()}")
+}
+
+// --- C2: global value places ---
+//
+// The WRITE is legal (Phase B place/rvalue classification: a global is mutable
+// storage, so a value field of a value-struct global is writable in place). The
+// leaf-knowledge invalidation across non-@pure calls / yields the axes doc calls
+// for is forward-looking -- there is no value-leaf CSE yet to invalidate, so
+// nothing to pin behaviorally beyond the write.
+global CAST_ENV: Pt = Pt { x: 1, y: 2 }
+
+@test(output = "42")
+fn c2_global_value_place_write() {
+    CAST_ENV.x = 42
+    print("{CAST_ENV.x}")
+}
+
+// --- C3: inline(lua) boxed ABI -- DECISION: borrowed, don't mutate ---
+//
+// A non-@scalar_abi (@nomangle) inline(lua) callee needs a BOX, but a value
+// travels as its leaf scalars, so the call site packs a FRESH one from the
+// leaves -- `poke((Pt_ct(r0, r1)))`, `poke_gc((GcM_vt(r0, r1)))`. That happens at
+// every caller shape (local, struct field, global, container element) and in both
+// tiers, so the callee never holds the caller's box. The pack is SHALLOW: a
+// reference leaf is carried into the new box by reference, since a deep copy
+// would be unbounded.
+//
+// The contract is BORROWED, DON'T MUTATE, and the two halves fail differently:
+//   - writing a SCALAR leaf is a silent NO-OP (the write hits the copy)
+//   - writing through a REFERENCE leaf ALIASES (the caller observes it)
+// Both are pinned below, so a change to the boundary's copy depth breaks a test
+// instead of changing behavior silently.
+//
+// Copying at the boundary unconditionally was rejected -- it defeats
+// scalarization sinking and the deliberate in-place batch.rock append path.
+value GcM { m: Map<int, int>, n: int }   // a Map leaf -> GC tier, reference leaf
+struct C3Own { p: Pt }
+struct C3GcOwn { g: GcM }
+
+@nomangle inline(lua) fn c3_read_x(p: Pt) -> int = "return p.x"
+@nomangle inline(lua) fn c3_poke(p: Pt) = "p.x = 999"
+@nomangle inline(lua) fn c3_poke_gc(g: GcM) = "g.n = 999"
+@nomangle inline(lua) fn c3_poke_map(g: GcM) = "g.m[1] = 777"
+
+fn c3_mk(a: int) -> Pt { return Pt { x: a, y: 0 } }
+
+global C3_G: Pt = Pt { x: 5, y: 0 }
+
+// A scalar-leaf write is discarded at EVERY caller shape, not just the
+// scalarized one -- the boundary copies uniformly.
+@test(output = "5 5 5 5 5")
+fn c3_scalar_leaf_write_is_discarded_every_shape() {
+    let a = c3_mk(5)
+    c3_poke(a)
+    let o = C3Own { p: c3_mk(5) }
+    c3_poke(o.p)
+    c3_poke(C3_G)
+    let xs = [c3_mk(5)]
+    c3_poke(xs[0])
+    let b: NativeBuffer<Pt> = native_buffer_alloc(2)
+    b[0] = c3_mk(5)
+    c3_poke(b[0])
+    print("{c3_read_x(a)} {o.p.x} {C3_G.x} {xs[0].x} {b[0].x}")
+}
+
+// The GC tier copies its scalar leaves too.
+@test(output = "5 5")
+fn c3_gc_tier_scalar_leaf_write_is_discarded() {
+    let g = GcM { m: map_new(), n: 5 }
+    c3_poke_gc(g)
+    let o = C3GcOwn { g: GcM { m: map_new(), n: 5 } }
+    c3_poke_gc(o.g)
+    print("{g.n} {o.g.n}")
+}
+
+// ...but a REFERENCE leaf is shared, so a write through it reaches the caller.
+// This is the half of the contract that can corrupt state.
+@test(output = "777 777")
+fn c3_reference_leaf_is_shared_and_write_aliases() {
+    let g = GcM { m: map_new(), n: 5 }
+    g.m[1] = 1
+    c3_poke_map(g)
+    let o = C3GcOwn { g: GcM { m: map_new(), n: 5 } }
+    o.g.m[1] = 1
+    c3_poke_map(o.g)
+    print("{g.m[1]} {o.g.m[1]}")
+}
+

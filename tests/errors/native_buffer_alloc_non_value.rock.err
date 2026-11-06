@@ -1,0 +1,20 @@
+//! Error: the `native_buffer_alloc<T>` intrinsic
+//!        allocates a flat ffi array (`ffi.new("<ctype>[?]")`), so `T` must
+//!        have a C array layout: an FFI-clean `value` struct or int/float/bool.
+//!        A heap (non-value) struct has no cdef, so it is rejected at emit --
+//!        a HARD spanned error from concrete native-buffer representation
+//!        selection, NOT the lenient silent-skip (which would leave a dangling nil
+//!        call).
+//! Tags: native-buffer, intrinsic, value-struct, c-boundary, emit-time
+
+//=== TEST CASE: native_buffer_alloc_heap_struct ===
+struct Heap { xs: [int] }
+
+fn bad(n: int) -> NativeBuffer<Heap> {
+    return native_buffer_alloc(n)
+}
+
+fn main() {
+    let b = bad(4)
+    print("{b.len}")
+}

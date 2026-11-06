@@ -1,0 +1,54 @@
+//! Error: Duplicate symbol detection tests
+//! Tags: symbols, duplicates
+
+//=== TEST CASE: duplicate_enum_DuplicateSymbol ===
+enum DrawCommand {
+    Rect { x: int, y: int, width: int, height: int },
+    Circle { x: int, y: int, radius: int }
+}
+
+// Duplicate definition
+enum DrawCommand {
+    Line { x1: int, y1: int, x2: int, y2: int }
+}
+
+fn main() {
+    print("Testing duplicate enum detection")
+}
+
+//=== TEST CASE: duplicate_struct_DuplicateSymbol ===
+struct Player {
+    x: int,
+    y: int,
+    health: int
+}
+
+// Duplicate struct
+struct Player {
+    name: string,
+    score: int
+}
+
+fn main() {
+    print("Testing duplicate struct detection")
+}
+
+//=== TEST CASE: duplicate_newtype_DuplicateSymbol ===
+newtype UserId(int)
+
+// Duplicate newtype
+newtype UserId(string)
+
+fn main() {
+    print("Testing duplicate newtype detection")
+}
+
+//=== TEST CASE: duplicate_struct_across_modules_DuplicateSymbol ===
+//--- FILE: a.rock ---
+struct Foo { x: int }
+//--- FILE: b.rock ---
+struct Foo { y: string }
+
+fn main() {
+    print("Testing cross-module duplicate struct detection")
+}

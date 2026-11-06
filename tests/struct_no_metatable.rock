@@ -1,0 +1,25 @@
+// Struct type tagging is `__ty`-only -- the metatable mechanism
+// (`__ROCK_METATABLES` + `setmetatable` in `__rock_create_struct` +
+// the metatable branch in `__rock_get_type`) is gone. A struct carries
+// its type solely in the direct `__ty` field, the same single tag Vec and
+// every other value uses.
+
+struct PointZ { x: int, y: int }
+
+@nomangle inline(lua) fn __test_struct_no_mt() -> bool = """
+    local p = __rock_create_struct("PointZ", { x = 1, y = 2 })
+    return getmetatable(p) == nil and __rock_get_type(p) == "PointZ"
+"""
+
+@test(output = "true")
+fn struct_has_no_metatable() {
+    print(__test_struct_no_mt())
+}
+
+@test(output = "true false")
+fn struct_structural_eq_still_works() {
+    let a = PointZ { x: 1, y: 2 }
+    let b = PointZ { x: 1, y: 2 }
+    let c = PointZ { x: 1, y: 9 }
+    print("{a == b} {a == c}")
+}

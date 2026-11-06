@@ -1,0 +1,61 @@
+//! Error: `Scene<T>`'s root type is static information, so a handle to one
+//!        Scene root type is not a handle to another even though both are the
+//!        same two integers at runtime. The registry stores the root behind an
+//!        any-compatible slot and `Scene<T>.get` recovers `T` with a `cast`,
+//!        which is a runtime no-op -- so the ONLY thing separating the two is
+//!        the typechecker, and this pins that it does. Same property for
+//!        `SceneBuilder.arena<T>()`, whose element type comes from the expected
+//!        type at the call site.
+//! Tags: scenes, generics, weak-handles
+
+//=== TEST CASE: scene_handle_of_wrong_root_type_Generic ===
+struct RoomState { n: int }
+struct MenuState { label: string }
+
+fn main() {
+    let room: Scene<RoomState>? = scene_create((b) => {
+        let r: RoomState? = RoomState { n: 1 }
+        return r
+    })
+    let menu: Scene<MenuState> = room.unwrap()
+    print("{menu._scene_id}")
+}
+
+//=== TEST CASE: scene_root_used_as_other_root_Generic ===
+struct RoomState { n: int }
+struct MenuState { label: string }
+
+fn main() {
+    let room: Scene<RoomState>? = scene_create((b) => {
+        let r: RoomState? = RoomState { n: 1 }
+        return r
+    })
+    let menu: MenuState = room.unwrap().get().unwrap()
+    print(menu.label)
+}
+
+//=== TEST CASE: scene_owned_arena_of_wrong_element_Generic ===
+struct Actor { hp: int }
+struct Prop { solid: bool }
+struct RoomState { actors: Arena<Actor> }
+
+fn main() {
+    let room: Scene<RoomState>? = scene_create((b) => {
+        let r: RoomState? = RoomState { actors: b.arena() }
+        return r
+    })
+    let props: Arena<Prop> = room.unwrap().get().unwrap().actors
+    print("{props.len()}")
+}
+
+//=== TEST CASE: scene_create_root_type_mismatch_Generic ===
+struct RoomState { n: int }
+struct MenuState { label: string }
+
+fn main() {
+    let room: Scene<RoomState>? = scene_create((b) => {
+        let m: MenuState? = MenuState { label: "x" }
+        return m
+    })
+    print("{room.unwrap()._scene_id}")
+}

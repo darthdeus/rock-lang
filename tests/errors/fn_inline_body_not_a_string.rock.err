@@ -1,0 +1,18 @@
+//! Error: an `= <body>` function body must be a string literal
+//! Tags: parser, inline, silent-fallback
+
+// `= <expr>` parsed the expression, THREW IT AWAY, and kept an empty inline
+// source -- so `fn c(x: int) -> int = x + 1` emitted `function c(x) return end`
+// and answered nil. The comment called it recovery from a malformed inline
+// body, but it ran on the ordinary path and produced a silently wrong program.
+//
+// Rock has no expression-bodied function form. If one is ever wanted, it is a
+// language decision with a lowering behind it, not a parser fallthrough.
+// Reproduces identically on `operator` and on the `Type.method` form.
+
+//=== TEST CASE: expression_bodied_fn ===
+fn c(x: int) -> int = x + 1
+
+fn main() {
+    let _ = c(1)
+}

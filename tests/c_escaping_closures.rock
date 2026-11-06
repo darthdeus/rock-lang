@@ -1,0 +1,53 @@
+fn make_shared_counter() -> fn() -> int {
+    let last = 1
+    let read = () => last
+    let bump = () => { last = last + 10; return last }
+    assert(read() == 1, "initial shared cell")
+    assert(bump() == 11 && last == 11, "closure mutation reaches enclosing scope")
+    last = 100
+    assert(read() == 100, "enclosing mutation reaches sibling closure")
+    return bump
+}
+
+@test
+fn c_escaping_mutable_capture_preserves_aliasing() {
+    let bump = make_shared_counter()
+    let alias = bump
+    assert(bump() == 110, "box survives the creating frame")
+    assert(alias() == 120 && bump() == 130, "copied function handles share the box")
+}
+
+fn make_curve_factory(base: int) -> fn(int) -> fn(int) -> int {
+    return (step: int) => {
+        let radius = base + step
+        return (t: int) => radius + t
+    }
+}
+
+@test
+fn c_nested_returned_closure_preserves_capture_types() {
+    let factory = make_curve_factory(40)
+    let first = factory(2)
+    let second = factory(10)
+    assert(first(3) == 45 && second(3) == 53, "inner captures belong to their invocation")
+    assert(first(4) == 46, "later factory calls do not overwrite earlier captures")
+}
+
+struct ClosureRenderBatch { vbo: int }
+
+fn closure_render_pass(draw: fn() -> ()) { draw() }
+
+@test
+fn c_nested_renderer_callback_captures_borrowed_batch() {
+    let batch = ClosureRenderBatch { vbo: 40 }
+    let count = 2
+    closure_render_pass(() => {
+        closure_render_pass(() => {
+            closure_render_pass(() => {
+                assert(batch.vbo + count == 42, "nested synchronous renderer captures")
+                batch.vbo = 50
+            })
+        })
+    })
+    assert(batch.vbo == 50, "renderer callback observes the borrowed batch")
+}

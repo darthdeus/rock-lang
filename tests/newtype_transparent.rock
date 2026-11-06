@@ -1,0 +1,62 @@
+// Transparency premise: a newtype compiles to its inner value -- no
+// `{__ty, [1]=...}` box, no tag, no allocation. The value IS the inner value
+// at runtime; nominal distinctness is purely compile-time.
+
+newtype Uid(int)
+newtype Lbl(string)
+newtype Dist(int)
+
+inline(lua) fn lua_type_of(v: any) -> string = "return type(v)"
+inline(lua) fn lua_raw_eq(a: any, b: any) -> bool = "return a == b"
+
+// A newtype-wrapped int is a raw Lua number, not a table.
+@test(output = "number")
+fn test_newtype_int_is_raw_scalar() {
+    let id = Uid(42)
+    print(lua_type_of(id))
+}
+
+// A newtype-wrapped string is a raw Lua string.
+@test(output = "string")
+fn test_newtype_string_is_raw_scalar() {
+    let l = Lbl("hi")
+    print(lua_type_of(l))
+}
+
+// Construction is identity: the wrapped value flows through unchanged.
+@test(output = "true")
+fn test_newtype_construct_is_identity() {
+    let id = Uid(7)
+    print(lua_raw_eq(id, 7))
+}
+
+// `.0` unwrap is identity.
+@test(output = "true")
+fn test_newtype_unwrap_is_identity() {
+    let id = Uid(9)
+    print(lua_raw_eq(id.0, 9))
+}
+
+// Operators forward and stay free (int + int natively); result is the newtype.
+@test(output = "15")
+fn test_newtype_arith_native() {
+    let a = Dist(10)
+    let b = Dist(5)
+    print((a + b).0)
+}
+
+// Map keys natively (no unwrap hook): the key is the raw int.
+@test(output = "south")
+fn test_newtype_map_key_native() {
+    let m: Map<Uid, string> = map_new()
+    m[Uid(1)] = "south"
+    print(m[Uid(1)])
+}
+
+// Pattern unwrap still binds the inner value.
+@test(output = "42")
+fn test_newtype_pattern_unwrap() {
+    let id = Uid(42)
+    let Uid(v) = id
+    print(v)
+}

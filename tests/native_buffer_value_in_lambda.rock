@@ -1,0 +1,32 @@
+// Adversarial: NativeBuffer slot-write happens inside a lambda body,
+// with the buffer captured from the enclosing scope. Verify the
+// leaf-store codegen runs cleanly inside the lambda (closure) too.
+
+@intrinsic @inline inline(lua) fn put(s: string) = "io.write(s)"
+
+value V2 {
+    x: float,
+    y: float,
+}
+
+@nomangle inline(lua) fn __nb_alloc_V2(n: int) -> Ptr<V2> = 'return ffi.new("V2[?]", n)'
+
+fn nb_v2(n: int) -> NativeBuffer<V2> {
+    return NativeBuffer { ptr: __nb_alloc_V2(n), len: n }
+}
+
+@test(output = "x=5\ny=9")
+fn test_slot_write_in_lambda() {
+    let buf = nb_v2(1)
+    let writer = () => {
+        buf[0] = V2 { x: 5.0, y: 9.0 }
+    }
+    writer()
+    let r = buf[0]
+    put("x=")
+    put("{r.x}")
+    put("\n")
+    put("y=")
+    put("{r.y}")
+    put("\n")
+}

@@ -1,0 +1,41 @@
+newtype LaneImage(int)
+newtype LaneCanvasId(int)
+value LaneCanvas { handle: LaneCanvasId }
+struct LaneCache { image: LaneImage? = null }
+struct LaneCanvasCache { image: LaneImage? = null, canvas: LaneCanvas? = null, key: [int] = [] }
+
+fn nullable_image_key(cache: LaneCache) -> [int] {
+    let image = cache.image ?? return []
+    let key: [int] = []
+    for value in [17, image.0, 29] { key.push(value) }
+    return key
+}
+
+@test
+fn c_nullable_newtype_projects_integer_lane() {
+    let cache = LaneCache { image: LaneImage(23) }
+    let key = nullable_image_key(cache)
+    assert(key.len() == 3 && key[0] == 17 && key[1] == 23 && key[2] == 29)
+    cache.image = null
+    assert(nullable_image_key(cache).len() == 0)
+}
+
+fn refresh_canvas_key(cache: LaneCanvasCache) {
+    let image = cache.image ?? return
+    let canvas = cache.canvas ?? return
+    let key = cache.key
+    if key.len() != 3 || key[0] != canvas.handle.0 || key[1] != image.0 {
+        key.clear()
+        for value in [canvas.handle.0, image.0, 29] { key.push(value) }
+    }
+}
+
+@test
+fn c_nullable_host_handles_project_array_lanes() {
+    let cache = LaneCanvasCache { image: LaneImage(23), canvas: LaneCanvas { handle: LaneCanvasId(17) } }
+    refresh_canvas_key(cache)
+    assert(cache.key.len() == 3 && cache.key[0] == 17 && cache.key[1] == 23)
+    cache.image = LaneImage(31)
+    refresh_canvas_key(cache)
+    assert(cache.key[1] == 31)
+}

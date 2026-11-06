@@ -1,0 +1,477 @@
+// The scratch-slot return ABI: leaf 0 rides
+// the JS return value, leaves 1..N ride module-scope slots. Its whole safety
+// argument is that nothing runs between a call and the capture of every slot --
+// so these are the shapes that could silently clobber the bank and return a
+// plausible wrong number rather than crash.
+//
+// Runs on BOTH backends on purpose: luajit has native multi-return and no bank,
+// so it is the oracle. A divergence here means the JS ABI is wrong.
+//
+// ADDING A CASE: the bank is module scope and every @test in a file shares ONE
+// JS program, so a case asserting a value some earlier case left in a slot
+// passes while reading the stale slot -- green, and testing nothing. Pick values
+// no other wire in this file produces, and confirm the case goes RED under the
+// capture-before-call mutation (reorder `multi_assign` in skull-codegen-js) as
+// the rest of the file does; one that survives it is a control, not coverage.
+
+nobox value NV { x: int, y: int }
+value BV { x: int, y: int }
+
+fn mk(a: int) -> NV { return NV { x: a, y: a * 2 } }
+fn mk3(a: int) -> (int, int, int) { return (a, a * 2, a * 3) }
+
+@test fn direct_call() {
+    let v = mk(3)
+    assert_eq(v.x, 3)
+    assert_eq(v.y, 6)
+}
+
+// The linearization case. If `mk(inner(..))` emitted as a nested JS call
+// expression, the inner call would publish into the bank and the outer capture
+// would read ITS leaves, not the outer call's.
+fn inner(a: int) -> NV { return NV { x: a + 100, y: a + 200 } }
+fn outer(v: NV) -> NV { return NV { x: v.x * 2, y: v.y * 2 } }
+
+@test fn nested_call_in_argument_position() {
+    let v = outer(inner(1))
+    assert_eq(v.x, 202)
+    assert_eq(v.y, 402)
+}
+
+// Two calls whose captures could interleave if the capture were ever split from
+// its call.
+@test fn two_calls_do_not_clobber_each_other() {
+    let a = mk(1)
+    let b = mk(5)
+    assert_eq(a.x, 1)
+    assert_eq(a.y, 2)
+    assert_eq(b.x, 5)
+    assert_eq(b.y, 10)
+}
+
+// Recursion: the inner activation publishes, its caller captures, and only then
+// does the outer activation publish its own result.
+fn countdown(n: int) -> NV {
+    if n <= 0 { return NV { x: 0, y: 0 } }
+    let rest = countdown(n - 1)
+    return NV { x: rest.x + n, y: rest.y + 1 }
+}
+
+@test fn recursion_keeps_each_activation_separate() {
+    let v = countdown(4)
+    assert_eq(v.x, 10)
+    assert_eq(v.y, 4)
+}
+
+// Mutual recursion -- two banks-users alternating.
+fn ping(n: int) -> NV {
+    if n <= 0 { return NV { x: 0, y: 0 } }
+    let r = pong(n - 1)
+    return NV { x: r.x + 1, y: r.y }
+}
+fn pong(n: int) -> NV {
+    if n <= 0 { return NV { x: 0, y: 0 } }
+    let r = ping(n - 1)
+    return NV { x: r.x, y: r.y + 1 }
+}
+
+@test fn mutual_recursion() {
+    let v = ping(6)
+    assert_eq(v.x, 3)
+    assert_eq(v.y, 3)
+}
+
+// A call in a loop: each iteration must capture before the next call publishes.
+@test fn call_in_a_loop() {
+    let sum = 0
+    for i in 0..5 {
+        let v = mk(i)
+        sum = sum + v.x + v.y
+    }
+    assert_eq(sum, 30)
+}
+
+// A wider wire than 2, and a MIXED wire (scalar + leaves) -- the arity the
+// bank must size for.
+@test fn three_leaf_wire() {
+    let (a, b, c) = mk3(2)
+    assert_eq(a, 2)
+    assert_eq(b, 4)
+    assert_eq(c, 6)
+}
+
+fn flag_and_value(a: int) -> (bool, NV) { return (a > 0, mk(a)) }
+
+@test fn mixed_flag_and_nobox_wire() {
+    let (ok, v) = flag_and_value(7)
+    assert_eq(ok, true)
+    assert_eq(v.x, 7)
+    assert_eq(v.y, 14)
+}
+
+// A nested call feeding a WIDER wire, so the inner publish uses fewer slots than
+// the outer -- a stale high slot must not leak into the outer capture.
+fn widen(v: NV) -> (int, int, int) { return (v.x, v.y, v.x + v.y) }
+
+@test fn narrow_call_feeding_a_wider_wire() {
+    let (a, b, c) = widen(mk(3))
+    assert_eq(a, 3)
+    assert_eq(b, 6)
+    assert_eq(c, 9)
+}
+
+// The unmarked twin: same ABI now, and it must still answer correctly.
+fn mkb(a: int) -> BV { return BV { x: a, y: a * 2 } }
+
+@test fn unmarked_value_return() {
+    let v = mkb(4)
+    assert_eq(v.x, 4)
+    assert_eq(v.y, 8)
+}
+
+// An indirect call through a function value: the callee is not statically known,
+// so the capture must still be inseparable from the call.
+@test fn indirect_call_through_a_fn_value() {
+    let f: fn(int) -> NV = mk
+    let v = f(6)
+    assert_eq(v.x, 6)
+    assert_eq(v.y, 12)
+}
+
+// A multi-value call whose ARGUMENT is itself a multi-value call result, bound
+// first -- the ordinary shape SROA forwards.
+@test fn chained_through_a_binding() {
+    let a = mk(2)
+    let b = outer(a)
+    assert_eq(b.x, 4)
+    assert_eq(b.y, 8)
+}
+
+// Leaves that are expressions rather than plain temps: publishing reorders the
+// leaves' evaluation, which is only sound because a leaf can never be a call.
+fn computed(a: int) -> (int, int) { return (a * 3 + 1, a * 5 - 1) }
+
+@test fn computed_leaves_keep_their_values() {
+    let (p, q) = computed(4)
+    assert_eq(p, 13)
+    assert_eq(q, 19)
+}
+
+// --- shapes the first pass did NOT cover; added because "we tested it" must
+// --- mean these too, not just the ones that were easy to think of.
+
+// A `defer` body runs at scope exit. If it ran BETWEEN the publish and the
+// caller's capture, it would clobber the bank; it must run before the return.
+fn with_defer(a: int) -> NV {
+    let extra = 0
+    defer { let junk = mk(99) }
+    return NV { x: a, y: a + 1 }
+}
+
+@test fn defer_does_not_clobber_the_bank() {
+    let v = with_defer(5)
+    assert_eq(v.x, 5)
+    assert_eq(v.y, 6)
+}
+
+// A multi-value return from inside a CLOSURE -- a different emit path than a
+// top-level fn (convert_closures rewrites the body).
+@test fn closure_returning_a_nobox_value() {
+    let f = (a: int) => NV { x: a * 2, y: a * 3 }
+    let v = f(4)
+    assert_eq(v.x, 8)
+    assert_eq(v.y, 12)
+}
+
+// CONTROL, NOT ABI COVERAGE. A nested fn returning a multi-value wire gets
+// INLINED, so no multi-value call survives and the scratch ABI is never
+// exercised -- verified: this is the one test in this file that stays GREEN
+// under the capture-before-call mutation that reddens the other 17. Kept because
+// the answer is still worth pinning, labelled so nobody counts it as coverage.
+@test fn nested_fn_returning_a_nobox_value() {
+    fn helper(a: int) -> NV { return NV { x: a + 1, y: a + 2 } }
+    let v = helper(10)
+    assert_eq(v.x, 11)
+    assert_eq(v.y, 12)
+}
+
+// A capture whose result feeds directly into ANOTHER call's argument, with no
+// intervening binding -- the tightest publish/capture/publish sequence.
+@test fn capture_feeds_straight_into_another_call() {
+    let v = outer(outer(mk(1)))
+    assert_eq(v.x, 4)
+    assert_eq(v.y, 8)
+}
+
+// A multi-value call inside a conditional arm, so the capture sits in a branch
+// the trampoline printer may lay out as a separate switch case.
+@test fn call_inside_a_branch() {
+    let n = 3
+    let v = if n > 0 { mk(n) } else { mk(0) }
+    assert_eq(v.x, 3)
+    assert_eq(v.y, 6)
+}
+
+// --- safe-nav UFCS (`recv?.method()`) returning a multi-value wire -----------
+//
+// `?.` lowers to a branch, so the capture of leaves 1..N sits inside the HIT arm
+// while the miss arm produces null. Nothing in the ABI's safety argument covers
+// a call the emitter may skip: if a capture were ever hoisted out of the hit arm,
+// the miss would read whatever the previous call left in the bank -- a plausible
+// wrong number, not a crash. The spec-key propagation on this path is also new
+// (`bb819f640`, rewired to `spec_key_has_target_storage` at `587779159`).
+//
+// Both wires now reach the bank. `recv?.method()` returning a `nobox` VALUE used
+// to reject in shared lowering -- safe-nav joined its arms through one result
+// cell, which a value's leaves plus presence tag do not fit -- and its `.err`
+// pin here went red when that landed, so the pin is gone and the value wire is
+// exercised directly below. The tuple wire stays: it is a different arity and a
+// different rebuild, and the attack is per-shape.
+
+struct Holder { n: int }
+
+fn Holder.wire(h) -> (int, int) { return (h.n, h.n * 2) }
+fn Holder.nv_wire(h) -> NV { return NV { x: h.n, y: h.n * 2 } }
+fn Holder.wire3(h) -> (int, int, int) { return (h.n, h.n * 2, h.n * 3) }
+
+// `n` is 11, not 3: the bank is module scope and every `@test` runs in ONE
+// program, so a hit asserting 6 passes just as well by reading the 6 an earlier
+// test left in `__rock_ret1`. 22 is a value no other wire in this file produces.
+@test fn safenav_ufcs_hit_captures_its_own_leaves() {
+    let h: Holder? = Holder { n: 11 }
+    let v = h?.wire()
+    assert_eq(v?.0 ?? -1, 11)
+    assert_eq(v?.1 ?? -1, 22)
+}
+
+// THE ATTACK. Seed the bank with a wide wire, then take the MISS arm. A capture
+// hoisted above the branch reads `__rock_ret1` from `mk(7)` and reports 14.
+@test fn safenav_ufcs_miss_does_not_read_a_stale_bank() {
+    let seed = mk(7)
+    assert_eq(seed.y, 14)
+    let h: Holder? = null
+    let v = h?.wire()
+    assert_eq(v == null, true)
+    assert_eq(v?.1 ?? -1, -1)
+}
+
+// Same attack one leaf wider: a 3-leaf wire leaves two slots dirty, so a hoisted
+// capture has two chances to report a stale number.
+@test fn safenav_ufcs_miss_after_a_three_leaf_seed() {
+    let (a, b, c) = mk3(5)
+    assert_eq(a + b + c, 30)
+    let h: Holder? = null
+    let v = h?.wire3()
+    assert_eq(v == null, true)
+    assert_eq(v?.2 ?? -1, -1)
+}
+
+// A hit whose receiver is itself produced by a call, so a publish sits between
+// the receiver's evaluation and the method's own publish.
+@test fn safenav_ufcs_hit_after_an_intervening_publish() {
+    let h: Holder? = Holder { n: 4 }
+    let seed = mk(9)
+    let v = h?.wire()
+    assert_eq(seed.y, 18)
+    assert_eq(v?.0 ?? -1, 4)
+    assert_eq(v?.1 ?? -1, 8)
+}
+
+// A `nobox` VALUE through the same safe-nav wire -- the widest multi-value that
+// reaches the bank, and the shape the tuple above used to stand in for. 31/62 are
+// values no other wire in this file produces, so a hit that read a stale slot
+// reports a number that is visibly not its own.
+@test fn safenav_ufcs_nobox_value_hit_captures_its_own_leaves() {
+    let h: Holder? = Holder { n: 31 }
+    let v = h?.nv_wire()
+    assert_eq(v?.x ?? -1, 31)
+    assert_eq(v?.y ?? -1, 62)
+}
+
+// THE ATTACK, on the value wire: seed the bank, then take the MISS arm. A capture
+// hoisted above the branch reports 14 instead of absent.
+@test fn safenav_ufcs_nobox_value_miss_does_not_read_a_stale_bank() {
+    let seed = mk(7)
+    assert_eq(seed.y, 14)
+    let h: Holder? = null
+    let v = h?.nv_wire()
+    assert_eq(v == null, true)
+    assert_eq(v?.y ?? -1, -1)
+}
+
+// The control kept from the retired `.err` pin: the same nullable `nobox` payload
+// through a DECLARED return type. It always worked, and it is what bounded the
+// defect to safe-nav's own join rather than the nullable payload.
+fn maybe_wire(a: int) -> NV? {
+    if a > 0 { return NV { x: a, y: a * 2 } }
+    return null
+}
+
+@test fn declared_nullable_nobox_return() {
+    assert_eq(maybe_wire(3)?.y ?? -1, 6)
+    assert_eq(maybe_wire(0)?.y ?? -1, -1)
+}
+
+// --- operator overloads returning a value struct -------------------------
+//
+// `a + b` on a nobox value returns a multi-value wire. Whether that reaches the
+// return ABI depends entirely on whether the operator INLINES at the call site,
+// so a probe written outside an inline-excluded context tests nothing: an
+// ordinary `let r = a + b` folds to bare arithmetic with no call at all
+// (`operator_body_is_inlined_control` pins exactly that, and stays green under
+// every bank mutation because it reaches none of the ABI).
+//
+// The shape that matters is inside a `co fn`. `classify`
+// (rock-lang/crates/skull-transform/src/inline.rs) hard-excludes a coroutine body, so an operator
+// called there stays a real multi-value call -- and that is the ENGINE's real
+// shape, not a contrivance: mag emits 13 such `__op_add_Vec2_Vec2`
+// call sites, every one inside a `__step` lambda, each capturing the bank:
+//   c23 = __op_add_Vec2_Vec2(v52, v53, v62, v63); c24 = __rock_ret1;
+//
+// Self-recursive and lambda-bearing are the other two documented exclusions and
+// are covered below as well, since they reach the same ABI by a different route.
+//
+// Values are in the 7000s because everything else in this file is under 500; a
+// case reading a stale slot would otherwise look plausible.
+
+nobox value RV { x: int, y: int }
+
+// Self-recursive -> not inlinable. The recursion also puts a SECOND multi-value
+// call inside the operator's own body, so the inner publish must not survive
+// into the outer capture.
+operator +(a: RV, b: RV) -> RV {
+    if a.x >= 7000 { return RV { x: a.x + b.x, y: a.y + b.y } }
+    return RV { x: a.x + 7000, y: a.y } + b
+}
+
+// Lambda-bearing -> not inlinable, by the other documented exclusion.
+operator *(a: RV, b: RV) -> RV {
+    let f = k => k * 2
+    return RV { x: f(a.x) + b.x, y: f(a.y) + b.y }
+}
+
+@test fn operator_returning_nobox_value_through_a_real_call() {
+    let r = RV { x: 1, y: 2 } + RV { x: 10, y: 20 }
+    assert_eq(r.x, 7011)
+    assert_eq(r.y, 22)
+}
+
+// The linearization hazard in operator form: the inner `+` publishes to the bank
+// and the outer `+` must not capture ITS leaves.
+@test fn nested_operator_calls_do_not_clobber() {
+    let r = (RV { x: 1, y: 2 } + RV { x: 10, y: 20 }) + RV { x: 100, y: 200 }
+    assert_eq(r.x, 7111)
+    assert_eq(r.y, 222)
+}
+
+@test fn lambda_bearing_operator_returning_nobox_value() {
+    let r = RV { x: 3000, y: 4000 } * RV { x: 5, y: 6 }
+    assert_eq(r.x, 6005)
+    assert_eq(r.y, 8006)
+}
+
+// Two operator results live at once -- the shape that breaks if a capture were
+// ever split from its call.
+@test fn two_operator_results_coexist() {
+    let a = RV { x: 1, y: 2 } + RV { x: 10, y: 20 }
+    let b = RV { x: 3000, y: 4000 } * RV { x: 5, y: 6 }
+    assert_eq(a.x, 7011)
+    assert_eq(a.y, 22)
+    assert_eq(b.x, 6005)
+    assert_eq(b.y, 8006)
+}
+
+// The ENGINE's actual shape: an ordinary (inlinable) operator called from inside
+// a `co fn`, which the inliner will not enter. This is what mag's 13 Vec2
+// operator call sites are; the two cases above reach the same ABI only through
+// exclusions a game does not normally hit.
+nobox value IV { x: int, y: int }
+
+operator +(a: IV, b: IV) -> IV { return IV { x: a.x + b.x, y: a.y + b.y } }
+
+co fn op_in_coroutine(seed: IV) -> Coroutine<int> {
+    let acc = seed + IV { x: 7, y: 8 }
+    yield acc.x
+    let again = acc + IV { x: 70, y: 80 }
+    yield again.y
+}
+
+@test fn operator_inside_a_coroutine_is_a_real_multi_value_call() {
+    let c = op_in_coroutine(IV { x: 700, y: 800 })
+    assert_eq(c.resume(), 707)
+    assert_eq(c.resume(), 888)
+}
+
+// CONTROL, not coverage: the SAME operator at an ordinary call site inlines to
+// bare arithmetic, so it reaches none of the ABI and stays green under every
+// bank mutation. It is the control that makes the coroutine case's redness
+// attributable to the call, not to the operator or the value type.
+@test fn operator_body_is_inlined_control() {
+    let r = IV { x: 700, y: 800 } + IV { x: 7, y: 8 }
+    assert_eq(r.x, 707)
+    assert_eq(r.y, 808)
+}
+
+// --- an OPAQUE body's publisher rides the same wire ---------------------------
+//
+// A `@scalar_abi inline(js)` boundary returning a multi-lane result publishes
+// through the compiler-owned `__rock_publish(..)`, whose arity comes from the
+// concrete result ABI. Before that contract, `stone_measure_text_vec2_for`'s
+// web sibling handed back a JS ARRAY here while its caller captured
+// `c0 = f(); c1 = __rock_ret1;` -- so leaf 0 was the array and leaf 1 was
+// whatever the last multi-value call left behind.
+
+// The luajit sibling returns its leaves natively; the JS one publishes them.
+// Both are the same boundary, which is the whole point -- the two transports
+// realize one concrete result bundle.
+@scalar_abi inline(lua) fn published_pair(a: int, b: int) -> NV = """
+    return a, b
+"""
+
+@scalar_abi inline(js) fn published_pair(a: int, b: int) -> NV = """
+    return __rock_publish(a, b);
+"""
+
+@test fn an_opaque_publisher_lands_in_the_callers_leaves() {
+    let seed = mk(7)
+    assert_eq(seed.y, 14)
+    let v = published_pair(31, 37)
+    assert_eq(v.x, 31)
+    assert_eq(v.y, 37)
+}
+
+// --- the publisher does not reorder its arguments -----------------------------
+//
+// `__rock_publish(f(), g())` is an ordinary JS call expression: `f` runs first.
+// Lowering it to `__rock_ret1 = g(); return f();` would swap them -- a visible
+// change of effects, and a lane written before `f` could throw. The trace below
+// reads "12" only if the arguments evaluate in source order.
+
+@nomangle inline(lua) fn __order_note(tag: int) -> int = """
+    __order_trace = (__order_trace or "") .. tostring(tag)
+    return tag
+"""
+@nomangle inline(js) fn __order_note(tag: int) -> int = """
+    __order_trace = (typeof __order_trace === "string" ? __order_trace : "") + tag;
+    return tag;
+"""
+@nomangle inline(lua) fn __order_trace_read() -> string = """
+    return __order_trace or ""
+"""
+@nomangle inline(js) fn __order_trace_read() -> string = """
+    return typeof __order_trace === "string" ? __order_trace : "";
+"""
+
+@scalar_abi inline(lua) fn ordered_pair() -> NV = """
+    return __order_note(1), __order_note(2)
+"""
+@scalar_abi inline(js) fn ordered_pair() -> NV = """
+    return __rock_publish(__order_note(1), __order_note(2));
+"""
+
+@test fn a_publisher_evaluates_left_to_right() {
+    let v = ordered_pair()
+    assert_eq(v.x, 1)
+    assert_eq(v.y, 2)
+    assert_eq(__order_trace_read(), "12")
+}

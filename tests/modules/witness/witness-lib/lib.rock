@@ -1,0 +1,33 @@
+// Root module of the witness library. Everything a consumer may reach is
+// declared `pub` here; the type closure (spec 11) forces `Greeting` public
+// because `greet` returns it.
+
+pub struct Greeting {
+    pub text: string,
+}
+
+pub fn greet(name: string) -> Greeting {
+    Greeting { text: "hello, {name}" }
+}
+
+// Private to the package root, so reachable from every module of this package
+// and from no consumer.
+fn root_secret() -> int {
+    41
+}
+
+pub fn answer() -> int {
+    root_secret() + 1
+}
+
+// The private child module is reachable from its parent, which is the whole
+// point: `sauce` is public, `secret::recipe` is not.
+pub fn sauce() -> string {
+    secret::recipe()
+}
+
+@test
+fn the_package_reaches_its_own_private_module() {
+    assert(secret::recipe() == "sauce")
+    assert(root_secret() == 41)
+}

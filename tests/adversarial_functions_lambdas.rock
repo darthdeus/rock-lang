@@ -1,0 +1,217 @@
+// Adversarial tests: Functions, lambdas, blocks, ranges
+
+// --- Recursive functions ---
+
+fn factorial(n: int) -> int {
+    if n <= 1 { return 1 }
+    return n * factorial(n - 1)
+}
+
+@test(output = "120")
+fn test_recursion() {
+    print(factorial(5))
+}
+
+// --- Mutual recursion ---
+
+fn is_even(n: int) -> bool {
+    if n == 0 { return true }
+    return is_odd(n - 1)
+}
+
+fn is_odd(n: int) -> bool {
+    if n == 0 { return false }
+    return is_even(n - 1)
+}
+
+@test(output = "true false")
+fn test_mutual_recursion() {
+    print("{is_even(10)} {is_even(11)}")
+}
+
+// --- Function overloading ---
+
+fn describe(x: int) -> string {
+    return "int: {x}"
+}
+
+fn describe(x: string) -> string {
+    return "string: {x}"
+}
+
+fn describe(x: bool) -> string {
+    if x { return "bool: true" }
+    return "bool: false"
+}
+
+@test(output = "int: 42")
+fn test_overload_int() {
+    print(describe(42))
+}
+
+@test(output = "string: hello")
+fn test_overload_string() {
+    print(describe("hello"))
+}
+
+@test(output = "bool: true")
+fn test_overload_bool() {
+    print(describe(true))
+}
+
+// --- Default parameters ---
+
+fn greet(name: string, greeting: string = "Hello") -> string {
+    return "{greeting}, {name}!"
+}
+
+@test(output = "Hello, World!")
+fn test_default_param() {
+    print(greet("World"))
+}
+
+@test(output = "Hi, World!")
+fn test_override_default() {
+    print(greet("World", "Hi"))
+}
+
+// --- Lambda basics ---
+
+@test(output = "42")
+fn test_basic_lambda() {
+    let f = (x: int) => x * 2
+    print(f(21))
+}
+
+// --- Lambda as function parameter ---
+
+fn apply(x: int, f: fn(int) -> int) -> int {
+    return f(x)
+}
+
+@test(output = "9")
+fn test_lambda_as_param() {
+    print(apply(3, (x: int) => x * x))
+}
+
+// --- Lambda capturing loop variable ---
+
+@test(output = "0 1 2")
+fn test_lambda_capture_loop_var() {
+    let funcs: [fn() -> int] = []
+    let i = 0
+    while i < 3 {
+        let captured = i
+        funcs.push(() => captured)
+        i = i + 1
+    }
+    let out = ""
+    let first = true
+    for f in funcs {
+        if !first { out = out + " " }
+        first = false
+        out = out + "{f()}"
+    }
+    print(out)
+}
+
+// --- Placeholder lambda ---
+
+struct Item {
+    name: string,
+    value: int,
+}
+
+@test(output = "2")
+fn test_placeholder_lambda() {
+    let items = [
+        Item { name: "a", value: 10 },
+        Item { name: "b", value: 20 },
+        Item { name: "c", value: 5 },
+    ]
+    let big_items = items.iter().filter(_.value > 8).collect()
+    print(big_items.len)
+}
+
+// --- Lambda returning different types via branches ---
+
+@test(output = "positive")
+fn test_lambda_branching() {
+    let classify = (x: int) => {
+        if x > 0 { return "positive" }
+        if x < 0 { return "negative" }
+        return "zero"
+    }
+    print(classify(5))
+}
+
+// --- Nested block ---
+
+@test(output = "10")
+fn test_nested_block() {
+    let x = {
+        let a = {
+            let b = 5
+            b * 2
+        }
+        a
+    }
+    print(x)
+}
+
+// --- Range basics ---
+
+// --- Range in variable ---
+
+@test(output = "5")
+fn test_range_count() {
+    let count = 0
+    for i in 0..5 {
+        count = count + 1
+    }
+    print(count)
+}
+
+// --- Empty range ---
+
+@test(output = "0")
+fn test_empty_range() {
+    let count = 0
+    for i in 5..5 {
+        count = count + 1
+    }
+    print(count)
+}
+
+// --- First class function ---
+
+fn double(x: int) -> int {
+    return x * 2
+}
+
+@test(output = "10")
+fn test_function_as_value() {
+    let f: fn(int) -> int = double
+    print(f(5))
+}
+
+// --- Multiple return values (tuples) ---
+
+fn divmod(a: int, b: int) -> (int, int) {
+    return (a ./ b, a % b)
+}
+
+@test(output = "3 1")
+fn test_tuple_return() {
+    let (q, r) = divmod(10, 3)
+    print("{q} {r}")
+}
+
+// --- Tuple destructuring ---
+
+@test(output = "1 2 3")
+fn test_tuple_destructure() {
+    let t = (1, 2, 3)
+    let (a, b, c) = t
+    print("{a} {b} {c}")
+}

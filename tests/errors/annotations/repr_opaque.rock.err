@@ -1,0 +1,62 @@
+//! `@repr(opaque)` -- the parameter-level representation contract
+//!
+//! It states that the body makes NO assumption about the parameter's physical
+//! form, so the column-container rejection skips that one parameter. It is
+//! therefore only meaningful where a body is opaque to the compiler: on a
+//! regular Rock fn there is no assumption to waive, and admitting it there
+//! would let a reader believe a contract was in force that nothing consults.
+//! Tags: annotations, registry, param, boundary-contracts
+
+//=== TEST CASE: repr_opaque_on_a_regular_rock_fn_Generic ===
+// The fn has a Rock body, so there is no opaque boundary to contract about.
+fn plain(@repr(opaque) v: int) -> int { v }
+
+fn main() { print("{plain(1)}") }
+
+//=== TEST CASE: repr_opaque_at_fn_item_position_Generic ===
+// It is a PARAMETER contract; on the item it names nothing.
+@repr(opaque) @nomangle inline(lua) fn item_level(v: any) -> int = """
+    return 1
+"""
+
+fn main() { print("{item_level(1)}") }
+
+//=== TEST CASE: repr_opaque_on_a_struct_field_Generic ===
+// Struct fields have their own representation annotations (`@flat`); this is
+// not one of them.
+struct Holder { @repr(opaque) a: int }
+
+fn main() { print("{Holder { a: 1 }.a}") }
+
+//=== TEST CASE: repr_with_no_argument_Generic ===
+// `@repr` names WHICH contract; bare, it names none.
+@nomangle inline(lua) fn no_arg(@repr v: any) -> int = """
+    return 1
+"""
+
+fn main() { print("{no_arg(1)}") }
+
+//=== TEST CASE: repr_with_an_unknown_kind_Generic ===
+// `opaque` is the only kind. An unrecognized one must reject rather than be
+// read as "some contract".
+@nomangle inline(lua) fn bad_kind(@repr(boxed) v: any) -> int = """
+    return 1
+"""
+
+fn main() { print("{bad_kind(1)}") }
+
+//=== TEST CASE: repr_with_a_non_ident_argument_Generic ===
+// The kind is an identifier, not a string.
+@nomangle inline(lua) fn str_kind(@repr("opaque") v: any) -> int = """
+    return 1
+"""
+
+fn main() { print("{str_kind(1)}") }
+
+//=== TEST CASE: repr_with_extra_arguments_Generic ===
+// Exactly one argument.
+@nomangle inline(lua) fn extra(@repr(opaque, opaque) v: any) -> int = """
+    return 1
+"""
+
+fn main() { print("{extra(1)}") }

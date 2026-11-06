@@ -1,0 +1,23 @@
+//! Error: KNOWN HOLE (transitivity) -- pinned, not yet closed. `outer<T>`
+//!        forwards its own generic `T` into `same`'s eq-compared param, so
+//!        `outer(mk(), mk())` reaches an `==` on fn values one level up. The
+//!        base case (`same(mk(), mk())`) is closed at the call site by
+//!        eq_compared_generics (tests/errors/fn_identity_generic.rock.err);
+//!        closing the transitive case needs a call-graph fixpoint that
+//!        propagates eq-compared-ness through generic-to-generic calls --
+//!        only resolvable during inference (par_iter across modules,
+//!        cross-arena TyIds), i.e. genuinely new machinery beyond the
+//!        sanctioned field + call-site check. Pinned exactly as the
+//!        any-cast bypass is pinned here. REMOVE this
+//!        TODO + the sentinel below when the fixpoint lands.
+//! Tags: closures, fn-values, equality, generics
+//! TODO: transitive generic fn-eq bypass is not yet rejected
+
+//=== TEST CASE: generic_eq_fn_arg_transitive_Generic ===
+fn same<T>(a: T, b: T) -> bool { return a == b }
+fn outer<T>(a: T, b: T) -> bool { return same(a, b) }
+fn mk() -> fn() -> int { return () => 1 }
+
+fn main() {
+    if outer(mk(), mk()) { print("same") }   // NOT YET rejected (transitive hole)
+}

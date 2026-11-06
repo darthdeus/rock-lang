@@ -1,0 +1,176 @@
+// GC-carrying value structs: materialization shapes (item 0b premise).
+//
+// A `value` struct with a non-C-mappable field (`[int]`, `Arena<T>`, ...) or a
+// generic `value` struct is GC-CARRYING: it scalarizes through calls exactly
+// like an FFI-clean value struct, but materializes as an immutable Lua table
+// (`<Name>_vt(...)`), not cdata. Before the two-tier work these files CRASHED
+// at every materialization site -- `value_struct_defs` skipped the cdef, so a
+// nullable return / container store / capture emitted `<Name>_ct(...)` against
+// an undefined ctor ("attempt to call global 'Bag_ct'", unfuck backlog #51).
+//
+// Every test asserts a RUNTIME VALUE, not just compilation. The eq cases pin
+// the locked contract: scalar fields structural, GC-ref fields BY REFERENCE.
+
+value Bag {
+    xs: [int],
+    n: int,
+}
+
+fn make_bag(a: int, b: int, c: int, n: int) -> Bag {
+    return Bag { xs: [a, b, c], n: n }
+}
+
+fn bag_sum(b: Bag) -> int {
+    let s = 0
+    for x in b.xs { s = s + x }
+    return s + b.n
+}
+
+// ----- 1. Nullable return (keeps the boxed ABI -> forces materialization).
+
+fn find_bag(want: int) -> Bag? {
+    if want == 0 { return null }
+    return make_bag(want, want * 2, want * 3, want)
+}
+
+@test(output = "7\n-1")
+fn gc_nullable_return() {
+    let b = find_bag(1)
+    print(if b != null { bag_sum(b) } else { -1 })   // (1+2+3) + 1 = 7
+    let none = find_bag(0)
+    print(if none != null { bag_sum(none) } else { -1 })
+}
+
+// ----- 2. Vec store + read-back.
+
+@test(output = "34")
+fn gc_vec_store() {
+    let bags: [Bag] = []
+    bags.push(make_bag(1, 2, 3, 4))    // sum 6+4 = 10
+    bags.push(make_bag(5, 6, 7, 6))    // sum 18+6 = 24
+    let total = 0
+    for b in bags { total = total + bag_sum(b) }
+    print(total)
+}
+
+// ----- 3. Struct-field store.
+
+struct Holder {
+    bag: Bag,
+    tag: int,
+}
+
+@test(output = "16")
+fn gc_struct_field_store() {
+    let h = Holder { bag: make_bag(2, 4, 6, 4), tag: 9 }
+    print(bag_sum(h.bag))              // 12 + 4 = 16
+}
+
+// ----- 4. Global store (nullable global).
+
+global GBAG: Bag? = null
+
+@test(output = "42")
+fn gc_global_store() {
+    GBAG = make_bag(10, 20, 9, 3)      // 39 + 3 = 42; GBAG refines non-null here
+    print(bag_sum(GBAG))
+}
+
+// ----- 5. Capture in a closure.
+
+@test(output = "10")
+fn gc_capture() {
+    let b = make_bag(1, 2, 3, 4)
+    let f = () => bag_sum(b)
+    print(f())                          // 6 + 4 = 10
+}
+
+// ----- 6. Coroutine yielding the whole value (boxed across the yield).
+
+co fn co_bags() -> Coroutine<Bag> {
+    yield make_bag(1, 1, 1, 1)          // 3 + 1 = 4
+    yield make_bag(2, 2, 2, 2)          // 6 + 2 = 8
+}
+
+@test(output = "4\n8")
+fn gc_coroutine_yield_value() {
+    let c = co_bags()
+    let a = c.resume()
+    print(if a != null { bag_sum(a) } else { -1 })
+    let b = c.resume()
+    print(if b != null { bag_sum(b) } else { -1 })
+}
+
+// ----- 7. String interpolation of a container-carrying value is rejected at
+// compile time (tests/errors/enum_format_unsupported_payload.rock.err).
+
+// ----- 8. Equality: scalar structural, GC-ref BY REFERENCE.
+
+@test(output = "true false")
+fn gc_eq_ref_identity() {
+    let xs = [1, 2, 3]
+    let a = Bag { xs: xs, n: 5 }
+    let b = Bag { xs: xs, n: 5 }        // same xs ref, same n -> equal
+    let ys = [1, 2, 3]
+    let c = Bag { xs: ys, n: 5 }        // different xs ref (equal contents) -> not equal
+    print("{a == b} {a == c}")
+}
+
+@test(output = "false")
+fn gc_eq_scalar_differs() {
+    let xs = [1, 2, 3]
+    let a = Bag { xs: xs, n: 5 }
+    let b = Bag { xs: xs, n: 6 }        // same xs ref, different n -> not equal
+    print("{a == b}")
+}
+
+// ----- 9. Generic value struct (generic => GC-tier, uniform slot).
+
+value Pair<T> {
+    a: T,
+    b: T,
+}
+
+fn make_pair(x: int, y: int) -> Pair<int> {
+    return Pair { a: x, b: y }
+}
+
+fn pair_sum(p: Pair<int>) -> int {
+    return p.a + p.b
+}
+
+fn find_pair(want: int) -> Pair<int>? {
+    if want == 0 { return null }
+    return make_pair(want, want * 10)
+}
+
+@test(output = "33\n-1")
+fn gc_generic_nullable_return() {
+    let p = find_pair(3)
+    print(if p != null { pair_sum(p) } else { -1 })   // 3 + 30 = 33
+    let none = find_pair(0)
+    print(if none != null { pair_sum(none) } else { -1 })
+}
+
+@test(output = "132")
+fn gc_generic_vec_store() {
+    let ps: [Pair<int>] = []
+    ps.push(make_pair(1, 10))          // 11
+    ps.push(make_pair(11, 110))        // 121
+    let total = 0
+    for p in ps { total = total + pair_sum(p) }
+    print(total)                        // 132
+}
+
+// ----- 10. deepcopy of a GC-carrying value struct DEEP-COPIES (not shares):
+// its fields survive, and because a value struct may hold a mutable ref the
+// walk copies that ref -- so the GC-ref field is a fresh instance and value eq
+// (GC-ref BY REFERENCE) reports the copy as distinct. (Self-contained cdata
+// value structs are shared; the plan's "copy is share" holds only for those.)
+
+@test(output = "7 false true")
+fn gc_deepcopy_deep_copies_and_preserves_fields() {
+    let b = make_bag(1, 2, 3, 1)       // xs=[1,2,3], n=1 -> sum 7
+    let c = deepcopy(b)
+    print("{bag_sum(c)} {b == c} {bag_sum(b) == bag_sum(c)}")
+}

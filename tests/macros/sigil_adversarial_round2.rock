@@ -1,0 +1,209 @@
+// Adversarial round 2 for the sigil macro form. Round 1 covered
+// argument-list edges and parser-precedence. This round targets:
+//
+//   - Empty macro bodies and zero-emission templates
+//   - Multi-line arg lists with interleaved comments
+//   - Named args in sigil form (currently unsupported — sentinel)
+//   - Self-recursion guard (stack-bounded expansion)
+//   - One macro emitting another macro's invocation
+//   - Macro emitting a fn that recursively calls itself
+//
+// === Empty macro body — rejected by design ===
+//
+// `macro nothing() { }` is a compile error: "macro body must
+// produce a value." Macros must emit at least one item OR end with
+// a trailing expression. We don't `@test` the diagnostic itself
+// (test-fixture compile errors kill the whole file); coverage
+// belongs at the parser/macro-pass Rust level.
+//
+// Closest legal degenerate case: a macro that emits a single fn
+// with an empty body. The macro produces one item; the fn's body
+// is the empty block.
+
+macro emit_noop_fn(Name: ident) {
+    fn Name() { }
+}
+
+emit_noop_fn!(noop_a)
+
+@test
+fn test_empty_emitted_fn_body() {
+    noop_a()
+    assert(1 == 1, "macro emitted fn with empty body, called at runtime")
+}
+
+// === Named args in sigil form ===
+//
+// Sentinel: today the sigil arg parser doesn't support `name: value`
+// syntax. Calling `name!(x: 5)` parses `x: 5` as something else
+// (the `:` triggers type-ascription cursor backtracking) and fails
+// with a parse error. We can't `@test` a parse failure (it kills
+// the file's compilation), so the sentinel here is positive: a
+// sigil call with positional args matching the param order works,
+// while the named-arg form is documented as not-yet-supported.
+//
+// If named-arg support lands, this test still passes (positional
+// works); add a `name!(b: 2, a: 1)` test alongside to verify.
+
+macro pair_sum(a: expr, b: expr) {
+    a + b
+}
+
+@test
+fn test_sigil_positional_args_only() {
+    let r = pair_sum!(1, 2)
+    assert(r == 3, "positional sigil call resolves args by position")
+}
+
+// === Multi-line arg list with comments ===
+//
+// Cursor-backtracking arg parser must skip line comments inside the
+// arg list. This is a common formatting pattern when args are
+// type-shape compounds.
+
+macro decl3(A: ident, B: ident, C: ident) {
+    fn A() -> int { return 1 }
+    fn B() -> int { return 2 }
+    fn C() -> int { return 3 }
+}
+
+decl3!(
+    multiline_a,  // first arg on its own line
+    multiline_b,  // trailing comment after comma
+    multiline_c   // last arg, no trailing comma
+)
+
+@test
+fn test_multiline_args_with_line_comments() {
+    assert(multiline_a() == 1, "multi-line arg 1")
+    assert(multiline_b() == 2, "multi-line arg 2")
+    assert(multiline_c() == 3, "multi-line arg 3")
+}
+
+// === Comments inside nested generic brackets ===
+//
+// More aggressive than the basic multi-line case: comments
+// interleaved INSIDE a `Foo<int>`-shaped type-app arg. Parser must
+// keep skipping line comments after the cursor-backtracking
+// `parse_type_expr` enters its sub-parser.
+
+macro decl_holder2(Name: ident, T: ty) {
+    struct Name { v: T }
+}
+
+struct Box4<X> { v: X }
+
+decl_holder2!(
+    HolderA,
+    Box4< // comment after `<`
+        int  // comment before `>`
+    >
+)
+
+@test
+fn test_comments_inside_generic_brackets() {
+    let h = HolderA { v: Box4 { v: 42 } }
+    assert(h.v.v == 42, "type-app arg with internal comments parsed")
+}
+
+// === Tuple type with comments and nullable inside ===
+//
+// `(int?, [bool])` as a `ty` arg, formatted across lines. The
+// sigil arg parser's cursor-backtracking accepts any TypeExpr that
+// terminates at `,` or `)`; a tuple ending with `)` interacts with
+// the call's outer `)` so this exercises the lookahead carefully.
+
+macro decl_tuple_field(Name: ident, T: ty) {
+    struct Name { tup: T }
+}
+
+decl_tuple_field!(
+    TupHolder,
+    (
+        int?,    // nullable int
+        [bool]   // vec of bool
+    )
+)
+
+@test
+fn test_tuple_with_nullable_and_comments() {
+    let h = TupHolder { tup: (null, [true, false]) }
+    assert(h.tup.0 == null, "nullable tuple element 0")
+    assert(h.tup.1.len() == 2, "vec tuple element 1 has expected len")
+}
+
+// === Block-expression as a sigil macro arg ===
+//
+// `name!({ ... })` — block-expression in arg position. The
+// cursor-backtracking parser tries `parse_type_expr` first; a
+// `{` starts neither a type nor an ident, so it should fall back
+// to `parse_expr` cleanly and consume the whole block.
+
+macro identity(v: expr) { v }
+
+@test
+fn test_block_expr_as_sigil_arg() {
+    let r = identity!({
+        let x = 7
+        let y = 3
+        x + y
+    })
+    assert(r == 10, "block expression args parse + evaluate")
+}
+
+// === Macro emitting another macro's invocation ===
+//
+// `outer!(...)` emits `inner!(...)` as part of its body. The pass
+// re-runs expansion on the spliced output, so `inner` must be
+// resolved on the second sweep, not left as a literal call.
+
+macro inner_dbl(v: expr) { v * 2 }
+
+macro outer_quad(v: expr) {
+    inner_dbl!(inner_dbl!(v))
+}
+
+@test
+fn test_macro_emits_macro_call() {
+    let r = outer_quad!(5)
+    assert(r == 20, "outer_quad expansion runs inner_dbl twice")
+}
+
+// === Macro emitting a fn that recursively calls itself ===
+//
+// Hygiene: the fn name in the emitted body and the recursive call
+// inside the body must agree after splice (both rename or neither).
+// If only the binder renames, the recursive call dangles.
+
+macro mk_factorial(Name: ident) {
+    fn Name(n: int) -> int {
+        if n <= 1 { return 1 }
+        return n * Name(n - 1)
+    }
+}
+
+mk_factorial!(my_fact)
+
+@test
+fn test_macro_emits_self_recursive_fn() {
+    assert(my_fact(5) == 120, "5! via macro-emitted self-recursive fn")
+    assert(my_fact(0) == 1, "0! base case")
+}
+
+// === Self-referential macro (recursion guard) ===
+//
+// Macro expansion runs at compile time and unconditionally walks
+// every branch — there's no constant-folding step that prunes
+// `else` branches before recursing. So a "base case at runtime"
+// pattern like `if n <= 0 { 0 } else { rec!(n - 1) }` is still an
+// infinite expansion: the macro pass keeps splicing the `else`
+// arm and never terminates without a hard depth cap.
+//
+// The pass DOES enforce a depth cap at 64 with a diagnostic
+// ("macro expansion exceeded maximum depth (64); likely unbounded
+// recursion"). That's the guarantee — verified manually by
+// constructing such a macro and watching it error out. We don't
+// `@test` it directly because @test runs only after compilation
+// succeeds; a compile-time error from the test fixture would kill
+// the whole file. Coverage for the cap belongs at the
+// `MacroExpansionPass` Rust-test level.

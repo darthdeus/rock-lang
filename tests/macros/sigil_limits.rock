@@ -1,0 +1,96 @@
+// Coverage for the full type grammar at macro-arg position. The sigil
+// arg parser tries `parse_type_expr` first with cursor backtracking —
+// any shape `parse_type_expr` accepts at top level is automatically
+// accepted as a macro `ty:` arg, including arbitrarily nested forms.
+
+struct BoxL<T> { v: T }
+
+macro hold(Name: ident, Elem: ty) {
+    struct Name { v: Elem }
+}
+
+// === Compound types at top level ===
+
+hold!(ArrInt, [int])
+hold!(BoxArrInt, BoxL<[int]>)
+hold!(ArrBox, [BoxL<int>])               // nested: array of type-app
+hold!(ArrArrInt, [[int]])                // nested: array of array
+hold!(BoxBoxInt, BoxL<BoxL<int>>)        // nested type-app
+hold!(TupNested, ([int], BoxL<string>))  // tuple of compound types
+hold!(MapToBox, Map<int, BoxL<int>>)     // Map with compound value
+
+@test
+fn test_array_of_builtin() {
+    let h = ArrInt { v: [1, 2, 3] }
+    assert(h.v.len() == 3, "[int]")
+}
+
+@test
+fn test_typeapp_with_array_inner() {
+    let h = BoxArrInt { v: BoxL { v: [10, 20] } }
+    assert(h.v.v[0] + h.v.v[1] == 30, "BoxL<[int]>")
+}
+
+@test
+fn test_array_of_typeapp() {
+    let h = ArrBox { v: [BoxL { v: 5 }, BoxL { v: 7 }] }
+    assert(h.v[0].v + h.v[1].v == 12, "[BoxL<int>]")
+}
+
+@test
+fn test_array_of_array() {
+    let h = ArrArrInt { v: [[1, 2], [3, 4]] }
+    assert(h.v[0][0] + h.v[1][1] == 5, "[[int]]")
+}
+
+@test
+fn test_typeapp_of_typeapp() {
+    let h = BoxBoxInt { v: BoxL { v: BoxL { v: 99 } } }
+    assert(h.v.v.v == 99, "BoxL<BoxL<int>>")
+}
+
+@test
+fn test_tuple_of_compound() {
+    let h = TupNested { v: ([1, 2, 3], BoxL { v: "hi" }) }
+    assert(h.v.0.len() == 3, "tuple first elem")
+    assert(h.v.1.v == "hi", "tuple second elem")
+}
+
+@test
+fn test_map_with_compound_value() {
+    let m: Map<int, BoxL<int>> = map_new()
+    m[1] = BoxL { v: 42 }
+    let h = MapToBox { v: m }
+    assert(h.v[1].v == 42, "Map<int, BoxL<int>>")
+}
+
+// === Nullable shapes ===
+
+hold!(NullInt, int?)
+hold!(NullBox, BoxL<int>?)
+hold!(BoxOfNullInt, BoxL<int?>)
+
+@test
+fn test_nullable_builtin() {
+    let h = NullInt { v: null }
+    assert(h.v == null, "int? — null inhabits")
+    let h2 = NullInt { v: 7 }
+    assert(h2.v == 7, "int? — non-null also inhabits")
+}
+
+@test
+fn test_nullable_typeapp() {
+    let h = NullBox { v: null }
+    assert(h.v == null, "BoxL<int>? null")
+}
+
+@test
+fn test_typeapp_with_nullable_inner() {
+    // Construct via the field's declared type so Rock picks up the
+    // `int?` from `v`'s annotation instead of inferring `int` from a
+    // bare literal. The macro arg `BoxL<int?>` substituted correctly —
+    // proven by the fact that this annotation drives inference.
+    let v: BoxL<int?> = BoxL { v: null }
+    let h = BoxOfNullInt { v: v }
+    assert(h.v.v == null, "BoxL<int?> with null inner")
+}

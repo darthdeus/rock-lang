@@ -1,0 +1,125 @@
+// An interpolated string nested inside another interpolation's hole. The
+// outer string's parts must be exactly its own: a nested literal's parts are
+// lowered while the outer ones are being collected, and must not land inside
+// the outer part range (that printed "a: 11.1911.19" for the first case, and
+// rejected a leaked `{y}` part as undefined when its `let` sat in the branch).
+
+enum Mode {
+    Fmt,
+    Plain,
+    Off,
+}
+
+fn wrap(s: string) -> string {
+    return "[{s}]"
+}
+
+@test
+fn test_if_branch_formatted() {
+    let x = 11.19
+    let ok = true
+    assert_eq("a: {if ok { "{x:.2f}" } else { "no" }}", "a: 11.19")
+}
+
+@test
+fn test_if_branch_plain() {
+    let x = 11.19
+    let ok = true
+    assert_eq("b: {if ok { "{x}" } else { "no" }}", "b: 11.19")
+}
+
+@test
+fn test_if_else_branch_taken() {
+    let x = 11.19
+    let ok = false
+    assert_eq("a: {if ok { "no" } else { "{x:.1f}" }}", "a: 11.2")
+}
+
+@test
+fn test_else_if_chain() {
+    let n = 7
+    let r = "{n}: {if n < 0 { "neg {n}" } else if n < 10 { "small {n}" } else { "big {n}" }}"
+    assert_eq(r, "7: small 7")
+}
+
+@test
+fn test_match_arms() {
+    let x = 2.5
+    let m = Mode::Fmt
+    assert_eq("m: {match m { Mode::Fmt => "{x:.2f}", Mode::Plain => "{x}", Mode::Off => "off" }}", "m: 2.50")
+    let p = Mode::Plain
+    assert_eq("m: {match p { Mode::Fmt => "{x:.2f}", Mode::Plain => "{x}", Mode::Off => "off" }}", "m: 2.5")
+}
+
+@test
+fn test_let_in_branch_block_same_line() {
+    let x = 3
+    let ok = true
+    let r = "v: {if ok { let y = x * 2; "{x}/{y}" } else { "none" }} end"
+    assert_eq(r, "v: 3/6 end")
+}
+
+@test
+fn test_let_in_branch_block_multiline() {
+    let x = 3
+    let ok = true
+    let r = "v: {if ok { let y = x * 2
+        "{y}" } else { "none" }}"
+    assert_eq(r, "v: 6")
+}
+
+@test
+fn test_lambda_param_in_hole() {
+    let xs = [1, 2]
+    let r = "l: {join(xs.iter().map(v => "<{v}>").collect(), ",")}"
+    assert_eq(r, "l: <1>,<2>")
+}
+
+@test
+fn test_inner_string_is_part_of_branch_value() {
+    let x = 4
+    let ok = true
+    assert_eq("<{if ok { "{x}" + "!" } else { "no" }}>", "<4!>")
+    assert_eq("<{if ok { wrap("{x}") } else { "no" }}>", "<[4]>")
+}
+
+@test
+fn test_call_argument() {
+    let x = 5
+    assert_eq("c: {wrap("{x}")}", "c: [5]")
+    assert_eq("c: {wrap("x={x:03}")} tail", "c: [x=005] tail")
+}
+
+@test
+fn test_outer_parts_around_the_nested_hole() {
+    let x = 1.5
+    let n = 9
+    let ok = true
+    let r = "{n} pre {if ok { "{x:.1f} in {n}" } else { "no" }} mid {n:>3} post"
+    assert_eq(r, "9 pre 1.5 in 9 mid   9 post")
+}
+
+@test
+fn test_two_nested_holes() {
+    let a = 1
+    let b = 2
+    let ok = true
+    let r = "x{if ok { "{a}" } else { "-" }}y{if ok { "{b}" } else { "-" }}z"
+    assert_eq(r, "x1y2z")
+}
+
+@test
+fn test_doubly_nested() {
+    let x = 6
+    let ok = true
+    let r = "o: {if ok { "m: {if ok { "i: {x}" } else { "-" }}" } else { "-" }}"
+    assert_eq(r, "o: m: i: 6")
+}
+
+@test
+fn test_bound_to_a_local_first() {
+    let x = 11.19
+    let ok = true
+    let bound = if ok { "{x:.2f}" } else { "no" }
+    assert_eq("c: {bound}", "c: 11.19")
+}

@@ -1,0 +1,14 @@
+@test
+fn cross_package_value_constructor_default() {
+    let items: [Presence] = []
+    items.push(Presence {})
+    let p = items[0]
+    assert_eq(p.rect.x, 3.0)
+    assert_eq(p.rect.y, 7.0)
+    assert_eq(p.rect.w, 11.0)
+    assert_eq(p.rect.h, 13.0)
+    assert_eq(p.rect.z, 0)
+    assert_eq(p.rect.ctx, 0)
+    assert_eq(p.rect.ref_h, 0.0)
+    assert_eq(p.age, 0.0)
+}

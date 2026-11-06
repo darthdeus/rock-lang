@@ -1,0 +1,185 @@
+// Adversarial round 3 for the sigil macro form. Round 1 covered
+// arg-list edges + parser precedence; round 2 covered empty bodies,
+// nested macro emission, and macros emitting macro calls. This
+// round targets the holes called out in the parked note:
+//
+//   - Splat forwarding through sigil and through a chained variadic
+//   - Same-name macros with different fragment kinds (overloading)
+//   - UFCS sigil with heterogeneous receiver types + chaining
+//   - Zero-arg sigil call
+//   - Nested sigil-in-sigil-arg + method-chain in sigil arg
+//
+// Two real bugs surfaced and are pinned as sentinels at the bottom.
+
+// === Zero-arg sigil call ===
+
+macro forty_two() -> int { 42 }
+
+@test
+fn test_zero_arg_sigil() {
+    assert(forty_two!() == 42, "zero-arg sigil call resolves")
+}
+
+// === Nested sigil — sigil call inside another sigil call's arg ===
+
+macro double(x: expr) -> int { x * 2 }
+
+@test
+fn test_nested_sigil_in_arg() {
+    let r = double!(double!(7))
+    assert(r == 28, "outer sigil sees inner sigil's expansion")
+}
+
+// === Sigil arg containing a method-chain expression ===
+//
+// Cursor-backtracking arg parser must let the sub-`parse_expr` see
+// `xs.len()` end-to-end without splitting at the dot.
+
+@test
+fn test_sigil_arg_method_chain() {
+    let xs = [1, 2, 3]
+    let r = double!(xs.len())
+    assert(r == 6, "sigil arg accepts UFCS-style method chain")
+}
+
+// === UFCS sigil with heterogeneous receiver types ===
+//
+// Macro params are fragment kinds, so the receiver's runtime type
+// is irrelevant — UFCS sigil should compose for any value the
+// expr-fragment slot accepts.
+
+macro tagged(x: expr, label: expr) -> string {
+    "{label}: {x}"
+}
+
+@test
+fn test_ufcs_sigil_int_receiver() {
+    let r = (42).tagged!("answer")
+    assert(r == "answer: 42", "ufcs sigil with int receiver")
+}
+
+@test
+fn test_ufcs_sigil_string_receiver() {
+    let r = "hello".tagged!("greeting")
+    assert(r == "greeting: hello", "ufcs sigil with string receiver")
+}
+
+@test
+fn test_ufcs_sigil_bool_receiver() {
+    let r = true.tagged!("flag")
+    assert(r == "flag: true", "ufcs sigil with bool receiver")
+}
+
+// === Chaining a sigil call into a UFCS-sigil call ===
+//
+// `inc!(10).tagged!("res")` — the receiver of the second sigil
+// call is itself the result of a sigil call. Both sites must
+// expand and the second's receiver must consume the first's
+// substituted expression as its `x` arg.
+
+macro inc(x: expr) -> int { x + 1 }
+
+@test
+fn test_chain_sigil_into_ufcs_sigil() {
+    let r = inc!(10).tagged!("res")
+    assert(r == "res: 11", "sigil result feeds UFCS sigil receiver")
+}
+
+// === Variadic + sigil — `sum_of!(1, 2, 3)` ===
+//
+// Round 2 didn't cover variadic+sigil. Confirms the sigil parser
+// + variadic dispatch compose: the sigil call selects the
+// non-empty overload, splats `rest`, and recurses through the
+// sugar form internally.
+
+macro sum_of() -> int { 0 }
+macro sum_of(x: expr, rest: ...expr) -> int { x + sum_of(...rest) }
+
+@test
+fn test_variadic_sigil() {
+    let r = sum_of!(10, 20, 30)
+    assert(r == 60, "variadic sigil composes")
+}
+
+@test
+fn test_variadic_sigil_arity_one() {
+    let r = sum_of!(7)
+    assert(r == 7, "variadic sigil with single arg")
+}
+
+// === Fixed-shape forwarder (positive control) ===
+//
+// A non-variadic macro forwarding to a variadic macro works.
+// Compares against the broken splat-forwarding sentinel below to
+// isolate the failure to splat-passthrough specifically.
+
+macro fwd_two(a: expr, b: expr) -> int {
+    sum_of(a, b)
+}
+
+@test
+fn test_fixed_forwarder_calls_variadic() {
+    let r = fwd_two(10, 20)
+    assert(r == 30, "fixed-shape forwarder into variadic works")
+}
+
+// === Same-name overload by fragment kind — rejected at registration ===
+//
+// Two macros with the same name and same arity (or two variadic
+// overloads) are flagged as ambiguous at registration time:
+// dispatch is arity-only, so without a diagnostic the second arm
+// would silently shadow the first regardless of caller arg shape.
+// Coverage lives in `rock/tests/macro_splat_sentinel_test.rs` —
+// fixture-level inclusion would kill compilation.
+
+// === Splat passthrough — both sigil and sugar ===
+//
+// Two bugs that originally lived as Rust-side sentinels in
+// `rock/tests/macro_splat_sentinel_test.rs` were fixed in this
+// branch. Now landed as positive @tests:
+//
+//   1. `sum_of!(...rest)` — sigil arg parser now accepts
+//      `...ident` (parse_macro_call_args mirrors the sugar
+//      parser's TripleDot recognition).
+//
+//   2. Cross-macro splat forwarding — when a variadic macro's
+//      body splats into a DIFFERENT variadic macro,
+//      rewrite_variadic_body now detects the callee-name
+//      mismatch and emits a regular FunctionCall with splat-
+//      expanded args, letting the outer expansion walker
+//      dispatch via the registry. Self-recursion is unaffected.
+
+macro fwd_sugar_splat(rest: ...expr) -> int { sum_of(...rest) }
+macro fwd_sigil_splat(rest: ...expr) -> int { sum_of!(...rest) }
+
+@test
+fn test_splat_passthrough_sugar() {
+    assert(fwd_sugar_splat(1, 2, 3) == 6, "sugar passthrough")
+}
+
+@test
+fn test_splat_passthrough_sigil() {
+    assert(fwd_sigil_splat(1, 2, 3) == 6, "sigil passthrough")
+}
+
+// Two-layer passthrough: outer forwarder splats into another
+// forwarder which splats into the actual variadic.
+macro fwd_two_layer(rest: ...expr) -> int { fwd_sugar_splat(...rest) }
+
+@test
+fn test_splat_passthrough_two_layer() {
+    assert(fwd_two_layer(1, 2, 3, 4) == 10, "two-layer splat passthrough")
+}
+
+@test
+fn test_splat_passthrough_outer_sigil() {
+    // Outer call uses sigil form, middle is sugar, inner is sigil.
+    assert(fwd_sigil_splat!(10, 20, 30) == 60, "outer sigil splat passthrough")
+}
+
+@test
+fn test_splat_passthrough_empty_dispatches_to_base() {
+    // Empty rest. Forwarder calls `sum_of()` post-splat which selects
+    // the 0-arg overload returning 0.
+    assert(fwd_sugar_splat() == 0, "empty rest dispatches to 0-arg overload")
+}

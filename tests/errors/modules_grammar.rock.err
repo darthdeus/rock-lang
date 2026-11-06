@@ -1,0 +1,63 @@
+//! Error: modules-v1 grammar rejections (plan M1). Each case names the reason
+//! it pins with `//! expect:`, so a case cannot pass by being rejected for an
+//! unrelated reason. These are the whole-program rejections: parse-level v1
+//! grammar and the legacy compilation unit. Cases that need a package context
+//! (v1 path resolution, visibility, tiers) live in
+//! `crates/bone-semantic/tests/fixtures/modules_multi_file.rock`, which can
+//! declare packages -- here they would only ever reject as "no owning package".
+//! Tags: modules
+
+//=== TEST CASE: use_in_legacy_compilation_unit_rejects ===
+//! expect: legacy item-level `use` needs an owning package to resolve its path
+use stone::engine::State;
+
+fn main() {
+    print("hi")
+}
+
+//=== TEST CASE: misplaced_mod_header_rejects ===
+//! expect: `mod path;` is a file header and must be the file's first item
+//! modules: v1
+fn main() {
+    print("hi")
+}
+
+mod combat;
+
+//=== TEST CASE: second_mod_header_rejects ===
+//! expect: a file has one `mod path;` header
+//! modules: v1
+mod combat;
+mod casting;
+
+fn main() {
+    print("hi")
+}
+
+//=== TEST CASE: use_as_underscore_rejects ===
+//! expect: `use ... as _` has no activation semantics in modules-v1
+//! modules: v1
+use stone::engine as _;
+
+fn main() {
+    print("hi")
+}
+
+//=== TEST CASE: private_set_on_item_rejects ===
+//! expect: `private(set)` applies to stored struct fields, not to items
+//! modules: v1
+private(set) fn main() {
+    print("hi")
+}
+
+//=== TEST CASE: macro_generated_module_item_rejects ===
+//! expect: macro-generated `mod`/`use` is not supported
+macro emit_use() {
+    use stone::engine::State;
+}
+
+emit_use()
+
+fn main() {
+    print("hi")
+}

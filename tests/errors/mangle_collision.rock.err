@@ -1,0 +1,26 @@
+//! Error: the unified always-mangle scheme keys the emitted symbol on a fn's
+//!        (name + declared parameter types), single-`_` joiner. Two programs the
+//!        corpus scan proved collision-free in practice can still be contrived
+//!        to collide; the compiler REJECTS them (reject, don't fall back) with a
+//!        spanned CompilerError through the same sink as mint_synthetic, rather
+//!        than emit a symbol that resolves to the wrong body. Two forms: two
+//!        distinct signatures mangling alike, and a mangled name equal to an
+//!        exempt (`@nomangle`/`extern`/`main`/`test_*`) bare name. These are
+//!        valid bone identifiers -- only skull's mangling makes them collide --
+//!        so the rejection is EMIT-time and this suite runs skull emission on the
+//!        bone-accepted case. Positive controls (successful emit + the emitted
+//!        name) live in rock-lang/crates/skull/tests/backend_variant_mangling.rs.
+//! Tags: skull, codegen, mangle, emit-time
+
+//=== TEST CASE: distinct_signatures_collide_Generic ===
+// `foo(int, int) -> int` and `foo_int(int) -> int` both mangle to `foo_int_int`.
+fn foo(x: int, y: int) -> int { return x }
+fn foo_int(x: int) -> int { return 0 }
+fn main() { let a = foo(1, 2) let b = foo_int(1) }
+
+//=== TEST CASE: mangled_equals_exempt_bare_name_Generic ===
+// `bar(int) -> int` mangles to `bar_int`, which is the bare name a
+// `@nomangle` fn `bar_int` keeps -- one emitted symbol for two functions.
+fn bar(x: int) -> int { return x }
+@nomangle fn bar_int() -> int { return 2 }
+fn main() { let a = bar(1) let b = bar_int() }

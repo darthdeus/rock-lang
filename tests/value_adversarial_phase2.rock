@@ -1,0 +1,244 @@
+// Phase 2 adversarial tests — hunting for more multi-return / scalar-ABI
+// siblings of the eight bugs already closed. The shape we're probing:
+// anywhere a value-typed expression can emit as Multi (N scalars) or
+// Single (one cdata), and the surrounding Lua context silently takes
+// only one value (or the wrong number), we risk truncation.
+
+value V2 {
+    x: float,
+    y: float,
+}
+
+value V3 {
+    r: float,
+    g: float,
+    b: float,
+}
+
+fn make_v2(a: float, b: float) -> V2 {
+    return V2 { x: a, y: b }
+}
+
+fn make_v3(a: float, b: float, c: float) -> V3 {
+    return V3 { r: a, g: b, b: c }
+}
+
+fn sum2(v: V2) -> float {
+    return v.x + v.y
+}
+
+fn sum3(v: V3) -> float {
+    return v.r + v.g + v.b
+}
+
+// ----- 1. Match-arm leaves with value-returning calls.
+
+enum Side {
+    Left,
+    Right,
+    Both,
+}
+
+@test(output = "3")
+fn adv_match_arm_value_call() {
+    let s = Side::Right
+    let v = match s {
+        Side::Left => make_v2(1.0, 1.0),
+        Side::Right => make_v2(2.0, 1.0),
+        Side::Both => make_v2(10.0, 10.0),
+    }
+    print("{sum2(v).floor()}")
+}
+
+@test(output = "12")
+fn adv_match_arm_into_scalar_slot() {
+    let s = Side::Both
+    let total = sum2(match s {
+        Side::Left => make_v2(1.0, 1.0),
+        Side::Right => make_v2(2.0, 2.0),
+        Side::Both => make_v2(5.0, 7.0),
+    })
+    print("{total.floor()}")
+}
+
+// ----- 2. Tuples with value-returning calls in non-last positions.
+
+@test(output = "3 7")
+fn adv_tuple_with_value_call() {
+    let t = (make_v2(1.0, 2.0), 7)
+    print("{sum2(t.0).floor()} {t.1}")
+}
+
+@test(output = "3 30")
+fn adv_tuple_two_value_calls() {
+    let t = (make_v2(1.0, 2.0), make_v3(10.0, 10.0, 10.0))
+    print("{sum2(t.0).floor()} {sum3(t.1).floor()}")
+}
+
+// ----- 3. Vec/Array push + index of value types.
+
+@test(output = "3\n7")
+fn adv_vec_push_value_call() {
+    let xs: [V2] = []
+    xs.push(make_v2(1.0, 2.0))
+    xs.push(make_v2(3.0, 4.0))
+    print("{sum2(xs[0]).floor()}")
+    print("{sum2(xs[1]).floor()}")
+}
+
+@test(output = "3\n7")
+fn adv_array_literal_value_calls() {
+    let xs: [V2] = [make_v2(1.0, 2.0), make_v2(3.0, 4.0)]
+    print("{sum2(xs[0]).floor()}")
+    print("{sum2(xs[1]).floor()}")
+}
+
+// ----- 4. Closure capturing a scalarized value param.
+
+fn make_sum_closure(v: V2) -> fn() -> float {
+    return () => v.x + v.y
+}
+
+@test(output = "30")
+fn adv_closure_captures_value_param() {
+    let f = make_sum_closure(make_v2(10.0, 20.0))
+    print("{f().floor()}")
+}
+
+// ----- 5. `??` null-coalesce with value-returning call on the right.
+
+fn maybe_v2(on: bool) -> V2? {
+    if on { return make_v2(5.0, 6.0) }
+    return null
+}
+
+@test(output = "11\n30")
+fn adv_coalesce_rhs_value_call() {
+    let a = maybe_v2(true) ?? make_v2(10.0, 20.0)
+    let b = maybe_v2(false) ?? make_v2(10.0, 20.0)
+    print("{sum2(a).floor()}")
+    print("{sum2(b).floor()}")
+}
+
+// ----- 6. Interpolation reading fields from a value-returning call.
+
+@test(output = "sum=3")
+fn adv_interpolation_with_value_call_field() {
+    print("sum={sum2(make_v2(1.0, 2.0)).floor()}")
+}
+
+// ----- 7. Nullable slot assignment — RHS is a value-returning Rock call.
+
+@test(output = "3")
+fn adv_nullable_slot_value_call() {
+    let v: V2? = make_v2(1.0, 2.0)
+    if v != null {
+        print("{sum2(v).floor()}")
+    }
+}
+
+// ----- 8. Method call (UFCS / field-access-on-call) on value-returning call.
+
+fn v2_mag_sq(v: V2) -> float {
+    return v.x * v.x + v.y * v.y
+}
+
+@test(output = "25")
+fn adv_ufcs_on_value_call() {
+    // make_v2(...).v2_mag_sq() — the call result is the receiver.
+    // Tests whether UFCS method lowering packs / handles the multi-
+    // return correctly in the receiver position.
+    print("{make_v2(3.0, 4.0).v2_mag_sq().floor()}")
+}
+
+// ----- 9. Nested if-IIFE — outer else-branch is itself an if-expr.
+
+@test(output = "21")
+fn adv_nested_if_iife() {
+    let a = false
+    let b = true
+    let total = sum3(
+        if a {
+            make_v3(100.0, 100.0, 100.0)
+        } else if b {
+            make_v3(10.0, 7.0, 4.0)
+        } else {
+            make_v3(0.0, 0.0, 0.0)
+        },
+    )
+    print("{total.floor()}")
+}
+
+// ----- 10. Early-return value-returning call from a nested branch.
+
+fn nested_early_return(pick: int) -> V2 {
+    if pick == 0 {
+        if true {
+            return make_v2(1.0, 2.0)
+        }
+    }
+    if pick == 1 {
+        return make_v2(10.0, 20.0)
+    }
+    return make_v2(100.0, 200.0)
+}
+
+@test(output = "3\n30\n300")
+fn adv_nested_early_return() {
+    print("{sum2(nested_early_return(0)).floor()}")
+    print("{sum2(nested_early_return(1)).floor()}")
+    print("{sum2(nested_early_return(2)).floor()}")
+}
+
+// ----- 11. Value-returning call as key or value in a Map<K, Vec2>.
+
+@test(output = "3")
+fn adv_map_value_insert() {
+    let m: Map<int, V2> = map_new()
+    m[7] = make_v2(1.0, 2.0)
+    print("{sum2(m[7]).floor()}")
+}
+
+// (12 dropped — value-typed binop already covered by bug #1's regression
+// test in value_adversarial_calls.rock; stdlib Vec2 isn't reachable from
+// this bare test file.)
+
+// ----- 13-15. Regression guards for "direct return" (NOT IIFE) paths.
+// If my emit_block_stmts_with_return fix over-packed, a fn returning a
+// value type through an if/if-let/match would emit a cdata cdata pack
+// where the caller expects scalars — invisible ABI mismatch that
+// wouldn't crash but would double-box. Catch it by reading back
+// through another scalarized Rock fn.
+
+fn maybe_v2_some(on: bool) -> V2 {
+    if on {
+        return make_v2(1.0, 2.0)
+    }
+    return make_v2(3.0, 4.0)
+}
+
+@test(output = "3\n7")
+fn adv_direct_return_if() {
+    print("{sum2(maybe_v2_some(true)).floor()}")
+    print("{sum2(maybe_v2_some(false)).floor()}")
+}
+
+fn maybe_v2_match(s: Side) -> V2 {
+    return match s {
+        Side::Left => make_v2(1.0, 1.0),
+        Side::Right => make_v2(10.0, 20.0),
+        Side::Both => make_v2(100.0, 100.0),
+    }
+}
+
+@test(output = "2\n30\n200")
+fn adv_direct_return_match() {
+    // `Side::Left` inside string interpolation `{}` breaks Rock's
+    // format parser (the `::` confuses it); bind to locals first.
+    let l = maybe_v2_match(Side::Left)
+    let r = maybe_v2_match(Side::Right)
+    let b = maybe_v2_match(Side::Both)
+    print("{sum2(l).floor()}")
+    print("{sum2(r).floor()}")
+    print("{sum2(b).floor()}")
+}

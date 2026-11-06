@@ -1,0 +1,210 @@
+// Exhaustive tests for all combinations of break/continue/return in loops.
+// These patterns have had codegen bugs in the past.
+
+// === continue + return ===
+
+global G1: int = 0
+
+@test(output = "42")
+fn continue_then_return_void() {
+    continue_return_void()
+    print(G1)
+}
+
+fn continue_return_void() {
+    for i in 0..5 {
+        if i < 3 { continue }
+        G1 = 42
+        return
+    }
+}
+
+@test(output = "3")
+fn continue_then_return_value() {
+    print(continue_return_value())
+}
+
+fn continue_return_value() -> int {
+    for i in 0..5 {
+        if i < 3 { continue }
+        return i
+    }
+    return -1
+}
+
+// === continue + break ===
+
+@test(output = "3")
+fn continue_then_break() {
+    let result = -1
+    for i in 0..5 {
+        if i < 3 { continue }
+        result = i
+        break
+    }
+    print(result)
+}
+
+// === break + continue (break first in source, continue later) ===
+
+@test(output = "5")
+fn break_and_continue_in_branches() {
+    let sum = 0
+    for i in 0..10 {
+        if i >= 4 { break }
+        if i == 1 { continue }
+        sum = sum + i
+    }
+    // 0 + skip 1 + 2 + 3 = 5
+    print(sum)
+}
+
+// === continue + return inside if/else ===
+
+global G2: int = 0
+
+@test(output = "30")
+fn continue_then_ifelse_then_return_void() {
+    ifelse_return_void()
+    print(G2)
+}
+
+fn ifelse_return_void() {
+    for i in 0..5 {
+        if i < 3 { continue }
+
+        if i == 3 {
+            G2 = 30
+        } else {
+            G2 = 99
+        }
+
+        return
+    }
+}
+
+@test(output = "yes 3")
+fn continue_then_ifelse_then_return_value() {
+    print(ifelse_return_value(true))
+}
+
+fn ifelse_return_value(flag: bool) -> string {
+    for i in 0..5 {
+        if i < 3 { continue }
+
+        let r = ""
+        if flag {
+            r = "yes"
+        } else {
+            r = "no"
+        }
+
+        return "{r} {i}"
+    }
+    return "none"
+}
+
+// === nested loops with mixed control flow ===
+
+@test(output = "2-1")
+fn nested_continue_break_return() {
+    print(nested_loop_test())
+}
+
+fn nested_loop_test() -> string {
+    for i in 0..5 {
+        if i < 2 { continue }
+
+        for j in 0..5 {
+            if j < 1 { continue }
+            return "{i}-{j}"
+        }
+    }
+    return "none"
+}
+
+@test(output = "18")
+fn nested_continue_outer_break() {
+    let sum = 0
+    for i in 0..10 {
+        if i >= 4 { break }
+
+        for j in 0..5 {
+            if j < 2 { continue }
+            sum = sum + i
+        }
+        // inner loop adds i three times (j=2,3,4)
+    }
+    // i=0: +0, i=1: +3, i=2: +6, i=3: +9 = 18
+    print(sum)
+}
+
+// === continue + return + mutation between them ===
+
+global G3: string = ""
+
+@test(output = "processed 3")
+fn continue_mutate_return_void() {
+    mutate_then_return()
+    print(G3)
+}
+
+fn mutate_then_return() {
+    for i in 0..5 {
+        if i < 3 { continue }
+
+        G3 = "processed"
+        G3 = "{G3} {i}"
+        return
+    }
+}
+
+// === multiple continues before return/break ===
+
+@test(output = "3")
+fn multiple_continues_then_return() {
+    print(multi_continue())
+}
+
+fn multi_continue() -> int {
+    for i in 0..10 {
+        if i < 3 { continue }
+        if i == 4 { continue }
+        if i == 5 { continue }
+        return i
+    }
+    return -1
+}
+
+@test(output = "3")
+fn multiple_continues_then_break() {
+    let result = -1
+    for i in 0..10 {
+        if i < 3 { continue }
+        if i == 4 { continue }
+        if i == 5 { continue }
+        result = i
+        break
+    }
+    print(result)
+}
+
+// === return inside nested if inside loop with continue ===
+
+@test(output = "found 4")
+fn continue_nested_if_return() {
+    print(nested_if_return())
+}
+
+fn nested_if_return() -> string {
+    for i in 0..10 {
+        if i < 2 { continue }
+
+        if i > 3 {
+            if i < 6 {
+                return "found {i}"
+            }
+        }
+    }
+    return "none"
+}

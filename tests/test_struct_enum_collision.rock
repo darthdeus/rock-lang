@@ -1,0 +1,25 @@
+struct Rect {
+    x: float
+}
+
+enum Shape {
+    Rect(string)
+}
+
+@test 
+fn test_struct_should_work_with_tuple_variant() {
+    // When enum has tuple variant, struct should be unambiguous
+    let rect_struct = Rect { x: 5.0 }
+    assert_eq(rect_struct.x, 5.0)
+}
+
+@test
+fn test_enum_variant_should_work() {
+    // Qualified enum variant should always work
+    let rect_variant = Shape::Rect("test")
+    // We need pattern matching to test this properly
+}
+
+fn main() {
+    print("Testing struct/enum collision fixes")
+}

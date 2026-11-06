@@ -1,0 +1,53 @@
+// Position-aware resolution for two same-name `let`s in one scope.
+// Regression: a read between `let x = ...` and a later `let x = ...`
+// in the same block must resolve to the FIRST x (lexical scoping),
+// not the second. The Rock compiler relies on Lua's lexical scoping
+// for codegen, but the unused-var lint and any consumer of
+// `symbol_refs` need correct attribution too.
+
+@test(output = "first\nsecond")
+fn test_two_lets_same_scope() {
+    let x = "first"
+    print(x)
+    let x = "second"
+    print(x)
+}
+
+@test(output = "1\n2\n3")
+fn test_three_lets_same_scope() {
+    let n = 1
+    print(n)
+    let n = 2
+    print(n)
+    let n = 3
+    print(n)
+}
+
+// Read inside an `if` branch sits in a child scope but resolves up
+// the chain — must still pick the correct one based on position.
+@test(output = "outer\ninner")
+fn test_shadow_via_inner_block() {
+    let label = "outer"
+    if true {
+        print(label)
+    }
+    let label = "inner"
+    if true {
+        print(label)
+    }
+}
+
+global G_OUTER_B: string = "outer-b"
+
+// Inside the helper, `let a = G_OUTER_B; let b = 10` — the `b` later
+// is unrelated. The first `let b = 10` must not be shadowed by the
+// later one when `print(b)` runs between the two.
+@test(output = "outer-b\n10\n20")
+fn test_no_forward_reference_in_rhs() {
+    let a = G_OUTER_B
+    let b = 10
+    print(a)
+    print(b)
+    let b = 20
+    print(b)
+}

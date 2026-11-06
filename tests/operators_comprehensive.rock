@@ -1,0 +1,213 @@
+// Comprehensive operator tests ported from rock/tests/operator_tests.rs
+// Tests basic arithmetic, comparison, logical, and unary operators
+
+// Helper functions for short-circuit tests
+fn side_effect_true() -> bool {
+    print("side effect called")
+    return true
+}
+
+fn side_effect_false() -> bool {
+    print("side effect called")
+    return false
+}
+
+// Struct definitions for custom operator overloads
+struct FixVec2 {
+    x: float,
+    y: float,
+}
+
+fn __unm(v: FixVec2) -> FixVec2 {
+    return FixVec2 { x: 0.0 - v.x, y: 0.0 - v.y }
+}
+
+struct BoolWrapper {
+    value: bool,
+}
+
+fn __not(b: BoolWrapper) -> BoolWrapper {
+    return BoolWrapper { value: if b.value { false } else { true } }
+}
+
+@test(output = "3\n2\n10")
+fn int_addition_and_subtraction() {
+    print(1 + 2)
+    print(5 - 3)
+    print(10 + 0)
+}
+
+@test(output = "4\n1.8\n10")
+fn float_addition_and_subtraction() {
+    print(1.5 + 2.5)
+    print(5.0 - 3.2)
+    print(10.0 + 0.0)
+}
+
+@test(output = "3.5\n2\n10\n7\n3.5")
+fn mixed_int_float_arithmetic() {
+    print(1 + 2.5)
+    print(5.0 - 3)
+    print(10 + 0.0)
+    print(2 * 3.5)
+    print(7.0 / 2)
+}
+
+@test(output = "6\n5\n0")
+fn int_multiplication_and_division() {
+    print(2 * 3)
+    print(10 ./ 2)
+    print(5 * 0)
+}
+
+@test(output = "10\n3\n0")
+fn float_multiplication_and_division() {
+    print(2.5 * 4.0)
+    print(9.0 / 3.0)
+    print(5.5 * 0.0)
+}
+
+@test(output = "true\ntrue\ntrue\ntrue\ntrue\nfalse")
+fn comparison_operators_int_and_float() {
+    print(1 < 2)
+    print(2 <= 2)
+    print(3 > 1)
+    print(3.5 >= 3.5)
+    print(1 < 1.5)
+    print(2.5 > 5)
+}
+
+@test(output = "true\nfalse\ntrue\nfalse")
+fn boolean_and_or() {
+    print(true && true)
+    print(true && false)
+    print(false || true)
+    print(false || false)
+}
+
+@test(output = "false\nside effect called\ntrue")
+fn short_circuit_and_operator() {
+    // Test && short-circuit: false && side_effect() should not call side_effect
+    let result1 = false && side_effect_true()
+    print(result1)
+
+    // Test && short-circuit: true && side_effect() should call side_effect
+    let result2 = true && side_effect_true()
+    print(result2)
+}
+
+@test(output = "true\nside effect called\nfalse")
+fn short_circuit_or_operator() {
+    // Test || short-circuit: true || side_effect() should not call side_effect
+    let result1 = true || side_effect_false()
+    print(result1)
+
+    // Test || short-circuit: false || side_effect() should call side_effect
+    let result2 = false || side_effect_false()
+    print(result2)
+}
+
+@test(output = "2\n2\n1\n2")
+fn pre_and_post_increment_int() {
+    let x: int = 1
+    let a = ++x
+    print(a)
+    print(x)
+    let y: int = 1
+    let b = y++
+    print(b)
+    print(y)
+}
+
+@test(output = "2\n2\n1\n2")
+fn pre_and_post_increment_float() {
+    let x: float = 1.0
+    let a = ++x
+    print(a)
+    print(x)
+    let y: float = 1.0
+    let b = y++
+    print(b)
+    print(y)
+}
+
+@test(output = "-5\n0\n-10")
+fn unary_minus_int() {
+    print(-5)
+    print(-0)
+    let x = 10
+    print(-x)
+}
+
+@test(output = "-3.14\n1.5\n-2.5")
+fn unary_minus_float() {
+    print(-3.14)
+    print(-(-1.5))
+    let y = 2.5
+    print(-y)
+}
+
+@test(output = "-8\n4\n-6")
+fn unary_minus_with_expressions() {
+    print(-(5 + 3))
+    print(-(-4))
+    print(-(2 * 3))
+}
+
+@test(output = "-2\n-2\n6\n-5")
+fn unary_minus_with_binary_operations() {
+    print(-5 + 3)
+    print(2 + -4)
+    print(-3 * -2)
+    print(-10 ./ 2)
+}
+
+@test(output = "-6\n-6")
+fn unary_minus_precedence() {
+    print(-2 * 3)
+    print(-(2 * 3))
+}
+
+@test(output = "-5\n-5")
+fn unary_minus_vs_workaround_compatibility() {
+    // Both approaches should give the same result
+    let x = 5
+    print(-x)
+    print(-1 * x)
+}
+
+@test(output = "-3\n-4")
+fn unary_minus_custom_type_overload() {
+    let v = FixVec2 { x: 3.0, y: 4.0 }
+    let neg_v = -v
+
+    print(neg_v.x)
+    print(neg_v.y)
+}
+
+@test(output = "false\ntrue\ntrue\nfalse")
+fn not_operator_basic() {
+    print(!true)
+    print(!false)
+    print(!!true)
+    print(!(!false))
+}
+
+@test(output = "false\ntrue")
+fn not_operator_custom_type_overload() {
+    let b = BoolWrapper { value: true }
+    let not_b = !b
+    print(not_b.value)
+
+    let c = BoolWrapper { value: false }
+    let not_c = !c
+    print(not_c.value)
+}
+
+@test(output = "false\ntrue\ntrue\ntrue")
+fn not_operator_in_expressions() {
+    print(!true || false)
+    print(true && !false)
+    print(!(true && false))
+    print(!false == true)
+}

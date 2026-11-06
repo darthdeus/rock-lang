@@ -1,0 +1,89 @@
+// Behavior tests for `let x = if ... { ... } else { ... }` lowering.
+// The codegen for this shape no longer allocates a Lua closure wrapper
+// (IIFE); observable semantics must be unchanged.
+
+@test(output = "1")
+fn test_let_if_rvalue_simple() {
+    let c = true
+    let x = if c { 1 } else { 2 }
+    print(x)
+}
+
+@test(output = "2")
+fn test_let_if_rvalue_else_branch() {
+    let c = false
+    let x = if c { 1 } else { 2 }
+    print(x)
+}
+
+@test(output = "many")
+fn test_let_if_rvalue_elseif_chain() {
+    let n = 2
+    let s = if n == 0 { "zero" } else if n == 1 { "one" } else { "many" }
+    print(s)
+}
+
+@test(output = "2")
+fn test_let_if_rvalue_nested() {
+    let a = true
+    let b = false
+    let x = if a { if b { 1 } else { 2 } } else { 3 }
+    print(x)
+}
+
+@test(output = "7")
+fn test_let_if_rvalue_shadowing() {
+    let x = 99
+    let x = if x > 0 { 7 } else { 8 }
+    print(x)
+}
+
+@test(output = "42")
+fn test_let_if_rvalue_nullable_non_null() {
+    let c = true
+    let x: int? = if c { 42 } else { null }
+    if x != null { print(x) } else { print(-1) }
+}
+
+@test(output = "-1")
+fn test_let_if_rvalue_nullable_null() {
+    let c = false
+    let x: int? = if c { 42 } else { null }
+    if x != null { print(x) } else { print(-1) }
+}
+
+// Side effects in the branches must fire exactly once, matching the
+// taken arm. This catches any accidental double-evaluation in the
+// new lowering.
+global SIDE_A: int = 0
+global SIDE_B: int = 0
+
+fn bump_a() -> int {
+    SIDE_A = SIDE_A + 1
+    10
+}
+
+fn bump_b() -> int {
+    SIDE_B = SIDE_B + 1
+    20
+}
+
+@test(output = "10\n1\n0")
+fn test_let_if_rvalue_side_effects_then() {
+    SIDE_A = 0
+    SIDE_B = 0
+    let x = if true { bump_a() } else { bump_b() }
+    print(x)
+    print(SIDE_A)
+    print(SIDE_B)
+}
+
+@test(output = "20\n0\n1")
+fn test_let_if_rvalue_side_effects_else() {
+    SIDE_A = 0
+    SIDE_B = 0
+    let x = if false { bump_a() } else { bump_b() }
+    print(x)
+    print(SIDE_A)
+    print(SIDE_B)
+}

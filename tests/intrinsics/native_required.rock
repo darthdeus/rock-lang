@@ -1,0 +1,202 @@
+// Conformance: semantic tests for the NATIVE-REQUIRED intrinsic set. These
+// primitives have no portable Rock fallback, so the differential harness
+// (native-vs-fallback) cannot cover them
+// -- they need hand-written semantics, or they end up the least-tested entries.
+// Every backend that maps these must reproduce exactly these results.
+
+// --- NativeBuffer alloc/get/set (__nb_alloc_*, nb_get, nb_set) ---------------
+
+@test(output = "10 20 30")
+fn nb_int_roundtrip() {
+    let b = native_buffer_int(3)
+    b[0] = 10
+    b[1] = 20
+    b[2] = 30
+    print("{b[0]} {b[1]} {b[2]}")
+}
+
+@test(output = "1.5")
+fn nb_float_roundtrip() {
+    let b = native_buffer_float(2)
+    b[0] = 1.5
+    print("{b[0]}")
+}
+
+// The phantom-typed variants truncate at the ffi boundary (a u8 keeps the low 8
+// bits): 258 & 0xFF == 2.
+@test(output = "2")
+fn nb_u8_truncates() {
+    let b = native_buffer_u8(1)
+    b[0] = 258
+    print("{b[0]}")
+}
+
+// --- NativeBuffer alloc + .len ----------------------------------------------
+
+// .len reflects the requested count for every variant.
+@test(output = "3 5 7 2 4 6 8")
+fn nb_len_matches_alloc() {
+    print("{native_buffer_float(3).len} {native_buffer_int(5).len} {native_buffer_u8(7).len} {native_buffer_i8(2).len} {native_buffer_u16(4).len} {native_buffer_i16(6).len} {native_buffer_u32(8).len}")
+}
+
+// --- NativeBuffer 0-based indexing boundary (index 0 and len-1) --------------
+
+@test(output = "1.5 2.5 11 99")
+fn nb_boundary_real() {
+    let f = native_buffer_float(3)
+    f[0] = 1.5
+    f[f.len - 1] = 2.5
+    let bi = native_buffer_int(4)
+    bi[0] = 11
+    bi[bi.len - 1] = 99
+    print("{f[0]} {f[f.len - 1]} {bi[0]} {bi[bi.len - 1]}")
+}
+
+@test(output = "1 2 3 4 5 6 7 8 9 10")
+fn nb_boundary_sized() {
+    let u8 = native_buffer_u8(2);   u8[0] = 1;   u8[u8.len - 1] = 2
+    let i8 = native_buffer_i8(2);   i8[0] = 3;   i8[i8.len - 1] = 4
+    let u16 = native_buffer_u16(2); u16[0] = 5;  u16[u16.len - 1] = 6
+    let i16 = native_buffer_i16(2); i16[0] = 7;  i16[i16.len - 1] = 8
+    let u32 = native_buffer_u32(2); u32[0] = 9;  u32[u32.len - 1] = 10
+    print("{u8[0]} {u8[u8.len - 1]} {i8[0]} {i8[i8.len - 1]} {u16[0]} {u16[u16.len - 1]} {i16[0]} {i16[i16.len - 1]} {u32[0]} {u32[u32.len - 1]}")
+}
+
+// --- NativeBuffer .get(i) bounds contract (null out of range) ----------------
+
+@test(output = "true true true true")
+fn nb_get_null_real() {
+    let f = native_buffer_float(1)
+    let bi = native_buffer_int(1)
+    print("{f.get(-1) == null} {f.get(f.len) == null} {bi.get(-1) == null} {bi.get(bi.len) == null}")
+}
+
+@test(output = "true true true true true true true true true true")
+fn nb_get_null_sized() {
+    let u8 = native_buffer_u8(1)
+    let i8 = native_buffer_i8(1)
+    let u16 = native_buffer_u16(1)
+    let i16 = native_buffer_i16(1)
+    let u32 = native_buffer_u32(1)
+    print("{u8.get(-1) == null} {u8.get(u8.len) == null} {i8.get(-1) == null} {i8.get(i8.len) == null} {u16.get(-1) == null} {u16.get(u16.len) == null} {i16.get(-1) == null} {i16.get(i16.len) == null} {u32.get(-1) == null} {u32.get(u32.len) == null}")
+}
+
+@test(output = "4.5 77")
+fn nb_get_inrange_real() {
+    let f = native_buffer_float(2)
+    f[1] = 4.5
+    let bi = native_buffer_int(3)
+    bi[2] = 77
+    print("{f.get(f.len - 1) ?? -1.0} {bi.get(bi.len - 1) ?? -1}")
+}
+
+@test(output = "12 13 14 15 16")
+fn nb_get_inrange_sized() {
+    let u8 = native_buffer_u8(2);   u8[1] = 12
+    let i8 = native_buffer_i8(2);   i8[1] = 13
+    let u16 = native_buffer_u16(2); u16[1] = 14
+    let i16 = native_buffer_i16(2); i16[1] = 15
+    let u32 = native_buffer_u32(2); u32[1] = 16
+    print("{u8.get(u8.len - 1) ?? -1} {i8.get(i8.len - 1) ?? -1} {u16.get(u16.len - 1) ?? -1} {i16.get(i16.len - 1) ?? -1} {u32.get(u32.len - 1) ?? -1}")
+}
+
+// --- NativeBuffer sized-store wrap (mod-2^n, truncate-toward-zero) -----------
+// The per-backend store contract:
+// an out-of-width int store wraps mod 2^width. LuaJIT reaches these by C
+// truncation at the ffi boundary; a JS backend must match via typed-array wrap.
+
+@test(output = "0 44 255")
+fn nb_u8_wrap() {
+    let b = native_buffer_u8(1)
+    b[0] = 256;  let a = b[0]
+    b[0] = 300;  let c = b[0]
+    b[0] = -1;   let d = b[0]
+    print("{a} {c} {d}")
+}
+
+@test(output = "-128 127")
+fn nb_i8_wrap() {
+    let b = native_buffer_i8(1)
+    b[0] = 128;   let a = b[0]
+    b[0] = -129;  let c = b[0]
+    print("{a} {c}")
+}
+
+@test(output = "0 65535")
+fn nb_u16_wrap() {
+    let b = native_buffer_u16(1)
+    b[0] = 65536;  let a = b[0]
+    b[0] = -1;     let c = b[0]
+    print("{a} {c}")
+}
+
+@test(output = "-32768")
+fn nb_i16_wrap() {
+    let b = native_buffer_i16(1)
+    b[0] = 32768;  let a = b[0]
+    print("{a}")
+}
+
+@test(output = "0 4294967295")
+fn nb_u32_wrap() {
+    let b = native_buffer_u32(1)
+    b[0] = 4294967296;  let a = b[0]
+    b[0] = -1;          let c = b[0]
+    print("{a} {c}")
+}
+
+// int is pinned 32-bit: 2^31 wraps to the int32 minimum.
+@test(output = "-2147483648")
+fn nb_int_wrap() {
+    let b = native_buffer_int(1)
+    b[0] = 2147483648;  let a = b[0]
+    print("{a}")
+}
+
+// buf[i] sugar lowers to __nb_checked_set / raw ptr stores, never these fns
+// -- explicit calls are the only coverage the nb_get/nb_set mapping keys get.
+@test(output = "2.5 42 44 -127 60000 -300 4000000000")
+fn nb_get_set_called_directly() {
+    let f = native_buffer_float(1);   nb_set(f, 0, 2.5)
+    let bi = native_buffer_int(1);    nb_set(bi, 0, 42)
+    let b8 = native_buffer_u8(1);     nb_set(b8, 0, 300)
+    let s8 = native_buffer_i8(1);     nb_set(s8, 0, 129)
+    let b16 = native_buffer_u16(1);   nb_set(b16, 0, 60000)
+    let s16 = native_buffer_i16(1);   nb_set(s16, 0, -300)
+    let b32 = native_buffer_u32(1);   nb_set(b32, 0, 4000000000)
+    print("{nb_get(f, 0)} {nb_get(bi, 0)} {nb_get(b8, 0)} {nb_get(s8, 0)} {nb_get(b16, 0)} {nb_get(s16, 0)} {nb_get(b32, 0)}")
+}
+
+// --- table_get / table_set --------------------------------------------------
+
+// The untyped indexing primitives round-trip a value under an int key on a raw
+// table (a Map is a Lua table, so table_get(m, k) reads what m[k] wrote, and
+// table_set writes a slot m.get(k) then reads back).
+@test(output = "42 7")
+fn table_get_set_roundtrip() {
+    let m: Map<int, int> = map_new()
+    m[1] = 42
+    table_set(m, 2, 7)
+    let a: int = cast(table_get(m, 1))
+    let b: int = cast(table_get(m, 2))
+    print("{a} {b}")
+}
+
+// --- string.find (0-based, plain-text, -1 on miss) --------------------------
+
+@test(output = "2")
+fn string_find_hit() {
+    print("{"abcde".find("cd")}")
+}
+
+@test(output = "-1")
+fn string_find_miss() {
+    print("{"abcde".find("xy")}")
+}
+
+// The scan starts at `from` (0-based): index 0's "a" is skipped, so the first
+// match at or after index 1 is index 2.
+@test(output = "2")
+fn string_find_from_offset() {
+    print("{"a-a-a".find("a", 1)}")
+}

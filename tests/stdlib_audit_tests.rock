@@ -1,0 +1,341 @@
+// Tests for stdlib audit fixes
+// Each section corresponds to one audited stdlib item.
+
+// --- Item 2: PI precision ---
+
+@test
+fn test_pi_precision() {
+    // PI should have at least 15 significant digits (IEEE 754 double precision)
+    // sin(PI) should be very close to 0 — if PI is truncated, this drifts
+    let s = sin(PI)
+    // With 8-digit PI (3.14159265), sin(PI) ~ 3.58e-9 — not great
+    // With full precision, sin(PI) ~ 1.22e-16
+    // We test that it's below 1e-10, which catches the 8-digit truncation
+    assert(abs(s) < 0.0000000001, "sin(PI) should be near zero, got: {s}")
+}
+
+@test
+fn test_pi_value_direct() {
+    // Direct check: PI should start with these digits
+    let pi_str = to_string(PI)
+    assert(pi_str.starts_with("3.14159265358"), "PI should have at least 12 correct digits, got: {pi_str}")
+}
+
+// --- Item 4: replace % in replacement ---
+
+@test
+fn test_string_replace_percent_in_replacement() {
+    // % is special in gsub replacements (%1 = first capture)
+    // replace should treat replacement as literal
+    let result = "hello world".replace("world", "100%")
+    assert_eq(result, "hello 100%", "Percent in replacement should be literal")
+}
+
+@test
+fn test_string_replace_percent_capture_ref() {
+    // %1 in replacement should NOT be treated as a capture reference
+    let result = "abc".replace("b", "%1")
+    assert_eq(result, "a%1c", "%1 in replacement should be literal")
+}
+
+@test
+fn test_string_replace_special_chars_in_search() {
+    // Existing behavior: special pattern chars in search should be escaped
+    let result = "a.b.c".replace(".", "-")
+    assert_eq(result, "a-b-c", "Dots in search should be literal")
+}
+
+@test
+fn test_string_replace_normal() {
+    // Sanity: normal replacement still works
+    let result = "hello world".replace("world", "rock")
+    assert_eq(result, "hello rock")
+}
+
+// --- Item 5: __op_eq structural equality ---
+
+struct EqTestPoint { x: int, y: int }
+
+@test
+fn test_op_eq_structs() {
+    let a = EqTestPoint { x: 1, y: 2 }
+    let b = EqTestPoint { x: 1, y: 2 }
+    let c = EqTestPoint { x: 3, y: 4 }
+    assert_eq(a, b, "Same-valued structs should be equal")
+    assert_ne(a, c, "Different structs should not be equal")
+}
+
+@test
+fn test_op_eq_primitives() {
+    assert_eq(42, 42)
+    assert_ne(42, 99)
+    assert_eq("hello", "hello")
+    assert_ne("hello", "world")
+    assert_eq(true, true)
+    assert_ne(true, false)
+}
+
+// --- Item 13: sort correctness ---
+
+@test
+fn test_vec_sort_basic() {
+    let v: [int] = vec_new()
+    vec_push(v, 5)
+    vec_push(v, 1)
+    vec_push(v, 3)
+    vec_push(v, 2)
+    vec_push(v, 4)
+    sort(v, x => x)
+    assert_eq(v[0], 1)
+    assert_eq(v[1], 2)
+    assert_eq(v[2], 3)
+    assert_eq(v[3], 4)
+    assert_eq(v[4], 5)
+}
+
+@test
+fn test_vec_sort_descending() {
+    let v: [int] = vec_new()
+    vec_push(v, 1)
+    vec_push(v, 5)
+    vec_push(v, 3)
+    sort(v, x => -x)
+    assert_eq(v[0], 5)
+    assert_eq(v[1], 3)
+    assert_eq(v[2], 1)
+}
+
+@test
+fn test_vec_sort_already_sorted() {
+    let v: [int] = vec_new()
+    vec_push(v, 1)
+    vec_push(v, 2)
+    vec_push(v, 3)
+    sort(v, x => x)
+    assert_eq(v[0], 1)
+    assert_eq(v[1], 2)
+    assert_eq(v[2], 3)
+}
+
+@test
+fn test_vec_sort_single_element() {
+    let v: [int] = vec_new()
+    vec_push(v, 42)
+    sort(v, x => x)
+    assert_eq(v[0], 42)
+}
+
+struct SortItem { name: string, priority: int }
+
+@test
+fn test_vec_sort_by_field() {
+    let v: [SortItem] = vec_new()
+    vec_push(v, SortItem { name: "c", priority: 3 })
+    vec_push(v, SortItem { name: "a", priority: 1 })
+    vec_push(v, SortItem { name: "b", priority: 2 })
+    sort(v, x => x.priority)
+    assert_eq(v[0].name, "a")
+    assert_eq(v[1].name, "b")
+    assert_eq(v[2].name, "c")
+}
+
+// --- Item 14: find/any/all ---
+
+@test
+fn test_vec_find() {
+    let v: [int] = vec_new()
+    vec_push(v, 10)
+    vec_push(v, 20)
+    vec_push(v, 30)
+    let found = v.find(x => x > 15)
+    assert_eq(found.unwrap(), 20)
+    let not_found = v.find(x => x > 100)
+    assert_null(not_found)
+}
+
+@test
+fn test_vec_any() {
+    let v: [int] = vec_new()
+    vec_push(v, 1)
+    vec_push(v, 2)
+    vec_push(v, 3)
+    assert_true(v.iter().any(x => x == 2))
+    assert_false(v.iter().any(x => x == 99))
+}
+
+@test
+fn test_vec_all() {
+    let v: [int] = vec_new()
+    vec_push(v, 2)
+    vec_push(v, 4)
+    vec_push(v, 6)
+    assert_true(v.iter().all(x => x % 2 == 0))
+    vec_push(v, 7)
+    assert_false(v.iter().all(x => x % 2 == 0))
+}
+
+@test
+fn test_vec_find_empty() {
+    let v: [int] = vec_new()
+    assert_null(v.find(x => true))
+    assert_false(v.any(x => true))
+    assert_true(v.all(x => false))
+}
+
+// --- Item 16: unwrap/expect error messages ---
+
+@test
+fn test_unwrap_or_works() {
+    let x: int? = null
+    assert_eq(unwrap_or(x, 42), 42)
+    let y: int? = 10
+    assert_eq(unwrap_or(y, 42), 10)
+}
+
+@test
+fn test_unwrap_success() {
+    let x: int? = 5
+    assert_eq(unwrap(x), 5)
+}
+
+@test
+fn test_expect_success() {
+    let x: int? = 5
+    assert_eq(expect(x, "should not fail"), 5)
+}
+
+// --- Item 1: inspect deduplication ---
+
+struct InspectPoint { x: int, y: int }
+
+@test(output = "InspectPoint {{ x = 1, y = 2 }}")
+fn test_inspect_struct() {
+    let p = InspectPoint { x: 1, y: 2 }
+    print(inspect(p))
+}
+
+@test(output = "Vec {{ 1, 2, 3 }}")
+fn test_inspect_vec() {
+    let v: [int] = vec_new()
+    vec_push(v, 1)
+    vec_push(v, 2)
+    vec_push(v, 3)
+    print(inspect(v))
+}
+
+@test(output = "\"hello\"")
+fn test_inspect_string() {
+    print(inspect("hello"))
+}
+
+@test(output = "42")
+fn test_inspect_int() {
+    print(inspect(42))
+}
+
+@test(output = "Vec {{ }}")
+fn test_inspect_empty_vec() {
+    let v: [int] = vec_new()
+    print(inspect(v))
+}
+
+// --- Item 17: __rock_range with inclusive-style upper bound ---
+
+@test
+fn test_rock_range_inclusive_equivalent() {
+    // __rock_range(0, 4) produces [0, 1, 2, 3] — exclusive upper bound, 4 elements
+    let r = __rock_range(0, 4)
+    assert_eq(vec_len(r), 4, "__rock_range(0, 4) should have 4 elements")
+    assert_eq(r[0], 0)
+    assert_eq(r[3], 3)
+}
+
+@test
+fn test_rock_range_single_element() {
+    let r = __rock_range(0, 1)
+    assert_eq(vec_len(r), 1, "__rock_range(0, 1) should have 1 element")
+    assert_eq(r[0], 0)
+}
+
+// --- Item 10: UFCS .len() works uniformly ---
+
+@test
+fn test_len_vec_ufcs() {
+    let v: [int] = vec_new()
+    vec_push(v, 10)
+    vec_push(v, 20)
+    vec_push(v, 30)
+    assert_eq(v.len(), 3)
+}
+
+@test
+fn test_len_vec_empty_ufcs() {
+    let v: [int] = vec_new()
+    assert_eq(v.len(), 0)
+}
+
+@test
+fn test_len_string_ufcs() {
+    assert_eq("hello".len(), 5)
+    assert_eq("".len(), 0)
+    assert_eq("a".len(), 1)
+}
+
+@test
+fn test_len_map_ufcs() {
+    let m: Map<string, int> = map_new()
+    assert_eq(m.len(), 0)
+    insert(m, "a", 1)
+    insert(m, "b", 2)
+    assert_eq(m.len(), 2)
+}
+
+struct LenArenaItem { value: int }
+
+@test
+fn test_len_arena_ufcs() {
+    let a: Arena<LenArenaItem> = arena_new()
+    assert_eq(a.len(), 0)
+    a.insert(LenArenaItem { value: 1 })
+    a.insert(LenArenaItem { value: 2 })
+    assert_eq(a.len(), 2)
+}
+
+// --- Item 18: keys/values sort stability ---
+
+@test
+fn test_map_keys_sorted() {
+    let m: Map<string, int> = map_new()
+    insert(m, "cherry", 3)
+    insert(m, "apple", 1)
+    insert(m, "banana", 2)
+    let keys = keys(m)
+    assert_eq(keys[0], "apple")
+    assert_eq(keys[1], "banana")
+    assert_eq(keys[2], "cherry")
+}
+
+@test
+fn test_map_values_sorted_by_key() {
+    let m: Map<string, int> = map_new()
+    insert(m, "cherry", 3)
+    insert(m, "apple", 1)
+    insert(m, "banana", 2)
+    let vals = values(m)
+    assert_eq(vals[0], 1)
+    assert_eq(vals[1], 2)
+    assert_eq(vals[2], 3)
+}
+
+@test
+fn test_map_keys_int_keys() {
+    let m: Map<int, string> = map_new()
+    insert(m, 30, "c")
+    insert(m, 10, "a")
+    insert(m, 20, "b")
+    let keys = keys(m)
+    // With tostring comparator, ints sort lexicographically: "10" < "20" < "30"
+    assert_eq(keys[0], 10)
+    assert_eq(keys[1], 20)
+    assert_eq(keys[2], 30)
+}

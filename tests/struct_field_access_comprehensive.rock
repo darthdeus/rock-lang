@@ -1,0 +1,222 @@
+// Comprehensive struct field access tests migrated from rock/tests/type_system_tests.rs struct_field_tests module
+// Tests struct field access patterns, assignments, nested structs, type validation, and self-referential structs
+// Covers basic field access, nested access, assignment operations, and type inference validation
+
+// ============================================
+// Struct Definitions
+// ============================================
+
+struct FixVec2 { 
+    x: int, 
+    y: int 
+}
+
+struct FixVec2String { 
+    x: string, 
+    y: int 
+}
+
+struct FixVec2Single { 
+    x: string 
+}
+
+struct Rect { 
+    pos: FixVec2, 
+    size: FixVec2 
+}
+
+struct Rt { 
+    fa: Rt? 
+}
+
+// ============================================
+// Basic Struct Field Access Tests
+// ============================================
+
+@test(output = "hello\\n10", type_holes = [[0, "FixVec2String"], [1, "string"], [2, "int"], [3, "FixVec2String"]])
+fn test_struct_field_access_complex() {
+    let v = FixVec2String { x: "hello", y: 10 }
+    let struct_type: ? = v
+    let x_field: ? = v.x
+    let y_field: ? = v.y
+    let access_base: ? = v
+    
+    print(v.x)
+    print(v.y)
+}
+
+@test(output = "5\\n10\\n20\\n20")
+fn test_struct_field_assignment() {
+    let v = FixVec2 { x: 5, y: 10 }
+    print(v.x)
+    print(v.y)
+    
+    v.x = 20
+    print(v.x)
+    print(v.x)
+}
+
+// ============================================
+// Nested Struct Access Tests
+// ============================================
+
+@test(output = "0\\n10")
+fn test_struct_nested_field_access() {
+    let r = Rect { pos: FixVec2 { x: 0, y: 0 }, size: FixVec2 { x: 10, y: 20 } }
+    
+    print(r.pos.x)
+    print(r.size.x)
+}
+
+// ============================================
+// Self-Referential Struct Tests
+// ============================================
+
+@test(output = "0")
+fn test_self_referential_structs() {
+    let fart = null
+    let fa = Rt { fa: Rt { fa: fart } }
+    
+    print(0)
+}
+
+// ============================================
+// Struct Construction with Variables Tests
+// ============================================
+
+@test(output = "42\\n17")
+fn test_struct_with_variable_values() {
+    let x_val = 42
+    let y_val = 17
+    let v = FixVec2 { x: x_val, y: y_val }
+    
+    print(v.x)
+    print(v.y)
+}
+
+@test(output = "100\\n200")
+fn test_struct_field_complex_assignment() {
+    let v1 = FixVec2 { x: 100, y: 50 }
+    let v2 = FixVec2 { x: 25, y: 200 }
+    
+    print(v1.x)
+    print(v2.y)
+}
+
+// ============================================
+// Mixed Type Struct Field Tests
+// ============================================
+
+@test(output = "test\\n42")
+fn test_mixed_type_struct_fields() {
+    let mixed = FixVec2String { x: "test", y: 42 }
+    print(mixed.x)
+    print(mixed.y)
+}
+
+@test(output = "hello")
+fn test_single_field_struct() {
+    let single = FixVec2Single { x: "hello" }
+    print(single.x)
+}
+
+// ============================================
+// Struct Field Chaining Tests
+// ============================================
+
+@test(output = "5\\n15\\n25")
+fn test_struct_field_chaining() {
+    let rect = Rect { 
+        pos: FixVec2 { x: 5, y: 10 }, 
+        size: FixVec2 { x: 15, y: 20 } 
+    }
+    
+    print(rect.pos.x)
+    print(rect.size.x)
+    
+    rect.pos.x = 25
+    print(rect.pos.x)
+}
+
+// ============================================
+// Struct Field Update Patterns Tests
+// ============================================
+
+@test(output = "1\\n2\\n10\\n20")
+fn test_struct_field_updates() {
+    let v = FixVec2 { x: 1, y: 2 }
+    print(v.x)
+    print(v.y)
+    
+    // Update both fields
+    v.x = 10
+    v.y = 20
+    
+    print(v.x) 
+    print(v.y)
+}
+
+@test(output = "0\\n0\\n100\\n200")
+fn test_nested_struct_updates() {
+    let rect = Rect { 
+        pos: FixVec2 { x: 0, y: 0 }, 
+        size: FixVec2 { x: 100, y: 200 } 
+    }
+    
+    print(rect.pos.x)
+    print(rect.pos.y)
+    print(rect.size.x)
+    print(rect.size.y)
+}
+
+// ============================================
+// Complex Self-Referential Patterns Tests
+// ============================================
+
+@test(output = "built")
+fn test_complex_self_referential() {
+    let inner_rt = Rt { fa: null }
+    let middle_rt = Rt { fa: inner_rt }
+    let outer_rt = Rt { fa: middle_rt }
+    
+    print("built")
+}
+
+// ============================================
+// Struct Field Type Validation Tests
+// ============================================
+
+@test(output = "validation complete")
+fn test_struct_field_type_consistency() {
+    // Test that struct fields maintain their types correctly
+    let v = FixVec2 { x: 1, y: 2 }
+    let str_struct = FixVec2String { x: "hello", y: 42 }
+    
+    // All field accesses should maintain correct types
+    let _ = v.x + v.y          // int operations
+    let _ = str_struct.x       // string field
+    let _ = str_struct.y * 2   // int field
+    
+    print("validation complete")
+}
+
+// ============================================
+// Error Cases - Type Mismatch Examples
+// ============================================
+
+// The following tests demonstrate compile-time error cases.
+// Since Rock's @test system focuses on runtime validation,
+// these are documented as examples that should NOT compile.
+
+// EXAMPLE 1: Type mismatch in struct field assignment
+// struct FixVec2 { x: string }
+// let v = FixVec2 { x: 9 }  // ERROR: Cannot assign int to string field
+
+// EXAMPLE 2: Type mismatch with variable assignment
+// struct FixVec2 { x: int, y: int }
+// let x = "fart"
+// let v = FixVec2 { x: x, y: 5 }  // ERROR: Cannot assign string to int field
+
+// EXAMPLE 3: Type mismatch with literal assignment  
+// struct FixVec2 { x: int, y: int }
+// let v = FixVec2 { x: "fart", y: 5 }  // ERROR: Cannot assign string literal to int field

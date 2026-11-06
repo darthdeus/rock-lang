@@ -1,0 +1,74 @@
+// Struct default initialization tests - migrated from rock/tests/struct_tests.rs
+// Tests struct default field values, partial override, and nested structs
+
+// Helper functions for default value testing
+fn fixv(x: float, y: float) -> int {
+    return 42
+}
+
+fn add(a: int, b: int) -> int {
+    return a + b
+}
+
+// Struct definitions at top level
+struct Point1 { x: int = 10, y: int = 20 }
+struct Point2 { x: int = 1, y: int = 2, z: int = 3 }
+struct Point3 { x: int = 1, y: int = 2 }
+struct Inner1 { a: int = 7, b: int = 8 }
+struct Outer1 { inner: Inner1 = Inner1{ a: 1 }, c: int = 9 }
+struct Inner2 { a: int = 1, b: int = 2 }
+struct Outer2 { inner: Inner2 = Inner2 {}, c: int = 3 }
+struct TestStruct {
+    field1: int = fixv(1.0, 2.0),
+    field2: int = add(10, 5)
+}
+
+@test(output = "10\n20")
+fn test_default_struct_empty_literal() {
+    let p = Point1 {}
+
+    print(p.x)
+    print(p.y)
+}
+
+@test(output = "1\n5\n3")
+fn test_default_struct_partial_override() {
+    let p = Point2 { y: 5 }
+
+    print(p.x)
+    print(p.y)
+    print(p.z)
+}
+
+@test(output = "7\n8")
+fn test_default_struct_all_override() {
+    let p = Point3 { x: 7, y: 8 }
+
+    print(p.x)
+    print(p.y)
+}
+
+@test(output = "1\n8\n9")
+fn test_nested_struct_defaults() {
+    let o = Outer1 {}
+
+    print(o.inner.a)
+    print(o.inner.b)
+    print(o.c)
+}
+
+@test(output = "1\n5\n3")
+fn test_nested_struct_partial_override() {
+    let o = Outer2 { inner: Inner2 { b: 5 } }
+
+    print(o.inner.a)
+    print(o.inner.b)
+    print(o.c)
+}
+
+@test(output = "42\n15")
+fn test_function_calls_in_struct_defaults() {
+    let s = TestStruct {}
+    print(s.field1)
+    print(s.field2)
+}

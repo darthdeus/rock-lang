@@ -1,0 +1,86 @@
+// @pure user-vouched annotation — applied to inline(lua) / @lua bodies
+// that the purity walker can't see inside. With the annotation, @inline
+// accepts calls to the marked fn as dup-safe, matching hand-written
+// code. Mis-annotating a side-effecting body silently miscompiles
+// (same trust level as @nomangle).
+
+@pure
+inline(lua) fn lua_abs(n: int) -> int = "if n < 0 then return -n else return n end"
+
+@inline
+fn triple(x: int) -> int {
+    return x + x + x
+}
+
+@test(output = "15")
+fn test_pure_inline_lua_dup_safe() {
+    // Without @pure on lua_abs, this would force a hoist because
+    // the inline(lua) body is opaque to the purity walker. With the
+    // annotation, triple's body substitutes lua_abs(-5) directly at
+    // each of the three x-sites.
+    let r = triple(lua_abs(-5))
+    print(r)
+}
+
+// A chained case — @pure composes transitively because `double_it`
+// is a body-defined fn calling a @pure fn; the walker verifies its
+// body is pure.
+fn double_it(n: int) -> int {
+    return lua_abs(n) * 2
+}
+
+@test(output = "30")
+fn test_pure_propagates_through_defined_body() {
+    let r = triple(double_it(-5))
+    print(r)
+}
+
+// Exercise the real stdlib sweep — `abs`, `sqrt`, `floor` are now
+// @pure @lua, so @inline callers taking them as args don't force a
+// hoist.
+@inline
+fn sum_3(a: float) -> float {
+    return a + a + a
+}
+
+@test(output = "4.5")
+fn test_stdlib_abs_is_pure() {
+    let x = -1.5
+    let r = sum_3(abs(x))
+    print(r)
+}
+
+@test(output = "12")
+fn test_stdlib_floor_is_pure() {
+    let r = sum_3(floor(4.7))
+    print(r)
+}
+
+// Positive: a Rock body annotated @pure that IS pure. The verifier
+// must accept this. Uses only params, literals, arithmetic on
+// primitives, and calls to @pure callees.
+@pure
+fn square_plus_one(n: int) -> int {
+    let s = n * n
+    return s + 1
+}
+
+@test(output = "51")
+fn test_rock_body_pure_accepted() {
+    let r = sum_3(square_plus_one(4) as float)
+    print(r)
+}
+
+// Positive: @pure composing transitively through another @pure
+// defined-body fn.
+@pure
+fn plus_two(n: int) -> int {
+    return square_plus_one(n) + 2
+}
+
+@test(output = "57")
+fn test_rock_body_pure_transitive() {
+    // plus_two(4) = 17 + 2 = 19, sum_3(19) = 57
+    let r = sum_3(plus_two(4) as float)
+    print(r)
+}

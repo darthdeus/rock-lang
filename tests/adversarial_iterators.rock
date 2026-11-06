@@ -1,0 +1,228 @@
+// Adversarial tests: Iterators, enumerate, for loops
+
+// --- Basic iteration ---
+
+@test(output = "1 2 3")
+fn test_vec_iteration() {
+    let v = [1, 2, 3]
+    let out = ""
+    let first = true
+    for x in v {
+        if !first { out = out + " " }
+        first = false
+        out = out + "{x}"
+    }
+    print(out)
+}
+
+// --- Empty collection ---
+
+@test(output = "empty")
+fn test_empty_vec_iteration() {
+    let v: [int] = []
+    let count = 0
+    for x in v {
+        count = count + 1
+    }
+    if count == 0 { print("empty") }
+}
+
+// --- Enumerate ---
+
+@test(output = "0:a 1:b 2:c")
+fn test_enumerate_vec() {
+    let v = ["a", "b", "c"]
+    let out = ""
+    let first = true
+    for (i, x) in enumerate(v) {
+        if !first { out = out + " " }
+        first = false
+        out = out + "{i}:{x}"
+    }
+    print(out)
+}
+
+// --- Enumerate starts at 0 ---
+
+@test(output = "0")
+fn test_enumerate_starts_at_zero() {
+    let v = [42]
+    for (i, x) in enumerate(v) {
+        print(i)
+    }
+}
+
+// --- Break in for loop ---
+
+@test(output = "1 2")
+fn test_break_in_for() {
+    let v = [1, 2, 3, 4, 5]
+    let out = ""
+    let first = true
+    for x in v {
+        if x > 2 { break }
+        if !first { out = out + " " }
+        first = false
+        out = out + "{x}"
+    }
+    print(out)
+}
+
+// --- Continue in for loop ---
+
+@test(output = "1 3 5")
+fn test_continue_in_for() {
+    let v = [1, 2, 3, 4, 5]
+    let out = ""
+    let first = true
+    for x in v {
+        if x % 2 == 0 { continue }
+        if !first { out = out + " " }
+        first = false
+        out = out + "{x}"
+    }
+    print(out)
+}
+
+// --- Nested for loops ---
+
+@test(output = "1,a 1,b 2,a 2,b")
+fn test_nested_for() {
+    let nums = [1, 2]
+    let letters = ["a", "b"]
+    let out = ""
+    let first = true
+    for n in nums {
+        for l in letters {
+            if !first { out = out + " " }
+            first = false
+            out = out + "{n},{l}"
+        }
+    }
+    print(out)
+}
+
+// --- For loop with nullable elements ---
+
+@test(output = "1 null 3")
+fn test_for_nullable_elements() {
+    let v: [int?] = [1, null, 3]
+    let out = ""
+    let first = true
+    for x in v {
+        if !first { out = out + " " }
+        first = false
+        if x != null {
+            out = out + "{x}"
+        } else {
+            out = out + "null"
+        }
+    }
+    print(out)
+}
+
+// --- Enumerate with break ---
+
+@test(output = "0:a 1:b")
+fn test_enumerate_with_break() {
+    let v = ["a", "b", "c", "d"]
+    let out = ""
+    let first = true
+    for (i, x) in enumerate(v) {
+        if i >= 2 { break }
+        if !first { out = out + " " }
+        first = false
+        out = out + "{i}:{x}"
+    }
+    print(out)
+}
+
+// --- Range iteration ---
+
+@test(output = "0 1 2 3 4")
+fn test_range_iteration() {
+    let out = ""
+    let first = true
+    for i in 0..5 {
+        if !first { out = out + " " }
+        first = false
+        out = out + "{i}"
+    }
+    print(out)
+}
+
+// --- Range with break ---
+
+@test(output = "0 1 2")
+fn test_range_with_break() {
+    let out = ""
+    let first = true
+    for i in 0..100 {
+        if i >= 3 { break }
+        if !first { out = out + " " }
+        first = false
+        out = out + "{i}"
+    }
+    print(out)
+}
+
+// --- Struct iteration ---
+
+struct Item {
+    name: string,
+    value: int,
+}
+
+@test(output = "sword:10 shield:5")
+fn test_struct_vec_iteration() {
+    let items = [
+        Item { name: "sword", value: 10 },
+        Item { name: "shield", value: 5 },
+    ]
+    let out = ""
+    let first = true
+    for item in items {
+        if !first { out = out + " " }
+        first = false
+        out = out + "{item.name}:{item.value}"
+    }
+    print(out)
+}
+
+// --- Enumerate on struct vec ---
+
+@test(output = "0:sword 1:shield")
+fn test_enumerate_struct_vec() {
+    let items = [
+        Item { name: "sword", value: 10 },
+        Item { name: "shield", value: 5 },
+    ]
+    let out = ""
+    let first = true
+    for (i, item) in enumerate(items) {
+        if !first { out = out + " " }
+        first = false
+        out = out + "{i}:{item.name}"
+    }
+    print(out)
+}
+
+// --- Mutation during iteration (via index) ---
+
+@test(output = "2 4 6")
+fn test_mutation_via_index() {
+    let v = [1, 2, 3]
+    let i = 0
+    while i < v.len {
+        v[i] = v[i] * 2
+        i = i + 1
+    }
+    let out = ""
+    let first = true
+    for x in v {
+        if !first { out = out + " " }
+        first = false
+        out = out + "{x}"
+    }
+    print(out)
+}

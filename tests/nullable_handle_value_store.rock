@@ -1,0 +1,24 @@
+struct NullableStoreResource { id: int }
+value NullableStoreHandle { handle: Entity<NullableStoreResource> }
+
+fn nullable_store_retain(cache: Map<string, NullableStoreHandle>, value: NullableStoreHandle?) {
+    if value == null { return }
+    cache["active"] = value
+}
+
+@test
+fn narrowed_nullable_handle_value_retains_the_resource_name() {
+    let rows: Arena<NullableStoreResource> = arena_new()
+    let handle = NullableStoreHandle { handle: rows.insert(NullableStoreResource { id: 7 }) }
+    let cache: Map<string, NullableStoreHandle> = map_new()
+    nullable_store_retain(cache, handle)
+    assert_eq(cache.get("active").unwrap().handle.get().unwrap().id, 7)
+    arena_destroy(rows)
+}
+
+@test
+fn absent_nullable_handle_value_leaves_the_map_empty() {
+    let cache: Map<string, NullableStoreHandle> = map_new()
+    nullable_store_retain(cache, null)
+    assert_eq(cache.len(), 0)
+}

@@ -1,0 +1,59 @@
+// Adversarial tests: @inline — struct return values
+//
+// The motivating case. An @inline fn that returns a struct exposes
+// the struct literal to the caller's scope, where scalarization can
+// then fire if the caller doesn't escape it.
+
+struct FixVec2 {
+    x: float,
+    y: float,
+}
+
+@inline
+fn make_vec2(x: float, y: float) -> FixVec2 {
+    return FixVec2 { x: x, y: y }
+}
+
+@inline
+fn origin() -> FixVec2 {
+    return FixVec2 { x: 0.0, y: 0.0 }
+}
+
+// V0 only supports single-expression bodies; V1 will allow `let` bindings
+// so a helper like `tile_center` can keep its natural two-let form.
+@inline
+fn tile_center_inline(gx: int, gy: int) -> FixVec2 {
+    return FixVec2 {
+        x: (gx as float + 0.5) - (gy as float + 0.5),
+        y: -((gx as float + 0.5) + (gy as float + 0.5)),
+    }
+}
+
+@test(output = "3 4")
+fn test_struct_return_fields_readable() {
+    let p = make_vec2(3.0, 4.0)
+    print("{p.x as int} {p.y as int}")
+}
+
+@test(output = "0 0")
+fn test_struct_return_default() {
+    let o = origin()
+    print("{o.x as int} {o.y as int}")
+}
+
+@test(output = "1 2")
+fn test_returned_struct_used_in_math() {
+    // tile_center(1, 0) = v((1.5-0.5), -(1.5+0.5)) = v(1, -2); print abs
+    let c = tile_center_inline(1, 0)
+    let cx = c.x as int
+    let cy_abs = if c.y < 0.0 { -c.y as int } else { c.y as int }
+    print("{cx} {cy_abs}")
+}
+
+@test(output = "4 6")
+fn test_chained_returned_structs() {
+    let a = make_vec2(1.0, 2.0)
+    let b = make_vec2(3.0, 4.0)
+    let s = FixVec2 { x: a.x + b.x, y: a.y + b.y }
+    print("{s.x as int} {s.y as int}")
+}

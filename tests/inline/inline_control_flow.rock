@@ -1,0 +1,57 @@
+// Adversarial tests: @inline — inside control flow
+//
+// An @inline fn called inside for / while / match / if must produce
+// results identical to calling it out-of-line. Inlining the body into
+// a loop iteration must preserve loop semantics.
+
+@inline
+fn add_ten(x: int) -> int {
+    return x + 10
+}
+
+@inline
+fn is_positive(x: int) -> bool {
+    return x > 0
+}
+
+@test(output = "10 11 12 13 14")
+fn test_inline_in_for_loop() {
+    let out = ""
+    for i in 0..5 {
+        if out != "" { out += " " }
+        out += "{add_ten(i)}"
+    }
+    print(out)
+}
+
+@test(output = "pos pos neg zero pos")
+fn test_inline_in_match_condition() {
+    let xs = [1, 2, -3, 0, 7]
+    let out = ""
+    for x in xs {
+        if out != "" { out += " " }
+        if is_positive(x) {
+            out += "pos"
+        } else if x == 0 {
+            out += "zero"
+        } else {
+            out += "neg"
+        }
+    }
+    print(out)
+}
+
+@inline
+fn contrib(i: int) -> int {
+    return i * i
+}
+
+@test(output = "30")
+fn test_inline_accumulator() {
+    let total = 0
+    for i in 1..5 {
+        total += contrib(i)
+    }
+    // 1 + 4 + 9 + 16 = 30
+    print(total)
+}

@@ -1,0 +1,118 @@
+// Iterator terminal ops: collect/reduce/find/any/all over `I: Iterator<T>`.
+// Complements tests/iterator_combinators.rock (the intermediate ops); together
+// they cover the full lazy-iterator replacement for the deleted eager
+// vec/Arena functional methods.
+
+// A user iterator to prove terminals aren't Vec-only.
+struct Countup {
+    to: int,
+}
+
+struct CountupIter {
+    cur: int,
+    to: int,
+}
+
+fn iter(c: Countup) -> CountupIter {
+    return CountupIter { cur: 0, to: c.to }
+}
+
+fn next(it: CountupIter) -> (bool, int) {
+    if it.cur >= it.to { return (false, 0) }
+    let v = it.cur
+    it.cur = it.cur + 1
+    return (true, v)
+}
+
+@test
+fn collect_map_filter_chain() {
+    let v = [1, 2, 3, 4, 5, 6]
+    let r = v.iter().filter(x => x % 2 == 0).map(x => x * 10).collect()
+    assert_eq(r.len, 3)
+    assert_eq(r[0], 20)
+    assert_eq(r[1], 40)
+    assert_eq(r[2], 60)
+}
+
+@test
+fn collect_empty_chain() {
+    let v = [1, 2, 3]
+    let r = v.iter().filter(x => x > 100).collect()
+    assert_eq(r.len, 0)
+}
+
+@test
+fn reduce_over_chain() {
+    let v = [1, 2, 3, 4]
+    let sum = v.iter().map(x => x * 2).reduce(0, (acc, x) => acc + x)
+    assert_eq(sum, 20)
+    let concat = ["a", "b", "c"].iter().reduce("", (acc, s) => acc + s)
+    assert_eq(concat, "abc")
+}
+
+@test
+fn find_hit_and_miss() {
+    let v = [1, 2, 3, 4]
+    let hit = v.iter().find(x => x > 2)
+    assert(hit != null)
+    if hit != null { assert_eq(hit, 3) }
+    let miss = v.iter().find(x => x > 100)
+    assert(miss == null)
+}
+
+@test
+fn find_tuple_element_result() {
+    let ps = [(1, "a"), (2, "b"), (3, "c")]
+    let r = ps.iter().find(p => p.0 == 2)
+    assert(r != null)
+    if r != null {
+        assert_eq(r.1, "b")
+    }
+}
+
+@test
+fn any_all_semantics() {
+    let v = [2, 4, 6]
+    assert(v.iter().any(x => x > 5))
+    assert(!v.iter().any(x => x > 6))
+    assert(v.iter().all(x => x % 2 == 0))
+    assert(!v.iter().all(x => x > 2))
+}
+
+@test
+fn any_all_empty_iterator() {
+    let v: [int] = []
+    assert(!v.iter().any(x => true))
+    assert(v.iter().all(x => false))
+}
+
+@test
+fn any_short_circuits() {
+    let v = [1, 2, 3, 4]
+    let calls = 0
+    let hit = v.iter().any(x => {
+        calls += 1
+        return x == 2
+    })
+    assert(hit)
+    assert_eq(calls, 2)
+}
+
+@test
+fn terminals_on_user_iterator() {
+    let c = Countup { to: 5 }
+    let sum = c.iter().reduce(0, (acc, x) => acc + x)
+    assert_eq(sum, 10)
+    assert(c.iter().any(x => x == 4))
+    assert(c.iter().all(x => x < 5))
+    let evens = c.iter().filter(x => x % 2 == 0).collect()
+    assert_eq(evens.len, 3)
+}
+
+@test
+fn collect_after_take_while() {
+    let v = [1, 2, 3, 10, 4]
+    let r = v.iter().take_while(x => x < 5).collect()
+    assert_eq(r.len, 3)
+    assert_eq(r[2], 3)
+}

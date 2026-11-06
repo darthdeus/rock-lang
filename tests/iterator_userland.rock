@@ -1,0 +1,115 @@
+// Slice 3 RED: a user-defined iterator driven by a real `for` loop.
+// Today `for x in <user type>` errors "type is not iterable" (for_elem_ty
+// fallthrough). Target desugar:
+//   for pat in coll { body }
+//   => let it = iter(coll); loop { let (ok, pat) = next(it); if !ok break; body }
+// So `coll` is a CONTAINER with `iter(coll) -> It` and `next(It) -> (bool, E)`;
+// the iterator type is distinct from the container (no slice-5 identity needed).
+// Keep this file until slice 3 lands; it is the acceptance gate.
+
+struct IntRange {
+    lo: int,
+    hi: int,
+}
+
+struct IntRangeIter {
+    cur: int,
+    hi: int,
+}
+
+fn iter(r: IntRange) -> IntRangeIter {
+    return IntRangeIter { cur: r.lo, hi: r.hi }
+}
+
+fn next(it: IntRangeIter) -> (bool, int) {
+    if it.cur >= it.hi {
+        return (false, 0)
+    }
+    let v = it.cur
+    it.cur = it.cur + 1
+    return (true, v)
+}
+
+@test
+fn for_over_user_iter_sums() {
+    let total = 0
+    for x in (IntRange { lo: 1, hi: 4 }) {
+        total += x
+    }
+    assert_eq(total, 6) // 1 + 2 + 3
+}
+
+@test
+fn for_over_user_iter_empty() {
+    let count = 0
+    for x in (IntRange { lo: 5, hi: 5 }) {
+        count += 1
+    }
+    assert_eq(count, 0)
+}
+
+@test
+fn for_over_user_iter_break() {
+    let seen = 0
+    for x in (IntRange { lo: 0, hi: 100 }) {
+        if x == 3 { break }
+        seen += 1
+    }
+    assert_eq(seen, 3) // 0, 1, 2
+}
+
+@test
+fn for_over_user_iter_continue() {
+    let sum = 0
+    for x in (IntRange { lo: 0, hi: 5 }) {
+        if x == 2 { continue }
+        sum += x
+    }
+    assert_eq(sum, 8) // 0 + 1 + 3 + 4
+}
+
+@test
+fn for_over_user_iter_nested() {
+    let pairs = 0
+    for a in (IntRange { lo: 0, hi: 2 }) {
+        for b in (IntRange { lo: 0, hi: 3 }) {
+            pairs += 1
+        }
+    }
+    assert_eq(pairs, 6)
+}
+
+// Tuple-element iterator: next -> (bool, A, B) flattens into `for (a, b) in ...`.
+struct PairSeq {
+    n: int,
+}
+
+struct PairSeqIter {
+    i: int,
+    n: int,
+}
+
+fn iter(p: PairSeq) -> PairSeqIter {
+    return PairSeqIter { i: 0, n: p.n }
+}
+
+fn next(it: PairSeqIter) -> (bool, int, int) {
+    if it.i >= it.n {
+        return (false, 0, 0)
+    }
+    let i = it.i
+    it.i = it.i + 1
+    return (true, i, i * i)
+}
+
+@test
+fn for_over_tuple_element_iter() {
+    let sum_i = 0
+    let sum_sq = 0
+    for (i, sq) in (PairSeq { n: 4 }) {
+        sum_i += i
+        sum_sq += sq
+    }
+    assert_eq(sum_i, 6)   // 0+1+2+3
+    assert_eq(sum_sq, 14) // 0+1+4+9
+}

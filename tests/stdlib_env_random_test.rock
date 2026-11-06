@@ -1,0 +1,197 @@
+// Tests for random_seed, parse_int, parse_float, and env_var stdlib functions.
+
+@test(output = "true")
+fn test_random_seed_deterministic() {
+    random_seed(42)
+    let a = random_int(0, 1000)
+    random_seed(42)
+    let b = random_int(0, 1000)
+    print(a == b)
+}
+
+@test(output = "true")
+fn test_random_seed_changes_sequence() {
+    random_seed(1)
+    let a = random_int(0, 1000000)
+    random_seed(2)
+    let b = random_int(0, 1000000)
+    print(a != b)
+}
+
+// Determinism pin: re-seeding reproduces the exact same draw sequence. The
+// stream is backend-specific by doctrine (Lua numeric 32-bit transition, JS
+// mulberry32; bit-parity is a non-goal), so this shared suite checks the
+// seedable/deterministic semantic rather than a cross-backend vector.
+@test(output = "true")
+fn test_random_int_reseed_reproduces_sequence() {
+    random_seed(42)
+    let a: [string] = []
+    for _ in 0..5 { a.push(to_string(random_int(0, 6))) }
+    random_seed(42)
+    let b: [string] = []
+    for _ in 0..5 { b.push(to_string(random_int(0, 6))) }
+    print(join(a, ",") == join(b, ","))
+}
+
+// Large-range bounds: `random_int` is [min, max) exclusive. A range wider than
+// 2^32 exercises the two-draw 53-bit compose path; every draw must stay in
+// bounds (a single 32-bit draw would silently under-cover the high end).
+@test(output = "true")
+fn test_random_int_large_range_bounds() {
+    random_seed(7)
+    let ok = true
+    let high = 0
+    for _ in 0..2000 {
+        let v = random_int(0, 9000000000)
+        if v < 0 || v >= 9000000000 { ok = false }
+        if v > high { high = v }
+    }
+    print(ok && high > 4294967296)
+}
+
+@test(output = "true")
+fn test_random_stays_below_one() {
+    random_seed(1729)
+    let ok = true
+    for _ in 0..10000 {
+        let v = random()
+        if v < 0.0 || v >= 1.0 { ok = false }
+    }
+    print(ok)
+}
+
+@test(output = "true")
+fn test_random_range_bounds() {
+    random_seed(31415)
+    let ok = true
+    for _ in 0..10000 {
+        let v = random_range(-3.5, 8.25)
+        if v < -3.5 || v >= 8.25 { ok = false }
+    }
+    print(ok)
+}
+
+@test(output = "true")
+fn test_random_int_small_range_consumes_one_word() {
+    random_seed(123)
+    let _ = random_int(0, 17)
+    let after_small = random()
+    random_seed(123)
+    let _ = random()
+    let expected = random()
+    print(after_small == expected)
+}
+
+@test(output = "true")
+fn test_random_int_large_range_consumes_two_words() {
+    random_seed(123)
+    let _ = random_int(0, 9000000000)
+    let after_large = random()
+    random_seed(123)
+    let _ = random()
+    let _ = random()
+    let expected = random()
+    print(after_large == expected)
+}
+
+@test(output = "true")
+fn test_random_zero_seed_differs_from_one() {
+    random_seed(0)
+    let zero = random()
+    random_seed(1)
+    let one = random()
+    print(zero != one)
+}
+
+@test(output = "true")
+fn test_random_int_small_buckets_are_reachable() {
+    random_seed(2718)
+    let seen0 = false
+    let seen1 = false
+    let seen2 = false
+    let seen3 = false
+    let seen4 = false
+    let seen5 = false
+    let seen6 = false
+    let seen7 = false
+    for _ in 0..10000 {
+        match random_int(0, 8) {
+            0 => seen0 = true,
+            1 => seen1 = true,
+            2 => seen2 = true,
+            3 => seen3 = true,
+            4 => seen4 = true,
+            5 => seen5 = true,
+            6 => seen6 = true,
+            7 => seen7 = true,
+            _ => {}
+        }
+    }
+    print(seen0 && seen1 && seen2 && seen3 && seen4 && seen5 && seen6 && seen7)
+}
+
+// random() draws from the SAME numeric stream as random_int (unified
+// for replay determinism). So a random() call
+// between two seeds advances the stream and shifts the next random_int.
+// (A separate random() stream would leave the integer stream untouched,
+// so this printed "false".)
+@test(output = "true")
+fn test_random_shares_single_stream() {
+    random_seed(42)
+    let a = random_int(0, 1000000)
+    random_seed(42)
+    let _consume = random()
+    let b = random_int(0, 1000000)
+    print(a != b)
+}
+
+@test(output = "42")
+fn test_parse_int_valid() {
+    let result = "42".parse_int()
+    if result != null {
+        print(result)
+    }
+}
+
+@test(output = "true")
+fn test_parse_int_invalid() {
+    let result = "not_a_number".parse_int()
+    print(result == null)
+}
+
+@test(output = "true")
+fn test_parse_int_empty() {
+    let result = "".parse_int()
+    print(result == null)
+}
+
+@test(output = "1.5")
+fn test_parse_float_valid() {
+    let result = "1.5".parse_float()
+    if result != null {
+        print(result)
+    }
+}
+
+@test(output = "true")
+fn test_parse_float_invalid() {
+    let result = "abc".parse_float()
+    print(result == null)
+}
+
+@test(output = "true")
+fn test_env_var_missing() {
+    let result = env_var("ROCK_NONEXISTENT_VAR_XYZ_12345")
+    print(result == null)
+}
+
+@test(output = "true")
+fn test_env_var_rock_test_seed() {
+    // ROCK_TEST_SEED is set by the test runner when seeding is enabled.
+    // We just verify the function type-checks and returns a nullable string.
+    let result = env_var("ROCK_TEST_SEED")
+    // May be null or a string depending on environment -- both are valid string?.
+    // The `||` RHS narrows `result` to non-null (it runs only when the left is
+    // false), so `result.len()` type-checks without a separate guard.
+    print(result == null || result.len() >= 0)
+}

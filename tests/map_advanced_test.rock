@@ -1,0 +1,141 @@
+// Tests for advanced Map operations: get_or_insert, update, upsert
+
+newtype UserId(int)
+
+@test
+fn test_map_get_or_insert() {
+    let m: Map<string, int> = map_new()
+
+    // First call inserts the default value
+    let value1 = get_or_insert(m, "counter", 100)
+    assert_eq(value1, 100)
+    assert_eq(m.len(), 1)
+
+    // Second call returns existing value, doesn't insert
+    let value2 = get_or_insert(m, "counter", 200)
+    assert_eq(value2, 100) // Should still be 100, not 200
+    assert_eq(m.len(), 1)
+
+    // Different key inserts new default
+    let value3 = get_or_insert(m, "another", 300)
+    assert_eq(value3, 300)
+    assert_eq(m.len(), 2)
+}
+
+@test
+fn test_map_update() {
+    let m: Map<string, int> = map_new()
+
+    // Update non-existent key returns null and doesn't insert
+    let old1 = update(m, "key", 100)
+    assert_null(old1)
+    assert_eq(m.len(), 0)
+
+    // Insert a value
+    insert(m, "key", 50)
+    assert_eq(m.len(), 1)
+
+    // Update existing key returns old value and updates
+    let old2 = update(m, "key", 100)
+    assert_not_null(old2)
+    assert_eq(old2.unwrap(), 50)
+    assert_eq(get(m, "key").unwrap(), 100)
+    assert_eq(m.len(), 1)
+}
+
+@test
+fn test_map_upsert() {
+    let m: Map<string, int> = map_new()
+
+    // Upsert non-existent key returns null and inserts
+    let old1 = upsert(m, "counter", 1)
+    assert_null(old1)
+    assert_eq(get(m, "counter").unwrap(), 1)
+    assert_eq(m.len(), 1)
+
+    // Upsert existing key returns old value and updates
+    let old2 = upsert(m, "counter", 2)
+    assert_not_null(old2)
+    assert_eq(old2.unwrap(), 1)
+    assert_eq(get(m, "counter").unwrap(), 2)
+    assert_eq(m.len(), 1)
+
+    // Upsert another key
+    let old3 = upsert(m, "total", 10)
+    assert_null(old3)
+    assert_eq(m.len(), 2)
+}
+
+@test
+fn test_map_operations_with_newtype_keys() {
+    let m: Map<UserId, string> = map_new()
+    let user1 = UserId(100)
+    let user2 = UserId(200)
+
+    // Test get_or_insert with newtype
+    let name1 = get_or_insert(m, user1, "DefaultUser")
+    assert_eq(name1, "DefaultUser")
+
+    // Test update with newtype
+    let old_name = update(m, user1, "UpdatedUser")
+    assert_not_null(old_name)
+    assert_eq(old_name.unwrap(), "DefaultUser")
+
+    // Test upsert with newtype
+    let old_name2 = upsert(m, user2, "NewUser")
+    assert_null(old_name2)
+    assert_eq(get(m, user2).unwrap(), "NewUser")
+
+    assert_eq(m.len(), 2)
+}
+
+@test
+fn test_map_is_empty_boxed() {
+    let m: Map<string, int> = map_new()
+    assert(m.is_empty(), "a fresh map is empty")
+    m["a"] = 1
+    assert(!m.is_empty(), "a map with one entry is not empty")
+    m["b"] = 2
+    assert(!m.is_empty(), "a map with two entries is not empty")
+    assert(m.is_empty() == (m.len() == 0), "is_empty agrees with len on a nonempty map")
+    m.remove("a")
+    m.remove("b")
+    assert(m.is_empty(), "a drained map is empty again")
+    assert(m.is_empty() == (m.len() == 0), "is_empty agrees with len on a drained map")
+}
+
+value IsEmptySlot { a: int, b: int }
+
+@test
+fn test_map_is_empty_column() {
+    let m: Map<string, IsEmptySlot> = map_new()
+    assert(m.is_empty(), "a fresh column map is empty")
+    m["a"] = IsEmptySlot { a: 1, b: 2 }
+    assert(!m.is_empty(), "a column map with one entry is not empty")
+    m["b"] = IsEmptySlot { a: 3, b: 4 }
+    assert(!m.is_empty(), "a column map with two entries is not empty")
+    assert(m.is_empty() == (m.len() == 0), "is_empty agrees with len on a nonempty column map")
+    m.remove("a")
+    m.remove("b")
+    assert(m.is_empty(), "a drained column map is empty again")
+    assert(m.is_empty() == (m.len() == 0), "is_empty agrees with len on a drained column map")
+}
+
+@test
+fn test_map_operations_with_nullable_values() {
+    // For simplicity, test with Option<int> style operations
+    let m: Map<string, int> = map_new()
+
+    // Test that get_or_insert works with different default values
+    let value1 = get_or_insert(m, "counter", 0)
+    assert_eq(value1, 0)
+
+    // Increment using update
+    update(m, "counter", 1)
+    assert_eq(get(m, "counter").unwrap(), 1)
+
+    // Test upsert overwrites
+    let old = upsert(m, "counter", 5)
+    assert_eq(old.unwrap(), 1)
+    assert_eq(get(m, "counter").unwrap(), 5)
+}

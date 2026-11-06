@@ -1,0 +1,121 @@
+enum Color {
+    Red,
+    Green,
+    Blue,
+}
+
+enum Status {
+    Pending,
+    Success,
+    Failed,
+}
+
+@test
+fn test_enum_creation() {
+    let red = Color::Red
+    let green = Color::Green
+    let blue = Color::Blue
+    
+    assert_not_null(red)
+    assert_not_null(green)
+    assert_not_null(blue)
+}
+
+@test
+fn test_enum_equality() {
+    let red1 = Color::Red
+    let red2 = Color::Red
+    let green = Color::Green
+    
+    assert_eq(red1, red2)
+    assert_eq(red1, Color::Red)
+    assert_ne(red1, green)
+    assert_ne(red1, Color::Green)
+}
+
+@test
+fn test_enum_in_arrays() {
+    let colors = [Color::Red, Color::Green, Color::Blue]
+    
+    assert_eq(vec_len(colors), 3)
+    assert_eq(vec_get(colors, 0).unwrap(), Color::Red)
+    assert_eq(vec_get(colors, 1).unwrap(), Color::Green)
+    assert_eq(vec_get(colors, 2).unwrap(), Color::Blue)
+}
+
+@test
+fn test_enum_assignment() {
+    let color = Color::Red
+    assert_eq(color, Color::Red)
+    
+    color = Color::Green
+    assert_eq(color, Color::Green)
+    assert_ne(color, Color::Red)
+}
+
+@test
+fn test_match_expressions() {
+    let color = Color::Red
+    let result = match color {
+        Red => "red",
+        Green => "green", 
+        Blue => "blue",
+    }
+    
+    assert_eq(result, "red")
+}
+
+@test
+fn test_match_with_different_variants() {
+    let status = Status::Success
+    let message = match status {
+        Pending => "waiting",
+        Success => "done",
+        Failed => "error",
+    }
+    
+    assert_eq(message, "done")
+}
+
+@test(output="Red\nGreen\nBlue")
+fn test_enum_print_output() {
+    let red = Color::Red
+    let green = Color::Green  
+    let blue = Color::Blue
+    
+    match red {
+        Red => print("Red"),
+        Green => print("Green"),
+        Blue => print("Blue"),
+    }
+    
+    match green {
+        Red => print("Red"),
+        Green => print("Green"),
+        Blue => print("Blue"),
+    }
+    
+    match blue {
+        Red => print("Red"),
+        Green => print("Green"),
+        Blue => print("Blue"),
+    }
+}
+
+@test(output="It's red!\nStatus: done")
+fn test_complex_enum_scenario() {
+    let color = Color::Red
+    let status = Status::Success
+    
+    if color == Color::Red {
+        print("It's red!")
+    }
+    
+    let message = match status {
+        Pending => "waiting",
+        Success => "done", 
+        Failed => "error",
+    }
+    
+    print("Status: {message}")
+}

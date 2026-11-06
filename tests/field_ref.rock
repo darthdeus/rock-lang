@@ -1,0 +1,126 @@
+// Runtime coverage for FieldRef<T, V> and `.field` key paths: a resolved field
+// lowers to its interned name, so `o[name]` and `o.field` behave the same.
+
+struct Mob { health: int, attack_co: int? }
+value FixVec2 { x: float, y: float }
+
+@test(output = "10")
+fn test_field_get_read() {
+    let m = Mob { health: 10, attack_co: null }
+    print("{field_get(m, .health)}")
+}
+
+@test(output = "99")
+fn test_field_set_write() {
+    let m = Mob { health: 10, attack_co: null }
+    field_set(m, .health, 99)
+    print("{field_get(m, .health)}")
+}
+
+@test(output = "cleared")
+fn test_field_set_clear_nullable() {
+    let m = Mob { health: 1, attack_co: 5 }
+    field_set(m, .attack_co, null)
+    if field_get(m, .attack_co) == null {
+        print("cleared")
+    } else {
+        print("still set")
+    }
+}
+
+// value struct (C-layout cdata): string-keyed field read works on cdata.
+@test(output = "3.5 7")
+fn test_field_get_value_struct() {
+    let v = FixVec2 { x: 3.5, y: 7.0 }
+    print("{field_get(v, .x)} {field_get(v, .y)}")
+}
+
+// A `.field` arg must not break a call to an OVERLOADED name: arity alone
+// resolves the FieldRef-taking candidate; the field ref is checked against the
+// winner's param post-selection.
+fn probe<T>(o: T, f: FieldRef<T, int?>) -> int {
+    let v = field_get(o, f)
+    return v ?? -1
+}
+
+fn probe(x: int) -> int {
+    return x
+}
+
+@test(output = "5")
+fn test_field_ref_arg_with_overload_set() {
+    let m = Mob { health: 10, attack_co: 5 }
+    print("{probe(m, .attack_co)}")
+}
+
+@test(output = "5")
+fn test_field_ref_arg_ufcs_with_overload_set() {
+    let m = Mob { health: 10, attack_co: 5 }
+    print("{m.probe(.attack_co)}")
+}
+
+@test(output = "5")
+fn test_field_ref_arg_named_with_overload_set() {
+    let m = Mob { health: 10, attack_co: 5 }
+    let r = probe(m, f: .attack_co)
+    print("{r}")
+}
+
+// A `FieldRef<T, V>` arg must coerce to a `ReadFieldRef<T, V>` param even when the
+// callee name carries more than one overload -- the multi-candidate path scores
+// through `fit_cost`, which must know the coercion, not just the single-
+// candidate bypass. Regression: a second `field_get` decl (a backend sibling
+// counted as a candidate) turned every `field_get(o, f: FieldRef<..>)` in
+// stone's coroutines into "No overload".
+fn field_get(a: int, b: int) -> int {
+    return a + b
+}
+
+fn read_through<T>(o: T, f: FieldRef<T, int?>) -> int {
+    return field_get(o, f) ?? -1
+}
+
+@test(output = "5")
+fn test_fieldref_coerces_to_readfieldref_with_overload_set() {
+    let m = Mob { health: 10, attack_co: 5 }
+    print("{read_through(m, .attack_co)}")
+}
+
+// `WriteFieldRef<T, V>`: the write-only selector. A `.field` literal resolves
+// against it directly, and a `FieldRef` coerces DOWN to it -- which is what
+// keeps a slot-verb call site unchanged when its param relaxes.
+fn write_through<T>(o: T, f: WriteFieldRef<T, int?>, v: int?) {
+    field_set(o, f, v)
+}
+
+@test(output = "7")
+fn test_write_field_ref_literal() {
+    let m = Mob { health: 1, attack_co: null }
+    write_through(m, .attack_co, 7)
+    print("{field_get(m, .attack_co)}")
+}
+
+@test(output = "cleared")
+fn test_write_field_ref_coerced_from_field_ref() {
+    let m = Mob { health: 1, attack_co: 5 }
+    let f: FieldRef<Mob, int?> = .attack_co
+    write_through(m, f, null)
+    if field_get(m, .attack_co) == null {
+        print("cleared")
+    } else {
+        print("still set")
+    }
+}
+
+// Same name, two decls: the write-only param must also score through
+// `fit_cost` on the multi-candidate path, not only the single-candidate bypass.
+fn write_through(x: int) -> int {
+    return x
+}
+
+@test(output = "3")
+fn test_write_field_ref_with_overload_set() {
+    let m = Mob { health: 1, attack_co: null }
+    write_through(m, .attack_co, 3)
+    print("{field_get(m, .attack_co)}")
+}

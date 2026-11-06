@@ -1,0 +1,93 @@
+//! Error: A `value`-struct type used as a `Map` key must be rejected.
+//!        Value structs are C-layout cdata; as Lua table keys they hash by
+//!        pointer identity, so a runtime-built key silently misses an entry
+//!        stored under an equal-by-value but distinct instance (verified:
+//!        store mk(1,2), read a fresh mk(1,2) -> nil). int/string/bool/float/
+//!        newtype keys are Lua value-keyed and stay allowed. Reject until
+//!        structural/byte-value hashing lands; workaround is a string key.
+//! Tags: map, value-struct, keys
+
+//=== TEST CASE: value_struct_map_key_annotation_Generic ===
+value IVec2 { x: int, y: int }
+
+fn main() {
+    let m: Map<IVec2, int> = map_new()
+    m[IVec2 { x: 1, y: 2 }] = 3
+    print("{m.len()}")
+}
+
+//=== TEST CASE: entity_map_key_Generic ===
+struct Tag { v: int }
+
+fn main() {
+    let a: Arena<Tag> = arena_new()
+    let m: Map<Entity<Tag>, int> = map_new()
+    m[a.insert(Tag { v: 1 })] = 3
+    print("{m.len()}")
+}
+
+//=== TEST CASE: value_struct_map_key_inferred_Generic ===
+value Coord { q: int, r: int }
+
+fn make() -> Coord { return Coord { q: 1, r: 2 } }
+
+fn main() {
+    let m = map_new()
+    let k = make()
+    m[k] = 7
+    print("{m.get(k)}")
+}
+
+//=== TEST CASE: tuple_map_key_Generic ===
+fn main() {
+    let m: Map<(int, int), string> = map_new()
+    m.insert((1, 2), "a")
+    print("{m.get((1, 2)) ?? "MISS"}")
+}
+
+//=== TEST CASE: array_map_key_Generic ===
+fn main() {
+    let m: Map<[int], string> = map_new()
+    m.insert([1, 2], "a")
+    print("{m.get([1, 2]) ?? "MISS"}")
+}
+
+//=== TEST CASE: boxed_struct_map_key_Generic ===
+struct Boxed { a: int }
+
+fn main() {
+    let m: Map<Boxed, string> = map_new()
+    m.insert(Boxed { a: 1 }, "x")
+    print("{m.get(Boxed { a: 1 }) ?? "MISS"}")
+}
+
+//=== TEST CASE: payload_enum_map_key_Generic ===
+enum Ev { Tick(int), Idle }
+
+fn main() {
+    let m: Map<Ev, string> = map_new()
+    m.insert(Ev::Tick(1), "x")
+    print("{m.get(Ev::Tick(1)) ?? "MISS"}")
+}
+
+//=== TEST CASE: newtype_over_value_struct_map_key_Generic ===
+// The escape hatch the old diagnostic recommended: a `newtype` wrapping a
+// `value` struct is still cdata, so the wrapper reintroduces the defect the
+// rejection exists to stop.
+value VKey { a: int }
+newtype WrapValue(VKey)
+
+fn main() {
+    let m: Map<WrapValue, string> = map_new()
+    m.insert(WrapValue(VKey { a: 1 }), "x")
+    print("{m.len()}")
+}
+
+//=== TEST CASE: newtype_over_tuple_map_key_Generic ===
+newtype WrapTuple((int, int))
+
+fn main() {
+    let m: Map<WrapTuple, string> = map_new()
+    m.insert(WrapTuple((1, 2)), "x")
+    print("{m.len()}")
+}

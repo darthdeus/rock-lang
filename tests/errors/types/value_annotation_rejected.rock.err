@@ -1,0 +1,16 @@
+//! Error: `@value struct Foo { ... }` is rejected at parse time
+//! Tags: parser, value, structs
+
+//=== TEST CASE: value_annotation_on_struct_Generic ===
+// `@value struct` was an alias for the canonical `value Foo { ... }`
+// keyword form. The two spellings drifted: the annotation form set
+// `is_value` without `is_c_repr`, so codegen scalarized callers but
+// never emitted the `Foo_ct(...)` ctor. Mirrors the earlier retirement
+// of `struct(C)` syntax — only one canonical declaration form.
+@value
+struct Vr {
+    x: float,
+    y: float,
+}
+
+fn main() {}

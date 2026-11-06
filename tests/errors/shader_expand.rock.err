@@ -1,0 +1,111 @@
+//! Error: `rock_shader(vert, frag)` is
+//!        compiler-expanded to a pipeline key const at emit. Each arg must
+//!        be a DIRECT reference to a top-level `@shader` fn of the right stage
+//!        (arg0 vertex, arg1 fragment). The expander rejects, with a spanned
+//!        error, a non-reference arg (literal/local/lambda), a non-`@shader` fn,
+//!        and a stage mismatch (swapped vertex/fragment).
+//! Tags: shader_expand, rock_shader, emit-time
+
+//=== TEST CASE: arg_not_a_fn_reference_Generic ===
+value AV { p: Vec2 }
+value UV { m: Mat4 }
+value Vary { position: Vec4 }
+
+@shader(vertex)
+fn vtx(@attr a: AV, @uniform u: UV) -> Vary {
+    return Vary { position: u.m * Vec4 { x: a.p.x, y: a.p.y, z: 0.0, w: 1.0 } }
+}
+
+@shader(fragment)
+fn frg(vary: Vary) -> Vec4 { return Vec4 { x: 1.0, y: 0.0, z: 1.0, w: 1.0 } }
+
+fn main() {
+    let _ = rock_shader(3, frg)
+}
+
+//=== TEST CASE: arg_is_a_local_not_direct_reference_Generic ===
+value AV { p: Vec2 }
+value UV { m: Mat4 }
+value Vary { position: Vec4 }
+
+@shader(vertex)
+fn vtx(@attr a: AV, @uniform u: UV) -> Vary {
+    return Vary { position: u.m * Vec4 { x: a.p.x, y: a.p.y, z: 0.0, w: 1.0 } }
+}
+
+@shader(fragment)
+fn frg(vary: Vary) -> Vec4 { return Vec4 { x: 1.0, y: 0.0, z: 1.0, w: 1.0 } }
+
+fn main() {
+    let f = vtx
+    let _ = rock_shader(f, frg)
+}
+
+//=== TEST CASE: arg_is_not_a_shader_fn_Generic ===
+value AV { p: Vec2 }
+value UV { m: Mat4 }
+value Vary { position: Vec4 }
+
+fn plain() -> int { return 0 }
+
+@shader(fragment)
+fn frg(vary: Vary) -> Vec4 { return Vec4 { x: 1.0, y: 0.0, z: 1.0, w: 1.0 } }
+
+fn main() {
+    let _ = rock_shader(plain, frg)
+}
+
+//=== TEST CASE: swapped_vertex_and_fragment_Generic ===
+value AV { p: Vec2 }
+value UV { m: Mat4 }
+value Vary { position: Vec4 }
+
+@shader(vertex)
+fn vtx(@attr a: AV, @uniform u: UV) -> Vary {
+    return Vary { position: u.m * Vec4 { x: a.p.x, y: a.p.y, z: 0.0, w: 1.0 } }
+}
+
+@shader(fragment)
+fn frg(vary: Vary) -> Vec4 { return Vec4 { x: 1.0, y: 0.0, z: 1.0, w: 1.0 } }
+
+fn main() {
+    let _ = rock_shader(frg, vtx)
+}
+
+//=== TEST CASE: single_arg_vertex_fn_where_fragment_expected_Generic ===
+value AV { p: Vec2 }
+value UV { m: Mat4 }
+value Vary { position: Vec4 }
+
+@shader(vertex)
+fn vtx(@attr a: AV, @uniform u: UV) -> Vary {
+    return Vary { position: u.m * Vec4 { x: a.p.x, y: a.p.y, z: 0.0, w: 1.0 } }
+}
+
+fn main() {
+    let _ = rock_shader(vtx)
+}
+
+//=== TEST CASE: single_arg_not_a_shader_fn_Generic ===
+fn plain() -> int { return 0 }
+
+fn main() {
+    let _ = rock_shader(plain)
+}
+
+//=== TEST CASE: three_args_rejected_Generic ===
+value AV { p: Vec2 }
+value UV { m: Mat4 }
+value Vary { position: Vec4 }
+
+@shader(vertex)
+fn vtx(@attr a: AV, @uniform u: UV) -> Vary {
+    return Vary { position: u.m * Vec4 { x: a.p.x, y: a.p.y, z: 0.0, w: 1.0 } }
+}
+
+@shader(fragment)
+fn frg(vary: Vary) -> Vec4 { return Vec4 { x: 1.0, y: 0.0, z: 1.0, w: 1.0 } }
+
+fn main() {
+    let _ = rock_shader(vtx, frg, frg)
+}

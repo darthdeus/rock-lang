@@ -1,0 +1,31 @@
+// Bucket B coverage: value-position `if` whose result type is a non-flat
+// value struct (nested value `Seg { a: V2, b: V2 }`). The result is a
+// single cdata at runtime, not scalarized fields. Exercises the
+// cdata-ABI path; the "non-flat (lowerer-bug guard)" rejects in
+// `lower_value_if` (lower.rs:4149) are unreachable because the caller
+// chain only reaches `lower_value_*` for flat value structs.
+//
+
+value V2 {
+    x: float,
+    y: float,
+}
+
+value Seg {
+    a: V2,
+    b: V2,
+}
+
+@test(output = "1\n2\n3\n4")
+fn test_value_if_nested() {
+    let cond = true
+    let s: Seg = if cond {
+        Seg { a: V2 { x: 1, y: 2 }, b: V2 { x: 3, y: 4 } }
+    } else {
+        Seg { a: V2 { x: 0, y: 0 }, b: V2 { x: 0, y: 0 } }
+    }
+    print("{s.a.x.floor()}")
+    print("{s.a.y.floor()}")
+    print("{s.b.x.floor()}")
+    print("{s.b.y.floor()}")
+}

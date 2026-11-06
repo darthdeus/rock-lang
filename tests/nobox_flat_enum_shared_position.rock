@@ -1,0 +1,140 @@
+// Two `nobox` payloads of DIFFERENT shapes at the same flat-enum payload
+// position. `flat_enum_shape` agreed one layout per position, so a second
+// shape set `conflict[i]`, the position fell back to `Opaque`, and BOTH arms
+// rejected at the ctor -- marking one type took its unrelated sibling down.
+//
+// Live case: `enum UniformValue` holds `V2(Vec2)` and `V4(Vec4)` at position 0,
+// which is the whole cost of marking `Vec4`.
+
+nobox value P2 { x: float, y: float }
+nobox value P4 { x: float, y: float, z: float, w: float }
+
+enum Slot {
+    Two(P2),
+    Four(P4),
+    Count(int),
+    None,
+}
+
+fn render(s: Slot) -> string {
+    match s {
+        Slot::Two(p) => return "two({p.x},{p.y})",
+        Slot::Four(p) => return "four({p.x},{p.y},{p.z},{p.w})",
+        Slot::Count(n) => return "count({n})",
+        Slot::None => return "none",
+    }
+}
+
+@test(output = "two(1,2)")
+fn narrow_payload_at_a_widened_position() {
+    print("{render(Slot::Two(P2 { x: 1, y: 2 }))}")
+}
+
+@test(output = "four(1,2,3,4)")
+fn wide_payload_at_a_widened_position() {
+    print("{render(Slot::Four(P4 { x: 1, y: 2, z: 3, w: 4 }))}")
+}
+
+// The sibling with an ORDINARY payload at the same position must still find it
+// in the first slot -- it may not read the widened value's leaves.
+@test(output = "count(9)")
+fn ordinary_payload_at_a_widened_position() {
+    print("{render(Slot::Count(9))}")
+}
+
+@test(output = "none")
+fn unit_variant_at_a_widened_position() {
+    print("{render(Slot::None)}")
+}
+
+// Round-trip through a struct field, which is where the flat encoding is the
+// whole point: the payload lives in the parent's dotted slots.
+struct Holder { id: int, slot: Slot }
+
+@test(output = "5 two(6,7) 8 four(1,2,3,4)")
+fn flat_field_round_trips_both_widths() {
+    let a = Holder { id: 5, slot: Slot::Two(P2 { x: 6, y: 7 }) }
+    let b = Holder { id: 8, slot: Slot::Four(P4 { x: 1, y: 2, z: 3, w: 4 }) }
+    print("{a.id} {render(a.slot)} {b.id} {render(b.slot)}")
+}
+
+// A reassignment from the wide variant to the narrow one must clear the slots
+// the wide one filled, else the narrow arm reads a stale leaf.
+@test(output = "four(1,2,3,4) two(6,7)")
+fn a_narrow_write_clears_the_wide_slots() {
+    let h = Holder { id: 0, slot: Slot::Four(P4 { x: 1, y: 2, z: 3, w: 4 }) }
+    let before = render(h.slot)
+    h.slot = Slot::Two(P2 { x: 6, y: 7 })
+    print("{before} {render(h.slot)}")
+}
+
+// Two DISTINCT `nobox` shapes of the SAME width at one position. The old
+// conflict was keyed on nominal identity while the layout it guarded is
+// positional prim slots, so these rejected even though one layout serves both.
+
+nobox value Uv { u: float, v: float }
+
+enum Pair {
+    Point(P2),
+    Texel(Uv),
+}
+
+fn render_pair(p: Pair) -> string {
+    match p {
+        Pair::Point(q) => return "point({q.x},{q.y})",
+        Pair::Texel(t) => return "texel({t.u},{t.v})",
+    }
+}
+
+@test(output = "point(1,2) texel(3,4)")
+fn same_width_shapes_share_one_position() {
+    print("{render_pair(Pair::Point(P2 { x: 1, y: 2 }))} {render_pair(Pair::Texel(Uv { u: 3, v: 4 }))}")
+}
+
+// A widened position must not shift a LATER position's slot: the sibling's
+// trailing payload has to survive the widest variant's width.
+enum Tagged {
+    Wide(P4, int),
+    Narrow(P2, int),
+    Plain(int, int),
+}
+
+fn render_tagged(t: Tagged) -> string {
+    match t {
+        Tagged::Wide(p, n) => return "wide({p.x},{p.w},{n})",
+        Tagged::Narrow(p, n) => return "narrow({p.x},{p.y},{n})",
+        Tagged::Plain(a, n) => return "plain({a},{n})",
+    }
+}
+
+@test(output = "wide(1,4,10) narrow(5,6,11) plain(7,12)")
+fn a_trailing_position_survives_the_widening() {
+    let w = render_tagged(Tagged::Wide(P4 { x: 1, y: 2, z: 3, w: 4 }, 10))
+    let n = render_tagged(Tagged::Narrow(P2 { x: 5, y: 6 }, 11))
+    print("{w} {n} {render_tagged(Tagged::Plain(7, 12))}")
+}
+
+// The trailing position is itself a `nobox` value, so its LEAVES start at the
+// widened position's offset rather than at its position index. `Tagged` above
+// only ever puts an ordinary payload after the widening, which reads through a
+// different consumer than the leaf-binding one.
+enum Trailer {
+    WideThen(P4, P2),
+    NarrowThen(P2, P2),
+    PlainThen(int, P2),
+}
+
+fn render_trailer(t: Trailer) -> string {
+    match t {
+        Trailer::WideThen(a, b) => return "wide({a.x},{a.w},{b.x},{b.y})",
+        Trailer::NarrowThen(a, b) => return "narrow({a.x},{a.y},{b.x},{b.y})",
+        Trailer::PlainThen(a, b) => return "plain({a},{b.x},{b.y})",
+    }
+}
+
+@test(output = "wide(1,4,20,21) narrow(5,6,30,31) plain(7,40,41)")
+fn a_trailing_nobox_position_reads_its_own_leaves() {
+    let w = render_trailer(Trailer::WideThen(P4 { x: 1, y: 2, z: 3, w: 4 }, P2 { x: 20, y: 21 }))
+    let n = render_trailer(Trailer::NarrowThen(P2 { x: 5, y: 6 }, P2 { x: 30, y: 31 }))
+    print("{w} {n} {render_trailer(Trailer::PlainThen(7, P2 { x: 40, y: 41 }))}")
+}

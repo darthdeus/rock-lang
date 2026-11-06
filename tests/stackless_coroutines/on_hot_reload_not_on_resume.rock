@@ -1,0 +1,45 @@
+// on_hot_reload fires ONLY via fire_hot_reload(), never on a normal
+// resume(). Regression: skull lowered `on_hot_reload { body }` as a plain
+// body call (it only recognized on_killed/on_resume as lifecycle hooks),
+// so the hook ran on every resume -- in mag this cleared a mob's attack
+// flag each frame and respawned the swing coroutine endlessly. rock was
+// the oracle (correct). Sibling: on_killed coverage in
+// phase9_yield_star_kill.rock.
+
+global HR_LOG: [string] = []
+
+co fn hr_co() -> Coroutine<int> {
+    on_hot_reload { HR_LOG.push("hr") }
+    yield 1
+    yield 2
+}
+
+// resume() must NOT fire on_hot_reload.
+@test(output = "v1=1 log=0\nv2=2 log=0")
+fn test_on_hot_reload_silent_on_resume() {
+    HR_LOG = []
+    let c = hr_co()
+    let v1 = c.resume()
+    print("v1={v1 ?? -1} log={HR_LOG.len()}")
+    let v2 = c.resume()
+    print("v2={v2 ?? -1} log={HR_LOG.len()}")
+}
+
+// fire_hot_reload() fires the hook; a second fire fires again (it is not
+// one-shot), and a fire after the coroutine is dead is a no-op.
+@test(output = "after1=1\nafter2=2\nv=null\nafterdead=2")
+fn test_fire_hot_reload_fires_hook() {
+    HR_LOG = []
+    let c = hr_co()
+    let _ = c.resume()
+    fire_hot_reload(c)
+    print("after1={HR_LOG.len()}")
+    fire_hot_reload(c)
+    print("after2={HR_LOG.len()}")
+    // drain to completion, then fire on a dead handle -> no-op.
+    let _ = c.resume()
+    let last = c.resume()
+    if last == null { print("v=null") } else { print("v={last}") }
+    fire_hot_reload(c)
+    print("afterdead={HR_LOG.len()}")
+}

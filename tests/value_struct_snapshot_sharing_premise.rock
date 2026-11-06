@@ -1,0 +1,33 @@
+// A copy of program state may SHARE value structs (`value Foo {..}`) by
+// reference instead of deep-copying them, because they are immutable: there is
+// no path to mutate a value struct in place after another reference holds it --
+// a "change" must produce a NEW value and rebind, leaving prior references intact.
+
+value Vec2i { x: int, y: int }
+
+global VS_GLOBAL: Vec2i = Vec2i { x: 0, y: 0 }
+global VS_LIST: [Vec2i] = [Vec2i { x: 1, y: 1 }]
+
+// Rebinding a GLOBAL that holds a value struct replaces the value; it does not
+// mutate the value a prior snapshot captured. So a snapshot may share it.
+@test
+fn rebinding_global_value_struct_leaves_shared_snapshot_intact() {
+    let snapshot = VS_GLOBAL            // the snapshot "shares" this value
+    VS_GLOBAL = Vec2i { x: 7, y: 9 }    // a later frame rebinds the global
+    assert(snapshot.x == 0 && snapshot.y == 0)
+    assert(VS_GLOBAL.x == 7 && VS_GLOBAL.y == 9)
+    // Byte-value equality is content-based, so share-vs-copy is indistinguishable.
+    assert(snapshot == Vec2i { x: 0, y: 0 })
+}
+
+// Same guarantee for a value struct held inside a mutable container (which the
+// snapshot would deep-copy while sharing the value-struct leaves): replacing the
+// slot does not mutate the leaf a prior reference holds.
+@test
+fn replacing_value_struct_in_container_leaves_leaf_intact() {
+    let held = VS_LIST[0]
+    VS_LIST.push(Vec2i { x: 9, y: 9 })
+    VS_LIST[0] = Vec2i { x: 5, y: 5 }   // rebind the slot (values have no in-place field write)
+    assert(held.x == 1 && held.y == 1)
+    assert(VS_LIST[0].x == 5)
+}

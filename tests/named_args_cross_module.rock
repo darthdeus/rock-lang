@@ -1,0 +1,48 @@
+// Test named arguments with functions from other modules
+// This tests the fix for poly_functions lookup when calling functions
+// from other modules with named arguments
+
+// Test with a local function that has optional parameters
+fn local_func(x: int, y: int = 10, z: int = 20) -> int {
+    x + y + z
+}
+
+@test
+fn test_named_args_local() {
+    // Test various combinations of named arguments
+    assert_eq(local_func(1), 31)  // 1 + 10 + 20
+    assert_eq(local_func(1, y: 5), 26)  // 1 + 5 + 20
+    assert_eq(local_func(1, z: 30), 41)  // 1 + 10 + 30
+    assert_eq(local_func(1, y: 5, z: 30), 36)  // 1 + 5 + 30
+    assert_eq(local_func(1, z: 30, y: 5), 36)  // 1 + 5 + 30 (different order)
+    
+    // All named arguments
+    assert_eq(local_func(x: 1, y: 5, z: 30), 36)
+    assert_eq(local_func(z: 30, x: 1, y: 5), 36)  // Different order
+    
+    print("Local named arguments test passed!")
+}
+
+// Test with multiple optional parameters
+fn draw_rect(x: float, y: float, w: float = 100.0, h: float = 100.0, color: string = "black") -> string {
+    "{x},{y},{w}x{h} in {color}"
+}
+
+@test 
+fn test_named_args_complex() {
+    // Mix of positional and named
+    assert_eq(draw_rect(10.0, 20.0), "10,20,100x100 in black")
+    assert_eq(draw_rect(10.0, 20.0, color: "red"), "10,20,100x100 in red")
+    assert_eq(draw_rect(10.0, 20.0, w: 50.0), "10,20,50x100 in black")
+    assert_eq(draw_rect(10.0, 20.0, h: 50.0, color: "blue"), "10,20,100x50 in blue")
+    
+    // All named
+    assert_eq(draw_rect(x: 5.0, y: 10.0, w: 200.0, h: 150.0, color: "green"), 
+              "5,10,200x150 in green")
+    
+    // Different order with named args
+    assert_eq(draw_rect(color: "yellow", x: 1.0, h: 75.0, y: 2.0, w: 125.0),
+              "1,2,125x75 in yellow")
+              
+    print("Complex named arguments test passed!")
+}

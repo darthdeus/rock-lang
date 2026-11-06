@@ -1,0 +1,26 @@
+// The `cast` identity fast path in skull must key on the RESOLVED callee, not
+// on the spelling. A user fn named `cast` returning a nobox value used to be
+// treated as the stdlib identity intrinsic: the call vanished, its argument was
+// threaded through as the result, and the emitted Lua indexed an int as a
+// struct ("attempt to index local 'r0' (a number value)").
+
+nobox value V { x: int, y: int }
+
+fn cast(n: int) -> V {
+    return V { x: n + 1, y: n + 2 }
+}
+
+@test(output = "11 12")
+fn user_cast_is_not_the_identity_intrinsic() {
+    let v = cast(10)
+    print("{v.x} {v.y}")
+}
+
+// The stdlib `cast` must keep threading the repr -- this is the column read the
+// fast path exists for.
+@test(output = "1")
+fn stdlib_cast_still_threads_repr() {
+    let xs: [V] = [V { x: 1, y: 2 }]
+    let got = xs.get(0)
+    if got != null { print("{got.x}") }
+}

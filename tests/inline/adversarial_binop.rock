@@ -1,0 +1,32 @@
+// ATTACK: BinOp with user operator overload has side effects.
+// purity.rs BinOp case recurses into operands only. If operands are pure
+// idents/literals, whole BinOp is classified Pure. But the overload body
+// has side effects -> miscompile via duplication.
+
+global LOG_COUNT: int = 0
+
+value V2 { x: int, y: int }
+
+fn __op_add(a: V2, b: V2) -> V2 {
+    LOG_COUNT = LOG_COUNT + 1           // SIDE EFFECT
+    return V2 { x: a.x + b.x, y: a.y + b.y }
+}
+
+// @inline fn with param used exactly twice -- drives the dup decision.
+@inline
+fn sum_twice(p: V2) -> int {
+    return p.x + p.y + p.x + p.y        // uses p 4 times (these are .x/.y field access -- purely field access on param)
+}
+
+@test(output = "call_count=1 result=12")
+fn test_binop_overload_side_effect() {
+    LOG_COUNT = 0
+    let a = V2 { x: 1, y: 2 }
+    let b = V2 { x: 2, y: 1 }
+    // Argument is `a + b` -- a BinOp. If purity says "pure" (because
+    // operands are bare idents/pure), dup-safe -> duplicated 4 times.
+    // Result would be 12 either way (value-equal) BUT LOG_COUNT would
+    // bump 4x instead of 1x.
+    let r = sum_twice(a + b)
+    print("call_count={LOG_COUNT} result={r}")
+}

@@ -1,0 +1,55 @@
+// Test that string interpolation uses inspect() for composite types
+
+struct Point {
+    x: int,
+    y: int
+}
+
+enum Status {
+    Ok,
+    Error(string)
+}
+
+@test fn test_composite_types_use_inspect() {
+    // Test structs - should NOT show memory addresses
+    let p = Point { x: 10, y: 20 }
+    let result = "{p}"
+    assert(!result.contains("0x"), "Struct should not show memory address")
+    // Type name display for user-defined structs is now implemented
+    assert(result.contains("Point"), "Struct should show type name")
+    assert(result.contains("x") && result.contains("10"), "Struct should show fields")
+    
+    // Test arrays - should NOT show memory addresses
+    let arr = [1, 2, 3]
+    let arr_str = "{arr}"
+    assert(!arr_str.contains("0x"), "Array should not show memory address")
+    assert(arr_str.contains("Vec"), "Array should show Vec type")
+    assert(arr_str.contains("1") && arr_str.contains("2") && arr_str.contains("3"), "Array should show contents")
+    
+    // Test tuples - should show contents
+    let tup = (42, "hello")
+    let tup_str = "{tup}"
+    assert(tup_str.contains("42"), "Tuple should show first element")
+    assert(tup_str.contains("hello"), "Tuple should show second element")
+    
+    // Test enums - should show variant information
+    let status1 = Status::Ok
+    let status1_str = "{status1}"
+    assert(!status1_str.contains("0x"), "Enum should not show memory address")
+    assert(status1_str.contains("Status"), "Enum should show type name")
+    assert(status1_str.contains("Ok"), "Enum should show variant")
+    
+    let status2 = Status::Error("oops")
+    let status2_str = "{status2}"
+    assert(status2_str.contains("Status"), "Enum should show type name")
+    assert(status2_str.contains("Error"), "Enum should show variant")
+    assert(status2_str.contains("oops"), "Enum should show variant data")
+}
+
+@test fn test_primitive_types_use_tostring() {
+    // Test that primitive types still use tostring (no change)
+    assert("{42}" == "42", "Integer interpolation")
+    assert("{true}" == "true", "Boolean interpolation")
+    assert("{\"hello\"}" == "hello", "String interpolation")
+    assert("{3.14159}" == "3.1416", "Float interpolation with default precision")
+}

@@ -1,0 +1,7 @@
+// Comment inside generic parameter list of fn declaration
+fn identity<T /* the type */>(x: T) -> T {
+    return x
+}
+
+@test(output = "5")
+fn t() { print(identity(5)) }

@@ -1,0 +1,34 @@
+//! Error: skull emits `r<N>`/`v<N>` value temps, `c<N>` cell locals, and the
+//!        `__rock_env` closure-env param as bare locals into every function
+//!        body, while `Inst::Global` reads/writes user globals by bare name. A
+//!        top-level def whose EMITTED name matches one of those body-local forms
+//!        is silently shadowed inside any body that also uses temps (the
+//!        env-param-`e` class, 5c378c810). These are legal bone identifiers, so
+//!        the rejection is EMIT-time (skull), not the bone front end -- this
+//!        suite runs skull emission on bone-accepted cases. The `__rock_` prefix
+//!        at large is NOT reserved (stdlib + stone engine define `@nomangle
+//!        __rock_*` globals); only the exact `__rock_env` body-local collides.
+//!        Positive controls (a name that only LOOKS reserved still compiles, and
+//!        the exact emitted-Lua substring) stay in
+//!        rock-lang/crates/skull/tests/reserved_namespace.rs -- a rejection suite can't
+//!        assert successful emission.
+//! Tags: skull, codegen, reserved-namespace, emit-time
+
+//=== TEST CASE: global_r1_Generic ===
+global r1: int = 100
+fn use_it(a: int) -> int { return a + r1 }
+fn main() { print("{use_it(7)}") }
+
+//=== TEST CASE: global_c0_Generic ===
+global c0: int = 5
+fn use_it(a: int) -> int { return a + c0 }
+fn main() { print("{use_it(1)}") }
+
+//=== TEST CASE: global_rock_env_Generic ===
+global __rock_env: int = 9
+fn use_it(a: int) -> int { return a + __rock_env }
+fn main() { print("{use_it(1)}") }
+
+//=== TEST CASE: nomangle_fn_r2_Generic ===
+@nomangle fn r2() -> int { return 3 }
+fn main() { print("{r2()}") }

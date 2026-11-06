@@ -1,0 +1,58 @@
+// Value-ABI Inc 7: newtype ABI. A newtype is a single Lua value
+// (the `Name(v)` constructor is a global fn call; `.0` unwrap reads
+// `[1]`), not scalarized. Pins runtime behavior; must pass with and
+// without ROCK_ANF_FUNCTIONS=1.
+
+newtype UserId(int)
+newtype Meters(float)
+
+fn mk(n: int) -> UserId {
+    return UserId(n)
+}
+
+fn raw(u: UserId) -> int {
+    return u.0
+}
+
+fn passthrough(u: UserId) -> UserId {
+    return u
+}
+
+fn add_ids(a: UserId, b: UserId) -> UserId {
+    return UserId(a.0 + b.0)
+}
+
+@test(output = "42\n7")
+fn test_construct_and_unwrap() {
+    let u = mk(42)
+    print("{raw(u)}")
+    let v = UserId(7)
+    print("{v.0}")
+}
+
+@test(output = "99")
+fn test_passthrough() {
+    let u = passthrough(UserId(99))
+    print("{u.0}")
+}
+
+@test(output = "5")
+fn test_newtype_arith_via_unwrap() {
+    let s = add_ids(UserId(2), UserId(3))
+    print("{s.0}")
+}
+
+@test(output = "true\nfalse")
+fn test_newtype_eq() {
+    let a = UserId(1)
+    let b = UserId(1)
+    let c = UserId(2)
+    print("{a == b}")
+    print("{a == c}")
+}
+
+@test(output = "3")
+fn test_float_newtype() {
+    let m = Meters(3.5)
+    print("{m.0.floor()}")
+}

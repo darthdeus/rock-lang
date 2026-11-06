@@ -1,0 +1,139 @@
+// Semantics the multi-return ABI (slice 1) must preserve. Every case is green
+// BEFORE the ABI change (tuples are heap tables) and must stay green after
+// (multi-return on the wire, re-packed only where a tuple is used whole).
+
+fn pair() -> (bool, int) {
+    return (true, 42)
+}
+
+fn swap(a: int, b: int) -> (int, int) {
+    return (b, a)
+}
+
+// tuple result stored in a variable then indexed
+@test
+fn stored_then_indexed() {
+    let t = pair()
+    assert_eq(t.0, true)
+    assert_eq(t.1, 42)
+}
+
+// immediate destructure (the fast path the desugar needs)
+@test
+fn immediate_destructure() {
+    let (ok, n) = pair()
+    assert_eq(ok, true)
+    assert_eq(n, 42)
+}
+
+@test
+fn destructure_swap() {
+    let (a, b) = swap(3, 7)
+    assert_eq(a, 7)
+    assert_eq(b, 3)
+}
+
+struct Holder {
+    p: (bool, int),
+}
+
+// tuple stored in a struct field, read back
+@test
+fn stored_in_struct_field() {
+    let h = Holder { p: pair() }
+    assert_eq(h.p.0, true)
+    assert_eq(h.p.1, 42)
+}
+
+fn take_tuple(t: (bool, int)) -> int {
+    return t.1
+}
+
+// tuple passed as an argument
+@test
+fn passed_as_argument() {
+    assert_eq(take_tuple(pair()), 42)
+}
+
+fn forward() -> (bool, int) {
+    return pair()
+}
+
+// tuple returned through a second fn (tail forward)
+@test
+fn returned_through_second_fn() {
+    let (ok, n) = forward()
+    assert_eq(ok, true)
+    assert_eq(n, 42)
+}
+
+fn nested() -> ((int, int), int) {
+    return ((1, 2), 3)
+}
+
+// nested tuples
+@test
+fn nested_tuples() {
+    let (inner, c) = nested()
+    assert_eq(inner.0, 1)
+    assert_eq(inner.1, 2)
+    assert_eq(c, 3)
+}
+
+// lambda returning a tuple, called indirectly
+@test
+fn lambda_returning_tuple() {
+    let f = () => (true, 99)
+    let (ok, n) = f()
+    assert_eq(ok, true)
+    assert_eq(n, 99)
+}
+
+// stored fn-var call returning a tuple
+@test
+fn stored_fn_var_tuple() {
+    let g = pair
+    let (ok, n) = g()
+    assert_eq(ok, true)
+    assert_eq(n, 42)
+}
+
+fn maybe() -> (bool, int?) {
+    return (false, null)
+}
+
+// embedded-nil tuple through both destructure and boxed paths
+@test
+fn embedded_nil_destructure() {
+    let (ok, v) = maybe()
+    assert_eq(ok, false)
+    assert_eq(v, null)
+}
+
+@test
+fn embedded_nil_boxed() {
+    let t = maybe()
+    assert_eq(t.0, false)
+    assert_eq(t.1, null)
+}
+
+struct Box {
+    n: int,
+}
+
+fn get_pair(b: Box) -> (bool, int) {
+    return (true, b.n)
+}
+
+// safe-nav UFCS call to a tuple-returning method: the method splats, the
+// nil-guarded call must multi-capture then pack (result is a boxed `(..)?`).
+@test
+fn safe_nav_call_tuple() {
+    let b: Box? = Box { n: 42 }
+    let r = b?.get_pair()
+    assert_eq(r != null, true)
+    if r != null {
+        assert_eq(r.0, true)
+        assert_eq(r.1, 42)
+    }
+}

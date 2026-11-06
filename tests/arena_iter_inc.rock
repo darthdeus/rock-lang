@@ -1,0 +1,60 @@
+// Map/Arena iteration sub-arc, slice 2: Arena iteration.
+// `for (e, t) in a` and `for item in a` -> live's closure-free
+// numeric loop over `.entries` with goto-skip of nil/unoccupied
+// slots. Byte-identical to live IterationStrategy::Arena. Pins
+// runtime behavior; must pass with and without ROCK_ANF_FUNCTIONS=1.
+
+@test(output = "60")
+fn test_arena_pair_sum() {
+    let a: Arena<int> = arena_new()
+    a.insert(10)
+    a.insert(20)
+    a.insert(30)
+    let total = 0
+    for (e, v) in a {
+        total = total + v
+    }
+    print("{total}")
+}
+
+@test(output = "2")
+fn test_arena_skips_removed() {
+    let a: Arena<int> = arena_new()
+    let e1 = a.insert(1)
+    a.insert(2)
+    a.insert(3)
+    a.remove(e1)
+    let count = 0
+    for (e, v) in a {
+        count = count + 1
+    }
+    print("{count}")
+}
+
+@test(output = "2")
+fn test_arena_continue_in_body() {
+    let a: Arena<int> = arena_new()
+    a.insert(5)
+    a.insert(100)
+    a.insert(7)
+    let kept = 0
+    for (e, v) in a {
+        if v > 50 {
+            continue
+        }
+        kept = kept + 1
+    }
+    print("{kept}")
+}
+
+@test(output = "11")
+fn test_arena_single_binding_tuple() {
+    let a: Arena<int> = arena_new()
+    a.insert(4)
+    a.insert(7)
+    let s = 0
+    for item in a {
+        s = s + item.1
+    }
+    print("{s}")
+}

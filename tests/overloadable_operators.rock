@@ -1,0 +1,50 @@
+// The admitted side of the operator-overloading gate. Its rejected side is
+// `tests/errors/non_overloadable_operator_def.rock.err`; together they cover
+// every symbol in `bone_core::hir::OPERATOR_FNS`, and
+// `crates/bone-semantic/tests/operator_table.rs` ties that table to the parser.
+//
+// Each operator returns a MARKER rather than the arithmetic answer, so a test
+// passes only if the user fn was actually called -- computing the right number
+// natively would not.
+
+value Mark { v: int }
+
+operator +(a: Mark, b: Mark) -> int { return 1001 }
+operator -(a: Mark, b: Mark) -> int { return 1002 }
+operator *(a: Mark, b: Mark) -> int { return 1003 }
+operator /(a: Mark, b: Mark) -> int { return 1004 }
+operator %(a: Mark, b: Mark) -> int { return 1005 }
+operator ./(a: Mark, b: Mark) -> int { return 1006 }
+
+@test
+fn every_overloadable_operator_dispatches_to_the_user_fn() {
+    let a = Mark { v: 7 }
+    let b = Mark { v: 3 }
+    assert((a + b) == 1001, "+ must call the overload")
+    assert((a - b) == 1002, "- must call the overload")
+    assert((a * b) == 1003, "* must call the overload")
+    assert((a / b) == 1004, "/ must call the overload")
+    assert((a % b) == 1005, "% must call the overload")
+    assert((a ./ b) == 1006, "./ must call the overload")
+}
+
+// Primitive arithmetic is native codegen and must not be diverted by the
+// presence of overloads on an unrelated type.
+@test
+fn primitive_arithmetic_is_unaffected_by_user_overloads() {
+    assert(7 + 3 == 10, "int add stays native")
+    assert(7.0 / 2.0 == 3.5, "float div stays native")
+    assert(7 ./ 2 == 3, "int floor-div stays native")
+}
+
+// A newtype over a primitive derives its operators through the same path, and
+// the synthesized comparison operators are exempt from the rejection -- so
+// ordering on a newtype must still work.
+newtype Tally(int)
+
+@test
+fn a_newtype_still_derives_arithmetic_and_ordering() {
+    assert((Tally(4) + Tally(5)).0 == 9, "derived add")
+    assert(Tally(4) < Tally(5), "derived ordering survives the rejection")
+    assert(Tally(9) >= Tally(9), "and so does the non-strict form")
+}

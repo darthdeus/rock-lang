@@ -1,0 +1,116 @@
+// D-form method-definition syntax.
+// `fn Type.name(recv, ..)` is pure surface sugar desugared in skull-parser to
+// `fn name(recv: Type, ..)`: same fn, same mangling, same overloads, same UFCS.
+
+struct Mob { hp: int }
+
+fn Mob.take_damage(m, amount: int) -> int {
+    return m.hp - amount
+}
+
+@test(output = "7")
+fn test_dform_dot_call() {
+    let m = Mob { hp: 10 }
+    print(m.take_damage(3))
+}
+
+@test(output = "7")
+fn test_dform_bare_call() {
+    let m = Mob { hp: 10 }
+    print(take_damage(m, 3))
+}
+
+// Float receiver param (the plan's canonical example shape).
+fn Mob.would_survive(m, amount: float) -> bool {
+    return (m.hp * 1.0) > amount
+}
+
+@test(output = "true")
+fn test_dform_float_param() {
+    let m = Mob { hp: 10 }
+    print(m.would_survive(3.5))
+}
+
+// `self` is just an identifier -- no special handling.
+fn Mob.heal(self, amount: int) -> int {
+    return self.hp + amount
+}
+
+@test(output = "15")
+fn test_dform_self_receiver() {
+    let m = Mob { hp: 10 }
+    print(m.heal(5))
+}
+
+// Receiver generics bound by the path (a user struct).
+struct Pair<A, B> { a: A, b: B }
+
+fn Pair<A, B>.get_a(p) -> A {
+    return p.a
+}
+
+@test(output = "5")
+fn test_dform_receiver_generics() {
+    let p = Pair { a: 5, b: "x" }
+    print(p.get_a())
+}
+
+// Method-only generics: a second list after the fn name.
+fn Pair<A, B>.map_first<C>(p, f: fn(A) -> C) -> C {
+    return f(p.a)
+}
+
+@test(output = "10")
+fn test_dform_method_generics() {
+    let p = Pair { a: 5, b: "x" }
+    print(p.map_first(x => x * 2))
+}
+
+// Same spelling on different receiver types overloads (per-first-arg-type).
+struct Cat {}
+struct Dog {}
+
+fn Cat.speak(c) -> string {
+    return "meow"
+}
+
+fn Dog.speak(d) -> string {
+    return "woof"
+}
+
+@test(output = "meow\nwoof")
+fn test_dform_overload_by_receiver() {
+    let c = Cat {}
+    let d = Dog {}
+    print(c.speak())
+    print(d.speak())
+}
+
+// `co fn` D-form desugars like any coroutine.
+co fn Mob.ticks(m) -> Coroutine<int> {
+    let i = 0
+    loop {
+        yield i
+        i = i + 1
+    }
+}
+
+@test(output = "0\n1")
+fn test_dform_co_fn() {
+    let m = Mob { hp: 2 }
+    let c = m.ticks()
+    print(c.resume())
+    print(c.resume())
+}
+
+// `@inline` annotation on a D-form fn is orthogonal -- unchanged.
+@inline
+fn Mob.double_hp(m) -> int {
+    return m.hp * 2
+}
+
+@test(output = "20")
+fn test_dform_inline_annotation() {
+    let m = Mob { hp: 10 }
+    print(m.double_hp())
+}

@@ -1,0 +1,32 @@
+// Misc scalar-intrinsic corpus for the `--backend js` ratchet (T8d). Four
+// trivial host-bodied intrinsics: tuple_first/tuple_second (Lua `tuple[1]`/`[2]`
+// -> the 0-based JS array `[0]`/`[1]`), __range (materialized `a..b` -> a
+// Vec-shaped object via a runtime helper). Pins
+// crates/skull-codegen-js/tests/misc_intrinsics.rs.
+
+@test(output = "1 2")
+fn test_tuple_projections() {
+    let t = (1, 2)
+    print("{tuple_first(t)} {tuple_second(t)}")
+}
+
+// tuple_first on a fresh tuple literal (not stored).
+@test(returns = 7)
+fn test_tuple_first_literal() -> int {
+    tuple_first((7, 99))
+}
+
+// A materialized range iterates its elements in order.
+@test(returns = 10)
+fn test_range_collect_sum() -> int {
+    let r = (0..5).collect()
+    let s = 0
+    for x in r { s = s + x }
+    s
+}
+
+@test(returns = 3)
+fn test_range_len() -> int {
+    let r = (2..5).collect()
+    r.len
+}

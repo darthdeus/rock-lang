@@ -1,0 +1,42 @@
+// PR-γ phase 2: a co fn with R != () can `return expr` and the
+// caller observes it via `.result()` after the coroutine reaches
+// terminal. `.resume()` continues to expose Y? for both R = ()
+// and R != () (D2a-with-unit-elision; the ResumeResult enum
+// surface is a follow-up).
+
+co fn produce() -> Coroutine<int, string> {
+    yield 1
+    yield 2
+    return "done"
+}
+
+@test(output = "1 2 done")
+fn test_return_value_observable() {
+    let c = produce()
+    let a = c.resume()
+    let b = c.resume()
+    let _drain = c.resume() // drives terminal; returns null
+    let r = c.result()
+    let pa = if a != null { "{a}" } else { "null" }
+    let pb = if b != null { "{b}" } else { "null" }
+    let pr = if r != null { "{r}" } else { "null" }
+    print("{pa} {pb} {pr}")
+}
+
+// Sanity: a coroutine that bare-returns without a value sees null
+// from `.result()`. This guards the unit-elision path.
+co fn bare_return() -> Coroutine<int> {
+    yield 1
+    return
+}
+
+@test(output = "1 null")
+fn test_bare_return_result_is_null() {
+    let c = bare_return()
+    let v = c.resume()
+    let _drain = c.resume()
+    let r = c.result()
+    let pv = if v != null { "{v}" } else { "null" }
+    let pr = if r != null { "stashed" } else { "null" }
+    print("{pv} {pr}")
+}

@@ -1,0 +1,119 @@
+// Test flexible array type inference with least upper bound
+
+@test
+fn test_int_float_promotion() {
+    // Mix of ints and floats should promote to float array
+    let arr1 = [1, 2.0, 3.0]
+    assert_eq(vec_len(arr1), 3)
+    assert_eq(vec_get(arr1, 0).unwrap(), 1.0)  // int promoted to float
+    assert_eq(vec_get(arr1, 1).unwrap(), 2.0)
+    assert_eq(vec_get(arr1, 2).unwrap(), 3.0)
+    
+    // Different order should also work
+    let arr2 = [2.5, 3, 4.0, 5]
+    assert_eq(vec_len(arr2), 4)
+    assert_eq(vec_get(arr2, 0).unwrap(), 2.5)
+    assert_eq(vec_get(arr2, 1).unwrap(), 3.0)  // int promoted to float
+    assert_eq(vec_get(arr2, 2).unwrap(), 4.0)
+    assert_eq(vec_get(arr2, 3).unwrap(), 5.0)  // int promoted to float
+    
+    // All ints should remain int array
+    let arr3 = [1, 2, 3, 4]
+    assert_eq(vec_len(arr3), 4)
+    assert_eq(vec_get(arr3, 0).unwrap(), 1)
+    assert_eq(vec_get(arr3, 3).unwrap(), 4)
+}
+
+@test
+fn test_nullable_promotion() {
+    // null with ints should create int? array
+    let arr1 = [null, 2, 4]
+    assert_eq(vec_len(arr1), 3)
+    assert(vec_get(arr1, 0).is_null())  // null element
+    // For non-null elements, check that they contain the expected values
+    assert(!vec_get(arr1, 1).is_null())
+    let expected_int1: int? = 2
+    assert_eq(vec_get(arr1, 1).unwrap(), expected_int1)  // non-null element  
+    assert(!vec_get(arr1, 2).is_null())
+    let expected_int2: int? = 4
+    assert_eq(vec_get(arr1, 2).unwrap(), expected_int2)  // non-null element
+    
+    // null with floats should create float? array
+    let arr2 = [null, 2.5, 4.5]
+    assert_eq(vec_len(arr2), 3)
+    assert(vec_get(arr2, 0).is_null())  // null element
+    assert(!vec_get(arr2, 1).is_null())
+    let expected_float1: float? = 2.5
+    assert_eq(vec_get(arr2, 1).unwrap(), expected_float1)  // non-null element
+    assert(!vec_get(arr2, 2).is_null())
+    let expected_float2: float? = 4.5
+    assert_eq(vec_get(arr2, 2).unwrap(), expected_float2)  // non-null element
+    
+    // Mix of null, int, and float should create float? array
+    let arr3 = [null, 2, 4.5]
+    assert_eq(vec_len(arr3), 3)
+    assert(vec_get(arr3, 0).is_null())  // null element
+    assert(!vec_get(arr3, 1).is_null())
+    let expected_float3: float? = 2.0
+    assert_eq(vec_get(arr3, 1).unwrap(), expected_float3)  // int promoted to float
+    assert(!vec_get(arr3, 2).is_null())
+    let expected_float4: float? = 4.5
+    assert_eq(vec_get(arr3, 2).unwrap(), expected_float4)  // float element
+}
+
+@test
+fn test_nullable_with_non_null() {
+    // Nullable int with regular int should create int? array
+    let x: int? = 5
+    let arr = [x, 10, null]
+    assert_eq(vec_len(arr), 3)
+    
+    // Get the values from the array - they are int? types
+    // Note: vec_get returns the element directly for nullable arrays
+    // For array [int?], vec_get returns int? (nullable int)
+    let val0 = vec_get(arr, 0)  // int? = 5
+    let val1 = vec_get(arr, 1)  // int? = 10 
+    let val2 = vec_get(arr, 2)  // int? = null
+    
+    // Check the values - they are nullable types
+    assert(!val0.is_null())
+    assert(!val1.is_null())
+    assert(val2.is_null())
+    
+    // For non-null elements, unwrap to get the inner value
+    if !val0.is_null() {
+        let expected_val0: int? = 5
+        assert_eq(val0.unwrap(), expected_val0)
+    }
+    if !val1.is_null() {
+        let expected_val1: int? = 10
+        assert_eq(val1.unwrap(), expected_val1)
+    }
+    // val2 is null, so we don't unwrap it
+    assert(val2.is_null())
+}
+
+@test
+fn test_complex_promotion() {
+    // Complex case: nullable int, int, float
+    let x: int? = 3
+    let arr = [x, 5, 7.5]  // Should become float? array
+    assert_eq(vec_len(arr), 3)
+    
+    // Get values by direct index: `arr[i]` yields the element type `float?` in
+    // BOTH backends, so `?? -1.0` is meaningful everywhere.
+    //
+    // (The earlier `vec_get(arr, i).unwrap()` form relied on rock keeping nested
+    // optionals: `vec_get` returns `float??`, `unwrap` peels one -> `float?`, so
+    // `?? -1.0` is meaningful. bone soundly collapses `T?? -> T?` -- Lua has one
+    // `nil`, so the two layers are indistinguishable at runtime -- so there
+    // `unwrap` yields a non-null `float` and `?? -1.0` is (correctly) redundant.
+    // )
+    let val0 = arr[0]
+    let val1 = arr[1]
+    let val2 = arr[2]
+    
+    assert_eq(val0 ?? -1.0, 3.0)  // int? -> float?
+    assert_eq(val1 ?? -1.0, 5.0)  // int -> float?
+    assert_eq(val2 ?? -1.0, 7.5)  // float -> float?
+}

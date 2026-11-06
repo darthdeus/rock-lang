@@ -1,0 +1,45 @@
+value CatalogValueDef {
+    is_open: fn() -> bool,
+    scope: string,
+    stage: int,
+}
+
+@artifact_definition(catalog="value_definitions", key_param="key")
+deco init catalog_value(key: string) {}
+
+@artifact_catalog(catalog="value_definitions")
+@intrinsic extern fn value_definition_plan() -> [ArtifactDefinition<CatalogValueDef>]
+
+@catalog_value(key="first")
+fn define_catalog_first() -> CatalogValueDef {
+    return CatalogValueDef { is_open: () => true, scope: "first", stage: 100 }
+}
+
+@catalog_value(key="second")
+fn define_catalog_second() -> CatalogValueDef {
+    return CatalogValueDef { is_open: () => false, scope: "second", stage: 10 }
+}
+
+@test(output = "catalog values preserved")
+fn definition_catalog_preserves_value_factory_results() {
+    let direct = define_catalog_first()
+    assert(direct.is_open(), "direct value return preserves callable")
+    assert(direct.scope == "first", "direct value return preserves string")
+    assert(direct.stage == 100, "direct value return preserves stage")
+
+    let plan = value_definition_plan()
+    assert(plan.len == 2, "catalog contains both entries")
+    assert(plan[0].definition.is_open(), "first catalog callable")
+    assert(plan[0].definition.scope == "first", "first catalog string")
+    assert(plan[0].definition.stage == 100, "first catalog stage")
+    assert(!plan[1].definition.is_open(), "second catalog callable")
+    assert(plan[1].definition.scope == "second", "second catalog string")
+    assert(plan[1].definition.stage == 10, "second catalog stage")
+
+    plan.sort(entry => entry.definition.stage * 10000 + entry.ordinal)
+    assert(plan[0].key == "second", "sort reads complete catalog values")
+    let copied = plan[0].definition
+    assert(!copied.is_open() && copied.scope == "second" && copied.stage == 10,
+        "catalog values remain complete after copying")
+    print("catalog values preserved")
+}

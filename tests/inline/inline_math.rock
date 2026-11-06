@@ -1,0 +1,81 @@
+// Adversarial tests: @inline — math abstractions
+//
+// The motivating use case. Vector operations marked @inline must
+// produce byte-identical results vs. non-inlined versions.
+
+struct FixVec2 {
+    x: float,
+    y: float,
+}
+
+struct IVec2 {
+    x: int,
+    y: int,
+}
+
+@inline
+fn vadd(a: FixVec2, b: FixVec2) -> FixVec2 {
+    return FixVec2 { x: a.x + b.x, y: a.y + b.y }
+}
+
+@inline
+fn vsub(a: FixVec2, b: FixVec2) -> FixVec2 {
+    return FixVec2 { x: a.x - b.x, y: a.y - b.y }
+}
+
+@inline
+fn vdot(a: FixVec2, b: FixVec2) -> float {
+    return a.x * b.x + a.y * b.y
+}
+
+@inline
+fn vscale(a: FixVec2, k: float) -> FixVec2 {
+    return FixVec2 { x: a.x * k, y: a.y * k }
+}
+
+@inline
+fn iv_to_v(i: IVec2) -> FixVec2 {
+    return FixVec2 { x: i.x as float, y: i.y as float }
+}
+
+// V0 note: when a param is used >1 times in an @inline body, the arg at
+// the call site must be a literal / identifier / field-access chain —
+// NOT a struct literal (which would allocate twice). Bind struct literals
+// to a local first.
+
+@test(output = "4 6")
+fn test_vadd_componentwise() {
+    let a = FixVec2 { x: 1.0, y: 2.0 }
+    let b = FixVec2 { x: 3.0, y: 4.0 }
+    let r = vadd(a, b)
+    print("{r.x as int} {r.y as int}")
+}
+
+@test(output = "-2 -2")
+fn test_vsub_componentwise() {
+    let a = FixVec2 { x: 1.0, y: 2.0 }
+    let b = FixVec2 { x: 3.0, y: 4.0 }
+    let r = vsub(a, b)
+    print("{r.x as int} {r.y as int}")
+}
+
+@test(output = "11")
+fn test_vdot() {
+    let a = FixVec2 { x: 1.0, y: 2.0 }
+    let b = FixVec2 { x: 3.0, y: 4.0 }
+    print(vdot(a, b) as int)
+}
+
+@test(output = "4 6")
+fn test_vscale() {
+    let a = FixVec2 { x: 2.0, y: 3.0 }
+    let r = vscale(a, 2.0)
+    print("{r.x as int} {r.y as int}")
+}
+
+@test(output = "7 -4")
+fn test_ivec_to_vec_conversion() {
+    let i = IVec2 { x: 7, y: -4 }
+    let r = iv_to_v(i)
+    print("{r.x as int} {r.y as int}")
+}

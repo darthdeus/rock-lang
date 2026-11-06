@@ -1,0 +1,106 @@
+// Widening a `nobox` value read out of a FIELD into a nullable slot.
+//
+// `prev = p.pos`, where `pos: Vec2` is declared non-nullable and `prev` is
+// `Vec2?`, lowered the presence as a runtime `p.pos ~= nil` test. That test is
+// an opaque use of the box, so SROA could no longer peel the cell feeding it,
+// and the `Vec2` ctor survived to emit as an implicit materialization -- the
+// `nobox` guarantee's own rejection, on a program that never mentions null.
+//
+// The declared field type already answers the presence question. A `nobox`
+// field read now takes the leaf-splitting Group form regardless of whether its
+// base is a mutable place, so presence is the static `true` a Group carries,
+// exactly as the `embed` path beside it already did for a marked child.
+//
+// Controls, because both conjuncts are needed to reproduce: `plain_target_*`
+// keeps the field read and drops the nullability, `ctor_source_*` keeps the
+// nullability and sources the value from a ctor instead of a field. Each
+// compiled and answered correctly while the subject rejected, so a fix that
+// only satisfies them has not touched the defect.
+
+nobox value V2 { x: float, y: float }
+value Pt { pos: V2, born: float }
+
+// SUBJECT: nullable target, value sourced from a field read off a vec element.
+fn max_step(line: [Pt]) -> float {
+    let worst = 0.0
+    let prev: V2? = null
+    for p in line {
+        if let pp = prev {
+            let dx = p.pos.x - pp.x
+            let dy = p.pos.y - pp.y
+            worst = max(worst, dx * dx + dy * dy)
+        }
+        prev = p.pos
+    }
+    return worst
+}
+
+// CONTROL: same field read, NON-nullable target.
+fn max_step_plain(line: [Pt]) -> float {
+    let worst = 0.0
+    let prev = V2 { x: 0.0, y: 0.0 }
+    for p in line {
+        let dx = p.pos.x - prev.x
+        let dy = p.pos.y - prev.y
+        worst = max(worst, dx * dx + dy * dy)
+        prev = p.pos
+    }
+    return worst
+}
+
+// CONTROL: same nullable target, value sourced from a ctor.
+fn max_step_ctor(n: int) -> float {
+    let worst = 0.0
+    let prev: V2? = null
+    for i in 0..n {
+        // Uneven steps on purpose: a uniform stride makes every gap 1, so the
+        // max is 1 no matter which pair the loop actually compared.
+        let cur = V2 { x: (i * i) as float, y: 0.0 }
+        if let pp = prev {
+            let dx = cur.x - pp.x
+            worst = max(worst, dx * dx)
+        }
+        prev = cur
+    }
+    return worst
+}
+
+fn sample() -> [Pt] {
+    return [
+        Pt { pos: V2 { x: 0.0, y: 0.0 }, born: 0.0 },
+        Pt { pos: V2 { x: 3.0, y: 4.0 }, born: 1.0 },
+        Pt { pos: V2 { x: 3.0, y: 5.0 }, born: 2.0 },
+    ]
+}
+
+// 0->(3,4) is 25; (3,4)->(3,5) is 1. The first step is the max.
+@test(returns = 25)
+fn subject_field_read_into_nullable() -> int {
+    return max_step(sample()) as int
+}
+
+// The null seed must not read as a present (0,0): with `prev` seeded absent the
+// first point contributes nothing, so a wrongly-constant presence would report
+// 9 + 16 twice over and still land on 25 -- it is the SECOND step that separates
+// them. Asserted directly so presence is pinned, not inferred from the max.
+@test(returns = 2)
+fn subject_counts_only_seeded_steps() -> int {
+    let n = 0
+    let prev: V2? = null
+    for p in sample() {
+        if prev != null { n = n + 1 }
+        prev = p.pos
+    }
+    return n
+}
+
+@test(returns = 25)
+fn plain_target_control() -> int {
+    return max_step_plain(sample()) as int
+}
+
+// x goes 0, 1, 4: the gaps are 1 and 3, so the max squared step is 9.
+@test(returns = 9)
+fn ctor_source_control() -> int {
+    return max_step_ctor(3) as int
+}

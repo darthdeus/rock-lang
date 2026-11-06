@@ -1,0 +1,192 @@
+// The combinator + terminal surface over a NULLABLE column `[Vec2?]`, the twin
+// of `nobox_column_combinators.rock`,
+// step 5: the element destination is split into {presence cell, leaf cells} at
+// the point the shape is known, so a presence-carrying element crosses the
+// placeholder splice without ever being repacked into a box.
+//
+// Every shape here funnels through ONE arm, measured (`40958a4fb`) -- so the
+// enumeration is the point. Unlocking the arm makes fourteen shapes reachable at
+// once against a suite that covered none of them, and the ops nobody thought of
+// are the ones that break. Values, not statuses: each test returns the answer.
+
+value BV2 { x: float, y: float }
+
+fn px(v: Vec2?) -> float {
+    if v != null { return v.x }
+    return 0.0
+}
+
+fn py(v: Vec2?) -> float {
+    if v != null { return v.y }
+    return 0.0
+}
+
+fn present(v: Vec2?) -> bool { return v != null }
+
+// --- terminals that never touch an element ---
+
+@test(returns = 3)
+fn count_over_a_nullable_column() -> int {
+    let a: [Vec2?] = [Vec2 { x: 1.0, y: 1.0 }, null, Vec2 { x: 2.0, y: 2.0 }]
+    return a.count()
+}
+
+@test(returns = 2)
+fn skip_over_a_nullable_column() -> int {
+    let a: [Vec2?] = [Vec2 { x: 1.0, y: 1.0 }, null, Vec2 { x: 2.0, y: 2.0 }]
+    return a.skip(1).count()
+}
+
+// --- terminals that CONSUME the element, absent rows included ---
+
+@test(returns = 1)
+fn find_reaches_the_absent_row() -> int {
+    let a: [Vec2?] = [Vec2 { x: 1.0, y: 1.0 }, null, Vec2 { x: 2.0, y: 2.0 }]
+    // `find` returns `T?` at `T = Vec2?`, so a hit on the ABSENT row and a miss
+    // are the same value -- count the presence pattern instead, which separates
+    // them: exactly one row is absent.
+    return a.filter(v => v == null).count()
+}
+
+fn keep_absent_or_first_payload(v: Vec2?) -> bool {
+    if v == null { return true }
+    return v.x == 11.0
+}
+
+@test(returns = 310)
+fn indirect_nullable_argument_preserves_presence_and_payload() -> int {
+    let a: [Vec2?] = [Vec2 { x: 11.0, y: 23.0 }, null, Vec2 { x: 33.0, y: 45.0 }]
+    let b = a.filter(keep_absent_or_first_payload).collect()
+    let second = if b.len > 1 { px(b[1]) } else { 0.0 }
+    return b.len * 100 + (px(b[0]) * 10.0 + second) as int
+}
+
+@test(returns = 1)
+fn any_and_all_read_presence() -> int {
+    let a: [Vec2?] = [Vec2 { x: 1.0, y: 1.0 }, null, Vec2 { x: 2.0, y: 2.0 }]
+    let some_absent = a.any(v => v == null)
+    let not_all_present = !a.all(present)
+    return if some_absent && not_all_present { 1 } else { 0 }
+}
+
+@test(returns = 3)
+fn map_projects_through_presence() -> int {
+    let a: [Vec2?] = [Vec2 { x: 1.0, y: 1.0 }, null, Vec2 { x: 2.0, y: 2.0 }]
+    return a.map(px).sum_f() as int
+}
+
+@test(returns = 3)
+fn reduce_over_a_nullable_column() -> int {
+    let a: [Vec2?] = [Vec2 { x: 1.0, y: 1.0 }, null, Vec2 { x: 2.0, y: 2.0 }]
+    return a.map(px).reduce(0.0, (acc, v) => acc + v) as int
+}
+
+// A chain, so the element crosses two wrapper `next`s before the terminal.
+@test(returns = 8)
+fn chained_combinators_over_a_nullable_column() -> int {
+    let a: [Vec2?] = [Vec2 { x: 1.0, y: 1.0 }, null, Vec2 { x: 2.0, y: 6.0 }, Vec2 { x: 6.0, y: 2.0 }]
+    return a.filter(v => px(v) > 1.0).map(py).sum_f() as int
+}
+
+// --- the element must survive the pipeline WHOLE, presence and all ---
+
+@test(returns = 207)
+fn collect_preserves_presence() -> int {
+    let a: [Vec2?] = [Vec2 { x: 1.0, y: 3.0 }, null, Vec2 { x: 2.0, y: 4.0 }]
+    let b = a.filter(present).collect()
+    // len in the hundreds digit, the surviving y's in the units: a collect that
+    // dropped or duplicated a row moves the first, one that rebuilt the element
+    // off the wrong column moves the second.
+    return b.len * 100 + (py(b[0]) + py(b[1])) as int
+}
+
+// A top-level fn rather than a lambda: a LAMBDA returning a `nobox` value is a
+// separate open gap (mechanism L1) that would mask this one.
+fn swap_opt(v: Vec2?) -> Vec2? {
+    if v != null { return Vec2 { x: v.y, y: v.x } }
+    return null
+}
+
+@test(returns = 35)
+fn element_survives_a_map_to_itself() -> int {
+    let a: [Vec2?] = [Vec2 { x: 1.0, y: 3.0 }, null, Vec2 { x: 2.0, y: 5.0 }]
+    let b = a.map(swap_opt).collect()
+    // x of the swapped first (3) in the tens, the middle still absent (0), the
+    // swapped third's x (5) in the units -- a lost presence bit would make the
+    // middle a struct of nils and fault, a swapped leaf would move a digit.
+    return (px(b[0]) * 10.0 + px(b[1]) + px(b[2])) as int
+}
+
+// --- tuple elements: the pair carries a presence leaf on one side ---
+
+@test(returns = 3)
+fn zip_over_a_nullable_column_counts() -> int {
+    let a: [Vec2?] = [Vec2 { x: 1.0, y: 1.0 }, null, Vec2 { x: 2.0, y: 2.0 }]
+    let b: [int] = [10, 20, 30]
+    return a.zip(b).count()
+}
+
+// A wrapper BEHIND the zip, so the pair element crosses the placeholder splice
+// inside `SkipIter.next` and is then read whole. Each side contributes a
+// different value, so a swapped or dropped leaf moves the answer.
+@test(returns = 54)
+fn zip_carries_a_nullable_element_whole() -> int {
+    let a: [Vec2?] = [Vec2 { x: 1.0, y: 3.0 }, null, Vec2 { x: 2.0, y: 4.0 }]
+    let b: [int] = [10, 20, 30]
+    let t = 0
+    // rows 1 and 2: (null, 20) contributes 0 + 20, (y=4, 30) contributes 4 + 30.
+    for (p, q) in a.zip(b).skip(1) { t = t + py(p) as int + q }
+    return t
+}
+
+// The pair the other way round, so the presence leaf is the SECOND slot rather
+// than the first -- a rebuild that pairs leaves positionally from the left
+// cannot get both orders right by accident.
+@test(returns = 54)
+fn zip_with_the_nullable_side_second() -> int {
+    let a: [Vec2?] = [Vec2 { x: 1.0, y: 3.0 }, null, Vec2 { x: 2.0, y: 4.0 }]
+    let b: [int] = [10, 20, 30]
+    let t = 0
+    for (q, p) in b.iter().zip(a).skip(1) { t = t + py(p) as int + q }
+    return t
+}
+
+@test(returns = 15)
+fn enumerate_chain_over_a_nullable_column() -> int {
+    let a: [Vec2?] = [Vec2 { x: 1.0, y: 1.0 }, null]
+    let t = 0.0
+    for (i, v) in a.iter().enumerate() { t = t + i as float * 10.0 + px(v) + 2.0 }
+    return t as int
+}
+
+// --- the rest of the surface, enumerated rather than assumed ---
+
+fn pair_of_opt(v: Vec2?) -> VecIter<Vec2?> { return [v, v].iter() }
+
+@test(returns = 1226643)
+fn the_remaining_combinators_over_a_nullable_column() -> int {
+    let a: [Vec2?] = [Vec2 { x: 1.0, y: 1.0 }, null, Vec2 { x: 3.0, y: 3.0 }]
+    let n = a.take_while(present).count()
+    n = n * 10 + a.take(2).count()
+    n = n * 10 + a.step_by(2).count()
+    n = n * 10 + a.chain(a.iter()).count()
+    n = n * 10 + a.flat_map(pair_of_opt).count()
+    n = n * 10 + a.map(px).sum_f() as int
+    return n * 10 + (py(a.max_by(px)) + py(a.min_by(px))) as int
+}
+
+// The unmarked twin: the same pipeline over a boxed `value` keeps working.
+@test(returns = 3)
+fn unmarked_value_pipeline_still_works() -> int {
+    let a: [BV2] = [BV2 { x: 1.0, y: 1.0 }, BV2 { x: 2.0, y: 2.0 }]
+    let t = 0.0
+    for v in a { t = t + v.x }
+    return t as int
+}
+
+// The unmarked NULLABLE twin is not here because it is not a column at all:
+// `[BV2?]` at an unmarked value emits a boxed `_data` vec (only the
+// non-nullable `[BV2]` and the MARKED `[MV2?]` are column-stored). It used to
+// die packing `BV2_ct(nil, nil)` on the absent row, which was an SROA license
+// bug at a generic bound to `V?` rather than anything about columns -- fixed,
+// with its controls, in `rock-lang/crates/skull/tests/nullable_generic_binding_sroa.rs`.

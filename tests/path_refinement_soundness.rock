@@ -1,0 +1,265 @@
+// Soundness tests: verify the compiler REJECTS unsound code
+// Each test here should either:
+//   - compile and produce correct output (safe patterns)
+//   - be a positive test demonstrating soundness is maintained
+
+struct Val { n: int }
+struct Box { val: Val?, label: string }
+struct Wrapper { box: Box? }
+
+// ==============================
+// After null assignment, refinement must be invalidated
+// ==============================
+
+// After `b.val = null`, we must NOT be able to use b.val as non-null
+// This tests that the invalidation at assignment time works
+@test(output = "was set\nnow null")
+fn invalidation_after_null_assign() {
+    let b = Box { val: Val { n: 1 }, label: "x" }
+    if b.val != null {
+        print("was set")
+        b.val = null
+        // After this assignment, path refinement is invalidated
+        // We must use ?. to access b.val now
+        if b.val == null {
+            print("now null")
+        }
+    }
+}
+
+// Assign a nullable expression (not literal null) — must also invalidate
+@test(output = "re-checked")
+fn invalidation_after_nullable_assign() {
+    let b = Box { val: Val { n: 1 }, label: "x" }
+    let maybe: Val? = null
+    if b.val != null {
+        b.val = maybe  // maybe is Val?, could be null
+        // refinement invalidated — must re-check
+        if b.val != null {
+            print("still set")
+        } else {
+            print("re-checked")
+        }
+    }
+}
+
+// ==============================
+// Root assignment invalidates all sub-paths
+// ==============================
+
+@test(output = "set\nnull box")
+fn root_assign_invalidates_sub_paths() {
+    let w = Wrapper { box: Box { val: Val { n: 1 }, label: "x" } }
+    if w.box != null && w.box.val != null {
+        print("set")
+    }
+    // Replace the whole wrapper — sub-path refinements should not survive
+    // (they don't survive anyway since they're scoped to the if block)
+    let w2 = Wrapper { box: null }
+    if w2.box != null {
+        print("unreachable")
+    } else {
+        print("null box")
+    }
+}
+
+// ==============================
+// Refinement doesn't leak from if-body to after-if
+// ==============================
+
+@test(output = "inside\noutside safe")
+fn refinement_scoped_to_if() {
+    let b = Box { val: Val { n: 42 }, label: "x" }
+    if b.val != null {
+        print("inside")
+        // b.val.n accessible here
+    }
+    // Outside: must use safe nav
+    let n = b.val?.n ?? 0
+    print("outside safe")
+}
+
+// ==============================
+// Refinement doesn't leak from while body
+// ==============================
+
+@test(output = "loop done\nsafe access")
+fn refinement_scoped_to_while() {
+    let b = Box { val: Val { n: 1 }, label: "x" }
+    while b.val != null && b.val.n > 0 {
+        b.val.n = b.val.n - 1
+    }
+    print("loop done")
+    // Outside while: must use safe nav
+    let n = b.val?.n ?? -1
+    print("safe access")
+}
+
+// ==============================
+// Else-branch gets opposite refinement
+// ==============================
+
+@test(output = "null path")
+fn else_branch_no_refinement() {
+    let b = Box { val: null, label: "x" }
+    if b.val != null {
+        print("unreachable")
+    } else {
+        // In else: b.val IS null, so we can't access it
+        print("null path")
+    }
+}
+
+// ==============================
+// Re-refinement after invalidation requires new check
+// ==============================
+
+@test(output = "first: 1\ncleared\nsecond: 2")
+fn re_refinement_after_clear() {
+    let b = Box { val: Val { n: 1 }, label: "x" }
+    if b.val != null {
+        print("first: {b.val.n}")
+    }
+    b.val = null
+    print("cleared")
+    // Re-assign via a local (backend-agnostic): bone narrows b.val to non-null
+    // after the assignment so a re-check is dead, while rock needs a guard to
+    // read b.val. Use the local.
+    let v2 = Val { n: 2 }
+    b.val = v2
+    print("second: {v2.n}")
+}
+
+// ==============================
+// Compound assignment doesn't invalidate (non-null result)
+// ==============================
+
+@test(output = "11")
+fn compound_assign_preserves_refinement() {
+    let b = Box { val: Val { n: 10 }, label: "x" }
+    if b.val != null {
+        b.val.n = b.val.n + 1
+        // n is int (non-nullable), so refinement of b.val is preserved
+        print(b.val.n)
+    }
+}
+
+// ==============================
+// Multiple fields, independent refinements
+// ==============================
+
+struct Multi {
+    a: Val?,
+    b: Val?,
+    c: Val?,
+}
+
+@test(output = "1\n3")
+fn independent_field_refinements() {
+    let m = Multi { a: Val { n: 1 }, b: null, c: Val { n: 3 } }
+    if m.a != null {
+        print(m.a.n)
+    }
+    if m.b != null {
+        print("unreachable")
+    }
+    if m.c != null {
+        print(m.c.n)
+    }
+}
+
+// Clearing one field doesn't affect another's refinement scope
+@test(output = "a=1 c=3\na cleared")
+fn clear_one_keeps_other() {
+    let m = Multi { a: Val { n: 1 }, b: null, c: Val { n: 3 } }
+    if m.a != null && m.c != null {
+        print("a={m.a.n} c={m.c.n}")
+        m.a = null
+        // m.c should still be refined
+        print("a cleared")
+    }
+}
+
+// ==============================
+// Safe nav assignment target
+// ==============================
+
+@test(output = "10")
+fn safe_nav_assign_preserves_value() {
+    let w: Wrapper? = Wrapper { box: Box { val: Val { n: 5 }, label: "x" } }
+    if w != null && w.box != null && w.box.val != null {
+        w.box.val.n = 10
+        print(w.box.val.n)
+    }
+}
+
+// ==============================
+// Guard + safe nav + assignment combined
+// ==============================
+
+@test(output = "original\nupdated")
+fn guard_safenav_assign() {
+    let w: Wrapper? = Wrapper { box: Box { val: Val { n: 1 }, label: "original" } }
+    if w == null { return }
+    if w.box == null { return }
+    let box = w.box
+    print(box.label)
+    box.label = "updated"
+    print(box.label)
+}
+
+// ==============================
+// Nested nullable with safe nav chain and value modification
+// ==============================
+
+@test(output = "before: 1\nafter: 100")
+fn deep_modify_through_refinement() {
+    let w = Wrapper { box: Box { val: Val { n: 1 }, label: "x" } }
+    if w.box != null && w.box.val != null {
+        let val = w.box.val
+        print("before: {val.n}")
+        val.n = 100
+        print("after: {val.n}")
+    }
+}
+
+// ==============================
+// Verify runtime: null actually crashes without refinement
+// These test that our safe patterns work at runtime
+// ==============================
+
+@test(output = "safe: 0")
+fn safe_nav_returns_null_on_null_path() {
+    let b = Box { val: null, label: "x" }
+    let n = b.val?.n ?? 0
+    print("safe: {n}")
+}
+
+@test(output = "safe: 0")
+fn safe_nav_deep_null() {
+    let w = Wrapper { box: null }
+    let n = w.box?.val?.n ?? 0
+    print("safe: {n}")
+}
+
+// ==============================
+// Ensure refinement works with &&  chained path checks
+// ==============================
+
+@test(output = "all: 42 x 42")
+fn and_chain_three_levels() {
+    let w = Wrapper { box: Box { val: Val { n: 42 }, label: "x" } }
+    if w.box != null && w.box.val != null {
+        print("all: {w.box.val.n} {w.box.label} {w.box.val.n}")
+    }
+}
+
+@test(output = "no val")
+fn and_chain_short_circuits() {
+    let w = Wrapper { box: Box { val: null, label: "x" } }
+    if w.box != null && w.box.val != null {
+        print("unreachable")
+    } else {
+        print("no val")
+    }
+}

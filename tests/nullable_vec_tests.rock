@@ -1,0 +1,142 @@
+// Tests for Vec<T?> (nullable element vector) and Vec<T>? (nullable vector)
+// These have distinct semantics and different codegen paths.
+
+struct Mob { name: string, health: int }
+
+// ============================================
+// Vec<T>? - nullable vector
+// ============================================
+
+@test(output = "present")
+fn nullable_vec_non_null() {
+    let mobs: [Mob]? = [Mob { name: "a", health: 10 }]
+    if mobs != null {
+        print("present")
+    }
+}
+
+@test(output = "absent")
+fn nullable_vec_null() {
+    let mobs: [Mob]? = null
+    if mobs == null {
+        print("absent")
+    }
+}
+
+@test(output = "1")
+fn nullable_vec_safe_nav_len() {
+    let mobs: [Mob]? = [Mob { name: "a", health: 10 }]
+    print(mobs?.len() ?? 0)
+}
+
+@test(output = "0")
+fn nullable_vec_null_safe_nav() {
+    let mobs: [Mob]? = null
+    print(mobs?.len() ?? 0)
+}
+
+@test(output = "a")
+fn nullable_vec_index_after_unwrap() {
+    let mobs: [Mob]? = [Mob { name: "a", health: 10 }]
+    if mobs != null {
+        print(mobs[0].name)
+    }
+}
+
+// ============================================
+// Vec<T?> - vector of nullable elements
+// ============================================
+
+@test(output = "present\nskipped")
+fn vec_of_nullable_basic() {
+    let mobs: [Mob?] = []
+    vec_push(mobs, Mob { name: "a", health: 10 })
+    vec_push(mobs, null)
+    for mob in mobs {
+        if mob != null {
+            print("present")
+        } else {
+            print("skipped")
+        }
+    }
+}
+
+@test(output = "2")
+fn vec_of_nullable_len_includes_nulls() {
+    let mobs: [Mob?] = []
+    vec_push(mobs, Mob { name: "a", health: 10 })
+    vec_push(mobs, null)
+    print(mobs.len())
+}
+
+@test(output = "a\nc")
+fn vec_of_nullable_continue_on_null() {
+    let mobs: [Mob?] = []
+    vec_push(mobs, Mob { name: "a", health: 10 })
+    vec_push(mobs, null)
+    vec_push(mobs, Mob { name: "c", health: 30 })
+    for mob in mobs {
+        if mob == null {
+            continue
+        }
+        print(mob.name)
+    }
+}
+
+@test(output = "a")
+fn vec_of_nullable_break_on_null() {
+    let mobs: [Mob?] = []
+    vec_push(mobs, Mob { name: "a", health: 10 })
+    vec_push(mobs, null)
+    vec_push(mobs, Mob { name: "c", health: 30 })
+    for mob in mobs {
+        if mob == null {
+            break
+        }
+        print(mob.name)
+    }
+}
+
+@test(output = "not-null\nnull")
+fn vec_of_nullable_index_access() {
+    let mobs: [Mob?] = []
+    vec_push(mobs, Mob { name: "a", health: 10 })
+    vec_push(mobs, null)
+    let m0 = mobs[0]
+    let m1 = mobs[1]
+    if m0 != null { print("not-null") } else { print("null") }
+    if m1 != null { print("not-null") } else { print("null") }
+}
+
+@test(output = "4")
+fn vec_of_nullable_int_sum() {
+    let nums: [int?] = []
+    vec_push(nums, 1)
+    vec_push(nums, null)
+    vec_push(nums, 3)
+    let sum = 0
+    for x in nums {
+        if x != null {
+            sum += x
+        }
+    }
+    print(sum)
+}
+
+// ============================================
+// Refinement inside loops over Vec<T?>
+// ============================================
+
+@test(output = "a\nc")
+fn vec_of_nullable_refinement_in_loop() {
+    let mobs: [Mob?] = []
+    vec_push(mobs, Mob { name: "a", health: 10 })
+    vec_push(mobs, null)
+    vec_push(mobs, Mob { name: "c", health: 30 })
+    for mob in mobs {
+        if mob != null {
+            // mob is refined to Mob here (not Mob?)
+            print(mob.name)
+        }
+    }
+}

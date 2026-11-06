@@ -1,0 +1,18 @@
+//! Error: the legacy `yield*` delegation spelling is rejected -- `await` is
+//!        the only delegation form.
+//! Tags: coroutine, await, yield_star
+
+//=== TEST CASE: yield_star_delegation_Rejected ===
+co fn inner() -> Coroutine<int, int> {
+    yield 1
+    return 2
+}
+
+co fn outer() -> Coroutine<int, int> {
+    yield* inner()   // ERROR: use `await`
+    yield 3
+}
+
+fn main() {
+    let c = outer()
+}

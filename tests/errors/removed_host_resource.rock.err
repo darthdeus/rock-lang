@@ -1,0 +1,14 @@
+//! Error: reflective host-handle projection has been retired.
+//! Tags: annotations, removed-contract
+
+//=== TEST CASE: removed_host_resource_on_type ===
+@host_resource(voice)
+newtype VoiceG(int)   // ERROR: `@host_resource` was removed; delete it
+
+fn main() { print("{VoiceG(0).0}") }
+
+//=== TEST CASE: removed_host_resource_on_function ===
+@host_resource
+fn play_f() -> int { return 1 }   // ERROR: `@host_resource` was removed; delete it
+
+fn main() { print("{play_f()}") }

@@ -1,0 +1,36 @@
+nobox value HealingSpace { value: int }
+nobox value HealingPlace { space: HealingSpace }
+struct HealingSimulation { place: HealingPlace }
+struct HealingMovable { simulation: HealingSimulation }
+struct HealingMob { movable: HealingMovable, diorama: bool }
+enum HealingSubject { None, Mob(Entity<HealingMob>), DioramaMob(Entity<HealingMob>) }
+
+fn healing_subject(entity: Entity<HealingMob>, mob: HealingMob) -> HealingSubject {
+    return if mob.diorama { HealingSubject::DioramaMob(entity) } else { HealingSubject::Mob(entity) }
+}
+
+// A native enum return must replace the leaves initialized by a variant.
+@test fn c_healing_feedback_assignment_projects_subject_and_space() {
+    let rows: Arena<HealingMob> = arena_new()
+    let mob = rows.insert(HealingMob {
+        diorama: true,
+        movable: HealingMovable {
+            simulation: HealingSimulation { place: HealingPlace { space: HealingSpace { value: 29 } } },
+        },
+    })
+    let target_space: HealingSpace? = null
+    let subject = HealingSubject::Mob(mob)
+    if let target = mob.get() {
+        subject = healing_subject(mob, target)
+        target_space = target.movable.simulation.place.space
+    }
+    match subject {
+        HealingSubject::DioramaMob(entity) => assert(entity == mob),
+        _ => assert(false),
+    }
+    if let space = target_space {
+        assert_eq(space.value, 29)
+    } else { assert(false) }
+    let _ = arena_destroy(rows)
+    let _ = __arena_drain_retired()
+}

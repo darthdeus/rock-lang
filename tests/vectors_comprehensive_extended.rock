@@ -1,0 +1,452 @@
+// Extended vector tests - migrated from rock/tests/vec_tests.rs (tests 15-38)
+// Tests advanced vector operations, iteration patterns, and edge cases
+// Note: Now using stdlib unwrap() function
+
+// Test that was marked as ignored due to infinite loop
+@test(output = "v[0]: hi\nv[1]: bye\npopped: bye\nlen after pop: 1\nremaining v[0]: hi\nafter push new: new\nfinal len: 2")
+fn vec_comprehensive_operations() {
+    let v = vec_new()
+    vec_push(v, "hi")
+    vec_push(v, "bye")
+
+    // Test direct access
+    print("v[0]: {v[0]}")
+    print("v[1]: {v[1]}")
+
+    // Test pop
+    let popped = pop(v)
+    print("popped: {unwrap(popped)}")
+    print("len after pop: {vec_len(v)}")
+
+    // Test remaining element access
+    print("remaining v[0]: {v[0]}")
+
+    // Test push after pop
+    vec_push(v, "new")
+    print("after push new: {v[1]}")
+    print("final len: {vec_len(v)}")
+}
+
+@test(output = "empty len: 0\nis empty: true\npop from empty: nil\nafter push len: 1\nafter clear len: 0\nafter clear is empty: true")
+fn vec_empty_operations() {
+    let v = vec_new()
+    print("empty len: {vec_len(v)}")
+    print("is empty: {is_empty(v)}")
+
+    // Pop from empty should return null
+    let popped = pop(v)
+    print("pop from empty: {popped}")
+
+    // Add element then clear
+    vec_push(v, "test")
+    print("after push len: {vec_len(v)}")
+    clear(v)
+    print("after clear len: {vec_len(v)}")
+    print("after clear is empty: {is_empty(v)}")
+}
+
+@test(output = "v type: table\nv._data type: table\nv.len: 0\nafter push - v._data type: table\nafter push - v.len: 1\nv is already array-like...\nv type: table")
+fn debug_vec_structure() {
+    let v = vec_new()
+    print("v type: {typeof(v)}")
+    print("v._data type: {typeof(v._data)}")
+    print("v.len: {v.len}")
+
+    vec_push(v, "test")
+    print("after push - v._data type: {typeof(v._data)}")
+    print("after push - v.len: {v.len}")
+
+    print("v is already array-like...")
+    print("v type: {typeof(v)}")
+}
+
+@test(output = "60 60 3")
+fn vec_iter_basic() {
+    let v = [10, 20, 30]
+    let sum = 0
+    let sum2 = 0
+    let isum = 0
+
+    for item in v {
+        sum = sum + item
+    }
+
+    for (i, item) in enumerate(v) {
+        isum = isum + i
+        sum2 = sum2 + item
+    }
+
+    assert_eq(sum, 60)
+    assert_eq(sum2, 60)
+    assert_eq(isum, 3) // 0 + 1 + 2
+
+    print("{sum} {sum2} {isum}")
+}
+
+@test(output = "0:a\n1:b\n2:c")
+fn vec_enumerate_basic() {
+    let v = ["a", "b", "c"]
+
+    for (i, item) in enumerate(v) {
+        print("{i}:{item}")
+    }
+}
+
+@test(output = "index 0 = 100\nindex 1 = 200\nindex 2 = 300")
+fn vec_enumerate_with_modifications() {
+    let v = [100, 200]
+    vec_push(v, 300)
+
+    for (i, item) in enumerate(v) {
+        print("index {i} = {item}")
+    }
+}
+
+@test(output = "Using :\n  5\n  10\n  15\nUsing enumerate():\n  [0] = 5\n  [1] = 10\n  [2] = 15")
+fn vec_iter_vs_enumerate() {
+    let numbers = [5, 10, 15]
+
+    print("Using :")
+    for num in numbers {
+        print("  {num}")
+    }
+
+    print("Using enumerate():")
+    for (i, num) in enumerate(numbers) {
+        print("  [{i}] = {num}")
+    }
+}
+
+@test(output = "Enumerated 0 items")
+fn vec_enumerate_empty() {
+    let empty_vec: [int] = vec_new()
+    let count = 0
+
+    for (i, item) in enumerate(empty_vec) {
+        count = count + 1
+    }
+
+    print("Enumerated {count} items")
+}
+
+@test(output = "Iterated over 0 items")
+fn vec_iter_empty() {
+    let empty_vec: [int] = []
+    let count = 0
+
+    for item in empty_vec {
+        count = count + 1
+    }
+
+    print("Iterated over {count} items")
+}
+
+@test(output = "Single item at index 0: only")
+fn vec_enumerate_single_item() {
+    let single = ["only"]
+
+    for (i, item) in enumerate(single) {
+        print("Single item at index {i}: {item}")
+    }
+}
+
+@test(output = "True values: 2\nSum of even-indexed items: 9")
+fn vec_iterate_different_types() {
+    let bools = [true, false, true]
+    let bool_count = 0
+
+    for b in bools {
+        if b {
+            bool_count = bool_count + 1
+        }
+    }
+
+    print("True values: {bool_count}")
+
+    let nums = [1, 2, 3, 4, 5]
+    let sum = 0
+    for (idx, num) in enumerate(nums) {
+        if idx % 2 == 0 {  // Even indices
+            sum = sum + num
+        }
+    }
+
+    print("Sum of even-indexed items: {sum}")
+}
+
+fn get_direct_return() -> [string] {
+    return ["a", "b", "c"]
+}
+
+fn get_with_variable() -> [string] {
+    let arr = ["a", "b", "c"]
+    return arr
+}
+
+@test(output = "Direct: a,b,c\nVariable: a,b,c")
+fn vec_direct_array_literal_return() {
+    let direct = get_direct_return()
+    print("Direct: {direct[0]},{direct[1]},{direct[2]}")
+
+    let variable = get_with_variable()
+    print("Variable: {variable[0]},{variable[1]},{variable[2]}")
+}
+
+@test(output = "index_sum: 3\nvalue_sum: 60\n3\n60")
+fn vec_tuple_iteration_now_works() {
+    let arr = [10, 20, 30]
+    let index_sum = 0
+    let value_sum = 0
+
+    for (i, x) in enumerate(arr) {
+        index_sum = index_sum + i
+        value_sum = value_sum + x
+    }
+
+    // Indices should be 0, 1, 2 (0-based)
+    print("index_sum: {index_sum}")
+    print("value_sum: {value_sum}")
+    print(index_sum)
+    print(value_sum)
+}
+
+@test(output = "6")
+fn vec_array_iteration_comprehensive() {
+    let arr = [1, 2, 3]
+    let sum = 0
+
+    for (i, x) in enumerate(arr) {
+        sum = sum + x
+    }
+
+    print(sum)
+}
+
+@test(output = "3\n1\n2\n3")
+fn vec_structure_and_operations() {
+    let vec = vec_new()
+    vec_push(vec, 1)
+    vec_push(vec, 2)
+    vec_push(vec, 3)
+
+    // Test that the vector has correct length
+    print(vec_len(vec))
+
+    // Test that individual elements are correct via vec_get
+    print(unwrap(vec_get(vec, 0)))
+    print(unwrap(vec_get(vec, 1)))
+    print(unwrap(vec_get(vec, 2)))
+}
+
+@test(output = "100\n100\n4")
+fn vec_modern_iteration_patterns() {
+    let numbers = [10, 20, 30, 40]
+
+    // Test pattern
+    let sum_iter = 0
+    for num in numbers {
+        sum_iter = sum_iter + num
+    }
+    print(sum_iter)
+
+    // Test enumerate() pattern
+    let sum_enum = 0
+    let index_count = 0
+    for (i, num) in enumerate(numbers) {
+        sum_enum = sum_enum + num
+        index_count = index_count + 1
+    }
+    print(sum_enum)
+    print(index_count)
+}
+
+@test(output = "3\n10\n20\n30\n30\n2")
+fn vec_core_operations_part1() {
+    let v = vec_new()
+
+    // Test push and length
+    vec_push(v, 10)
+    vec_push(v, 20)
+    vec_push(v, 30)
+    print(vec_len(v))
+
+    // Test get
+    print(unwrap(vec_get(v, 0)))
+    print(unwrap(vec_get(v, 1)))
+    print(unwrap(vec_get(v, 2)))
+
+    // Test pop
+    print(unwrap(pop(v)))
+    print(vec_len(v))
+}
+
+@test(output = "0\ntrue\n2")
+fn vec_core_operations_part2() {
+    let v = vec_new_with_capacity(10)
+    print(vec_len(v))
+    print(capacity(v) >= 10)
+
+    vec_push(v, 1)
+    vec_push(v, 2)
+    print(vec_len(v))
+}
+
+@test(output = "0\ntrue")
+fn vec_core_operations_part3() {
+    let v = vec_new()
+    vec_push(v, 1)
+    vec_push(v, 2)
+    vec_push(v, 3)
+
+    clear(v)
+    print(vec_len(v))
+    print(is_empty(v))
+}
+
+@test(output = "30")
+fn vec_core_operations_part4() {
+    let v = vec_new()
+    vec_push(v, 5)
+    vec_push(v, 10)
+    vec_push(v, 15)
+
+    let sum = 0
+    for x in v {
+        sum = sum + x
+    }
+    print(sum)
+}
+
+@test(output = "30")
+fn vec_tuple_iteration_tests_part2() {
+    let arr = [5, 10, 15]
+    let sum = 0
+
+    for x in arr {
+        sum = sum + x
+    }
+
+    print(sum)
+}
+
+@test(output = "6\n3")
+fn vec_array_tuple_tests_part1() {
+    let arr = [1, 2, 3]
+    let sum = 0
+    let index_sum = 0
+
+    for (i, x) in enumerate(arr) {
+        sum = sum + x
+        index_sum = index_sum + i
+    }
+
+    print(sum)
+    print(index_sum)
+}
+
+@test(output = "60\n60\n3")
+fn vec_array_tuple_tests_part2() {
+    let vec1 = [10, 20, 30]
+    let vec2 = [10, 20, 30]
+
+    // Single binding iteration
+    let sum1 = 0
+    for x in vec1 {
+        sum1 = sum1 + x
+    }
+
+    // Tuple destructuring iteration
+    let sum2 = 0
+    let idx_sum = 0
+    for (i, x) in enumerate(vec2) {
+        sum2 = sum2 + x
+        idx_sum = idx_sum + i
+    }
+
+    print(sum1)
+    print(sum2)
+    print(idx_sum)
+}
+
+@test(output = "=== Single binding ===\n1:one\n2:two\n3:three\n=== Tuple destructuring ===\nidx=0, num=1, word=one\nidx=1, num=2, word=two\nidx=2, num=3, word=three\n=== Explicit  ===\n1:one\n2:two\n3:three\n=== Explicit enumerate() ===\nidx=0, num=1, word=one\nidx=1, num=2, word=two\nidx=2, num=3, word=three\n=== Direct tuple destructuring ===\nnum=1, word=\"one\"\nnum=2, word=\"two\"\nnum=3, word=\"three\"")
+fn vec_of_tuples_comprehensive() {
+    // Create a Vec of tuples
+    let pairs = [(1, "one"), (2, "two"), (3, "three")]
+
+    // Test 1: Single binding iteration - should give us the tuples
+    print("=== Single binding ===")
+    for pair in pairs {
+        let num = tuple_first(pair)
+        let word = tuple_second(pair)
+        print("{num}:{word}")
+    }
+
+    // Test 2: Enumeration - should give (index, tuple) with explicit enumerate()
+    print("=== Tuple destructuring ===")
+    for (i, pair) in enumerate(pairs) {
+        let num = tuple_first(pair)
+        let word = tuple_second(pair)
+        print("idx={i}, num={num}, word={word}")
+    }
+
+    // Test 3: Using explicitly
+    print("=== Explicit  ===")
+    for pair in pairs {
+        let num = tuple_first(pair)
+        let word = tuple_second(pair)
+        print("{num}:{word}")
+    }
+
+    // Test 4: Using enumerate() explicitly
+    print("=== Explicit enumerate() ===")
+    for (i, pair) in enumerate(pairs) {
+        let num = tuple_first(pair)
+        let word = tuple_second(pair)
+        print("idx={i}, num={num}, word={word}")
+    }
+
+    // Test 5: Direct tuple destructuring (new behavior)
+    print("=== Direct tuple destructuring ===")
+    for (num, word) in pairs {
+        print("num={num}, word=\"{word}\"")
+    }
+}
+
+@test(output = "=== Nested tuples - single binding ===\n(1,2),(3,4)\n(5,6),(7,8)\n=== Nested tuples - tuple destructuring ===\nidx=0: left=(1,2)\nidx=1: left=(5,6)\n=== Single element ===\ni=0, elem=(42,answer)\nEmpty vec iteration count: 0")
+fn vec_of_tuples_edge_cases() {
+    // Test with nested tuples
+    let nested = [((1, 2), (3, 4)), ((5, 6), (7, 8))]
+
+    print("=== Nested tuples - single binding ===")
+    for item in nested {
+        let left = tuple_first(item)
+        let right = tuple_second(item)
+        let a = tuple_first(left)
+        let b = tuple_second(left)
+        let c = tuple_first(right)
+        let d = tuple_second(right)
+        print("({a},{b}),({c},{d})")
+    }
+
+    print("=== Nested tuples - tuple destructuring ===")
+    for (idx, item) in enumerate(nested) {
+        let left = tuple_first(item)
+        let right = tuple_second(item)
+        print("idx={idx}: left=({tuple_first(left)},{tuple_second(left)})")
+    }
+
+    // Test with single element tuple vec
+    let single = [(42, "answer")]
+    print("=== Single element ===")
+    for (i, elem) in enumerate(single) {
+        print("i={i}, elem=({tuple_first(elem)},{tuple_second(elem)})")
+    }
+
+    // Test empty vec of tuples
+    let empty: [(int, string)] = []
+    let count = 0
+    for _ in empty {
+        count = count + 1
+    }
+    print("Empty vec iteration count: {count}")
+}

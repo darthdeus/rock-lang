@@ -1,0 +1,31 @@
+// Regression: LICM must NOT hoist a @pure call reading a global out of a loop.
+//
+// `pure_double(SENT_G)` reads the global `SENT_G`, which `sent_set_g` mutates
+// every iteration -- the call is loop-VARIANT and must run each iteration.
+// PureLicmAnf treats `SENT_G` as a free variable (a global: not bound by any
+// param/Let/for-binding) and refuses the hoist
+// (rock-codegen/src/anf/pure_licm.rs `all_refs_invariant`). Correct output is
+// "total=66" (2*(10+11+12)); the pre-fix bug hoisted the call above the loop and
+// computed it once from the stale entry value 1.0, giving "total=6".
+
+global SENT_G: float = 0.0
+
+fn sent_set_g(v: float) {
+    SENT_G = v
+}
+
+@pure
+fn pure_double(x: float) -> float {
+    return x * 2.0
+}
+
+@test(output = "total=66")
+fn licm_global_write_across_call_sentinel() {
+    SENT_G = 1.0
+    let total = 0.0
+    for i in 0..3 {
+        sent_set_g(float(i + 10))
+        total = total + pure_double(SENT_G)
+    }
+    print("total={total}")
+}

@@ -1,0 +1,58 @@
+// Bounds checks on NativeBuffer<T>[i]: out-of-bounds reads/writes error via
+// the __nb_checked_get / __nb_checked_set helpers, unconditionally.
+
+@intrinsic @nomangle inline(lua) fn try_call(f: fn()) -> bool = """
+    local ok, err = pcall(f)
+    return not ok
+"""
+
+@test
+fn in_bounds_works() {
+    let buf = native_buffer_float(3)
+    buf[0] = 1.5
+    buf[1] = 2.5
+    buf[2] = 3.5
+    assert(buf[0] == 1.5)
+    assert(buf[1] == 2.5)
+    assert(buf[2] == 3.5)
+}
+
+@test
+fn oob_read_errors() {
+    let buf = native_buffer_float(3)
+    buf[0] = 10.0
+    let errored = try_call(() => {
+        let _x = buf[5]
+    })
+    assert(errored)
+}
+
+@test
+fn oob_write_errors() {
+    let buf = native_buffer_float(3)
+    let errored = try_call(() => {
+        buf[10] = 99.0
+    })
+    assert(errored)
+}
+
+@test
+fn negative_index_errors() {
+    let buf = native_buffer_int(5)
+    let errored = try_call(() => {
+        let _x = buf[-1]
+    })
+    assert(errored)
+}
+
+@test
+fn boundary_at_len_errors() {
+    // len-1 is valid; len is out of bounds (half-open).
+    let buf = native_buffer_int(4)
+    buf[3] = 42
+    assert(buf[3] == 42)
+    let errored = try_call(() => {
+        let _x = buf[4]
+    })
+    assert(errored)
+}

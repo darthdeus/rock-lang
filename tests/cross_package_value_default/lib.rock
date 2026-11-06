@@ -1,0 +1,4 @@
+pub value Presence {
+    pub rect: rect::Rect = rect::Rect { x: 3.0, y: 7.0, w: 11.0, h: 13.0 },
+    pub age: float = 0.0,
+}

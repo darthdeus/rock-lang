@@ -1,0 +1,101 @@
+// Test the type hole testing feature
+
+// Basic type inference tests
+@test(type_holes = [[0, "int"], [1, "string"], [2, "float"]])
+fn test_basic_type_inference() {
+    let x: ? = 42           // hole 0 -> int
+    let y: ? = "hello"      // hole 1 -> string  
+    let z: ? = 3.14         // hole 2 -> float
+    
+    // Also verify values work correctly
+    assert_eq(x, 42)
+    assert_eq(y, "hello")
+    assert_eq(z, 3.14)
+}
+
+// Helper function for generic test
+fn identity<T>(x: T) -> T { 
+    return x 
+}
+
+// Generic function type inference
+@test(type_holes = [[3, "[int]"], [4, "int"]])
+fn test_generic_function_inference() {
+    let arr: ? = [1, 2, 3]              // hole 3 -> [int]
+    let elem: ? = identity(arr[0])      // hole 4 -> int
+    
+    assert_eq(elem, 1)
+}
+
+// Struct field type inference
+struct Point { 
+    x: int, 
+    y: int 
+}
+
+@test(type_holes = [[5, "Point"], [6, "int"], [7, "int"]])
+fn test_struct_field_inference() {
+    let p: ? = Point { x: 10, y: 20 }  // hole 5 -> Point
+    let x_val: ? = p.x                  // hole 6 -> int
+    let y_val: ? = p.y                  // hole 7 -> int
+    
+    assert_eq(x_val, 10)
+    assert_eq(y_val, 20)
+}
+
+// Complex nested types
+@test(type_holes = [[8, "[[int]]"], [9, "[int]"], [10, "int"]])
+fn test_nested_type_inference() {
+    let matrix: ? = [[1, 2], [3, 4]]    // hole 8 -> [[int]]
+    let row: ? = matrix[0]              // hole 9 -> [int]
+    let elem: ? = row[1]                // hole 10 -> int
+    
+    assert_eq(elem, 2)
+}
+
+// Nullable type inference
+@test(type_holes = [[11, "int"]])
+fn test_nullable_type_inference() {
+    let maybe_val: int? = 42
+    let default_val: ? = maybe_val ?? 0 // hole 11 -> int
+    
+    assert_eq(default_val, 42)
+}
+
+// Combined output and type hole testing
+@test(output = "Value: 42", type_holes = [[0, "int"]])
+fn test_combined_output_and_types() {
+    let x: ? = 42                       // hole 0 -> int
+    print("Value: {x}")
+}
+
+// Type inference with operators
+@test(type_holes = [[12, "int"], [13, "int"], [15, "bool"]])
+fn test_operator_type_inference() {
+    let a: ? = 10 + 20                  // hole 12 -> int
+    let b: ? = a * 2                    // hole 13 -> int
+    let c: ? = a > b                    // hole 15 -> bool
+    
+    assert_eq(a, 30)
+    assert_eq(b, 60)
+    assert_eq(c, false)
+}
+
+// Helper functions for return type test
+fn greet(name: string) -> string {
+    return "Hello, {name}!"
+}
+
+fn count_chars(s: string) -> int {
+    return 13  // "Hello, World!" has 13 characters
+}
+
+// Function return type inference
+@test(type_holes = [[16, "string"], [17, "int"]])
+fn test_function_return_inference() {
+    let greeting: ? = greet("World")    // hole 16 -> string
+    let length: ? = count_chars(greeting) // hole 17 -> int
+    
+    assert_eq(greeting, "Hello, World!")
+    assert_eq(length, 13)
+}

@@ -1,0 +1,55 @@
+//! Error: `@vertex_expand fn f<T>(buf: FlatVec<T>) -> int | [int]`
+//!        is compiler-expanded at emit. The expander rejects with a spanned
+//!        error when an argument is not a buffer, when a buffer's element is
+//!        not a concrete value struct,
+//!        a return type that is neither `int` nor `[int]`, and an element whose
+//!        layout the float-unit view cannot state (an integer attribute).
+//!
+//!        The remaining rejection -- a field off its cumulative byte position --
+//!        has no source-level case: every admitted attribute kind is 4-byte
+//!        aligned, so no struct can currently violate it. It is pinned instead at
+//!        the unit level against a hand-built plan.
+//! Tags: vertex_expand, vertex_plan, emit-time
+
+//=== TEST CASE: arg_not_a_buffer_Generic ===
+@vertex_expand inline(lua) fn vstride<T>(u: T) -> int = """
+    error("compiler-expanded")
+"""
+
+fn main() {
+    let _ = vstride(3)
+}
+
+//=== TEST CASE: element_not_a_value_struct_Generic ===
+@vertex_expand inline(lua) fn vstride<T>(buf: NativeBuffer<T>) -> int = """
+    error("compiler-expanded")
+"""
+
+fn main() {
+    let buf = native_buffer_int(4)
+    let _ = vstride(buf)
+}
+
+//=== TEST CASE: return_type_not_layout_Generic ===
+value Inst { pos: Vec2, rot: float }
+
+@vertex_expand inline(lua) fn vbad<T>(buf: FlatVec<T>) -> float = """
+    error("compiler-expanded")
+"""
+
+fn main() {
+    let xs: FlatVec<Inst> = flat_vec_new()
+    let _ = vbad(xs)
+}
+
+//=== TEST CASE: integer_attribute_rejects_float_unit_Generic ===
+value WithId { pos: Vec2, id: int }
+
+@vertex_expand inline(lua) fn vsizes<T>(buf: FlatVec<T>) -> [int] = """
+    error("compiler-expanded")
+"""
+
+fn main() {
+    let xs: FlatVec<WithId> = flat_vec_new()
+    let _ = vsizes(xs)
+}

@@ -1,0 +1,20 @@
+//! Error: Heterogeneous struct/tuple spread into a typed array must error
+//! Tags: types, spread, soundness
+
+//=== TEST CASE: heterogeneous_struct_spread_Generic ===
+struct Mixed {
+    name: string,
+    age: int,
+    score: float,
+}
+
+fn main() {
+    let person = Mixed { name: "Alice", age: 25, score: 95.5 }
+    let data: [int] = [...person, 100]
+}
+
+//=== TEST CASE: heterogeneous_tuple_spread_into_int_array_MismatchedType ===
+fn main() {
+    let floats = (1.0, 2.0, 3.0)
+    let data: [int] = [...floats, 4]
+}

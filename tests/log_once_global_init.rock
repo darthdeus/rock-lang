@@ -1,0 +1,35 @@
+// B1 (adversarial): log_once called from a top-level global initializer.
+//
+// Risk: log_once calls __rock_log_init(), whose body checks
+// `if __rock_log_level >= 0 then return end`. The Rock global
+// `__rock_log_level: int = -1` provides the initial value — but Rock emits
+// global initializers in declaration order at module load time. If a user's
+// global initializer calls log_once BEFORE the stdlib's
+// `__rock_log_level = -1` initializer runs, __rock_log_level is still
+// `nil`, and `nil >= 0` raises:
+//
+//   attempt to compare number with nil
+//
+// FINDING (BUG, severity: medium):
+//   log_once is NOT safe to call from a top-level global initializer.
+//   Crashes at module load. Workarounds: (a) add a nil guard in
+//   __rock_log_init like `if __rock_log_level == nil then __rock_log_level = -1 end`;
+//   (b) ensure stdlib globals are emitted before user globals in codegen.
+//   This file isolates the crash in its own module so it doesn't poison the
+//   rest of the log_once test suite.
+//
+// This file is currently EXPECTED TO FAIL — the @test asserts the
+// no-crash invariant we want, but the bug causes module load to abort.
+// Leave the test as-is until the underlying bug is fixed; do not silently
+// edit it to match the bad behavior.
+
+global startup_log_count: int = {
+    log_once("INIT_TEST", "from global initializer", "global-init-key")
+    1
+}
+
+@test
+fn test_log_once_from_global_initializer_doesnt_crash() {
+    // If this @test runs at all, module load did not crash on log_once.
+    assert(startup_log_count == 1)
+}

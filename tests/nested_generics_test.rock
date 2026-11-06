@@ -1,0 +1,152 @@
+// Exploration tests for nested generic type application.
+
+struct Bucket<K, V> {
+    key: K,
+    value: V,
+}
+
+struct Container<K, V> {
+    entries: [Bucket<K, V>],
+}
+
+@test(output = "ok")
+fn test_nested_vec_of_generic_struct() {
+    let c: Container<int, string> = Container { entries: vec_new() }
+    print("ok")
+}
+
+@test(output = "hello")
+fn test_push_into_nested_generic() {
+    let c: Container<int, string> = Container { entries: vec_new() }
+    let b: Bucket<int, string> = Bucket { key: 1, value: "hello" }
+    c.entries.push(b)
+    print(c.entries[0].value)
+}
+
+struct MapLike<K, V> {
+    buckets: [Bucket<K, V>?],
+    size: int,
+}
+
+@test(output = "ok")
+fn test_nullable_nested_bucket_vec() {
+    let m: MapLike<int, string> = MapLike { buckets: vec_new(), size: 0 }
+    print("ok")
+}
+
+fn make_container<K, V>() -> Container<K, V> {
+    return Container { entries: vec_new() }
+}
+
+@test(output = "ok")
+fn test_generic_fn_nested_return() {
+    let c: Container<int, string> = make_container()
+    print("ok")
+}
+
+fn first_key<K, V>(c: Container<K, V>) -> K? {
+    if c.entries.len() == 0 { return null }
+    return c.entries[0].key
+}
+
+@test(output = "42")
+fn test_generic_fn_uses_nested_field() {
+    let c: Container<int, string> = Container { entries: vec_new() }
+    c.entries.push(Bucket { key: 42, value: "x" })
+    let k = first_key(c)
+    print(k.unwrap())
+}
+
+// --- Triple-nested: Container containing a Vec of Vec of Bucket ---
+
+struct DeepContainer<K, V> {
+    rows: [[Bucket<K, V>]],
+}
+
+@test(output = "zz")
+fn test_triple_nested_generic() {
+    let d: DeepContainer<int, string> = DeepContainer { rows: vec_new() }
+    let row: [Bucket<int, string>] = vec_new()
+    row.push(Bucket { key: 1, value: "zz" })
+    d.rows.push(row)
+    print(d.rows[0][0].value)
+}
+
+// --- The full HashMap shape with operations in pure Rock ---
+
+struct HashEntry<K, V> {
+    hash: int,
+    key: K,
+    value: V,
+}
+
+struct MyMap<K, V> {
+    buckets: [HashEntry<K, V>?],
+    size: int,
+    capacity: int,
+}
+
+fn my_map_new<K, V>() -> MyMap<K, V> {
+    let buckets: [HashEntry<K, V>?] = vec_new()
+    let i = 0
+    while i < 8 {
+        buckets.push(null)
+        i = i + 1
+    }
+    return MyMap { buckets: buckets, size: 0, capacity: 8 }
+}
+
+@test(output = "ok")
+fn test_hashmap_shape_new() {
+    let m: MyMap<int, string> = my_map_new()
+    print("ok")
+}
+
+fn my_map_put<K, V>(m: MyMap<K, V>, key: K, value: V) {
+    // Trivial: just stuff at index 0 for this test
+    let e: HashEntry<K, V> = HashEntry { hash: 0, key: key, value: value }
+    m.buckets[0] = e
+    m.size = m.size + 1
+}
+
+@test(output = "hi")
+fn test_hashmap_shape_put_get() {
+    let m: MyMap<int, string> = my_map_new()
+    my_map_put(m, 7, "hi")
+    let e = m.buckets[0]
+    if e != null {
+        print(e.value)
+    } else {
+        print("null")
+    }
+}
+
+// --- Enum with nested generic variant ---
+
+enum Tree<T> {
+    Leaf,
+    Node(T, [Tree<T>]),
+}
+
+@test(output = "leaf")
+fn test_recursive_generic_enum() {
+    let t: Tree<int> = Tree::Leaf
+    match t {
+        Tree::Leaf => print("leaf"),
+        Tree::Node(_, _) => print("node"),
+    }
+}
+
+// --- Generic function inferring nested type from argument ---
+
+fn container_size<K, V>(c: Container<K, V>) -> int {
+    return c.entries.len()
+}
+
+@test(output = "2")
+fn test_generic_fn_infers_nested() {
+    let c: Container<int, string> = Container { entries: vec_new() }
+    c.entries.push(Bucket { key: 1, value: "a" })
+    c.entries.push(Bucket { key: 2, value: "b" })
+    print(container_size(c))
+}

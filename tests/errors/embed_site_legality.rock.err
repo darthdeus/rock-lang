@@ -1,0 +1,61 @@
+//! Error: what may be embedded at all. `embed` inlines a type's LEAVES into
+//!        the parent, so the embedded type must have leaves the compiler can
+//!        name statically, and the embed graph must terminate.
+//! Tags: embed, site-legality, scalarization
+
+//=== TEST CASE: embed_primitive_Generic ===
+struct Holder { embed n: int }
+
+fn main() {
+    let h = Holder { n: 1 }
+    print("{h.n}")
+}
+
+//=== TEST CASE: embed_collection_Generic ===
+struct Holder { embed xs: [int] }
+
+fn main() {
+    let h = Holder { xs: [1] }
+    print("{h.xs.len}")
+}
+
+//=== TEST CASE: embed_any_Generic ===
+struct Holder { embed a: any }
+
+fn main() {
+    let h = Holder { a: 1 }
+    print("{h.a}")
+}
+
+//=== TEST CASE: embed_enum_Generic ===
+enum Color { Red, Green }
+struct Holder { embed c: Color }
+
+fn main() {
+    let h = Holder { c: Color::Red }
+    print("{h.c}")
+}
+
+//=== TEST CASE: embed_generic_param_Generic ===
+// A generic param has no statically known leaves at the declaration.
+struct Holder<T> { embed t: T }
+
+fn main() {
+    let h: Holder<int> = Holder { t: 1 }
+    print("{h.t}")
+}
+
+//=== TEST CASE: embed_self_cycle_Generic ===
+struct Node { embed next: Node, v: int }
+
+fn main() {
+    print("unreachable")
+}
+
+//=== TEST CASE: embed_mutual_cycle_Generic ===
+struct A { embed b: B, v: int }
+struct B { embed a: A, w: int }
+
+fn main() {
+    print("unreachable")
+}

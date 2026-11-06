@@ -1,0 +1,60 @@
+// Premise oracle for coroutine-slot instance identity.
+//
+// Compare-before-write needs per-instance identity: a coroutine that replaces
+// its own slot with a fresh instance of the SAME co fn must not compare equal,
+// or the stale completion clears the new registration. Today that identity is
+// `rawequal` on the Task table. Stage 3 removes the Task box and keeps
+// the frame as the `coroutine` leaf, so the identity moves onto the FRAME --
+// sound only while the frame is one fresh table per creation.
+//
+// That is what this pins. If frames ever become pooled, interned, or otherwise
+// shared, stage 3 loses its identity source and the explicit instance token
+// stops being a stage-4 concern -- these tests go red at that moment, which is
+// the point.
+
+co fn ticker() -> Coroutine<int> {
+    yield 1
+    yield 2
+}
+
+co fn other() -> Coroutine<int> {
+    yield 9
+}
+
+inline(lua) fn frames_same(a: Coroutine<int>, b: Coroutine<int>) -> bool = """
+    return rawequal(a, b)
+"""
+
+@test
+fn two_spawns_of_one_co_fn_are_distinct_frames() {
+    let a = ticker()
+    let b = ticker()
+    assert_eq(frames_same(a, b), false)
+}
+
+@test
+fn a_frame_is_identical_to_itself() {
+    // Control: without this, a `frames_same` that always returned false would
+    // satisfy every other assertion here.
+    let a = ticker()
+    assert_eq(frames_same(a, a), true)
+}
+
+@test
+fn distinctness_survives_advancing_both() {
+    // Guards the replace-mid-poll shape specifically: identity must still
+    // discriminate after the frames have run, not just at construction.
+    let a = ticker()
+    let b = ticker()
+    assert_eq(a.resume() ?? -1, 1)
+    assert_eq(b.resume() ?? -1, 1)
+    assert_eq(b.resume() ?? -1, 2)
+    assert_eq(frames_same(a, b), false)
+}
+
+@test
+fn distinct_co_fns_are_distinct_frames() {
+    let a = ticker()
+    let b = other()
+    assert_eq(frames_same(a, b), false)
+}

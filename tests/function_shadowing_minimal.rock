@@ -1,0 +1,15 @@
+// Minimal regression test for function shadowing bug
+// Bug: When a variable is declared with the same name as a function,
+// and that function is called in the variable's initialization,
+// the variable shadows itself causing "attempt to call nil value"
+
+fn foo() -> int {
+    return 42
+}
+
+@test
+fn test_workaround() {
+    // Workaround: Use a different variable name
+    let result = foo()
+    assert_eq(result, 42)
+}

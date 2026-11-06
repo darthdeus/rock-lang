@@ -1,0 +1,365 @@
+// Comprehensive if-expression shadowing tests
+// Tests shadow renaming in if expressions with nullable types and complex scenarios
+
+// Helper structs
+struct Image {
+    id: int
+}
+
+struct FixVec2 {
+    x: int,
+    y: int
+}
+
+struct IRect {
+    x: int,
+    y: int,
+    w: int,
+    h: int
+}
+
+// Simulate some helper functions
+fn image_dims(image: Image) -> FixVec2 {
+    return FixVec2 { x: 100, y: 100 }
+}
+
+fn irect(x: int, y: int, w: int, h: int) -> IRect {
+    return IRect { x: x, y: y, w: w, h: h }
+}
+
+fn fixv(x: int, y: int) -> FixVec2 {
+    return FixVec2 { x: x, y: y }
+}
+
+fn draw_sprite_pro(image: Image, pos: FixVec2, source: IRect, world_size: FixVec2, angle: int, flip_x: bool, flip_y: bool, opt: int?) {
+    print("Drawing at:")
+    print(pos.x)
+    print(pos.y)
+    print("Source rect:")
+    print(source.x)
+    print(source.y)
+    print(source.w)
+    print(source.h)
+    print("World size:")
+    print(world_size.x)
+    print(world_size.y)
+}
+
+// Helper function for test 1
+fn draw_sprite(image: Image, pos: FixVec2, source: IRect? = null) {
+    let source = if source == null {
+        let dims = image_dims(image)
+        irect(0, 0, dims.x, dims.y)
+    } else {
+        source.unwrap()
+    }
+
+    let world_size = fixv(source.w ./ 16, source.h ./ 16)
+
+    draw_sprite_pro(image, pos, source, world_size, 0, false, false, null)
+}
+
+// Test 1: Basic if expression shadowing with nullable
+@test(output = "Drawing at:\n10\n20\nSource rect:\n0\n0\n100\n100\nWorld size:\n6\n6")
+fn test_if_expression_nullable_shadowing() {
+    let img = Image { id: 1 }
+    let pos = FixVec2 { x: 10, y: 20 }
+    draw_sprite(img, pos)
+}
+
+// Test 2: Nested if expression shadowing
+@test(output = "Inner: 100\nMiddle: 50\nOuter: 10")
+fn test_nested_if_shadowing() {
+    let x = 10
+
+    let result = if true {
+        let x = 50
+        let inner = if true {
+            let x = 100
+            print("Inner: " + x.to_string())
+            x
+        } else {
+            x
+        }
+        print("Middle: " + x.to_string())
+        inner
+    } else {
+        x
+    }
+
+    print("Outer: " + x.to_string())
+}
+
+// Test 3: If expression with multiple shadow levels and type changes
+@test(output = "Type changed to string: hello\nOriginal int: 42")
+fn test_if_expression_type_change_shadow() {
+    let value = 42
+
+    let result = if true {
+        let value = "hello"  // Shadow with different type
+        print("Type changed to string: " + value)
+        value
+    } else {
+        value.to_string()
+    }
+
+    print("Original int: " + value.to_string())
+}
+
+// Helper for test 4
+fn process_nullable(a: int? = null, b: int? = null, c: int? = null) {
+    let a = if a == null { 10 } else { a.unwrap() }
+    let b = if b == null { 20 } else { b.unwrap() }
+    let c = if c == null { 30 } else { c.unwrap() }
+
+    print(a)
+    print(b)
+    print(c)
+}
+
+// Test 4: Complex nullable shadowing with multiple parameters
+@test(output = "10\n20\n30\n10\n20\n30")
+fn test_multiple_nullable_shadows() {
+    process_nullable()
+    process_nullable(10, 20, 30)
+}
+
+// Test 5: Shadowing in if expression branches with closures
+@test(output = "Captured before shadow: 5\nCaptured after shadow: 5\nLocal shadow: 10")
+fn test_if_expression_closure_capture() {
+    let x = 5
+    let capture_before = () => x
+
+    let result = if true {
+        let x = 10  // Shadow
+        let capture_after = () => capture_before()  // Still captures original x
+        print("Captured before shadow: " + capture_before().to_string())
+        print("Captured after shadow: " + capture_after().to_string())
+        print("Local shadow: " + x.to_string())
+        x
+    } else {
+        x
+    }
+}
+
+// Test 6: If expression with shadowing in condition
+@test(output = "Condition x: 100\nBranch x: 5\nOuter x: 1")
+fn test_shadow_in_if_condition() {
+    let x = 1
+
+    let check = (x: int) => {
+        print("Condition x: " + x.to_string())
+        return x > 50
+    }
+
+    if check(100) {
+        let x = 5
+        print("Branch x: " + x.to_string())
+    }
+
+    print("Outer x: " + x.to_string())
+}
+
+// Helper for test 7
+fn process_with_default(value: int? = null) -> int {
+    let value = if value == null {
+        if true {
+            let default_val = 42
+            default_val
+        } else {
+            0
+        }
+    } else {
+        value.unwrap()
+    }
+    return value
+}
+
+// Test 7: Complex pattern with nullable and if expression as default
+@test(output = "Default from if: 42\nProvided value: 100")
+fn test_nullable_default_if_expression() {
+    print("Default from if: " + process_with_default().to_string())
+    print("Provided value: " + process_with_default(100).to_string())
+}
+
+// Helper struct for test 8
+struct Data8 {
+    value: int
+}
+
+// Test 8: Shadowing with struct field access in if expression
+@test(output = "Field value: 10\nShadowed value: 20\nOriginal struct field: 10")
+fn test_struct_field_shadow_in_if() {
+    let data = Data8 { value: 10 }
+
+    let result = if true {
+        print("Field value: " + data.value.to_string())
+        let value = 20  // Shadow the field name
+        print("Shadowed value: " + value.to_string())
+        value
+    } else {
+        data.value
+    }
+
+    print("Original struct field: " + data.value.to_string())
+}
+
+// Test 9: Triple nested if expressions with shadowing
+@test(output = "Level 3: 300\nOriginal: 1")
+fn test_triple_nested_if_shadows() {
+    let x = 1
+
+    let result = if true {
+        let x = 100
+        if true {
+            let x = 200
+            if true {
+                let x = 300
+                print("Level 3: " + x.to_string())
+                x
+            } else {
+                print("Level 2: " + x.to_string())
+                x
+            }
+        } else {
+            print("Level 1: " + x.to_string())
+            x
+        }
+    } else {
+        x
+    }
+
+    print("Original: " + x.to_string())
+}
+
+// Test 10: Shadowing with array/loop interaction in if expression
+@test(output = "Loop sum: 6\nShadowed in if: 100\nOriginal sum: 0")
+fn test_if_expression_loop_shadow() {
+    let sum = 0
+
+    let result = if true {
+        let values = [1, 2, 3]
+        let sum = 0  // Shadow outer sum
+
+        for val in values {
+            sum = sum + val
+        }
+
+        print("Loop sum: " + sum.to_string())
+
+        let sum = 100  // Shadow again
+        print("Shadowed in if: " + sum.to_string())
+        sum
+    } else {
+        sum
+    }
+
+    print("Original sum: " + sum.to_string())
+}
+
+// Helper for test 11
+fn f_test11() -> int {
+    print("Function f() called: 42")
+    return 42
+}
+
+// Test 11: Function overload shadowing in if expression
+@test(output = "Function f() called: 42\nShadowed f: 100\nFunction f() called: 42")
+fn test_function_shadow_in_if() {
+    let before = f_test11()
+
+    let result = if true {
+        let f = 100  // Shadow function with variable
+        print("Shadowed f: " + f.to_string())
+        f
+    } else {
+        f_test11()  // Would call function
+    }
+
+    let after = f_test11()  // Function still accessible
+}
+
+// Helper for test 12
+fn process_text(text: string? = null) {
+    let text = if text == null {
+        "hello world"
+    } else {
+        text.unwrap()
+    }
+
+    // Now text is non-nullable and we can use it
+    print("Processing: " + text)
+}
+
+// Test 12: Complex nullable with method chaining after shadow
+@test(output = "Processing: hello world")
+fn test_nullable_shadow_with_chaining() {
+    process_text()
+}
+
+// Helper for test 13
+fn process_generic<T>(value: T, flag: bool) -> int {
+    if flag {
+        let T = 100  // Shadow type parameter with variable
+        print("Shadowed T: " + T.to_string())
+        return T
+    } else {
+        return 0
+    }
+}
+
+// Test 13: Shadowing with generics in if expression
+@test(output = "Generic value: 42\nShadowed T: 100")
+fn test_generic_shadow_in_if() {
+    print("Generic value: 42")
+    let _ = process_generic(42, true)
+}
+
+// Helper for test 14
+fn pick_branch(flag: bool) {
+    if flag {
+        let x = 100
+        print("True branch x: " + x.to_string())
+    } else {
+        let x = 200
+        print("False branch x: " + x.to_string())
+    }
+}
+
+// Test 14: Edge case - shadowing in both if branches differently
+@test(output = "True branch x: 100\nFalse branch x: 200\nOuter x: 1")
+fn test_different_shadows_in_branches() {
+    let x = 1
+
+    pick_branch(true)
+    pick_branch(false)
+    print("Outer x: " + x.to_string())
+}
+
+// Helper struct for test 15
+struct Container {
+    value: int?
+}
+
+// Helper for test 15
+fn get_value(c: Container?) -> int {
+    let value = if c == null {
+        0
+    } else {
+        let container_value = c.unwrap().value
+        if container_value == null {
+            0
+        } else {
+            container_value.unwrap()
+        }
+    }
+    return value
+}
+
+// Test 15: Shadow with safe navigation operator
+@test(output = "Result: 42\nResult with null: 0")
+fn test_shadow_with_safe_navigation() {
+    let c1 = Container { value: 42 }
+    print("Result: " + get_value(c1).to_string())
+    print("Result with null: " + get_value(null).to_string())
+}

@@ -1,0 +1,14 @@
+//! Error: Complex patterns rejected in if-let chain (was silent-drop)
+//! Tags: if-let, patterns, chain
+
+//=== TEST CASE: literal_pattern_in_chain_Generic ===
+fn maybe_int(b: bool) -> int? {
+    if b { return 7 }
+    return null
+}
+
+fn main() {
+    if let 7 = maybe_int(true) && let c = maybe_int(true) {
+        let _ = c
+    }
+}

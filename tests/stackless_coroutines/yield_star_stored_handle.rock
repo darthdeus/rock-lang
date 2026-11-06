@@ -1,0 +1,58 @@
+// `await` of a stored handle. Pre-this-commit, the codegen rejected
+// any `await <expr>` whose inner wasn't a direct function call. The
+// runtime shape is identical -- the delegation pump reads
+// `s.__inner_<id>.resume(arg)` regardless of how the handle landed in
+// the slot. Lifting the restriction enables spawn-then-delegate-later.
+
+co fn inner_simple() -> Coroutine<int> {
+    yield 1
+    yield 2
+    yield 3
+}
+
+@test(output = "100\n1\n2\n3\n200")
+fn test_yield_star_stored_handle_statement_form() {
+    // Stored-handle pattern: build h inside the outer co fn body, delegate
+    // to it via `await h`. Pre-this-commit the second form was rejected.
+    let c = outer_with_stored()
+    print(c.resume() ?? -1)        // 100 (outer's first yield)
+    print(c.resume() ?? -1)        // 1   (inner via delegation)
+    print(c.resume() ?? -1)        // 2
+    print(c.resume() ?? -1)        // 3
+    print(c.resume() ?? -1)        // 200
+}
+
+co fn outer_with_stored() -> Coroutine<int> {
+    let h = inner_simple()
+    yield 100
+    await h
+    yield 200
+}
+
+co fn inner_with_return() -> Coroutine<int, string> {
+    yield 7
+    return "from-inner"
+}
+
+@test(output = "1\n7\n-1\nresult=ok")
+fn test_yield_star_stored_handle_let_binding_form() {
+    let c = outer_capturing()
+    print(c.resume() ?? -1)        // 1   outer's yield
+    print(c.resume() ?? -1)        // 7   delegated (inner's only yield)
+    print(c.resume() ?? -1)        // -1  inner returns "from-inner"; outer
+                                    //     binds `r`, then `return r` puts
+                                    //     outer in terminal -- resume null
+    let r = c.result()
+    if r == "from-inner" {
+        print("result=ok")
+    } else {
+        print("result=bad:{r ?? \"null\"}")
+    }
+}
+
+co fn outer_capturing() -> Coroutine<int, string> {
+    let h = inner_with_return()
+    yield 1
+    let r = await h
+    return r
+}

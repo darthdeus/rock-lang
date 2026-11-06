@@ -1,0 +1,43 @@
+// Stage 1 of the @call_site → __SITE__ replacement.
+//
+//
+// __SITE__ is a source-position literal that expands to "file:line"
+// at its own AST span. (Macro-expansion semantics tested separately.)
+
+@test
+fn test_site_literal_returns_file_and_line() {
+    let s: string = __SITE__
+    assert(s.contains("site_literal.rock"), "expected filename in {s}")
+    assert(s.contains(":9"), "expected :9 (line of __SITE__ above), got: {s}")
+}
+
+@test
+fn test_site_literal_in_interpolation() {
+    let s = "at {__SITE__}"
+    assert(s.contains("site_literal.rock:16"), "got: {s}")
+}
+
+@test
+fn test_site_literal_multiple_uses_same_line() {
+    let pair = (__SITE__, __SITE__)
+    assert(pair.0 == pair.1, "same line, same value")
+    assert(pair.0.contains(":22"), "got: {pair.0}")
+}
+
+fn passthrough(s: string) -> string { s }
+
+@test
+fn test_site_literal_in_nested_expression() {
+    let s = passthrough(__SITE__)
+    assert(s.contains(":31"), "expected line of __SITE__ use, got: {s}")
+}
+
+// Adversarial: __SITE__ on different lines gives different values.
+@test
+fn test_site_literal_different_lines() {
+    let a = __SITE__
+    let b = __SITE__
+    assert(a != b, "different lines should produce different sites: {a} vs {b}")
+    assert(a.contains(":38"), "a: {a}")
+    assert(b.contains(":39"), "b: {b}")
+}

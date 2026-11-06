@@ -1,0 +1,36 @@
+nobox value SpaceId { value: int }
+nobox value IVec2 { x: int, y: int }
+nobox value Place { space: SpaceId, grid: IVec2 }
+
+fn maybe_place(present: bool) -> Place? {
+    if present { return boot_spawn_place(IVec2 { x: 3, y: 9 }) }
+    return null
+}
+
+fn maybe_grid(present: bool) -> IVec2? {
+    if present { return IVec2 { x: 3, y: 9 } }
+    return null
+}
+
+fn boot_spawn_place(grid: IVec2) -> Place {
+    return Place { space: SpaceId { value: 7 }, grid }
+}
+
+fn check_placement(prepared_present: bool, grid_present: bool, editor: bool) {
+    let prepared = maybe_place(prepared_present) ?? if let grid = maybe_grid(grid_present) {
+        boot_spawn_place(grid)
+    } else {
+        if editor { boot_spawn_place(IVec2 { x: 4, y: 8 }) } else { null }
+    }
+    if let place = prepared {
+        print("{place.space.value} {place.grid.x} {place.grid.y}")
+    } else { print("null") }
+}
+
+@test(output = "7 3 9\n7 3 9\n7 4 8\nnull")
+fn coalesce_nested_iflet_preserves_presence_and_payload() {
+    check_placement(true, false, false)
+    check_placement(false, true, false)
+    check_placement(false, false, true)
+    check_placement(false, false, false)
+}

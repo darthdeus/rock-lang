@@ -1,0 +1,54 @@
+//! Error: D-form method syntax parse errors
+//! Tags: methods, dform, parser
+
+//=== TEST CASE: annotated_receiver_Generic ===
+// The receiver takes its type from the path; annotating it is rejected.
+struct Mob { hp: int }
+fn Mob.take_damage(m: Mob, amount: int) -> int {
+    return m.hp - amount
+}
+fn main() {}
+
+//=== TEST CASE: no_receiver_param_Generic ===
+// The method form requires a receiver parameter.
+struct Mob { hp: int }
+fn Mob.foo() -> int {
+    return 0
+}
+fn main() {}
+
+//=== TEST CASE: macro_dform_Generic ===
+// D-form is for functions, not macros.
+macro Mob.m() {
+    5
+}
+fn main() {}
+
+//=== TEST CASE: extern_dform_Generic ===
+// Extern fns are foreign symbols; they cannot declare a receiver path.
+struct Mob { hp: int }
+extern fn Mob.x(m: Mob) -> int
+fn main() {}
+
+//=== TEST CASE: dup_generic_Generic ===
+// A generic declared in both the receiver path and the method list.
+struct Pair<A, B> { a: A, b: B }
+fn Pair<A, B>.dup<A>(p) -> A {
+    return p.a
+}
+fn main() {}
+
+//=== TEST CASE: nested_path_Generic ===
+// The receiver path may have only one segment.
+struct Mob { hp: int }
+fn Mob.Sub.foo(m) -> int {
+    return 0
+}
+fn main() {}
+
+//=== TEST CASE: unknown_receiver_type_Unknown ===
+// Not a parse error -- desugars, then bone rejects the unknown param type.
+fn Ghost.haunt(g) -> int {
+    return 0
+}
+fn main() {}

@@ -1,0 +1,39 @@
+// UFCS on macros: `recv.mac(args)` expands as `mac(recv, args)` -- the receiver
+// binds to the macro's FIRST parameter. A macro name is globally unique against
+// fn/method names, so the member form is unambiguously the macro. Before this
+// worked, `42.twice()` failed with "missing function/operator: twice".
+
+macro twice(x: expr) -> int { x + x }
+macro add(a: expr, b: expr) -> int { a + b }
+macro first_of(a: expr, b: expr, c: expr) -> int { a }
+
+struct Box { n: int }
+
+@test(returns = 84)
+fn ufcs_receiver_only() -> int {
+    return 42.twice()
+}
+
+@test(returns = 84)
+fn ufcs_matches_plain_call() -> int {
+    return twice(42)
+}
+
+@test(returns = 7)
+fn ufcs_receiver_is_first_arg() -> int {
+    // 3.add(4) == add(3, 4) == 3 + 4
+    return 3.add(4)
+}
+
+@test(returns = 10)
+fn ufcs_receiver_first_of_three() -> int {
+    // 10.first_of(20, 30) == first_of(10, 20, 30) == 10
+    return 10.first_of(20, 30)
+}
+
+@test(returns = 12)
+fn ufcs_on_a_field_receiver() -> int {
+    let b = Box { n: 6 }
+    // b.n.twice() == twice(b.n) == 6 + 6
+    return b.n.twice()
+}

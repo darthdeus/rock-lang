@@ -1,0 +1,29 @@
+// Adversarial tests: @inline — UFCS method call syntax
+//
+// `x.foo(y)` desugars to `foo(x, y)` in Rock. If `foo` is @inline,
+// the inlining must still happen after desugaring.
+
+@inline
+fn doubled(x: int) -> int {
+    return x * 2
+}
+
+@inline
+fn added(x: int, y: int) -> int {
+    return x + y
+}
+
+@test(output = "10")
+fn test_ufcs_single_arg() {
+    print(5.doubled())
+}
+
+@test(output = "12")
+fn test_ufcs_with_extra_arg() {
+    print(5.added(7))
+}
+
+@test(output = "20")
+fn test_ufcs_chained() {
+    print(5.doubled().added(10))
+}

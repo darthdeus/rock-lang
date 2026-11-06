@@ -1,0 +1,67 @@
+// UFCS form for sigil macro calls: `xs.foo!(args)` desugars to
+// `foo!(xs, args)` at parse time. The receiver becomes the first
+// positional arg; the rest of the call shape is identical to a regular
+// sigil invocation. Eager desugar means the macro pass needs no UFCS-
+// specific handling — it sees `FunctionCall { func: Ident(foo), args }`
+// in both forms.
+
+// === Baseline: expression-emitting macro, sigil-form prefix call ===
+
+macro double(x: expr) {
+    x * 2
+}
+
+@test
+fn test_prefix_sigil_expr_macro() {
+    let r = double!(7)
+    assert(r == 14, "prefix-form sigil expr macro")
+}
+
+// === UFCS sigil: receiver becomes first positional arg ===
+
+@test
+fn test_ufcs_sigil_basic() {
+    let r = (5).double!()
+    assert(r == 10, "x.double!() == double!(x)")
+}
+
+@test
+fn test_ufcs_sigil_with_extra_args() {
+    let r = (3).combine!(4, 5)
+    assert(r == 12, "x.combine!(a, b) == combine!(x, a, b)")
+}
+
+macro combine(a: expr, b: expr, c: expr) {
+    a + b + c
+}
+
+// === UFCS sigil chains through normal UFCS afterwards ===
+
+macro triple(x: expr) {
+    x * 3
+}
+
+@test
+fn test_ufcs_chain() {
+    let r = (4).triple!() + (4).double!()
+    assert(r == 20, "two UFCS sigil calls")
+}
+
+// === UFCS sigil with type-shaped arg (the headline use case) ===
+
+struct Box2<T> { v: T }
+
+macro decl_inner_holder(Name: ident, Elem: ty) {
+    struct Name { inner: Box2<Elem> }
+}
+
+// Item-level UFCS doesn't really make sense (no receiver in item
+// position), so we exercise type-shaped args via the regular prefix
+// form here. The UFCS path is for expression-position macros above.
+decl_inner_holder!(InnerHoldInt, int)
+
+@test
+fn test_inner_hold() {
+    let h = InnerHoldInt { inner: Box2 { v: 9 } }
+    assert(h.inner.v == 9, "type-shaped arg in prefix sigil form")
+}

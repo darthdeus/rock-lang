@@ -1,0 +1,136 @@
+// Every number `json_decode` produces must equal what the host number parser
+// produces for the same literal, BIT FOR BIT. The oracle is `parse_float` /
+// `parse_int` on that literal, compared by equality rather than a tolerance.
+//
+// The float arms are a REAL comparison: `parse_number` reaches C `strtod_l`
+// through `parse_float_at` and no longer calls `parse_float` at all, so the two
+// sides are two different parsers and equality is a claim about both. The int
+// arms still share the oracle. (`json_as_int` on a float literal would coerce,
+// so the float arms go through `json_as_float`, which returns null for an Int
+// and would fail the assert rather than silently compare a truncation.)
+//
+// It is also the admission gate for any future fast path -- a digit accumulator
+// that computes the value arithmetically was written and measured
+// which decoded 999999999999999999 as
+// 1e+18, because `int` is double-backed on luajit and the bound had been set at
+// 18 digits rather than the 15 that 2^53 allows. This file is what caught it.
+//
+// So the corpus straddles the bounds such a path needs -- 15 significant
+// digits, 22 fractional digits, exponents -- rather than sampling typical
+// values.
+
+fn decoded_float(lit: string) -> float {
+    let v = json_decode(lit)
+    assert(v != null, "literal did not decode: {lit}")
+    let f = json_as_float(v.unwrap())
+    assert(f != null, "literal did not decode as a float: {lit}")
+    return f.unwrap()
+}
+
+fn assert_matches_host(lit: string) {
+    let host = lit.parse_float()
+    assert(host != null, "host parser rejected the literal: {lit}")
+    let got = decoded_float(lit)
+    // Equality, not a tolerance: a fast path that is merely close is wrong.
+    assert(got == host.unwrap(), "{lit}: decoded {got}, host parser gives {host.unwrap()}")
+}
+
+// Literals the accumulator handles itself: no exponent, <= 15 significant
+// digits, <= 22 fractional digits.
+@test
+fn test_json_float_fast_path_matches_host_parser() {
+    let cases = [
+        "0.0", "-0.0", "1.5", "-1.5", "0.1", "0.2", "0.3", "-0.7",
+        "3.14159", "2.718281828", "-65.613033", "43.416419",
+        "123456789.123456", "0.000001", "-0.000001",
+        "999999999999999.0", "0.999999999999999",
+        "100.0", "-100.0", "0.5", "0.25", "0.125",
+    ]
+    for lit in cases { assert_matches_host(lit) }
+    assert_eq(cases.len(), 22)
+}
+
+// 0.1 + 0.2 famously is not 0.3 in binary. That is a property of the VALUES,
+// so the decoder must reproduce it exactly -- if this arm ever passes as
+// "equal", the decoder has rounded somewhere the host parser does not.
+@test
+fn test_json_float_reproduces_binary_representation_exactly() {
+    assert(decoded_float("0.1") + decoded_float("0.2") != decoded_float("0.3"),
+        "0.1 + 0.2 == 0.3 after decoding -- the decoder is not producing IEEE doubles")
+    assert_eq(decoded_float("0.1") + decoded_float("0.2"), 0.1 + 0.2)
+}
+
+// Past either bound the accumulator must stand aside. These are the inputs
+// that would be silently wrong if the admission test were widened.
+@test
+fn test_json_float_beyond_the_fast_path_bounds_still_matches_host() {
+    let cases = [
+        "1234567890123456.0",           // 16 significant digits
+        "12345678901234567890.0",       // 20
+        "0.12345678901234567890123",    // 23 fractional digits
+        "1e10", "1E10", "1e-10", "-2.5e3", "1.7976931348623157e308",
+        "5e-324", "0e0", "-0e0", "1e+2",
+    ]
+    for lit in cases { assert_matches_host(lit) }
+    assert_eq(cases.len(), 12)
+}
+
+// The ends of the double range, where two different parsers most easily
+// disagree: overflow has to saturate to the same infinity, underflow to the
+// same zero, and the denormals in between have to round identically. `strtod`
+// signals these through ERANGE and a host scanner does not, so "it returned a
+// number" is not enough -- these must be equal to the oracle's own answer.
+@test
+fn test_json_float_range_boundaries_match_host() {
+    let cases = [
+        "1e400", "-1e400",                  // overflow -> +/-inf
+        "1e-400",                           // underflow -> 0
+        "1e-320", "1e-310",                 // denormal
+        "2.2250738585072011e-308",          // the smallest normal
+        "1.0000000000000002",               // 1 + 1ulp
+        "-1.7976931348623157e308",          // most negative finite
+    ]
+    for lit in cases { assert_matches_host(lit) }
+    assert_eq(cases.len(), 8)
+}
+
+// Integers run through the same accumulator and the same 15-digit bound; past
+// it the literal is the authority.
+@test
+fn test_json_int_accumulator_matches_host_parser() {
+    let cases = [
+        "0", "1", "-1", "42", "-42", "1000000",
+        "999999999999999",              // 15 digits, the widest admitted
+        "-999999999999999",
+        // Past the bound. `int` is double-backed on luajit, so an 18-digit
+        // bound decoded this as 1e+18; the fallback to the literal is what
+        // keeps it exact.
+        "999999999999999999",
+        "1234567890123456789",
+    ]
+    for lit in cases {
+        let v = json_decode(lit)
+        assert(v != null, "literal did not decode: {lit}")
+        let got = json_as_int(v.unwrap())
+        assert(got != null, "did not decode as an int: {lit}")
+        let host = lit.parse_int()
+        assert(host != null, "host parser rejected: {lit}")
+        assert(got.unwrap() == host.unwrap(),
+            "{lit}: decoded {got.unwrap()}, host parser gives {host.unwrap()}")
+    }
+    assert_eq(cases.len(), 10)
+}
+
+// A number nested in a container takes the same path as a bare one; this is
+// the shape every real payload actually has.
+@test
+fn test_json_nested_numbers_match_host_parser() {
+    let v = json_decode("{{\"a\":[-65.613033,43.416419],\"b\":1.5}}")
+    assert(v != null, "object did not decode")
+    let arr = json_as_array(json_field(v.unwrap(), "a").unwrap())
+    assert(arr != null, "field a is not an array")
+    let items = arr.unwrap()
+    assert_eq(items.len(), 2)
+    assert_eq(json_as_float(items[0]).unwrap(), "-65.613033".parse_float().unwrap())
+    assert_eq(json_as_float(items[1]).unwrap(), "43.416419".parse_float().unwrap())
+}

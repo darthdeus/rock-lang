@@ -1,0 +1,71 @@
+// Adversarial tests: @inline — match / if let arms that bind (L5).
+
+enum Opt { None, Some(int) }
+
+@inline
+fn unwrap_or_zero(o: Opt) -> int {
+    return match o {
+        Opt::None => 0,
+        Opt::Some(v) => v,
+    }
+}
+
+@test(output = "42\n0\n7")
+fn test_unwrap_or_zero() {
+    print(unwrap_or_zero(Opt::Some(42)))
+    print(unwrap_or_zero(Opt::None))
+    print(unwrap_or_zero(Opt::Some(7)))
+}
+
+// Caller has a `v` in scope; the body's pattern binding `v` must
+// rename to avoid collision.
+@test(output = "999 42")
+fn test_match_bind_caller_collision() {
+    let v = 999
+    let r = unwrap_or_zero(Opt::Some(42))
+    print("{v} {r}")
+}
+
+// Nested tuple pattern — both `a` and `b` should rename.
+enum OptPair { None, Some((int, int)) }
+
+@inline
+fn sum_pair_or_zero(p: OptPair) -> int {
+    return match p {
+        OptPair::None => 0,
+        OptPair::Some((a, b)) => a + b,
+    }
+}
+
+@test(output = "11\n0")
+fn test_nested_tuple_pattern() {
+    print(sum_pair_or_zero(OptPair::Some((4, 7))))
+    print(sum_pair_or_zero(OptPair::None))
+}
+
+// `if let` binding.
+@inline
+fn double_or_zero(o: int?) -> int {
+    if let x = o {
+        return x * 2
+    } else {
+        return 0
+    }
+}
+
+@test(output = "10\n0")
+fn test_if_let() {
+    let a: int? = 5
+    let b: int? = null
+    print(double_or_zero(a))
+    print(double_or_zero(b))
+}
+
+// if let with caller-side same-name local — must not clash.
+@test(output = "777 10")
+fn test_if_let_caller_collision() {
+    let x = 777
+    let a: int? = 5
+    let r = double_or_zero(a)
+    print("{x} {r}")
+}

@@ -1,0 +1,479 @@
+// Extended shadowing tests - migrated from rock/tests/shadowing_tests.rs
+// Tests parameter vs function precedence, global shadowing, lambda captures, 
+// loop variables, and advanced shadowing scenarios
+
+// TODO: Add pattern matching variable shadowing tests when Rock supports match expressions
+// Example scenarios to test:
+// - match expressions where pattern variables shadow outer scope variables
+// - nested pattern matching with multiple levels of shadowing
+// - enum variant destructuring that introduces variables shadowing outer scope
+// - tuple pattern matching with variable shadowing
+
+// Shared struct definitions
+struct FixVec2 {
+    x: int,
+    y: int,
+}
+
+struct Data {
+    value: int
+}
+
+struct Counter {
+    count: int
+}
+
+struct Container<T> {
+    value: T
+}
+
+// Helper functions
+fn fixv() -> int {
+    return 42
+}
+
+fn helper() -> int {
+    return 999
+}
+
+fn item() -> int {
+    return 999
+}
+
+fn value_func() -> int {
+    return 42
+}
+
+// Helper functions for specific tests
+fn test_precedence(v: FixVec2) -> int {
+    return v.x  // This should resolve to parameter v, not function v()
+}
+
+fn test_function_parameter(v: int) -> int {
+    return v  // This should resolve to parameter v, not function v()
+}
+
+fn test_local_shadowing() -> int {
+    let v = 10  // Local variable shadows the function
+    return v    // This should resolve to local variable v, not function v()
+}
+
+fn test_inner(helper: int) -> int {
+    return helper  // Parameter should shadow the global function
+}
+
+fn test_nested() -> int {
+    let helper = 5
+    return test_inner(helper)  // Should use local variable, not global function
+}
+
+// Global variables
+global g: int = 100
+global counter: int = 42
+global value: int = 100
+global counter2: int = 0
+global x: int = 1
+global g2: int = 100
+
+// Helper functions that use globals
+fn test_global_local() -> int {
+    let g = 10  // Local shadows global
+    return g
+}
+
+fn process_param(counter: int) -> int {
+    return counter * 2  // Should use parameter, not global
+}
+
+fn increment_global() {
+    counter2 = counter2 + 1  // Modifies global
+}
+
+fn test_shadow_local() -> int {
+    let counter = 50  // Local shadow
+    increment_global()  // Still modifies global
+    return counter  // Returns local
+}
+
+fn test_lambda_capture() -> int {
+    let x = 10
+    let f = () => {
+        return x  // Should capture outer x
+    }
+    let x = 20  // Shadow x
+    return f()  // Should still return 10
+}
+
+fn test_lambda_global() {
+    let capture_global = () => {
+        return g2  // Should capture global
+    }
+
+    let g2 = 10  // Local shadow
+
+    print(capture_global())  // Should print global value
+    print(g2)  // Should print local value
+}
+
+// Additional helper functions
+fn test_func(x: int = 10, default_val: int = 20) -> int {
+    return x + default_val  // Uses parameters, not outer variable
+}
+
+fn process(t: (int, int)) -> int {
+    let (a, b) = t
+    return a + b  // Uses tuple elements, not outer variables
+}
+
+fn process_data(d: Data) -> int {
+    return d.value  // Field access, not outer variable
+}
+
+fn increment(c: Counter, count: int) -> Counter {
+    return Counter {
+        count: c.count + count
+    }
+}
+
+fn level1(x: int) -> int {
+    // x = parameter (shadows global)
+    let result = x * 10
+
+    let inner = () => {
+        let x = 100  // Shadows parameter
+        return x + result
+    }
+
+    return inner()
+}
+
+fn test_flag(flag: bool) -> int {
+    if flag {
+        let value = 10
+        return value
+    } else {
+        let value = 20
+        return value
+    }
+}
+
+fn test_types() {
+    print(value_func())  // Function call
+
+    let value = "hello"  // Shadow with different type
+    print(value)  // String variable
+
+    let inner = () => {
+        let value = 3.14  // Shadow with another type
+        print(value)
+    }
+    inner()
+}
+
+fn f(x: int) -> int {
+    return x
+}
+
+fn g_func(x: int) -> int {
+    let x = x * 2  // Shadow parameter with computed value
+    return f(x)  // Pass shadowed value
+}
+
+fn h(x: int) -> int {
+    let x = g_func(x)  // Shadow with result of g
+    let x = f(x)  // Shadow again with result of f
+    return x
+}
+
+fn process_generic<T>(c: Container<T>, param: int) -> int {
+    // Parameter param is an int
+    return param  // Returns the parameter value
+}
+
+fn test_type_alias(x: int) -> int {
+    // 'int' in type annotation refers to the type, not the variable
+    return x * 2
+}
+
+fn print_custom(x: int) -> int {
+    print(x * 2)  // Call builtin print
+    return x
+}
+
+fn f_recursive(n: int) -> int {
+    if n <= 0 {
+        return 0
+    }
+    let f = n  // Shadow function with value
+    return f + f  // Uses shadowed value
+}
+
+// Test cases
+@test(output = "10")
+fn test_parameter_vs_function_precedence_field_access() {
+    let pos = FixVec2 { x: 10, y: 20 }
+    let result = test_precedence(pos)
+    print(result)
+}
+
+@test(output = "10")
+fn test_parameter_vs_function_precedence_direct_use() {
+    let result = test_function_parameter(10)
+    print(result)
+}
+
+@test(output = "10")
+fn test_local_var_vs_function_precedence() {
+    let result = test_local_shadowing()
+    print(result)
+}
+
+@test(output = "5")
+fn test_nested_scope_precedence() {
+    let result = test_nested()
+    print(result)
+}
+
+@test(output = "10\n100")
+fn local_shadows_global_variable() {
+    print(test_global_local())
+    print(g)  // Should still access global
+}
+
+@test(output = "10\n42")
+fn parameter_shadows_global_variable() {
+    print(process_param(5))
+    print(counter)  // Global still accessible
+}
+
+@test(output = "100\n10\n100")
+fn global_access_from_nested_scope() {
+    print(value)  // Access global
+    if true {
+        let value = 10  // Shadow in nested scope
+        print(value)    // Should print local
+    }
+    print(value)  // Should print global again
+}
+
+@test(output = "0\n50\n1")
+fn global_mutation_with_shadowing() {
+    counter2 = 0  // Reset counter2
+    print(counter2)
+    print(test_shadow_local())
+    print(counter2)  // Global was incremented
+}
+
+@test(output = "10")
+fn lambda_captures_shadowed_variable() {
+    print(test_lambda_capture())
+}
+
+@test(output = "42\n100")
+fn lambda_parameter_shadows_capture() {
+    let outer = 100
+    let f = (outer: int) => {
+        return outer  // Parameter shadows captured variable
+    }
+
+    print(f(42))
+    print(outer)  // Original still accessible
+}
+
+@test(output = "10\n1")
+fn nested_lambda_shadowing() {
+    let x = 1
+    let outer = () => {
+        let x = 10
+        let inner = () => {
+            return x  // Should capture x=10 from outer lambda
+        }
+        return inner
+    }
+
+    let inner_fn = outer()
+    print(inner_fn())
+    print(x)  // Original x still accessible
+}
+
+@test(output = "100\n10")
+fn lambda_captures_global_with_local_shadow() {
+    test_lambda_global()
+}
+
+@test(output = "6\n100")
+fn for_loop_var_shadows_outer() {
+    let i = 100
+    let sum = 0
+
+    for i in [1, 2, 3] {
+        sum = sum + i  // Uses loop variable
+    }
+
+    print(sum)
+    print(i)  // Original i unchanged
+}
+
+@test(output = "1\n2\n3\n4\n100\n200")
+fn for_loop_tuple_binding_shadows() {
+    let x = 100
+    let y = 200
+
+    for xy in [(1, 2), (3, 4)] {
+        let (x, y) = xy
+        print(x)
+        print(y)
+    }
+
+    print(x)  // Original values unchanged
+    print(y)
+}
+
+@test(output = "6\n999")
+fn for_loop_shadows_function() {
+    let result = 0
+    for item in [1, 2, 3] {
+        result = result + item  // Uses loop variable, not function
+    }
+
+    print(result)
+    print(item())  // Function still callable
+}
+
+@test(output = "25")
+fn multiple_parameters_same_function_chain() {
+    // Using the fact that each function has its own parameter scope
+    // f1(5) = 10, f2(5) = f1(5) + 5 = 15, f3(5) = f2(5) + f1(5) = 15 + 10 = 25
+    let result = 5 * 2 + 5 + 5 * 2
+    print(result)
+}
+
+@test(output = "30\n25\n8")
+fn default_parameter_with_shadowing() {
+    let default_val = 100
+
+    print(test_func())  // Uses both defaults: 10 + 20
+    print(test_func(5))  // 5 + 20
+    print(test_func(5, 3))  // 5 + 3
+}
+
+@test(output = "7\n100\n200")
+fn tuple_parameter_shadows() {
+    let a = 100
+    let b = 200
+
+    print(process((3, 4)))
+    print(a)  // Outer variables unchanged
+    print(b)
+}
+
+@test(output = "42\n100")
+fn field_access_vs_variable() {
+    let value = 100
+
+    let d = Data { value: 42 }
+    print(process_data(d))
+    print(value)  // Outer variable unchanged
+}
+
+@test(output = "15")
+fn method_parameter_shadows_field() {
+    let c = Counter { count: 10 }
+    let c2 = increment(c, 5)
+    print(c2.count)
+}
+
+@test(output = "150\n5\n5")
+fn multiple_shadow_levels() {
+    let x = 5  // Shadows global
+    print(level1(x))  // Pass local x
+    print(x)  // Local x
+    print(x)  // Will print local x (5)
+}
+
+@test(output = "10\n20\n100")
+fn shadow_in_conditional_branches() {
+    let value = 100
+
+    print(test_flag(true))
+    print(test_flag(false))
+    print(value)  // Outer unchanged
+}
+
+@test(output = "42\nhello\n3.14")
+fn shadow_with_different_types() {
+    test_types()
+}
+
+@test(output = "10")
+fn shadow_chain_in_function_calls() {
+    print(h(5))  // 5 * 2 = 10
+}
+
+@test(output = "1\n2\n3\nfalse")
+fn while_loop_condition_shadowing() {
+    let flag = false
+    let counter = 0
+
+    while counter < 3 {
+        let flag = true  // Local shadow in loop body
+        counter = counter + 1
+        if flag {  // Uses local shadow
+            print(counter)
+        }
+    }
+
+    print(flag)  // Original flag unchanged
+}
+
+@test(output = "400\n2")
+fn while_loop_nested_shadowing() {
+    let i = 0
+    let outer_sum = 0
+
+    while i < 2 {
+        let inner_i = 10  // Don't shadow loop counter
+        let j = 0
+        while j < 2 {
+            let i = 100  // Shadow here
+            outer_sum = outer_sum + i
+            j = j + 1
+        }
+        i = i + 1  // Increment outer i
+    }
+
+    print(outer_sum)  // 100 * 2 * 2 = 400
+    print(i)  // Should be 2
+}
+
+@test(output = "42")
+fn generic_type_parameter_shadows() {
+    let c = Container { value: "hello" }
+    print(process_generic(c, 42))
+}
+
+@test(output = "10\n100")
+fn type_alias_shadows_variable() {
+    let int = 100  // Variable named 'int'
+
+    print(test_type_alias(5))
+    print(int)  // The variable
+}
+
+@test(output = "15")
+fn underscore_in_lambda() {
+    // Underscore has special meaning in lambdas
+    let f = _ + 10
+    print(f(5))
+}
+
+@test(output = "10\n100")
+fn shadow_builtin_print() {
+    print_custom(5)  // Calls our function
+    print(100)  // Calls builtin directly
+}
+
+@test(output = "10")
+fn recursive_shadow_pattern() {
+    print(f_recursive(5))  // 5 + 5 = 10
+}

@@ -1,0 +1,71 @@
+// `float` is f64 in every storage; `f32` is explicit narrow storage that
+// rounds on write. Map values, nullable Vec elements and native buffers hold
+// a value in C-layout storage, where a float leaf used to narrow silently.
+
+value WideLeaf { x: float, n: int }
+value NarrowLeaf { x: f32, n: int }
+
+// 0.7 is not a float32; this is the nearest one, exact as a double literal.
+fn f32_of_0_7() -> float {
+    return 0.699999988079071044921875
+}
+
+@test
+fn test_float_leaf_round_trips_exactly_through_value_storage() {
+    let m: Map<int, WideLeaf> = map_new()
+    m[1] = WideLeaf { x: 0.7, n: 1 }
+    assert(m[1].unwrap().x == 0.7, "map float leaf narrowed: {m[1].unwrap().x}")
+    let o: [WideLeaf?] = []
+    o.push(WideLeaf { x: 0.7, n: 1 })
+    assert(o[0].unwrap().x == 0.7, "nullable element float leaf narrowed: {o[0].unwrap().x}")
+    let nb = native_buffer_alloc<WideLeaf>(1)
+    nb[0] = WideLeaf { x: 0.7, n: 1 }
+    assert(nb[0].x == 0.7, "native buffer float leaf narrowed: {nb[0].x}")
+}
+
+@test
+fn test_f32_leaf_rounds_in_value_storage() {
+    let m: Map<int, NarrowLeaf> = map_new()
+    m[1] = NarrowLeaf { x: 0.7, n: 1 }
+    assert(m[1].unwrap().x == f32_of_0_7(), "map f32 leaf did not round: {m[1].unwrap().x}")
+    let nb = native_buffer_alloc<NarrowLeaf>(1)
+    nb[0] = NarrowLeaf { x: 0.7, n: 1 }
+    assert(nb[0].x == f32_of_0_7(), "native buffer f32 leaf did not round: {nb[0].x}")
+    // Reads are plain floats: arithmetic needs no cast and stays double.
+    let sum = nb[0].x + 1.0
+    assert(sum == f32_of_0_7() + 1.0, "f32 read is not a float: {sum}")
+}
+
+// Only a `float` leaf view rounds its store; an `f32` value written into a
+// `float` (f64) leaf keeps the rounding it was given.
+@test
+fn test_f32_value_keeps_its_rounding_in_a_wide_leaf() {
+    let narrow = NarrowLeaf { x: 0.7, n: 1 }
+    let nb = native_buffer_alloc<WideLeaf>(1)
+    nb[0] = WideLeaf { x: narrow.x, n: 1 }
+    assert(nb[0].x == f32_of_0_7(), "wide leaf lost the f32 rounding: {nb[0].x}")
+}
+
+nobox value NarrowPair { a: f32, b: f32 }
+value Tag { n: int }
+global NARROW_TILES: [(NarrowPair, Tag)] = []
+
+fn push_narrow(p: NarrowPair, t: Tag) {
+    NARROW_TILES.push((p, t))
+}
+
+// A stored element and its scalarized copies agree: the f32 leaves round
+// on every write, so packing, flattening and iterating all see one number.
+@test
+fn test_f32_leaves_agree_across_storage() {
+    push_narrow(NarrowPair { a: 0.7, b: 2.0 }, Tag { n: 3 })
+    let local = NarrowPair { a: 0.7, b: 2.0 }
+    assert(local.a == f32_of_0_7(), "scalarized f32 leaf did not round: {local.a}")
+    let seen = 0.0
+    for (p, t) in NARROW_TILES {
+        seen = seen + p.a + p.b + t.n
+    }
+    assert(seen == f32_of_0_7() + 5.0, "iterated f32 leaves disagree: {seen}")
+    let (first, _) = NARROW_TILES[0]
+    assert(first == local, "stored and scalarized f32 values differ")
+}

@@ -1,0 +1,35 @@
+//! Error: a BARE (non-tuple) `nobox` return from an opaque body. The callee
+//!        writes its own `return`, so a hand-written box is handed back where
+//!        the call site expects leaves -- and Lua's `.field` does not
+//!        distinguish a table from cdata, so it COMPILED CLEAN AND PASSED.
+//!        The guarantee was violated with no diagnostic at all.
+//! Tags: nobox, inline-lua, scalar-abi, return-position, emit-time
+//!
+//! The param direction (`reject_nobox_boxed_call_args`) and the TUPLE return
+//! (`reject_nobox_opaque_tuple_return`) were both already checked; a plain
+//! `-> NV2` was the one uncovered position.
+//!
+//! The escape is `@scalar_abi` + returning the leaves, which the message names.
+//! Positive control (accepted, leaves returned): `tests/nobox_opaque_return.rock`.
+
+//=== TEST CASE: nobox_bare_return_from_inline_lua ===
+nobox value NV2 { x: float, y: float }
+
+inline(lua) fn hand_boxed() -> NV2 = """
+    return NV2_ct(3.0, 4.0)
+"""
+
+fn main() {
+    print("{hand_boxed().x}")
+}
+
+//=== TEST CASE: nobox_bare_return_from_nomangle_inline_lua ===
+nobox value NV2 { x: float, y: float }
+
+@nomangle inline(lua) fn hand_boxed_fixed_name() -> NV2 = """
+    return NV2_ct(3.0, 4.0)
+"""
+
+fn main() {
+    print("{hand_boxed_fixed_name().x}")
+}

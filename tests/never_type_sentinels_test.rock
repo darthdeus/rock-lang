@@ -1,0 +1,25 @@
+// Sentinel tests — pinned to the codegen limitations the Never-type PR
+// shipped with. Each test asserts that the *currently-broken* position
+// FAILS to compile today (`expect_failure = true`).
+//
+// When a future PR extends `is_iife_eligible_rvalue` /
+// `generate_expr_into_local` (or otherwise lifts diverging sub-exprs out
+// of these positions), one of these tests will start compiling
+// successfully — which causes `expect_failure = true` to mark it as a
+// test failure, forcing the author of the fix to flip the assertion in
+// the same commit.
+//
+// Flip pattern when fixed:
+//   - Replace `@test(expect_failure = true)` with `@test(output = "<expected>")`.
+//     to drop the now-supported position.
+//
+// Each sentinel is in its own file so positions can be flipped
+// independently as their codegen path lands.
+//
+// FLIPPED: array-literal, tuple, index, function-call-arg positions all
+// work end-to-end now. The hoist arms in `generate_expr_into_local` cover
+// these shapes; tail-position fncalls (`fn f() { print(if c { 42 } else
+// { return }) }`) are routed via the statement path in
+// `generate_ast_function_body`. Runtime tests live in
+// `tests/never_type_test.rock`. This file is currently empty of sentinels
+// — the next still-broken position to be discovered should be added here.

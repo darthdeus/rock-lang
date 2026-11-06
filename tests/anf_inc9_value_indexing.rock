@@ -1,0 +1,35 @@
+// Inc 9: value indexing `vs[i]` of `[V2]`.
+//
+// A Vec/array element of a value-struct type is one cdata at runtime
+// (`V2_ct(...)`). Consuming `vs[i].field` or passing `vs[i]` to a
+// scalar-ABI callee unpacks the cdata into per-field reads. Shares
+// the `unpack_cdata_value` helper with Inc 8 (cdata-backed value
+// field read).
+
+value V2 { x: int, y: int }
+
+fn make_v2(x: int, y: int) -> V2 {
+    return V2 { x: x, y: y }
+}
+
+fn sum2(v: V2) -> int {
+    return v.x + v.y
+}
+
+@test(output = "3")
+fn test_inc9_index_field_read() {
+    let xs: [V2] = [make_v2(1, 2), make_v2(3, 4)]
+    print(xs[0].x + xs[0].y)
+}
+
+@test(output = "7")
+fn test_inc9_index_second_element() {
+    let xs: [V2] = [make_v2(1, 2), make_v2(3, 4)]
+    print(xs[1].x + xs[1].y)
+}
+
+@test(output = "3")
+fn test_inc9_index_into_scalar_abi_arg() {
+    let xs: [V2] = [make_v2(1, 2), make_v2(3, 4)]
+    print(sum2(xs[0]))
+}

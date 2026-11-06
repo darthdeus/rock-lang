@@ -1,0 +1,59 @@
+// A co fn that kills its OWN handle mid-body and then reaches a `yield` must
+// STAY killed: the yield stamp is guarded on `state >= 0` (same guard as the
+// completion stamp), so status() stays "dead", the post-yield body never runs,
+// and a resume after the kill is a no-op. The defer fires exactly once, at the
+// kill. Sibling coverage: tests/coroutine_defer_terminal.rock (external kill).
+
+global K_SELF: Coroutine<int>? = null
+global K_LOG: int = 0
+global K_DEFER: int = 0
+
+co fn ksuicide() -> Coroutine<int> {
+    defer { K_DEFER = K_DEFER + 1 }
+    yield 1
+    if let s = K_SELF { kill(s) }
+    yield 2
+    K_LOG = 999
+}
+
+@test(output = "status=dead log=0 defer=1")
+fn test_self_kill_then_yield_stays_dead() {
+    K_SELF = ksuicide()
+    if let c = K_SELF {
+        let _ = resume(c)   // -> yield 1
+        let _ = resume(c)   // -> kill(self); reaches `yield 2`, must stay dead
+        let st = status(c)
+        let _ = resume(c)   // no-op on a dead coroutine
+        print("status={st} log={K_LOG} defer={K_DEFER}")
+    }
+}
+
+// Same edge through the flat-enum yield CHANNEL (`__y*` frame slots +
+// `__advance` done-bool) -- a distinct transform/emit path from the scalar
+// boxed yield above. The string payload keeps KSig off the cdata path so it
+// takes the mixed/boxed flat-enum shape (like Wait).
+enum KSig { Ping(int), Note(string) }
+
+global KC_SELF: Coroutine<KSig>? = null
+global KC_LOG: int = 0
+global KC_DEFER: int = 0
+
+co fn kcsuicide() -> Coroutine<KSig> {
+    defer { KC_DEFER = KC_DEFER + 1 }
+    yield KSig::Ping(1)
+    if let s = KC_SELF { kill(s) }
+    yield KSig::Ping(2)
+    KC_LOG = 999
+}
+
+@test(output = "status=dead log=0 defer=1")
+fn test_self_kill_then_yield_stays_dead_flat_enum_channel() {
+    KC_SELF = kcsuicide()
+    if let c = KC_SELF {
+        let _ = resume(c)
+        let _ = resume(c)
+        let st = status(c)
+        let _ = resume(c)
+        print("status={st} log={KC_LOG} defer={KC_DEFER}")
+    }
+}

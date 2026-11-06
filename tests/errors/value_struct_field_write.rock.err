@@ -1,0 +1,59 @@
+//! Error: writing a `value` struct's field must be rejected -- value structs
+//!        are immutable by construction. It covers both the direct
+//!        `v.field = x` form and the `field_set(v, .field, x)`
+//!        key-path intrinsic.
+//! Tags: value, immutability, field-refs
+
+//=== TEST CASE: value_struct_direct_field_write_Immutable ===
+value Pt { x: int, y: int }
+
+fn main() {
+    let p = Pt { x: 1, y: 2 }
+    p.x = 5   // ERROR: value struct fields are immutable
+}
+
+//=== TEST CASE: value_struct_field_set_Immutable ===
+value Pt { x: int, y: int }
+
+fn main() {
+    let p = Pt { x: 1, y: 2 }
+    field_set(p, .x, 5)   // ERROR: field_set mutates an immutable value struct
+}
+
+//=== TEST CASE: value_field_write_through_call_temporary_Immutable ===
+value Pt { x: int, y: int }
+struct Owner { p: Pt }
+
+fn mk() -> Owner { return Owner { p: Pt { x: 1, y: 1 } } }
+
+fn main() {
+    mk().p.x = 5   // ERROR: the owner is a temporary, not mutable storage
+}
+
+//=== TEST CASE: nobox_value_local_field_write_Immutable ===
+// The `nobox` marker does NOT legalize a write to a value LOCAL. Legality is
+// decided during front-end field validation, before backend selection, so no
+// representation choice is consulted. This pins the rule that a `nobox`
+// representation guarantee must not change whether a value-local field is
+// assignable.
+//
+// If value locals become writable places, this case starts compiling -- delete
+// it and pin the acceptance positively instead. It must NOT be made to pass by
+// marking the type.
+nobox value NPt { x: float, y: float }
+
+fn main() {
+    let p = NPt { x: 1.0, y: 2.0 }
+    p.x = 5.0
+}
+
+//=== TEST CASE: value_local_compound_assign_component_Immutable ===
+// Compound assignment on a component of a value local -- the user-reported
+// shader-helper shape, reduced. Same rejection as plain `=`; the compound form
+// routes through the same lvalue analysis.
+value V2c { x: float, y: float }
+
+fn main() {
+    let s = V2c { x: 0.5, y: 0.5 }
+    s.y *= 2.0
+}

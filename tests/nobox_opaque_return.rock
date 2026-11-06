@@ -1,0 +1,60 @@
+// Positive control for the bare-return reject
+// (`tests/errors/nobox_opaque_value_return.rock.err`): the shapes that must
+// KEEP compiling once an opaque body's boxed `nobox` return is refused. The
+// reject keys on "opaque AND not `@scalar_abi`", so each case below differs
+// from the rejected one by exactly one of those two conditions.
+
+nobox value NV2 { x: float, y: float }
+
+value BV2 { x: float, y: float }
+
+// The escape the rejection's message names: opaque body, opted in, returns the
+// LEAVES rather than a box.
+@scalar_abi inline(lua) fn leaves() -> NV2 = """
+    return 3.0, 4.0
+"""
+
+// Fixed name AND the leaf ABI -- `@scalar_abi` overrides the `@nomangle` gate,
+// so a hand-written caller spelling the bare name still gets leaves.
+@scalar_abi
+@nomangle inline(lua) fn leaves_fixed_name() -> NV2 = """
+    return 5.0, 6.0
+"""
+
+// Not opaque: an ordinary Rock body, which skull emits itself.
+fn rock_bodied() -> NV2 {
+    return NV2 { x: 7.0, y: 8.0 }
+}
+
+// Not nobox: an UNMARKED value still rides the single-cdata return out of an
+// opaque body, exactly as before. This is the asymmetry guard -- the reject
+// must not widen to every value type.
+@nomangle inline(lua) fn unmarked_boxed() -> BV2 = """
+    return BV2_ct(9.0, 10.0)
+"""
+
+// A tuple return whose element is nobox is covered by the tuple sibling; its
+// `@scalar_abi` form must still pass.
+@scalar_abi inline(lua) fn leaves_in_tuple() -> (bool, NV2) = """
+    return true, 1.0, 2.0
+"""
+
+@test fn opted_in_leaf_return_round_trips() {
+    let a = leaves()
+    assert_eq(a.x + a.y, 7.0)
+    let b = leaves_fixed_name()
+    assert_eq(b.x + b.y, 11.0)
+}
+
+@test fn non_opaque_and_unmarked_returns_are_untouched() {
+    let c = rock_bodied()
+    assert_eq(c.x + c.y, 15.0)
+    let d = unmarked_boxed()
+    assert_eq(d.x + d.y, 19.0)
+}
+
+@test fn opted_in_tuple_element_still_splats() {
+    let (ok, p) = leaves_in_tuple()
+    assert(ok)
+    assert_eq(p.x + p.y, 3.0)
+}

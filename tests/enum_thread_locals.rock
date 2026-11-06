@@ -1,0 +1,74 @@
+// Locals threading: a flat (boxed) enum bound to a `let` threads as leaf cells, so
+// `let x = ...; match x` reads cells with no box; reassignment updates the cells; a
+// whole-value use (==, capture) materializes a box on demand. Behavior identical to
+// the boxed local -- holds BEFORE and AFTER threading.
+
+enum Ev {
+    Idle,
+    Tick(int),
+    At { x: int, y: int },
+    Cb(() -> int),
+}
+
+fn make(n: int) -> Ev {
+    if n == 0 { return Ev::Idle }
+    if n < 0 { return Ev::At { x: n, y: -n } }
+    return Ev::Tick(n)
+}
+
+fn read(e: Ev) -> int {
+    return match e {
+        Ev::Idle => 0
+        Ev::Tick(n) => n
+        Ev::At { x, y } => x + y
+        Ev::Cb(f) => f()
+    }
+}
+
+@test
+fn test_let_then_match() {
+    let a = make(5)
+    assert_eq(read(a), 5)
+    let b = Ev::At { x: 3, y: 4 }
+    assert_eq(read(b), 7)
+    let c = Ev::Idle
+    assert_eq(read(c), 0)
+}
+
+@test
+fn test_reassign_local() {
+    let e = Ev::Idle
+    assert_eq(read(e), 0)
+    e = Ev::Tick(9)
+    assert_eq(read(e), 9)
+    e = Ev::At { x: 1, y: 2 }
+    assert_eq(read(e), 3)
+    e = make(7)
+    assert_eq(read(e), 7)
+}
+
+@test
+fn test_local_whole_value_use() {
+    let e = make(4)
+    // `==` forces a box materialization at this site; still structural-correct.
+    assert_eq(e == Ev::Tick(4), true)
+    assert_eq(e == Ev::Tick(5), false)
+    // pass the whole value to another fn (materialize at the call)
+    assert_eq(read(e), 4)
+}
+
+@test
+fn test_local_captured_by_closure() {
+    let e = Ev::Tick(11)
+    let get = () => read(e)      // closure captures the threaded local (the cells)
+    assert_eq(get(), 11)
+    e = Ev::At { x: 5, y: 20 }   // reassign after capture; closure sees the update
+    assert_eq(get(), 25)         // captures the VARIABLE, so reads the new value
+    assert_eq(read(e), 25)
+}
+
+@test
+fn test_local_cb_variant() {
+    let e = Ev::Cb(() => 42)
+    assert_eq(read(e), 42)
+}

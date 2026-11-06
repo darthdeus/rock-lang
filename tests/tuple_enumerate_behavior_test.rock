@@ -1,0 +1,137 @@
+// Test that tuple destructuring is the default and enumerate() must be explicit
+
+@test(output = "1\nhello\n2\nworld\n3\ntest")
+fn vec_tuple_destructuring_is_default() {
+    let items: [(int, string)] = vec_new()
+    vec_push(items, (1, "hello"))
+    vec_push(items, (2, "world"))
+    vec_push(items, (3, "test"))
+
+    // Default behavior: destructure the tuples
+    for (num, str) in items {
+        print(num)
+        print(str)
+    }
+}
+
+@test(output = "0\n1\nhello\n1\n2\nworld\n2\n3\ntest")
+fn enumerate_must_be_explicit() {
+    let items: [(int, string)] = vec_new()
+    vec_push(items, (1, "hello"))
+    vec_push(items, (2, "world"))
+    vec_push(items, (3, "test"))
+
+    // Enumeration requires explicit enumerate()
+    for (i, tuple) in enumerate(items) {
+        print(i)
+        print(tuple.0)  // First element of tuple
+        print(tuple.1)  // Second element of tuple
+    }
+}
+
+@test(output = "idx=0: a=1, b=hello\nidx=1: a=2, b=world\nidx=2: a=3, b=test")
+fn enumerate_with_nested_destructuring() {
+    let items: [(int, string)] = vec_new()
+    vec_push(items, (1, "hello"))
+    vec_push(items, (2, "world"))
+    vec_push(items, (3, "test"))
+
+    // Enumerate with nested tuple destructuring
+    for (i, (a, b)) in enumerate(items) {
+        print("idx={i}: a={a}, b={b}")
+    }
+}
+
+@test(output = "1-2\n4-5\n7-8")
+fn nested_tuple_first_element() {
+    // Test destructuring nested tuples
+    let items: [((int, int), string)] = vec_new()
+    vec_push(items, ((1, 2), "a"))
+    vec_push(items, ((4, 5), "b"))
+    vec_push(items, ((7, 8), "c"))
+
+    // Destructure to get the pair and string
+    for (pair, _) in items {
+        print("{pair.0}-{pair.1}")
+    }
+}
+
+@test(output = "0: (1,2)\n1: (4,5)")
+fn enumerate_nested_tuple_structures() {
+    let items: [((int, int), string)] = vec_new()
+    vec_push(items, ((1, 2), "a"))
+    vec_push(items, ((4, 5), "b"))
+
+    // Enumerate gives index and whole tuple
+    for (i, tuple) in enumerate(items) {
+        let pair = tuple.0  // First element is the nested tuple
+        print("{i}: ({pair.0},{pair.1})")
+    }
+}
+
+@test(output = "single: (1,a)")
+fn single_binding_gives_whole_tuple() {
+    let items: [(int, string)] = vec_new()
+    vec_push(items, (1, "a"))
+
+    // Single binding should give the whole tuple
+    for item in items {
+        print("single: ({item.0},{item.1})")
+    }
+}
+
+@test(output = "5\n15\n25")
+fn array_literal_default_iteration() {
+    // Array literals should iterate over values by default
+    for value in [5, 15, 25] {
+        print(value)
+    }
+}
+
+@test(output = "0:5\n1:15\n2:25")
+fn array_literal_with_enumerate() {
+    // Array literals with enumerate give index + value
+    for (i, value) in enumerate([5, 15, 25]) {
+        print("{i}:{value}")
+    }
+}
+
+@test(output = "idx=0: coord=(1,2), meta=(10,a)\nidx=1: coord=(3,4), meta=(20,b)")
+fn deeply_nested_destructuring_three_levels() {
+    // Test 3-level deep nested destructuring: (index, ((x, y), (num, str)))
+    let items: [((int, int), (int, string))] = vec_new()
+    vec_push(items, ((1, 2), (10, "a")))
+    vec_push(items, ((3, 4), (20, "b")))
+
+    for (i, ((x, y), (num, str))) in enumerate(items) {
+        print("idx={i}: coord=({x},{y}), meta=({num},{str})")
+    }
+}
+
+@test(output = "a=1,b=2,c=3,d=4,e=5")
+fn deeply_nested_destructuring_four_levels() {
+    // Test 4-level deep nested destructuring
+    let items: [(((int, int), int), (int, int))] = vec_new()
+    vec_push(items, (((1, 2), 3), (4, 5)))
+
+    for (((a, b), c), (d, e)) in items {
+        print("a={a},b={b},c={c},d={d},e={e}")
+    }
+}
+
+@test(output = "Empty vector handled correctly")
+fn edge_case_empty_vector_with_nested_destructuring() {
+    // Test that empty vectors don't crash with nested patterns
+    let items: [((int, int), string)] = vec_new()
+    let processed = false
+
+    for (i, ((x, y), str)) in enumerate(items) {
+        processed = true
+        print("Should not print")
+    }
+
+    if (!processed) {
+        print("Empty vector handled correctly")
+    }
+}
+

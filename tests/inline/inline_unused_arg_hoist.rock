@@ -1,0 +1,62 @@
+// L1 + L3: unused-but-side-effecting argument handling.
+//
+// Previously hard-errored with:
+//   "@inline cannot elide argument for unused parameter `X` because
+//    the argument has side effects"
+//
+// New behavior: emit the arg as a bare expression-statement in the
+// hoist block's prefix so side effects run exactly once and the value
+// is discarded. Matches what a user writing this chain out by hand
+// would naturally do.
+
+global CALLS: int = 0
+
+fn produce(n: int) -> int {
+    CALLS = CALLS + 1
+    return n
+}
+
+// Body ignores the second arg entirely. With L1 fix, `produce(99)`
+// runs once for its side effect and is dropped.
+@inline
+fn first_arg(a: int, b: int) -> int {
+    return a
+}
+
+@test(output = "7 1")
+fn test_ignored_side_effecting_arg() {
+    CALLS = 0
+    let r = first_arg(7, produce(99))
+    print("{r} {CALLS}")
+}
+
+// Body ignores both args.
+@inline
+fn constant_42(a: int, b: int) -> int {
+    return 42
+}
+
+@test(output = "42 2")
+fn test_both_ignored_side_effects() {
+    CALLS = 0
+    let r = constant_42(produce(1), produce(2))
+    print("{r} {CALLS}")
+}
+
+// L3: struct-literal field-level path with a side-effecting init for
+// a field the body doesn't read. Previously hard-errored with:
+//   "@inline field-substitution: argument field `p.y` is unused by
+//    the body but its initializer has side effects"
+struct P { x: int, y: int }
+
+@inline
+fn read_x(p: P) -> int {
+    return p.x
+}
+
+@test(output = "5 1")
+fn test_field_level_ignored_side_effecting_init() {
+    CALLS = 0
+    let r = read_x(P { x: 5, y: produce(99) })
+    print("{r} {CALLS}")
+}

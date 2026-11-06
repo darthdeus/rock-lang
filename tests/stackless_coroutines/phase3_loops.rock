@@ -1,0 +1,89 @@
+// Phase 3: yield inside loops.
+//
+// loop/while/for with yield, break, continue. Fails on Phase 1/2 lowering;
+// greens when Phase 3 lands.
+
+// ---- loop with conditional break and yield ----
+co fn yield_in_loop(limit: int) -> Coroutine<int> {
+    let i = 0
+    loop {
+        if i >= limit { break }
+        yield i
+        i = i + 1
+    }
+}
+
+@test(output = "0\n1\n2\nnull")
+fn test_loop_with_break() {
+    let c = yield_in_loop(3)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    let r = c.resume()
+    if r == null { print("null") } else { print(r.unwrap()) }
+}
+
+// ---- Loop with zero iterations ----
+@test(output = "null")
+fn test_loop_zero_iterations() {
+    let c = yield_in_loop(0)
+    let r = c.resume()
+    if r == null { print("null") } else { print(r.unwrap()) }
+}
+
+// ---- while with yield ----
+co fn yield_in_while(limit: int) -> Coroutine<int> {
+    let i = 0
+    while i < limit {
+        yield i
+        i = i + 1
+    }
+}
+
+@test(output = "0\n1\n2")
+fn test_yield_in_while() {
+    let c = yield_in_while(3)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+}
+
+// ---- Nested loops with yield ----
+co fn nested_loops(rows: int, cols: int) -> Coroutine<int> {
+    let r = 0
+    while r < rows {
+        let c = 0
+        while c < cols {
+            yield r * 10 + c
+            c = c + 1
+        }
+        r = r + 1
+    }
+}
+
+@test(output = "0\n1\n10\n11")
+fn test_nested_loops_yield() {
+    let c = nested_loops(2, 2)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+}
+
+// ---- continue inside loop with yield ----
+co fn yield_with_continue(n: int) -> Coroutine<int> {
+    let i = 0
+    while i < n {
+        i = i + 1
+        if i == 2 { continue }
+        yield i
+    }
+}
+
+@test(output = "1\n3\n4")
+fn test_yield_with_continue() {
+    let c = yield_with_continue(4)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+}

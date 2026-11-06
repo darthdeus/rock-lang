@@ -1,0 +1,161 @@
+// Function overload return type tests migrated from rock/tests/type_system_tests.rs overload_return_type_tests module
+// Tests function overload resolution with different return types, void vs value returns, and expression contexts
+// Covers overload selection based on parameters, mixed return types, and expression usage patterns
+
+// ============================================
+// Function Definitions for Testing
+// ============================================
+
+fn f() -> int { return 42 }
+fn f(x: int) { print(x) }  // returns ()
+
+fn action() { print("action!") }     // returns ()
+fn action(x: int) -> int { return x * x }
+
+fn process() -> string { return "done" }
+fn process(x: int) { print(x * 2) }  // returns ()
+fn process(x: string) -> int { return len(x) }
+
+fn compute() -> int { return 100 }
+fn compute(x: int) { print("computing\t{x}") }  // returns ()
+
+fn transform(x: int) -> string { return "int: {x}" }
+fn transform(x: string) -> int { return len(x) }
+
+fn greet() -> string { return "zero args" }
+fn greet(x: int) -> string { return "one arg: {x}" }
+fn greet(x: string) -> int { return len(x) }
+
+fn calculate() -> int { return 100 }
+fn calculate(x: int) -> int { return x * 2 }
+fn calculate(x: string) { print("void call") }
+
+fn get_value() -> string { return "default" }
+fn get_value(x: int) -> string { return "processed: {x}" }
+
+fn fetch() -> int { return 42 }
+fn fetch(flag: bool) { print("nothing") }
+
+fn work() -> string { return "simple" }
+fn work(complexity: int) -> string { return "complex: {complexity}" }
+
+// ============================================
+// Basic Overload Return Type Tests
+// ============================================
+
+@test(output = "42\\n10")
+fn test_overloads_with_different_return_types() {
+    print(f())     // Should select zero-arg overload
+    f(10)          // Should select one-arg overload
+}
+
+@test(output = "action!\\n16")
+fn test_overloads_void_vs_value() {
+    action()                    // Should print "action!"
+    print(action(4))           // Should print 16
+}
+
+// ============================================
+// Mixed Return Type Overload Tests (Ignored in original)
+// ============================================
+
+// Note: These tests were marked as #[ignore] in the original Rust tests
+// They test more complex overload resolution scenarios that may not be fully implemented
+
+@test(output = "done\\n10\\n5")
+fn test_overloads_mixed_return_types() {
+    print(process())        // Should print "done"
+    process(5)              // Should print 10
+    print(process("hello")) // Should print 5
+}
+
+@test(output = "100\\ncomputing\\t100")
+fn test_overloads_in_expressions() {
+    let result = compute()     // Should get 100
+    print(result)
+    compute(result)           // Should print "computing 100"
+}
+
+@test(output = "int: 42\\n5")
+fn test_overload_selection_by_args_not_return() {
+    print(transform(42))       // Should print "int: 42"
+    print(transform("hello"))  // Should print 5
+}
+
+// ============================================
+// Additional Overload Resolution Tests
+// ============================================
+
+@test(output = "zero args\\n11\\none arg: 10")
+fn test_overload_resolution_clarity() {
+    print(greet())
+    print(greet("hello world"))  // Should return 11 chars
+    print(greet(10))
+}
+
+@test(output = "100\\n200\\nvoid call")
+fn test_mixed_void_and_value_overloads() {
+    print(calculate())
+    print(calculate(100))
+    calculate("test")
+}
+
+// ============================================
+// Complex Return Type Patterns Tests
+// ============================================
+
+@test(output = "default\\nprocessed: 5")
+fn test_overload_context_selection() {
+    let default_val = get_value()
+    let processed_val = get_value(5)
+    
+    print(default_val)
+    print(processed_val)
+}
+
+@test(output = "42\\nnothing")
+fn test_overload_assignment_contexts() {
+    let number = fetch()        // Should call int version
+    print(number)
+    fetch(true)                 // Should call void version
+}
+
+// ============================================
+// Edge Cases and Error Conditions
+// ============================================
+
+@test(output = "simple\\ncomplex: 10")
+fn test_overload_parameter_disambiguation() {
+    print(work())
+    print(work(10))
+}
+
+// ============================================
+// Documentation of Error Cases
+// ============================================
+
+// The following demonstrate compile-time error cases for overload resolution.
+// Since Rock's @test system focuses on runtime validation,
+// these are documented as examples that should NOT compile.
+
+// EXAMPLE 1: Ambiguous overload resolution
+// fn ambiguous(x: int) -> string { return "string" }
+// fn ambiguous(x: int) -> int { return 42 }
+// let result = ambiguous(5)  // ERROR: Ambiguous - which return type?
+
+// EXAMPLE 2: Return type cannot disambiguate when parameters are identical
+// fn conflict() -> int { return 1 }
+// fn conflict() -> string { return "test" }  // ERROR: Identical signatures
+
+// EXAMPLE 3: Overload with missing return annotation
+// fn unclear() { return 5 }    // Inferred return type
+// fn unclear() -> int { return 10 }  // ERROR: Conflicts with inferred return
+
+// EXAMPLE 4: Using void function result in expression
+// fn void_func() { print("hi") }
+// let x = void_func()  // ERROR: Cannot assign () to variable
+
+// EXAMPLE 5: Overload resolution in complex expressions
+// fn multi() -> int { return 1 }
+// fn multi(x: string) { print(x) }
+// let result = multi() + multi("test")  // ERROR: multi("test") returns (), not int

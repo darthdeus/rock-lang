@@ -1,0 +1,328 @@
+// Characterization tests for the stdlib string fns (stdlib/unified.rock).
+// These pin the CURRENT behavior of split/replace/contains/starts_with/
+// ends_with/trim/join/find/upper/lower/repeat BEFORE they are ported from
+// inline(lua) to pure Rock. Every expected value below was produced by
+// running the current implementation, not assumed. The port must keep these
+// green (byte-identical behavior) or consciously update a pin.
+//
+// Special attention: split/replace feed the delimiter/needle into Lua
+// gmatch/gsub, so they must escape Lua pattern magic chars (% . - * + ? [ ]
+// ( ) ^ $). Those escape gymnastics are exactly what these tests pin.
+
+@intrinsic @nomangle inline(lua) fn try_call(f: fn()) -> bool = """
+    local ok, err = pcall(f)
+    return not ok
+"""
+
+// ---------------------------------------------------------------------------
+// split
+// ---------------------------------------------------------------------------
+
+@test(output = "[a|b|c]")
+fn test_split_basic() {
+    print("[{join("a,b,c".split(","), "|")}]")
+}
+
+// Empty delimiter is a programmer error -- there is nothing to split on. The
+// pure-Rock port rejects it with error("split: empty delimiter") (the earlier
+// Lua gmatch impl leaked N+1 empty strings; sentinel flipped when the port
+// decided the intended shape).
+@test
+fn test_split_empty_delimiter() {
+    assert(try_call(() => { let _x = "hello".split("") }))
+}
+
+@test(output = "[abc]")
+fn test_split_no_match() {
+    print("[{join("abc".split(","), "|")}]")
+}
+
+@test(output = "[a|b|]")
+fn test_split_trailing_delimiter() {
+    print("[{join("a,b,".split(","), "|")}]")
+}
+
+@test(output = "[|a|b]")
+fn test_split_leading_delimiter() {
+    print("[{join(",a,b".split(","), "|")}]")
+}
+
+@test(output = "[a|b|c]")
+fn test_split_multichar_delimiter() {
+    print("[{join("aXYbXYc".split("XY"), "|")}]")
+}
+
+@test(output = "[a|b|c]")
+fn test_split_magic_dot() {
+    print("[{join("a.b.c".split("."), "|")}]")
+}
+
+@test(output = "[a|b|c]")
+fn test_split_magic_percent() {
+    print("[{join("a%b%c".split("%"), "|")}]")
+}
+
+@test(output = "[a|b|c]")
+fn test_split_magic_dash() {
+    print("[{join("a-b-c".split("-"), "|")}]")
+}
+
+@test(output = "[a|b]")
+fn test_split_magic_star() {
+    print("[{join("a*b".split("*"), "|")}]")
+}
+
+// splitting by "(" leaves the unmatched ")" in the tail element.
+@test(output = "[a|b)c]")
+fn test_split_magic_open_paren() {
+    print("[{join("a(b)c".split("("), "|")}]")
+}
+
+// splitting by "[" leaves the unmatched "]" in the tail element.
+@test(output = "[a|b]c]")
+fn test_split_magic_open_bracket() {
+    print("[{join("a[b]c".split("["), "|")}]")
+}
+
+// ---------------------------------------------------------------------------
+// replace
+// ---------------------------------------------------------------------------
+
+@test(output = "[a;b;c]")
+fn test_replace_basic() {
+    print("[{"a,b,c".replace(",", ";")}]")
+}
+
+// Empty needle is a programmer error -- there is nothing to find. The
+// pure-Rock port rejects it with error("replace: empty needle") (the earlier
+// Lua gsub impl inserted the replacement at every boundary; sentinel flipped
+// when the port decided the intended shape).
+@test
+fn test_replace_empty_old() {
+    assert(try_call(() => { let _x = "abc".replace("", "X") }))
+}
+
+@test(output = "[a_b]")
+fn test_replace_magic_dot() {
+    print("[{"a.b".replace(".", "_")}]")
+}
+
+@test(output = "[a_b]")
+fn test_replace_magic_percent_needle() {
+    print("[{"a%b".replace("%", "_")}]")
+}
+
+// replacement string containing a lone "%": must survive as a literal "%"
+// (the escaped_new "%%" -> "%%%%" dance), not be treated as a gsub capture.
+@test(output = "[a%b]")
+fn test_replace_replacement_has_percent() {
+    print("[{"aXb".replace("X", "%")}]")
+}
+
+// replacement string containing the needle itself: no runaway re-match.
+@test(output = "[aXXb]")
+fn test_replace_replacement_contains_needle() {
+    print("[{"aXb".replace("X", "XX")}]")
+}
+
+@test(output = "[abc]")
+fn test_replace_no_match() {
+    print("[{"abc".replace("z", "Y")}]")
+}
+
+@test(output = "[a_b]]")
+fn test_replace_magic_open_bracket() {
+    print("[{"a[b]".replace("[", "_")}]")
+}
+
+@test(output = "[a_b]")
+fn test_replace_magic_dash() {
+    print("[{"a-b".replace("-", "_")}]")
+}
+
+// ---------------------------------------------------------------------------
+// contains
+// ---------------------------------------------------------------------------
+
+@test(output = "true")
+fn test_contains_yes() {
+    print("hello".contains("ell"))
+}
+
+@test(output = "false")
+fn test_contains_no() {
+    print("hello".contains("xyz"))
+}
+
+@test(output = "true")
+fn test_contains_empty_needle() {
+    print("hello".contains(""))
+}
+
+// plain-text find, so "." matches a literal dot, not any char.
+@test(output = "true")
+fn test_contains_magic_literal() {
+    print("a.b".contains("."))
+}
+
+@test(output = "false")
+fn test_contains_needle_longer_than_haystack() {
+    print("ab".contains("abc"))
+}
+
+// ---------------------------------------------------------------------------
+// starts_with / ends_with
+// ---------------------------------------------------------------------------
+
+@test(output = "true")
+fn test_starts_with_yes() {
+    print("hello".starts_with("he"))
+}
+
+@test(output = "false")
+fn test_starts_with_no() {
+    print("hello".starts_with("lo"))
+}
+
+@test(output = "true")
+fn test_starts_with_empty() {
+    print("hello".starts_with(""))
+}
+
+@test(output = "false")
+fn test_starts_with_prefix_longer() {
+    print("ab".starts_with("abc"))
+}
+
+@test(output = "true")
+fn test_ends_with_yes() {
+    print("hello".ends_with("lo"))
+}
+
+@test(output = "false")
+fn test_ends_with_no() {
+    print("hello".ends_with("he"))
+}
+
+@test(output = "true")
+fn test_ends_with_empty() {
+    print("hello".ends_with(""))
+}
+
+@test(output = "false")
+fn test_ends_with_suffix_longer() {
+    print("ab".ends_with("abc"))
+}
+
+// ---------------------------------------------------------------------------
+// trim
+// ---------------------------------------------------------------------------
+
+@test(output = "[hi]")
+fn test_trim_basic() {
+    print("[{"  hi  ".trim()}]")
+}
+
+@test(output = "[]")
+fn test_trim_empty() {
+    print("[{"".trim()}]")
+}
+
+@test(output = "[hi]")
+fn test_trim_tabs_newlines() {
+    print("[{"\t\nhi\n\t".trim()}]")
+}
+
+@test(output = "[hi]")
+fn test_trim_no_whitespace() {
+    print("[{"hi".trim()}]")
+}
+
+// ---------------------------------------------------------------------------
+// join
+// ---------------------------------------------------------------------------
+
+@test(output = "[a,b,c]")
+fn test_join_basic() {
+    print("[{join(["a", "b", "c"], ",")}]")
+}
+
+@test(output = "[]")
+fn test_join_empty_vec() {
+    let empty: [string] = []
+    print("[{join(empty, ",")}]")
+}
+
+@test(output = "[x]")
+fn test_join_single() {
+    print("[{join(["x"], ",")}]")
+}
+
+@test(output = "[a-b-c]")
+fn test_join_multichar_sep() {
+    print("[{join(["a", "b", "c"], "-")}]")
+}
+
+// ---------------------------------------------------------------------------
+// find (0-based unit index, -1 on miss)
+// ---------------------------------------------------------------------------
+
+@test(output = "2")
+fn test_find_middle() {
+    print("hello".find("ll"))
+}
+
+@test(output = "0")
+fn test_find_at_start() {
+    print("hello".find("he"))
+}
+
+@test(output = "3")
+fn test_find_at_end() {
+    print("hello".find("lo"))
+}
+
+@test(output = "-1")
+fn test_find_absent() {
+    print("hello".find("z"))
+}
+
+@test(output = "0")
+fn test_find_empty_needle() {
+    print("hello".find(""))
+}
+
+// plain-text find: "." matches the literal dot at index 1, not index 0.
+@test(output = "1")
+fn test_find_magic_literal() {
+    print("a.b".find("."))
+}
+
+@test(output = "-1")
+fn test_find_needle_longer() {
+    print("ab".find("abc"))
+}
+
+// ---------------------------------------------------------------------------
+// upper / lower / repeat
+// ---------------------------------------------------------------------------
+
+@test(output = "HELLO")
+fn test_upper() {
+    print("heLLo".upper())
+}
+
+@test(output = "hello")
+fn test_lower() {
+    print("heLLo".lower())
+}
+
+@test(output = "[ababab]")
+fn test_repeat() {
+    print("[{"ab".repeat(3)}]")
+}
+
+@test(output = "[]")
+fn test_repeat_zero() {
+    print("[{"ab".repeat(0)}]")
+}

@@ -1,0 +1,28 @@
+@test
+fn test_assertion_functions() {
+    // Test assert_eq
+    assert_eq(5, 5, "Five should equal five")
+    assert_eq("hello", "hello", "Strings should match")
+    
+    // Test assert_ne
+    assert_ne(5, 10, "Five should not equal ten")
+    assert_ne("hello", "world", "Different strings should not be equal")
+    
+    // Test assert_true
+    assert_true(true, "True should be true")
+    assert_true(5 > 3, "5 should be greater than 3")
+    
+    // Test assert_false
+    assert_false(false, "False should be false")
+    assert_false(3 > 5, "3 should not be greater than 5")
+    
+    // Test assert_null
+    let null_value: int? = null
+    assert_null(null_value, "Null value should be null")
+    
+    // Test assert_not_null
+    let non_null_value: int? = 42
+    assert_not_null(non_null_value, "Non-null value should not be null")
+    
+    print("All assertion tests passed!")
+}

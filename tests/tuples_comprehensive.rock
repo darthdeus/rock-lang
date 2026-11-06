@@ -1,0 +1,113 @@
+// Tuple tests - migrated from rock/tests/tuple_tests.rs
+// Tests tuple types, destructuring, and basic operations
+
+// Struct definition for tuple field test
+struct Data { 
+    point: (int, int) 
+}
+
+// Helper function for tuple return type test
+fn get_pair() -> (string, int?) { 
+    return ("val", null) 
+}
+
+// Helper function for swap and add test
+fn swap_and_add(pair: (int, int)) -> (int, int) {
+    let (a, b) = pair
+    return (b, a + b)
+}
+
+// Runtime behavior tests
+@test(output = "10\n20")
+fn test_tuple_destructuring_runtime() {
+    let point = (10, 20)
+    let (x, y) = point
+    print(x)
+    print(y)
+}
+
+@test(output = "true\nval")
+fn test_tuple_destructuring_mixed_types() {
+    let (x, y) = (true, "val")
+    print(x)
+    print(y)
+}
+
+@test(output = "val\nnil")
+fn test_tuple_function_return_runtime() {
+    let result = get_pair()
+    let (s, i) = result
+    print(s)
+    print(i)
+}
+
+@test(output = "42\nhello\ntrue")
+fn test_mixed_tuple_types() {
+    let mixed = (42, "hello", true)
+    let (num, str, bool) = mixed
+    print(num)
+    print(str)
+    print(bool)
+}
+
+@test(output = "inner")
+fn test_nested_tuple_destructuring() {
+    let nested = (1, ("inner", false))
+    let (outer, inner_tuple) = nested
+    let (inner_s, inner_b) = inner_tuple
+    print(inner_s)
+}
+
+@test(output = "20\n30")
+fn test_tuple_in_function() {
+    let result = swap_and_add((10, 20))
+    let (x, y) = result
+    print(x)
+    print(y)
+}
+
+@test(output = "5")
+fn test_single_element_tuple() {
+    let single = (5,)
+    let (x,) = single
+    print(x)
+}
+
+@test(output = "10\n20\n30\n40")
+fn test_four_tuple() {
+    let quad = (10, 20, 30, 40)
+    let (a, b, c, d) = quad
+    print(a)
+    print(b)
+    print(c)
+    print(d)
+}
+
+@test(output = "1\n2")
+fn test_tuple_print() {
+    let pair = (1, 2)
+    let (a, b) = pair
+    print(a)
+    print(b)
+}
+
+@test(output = "3")
+fn test_tuple_with_computation() {
+    let pair = (1, 2)
+    let (a, b) = pair
+    print(a + b)
+}
+
+@test(output = "hello world")
+fn test_string_tuple() {
+    let pair = ("hello", "world")
+    let (a, b) = pair
+    print(a + " " + b)
+}
+
+@test(output = "nil")
+fn test_nullable_in_tuple() {
+    let pair: (int, int?) = (42, null)
+    let (a, b) = pair
+    print(b)
+}

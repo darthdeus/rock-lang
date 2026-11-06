@@ -1,0 +1,112 @@
+//! Error: defining a non-overloadable operator must reject rather than be silently dropped
+//! Tags: operators,overloading
+
+// Only `+ - * / % ./` dispatch to a user fn in their binary form. Prefix `-`
+// and `!` have their own callable families; the other operator symbols parse
+// into an `__op_*` definition that nothing ever calls, so before this rejection
+// existed the definition was accepted, emitted, and ignored -- `==` with no
+// diagnostic at any stage, the ordering ops with a use-site error that blamed
+// the operand type instead of the overload.
+//
+// One case per symbol: the harness reports only the FIRST error, so a shared
+// case would hide every symbol after the one that fired.
+
+//=== TEST CASE: eq_Generic ===
+value V { a: int }
+operator ==(x: V, y: V) -> bool { return true }
+fn main() {}
+
+//=== TEST CASE: ne_Generic ===
+value V { a: int }
+operator !=(x: V, y: V) -> bool { return true }
+fn main() {}
+
+//=== TEST CASE: lt_Generic ===
+value V { a: int }
+operator <(x: V, y: V) -> bool { return true }
+fn main() {}
+
+//=== TEST CASE: le_Generic ===
+value V { a: int }
+operator <=(x: V, y: V) -> bool { return true }
+fn main() {}
+
+//=== TEST CASE: gt_Generic ===
+value V { a: int }
+operator >(x: V, y: V) -> bool { return true }
+fn main() {}
+
+//=== TEST CASE: ge_Generic ===
+value V { a: int }
+operator >=(x: V, y: V) -> bool { return true }
+fn main() {}
+
+//=== TEST CASE: and_Generic ===
+value V { a: int }
+operator &&(x: V, y: V) -> bool { return true }
+fn main() {}
+
+//=== TEST CASE: or_Generic ===
+value V { a: int }
+operator ||(x: V, y: V) -> bool { return true }
+fn main() {}
+
+//=== TEST CASE: not_Generic ===
+value V { a: int }
+operator !(x: V, y: V) -> bool { return true }
+fn main() {}
+
+//=== TEST CASE: bitnot_Generic ===
+value V { a: int }
+operator ~(x: V) -> V { return x }
+fn main() {}
+
+//=== TEST CASE: bitand_Generic ===
+value V { a: int }
+operator &(x: V, y: V) -> V { return x }
+fn main() {}
+
+//=== TEST CASE: bitor_Generic ===
+value V { a: int }
+operator |(x: V, y: V) -> V { return x }
+fn main() {}
+
+//=== TEST CASE: bitxor_Generic ===
+value V { a: int }
+operator ^(x: V, y: V) -> V { return x }
+fn main() {}
+
+//=== TEST CASE: shl_Generic ===
+value V { a: int }
+operator <<(x: V, y: V) -> V { return x }
+fn main() {}
+
+//=== TEST CASE: shr_Generic ===
+value V { a: int }
+operator >>(x: V, y: V) -> V { return x }
+fn main() {}
+
+//=== TEST CASE: index_Generic ===
+value V { a: int }
+operator [](x: V, i: int) -> int { return 1 }
+fn main() {}
+
+// The reserved name is reserved in EVERY spelling, not just the `operator`
+// one with a Rock body. Both of these were accepted and ignored while the
+// rejection keyed on narrower guards; each is the same swallow wearing a
+// different hat.
+
+//=== TEST CASE: plain_fn_spelling_Generic ===
+value V { a: int }
+fn __op_eq(x: V, y: V) -> bool { return true }
+fn main() {}
+
+//=== TEST CASE: inline_backend_spelling_Generic ===
+value V { a: int }
+@pure @inline operator(lua) ==(x: V, y: V) -> bool = "return true"
+fn main() {}
+
+// The admitted side is NOT here: a rejection suite cannot express "accepted
+// and then actually dispatched", and acceptance alone would pass even if `+`
+// were silently ignored too. `tests/overloadable_operators.rock` covers all
+// six overloadable symbols by asserting each returns its marker.

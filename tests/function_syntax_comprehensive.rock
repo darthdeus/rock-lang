@@ -1,0 +1,111 @@
+// Comprehensive test for all function type syntaxes
+// This test documents all the function type syntaxes supported by Rock
+
+fn void_fn() {
+    print("void")
+}
+
+fn string_fn() -> string {
+    "hello"
+}
+
+fn identity(s: string) -> string {
+    s
+}
+
+// Test all function type syntaxes now supported:
+
+// 1. fn() shorthand (defaults to fn() -> ())
+fn test_fn_shorthand(f: fn()) {
+    f()
+}
+
+// 2. fn() -> () explicit void return
+fn test_fn_explicit_void(f: fn() -> ()) {
+    f()
+}
+
+// 3. () -> () alternative syntax  
+fn test_paren_void(f: () -> ()) {
+    f()
+}
+
+// 4. fn() -> T with return type
+fn test_fn_with_return(f: fn() -> string) -> string {
+    f()
+}
+
+// 5. () -> T alternative syntax with return type
+fn test_paren_with_return(f: () -> string) -> string {
+    f()
+}
+
+// 6. fn(T) -> U with parameters and return type
+fn test_fn_with_params(f: fn(string) -> string) -> string {
+    f("test")
+}
+
+// 7. (T) -> U alternative syntax with parameters and return type  
+fn test_paren_with_params(f: (string) -> string) -> string {
+    f("test")
+}
+
+// 8. T -> U bare syntax (no parentheses around single parameter)
+fn test_bare_syntax(f: string -> string) -> string {
+    f("test")
+}
+
+@test(output = "void")
+fn test_shorthand_syntax() {
+    test_fn_shorthand(void_fn)
+}
+
+@test(output = "void")
+fn test_explicit_void_syntax() {
+    test_fn_explicit_void(void_fn)
+}
+
+@test(output = "void")
+fn test_alternative_void_syntax() {
+    test_paren_void(void_fn)
+}
+
+@test(output = "hello")
+fn test_fn_return_syntax() {
+    print(test_fn_with_return(string_fn))
+}
+
+@test(output = "hello")
+fn test_paren_return_syntax() {
+    print(test_paren_with_return(string_fn))
+}
+
+@test(output = "test")
+fn test_fn_param_syntax() {
+    print(test_fn_with_params(identity))
+}
+
+@test(output = "test")
+fn test_paren_param_syntax() {
+    print(test_paren_with_params(identity))
+}
+
+@test(output = "test")
+fn test_bare_param_syntax() {
+    print(test_bare_syntax(identity))
+}
+
+// Test that all syntaxes are interchangeable - same function can be passed to different parameter types
+@test(output = "void\nvoid\nvoid")
+fn test_syntax_interchangeability() {
+    test_fn_shorthand(void_fn)
+    test_fn_explicit_void(void_fn)
+    test_paren_void(void_fn)
+}
+
+@test(output = "test\ntest\ntest")
+fn test_param_syntax_interchangeability() {
+    print(test_fn_with_params(identity))
+    print(test_paren_with_params(identity))
+    print(test_bare_syntax(identity))
+}

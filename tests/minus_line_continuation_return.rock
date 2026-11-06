@@ -1,0 +1,9 @@
+fn continued_return() -> float {
+    return 10.0
+        - 1.0
+}
+
+@test
+fn leading_minus_continues_a_return_value() {
+    assert_eq(continued_return(), 9.0)
+}

@@ -1,0 +1,40 @@
+// CSE within a block for @pure calls. Two identical pure calls with
+// structurally-equal args collapse to a single `let __cse_N = ...`
+// at the first occurrence; subsequent uses reference the binding.
+// Runtime output must be unchanged.
+
+@pure
+fn my_abs(x: int) -> int {
+    if x < 0 { return -x }
+    return x
+}
+
+// Same @pure call appearing twice with the same arg → CSE'd.
+// my_abs(-7) = 7, so sum = 7 + 7 = 14.
+@test(output = "14")
+fn test_cse_same_pure_call_twice() {
+    let x = -7
+    let sum = my_abs(x) + my_abs(x)
+    print(sum)
+}
+
+// Different args → no CSE.
+@test(output = "12")
+fn test_no_cse_different_args() {
+    let a = -5
+    let b = -7
+    let sum = my_abs(a) + my_abs(b)
+    print(sum)
+}
+
+// Intervening mutation to an arg invalidates CSE — the second call
+// must see the new value of x. First: my_abs(-3) = 3; after x = 10,
+// my_abs(10) = 10. Sum = 3 + 10 = 13.
+@test(output = "13")
+fn test_mutation_blocks_cse() {
+    let x = -3
+    let a = my_abs(x)
+    x = 10
+    let b = my_abs(x)
+    print(a + b)
+}

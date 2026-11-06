@@ -1,0 +1,52 @@
+// Small-tail: tuple and range match patterns. ANF lower_pattern now
+// mirrors live pattern_matching.rs (Range -> `(v>=s) and (v<e/<=e)`,
+// Tuple -> AND of element conds against `v[i+1]` + recursive binds).
+// Record / Or patterns stay reject-to-live. Pins runtime behavior;
+// must pass with and without ROCK_ANF_FUNCTIONS=1.
+
+fn classify(n: int) -> int {
+    return match n {
+        0..10 => 1,
+        10..=20 => 2,
+        _ => 9,
+    }
+}
+
+fn tup(p: (int, int)) -> int {
+    return match p {
+        (0, 0) => 100,
+        (1, y) => y,
+        (x, _) => x,
+        _ => 42,
+    }
+}
+
+fn open_range(n: int) -> int {
+    return match n {
+        ..0 => 0,
+        100.. => 2,
+        _ => 1,
+    }
+}
+
+@test(output = "1\n2\n2\n9")
+fn test_range_patterns() {
+    print("{classify(5)}")
+    print("{classify(15)}")
+    print("{classify(20)}")
+    print("{classify(99)}")
+}
+
+@test(output = "100\n7\n4")
+fn test_tuple_patterns() {
+    print("{tup((0, 0))}")
+    print("{tup((1, 7))}")
+    print("{tup((4, 9))}")
+}
+
+@test(output = "0\n1\n2")
+fn test_open_ranges() {
+    print("{open_range(-5)}")
+    print("{open_range(50)}")
+    print("{open_range(200)}")
+}

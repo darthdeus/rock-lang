@@ -1,0 +1,245 @@
+// Core type inference tests migrated from rock/tests/type_system_tests.rs simple_inference_tests module
+// Tests fundamental type inference patterns, error cases, and basic language constructs
+// Covers literals, let bindings, function types, if expressions, loops, and semicolon handling
+
+// ============================================
+// Helper Function Definitions
+// ============================================
+
+fn foo_any(x: any) {
+    print(x)
+}
+
+fn bar_string(x: string) -> string {
+    return x
+}
+
+fn baz_string(x: string) -> string {
+    print("test")
+    return x
+}
+
+fn foo_unit() -> int { 5 }
+
+fn foo_semicolon() -> int {
+    let x = 5
+    x + 10
+}
+
+fn foo_empty() {}
+
+fn foo_let_unit() { let x = 5 }
+
+fn process_int(x: int) -> int {
+    return x
+}
+
+fn process_string(s: string) {
+    print(s)
+}
+
+fn compute(x: int, y: int) -> int {
+    return x * y + 5
+}
+
+fn is_positive(x: int) -> bool {
+    return x > 0
+}
+
+fn add_one(x: int) -> int {
+    return x + 1
+}
+
+fn multiply_by_three(x: int) -> int {
+    return x * 3
+}
+
+fn log_and_double(x: int) -> int {
+    print("Processing {x}")
+    return x * 2
+}
+
+// ============================================
+// Basic Type Inference Tests
+// ============================================
+
+@test(output = "false")
+fn test_bool_literal_inference() {
+    print(true == false)
+}
+
+@test(type_holes = [[0, "int"], [1, "int"]])
+fn test_typed_let_inference() {
+    let x: int = 5
+    let y: ? = x
+    let z: ? = 5
+}
+
+@test(output = "test")
+fn test_function_parameter_types() {
+    let a = 5
+    let b = bar_string("test")
+    print(b)
+}
+
+@test(output = "hello\\n5")
+fn test_print_accepts_any() {
+    let x = "hello"
+    print(x)
+    
+    let y = 5
+    print(y)
+}
+
+// ============================================
+// If Expression Type Inference Tests
+// ============================================
+
+@test(output = "0")
+fn test_if_no_else_is_unit() {
+    // statement position: a no-else if is unit. In value position
+    // (`let x = if true { () }`) bone rejects it (missing else).
+    if true { () }
+    print(0)
+}
+
+// ============================================
+// While Loop Type Inference Tests
+// ============================================
+
+@test(type_holes = [[0, "int"], [1, "int"]])
+fn test_while_loop_inference() {
+    let x = 0
+    let a: ? = x
+    
+    while x < 5 {
+        x = x + 1
+        let b: ? = x
+    }
+}
+
+// ============================================
+// Semicolon and Return Value Tests
+// ============================================
+
+@test(output = "0")
+fn test_no_semicolon_value_function() {
+    print(0)
+}
+
+@test(output = "0")  
+fn test_semicolon_intermediate_statement() {
+    print(0)
+}
+
+@test(output = "0")
+fn test_empty_block_is_unit() {
+    print(0)
+}
+
+@test(output = "0")
+fn test_block_ending_in_let_is_unit() {
+    print(0)
+}
+
+// ============================================
+// Error Cases - Type Mismatch Examples
+// ============================================
+
+// The following tests demonstrate compile-time error cases.
+// Since Rock's @test system focuses on runtime validation,
+// these are documented as examples that should NOT compile.
+
+// EXAMPLE 1: Type mismatch in let binding
+// let x: string = 5  // ERROR: Cannot assign int to string
+
+// EXAMPLE 2: If expression type mismatch 
+// let x = if true { 5 } else { "hello" }  // ERROR: int vs string in branches
+
+// EXAMPLE 3: While loop condition must be bool
+// while 5 { }  // ERROR: Condition must be bool, got int
+
+// EXAMPLE 4: Function return type mismatch with semicolon
+// fn foo() -> int { 5; }  // ERROR: Returns (), expected int
+
+// EXAMPLE 5: Function return type mismatch without semicolon  
+// fn foo() { 5 }  // ERROR: Returns int, expected ()
+
+// ============================================
+// Complex Type Inference Scenarios
+// ============================================
+
+@test(output = "42\\n10\\nhello")
+fn test_complex_function_call_inference() {
+    // Test that type inference correctly resolves function calls
+    let result = process_int(42)
+    print(result)
+    
+    let value = 10
+    print(process_int(value))
+    
+    process_string("hello")
+}
+
+@test(output = "25\\n18")
+fn test_nested_expression_inference() {
+    let a = 4
+    let b = 5
+    let result = compute(a, b)
+    print(result)
+    
+    // Test inference in complex expressions: compute(2, 3) = 11, compute(1, 2) = 7, total = 18
+    let complex = compute(2, 3) + compute(1, 2)
+    print(complex)
+}
+
+@test(output = "true\\nfalse")
+fn test_boolean_inference_patterns() {
+    let positive = is_positive(5)
+    print(positive)
+    
+    let negative = is_positive(-3)
+    print(negative)
+}
+
+// ============================================
+// Variable Assignment and Reassignment Tests
+// ============================================
+
+@test(output = "5\\n10\\n15")
+fn test_variable_reassignment_inference() {
+    let x = 5
+    print(x)
+    
+    x = 10
+    print(x)
+    
+    x = x + 5
+    print(x)
+}
+
+@test(output = "hello\\nworld")
+fn test_string_variable_inference() {
+    let message = "hello"
+    print(message)
+    
+    message = "world"
+    print(message)
+}
+
+// ============================================
+// Function Call Chain Inference Tests  
+// ============================================
+
+@test(output = "15")
+fn test_function_call_chain_inference() {
+    // Test that type inference works through function call chains
+    let result = multiply_by_three(add_one(4))
+    print(result)
+}
+
+@test(output = "Processing 42\\n84")
+fn test_mixed_return_types() {
+    let doubled = log_and_double(42)
+    print(doubled)
+}

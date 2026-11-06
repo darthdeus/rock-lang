@@ -1,0 +1,83 @@
+// T3 loop value-model conformance. Each
+// @test returns a scalar the HOST compares against the pinned literal, run on
+// both luajit and the JS backend -- so a cell written in iteration N and read in
+// N+1 that folded across the back-edge would diverge here. Behavioral companion
+// to the structure pins in crates/skull-codegen-js/tests/loops.rs.
+
+fn sum_while(n: int) -> int {
+    let acc = 0
+    let i = 0
+    while i < n {
+        acc = acc + i
+        i = i + 1
+    }
+    return acc
+}
+
+fn sum_for(n: int) -> int {
+    let acc = 0
+    for i in 0..n {
+        acc = acc + i
+    }
+    return acc
+}
+
+fn first_ge(n: int, target: int) -> int {
+    let found = -1
+    for i in 0..n {
+        if i == target {
+            found = i
+            break
+        }
+    }
+    return found
+}
+
+fn sum_skip(n: int, skip: int) -> int {
+    let acc = 0
+    for i in 0..n {
+        if i == skip {
+            continue
+        }
+        acc = acc + i
+    }
+    return acc
+}
+
+fn nested(n: int) -> int {
+    let total = 0
+    for i in 0..n {
+        for j in 0..n {
+            total = total + j
+        }
+    }
+    return total
+}
+
+fn while_call_cond(n: int) -> int {
+    let acc = 0
+    let i = 0
+    while i < abs(n) {
+        acc = acc + i
+        i = i + 1
+    }
+    return acc
+}
+
+@test(returns = 10)
+fn t_sum_while() -> int { return sum_while(5) }
+
+@test(returns = 10)
+fn t_sum_for() -> int { return sum_for(5) }
+
+@test(returns = 3)
+fn t_first_ge() -> int { return first_ge(10, 3) }
+
+@test(returns = 8)
+fn t_sum_skip() -> int { return sum_skip(5, 2) }
+
+@test(returns = 9)
+fn t_nested() -> int { return nested(3) }
+
+@test(returns = 6)
+fn t_while_call_cond() -> int { return while_call_cond(-4) }

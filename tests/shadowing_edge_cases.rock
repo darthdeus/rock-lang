@@ -1,0 +1,291 @@
+// Edge case tests for shadowing - fuzzing-inspired scenarios
+// These tests try to break the compiler with complex but valid shadowing patterns
+
+// Test 1: Extreme nested shadowing depth
+@test(output = "10\n9\n8\n7\n6\n5\n4\n3\n2\n1\n0")
+fn test_extreme_nesting_depth() {
+    let x = 0
+    if true {
+        let x = 1
+        if true {
+            let x = 2
+            if true {
+                let x = 3
+                if true {
+                    let x = 4
+                    if true {
+                        let x = 5
+                        if true {
+                            let x = 6
+                            if true {
+                                let x = 7
+                                if true {
+                                    let x = 8
+                                    if true {
+                                        let x = 9
+                                        if true {
+                                            let x = 10
+                                            print(x.to_string())
+                                        }
+                                        print(x.to_string())
+                                    }
+                                    print(x.to_string())
+                                }
+                                print(x.to_string())
+                            }
+                            print(x.to_string())
+                        }
+                        print(x.to_string())
+                    }
+                    print(x.to_string())
+                }
+                print(x.to_string())
+            }
+            print(x.to_string())
+        }
+        print(x.to_string())
+    }
+    print(x.to_string())
+}
+
+// Test 2: Shadowing with same name used in complex expressions
+@test(output = "Result: 1100")
+fn test_shadow_in_complex_expression() {
+    let x = 100
+    let y = 1000
+    
+    let result = if true {
+        let x = x + 10  // x = 110
+        let y = y + x   // y = 1110
+        
+        if x > 100 {
+            let x = y - x  // x = 1000
+            let y = x + 100  // y = 1100
+            y
+        } else {
+            x
+        }
+    } else {
+        x + y
+    }
+    
+    print("Result: " + result.to_string())
+}
+
+// Test 3: Shadowing with multiple variables interdependent
+@test(output = "20")
+fn test_interdependent_shadows() {
+    let a = 1
+    let b = 2
+    let c = 3
+    
+    let result = if true {
+        let a = b + c    // a = 5
+        let b = a + c    // b = 8
+        let c = a + b - c  // c = 10
+        
+        if a < b {
+            let a = c - a  // a = 5
+            let b = a      // b = 5
+            let c = a + b  // c = 10
+            a + b + c      // 5 + 5 + 10 = 20
+        } else {
+            a + b + c
+        }
+    } else {
+        a + b + c
+    }
+    
+    // Wait, let me recalculate...
+    // a = 2 + 3 = 5
+    // b = 5 + 3 = 8  
+    // c = 5 + 8 - 3 = 10
+    // Since 5 < 8:
+    // a = 10 - 5 = 5
+    // b = 5
+    // c = 5 + 5 = 10
+    // Result should be 5 + 5 + 10 = 20, not 15
+    
+    print(result.to_string())
+}
+
+// Test 4: Shadowing with lambda capturing multiple levels
+@test(output = "Outer: 1\nCapture1: 1\nCapture2: 10\nCapture3: 100\nCapture4: 1000")
+fn test_multilevel_lambda_capture() {
+    let x = 1
+    print("Outer: " + x.to_string())
+    
+    let f1 = () => {
+        return x  // Captures x = 1
+    }
+    
+    if true {
+        let x = 10
+        let f2 = () => {
+            return x  // Captures x = 10
+        }
+        
+        if true {
+            let x = 100
+            let f3 = () => {
+                return x  // Captures x = 100
+            }
+            
+            if true {
+                let x = 1000
+                let f4 = () => {
+                    return x  // Captures x = 1000
+                }
+                
+                print("Capture1: " + f1().to_string())
+                print("Capture2: " + f2().to_string())
+                print("Capture3: " + f3().to_string())
+                print("Capture4: " + f4().to_string())
+            }
+        }
+    }
+}
+
+// Test 5: Shadowing with accumulation pattern
+@test(output = "Final: 10")
+fn test_shadow_accumulation() {
+    let sum: int = 0
+    let sum: int = sum + 1  // sum = 1
+    let sum: int = sum + 2  // sum = 3
+    let sum: int = sum + 3  // sum = 6
+    let sum: int = sum + 4  // sum = 10
+    print("Final: " + sum.to_string())
+}
+// Test 5 v2: Shadowing with mutation and loops
+@test(output = "Iteration 0: 0\nIteration 1: 1\nIteration 2: 2\nIteration 3: 3\nIteration 4: 4\nOuter sum: 0")
+fn test_shadow_in_loop_iterations() {
+    let sum: int = 0
+    let i = 0
+    
+    while i < 5 {
+        let sum = sum + i  // Shadow sum in each iteration
+        print("Iteration " + i.to_string() + ": " + sum.to_string())
+        i = i + 1
+    }
+    
+    print("Outer sum: " + sum.to_string())  // Original sum unchanged
+}
+
+// Test 6: Shadowing with array destructuring in loops
+@test(output = "1,2\n3,4\n5,6\nOriginal: 100,200")
+fn test_shadow_array_destructure() {
+    let x = 100
+    let y = 200
+    
+    let pairs = [(1, 2), (3, 4), (5, 6)]
+    
+    for pair in pairs {
+        let (x, y) = pair
+        print(x.to_string() + "," + y.to_string())
+    }
+    
+    print("Original: " + x.to_string() + "," + y.to_string())
+}
+
+// Test 7: Complex if-expression shadowing with side effects
+@test(output = "Computing A\nA=10\nComputing B\nB=20\nResult: 30\nOriginal: 1")
+fn test_if_expr_side_effects_shadow() {
+    let x = 1
+    
+    let result = if true {
+        print("Computing A")
+        let x = 10
+        print("A=" + x.to_string())
+        x
+    } else {
+        0
+    } + if true {
+        print("Computing B") 
+        let x = 20
+        print("B=" + x.to_string())
+        x
+    } else {
+        0
+    }
+    
+    print("Result: " + result.to_string())
+    print("Original: " + x.to_string())
+}
+
+// Test 8: Shadowing with struct literals
+struct Point { x: int, y: int }
+
+@test(output = "Point: 42,42\nVars: 10,20")
+fn test_shadow_in_struct_literal() {
+    let x = 10
+    let y = 20
+    
+    let p = Point {
+        x: if true { let x = 42; x } else { x },
+        y: if true { let y = 42; y } else { y }
+    }
+    
+    print("Point: " + p.x.to_string() + "," + p.y.to_string())
+    print("Vars: " + x.to_string() + "," + y.to_string())
+}
+
+// Test 9: Function parameter shadowing with defaults
+fn shadow_with_default(x: int = 10) -> int {
+    let x = x * 2  // Shadow parameter
+    return x
+}
+
+@test(output = "Default: 20\nProvided: 10")
+fn test_parameter_shadow_with_default() {
+    print("Default: " + shadow_with_default().to_string())
+    print("Provided: " + shadow_with_default(5).to_string())
+}
+
+// Test 10: Recursive shadowing pattern
+fn recursive_shadow(n: int) -> int {
+    if n <= 0 {
+        return 0
+    }
+    
+    let n = n - 1  // Shadow parameter
+    let result = recursive_shadow(n)
+    let n = result + 1  // Shadow again
+    return n
+}
+
+@test(output = "Result: 5")
+fn test_recursive_shadow() {
+    print("Result: " + recursive_shadow(5).to_string())
+}
+
+// Helper for test 11
+fn process_with_shadow(flag: bool) -> int {
+    let x = 100
+    
+    if flag {
+        let x = x * 2
+        return x  // Early return with shadowed value
+    }
+    
+    let x = 200  // This shadow only happens if no early return
+    return x
+}
+
+// Test 11: Shadowing with early returns
+@test(output = "Early return: 200\nNormal: 200")
+fn test_shadow_with_early_return() {
+    print("Early return: " + process_with_shadow(true).to_string())
+    print("Normal: " + process_with_shadow(false).to_string())
+}
+
+// Test 12: Maximum identifier reuse
+@test(output = "Final x: 6")
+fn test_maximum_identifier_reuse() {
+    let x: int = 1
+    let x = x + 1  // x = 2
+    let x = x + 1  // x = 3
+    let x = x + 1  // x = 4
+    let x = x + 1  // x = 5
+    let x = x + 1  // x = 6
+    print("Final x: " + x.to_string())
+}

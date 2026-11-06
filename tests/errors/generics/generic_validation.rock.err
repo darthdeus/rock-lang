@@ -1,0 +1,44 @@
+//! Error: Generic type validation tests
+//! Tags: generics, validation
+
+//=== TEST CASE: struct_missing_type_args_Generic ===
+struct GenericStruct<T> {
+    value: T
+}
+
+fn main() {
+    let x: GenericStruct = GenericStruct { value: 42 }
+    print(x.value)
+}
+
+//=== TEST CASE: enum_missing_type_args_Generic ===
+enum GenericEnum<T> {
+    Some(T),
+    None
+}
+
+fn main() {
+    let x: GenericEnum = GenericEnum::Some(42)
+    print("test")
+}
+
+//=== TEST CASE: entity_missing_type_args_Generic ===
+fn main() {
+    let e: Entity = entity_new(arena_new(), 0, 0)
+    print("test")
+}
+
+//=== TEST CASE: arena_missing_type_args_Generic ===
+fn main() {
+    let a: Arena = arena_new()
+    print("test")
+}
+
+//=== TEST CASE: function_param_missing_type_args_Generic ===
+fn buggy_entity_equals(a: Entity, b: Entity) -> bool {
+    return a._index == b._index && a._generation == b._generation
+}
+
+fn main() {
+    print("test")
+}

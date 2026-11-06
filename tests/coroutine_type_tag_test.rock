@@ -1,0 +1,25 @@
+// A coroutine handle carries `__ty = "Coroutine"` like every other Rock heap
+// value, so `__rock_get_type` / `inspect` can identify it. The driver fns
+// (resume/status/kill/result) dispatch directly with no runtime type guard --
+// the static `Coroutine<..>` param guarantees a real handle.
+
+co fn counter() -> Coroutine<int> {
+    yield 1
+    yield 2
+}
+
+@test(output = "Coroutine")
+fn coroutine_handle_is_ty_tagged() {
+    let c = counter()
+    print(__rock_get_type(c) ?? "untagged")
+}
+
+@test(output = "suspended\n1\n2\nnull")
+fn driver_fns_work_without_a_guard() {
+    let c = counter()
+    print(c.status())
+    print(c.resume() ?? -99)
+    print(c.resume() ?? -99)
+    let r = c.resume()
+    if r == null { print("null") } else { print(r.unwrap()) }
+}

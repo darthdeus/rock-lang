@@ -1,0 +1,107 @@
+// Nullable flat-enum threading (Part 0 of the yield-channel arc). A nullable flat
+// enum (`E?`) threads as its leaf scalars with `tag = nil` as the null sentinel --
+// a present variant always has a non-nil string tag, so there's no ambiguity.
+// Behavior must be IDENTICAL to the boxed representation; these assertions hold
+// BEFORE (boxed) and AFTER (threaded) enabling nullable threading.
+
+enum Sig {
+    Idle,
+    Num(int),
+    Pair(int, int),
+    Act(() -> ()),      // closure payload -> Sig is non-cdata (boxed/flat, not cdata)
+}
+
+// nullable RETURN (nil on the not-found path)
+fn find(n: int) -> Sig? {
+    if n < -100 { return null }
+    if n == 0 { return Sig::Idle }
+    if n < 0 { return Sig::Pair(n, -n) }
+    return Sig::Num(n)
+}
+
+// nullable PARAM + refinement + match
+fn describe(s: Sig?) -> int {
+    if s == null { return -1000 }
+    return match s {
+        Sig::Idle => 0
+        Sig::Num(x) => x
+        Sig::Pair(a, b) => a + b
+        Sig::Act(_) => -1
+    }
+}
+
+@test
+fn test_return_null() {
+    assert_eq(find(-999) == null, true)
+    assert_eq(find(-999) != null, false)
+}
+
+@test
+fn test_return_value() {
+    assert_eq(find(5) != null, true)
+    assert_eq(describe(find(5)), 5)
+    assert_eq(describe(find(0)), 0)
+    assert_eq(describe(find(-3)), 0)   // Pair(-3, 3) -> 0
+}
+
+@test
+fn test_param_null() {
+    assert_eq(describe(null), -1000)
+}
+
+@test
+fn test_param_value() {
+    assert_eq(describe(Sig::Num(7)), 7)
+    assert_eq(describe(Sig::Idle), 0)
+    assert_eq(describe(Sig::Pair(2, 3)), 5)
+    assert_eq(describe(Sig::Act(() => {})), -1)
+}
+
+@test
+fn test_nullable_local() {
+    let x: Sig? = Sig::Num(3)
+    assert_eq(x != null, true)
+    assert_eq(describe(x), 3)
+    let y: Sig? = null
+    assert_eq(y == null, true)
+    assert_eq(describe(y), -1000)
+}
+
+@test
+fn test_nullable_local_reassign() {
+    let x: Sig? = null
+    assert_eq(describe(x), -1000)
+    x = Sig::Num(11)
+    assert_eq(describe(x), 11)
+    x = null
+    assert_eq(describe(x), -1000)
+}
+
+@test
+fn test_coalesce() {
+    let x: Sig? = null
+    assert_eq(describe(x ?? Sig::Idle), 0)
+    let y: Sig? = Sig::Num(9)
+    assert_eq(describe(y ?? Sig::Idle), 9)
+}
+
+@test
+fn test_roundtrip_return_to_param() {
+    // return (nullable) -> param (nullable): threaded end to end.
+    assert_eq(describe(find(8)), 8)
+    assert_eq(describe(find(0)), 0)
+    assert_eq(describe(find(-999)), -1000)
+}
+
+// A THREADED nullable param materialized into a container must produce `nil` for
+// the null case (a `{__variant = nil}` box would fail `== null`).
+fn boxit(s: Sig?) -> [Sig?] { return [s] }
+
+@test
+fn test_threaded_null_materialized() {
+    let arr = boxit(null)
+    assert_eq(arr[0] == null, true)
+    let arr2 = boxit(Sig::Num(7))
+    assert_eq(arr2[0] != null, true)
+    assert_eq(describe(arr2[0]), 7)
+}

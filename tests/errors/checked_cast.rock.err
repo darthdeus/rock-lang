@@ -1,0 +1,102 @@
+//! Error: `as` is a checked explicit conversion against a closed relation.
+//!        A pair outside it is rejected rather than emitted as identity, and
+//!        the operand must infer on its own -- `as` is not contextual, so the
+//!        target may not supply the operand's missing types.
+//! Tags: cast, types, mono
+
+//=== TEST CASE: cast_string_to_int_MismatchedType ===
+fn main() {
+    let value = "42" as int
+    print(value)
+}
+
+//=== TEST CASE: cast_int_to_string_MismatchedType ===
+fn main() {
+    let value = 42 as string
+    print(value)
+}
+
+//=== TEST CASE: cast_bool_to_int_MismatchedType ===
+fn main() {
+    let value = true as int
+    print(value)
+}
+
+//=== TEST CASE: cast_struct_to_int_MismatchedType ===
+struct Point { x: int, y: int }
+
+fn main() {
+    let value = Point { x: 1, y: 2 } as int
+    print(value)
+}
+
+//=== TEST CASE: cast_any_to_nominal_MismatchedType ===
+struct Point { x: int, y: int }
+
+fn take(a: any) -> int {
+    let p = a as Point
+    p.x
+}
+
+fn main() {
+    print(take(Point { x: 1, y: 2 }))
+}
+
+// An empty array literal has no element type of its own. `[1, 2, 3] as [int]`
+// (tests/checked_ascription.rock) is the accepted control -- there the operand
+// types itself.
+//=== TEST CASE: cast_empty_array_unresolved_element_MismatchedType ===
+fn main() {
+    let value = [] as [int]
+    print(value.len())
+}
+
+// A bare `null` carries only a fresh variable. `(null :: int?)` is the ascription
+// that legitimately binds it.
+//=== TEST CASE: cast_bare_null_unresolved_MismatchedType ===
+fn main() {
+    let value = null as int?
+    print(value == null)
+}
+
+// The lambda infers as `fn(?a) -> ?a`; taking `int` from the cast target is the
+// contextual behaviour that belongs to `::`, not `as`.
+//=== TEST CASE: cast_deferred_lambda_param_MismatchedType ===
+fn main() {
+    let f = ((x) => x) as fn(int) -> int
+    print(f(7))
+}
+
+// Same rule where the operand also has a deferred field access waiting on the
+// parameter's type: `as` may not discharge it either.
+//=== TEST CASE: cast_deferred_lambda_field_MismatchedType ===
+struct Point { x: int, y: int }
+
+fn main() {
+    let f = ((p) => p.x) as fn(Point) -> int
+    print(f(Point { x: 3, y: 4 }))
+}
+
+// `_` is an inference hole in type position, so a hole target has nothing to
+// validate against: the classification passes, and the surrounding expectation
+// then binds the hole. That laundered `42 as string`, which rejects directly.
+//=== TEST CASE: cast_target_hole_MismatchedType ===
+fn main() {
+    let bad: string = 42 as _
+    print(bad)
+}
+
+// The hole does not have to be the whole target.
+//=== TEST CASE: cast_nested_target_hole_MismatchedType ===
+fn main() {
+    let bad: [string] = [1, 2, 3] as [_]
+    print(bad.len())
+}
+
+// A hole target is rejected on its own terms, not only when it launders a bad
+// pair -- `as` validates a written type, and `_` is not one.
+//=== TEST CASE: cast_target_hole_identity_MismatchedType ===
+fn main() {
+    let same: int = 42 as _
+    print(same)
+}

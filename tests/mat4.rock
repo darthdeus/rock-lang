@@ -1,0 +1,84 @@
+// Mat4 (stdlib/mat.rock): column-major 4x4, 4 Vec4 columns. Math + the
+// column-major memory contract the GL upload relies on.
+
+@test
+fn mat4_identity_transform() {
+    let m = mat4_identity()
+    let p = m.transform_point(v(3.0, 4.0, 5.0))
+    assert(p.x == 3.0 && p.y == 4.0 && p.z == 5.0)
+
+    let r = m * v(1.0, 2.0, 3.0, 4.0)
+    assert(r.x == 1.0 && r.y == 2.0 && r.z == 3.0 && r.w == 4.0)
+}
+
+@test
+fn mat4_translate_scale() {
+    let t = mat4_translate(v(10.0, 20.0, 30.0))
+    let p = t.transform_point(v(1.0, 2.0, 3.0))
+    assert(p.x == 11.0 && p.y == 22.0 && p.z == 33.0)
+
+    // translation ignored for a direction (w = 0)
+    let d = t.transform_vector(v(1.0, 2.0, 3.0))
+    assert(d.x == 1.0 && d.y == 2.0 && d.z == 3.0)
+
+    let s = mat4_scale(v(2.0, 3.0, 4.0))
+    let q = s.transform_point(v(1.0, 1.0, 1.0))
+    assert(q.x == 2.0 && q.y == 3.0 && q.z == 4.0)
+}
+
+@test
+fn mat4_rotate_z_quarter() {
+    let m = mat4_rotate_z(PI / 2.0)
+    let d = m.transform_vector(v(1.0, 0.0, 0.0))
+    // +X rotated 90 deg CCW about Z -> +Y (fp epsilon)
+    assert(abs(d.x) < 0.0001)
+    assert(abs(d.y - 1.0) < 0.0001)
+}
+
+@test
+fn mat4_compose_translate() {
+    let a = mat4_translate(v(1.0, 2.0, 3.0))
+    let b = mat4_translate(v(10.0, 20.0, 30.0))
+    let c = a * b
+    let p = c.transform_point(v(0.0, 0.0, 0.0))
+    assert(p.x == 11.0 && p.y == 22.0 && p.z == 33.0)
+}
+
+@test
+fn mat4_compose_translate_scale() {
+    // T * S applies S first, then T
+    let m = mat4_translate(v(5.0, 5.0, 5.0)) * mat4_scale(v(2.0, 2.0, 2.0))
+    let p = m.transform_point(v(1.0, 1.0, 1.0))
+    assert(p.x == 7.0 && p.y == 7.0 && p.z == 7.0)
+}
+
+@test
+fn mat4_ortho_corners() {
+    let m = mat4_ortho(0.0, 800.0, 600.0, 0.0, -1.0, 1.0)
+    let tl = m.transform_point(v(0.0, 0.0, 0.0))
+    assert(tl.x == -1.0 && tl.y == 1.0)
+    let br = m.transform_point(v(800.0, 600.0, 0.0))
+    assert(br.x == 1.0 && br.y == -1.0)
+}
+
+// The Mat4 cdata is contiguous column-major double[16]; the GL upload packs it
+// into float[16] (stone/engine/debug/watcher.rock shader_set_mat4).
+inline(lua) fn mat4_float_at(m: Mat4, i: int) -> float = """
+    local p = ffi.cast("double*", m)
+    return p[i]
+"""
+
+@test
+fn mat4_column_major_memory() {
+    let m = Mat4 {
+        c0: v(0.0, 1.0, 2.0, 3.0),
+        c1: v(4.0, 5.0, 6.0, 7.0),
+        c2: v(8.0, 9.0, 10.0, 11.0),
+        c3: v(12.0, 13.0, 14.0, 15.0),
+    }
+    assert(mat4_float_at(m, 0) == 0.0)
+    assert(mat4_float_at(m, 3) == 3.0)
+    assert(mat4_float_at(m, 5) == 5.0)
+    assert(mat4_float_at(m, 12) == 12.0)
+    assert(mat4_float_at(m, 15) == 15.0)
+}

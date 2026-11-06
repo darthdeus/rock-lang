@@ -1,0 +1,60 @@
+//! Error: a `cast`/`transmute` whose argument is nullable and whose result is
+//!        not launders a real null-on-failure into an apparently-valid value.
+//!        The `?` is the only thing that made the failure checkable; stripping
+//!        it hands the caller a null wearing a non-null type, and every later
+//!        null check is dead. Use `?? default` or an explicit null check.
+//!
+//!        The rejecting stage is the LINT pass (`bone-lints`, `Error`
+//!        severity), which fails a build the same way bone and skull-emit do.
+//!        Unlike `entity_across_yield` a `// rock: allow(transmute_of_nullable)`
+//!        IS legal here -- irreducible instances exist (`take_result` in
+//!        `stone/engine/systems/coroutines.rock` casts a generic `R?` to `R`,
+//!        where there is no `?? default` to reach for and null is a legal `R`).
+//!        Suppression is name-matched, which the wrong-name case below pins.
+//! Tags: lint, nullable, cast, error-severity
+
+//=== TEST CASE: cast_strips_nullability ===
+fn maybe_int() -> int? {
+    return 1
+}
+fn main() {
+    let x: int = cast(maybe_int())
+    print("{x}")
+}
+
+//=== TEST CASE: transmute_strips_nullability ===
+// `transmute` is the other stdlib nullability-eraser; same judgement.
+struct Mob { hp: int }
+
+fn maybe_mob() -> Mob? {
+    return Mob { hp: 1 }
+}
+fn main() {
+    let m: Mob = transmute(maybe_mob())
+    print("{m.hp}")
+}
+
+//=== TEST CASE: nested_cast_outer_strip_rejects ===
+// The inner cast targets `int?` and preserves nullability, so it is clean; the
+// outer one is the strip. Each call is judged on its own arg/result pair, so
+// wrapping the launder in a preserving cast does not hide it.
+fn maybe_int() -> int? {
+    return 1
+}
+fn main() {
+    let inner: int? = cast(maybe_int())
+    let outer: int = cast(inner)
+    print("{outer}")
+}
+
+//=== TEST CASE: allow_of_another_lint_does_not_suppress ===
+// Suppression matches the lint NAME. An `allow` for a different lint sitting on
+// the same line leaves this one live.
+fn maybe_int() -> int? {
+    return 1
+}
+fn main() {
+    // rock: allow(unused_var)
+    let x: int = cast(maybe_int())
+    print("{x}")
+}

@@ -1,0 +1,44 @@
+// Adversarial tests: @inline — argument evaluation order
+//
+// CRITICAL: inlining must NOT change the order in which arguments
+// evaluate. `f(a(), b())` must evaluate a() before b() even if the
+// body uses p1 before p0.
+
+global counter: int = 0
+
+fn tick(label: string) -> int {
+    counter = counter + 1
+    print("{label}={counter}")
+    return counter
+}
+
+@inline
+fn params_reversed_usage(a: int, b: int) -> int {
+    // Body uses b before a — must not change caller-side eval order
+    return b * 100 + a
+}
+
+@inline
+fn ignore_second(a: int, b: int) -> int {
+    // Does not use b — but b's side effects must still fire once
+    return a
+}
+
+@test(output = "A=1\nB=2\n201")
+fn test_arg_order_preserved_even_if_body_reverses() {
+    counter = 0
+    let r = params_reversed_usage(tick("A"), tick("B"))
+    // tick("A") prints A=1 (counter becomes 1, returns 1)
+    // tick("B") prints B=2 (counter becomes 2, returns 2)
+    // params_reversed_usage(1, 2) = 2*100 + 1 = 201
+    print(r)
+}
+
+@test(output = "A=1\nB=2\n1")
+fn test_unused_arg_still_evaluates_once() {
+    counter = 0
+    let r = ignore_second(tick("A"), tick("B"))
+    // Both prints must appear — B was evaluated even though body ignores it.
+    // r = 1.
+    print(r)
+}

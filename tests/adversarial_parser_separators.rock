@@ -1,0 +1,67 @@
+// Regression coverage for enum/struct separator strictness.
+//
+// History: the parser used to accept bare spaces as separators between enum
+// variants and struct fields, so `enum Foo { A B C D }` and
+// `struct Foo { x: int y: int }` parsed silently. That has been fixed —
+// commas or newlines are required, end-of-block (`}`) is allowed without a
+// trailing separator. Sentinel pinning that the buggy inputs are rejected
+// lives in rock/tests/enum_variant_separator_sentinel_test.rs.
+//
+// This file pins the *accepted* shapes from real code so we don't accidentally
+// re-tighten too far (e.g. breaking trailing-newline-only enums or
+// optional-comma match arms).
+
+// --- Enum: newline-separated variants ---
+
+enum NewlineEnum {
+    X
+    Y
+    Z
+}
+
+@test(output = "X")
+fn test_newline_separated_enum_compiles() {
+    let v = NewlineEnum::X
+    let s = match v {
+        NewlineEnum::X => "X",
+        NewlineEnum::Y => "Y",
+        NewlineEnum::Z => "Z",
+    }
+    print(s)
+}
+
+// --- Match arms: trailing comma optional after the final arm ---
+
+enum Color { Red, Green, Blue }
+
+@test(output = "red")
+fn test_match_arms_without_commas() {
+    let c = Color::Red
+    let name = match c {
+        Color::Red => "red"
+        Color::Green => "green"
+        Color::Blue => "blue"
+    }
+    print(name)
+}
+
+// --- Fn params: commas required (control case) ---
+
+fn add(x: int, y: int) -> int { x + y }
+
+@test(output = "3")
+fn test_fn_params_require_commas() {
+    print(add(1, 2))
+}
+
+// --- Tuple types: commas required (control case) ---
+
+fn swap(pair: (int, string)) -> (string, int) {
+    (pair.1, pair.0)
+}
+
+@test(output = "hello 42")
+fn test_tuple_type_commas_required() {
+    let result = swap((42, "hello"))
+    print("{result.0} {result.1}")
+}

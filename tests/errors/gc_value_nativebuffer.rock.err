@@ -1,0 +1,17 @@
+//! Error: `native_buffer_alloc<T>` must reject a GC-carrying `value` struct.
+//!        Its flat array needs a C layout (`ffi.new("T[?]")`), which this
+//!        representation does not have. FFI-clean value structs remain valid
+//!        NativeBuffer elements.
+//! Tags: value-struct, gc-carrying, native-buffer, c-boundary, emit-time
+
+//=== TEST CASE: gc_value_nativebuffer_alloc ===
+value Bag { xs: [int], n: int }
+
+fn nb_bag(n: int) -> NativeBuffer<Bag> {
+    return native_buffer_alloc(n)
+}
+
+fn main() {
+    let b = nb_bag(4)
+    print("{b.len}")
+}

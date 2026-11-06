@@ -1,0 +1,28 @@
+// Original form from a9fdc5d09d.
+
+nobox value Place { x: int, y: int }
+
+fn maybe_place(present: bool) -> Place? {
+    if present { return Place { x: 3, y: 9 } }
+    return null
+}
+
+@test(output = "3 9")
+fn coalesce_iflet_rhs_keeps_present_value() {
+    let place = maybe_place(false) ?? if let value = maybe_place(true) { value } else { null }
+    if place != null {
+        print("{place.x} {place.y}")
+    } else {
+        print("null")
+    }
+}
+
+@test(output = "5 8")
+fn coalesce_if_rhs_keeps_present_value() {
+    let place = maybe_place(false) ?? if true { Place { x: 5, y: 8 } } else { null }
+    if place != null {
+        print("{place.x} {place.y}")
+    } else {
+        print("null")
+    }
+}

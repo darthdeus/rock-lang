@@ -1,0 +1,31 @@
+@test
+fn reader_validation_finishes_the_root_before_end_of_input() {
+    for raw in ["0", "-1", "1.25", "true", "false", "null", "\"plain\"", "[]", "{{}}",
+        "[0,{{\"a\":[[],{{}}]}}]", "{{\"a\":[],\"b\":{{}},\"a\":1}}", "  [1] \n"] {
+        let reader = json_reader_decode(raw)
+        assert(reader != null, raw)
+        assert_eq(json_encode(json_reader_materialize(reader.unwrap())), json_encode(json_decode(raw).unwrap()))
+    }
+}
+
+@test
+fn reader_validation_keeps_container_grammar_and_depth() {
+    for raw in ["[1,]", "{{\"a\":1,}}", "[[],,[]]", "{{\"a\" 1}}", "[1}}", "{{]",
+        "[", "{{", "[1", "{{\"a\":", "{{\"a\":1", "[[]", "0 0", "[] []", "01", "1e"] {
+        assert(json_reader_decode(raw) == null, raw)
+    }
+    let legal = "[".repeat(json_max_depth()) + "0" + "]".repeat(json_max_depth())
+    assert(json_reader_decode(legal) != null)
+    assert(json_reader_decode("[" + legal + "]") == null)
+}
+
+@test
+fn reader_string_segments_preserve_prefix_escapes_and_tail() {
+    for (raw, expected) in [("\"prefix\\nmid\\tend\"", "prefix\nmid\tend"),
+        ("\"\\u0041tail\"", "Atail"), ("\"head\\uD83D\\uDE00tail\"", "head" + from_codepoint(0x1F600) + "tail"),
+        ("\"\\n\\t\"", "\n\t"), ("\"plain\"", "plain"), ("\"x\\\\y\\\"z\"", "x\\y\"z")] {
+        let reader = json_reader_decode(raw).unwrap()
+        assert_eq(json_reader_as_str(reader).unwrap(), expected)
+        assert_eq(json_as_str(json_decode(raw).unwrap()).unwrap(), expected)
+    }
+}

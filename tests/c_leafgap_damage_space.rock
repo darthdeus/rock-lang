@@ -1,0 +1,36 @@
+nobox value DamageSpace { value: int }
+nobox value DamagePlace { space: DamageSpace }
+struct DamageSimulation { place: DamagePlace }
+struct DamageMovable { simulation: DamageSimulation }
+struct DamageMob { movable: DamageMovable, diorama: bool }
+enum DamageSubject { None, Mob(Entity<DamageMob>), DioramaMob(Entity<DamageMob>) }
+
+fn damage_subject(entity: Entity<DamageMob>, mob: DamageMob) -> DamageSubject {
+    return if mob.diorama { DamageSubject::DioramaMob(entity) } else { DamageSubject::Mob(entity) }
+}
+
+// A native enum return must replace the leaves initialized by a variant.
+@test fn c_damage_feedback_assignment_projects_subject_and_space() {
+    let rows: Arena<DamageMob> = arena_new()
+    let mob = rows.insert(DamageMob {
+        diorama: true,
+        movable: DamageMovable {
+            simulation: DamageSimulation { place: DamagePlace { space: DamageSpace { value: 17 } } },
+        },
+    })
+    let target_space: DamageSpace? = null
+    let subject = DamageSubject::Mob(mob)
+    if let target = mob.get() {
+        subject = damage_subject(mob, target)
+        target_space = target.movable.simulation.place.space
+    }
+    match subject {
+        DamageSubject::DioramaMob(entity) => assert(entity == mob),
+        _ => assert(false),
+    }
+    if let space = target_space {
+        assert_eq(space.value, 17)
+    } else { assert(false) }
+    let _ = arena_destroy(rows)
+    let _ = __arena_drain_retired()
+}

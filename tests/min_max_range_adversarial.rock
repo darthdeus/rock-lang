@@ -1,0 +1,162 @@
+// Adversarial coverage for the __rock_range positive-step rewrite
+// (commit 1f36ff07: while -> numeric `for i = min, max - 1, step`).
+//
+// Goal: probe edge cases where the two forms could diverge. Lua's
+// numeric `for i = a, b, s` iterates while `i <= b`; with `b = max - 1`
+// that's `i < max`, matching the old `while i < max` exactly. These
+// tests pin that equivalence.
+
+fn check_range(r: [int], expected: [int], label: string) {
+    assert_eq(r.len, expected.len, label)
+    for i in 0..expected.len {
+        assert_eq(r[i], expected[i], label)
+    }
+}
+
+@test
+fn test_mmr_positive_basic() {
+    check_range(__rock_range(0, 5, 1), [0, 1, 2, 3, 4], "0..5 step 1")
+    check_range(__rock_range(0, 1, 1), [0], "0..1 step 1")
+    check_range(__rock_range(0, 10, 2), [0, 2, 4, 6, 8], "0..10 step 2")
+    check_range(__rock_range(0, 10, 3), [0, 3, 6, 9], "0..10 step 3")
+    check_range(__rock_range(0, 10, 4), [0, 4, 8], "0..10 step 4")
+    check_range(__rock_range(0, 11, 4), [0, 4, 8], "0..11 step 4")
+}
+
+@test
+fn test_mmr_empty_when_min_eq_max() {
+    let r1 = __rock_range(0, 0, 1)
+    assert_eq(r1.len, 0, "0..0 step 1")
+    let r2 = __rock_range(5, 5, 1)
+    assert_eq(r2.len, 0, "5..5 step 1")
+    let r3 = __rock_range(-3, -3, 2)
+    assert_eq(r3.len, 0, "-3..-3 step 2")
+}
+
+@test
+fn test_mmr_min_gt_max_positive_step() {
+    // Old while: 5 < 0 false -> []. New for: i=5,-1,1 -> 5<=-1 false -> [].
+    let r = __rock_range(5, 0, 1)
+    assert_eq(r.len, 0, "5..0 step 1 (min>max)")
+    let r2 = __rock_range(10, 5, 2)
+    assert_eq(r2.len, 0, "10..5 step 2 (min>max)")
+}
+
+@test
+fn test_mmr_step_jumps_past_max() {
+    // step bigger than range -> single iteration with min.
+    check_range(__rock_range(0, 10, 100), [0], "0..10 step 100")
+    check_range(__rock_range(3, 7, 50), [3], "3..7 step 50")
+    check_range(__rock_range(-5, 5, 1000), [-5], "-5..5 step 1000")
+}
+
+@test
+fn test_mmr_step_exactly_hits_max() {
+    // The classic exclusive-upper-bound trap. With max-1 limit
+    // these must still NOT include `max`.
+    check_range(__rock_range(0, 10, 10), [0], "0..10 step 10 (next=10 excluded)")
+    check_range(__rock_range(0, 10, 5), [0, 5], "0..10 step 5 (next=10 excluded)")
+    check_range(__rock_range(0, 11, 5), [0, 5, 10], "0..11 step 5 (10<11 included)")
+    check_range(__rock_range(2, 12, 5), [2, 7], "2..12 step 5 (next=12 excluded)")
+    check_range(__rock_range(2, 13, 5), [2, 7, 12], "2..13 step 5 (12<13 included)")
+}
+
+@test
+fn test_mmr_negative_min_positive_step() {
+    let r = __rock_range(-5, 5, 1)
+    assert_eq(r.len, 10, "-5..5 step 1 len")
+    assert_eq(r[0], -5, "first")
+    assert_eq(r[9], 4, "last")
+
+    check_range(__rock_range(-10, -5, 2), [-10, -8, -6], "-10..-5 step 2")
+    check_range(__rock_range(-3, 3, 2), [-3, -1, 1], "-3..3 step 2")
+}
+
+@test
+fn test_mmr_large_range() {
+    let r = __rock_range(0, 1000000, 100000)
+    assert_eq(r.len, 10, "0..1M step 100k len")
+    assert_eq(r[0], 0, "first")
+    assert_eq(r[9], 900000, "last")
+
+    let r2 = __rock_range(0, 100, 1)
+    assert_eq(r2.len, 100, "0..100 step 1 len")
+    assert_eq(r2[0], 0, "first")
+    assert_eq(r2[99], 99, "last")
+}
+
+@test
+fn test_mmr_default_step() {
+    check_range(__rock_range(0, 3), [0, 1, 2], "default step 0..3")
+    check_range(__rock_range(0, 1), [0], "default step 0..1")
+    let r = __rock_range(0, 0)
+    assert_eq(r.len, 0, "default step 0..0")
+}
+
+@test
+fn test_mmr_step_zero_returns_empty() {
+    // Explicit early-return branch for step==0.
+    let r = __rock_range(0, 5, 0)
+    assert_eq(r.len, 0, "step 0")
+    let r2 = __rock_range(-10, 10, 0)
+    assert_eq(r2.len, 0, "step 0 with wide range")
+    let r3 = __rock_range(0, 0, 0)
+    assert_eq(r3.len, 0, "step 0 with empty range")
+}
+
+@test
+fn test_mmr_negative_step_untouched() {
+    // Negative branch still uses while; verify untouched.
+    check_range(__rock_range(5, 0, -1), [5, 4, 3, 2, 1], "5..0 step -1")
+    check_range(__rock_range(10, 0, -3), [10, 7, 4, 1], "10..0 step -3")
+    check_range(__rock_range(10, 0, -2), [10, 8, 6, 4, 2], "10..0 step -2")
+
+    let r = __rock_range(0, 0, -1)
+    assert_eq(r.len, 0, "0..0 step -1")
+    let r2 = __rock_range(5, 5, -1)
+    assert_eq(r2.len, 0, "5..5 step -1")
+
+    // step exactly hits max for negative direction
+    check_range(__rock_range(10, 0, -5), [10, 5], "10..0 step -5 (next=0 excluded)")
+    check_range(__rock_range(10, 0, -10), [10], "10..0 step -10 (next=0 excluded)")
+}
+
+@test
+fn test_mmr_negative_step_min_lt_max() {
+    // wrong direction: min < max with negative step -> []
+    let r = __rock_range(0, 5, -1)
+    assert_eq(r.len, 0, "0..5 step -1 (wrong dir)")
+}
+
+@test
+fn test_mmr_negative_range_negative_step() {
+    check_range(__rock_range(-5, -10, -1), [-5, -6, -7, -8, -9], "-5..-10 step -1")
+    check_range(__rock_range(-1, -10, -3), [-1, -4, -7], "-1..-10 step -3")
+}
+
+@test
+fn test_mmr_off_by_one_exclusive_bound() {
+    // Sentinel: max is NEVER included. This is the property the
+    // rewrite must preserve.
+    let r = __rock_range(0, 5, 1)
+    for i in 0..r.len {
+        assert_true(r[i] < 5, "value < max")
+    }
+    let r2 = __rock_range(0, 100, 7)
+    for i in 0..r2.len {
+        assert_true(r2[i] < 100, "value < max")
+    }
+}
+
+@test
+fn test_mmr_consistency_step_one_count() {
+    // For step=1 across many ranges, count must equal max - min (or 0 when min >= max).
+    for n in 0..20 {
+        let r = __rock_range(0, n, 1)
+        assert_eq(r.len, n, "0..n step 1 len == n")
+    }
+    for n in 0..10 {
+        let r = __rock_range(-n, n, 1)
+        assert_eq(r.len, 2 * n, "-n..n step 1 len == 2n")
+    }
+}

@@ -1,0 +1,95 @@
+// Rebuildable values beside handle-owned rows, outside saved/replay state.
+
+struct WeakCacheOwner { tag: int }
+struct WeakCacheValue { tag: int }
+
+const WC_BASIC: string = "test.weak_cache.basic"
+const WC_OWNERS: string = "test.weak_cache.owners"
+const WC_LEFT: string = "test.weak_cache.left"
+const WC_RIGHT: string = "test.weak_cache.right"
+const WC_GC: string = "test.weak_cache.gc"
+
+@test
+fn weak_cache_misses_hits_counts_and_invalidates() {
+    let rows: Arena<WeakCacheOwner> = arena_new()
+    let owner = rows.insert(WeakCacheOwner { tag: 1 })
+    let cold: WeakCacheValue? = weak_cache_get(WC_BASIC, owner)
+    assert(cold == null, "a cache with no entry for this owner misses")
+
+    let builds = weak_cache_builds(WC_BASIC)
+    weak_cache_put(WC_BASIC, owner, WeakCacheValue { tag: 10 })
+    assert_eq(weak_cache_builds(WC_BASIC), builds + 1, "a store counts one build")
+
+    let warm: WeakCacheValue? = weak_cache_get(WC_BASIC, owner)
+    assert(warm != null, "a stored owner hits")
+    assert_eq(warm.unwrap().tag, 10, "the hit is the value that was stored")
+
+    for _ in 0..16 {
+        let repeat: WeakCacheValue? = weak_cache_get(WC_BASIC, owner)
+        assert(repeat != null, "the entry stays warm across reads")
+    }
+    assert_eq(weak_cache_builds(WC_BASIC), builds + 1, "reads do not build")
+
+    weak_cache_drop(WC_BASIC, owner)
+    let dropped: WeakCacheValue? = weak_cache_get(WC_BASIC, owner)
+    assert(dropped == null, "invalidation removes the entry")
+    assert_eq(weak_cache_builds(WC_BASIC), builds + 1, "invalidation does not build")
+}
+
+@test
+fn weak_cache_keeps_two_live_owners_independent() {
+    let rows: Arena<WeakCacheOwner> = arena_new()
+    let a = rows.insert(WeakCacheOwner { tag: 1 })
+    let b = rows.insert(WeakCacheOwner { tag: 2 })
+    weak_cache_put(WC_OWNERS, a, WeakCacheValue { tag: 100 })
+    weak_cache_put(WC_OWNERS, b, WeakCacheValue { tag: 200 })
+
+    let got_a: WeakCacheValue? = weak_cache_get(WC_OWNERS, a)
+    let got_b: WeakCacheValue? = weak_cache_get(WC_OWNERS, b)
+    assert_eq(got_a.unwrap().tag, 100, "the first owner keeps its own value")
+    assert_eq(got_b.unwrap().tag, 200, "the second owner keeps its own value")
+
+    weak_cache_drop(WC_OWNERS, a)
+    let after_a: WeakCacheValue? = weak_cache_get(WC_OWNERS, a)
+    let after_b: WeakCacheValue? = weak_cache_get(WC_OWNERS, b)
+    assert(after_a == null, "invalidating one owner clears that owner")
+    assert_eq(after_b.unwrap().tag, 200, "invalidating one owner leaves the other alone")
+    assert_eq(weak_cache_live(WC_OWNERS), 1, "one entry remains")
+}
+
+@test
+fn weak_cache_keeps_two_caches_over_one_owner_independent() {
+    let rows: Arena<WeakCacheOwner> = arena_new()
+    let owner = rows.insert(WeakCacheOwner { tag: 1 })
+    weak_cache_put(WC_LEFT, owner, WeakCacheValue { tag: 11 })
+    weak_cache_put(WC_RIGHT, owner, WeakCacheValue { tag: 22 })
+
+    let left: WeakCacheValue? = weak_cache_get(WC_LEFT, owner)
+    let right: WeakCacheValue? = weak_cache_get(WC_RIGHT, owner)
+    assert_eq(left.unwrap().tag, 11, "each named cache answers with its own value")
+    assert_eq(right.unwrap().tag, 22, "each named cache answers with its own value")
+    assert_eq(weak_cache_builds(WC_LEFT), 1, "each named cache counts its own builds")
+    assert_eq(weak_cache_builds(WC_RIGHT), 1, "each named cache counts its own builds")
+
+    weak_cache_drop(WC_LEFT, owner)
+    let cleared: WeakCacheValue? = weak_cache_get(WC_LEFT, owner)
+    let kept: WeakCacheValue? = weak_cache_get(WC_RIGHT, owner)
+    assert(cleared == null, "invalidating one cache clears that cache")
+    assert_eq(kept.unwrap().tag, 22, "invalidating one cache leaves the other alone")
+}
+
+@test
+fn weak_cache_releases_a_retired_owner() {
+    let rows: Arena<WeakCacheOwner> = arena_new()
+    let kept = rows.insert(WeakCacheOwner { tag: 1 })
+    let retired = rows.insert(WeakCacheOwner { tag: 99 })
+    weak_cache_put(WC_GC, kept, WeakCacheValue { tag: 1 })
+    weak_cache_put(WC_GC, retired, WeakCacheValue { tag: 99 })
+    assert_eq(weak_cache_live(WC_GC), 2, "both owners hold an entry")
+    let _ = retired.remove()
+    assert_eq(weak_cache_live(WC_GC), 1, "retirement evicts the entry without GC")
+    let survivor: WeakCacheValue? = weak_cache_get(WC_GC, kept)
+    assert_eq(survivor.unwrap().tag, 1, "the live owner keeps its entry")
+    assert_eq(weak_cache_builds(WC_GC), 2, "retirement preserves the build count")
+    let _ = arena_destroy(rows)
+}

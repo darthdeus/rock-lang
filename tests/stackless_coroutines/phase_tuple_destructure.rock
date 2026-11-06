@@ -1,0 +1,58 @@
+// Tuple-destructuring let inside co fn bodies.
+//
+// Pre-fix this errored at compile time with:
+//   "stackless coroutine: only simple ident let-bindings are supported..."
+// The lowering now recognizes Tuple bindings and generates per-component
+// state-field assignments via a hidden temp.
+
+fn pair() -> (int, int) {
+    return (10, 20)
+}
+
+co fn tuple_basic() -> Coroutine<int> {
+    let (a, b) = pair()
+    yield a
+    yield b
+    yield a + b
+}
+
+@test(output = "10\n20\n30")
+fn test_tuple_basic() {
+    let c = tuple_basic()
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+}
+
+// Each component must persist across yields independently.
+co fn tuple_persists() -> Coroutine<int> {
+    let (x, y) = pair()
+    yield x
+    x = x + 1
+    yield y
+    yield x
+}
+
+@test(output = "10\n20\n11")
+fn test_tuple_persists_across_yields() {
+    let c = tuple_persists()
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+}
+
+// Tuple literal RHS (no call).
+co fn tuple_literal() -> Coroutine<int> {
+    let (a, b, c) = (1, 2, 3)
+    yield a
+    yield b
+    yield c
+}
+
+@test(output = "1\n2\n3")
+fn test_tuple_literal_destructure() {
+    let h = tuple_literal()
+    print(h.resume() ?? -1)
+    print(h.resume() ?? -1)
+    print(h.resume() ?? -1)
+}

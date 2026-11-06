@@ -1,0 +1,76 @@
+// A `nobox` value crossing an INDIRECT (fn-value) call, both directions. The
+// ABI is read off the fn TYPE at both ends -- a call through a fn value cannot
+// see its callee, so definition and call site agree only by reading the same
+// signature.
+//
+// Was `tests/errors/nobox_indirect_call_arg.rock.err`, a sentinel pinning the
+// gap; it named this file's shape as what to write when the gap closed.
+
+nobox value NV { x: float, y: float }
+
+fn apply(f: (NV) -> float, v: NV) -> float {
+    return f(v)
+}
+
+// A NESTED fn taken by value keeps the leaf ABI rather than dropping to boxed.
+fn via_nested(p: NV) -> float {
+    fn sum(v: NV) -> float { return v.x + v.y }
+    return apply(sum, p)
+}
+
+// The return half: a lambda handing a nobox value back through the multi-return
+// wire.
+fn arc(r: float) -> (float) -> NV {
+    t => NV { x: t * r, y: t + r }
+}
+
+@test fn a_nobox_value_crosses_a_fn_value_call() {
+    assert_eq(apply((a) => a.x, NV { x: 3.0, y: 0.0 }), 3.0)
+    assert_eq(via_nested(NV { x: 1.0, y: 2.0 }), 3.0)
+
+    let stroke = arc(2.0)
+    let p = stroke(3.0)
+    assert_eq(p.x, 6.0)
+    assert_eq(p.y, 5.0)
+}
+
+// A LAMBDA whose RETURN is a nobox value, filling a fn-value param. The
+// discriminant is the lambda: the same `fn(NV) -> NV` param filled by a
+// TOP-LEVEL fn already worked, because only a lambda's own expression type was
+// never recorded, so its return ABI silently fell back to boxed while the
+// indirect call site read the leaf ABI off the fn type.
+fn swap(v: NV) -> NV { return NV { x: v.y, y: v.x } }
+fn remap(f: (NV) -> NV, v: NV) -> NV { return f(v) }
+
+@test fn a_lambda_returning_a_nobox_value_keeps_the_leaf_abi() {
+    let ctrl = remap(swap, NV { x: 1.0, y: 3.0 })
+    assert_eq(ctrl.x, 3.0)
+    assert_eq(ctrl.y, 1.0)
+
+    let lam = remap(v => NV { x: v.y, y: v.x }, NV { x: 1.0, y: 3.0 })
+    assert_eq(lam.x, 3.0)
+    assert_eq(lam.y, 1.0)
+}
+
+// A lambda in RETURN position records the type of the HOLE it fills, not its
+// own narrower inferred type -- otherwise the hoisted body and the indirect
+// call site derive different fn-value ABIs from it (the body omits the presence
+// slot the site binds). All three return positions check: the fn-body TAIL, a
+// `Statement::Return` and an `Expr::Return`. Emitted-shape coverage and the
+// full control set: `rock-lang/crates/skull/tests/nobox_fn_value_nullable_return_sentinel.rs`.
+nobox value RL { x: int, y: int }
+
+fn rl_tail() -> (bool) -> RL? { present => if present { RL { x: 5, y: 6 } } else { null } }
+fn rl_return() -> (bool) -> RL? { return present => if present { RL { x: 5, y: 6 } } else { null } }
+
+@test
+fn a_returned_lambda_agrees_with_its_call_site_on_the_presence_slot() {
+    let f = rl_tail()
+    assert_eq(f(true)?.x ?? -1, 5)
+    assert_eq(f(true)?.y ?? -1, 6)
+    assert_eq(f(false)?.x ?? -1, -1)
+
+    let g = rl_return()
+    assert_eq(g(true)?.x ?? -1, 5)
+    assert_eq(g(false)?.x ?? -1, -1)
+}

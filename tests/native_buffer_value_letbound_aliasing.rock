@@ -1,0 +1,45 @@
+// Adversarial: a let-bound cdata local of value-struct type used as a
+// FIELD inside a struct literal RHS. The local's fields are read in
+// pass 1; mutating the local *between* writes should affect later
+// writes that read the local AFTER the mutation, but should not
+// retroactively rewrite already-evaluated temps.
+
+@intrinsic @inline inline(lua) fn put(s: string) = "io.write(s)"
+
+value V2 {
+    x: float,
+    y: float,
+}
+
+value Pair {
+    first: V2,
+    second: V2,
+}
+
+@nomangle inline(lua) fn __nb_alloc_Pair(n: int) -> Ptr<Pair> = 'return ffi.new("Pair[?]", n)'
+
+fn nb_pair(n: int) -> NativeBuffer<Pair> {
+    return NativeBuffer { ptr: __nb_alloc_Pair(n), len: n }
+}
+
+@test(output = "f.x=1\nf.y=2\ns.x=10\ns.y=20")
+fn test_local_observed_at_eval_time() {
+    let buf = nb_pair(1)
+    let v = V2 { x: 1.0, y: 2.0 }
+    // both `first: v` and `second: v` reference the same local. They
+    // both read the local at eval time. Both should see the same v.
+    buf[0] = Pair { first: v, second: V2 { x: 10.0, y: 20.0 } }
+    let p = buf[0]
+    put("f.x=")
+    put("{p.first.x}")
+    put("\n")
+    put("f.y=")
+    put("{p.first.y}")
+    put("\n")
+    put("s.x=")
+    put("{p.second.x}")
+    put("\n")
+    put("s.y=")
+    put("{p.second.y}")
+    put("\n")
+}

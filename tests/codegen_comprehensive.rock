@@ -1,0 +1,397 @@
+// Comprehensive codegen tests - migrated from rock/tests/codegen_tests.rs
+// Tests code generation features including string interpolation, operators, methods, etc.
+
+// ============================================
+// Helper structures and functions
+// ============================================
+
+struct FixVec2 {
+    x: float,
+    y: float,
+}
+
+fn length(v: FixVec2) -> float {
+    return (v.x * v.x + v.y * v.y).sqrt()
+}
+
+fn double_string(x: string, suffix: string) -> string {
+    return "{x}{x}{suffix}"
+}
+
+fn string_double(x: string, suffix: string) -> string {
+    return "{x}{x}{suffix}"
+}
+
+fn string_rev_concat(a: string, b: string) -> string {
+    return "{b}{a}"
+}
+
+fn string_concat(a: string, b: string) -> string {
+    return "{a}{b}"
+}
+
+struct Point { x: int, y: int }
+
+struct Rectangle { width: int, height: int }
+
+fn area(r: Rectangle) -> int {
+    return r.width * r.height
+}
+
+struct Foo { value: int }
+
+struct Inner { value: int }
+struct Outer { inner: Inner? }
+
+enum Color { Red, Green, Blue }
+
+enum Option<T> { Some(T), None }
+
+// ============================================
+// Basic codegen tests
+// ============================================
+
+@test(output = "4")
+fn simple_codegen_arithmetic() {
+    print(1 + 3)
+}
+
+@test(output = "5\n7")
+fn simple_codegen_increment() {
+    let x = 5
+    print(x++)
+    print(++x)
+}
+
+// ============================================
+// String interpolation tests
+// ============================================
+
+@test(output = "3")
+fn string_interpolation_basic() {
+    print("{1 + 2}")
+}
+
+@test(output = "a1b2c7")
+fn string_interpolation_multiple() {
+    print("a{1}b{2}c{3+4}")
+}
+
+@test(output = "x=42\nx = 42")
+fn string_interpolation_variable() {
+    let x = 42
+    print("x={x}")
+    print("x = {x}")
+}
+
+@test(output = "calc=9")
+fn string_interpolation_arithmetic() {
+    print("calc={(1+2)*3}")
+}
+
+@test(output = "truth: true, lie: false")
+fn string_interpolation_booleans() {
+    print("truth: {true}, lie: {false}")
+}
+
+@test(output = "nothing: nil")
+fn string_interpolation_null() {
+    print("nothing: {null}")
+}
+
+@test(output = "say hi!")
+fn string_interpolation_nested_string() {
+    print("say {\"hi\"}!")
+}
+
+@test(output = "hello 1 5 world")
+fn string_interpolation_complex() {
+    print("hello {1} {2 + 3} world")
+}
+
+// ============================================
+// Operator tests
+// ============================================
+
+// ============================================
+// Method tests
+// ============================================
+
+@test(output = "hihiho\nhihiho")
+fn simple_method_codegen() {
+    print("hi".double_string("ho"))
+    print("hi".string_double("ho"))
+}
+
+@test(output = "5")
+fn more_method_codegen() {
+    let v = FixVec2 { x: 3, y: 4 }
+    print(v.length())
+}
+
+@test(output = "hohi\nhiho")
+fn complex_strip_type_method_codegen() {
+    print("hi".string_rev_concat("ho"))
+    print("hi".string_concat("ho"))
+}
+
+// ============================================
+// Let and var tests
+// ============================================
+
+@test(output = "5\n42")
+fn let_assignment() {
+    let values = [5, 42]
+    for value in values {
+        let inferred = value
+        print(inferred)
+    }
+}
+
+@test(output = "37")
+fn let_reassignment() {
+    let x = 5
+    x = 37
+    print(x)
+}
+
+// ============================================
+// Loop tests
+// ============================================
+
+@test(output = "0\n1\n2\n3\n4")
+fn loop_with_index() {
+    let i = 0
+    while i < 5 {
+        print(i)
+        i += 1
+    }
+}
+
+@test(output = "0 \n1 \n2 \n3 \n4")
+fn for_range_space() {
+    for i in 0..5 {
+        print("{i} ")
+    }
+}
+
+@test(output = "0\n \n1\n \n2\n \n3\n \n4")
+fn for_range_no_trailing_space() {
+    for i in 0..5 {
+        if i > 0 { print(" ") }
+        print(i)
+    }
+}
+
+// ============================================
+// Tuple tests
+// ============================================
+
+@test(output = "4\n2")
+fn tuple_access() {
+    let t = (4, 2)
+    print(t.0)
+    print(t.1)
+}
+
+@test(output = "15")
+fn tuple_sum() {
+    let t = (5, 10)
+    print(t.0 + t.1)
+}
+
+// ============================================
+// Enum tests
+// ============================================
+
+@test
+fn enum_basic() {
+    let c1 = Color::Red
+    let c2 = Color::Green
+    let c3 = Color::Blue
+
+    assert_eq(c1 == Color::Red, true)
+    assert_eq(c2 == Color::Green, true)
+    assert_eq(c3 == Color::Blue, true)
+    assert_eq(c1 == c2, false)
+}
+
+@test(output = "42")
+fn enum_with_data() {
+    let a = Option::Some(42)
+    let _b: Option<int> = Option::None
+    
+    // Test pattern matching instead
+    match a {
+        Option::Some(val) => print(val),
+        Option::None => print(0)
+    }
+}
+
+// ============================================
+// Struct tests
+// ============================================
+
+@test(output = "15")
+fn struct_field_sum() {
+    let p = Point { x: 5, y: 10 }
+    print(p.x + p.y)
+}
+
+@test(output = "15")
+fn struct_method() {
+    let rect = Rectangle { width: 3, height: 5 }
+    print(rect.area())
+}
+
+// ============================================
+// Closure tests
+// ============================================
+
+@test(output = "8")
+fn closure_capture() {
+    let x = 3
+    let add = y => x + y
+    print(add(5))
+}
+
+@test(output = "15")
+fn closure_multiple_captures() {
+    let a = 5
+    let b = 10
+    let sum = () => a + b
+    print(sum())
+}
+
+// ============================================
+// Safe navigation tests
+// ============================================
+
+@test(output = "5\nnil")
+fn safe_navigation_basic() {
+    let f_val = Foo { value: 5 }
+    let f: Foo? = f_val
+    print(f?.value)
+    
+    let g: Foo? = null
+    print(g?.value)
+}
+
+@test(output = "10\nnil")
+fn safe_navigation_chain() {
+    let o1 = Outer { inner: Inner { value: 10 } }
+    print(o1.inner?.value)
+    
+    let o2 = Outer { inner: null }
+    print(o2.inner?.value)
+}
+
+// ============================================
+// Type casting tests
+// ============================================
+
+@test(output = "42\n42")
+fn type_casting() {
+    let x = 42
+    let y = 42.0
+    
+    print(x)
+    print(float_to_int(y))
+}
+
+@test
+fn float_int_casting() {
+    let f: float = 3.14
+    let i: int = f as int
+    let round_trip: float = i as float
+
+    assert_eq(i, 3)
+    assert_eq(round_trip, 3.0)
+}
+
+// ============================================
+// Array/Vec tests
+// ============================================
+
+@test(output = "2")
+fn array_access() {
+    let arr = [1, 2, 3]
+    print(arr[1])
+}
+
+@test(output = "1 \n2 \n3")
+fn array_iteration() {
+    let arr = [1, 2, 3]
+    for x in arr {
+        print("{x} ")
+    }
+}
+
+// ============================================
+// Map tests
+// ============================================
+
+@test(output = "100")
+fn map_basic() {
+    let m: Map<string, int> = map_new()
+    insert(m, "hp", 100)
+    print(get(m, "hp"))
+}
+
+@test(output = "nil")
+fn map_missing_key() {
+    let m: Map<string, int> = map_new()
+    print(get(m, "missing"))
+}
+
+// ============================================
+// Error handling tests
+// ============================================
+
+@test(output = "Value: 42")
+fn nullable_unwrap() {
+    let x: int? = 42
+    print("Value: {unwrap(x)}")
+}
+
+@test(output = "Default: 0")
+fn nullable_unwrap_or() {
+    let x: int? = null
+    print("Default: {unwrap_or(x, 0)}")
+}
+
+// ============================================
+// Coroutine tests
+// ============================================
+
+co fn simple() -> Coroutine<int> {
+    yield 1
+    yield 2
+    yield 3
+}
+
+@test(output = "1\n2\n3")
+fn coroutine_basic() {
+    let coro = simple()
+    print(coro.resume())
+    print(coro.resume())
+    print(coro.resume())
+}
+
+co fn evens(max: int) -> Coroutine<int> {
+    let i = 0
+    while i < max {
+        yield i
+        i += 2
+    }
+}
+
+@test(output = "0\n2\n4\n6\n8")
+fn coroutine_with_loop() {
+    let coro = evens(10)
+    print(coro.resume())
+    print(coro.resume())
+    print(coro.resume())
+    print(coro.resume())
+    print(coro.resume())
+}

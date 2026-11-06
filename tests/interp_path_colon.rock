@@ -1,0 +1,41 @@
+// A `::` inside an interpolation hole is a PATH separator, not the start of a
+// format spec. The hole splitter must only split on a single `:` at depth 0.
+
+enum Col { Red, Green }
+enum Shape { Circle(int), Rect(int, int) }
+
+@test
+fn test_enum_variant_in_hole() {
+    assert_eq("{Col::Green}", "Col::Green")
+    assert_eq("{Col::Red}", "Col::Red")
+}
+
+@test
+fn test_enum_payload_variant_in_hole() {
+    assert_eq("{Shape::Circle(2)}", "Shape::Circle(2)")
+    assert_eq("{Shape::Rect(1, 2)}", "Shape::Rect(1, 2)")
+}
+
+// Controls: a single `:` still starts the spec, and a `:` nested inside a
+// call/index does not split at all.
+
+@test
+fn test_plain_spec_still_splits() {
+    let x = 3.14159
+    assert_eq("{x:.2f}", "3.14")
+    let n = 7
+    assert_eq("{n:03}", "007")
+}
+
+@test
+fn test_path_inside_call_arg() {
+    assert_eq("{shade(Col::Green)}", "green")
+    assert_eq("{shade(Col::Green):>8}", "   green")
+}
+
+fn shade(c: Col) -> string {
+    match c {
+        Col::Red => "red",
+        Col::Green => "green",
+    }
+}

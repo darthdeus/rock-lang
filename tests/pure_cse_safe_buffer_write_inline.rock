@@ -1,0 +1,42 @@
+// Reproduces the queue_ui_text_rock shape: @inline @pure ctor called
+// 6 times across 6 NativeBuffer slot writes with 4 unique fingerprints
+// (2 of them appearing twice).
+
+value Vert {
+    px: float,
+    py: float,
+}
+
+@nomangle inline(lua) fn __nb_alloc_Vert(n: int) -> Ptr<Vert> = 'return ffi.new("Vert[?]", n)'
+
+fn native_buffer_vert(n: int) -> NativeBuffer<Vert> {
+    return NativeBuffer { ptr: __nb_alloc_Vert(n), len: n }
+}
+
+@inline
+@pure fn make_vert(x: float, y: float) -> Vert {
+    return Vert { px: x, py: y }
+}
+
+@test(output = "1\n2\n3\n2\n3\n4\n3\n4\n1\n2")
+fn test_cse_inline_pure_buffer_writes() {
+    let buf = native_buffer_vert(5)
+    let a = 1.0
+    let b = 2.0
+    let c = 3.0
+    let d = 4.0
+
+    // Mirrors tl/tr/br/bl/tl/br pattern from queue_ui_text_rock —
+    // make_vert(a,b) appears at slots 0 and 4, make_vert(c,d) at 2 and 3.
+    buf[0] = make_vert(a, b)
+    buf[1] = make_vert(c, b)
+    buf[2] = make_vert(c, d)
+    buf[3] = make_vert(c, d)
+    buf[4] = make_vert(a, b)
+
+    let v0 = buf[0]; print("{v0.px.floor()}"); print("{v0.py.floor()}")
+    let v1 = buf[1]; print("{v1.px.floor()}"); print("{v1.py.floor()}")
+    let v2 = buf[2]; print("{v2.px.floor()}"); print("{v2.py.floor()}")
+    let v3 = buf[3]; print("{v3.px.floor()}"); print("{v3.py.floor()}")
+    let v4 = buf[4]; print("{v4.px.floor()}"); print("{v4.py.floor()}")
+}

@@ -1,0 +1,62 @@
+// Let binding tests - migrated from rock/tests/let_tests.rs
+// Tests tuple destructuring, let bindings, and keyword variable names
+
+@test(output = "5\nhello")
+fn test_tuple_let_binding_basic() {
+    let (a, b) = (5, "hello")
+    print(a)
+    print(b)
+}
+
+@test(output = "10\n20\nRED")
+fn test_tuple_let_binding_with_if_expr() {
+    let has_hit = false
+    let (pos, color) = if has_hit {
+        ((5, 10), "GREEN")
+    } else {
+        ((10, 20), "RED")
+    }
+
+    print(pos.0)
+    print(pos.1)
+    print(color)
+}
+
+@test(output = "5\nGREEN")
+fn test_tuple_let_binding_with_if_expr_simple() {
+    let (pos, color) = if true {
+        (5, "GREEN")
+    } else {
+        (10, "RED")
+    }
+
+    print(pos)
+    print(color)
+}
+
+@test(output = "42\nworld")
+fn test_tuple_let_binding_with_type_annotation() {
+    let (x, y): (int, string) = (42, "world")
+    print(x)
+    print(y)
+}
+
+// Note: test_nested_tuple_let_binding is #[ignore]d in Rust
+// because nested tuple destructuring is not yet supported
+
+@test(output = "5\nhello")
+fn test_keyword_variable_names() {
+    let end = 5
+    let function = "hello"
+    print(end)
+    print(function)
+}
+
+inline(lua) fn test_keywords(end: int, function: string) -> string = """
+    return tostring(__rock_end) .. __rock_function  -- Keep Lua syntax in extern block
+"""
+
+@test(output = "42test")
+fn test_keyword_names_in_extern_functions() {
+    print(test_keywords(42, "test"))
+}

@@ -1,0 +1,255 @@
+// `Map<K, P>` at a `nobox` value P stores flat: a hash spine of slot indices
+// over the same column storage `[P]` uses.
+// These replace the `map_value_of_a_nobox_value_Generic` gap sentinel.
+
+@test fn map_nobox_store_and_read() {
+    let m: Map<string, Vec2> = map_new()
+    m["a"] = Vec2 { x: 1.0, y: 2.0 }
+    assert_eq(m["a"].x, 1.0)
+    assert_eq(m["a"].y, 2.0)
+}
+
+@test fn map_nobox_two_keys_stay_distinct() {
+    let m: Map<string, Vec2> = map_new()
+    m["a"] = Vec2 { x: 1.0, y: 2.0 }
+    m["b"] = Vec2 { x: 3.0, y: 4.0 }
+    assert_eq(m["a"].x, 1.0)
+    assert_eq(m["b"].x, 3.0)
+    assert_eq(m["a"].y, 2.0)
+    assert_eq(m["b"].y, 4.0)
+}
+
+// The update path: overwriting a present key must reuse its slot, not leak one.
+@test fn map_nobox_update_in_place() {
+    let m: Map<string, Vec2> = map_new()
+    m["a"] = Vec2 { x: 1.0, y: 2.0 }
+    m["a"] = Vec2 { x: 9.0, y: 8.0 }
+    assert_eq(m["a"].x, 9.0)
+    assert_eq(m["a"].y, 8.0)
+    assert_eq(m.len(), 1)
+}
+
+// The spine IS the presence structure -- a miss never reads the columns.
+@test fn map_nobox_miss_is_null() {
+    let m: Map<string, Vec2> = map_new()
+    m["a"] = Vec2 { x: 1.0, y: 2.0 }
+    assert(m.get("nope") == null)
+    assert(m.get("a") != null)
+    assert(!m.contains("nope"))
+    assert(m.contains("a"))
+}
+
+// A miss must stay null even though the freed slot still holds stale leaves.
+@test fn map_nobox_miss_after_remove_is_null() {
+    let m: Map<string, Vec2> = map_new()
+    m["a"] = Vec2 { x: 7.0, y: 7.0 }
+    m.remove("a")
+    assert(m.get("a") == null)
+    assert(!m.contains("a"))
+    assert_eq(m.len(), 0)
+}
+
+@test fn map_nobox_remove_returns_the_value() {
+    let m: Map<string, Vec2> = map_new()
+    m["a"] = Vec2 { x: 5.0, y: 6.0 }
+    let old = m.remove("a")
+    assert(old != null)
+    assert_eq(old.unwrap().x, 5.0)
+    assert_eq(old.unwrap().y, 6.0)
+}
+
+// A freed slot must be reusable without corrupting a live neighbour.
+@test fn map_nobox_slot_reuse_after_remove() {
+    let m: Map<string, Vec2> = map_new()
+    m["a"] = Vec2 { x: 1.0, y: 1.0 }
+    m["b"] = Vec2 { x: 2.0, y: 2.0 }
+    m.remove("a")
+    m["c"] = Vec2 { x: 3.0, y: 3.0 }
+    assert_eq(m["b"].x, 2.0)
+    assert_eq(m["c"].x, 3.0)
+    assert(m.get("a") == null)
+    assert_eq(m.len(), 2)
+}
+
+@test fn map_nobox_iteration_reads_leaves() {
+    let m: Map<string, Vec2> = map_new()
+    m["a"] = Vec2 { x: 1.0, y: 2.0 }
+    m["b"] = Vec2 { x: 3.0, y: 4.0 }
+    let sx = 0.0
+    let sy = 0.0
+    let n = 0
+    for (k, v) in m {
+        sx = sx + v.x
+        sy = sy + v.y
+        n = n + 1
+    }
+    assert_eq(n, 2)
+    assert_eq(sx, 4.0)
+    assert_eq(sy, 6.0)
+}
+
+// clear() retains column capacity; the map must still behave as empty.
+@test fn map_nobox_clear_then_rebuild() {
+    let m: Map<string, Vec2> = map_new()
+    m["a"] = Vec2 { x: 1.0, y: 1.0 }
+    m["b"] = Vec2 { x: 2.0, y: 2.0 }
+    m.clear()
+    assert_eq(m.len(), 0)
+    assert(m.get("a") == null)
+    m["c"] = Vec2 { x: 5.0, y: 5.0 }
+    assert_eq(m.len(), 1)
+    assert_eq(m["c"].x, 5.0)
+    assert(m.get("a") == null)
+}
+
+@test fn map_nobox_keys_and_values() {
+    let m: Map<string, Vec2> = map_new()
+    m["a"] = Vec2 { x: 1.0, y: 2.0 }
+    m["b"] = Vec2 { x: 3.0, y: 4.0 }
+    assert_eq(m.keys().len, 2)
+    let vs = m.values()
+    assert_eq(vs.len, 2)
+    let sx = 0.0
+    for v in vs { sx = sx + v.x }
+    assert_eq(sx, 4.0)
+}
+
+@test fn map_keys_into_writes_deterministic_order() {
+    let m: Map<string, int> = map_new()
+    m["z"] = 1
+    m["a"] = 2
+    m["m"] = 3
+    let scratch: [string] = []
+    let first = m.keys_into(scratch)
+    assert(first == scratch)
+    assert_eq(first.len, 3)
+    assert_eq(first[0], "a")
+    assert_eq(first[1], "m")
+    assert_eq(first[2], "z")
+    m["b"] = 4
+    let second = m.keys_into(scratch)
+    assert(second == scratch)
+    assert_eq(second.len, 4)
+    assert_eq(second[0], "a")
+    assert_eq(second[1], "b")
+    assert_eq(second[2], "m")
+    assert_eq(second[3], "z")
+}
+
+@test fn map_nobox_insert_ufcs() {
+    let m: Map<string, Vec2> = map_new()
+    m.insert("a", Vec2 { x: 1.0, y: 2.0 })
+    assert_eq(m["a"].x, 1.0)
+    assert_eq(m.len(), 1)
+}
+
+// A Map<K, P?> collapses value-absent into key-absent, which is what a bare
+// Map already does for a nil store. Nothing writes a top-level presence tag.
+@test fn map_nobox_nullable_value_null_store_removes() {
+    let m: Map<string, Vec2?> = map_new()
+    m["a"] = Vec2 { x: 1.0, y: 2.0 }
+    assert(m.get("a") != null)
+    m["a"] = null
+    assert(m.get("a") == null)
+    assert(!m.contains("a"))
+    assert_eq(m.len(), 0)
+}
+
+// A nobox Map as a struct field, built in a global initializer -- bitgun's
+// FlowField shape.
+struct MapHolder {
+    grid: Map<string, Vec2>,
+}
+
+global MAP_HOLDER: MapHolder = MapHolder { grid: map_new() }
+
+@test fn map_nobox_in_a_struct_field_global() {
+    MAP_HOLDER.grid.clear()
+    MAP_HOLDER.grid["a"] = Vec2 { x: 1.0, y: 2.0 }
+    assert_eq(MAP_HOLDER.grid["a"].x, 1.0)
+    assert_eq(MAP_HOLDER.grid.len(), 1)
+    let f = MAP_HOLDER.grid.get("a")
+    assert(f != null)
+    assert_eq(f.unwrap().y, 2.0)
+}
+
+// An int-keyed map: the spine must not assume string keys.
+@test fn map_nobox_int_keys() {
+    let m: Map<int, Vec2> = map_new()
+    m[7] = Vec2 { x: 1.0, y: 2.0 }
+    m[9] = Vec2 { x: 3.0, y: 4.0 }
+    assert_eq(m[7].x, 1.0)
+    assert_eq(m[9].y, 4.0)
+    assert(m.get(8) == null)
+}
+
+// User keys that collide with the repr's own field names -- the reason columns
+// cannot be keyed directly by K. They live in the spine, which holds only keys.
+@test fn map_nobox_user_key_cannot_collide_with_the_repr() {
+    let m: Map<string, Vec2> = map_new()
+    m["x"] = Vec2 { x: 1.0, y: 2.0 }
+    m["len"] = Vec2 { x: 3.0, y: 4.0 }
+    m["spine"] = Vec2 { x: 5.0, y: 6.0 }
+    m["data"] = Vec2 { x: 7.0, y: 8.0 }
+    assert_eq(m["x"].x, 1.0)
+    assert_eq(m["len"].x, 3.0)
+    assert_eq(m["spine"].x, 5.0)
+    assert_eq(m["data"].x, 7.0)
+    assert_eq(m.len(), 4)
+}
+
+// A field write THROUGH the map index: the place base is a slot in `data`, not
+// a whole element. Found by `just shape-sweep` at an UNMARKED value -- column
+// eligibility is the same rule Vec uses, so this is not a nobox-only path.
+value MapCellP { a: int, b: int }
+
+@test fn map_column_compound_field_write() {
+    let m: Map<string, MapCellP> = map_new()
+    m["k"] = MapCellP { a: 7, b: 11 }
+    m["k"].a += 92
+    assert_eq(m["k"].a, 99)
+    assert_eq(m["k"].b, 11)
+}
+
+@test fn map_column_field_write_is_per_key() {
+    let m: Map<string, MapCellP> = map_new()
+    m["j"] = MapCellP { a: 1, b: 2 }
+    m["k"] = MapCellP { a: 7, b: 11 }
+    m["k"].a = 50
+    assert_eq(m["j"].a, 1)
+    assert_eq(m["k"].a, 50)
+}
+
+// A column-stored Map (nobox value) with INT keys. The spine is what iteration
+// walks, so its representation decides the type the loop hands back: a plain JS
+// object coerces every key to a string, and `sum` would then be a concatenation
+// rather than an addition. luajit's table keys are typed already, so this is the
+// arm that pins the JS spine to a native Map.
+@test fn a_column_map_iterates_int_keys_as_ints() {
+    let m: Map<int, Vec2> = map_new()
+    m[1] = Vec2 { x: 1.0, y: 0.0 }
+    m[2] = Vec2 { x: 2.0, y: 0.0 }
+    m[40] = Vec2 { x: 3.0, y: 0.0 }
+    let sum = 0
+    let n = 0
+    for (k, v) in m {
+        sum = sum + k
+        n = n + 1
+    }
+    assert_eq(n, 3)
+    assert_eq(sum, 43)
+}
+
+// `clear` returns every slot to the free list; a later insert must reuse rather
+// than grow, and the map must read empty in between.
+@test fn a_column_map_clears_and_refills() {
+    let m: Map<int, Vec2> = map_new()
+    m[1] = Vec2 { x: 1.0, y: 2.0 }
+    m[2] = Vec2 { x: 3.0, y: 4.0 }
+    m.clear()
+    assert_eq(m.len(), 0)
+    assert(!m.contains(1), "a cleared map contains nothing")
+    m[7] = Vec2 { x: 5.0, y: 6.0 }
+    assert_eq(m.len(), 1)
+    assert_eq(m[7].x, 5.0)
+}

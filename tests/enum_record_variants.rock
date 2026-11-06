@@ -1,0 +1,117 @@
+// Test record variant enums
+
+enum Shape {
+    Point,
+    Line { start: FixVec2, end: FixVec2 },
+    Circle { center: FixVec2, radius: float },
+    Rectangle { x: float, y: float, width: float, height: float },
+}
+
+struct FixVec2 {
+    x: float,
+    y: float,
+}
+
+@test
+fn test_record_variant_construction() {
+    let point = Shape::Point
+    let line = Shape::Line { start: FixVec2 { x: 0.0, y: 0.0 }, end: FixVec2 { x: 10.0, y: 10.0 } }
+    let circle = Shape::Circle { center: FixVec2 { x: 5.0, y: 5.0 }, radius: 3.0 }
+    let rect = Shape::Rectangle { x: 0.0, y: 0.0, width: 100.0, height: 50.0 }
+
+    assert(point == Shape::Point)
+    print("Record variant construction works")
+}
+
+@test
+fn test_record_variant_pattern_matching() {
+    let shape = Shape::Circle { center: FixVec2 { x: 5.0, y: 5.0 }, radius: 2.5 }
+    
+    match shape {
+        Point => print("Point"),
+        Line { start, end } => {
+            print("Line from ({start.x}, {start.y}) to ({end.x}, {end.y})")
+        }
+        Circle { center, radius } => {
+            assert_eq(center.x, 5.0)
+            assert_eq(center.y, 5.0)
+            assert_eq(radius, 2.5)
+            print("Circle at ({center.x}, {center.y}) with radius {radius}")
+        }
+        Rectangle { x, y, width, height } => {
+            print("Rectangle at ({x}, {y}) size {width}x{height}")
+        }
+    }
+}
+
+@test
+fn test_record_variant_partial_destructuring() {
+    let rect = Shape::Rectangle { x: 10.0, y: 20.0, width: 100.0, height: 50.0 }
+    
+    match rect {
+        Rectangle { x, y, .. } => {
+            assert_eq(x, 10.0)
+            assert_eq(y, 20.0)
+            print("Rectangle at ({x}, {y})")
+        }
+        _ => print("Not a rectangle"),
+    }
+}
+
+@test
+fn test_record_variant_equality() {
+    let circle1 = Shape::Circle { center: FixVec2 { x: 0.0, y: 0.0 }, radius: 5.0 }
+    let circle2 = Shape::Circle { center: FixVec2 { x: 0.0, y: 0.0 }, radius: 5.0 }
+    let circle3 = Shape::Circle { center: FixVec2 { x: 1.0, y: 0.0 }, radius: 5.0 }
+    
+    assert(circle1 == circle2)
+    assert(circle1 != circle3)
+    print("Record variant equality works")
+}
+
+@test
+fn test_mixed_variant_types() {
+    let shapes = [
+        Shape::Point,
+        Shape::Line { start: FixVec2 { x: 0.0, y: 0.0 }, end: FixVec2 { x: 5.0, y: 5.0 } },
+        Shape::Circle { center: FixVec2 { x: 10.0, y: 10.0 }, radius: 2.5 },
+    ]
+    
+    for shape in shapes {
+        match shape {
+            Point => print("Got a point"),
+            Line { start, end } => {
+                let dx = end.x - start.x
+                let dy = end.y - start.y
+                let length = (dx * dx + dy * dy).sqrt()
+                print("Line length: {length}")
+            }
+            Circle { radius, .. } => print("Circle with radius {radius}"),
+            Rectangle { .. } => print("Rectangle"),
+        }
+    }
+}
+
+// Test enum with only record variants
+enum Message {
+    Move { x: int, y: int },
+    Write { text: string },
+    ChangeColor { r: int, g: int, b: int },
+    Resize { width: int, height: int },
+}
+
+@test
+fn test_record_only_enum() {
+    let msg = Message::Move { x: 10, y: 20 }
+    
+    match msg {
+        Move { x, y } => {
+            assert_eq(x, 10)
+            assert_eq(y, 20)
+            print("Move to ({x}, {y})")
+        }
+        Write { text } => print("Write: {text}"),
+        ChangeColor { r, g, b } => print("Color: ({r}, {g}, {b})"),
+        Resize { width, height } => print("Resize to {width}x{height}"),
+    }
+}

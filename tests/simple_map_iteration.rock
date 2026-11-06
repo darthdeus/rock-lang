@@ -1,0 +1,35 @@
+// Simple test to verify Map iteration works without tuple destructuring
+// This avoids the type system issue while testing code generation
+
+@test
+fn test_simple_map_iteration() {
+    let test_map: Map<string, string> = map_new()
+    insert(test_map, "key1", "value1")
+    insert(test_map, "key2", "value2")
+    insert(test_map, "key3", "value3")
+
+    let iterations = 0
+
+    // Use single variable binding to avoid tuple destructuring type issue
+    for item in test_map {
+        iterations = iterations + 1
+    }
+
+    // Should iterate over all 3 entries
+    assert iterations == 3
+}
+
+@test
+fn test_map_len() {
+    let test_map: Map<string, int> = map_new()
+    assert $ test_map.len() == 0
+
+    insert(test_map, "one", 1)
+    assert $ test_map.len() == 1
+
+    insert(test_map, "two", 2)
+    assert $ test_map.len() == 2
+
+    insert(test_map, "three", 3)
+    assert $ test_map.len() == 3
+}

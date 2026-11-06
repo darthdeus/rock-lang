@@ -1,0 +1,48 @@
+// Phase 5: manual coroutine composition.
+//
+// Outer holds a reference to inner's handle and drives it via .resume().
+// This requires hoisting inner's handle (a struct with closures) as a
+// state-struct field in outer. Fails until Phase 5 hoists inner-handle
+// locals correctly AND until conditionals (Phase 2) land for the
+// pump_until_null test.
+
+co fn inner_source() -> Coroutine<int> {
+    yield 1
+    yield 2
+    yield 3
+}
+
+co fn manual_pump() -> Coroutine<int> {
+    let src = inner_source()
+    yield (src.resume() ?? -99) * 10
+    yield (src.resume() ?? -99) * 10
+    yield (src.resume() ?? -99) * 10
+}
+
+@test(output = "10\n20\n30")
+fn test_manual_pump() {
+    let c = manual_pump()
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+}
+
+// ---- Inner exhausted, manual_pump observes null ----
+co fn short_inner() -> Coroutine<int> {
+    yield 7
+}
+
+co fn pump_until_null() -> Coroutine<int> {
+    let src = short_inner()
+    let first = src.resume()
+    if first == null { yield -1 } else { yield first.unwrap() }
+    let second = src.resume()
+    if second == null { yield -1 } else { yield second.unwrap() }
+}
+
+@test(output = "7\n-1")
+fn test_pump_observes_inner_exhaustion() {
+    let c = pump_until_null()
+    print(c.resume() ?? -99)
+    print(c.resume() ?? -99)
+}

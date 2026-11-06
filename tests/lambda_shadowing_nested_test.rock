@@ -1,0 +1,89 @@
+// Test for lambda variable capture with shadowing in nested closures
+// This reproduces the issue where lambdas capture the wrong variable
+// when shadowing occurs inside a loop that's inside a closure
+
+struct Mesh { data: int }
+
+struct Map { items: [Mesh?] }
+
+fn draw_mesh(mesh: Mesh) {
+    assert_eq(mesh.data, 42, "Expected mesh data to be 42")
+}
+
+fn with_debug_group(name: string, action: fn() -> ()) { action() }
+
+fn with_shader(shader: int, action: fn() -> ()) { action() }
+
+fn get(map: Map, key: int) -> Mesh? {
+    if key < map.items.len() { return map.items[key] }
+    return null
+}
+
+@test
+fn test_lambda_shadowing_with_continue_in_nested_closure() {
+    let key_meshes = Map {
+        items: [
+        null,
+        Mesh { data: 42 },
+        null
+    ]
+    }
+    let sorted_keys = [0, 1, 2]
+
+    // This specific pattern causes the issue:
+    // closure -> loop -> continue -> shadowing -> lambda
+    with_shader(
+        1,
+        () => {
+        for key in sorted_keys {
+            let mesh = get(key_meshes, key)
+
+            if mesh == null {
+                return
+            // continue  // The continue statement is crucial to trigger the bug
+            }
+
+            let mesh = mesh.unwrap()  // Shadow with non-nullable
+
+            // Direct call works
+            draw_mesh(mesh)
+
+            // Lambda call fails with "Type mismatch: found Mesh?, expected Mesh"
+            // The lambda incorrectly sees the outer mesh: Mesh? instead of the shadowed mesh: Mesh
+            with_debug_group("draw-{key}") @ draw_mesh(mesh)
+        }
+    }
+    )
+}
+
+@test
+fn test_lambda_shadowing_simple_case_works() {
+    // This simpler case without nested closure works fine
+    let mesh: Mesh? = Mesh { data: 42 }
+
+    if mesh != null {
+        let mesh = mesh.unwrap()
+
+        // Both direct and lambda calls work
+        draw_mesh(mesh)
+        with_debug_group("test") @ draw_mesh(mesh)
+    }
+}
+
+@test
+fn test_lambda_shadowing_in_loop_works() {
+    // Loop without outer closure also works
+    let items = [0]
+
+    for i in items {
+        let mesh: Mesh? = Mesh { data: 42 }
+
+        if mesh != null {
+            let mesh = mesh.unwrap()
+
+            // Both direct and lambda calls work
+            draw_mesh(mesh)
+            with_debug_group("item-{i}") @ draw_mesh(mesh)
+        }
+    }
+}

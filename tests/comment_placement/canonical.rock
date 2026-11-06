@@ -1,0 +1,94 @@
+// Canonical fixture for comment-fuzz. Exercises a broad slice of Rock syntax.
+
+struct Point { x: int, y: int }
+
+struct Box<T> { value: T }
+
+enum Shape {
+    Circle(float),
+    Rect(float, float),
+}
+
+global COUNTER: int = 0
+
+fn identity<T>(x: T) -> T {
+    return x
+}
+
+fn make_box() -> Box<int> {
+    let b: Box<int> = Box { value: 42 }
+    return b
+}
+
+fn add(a: int, b: int) -> int {
+    return a + b
+}
+
+fn classify(s: Shape) -> string {
+    return match s {
+        Shape::Circle(r) => "circle",
+        Shape::Rect(w, h) => "rect",
+    }
+}
+
+fn sum_arr(arr: [int]) -> int {
+    let total = 0
+    for v in arr {
+        total = total + v
+    }
+    return total
+}
+
+fn filter_positive(arr: [int]) -> [int] {
+    let out: [int] = []
+    for v in arr {
+        if v > 0 {
+            vec_push(out, v)
+        }
+    }
+    return out
+}
+
+fn higher_order(f: fn(int) -> int, x: int) -> int {
+    return f(x)
+}
+
+@test(output = "3")
+fn t_add() { print(add(1, 2)) }
+
+@test(output = "42")
+fn t_box() { print(make_box().value) }
+
+@test(output = "circle")
+fn t_match() { print(classify(Shape::Circle(1.0))) }
+
+@test(output = "6")
+fn t_sum() { print(sum_arr([1, 2, 3])) }
+
+@test(output = "10")
+fn t_lambda() {
+    let f = x => x * 2
+    print(higher_order(f, 5))
+}
+
+@test(output = "yes")
+fn t_if() {
+    let x = 5
+    if x > 0 {
+        print("yes")
+    } else {
+        print("no")
+    }
+}
+
+@test(output = "6")
+fn t_while() {
+    let i = 0
+    let n = 3
+    let sum = 0
+    while i < n {
+        i = i + 1
+        sum = sum + i
+    }
+    print(sum)
+}

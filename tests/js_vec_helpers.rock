@@ -1,0 +1,117 @@
+// Vec-helper coverage corpus (T8f): non-vacuous byte-checked cases over every
+// Vec helper family, first AND last element asserted everywhere so an
+// off-by-one in any `_data` accessor reads as a wrong value, not a silent
+// vacuous pass. Byte-checked integer/string output, so both the luajit and JS
+// backends gate on the same expectations. Guards the JS `_data` repr (1-based
+// hole slot) against silent regression: the 0-based flip T8f originally scoped
+// was falsified as JS-crate-only (shared stdlib bakes 1-based `_data` math into
+// 6 pure-Rock Vec ops).
+
+@test(output = "10 40")
+fn index_read_first_last() {
+    let xs = [10, 20, 30, 40]
+    print("{xs[0]} {xs[3]}")
+}
+
+@test(output = "11 44")
+fn index_write_first_last() {
+    let xs = [10, 20, 30, 40]
+    xs.set(0, 11)
+    xs.set(3, 44)
+    print("{xs[0]} {xs[3]}")
+}
+
+@test(output = "3 1 3")
+fn push_pop() {
+    let xs = [1, 2]
+    xs.push(3)
+    let n = xs.len()
+    let last = xs.pop() ?? -1
+    print("{n} {xs[0]} {last}")
+}
+
+@test(output = "1 5 9")
+fn sort_first_mid_last() {
+    let xs = [5, 1, 9, 3, 7]
+    xs.sort(x => x)
+    print("{xs[0]} {xs[2]} {xs[4]}")
+}
+
+@test(output = "3 10 40")
+fn remove_at_shifts() {
+    let xs = [10, 20, 30, 40]
+    let removed = xs.remove_at(1) ?? -1
+    print("{xs.len()} {xs[0]} {xs[2]}")
+}
+
+@test(output = "20 3 40 30")
+fn swap_remove_moves_last() {
+    let xs = [10, 20, 30, 40]
+    let removed = xs.swap_remove(1) ?? -1
+    print("{removed} {xs.len()} {xs[1]} {xs[2]}")
+}
+
+@test(output = "0")
+fn clear_empties() {
+    let xs = [1, 2, 3]
+    xs.clear()
+    print("{xs.len()}")
+}
+
+@test(output = "10 40 4")
+fn deepcopy_vec() {
+    let xs = [10, 20, 30, 40]
+    let ys = deepcopy(xs)
+    ys.set(0, 99)
+    print("{xs[0]} {xs[3]} {ys.len()}")
+}
+
+@test(output = "Vec {{ 10, 20, 30 }}")
+fn inspect_vec() {
+    let xs = [10, 20, 30]
+    print(inspect(xs))
+}
+
+@test(output = "100")
+fn for_in_sum() {
+    let xs = [10, 20, 30, 40]
+    let total = 0
+    for v in xs {
+        total = total + v
+    }
+    print("{total}")
+}
+
+@test(output = "0:10 3:40")
+fn enumerate_first_last() {
+    let xs = [10, 20, 30, 40]
+    let first = ""
+    let last = ""
+    for (i, v) in enumerate(xs) {
+        if i == 0 { first = "{i}:{v}" }
+        last = "{i}:{v}"
+    }
+    print("{first} {last}")
+}
+
+enum Payload {
+    Nums([int]),
+}
+
+@test(output = "10 40")
+fn vec_in_enum_payload() {
+    let p = Payload::Nums([10, 20, 30, 40])
+    match p {
+        Payload::Nums(xs) => print("{xs[0]} {xs[3]}"),
+    }
+}
+
+struct Holder {
+    items: [int],
+}
+
+@test(output = "10 40")
+fn vec_in_struct_field() {
+    let h = Holder { items: [10, 20, 30, 40] }
+    print("{h.items[0]} {h.items[3]}")
+}

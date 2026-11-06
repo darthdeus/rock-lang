@@ -1,0 +1,138 @@
+// Regression tests for vector operations and function overloading
+// These patterns were investigated during the Arena iteration bug fix
+// to ensure they work correctly with the compiler
+
+struct FixVec2 {
+    x: float,
+    y: float,
+}
+
+struct IVec2 {
+    x: int,
+    y: int,
+}
+
+// Multiple overloads of fixv() function
+fn fixv() -> FixVec2 {
+    return FixVec2 { x: 0.0, y: 0.0 }
+}
+
+fn fixv(x: float) -> FixVec2 {
+    return FixVec2 { x: x, y: x }
+}
+
+fn fixv(x: float, y: float) -> FixVec2 {
+    return FixVec2 { x: x, y: y }
+}
+
+// Operator overloading for FixVec2
+operator *(v: FixVec2, scale: int) -> FixVec2 {
+    let s = float(scale)
+    return FixVec2 { x: v.x * s, y: v.y * s }
+}
+
+// Note: Rock doesn't support reverse order operators yet
+// operator *(scale: int, v: FixVec2) -> FixVec2 {
+//     let s = float(scale)
+//     return FixVec2 { x: v.x * s, y: v.y * s }
+// }
+
+@test(output = "0\\n0\\n5\\n5\\n10\\n20")
+fn test_v_function_overloads() {
+    // Test fixv() - no arguments
+    let vec0 = fixv()
+    print(int(vec0.x))
+    print(int(vec0.y))
+
+    // Test fixv(float) - single argument
+    let vec1 = fixv(5.0)
+    print(int(vec1.x))
+    print(int(vec1.y))
+
+    // Test fixv(float, float) - two arguments
+    let vec2 = fixv(10.0, 20.0)
+    print(int(vec2.x))
+    print(int(vec2.y))
+}
+
+@test(output = "56\\n56\\n-84\\n-84")
+fn test_vec2_multiplication_operator() {
+    // Test FixVec2 * int
+    let vec = fixv(2.0, 2.0)
+    let scaled = vec * 28
+    print(int(scaled.x))
+    print(int(scaled.y))
+
+    // Test FixVec2 * negative int
+    let vec2 = fixv(3.0, 3.0)
+    let scaled2 = vec2 * (-28)
+    print(int(scaled2.x))
+    print(int(scaled2.y))
+}
+
+@test(output = "-84\\n-28\\n-84\\n0\\n-84\\n28\\n84\\n-28\\n84\\n0\\n84\\n28")
+fn test_loop_with_vec_operations() {
+    // This mimics the pattern from map.rock that triggered the investigation
+    let bg_size = 28
+    let span = 3
+
+    for x in (-span)..(span + 1) {
+        // Only test x=-3 and x=3 to keep output manageable
+        if x == -3 || x == 3 {
+            for y in (-1)..2 {
+                // The exact pattern from map.rock line 178
+                let result = fixv(float(x), float(y)) * bg_size
+                print(int(result.x))
+                print(int(result.y))
+            }
+        }
+    }
+}
+
+@test(output = "tuple access works\\n1\\na\\n2\\nb\\n3\\nc")
+fn test_tuple_access_in_vectors() {
+    // Test accessing tuples in vectors
+    let items = [(1, "a"), (2, "b"), (3, "c")]
+
+    print("tuple access works")
+
+    // Access with simple iteration over indices
+    for i in 0..3 {
+        if let item = vec_get(items, i) {
+            print(tuple_first(item))
+            print(tuple_second(item))
+        }
+    }
+}
+
+@test(output = "0\\n0\\n28\\n28\\n56\\n56")
+fn test_range_iteration_with_calculations() {
+    // Test range iteration with calculations inside
+    let scale = 28
+
+    for i in 0..3 {
+        let vec = fixv(float(i), float(i))
+        let result = vec * scale
+        print(int(result.x))
+        print(int(result.y))
+    }
+}
+
+@test(output = "chained operations work")
+fn test_chained_vec_operations() {
+    // Test that chained operations work correctly
+    let base = fixv(1.0, 1.0)
+    let step1 = base * 2  // (2, 2)
+    let step2 = step1 * 3  // (6, 6)
+
+    assert(step2.x == 6.0)
+    assert(step2.y == 6.0)
+
+    // Test with negative values
+    let neg = fixv(-1.0, -2.0)
+    let scaled_neg = neg * (-3)  // (3, 6)
+    assert(scaled_neg.x == 3.0)
+    assert(scaled_neg.y == 6.0)
+
+    print("chained operations work")
+}

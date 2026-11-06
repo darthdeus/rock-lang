@@ -1,0 +1,71 @@
+// Generators-as-iterators (coroutine-vocabulary-plan.md PR2): a
+// `Coroutine<Y, R, ()>` iterates as itself through the stdlib structural
+// `next` adapter -- no `iter`, no syntax. Covers a delegating tree walk,
+// nullable-`Y` elements, and a lazy combinator chain over a generator.
+
+value Tree {
+    val: int,
+    kids: [Tree],
+}
+
+// Pre-order walk; `await` delegates each subtree's elements as our own.
+co fn walk(t: Tree) -> Coroutine<int, (), ()> {
+    yield t.val
+    for k in t.kids {
+        await walk(k)
+    }
+}
+
+fn leaf(v: int) -> Tree {
+    return Tree { val: v, kids: [] }
+}
+
+@test(output = "1\n2\n4\n5\n3")
+fn test_tree_walk_generator() {
+    let root = Tree {
+        val: 1,
+        kids: [
+            Tree { val: 2, kids: [leaf(4), leaf(5)] },
+            leaf(3),
+        ],
+    }
+    for v in walk(root) {
+        print(v)
+    }
+}
+
+// Nullable `Y`: a yielded `null` is a real element, not a stop-sentinel.
+co fn maybe_nums() -> Coroutine<int?, (), ()> {
+    yield 1
+    yield null
+    yield 3
+}
+
+@test(output = "1\nNULL\n3")
+fn test_nullable_yield_elements() {
+    for v in maybe_nums() {
+        if v == null {
+            print("NULL")
+        } else {
+            print(v)
+        }
+    }
+}
+
+// Lazy combinator chain: the coroutine IS an iterator (it has `next`), so it
+// flows straight into `map`/`filter` at their `Iterator`-bounded params.
+co fn count_up(n: int) -> Coroutine<int, (), ()> {
+    let i = 0
+    while i < n {
+        yield i
+        i = i + 1
+    }
+}
+
+@test(output = "0\n4\n8")
+fn test_combinator_chain_over_generator() {
+    let out = count_up(6).filter(_ % 2 == 0).map(_ * 2).collect()
+    for v in out {
+        print(v)
+    }
+}

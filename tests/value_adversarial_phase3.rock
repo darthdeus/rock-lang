@@ -1,0 +1,262 @@
+// Phase 3 adversarial — going after language features not yet covered.
+// Hypothesis: there are more Lua single-value slots hiding in enum
+// variant ctors, pattern bindings, lambda returns, generic calls,
+// destructuring, globals, Arena/iteration APIs, and inline(lua) bodies.
+
+value V2 {
+    x: float,
+    y: float,
+}
+
+value V3 {
+    r: float,
+    g: float,
+    b: float,
+}
+
+fn make_v2(a: float, b: float) -> V2 {
+    return V2 { x: a, y: b }
+}
+
+fn make_v3(a: float, b: float, c: float) -> V3 {
+    return V3 { r: a, g: b, b: c }
+}
+
+fn sum2(v: V2) -> float {
+    return v.x + v.y
+}
+
+fn sum3(v: V3) -> float {
+    return v.r + v.g + v.b
+}
+
+// ----- 1. Enum variant payload from value-returning Rock call.
+
+enum Shape {
+    Point(V2),
+    Circle(V2, float),
+    Color(V3),
+}
+
+fn shape_describe(s: Shape) -> float {
+    return match s {
+        Shape::Point(p) => sum2(p),
+        Shape::Circle(c, r) => sum2(c) + r,
+        Shape::Color(col) => sum3(col),
+    }
+}
+
+@test(output = "3\n13\n6")
+fn adv_enum_variant_payload_value_call() {
+    let p = Shape::Point(make_v2(1.0, 2.0))
+    let c = Shape::Circle(make_v2(2.0, 1.0), 10.0)
+    let col = Shape::Color(make_v3(1.0, 2.0, 3.0))
+    print("{shape_describe(p).floor()}")
+    print("{shape_describe(c).floor()}")
+    print("{shape_describe(col).floor()}")
+}
+
+// ----- 2. Stdlib Option-like enum with value payload.
+
+enum MaybeV2 {
+    Just(V2),
+    Nope,
+}
+
+fn unwrap_or_zero(m: MaybeV2) -> float {
+    return match m {
+        MaybeV2::Just(v) => sum2(v),
+        MaybeV2::Nope => 0.0,
+    }
+}
+
+@test(output = "7\n0")
+fn adv_option_like_payload_call() {
+    let a = MaybeV2::Just(make_v2(3.0, 4.0))
+    let b = MaybeV2::Nope
+    print("{unwrap_or_zero(a).floor()}")
+    print("{unwrap_or_zero(b).floor()}")
+}
+
+// ----- 3. For-loop over [V2] — iteration binding receives value types.
+
+@test(output = "3\n7\n11")
+fn adv_for_loop_value_array() {
+    let xs = [make_v2(1.0, 2.0), make_v2(3.0, 4.0), make_v2(5.0, 6.0)]
+    for v in xs {
+        print("{sum2(v).floor()}")
+    }
+}
+
+// ----- 4. For-loop over Map<int, V2> — tuple destructure (k, v) where v is
+// value-typed.
+
+@test(output = "3\n7")
+fn adv_for_loop_map_value_destructure() {
+    // Single-entry maps give deterministic iteration; exercise the
+    // destructure path without needing sort.
+    let m1: Map<int, V2> = map_new()
+    m1[100] = make_v2(1.0, 2.0)
+    for (k, v) in m1 {
+        let _ = k
+        print("{sum2(v).floor()}")
+    }
+    let m2: Map<int, V2> = map_new()
+    m2[200] = make_v2(3.0, 4.0)
+    for (k, v) in m2 {
+        let _ = k
+        print("{sum2(v).floor()}")
+    }
+}
+
+// ----- 5. Lambda body returning a value-typed Rock call, invoked
+// immediately. Tests whether lambda return lowering packs.
+
+@test(output = "7")
+fn adv_lambda_returning_value() {
+    let mk = (a: float, b: float) => make_v2(a, b)
+    print("{sum2(mk(3.0, 4.0)).floor()}")
+}
+
+// ----- 6. Lambda stored and invoked later, through a value-typed
+// first-class-fn round trip.
+
+fn invoke_fn(f: fn(float, float) -> V2, a: float, b: float) -> V2 {
+    return f(a, b)
+}
+
+@test(output = "30")
+fn adv_value_fn_ref_roundtrip() {
+    let total = sum2(invoke_fn(make_v2, 10.0, 20.0))
+    print("{total.floor()}")
+}
+
+// ----- 7. Generic fn instantiated with value type.
+// Generics keep cdata ABI (no scalarization), so the monomorphized
+// `id<V2>` should pack the V2 arg before passing. Tests whether the
+// caller-side packing happens when the callee is generic.
+
+fn identity_generic<T>(x: T) -> T {
+    return x
+}
+
+@test(output = "3")
+fn adv_generic_with_value_type() {
+    let v = identity_generic(make_v2(1.0, 2.0))
+    print("{sum2(v).floor()}")
+}
+
+// ----- 8. Tuple destructure of multi-value-typed tuple.
+
+fn make_pair() -> (V2, V3) {
+    return (make_v2(1.0, 2.0), make_v3(3.0, 4.0, 5.0))
+}
+
+@test(output = "3\n12")
+fn adv_tuple_destructure_value_types() {
+    let (a, b) = make_pair()
+    print("{sum2(a).floor()}")
+    print("{sum3(b).floor()}")
+}
+
+// ----- 9. String interpolation printing a value type directly via
+// `{v}`. `tostring` path — any-slot expects cdata; value-typed Ident
+// passes as Multi, needs packing. Test by checking the interpolation
+// doesn't crash and the output contains x and y fields.
+
+@test(output = "ok")
+fn adv_interp_value_direct() {
+    let v = make_v2(3.0, 4.0)
+    let s = "{v}"
+    // Don't assert exact format — just that interpolation didn't
+    // crash and produced something containing both fields.
+    if s.contains("3") && s.contains("4") {
+        print("ok")
+    } else {
+        print("mismatch")
+    }
+}
+
+// ----- 10. Global value-typed const initialized with a value-returning
+// call.
+
+global GLOB_V2: V2 = make_v2(10.0, 20.0)
+
+@test(output = "30")
+fn adv_global_value_call_init() {
+    print("{sum2(GLOB_V2).floor()}")
+}
+
+// ----- 11. Safe navigation on value-returning nullable call.
+
+fn maybe_v2(on: bool) -> V2? {
+    if on { return make_v2(5.0, 12.0) }
+    return null
+}
+
+@test(output = "5\n-1")
+fn adv_safe_nav_value_field() {
+    let a = maybe_v2(true)?.x ?? -1.0
+    let b = maybe_v2(false)?.x ?? -1.0
+    print("{a.floor()}")
+    print("{b.floor()}")
+}
+
+// ----- 12. While-let with value-typed binding from a state-machine-like
+// source.
+
+fn take_v2(p: [V2]) -> (V2?, [V2]) {
+    if p.len == 0 {
+        return (null, p)
+    }
+    let first = p[0]
+    let rest: [V2] = []
+    let i = 1
+    while i < p.len {
+        rest.push(p[i])
+        i = i + 1
+    }
+    return (first, rest)
+}
+
+@test(output = "3\n7\n11")
+fn adv_while_let_value() {
+    let xs = [make_v2(1.0, 2.0), make_v2(3.0, 4.0), make_v2(5.0, 6.0)]
+    let i = 0
+    while i < 3 {
+        let v = xs[i]
+        print("{sum2(v).floor()}")
+        i = i + 1
+    }
+}
+
+// ----- 13. Operator-overload chain with 3 terms: `a + b + c` —
+// associativity and intermediate multi-return handling.
+
+fn v2_add(a: V2, b: V2) -> V2 {
+    return V2 { x: a.x + b.x, y: a.y + b.y }
+}
+
+@test(output = "21")
+fn adv_chained_value_binary_calls() {
+    let sum = v2_add(v2_add(make_v2(1.0, 2.0), make_v2(3.0, 4.0)), make_v2(5.0, 6.0))
+    print("{sum2(sum).floor()}")
+}
+
+// ----- 14. Interpolation with nested value-returning call deep in an
+// expression.
+
+@test(output = "total=30")
+fn adv_interp_deep_value_expr() {
+    print("total={(sum2(v2_add(make_v2(1.0, 2.0), make_v2(10.0, 17.0)))).floor()}")
+}
+
+// ----- 15. Vec<V2> indexed-write via assignment (xs[i] = ...), not push.
+
+@test(output = "100\n7")
+fn adv_vec_indexed_write_value_call() {
+    let xs = [make_v2(1.0, 2.0), make_v2(3.0, 4.0)]
+    xs[0] = make_v2(40.0, 60.0)
+    print("{sum2(xs[0]).floor()}")
+    print("{sum2(xs[1]).floor()}")
+}

@@ -1,0 +1,33 @@
+//! Error: Duplicate pattern matching tests
+//! Tags: patterns, match, duplicates
+
+//=== TEST CASE: duplicate_wildcard_DuplicatePattern ===
+fn test() -> int {
+    let t = 1
+    match t {
+        0 => 10
+        1 => 20
+        _ => 30
+        _ => 40  // Duplicate wildcard - should be an error!
+    }
+}
+
+fn main() {
+    test()
+}
+
+//=== TEST CASE: multiple_duplicate_wildcards_DuplicatePattern ===
+fn test() -> int {
+    let t = 3
+    match t {
+        0 => 10
+        _ => 20
+        1 => 30
+        _ => 40  // Second wildcard - should be an error!
+        _ => 50  // Third wildcard - but error should trigger on the second one
+    }
+}
+
+fn main() {
+    test()
+}

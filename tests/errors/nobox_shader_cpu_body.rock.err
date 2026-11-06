@@ -1,0 +1,37 @@
+//! Error: a `@shader` fn's body is ordinary CPU-executable Lua -- the authoring
+//!        contract promises shader fns "compile
+//!        to Lua as normal fns, so shader helper math is CPU-callable and
+//!        `@test`-able", and nothing rejects a CPU call to one. So the `nobox`
+//!        guarantee applies to it like any other body: an implicit
+//!        materialization inside a `@shader` fn must reject.
+//! Tags: nobox, shader, gpu, guarantee, emit-time
+//!
+//! The materialization below is unrelated to any GPU intrinsic: a box is
+//! authorized only AT a `@gpu_only` call boundary, never anywhere inside a body
+//! that happens to be annotated.
+//!
+//! The sink has to be a shape with nowhere to put the value but a box. A bare
+//! nobox global stores LEAVES and a value-struct outer stores flat leaf keys, so
+//! either would pass here for the wrong reason.
+//!
+//! Interpolating a WHOLE tuple that carries one is the sink, and it is chosen
+//! because it is PERMANENT: asking for a single runtime-typed value is F1
+//! erasure, a justified box that is meant to stay a rejection
+//! (`nobox_container_gaps.rock.err`). A tuple element in a COLLECTION used to
+//! stand here and was the wrong choice -- that was an open gap, it closed, and
+//! this case went green while the shader rule it guards was untouched. Do not
+//! re-point this at a sink the matrix lists as live.
+
+//=== TEST CASE: nobox_materialization_in_a_shader_body ===
+nobox value NV2 { x: float, y: float }
+
+@shader(fragment)
+fn leaky_frag(tc: NV2) -> Vec4 {
+    let t = (tc, 1.0)
+    let s = "{t}"
+    return v(0.0, 0.0, 0.0, 1.0)
+}
+
+fn main() {
+    let _ = leaky_frag(NV2 { x: 1.0, y: 2.0 })
+}

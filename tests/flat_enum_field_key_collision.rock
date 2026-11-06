@@ -1,0 +1,74 @@
+// A flattened enum field's physical slots are DOTTED parent keys
+// (`sig.tag`, `sig.0`, `sig.r`), the same encoding `embed` uses. `.` is not an
+// identifier character, so a slot key can never equal a legal user field name.
+//
+// The `__`-based encoding this replaced was not injective: an enum field `sig`
+// and a user field `sig__tag` both wrote the key `sig__tag`, so the table ctor
+// emitted it twice and Lua's last-write-wins clobbered the DISCRIMINANT with
+// the user value -- every match on that enum then fell through silently, with
+// no error and no output.
+
+enum Sig { A, B(string) }
+
+// `show` takes the struct by param so the parent survives as a table (a
+// non-escaping parent scalarizes away and never exposes the key collision).
+struct TagHolder { sig: Sig, sig__tag: int }
+
+fn show_tag(h: TagHolder) {
+    match h.sig {
+        Sig::A => print("A {h.sig__tag}")
+        Sig::B(n) => print("B {n} {h.sig__tag}")
+    }
+}
+
+@test(output = "B seven 42")
+fn test_discriminant_slot_vs_user_field() {
+    show_tag(TagHolder { sig: Sig::B("seven"), sig__tag: 42 })
+}
+
+// The positional payload slot, same shape.
+struct PayloadHolder { sig: Sig, sig__0: int }
+
+fn show_payload(h: PayloadHolder) {
+    match h.sig {
+        Sig::A => print("A {h.sig__0}")
+        Sig::B(n) => print("B {n} {h.sig__0}")
+    }
+}
+
+@test(output = "B seven 7")
+fn test_payload_slot_vs_user_field() {
+    show_payload(PayloadHolder { sig: Sig::B("seven"), sig__0: 7 })
+}
+
+// A record-payload variant's named slot.
+enum Shape { Dot, Circle { r: string } }
+struct ShapeHolder { shape: Shape, shape__r: int }
+
+fn show_shape(h: ShapeHolder) {
+    match h.shape {
+        Shape::Dot => print("dot {h.shape__r}")
+        Shape::Circle { r } => print("circle {r} {h.shape__r}")
+    }
+}
+
+@test(output = "circle big 5")
+fn test_named_slot_vs_user_field() {
+    show_shape(ShapeHolder { shape: Shape::Circle { r: "big" }, shape__r: 5 })
+}
+
+// CONTROL: the ordinary flattened-enum field still round-trips with no user
+// field in the way, so the tests above fail on the COLLISION, not on flattening.
+struct Plain { sig: Sig, other: int }
+
+fn show_plain(h: Plain) {
+    match h.sig {
+        Sig::A => print("A {h.other}")
+        Sig::B(n) => print("B {n} {h.other}")
+    }
+}
+
+@test(output = "B seven 1")
+fn test_flat_enum_field_control() {
+    show_plain(Plain { sig: Sig::B("seven"), other: 1 })
+}

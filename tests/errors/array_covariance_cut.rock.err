@@ -1,0 +1,14 @@
+//! Error: arrays are invariant -- element covariance is cut. An already-typed
+//!        [int] value is NOT coercible to [float] (numeric widening); it went
+//!        through the covariant array arm, which is gone. The only production
+//!        reliance was struct-spread numeric promotion, deliberately dropped.
+//!        Array literals still check element-wise and type-var inference still
+//!        flows through arrays (see tests/invariant_nested_generic_inference.rock).
+//! Tags: arrays, covariance
+
+//=== TEST CASE: array_int_to_float_rejected_MismatchedType ===
+fn g() -> int {
+    let xs: [int] = [1, 2, 3]
+    let ys: [float] = xs
+    ys.len()
+}

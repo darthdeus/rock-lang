@@ -1,0 +1,47 @@
+// Pure expressions should NOT trigger the argument-hoist path. Before
+// the purity-aware dup-safety relaxation, a body that reads a param
+// multiple times forced a `let __inline_arg_N = <arg>` hoist whenever
+// the arg wasn't a plain literal/ident/field-chain. With purity, a
+// pure function call returning a scalar, or a BinOp over dup-safe
+// operands, is accepted as directly duplicable — no hoist, matching
+// hand-written code exactly.
+
+// Plain pure function returning int — body uses `x` three times.
+// With the relaxation, `triple(abs_like(-5))` substitutes `abs_like(-5)`
+// at each site directly, no hoist local.
+@inline
+fn triple(x: int) -> int {
+    return x + x + x
+}
+
+// Small pure helper — no globals, no mutation, no allocation.
+fn abs_like(n: int) -> int {
+    return if n < 0 { 0 - n } else { n }
+}
+
+@test(output = "15")
+fn test_pure_call_dup_safe() {
+    let r = triple(abs_like(-5))
+    print(r)
+}
+
+// BinOp over idents must also be recognized as dup-safe even though
+// the current syntactic rule rejects all BinOps.
+@test(output = "15")
+fn test_binop_dup_safe() {
+    let a = 3
+    let b = 2
+    let r = triple(a + b)   // (a+b)=5 used 3x = 15; with relaxation no hoist
+    print(r)
+}
+
+// Pure + pure composition — arithmetic pipeline.
+fn square(n: int) -> int {
+    return n * n
+}
+
+@test(output = "12")
+fn test_pure_pipeline_dup_safe() {
+    let r = triple(square(2))   // square(2) = 4, triple(4) = 12
+    print(r)
+}

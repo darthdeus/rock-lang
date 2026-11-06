@@ -1,0 +1,50 @@
+// Compile-time const-folding through UFCS method calls. When the
+// receiver and all args are literal constants and the method is a
+// `@pure` straight-line `return <expr>;`, the call evaluates at
+// compile time. Same machinery as `pure_const_fold.rock` — this file
+// exercises the `obj.method(...)` surface (parsed as
+// `UniversalMethodCall` or `FunctionCall { func: FieldAccess, ... }`).
+// Runtime behavior is unchanged; the syntactic "the call is gone"
+// side is asserted in `rock/tests/const_fold_ufcs_tests.rs`.
+
+@pure
+fn neg_int(x: int) -> int {
+    return -x
+}
+
+@test(output = "3")
+fn test_ufcs_const_receiver_folds() {
+    // Receiver `(-3)` is a constant; `neg_int` is @pure.
+    let r = (-3).neg_int()
+    print(r)
+}
+
+@pure
+fn add_int(x: int, y: int) -> int {
+    return x + y
+}
+
+@test(output = "7")
+fn test_ufcs_multi_arg_folds() {
+    let r = (3).add_int(4)
+    print(r)
+}
+
+// Non-const receiver: must NOT fold but must still evaluate at runtime.
+@test(output = "-9")
+fn test_ufcs_non_const_receiver_no_fold() {
+    let n = 9
+    let r = n.neg_int()
+    print(r)
+}
+
+// Impure method: even with constant receiver, no fold.
+fn impure_neg(x: int) -> int {
+    return -x
+}
+
+@test(output = "-5")
+fn test_ufcs_impure_no_fold() {
+    let r = (5).impure_neg()
+    print(r)
+}

@@ -1,0 +1,59 @@
+// Tests for break/continue/return at the top level of a loop body
+// (not nested inside an if/else block). These trigger a LuaJIT syntax
+// error because break/return must be the last statement in a block,
+// but the compiler emits ::continue:: after them.
+
+@test
+fn test_break_toplevel_in_range_loop() {
+    let sum = 0
+    for i in 0..10 {
+        sum = sum + i
+        break
+    }
+    assert(sum == 0, "break at toplevel should exit after first iteration, got {sum}")
+}
+
+@test
+fn test_break_after_code_in_range_loop() {
+    let results: [int] = []
+    for i in 0..5 {
+        results.push(i)
+        if results.len == 3 { break }
+    }
+    assert(results.len == 3, "expected 3 elements, got {results.len}")
+}
+
+@test
+fn test_continue_toplevel_in_range_loop() {
+    let sum = 0
+    for i in 0..5 {
+        sum = sum + 1
+        continue
+    }
+    assert(sum == 5, "continue at toplevel should not skip, got {sum}")
+}
+
+@test
+fn test_return_inside_loop() {
+    let result = helper_return_from_loop()
+    assert(result == 42, "expected 42 from early return, got {result}")
+}
+
+fn helper_return_from_loop() -> int {
+    for i in 0..10 {
+        let x = 42
+        return x
+    }
+    return -1
+}
+
+@test
+fn test_break_in_array_loop() {
+    let arr = [10, 20, 30, 40, 50]
+    let first = -1
+    for x in arr {
+        first = x
+        break
+    }
+    assert(first == 10, "expected first element 10, got {first}")
+}

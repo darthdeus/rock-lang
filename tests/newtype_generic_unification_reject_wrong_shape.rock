@@ -1,0 +1,12 @@
+// Negative: pattern is Entity<T>, arg is plain int. The unification path
+// rejects "App pattern vs non-App arg"; the Check-mode pass that
+// follows the subst attempt confirms the rejection. Either way, the
+// program must fail to compile.
+
+newtype Wrap<T>(Entity<T>)
+
+@test(expect_failure = true)
+fn rejects_non_app_arg_for_app_pattern() {
+    let w = Wrap(42)
+    print(w)
+}

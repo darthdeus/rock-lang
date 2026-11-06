@@ -1,0 +1,263 @@
+// Item-level macros emitting non-fn type definitions: struct, newtype,
+// enum. Two invocations of the same macro must produce two
+// distinct types (their `name.id`, `field.id`, `variant.id` etc. all
+// minted afresh per splice). Substitution into the type's own ident
+// runs through `replace_ident_name` (`Name: ident` fragment).
+//
+// Pinned by `mint_item_ids` + `subst_in_item` in
+// `rock-optimizations/src/macro_expansion_pass.rs`. Was RED before
+// the mint extension landed.
+
+// === STRUCT — basic two-invocation ident substitution ===
+
+macro decl_pair(Name: ident) {
+    struct Name { x: int, y: int }
+}
+
+decl_pair(PairFoo)
+decl_pair(PairBar)
+
+@test
+fn test_struct_ident_subst_two_invocations() {
+    let f = PairFoo { x: 1, y: 2 }
+    let b = PairBar { x: 3, y: 4 }
+    assert(f.x + b.y == 5, "two distinct structs from same macro template")
+}
+
+// === STRUCT — `ty` substitution into a field type ===
+
+macro decl_holder(Name: ident, Elem: ty) {
+    struct Name { v: Elem }
+}
+
+decl_holder(HolderInt, int)
+decl_holder(HolderString, string)
+
+@test
+fn test_struct_ty_subst_into_field() {
+    let i = HolderInt { v: 42 }
+    let s = HolderString { v: "hello" }
+    assert(i.v == 42, "int field")
+    assert(s.v == "hello", "string field")
+}
+
+// === STRUCT — field with a default expression that references a macro
+// `expr` arg. Tests substitute_expr_params running through field defaults. ===
+
+macro decl_with_default(Name: ident, init: expr) {
+    struct Name { v: int = init }
+}
+
+decl_with_default(DefStructA, 7)
+decl_with_default(DefStructB, 99)
+
+@test
+fn test_struct_field_default_expr_subst() {
+    let a = DefStructA { }
+    let b = DefStructB { }
+    assert(a.v == 7, "default 7 from first invocation")
+    assert(b.v == 99, "default 99 from second invocation")
+}
+
+// === NEWTYPE — single-field wrapper, two invocations ===
+
+macro decl_newtype(Name: ident, Elem: ty) {
+    newtype Name(Elem)
+}
+
+decl_newtype(NewtypeIntA, int)
+decl_newtype(NewtypeIntB, int)
+
+@test
+fn test_newtype_two_invocations() {
+    let a = NewtypeIntA(5)
+    let b = NewtypeIntB(7)
+    assert(a.0 + b.0 == 12, "two distinct newtypes")
+}
+
+// === ENUM — Unit + Tuple + Record variants, two invocations ===
+
+macro decl_choice(Name: ident) {
+    enum Name {
+        Empty,
+        One(int),
+        Pair { a: int, b: int },
+    }
+}
+
+decl_choice(ChoiceA)
+decl_choice(ChoiceB)
+
+fn evaluate_choice_a(c: ChoiceA) -> int {
+    match c {
+        Empty => 0,
+        One(n) => n,
+        Pair { a, b } => a + b,
+    }
+}
+
+fn evaluate_choice_b(c: ChoiceB) -> int {
+    match c {
+        Empty => 0,
+        One(n) => n * 10,
+        Pair { a, b } => a * b,
+    }
+}
+
+// === STRUCT — field name substituted via `ident` fragment ===
+
+macro decl_holder_named(Name: ident, Field: ident) {
+    struct Name { Field: int }
+}
+
+decl_holder_named(NamedHolderX, val_x)
+decl_holder_named(NamedHolderY, val_y)
+
+@test
+fn test_struct_field_name_subst() {
+    let h = NamedHolderX { val_x: 10 }
+    let g = NamedHolderY { val_y: 20 }
+    assert(h.val_x + g.val_y == 30, "field-name ident subst into struct body")
+}
+
+// === STRUCT — emitted fn constructs the spliced struct via literal ===
+//
+// Pins StructLiteral.name substitution: the inner literal `Name { ... }`
+// has an embedded ctor Ident that the recursive walk doesn't reach
+// through `ExprKind::Ident`. Without the explicit ctor-ident rewrite,
+// the literal renders as the literal `Name`, which doesn't resolve.
+
+macro decl_v_struct(Name: ident, Maker: ident, init_val: expr) {
+    struct Name { v: int }
+    fn Maker() -> Name { Name { v: init_val } }
+}
+
+decl_v_struct(VStructA, make_v_a, 7)
+decl_v_struct(VStructB, make_v_b, 100)
+
+@test
+fn test_struct_literal_in_emitted_fn() {
+    let a = make_v_a()
+    let b = make_v_b()
+    assert(a.v == 7, "first invocation's struct + maker")
+    assert(b.v == 100, "second invocation's struct + maker — distinct from first")
+}
+
+// === ENUM — emitted fn constructs a variant of the spliced enum ===
+
+macro decl_color(Name: ident, Maker: ident) {
+    enum Name { Red, Green, Blue }
+    fn Maker() -> Name { Name::Green }
+}
+
+decl_color(ColorA, make_green_a)
+decl_color(ColorB, make_green_b)
+
+fn color_a_eq_green(c: ColorA) -> bool {
+    match c {
+        Red => false,
+        Green => true,
+        Blue => false,
+    }
+}
+
+@test
+fn test_enum_variant_in_emitted_fn() {
+    let g = make_green_a()
+    assert(color_a_eq_green(g), "spliced enum's Green variant constructed via spliced fn")
+    let _b = make_green_b()
+    // No symbol collision between the two color enums proves mint
+    // covered both Color enums + their Green variants.
+}
+
+// === FUNCTION — fn name + param name substituted ===
+
+macro decl_doubler(FnName: ident, ParamName: ident) {
+    fn FnName(ParamName: int) -> int { ParamName * 2 }
+}
+
+decl_doubler(double_a, a)
+decl_doubler(double_b, b)
+
+@test
+fn test_fn_name_and_param_name_subst() {
+    assert(double_a(5) == 10, "first emitted fn callable by spliced name")
+    assert(double_b(7) == 14, "second emitted fn callable by spliced name")
+}
+
+// === ANNOTATIONS on emitted fn ===
+
+macro decl_pure_doubler(Name: ident) {
+    @pure fn Name(x: int) -> int { x * 2 }
+}
+
+decl_pure_doubler(pure_dbl_a)
+decl_pure_doubler(pure_dbl_b)
+
+@test
+fn test_emitted_fn_keeps_annotation() {
+    assert(pure_dbl_a(3) == 6, "a")
+    assert(pure_dbl_b(7) == 14, "b")
+}
+
+// === `value struct` emission ===
+
+macro decl_value_pair(Name: ident) {
+    value struct Name { x: int, y: int }
+}
+
+decl_value_pair(VPairA)
+decl_value_pair(VPairB)
+
+@test
+fn test_value_struct_emission() {
+    let a = VPairA { x: 1, y: 2 }
+    let b = VPairB { x: 3, y: 4 }
+    assert(a.x + b.y == 5, "value struct preserved through splice")
+}
+
+// === Generic struct emission ===
+
+macro decl_generic_box(Name: ident) {
+    struct Name<T> { v: T }
+}
+
+decl_generic_box(GenBoxA)
+decl_generic_box(GenBoxB)
+
+@test
+fn test_generic_struct_emission() {
+    let a: GenBoxA<int> = GenBoxA { v: 7 }
+    let b: GenBoxB<string> = GenBoxB { v: "hi" }
+    assert(a.v == 7, "Box<int>")
+    assert(b.v == "hi", "Box<string>")
+}
+
+// === Cross-reference: emitted fn body uses caller-side global ===
+
+global ITEM_LEVEL_MULT: int = 10
+
+macro decl_with_global_ref(Name: ident, Maker: ident, k: expr) {
+    struct Name { v: int }
+    fn Maker() -> Name { Name { v: k * ITEM_LEVEL_MULT } }
+}
+
+decl_with_global_ref(CrossA, make_cross_a, 3)
+decl_with_global_ref(CrossB, make_cross_b, 7)
+
+@test
+fn test_emitted_fn_refs_caller_global() {
+    let a = make_cross_a()
+    let b = make_cross_b()
+    assert(a.v + b.v == 100, "30 + 70 = 100; global ref survives splice")
+}
+
+@test
+fn test_enum_two_invocations() {
+    assert(evaluate_choice_a(ChoiceA::Empty) == 0, "A unit")
+    assert(evaluate_choice_a(ChoiceA::One(7)) == 7, "A tuple")
+    assert(evaluate_choice_a(ChoiceA::Pair { a: 3, b: 4 }) == 7, "A record")
+    assert(evaluate_choice_b(ChoiceB::Empty) == 0, "B unit")
+    assert(evaluate_choice_b(ChoiceB::One(7)) == 70, "B tuple, distinct fn")
+    assert(evaluate_choice_b(ChoiceB::Pair { a: 3, b: 4 }) == 12, "B record")
+}

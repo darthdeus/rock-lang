@@ -1,0 +1,86 @@
+// GC-tier `value` construction, spliced at the use site instead of called.
+//
+// `ROCK_SKULL_VALUE_CTOR=splice` writes `setmetatable({ .. }, __rock_vt_<Name>)`
+// where `call` (the shipped default) writes `<Name>_vt(..)`. Both must build the
+// same table, carry the SAME shared metatable -- LuaJIT fires `__eq` only when
+// both operands share the metamethod, so a mismatch here silently makes equal
+// values compare unequal -- and evaluate the field operands in the order the
+// argument list had them. Every test below asserts a runtime value, and passes
+// under both shapes.
+
+value Bag {
+    xs: [int],
+    n: int,
+}
+
+value Pair {
+    a: [int],
+    b: [int],
+}
+
+struct Shelf {
+    bag: Bag,
+    label: string,
+}
+
+// A nullable return keeps the boxed ABI, so the value has to materialize.
+fn find_bag(want: int) -> Bag? {
+    if want == 0 { return null }
+    return Bag { xs: [want, want * 2], n: want }
+}
+
+fn bag_sum(b: Bag) -> int {
+    let s = 0
+    for x in b.xs { s = s + x }
+    return s + b.n
+}
+
+// ----- 1. A value type stored in a record round-trips.
+
+@test(output = "4\nshelf")
+fn value_in_a_record_round_trips() {
+    let b = find_bag(1)
+    if b == null { print("no bag"); return }
+    let shelf = Shelf { bag: b, label: "shelf" }
+    print(bag_sum(shelf.bag))   // xs = [1, 2], n = 1 -> 4
+    print(shelf.label)
+}
+
+// ----- 2. Two materializations of the same contents compare equal.
+//
+// The locked GC-tier contract: scalar fields structural, GC-ref fields BY
+// REFERENCE. So two bags sharing one `xs` are equal, and two with separately
+// built `xs` are not -- and that verdict must not depend on the emitted shape,
+// which it would if a spliced table carried a different metatable.
+
+@test(output = "true\nfalse\ntrue")
+fn equality_is_unchanged_by_the_emitted_shape() {
+    let shared = [4, 5]
+    let one = Bag { xs: shared, n: 7 }
+    let two = Bag { xs: shared, n: 7 }
+    print(one == two)
+    let apart = Bag { xs: [4, 5], n: 7 }
+    print(one == apart)
+    let shelf = Shelf { bag: one, label: "s" }
+    print(shelf.bag == two)
+}
+
+// ----- 3. Field operands evaluate left to right.
+
+global ORDER: [int] = []
+
+fn mark(n: int) -> [int] {
+    ORDER.push(n)
+    return [n]
+}
+
+fn make_pair() -> Pair? {
+    return Pair { a: mark(1), b: mark(2) }
+}
+
+@test(output = "1 2")
+fn field_operands_evaluate_in_order() {
+    let p = make_pair()
+    if p == null { print("none"); return }
+    print("{ORDER[0]} {ORDER[1]}")
+}

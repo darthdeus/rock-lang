@@ -1,0 +1,75 @@
+// Value-ABI Inc 5: nested / value-typed value fields.
+// A `value` struct with value-struct fields has a one-slot-per-direct-
+// field scalar ABI; a value field's slot is that field's single cdata
+// (mirrors live `emit_scalar_param_list` + `pack_value_expr`). These
+// tests pin runtime behavior; they must pass with and without
+// ROCK_ANF_FUNCTIONS=1.
+
+value V2 {
+    x: float,
+    y: float,
+}
+
+value Seg {
+    a: V2,
+    b: V2,
+}
+
+value Ray {
+    o: V2,
+    t: float,
+}
+
+// Pass-through: nested value param returned whole (scalar ABI =
+// `return s__a, s__b`, two cdata).
+fn ident_seg(s: Seg) -> Seg {
+    return s
+}
+
+// Construct a nested value literal, return it.
+fn mk_seg(ax: float, ay: float, bx: float, by: float) -> Seg {
+    return Seg { a: V2 { x: ax, y: ay }, b: V2 { x: bx, y: by } }
+}
+
+// Read a value-typed field as a whole cdata and return it.
+fn seg_a(s: Seg) -> V2 {
+    return s.a
+}
+
+// Mixed: primitive direct field of a nested value struct.
+fn ray_t(r: Ray) -> float {
+    return r.t
+}
+
+@test(output = "1\n2\n3\n4")
+fn test_construct_and_passthrough() {
+    let s = mk_seg(1, 2, 3, 4)
+    let s2 = ident_seg(s)
+    print("{s2.a.x.floor()}")
+    print("{s2.a.y.floor()}")
+    print("{s2.b.x.floor()}")
+    print("{s2.b.y.floor()}")
+}
+
+@test(output = "7\n9")
+fn test_value_field_read() {
+    let s = mk_seg(7, 9, 0, 0)
+    let p = seg_a(s)
+    print("{p.x.floor()}")
+    print("{p.y.floor()}")
+}
+
+@test(output = "42")
+fn test_mixed_primitive_field() {
+    let r = Ray { o: V2 { x: 1, y: 2 }, t: 42 }
+    print("{ray_t(r).floor()}")
+}
+
+@test(output = "5\n6")
+fn test_nested_in_array() {
+    let xs: [Seg] = []
+    xs.push(mk_seg(5, 6, 0, 0))
+    let g = xs[0]
+    print("{g.a.x.floor()}")
+    print("{g.a.y.floor()}")
+}

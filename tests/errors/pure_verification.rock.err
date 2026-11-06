@@ -1,0 +1,162 @@
+//! Error: @pure verification rejects Rock bodies that aren't provably pure
+//! Tags: pure, verification
+
+//=== TEST CASE: pure_reads_global_Generic ===
+// Reads a mutable global — not a param or local. Verification errors
+// at the specific Ident site.
+global COUNTER: int = 0
+
+@pure
+fn bad_reads_global() -> int {
+    return COUNTER
+}
+
+//=== TEST CASE: pure_writes_global_Generic ===
+// Assigns to a mutable global — a mutation side effect.
+global COUNTER2: int = 0
+
+@pure
+fn bad_writes_global() -> int {
+    COUNTER2 = 5
+    return 0
+}
+
+//=== TEST CASE: pure_increments_global_Generic ===
+// Compound/increment is a mutation.
+global COUNTER3: int = 0
+
+@pure
+fn bad_increments_global() -> int {
+    COUNTER3 += 1
+    return 0
+}
+
+//=== TEST CASE: pure_calls_non_pure_Generic ===
+// Calls a function whose body is not provably pure.
+global TICK: int = 0
+
+fn bump_tick() -> int {
+    TICK = TICK + 1
+    return TICK
+}
+
+@pure
+fn bad_calls_impure() -> int {
+    return bump_tick()
+}
+
+//=== TEST CASE: pure_mutates_param_field_Generic ===
+// Mutation through a parameter. Field assignment is a side effect
+// observable via the arg at the call site.
+struct Point { x: int, y: int }
+
+@pure
+fn bad_mutates_param(p: Point) -> int {
+    p.x = 99
+    return p.x
+}
+
+//=== TEST CASE: pure_heap_struct_literal_Generic ===
+// Constructs a heap struct (non-value) whose identity is observable.
+struct NotAValue { n: int }
+
+@pure
+fn bad_heap_struct() -> NotAValue {
+    return NotAValue { n: 5 }
+}
+
+//=== TEST CASE: pure_array_literal_Generic ===
+// Array literal allocates a heap table.
+@pure
+fn bad_array_literal() -> [int] {
+    return [1, 2, 3]
+}
+
+//=== TEST CASE: pure_lambda_Generic ===
+// Lambda captures enclosing scope.
+@pure
+fn bad_lambda() -> (int) -> int {
+    return x => x + 1
+}
+
+//=== TEST CASE: pure_while_loop_with_mutation_Generic ===
+// While loop whose body writes a global.
+global C: int = 0
+
+@pure
+fn bad_while() -> int {
+    while C < 10 {
+        C = C + 1
+    }
+    return C
+}
+
+//=== TEST CASE: pure_collection_index_Generic ===
+// Index read from a collection — could read mutable state.
+@pure
+fn bad_index(v: Vec<int>) -> int {
+    return v[0]
+}
+
+//=== TEST CASE: pure_and_debug_impure_conflict_Generic ===
+// `@pure` (no side effects) and `@debug_impure` (debug-only side
+// effect) on the same function is a contradiction. Rejected at the
+// annotation-registration site in type_declaration_pass, before
+// purity verification runs.
+@pure
+@debug_impure
+fn bad_both() -> int {
+    return 1
+}
+
+//=== TEST CASE: pure_calls_unannotated_pure_Generic ===
+// Calls a function that is genuinely pure but NOT annotated `@pure`. Under
+// the annotation-contract model (matching bone), a `@pure` body may only
+// call callees that are themselves annotated `@pure` -- being pure by
+// inference is not enough. The user vouches via the annotation; the callee's
+// own verification guarantees its body.
+fn double_it(x: int) -> int { return x + x }
+
+@pure
+fn bad_calls_unannotated_pure() -> int {
+    return double_it(21)
+}
+
+//=== TEST CASE: pure_reads_global_via_method_Generic ===
+// Reading a mutable global in METHOD-RECEIVER position (`G.m()`) is a global
+// read, exactly like a bare `G`. The receiver sits in the call's `func` (a UFCS
+// `recv.method()` desugars to `method(recv)`), which the purity walker must
+// check -- not only the explicit args. The callee `double_val` is @pure, so the
+// only impurity is the read of `GLO` in receiver position.
+global GLO: int = 0
+@pure fn double_val(x: int) -> int { return x + x }
+@pure fn bad_reads_global_via_method() -> int { return GLO.double_val() }
+
+//=== TEST CASE: pure_mutates_own_local_int_Generic ===
+// PINNED CURRENT BEHAVIOR, believed OVER-RESTRICTIVE. `@pure` rejects EVERY
+// assignment form syntactically, without asking WHAT is mutated. This body is
+// referentially transparent -- `x` is a function-local that never escapes, so
+// the fn is a constant function of its (empty) arguments -- and is rejected
+// anyway. If purity becomes effect-aware (writes to non-escaping locals
+// allowed, writes to globals/params/captures still rejected), this case starts
+// COMPILING: delete it then, and move the shape to a positive `.rock` test.
+@pure
+fn pure_mutates_own_local() -> int {
+    let x = 1
+    x += 1
+    return x
+}
+
+//=== TEST CASE: pure_local_value_field_write_Generic ===
+// The user-reported shape (a shader helper): a `@pure` fn building a Vec2-like
+// value in a local and adjusting one component. TWO rules fire on the same
+// line -- the value-local place rejection (tests/errors/value_struct_field_write
+// .rock.err) and this syntactic purity rejection. Both checks are independent.
+value V2 { x: float, y: float }
+
+@pure
+fn pure_adjusts_local_value_component(res: V2) -> V2 {
+    let s = V2 { x: 0.5, y: 0.5 }
+    s.y *= res.y / res.x
+    return s
+}

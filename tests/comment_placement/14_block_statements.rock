@@ -1,0 +1,10 @@
+// Baseline: comments between statements in a block
+@test(output = "3")
+fn t() {
+    // before let
+    let a = 1
+    /* between */
+    let b = 2
+    // trailing before expr
+    print(a + b)
+}

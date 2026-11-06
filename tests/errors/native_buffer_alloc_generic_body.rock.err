@@ -1,0 +1,23 @@
+//! Error: A generic `@inline` fn calling `native_buffer_alloc<T>` is now LEGAL
+//!        when every call specializes it to an FFI-clean `value`-struct element.
+//!        Call-site specialization resolves the ffi ctype at each instantiation.
+//!        But instantiating at a GC-carrying value
+//!        struct (a `string`/array field -> no C layout) still rejects at emit:
+//!        the specialized element cannot name a cdef. This replaces the blanket
+//!        generic-body rejection. The positive value case is covered by an emit
+//!        test.
+//! Tags: native-buffer, intrinsic, generics, specialization, gc-value, emit-time
+
+//=== TEST CASE: native_buffer_alloc_generic_gc_value ===
+struct FlatVec<T> { buf: NativeBuffer<T>, len: int }
+
+value Named { s: string }   // string field -> GC-carrying value struct, no C layout
+
+@inline fn flat_vec_new<T>(cap: int) -> FlatVec<T> {
+    return FlatVec { buf: native_buffer_alloc(cap), len: 0 }
+}
+
+fn main() {
+    let fv: FlatVec<Named> = flat_vec_new(8)
+    print("{fv.len}")
+}

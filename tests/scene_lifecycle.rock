@@ -1,0 +1,291 @@
+// `Scene<T>`: a typed weak handle to one independently disposable state root
+// inside the Session. Construction is
+// transactional through a `SceneBuilder`; destruction is a two-step
+// close-then-drain so no live row is invalidated mid-invocation.
+
+struct Actor { hp: int }
+
+struct RoomState {
+    actors: Arena<Actor>,
+    name: string,
+}
+
+struct TwoRoom {
+    a: Arena<Actor>,
+    b: Arena<Actor>,
+}
+
+@nomangle inline(lua) fn raises(f: fn()) -> bool = """
+    local ok, err = pcall(f)
+    return not ok
+"""
+
+@nomangle inline(js) fn raises(f: fn()) -> bool = """
+    try { __rock_call(f); return false; } catch (e) { return true; }
+"""
+
+fn build_room(b: SceneBuilder, name: string) -> RoomState? {
+    let r: RoomState? = RoomState { actors: b.arena(), name: name }
+    return r
+}
+
+// Two Scenes of the same root type, each owning an `Arena<Actor>`, are
+// independent: the same element type at the same slot and generation in the
+// other Scene does not resolve.
+@test(output = "a\nb\n1\n1\ntrue\ntrue")
+fn two_scenes_coexist_without_aliasing() {
+    let sa: Scene<RoomState>? = scene_create((b) => build_room(b, "a"))
+    let sb: Scene<RoomState>? = scene_create((b) => build_room(b, "b"))
+    let ra = sa.unwrap().get().unwrap()
+    let rb = sb.unwrap().get().unwrap()
+    print(ra.name)
+    print(rb.name)
+    let ea = ra.actors.insert(Actor { hp: 10 })
+    let eb = rb.actors.insert(Actor { hp: 20 })
+    print(ra.actors.len())
+    print(rb.actors.len())
+    print(is_null(ra.actors.get(eb)))
+    print(is_null(rb.actors.get(ea)))
+}
+
+@test(output = "true\ntrue")
+fn scene_and_arena_ids_are_never_reused() {
+    let s1: Scene<RoomState>? = scene_create((b) => build_room(b, "x"))
+    let id1 = s1.unwrap()._scene_id
+    let aid1 = s1.unwrap().get().unwrap().actors._arena_id
+    scene_close(s1.unwrap())
+    __scene_drain_closed()
+    let s2: Scene<RoomState>? = scene_create((b) => build_room(b, "y"))
+    print(s2.unwrap()._scene_id > id1)
+    print(s2.unwrap().get().unwrap().actors._arena_id > aid1)
+}
+
+// Close is a REQUEST: the Scene leaves lookup at once, but its rows survive
+// until the safe-point drain, so nothing is pulled out from under a caller that
+// is already holding them.
+@test(output = "true\nfalse\ntrue\n5\n1\ntrue\ntrue\n7\n2")
+fn close_hides_immediately_and_drain_reclaims() {
+    __scene_drain_closed()
+    let a: Scene<RoomState>? = scene_create((b) => build_room(b, "A"))
+    let bs: Scene<RoomState>? = scene_create((b) => build_room(b, "B"))
+    let ra = a.unwrap().get().unwrap()
+    let rb = bs.unwrap().get().unwrap()
+    let ea = ra.actors.insert(Actor { hp: 5 })
+    let eb = rb.actors.insert(Actor { hp: 7 })
+
+    print(scene_close(a.unwrap()))
+    print(scene_close(a.unwrap()))
+    print(is_null(a.unwrap().get()))
+    print(ea.get().unwrap().hp)
+    print(ra.actors.len())
+
+    print(__scene_drain_closed() == 1)
+    print(is_null(ea.get()))
+    print(eb.get().unwrap().hp)
+    rb.actors.insert(Actor { hp: 8 })
+    print(rb.actors.len())
+}
+
+@test(output = "3\ntrue\n3")
+fn process_root_arena_survives_a_scene_close() {
+    let root: Arena<Actor> = arena_new()
+    let re = root.insert(Actor { hp: 3 })
+    let a: Scene<RoomState>? = scene_create((b) => build_room(b, "A"))
+    print(root.get(re).unwrap().hp)
+    scene_close(a.unwrap())
+    print(__scene_drain_closed() >= 1)
+    print(root.get(re).unwrap().hp)
+}
+
+@test(output = "false\n0\n6")
+fn repeated_close_and_drain_is_idempotent() {
+    __scene_drain_closed()
+    let root: Arena<Actor> = arena_new()
+    let re = root.insert(Actor { hp: 6 })
+    let s: Scene<RoomState>? = scene_create((b) => build_room(b, "z"))
+    scene_close(s.unwrap())
+    __scene_drain_closed()
+    print(scene_close(s.unwrap()))
+    print(__scene_drain_closed())
+    print(root.get(re).unwrap().hp)
+}
+
+global ESCAPED_ARENA: Arena<Actor>? = null
+global ESCAPED_BUILDER: SceneBuilder? = null
+
+fn failing_build(b: SceneBuilder) -> RoomState? {
+    let a: Arena<Actor> = b.arena()
+    a.insert(Actor { hp: 1 })
+    ESCAPED_ARENA = a
+    ESCAPED_BUILDER = b
+    let none: RoomState? = null
+    return none
+}
+
+@test(output = "true\ntrue\n0\n0\ntrue\ntrue")
+fn failed_construction_publishes_nothing_and_leaks_no_backing() {
+    __scene_drain_closed()
+    let scenes0 = scene_live_count()
+    let arenas0 = arena_live_count()
+    let s: Scene<RoomState>? = scene_create(failing_build)
+    print(is_null(s))
+    print(scene_live_count() == scenes0)
+    print(arena_live_count() - arenas0)
+    print(ESCAPED_ARENA.unwrap().len())
+    print(raises(() => { let _e = ESCAPED_ARENA.unwrap().insert(Actor { hp: 2 }) }))
+    print(raises(() => { let _x: Arena<Actor> = ESCAPED_BUILDER.unwrap().arena() }))
+}
+
+global PUBLISHED_BUILDER: SceneBuilder? = null
+
+fn capture_build(b: SceneBuilder) -> RoomState? {
+    PUBLISHED_BUILDER = b
+    let r: RoomState? = RoomState { actors: b.arena(), name: "cap" }
+    return r
+}
+
+// A copied builder is only a capability while its Scene entry is Building, so
+// the copy is inert once the Scene publishes -- and the count control says the
+// rejection is not merely a Scene that failed to build.
+@test(output = "false\ntrue\n1\n1")
+fn a_copied_builder_cannot_create_an_arena_after_publish() {
+    __scene_drain_closed()
+    let scenes0 = scene_live_count()
+    let arenas0 = arena_live_count()
+    let s: Scene<RoomState>? = scene_create(capture_build)
+    print(is_null(s))
+    print(raises(() => { let _x: Arena<Actor> = PUBLISHED_BUILDER.unwrap().arena() }))
+    print(scene_live_count() - scenes0)
+    print(arena_live_count() - arenas0)
+}
+
+// A flat count cannot tell a published Scene from a discarded one, so the
+// success control asserts the counts MOVED and that the root and its Arena are
+// live afterwards.
+@test(output = "1\n1\ntrue\ntrue")
+fn successful_construction_moves_the_counts_and_stays_live() {
+    __scene_drain_closed()
+    let scenes0 = scene_live_count()
+    let arenas0 = arena_live_count()
+    let s: Scene<RoomState>? = scene_create((b) => build_room(b, "live"))
+    print(scene_live_count() - scenes0)
+    print(arena_live_count() - arenas0)
+    print(!is_null(s.unwrap().get()))
+    let r = s.unwrap().get().unwrap()
+    let e = r.actors.insert(Actor { hp: 1 })
+    print(!is_null(e.get()))
+}
+
+// The drain releases only what it CONFIRMED it owns: an Arena a caller already
+// retired is skipped without the sibling Arena beside it being missed.
+@test(output = "true\ntrue\ntrue\ntrue\n0")
+fn a_manually_destroyed_arena_does_not_derail_the_drain() {
+    __scene_drain_closed()
+    let arenas0 = arena_live_count()
+    let s: Scene<TwoRoom>? = scene_create((bb) => {
+        let r: TwoRoom? = TwoRoom { a: bb.arena(), b: bb.arena() }
+        return r
+    })
+    let r = s.unwrap().get().unwrap()
+    r.a.insert(Actor { hp: 1 })
+    let e2 = r.b.insert(Actor { hp: 2 })
+    print(arena_destroy(r.a))
+    print(scene_close(s.unwrap()))
+    print(__scene_drain_closed() == 1)
+    print(is_null(e2.get()))
+    print(arena_live_count() - arenas0)
+}
+
+// Pending-close is staging, not a second ownership system: the count is the
+// exact population the next drain will retire.
+@test(output = "0\n1\n2\n0")
+fn pending_close_count_tracks_the_drain_queue() {
+    __scene_drain_closed()
+    print(scene_pending_close_count())
+    let a: Scene<RoomState>? = scene_create((b) => build_room(b, "p"))
+    let bb: Scene<RoomState>? = scene_create((b) => build_room(b, "q"))
+    scene_close(a.unwrap())
+    print(scene_pending_close_count())
+    scene_close(bb.unwrap())
+    print(scene_pending_close_count())
+    __scene_drain_closed()
+    print(scene_pending_close_count())
+}
+
+// Graceful close: the Scene's registered teardown actions run at the drain, in
+// registration order, and BEFORE any owned Arena is retired -- a cleanup that
+// touches its own rows has to find them alive, which is the whole reason the
+// order is specified rather than incidental.
+@test(output = "one\n2\ntrue\n0")
+fn close_runs_closers_in_order_while_the_rows_are_still_live() {
+    __scene_drain_closed()
+    let s: Scene<RoomState>? = scene_create((b) => {
+        let r = RoomState { actors: b.arena(), name: "g" }
+        r.actors.insert(Actor { hp: 1 })
+        r.actors.insert(Actor { hp: 2 })
+        b.on_close(() => print("one"))
+        b.on_close(() => print("{r.actors.len()}"))
+        let out: RoomState? = r
+        return out
+    })
+    let room = s.unwrap().get().unwrap()
+    scene_close(s.unwrap())
+    print(__scene_drain_closed() == 1)
+    print(room.actors.len())
+}
+
+// Abrupt discard is the other half of the pair: the rows go exactly as they do
+// on close, and no terminal runs. The markers bracket the drain so the missing
+// line is visible as a gap rather than inferred from an absence.
+@test(output = "before\ntrue\ntrue\nafter\n0")
+fn discard_retires_the_rows_and_runs_no_closer() {
+    __scene_drain_closed()
+    let s: Scene<RoomState>? = scene_create((b) => {
+        let r = RoomState { actors: b.arena(), name: "d" }
+        r.actors.insert(Actor { hp: 1 })
+        b.on_close(() => print("RAN"))
+        let out: RoomState? = r
+        return out
+    })
+    let room = s.unwrap().get().unwrap()
+    print("before")
+    print(scene_discard(s.unwrap()))
+    print(__scene_drain_closed() == 1)
+    print("after")
+    print(room.actors.len())
+}
+
+// Registration is not construction-only: a task spawned mid-life registers its
+// own teardown. A Scene that has left lookup refuses one -- a closer accepted
+// after the close request would never run, and silently.
+@test(output = "1\ntrue\nfalse\nearly\nlate\ntrue\n0")
+fn a_live_scene_accepts_a_closer_and_a_closing_one_refuses() {
+    __scene_drain_closed()
+    let s: Scene<RoomState>? = scene_create((b) => {
+        b.on_close(() => print("early"))
+        let out: RoomState? = RoomState { actors: b.arena(), name: "l" }
+        return out
+    })
+    print(scene_closer_count(s.unwrap()))
+    print(scene_on_close(s.unwrap(), () => print("late")))
+    scene_close(s.unwrap())
+    print(scene_on_close(s.unwrap(), () => print("never")))
+    print(__scene_drain_closed() == 1)
+    print(scene_closer_count(s.unwrap()))
+}
+
+// The drain retires one incarnation once: a second pass has nothing queued, so
+// no closer runs twice.
+@test(output = "gone\n1\n0\n0")
+fn closers_run_once_per_incarnation() {
+    __scene_drain_closed()
+    let s: Scene<RoomState>? = scene_create((b) => {
+        b.on_close(() => print("gone"))
+        let out: RoomState? = RoomState { actors: b.arena(), name: "o" }
+        return out
+    })
+    scene_close(s.unwrap())
+    print(__scene_drain_closed())
+    print(__scene_drain_closed())
+    print(scene_closer_count(s.unwrap()))
+}

@@ -1,0 +1,61 @@
+// A nil field is an ABSENT KEY in the emitted Lua table, so a key-driven
+// inspect cannot see it. Field rendering is driven off `__ROCK_TYPE_TABLE`
+// so declared-but-null fields still render.
+//
+// Expected strings are composed through `{ob}`/`{cb}` holes because a Rock
+// string literal cannot contain a literal brace (no `{{`, no `\{`).
+
+struct AllNull { a: int?, b: string? }
+struct SomeNull { a: int, b: string?, c: int? }
+struct NoNull { a: int, b: string }
+
+@nomangle inline(lua) fn __brace_open() -> string = """
+    return "{"
+"""
+
+@nomangle inline(lua) fn __brace_close() -> string = """
+    return "}"
+"""
+
+@test
+fn test_all_fields_null() {
+    let ob = __brace_open()
+    let cb = __brace_close()
+    let x = AllNull { a: null, b: null }
+    assert_eq(inspect(x), "AllNull {ob} a = nil, b = nil {cb}")
+}
+
+@test
+fn test_some_fields_null() {
+    let ob = __brace_open()
+    let cb = __brace_close()
+    let x = SomeNull { a: 1, b: null, c: null }
+    assert_eq(inspect(x), "SomeNull {ob}\n  a = 1,\n  b = nil,\n  c = nil\n{cb}")
+}
+
+@test
+fn test_null_field_in_interpolation() {
+    let ob = __brace_open()
+    let cb = __brace_close()
+    let x = AllNull { a: null, b: null }
+    assert_eq("{x}", "AllNull {ob} a = nil, b = nil {cb}")
+}
+
+// Controls: a fully-populated struct is unchanged, and a populated field
+// alongside a null one still renders its value.
+
+@test
+fn test_no_null_fields_unchanged() {
+    let ob = __brace_open()
+    let cb = __brace_close()
+    let x = NoNull { a: 1, b: "hi" }
+    assert_eq(inspect(x), "NoNull {ob} a = 1, b = \"hi\" {cb}")
+}
+
+@test
+fn test_populated_field_survives() {
+    let ob = __brace_open()
+    let cb = __brace_close()
+    let x = SomeNull { a: 42, b: "set", c: null }
+    assert_eq(inspect(x), "SomeNull {ob}\n  a = 42,\n  b = \"set\",\n  c = nil\n{cb}")
+}

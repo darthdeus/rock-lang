@@ -1,0 +1,23 @@
+// Regression: PureConstFoldPass evaluated `int / int` and `int % int`
+// using Rust's truncate-toward-zero semantics (`checked_div` /
+// `checked_rem`), but Rock's runtime codegen emits `math.floor(a/b)`
+// for int division and Lua's `%` operator (which is floor-modulo).
+// Compile-time fold and runtime diverged on every case where exactly
+// one operand was negative.
+//
+// Constant evaluation must use floor division and floor modulo.
+
+@pure fn idiv(a: int, b: int) -> int { return a ./ b }
+@pure fn imod(a: int, b: int) -> int { return a % b }
+
+@test(output = "-4\n-4\n3\n1\n-1\n-1")
+fn test_int_div_mod_match_runtime() {
+    // idiv:    -7/2,  7/-2, -7/-2
+    print("{idiv(-7, 2)}")
+    print("{idiv(7, -2)}")
+    print("{idiv(-7, -2)}")
+    // imod:    -7%2,  7%-2, -7%-2
+    print("{imod(-7, 2)}")
+    print("{imod(7, -2)}")
+    print("{imod(-7, -2)}")
+}

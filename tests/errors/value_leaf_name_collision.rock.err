@@ -1,0 +1,78 @@
+//! Error: an `inline(lua)` fn's emitted Lua parameter list must be INJECTIVE.
+//!        The scalar ABI joins nested value fields with `__`, which is legal in
+//!        an identifier too, so two distinct sources can land on one emitted
+//!        name: two leaves of the same value param (`tl__x` the field vs `tl.x`
+//!        the nested path), or a leaf and a SIBLING param (`fn f(r: V2, r__x:
+//!        float)`). Lua binds the later one and the hand-written body silently
+//!        reads the wrong value, so the ambiguity is rejected at emit through the
+//!        `collision_errors` sink.
+//!
+//!        Keyed on the SIGNATURE, at the point leaves become parameter NAMES --
+//!        not on the value declaration. A declaration key misses the
+//!        sibling-param case entirely (the struct is clean there) and rejects
+//!        programs whose ambiguous shape never reaches a named param list, which
+//!        is legal and computes correctly. That accepted shape is pinned as a
+//!        positive test in tests/scalar_abi_leaf_name_ambiguity.rock; the
+//!        non-colliding emit control is in rock-lang/crates/skull/tests/value_scalarize.rs.
+//! Tags: skull, codegen, scalar-abi, value-struct, emit-time
+
+//=== TEST CASE: direct_scalar_abi_call_Generic ===
+value V2 { x: float, y: float }
+value Bad { tl__x: float, tl: V2 }
+
+@scalar_abi inline(lua) fn ambiguous(r: Bad) -> float = """
+    return r__tl__x
+"""
+
+fn main() { let _ = ambiguous(Bad { tl__x: 1.0, tl: V2 { x: 2.0, y: 3.0 } }) }
+
+//=== TEST CASE: through_a_fn_value_Generic ===
+nobox value P { x: float, y: float }
+nobox value Bad { tl: P, tl__x: float }
+
+@scalar_abi inline(lua) fn probe(r: Bad) -> float = """
+    return r__tl__x * 1.0 + r__tl__y * 10.0
+"""
+
+fn apply(f: (Bad) -> float, r: Bad) -> float { return f(r) }
+
+fn main() {
+    let r = Bad { tl: P { x: 1.0, y: 2.0 }, tl__x: 900.0 }
+    print("{apply(probe, r)}")
+}
+
+//=== TEST CASE: sibling_param_collides_with_a_leaf_Generic ===
+// The value declaration is CLEAN here -- `V2 { x, y }` has no ambiguity of its
+// own. The collision is between the leaf `r.x` (emitted `r__x`) and the sibling
+// param literally named `r__x`, so only a signature-level check sees it. Emits
+// `collide(r__x, r__y, r__x)` and returns 103 instead of 5 when unchecked.
+value V2 { x: float, y: float }
+
+@scalar_abi inline(lua) fn collide(r: V2, r__x: float) -> float = """
+    return r__x + r__y
+"""
+
+fn main() { print("{collide(V2 { x: 2.0, y: 3.0 }, 100.0)}") }
+
+//=== TEST CASE: sibling_param_collides_with_a_nested_leaf_Generic ===
+// The same class one level deeper: the sibling param spells out a NESTED leaf.
+value V2 { x: float, y: float }
+value Rect { tl: V2, br: V2 }
+
+@scalar_abi inline(lua) fn collide2(r: Rect, r__tl__x: float) -> float = """
+    return r__tl__x + r__br__y
+"""
+
+fn main() { print("{collide2(Rect { tl: V2 { x: 1.0, y: 2.0 }, br: V2 { x: 3.0, y: 4.0 } }, 9.0)}") }
+
+//=== TEST CASE: deep_nesting_collision_Generic ===
+// Two levels down: `a.b.c` and a flat `a__b__c` join alike.
+value Inner { c: float }
+value Mid { b: Inner }
+value Deep { a: Mid, a__b__c: float }
+
+@scalar_abi inline(lua) fn deep(r: Deep) -> float = """
+    return r__a__b__c
+"""
+
+fn main() { let _ = deep(Deep { a: Mid { b: Inner { c: 1.0 } }, a__b__c: 2.0 }) }

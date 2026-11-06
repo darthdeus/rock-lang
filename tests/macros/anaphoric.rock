@@ -1,0 +1,37 @@
+// Slice 3: `^name` anaphoric ident — caller-scope resolution after
+// macro expansion. Bare references in macro bodies stay hygienic
+// (Slice 1 codegen rule), so `^name` is the explicit opt-in for
+// reading the caller's binding.
+
+global ANA_GLOBAL: int = 1000
+
+macro ana_read_anaphoric() -> int {
+    ^ANA_GLOBAL
+}
+
+macro ana_read_global() -> int {
+    _G.ANA_GLOBAL
+}
+
+@test
+fn test_anaphoric_picks_caller_local_over_def_global() {
+    let ANA_GLOBAL = 42
+    assert_eq(ana_read_anaphoric(), 42)   // ^X reads caller local
+    assert_eq(ana_read_global(), 1000)    // bare X stays hygienic
+}
+
+macro ana_double() -> int {
+    ^x * 2
+}
+
+@test
+fn test_anaphoric_local() {
+    let x = 7
+    assert_eq(ana_double(), 14)
+}
+
+@test
+fn test_anaphoric_other_local() {
+    let x = 5
+    assert_eq(ana_double(), 10)
+}

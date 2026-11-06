@@ -1,0 +1,58 @@
+// Adversarial tests: @inline — nested chains
+//
+// @inline fns that call other @inline fns that call others. The inline
+// pass must fully expand the chain (or cap at depth, never silently).
+
+@inline
+fn level3(x: int) -> int {
+    return x + 1
+}
+
+@inline
+fn level2(x: int) -> int {
+    return level3(x) * 2
+}
+
+@inline
+fn level1(x: int) -> int {
+    return level2(x) + level3(x)
+}
+
+@inline
+fn level0(x: int) -> int {
+    return level1(x) - level2(x) + level3(x)
+}
+
+@test(output = "12")
+fn test_two_level_chain() {
+    // level2(5) = level3(5) * 2 = 6 * 2 = 12
+    print(level2(5))
+}
+
+@test(output = "18")
+fn test_three_level_chain() {
+    // level3(5) = 6
+    // level2(5) = 12
+    // level1(5) = level2(5) + level3(5) = 12 + 6 = 18
+    print(level1(5))
+}
+
+@test(output = "18")
+fn test_four_level_chain() {
+    // level3(8) = 9; level2(8) = 18; level1(8) = 18+9 = 27
+    // level0(8) = level1(8) - level2(8) + level3(8) = 27 - 18 + 9 = 18
+    print(level0(8))
+}
+
+// Ensure inlining preserves operator precedence, not just call chain
+@inline
+fn mul(a: int, b: int) -> int { a * b }
+
+@inline
+fn add(a: int, b: int) -> int { a + b }
+
+@test(output = "20")
+fn test_precedence_in_nested() {
+    // add(mul(2, 3), mul(2, 7)) = 6 + 14 = 20
+    print(add(mul(2, 3), mul(2, 7)))
+}

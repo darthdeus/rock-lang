@@ -1,0 +1,194 @@
+// Arena iteration through the unified iterator protocol: `values()` yields T,
+// `pairs()` yields (Entity<T>, T) as a tuple ELEMENT, so both satisfy
+// `Iterator<..>` and compose with every combinator + terminal. Bare
+// `for (e, v) in arena` desugars through `iter(arena)` = pairs mode.
+
+struct Mob {
+    name: string,
+    health: int,
+}
+
+fn mk_arena() -> Arena<Mob> {
+    let mobs: Arena<Mob> = arena_new()
+    mobs.insert(Mob { name: "rat", health: 10 })
+    mobs.insert(Mob { name: "bat", health: 20 })
+    mobs.insert(Mob { name: "boss", health: 100 })
+    return mobs
+}
+
+@test
+fn values_basic() {
+    let mobs = mk_arena()
+    let total = 0
+    for m in mobs.values() {
+        total += m.health
+    }
+    assert_eq(total, 130)
+}
+
+@test
+fn values_skips_holes() {
+    let mobs = mk_arena()
+    let doomed = mobs.pairs().find(p => p.1.name == "bat")
+    assert(doomed != null)
+    if doomed != null {
+        doomed.0.remove()
+    }
+    let total = 0
+    let count = 0
+    for m in mobs.values() {
+        total += m.health
+        count += 1
+    }
+    assert_eq(count, 2)
+    assert_eq(total, 110)
+}
+
+@test
+fn values_through_combinators_and_terminals() {
+    let mobs = mk_arena()
+    assert(mobs.values().any(m => m.health > 50))
+    assert(!mobs.values().all(m => m.health > 15))
+    let names = mobs.values().filter(m => m.health >= 20).map(m => m.name).collect()
+    assert_eq(names.len, 2)
+    let sum = mobs.values().reduce(0, (acc, m) => acc + m.health)
+    assert_eq(sum, 130)
+}
+
+@test
+fn pairs_destructures_in_for() {
+    let mobs = mk_arena()
+    let count = 0
+    for (e, m) in mobs.pairs() {
+        if m.health > 0 {
+            count += 1
+        }
+        assert(e.get() != null)
+    }
+    assert_eq(count, 3)
+}
+
+@test
+fn pairs_filter_collect_keeps_entities() {
+    let mobs = mk_arena()
+    let strong = mobs.pairs().filter(p => p.1.health >= 20).collect()
+    assert_eq(strong.len, 2)
+    for (e, m) in strong {
+        assert(e.get() != null)
+        assert(m.health >= 20)
+    }
+}
+
+@test
+fn pairs_find_boss_and_remove() {
+    let mobs = mk_arena()
+    let boss = mobs.pairs().find(p => p.1.name == "boss")
+    assert(boss != null)
+    if boss != null {
+        assert_eq(boss.1.health, 100)
+        boss.0.remove()
+        assert(boss.0.get() == null)
+    }
+    assert(!mobs.values().any(m => m.name == "boss"))
+}
+
+@test
+fn pairs_map_entity_projection() {
+    let mobs = mk_arena()
+    let entities = mobs.pairs().filter(p => p.1.health < 50).map(p => p.0).collect()
+    assert_eq(entities.len, 2)
+    for e in entities {
+        assert(e.get() != null)
+    }
+}
+
+@test
+fn bare_for_is_pair_mode() {
+    let mobs = mk_arena()
+    let total = 0
+    let alive = 0
+    for (e, m) in mobs {
+        total += m.health
+        if e.get() != null {
+            alive += 1
+        }
+    }
+    assert_eq(total, 130)
+    assert_eq(alive, 3)
+}
+
+@test
+fn bare_for_skips_holes() {
+    let mobs = mk_arena()
+    for (e, m) in mobs {
+        if m.name == "rat" {
+            e.remove()
+        }
+    }
+    let count = 0
+    for (e, m) in mobs {
+        count += 1
+    }
+    assert_eq(count, 2)
+}
+
+@test
+fn arena_iter_chains_with_combinators() {
+    let mobs = mk_arena()
+    let hurt = mobs.iter().filter(p => p.1.health < 100).collect()
+    assert_eq(hurt.len, 2)
+}
+
+@test
+fn empty_arena_iteration() {
+    let mobs: Arena<Mob> = arena_new()
+    let count = 0
+    for (e, m) in mobs {
+        count += 1
+    }
+    assert_eq(count, 0)
+    assert(!mobs.values().any(m => true))
+    assert_eq(mobs.pairs().collect().len, 0)
+}
+
+@test
+fn keys_iterates_entities() {
+    let mobs = mk_arena()
+    let n = 0
+    for e in mobs.keys() {
+        assert(e.get() != null)
+        n += 1
+    }
+    assert_eq(n, 3)
+    let dead = mobs.keys().filter(e => (e.get()?.health ?? 0) < 15).collect()
+    assert_eq(dead.len, 1)
+}
+
+@test
+fn pairs_enumerate_nests_a_tuple_element() {
+    let mobs = mk_arena()
+    let rows = mobs.pairs().enumerate().collect()
+    assert_eq(rows.len, 3)
+    assert_eq(rows[0].0, 0)
+    assert_eq(rows[2].0, 2)
+    assert_eq(rows[1].1.1.name, "bat")
+    assert_eq(mobs.pairs().enumerate().count(), 3)
+}
+
+// `enumerate` over an arena has no eager overload -- it coerces to the lazy
+// `EnumIter` like a vec does, so the result stays an iterator until a terminal.
+@test
+fn enumerate_coerces_to_the_lazy_iterator() {
+    let mobs = mk_arena()
+    let rows = mobs.enumerate().collect()
+    assert_eq(rows.len, 3)
+    assert_eq(rows[1].0, 1)
+    assert_eq(rows[1].1.1.name, "bat")
+    assert_eq(mobs.enumerate().filter(r => r.1.1.health > 15).count(), 2)
+    let seen = 0
+    for (i, (e, m)) in enumerate(mobs) {
+        assert(e.get() != null)
+        seen += i + m.health
+    }
+    assert_eq(seen, 133)
+}

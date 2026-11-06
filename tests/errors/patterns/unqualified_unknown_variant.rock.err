@@ -1,0 +1,20 @@
+//! Error: a bare `Name` match arm is a nullary-variant tag test when the name
+//!        is a variant of the scrutinee enum, and a binding otherwise. The
+//!        discriminant is capitalization, so an uppercase arm name over an
+//!        enum scrutinee must name a real variant -- a typo would otherwise
+//!        become a silent catch-all and kill every arm after it.
+//! Tags: patterns, enums, match
+
+//=== TEST CASE: unqualified_unknown_variant_rejected ===
+enum Choice { A, B }
+
+fn f(c: Choice) -> int {
+    match c {
+        A => 1
+        Nope => 2   // ERROR: `Nope` is not a variant of `Choice`
+    }
+}
+
+fn main() {
+    print("{f(Choice::A)}")
+}

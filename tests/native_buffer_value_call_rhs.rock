@@ -1,0 +1,45 @@
+// Adversarial: a regular Rock fn call returning a value struct used
+// as a nested field RHS. The Multi shape from `generate_expr_emit`
+// should align with the inner struct fields and produce per-leaf
+// stores; otherwise it falls back to a single cdata-cell store.
+
+@intrinsic @inline inline(lua) fn put(s: string) = "io.write(s)"
+
+value V2 {
+    x: float,
+    y: float,
+}
+
+value Pair {
+    first: V2,
+    second: V2,
+}
+
+@nomangle inline(lua) fn __nb_alloc_Pair(n: int) -> Ptr<Pair> = 'return ffi.new("Pair[?]", n)'
+
+fn nb_pair(n: int) -> NativeBuffer<Pair> {
+    return NativeBuffer { ptr: __nb_alloc_Pair(n), len: n }
+}
+
+fn make_v2(a: float, b: float) -> V2 {
+    return V2 { x: a, y: b }
+}
+
+@test(output = "f.x=1\nf.y=2\ns.x=3\ns.y=4")
+fn test_call_value_rhs() {
+    let buf = nb_pair(1)
+    buf[0] = Pair { first: make_v2(1.0, 2.0), second: make_v2(3.0, 4.0) }
+    let p = buf[0]
+    put("f.x=")
+    put("{p.first.x}")
+    put("\n")
+    put("f.y=")
+    put("{p.first.y}")
+    put("\n")
+    put("s.x=")
+    put("{p.second.x}")
+    put("\n")
+    put("s.y=")
+    put("{p.second.y}")
+    put("\n")
+}

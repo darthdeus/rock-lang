@@ -1,0 +1,32 @@
+//! Error: Decorator body type error tests
+//! Tags: decorators, types
+
+//=== TEST CASE: deco_init_type_mismatch_MismatchedType ===
+deco init bad_types {
+    let x: int = "hello"
+}
+
+@bad_types
+fn foo() {}
+
+fn main() {}
+
+//=== TEST CASE: deco_invalid_target_field_Generic ===
+deco init invalid_field {
+    let x = target.nonexistent_field
+}
+
+@invalid_field
+fn baz() {}
+
+fn main() {}
+
+//=== TEST CASE: deco_param_type_mismatch_MismatchedType ===
+deco init param_error(priority: int) {
+    let x: string = priority
+}
+
+@param_error(5)
+fn qux() {}
+
+fn main() {}

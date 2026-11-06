@@ -1,0 +1,74 @@
+// 8A: scalarized value-local reassignment.
+//
+// When `v` is a scalarized value local (per-field scalars `v__x`,
+// `v__y`), an `Assign` `v = <rhs>` must fan-out into one Assign per
+// slot. The default `lower_assign` path emits a single Assign which is
+// wrong shape (and the previous code rejected to live). This test
+// drives the absorbed ANF path: byte-equivalent Lua across rebinds.
+
+value V2 { x: int, y: int }
+
+@test(output = "30")
+fn test_value_local_reassign_struct_lit() {
+    let v = V2 { x: 1, y: 2 }
+    v = V2 { x: 10, y: 20 }
+    print(v.x + v.y)
+}
+
+@test(output = "30")
+fn test_value_local_reassign_from_other_local() {
+    let v1 = V2 { x: 10, y: 20 }
+    let v = V2 { x: 1, y: 2 }
+    v = v1
+    print(v.x + v.y)
+}
+
+fn make_v2(a: int, b: int) -> V2 {
+    return V2 { x: a, y: b }
+}
+
+@test(output = "30")
+fn test_value_local_reassign_from_call() {
+    let v = V2 { x: 1, y: 2 }
+    v = make_v2(10, 20)
+    print(v.x + v.y)
+}
+
+// Reassignment must COPY, not bind the source place. These are the cases the
+// three above do not reach: they check the value ARRIVES, not that it is
+// independent of where it came from. Copy-on-whole-value-read is the invariant
+// the place model rests on, and it is broken for
+// one other shape -- see tests/value_nullable_read_aliasing.rock.
+
+struct Box { p: V2 }
+struct NBox { p: V2? }
+
+@test(output = "v=1 src=99")
+fn reassign_from_field_copies() {
+    let src = Box { p: V2 { x: 1, y: 2 } }
+    let v = V2 { x: 0, y: 0 }
+    v = src.p
+    src.p.x = 99
+    print("v={v.x} src={src.p.x}")
+}
+
+// The nullable path is where the sibling file's aliasing bug lives; through
+// reassignment it copies correctly, which is what scopes that bug to a ctor
+// field operand rather than to nullable value reads at large.
+@test(output = "v=1 src=99")
+fn reassign_from_nullable_field_copies() {
+    let src = NBox { p: V2 { x: 1, y: 2 } }
+    let v = V2 { x: 0, y: 0 }
+    if src.p != null {
+        v = src.p
+        src.p.x = 99
+        print("v={v.x} src={src.p.x}")
+    }
+}
+
+@test(output = "7")
+fn reassign_nullable_local() {
+    let a: V2? = V2 { x: 1, y: 2 }
+    a = V2 { x: 7, y: 8 }
+    if a != null { print("{a.x}") }
+}

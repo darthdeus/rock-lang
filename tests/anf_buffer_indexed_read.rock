@@ -1,0 +1,28 @@
+// Sentinel: NativeBuffer[i] indexed read as let-RHS / print-arg.
+// Routes through `try_emit_anf_value_into` (let-init).
+// In debug mode the ANF `lower_into` Index arm at lower.rs:1510 uses
+// `index_get_helper` (`__nb_checked_get`) -> AnfComp::Call. In release
+// mode it uses `index_kind=NativeBuffer` -> AnfComp::IndexGet.
+
+@test(output = "42")
+fn test_buffer_int_indexed_read() {
+    let buf = native_buffer_int(4)
+    buf[0] = 42
+    let v = buf[0]
+    print(v)
+}
+
+@test(output = "3")
+fn test_buffer_float_indexed_read_print() {
+    let buf = native_buffer_float(4)
+    buf[2] = 3.0
+    print(buf[2] as int)
+}
+
+@test(output = "9")
+fn test_buffer_u8_indexed_read() {
+    let buf = native_buffer_u8(8)
+    buf[3] = 9
+    let v = buf[3]
+    print(v)
+}

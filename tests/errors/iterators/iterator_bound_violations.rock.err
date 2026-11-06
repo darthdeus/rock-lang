@@ -1,0 +1,84 @@
+//! Error: `Iterator<T>` bound violations reject with a message naming the
+//!        missing piece. Bounds are STRUCTURAL: `C` satisfies `Iterator<E>` iff
+//!        `next(C) -> (bool, E)` resolves. Replaces the parse-error sentinel
+//!        (bounds now parse).
+//! Tags: iterators, generics, bounds
+
+//=== TEST CASE: non_iterator_arg_fails_bound_Generic ===
+struct Wrap<I> { inner: I }
+fn wrap_it<I: Iterator<T>, T>(x: I) -> Wrap<I> {
+    return Wrap { inner: x }
+}
+fn main() {
+    // `int` has no `next(int) -> (bool, E)` -- does not satisfy the bound.
+    let w = wrap_it(3)
+    let _ = w
+}
+
+//=== TEST CASE: unknown_bound_name_rejects_Generic ===
+fn take_foo<I: Frobnicator<T>, T>(x: I) -> int {
+    return 0
+}
+fn main() {
+    let _ = take_foo(3)
+}
+
+//=== TEST CASE: bound_on_struct_decl_rejects_Generic ===
+struct Holder<I: Iterator<T>, T> { it: I }
+fn main() {
+    let _ = 1
+}
+
+//=== TEST CASE: elem_type_mismatch_rejects_Generic ===
+fn sum_ints<I: Iterator<int>>(it: I) -> int {
+    let total = 0
+    for x in it { total += x }
+    return total
+}
+fn main() {
+    let v = ["a", "b"]
+    // VecIter<string> satisfies Iterator<string>, not Iterator<int>.
+    let _ = sum_ints(v.iter())
+}
+
+//=== TEST CASE: multi_value_iterator_cannot_be_wrapped_Generic ===
+struct Multi { n: int }
+struct MultiIter { cur: int, n: int }
+fn iter(m: Multi) -> MultiIter { return MultiIter { cur: 0, n: m.n } }
+fn next(it: MultiIter) -> (bool, int, int) {
+    if it.cur >= it.n { return (false, 0, 0) }
+    it.cur = it.cur + 1
+    return (true, it.cur, it.cur * 2)
+}
+fn main() {
+    let m = Multi { n: 3 }
+    // A 3-value `next` drives a `for` fine, but a bound requires exactly
+    // (bool, E), so wrapping it in map rejects. (Stdlib iterators all yield
+    // tuple ELEMENTS now -- enumerate/zip/pairs -- so only a user iterator
+    // can hit this.)
+    for x in m.iter().map(p => p) {
+        let _ = x
+    }
+}
+
+//=== TEST CASE: bounded_fn_as_value_rejects_Generic ===
+fn sum_it<I: Iterator<int>>(it: I) -> int {
+    let total = 0
+    for x in it { total += x }
+    return total
+}
+fn main() {
+    // A bounded fn exists only inlined at call sites -- no runtime identity.
+    let f = sum_it
+    let _ = f
+}
+
+//=== TEST CASE: unbounded_generic_not_iterable_Generic ===
+fn each<I>(it: I) {
+    for x in it {
+        let _ = x
+    }
+}
+fn main() {
+    each([1, 2, 3])
+}

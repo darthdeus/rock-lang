@@ -1,0 +1,67 @@
+// JS backend module globals (T8d): module-level `let`/`global` state
+// (Global read + StoreGlobal write) and a top-level fn referenced as a VALUE
+// (`Inst::Global` naming a function). State globals emit into a scoped `__G`
+// object so no user global can collide with or be shadowed by an emitted body
+// local (r/v/c); a fn-as-value global renders as its co-emitted JS name. Init
+// runs once at program load, in transitive-dependency order (luajit module
+// semantics). Runs under BOTH executors so the JS shapes are luajit-checked.
+
+const CANS: int = 7
+global COUNTER: int = 0
+global BASE: int = 100
+global DERIVED: int = BASE + 5
+
+fn bump() -> int {
+    COUNTER = COUNTER + 1
+    return COUNTER
+}
+
+// A const global read in arithmetic.
+@test(returns = 21)
+fn read_const_global() -> int {
+    return CANS * 3
+}
+
+// Mutable state: reset, mutate through a call chain, read back.
+@test(returns = 3)
+fn mutate_counter() -> int {
+    COUNTER = 0
+    bump()
+    bump()
+    return bump()
+}
+
+// A global initialized FROM another global -- init order must place BASE first.
+@test(returns = 105)
+fn derived_global_init() -> int {
+    return DERIVED
+}
+
+// A top-level fn used as a value (Inst::Global naming a function).
+fn add_one(x: int) -> int {
+    return x + 1
+}
+
+@test(returns = 6)
+fn fn_as_value() -> int {
+    let f = add_one
+    return f(5)
+}
+
+// A fn value passed to a higher-order fn.
+fn apply(f: fn(int) -> int, x: int) -> int {
+    return f(x)
+}
+
+@test(returns = 8)
+fn fn_value_as_arg() -> int {
+    return apply(add_one, 7)
+}
+
+// Output form: mutate a global across calls and print it (module state persists
+// between the calls within one test, same as luajit).
+@test(output = "1 2 3")
+fn counter_output() {
+    COUNTER = 0
+    print("{bump()} {bump()} {bump()}")
+}

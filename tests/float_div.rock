@@ -1,0 +1,30 @@
+// `/` is always float division.
+
+@test
+fn test_div_infers_float() {
+    // unannotated let infers float, no truncation
+    let x = 3 / 4
+    assert_eq(x, 0.75)
+}
+
+@test
+fn test_div_annotated_float() {
+    let x: float = 3 / 4
+    assert_eq(x, 0.75)
+}
+
+@test
+fn test_div_mixed_operands() {
+    assert_eq(3 / 2, 1.5)
+}
+
+@test
+fn test_div_int_promotes_into_float_arg() {
+    // int literal promotes into the float `/`
+    assert_eq(10 / 4, 2.5)
+}
+
+@test(output = "0.75")
+fn test_div_print() {
+    print(3 / 4)
+}

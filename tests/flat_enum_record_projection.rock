@@ -1,0 +1,116 @@
+nobox value ProjectedId { scene: int, arena: int, slot: int, generation: int }
+enum ProjectedTarget { Player, Mob(ProjectedId) }
+nobox value ProjectedLock { target: ProjectedTarget, visible: bool }
+nobox value ProjectedSnapshot { lock: ProjectedLock }
+struct ProjectedState { snapshot: ProjectedSnapshot }
+
+fn projected_state(snapshot: ProjectedSnapshot) -> ProjectedState {
+    return ProjectedState { snapshot }
+}
+
+fn projected_is_player(state: ProjectedState) -> bool {
+    if let ProjectedTarget::Player = state.snapshot.lock.target {
+        return true
+    }
+    return false
+}
+
+fn projected_payload(state: ProjectedState) -> int {
+    return match state.snapshot.lock.target {
+        ProjectedTarget::Player => -1,
+        ProjectedTarget::Mob(id) => id.scene + id.arena + id.slot + id.generation,
+    }
+}
+
+@test
+fn flat_enum_record_projection_reads_unit_and_payload() {
+    let state = projected_state(ProjectedSnapshot {
+        lock: ProjectedLock { target: ProjectedTarget::Player, visible: false },
+    })
+    assert(projected_is_player(state))
+    assert_eq(projected_payload(state), -1)
+    state.snapshot.lock.target = ProjectedTarget::Mob(ProjectedId {
+        scene: 1, arena: 2, slot: 3, generation: 4,
+    })
+    assert(!projected_is_player(state))
+    assert_eq(projected_payload(state), 10)
+}
+
+@test
+fn flat_enum_record_projection_agrees_for_literal_and_whole_store() {
+    let state = ProjectedState {
+        snapshot: ProjectedSnapshot {
+            lock: ProjectedLock { target: ProjectedTarget::Player, visible: false },
+        },
+    }
+    assert(projected_is_player(state))
+    let snapshot = ProjectedSnapshot {
+        lock: ProjectedLock {
+            target: ProjectedTarget::Mob(ProjectedId {
+                scene: 11, arena: 13, slot: 17, generation: 19,
+            }),
+            visible: true,
+        },
+    }
+    state.snapshot = snapshot
+    assert_eq(projected_payload(state), 60)
+    let copied = state.snapshot
+    state.snapshot.lock.target = ProjectedTarget::Player
+    assert_eq(projected_payload(projected_state(copied)), 60)
+    assert(projected_is_player(state))
+}
+
+global PROJECTED_READS: int = 0
+
+fn projected_once(state: ProjectedState) -> ProjectedState {
+    PROJECTED_READS += 1
+    return state
+}
+
+@test
+fn flat_enum_record_projection_evaluates_owner_once() {
+    let state = projected_state(ProjectedSnapshot {
+        lock: ProjectedLock { target: ProjectedTarget::Player, visible: false },
+    })
+    PROJECTED_READS = 0
+    let player = false
+    if let ProjectedTarget::Player = projected_once(state).snapshot.lock.target {
+        player = true
+    }
+    assert(player)
+    assert_eq(PROJECTED_READS, 1)
+}
+
+nobox value ProjectedOptionalSnapshot { lock: ProjectedLock? }
+struct ProjectedOptionalState { snapshot: ProjectedOptionalSnapshot }
+
+fn projected_optional_state(snapshot: ProjectedOptionalSnapshot) -> ProjectedOptionalState {
+    return ProjectedOptionalState { snapshot }
+}
+
+fn projected_optional_payload(state: ProjectedOptionalState) -> int {
+    if let lock = state.snapshot.lock {
+        return match lock.target {
+            ProjectedTarget::Player => 0,
+            ProjectedTarget::Mob(id) => id.slot,
+        }
+    }
+    return -1
+}
+
+@test
+fn flat_enum_record_projection_preserves_nullable_child() {
+    let state = projected_optional_state(ProjectedOptionalSnapshot { lock: null })
+    assert_eq(projected_optional_payload(state), -1)
+    state.snapshot.lock = ProjectedLock {
+        target: ProjectedTarget::Mob(ProjectedId {
+            scene: 2, arena: 3, slot: 5, generation: 7,
+        }),
+        visible: false,
+    }
+    assert_eq(projected_optional_payload(state), 5)
+    state.snapshot.lock = ProjectedLock { target: ProjectedTarget::Player, visible: false }
+    assert_eq(projected_optional_payload(state), 0)
+    state.snapshot.lock = null
+    assert_eq(projected_optional_payload(state), -1)
+}

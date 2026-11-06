@@ -1,0 +1,54 @@
+//! Error: swizzle misuse on Vec2/3/4 -- out-of-arity components, mixed
+//!        alphabets, writes (swizzles are read-only synthetic fields), and
+//!        swizzle-shaped names on non-vec receivers stay plain missing-field
+//!        errors.
+//! Tags: swizzle, vec, fields
+
+//=== TEST CASE: vec2_component_out_of_arity_Rejected ===
+fn main() {
+    let p = v(1.0, 2.0)
+    let q = p.xz   // ERROR: Vec2 has no z component
+    print("{q.x}")
+}
+
+//=== TEST CASE: vec3_w_component_Rejected ===
+fn main() {
+    let p = v(1.0, 2.0, 3.0)
+    let q = p.xw   // ERROR: Vec3 has no w component
+    print("{q.x}")
+}
+
+//=== TEST CASE: mixed_alphabet_Rejected ===
+fn main() {
+    let c = v(1.0, 2.0, 3.0, 4.0)
+    let q = c.xg   // ERROR: mixed swizzle alphabets
+    print("{q.x}")
+}
+
+//=== TEST CASE: swizzle_assignment_Rejected ===
+fn main() {
+    let p = v(1.0, 2.0)
+    p.yx = v(3.0, 4.0)   // ERROR: swizzles are read-only
+}
+
+//=== TEST CASE: swizzle_compound_assignment_Rejected ===
+fn main() {
+    let p = v(1.0, 2.0)
+    p.xy += v(1.0, 1.0)   // ERROR: swizzles are read-only
+}
+
+//=== TEST CASE: swizzle_name_on_non_vec_struct_Rejected ===
+struct Foo { x: float }
+
+fn main() {
+    let f = Foo { x: 1.0 }
+    let q = f.yx   // ERROR: no such field on Foo
+    print("{q}")
+}
+
+//=== TEST CASE: too_long_swizzle_Rejected ===
+fn main() {
+    let p = v(1.0, 2.0)
+    let q = p.xyxyx   // ERROR: swizzles are at most 4 components
+    print("{q}")
+}

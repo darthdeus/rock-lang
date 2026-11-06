@@ -1,0 +1,223 @@
+// Function pointer tests - migrated from rock/tests/function_pointer_tests.rs
+// Tests function references, higher-order functions, and function pointer behavior
+
+// Shared struct definition
+struct Point {
+    x: int,
+    y: int,
+}
+
+// Basic function definitions
+fn simple_function() -> int {
+    return 42
+}
+
+fn add_one(x: int) -> int {
+    return x + 1
+}
+
+fn double(x: int) -> int {
+    return x * 2
+}
+
+fn multiply(a: int, b: int) -> int {
+    return a * b
+}
+
+fn float_add(a: float, b: float) -> float {
+    return a + b
+}
+
+fn get_answer() -> int {
+    return 42
+}
+
+fn add_five(x: int) -> int {
+    return x + 5
+}
+
+fn multiply_two(x: int) -> int {
+    return x * 2
+}
+
+fn subtract_one(x: int) -> int {
+    return x - 1
+}
+
+fn square(x: int) -> int {
+    return x * x
+}
+
+fn add_two(x: int) -> int {
+    return x + 2
+}
+
+fn multiply_three(x: int) -> int {
+    return x * 3
+}
+
+fn sum_array(arr: [int]) -> int {
+    let total = 0
+    for val in arr {
+        total = total + val
+    }
+    return total
+}
+
+fn distance_from_origin(p: Point) -> int {
+    return p.x * p.x + p.y * p.y
+}
+
+// Higher-order functions
+fn apply_twice(f: fn(int) -> int, x: int) -> int {
+    return f(f(x))
+}
+
+fn transform(f: fn(int) -> int, value: int) -> int {
+    return f(value)
+}
+
+fn compose(f: fn(int) -> int, g: fn(int) -> int, x: int) -> int {
+    return f(g(x))
+}
+
+// Functions for shadowing tests
+fn test_func() -> int {
+    return 42
+}
+
+fn helper() -> int {
+    return 100
+}
+
+fn global_func() -> int {
+    return 999
+}
+
+fn test() {
+    let test_func = 10
+    print(test_func) // Should print 10, not call function
+}
+
+fn test_ref() {
+    let func_ref = &helper  // Get function reference first
+    let helper = 50        // Shadow the function name
+    print(func_ref())      // Should still work with function
+    print(helper)          // Should print the variable value
+}
+
+fn test_param(global_func: int) {
+    print(global_func) // Should use parameter, not function
+}
+
+// Basic function pointer tests
+@test(output = "42")
+fn function_reference_simple() {
+    let func_ref = simple_function
+    print(func_ref())
+}
+
+@test(output = "6")
+fn function_reference_with_params() {
+    let func_ref = add_one
+    print(func_ref(5))
+}
+
+@test(output = "10")
+fn function_reference_type_inference() {
+    let func_ref = double
+    print(func_ref(5))
+}
+
+@test(output = "12")
+fn function_reference_multiple_params() {
+    let func_ref = multiply
+    print(func_ref(3, 4))
+}
+
+@test(output = "5.6")
+fn function_reference_different_types() {
+    let func_ref = float_add
+    print(func_ref(3.5, 2.1))
+}
+
+// Function pointer assignment tests
+@test(output = "42")
+fn assign_to_variable() {
+    let my_func = get_answer
+    print(my_func())
+}
+
+@test(output = "15\n20")
+fn assign_multiple_functions() {
+    let func1 = add_five
+    let func2 = multiply_two
+
+    print(func1(10))
+    print(func2(10))
+}
+
+@test(output = "6\n4")
+fn reassign_function_pointer() {
+    let func = add_one
+    print(func(5))
+
+    func = subtract_one
+    print(func(5))
+}
+
+// Function pointer as parameter tests
+@test(output = "7")
+fn pass_function_as_parameter() {
+    print(apply_twice(add_one, 5))
+}
+
+@test(output = "10\n25")
+fn higher_order_function_with_different_functions() {
+    print(transform(double, 5))
+    print(transform(square, 5))
+}
+
+@test(output = "14")
+fn function_composition() {
+    print(compose(add_two, multiply_three, 4))
+}
+
+// Function pointer shadowing tests
+@test(output = "10")
+fn variable_shadows_function() {
+    test()
+}
+
+@test(output = "100\n50")
+fn function_reference_before_shadowing() {
+    test_ref()
+}
+
+@test(output = "42")
+fn parameter_shadows_function_name() {
+    test_param(42)
+}
+
+// Complex type tests
+@test(output = "15")
+fn function_with_array_parameters() {
+    let func_ref = sum_array
+    print(func_ref([1, 2, 3, 4, 5]))
+}
+
+@test(output = "25")
+fn function_with_struct_parameters() {
+    let func_ref = distance_from_origin
+
+    let point = Point { x: 3, y: 4 }
+    print(func_ref(point))
+}
+
+// NOTE: The following tests from the original file are not migrated because:
+// 1. Nested function definitions are not supported in Rock
+// 2. Function pointers as return values require nested functions
+// 3. Arrays of function pointers not fully supported
+// 4. Struct fields with function pointers not fully supported
+// 5. Overloaded function reference errors can't be tested with @test
+// 6. Type mismatch and parameter count errors are compile-time errors

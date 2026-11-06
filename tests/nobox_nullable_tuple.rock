@@ -1,0 +1,244 @@
+// A nullable TUPLE whose element is a `nobox` value -- `(NV, int)?`.
+//
+// The wire is a presence bool leading one slot per element, and a `let` binds
+// that wire cell-wise (`tuple_binds`) instead of packing it. Packing is what
+// used to happen, and it failed twice over: it boxed the `nobox` element, and a
+// packed tuple is structurally never nil, so `t == null` answered `false` on the
+// absent arm.
+//
+// `?.` is NOT the discriminant. A safe-nav yielding a tuple and a plain call
+// declared `-> (NV, int)?` reached the same missing `let` arm; the safe-nav case
+// only additionally needed its JOIN to mint a presence tag, since no callee puts
+// one on that wire.
+//
+// The whole-tuple ESCAPE stays a rejection by design -- `print("{t}")` packs,
+// which is exactly how the guarantee stays honest. Pinned in
+// `tests/errors/nobox_container_gaps.rock.err`.
+
+nobox value NV { x: int, y: int }
+
+value BV { x: int, y: int }
+
+struct Holder { v: NV, n: int }
+
+fn Holder.wire2(h) -> (NV, int) { return (h.v, h.n) }
+
+fn Holder.maybe2(h) -> (NV, int)? {
+    if h.n > 0 { return (h.v, h.n) }
+    return null
+}
+
+fn pick(b: bool) -> Holder? {
+    if b { return Holder { v: NV { x: 3, y: 6 }, n: 7 } }
+    return null
+}
+
+fn maybe(b: bool) -> (NV, int)? {
+    if b { return (NV { x: 3, y: 6 }, 1) }
+    return null
+}
+
+// --- a declared `-> (..)?` bound by `let` ---
+
+@test(returns = 1)
+fn declared_nullable_tuple_binds_present() -> int {
+    let t = maybe(true)
+    if t == null { return -1 }
+    return 1
+}
+
+@test(returns = 1)
+fn declared_nullable_tuple_binds_absent() -> int {
+    let t = maybe(false)
+    if t == null { return 1 }
+    return -1
+}
+
+@test(returns = 10)
+fn a_bound_nullable_tuple_projects_its_slots() -> int {
+    let t = maybe(true)
+    if t == null { return -1 }
+    return t.0.x + t.0.y + t.1
+}
+
+// --- `?.` yielding a tuple ---
+
+@test(returns = 1)
+fn safe_nav_tuple_present() -> int {
+    let t = pick(true)?.wire2()
+    if t == null { return -1 }
+    return 1
+}
+
+@test(returns = 1)
+fn safe_nav_tuple_absent_receiver() -> int {
+    let t = pick(false)?.wire2()
+    if t == null { return 1 }
+    return -1
+}
+
+@test(returns = 16)
+fn safe_nav_tuple_projects_its_slots() -> int {
+    let t = pick(true)?.wire2()
+    if t == null { return -1 }
+    return t.0.x + t.0.y + t.1
+}
+
+// Both links are absence: the receiver is present but the method returns null,
+// so the join forwards the CALLEE's presence tag rather than minting `true`.
+@test(returns = 1)
+fn safe_nav_forwards_the_callees_own_absence() -> int {
+    let h: Holder? = Holder { v: NV { x: 3, y: 6 }, n: 0 }
+    let t = h?.maybe2()
+    if t == null { return 1 }
+    return -1
+}
+
+// --- forwarding a nullable tuple straight out of a `-> (..)?` fn ---
+
+fn fwd(b: bool) -> (NV, int)? { return maybe(b) }
+
+@test(returns = 1)
+fn forwarding_preserves_absence() -> int {
+    if fwd(true) == null { return -1 }
+    if fwd(false) == null { return 1 }
+    return -1
+}
+
+fn fwd_bound(b: bool) -> (NV, int)? {
+    let t = maybe(b)
+    return t
+}
+
+@test(returns = 1)
+fn forwarding_a_bound_wire_preserves_absence() -> int {
+    if fwd_bound(true) == null { return -1 }
+    if fwd_bound(false) == null { return 1 }
+    return -1
+}
+
+// --- `if let` ---
+
+@test(returns = 9)
+fn if_let_binds_a_present_nullable_tuple() -> int {
+    if let t = maybe(true) { return t.0.x + t.0.y } else { return -1 }
+}
+
+@test(returns = 1)
+fn if_let_misses_an_absent_nullable_tuple() -> int {
+    if let t = pick(false)?.wire2() { return t.1 } else { return 1 }
+}
+
+// A DESTRUCTURING pattern is the same wire, and it used to miss the presence
+// slot entirely: only `Pattern::Bind` took the wire-aware path, so `(v, n)` fell
+// through to the boxed one, where the nil test is against a `MakeTuple` that is
+// never nil -- always-present, else arm deleted, absent arm reading nil leaves.
+// A hole is names-only too, and still consumes its slots.
+
+@test(returns = 10)
+fn if_let_destructures_a_present_nullable_tuple() -> int {
+    if let (v, n) = maybe(true) { return v.x + v.y + n } else { return -1 }
+}
+
+@test(returns = 1)
+fn if_let_destructuring_misses_an_absent_one() -> int {
+    if let (v, n) = maybe(false) { return v.x + n } else { return 1 }
+}
+
+@test(returns = 3)
+fn a_hole_consumes_its_slots() -> int {
+    if let (v, _) = maybe(true) { return v.x } else { return -1 }
+}
+
+@test(returns = 1)
+fn a_hole_does_not_make_an_absent_tuple_present() -> int {
+    if let (v, _) = maybe(false) { return v.x } else { return 1 }
+}
+
+// --- `??` ---
+//
+// The lhs presence SLOT is the branch condition. Going through the boxed path
+// instead const-folded the test away (a `MakeTuple` is never nil), deleted the
+// rhs arm, and yielded the ABSENT wire's nil leaves.
+
+@test(returns = 27)
+fn coalesce_takes_the_default_when_absent() -> int {
+    let t = maybe(false) ?? (NV { x: 9, y: 9 }, 9)
+    return t.0.x + t.0.y + t.1
+}
+
+@test(returns = 10)
+fn coalesce_keeps_the_value_when_present() -> int {
+    let t = maybe(true) ?? (NV { x: 9, y: 9 }, 9)
+    return t.0.x + t.0.y + t.1
+}
+
+// --- reassignment ---
+//
+// A rebind writes the slot cells, presence included -- the tuple twin of the
+// scalarized-value binding, which has always had this path.
+
+@test(returns = 1)
+fn reassigning_a_bound_wire_updates_its_presence() -> int {
+    let t = maybe(true)
+    t = maybe(false)
+    if t == null { return 1 }
+    return -1
+}
+
+@test(returns = 10)
+fn reassigning_a_bound_wire_updates_its_slots() -> int {
+    let t = maybe(false)
+    t = maybe(true)
+    if t == null { return -1 }
+    return t.0.x + t.0.y + t.1
+}
+
+// --- controls ---
+//
+// An UNMARKED value and a plain primitive tuple take the same path and must
+// answer identically: the mark changes whether a box is legal, not what the
+// program computes.
+
+fn maybe_bv(b: bool) -> (BV, int)? {
+    if b { return (BV { x: 3, y: 6 }, 1) }
+    return null
+}
+
+@test(returns = 1)
+fn unmarked_value_element_answers_the_same() -> int {
+    let t = maybe_bv(true)
+    let u = maybe_bv(false)
+    if t == null { return -1 }
+    if u != null { return -1 }
+    return 1
+}
+
+fn maybe_ints(b: bool) -> (int, int)? {
+    if b { return (3, 6) }
+    return null
+}
+
+@test(returns = 1)
+fn primitive_tuple_answers_the_same() -> int {
+    let t = maybe_ints(true)
+    let u = maybe_ints(false)
+    if t == null { return -1 }
+    if u != null { return -1 }
+    return 1
+}
+
+// `materialize` of a nullable tuple is an escape, so an absent value boxes to
+// `nil`, never to a statically non-nil tuple (bitgun's
+// `materialize(line_intersects_circle(..))` null checks).
+@test(returns = 1)
+fn materialize_keeps_an_absent_nullable_tuple_absent() -> int {
+    if materialize(maybe(false)) == null { return 1 }
+    return 0
+}
+
+@test(returns = 4)
+fn materialize_boxes_a_present_nullable_tuple() -> int {
+    let t = materialize(maybe(true)) ?? return 0
+    return t.0.x + t.1
+}

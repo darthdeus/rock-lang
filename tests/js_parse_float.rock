@@ -1,0 +1,44 @@
+// parse_float corpus for the `--backend js` ratchet (T8d). `string.parse_float`
+// is `tonumber(s)`: a strict whole-string numeric parse returning `float?`
+// (null on failure). On JS `__parse_float` reproduces Lua tonumber's strict
+// semantics -- empty/whitespace-only -> null (JS `Number("")` is 0, a
+// divergence handled explicitly), a non-numeric tail -> null (NaN), else the
+// parsed double (decimals, exponents, `0x` hex, surrounding whitespace all
+// accepted). Pins crates/skull-codegen-js/tests/parse_float.rs.
+
+fn show(s: string) -> string {
+    let r = s.parse_float()
+    if r == null { "nil" } else { tostring(r) }
+}
+
+@test(output = "12")
+fn test_int_literal() { print(show("12")) }
+
+@test(output = "1.5")
+fn test_decimal() { print(show("1.5")) }
+
+@test(output = "1000")
+fn test_exponent() { print(show("1e3")) }
+
+@test(output = "26")
+fn test_hex() { print(show("0x1A")) }
+
+@test(output = "3")
+fn test_surrounding_ws() { print(show("  3  ")) }
+
+@test(output = "nil")
+fn test_non_numeric() { print(show("12abc")) }
+
+@test(output = "nil")
+fn test_empty() { print(show("")) }
+
+@test(output = "nil")
+fn test_whitespace_only() { print(show("   ")) }
+
+// A parsed value flows through arithmetic (it is a real float).
+@test(output = "7")
+fn test_arith() {
+    let a = "3.5".parse_float() ?? 0.0
+    let b = "3.5".parse_float() ?? 0.0
+    print(tostring(a + b))
+}

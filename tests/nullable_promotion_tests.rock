@@ -1,0 +1,105 @@
+// T -> T? promotion and how it propagates through generics, HOF
+// params, map, and non-contamination of sibling bindings.
+
+// Helper functions for all tests
+fn promote_int(x: int) -> int? { return x }
+fn promote_string(x: string) -> string? { return x }
+
+fn identity<T>(value: T) -> T {
+    return value
+}
+
+fn double(x: int) -> int { return x * 2 }
+
+fn identity_int(x: int) -> int { return x }
+
+fn call_with_lambda<T, U>(value: T, f: (T) -> U) -> U {
+    return f(value)
+}
+
+fn int_to_string(x: int) -> string {
+    return "{x}"
+}
+
+fn process_mixed(regular: int, nullable: int?) -> string {
+    let r_str = "{regular}"
+    let n_str = if is_null(nullable) { "null" } else { "{nullable.unwrap()}" }
+    return "{r_str}-{n_str}"
+}
+
+@test(output = "42\n42\nhello")
+fn nullable_promotion_basic_functionality() {
+    let x: int = 42
+    let y: int? = promote_int(x)
+    let z: string? = promote_string("hello")
+    
+    print(x)
+    print(y.unwrap())
+    print(z.unwrap())
+}
+
+@test(output = "10\n5")
+fn nullable_promotion_does_not_contaminate_variables() {
+    // Promoting `length` into int? must not change the sibling `n`
+    // (still a plain int usable in arithmetic) nor `length` itself.
+    let length: int = 5
+    let n: int = 5
+    let maybe: int? = promote_int(length)
+    print(n + maybe.unwrap())  // both still int -> 10
+    print(length)               // length unchanged
+}
+
+@test(output = "3\ntrue")
+fn nullable_promotion_into_vec_construction() {
+    // A promoted value flows into a [int?] element and stays nullable.
+    let data: [int?] = [promote_int(1), promote_int(2), null]
+    print(data.len())
+    print(data[2] == null)
+}
+
+@test(output = "42")
+fn nullable_promotion_through_generic_identity() {
+    // identity<T> must carry T = int? through, not collapse to int.
+    let x: int = 42
+    let y: int? = identity(promote_int(x))
+    print(y.unwrap())
+}
+
+@test(output = "84")
+fn nullable_promotion_through_lambda_parameter() {
+    // A promoted int? passed as the generic T into a HOF.
+    let result: int = call_with_lambda(promote_int(42), m => m.unwrap() * 2)
+    print(result)
+}
+
+@test(output = "1\n2\n3")
+fn nullable_promotion_through_vec_map() {
+    // map over a [int?]: each element is promoted, unwrapped in f.
+    let nums: [int?] = [promote_int(1), promote_int(2), promote_int(3)]
+    let out = nums.iter().map(m => m.unwrap()).collect()
+
+    for x in out {
+        print(x)
+    }
+}
+
+@test(output = "1\nnull\n3")
+fn nullable_promotion_complex_generic_scenario() {
+    // Mixed promoted/null through map + the null branch of process_mixed.
+    let numbers: [int?] = [promote_int(1), null, promote_int(3)]
+    let strings = numbers.iter().map(m => if is_null(m) { "null" } else { "{m.unwrap()}" }).collect()
+
+    for s in strings {
+        print(s)
+    }
+}
+
+@test(output = "42-42\n42-null")
+fn nullable_promotion_mixed_types() {
+    let x: int = 42
+    let y: int? = promote_int(x)
+    let z: int? = null
+    
+    print(process_mixed(x, y))
+    print(process_mixed(x, z))
+}

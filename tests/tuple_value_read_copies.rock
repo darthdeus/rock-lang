@@ -1,0 +1,41 @@
+value TupleSnapshotRecipe { label: string, count: int }
+value TupleSnapshotPoint { x: float, y: float }
+value NestedTupleSnapshot { recipe: TupleSnapshotRecipe, items: [int] }
+
+@test(output = "1 9")
+fn tuple_gc_value_read_copies_before_a_second_store() {
+    let rows = [("recipe", TupleSnapshotRecipe { label: "mage", count: 1 })]
+    let copies = [rows[0].1]
+    copies[0].count = 9
+    print("{rows[0].1.count} {copies[0].count}")
+}
+
+@test(output = "1 9")
+fn tuple_cdata_value_read_copies_before_a_second_store() {
+    let rows = [("point", TupleSnapshotPoint { x: 1.0, y: 2.0 })]
+    let copies = [rows[0].1]
+    copies[0].x = 9.0
+    print("{rows[0].1.x} {copies[0].x}")
+}
+
+@test(output = "1 9")
+fn tuple_nullable_value_read_copies_before_a_second_store() {
+    let present: TupleSnapshotRecipe? = TupleSnapshotRecipe { label: "mage", count: 1 }
+    let absent: TupleSnapshotRecipe? = null
+    let rows: [(string, TupleSnapshotRecipe?)] = [("recipe", present), ("absent", absent)]
+    let copies = [rows[0].1]
+    copies[0]?.count = 9
+    print("{rows[0].1.unwrap().count} {copies[0].unwrap().count}")
+    assert(rows[1].1 == null)
+}
+
+@test(output = "1 9 2")
+fn tuple_nested_value_read_copies_and_shares_container_leaves() {
+    let rows = [("nested", NestedTupleSnapshot {
+        recipe: TupleSnapshotRecipe { label: "mage", count: 1 }, items: [3],
+    })]
+    let copies = [rows[0].1]
+    copies[0].recipe.count = 9
+    copies[0].items.push(4)
+    print("{rows[0].1.recipe.count} {copies[0].recipe.count} {rows[0].1.items.len()}")
+}

@@ -1,0 +1,56 @@
+struct MetadataRow { value: int }
+
+value MetadataStamp { arena_id: int, issued: int, count: int }
+
+fn metadata_issued_ref(store: ref ArenaStore<MetadataRow>) -> int {
+    return store.next_generation
+}
+
+fn metadata_stamp(arena: Arena<MetadataRow>) -> MetadataStamp? {
+    let store = __arena_store(arena) ?? return null
+    return MetadataStamp {
+        arena_id: arena._arena_id,
+        issued: store.next_generation,
+        count: store.occupied_count,
+    }
+}
+
+@test
+fn typed_arena_store_metadata_tracks_issuance_and_occupancy() {
+    let rows: Arena<MetadataRow> = arena_new()
+    let first = rows.insert(MetadataRow { value: 1 })
+    let stamp = metadata_stamp(rows).unwrap()
+    assert(stamp.arena_id == rows._arena_id && stamp.issued == 1 && stamp.count == 1)
+    let _ = rows.remove(first)
+    let removed = metadata_stamp(rows).unwrap()
+    assert(removed.issued == 1 && removed.count == 0)
+    let second = rows.insert(MetadataRow { value: 2 })
+    let reused = metadata_stamp(rows).unwrap()
+    assert(second._slot == first._slot && reused.issued == 2 && reused.count == 1)
+    rows.clear()
+    let cleared = metadata_stamp(rows).unwrap()
+    assert(cleared.issued == 2 && cleared.count == 0)
+    let _ = arena_destroy(rows)
+    assert(metadata_stamp(rows) == null)
+}
+
+@test
+fn typed_arena_store_metadata_is_a_live_view_until_registry_retirement() {
+    let rows: Arena<MetadataRow> = arena_new()
+    let store = __arena_store(rows).unwrap()
+    assert(store._owner_scene_id == rows._scene_id)
+    let _ = rows.insert(MetadataRow { value: 3 })
+    assert(store.next_generation == 1 && store.occupied_count == 1)
+    let _ = arena_destroy(rows)
+    assert(__arena_store(rows) == null)
+    assert(store.next_generation == 1 && store.occupied_count == 1)
+}
+
+@test
+fn typed_arena_store_metadata_reads_through_a_frame_reference() {
+    let rows: Arena<MetadataRow> = arena_new()
+    let _ = rows.insert(MetadataRow { value: 1 })
+    let store = __arena_store(rows).unwrap()
+    assert(metadata_issued_ref(store) == 1)
+    let _ = arena_destroy(rows)
+}

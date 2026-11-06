@@ -1,0 +1,44 @@
+// A `@nomangle`/unmangled fn returning an UNMARKED `value` struct keeps the
+// SINGLE-CDATA ABI (`return V_ct(...)`), not the scalar multi-return: its name
+// is callable from inline(lua) / runtime glue that expects one cdata, and a
+// caller reading one value off a two-value return would bind a number and then
+// index it. A `nobox` value is the opposite case and opts in explicitly --
+// `@scalar_abi` overrides this gate and returns the leaves
+// (`tests/nobox_opaque_return.rock`). Must pass with and without
+// ROCK_ANF_FUNCTIONS=1.
+
+value V2 { x: int, y: int }
+
+// @nomangle => emitted name == source name == cdata ABI (a single cdata
+// return, because the value is unmarked).
+@nomangle fn mk_v2(x: int, y: int) -> V2 {
+    return V2 { x: x, y: y }
+}
+
+@test(output = "3\n4")
+fn test_nomangle_value_return_is_single_cdata() {
+    // `local v = mk_v2(3,4)` binds ONE local; if mk_v2 wrongly
+    // multi-returned `3, 4` this truncates to v=3 and `v.x` crashes
+    // (number indexed). Correct: v is one Vec2 cdata.
+    let v = mk_v2(3, 4)
+    print("{v.x}")
+    print("{v.y}")
+}
+
+@test(output = "12")
+fn test_nomangle_value_return_field_arith() {
+    let v = mk_v2(3, 4)
+    print("{v.x * v.y}")
+}
+
+// A regular (mangled) fn still uses the scalar ABI — sanity that
+// the fix did not break the scalar-ABI return path.
+fn mk_v2_mangled(x: int, y: int) -> V2 {
+    return V2 { x: x, y: y }
+}
+
+@test(output = "30")
+fn test_mangled_value_return_still_scalar_abi() {
+    let v = mk_v2_mangled(5, 6)
+    print("{v.x * v.y}")
+}

@@ -1,0 +1,98 @@
+// A multi-leaf value as an enum PAYLOAD. `nobox` additionally forbids an
+// escaping materialization; scalarizable unmarked values use the same lanes.
+//
+// A flat enum threads as `[tag, _0.., <rec>..]`, one dynamically-typed slot per
+// payload POSITION. A scalarizable value is several leaves, so it had nowhere to go
+// but a box in that one slot -- `P_ct(x, y)` emitted at the ctor, usually dead
+// (SROA forwards the fields straight to the match arm) but surviving to the
+// residue check.
+//
+// The fix widens a position to its payload's leaf count, so the value's leaves
+// ARE the slots. Width is keyed on the DECLARED payload type, so every variant
+// agrees on the layout without seeing the others.
+
+nobox value P { x: float, y: float }
+
+value BP { x: float, y: float }
+
+enum U { V2(P), F(float) }
+
+enum Mixed { V2(P), Arr([float]), Unit }
+
+@test(returns = 3)
+fn nobox_payload_round_trips() -> int {
+    let u = U::V2(P { x: 1.0, y: 2.0 })
+    match u {
+        U::V2(p) => { return (p.x + p.y) as int }
+        U::F(f) => { return -1 }
+    }
+}
+
+@test(returns = 7)
+fn a_sibling_scalar_variant_still_works() -> int {
+    let u = U::F(7.0)
+    match u {
+        U::V2(p) => { return -1 }
+        U::F(f) => { return f as int }
+    }
+}
+
+@test(returns = 3)
+fn the_payload_survives_a_call_boundary() -> int {
+    return consume(U::V2(P { x: 1.0, y: 2.0 }))
+}
+
+fn consume(u: U) -> int {
+    match u {
+        U::V2(p) => { return (p.x + p.y) as int }
+        U::F(f) => { return -1 }
+    }
+}
+
+@test(returns = 3)
+fn a_mixed_enum_keeps_its_other_variants() -> int {
+    let m = Mixed::V2(P { x: 1.0, y: 2.0 })
+    match m {
+        Mixed::V2(p) => { return (p.x + p.y) as int }
+        Mixed::Arr(a) => { return a.len }
+        Mixed::Unit => { return -1 }
+    }
+}
+
+// Control: an UNMARKED value payload uses the same scalar enum representation.
+// The mark decides whether a later genuine escape may materialize a box.
+enum BU { V2(BP), F(float) }
+
+@test(returns = 3)
+fn unmarked_value_payload_answers_the_same() -> int {
+    let u = BU::V2(BP { x: 1.0, y: 2.0 })
+    match u {
+        BU::V2(p) => { return (p.x + p.y) as int }
+        BU::F(f) => { return -1 }
+    }
+}
+
+// A sibling variant whose payload sits AFTER a widened position. `V2(P)` spans
+// two slots, so `Pair`'s second element starts at slot 2 -- indexing the read by
+// POSITION handed back the widened value's second leaf instead. This is the
+// shape the retired `UniformValue::Vec4Array(NativeBuffer<float>, int)` had; it fed a
+// `nil` count to `stone_shader_set_vec4_array` in every match3 frame.
+enum Multi { V2(P), Pair(int, int) }
+
+@test(returns = 9)
+fn a_later_position_reads_past_a_widened_one() -> int {
+    let m = Multi::Pair(4, 5)
+    match m {
+        Multi::V2(p) => { return -1 }
+        Multi::Pair(a, b) => { return a + b }
+    }
+}
+
+@test(returns = 3)
+fn the_widened_position_still_reads_in_the_same_enum() -> int {
+    let m = Multi::V2(P { x: 1.0, y: 2.0 })
+    match m {
+        Multi::V2(p) => { return (p.x + p.y) as int }
+        Multi::Pair(a, b) => { return -1 }
+    }
+}

@@ -1,0 +1,235 @@
+struct C { value: int }
+struct B { c: C?, name: string }
+struct A { b: B? }
+struct Outer { inner: A? }
+
+// ==============================
+// && short-circuit variable refinement
+// ==============================
+
+// The failing test: o != null && o.inner != null
+@test(output = "hello")
+fn and_variable_refinement() {
+    let o: A? = A { b: B { c: C { value: 42 }, name: "hello" } }
+    if o != null && o.b != null {
+        print(o.b.name)
+    }
+}
+
+@test(output = "default")
+fn and_variable_refinement_null_root() {
+    let o: A? = null
+    if o != null && o.b != null {
+        print(o.b.name)
+    } else {
+        print("default")
+    }
+}
+
+@test(output = "no inner")
+fn and_variable_refinement_null_field() {
+    let o: A? = A { b: null }
+    if o != null && o.b != null {
+        print(o.b.name)
+    } else {
+        print("no inner")
+    }
+}
+
+// ==============================
+// Safe navigation chain refinement
+// ==============================
+
+// a?.b?.c != null refines a, a.b, a.b.c in the body
+@test
+fn safe_nav_two_level() {
+    let a: A? = A { b: B { c: C { value: 42 }, name: "x" } }
+    if a?.b != null {
+        assert_eq(a.b.name, "x")
+    }
+}
+
+@test
+fn safe_nav_three_level() {
+    let a: A? = A { b: B { c: C { value: 42 }, name: "x" } }
+    if a?.b?.c != null {
+        assert_eq(a.b.c.value, 42)
+    }
+}
+
+@test
+fn safe_nav_four_level() {
+    let o: Outer? = Outer { inner: A { b: B { c: C { value: 99 }, name: "deep" } } }
+    if o?.inner?.b?.c != null {
+        assert_eq(o.inner.b.c.value, 99)
+    }
+}
+
+// ==============================
+// Mixed && with path refinements
+// ==============================
+
+// Each clause uses refinements from prior clauses
+@test
+fn and_chain_incremental() {
+    let a: A? = A { b: B { c: C { value: 7 }, name: "inc" } }
+    if a != null && a.b != null && a.b.c != null {
+        assert_eq(a.b.c.value, 7)
+    }
+}
+
+// Safe nav LHS establishes path, plain access RHS uses it
+@test
+fn and_safe_nav_lhs_plain_rhs() {
+    let a: A? = A { b: B { c: C { value: 9 }, name: "ok" } }
+    if a?.b != null && a.b.c != null {
+        assert_eq(a.b.c.value, 9)
+    }
+}
+
+// && with non-null-check condition using path-refined access
+@test
+fn and_condition_on_refined_path() {
+    let a: A? = A { b: B { c: C { value: 5 }, name: "test" } }
+    if a?.b?.c != null && a.b.c.value > 0 {
+        assert_eq(a.b.c.value, 5)
+    }
+}
+
+// ==============================
+// Mixed . and ?. in chains
+// ==============================
+
+// a.b?.c where a is non-nullable, b is nullable field
+@test
+fn dot_then_safenav() {
+    let a: A = A { b: B { c: C { value: 7 }, name: "hi" } }
+    if a.b?.c != null {
+        assert_eq(a.b.c.value, 7)
+    }
+}
+
+// Post-divergence then deeper check
+@test
+fn post_divergence_then_deeper() {
+    let a: A? = A { b: B { c: C { value: 3 }, name: "g" } }
+    if a == null { return }
+    // a is now A (non-null via divergence refinement)
+    if a.b?.c != null {
+        assert_eq(a.b.c.value, 3)
+    }
+}
+
+// ==============================
+// Null cases (runtime correctness)
+// ==============================
+
+@test(output = "missing")
+fn safe_nav_chain_null_root() {
+    let a: A? = null
+    if a?.b?.c != null {
+        print("found")
+    } else {
+        print("missing")
+    }
+}
+
+@test(output = "missing")
+fn safe_nav_chain_null_intermediate() {
+    let a: A? = A { b: null }
+    if a?.b?.c != null {
+        print("found")
+    } else {
+        print("missing")
+    }
+}
+
+@test(output = "missing")
+fn safe_nav_chain_null_leaf() {
+    let a: A? = A { b: B { c: null, name: "leaf" } }
+    if a?.b?.c != null {
+        print("found")
+    } else {
+        print("missing")
+    }
+}
+
+// ==============================
+// Post-divergence path refinement (guard patterns)
+// ==============================
+
+// if a?.b == null { return } refines a.b after the guard
+@test
+fn guard_safe_nav_eq_null() {
+    let a: A? = A { b: B { c: C { value: 42 }, name: "ok" } }
+    if a?.b == null { return }
+    assert_eq(a.b.name, "ok")
+}
+
+// Deeper guard: if a?.b?.c == null { return }
+@test
+fn guard_deep_chain() {
+    let a: A? = A { b: B { c: C { value: 7 }, name: "deep" } }
+    if a?.b?.c == null { return }
+    assert_eq(a.b.c.value, 7)
+}
+
+// Guard fires on null root (verify runtime correctness)
+@test(output = "guarded")
+fn guard_fires_null_root() {
+    let a: A? = null
+    if a?.b == null {
+        print("guarded")
+        return
+    }
+    assert(false)
+}
+
+// Else-diverges: if a?.b != null { } else { return }; a.b.name
+@test
+fn else_diverges_path_refined() {
+    let a: A? = A { b: B { c: C { value: 3 }, name: "else" } }
+    if a?.b != null {
+        // ok
+    } else {
+        return
+    }
+    assert_eq(a.b.name, "else")
+}
+
+// ==============================
+// While loop path refinement
+// ==============================
+
+@test(output = "3\n2\n1")
+fn while_safe_nav_path_refined() {
+    let a: A? = A { b: B { c: C { value: 3 }, name: "w" } }
+    while a?.b != null && a.b.c != null && a.b.c.value > 0 {
+        let c = a.b.c
+        print(c.value)
+        c.value = c.value - 1
+    }
+}
+
+@test(output = "done")
+fn while_safe_nav_null_skip() {
+    let a: A? = null
+    while a?.b != null {
+        print(a.b.name)
+    }
+    print("done")
+}
+
+// ==============================
+// Scoping: refinement doesn't leak
+// ==============================
+
+@test(output = "inside\n7")
+fn refinement_scoped_to_block() {
+    let a: A? = A { b: B { c: C { value: 7 }, name: "s" } }
+    if a?.b?.c != null {
+        print("inside")
+    }
+    // Outside: a is still A?, must use ?.
+    print(a?.b?.c?.value ?? 0)
+}

@@ -1,0 +1,14 @@
+[package]
+name = "default-owner"
+version = "0.1.0"
+type = "lib"
+
+[language]
+modules = "v1"
+
+[dependencies]
+rect = { path = "rect" }
+
+[build]
+channels = ["dev"]
+default_channel = "dev"

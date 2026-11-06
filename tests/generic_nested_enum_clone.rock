@@ -1,0 +1,18 @@
+enum Inner<Source> { Empty, From { source: Source, label: string } }
+enum Outer { Empty, Wrapped(Inner<string>) }
+global DEST: [Outer] = []
+
+@test
+fn nested_generic_enum_clone_uses_concrete_source() {
+    let source = Outer::Wrapped(Inner::From { source: "origin", label: "label" })
+    DEST.push(source.clone_into(DEST.storage))
+    assert(DEST.len() == 1, "cloned event stored")
+    let copied = match DEST[0] {
+        Outer::Wrapped(inner) => match inner {
+            Inner::From { source, label } => source == "origin" && label == "label",
+            _ => false,
+        },
+        _ => false,
+    }
+    assert(copied, "cloned nested record retains both strings")
+}

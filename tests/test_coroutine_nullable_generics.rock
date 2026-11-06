@@ -1,0 +1,240 @@
+// Stress tests: coroutines + nullable + generics interactions
+//
+// Key tension: resume() returns T? for Coroutine<T>, so when T is already
+// nullable (e.g., int?), how do we distinguish "yielded null" from "exhausted"?
+
+struct Player {
+    name: string,
+    health: int,
+}
+
+struct NPC {
+    name: string,
+    health: int,
+    dialogue: string,
+}
+
+// Shared shape for heterogeneous coroutine yields.
+struct Being {
+    name: string,
+    health: int,
+}
+
+// ============================================================
+// 1. Coroutine yielding nullable type — the ambiguity test
+// ============================================================
+
+co fn nullable_ints() -> Coroutine<int?> {
+    yield 1
+    yield null
+    yield 3
+}
+
+// When T = int?, resume() returns int?? which should collapse to int?
+// But we can't distinguish "yielded null" from "exhausted"
+@test(output = "1")
+fn test_nullable_yield_first() {
+    let c = nullable_ints()
+    let val = c.resume() ?? -1
+    print(val)
+}
+
+@test(output = "-1")
+fn test_nullable_yield_null_element() {
+    let c = nullable_ints()
+    c.resume()  // 1
+    // Next yield is null — resume() returns null, same as exhaustion
+    let val = c.resume() ?? -1
+    print(val)
+}
+
+@test(output = "3")
+fn test_nullable_yield_after_null() {
+    let c = nullable_ints()
+    c.resume()  // 1
+    c.resume()  // null (yielded)
+    let val = c.resume() ?? -1
+    print(val)
+}
+
+// ============================================================
+// 2. Coroutine yielding structs
+// ============================================================
+
+co fn make_players() -> Coroutine<Player> {
+    yield Player { name: "Alice", health: 100 }
+    yield Player { name: "Bob", health: 80 }
+}
+
+@test(output = "Alice Bob")
+fn test_coroutine_struct_yield() {
+    let c = make_players()
+    let a = c.resume()
+    let b = c.resume()
+    let out = ""
+    if a != null { out = a.name }
+    if b != null { out = out + " " + b.name }
+    print(out)
+}
+
+// ============================================================
+// 3. Coroutine yielding struct with safe navigation on resume
+// ============================================================
+
+@test(output = "Alice")
+fn test_coroutine_resume_safenav() {
+    let c = make_players()
+    print(c.resume()?.name ?? "nobody")
+}
+
+@test(output = "nobody")
+fn test_coroutine_exhausted_safenav() {
+    let c = make_players()
+    c.resume()
+    c.resume()
+    // Exhausted — resume returns null, ?. propagates
+    print(c.resume()?.name ?? "nobody")
+}
+
+// ============================================================
+// 4. Coroutine yielding tuples
+// ============================================================
+
+co fn pairs() -> Coroutine<(int, string)> {
+    yield (1, "one")
+    yield (2, "two")
+}
+
+@test(output = "1: one")
+fn test_coroutine_tuple_yield() {
+    let c = pairs()
+    let p = c.resume()
+    if p != null {
+        let (num, name) = p
+        print("{num}: {name}")
+    }
+}
+
+// ============================================================
+// 5. Coroutine with narrowing after resume
+// ============================================================
+
+@test(output = "Alice: 100hp")
+fn test_coroutine_resume_narrowing() {
+    let c = make_players()
+    let p = c.resume()
+    if p != null {
+        // p should be narrowed to Player (non-null)
+        print("{p.name}: {p.health}hp")
+    }
+}
+
+// ============================================================
+// 6. Coroutine resume in guard-return pattern
+// ============================================================
+
+fn first_player_name(c: Coroutine<Player>) -> string {
+    let p = c.resume()
+    if p == null { return "none" }
+    return p.name
+}
+
+@test(output = "Alice")
+fn test_coroutine_guard_return() {
+    let c = make_players()
+    print(first_player_name(c))
+}
+
+// ============================================================
+// 7. Coroutine yielding a shared struct type
+// ============================================================
+
+co fn make_entities() -> Coroutine<Being> {
+    yield Being { name: "Hero", health: 100 }
+    yield Being { name: "Guard", health: 50 }
+}
+
+@test(output = "Hero Guard")
+fn test_coroutine_shared_struct_yield() {
+    let c = make_entities()
+    let out = ""
+    let first = true
+    let i = 0
+    while i < 2 {
+        let e = c.resume()
+        if e != null {
+            if !first { out = out + " " }
+            first = false
+            out = out + e.name
+        }
+        i = i + 1
+    }
+    print(out)
+}
+
+// ============================================================
+// 8. Coroutine resume used with ??
+// ============================================================
+
+co fn count_to(n: int) -> Coroutine<int> {
+    let i = 0
+    while i < n {
+        yield i
+        i = i + 1
+    }
+}
+
+@test(output = "0 1 2 -1")
+fn test_coroutine_coalesce() {
+    let c = count_to(3)
+    let a = c.resume() ?? -1
+    let b = c.resume() ?? -1
+    let d = c.resume() ?? -1
+    let e = c.resume() ?? -1  // exhausted
+    print("{a} {b} {d} {e}")
+}
+
+// ============================================================
+// 9. Multiple coroutines interleaved
+// ============================================================
+
+@test(output = "Alice Hero Bob Guard")
+fn test_interleaved_coroutines() {
+    let a = make_players()
+    let b = make_entities()
+    let a1 = a.resume()?.name ?? "?"
+    let b1 = b.resume()?.name ?? "?"
+    let a2 = a.resume()?.name ?? "?"
+    let b2 = b.resume()?.name ?? "?"
+    print("{a1} {b1} {a2} {b2}")
+}
+
+// ============================================================
+// 10. Coroutine with conditional early return
+// ============================================================
+
+co fn fibonacci() -> Coroutine<int> {
+    let a = 0
+    let b = 1
+    loop {
+        yield a
+        let tmp = b
+        b = a + b
+        a = tmp
+    }
+}
+
+@test(output = "0 1 1 2 3 5 8")
+fn test_fibonacci_coroutine() {
+    let fib = fibonacci()
+    let out = ""
+    let first = true
+    let i = 0
+    while i < 7 {
+        if !first { out = out + " " }
+        first = false
+        out = out + "{fib.resume() ?? -1}"
+        i = i + 1
+    }
+    print(out)
+}

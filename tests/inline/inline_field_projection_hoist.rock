@@ -1,0 +1,60 @@
+// @inline L2 coverage: when the body reads multiple DIFFERENT fields of a
+// param and the arg expression has side effects (can't duplicate), the
+// base must be hoisted into a single `let __inline_arg = <base>` so the
+// side effect runs exactly once, then body-side `param.f` references
+// read through the bound local.
+
+global CALLS: int = 0
+
+struct V2 { x: int, y: int }
+struct V4 { a: int, b: int, c: int, d: int }
+
+fn produce_v2(x: int, y: int) -> V2 {
+    CALLS = CALLS + 1
+    return V2 { x: x, y: y }
+}
+
+fn produce_v4(a: int, b: int, c: int, d: int) -> V4 {
+    CALLS = CALLS + 1
+    return V4 { a: a, b: b, c: c, d: d }
+}
+
+// Body reads `.x` and `.y` — two different fields, bare=0.
+@inline
+fn sum_xy(p: V2) -> int {
+    return p.x + p.y
+}
+
+@test(output = "7 1")
+fn test_two_field_projection_hoist() {
+    CALLS = 0
+    let r = sum_xy(produce_v2(3, 4))
+    print("{r} {CALLS}")
+}
+
+// Body reads four different fields from one non-dup-safe arg.
+@inline
+fn sum_v4(p: V4) -> int {
+    return p.a + p.b + p.c + p.d
+}
+
+@test(output = "10 1")
+fn test_four_field_projection_hoist() {
+    CALLS = 0
+    let r = sum_v4(produce_v4(1, 2, 3, 4))
+    print("{r} {CALLS}")
+}
+
+// Mixed: one field used twice, another once. Whole-value hoist handles it
+// and every body reference reads through the fresh local.
+@inline
+fn lopsided(p: V2) -> int {
+    return p.x + p.x + p.y
+}
+
+@test(output = "10 1")
+fn test_lopsided_field_projection_hoist() {
+    CALLS = 0
+    let r = lopsided(produce_v2(3, 4))
+    print("{r} {CALLS}")
+}

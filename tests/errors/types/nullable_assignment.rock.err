@@ -1,0 +1,41 @@
+//! Error: Nullable assignment/promotion rejections
+//! Tags: types, nullable, soundness
+
+//=== TEST CASE: nullable_to_non_nullable_without_unwrap_Generic ===
+fn main() {
+    let x: int? = 5
+    let y: int = x
+}
+
+//=== TEST CASE: different_nullable_types_MismatchedType ===
+fn main() {
+    let x: int? = 5
+    let y: string? = x
+}
+
+//=== TEST CASE: wrong_nullable_param_type_MismatchedType ===
+fn process(maybe_int: int?) {}
+
+fn main() {
+    process("hello")
+}
+
+//=== TEST CASE: wrong_nullable_return_type_MismatchedType ===
+fn get_opt() -> string? {
+    return 5
+}
+
+fn main() {
+    let _ = get_opt()
+}
+
+//=== TEST CASE: nullable_in_arithmetic_without_unwrap_Generic ===
+fn main() {
+    let x: int? = null
+    let y = x + 5
+}
+
+//=== TEST CASE: null_to_bare_any_NullAssignmentToNonNullable ===
+fn main() {
+    let x: any = null
+}

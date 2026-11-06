@@ -1,0 +1,26 @@
+// Literal promotion tests - migrated from rock/tests/literal_promotion_test.rs
+// Tests automatic promotion of int literals to float in arithmetic operations
+
+@test(output = "5.14")
+fn test_literal_promotion_basic() {
+    let x: float = 3.14
+    let result = x + 2
+    print(result)
+}
+
+@test(output = "5\n50")
+fn test_literal_promotion_division() {
+    let x: float = 10.0
+    let result = x / 2
+    print(result)
+
+    let y: float = 100.0
+    print(y / 2)
+}
+
+@test(output = "4.5")
+fn test_literal_promotion_subtraction() {
+    let x: float = 5.5
+    let result = x - 1
+    print(result)
+}

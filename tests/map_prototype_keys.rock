@@ -1,0 +1,87 @@
+// A Map key is DATA, never a name in the host object model.
+//
+// Both backends spell a map spine as a plain key -> slot object. On luajit that
+// is a table, which inherits nothing; a JS object literal inherits
+// Object.prototype, so "constructor", "toString", "hasOwnProperty" and friends
+// read back as occupied slots that were never stored, and "__proto__" is not a
+// data key at all -- assigning it re-points the prototype instead of storing a
+// value.
+//
+// Cross-backend on purpose: this is free on luajit and is the whole question on
+// JS. Run with `--backend js` too.
+//
+// Column-stored maps are probed with `contains` / index / `remove` rather than
+// `.get`: `Map<K, V: value>.get` on a MISS is broken independently of any of
+// this, and routing around it keeps this file
+// about spine keys.
+
+value Slot { a: int, b: int }
+
+global PROTO_KEYS: [string] = [
+    "constructor", "toString", "hasOwnProperty", "valueOf", "__proto__",
+    "isPrototypeOf", "propertyIsEnumerable", "toLocaleString",
+]
+
+@test
+fn column_map_reports_no_inherited_keys() {
+    let m: Map<string, Slot> = map_new()
+    // Control: the probe answers correctly for a key that really is absent.
+    assert(!m.contains("ordinary"), "a fresh column map does not contain an ordinary key")
+    for k in PROTO_KEYS {
+        assert(!m.contains(k), "a fresh column map must not report `{k}` as present")
+    }
+    assert(m.len() == 0, "a fresh column map is empty")
+}
+
+@test
+fn column_map_stores_prototype_named_keys() {
+    let m: Map<string, Slot> = map_new()
+    for (i, k) in enumerate(PROTO_KEYS) {
+        m[k] = Slot { a: i, b: i * 10 }
+    }
+    assert(m.len() == PROTO_KEYS.len(),
+        "every prototype-named key occupies its own slot (got {m.len()})")
+    for (i, k) in enumerate(PROTO_KEYS) {
+        assert(m.contains(k), "`{k}` is present after storing")
+        assert(m[k].a == i, "`{k}` reads back its own value")
+        assert(m[k].b == i * 10, "`{k}` reads back its own second field")
+    }
+}
+
+@test
+fn column_map_removes_prototype_named_keys() {
+    let m: Map<string, Slot> = map_new()
+    m["constructor"] = Slot { a: 1, b: 2 }
+    m["__proto__"] = Slot { a: 3, b: 4 }
+    m["ordinary"] = Slot { a: 5, b: 6 }
+    assert(m.len() == 3, "three distinct keys")
+    m.remove("constructor")
+    assert(!m.contains("constructor"), "a removed prototype-named key is gone")
+    assert(m.contains("__proto__"), "removing one does not disturb another")
+    assert(m.contains("ordinary"), "removing one does not disturb an ordinary key")
+    assert(m.len() == 2, "the live count follows")
+}
+
+// The plain (non-column) path: an int value keeps the bare-table
+// representation, so it exercises the other spelling of the same question.
+@test
+fn plain_map_reports_no_inherited_keys() {
+    let m: Map<string, int> = map_new()
+    assert(m.get("ordinary") == null, "control: an ordinary missing key reads null")
+    for k in PROTO_KEYS {
+        assert(m.get(k) == null, "a fresh plain map must not report `{k}` as present")
+    }
+}
+
+@test
+fn plain_map_stores_prototype_named_keys() {
+    let m: Map<string, int> = map_new()
+    for (i, k) in enumerate(PROTO_KEYS) {
+        m[k] = i + 1
+    }
+    for (i, k) in enumerate(PROTO_KEYS) {
+        let got = m.get(k)
+        assert(got != null, "`{k}` reads back from a plain map")
+        assert(got.unwrap() == i + 1, "`{k}` reads back its own value from a plain map")
+    }
+}

@@ -1,0 +1,95 @@
+// JS backend logging (T8d): the log_once / log_throttled dedup+throttle surface
+// (stdlib/logging.rock). The `@nomangle inline(lua)` impls map to JS runtime
+// helpers with the same names; state lives in JS (`__G.__rock_log_level` shared
+// with bucket-1 globals, bare dedup/throttle vars). `__rock_log_emit`'s no-sink
+// fallback prints `[category] msg` into the same per-test buffer as `print`.
+// Runs under BOTH executors so the dedup/throttle/reset semantics are
+// luajit-checked.
+
+// log_once fires once per call site inside a loop.
+@test(output = "[ONCE] hit")
+fn once_in_loop() {
+    log_reset_dedup()
+    log_set_level(0)
+    for _i in 0..100 {
+        log_once("ONCE", "hit")
+    }
+}
+
+// Distinct explicit sites do not dedupe each other.
+@test(output = "[A] m1\n[B] m2")
+fn distinct_sites() {
+    log_reset_dedup()
+    log_set_level(0)
+    log_once("A", "m1", "key-a")
+    log_once("B", "m2", "key-b")
+    log_once("A", "m1", "key-a")
+    log_once("B", "m2", "key-b")
+}
+
+// reset lets the same site fire again.
+@test(output = "[X] hi\n[X] hi")
+fn reset_refires() {
+    log_reset_dedup()
+    log_set_level(0)
+    log_once("X", "hi", "shared")
+    log_reset_dedup()
+    log_once("X", "hi", "shared")
+}
+
+// dedup_count reflects unique sites remembered.
+@test(output = "[DC] a\n[DC] b\n2\n[DC] a\n[DC] b\n[DC] c\n3")
+fn dedup_count() {
+    for count in [2, 3] {
+        log_reset_dedup()
+        log_set_level(0)
+        let sites = ["a", "b", "c"]
+        for i in 0..count {
+            log_once("DC", sites[i], sites[i])
+        }
+        log_once("DC", "a", "a")
+        print(log_dedup_count())
+    }
+}
+
+// throttle fires at interval boundaries (>=), suppresses within.
+@test(output = "[T] tick\n[T] tick\n[T] tick")
+fn throttle_interval() {
+    log_reset_dedup()
+    log_set_level(0)
+    log_throttled_with_now(0.0, "T", "tick", 1.0, "tk")
+    log_throttled_with_now(0.5, "T", "tick", 1.0, "tk")
+    log_throttled_with_now(1.0, "T", "tick", 1.0, "tk")
+    log_throttled_with_now(1.5, "T", "tick", 1.0, "tk")
+    log_throttled_with_now(2.0, "T", "tick", 1.0, "tk")
+}
+
+// The engine now-source seam drives log_throttled deterministically.
+@test(output = "[NS] tick\n[NS] tick")
+fn throttle_now_source() {
+    log_reset_dedup()
+    log_set_level(0)
+    log_set_now(0.0)
+    log_throttled("NS", "tick", 1.0, "ns")
+    log_set_now(0.5)
+    log_throttled("NS", "tick", 1.0, "ns")
+    log_set_now(1.0)
+    log_throttled("NS", "tick", 1.0, "ns")
+    log_clear_now()
+}
+
+// A warning site obeys the level gate an error site ignores, and its
+// suppression summary line carries the same gate.
+@test(output = "[E] kept\n[W] shown\n[W] suppressed x2 at wk: shown")
+fn warn_level_gate() {
+    log_reset_dedup()
+    log_set_level(0)
+    log_warn_once("W", "dropped", "wk-quiet")
+    log_warn_throttled_with_now(0.0, "WT", "dropped", 1.0, "wtk")
+    log_once("E", "kept", "ek")
+    log_reset_dedup()
+    log_set_level(1)
+    log_warn_once("W", "shown", "wk")
+    log_warn_once("W", "shown", "wk")
+    log_suppression_summary()
+}

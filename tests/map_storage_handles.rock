@@ -1,0 +1,15 @@
+struct MapStorageHandleRow { n: int }
+global MAP_STORAGE_HANDLES: Map<int, Entity<MapStorageHandleRow>> = map_new()
+global MAP_STORAGE_CLONES: [int] = []
+
+@test
+fn map_storage_accepts_column_stored_entity_handles() {
+    let owner: Arena<MapStorageHandleRow> = arena_new()
+    let handle = owner.insert(MapStorageHandleRow { n: 7 })
+    MAP_STORAGE_HANDLES.insert(1, handle)
+    let values = [17, 23].clone_into(map_storage(MAP_STORAGE_HANDLES))
+    assert_eq(values[0], 17)
+    assert_eq(values[1], 23)
+    MAP_STORAGE_HANDLES.remove(1)
+    assert(arena_destroy(owner))
+}

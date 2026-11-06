@@ -1,0 +1,113 @@
+// A value-position MERGE of a present arm and `null`, at a `nobox` value.
+//
+// `let v: P? = if c { P { .. } } else { null }` is the one operation a nullable
+// marked value could not do: the null arm emitted
+// an unconditional leaf splat and indexed nil, and the merge block returned a
+// CONSTANT presence, so even without the crash the absent path could not be
+// reported. Both halves are asserted here -- a fix that only stops the crash
+// still fails `absent_*`, and a fix that hardcodes presence still fails
+// `present_*`.
+//
+// The three conjuncts the defect needs are controlled in
+// `tests/nobox_concrete_nullable_ops.rock` (statement-position returns, a merge
+// of two present arms, and the same merge unmarked). This file is the positive
+// form of the shape those controls bound, so it does not repeat them.
+//
+// Values on BOTH sides of the null, per the convention in
+// `tests/nobox_nullable_column.rock`: a presence answer that is right for the
+// wrong reason is exactly what a constant presence looks like.
+
+nobox value P { x: int, y: int }
+
+fn merged(present: bool) -> P? {
+    let v: P? = if present { P { x: 5, y: 6 } } else { null }
+    return v
+}
+
+@test(returns = 1)
+fn absent_merge_reports_absent() -> int {
+    return if merged(false) == null { 1 } else { 0 }
+}
+
+@test(returns = 1)
+fn present_merge_reports_present() -> int {
+    return if merged(true) != null { 1 } else { 0 }
+}
+
+@test(returns = 56)
+fn present_merge_carries_its_leaves() -> int {
+    let p = merged(true)
+    if p == null { return -1 }
+    return p.x * 10 + p.y
+}
+
+// The merge as the returned EXPRESSION, with no local to land in. The local is
+// where the sentinel's crash was observed, so this asks whether the local was
+// load-bearing or incidental.
+fn merged_no_local(present: bool) -> P? {
+    return if present { P { x: 7, y: 8 } } else { null }
+}
+
+@test(returns = 1)
+fn absent_merge_without_a_local_reports_absent() -> int {
+    return if merged_no_local(false) == null { 1 } else { 0 }
+}
+
+@test(returns = 78)
+fn present_merge_without_a_local_carries_its_leaves() -> int {
+    let p = merged_no_local(true)
+    if p == null { return -1 }
+    return p.x * 10 + p.y
+}
+
+// A merge whose present arm is COMPUTED rather than a literal: the leaves reach
+// the join from a call, not from constants the emitter could fold.
+fn make(a: int) -> P { return P { x: a, y: a + 1 } }
+
+fn merged_computed(present: bool, a: int) -> P? {
+    let v: P? = if present { make(a) } else { null }
+    return v
+}
+
+@test(returns = 34)
+fn present_merge_of_a_computed_arm() -> int {
+    let p = merged_computed(true, 3)
+    if p == null { return -1 }
+    return p.x * 10 + p.y
+}
+
+@test(returns = 1)
+fn absent_merge_of_a_computed_arm() -> int {
+    return if merged_computed(false, 3) == null { 1 } else { 0 }
+}
+
+// Safe navigation off the merged value, which reads presence and a leaf in one
+// expression rather than through a refinement.
+@test(returns = 5)
+fn safe_nav_off_a_present_merge() -> int {
+    return merged(true)?.x ?? -1
+}
+
+@test(returns = -1)
+fn safe_nav_off_an_absent_merge() -> int {
+    return merged(false)?.x ?? -1
+}
+
+// `materialize` is a PASSENGER on this shape -- deleting it from the reported
+// repro left an identical crash. Pinned so it stays one after the fix.
+fn merged_materialized(present: bool) -> P? {
+    let v: P? = if present { P { x: 5, y: 6 } } else { null }
+    return materialize(v)
+}
+
+@test(returns = 1)
+fn absent_merge_through_materialize_reports_absent() -> int {
+    return if merged_materialized(false) == null { 1 } else { 0 }
+}
+
+@test(returns = 56)
+fn present_merge_through_materialize_carries_its_leaves() -> int {
+    let p = merged_materialized(true)
+    if p == null { return -1 }
+    return p.x * 10 + p.y
+}

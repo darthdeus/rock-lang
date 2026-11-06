@@ -1,0 +1,22 @@
+//! Error: defaulted generics still enforce min/max arity at use sites
+//! Tags: generics,defaults
+
+//=== TEST CASE: too_few_args_bare_Generic ===
+struct P<T, U = int> {
+    a: T,
+    b: U,
+}
+
+fn main() {
+    let p: P = P { a: 1, b: 2 }
+}
+
+//=== TEST CASE: too_many_args_Generic ===
+struct P<T, U = int> {
+    a: T,
+    b: U,
+}
+
+fn main() {
+    let p: P<int, int, int> = P { a: 1, b: 2 }
+}

@@ -1,0 +1,23 @@
+// Inc 8j: non-Vec compound index-write `m[k] += v` / `m[k]++` for Map
+// (table-cell storage with checked-read helpers). HashMap stays reject
+// (write is `__hashmap_set` call, not place).
+//
+// Live emits the same shape:
+//   m[k] = __map_get_checked(m, k) <op> v
+// ANF mirrors via reading helper Call + BinOp + Assign.
+
+@test(output = "4")
+fn test_map_compound_add() {
+    let m: Map<string, int> = map_new()
+    insert(m, "k", 3)
+    m["k"] += 1
+    print(unwrap(get(m, "k")))
+}
+
+@test(output = "6")
+fn test_map_compound_mul() {
+    let m: Map<string, int> = map_new()
+    insert(m, "k", 2)
+    m["k"] *= 3
+    print(unwrap(get(m, "k")))
+}

@@ -1,0 +1,239 @@
+value ReturnPair { x: int, y: int }
+value ReturnLabel { text: string, active: bool }
+
+fn return_pair(present: bool, x: int) -> ReturnPair? {
+    if !present { return null }
+    return ReturnPair { x: x, y: x + 1 }
+}
+
+fn return_label(present: bool, text: string) -> ReturnLabel? {
+    if !present { return null }
+    return ReturnLabel { text: text, active: false }
+}
+
+fn forward_pair(present: bool, x: int) -> ReturnPair? {
+    return return_pair(present, x)
+}
+
+fn optional_identity<T>(v: T?) -> T? { return v }
+
+@test(returns = 41)
+fn nullable_return_present() -> int {
+    if let pair = return_pair(true, 20) { return pair.x + pair.y }
+    return -1
+}
+
+@test(returns = true)
+fn nullable_return_absent() -> bool {
+    return return_pair(false, 20) == null && forward_pair(false, 20) == null
+}
+
+@test(returns = 41)
+fn nullable_return_forwarded_and_generic() -> int {
+    if let pair = optional_identity(forward_pair(true, 20)) { return pair.x + pair.y }
+    return -1
+}
+
+@test(returns = true)
+fn nullable_return_gc_payload_and_false_leaf() -> bool {
+    if let label = return_label(true, "retained") {
+        return label.text == "retained" && !label.active
+    }
+    return false
+}
+
+@test(returns = true)
+fn nullable_return_gc_absent() -> bool { return return_label(false, "unused") == null }
+
+@test(returns = 7)
+fn nullable_return_coalesces() -> int {
+    let pair = return_pair(false, 20) ?? ReturnPair { x: 3, y: 4 }
+    return pair.x + pair.y
+}
+
+struct ReturnEntityRow { marker: int }
+
+fn return_entity(present: bool, slot: int) -> Entity<ReturnEntityRow>? {
+    if !present { return null }
+    return Entity {
+        _scene_id: 11, _arena_id: 12, _slot: slot, _generation: 13
+    }
+}
+
+@test(returns = 56)
+fn nullable_return_entity_handle() -> int {
+    if let entity = return_entity(true, 20) {
+        return entity._scene_id + entity._arena_id + entity._slot + entity._generation
+    }
+    return -1
+}
+
+@test(returns = true)
+fn nullable_return_entity_absent() -> bool { return return_entity(false, 20) == null }
+
+fn main() {
+    print(nullable_return_present())
+    print(nullable_return_gc_payload_and_false_leaf())
+    print(nullable_return_entity_handle())
+}
+
+@test(returns = 41)
+fn nullable_return_local_reassignment() -> int {
+    let pair = return_pair(false, 20)
+    if pair != null { return -2 }
+    pair = return_pair(true, 20)
+    if let value = pair { return value.x + value.y }
+    return -1
+}
+
+@test(returns = true)
+fn nullable_return_optional_equality() -> bool {
+    return return_pair(true, 20) == return_pair(true, 20)
+        && return_pair(false, 20) == return_pair(false, 30)
+        && return_pair(true, 20) != return_pair(false, 20)
+}
+
+@test(returns = 7)
+fn nullable_return_safe_navigation() -> int {
+    return return_pair(false, 20)?.x ?? 7
+}
+
+fn match_return_pair(present: bool) -> ReturnPair? {
+    match present {
+        true => ReturnPair { x: 20, y: 21 },
+        false => null,
+    }
+}
+
+fn if_return_pair(present: bool) -> ReturnPair? {
+    if present { ReturnPair { x: 20, y: 21 } } else { null }
+}
+
+@test(returns = 20)
+fn nullable_return_unwrap() -> int { return return_pair(true, 20).unwrap().x }
+
+@test(returns = 20)
+fn nullable_return_match_body() -> int { return match_return_pair(true).unwrap().x }
+
+@test(returns = 20)
+fn nullable_return_if_body() -> int { return if_return_pair(true).unwrap().x }
+
+fn vector_return_entity(xs: [Entity<ReturnEntityRow>], index: int) -> Entity<ReturnEntityRow>? {
+    if index < 0 { return null }
+    return xs[index]
+}
+
+@test(returns = 99)
+fn nullable_return_live_entity_from_vector() -> int {
+    let arena: Arena<ReturnEntityRow> = arena_new()
+    let entity = arena.insert(ReturnEntityRow { marker: 99 })
+    let entities = [entity]
+    let found = vector_return_entity(entities, 0).unwrap()
+    assert(found == entity)
+    return found.get().unwrap().marker
+}
+
+@nomangle fn fixed_return_pair(present: bool, x: int) -> ReturnPair? {
+    return return_pair(present, x)
+}
+
+@test(returns = true)
+fn nullable_return_fixed_name_boundary() -> bool {
+    return fixed_return_pair(false, 20) == null
+        && fixed_return_pair(true, 20).unwrap().x == 20
+}
+
+@test(returns = true)
+fn nullable_return_absent_iflet() -> bool {
+    if let pair = return_pair(false, 20) { return false }
+    if let label = return_label(false, "unused") { return false }
+    if let entity = return_entity(false, 20) { return false }
+    return true
+}
+
+fn indirect_return_pair(present: bool, x: int) -> ReturnPair? {
+    return return_pair(present, x)
+}
+
+@test(returns = true)
+fn nullable_return_function_value_boundary() -> bool {
+    let f: fn(bool, int) -> ReturnPair? = indirect_return_pair
+    return f(false, 20) == null && f(true, 20).unwrap().x == 20
+}
+
+nobox value ReturnChild { x: float }
+value ReturnEnvelope { child: ReturnChild?, tag: int }
+struct ReturnEnvelopeHolder { value: ReturnEnvelope? }
+
+fn return_envelope(present: bool, child: bool) -> ReturnEnvelope? {
+    if !present { return null }
+    let c: ReturnChild? = if child { ReturnChild { x: 8.0 } } else { null }
+    return ReturnEnvelope { child: c, tag: 9 }
+}
+
+@test(returns = true)
+fn nullable_return_nested_absence_is_preserved() -> bool {
+    let holder = ReturnEnvelopeHolder { value: return_envelope(true, false) }
+    if let envelope = holder.value { return envelope.child == null && envelope.tag == 9 }
+    return false
+}
+
+fn early_return_pair(pair: ReturnPair?) -> int {
+    let p = pair ?? return -1
+    return p.x
+}
+
+@test(returns = true)
+fn nullable_return_coalesce_early_exit() -> bool {
+    return early_return_pair(null) == -1 && early_return_pair(return_pair(true, 20)) == 20
+}
+
+fn tuple_return_pair(present: bool) -> (bool, ReturnPair?) {
+    return (present, return_pair(present, 20))
+}
+
+@test(returns = true)
+fn nullable_return_tuple_slot_absence() -> bool {
+    let tuple = tuple_return_pair(false)
+    return !tuple.0 && tuple.1 == null
+}
+
+value ReturnCycle { period: float, active: float, offset: float }
+value ReturnSettings { cycle: ReturnCycle?, state: string }
+fn copy_return_cycle(cycle: ReturnCycle?) -> ReturnCycle? { return cycle }
+fn copy_return_settings(settings: ReturnSettings) -> ReturnSettings {
+    return ReturnSettings { cycle: copy_return_cycle(settings.cycle), state: settings.state }
+}
+@test(returns = true)
+fn nullable_return_copy_nested_field() -> bool {
+    let copy = copy_return_settings(ReturnSettings { cycle: null, state: "retained" })
+    return copy.cycle == null && copy.state == "retained"
+}
+value ReturnLocation { region: string, description: string, active: bool }
+value ReturnQuest { location: ReturnLocation?, tag: int }
+fn copy_return_quest(quest: ReturnQuest) -> ReturnQuest {
+    let location: ReturnLocation? = null
+    if let value = quest.location {
+        location = ReturnLocation { region: value.region, description: value.description, active: value.active }
+    }
+    return ReturnQuest { location: location, tag: quest.tag }
+}
+@test(returns = true)
+fn nullable_return_null_initialized_local() -> bool {
+    let copy = copy_return_quest(ReturnQuest { location: null, tag: 9 })
+    return copy.location == null && copy.tag == 9
+}
+
+@test(returns = true)
+fn nullable_return_mixed_boxed_equality() -> bool {
+    let f: fn(bool, int) -> ReturnPair? = indirect_return_pair
+    return f(true, 20) == return_pair(true, 20)
+        && fixed_return_pair(false, 20) == return_pair(false, 30)
+}
+
+@scalar_abi inline(lua) fn inline_return_pair(pair: ReturnPair?) -> ReturnPair? = "return pair;"
+@test(returns = true)
+fn nullable_return_inline_scalar_boundary() -> bool {
+    return inline_return_pair(null) == null
+        && inline_return_pair(return_pair(true, 20)).unwrap().x == 20
+}

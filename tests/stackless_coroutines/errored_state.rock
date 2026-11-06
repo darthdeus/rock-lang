@@ -1,0 +1,123 @@
+// D6b: errored state. A step-fn raise during resume puts the
+// coroutine into a new "errored" terminal state, distinct from "dead".
+// resume returns null thereafter, status() reports "errored", and
+// last_error() returns the raised message.
+//
+// last_error() returns whatever Lua's `error()` builtin captured -- by
+// default Lua prepends "<chunk>:<line>:" to the user's message. We
+// substring-match in the test rather than asserting the full string.
+
+co fn bad() -> Coroutine<int> {
+    yield 1
+    error("BAD_MARKER")
+    yield 2
+}
+
+@test(output = "1\nnull\nerrored\ncaptured\nnull\nerrored")
+fn test_errored_state_basic() {
+    let c = bad()
+    let v1 = c.resume()
+    print(v1 ?? -1)                // 1
+    let v2 = c.resume()
+    if v2 == null { print("null") } else { print(v2) }  // "null"
+    print(c.status())              // errored
+    let msg = c.last_error() ?? ""
+    if msg.contains("BAD_MARKER") {
+        print("captured")
+    } else {
+        print("missing:{msg}")
+    }
+    // Subsequent resumes are no-ops; status / last_error remain.
+    let v3 = c.resume()
+    if v3 == null { print("null") } else { print(v3) }  // "null"
+    print(c.status())              // errored (terminal, idempotent)
+}
+
+co fn clean() -> Coroutine<int> {
+    yield 1
+    yield 2
+}
+
+@test(output = "1\n2\nnull\ndead\nno_error\ndead")
+fn test_no_error_clean_path() {
+    let c = clean()
+    print(c.resume() ?? -1)        // 1
+    print(c.resume() ?? -1)        // 2
+    let v = c.resume()             // null (body fall-off transitions __state < 0)
+    if v == null { print("null") } else { print(v) }
+    print(c.status())              // "dead" (fall-off terminal)
+    print(c.last_error() ?? "no_error")  // "no_error" -- clean path didn't raise
+    let v2 = c.resume()
+    if v2 == null { /* dead */ }
+    print(c.status())              // "dead" (idempotent)
+}
+
+global ERR_KILL_LOG: [string] = []
+
+co fn bad_with_hook() -> Coroutine<int> {
+    on_killed {
+        ERR_KILL_LOG.push("hook_fired")
+    }
+    yield 1
+    error("body_raised")
+}
+
+// D6b: on_killed fires when the body raises -- the body's resources
+// need cleanup whether termination came from outside (kill) or inside
+// (raise). Idempotent: a follow-up explicit kill() does not re-fire.
+@test(output = "1\nhook_fired\nerrored\ncaptured\n1")
+fn test_errored_fires_on_killed() {
+    ERR_KILL_LOG = []
+    let c = bad_with_hook()
+    let v = c.resume()
+    print(v ?? -1)                 // 1
+    let v2 = c.resume()
+    if v2 == null { /* errored */ }
+    for label in ERR_KILL_LOG {
+        print(label)              // "hook_fired"
+    }
+    print(c.status())              // errored
+    let msg = c.last_error() ?? ""
+    if msg.contains("body_raised") {
+        print("captured")
+    } else {
+        print("missing:{msg}")
+    }
+    c.kill()
+    print(ERR_KILL_LOG.len())     // still 1 -- kill on errored coroutine no-ops
+}
+
+// D6b await propagation: when inner errors during delegation, outer
+// must also become errored. Without explicit propagation, inner's
+// resume returns null (caught by inner's pcall) and outer's pump
+// would silently continue past the `await` -- the error vanishes.
+// The fix: after inner.resume() returns null, the pump checks
+// inner.last_error(); if non-null, re-raise it so outer's pcall
+// catches it and transitions outer to errored too.
+
+co fn inner_bad() -> Coroutine<int> {
+    yield 10
+    error("INNER_BOOM")
+}
+
+co fn outer_delegating() -> Coroutine<int> {
+    yield 1
+    await inner_bad()
+    yield 99   // never reached
+}
+
+@test(output = "1\n10\nnull\nerrored\ncaptured")
+fn test_yield_star_propagates_inner_error() {
+    let c = outer_delegating()
+    print(c.resume() ?? -1)        // 1 (outer's first yield)
+    print(c.resume() ?? -1)        // 10 (inner's yield, forwarded)
+    let v = c.resume()             // inner errors -> outer also errored
+    if v == null { print("null") } else { print(v) }
+    print(c.status())              // errored
+    let msg = c.last_error() ?? ""
+    if msg.contains("INNER_BOOM") {
+        print("captured")
+    } else {
+        print("missing:{msg}")
+    }
+}

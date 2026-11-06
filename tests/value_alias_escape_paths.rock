@@ -1,0 +1,708 @@
+// A whole value reaching a second owner by any route other than a bare
+// variable use must still be an independent copy: joins, tuples, nested
+// value children, nullable boxes, constructor groups and updates, loop
+// bindings and statics. Wide (50 int fields) crosses calls as one box.
+value Wide {
+    f0: int,
+    f1: int,
+    f2: int,
+    f3: int,
+    f4: int,
+    f5: int,
+    f6: int,
+    f7: int,
+    f8: int,
+    f9: int,
+    f10: int,
+    f11: int,
+    f12: int,
+    f13: int,
+    f14: int,
+    f15: int,
+    f16: int,
+    f17: int,
+    f18: int,
+    f19: int,
+    f20: int,
+    f21: int,
+    f22: int,
+    f23: int,
+    f24: int,
+    f25: int,
+    f26: int,
+    f27: int,
+    f28: int,
+    f29: int,
+    f30: int,
+    f31: int,
+    f32: int,
+    f33: int,
+    f34: int,
+    f35: int,
+    f36: int,
+    f37: int,
+    f38: int,
+    f39: int,
+    f40: int,
+    f41: int,
+    f42: int,
+    f43: int,
+    f44: int,
+    f45: int,
+    f46: int,
+    f47: int,
+    f48: int,
+    f49: int
+}
+
+value Narrow { a: int, b: int }
+
+struct HW { w: Wide }
+struct HN { n: Narrow }
+
+fn mkw(n: int) -> Wide { return Wide { f0: n, f1: n, f2: n, f3: n, f4: n, f5: n, f6: n, f7: n, f8: n, f9: n, f10: n, f11: n, f12: n, f13: n, f14: n, f15: n, f16: n, f17: n, f18: n, f19: n, f20: n, f21: n, f22: n, f23: n, f24: n, f25: n, f26: n, f27: n, f28: n, f29: n, f30: n, f31: n, f32: n, f33: n, f34: n, f35: n, f36: n, f37: n, f38: n, f39: n, f40: n, f41: n, f42: n, f43: n, f44: n, f45: n, f46: n, f47: n, f48: n, f49: n } }
+fn mkn(n: int) -> Narrow { return Narrow { a: n, b: n } }
+
+struct WidePair { a: Wide, b: Wide }
+value WideOuter { w: Wide, xs: [int] }
+struct WideOuterHolder { o: WideOuter }
+fn make_outer() -> WideOuter { return WideOuter { w: mkw(1), xs: [] } }
+fn make_hw() -> HW { return HW { w: mkw(1) } }
+
+fn joined_stores(h1: HW, h2: HW, w: Wide, choose: bool) -> int {
+    h1.w = if choose { w } else { mkw(0) }
+    h2.w = if choose { w } else { mkw(0) }
+    h1.w.f0 = 99
+    return h2.w.f0 + w.f0
+}
+@test(output = "2")
+fn if_join_of_a_param_copies() {
+    print(joined_stores(make_hw(), make_hw(), mkw(1), true))
+}
+
+fn matched_stores(h1: HW, h2: HW, w: Wide, k: int) -> int {
+    h1.w = match k { 1 => w, _ => mkw(0) }
+    h2.w = match k { 1 => w, _ => mkw(0) }
+    h1.w.f0 = 99
+    return h2.w.f0 + w.f0
+}
+@test(output = "2")
+fn match_join_of_a_param_copies() {
+    print(matched_stores(make_hw(), make_hw(), mkw(1), 1))
+}
+
+fn block_stores(h1: HW, h2: HW, w: Wide) -> int {
+    h1.w = { w }
+    h2.w = { w }
+    h1.w.f0 = 99
+    return h2.w.f0 + w.f0
+}
+@test(output = "2")
+fn block_tail_of_a_param_copies() {
+    print(block_stores(make_hw(), make_hw(), mkw(1)))
+}
+
+@test(output = "1")
+fn tuple_temporary_projection_copies() {
+    let w = mkw(1)
+    let h = HW { w: (w, w).0 }
+    h.w.f0 = 99
+    print(w.f0)
+}
+
+fn pair_of(w: Wide) -> (Wide, Wide) { return (w, w) }
+@test(output = "1")
+fn tuple_return_elements_copy() {
+    let t = pair_of(mkw(1))
+    let h = HW { w: t.0 }
+    h.w.f0 = 99
+    print(t.1.f0)
+}
+
+@test(output = "1")
+fn nested_value_constructor_copies() {
+    let w = mkw(1)
+    let h = WideOuterHolder { o: WideOuter { w: w, xs: [] } }
+    h.o.w.f0 = 99
+    print(w.f0)
+}
+
+fn child(o: WideOuter) -> Wide { return o.w }
+@test(output = "1")
+fn nested_value_parameter_return_copies() {
+    let o = make_outer()
+    let pick: fn(WideOuter) -> Wide = child
+    let h = HW { w: pick(o) }
+    h.w.f0 = 99
+    print(o.w.f0)
+}
+
+fn optional_stores(h1: HW, h2: HW, w: Wide?) -> int {
+    h1.w = w ?? mkw(0)
+    h2.w = w ?? mkw(0)
+    h1.w.f0 = 99
+    return h2.w.f0
+}
+@test(output = "1")
+fn boxed_nullable_parameter_copies() {
+    print(optional_stores(make_hw(), make_hw(), mkw(1)))
+}
+
+fn grouped(w: Wide) -> WidePair { return WidePair { a + b: w } }
+@test(output = "1")
+fn grouped_constructor_fields_copy_separately() {
+    let h = grouped(mkw(1))
+    h.a.f0 = 99
+    print(h.b.f0)
+}
+
+@test(output = "1")
+fn functional_update_copies_value_fields() {
+    let src = make_hw()
+    let dst = HW { ..src }
+    dst.w.f0 = 99
+    print(src.w.f0)
+}
+
+// The capture keeps the binding a whole box, so only a snapshot taken at
+// the binding separates it from the element the body then writes.
+@test(output = "1")
+fn loop_binding_snapshots_element() {
+    let xs = [mkw(1)]
+    for w in xs {
+        let f = () => w.f0
+        xs[0].f0 = 99
+        print(f())
+    }
+}
+
+@test(output = "1")
+fn enumerate_binding_snapshots_element() {
+    let xs = [mkw(1)]
+    for (i, w) in xs.enumerate() {
+        let f = () => w.f0
+        xs[i].f0 = 99
+        print(f())
+    }
+}
+
+@test(output = "1")
+fn static_value_read_copies() {
+    static w: Wide = mkw(1)
+    let h = HW { w: w }
+    h.w.f0 = 99
+    print(w.f0)
+}
+
+// A closure that assigns a ctor-built local keeps SROA from scalarizing
+// it, so its whole uses are loads of one box and must copy.
+fn closure_assigned_wide(h1: HW, h2: HW, n: int) -> int {
+    let w = Wide { f0: n, f1: n, f2: n, f3: n, f4: n, f5: n, f6: n, f7: n, f8: n, f9: n, f10: n, f11: n, f12: n, f13: n, f14: n, f15: n, f16: n, f17: n, f18: n, f19: n, f20: n, f21: n, f22: n, f23: n, f24: n, f25: n, f26: n, f27: n, f28: n, f29: n, f30: n, f31: n, f32: n, f33: n, f34: n, f35: n, f36: n, f37: n, f38: n, f39: n, f40: n, f41: n, f42: n, f43: n, f44: n, f45: n, f46: n, f47: n, f48: n, f49: n }
+    let reset = () => { w = mkw(5) }
+    h1.w = w
+    h2.w = w
+    h1.w.f0 = 99
+    return h2.w.f0
+}
+@test(output = "1")
+fn closure_assigned_ctor_local_copies() {
+    print(closure_assigned_wide(make_hw(), make_hw(), 1))
+}
+
+fn closure_assigned_narrow(h1: HN, h2: HN, n: int) -> int {
+    let w = Narrow { a: n, b: n }
+    let reset = () => { w = mkn(5) }
+    h1.n = w
+    h2.n = w
+    h1.n.a = 99
+    return h2.n.a
+}
+@test(output = "1")
+fn closure_assigned_narrow_ctor_local_copies() {
+    print(closure_assigned_narrow(HN { n: mkn(0) }, HN { n: mkn(0) }, 1))
+}
+
+fn joined_return(w: Wide, choose: bool) -> Wide {
+    return if choose { w } else { mkw(0) }
+}
+// GREEN today only because the direct boxed call copies its argument; it
+// guards against dropping that copy while a callee join can return the box.
+@test(output = "1")
+fn joined_return_behind_direct_argument_copy() {
+    let w = mkw(1)
+    let h = HW { w: joined_return(w, true) }
+    h.w.f0 = 99
+    print(w.f0)
+}
+
+// A box lent to an opaque argument slot is shared with the caller's local. A
+// `ref` borrow of that local, in this call or anywhere else in the body, can
+// write the box the callee holds, and a callee's own `ref` borrow of its
+// parameter would write the caller's.
+fn mutate_wide(w: ref Wide) { w.f0 = 99 }
+fn mutate_as_argument(w: ref Wide) -> int {
+    w.f0 = 99
+    return 0
+}
+fn mixed_read(w: Wide, ignored: int, n: Narrow) -> int { return w.f0 }
+@test(output = "1")
+fn later_ref_argument_does_not_reach_a_lent_box() {
+    let w = mkw(1)
+    print(mixed_read(w, mutate_as_argument(w), mkn(0)))
+}
+
+fn read_after_ref(x: Wide, r: ref Wide, n: Narrow) -> int {
+    r.f0 = 99
+    return x.f0
+}
+@test(output = "1")
+fn same_local_as_value_and_ref_argument() {
+    let w = mkw(1)
+    print(read_after_ref(w, w, mkn(0)))
+}
+
+@test(output = "1")
+fn ref_local_argument_does_not_reach_a_lent_box() {
+    let w = mkw(1)
+    let r: ref Wide = w
+    print(read_after_ref(w, r, mkn(0)))
+}
+
+fn retain_reader(w: Wide) -> fn() -> int { return () => w.f0 }
+@test(output = "1")
+fn retained_parameter_does_not_see_a_later_ref_write() {
+    let w = mkw(1)
+    let make: fn(Wide) -> fn() -> int = retain_reader
+    let read = make(w)
+    mutate_wide(w)
+    print(read())
+}
+
+fn mutate_own_param(w: Wide) -> int {
+    mutate_wide(w)
+    return w.f0
+}
+@test(output = "99 1")
+fn parameter_ref_borrow_writes_its_own_copy() {
+    let w = mkw(1)
+    let f: fn(Wide) -> int = mutate_own_param
+    let r = f(w)
+    print("{r} {w.f0}")
+}
+
+// A loop or pattern binder reads its value out of storage the body can still
+// write; a captured binder must not see that write.
+@test(output = "1")
+fn single_enumerate_snapshot() {
+    let xs = [mkw(1)]
+    for pair in xs.enumerate() {
+        let read = () => pair.1.f0
+        xs[pair.0].f0 = 99
+        print(read())
+    }
+}
+@test(output = "1")
+fn map_split_snapshot() {
+    let m: Map<int, Wide> = map_new()
+    m[0] = mkw(1)
+    for (key, w) in m {
+        let read = () => w.f0
+        m[key].f0 = 99
+        print(read())
+    }
+}
+@test(output = "1")
+fn map_single_snapshot() {
+    let m: Map<int, Wide> = map_new()
+    m[0] = mkw(1)
+    for entry in m {
+        let read = () => entry.1.f0
+        m[entry.0].f0 = 99
+        print(read())
+    }
+}
+@test(output = "1")
+fn map_enumerate_snapshot() {
+    let m: Map<int, Wide> = map_new()
+    m[0] = mkw(1)
+    for (i, (key, w)) in m.enumerate() {
+        let read = () => w.f0
+        m[key].f0 = 99
+        print(read())
+    }
+}
+// A plain Arena loop binds through its iterator's `next`, whose return
+// already copies the element out of its entry; an enumerated one is lowered
+// directly over the entries and snapshots the element itself.
+@test(output = "1")
+fn arena_snapshot() {
+    let a: Arena<Wide> = arena_new()
+    let original = a.insert(mkw(1))
+    for (entity, w) in a {
+        let read = () => w.f0
+        mutate_wide(entity.borrow().unwrap())
+        print(read())
+    }
+}
+@test(output = "1")
+fn arena_enumerate_snapshot() {
+    let a: Arena<Wide> = arena_new()
+    let original = a.insert(mkw(1))
+    for (i, (entity, w)) in a.enumerate() {
+        let read = () => w.f0
+        mutate_wide(entity.borrow().unwrap())
+        print(read())
+    }
+}
+@test(output = "1")
+fn record_pattern_snapshot() {
+    let src = make_hw()
+    match src {
+        HW { w } => {
+            let read = () => w.f0
+            src.w.f0 = 99
+            print(read())
+        }
+    }
+}
+
+// A nullable value is copied like a non-null one: a whole use of a `V?`
+// local, and a nullable value child of a copied parent. Absent stays absent.
+struct HOpt { w: Wide? }
+fn nullable_stores(h1: HOpt, h2: HOpt, w: Wide?) -> int {
+    h1.w = w
+    h2.w = w
+    if h1.w != null { h1.w.f0 = 99 }
+    if h2.w != null { return h2.w.f0 }
+    return -1
+}
+@test(output = "1 -1")
+fn nullable_local_whole_stores_copy() {
+    let present = nullable_stores(HOpt { w: null }, HOpt { w: null }, mkw(1))
+    let absent = nullable_stores(HOpt { w: null }, HOpt { w: null }, null)
+    print("{present} {absent}")
+}
+
+value OptionalOuter { w: Wide?, xs: [int] }
+struct HOptionalOuter { o: OptionalOuter }
+@test(output = "1 true")
+fn nullable_value_child_copies() {
+    let o = OptionalOuter { w: mkw(1), xs: [] }
+    let h1 = HOptionalOuter { o: o }
+    let h2 = HOptionalOuter { o: o }
+    if h1.o.w != null { h1.o.w.f0 = 99 }
+    let read = if h2.o.w != null { h2.o.w.f0 } else { -1 }
+    let none = OptionalOuter { w: null, xs: [] }
+    let h3 = HOptionalOuter { o: none }
+    print("{read} {h3.o.w == null}")
+}
+
+value SmallOptional { w: Wide?, n: int }
+struct HSmallOptional { o: SmallOptional }
+@test(output = "1")
+fn nullable_value_child_of_a_leaf_table_copies() {
+    let o = SmallOptional { w: mkw(1), n: 0 }
+    let h1 = HSmallOptional { o: o }
+    let h2 = HSmallOptional { o: o }
+    if h1.o.w != null { h1.o.w.f0 = 99 }
+    if h2.o.w != null { print(h2.o.w.f0) }
+}
+
+// A spread splices each value field or element into its destination as that
+// destination's own copy, and a grouped value field built by one call gives
+// each field its own box.
+@test(output = "1")
+fn struct_array_spread_copies_value_fields() {
+    let src = make_hw()
+    let xs = [...src]
+    xs[0].f0 = 99
+    print(src.w.f0)
+}
+
+@test(output = "1")
+fn tuple_array_spread_copies_value_elements() {
+    let t = (mkw(1), mkw(1))
+    let xs = [...t]
+    xs[0].f0 = 99
+    print(t.0.f0)
+}
+
+value ValuePair { a: Wide, b: Wide, xs: [int] }
+struct HValuePair { p: ValuePair }
+@test(output = "1")
+fn grouped_value_fields_from_one_call_copy() {
+    let h = HValuePair { p: ValuePair { a + b: mkw(1), xs: [] } }
+    h.p.a.f0 = 99
+    print(h.p.b.f0)
+}
+
+struct GenericHolder<T> { w: T }
+@test(output = "1")
+fn generic_struct_array_spread_copies_value_fields() {
+    let src: GenericHolder<Wide> = GenericHolder { w: mkw(1) }
+    let xs = [...src]
+    xs[0].f0 = 99
+    print(src.w.f0)
+}
+
+value GenericPair<T> { a: T, b: T, xs: [int] }
+struct HGenericPair { p: GenericPair<Wide> }
+@test(output = "1")
+fn generic_grouped_value_fields_from_one_call_copy() {
+    let h = HGenericPair { p: GenericPair { a + b: mkw(1), xs: [] } }
+    h.p.a.f0 = 99
+    print(h.p.b.f0)
+}
+
+fn generic_spread_read(w: Wide, src: GenericHolder<Wide>, n: Narrow) -> int {
+    src.w.f0 = 99
+    return w.f0
+}
+@test(output = "1")
+fn generic_call_spread_copies_value_fields() {
+    let src: GenericHolder<Wide> = GenericHolder { w: mkw(1) }
+    print(generic_spread_read(..src, src: src, n: mkn(0)))
+}
+
+fn spread_read(w: Wide, src: HW, n: Narrow) -> int {
+    src.w.f0 = 99
+    return w.f0
+}
+@test(output = "1")
+fn call_spread_copies_value_fields() {
+    let src = make_hw()
+    print(spread_read(..src, src: src, n: mkn(0)))
+}
+
+// A `V?` child a copy only reads stays the source's box; where the copy
+// escapes (a store, a return, a parameter stored by its callee) the child is
+// copied.
+fn optional_outer_of(h: HOptionalOuter) -> OptionalOuter { return h.o }
+@test(output = "1")
+fn returned_copy_owns_its_nullable_value_child() {
+    let src = HOptionalOuter { o: OptionalOuter { w: mkw(1), xs: [] } }
+    let dst = HOptionalOuter { o: optional_outer_of(src) }
+    if dst.o.w != null { dst.o.w.f0 = 99 }
+    if src.o.w != null { print(src.o.w.f0) }
+}
+
+fn store_optional_outer(h: HOptionalOuter, o: OptionalOuter) { h.o = o }
+@test(output = "1")
+fn stored_parameter_owns_its_nullable_value_child() {
+    let src = HOptionalOuter { o: OptionalOuter { w: mkw(1), xs: [] } }
+    let dst = HOptionalOuter { o: OptionalOuter { w: null, xs: [] } }
+    store_optional_outer(dst, src.o)
+    if dst.o.w != null { dst.o.w.f0 = 99 }
+    if src.o.w != null { print(src.o.w.f0) }
+}
+
+@test(output = "1 1")
+fn read_only_copy_reads_its_nullable_value_child() {
+    let src = HOptionalOuter { o: OptionalOuter { w: mkw(1), xs: [] } }
+    let o = src.o
+    let a = if o.w != null { o.w.f0 } else { -1 }
+    let b = o.w?.f0 ?? -1
+    print("{a} {b}")
+}
+
+@test(output = "1")
+fn let_place_read_then_store_owns_its_nullable_value_child() {
+    let src = HOptionalOuter { o: OptionalOuter { w: mkw(1), xs: [] } }
+    let o = src.o
+    let dst = HOptionalOuter { o: o }
+    if dst.o.w != null { dst.o.w.f0 = 99 }
+    if src.o.w != null { print(src.o.w.f0) }
+}
+
+// An enum payload binder owns its `V?` value descendants once it escapes: a
+// ref argument, a store, or a copied owner's payload written through one
+// holder.
+value OptionalPayload { w: Wide?, xs: [int] }
+enum PayloadBox { Some(OptionalPayload), Empty }
+value EnumCarrier { e: PayloadBox, xs: [int] }
+struct EnumHolder { c: EnumCarrier }
+struct HPayload { o: OptionalPayload }
+fn mutate_payload(o: ref OptionalPayload) { if o.w != null { o.w.f0 = 99 } }
+fn payload_child(e: PayloadBox) -> int {
+    match e {
+        PayloadBox::Some(o) => { return if o.w != null { o.w.f0 } else { -1 } }
+        PayloadBox::Empty => { return -2 }
+    }
+}
+@test(output = "1")
+fn enum_payload_ref_argument_owns_its_nullable_value_child() {
+    let e = PayloadBox::Some(OptionalPayload { w: mkw(1), xs: [] })
+    match e { PayloadBox::Some(o) => { mutate_payload(o) } PayloadBox::Empty => {} }
+    print(payload_child(e))
+}
+
+@test(output = "1")
+fn copied_enum_payload_owns_its_nullable_value_child() {
+    let c = EnumCarrier { e: PayloadBox::Some(OptionalPayload { w: mkw(1), xs: [] }), xs: [] }
+    let a = EnumHolder { c: c }
+    let b = EnumHolder { c: c }
+    match a.c.e { PayloadBox::Some(o) => { mutate_payload(o) } PayloadBox::Empty => {} }
+    print(payload_child(b.c.e))
+}
+
+@test(output = "1")
+fn stored_enum_payload_owns_its_nullable_value_child() {
+    let c = EnumCarrier { e: PayloadBox::Some(OptionalPayload { w: mkw(1), xs: [] }), xs: [] }
+    let a = EnumHolder { c: c }
+    let h = HPayload { o: OptionalPayload { w: null, xs: [] } }
+    match a.c.e { PayloadBox::Some(o) => { h.o = o } PayloadBox::Empty => {} }
+    if h.o.w != null { h.o.w.f0 = 99 }
+    print(payload_child(a.c.e))
+}
+
+// A record-variant binder holds the enum's stored box; a ref borrow of it
+// writes its own copy.
+enum RecordBox { R { o: OptionalPayload, n: int }, W { w: Wide, n: int }, Empty }
+value RecordCarrier { e: RecordBox, xs: [int] }
+struct RecordHolder { c: RecordCarrier }
+fn record_read(e: RecordBox) -> int {
+    match e {
+        RecordBox::R { o, n } => { return if o.w != null { o.w.f0 } else { -1 } }
+        RecordBox::W { w, n } => { return w.f0 }
+        RecordBox::Empty => { return -2 }
+    }
+}
+@test(output = "1 1")
+fn record_variant_ref_argument_writes_its_own_copy() {
+    let r = RecordBox::R { o: OptionalPayload { w: mkw(1), xs: [] }, n: 0 }
+    match r { RecordBox::R { o, n } => { mutate_payload(o) } RecordBox::W { w, n } => {} RecordBox::Empty => {} }
+    let w = RecordBox::W { w: mkw(1), n: 0 }
+    match w { RecordBox::R { o, n } => {} RecordBox::W { w, n } => { mutate_wide(w) } RecordBox::Empty => {} }
+    print("{record_read(r)} {record_read(w)}")
+}
+
+@test(output = "1")
+fn record_pattern_ref_argument_writes_its_own_copy() {
+    let src = make_hw()
+    match src { HW { w } => { mutate_wide(w) } }
+    print(src.w.f0)
+}
+
+@test(output = "1")
+fn copied_record_variant_ref_argument_writes_its_own_copy() {
+    let c = RecordCarrier { e: RecordBox::R { o: OptionalPayload { w: mkw(1), xs: [] }, n: 0 }, xs: [] }
+    let a = RecordHolder { c: c }
+    let b = RecordHolder { c: c }
+    match a.c.e { RecordBox::R { o, n } => { mutate_payload(o) } RecordBox::W { w, n } => {} RecordBox::Empty => {} }
+    print(record_read(b.c.e))
+}
+
+value PayloadInner { w: Wide?, n: int }
+value PayloadMid { i: PayloadInner, xs: [int] }
+enum MidBox { Some(PayloadMid), Empty }
+struct HMid { m: PayloadMid }
+@test(output = "1")
+fn stored_enum_payload_owns_its_nested_nullable_descendant() {
+    let e = MidBox::Some(PayloadMid { i: PayloadInner { w: mkw(1), n: 0 }, xs: [] })
+    let h = HMid { m: PayloadMid { i: PayloadInner { w: null, n: 0 }, xs: [] } }
+    match e { MidBox::Some(m) => { h.m = m } MidBox::Empty => {} }
+    if h.m.i.w != null { h.m.i.w.f0 = 99 }
+    match e { MidBox::Some(m) => { if m.i.w != null { print(m.i.w.f0) } } MidBox::Empty => {} }
+}
+
+// A `let` copy some `ref` borrow reaches (directly, through a closure, or
+// through a field of a value literal) owns its `V?` value children: the
+// write lands in the copy, not in the source.
+fn outer_source() -> HOptionalOuter { return HOptionalOuter { o: OptionalOuter { w: mkw(1), xs: [] } } }
+fn outer_child(h: HOptionalOuter) -> int { return if h.o.w != null { h.o.w.f0 } else { -1 } }
+fn mutate_outer(o: ref OptionalOuter) { if o.w != null { o.w.f0 = 99 } }
+@test(output = "1")
+fn later_ref_borrow_of_a_let_copy_owns_its_nullable_child() {
+    let src = outer_source()
+    let o = src.o
+    mutate_outer(o)
+    print(outer_child(src))
+}
+
+@test(output = "1")
+fn closure_ref_borrow_of_a_let_copy_owns_its_nullable_child() {
+    let src = outer_source()
+    let o = src.o
+    let write = () => { mutate_outer(o) }
+    write()
+    print(outer_child(src))
+}
+
+fn retain_outer_writer(src: HOptionalOuter) -> fn() {
+    let o = src.o
+    return () => { mutate_outer(o) }
+}
+@test(output = "1")
+fn escaped_closure_ref_borrow_of_a_let_copy_owns_its_nullable_child() {
+    let src = outer_source()
+    let write = retain_outer_writer(src)
+    write()
+    print(outer_child(src))
+}
+
+value OuterEnvelope { o: OptionalOuter, xs: [int] }
+fn write_envelope(e: ref OuterEnvelope) { mutate_outer(e.o) }
+@test(output = "1")
+fn ref_borrowed_value_literal_owns_its_fields_nullable_child() {
+    let src = outer_source()
+    let e = OuterEnvelope { o: src.o, xs: [] }
+    write_envelope(e)
+    print(outer_child(src))
+}
+
+// A widened enum payload owns its `V?` value children once built: the enum
+// keeps the value the payload had, wherever the enum is stored or yielded.
+enum OuterPayload { Some(OptionalOuter), Empty }
+struct OuterPayloadHolder { e: OuterPayload }
+fn outer_payload_child(e: OuterPayload) -> int {
+    match e {
+        OuterPayload::Some(o) => { return o.w?.f0 ?? -1 }
+        OuterPayload::Empty => { return -2 }
+    }
+}
+fn make_payload_holder(o: OptionalOuter) -> OuterPayloadHolder { return OuterPayloadHolder { e: OuterPayload::Some(o) } }
+@test(output = "1 1 1")
+fn enum_payload_owns_its_nullable_child() {
+    let src = outer_source()
+    let o = src.o
+    let built = OuterPayload::Some(o)
+    let stored = OuterPayloadHolder { e: OuterPayload::Some(o) }
+    let returned = make_payload_holder(o)
+    mutate_outer(src.o)
+    print("{outer_payload_child(built)} {outer_payload_child(stored.e)} {outer_payload_child(returned.e)}")
+}
+
+co fn deliver_outer_payload(h: HOptionalOuter) -> Coroutine<OuterPayload> {
+    let o = h.o
+    yield OuterPayload::Some(o)
+}
+@test(output = "1")
+fn yielded_enum_payload_owns_its_nullable_child() {
+    let src = outer_source()
+    let co = deliver_outer_payload(src)
+    let y = co.resume()
+    mutate_outer(src.o)
+    if y != null { print(outer_payload_child(y)) }
+}
+
+// A generic value field typed `T` or `T?` is a value child once `T` is: its
+// copies own it as a declared one's do.
+value GenericOptional<T> { w: T?, xs: [int] }
+struct HGenericOptional { o: GenericOptional<Wide> }
+value GenericChild<T> { w: T, xs: [int] }
+struct HGenericChild { o: GenericChild<Wide> }
+@test(output = "1 1 true")
+fn generic_value_children_copy() {
+    let o: GenericOptional<Wide> = GenericOptional { w: mkw(1), xs: [] }
+    let a = HGenericOptional { o: o }
+    let b = HGenericOptional { o: o }
+    if a.o.w != null { a.o.w.f0 = 99 }
+    let optional = if b.o.w != null { b.o.w.f0 } else { -1 }
+    let c: GenericChild<Wide> = GenericChild { w: mkw(1), xs: [] }
+    let d = HGenericChild { o: c }
+    let e = HGenericChild { o: c }
+    d.o.w.f0 = 99
+    let absent: GenericOptional<Wide> = GenericOptional { w: null, xs: [] }
+    let f = HGenericOptional { o: absent }
+    print("{optional} {e.o.w.f0} {f.o.w == null}")
+}

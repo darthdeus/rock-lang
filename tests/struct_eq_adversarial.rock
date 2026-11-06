@@ -1,0 +1,128 @@
+// Adversarial coverage for the same-concrete-struct == / != specialization.
+
+struct Pt { x: int, y: int }
+struct Wrap { inner: Pt, tag: string }
+struct Container { items: [int] }
+struct Flagged { val: int, enabled: bool }
+struct WithNullable { x: int, note: string? }
+
+// Regular struct used as HashMap key in a nested struct — struct inside
+// struct inside a container. Exercises that recursive __op_eq still uses
+// the monomorphized __op_eq_<Name> for inner structs.
+struct Outer { p: Pt, q: Pt }
+
+// Case 1: nested struct — outer fast-path, inner recurses via __op_eq.
+@test
+fn test_nested_equal() {
+    let a = Outer { p: Pt { x: 1, y: 2 }, q: Pt { x: 3, y: 4 } }
+    let b = Outer { p: Pt { x: 1, y: 2 }, q: Pt { x: 3, y: 4 } }
+    let c = Outer { p: Pt { x: 1, y: 2 }, q: Pt { x: 3, y: 5 } }
+    assert_eq(a == b, true)
+    assert_eq(a == c, false)
+    assert_eq(a != c, true)
+}
+
+// Case 2: struct with nullable field (both null).
+@test
+fn test_nullable_field_both_null() {
+    let a = WithNullable { x: 1, note: null }
+    let b = WithNullable { x: 1, note: null }
+    assert_eq(a == b, true)
+}
+
+// Case 3: struct with nullable field, one null one not.
+@test
+fn test_nullable_field_one_null() {
+    let a = WithNullable { x: 1, note: null }
+    let b = WithNullable { x: 1, note: "hi" }
+    assert_eq(a == b, false)
+    assert_eq(a != b, true)
+}
+
+// Case 4: struct with bool field.
+@test
+fn test_bool_field() {
+    let a = Flagged { val: 7, enabled: true }
+    let b = Flagged { val: 7, enabled: true }
+    let c = Flagged { val: 7, enabled: false }
+    assert_eq(a == b, true)
+    assert_eq(a == c, false)
+}
+
+// Case 5: struct mutated in place, then compared.
+@test
+fn test_struct_mutation() {
+    let a = Pt { x: 1, y: 2 }
+    let b = Pt { x: 1, y: 2 }
+    assert_eq(a == b, true)
+    a.x = 99
+    assert_eq(a == b, false)
+    b.x = 99
+    assert_eq(a == b, true)
+}
+
+// Case 6: struct equality inside conditional chain with short-circuit.
+@test
+fn test_struct_in_short_circuit() {
+    let a = Pt { x: 0, y: 0 }
+    let b = Pt { x: 0, y: 0 }
+    let gated = true && a == b
+    assert_eq(gated, true)
+    let gated2 = false || a != b
+    assert_eq(gated2, false)
+}
+
+// Case 7: struct returned from fn, compared with literal.
+fn make_pt(x: int, y: int) -> Pt { Pt { x: x, y: y } }
+
+@test
+fn test_struct_fn_return() {
+    let a = make_pt(1, 2)
+    assert_eq(a == Pt { x: 1, y: 2 }, true)
+    assert_eq(make_pt(5, 5) == make_pt(5, 5), true)
+    assert_eq(make_pt(1, 2) != make_pt(1, 3), true)
+}
+
+// Case 8: struct with Vec field — Vec has its own (broken, pre-existing)
+// equality path. Just make sure this doesn't crash and the outer struct's
+// equality behaves consistently with the generic __op_eq path.
+@test
+fn test_struct_with_vec_field_compiles() {
+    let a = Container { items: [1, 2, 3] }
+    let b = Container { items: [1, 2, 3] }
+    // Don't assert equality (Vec equality is a known pre-existing issue),
+    // just assert that a == a holds (same reference).
+    assert_eq(a == a, true)
+}
+
+// Case 9: reflexive equality on empty struct.
+struct NoFields {}
+@test
+fn test_empty_struct_reflexive() {
+    let a = NoFields {}
+    let b = NoFields {}
+    assert_eq(a == b, true)
+    assert_eq(a == a, true)
+}
+
+// Case 10: struct field access via chain, compared.
+struct Box { inner: Pt }
+
+@test
+fn test_chained_field_access() {
+    let b1 = Box { inner: Pt { x: 1, y: 2 } }
+    let b2 = Box { inner: Pt { x: 1, y: 2 } }
+    assert_eq(b1.inner == b2.inner, true)
+    assert_eq(b1.inner == Pt { x: 9, y: 9 }, false)
+    assert_eq(b1 == b2, true)
+}
+
+// Case 11: the `needs_structural_equality` gate must still use __op_eq when
+// types aren't identifiable (one side any / null). Ensure no compile error
+// and correct behavior.
+@test
+fn test_same_ref_reflexive() {
+    let p = Pt { x: 7, y: 7 }
+    let ref = p
+    assert_eq(p == ref, true)
+}

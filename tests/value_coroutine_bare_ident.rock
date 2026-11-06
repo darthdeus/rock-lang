@@ -1,0 +1,42 @@
+// Regression coverage for bare `Ident` references to a value-typed param
+// inside a stackless coroutine body. `let q = p` / `yield p` / `foo(p)` for
+// a value-typed `p` must resolve per-field scalars through `s.p__x`,
+// `s.p__y` — not bare `p__x`, `p__y` (which are nil globals because the
+// coroutine frame only has `s` as a local).
+
+value V2 {
+    x: int,
+    y: int,
+}
+
+fn v2_sum(v: V2) -> int {
+    return v.x + v.y
+}
+
+// Bare param forwarded through a let binding, then field-accessed.
+co fn co_alias(p: V2) -> Coroutine<int> {
+    let q = p
+    yield q.x
+    yield q.y
+}
+
+@test(output = "10\n20")
+fn test_value_param_let_alias() {
+    let c = co_alias(V2 { x: 10, y: 20 })
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+}
+
+// Bare param passed as arg across yield.
+co fn co_arg(p: V2) -> Coroutine<int> {
+    let a = v2_sum(p)
+    yield a
+    yield v2_sum(p) * 2
+}
+
+@test(output = "7\n14")
+fn test_value_param_as_arg() {
+    let c = co_arg(V2 { x: 3, y: 4 })
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+}

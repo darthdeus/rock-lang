@@ -1,0 +1,12 @@
+// Comment inside array literal
+@test(output = "6")
+fn t() {
+    let arr: [int] = [
+        1, // first
+        /* second */ 2,
+        3,
+    ]
+    let sum = 0
+    for v in arr { sum = sum + v }
+    print(sum)
+}

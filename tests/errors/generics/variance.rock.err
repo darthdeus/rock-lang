@@ -1,0 +1,24 @@
+//! Error: Invariant generic positions reject covariant assignment
+//! Tags: generics, variance, soundness
+
+//=== TEST CASE: entity_invariance_MismatchedType ===
+fn main() {
+    let arena: Arena<int> = arena_new()
+    let int_entity: Entity<int> = entity_new(arena, 1, 0)
+    // Entity<T> is invariant: Entity<int> is NOT an Entity<float>,
+    // even though a bare int widens to float.
+    let float_entity: Entity<float> = int_entity
+}
+
+//=== TEST CASE: custom_struct_invariance_MismatchedType ===
+struct Container<T> {
+    item: T
+}
+
+fn process_float_container(c: Container<float>) {}
+
+fn main() {
+    let int_container: Container<int> = Container { item: 5 }
+    // Container<T> invariant: Container<int> is NOT a Container<float>.
+    process_float_container(int_container)
+}

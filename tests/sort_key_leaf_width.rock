@@ -1,0 +1,71 @@
+// SENTINEL -- pins what `Vec<T>.sort<K>` does when the key `K` is WIDER than one
+// leaf. `K` is unconstrained (`fn Vec<T>.sort<K>(vec, key_fn: fn(T) -> K)`), so a
+// multi-leaf key type-checks, and the comparator is `key(a) < key(b)` in every
+// implementation: `__vec_data_sort`/`__rock_col_sort`/`__rock_col_sort_leaves` on
+// luajit, and their JS siblings.
+//
+// CURRENT (WRONG) BEHAVIOR, identical on BOTH backends: only LEAF 0 is compared.
+// A multi-value return sends leaf 0 as the ordinary return value, so `<` sees the
+// first leaf and the rest are silently discarded. `xs.sort(_.p)` on `Vec2` sorts
+// by `p.x` and ignores `p.y`, with no diagnostic.
+//
+// CORRECT would be either a compile-time rejection of a non-comparable key, or a
+// lexicographic compare across all leaves. That is a language-design call (the
+// unconstrained `K` is the root cause), not a codegen fix.
+//
+// WHEN THIS GOES RED the behavior changed. If the key became a compile error,
+// delete this file and add the case to `tests/errors/`. If it became
+// lexicographic, flip the expectations to 3,2,1 / 3,2,1 and drop the sentinel
+// framing.
+//
+// NOT a return-bank defect: the three JS sort comparators invoke the key twice in
+// one statement, which cannot corrupt anything because none of them READS the
+// bank (gated by `skull-codegen-js/tests/ret_bank_no_hand_readers.rs`). Both
+// backends agree here, which is what rules the ABI out.
+
+struct Item { id: int, p: Vec2 }
+
+// Leaf 0 distinct and ordered opposite to leaf 1, so a leaf-0-only compare and a
+// full lexicographic compare give DIFFERENT answers. No ties, so sort stability
+// (JS stable, luajit's table.sort not) cannot explain the result either way.
+@test(output = "order=3,2,1")
+fn sort_by_multi_leaf_key_uses_leaf_zero() {
+    let xs = [
+        Item { id: 1, p: v(3.0, 1.0) },
+        Item { id: 2, p: v(2.0, 2.0) },
+        Item { id: 3, p: v(1.0, 3.0) },
+    ]
+    xs.sort(_.p)
+    let ids = xs.map(_.id).collect()
+    print("order={ids[0]},{ids[1]},{ids[2]}")
+}
+
+// The discriminating case: leaf 0 CONSTANT, leaf 1 distinct and descending. A
+// leaf-0-only compare ties every pair and preserves input order; a lexicographic
+// compare would yield 3,2,1. Input order is the sentinel value.
+@test(output = "order=1,2,3")
+fn sort_by_multi_leaf_key_ignores_later_leaves() {
+    let xs = [
+        Item { id: 1, p: v(5.0, 3.0) },
+        Item { id: 2, p: v(5.0, 2.0) },
+        Item { id: 3, p: v(5.0, 1.0) },
+    ]
+    xs.sort(_.p)
+    let ids = xs.map(_.id).collect()
+    print("order={ids[0]},{ids[1]},{ids[2]}")
+}
+
+// CONTROL: a scalar key on the same data sorts correctly, so the two sentinels
+// above are about the key's WIDTH and not about `sort`, the item struct, or the
+// placeholder lambda.
+@test(output = "order=3,2,1")
+fn sort_by_scalar_key_control() {
+    let xs = [
+        Item { id: 1, p: v(3.0, 1.0) },
+        Item { id: 2, p: v(2.0, 2.0) },
+        Item { id: 3, p: v(1.0, 3.0) },
+    ]
+    xs.sort(_.p.x)
+    let ids = xs.map(_.id).collect()
+    print("order={ids[0]},{ids[1]},{ids[2]}")
+}

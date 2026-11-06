@@ -1,0 +1,24 @@
+// Bucket B coverage: value-position block-expr returning non-flat value.
+
+value V2 {
+    x: float,
+    y: float,
+}
+
+value Seg {
+    a: V2,
+    b: V2,
+}
+
+@test(output = "10\n20\n30\n40")
+fn test_value_block_nested() {
+    let s: Seg = {
+        let ax = 10.0
+        let ay = 20.0
+        Seg { a: V2 { x: ax, y: ay }, b: V2 { x: 30, y: 40 } }
+    }
+    print("{s.a.x.floor()}")
+    print("{s.a.y.floor()}")
+    print("{s.b.x.floor()}")
+    print("{s.b.y.floor()}")
+}

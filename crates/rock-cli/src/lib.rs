@@ -521,6 +521,17 @@ impl Args {
     }
 }
 
+/// Language fixtures from the same source revision as this compiler.
+#[cfg(feature = "test-support")]
+pub fn test_corpus_dir() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("tests")
+}
+
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
 pub mod overlay_test_support;

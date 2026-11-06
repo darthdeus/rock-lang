@@ -1,0 +1,28 @@
+// A lambda CHECKED against a declared fn type had no recorded expression type,
+// so its return ABI was decided as if the type were unknown while the call site
+// read the tuple straight off the declared type. The two ends then disagreed
+// about the multi-return wire and the destructure took the packed table as its
+// first slot. Nothing here is `nobox`: the defect predates that work.
+
+@test fn a_lambda_inferred_without_an_expectation_splats_its_tuple() {
+    let f = (x: int) => (x, x + 1)
+    let (a, b) = f(5)
+    assert_eq(a, 5)
+    assert_eq(b, 6)
+}
+
+@test fn a_lambda_checked_against_a_declared_fn_type_splats_its_tuple() {
+    let g: (int) -> (int, int) = x => (x, x + 1)
+    let (a, b) = g(5)
+    assert_eq(a, 5)
+    assert_eq(b, 6)
+}
+
+fn take(f: (int) -> (int, int)) -> int {
+    let (a, b) = f(7)
+    return a * 100 + b
+}
+
+@test fn the_same_lambda_at_a_fn_value_param_agrees_with_its_callee() {
+    assert_eq(take(x => (x, x + 1)), 708)
+}

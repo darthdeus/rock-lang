@@ -1,0 +1,155 @@
+// Adversarial coverage for the same-concrete-enum == / != specialization.
+// Exercises cases beyond the happy path to make sure we didn't regress
+// anything when we skip the generic __op_eq dispatch.
+
+enum Color { Red, Green, Blue }
+enum Tag { A, B, C }
+
+struct Item {
+    color: Color,
+    tag: Tag,
+}
+
+enum Shape {
+    Point,
+    Circle(int),
+    Rect(int, int),
+}
+
+struct Holder {
+    shape: Shape,
+}
+
+// Case 1: enum stored in a struct field, compared to a literal.
+@test
+fn test_enum_field_vs_literal() {
+    let item = Item { color: Color::Red, tag: Tag::B }
+    assert_eq(item.color == Color::Red, true)
+    assert_eq(item.color == Color::Green, false)
+    assert_eq(item.tag != Tag::A, true)
+}
+
+// Case 2: enum in nullable via null check refines to concrete.
+@test
+fn test_nullable_refinement() {
+    let maybe: Color? = Color::Blue
+    if maybe != null {
+        assert_eq(maybe == Color::Blue, true)
+        assert_eq(maybe == Color::Red, false)
+    }
+}
+
+// Case 3: enum ?? default, then compared (result is concrete Color).
+@test
+fn test_null_coalesce_then_eq() {
+    let maybe: Color? = null
+    let c = maybe ?? Color::Green
+    assert_eq(c == Color::Green, true)
+    assert_eq(c != Color::Red, true)
+}
+
+// Case 4: enum comparisons chained with && and ||.
+@test
+fn test_chained_conditions() {
+    let a = Color::Red
+    let b = Tag::C
+    assert_eq(a == Color::Red && b == Tag::C, true)
+    assert_eq(a == Color::Red || b == Tag::A, true)
+    assert_eq(a == Color::Green || b == Tag::A, false)
+}
+
+// Case 5: enum in a Vec and iterated.
+@test
+fn test_enum_in_vec() {
+    let xs: [Color] = [Color::Red, Color::Green, Color::Blue, Color::Red]
+    let count = 0
+    let matches = 0
+    for c in xs {
+        count = count + 1
+        if c == Color::Red {
+            matches = matches + 1
+        }
+    }
+
+    assert_eq(count, 4)
+    assert_eq(matches, 2)
+    assert_eq(xs[0] == Color::Red, true)
+    assert_eq(xs[1] == Color::Green, true)
+    assert_eq(xs[2] == Color::Blue, true)
+    assert_eq(xs[3] == Color::Red, true)
+
+    let indexed_matches = 0
+    let idx = 0
+    while idx < 4 {
+        if xs[idx] == Color::Red {
+            indexed_matches = indexed_matches + 1
+        }
+        idx = idx + 1
+    }
+    assert_eq(indexed_matches, 2)
+}
+
+// Case 6: payloaded enum stored in a struct, compared via fast path (==).
+@test
+fn test_payloaded_struct_field() {
+    let h1 = Holder { shape: Shape::Circle(5) }
+    let h2 = Holder { shape: Shape::Circle(5) }
+    let h3 = Holder { shape: Shape::Rect(2, 3) }
+    assert_eq(h1.shape == h2.shape, true)
+    assert_eq(h1.shape == h3.shape, false)
+    assert_eq(h1.shape != h3.shape, true)
+}
+
+// Case 7: match-like eq dispatch pattern.
+@test
+fn test_match_like_eq() {
+    let c = Color::Green
+    let name = if c == Color::Red { "r" } else if c == Color::Green { "g" } else { "b" }
+    assert_eq(name, "g")
+}
+
+// Case 8: map with enum keys — exercises equality in map key paths.
+@test
+fn test_enum_as_map_key() {
+    let m = map_new()
+    m[Color::Red] = 1
+    m[Color::Green] = 2
+    assert_eq(m[Color::Red], 1)
+    assert_eq(m[Color::Green], 2)
+}
+
+// Case 9: same-singleton identity via function roundtrip.
+fn return_red() -> Color {
+    Color::Red
+}
+
+@test
+fn test_singleton_identity_via_fn() {
+    let a = return_red()
+    let b = Color::Red
+    assert_eq(a == b, true)
+    assert_eq(b == a, true)
+}
+
+// Case 10: unit-enum comparison inside a generic container element.
+@test
+fn test_enum_in_tuple() {
+    let t = (Color::Red, 1)
+    assert_eq(t.0 == Color::Red, true)
+    assert_eq(t.0 != Color::Green, true)
+}
+
+// Case 11: payloaded variant with nested struct equality.
+struct Pt { x: int, y: int }
+enum Geo { Empty, Dot(Pt) }
+
+@test
+fn test_payloaded_with_struct() {
+    let a = Geo::Dot(Pt { x: 1, y: 2 })
+    let b = Geo::Dot(Pt { x: 1, y: 2 })
+    let c = Geo::Dot(Pt { x: 1, y: 3 })
+    // Same-type payloaded == goes through __op_eq_Geo -> compares field via __op_eq recursively.
+    assert_eq(a == b, true)
+    assert_eq(a == c, false)
+    assert_eq(a == Geo::Empty, false)
+}

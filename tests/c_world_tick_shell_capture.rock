@@ -1,0 +1,70 @@
+nobox value WorldMeleeProfile { move_speed: int }
+struct WorldTickShells<M> { profile: fn(M) -> WorldMeleeProfile? }
+nobox value WorldActorTurnProfile { move_speed: int = 0, moves: bool = true }
+struct WorldActorTurnHost<M> { profile: fn(M) -> WorldActorTurnProfile }
+struct WorldTickRunner<M> {
+    actor_host: WorldActorTurnHost<M>? = null,
+}
+
+fn tick_runner<M>(shells: Entity<WorldTickShells<M>>) -> WorldTickRunner<M> {
+    let runner = WorldTickRunner {}
+    runner.actor_host = WorldActorTurnHost {
+        profile: (shell: M) => {
+            let shells = shells.get() ?? return WorldActorTurnProfile { moves: false }
+            let profile = shells.profile(shell) ?? return WorldActorTurnProfile { moves: false }
+            return WorldActorTurnProfile { move_speed: profile.move_speed }
+        },
+    }
+    return runner
+}
+
+fn tick_fast(shell: int) -> WorldMeleeProfile? { return WorldMeleeProfile { move_speed: shell + 10 } }
+fn tick_slow(shell: int) -> WorldMeleeProfile? { return WorldMeleeProfile { move_speed: shell + 20 } }
+fn tick_absent(_shell: int) -> WorldMeleeProfile? { return null }
+
+@test
+fn c_world_tick_shell_capture_reads_current_callback_after_return() {
+    let rows: Arena<WorldTickShells<int>> = arena_new()
+    let shells = rows.insert(WorldTickShells { profile: tick_fast })
+    let runner = tick_runner(shells)
+    let callback = runner.actor_host.unwrap().profile
+    assert(callback(2).move_speed == 12, "callback survives runner construction")
+    shells.get().unwrap().profile = tick_slow
+    assert(callback(2).move_speed == 22, "callback reads the current shell profile")
+    shells.get().unwrap().profile = tick_absent
+    assert(!callback(2).moves, "an absent shell profile disables movement")
+}
+
+@test
+fn c_world_tick_shell_capture_does_not_revive_after_slot_reuse() {
+    let rows: Arena<WorldTickShells<int>> = arena_new()
+    let shells = rows.insert(WorldTickShells { profile: tick_fast })
+    let runner = tick_runner(shells)
+    let callback = runner.actor_host.unwrap().profile
+    assert(callback(2).moves, "live shell row permits movement")
+    let _ = rows.remove(shells)
+    assert(!callback(2).moves, "retired shell row disables movement")
+    let replacement = rows.insert(WorldTickShells { profile: tick_slow })
+    assert(!callback(2).moves, "slot reuse cannot revive the retained weak handle")
+    let other = tick_runner(replacement)
+    assert(other.actor_host.unwrap().profile(2).move_speed == 22,
+        "replacement runner resolves its own generation")
+}
+
+struct TickBody { move_speed: int }
+
+fn tick_body_profile(body: TickBody) -> WorldMeleeProfile? {
+    return WorldMeleeProfile { move_speed: body.move_speed }
+}
+
+@test
+fn c_world_tick_shell_capture_borrows_the_invocation_body() {
+    let rows: Arena<WorldTickShells<TickBody>> = arena_new()
+    let shells = rows.insert(WorldTickShells { profile: tick_body_profile })
+    let runner = tick_runner(shells)
+    let callback = runner.actor_host.unwrap().profile
+    let body = TickBody { move_speed: 3 }
+    assert(callback(body).move_speed == 3, "profile borrows the invocation's identity body")
+    body.move_speed = 9
+    assert(callback(body).move_speed == 9, "later calls observe the body's current state")
+}

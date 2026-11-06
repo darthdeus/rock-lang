@@ -1,0 +1,44 @@
+//! Annotation registry violations at struct/value FIELD position
+//! Unknown name, disallowed position, and bad
+//! arity -- each rejects with a spanned CompilerError from the registry
+//! validation during field lowering.
+//! Tags: annotations, registry, field
+
+//=== TEST CASE: unknown_annotation_name_on_field_Generic ===
+// Unknown name on a struct field -> reject.
+struct Widget {
+    @totally_unknown_anno
+    width: int
+}
+
+fn main() { print("{Widget { width: 4 }.width}") }
+
+//=== TEST CASE: disallowed_position_on_field_Generic ===
+// `@nomangle` is a fn-item annotation; on a field it is a
+// disallowed-position violation.
+struct Panel {
+    @nomangle
+    height: int
+}
+
+fn main() { print("{Panel { height: 5 }.height}") }
+
+//=== TEST CASE: bad_arity_on_field_Generic ===
+// `@flat` is a nullary varying marker; supplying an arg is an arity
+// violation.
+value Vertex {
+    @flat(1)
+    layer: int
+}
+
+fn main() { print("{Vertex { layer: 6 }.layer}") }
+
+//=== TEST CASE: attr_on_field_Generic ===
+// `@attr` is a param-only role marker; on a struct field it is a
+// disallowed-position violation.
+value Quad {
+    @attr
+    pos: Vec2
+}
+
+fn main() { print("{Quad { pos: v(0.0, 0.0) }.pos.x}") }

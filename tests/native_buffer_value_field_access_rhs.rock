@@ -1,0 +1,44 @@
+// Adversarial: nested-value field RHS is a FieldAccess on a cdata
+// local. `generate_expr_emit` for FieldAccess emits `Multi(["v.x",
+// "v.y"])`. Old codegen: aligned to inner-struct fields, emitted per
+// leaf. Fix path falls back to emit_value_arg_cdata only when shape
+// mismatches. Verify the matched shape still works.
+
+@intrinsic @inline inline(lua) fn put(s: string) = "io.write(s)"
+
+value V2 {
+    x: float,
+    y: float,
+}
+
+value Pair {
+    first: V2,
+    second: V2,
+}
+
+@nomangle inline(lua) fn __nb_alloc_Pair(n: int) -> Ptr<Pair> = 'return ffi.new("Pair[?]", n)'
+
+fn nb_pair(n: int) -> NativeBuffer<Pair> {
+    return NativeBuffer { ptr: __nb_alloc_Pair(n), len: n }
+}
+
+@test(output = "f.x=10\nf.y=20\ns.x=10\ns.y=20")
+fn test_field_access_rhs() {
+    let buf = nb_pair(1)
+    let p = Pair { first: V2 { x: 10.0, y: 20.0 }, second: V2 { x: 99.0, y: 99.0 } }
+    // RHS reads both halves of `p`; each is a FieldAccess of a value-cdata local.
+    buf[0] = Pair { first: p.first, second: p.first }
+    let r = buf[0]
+    put("f.x=")
+    put("{r.first.x}")
+    put("\n")
+    put("f.y=")
+    put("{r.first.y}")
+    put("\n")
+    put("s.x=")
+    put("{r.second.x}")
+    put("\n")
+    put("s.y=")
+    put("{r.second.y}")
+    put("\n")
+}

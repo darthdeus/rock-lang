@@ -1,0 +1,126 @@
+// NativeBuffer<T> wraps a contiguous LuaJIT ffi buffer (`ffi.new("T[?]", n)`)
+// with a phantom type parameter so get/set dispatch to the right primitive.
+
+// Simulates a C function that reads from a `float*` pointer. Takes the
+// raw cdata (buf.ptr) and returns a sum — exercises the FFI pass-through
+// contract: NativeBuffer<float>.ptr acts as `float*` to native code.
+@nomangle inline(lua) fn sum_float_ptr(p: any, n: int) -> float = """
+    local s = 0.0
+    for i = 0, n - 1 do s = s + p[i] end
+    return s
+"""
+
+struct VertexBatch {
+    positions: NativeBuffer<float>,
+    indices: NativeBuffer<int>,
+}
+
+@test
+fn float_buffer_roundtrip() {
+    let buf = native_buffer_float(4)
+    assert(buf.len == 4)
+    nb_set(buf, 0, 1.5)
+    nb_set(buf, 1, -2.25)
+    nb_set(buf, 2, 0.0)
+    nb_set(buf, 3, 3.75)
+    assert(nb_get(buf, 0) == 1.5)
+    assert(nb_get(buf, 1) == -2.25)
+    assert(nb_get(buf, 2) == 0.0)
+    assert(nb_get(buf, 3) == 3.75)
+}
+
+@test
+fn int_buffer_roundtrip() {
+    let buf = native_buffer_int(3)
+    assert(buf.len == 3)
+    nb_set(buf, 0, 10)
+    nb_set(buf, 1, -7)
+    nb_set(buf, 2, 2026)
+    assert(nb_get(buf, 0) == 10)
+    assert(nb_get(buf, 1) == -7)
+    assert(nb_get(buf, 2) == 2026)
+}
+
+@test
+fn float_buffer_tight_loop() {
+    let n = 64
+    let buf = native_buffer_float(n)
+    let i = 0
+    while i < n {
+        nb_set(buf, i, (i * 2) as float)
+        i = i + 1
+    }
+    let sum = 0.0
+    i = 0
+    while i < n {
+        sum = sum + nb_get(buf, i)
+        i = i + 1
+    }
+    // sum of 0,2,4,...,126 = 2 * (0+1+...+63) = 2 * 63*64/2 = 4032
+    assert(sum == 4032.0)
+}
+
+@test
+fn boundary_indices() {
+    let buf = native_buffer_float(3)
+    // First and last index must read what we wrote.
+    nb_set(buf, 0, 11.0)
+    nb_set(buf, 2, 33.0)
+    assert(nb_get(buf, 0) == 11.0)
+    assert(nb_get(buf, 2) == 33.0)
+    // Middle slot defaults to 0 (ffi.new zero-initializes).
+    assert(nb_get(buf, 1) == 0.0)
+}
+
+@test
+fn zero_length_buffer() {
+    // LuaJIT accepts ffi.new("float[?]", 0) and returns a valid but unusable
+    // pointer. We should not crash on construction.
+    let buf = native_buffer_float(0)
+    assert(buf.len == 0)
+}
+
+@test
+fn large_buffer() {
+    // 1M floats = 4 MB; well within reasonable test memory.
+    let n = 1000 * 1000
+    let buf = native_buffer_float(n)
+    assert(buf.len == n)
+    // Write two sentinels far apart; read back.
+    nb_set(buf, 0, -1.5)
+    nb_set(buf, n - 1, 2.75)
+    assert(nb_get(buf, 0) == -1.5)
+    assert(nb_get(buf, n - 1) == 2.75)
+}
+
+@test
+fn ffi_pass_through() {
+    // The .ptr field must be usable as a raw C pointer by FFI-declared
+    // functions. We simulate that here by passing buf.ptr into a Lua
+    // function that indexes it directly (same interface a real `float*`
+    // extern would use).
+    let buf = native_buffer_float(5)
+    nb_set(buf, 0, 1.0)
+    nb_set(buf, 1, 2.0)
+    nb_set(buf, 2, 3.0)
+    nb_set(buf, 3, 4.0)
+    nb_set(buf, 4, 5.0)
+    let total = sum_float_ptr(buf.ptr, buf.len)
+    assert(total == 15.0)
+}
+
+@test
+fn struct_field_interop() {
+    // A Rock struct can own a NativeBuffer as a field; reads and writes
+    // through the field must work the same as on a local binding.
+    let batch = VertexBatch {
+        positions: native_buffer_float(4),
+        indices: native_buffer_int(6),
+    }
+    nb_set(batch.positions, 0, 9.5)
+    nb_set(batch.indices, 5, 42)
+    assert(nb_get(batch.positions, 0) == 9.5)
+    assert(nb_get(batch.indices, 5) == 42)
+    assert(batch.positions.len == 4)
+    assert(batch.indices.len == 6)
+}

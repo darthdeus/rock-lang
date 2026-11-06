@@ -1,0 +1,44 @@
+// Test for v function with expression arguments
+
+struct FixVec2 {
+    x: float,
+    y: float,
+}
+
+fn fixv(x: float, y: float) -> FixVec2 {
+    return FixVec2 { x: x, y: y }
+}
+
+operator *(v: FixVec2, scale: float) -> FixVec2 {
+    return FixVec2 { x: v.x * scale, y: v.y * scale }
+}
+
+operator *(v: FixVec2, scale: int) -> FixVec2 {
+    let s = float(scale)
+    return FixVec2 { x: v.x * s, y: v.y * s }
+}
+
+@test
+fn test_v_with_arithmetic_exprs() {
+    let PAD = 10.0
+    let BAR_HEIGHT = 20.0
+
+    // This should call v with two arguments
+    let vec = fixv(2.0 * PAD, 3.0 * (BAR_HEIGHT + PAD))
+
+    assert_eq(vec.x, 20.0)  // 2 * 10
+    assert_eq(vec.y, 90.0)  // 3 * (20 + 10)
+}
+
+@test
+fn test_v_with_complex_exprs() {
+    let x = 5
+    let y = 7
+    let bg_size = 16
+
+    // Original failing case from map.rock
+    let vec = fixv(x, y) * bg_size
+
+    assert_eq(vec.x, 5.0 * 16.0)
+    assert_eq(vec.y, 7.0 * 16.0)
+}

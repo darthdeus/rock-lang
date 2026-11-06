@@ -1,0 +1,20 @@
+// Regression test for body-local macro hygiene. Macro body's `let x`
+// is renamed to `__inline_local_<callsite>_<N>_x` before param
+// substitution runs, so the body-local can never capture an `expr` arg
+// that happens to share a surface name with the body-local. Same
+// scheme as the InlinePass `__inline_local_` rename.
+//
+// Was a sentinel before the fix landed — see git history for the
+// inverted-assertion form (asserted r==14, the captured value).
+
+macro bad_capture(arg: expr) -> int {
+    let x = 7
+    arg + x
+}
+
+@test
+fn test_macro_body_local_hygiene() {
+    let x = 99
+    let r = bad_capture(x)
+    assert(r == 106, "expected 99 + 7 = 106; macro body-local `x` shadowed caller `x`")
+}

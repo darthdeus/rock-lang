@@ -1,0 +1,65 @@
+// Sigil-form macro invocations `name!(args)` enable extended-parsing of
+// args at the call site so type-shaped forms (Foo<T>, [T], (T, U),
+// Map<K,V>) can be passed as `ty:` fragments. Without the sigil, args
+// parse as ordinary expressions and `Foo<T>` fails because `<` is
+// comparison.
+//
+// Pinned by the parser carve-out for `Ident ! OpenParen` and the
+// expression-shape recognition in `expr_to_type_expr`
+// (`rock-optimizations/src/macro_expansion_pass.rs`).
+
+// Generic carrier struct used to exercise `App`-shaped type args.
+struct Box1<T> { v: T }
+
+macro decl_holder(Name: ident, Elem: ty) {
+    struct Name { v: Elem }
+}
+
+// `Foo<T>` — the headline case. `<` is comparison in expression
+// position, so this can only parse via the sigil's extended-arg parser.
+decl_holder!(WrapBox, Box1<int>)
+
+// `[T]` — array type. Parses as ArrayLiteral expression, e2t recovers.
+decl_holder!(WrapArr, [int])
+
+// `(T, U)` — tuple type. Parses as Tuple expression, e2t recovers.
+decl_holder!(WrapPair, (int, string))
+
+// `Map<K, V>` — generic with two args. Parses as TypeApp.
+decl_holder!(WrapMap, Map<int, string>)
+
+@test
+fn test_sigil_generic_app_arg() {
+    let w = WrapBox { v: Box1 { v: 7 } }
+    assert(w.v.v == 7, "Foo<T> as macro `ty:` arg")
+}
+
+@test
+fn test_sigil_array_arg() {
+    let w = WrapArr { v: [1, 2, 3] }
+    assert(w.v.len() == 3, "[T] as macro `ty:` arg")
+}
+
+@test
+fn test_sigil_tuple_arg() {
+    let w = WrapPair { v: (5, "hello") }
+    assert(w.v.0 == 5, "(T, U) as macro `ty:` arg")
+    assert(w.v.1 == "hello", "tuple second elem")
+}
+
+@test
+fn test_sigil_map_arg() {
+    let m: Map<int, string> = map_new()
+    m[1] = "a"
+    let w = WrapMap { v: m }
+    assert(w.v[1] == "a", "Map<K, V> as macro `ty:` arg")
+}
+
+// Sigil-less form still works for single-Ident args (no migration).
+decl_holder(WrapInt, int)
+
+@test
+fn test_sigilless_still_works() {
+    let w = WrapInt { v: 42 }
+    assert(w.v == 42, "sigil-less form unchanged")
+}

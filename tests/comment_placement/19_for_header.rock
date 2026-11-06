@@ -1,0 +1,10 @@
+// Comments inside for loop header
+@test(output = "6")
+fn t() {
+    let arr: [int] = [1, 2, 3]
+    let sum = 0
+    for /* iter var */ v in /* iterable */ arr {
+        sum = sum + v
+    }
+    print(sum)
+}

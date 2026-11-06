@@ -1,0 +1,114 @@
+// Test recursive enum definitions
+
+// Classic linked list
+enum List<T> {
+    Nil,
+    Cons(T, List<T>),
+}
+
+// Binary tree
+enum Tree<T> {
+    Leaf,
+    Node(T, Tree<T>, Tree<T>),
+}
+
+// Expression tree
+enum Expr {
+    Number(float),
+    Add(Expr, Expr),
+    Multiply(Expr, Expr),
+}
+
+@test
+fn test_recursive_list_basic() {
+    // Create a simple list: [1, 2, 3]
+    let list = List::Cons(1, List::Cons(2, List::Cons(3, List::Nil)))
+    
+    // Pattern match to extract first element
+    match list {
+        Cons(head, _) => assert_eq(head, 1),
+        Nil => assert(false, "List should not be nil"),
+    }
+    
+    print("Recursive list construction works")
+}
+
+fn list_length<T>(list: List<T>) -> int {
+    match list {
+        Nil => 0,
+        Cons(_, tail) => 1 + list_length(tail),
+    }
+}
+
+@test
+fn test_list_length() {
+    let empty: List<int> = List::Nil
+    assert_eq(list_length(empty), 0)
+    
+    let single = List::Cons(42, List::Nil)
+    assert_eq(list_length(single), 1)
+    
+    let three = List::Cons(1, List::Cons(2, List::Cons(3, List::Nil)))
+    assert_eq(list_length(three), 3)
+    
+    print("List length calculation works")
+}
+
+fn eval(expr: Expr) -> float {
+    match expr {
+        Number(n) => n,
+        Add(left, right) => eval(left) + eval(right),
+        Multiply(left, right) => eval(left) * eval(right),
+    }
+}
+
+@test
+fn test_expression_tree() {
+    // Create expression: 2 * (3 + 4)
+    let expr = Expr::Multiply(
+        Expr::Number(2.0),
+        Expr::Add(
+            Expr::Number(3.0),
+            Expr::Number(4.0)
+        )
+    )
+    
+    let result = eval(expr)
+    assert_eq(result, 14.0)
+    
+    print("Expression tree evaluation works")
+}
+
+fn tree_height<T>(tree: Tree<T>) -> int {
+    match tree {
+        Leaf => 0,
+        Node(_, left, right) => {
+            let left_height = tree_height(left)
+            let right_height = tree_height(right)
+            1 + max_int(left_height, right_height)
+        }
+    }
+}
+
+// Helper function for max
+fn max_int(a: int, b: int) -> int {
+    if a > b { a } else { b }
+}
+
+@test
+fn test_tree_height() {
+    let leaf: Tree<int> = Tree::Leaf
+    assert_eq(tree_height(leaf), 0)
+    
+    let single = Tree::Node(1, Tree::Leaf, Tree::Leaf)
+    assert_eq(tree_height(single), 1)
+    
+    let balanced = Tree::Node(
+        1,
+        Tree::Node(2, Tree::Leaf, Tree::Leaf),
+        Tree::Node(3, Tree::Leaf, Tree::Leaf)
+    )
+    assert_eq(tree_height(balanced), 2)
+    
+    print("Tree height calculation works")
+}

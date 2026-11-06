@@ -1,0 +1,68 @@
+//! Error: a fn whose fixed ABI cannot adopt the type-derived `nobox` fn-value
+//!        ABI is rejected in a GLOBAL INITIALIZER, exactly as it already is at
+//!        a direct call site. A call through a fn value cannot see its callee,
+//!        so both ends agree only by reading the same signature -- at a `nobox`
+//!        param that means splatted leaves, which an opaque body, an `extern`
+//!        and a `@nomangle` fn all keep their own boxed ABI against.
+//!
+//!        The gate ran on fn bodies and decorator bodies but not on global
+//!        initializers, so this route reached codegen and MISCOMPILED: the
+//!        leaves splat, the callee binds one param per leaf, and everything
+//!        shifts by one. `fn(p: P, k: float) -> float { return k }` returned
+//!        `p.y`. A dispatch table (`global HANDLERS: [(Vec2) -> float]`) is an
+//!        ordinary shape, so this was reachable from real code.
+//! Tags: nobox, fn-values, globals, abi
+
+//=== TEST CASE: opaque_body_via_global_init_Generic ===
+nobox value P { x: float, y: float }
+
+inline(lua) fn lscore(p: P) -> float = """
+    return p.x * 100.0 + p.y
+"""
+
+global HANDLER: (P) -> float = lscore   // ERROR: fixed ABI cannot adopt the leaf ABI
+
+fn main() {
+    let g = HANDLER
+    print("{g(P { x: 3.0, y: 7.0 })}")
+}
+
+//=== TEST CASE: opaque_body_in_global_vec_Generic ===
+nobox value P { x: float, y: float }
+
+inline(lua) fn lscore(p: P) -> float = """
+    return p.x * 100.0 + p.y
+"""
+
+global FS: [(P) -> float] = [lscore]   // ERROR: same gate, through a container
+
+fn main() {
+    let g = FS[0]
+    print("{g(P { x: 3.0, y: 7.0 })}")
+}
+
+//=== TEST CASE: nomangle_fn_via_global_init_Generic ===
+nobox value P { x: float, y: float }
+
+// Not an opaque body -- an ordinary Rock fn whose `@nomangle` bare name pins its
+// declared boxed ABI. It produced a SILENT wrong answer (returned `p.y` for `k`).
+@nomangle fn scorer(p: P, k: float) -> float { return k }
+
+global HANDLER: (P, float) -> float = scorer   // ERROR: fixed ABI cannot adopt the leaf ABI
+
+fn main() {
+    let g = HANDLER
+    print("{g(P { x: 3.0, y: 7.0 }, 999.0)}")
+}
+
+//=== TEST CASE: extern_fn_via_global_init_Generic ===
+nobox value P { x: float, y: float }
+
+extern fn take_p(p: P) -> float
+
+global H: (P) -> float = take_p   // ERROR: an FFI boundary cannot splat leaves
+
+fn main() {
+    let g = H
+    print("{g(P { x: 1.0, y: 2.0 })}")
+}

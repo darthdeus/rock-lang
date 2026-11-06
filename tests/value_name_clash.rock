@@ -1,0 +1,60 @@
+// Test: value names that could be problematic
+
+// Name that looks like it could clash with C standard types
+value Color {
+    r: float,
+    g: float,
+    b: float,
+    a: float,
+}
+
+// Very short name
+value V {
+    x: float,
+}
+
+// Name with numbers
+value FixVec3 {
+    x: float,
+    y: float,
+    z: float,
+}
+
+@test
+fn test_color() {
+    let c = Color { r: 1.0, g: 0.5, b: 0.0, a: 1.0 }
+    assert(c.r == 1.0)
+    assert(c.g == 0.5)
+    assert(c.b == 0.0)
+    assert(c.a == 1.0)
+}
+
+@test
+fn test_short_name() {
+    let v = V { x: 42.0 }
+    assert(v.x == 42.0)
+}
+
+@test
+fn test_vec3() {
+    let v = FixVec3 { x: 1.0, y: 2.0, z: 3.0 }
+    assert(v.x == 1.0)
+    assert(v.y == 2.0)
+    assert(v.z == 3.0)
+}
+
+// Test: all three types interact correctly
+@test
+fn test_multiple_types_coexist() {
+    let c = Color { r: 1.0, g: 0.5, b: 0.0, a: 1.0 }
+    let v = FixVec3 { x: 10.0, y: 20.0, z: 30.0 }
+    let p = V { x: 99.0 }
+
+    assert(c.r == 1.0)
+    assert(v.z == 30.0)
+    assert(p.x == 99.0)
+
+    // Equality works per-type
+    let c2 = Color { r: 1.0, g: 0.5, b: 0.0, a: 1.0 }
+    assert(c == c2)
+}

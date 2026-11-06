@@ -1,0 +1,28 @@
+// Bucket B coverage: value-position `if-let` returning non-flat value.
+
+value V2 {
+    x: float,
+    y: float,
+}
+
+value Seg {
+    a: V2,
+    b: V2,
+}
+
+fn maybe_int(have: bool) -> int? {
+    if have { 7 } else { null }
+}
+
+@test(output = "1\n2\n7\n4")
+fn test_value_iflet_nested() {
+    let s: Seg = if let n = maybe_int(true) {
+        Seg { a: V2 { x: 1, y: 2 }, b: V2 { x: n as float, y: 4 } }
+    } else {
+        Seg { a: V2 { x: 0, y: 0 }, b: V2 { x: 0, y: 0 } }
+    }
+    print("{s.a.x.floor()}")
+    print("{s.a.y.floor()}")
+    print("{s.b.x.floor()}")
+    print("{s.b.y.floor()}")
+}

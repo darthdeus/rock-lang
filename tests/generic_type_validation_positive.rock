@@ -1,0 +1,26 @@
+// Tests for correct usage of generic types with type arguments
+
+struct GenericStruct<T> {
+    value: T
+}
+
+enum GenericEnum<T> {
+    Some(T),
+    None
+}
+
+// These should pass - correct usage with type arguments
+@test(output = "42")
+fn test_correct_generic_usage() {
+    let x: GenericStruct<int> = GenericStruct { value: 42 }
+    print(x.value)
+}
+
+@test(output = "Hello")
+fn test_correct_enum_usage() {
+    let x: GenericEnum<string> = GenericEnum::Some("Hello")
+    match x {
+        GenericEnum::Some(s) => print(s),
+        GenericEnum::None => print("None")
+    }
+}

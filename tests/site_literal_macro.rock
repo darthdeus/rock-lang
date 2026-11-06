@@ -1,0 +1,61 @@
+// Stage 2: __SITE__ inside macro bodies must capture the *macro caller's*
+// source position, not the body's.
+
+macro my_site() -> string {
+    __SITE__
+}
+
+@test
+fn test_macro_captures_caller_line() {
+    let s = my_site()
+    assert(s.contains("site_literal_macro.rock"), "file: {s}")
+    // The expansion should resolve __SITE__ to *this* line (the macro
+    // call site), not line 5 (the macro body's __SITE__).
+    assert(!s.contains(":5"), "must NOT see body line :5, got: {s}")
+    assert(s.contains(":10"), "expected caller line :10, got: {s}")
+}
+
+// Two callers of the same macro: each gets its own line.
+@test
+fn test_macro_distinct_callers() {
+    let a = my_site()
+    let b = my_site()
+    assert(a != b, "different call sites should differ: {a} vs {b}")
+    assert(a.contains(":21"), "a: {a}")
+    assert(b.contains(":22"), "b: {b}")
+}
+
+// Nested macro: outer expands → inner. The __SITE__ inside the inner
+// macro should resolve to the *outermost* user call, not the outer
+// macro's body call to inner.
+macro inner_site() -> string {
+    __SITE__
+}
+macro outer_site() -> string {
+    inner_site()
+}
+
+@test
+fn test_nested_macros_capture_outermost_caller() {
+    let s = outer_site()
+    assert(s.contains("site_literal_macro.rock"), "file: {s}")
+    // The chain: caller :40 → outer_site → inner_site. Should pick :40.
+    assert(s.contains(":40"), "expected outermost caller :40, got: {s}")
+    assert(!s.contains(":31"), "must not see inner body line :31: {s}")
+    assert(!s.contains(":35"), "must not see outer body line :35: {s}")
+}
+
+// Variadic recursion: __SITE__ inside a variadic macro body should
+// resolve to the *user* call, not any intermediate recursive step.
+macro count_at() -> string {
+    "<base>"
+}
+macro count_at(x: expr, rest: ...expr) -> string {
+    __SITE__
+}
+
+@test
+fn test_variadic_captures_outer_caller() {
+    let s = count_at(1, 2, 3)
+    assert(s.contains(":59"), "expected user call :59, got: {s}")
+}

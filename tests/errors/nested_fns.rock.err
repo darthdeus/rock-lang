@@ -1,0 +1,73 @@
+//! Error: nested `fn` v1 rejects.
+//!        v1 restrictions: no capture of enclosing params/locals, no generics,
+//!        no annotations, decl-before-use (no forward/mutual recursion). The
+//!        `_<Kind>` suffixes are finalized against the real error kinds once
+//!        the lowering/typecheck lands.
+//! Tags: nested_fn, rejects
+
+//=== TEST CASE: nested_fn_reads_enclosing_param_Generic ===
+// A hoisted nested fn lives at module scope -- the enclosing param does not
+// exist there. Reading it is a compile error.
+fn outer(threshold: int) -> int {
+    fn keep(x: int) -> bool { x > threshold }
+    return [1, 5, 9].filter(keep).len()
+}
+fn main() { let _ = outer(3) }
+
+//=== TEST CASE: nested_fn_reads_enclosing_local_Generic ===
+// Same rule for an enclosing local.
+fn outer() -> int {
+    let bonus = 10
+    fn add(x: int) -> int { x + bonus }
+    return add(5)
+}
+fn main() { let _ = outer() }
+
+//=== TEST CASE: nested_fn_with_generics_Generic ===
+// v1: no generics on nested fns.
+fn outer() -> int {
+    fn id<T>(x: T) -> T { x }
+    return id(7)
+}
+fn main() { let _ = outer() }
+
+//=== TEST CASE: nested_fn_with_annotation_Generic ===
+// v1: no annotations on nested fns.
+fn outer() -> int {
+    @pure
+    fn inc(x: int) -> int { x + 1 }
+    return inc(7)
+}
+fn main() { let _ = outer() }
+
+//=== TEST CASE: nested_fn_forward_reference_Generic ===
+// v1 decl-before-use: calling a nested fn before its declaration does not
+// resolve (there is no like-named top-level fn).
+fn outer() -> int {
+    let r = later(5)
+    fn later(x: int) -> int { x + 1 }
+    return r
+}
+fn main() { let _ = outer() }
+
+//=== TEST CASE: nested_fn_out_of_scope_Generic ===
+// A nested fn is block-scoped (privacy is a property): calling it outside the
+// block it is declared in does not resolve.
+fn outer() -> int {
+    {
+        fn helper(x: int) -> int { x + 1 }
+        let _ = helper(1)
+    }
+    return helper(2)
+}
+fn main() { let _ = outer() }
+
+//=== TEST CASE: nested_fn_mutual_recursion_Generic ===
+// v1 decl-before-use forbids mutual recursion: `is_even` calls `is_odd` before
+// it is declared.
+fn parity(n: int) -> bool {
+    fn is_even(k: int) -> bool { if k == 0 { return true }  return is_odd(k - 1) }
+    fn is_odd(k: int) -> bool { if k == 0 { return false }  return is_even(k - 1) }
+    return is_even(n)
+}
+fn main() { let _ = parity(4) }

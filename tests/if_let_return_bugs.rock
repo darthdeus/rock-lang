@@ -1,0 +1,109 @@
+// Bug 1: if-let as expression should be usable as implicit return value
+// Currently compiles to bare `e;` in Lua which is a syntax error
+//
+// Bug 2: explicit return inside if-let branches causes type mismatch
+// "Type mismatch: found (), expected T" on the if-let block
+
+fn lookup_in_map(m: Map<int, string>, key: int) -> string? {
+    let val = m.get(key)
+
+    // Bug 1: if-let as implicit return expression
+    // This should work: the if-let is the last expression and its value
+    // should be the function's return value.
+    if let v = val {
+        v
+    } else {
+        null
+    }
+}
+
+fn lookup_in_map_explicit(m: Map<int, string>, key: int) -> string? {
+    let val = m.get(key)
+
+    // Bug 2: explicit return inside if-let branches
+    // This should also work but gives:
+    //   "Type mismatch: found (), expected string"
+    if let v = val {
+        return v
+    } else {
+        return null
+    }
+}
+
+@test
+fn test_if_let_implicit_return() {
+    let m: Map<int, string> = map_new()
+    insert(m, 42, "hello")
+
+    let result = lookup_in_map(m, 42)
+    assert(result != null, "Expected non-null result")
+    assert_eq(result.unwrap(), "hello")
+
+    let missing = lookup_in_map(m, 99)
+    assert(missing == null, "Expected null for missing key")
+
+    print("if-let implicit return works")
+}
+
+@test
+fn test_if_let_explicit_return() {
+    let m: Map<int, string> = map_new()
+    insert(m, 42, "hello")
+
+    let result = lookup_in_map_explicit(m, 42)
+    assert(result != null, "Expected non-null result")
+    assert_eq(result.unwrap(), "hello")
+
+    let missing = lookup_in_map_explicit(m, 99)
+    assert(missing == null, "Expected null for missing key")
+
+    print("if-let explicit return works")
+}
+
+// Regression: `if let x = <control-flow expr>` -- the binding value is
+// itself an if / match / block expression. Codegen used to splice it
+// as `local __iflet_val = if ... then ... end` (invalid Lua: bare
+// `if` is not an rvalue), so `rock compile` "succeeded" but luajit
+// aborted at load. Now lowered via generate_expr_into_local. See
+// rock-codegen exprs.rs generate_if_let_arm.
+fn rb_pick(i: int) -> int? {
+    if i >= 0 { return 7 }
+    return null
+}
+
+@test
+fn test_if_let_value_is_if_expr() {
+    let idx = 1
+    if let e = if idx >= 0 { rb_pick(idx) } else { null } {
+        assert_eq(e.unwrap(), 7)
+    } else {
+        assert(false, "if-expr value should have bound")
+    }
+    // and the null path
+    let neg = -1
+    let hit = if let e = if neg >= 0 { rb_pick(neg) } else { null } {
+        e.unwrap()
+    } else {
+        -99
+    }
+    assert_eq(hit, -99)
+}
+
+@test
+fn test_if_let_value_is_match_expr() {
+    let k = 1
+    if let v = match k { 1 => rb_pick(0), _ => null } {
+        assert_eq(v.unwrap(), 7)
+    } else {
+        assert(false, "match-expr value should have bound")
+    }
+}
+
+@test
+fn test_if_let_value_is_block_expr() {
+    if let v = { let t = rb_pick(5); t } {
+        assert_eq(v.unwrap(), 7)
+    } else {
+        assert(false, "block-expr value should have bound")
+    }
+}

@@ -1,0 +1,75 @@
+// Adversarial tests: @inline — multi-statement bodies
+//
+// V0 now accepts bodies of shape:
+//   side_effect_expr()
+//   side_effect_expr()
+//   trailing_expr    OR    return trailing_expr
+//
+// Prefix statements must be bare expression statements; no `let`,
+// `for`, `while`, `return` in the middle, etc. These tests exercise
+// the canonical "side effect then return receiver" fluent-builder
+// pattern.
+
+global SIDE: int = 0
+
+fn bump() -> int {
+    SIDE = SIDE + 1
+    return 0
+}
+
+fn bump_by(n: int) -> int {
+    SIDE = SIDE + n
+    return 0
+}
+
+// Bare side-effect + return receiver — the fluent-builder shape.
+@inline
+fn tap(r: int) -> int {
+    bump()
+    return r
+}
+
+@test(output = "7 1")
+fn test_tap_once() {
+    SIDE = 0
+    let r = tap(7)
+    print("{r} {SIDE}")
+}
+
+@test(output = "42 3")
+fn test_tap_chained() {
+    SIDE = 0
+    let r = tap(tap(tap(42)))
+    print("{r} {SIDE}")
+}
+
+// Multiple prefix side-effects + trailing expression (no explicit
+// return).
+@inline
+fn double_tap(r: int) -> int {
+    bump()
+    bump()
+    r
+}
+
+@test(output = "5 2")
+fn test_double_tap() {
+    SIDE = 0
+    let r = double_tap(5)
+    print("{r} {SIDE}")
+}
+
+// Parameter used in prefix statement — substitution must reach both
+// the side-effecting call and the trailing position.
+@inline
+fn tap_with(r: int, add: int) -> int {
+    bump_by(add)
+    return r
+}
+
+@test(output = "9 10")
+fn test_tap_with_param_in_prefix() {
+    SIDE = 0
+    let r = tap_with(9, 10)
+    print("{r} {SIDE}")
+}

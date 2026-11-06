@@ -1,0 +1,82 @@
+// Test the new string functions added to stdlib
+
+@test(output = "5\n11\n0")
+fn test_string_length() {
+    print("hello".len())
+    print("hello world".len())
+    print("".len())
+}
+
+@test(output = "hello\nworld\nlo wo")
+fn test_string_substring() {
+    let s = "hello world"
+    print(s.substring(0, 5))
+    print(s.substring(6, 11))
+    print(s.substring(3, 8))
+    // Empty string produces no output
+}
+
+@test(output = "3\napple\nbanana\ncherry")
+fn test_string_split() {
+    let parts = "apple,banana,cherry".split(",")
+    print(vec_len(parts))
+    for part in parts {
+        print(part)
+    }
+}
+
+@test(output = "hello\nworld\nhello world")
+fn test_string_trim() {
+    print("  hello  ".trim())
+    print("\n\tworld\n\t".trim())
+    print("hello world".trim())
+}
+
+@test(output = "HELLO WORLD\nhello world")
+fn test_string_case() {
+    print("hello world".upper())
+    print("HELLO WORLD".lower())
+}
+
+@test(output = "true\nfalse\ntrue\nfalse")
+fn test_string_contains() {
+    print("hello world".contains("world"))
+    print("hello world".contains("foo"))
+    print("hello".contains(""))
+    print("".contains("hello"))
+}
+
+@test(output = "true\nfalse\ntrue\ntrue")
+fn test_string_starts_with() {
+    print("hello world".starts_with("hello"))
+    print("hello world".starts_with("world"))
+    print("hello".starts_with(""))
+    print("".starts_with(""))
+}
+
+@test(output = "true\nfalse\ntrue\ntrue")
+fn test_string_ends_with() {
+    print("hello world".ends_with("world"))
+    print("hello world".ends_with("hello"))
+    print("hello".ends_with(""))
+    print("".ends_with(""))
+}
+
+@test(output = "hello rust\nhello bar hello")
+fn test_string_replace() {
+    print("hello world".replace("world", "rust"))
+    print("foo bar foo".replace("foo", "hello"))
+}
+
+@test(output = "6\n-1\n0")
+fn test_string_find() {
+    print("hello world".find("world"))
+    print("hello world".find("foo"))
+    print("hello".find("hello"))
+}
+
+@test(output = "A\n65")
+fn test_string_char_byte() {
+    print(string_char(65))  // 'A'
+    print("ABC".unit_at(0))  // 65
+}

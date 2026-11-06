@@ -1,0 +1,14 @@
+//! Error: a residual Iterator-bounded call in a coroutine body must reject.
+//! Coroutines do not inline, so the call requires a named standalone
+//! specialization before emission.
+//! Tags: iterators, bounds, lambdas, silent-errors
+
+//=== TEST CASE: chain_in_co_fn_body_drops_co_fn_Generic ===
+co fn worker(xs: [int]) -> int {
+    let evens = xs.iter().filter(x => x % 2 == 0).collect()
+    return evens.len
+}
+fn main() {
+    let n = worker([1, 2, 3, 4])
+    print("n={n}")
+}

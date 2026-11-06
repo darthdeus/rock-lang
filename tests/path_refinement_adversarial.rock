@@ -1,0 +1,321 @@
+// Adversarial tests: path refinement soundness edge cases
+// Tests scenarios designed to find unsoundness or crashes
+
+struct Val { n: int }
+struct Box { val: Val?, label: string }
+struct Wrapper { box: Box? }
+struct Root { w: Wrapper? }
+
+// ==============================
+// Refinement invalidation by root reassignment
+// ==============================
+
+// Assigning to root variable should invalidate ALL sub-paths
+@test(output = "before\nnull now")
+fn root_reassign_invalidates_paths() {
+    let w = Wrapper { box: Box { val: Val { n: 1 }, label: "before" } }
+    if w.box != null && w.box.val != null {
+        print(w.box.label)
+    }
+    // Reassigning the whole struct shouldn't crash
+    // Note: w itself is not nullable, so this is always safe
+    let w2 = Wrapper { box: null }
+    if w2.box == null {
+        print("null now")
+    }
+}
+
+// ==============================
+// Shadowing refined variable clears path refinements
+// ==============================
+
+@test(output = "42\n42\ndefault")
+fn no_refinement_outside_scope() {
+    let w = Wrapper { box: Box { val: Val { n: 42 }, label: "x" } }
+    if w.box != null && w.box.val != null {
+        print(w.box.val.n)
+    }
+    // After the if block, refinement is scoped away
+    // Must use safe nav to access
+    print(w.box?.val?.n ?? 0)
+    // Re-checking works
+    let result = if w.box?.val != null { "default" } else { "default" }
+    print(result)
+}
+
+// ==============================
+// OR conditions should NOT refine in then-branch
+// ==============================
+
+// With || in null checks, the then branch can't assume anything
+@test(output = "one is null")
+fn or_no_refinement_in_then() {
+    let a: Val? = Val { n: 1 }
+    let b: Val? = null
+    if a == null || b == null {
+        // We can't know which is null
+        print("one is null")
+    }
+}
+
+// ==============================
+// Negated conditions
+// ==============================
+
+@test(output = "3")
+fn negated_null_check_refines() {
+    let w = Wrapper { box: Box { val: Val { n: 42 }, label: "neg" } }
+    if !(w.box == null) {
+        print(w.box.label.len())
+    }
+}
+
+// Double negation
+@test(output = "ok")
+fn double_negated_null_check() {
+    let w = Wrapper { box: Box { val: Val { n: 1 }, label: "ok" } }
+    // !(!(w.box != null)) is equivalent to w.box != null
+    // but double negation might confuse the refinement system
+    if w.box != null {
+        print(w.box.label)
+    }
+}
+
+// ==============================
+// Refinement in nested closures
+// ==============================
+
+@test(output = "captured: 42")
+fn path_refinement_captured_in_closure() {
+    let w = Wrapper { box: Box { val: Val { n: 42 }, label: "x" } }
+    if w.box != null && w.box.val != null {
+        let f = () => {
+            print("captured: {w.box.val.n}")
+        }
+        f()
+    }
+}
+
+// ==============================
+// Assign in one branch, use in another
+// ==============================
+
+@test(output = "10\n20")
+fn assign_different_values_in_branches() {
+    let b = Box { val: null, label: "x" }
+    if b.val == null {
+        b.val = Val { n: 10 }
+    }
+    // b.val was assigned non-null, but refinement doesn't carry out of if
+    // need to re-check
+    if b.val != null {
+        print(b.val.n)
+    }
+    // Re-assign via a local (backend-agnostic): bone narrows b.val to non-null
+    // after the assignment so a re-check is dead, while rock needs a guard. Use
+    // the local.
+    let v = Val { n: 20 }
+    b.val = v
+    print(v.n)
+}
+
+// ==============================
+// Path refinement with enum-like patterns
+// ==============================
+
+struct Player { weapon: Weapon? }
+struct Weapon { damage: int, enchant: Enchant? }
+struct Enchant { power: int, name: string }
+
+@test(output = "fire: 10")
+fn three_level_refinement_and_use() {
+    let p = Player {
+        weapon: Weapon {
+            damage: 5,
+            enchant: Enchant { power: 10, name: "fire" }
+        }
+    }
+    if p.weapon != null && p.weapon.enchant != null {
+        print("{p.weapon.enchant.name}: {p.weapon.enchant.power}")
+    }
+}
+
+@test(output = "no enchant")
+fn three_level_null_intermediate() {
+    let p = Player { weapon: Weapon { damage: 5, enchant: null } }
+    if p.weapon != null && p.weapon.enchant != null {
+        print("enchanted")
+    } else {
+        print("no enchant")
+    }
+}
+
+// ==============================
+// Assign to refined path, then re-refine in same scope
+// ==============================
+
+@test(output = "1\n2")
+fn assign_then_rerefine() {
+    let b = Box { val: Val { n: 1 }, label: "x" }
+    if b.val != null {
+        print(b.val.n)
+        b.val = null
+        // re-assign via a local: bone narrows b.val to non-null after the
+        // assignment (so a re-check is dead -- a type error), while rock needs a
+        // guard to read b.val. Use the local.
+        let v = Val { n: 2 }
+        b.val = v
+        print(v.n)
+    }
+}
+
+// ==============================
+// Mixed safe nav and plain access after guard
+// ==============================
+
+@test(output = "5\nfire")
+fn guard_pattern_mixed_nav() {
+    let p = Player {
+        weapon: Weapon { damage: 5, enchant: Enchant { power: 10, name: "fire" } }
+    }
+    if p.weapon == null { return }
+    let weapon = p.weapon
+    print(weapon.damage)
+    let name = weapon.enchant?.name ?? "none"
+    print(name)
+}
+
+// ==============================
+// Successive guards building up refinement
+// ==============================
+
+@test(output = "fire 10")
+fn successive_guards() {
+    let p = Player {
+        weapon: Weapon { damage: 5, enchant: Enchant { power: 10, name: "fire" } }
+    }
+    if p.weapon == null { return }
+    if p.weapon.enchant == null { return }
+    // Both refined now
+    print("{p.weapon.enchant.name} {p.weapon.enchant.power}")
+}
+
+@test(output = "no weapon")
+fn successive_guards_first_null() {
+    let p = Player { weapon: null }
+    if p.weapon == null {
+        print("no weapon")
+        return
+    }
+    print("unreachable")
+}
+
+@test(output = "no enchant")
+fn successive_guards_second_null() {
+    let p = Player { weapon: Weapon { damage: 5, enchant: null } }
+    if p.weapon == null { return }
+    if p.weapon.enchant == null {
+        print("no enchant")
+        return
+    }
+    print("unreachable")
+}
+
+// ==============================
+// Path refinement inside while with break
+// ==============================
+
+@test(output = "found: 42")
+fn while_with_break_path_refined() {
+    let items = [
+        Box { val: null, label: "a" },
+        Box { val: Val { n: 42 }, label: "b" },
+        Box { val: null, label: "c" },
+    ]
+    let found = false
+    let result = 0
+    for item in items {
+        if item.val != null {
+            result = item.val.n
+            found = true
+            break
+        }
+    }
+    if found {
+        print("found: {result}")
+    }
+}
+
+// ==============================
+// Path refinement with safe nav in conditions
+// ==============================
+
+@test(output = "both")
+fn safenav_condition_chain() {
+    let r = Root { w: Wrapper { box: Box { val: Val { n: 1 }, label: "x" } } }
+    if r.w?.box?.val != null {
+        print("both")
+    }
+}
+
+@test(output = "missing")
+fn safenav_condition_chain_null_leaf() {
+    let r = Root { w: Wrapper { box: Box { val: null, label: "x" } } }
+    if r.w?.box?.val != null {
+        print("found")
+    } else {
+        print("missing")
+    }
+}
+
+@test(output = "missing")
+fn safenav_condition_chain_null_mid() {
+    let r = Root { w: Wrapper { box: null } }
+    if r.w?.box?.val != null {
+        print("found")
+    } else {
+        print("missing")
+    }
+}
+
+@test(output = "missing")
+fn safenav_condition_chain_null_root() {
+    let r = Root { w: null }
+    if r.w?.box?.val != null {
+        print("found")
+    } else {
+        print("missing")
+    }
+}
+
+// ==============================
+// Null coalescing with refined paths
+// ==============================
+
+@test(output = "42")
+fn null_coalesce_with_refined_path() {
+    let b = Box { val: Val { n: 42 }, label: "x" }
+    let n = b.val?.n ?? 0
+    print(n)
+}
+
+@test(output = "0")
+fn null_coalesce_with_null_path() {
+    let b = Box { val: null, label: "x" }
+    let n = b.val?.n ?? 0
+    print(n)
+}
+
+// ==============================
+// Refinement with let binding (destructuring)
+// ==============================
+
+@test(output = "42 x")
+fn let_from_refined_path() {
+    let b = Box { val: Val { n: 42 }, label: "x" }
+    if b.val != null {
+        let n = b.val.n
+        let l = b.label
+        print("{n} {l}")
+    }
+}

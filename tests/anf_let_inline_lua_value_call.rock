@@ -1,0 +1,25 @@
+// Bucket-C site 6953 (ANF unsupported-site audit):
+// `let v = make_v(...)` where `make_v` is `@inline inline(lua) -> V`
+// used to panic with `Unsupported("value-returning inline(lua)/dyn
+// call (cdata)")`. The inliner pre-splices the body so ANF sees an
+// `AnfComp::InlineLua` (single cdata splice) rather than an
+// `AnfComp::Call`. Treat as cdata-ABI single return: bind once,
+// unpack to per-field scalars via FieldGet.
+
+value V2 { x: int, y: int }
+
+@inline
+inline(lua) fn make_v(x: int, y: int) -> V2 = "return V2_ct(x, y)"
+
+@test
+fn test_let_inline_lua_value_call() {
+    let v = make_v(7, 9)
+    assert_eq(v.x, 7)
+    assert_eq(v.y, 9)
+}
+
+@test
+fn test_let_inline_lua_value_call_field_use() {
+    let v = make_v(3, 4)
+    assert_eq(v.x + v.y, 7)
+}

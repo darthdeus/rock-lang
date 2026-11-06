@@ -1,0 +1,208 @@
+// Tests for lambda parameter type inference and underscore placeholders
+
+struct Person {
+    name: string,
+    age: int,
+}
+
+struct Point {
+    x: float,
+    y: float,
+}
+
+// Test 1: Basic lambda parameter type inference
+@test
+fn test_lambda_type_inference() {
+    // Inference from array element type
+    let numbers = [1, 2, 3, 4, 5]
+    let doubled = numbers.iter().map(x => x * 2).collect()  // x inferred as int
+    assert_eq(doubled[0], 2)
+    assert_eq(doubled[4], 10)
+
+    // Inference with string operations
+    let names = ["alice", "bob", "charlie"]
+    let lengths = names.map(s => s.len()).collect()  // s inferred as string
+    assert_eq(lengths[0], 5)  // "alice" has 5 chars
+    assert_eq(lengths[2], 7)  // "charlie" has 7 chars
+
+    // Inference with tuples
+    let pairs = [(1, "a"), (2, "b"), (3, "c")]
+    let firsts = pairs.iter().map(p => p.0).collect()  // p inferred as (int, string)
+    let seconds = pairs.iter().map(p => p.1).collect()
+    assert_eq(firsts[0], 1)
+    assert_eq(seconds[2], "c")
+}
+
+// Test 2: Lambda inference with struct types
+@test
+fn test_lambda_struct_inference() {
+    let people = [
+        Person { name: "Alice", age: 30 },
+        Person { name: "Bob", age: 25 },
+        Person { name: "Charlie", age: 35 },
+    ]
+    
+    // Infer struct type in lambda
+    let names = people.iter().map(p => p.name).collect()
+    let ages = people.iter().map(p => p.age).collect()
+
+    assert_eq(names[0], "Alice")
+    assert_eq(ages[1], 25)
+
+    // Complex expressions
+    let older = people.iter().filter(p => p.age > 28).collect()
+    assert_eq(vec_len(older), 2)  // Alice and Charlie
+}
+
+// Test 3: Basic underscore placeholder usage
+@test
+fn test_underscore_placeholders() {
+    // Simple arithmetic
+    let add_one = _ + 1
+    assert_eq(add_one(5), 6)
+    assert_eq(add_one(10), 11)
+    
+    // Field access
+    let get_x = _.x
+    let p1 = Point { x: 3.0, y: 4.0 }
+    let p2 = Point { x: 5.0, y: 12.0 }
+    assert_eq(get_x(p1), 3.0)
+    assert_eq(get_x(p2), 5.0)
+    
+    // Method-call placeholder: `_.m()` desugars to `x => x.m()`. A
+    // single-overload method resolves with no annotation (`upper` is
+    // string-only, so the placeholder infers string).
+    let shout = _.upper()
+    assert_eq(shout("hi"), "HI")
+
+    // An overloaded method (`len`: string/Vec/Map/Arena) can't pick from
+    // the bare placeholder, so it needs a type to disambiguate. `_.len()`
+    // and the equivalent `len(_)` both work here.
+    let get_length: fn(string) -> int = _.len()
+    assert_eq(get_length("hello"), 5)
+    assert_eq(get_length("world"), 5)
+}
+
+// Test 4: Underscore with type annotations
+@test
+fn test_typed_underscore() {
+    // Type annotation makes underscore work with map
+    let numbers = [1, 2, 3, 4, 5]
+    let doubler: (int) -> int = _ * 2
+    let doubled = numbers.iter().map(doubler).collect()
+    assert_eq(doubled[0], 2)
+    assert_eq(doubled[4], 10)
+
+    // Multiple typed underscore functions
+    let add_ten: (int) -> int = _ + 10
+    let times_three: (int) -> int = _ * 3
+
+    let result1 = numbers.iter().map(add_ten).collect()
+    let result2 = numbers.iter().map(times_three).collect()
+    
+    assert_eq(result1[0], 11)  // 1 + 10
+    assert_eq(result2[0], 3)   // 1 * 3
+}
+
+// Test 5: Underscore in more complex expressions
+@test
+fn test_underscore_complex_expressions() {
+    // Arithmetic expressions
+    let complex_calc: (int) -> int = (_ + 5) * 2
+    assert_eq(complex_calc(10), 30)  // (10 + 5) * 2
+    
+    // Nested field access
+    let people = [
+        Person { name: "Alice", age: 30 },
+        Person { name: "Bob", age: 25 },
+    ]
+    
+    let get_age: (Person) -> int = _.age
+    let ages = people.iter().map(get_age).collect()
+    assert_eq(ages[0], 30)
+    assert_eq(ages[1], 25)
+    
+    // Boolean expressions
+    let is_positive: (int) -> bool = _ > 0
+    let is_adult: (Person) -> bool = _.age >= 18
+    
+    assert_true(is_positive(5))
+    assert_false(is_positive(-3))
+    assert_true(is_adult(Person { name: "Test", age: 21 }))
+}
+
+// Test 6: Combining inference and underscore
+@test
+fn test_inference_with_underscore() {
+    let numbers = [10, 20, 30, 40, 50]
+    
+    // Compare explicit lambda vs underscore
+    let explicit_doubled = numbers.iter().map(n => n * 2).collect()
+    let underscore_fn: (int) -> int = _ * 2
+    let underscore_doubled = numbers.iter().map(underscore_fn).collect()
+    
+    // Both should produce same results
+    for i in 0..vec_len(numbers) {
+        assert_eq(explicit_doubled[i], underscore_doubled[i])
+    }
+}
+
+// Test 7: Underscore limitations
+@test 
+fn test_underscore_limitations() {
+    // Multiple `_` in one expression bind to the same fresh parameter,
+    // so `_ + _` desugars to `x => x + x` (not Scala's two-arg form).
+    
+    // Underscore creates a callable CodeRef. `typeof` alone (an `any` param)
+    // pins nothing -- the call is what infers `_: int`; without a typed use an
+    // unconstrained placeholder is an annotate-or-use error.
+    let f = _ * 2
+    assert_eq(f(5), 10)
+    assert_true(__rock_is_fn_record(f))
+
+    // A capturing lambda is an env record -- a table on luajit, an object on
+    // JS -- so `typeof` says "table" on both.
+    let n = 3
+    let capturing = (x: int) => x + n
+    assert_eq(typeof(capturing), "table")
+
+    // Can't use underscore inside explicit lambda
+    // This would fail: let bad = (x => _ + x)
+    
+    // But can use result of underscore expression
+    let multiplier: (int) -> int = _ * 3
+    let numbers = [1, 2, 3]
+    let tripled = numbers.iter().map(multiplier).collect()
+    assert_eq(tripled[0], 3)
+    assert_eq(tripled[2], 9)
+}
+
+// Test 8: Practical underscore usage patterns
+@test
+fn test_underscore_practical_patterns() {
+    // Filtering with underscore
+    let is_even: (int) -> bool = _ % 2 == 0
+    let numbers = [1, 2, 3, 4, 5, 6]
+    let evens = numbers.iter().filter(is_even).collect()
+    assert_eq(vec_len(evens), 3)
+    assert_eq(evens[0], 2)
+    assert_eq(evens[1], 4)
+    assert_eq(evens[2], 6)
+    
+    // Sorting key extraction
+    let people = [
+        Person { name: "Charlie", age: 35 },
+        Person { name: "Alice", age: 30 },
+        Person { name: "Bob", age: 25 },
+    ]
+    
+    let by_age: (Person) -> int = _.age
+    let by_name: (Person) -> string = _.name
+    
+    // Note: Assuming vec_sort_by exists or similar
+    // This demonstrates the pattern even if not implemented
+    let ages = people.iter().map(by_age).collect()
+    assert_eq(ages[0], 35)  // Charlie
+    assert_eq(ages[1], 30)  // Alice
+    assert_eq(ages[2], 25)  // Bob
+}

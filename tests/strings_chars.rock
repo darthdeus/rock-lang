@@ -1,0 +1,32 @@
+// chars() -- portable code-point iterator over the native-unit primitives.
+// Values asserted are code points (ints); no unicode literals in source, so
+// multibyte inputs are built via from_codepoint.
+
+@test
+fn test_chars_ascii() {
+    let cps: [int] = []
+    for cp in "Ab9".chars() { cps.push(cp) }
+    assert_eq(cps.len(), 3)
+    assert_eq(cps[0], 65)
+    assert_eq(cps[1], 98)
+    assert_eq(cps[2], 57)
+}
+
+@test
+fn test_chars_multibyte() {
+    // 0xE9 e-acute (2-byte), 0x20AC euro (3-byte), 0x1F600 emoji (4-byte).
+    let s = "{from_codepoint(0xE9)}{from_codepoint(0x20AC)}{from_codepoint(0x1F600)}"
+    let cps: [int] = []
+    for cp in s.chars() { cps.push(cp) }
+    assert_eq(cps.len(), 3)
+    assert_eq(cps[0], 0xE9)
+    assert_eq(cps[1], 0x20AC)
+    assert_eq(cps[2], 0x1F600)
+}
+
+@test
+fn test_chars_empty() {
+    let cps: [int] = []
+    for cp in "".chars() { cps.push(cp) }
+    assert_eq(cps.len(), 0)
+}

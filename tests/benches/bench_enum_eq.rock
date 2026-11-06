@@ -1,0 +1,72 @@
+// Benchmark: direct == on enum values in a tight loop.
+// Exercises monomorphized __op_eq_EnumName vs the generic pairs-iteration path.
+
+@nomangle inline(lua) fn bench_clock() -> float = """return os.clock()"""
+
+enum Shape {
+    Circle(float),
+    Rect(float, float),
+    Square(float),
+    Triangle(float, float, float),
+}
+
+fn run_enum_eq_bench(n: int) -> float {
+    // Prebuild two parallel vecs of shapes so we can measure only eq overhead.
+    let xs: [Shape] = vec_new()
+    let ys: [Shape] = vec_new()
+    let i = 0
+    while i < n {
+        let m = i % 4
+        let s: Shape = if m == 0 {
+            Shape::Circle(i as float)
+        } else if m == 1 {
+            Shape::Rect(i as float, (i + 1) as float)
+        } else if m == 2 {
+            Shape::Square(i as float)
+        } else {
+            Shape::Triangle(i as float, (i + 1) as float, (i + 2) as float)
+        }
+        xs.push(s)
+        // Build ys with a *different* instance but equal structure.
+        let t: Shape = if m == 0 {
+            Shape::Circle(i as float)
+        } else if m == 1 {
+            Shape::Rect(i as float, (i + 1) as float)
+        } else if m == 2 {
+            Shape::Square(i as float)
+        } else {
+            Shape::Triangle(i as float, (i + 1) as float, (i + 2) as float)
+        }
+        ys.push(t)
+        i = i + 1
+    }
+
+    let t0 = bench_clock()
+
+    let j = 0
+    let eq_count = 0
+    while j < n {
+        if xs[j] == ys[j] { eq_count = eq_count + 1 }
+        j = j + 1
+    }
+
+    let t1 = bench_clock()
+
+    assert_eq(eq_count, n, "all pairs should be equal")
+    return t1 - t0
+}
+
+fn main() {
+    run_enum_eq_bench(1000)  // warmup
+
+    let runs = 10
+    let n = 500000
+    let best = 1e9
+    let i = 0
+    while i < runs {
+        let t = run_enum_eq_bench(n)
+        if t < best { best = t }
+        i = i + 1
+    }
+    print("BENCH enum_eq n={n} best={best}s")
+}

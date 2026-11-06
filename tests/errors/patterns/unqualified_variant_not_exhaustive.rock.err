@@ -1,0 +1,18 @@
+//! Error: a bare variant arm tag-tests, so it covers exactly its own variant.
+//!        Reading it as an irrefutable binding made a partial match look
+//!        exhaustive to bone while skull emitted a tag test, so the uncovered
+//!        variant fell through and the fn returned nil.
+//! Tags: patterns, enums, match, exhaustiveness
+
+//=== TEST CASE: unqualified_variant_arm_does_not_catch_all ===
+enum Choice { A, B }
+
+fn f(c: Choice) -> int {
+    match c {
+        A => 1   // ERROR: `B` is uncovered; a bare `A` is a tag test, not a catch-all
+    }
+}
+
+fn main() {
+    print("{f(Choice::B)}")
+}

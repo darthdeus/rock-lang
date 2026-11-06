@@ -1,0 +1,14 @@
+//! Error: @inline body validator rejects constructs we can't safely substitute params through
+//! Tags: inline, validation
+
+//=== TEST CASE: inline_body_lambda_Generic ===
+// @inline body contains a lambda — closure capture would need scope-aware
+// substitution. Validator must reject.
+@inline
+fn make_closure(x: int) -> (() -> int) {
+    return () => x
+}
+
+fn main() {
+    let f = make_closure(42)
+}

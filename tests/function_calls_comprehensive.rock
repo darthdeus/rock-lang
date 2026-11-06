@@ -1,0 +1,85 @@
+// Comprehensive function call tests ported from rock/tests/function_call_tests.rs
+// Tests named arguments, default parameters, overloading, and inline Lua
+
+// Helper functions for function call tests
+fn greet(first: string, last: string) -> string {
+    return "{first} {last}"
+}
+
+fn add(a: int, b: int = 2, c: int = 3) -> int {
+    return a + b + c
+}
+
+fn foo(a: int) -> string {
+    return "one"
+}
+
+fn foo(a: int, b: int) -> string {
+    return "two"
+}
+
+// Inline functions
+inline(lua) fn double(x: int) -> int = """
+    return x * 2
+"""
+
+inline(lua) fn shout(prefix: string, word: string) -> string = """
+    return prefix .. word
+"""
+
+inline(lua) fn f1() -> string = """
+    return "foo"
+"""
+
+inline(lua) fn f2() -> string = """
+    return "bar"
+"""
+
+inline(lua) fn scream(s: string) -> string = """
+    return string.upper(s) .. "!"
+"""
+
+@test(output = "John Doe\nJane Smith\nBruce Lee")
+fn named_and_positional_args() {
+    print(greet("John", "Doe"))
+    print(greet(first: "Jane", last: "Smith"))
+    print(greet(last: "Lee", first: "Bruce"))
+}
+
+@test(output = "6\n14\n13\n16")
+fn default_args_and_named_mixing() {
+    print(add(1))
+    print(add(1, 10))
+    print(add(1, c: 10))
+    print(add(a: 1, c: 10, b: 5))
+}
+
+@test(output = "one\ntwo\ntwo\ntwo\ntwo")
+fn overload_resolution_with_named_and_positional() {
+    print(foo(1))
+    print(foo(1, 2))
+    print(foo(a: 3, b: 4))
+    print(foo(b: 5, a: 6))
+    print(foo(7, b: 8))
+}
+
+@test(output = "8")
+fn simple_inline_lua() {
+    print(double(4))
+}
+
+@test(output = "Hello, Rock\nFooBar")
+fn inline_lua_with_strings() {
+    print(shout("Hello, ", "Rock"))
+    print(shout("Foo", "Bar"))
+}
+
+@test(output = "foobar")
+fn multiple_inline_lua_functions() {
+    print("{f1()}{f2()}")
+}
+
+@test(output = "HELLO!")
+fn inline_lua_string_manipulation() {
+    print(scream("hello"))
+}

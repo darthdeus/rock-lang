@@ -1,0 +1,109 @@
+// Regression test for nested for loops in block expressions
+// This tests the specific case that was failing in blood_canvas.rock
+
+fn with_callback(callback: () -> ()) {
+    callback()
+}
+
+@test
+fn test_nested_for_loops_in_block_expr() {
+    let count = 0
+
+    // This pattern matches what blood_canvas.rock does
+    with_callback(() => {
+        for y in 0..3 {
+            for x in 0..3 {
+                count = count + 1
+            }
+        }
+    })
+
+    assert(count == 9, "Nested for loops should execute 9 times")
+}
+
+@test
+fn test_triple_nested_for_loops() {
+    let sum = 0
+
+    with_callback(() => {
+        for i in 0..2 {
+            for j in 0..2 {
+                for k in 0..2 {
+                    sum = sum + (i * 4 + j * 2 + k)
+                }
+            }
+        }
+    })
+
+    assert(sum == 28, "Triple nested loops sum should be 28")
+}
+
+@test
+fn test_nested_loops_with_break() {
+    let count = 0
+
+    with_callback(() => {
+        for i in 0..3 {
+            for j in 0..3 {
+                if j == 1 {
+                    break
+                }
+                count = count + 1
+            }
+        }
+    })
+
+    assert(count == 3, "Should break inner loop at j==1 each time")
+}
+
+@test
+fn test_nested_loops_with_continue() {
+    let count = 0
+
+    with_callback(() => {
+        for i in 0..3 {
+            for j in 0..3 {
+                if j == 1 {
+                    continue
+                }
+                count = count + 1
+            }
+        }
+    })
+
+    assert(count == 6, "Should skip j==1 each time")
+}
+
+@test
+fn test_nested_loops_with_assignments() {
+    let grid = [[0, 0, 0], [0, 0, 0], [0, 0, 0]]
+
+    with_callback(() => {
+        for y in 0..3 {
+            for x in 0..3 {
+                grid[y][x] = y * 3 + x
+            }
+        }
+    })
+
+    assert(grid[0][0] == 0, "grid[0][0] should be 0")
+    assert(grid[1][1] == 4, "grid[1][1] should be 4")
+    assert(grid[2][2] == 8, "grid[2][2] should be 8")
+}
+
+@test
+fn test_nested_while_in_for_loop() {
+    let count = 0
+
+    with_callback(() => {
+        for i in 0..2 {
+            let j = 0
+            while j < 2 {
+                count = count + 1
+                j = j + 1
+            }
+        }
+    })
+
+    assert(count == 4, "Mixed for/while nested loops should work")
+}

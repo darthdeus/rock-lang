@@ -1,0 +1,105 @@
+// A TUPLE of `nobox` values at a fn PARAM.
+//
+// Was `tuple_of_nobox_at_a_fn_param` in `nobox_container_gaps.rock.err`, filed
+// there as a fn-VALUE gap. It was not: a direct call to an ordinary top-level fn
+// rejected on its own, and one nobox in the tuple was enough. The mechanism was
+// a missing vocabulary -- the RETURN side could describe a tuple of leaves
+// (`RetSlot::Nested`) and the PARAM side carried `Option<ValueShape>`, and a
+// `ValueShape` is a NAMED struct shape, which a tuple is not. Params now carry
+// the same `RetSlot` returns do.
+
+nobox value TV { x: float, y: float }
+
+value UTV { x: float, y: float }
+
+fn pair_sum(pq: (TV, TV)) -> float { return pq.0.y + pq.1.x }
+
+// ONE nobox in the tuple is enough to need the slot.
+fn mixed(pq: (TV, float)) -> float { return pq.0.y + pq.1 }
+
+fn nested(t: ((TV, TV), float)) -> float { return t.0.0.y + t.0.1.x + t.1 }
+
+fn with_nullable(pq: (TV?, TV)) -> float { return (pq.0?.y ?? -1.0) + pq.1.x }
+
+@test(returns = 5.0)
+fn a_tuple_of_nobox_crosses_a_direct_call() -> float {
+    return pair_sum((TV { x: 1.0, y: 3.0 }, TV { x: 2.0, y: 4.0 }))
+}
+
+@test(returns = 5.0)
+fn the_same_tuple_bound_to_a_local_first() -> float {
+    let t = (TV { x: 1.0, y: 3.0 }, TV { x: 2.0, y: 4.0 })
+    return pair_sum(t)
+}
+
+@test(returns = 12.0)
+fn one_nobox_element_is_enough() -> float {
+    return mixed((TV { x: 1.0, y: 3.0 }, 9.0))
+}
+
+@test(returns = 14.0)
+fn the_slot_nests() -> float {
+    return nested(((TV { x: 1.0, y: 3.0 }, TV { x: 2.0, y: 4.0 }), 9.0))
+}
+
+// A nullable element carries its presence leaf inside the tuple slot, so the
+// absent arm has somewhere to say so.
+@test(returns = 1.0)
+fn a_nullable_element_keeps_its_presence_leaf() -> float {
+    return with_nullable((null, TV { x: 2.0, y: 4.0 }))
+}
+
+@test(returns = 7.0)
+fn the_same_nullable_element_when_present() -> float {
+    return with_nullable((TV { x: 0.0, y: 5.0 }, TV { x: 2.0, y: 4.0 }))
+}
+
+// NAMED args place a splatting param by slot, so the nil-fill width has to be
+// the slot's, not one.
+fn keyed(k: int, pq: (TV, TV)) -> float { return pq.0.y + pq.1.x + (k as float) }
+
+@test(returns = 105.0)
+fn a_tuple_param_places_by_name() -> float {
+    let t = (TV { x: 1.0, y: 3.0 }, TV { x: 2.0, y: 4.0 })
+    return keyed(pq: t, k: 100)
+}
+
+// --- the fn-VALUE boundary, which is what the gap was originally filed as ---
+
+fn apply_pair(g: ((TV, TV)) -> float, pq: (TV, TV)) -> float { return g(pq) }
+
+@test(returns = 5.0)
+fn a_tuple_of_nobox_crosses_a_fn_VALUE_param() -> float {
+    let t = (TV { x: 1.0, y: 3.0 }, TV { x: 2.0, y: 4.0 })
+    return apply_pair(pair_sum, t)
+}
+
+@test(returns = 5.0)
+fn the_same_through_a_lambda() -> float {
+    let t = (TV { x: 1.0, y: 3.0 }, TV { x: 2.0, y: 4.0 })
+    return apply_pair(pq => pq.0.y + pq.1.x, t)
+}
+
+// The headline shape: `zip(..).reduce(..)`, which is what real combinator code
+// hits and what the sentinel used as its repro.
+@test(returns = 10.0)
+fn zip_reduce_over_a_column_carries_the_pair() -> float {
+    let a: [TV] = [TV { x: 1.0, y: 3.0 }, TV { x: 2.0, y: 4.0 }]
+    return a.zip(a).reduce(0.0, (acc, pq) => acc + pq.0.y + pq.1.x)
+}
+
+// A nested `fn` is the third definition form, and shares `bind_param_slot` with
+// the other two.
+@test(returns = 5.0)
+fn a_nested_fn_binds_a_tuple_param() -> float {
+    fn inner(pq: (TV, TV)) -> float { return pq.0.y + pq.1.x }
+    return inner((TV { x: 1.0, y: 3.0 }, TV { x: 2.0, y: 4.0 }))
+}
+
+// The control that scoped the gap: the UNMARKED twin always compiled, and must
+// keep its single boxed slot -- only a `nobox` element splats.
+@test(returns = 5.0)
+fn an_unmarked_value_tuple_param_still_works() -> float {
+    fn u(pq: (UTV, UTV)) -> float { return pq.0.y + pq.1.x }
+    return u((UTV { x: 1.0, y: 3.0 }, UTV { x: 2.0, y: 4.0 }))
+}

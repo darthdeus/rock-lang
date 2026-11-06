@@ -1,0 +1,44 @@
+// `same_ref` answers identity; `==` answers structure. They disagree, and the
+// disagreement is the point: every reference type in Rock compares STRUCTURALLY
+// under `==` (`__op_eq` walks fields), so a caller that means "is this the same
+// object" cannot spell it with `==`.
+//
+// Cross-backend on purpose -- luajit maps it to `rawequal`, JS to `===`, and a
+// backend with no mapping must reject rather than fall back to a structural
+// walk that silently answers the other question (`@native_required`).
+
+struct Node { v: int }
+
+@test
+fn eq_is_structural_on_reference_structs() {
+    let a = Node { v: 1 }
+    let b = Node { v: 1 }
+    assert(a == b, "two distinct structs with equal fields compare EQUAL under ==")
+}
+
+@test
+fn same_ref_is_identity_on_reference_structs() {
+    let a = Node { v: 1 }
+    let b = Node { v: 1 }
+    let alias = a
+    assert(same_ref(a, alias), "an alias is the same instance")
+    assert(!same_ref(a, b), "distinct-but-equal-looking structs are NOT the same instance")
+}
+
+// The shape that motivated the primitive: a struct holding a coroutine. Two
+// freshly-created coroutines walk equal field-for-field, so `==` reports two
+// unrelated holders as equal -- which is why the engine's task/pool identity
+// checks cannot use it.
+co fn ticker() -> Coroutine<int, ()> {
+    yield 1
+}
+
+struct Holder { co: Coroutine<int, ()> }
+
+@test
+fn coroutines_defeat_structural_equality() {
+    let ha = Holder { co: ticker() }
+    let hb = Holder { co: ticker() }
+    assert(ha == hb, "two independent coroutines compare EQUAL under ==")
+    assert(!same_ref(ha, hb), "but they are not the same instance")
+}

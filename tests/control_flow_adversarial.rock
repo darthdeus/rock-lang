@@ -1,0 +1,286 @@
+// Adversarial coverage for break / continue / return in loops.
+// Ensures each keyword binds to the correct enclosing loop, that
+// ::continue:: labels scope correctly when nested or sibling, and
+// that lambda return does not escape the enclosing function.
+
+// === Nested loops — label binding correctness ===
+
+@test(output = "6")
+fn inner_continue_scope() {
+    let sum = 0
+    for i in 0..3 {
+        for j in 0..3 {
+            if j == 1 { continue }
+            sum = sum + 1
+        }
+    }
+    print(sum)
+}
+
+@test(output = "3")
+fn inner_break_scope() {
+    let outer_iters = 0
+    for i in 0..3 {
+        outer_iters = outer_iters + 1
+        for j in 0..3 {
+            if j == 1 { break }
+        }
+    }
+    print(outer_iters)
+}
+
+fn inner_return_escapes() -> int {
+    for i in 0..3 {
+        for j in 0..3 {
+            if i == 2 && j == 1 { return 7 }
+        }
+    }
+    return -1
+}
+
+@test
+fn call_inner_return() {
+    assert(inner_return_escapes() == 7)
+}
+
+@test(output = "sib 4")
+fn sibling_loops_share_label_scope() {
+    let sum = 0
+    for i in 0..3 {
+        if i == 1 { continue }
+        sum = sum + i
+    }
+    for i in 0..3 {
+        if i == 1 { continue }
+        sum = sum + i
+    }
+    print("sib {sum}")
+}
+
+@test(output = "tn 6")
+fn triple_nested_mixed() {
+    let count = 0
+    for i in 0..2 {
+        for j in 0..2 {
+            for k in 0..3 {
+                if k == 2 { break }
+                if j == 1 && k == 1 { continue }
+                count = count + 1
+            }
+        }
+    }
+    print("tn {count}")
+}
+
+// === break / continue / return inside if and else branches ===
+
+@test(output = "4")
+fn break_inside_else() {
+    let c = 0
+    for i in 0..10 {
+        if i < 4 {
+            c = c + 1
+        } else {
+            break
+        }
+    }
+    print(c)
+}
+
+@test(output = "3")
+fn continue_inside_else() {
+    let c = 0
+    for i in 0..10 {
+        if i >= 5 { break }
+        if i % 2 == 0 {
+            c = c + 1
+        } else {
+            continue
+        }
+    }
+    print(c)
+}
+
+fn find_gt_5() -> int {
+    for i in 0..10 {
+        if i > 5 { return i }
+    }
+    return -1
+}
+
+@test
+fn return_mid_loop() {
+    assert(find_gt_5() == 6)
+}
+
+// === Naked return in void fn nested inside two loops ===
+
+global HIT: int = 0
+
+@test(output = "9")
+fn naked_return_in_nested_void() {
+    HIT = 0
+    naked_return_void_inner()
+    print(HIT)
+}
+
+fn naked_return_void_inner() {
+    for i in 0..3 {
+        for j in 0..3 {
+            HIT = HIT + 1
+            if HIT == 9 { return }
+        }
+    }
+}
+
+// continue as the final body statement — the `::continue::` label must
+// sit between the loop body and the closing `end`.
+@test(output = "done")
+fn continue_as_final_stmt() {
+    for i in 0..3 {
+        if i == 0 { continue }
+    }
+    print("done")
+}
+
+// === while-loop break / continue / return ===
+
+@test(output = "wq 5")
+fn while_break_continue_return() {
+    let n = 0
+    while n < 10 {
+        n = n + 1
+        if n == 3 { continue }
+        if n == 5 { break }
+    }
+    print("wq {n}")
+}
+
+fn while_early_return() -> int {
+    let n = 0
+    while n < 10 {
+        n = n + 1
+        if n == 4 { return n }
+    }
+    return -1
+}
+
+@test
+fn call_while_early_return() {
+    assert(while_early_return() == 4)
+}
+
+// === for over vec with break / continue ===
+
+@test(output = "v 4")
+fn for_vec_break_continue() {
+    let v: [int] = [1, 2, 3, 4, 5]
+    let sum = 0
+    for x in v {
+        if x == 2 { continue }
+        if x == 4 { break }
+        sum = sum + x
+    }
+    print("v {sum}")
+}
+
+// === lambda return must NOT escape enclosing fn ===
+
+@test(output = "lam 6")
+fn return_in_lambda_stays_local() {
+    let list: [int] = [1, 2, 3, 4, 5]
+    let count = 0
+    let found = list.iter().filter(x => {
+        if x == 3 { return true }
+        false
+    }).collect()
+    for _ in found {
+        count = count + 1
+    }
+    for _ in list {
+        count = count + 1
+    }
+    print("lam {count}")
+}
+
+// === match-arm body with {} wrap — break / continue / return all legal ===
+
+@test
+fn match_arm_block_continue() {
+    let c = 0
+    for i in 0..5 {
+        match i {
+            2 => { continue }
+            _ => { c = c + 1 }
+        }
+    }
+    assert(c == 4)
+}
+
+@test
+fn match_arm_block_break() {
+    let c = 0
+    for i in 0..10 {
+        match i {
+            3 => { break }
+            _ => { c = c + 1 }
+        }
+    }
+    assert(c == 3)
+}
+
+fn match_arm_block_return() -> int {
+    for i in 0..10 {
+        match i {
+            5 => { return i }
+            _ => {}
+        }
+    }
+    return -1
+}
+
+@test
+fn call_match_arm_block_return() {
+    assert(match_arm_block_return() == 5)
+}
+
+// === match-arm body — raw (no block wrap) break / continue / return ===
+
+@test
+fn match_arm_raw_continue() {
+    let c = 0
+    for i in 0..5 {
+        match i {
+            2 => continue,
+            _ => { c = c + 1 }
+        }
+    }
+    assert(c == 4)
+}
+
+@test
+fn match_arm_raw_break() {
+    let c = 0
+    for i in 0..10 {
+        match i {
+            3 => break,
+            _ => { c = c + 1 }
+        }
+    }
+    assert(c == 3)
+}
+
+fn match_arm_raw_return() -> int {
+    for i in 0..10 {
+        match i {
+            5 => return i,
+            _ => {}
+        }
+    }
+    return -1
+}
+
+@test
+fn call_match_arm_raw_return() {
+    assert(match_arm_raw_return() == 5)
+}

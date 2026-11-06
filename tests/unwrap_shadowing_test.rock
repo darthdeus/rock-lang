@@ -1,0 +1,76 @@
+// Test unwrap shadowing and type resolution
+
+struct Mesh {
+    data: int
+}
+
+fn draw_mesh(mesh: Mesh) {
+    assert_eq(mesh.data, 42)
+}
+
+@test
+fn test_basic_unwrap_shadowing() {
+    let mesh: Mesh? = Mesh { data: 42 }
+
+    if mesh == null {
+        return
+    }
+
+    let mesh = mesh.unwrap()
+
+    // This should work - mesh is now Mesh, not Mesh?
+    draw_mesh(mesh)
+}
+
+@test
+fn test_unwrap_with_variable_usage() {
+    let mesh: Mesh? = Mesh { data: 42 }
+
+    if mesh != null {
+        let mesh = mesh.unwrap()
+        // Use the unwrapped mesh multiple times
+        draw_mesh(mesh)
+        draw_mesh(mesh)
+        assert_eq(mesh.data, 42)
+    }
+}
+
+fn process_optional_mesh(mesh: Mesh?) -> int {
+    if mesh == null {
+        return -1
+    }
+
+    let mesh = mesh.unwrap()
+    return mesh.data
+}
+
+@test
+fn test_unwrap_in_function() {
+    let result = process_optional_mesh(Mesh { data: 100 })
+    assert_eq(result, 100)
+
+    let null_result = process_optional_mesh(null)
+    assert_eq(null_result, -1)
+}
+
+// More complex case similar to the game code
+fn with_debug_group(name: string, action: fn()) {
+    action()
+}
+
+@test
+fn test_unwrap_with_closure() {
+    let mesh1: Mesh? = Mesh { data: 42 }
+    let mesh2: Mesh? = Mesh { data: 42 }
+    let meshes = [mesh1, mesh2, null]
+
+    for mesh in meshes {
+        if mesh == null {
+            continue
+        }
+
+        let mesh = mesh.unwrap()
+
+        with_debug_group("test") @ draw_mesh(mesh)
+    }
+}

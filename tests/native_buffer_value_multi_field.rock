@@ -1,0 +1,43 @@
+// Struct-literal multi-field group `V { x + y: expr }` evaluates the
+// shared RHS once and assigns the same value to every named field. Skull MIR's
+// grouped-field lowering in `rock-lang/crates/skull-mir/src/lower/structs.rs` keys the
+// lowered result by the shared expression and fans it out across the fields.
+//
+// Companion side-effect oracle:
+// `tests/native_buffer_value_multi_field_side_effect.rock` counts RHS
+// evaluations directly.
+
+@intrinsic @inline inline(lua) fn put(s: string) = "io.write(s)"
+
+value V2 {
+    x: float,
+    y: float,
+}
+
+@nomangle inline(lua) fn __nb_alloc_V2(n: int) -> Ptr<V2> = 'return ffi.new("V2[?]", n)'
+
+fn nb_v2(n: int) -> NativeBuffer<V2> {
+    return NativeBuffer { ptr: __nb_alloc_V2(n), len: n }
+}
+
+@nomangle inline(lua) fn next_id() -> float = """
+    _G.__id = (_G.__id or 0) + 1
+    return _G.__id
+"""
+
+@nomangle inline(lua) fn init_id() = "_G.__id = 0"
+
+@test(output = "x=1\ny=1")
+fn test_multi_field_group_evaluates_once() {
+    init_id()
+    let buf = nb_v2(1)
+    // `x + y: next_id()` should run next_id() ONCE and write the
+    // same value to both fields. If we run twice, x = 1 and y = 2.
+    buf[0] = V2 { x + y: next_id() }
+    let v = buf[0]
+    put("x=")
+    put("{v.x}")
+    put("\n")
+    put("y=")
+    put("{v.y}")
+}

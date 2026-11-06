@@ -1,0 +1,67 @@
+// Coroutine tests - migrated from rock/tests/coroutine_tests.rs
+// Tests coroutine yield/resume functionality and multiple instances
+
+// Coroutine definitions at top level
+co fn echo() -> Coroutine<string> {
+    print("started")
+    yield "hello"
+    yield "world"
+}
+
+co fn gen(start: int) -> Coroutine<int> {
+    let i = start
+    loop {
+        yield i
+        i = i + 1
+    }
+}
+
+co fn counter(start: int) -> Coroutine<int> {
+    let i = start
+    loop {
+        yield i
+        i = i + 1
+    }
+}
+
+@test(output = "resuming\nstarted\nhello\nworld")
+fn test_coroutine_resume_and_yield_types() {
+    let c = echo()
+    print("resuming")
+    print(c.resume())
+    print(c.resume())
+}
+
+@test(output = "5\n6\n7")
+fn test_coroutine_basic_yield_int() {
+    let c = gen(5)
+    print(c.resume())
+    print(c.resume())
+    print(c.resume())
+}
+
+@test(output = "0\n100\n1\n101")
+fn test_coroutine_multiple_instances_int() {
+    let a = counter(0)
+    let b = counter(100)
+
+    print(a.resume())
+    print(b.resume())
+    print(a.resume())
+    print(b.resume())
+}
+
+@test(output = "10\n20\n11\n21")
+fn test_coroutine_in_vector_int() {
+    let coros = vec_new()
+    vec_push(coros, gen(10))
+    vec_push(coros, gen(20))
+
+    let a = vec_get(coros, 0).unwrap()
+    let b = vec_get(coros, 1).unwrap()
+
+    print(a.resume())
+    print(b.resume())
+    print(a.resume())
+    print(b.resume())
+}

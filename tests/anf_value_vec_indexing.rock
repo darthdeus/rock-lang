@@ -1,0 +1,8 @@
+value V2 { x: int, y: int }
+
+@test(output = "3, 4")
+fn test_value_vec_index() {
+    let vs: [V2] = [V2 { x: 1, y: 2 }, V2 { x: 3, y: 4 }]
+    let v = vs[1]
+    print("{v.x}, {v.y}")
+}

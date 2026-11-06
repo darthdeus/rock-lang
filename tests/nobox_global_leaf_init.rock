@@ -1,0 +1,58 @@
+// A `nobox` global's storage is its LEAVES (`__nbg_<name>_<i>`), not one boxed
+// name. The initializer therefore has to land through the multi-value return
+// ABI -- leaf 0 as the ordinary return, 1..N through the bank -- exactly as a
+// multi-leaf call does at any other site.
+//
+// Both backends, luajit as the oracle: luajit has native multi-return and no
+// bank, so a divergence here is the JS init line and nothing else.
+
+nobox value P { x: int, y: int }
+
+fn mk(a: int, b: int) -> P { return P { x: a, y: b } }
+
+global G_CALL: P = mk(5, 7)
+global G_LIT: P = P { x: 3, y: 4 }
+global G_WIDE: Q = Q { a: 1, b: 2, c: 3, d: 4 }
+
+nobox value Q { a: int, b: int, c: int, d: int }
+
+@test fn nobox_global_initialized_from_a_call() {
+    assert_eq(G_CALL.x, 5)
+    assert_eq(G_CALL.y, 7)
+}
+
+@test fn nobox_global_initialized_from_a_literal() {
+    assert_eq(G_LIT.x, 3)
+    assert_eq(G_LIT.y, 4)
+}
+
+// Past two leaves the bank carries 1..N, so a width the emitter sizes wrong
+// shows up here and not in the pair cases.
+@test fn nobox_global_wider_than_the_first_bank_slot() {
+    assert_eq(G_WIDE.a, 1)
+    assert_eq(G_WIDE.b, 2)
+    assert_eq(G_WIDE.c, 3)
+    assert_eq(G_WIDE.d, 4)
+}
+
+// Init ORDER is the second half of the same rule. A ginit reading another nobox
+// global reads its LEAF names, and those are synthesized -- so a dependency scan
+// keyed on base names does not see the edge, emits this init first, and reads
+// undefined leaves. Declared before its dependency on purpose; source order is
+// what the ordering has to override.
+global DERIVED: P = BASE
+global BASE: P = P { x: 3, y: 4 }
+
+@test fn nobox_global_initialized_from_a_LATER_nobox_global() {
+    assert_eq(DERIVED.x, 3)
+    assert_eq(DERIVED.y, 4)
+}
+
+// A write through the global has to reach the same leaves the initializer set,
+// or the init could be correct and every later read still wrong.
+@test fn nobox_global_reassigned_after_init() {
+    G_CALL = mk(11, 13)
+    assert_eq(G_CALL.x, 11)
+    assert_eq(G_CALL.y, 13)
+    G_CALL = mk(5, 7)
+}

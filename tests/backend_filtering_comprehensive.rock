@@ -1,0 +1,51 @@
+// Test of backend filtering with extern(lua) and inline(lua)
+// (Stdlib already provides `print`; declaring our own shim collides with
+// it now that the name-mangling collision check is enforced.)
+
+// Backend-specific implementations
+inline(lua) fn get_platform_name() -> string = """return "Lua Backend" """
+
+// Backend-specific external functions
+extern(lua) fn lua_collectgarbage()
+
+// Backend-specific extern
+extern(lua) fn platform_error(msg: string)
+
+// Backend-specific helper functions
+inline(lua) fn format_number(n: float) -> string = """return string.format("%.2f", n)"""
+
+// Generic function that uses backend-specific implementations
+fn display_info() {
+    let platform_name = get_platform_name()
+    print("Platform: ")
+    print(platform_name)
+    let formatted = format_number(3.14159)
+    print("Formatted number: ")
+    print(formatted)
+}
+
+// Backend-specific intrinsics
+inline(lua) fn get_table_size(t: any) -> int = """local count = 0; for _ in pairs(t) do count = count + 1 end; return count"""
+
+@test
+fn test_backend_filtering() {
+    let platform = get_platform_name()
+
+    print("Running on: ")
+    print(platform)
+
+    // Test number formatting
+    let formatted = format_number(42.12345)
+    print("Formatted: ")
+    print(formatted)
+
+    // Test table size
+    print("Table size test passed")
+}
+
+fn main() {
+    print("=== Backend Filtering Test ===")
+    display_info()
+    test_backend_filtering()
+    print("=== Test Complete ===")
+}

@@ -1,0 +1,129 @@
+// Comprehensive test for Map iteration
+
+@test
+fn test_map_direct_iteration() {
+    let m: Map<string, string> = map_new()
+    insert(m, "key1", "value1")
+    insert(m, "key2", "value2")
+    insert(m, "key3", "value3")
+
+    print("Direct iteration:")
+
+    // Collect all key-value pairs to verify they're all present
+    let found_key1 = false
+    let found_key2 = false
+    let found_key3 = false
+
+    for (k, v) in m {
+        print("{k} = {v}")
+        if k == "key1" && v == "value1" {
+            found_key1 = true
+        }
+        if k == "key2" && v == "value2" {
+            found_key2 = true
+        }
+        if k == "key3" && v == "value3" {
+            found_key3 = true
+        }
+    }
+
+    // Verify all expected pairs were found (order doesn't matter)
+    assert(found_key1, "key1 = value1 not found")
+    assert(found_key2, "key2 = value2 not found")
+    assert(found_key3, "key3 = value3 not found")
+}
+
+@test
+fn test_map_iteration_destructuring() {
+    let m: Map<string, int> = map_new()
+    insert(m, "a", 10)
+    insert(m, "b", 20)
+    insert(m, "c", 30)
+
+    print("Destructuring:")
+
+    // Collect all keys to verify they're present (order doesn't matter)
+    let found_a = false
+    let found_b = false
+    let found_c = false
+
+    for (key, _) in m {
+        print(key)
+        if key == "a" {
+            found_a = true
+        }
+        if key == "b" {
+            found_b = true
+        }
+        if key == "c" {
+            found_c = true
+        }
+    }
+
+    assert(found_a, "Key 'a' not found")
+    assert(found_b, "Key 'b' not found")
+    assert(found_c, "Key 'c' not found")
+}
+
+@test(output = "Sum of values: 150")
+fn test_map_iteration_computation() {
+    let m: Map<string, int> = map_new()
+    insert(m, "first", 30)
+    insert(m, "second", 50)
+    insert(m, "third", 70)
+
+    let sum = 0
+    for (_, value) in m {
+        sum = sum + value
+    }
+
+    print("Sum of values: {sum}")
+}
+
+struct Person {
+    name: string,
+    age: int,
+}
+
+@test
+fn test_map_iteration_complex_types() {
+    let m: Map<string, Person> = map_new()
+    let alice = Person { name: "Alice", age: 30 }
+    let bob = Person { name: "Bob", age: 25 }
+
+    insert(m, "alice", alice)
+    insert(m, "bob", bob)
+
+    print("Complex types:")
+    for (name, person) in m {
+        print("{name}: {inspect(person)}")
+    }
+}
+
+@test(output = "Empty map iteration count: 0")
+fn test_empty_map_iteration() {
+    let m: Map<int, int> = map_new()
+
+    let count = 0
+    for _ in m {
+        count = count + 1
+    }
+
+    print("Empty map iteration count: {count}")
+}
+
+@test(output = "Type inference works: 3")
+fn test_map_iteration_type_inference() {
+    // Test that type inference works correctly for map iteration
+    let m = map_new()
+    insert(m, "x", 1)
+    insert(m, "y", 2)
+
+    // The type of k and v should be inferred
+    let total = 0
+    for (k, v) in m {
+        total = total + v  // v should be inferred as int
+    }
+
+    print("Type inference works: {total}")
+}
