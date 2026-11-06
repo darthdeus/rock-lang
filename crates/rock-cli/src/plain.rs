@@ -336,7 +336,7 @@ pub static BONE: BackendSpec = BackendSpec {
         (Operation::Test, |cx| {
             let files = cx.get_test_files()?;
             let filter = cx.test_filter()?;
-            rock_cli::skull_backend::skull_test(&files, filter.as_ref())
+            rock_cli::skull_backend::skull_test(&files, filter.as_ref(), cx.args.test_threads)
         }),
         (Operation::Compile, bone_compile),
         (Operation::CompileSingle, bone_compile),
@@ -362,7 +362,7 @@ pub static SKULL: BackendSpec = BackendSpec {
         (Operation::Test, |cx| {
             let files = cx.get_test_files()?;
             let filter = cx.test_filter()?;
-            rock_cli::skull_backend::skull_test(&files, filter.as_ref())
+            rock_cli::skull_backend::skull_test(&files, filter.as_ref(), cx.args.test_threads)
         }),
         (Operation::Compile, skull_compile),
         (Operation::CompileSingle, skull_compile),

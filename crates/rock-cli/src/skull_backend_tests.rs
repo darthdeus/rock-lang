@@ -5609,7 +5609,7 @@ fn plain_luajit_without_runtime_layout() {
     const CHILD: &str = "ROCK_PLAIN_LUAJIT_CHILD";
     if std::env::var_os(CHILD).is_some() {
         let file = std::env::current_dir().unwrap().join("plain.rock");
-        super::skull_test(&[file.to_string_lossy().into_owned()], None).unwrap();
+        super::skull_test(&[file.to_string_lossy().into_owned()], None, None).unwrap();
         return;
     }
     let luajit = std::process::Command::new("sh")

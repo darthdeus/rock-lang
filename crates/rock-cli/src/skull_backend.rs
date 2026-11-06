@@ -2948,7 +2948,13 @@ pub fn collect_test_units(paths: &[String]) -> Result<(Vec<String>, Vec<String>)
     Ok((files, unique))
 }
 
-pub fn skull_test(paths: &[String], filter: Option<&crate::test::TestFilter>) -> Result<()> {
+/// `test_threads` caps how many file units compile and run at once (default:
+/// one per CPU); packages run after them, one at a time.
+pub fn skull_test(
+    paths: &[String],
+    filter: Option<&crate::test::TestFilter>,
+    test_threads: Option<usize>,
+) -> Result<()> {
     crate::lint_pass::set_corpus_mode();
     let verbose = std::env::var("ROCK_TEST_VERBOSE").is_ok();
     let timings_path = std::env::var_os("ROCK_TEST_TIMINGS");
@@ -2977,19 +2983,27 @@ pub fn skull_test(paths: &[String], filter: Option<&crate::test::TestFilter>) ->
     // Run every unit (files first, then packages), collecting labelled outcomes
     // so both kinds fold through one reporting path.
     type UnitResult = std::thread::Result<std::result::Result<SkullOutcome, SkullFailure>>;
-    let mut outcomes: Vec<(String, UnitResult)> = Vec::new();
-    for file in &files {
-        let outcome: UnitResult = match fs_err::read_to_string(file) {
-            Ok(src) => std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                skull_build(file, &src, filter)
-            })),
-            Err(e) => Ok(Err(SkullFailure {
-                reason: e.to_string(),
-                rendered: e.to_string(),
-            })),
-        };
-        outcomes.push((short_path(file).to_string(), outcome));
-    }
+    // Sampling builds keep one stack for the profiler.
+    let threads = if cfg!(feature = "sequential") {
+        1
+    } else {
+        test_threads.unwrap_or_else(|| {
+            std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
+        })
+    };
+    let mut outcomes: Vec<(String, UnitResult)> =
+        crate::parallel_runner::map_in_order(&files, threads, |file| {
+            let outcome: UnitResult = match fs_err::read_to_string(file) {
+                Ok(src) => std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    skull_build(file, &src, filter)
+                })),
+                Err(e) => Ok(Err(SkullFailure {
+                    reason: e.to_string(),
+                    rendered: e.to_string(),
+                })),
+            };
+            (short_path(file).to_string(), outcome)
+        });
     for dir in &package_dirs {
         let outcome: UnitResult = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             skull_build_package(dir, shards, filter)
