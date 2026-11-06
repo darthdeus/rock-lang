@@ -3,8 +3,8 @@
 // store field-wise through the buffer reference (`buf.ptr[i].tl.x = ...`),
 // never materializing a `Rect_ct`/`V2_ct` — the text-vertex JIT-abort fix.
 // Exercises both a literal RHS and a scalar-ABI fn-returning-Rect RHS, then
-// reads nested fields back. Sibling flat cases: native_buffer_value_scalar_rhs,
-// native_buffer_value_eval_order.
+// reads nested fields back. Sibling flat cases: test_native_buffer_value_scalar_rhs
+// and test_source_order in native_buffer_value.rock.
 
 value V2 {
     x: float,

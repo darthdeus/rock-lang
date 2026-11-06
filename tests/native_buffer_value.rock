@@ -1,35 +1,50 @@
-// NativeBuffer<T: value> — verifies that the existing NativeBuffer
-// infrastructure composes with user-supplied per-type allocators and
-// accessors for value struct types. Matches the pattern documented in
-// stdlib/unified.rock alongside the primitive variants.
-//
-// This is the "phase 1" answer for value-typed NativeBuffer support
-// Compile-time cdef emission comes for
-// free via the value-struct pipeline; indexing / assignment compile to
-// direct cdata ops; the per-T allocator + accessors are a handful of
-// lines of stdlib-style inline(lua).
+// NativeBuffer<T: value>: user-supplied per-type allocators and accessors
+// for value struct types, and slot stores `buf[i] = <value expr>` whose RHS
+// takes many shapes (calls, field reads, `if`, defaults, side effects,
+// aliasing reads of the slot being written).
+
+@intrinsic @inline inline(lua) fn put(s: string) = "io.write(s)"
 
 value V2 {
     x: float,
     y: float,
 }
 
+value Pair {
+    first: V2,
+    second: V2,
+}
+
 @nomangle inline(lua) fn __nb_alloc_V2(n: int) -> Ptr<V2> = 'return ffi.new("V2[?]", n)'
 
-fn native_buffer_v2(n: int) -> NativeBuffer<V2> {
+fn nb_v2(n: int) -> NativeBuffer<V2> {
     return NativeBuffer { ptr: __nb_alloc_V2(n), len: n }
 }
 
-// buf[i] / buf[i] = v already compile correctly via the existing
-// NativeBuffer indexing path. Helpers below mirror the `nb_get` / `nb_set`
-// shape used by the primitive variants.
+@nomangle inline(lua) fn __nb_alloc_Pair(n: int) -> Ptr<Pair> = 'return ffi.new("Pair[?]", n)'
+
+fn nb_pair(n: int) -> NativeBuffer<Pair> {
+    return NativeBuffer { ptr: __nb_alloc_Pair(n), len: n }
+}
+
+fn make_v2(a: float, b: float) -> V2 {
+    return V2 { x: a, y: b }
+}
+
+// -- Accessors --
+
+// The existing NativeBuffer infrastructure composes with per-type
+// allocators and accessors for value struct types, matching the pattern
+// documented in stdlib/unified.rock alongside the primitive variants.
+// buf[i] / buf[i] = v compile via the NativeBuffer indexing path; these
+// helpers mirror the `nb_get` / `nb_set` shape of the primitive variants.
 
 inline(lua) fn nb_get(b: NativeBuffer<V2>, i: int) -> V2 = "return b.ptr[i]"
 inline(lua) fn nb_set(b: NativeBuffer<V2>, i: int, v: V2) = "b.ptr[i] = v"
 
 @test(output = "3\n7\n11\n13")
 fn test_native_buffer_value() {
-    let buf = native_buffer_v2(4)
+    let buf = nb_v2(4)
     nb_set(buf, 0, V2 { x: 3, y: 7 })
     nb_set(buf, 1, V2 { x: 11, y: 13 })
 
@@ -40,4 +55,471 @@ fn test_native_buffer_value() {
     let b = nb_get(buf, 1)
     print("{b.x.floor()}")
     print("{b.y.floor()}")
+}
+
+// -- RHS shapes --
+
+// Regression: the RHS is a Rock fn returning a value struct via the
+// scalar ABI. The scalarized multi-return `(3, 7)` was truncated to its
+// first scalar at the cdata-write site (`buf.ptr[i] = 3`), crashing with
+// "cannot convert 'number' to 'struct N'".
+@test(output = "3\n7\n11\n13")
+fn test_native_buffer_value_scalar_rhs() {
+    let buf = nb_v2(2)
+    buf[0] = make_v2(3.0, 7.0)
+    buf[1] = make_v2(11.0, 13.0)
+
+    let a = buf[0]
+    print("{a.x.floor()}")
+    print("{a.y.floor()}")
+
+    let b = buf[1]
+    print("{b.x.floor()}")
+    print("{b.y.floor()}")
+}
+
+// A Rock fn call returning a value struct used as a nested field RHS.
+@test(output = "f.x=1\nf.y=2\ns.x=3\ns.y=4")
+fn test_call_value_rhs() {
+    let buf = nb_pair(1)
+    buf[0] = Pair { first: make_v2(1.0, 2.0), second: make_v2(3.0, 4.0) }
+    let p = buf[0]
+    put("f.x=")
+    put("{p.first.x}")
+    put("\n")
+    put("f.y=")
+    put("{p.first.y}")
+    put("\n")
+    put("s.x=")
+    put("{p.second.x}")
+    put("\n")
+    put("s.y=")
+    put("{p.second.y}")
+    put("\n")
+}
+
+// The nested-value field RHS is a field access on a value-cdata local.
+@test(output = "f.x=10\nf.y=20\ns.x=10\ns.y=20")
+fn test_field_access_rhs() {
+    let buf = nb_pair(1)
+    let p = Pair { first: V2 { x: 10.0, y: 20.0 }, second: V2 { x: 99.0, y: 99.0 } }
+    // RHS reads both halves of `p`; each is a FieldAccess of a value-cdata local.
+    buf[0] = Pair { first: p.first, second: p.first }
+    let r = buf[0]
+    put("f.x=")
+    put("{r.first.x}")
+    put("\n")
+    put("f.y=")
+    put("{r.first.y}")
+    put("\n")
+    put("s.x=")
+    put("{r.second.x}")
+    put("\n")
+    put("s.y=")
+    put("{r.second.y}")
+    put("\n")
+}
+
+// A let-bound cdata local of value-struct type used as a field inside a
+// struct literal RHS is read at evaluation time.
+@test(output = "f.x=1\nf.y=2\ns.x=10\ns.y=20")
+fn test_local_observed_at_eval_time() {
+    let buf = nb_pair(1)
+    let v = V2 { x: 1.0, y: 2.0 }
+    buf[0] = Pair { first: v, second: V2 { x: 10.0, y: 20.0 } }
+    let p = buf[0]
+    put("f.x=")
+    put("{p.first.x}")
+    put("\n")
+    put("f.y=")
+    put("{p.first.y}")
+    put("\n")
+    put("s.x=")
+    put("{p.second.x}")
+    put("\n")
+    put("s.y=")
+    put("{p.second.y}")
+    put("\n")
+}
+
+// An `if` expression as a scalar field RHS.
+@test(output = "x=10\ny=99")
+fn test_if_in_field_rhs() {
+    let buf = nb_v2(1)
+    let flag = true
+    buf[0] = V2 {
+        x: if flag { 10.0 } else { 0.0 },
+        y: if flag { 99.0 } else { -1.0 },
+    }
+    let v = buf[0]
+    put("x=")
+    put("{v.x}")
+    put("\n")
+    put("y=")
+    put("{v.y}")
+}
+
+// An `if` expression returning a value struct as a nested field RHS.
+@test(output = "f.x=1\nf.y=2\ns.x=99\ns.y=99")
+fn test_if_nested_value_field() {
+    let buf = nb_pair(1)
+    let cond = true
+    buf[0] = Pair {
+        first: if cond { V2 { x: 1.0, y: 2.0 } } else { V2 { x: 0.0, y: 0.0 } },
+        second: if cond { V2 { x: 99.0, y: 99.0 } } else { V2 { x: 0.0, y: 0.0 } },
+    }
+    let r = buf[0]
+    put("f.x=")
+    put("{r.first.x}")
+    put("\n")
+    put("f.y=")
+    put("{r.first.y}")
+    put("\n")
+    put("s.x=")
+    put("{r.second.x}")
+    put("\n")
+    put("s.y=")
+    put("{r.second.y}")
+    put("\n")
+}
+
+// -- Nesting --
+
+value NestPair { a: V2, b: V2 }
+value Quad { lo: NestPair, hi: NestPair }
+
+@nomangle inline(lua) fn __nb_alloc_Quad(n: int) -> Ptr<Quad> = 'return ffi.new("Quad[?]", n)'
+
+fn nb_quad(n: int) -> NativeBuffer<Quad> {
+    return NativeBuffer { ptr: __nb_alloc_Quad(n), len: n }
+}
+
+// Three levels of value-struct nesting in a single literal.
+@test(output = "1,2,3,4,5,6,7,8")
+fn test_three_level_nest() {
+    let buf = nb_quad(1)
+    buf[0] = Quad {
+        lo: NestPair {
+            a: V2 { x: 1.0, y: 2.0 },
+            b: V2 { x: 3.0, y: 4.0 },
+        },
+        hi: NestPair {
+            a: V2 { x: 5.0, y: 6.0 },
+            b: V2 { x: 7.0, y: 8.0 },
+        },
+    }
+    let q = buf[0]
+    put("{q.lo.a.x}"); put(",")
+    put("{q.lo.a.y}"); put(",")
+    put("{q.lo.b.x}"); put(",")
+    put("{q.lo.b.y}"); put(",")
+    put("{q.hi.a.x}"); put(",")
+    put("{q.hi.a.y}"); put(",")
+    put("{q.hi.b.x}"); put(",")
+    put("{q.hi.b.y}")
+}
+
+// -- Aliasing --
+
+// Swap x and y by reading from the slot being written. Slot stores write
+// leaf by leaf, but the RHS leaves are evaluated before the slot is
+// written, so the result matches pack-then-copy semantics.
+@test(output = "x=7\ny=3")
+fn test_aliasing_swap() {
+    let buf = nb_v2(1)
+    buf[0] = V2 { x: 3.0, y: 7.0 }
+    buf[0] = V2 { x: buf[0].y, y: buf[0].x }
+
+    let v = buf[0]
+    put("x=")
+    put("{v.x}")
+    put("\n")
+    put("y=")
+    put("{v.y}")
+    put("\n")
+}
+
+// A nested literal field reads from the slot being written; all leaves
+// must be captured before any slot mutation.
+@test(output = "f.x=3\nf.y=4\ns.x=1\ns.y=2")
+fn test_swap_via_nested() {
+    let buf = nb_pair(1)
+    buf[0] = Pair { first: V2 { x: 1.0, y: 2.0 }, second: V2 { x: 3.0, y: 4.0 } }
+    buf[0] = Pair {
+        first: V2 { x: buf[0].second.x, y: buf[0].second.y },
+        second: V2 { x: buf[0].first.x, y: buf[0].first.y },
+    }
+    let r = buf[0]
+    put("f.x=")
+    put("{r.first.x}")
+    put("\n")
+    put("f.y=")
+    put("{r.first.y}")
+    put("\n")
+    put("s.x=")
+    put("{r.second.x}")
+    put("\n")
+    put("s.y=")
+    put("{r.second.y}")
+    put("\n")
+}
+
+// RHS reads from a different buffer's slot.
+@test(output = "x=8\ny=5")
+fn test_cross_buffer() {
+    let a = nb_v2(1)
+    let b = nb_v2(1)
+    a[0] = V2 { x: 1.0, y: 2.0 }
+    b[0] = V2 { x: 5.0, y: 8.0 }
+    a[0] = V2 { x: b[0].y, y: b[0].x }
+    let v = a[0]
+    put("x=")
+    put("{v.x}")
+    put("\n")
+    put("y=")
+    put("{v.y}")
+    put("\n")
+}
+
+// -- Generic and closure writers --
+
+fn write_first<T>(buf: NativeBuffer<T>, v: T) {
+    buf[0] = v
+}
+
+// A generic fn writes a value-struct literal into a NativeBuffer<T>; the
+// store must resolve T after monomorphization.
+@test(output = "x=7\ny=11")
+fn test_generic_buffer_write() {
+    let buf = nb_v2(1)
+    write_first(buf, V2 { x: 7.0, y: 11.0 })
+    let r = buf[0]
+    put("x=")
+    put("{r.x}")
+    put("\n")
+    put("y=")
+    put("{r.y}")
+    put("\n")
+}
+
+// The slot write happens inside a lambda that captures the buffer.
+@test(output = "x=5\ny=9")
+fn test_slot_write_in_lambda() {
+    let buf = nb_v2(1)
+    let writer = () => {
+        buf[0] = V2 { x: 5.0, y: 9.0 }
+    }
+    writer()
+    let r = buf[0]
+    put("x=")
+    put("{r.x}")
+    put("\n")
+    put("y=")
+    put("{r.y}")
+    put("\n")
+}
+
+// -- Evaluation order and side effects --
+
+@nomangle inline(lua) fn record_call(tag: string) -> float = """
+    table.insert(_G.__rec, tag)
+    return 1.0
+"""
+
+@nomangle inline(lua) fn init_record() = "_G.__rec = {}"
+@nomangle inline(lua) fn dump_record() -> string = "return table.concat(_G.__rec, ',')"
+
+// Struct-literal field RHS evaluation follows source order, not
+// declaration order.
+@test(output = "y_first,x_second")
+fn test_source_order() {
+    init_record()
+    let buf = nb_v2(1)
+    buf[0] = V2 {
+        y: record_call("y_first"),
+        x: record_call("x_second"),
+    }
+    put(dump_record())
+}
+
+global SEQ: int = 0
+
+fn next_seq() -> float {
+    SEQ = SEQ + 1
+    return SEQ + 0.0
+}
+
+// A side-effecting expression in each scalar leaf of a nested literal
+// runs exactly once, in literal-source order.
+@test(output = "f.x=1\nf.y=2\ns.x=3\ns.y=4\ntotal=4")
+fn test_nested_literal_side_effect_order() {
+    let buf = nb_pair(1)
+    buf[0] = Pair {
+        first: V2 { x: next_seq(), y: next_seq() },
+        second: V2 { x: next_seq(), y: next_seq() },
+    }
+    let r = buf[0]
+    put("f.x=")
+    put("{r.first.x}")
+    put("\n")
+    put("f.y=")
+    put("{r.first.y}")
+    put("\n")
+    put("s.x=")
+    put("{r.second.x}")
+    put("\n")
+    put("s.y=")
+    put("{r.second.y}")
+    put("\n")
+    put("total=")
+    put("{SEQ}")
+    put("\n")
+}
+
+@nomangle inline(lua) fn next_group_id() -> float = """
+    _G.__id = (_G.__id or 0) + 1
+    return _G.__id
+"""
+
+@nomangle inline(lua) fn init_group_id() = "_G.__id = 0"
+
+// A multi-field group `V { x + y: expr }` evaluates the shared RHS once
+// and assigns the same value to every named field. If it ran twice,
+// x = 1 and y = 2.
+@test(output = "x=1\ny=1")
+fn test_multi_field_group_evaluates_once() {
+    init_group_id()
+    let buf = nb_v2(1)
+    buf[0] = V2 { x + y: next_group_id() }
+    let v = buf[0]
+    put("x=")
+    put("{v.x}")
+    put("\n")
+    put("y=")
+    put("{v.y}")
+}
+
+@nomangle inline(lua) fn bump_counter() -> float = """
+    _G.__se_count = (_G.__se_count or 0) + 1
+    return _G.__se_count
+"""
+
+@nomangle inline(lua) fn init_counter() = "_G.__se_count = 0"
+@nomangle inline(lua) fn read_counter() -> float = "return _G.__se_count or 0"
+
+// The same multi-field group, counting RHS evaluations directly.
+@test(output = "count=1")
+fn test_multi_field_group_single_eval() {
+    init_counter()
+    let buf = nb_v2(1)
+    buf[0] = V2 { x + y: bump_counter() }
+    put("count=")
+    put("{read_counter()}")
+}
+
+// -- Field defaults --
+
+value Holder {
+    a: V2 = V2 { x: 11.0, y: 22.0 },
+    b: float,
+}
+
+@nomangle inline(lua) fn __nb_alloc_Holder(n: int) -> Ptr<Holder> = 'return ffi.new("Holder[?]", n)'
+
+fn nb_holder(n: int) -> NativeBuffer<Holder> {
+    return NativeBuffer { ptr: __nb_alloc_Holder(n), len: n }
+}
+
+// An omitted field with a struct-literal default produces the same leaves
+// as writing the literal inline.
+@test(output = "a.x=11\na.y=22\nb=99")
+fn test_default_struct_literal() {
+    let buf = nb_holder(1)
+    buf[0] = Holder { b: 99.0 }
+    let h = buf[0]
+    put("a.x=")
+    put("{h.a.x}")
+    put("\n")
+    put("a.y=")
+    put("{h.a.y}")
+    put("\n")
+    put("b=")
+    put("{h.b}")
+}
+
+global COUNTER: int = 0
+
+fn next_id() -> int {
+    COUNTER = COUNTER + 1
+    return COUNTER
+}
+
+value Tagged {
+    a: int,
+    b: int = next_id(),
+    c: int = next_id(),
+}
+
+@nomangle inline(lua) fn __nb_alloc_Tagged(n: int) -> Ptr<Tagged> = 'return ffi.new("Tagged[?]", n)'
+
+fn nb_tagged(n: int) -> NativeBuffer<Tagged> {
+    return NativeBuffer { ptr: __nb_alloc_Tagged(n), len: n }
+}
+
+// Side-effecting defaults of omitted fields run in declaration order,
+// after the explicit fields.
+@test(output = "a=42\nb=1\nc=2")
+fn test_default_side_effect() {
+    let buf = nb_tagged(1)
+    buf[0] = Tagged { a: 42 }
+    let v = buf[0]
+    put("a=")
+    put("{v.a}")
+    put("\n")
+    put("b=")
+    put("{v.b}")
+    put("\n")
+    put("c=")
+    put("{v.c}")
+    put("\n")
+}
+
+global TICK: int = 0
+
+fn next_tick() -> float {
+    TICK = TICK + 1
+    return TICK + 0.0
+}
+
+value Boxed {
+    pos: V2 = V2 { x: next_tick(), y: next_tick() },
+    n: int,
+}
+
+@nomangle inline(lua) fn __nb_alloc_Boxed(n: int) -> Ptr<Boxed> = 'return ffi.new("Boxed[?]", n)'
+
+fn nb_boxed(n: int) -> NativeBuffer<Boxed> {
+    return NativeBuffer { ptr: __nb_alloc_Boxed(n), len: n }
+}
+
+// A default that is a nested literal with side-effecting leaves: `n: 42`
+// runs first, then the omitted `pos` default fires both next_tick() calls
+// once each, in literal-source order.
+@test(output = "n=42\npx=1\npy=2\ntick=2")
+fn test_nested_default_side_effect() {
+    let buf = nb_boxed(1)
+    buf[0] = Boxed { n: 42 }
+    let v = buf[0]
+    put("n=")
+    put("{v.n}")
+    put("\n")
+    put("px=")
+    put("{v.pos.x}")
+    put("\n")
+    put("py=")
+    put("{v.pos.y}")
+    put("\n")
+    put("tick=")
+    put("{TICK}")
+    put("\n")
 }
