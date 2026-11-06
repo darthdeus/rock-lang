@@ -332,37 +332,6 @@ fn lint_rejects(
         .map(|f| error_text(std::slice::from_ref(&f.error)))
 }
 
-/// Error-test cases the skull/bone successor DELIBERATELY accepts -- documented
-/// divergences where rock's rejection is an accident or over-conservatism.
-/// Matched by case-name substring. Two families:
-///
-/// 1. **Type-level** (`@pure`): bone is identity-pure, so it accepts
-///    match-with-binding and self-recursion (referentially transparent; rock
-///    rejects them as scope-walker limitations). Pinned by
-///    bone-semantic/tests/structural.rs.
-///
-/// 2. **Codegen-level** (`@inline` / if-let): these fixtures were authored as
-///    rejections for a stricter inliner that flagged arg-duplication hazards and
-///    a literal if-let pattern rule. skull's inliner HOISTS non-dup-safe args
-///    (verified: a param-mutating `@inline` called with a side-effecting arg
-///    evaluates it exactly once) and handles param-capturing closures and
-///    literal if-let patterns, so it COMPILES AND RUNS all six correctly
-///    (verified by run + the full skull-diff corpus, 0 divergences) -- the
-///    conservative rejection is unnecessary. See backlog #20.
-const BONE_ERROR_DIVERGENCES: &[&str] = &[
-    // type-level (@pure identity-pure)
-    "pure_match_pattern_bind",
-    "pure_self_recursion",
-    // codegen-level (inline-safety / if-let over-rejection; skull compiles +
-    // runs these correctly)
-    "inline_assigns_whole_param",
-    "inline_assigns_param_field",
-    "inline_compound_assigns_param",
-    "inline_increments_param",
-    "inline_body_lambda",
-    "literal_pattern_in_chain",
-];
-
 /// Run the error-test suite through bone's front end (the skull/bone `test`
 /// path). `backend` is informational -- bone is the shared front end, so both
 /// verify rejection identically. The error-KIND suffix is rock-specific (bone
@@ -439,12 +408,6 @@ pub fn run_error_suite(
                             None => ErrorTestResult::Pass,
                         }
                     }
-                    None if BONE_ERROR_DIVERGENCES.iter().any(|d| tc.name.contains(d)) => {
-                        ErrorTestResult::Todo(format!(
-                            "divergence (successor accepts by design): {}",
-                            tc.name
-                        ))
-                    }
                     None => ErrorTestResult::Fail(format!(
                         "expected bone or skull-emit to reject ({}), but both accepted",
                         tc.expected_error_kind
@@ -467,7 +430,7 @@ pub fn run_error_suite(
                 ErrorTestResult::Todo(msg) => {
                     todos += 1;
                     if verbose {
-                        println!("{} ... {} ({})", tc.name, "DIVERGENCE".yellow(), msg);
+                        println!("{} ... {} ({})", tc.name, "TODO".yellow(), msg);
                     }
                 }
             }
@@ -477,7 +440,7 @@ pub fn run_error_suite(
     let elapsed = start.elapsed().as_secs_f64();
     if failed == 0 {
         println!(
-            "Error tests (bone): {}. {} passed; {} failed; {} divergence; finished in {:.2}s",
+            "Error tests (bone): {}. {} passed; {} failed; {} todo; finished in {:.2}s",
             "ok".green(),
             passed,
             failed,
@@ -486,7 +449,7 @@ pub fn run_error_suite(
         );
     } else {
         println!(
-            "Error tests (bone): {}. {} passed; {} failed; {} divergence",
+            "Error tests (bone): {}. {} passed; {} failed; {} todo",
             "FAILED".red(),
             passed,
             failed,
