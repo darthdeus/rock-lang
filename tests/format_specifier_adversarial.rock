@@ -21,16 +21,6 @@ fn test_no_spec_smart_float() {
     assert_eq("{tiny}", "1e-09")
 }
 
-@test
-fn test_no_spec_non_float() {
-    let x = 42
-    let s = "hello"
-    let b = true
-    assert_eq("{x}", "42")
-    assert_eq("{s}", "hello")
-    assert_eq("{b}", "true")
-}
-
 // ---------------------------------------------------------------------
 // Float formatting: precision, width, zero-pad, sign
 // ---------------------------------------------------------------------

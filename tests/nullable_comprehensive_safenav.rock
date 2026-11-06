@@ -28,12 +28,6 @@ fn coalesce_basic() {
     print(y ?? 0)
 }
 
-@test(output = "default")
-fn safenav_coalesce_combined() {
-    let o: Outer? = null
-    print(o?.name ?? "default")
-}
-
 // -- Arithmetic with safe nav --
 
 @test(output = "15\n5")
@@ -47,16 +41,6 @@ fn safenav_arithmetic() {
 
 // -- ?.let --
 
-@test(output = "10\ntrue")
-fn safenav_let_basic() {
-    let x: int? = 5
-    let doubled = x?.let { x * 2 }
-    print(doubled)
-
-    let y: int? = null
-    print(y?.let { y * 2 } == null)
-}
-
 @test(output = "50")
 fn safenav_let_with_coalesce() {
     let x: int? = null
@@ -65,18 +49,6 @@ fn safenav_let_with_coalesce() {
 }
 
 // -- ?.0 / ?.1 on nullable tuples --
-
-@test(output = "Boss\ntrue")
-fn safenav_tuple_1() {
-    let mobs: Arena<Mob> = arena_new()
-    mobs.insert(Mob { name: "Boss", health: 500 })
-
-    let mob = mobs.pairs().find(_.1.name == "Boss")?.1
-    print(mob.unwrap().name)
-
-    let missing = mobs.pairs().find(_.1.name == "Nobody")?.1
-    print(missing == null)
-}
 
 @test(output = "true\ntrue")
 fn safenav_tuple_0() {

@@ -5,71 +5,11 @@
 // PROPOSED SYNTAX (not yet implemented):
 // @test(type_holes = [[hole_id, "expected_type"], ...])
 
-// Helper functions and types
-fn identity<T>(x: T) -> T { 
-    return x 
-}
-
-struct Point { 
-    x: int, 
-    y: int 
-}
+// The basic, generic-function, struct-field and nested-type examples are
+// checked with type_holes assertions in type_hole_tests.rock.
 
 fn greet(name: string) -> string {
     return "Hello, {name}!"
-}
-
-// Example 1: Basic type inference
-// Equivalent to assert_type_at tests
-@test
-fn test_basic_type_inference() {
-    // In the future, we could write:
-    // @test(type_holes = [[0, "int"], [1, "string"], [2, "float"]])
-    
-    let x: ? = 42           // hole 0 -> should infer to int
-    let y: ? = "hello"      // hole 1 -> should infer to string  
-    let z: ? = 3.14         // hole 2 -> should infer to float
-    
-    // For now, we can at least verify the values work correctly
-    assert_eq(x, 42)
-    assert_eq(y, "hello")
-    assert_eq(z, 3.14)
-}
-
-// Example 2: Generic function type inference
-@test
-fn test_generic_function_inference() {
-    // Future: @test(type_holes = [[0, "[int]"], [1, "int"]])
-    
-    let arr: ? = [1, 2, 3]              // hole 0 -> should infer to [int]
-    let elem: ? = identity(arr[0])      // hole 1 -> should infer to int
-    
-    assert_eq(elem, 1)
-}
-
-// Example 3: Struct field type inference
-@test
-fn test_struct_field_inference() {
-    // Future: @test(type_holes = [[0, "Point"], [1, "int"], [2, "int"]])
-    
-    let p: ? = Point { x: 10, y: 20 }  // hole 0 -> should infer to Point
-    let x_val: ? = p.x                  // hole 1 -> should infer to int
-    let y_val: ? = p.y                  // hole 2 -> should infer to int
-    
-    assert_eq(x_val, 10)
-    assert_eq(y_val, 20)
-}
-
-// Example 4: Complex nested types
-@test
-fn test_nested_type_inference() {
-    // Future: @test(type_holes = [[0, "[[int]]"], [1, "[int]"], [2, "int"]])
-    
-    let matrix: ? = [[1, 2], [3, 4]]    // hole 0 -> should infer to [[int]]
-    let row: ? = matrix[0]              // hole 1 -> should infer to [int]
-    let elem: ? = row[1]                // hole 2 -> should infer to int
-    
-    assert_eq(elem, 2)
 }
 
 // Example 5: Function return type inference

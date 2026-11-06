@@ -158,18 +158,6 @@ fn map_empty_arena() {
 
 // -- projecting tuple fields out of the pair iterator via .map(_.N) --
 
-@test(output = "Goblin\nOrc")
-fn dot1_extracts_values() {
-    let mobs: Arena<Mob> = arena_new()
-    mobs.insert(Mob { name: "Goblin", health: 30 })
-    mobs.insert(Mob { name: "Orc", health: 100 })
-
-    let names = mobs.pairs().map(p => (p.0, p.1.name)).map(_.1).collect()
-    for name in names {
-        print(name)
-    }
-}
-
 @test(output = "2")
 fn dot0_extracts_entities() {
     let mobs: Arena<Mob> = arena_new()

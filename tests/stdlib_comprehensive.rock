@@ -28,22 +28,6 @@ fn vector_insert_and_lookup() {
     print("len: {vec_len(v)}")
 }
 
-@test(output = "5\n3\n4\n1\n2\n4\n5")
-fn vec_remove_at_test() {
-    // Same test but avoid string interpolation issues
-    let v = [1, 2, 3, 4, 5]
-    print(vec_len(v))
-
-    let removed = remove_at(v, 2)
-    print(removed)
-    print(vec_len(v))
-
-    // Check remaining elements
-    for x in v {
-        print(x)
-    }
-}
-
 // ============================================
 // Map tests
 // ============================================

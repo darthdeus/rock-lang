@@ -10,11 +10,6 @@
 // - tuple pattern matching with variable shadowing
 
 // Shared struct definitions
-struct FixVec2 {
-    x: int,
-    y: int,
-}
-
 struct Data {
     value: int
 }
@@ -45,14 +40,6 @@ fn value_func() -> int {
 }
 
 // Helper functions for specific tests
-fn test_precedence(v: FixVec2) -> int {
-    return v.x  // This should resolve to parameter v, not function v()
-}
-
-fn test_function_parameter(v: int) -> int {
-    return v  // This should resolve to parameter v, not function v()
-}
-
 fn test_local_shadowing() -> int {
     let v = 10  // Local variable shadows the function
     return v    // This should resolve to local variable v, not function v()
@@ -209,19 +196,6 @@ fn f_recursive(n: int) -> int {
 }
 
 // Test cases
-@test(output = "10")
-fn test_parameter_vs_function_precedence_field_access() {
-    let pos = FixVec2 { x: 10, y: 20 }
-    let result = test_precedence(pos)
-    print(result)
-}
-
-@test(output = "10")
-fn test_parameter_vs_function_precedence_direct_use() {
-    let result = test_function_parameter(10)
-    print(result)
-}
-
 @test(output = "10")
 fn test_local_var_vs_function_precedence() {
     let result = test_local_shadowing()

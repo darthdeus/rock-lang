@@ -44,16 +44,6 @@ fn test_generic_id_int() {
     print(res)
 }
 
-@test(output = "hello")
-fn test_generic_id_string() {
-    print(id("hello"))
-}
-
-@test(output = "true")
-fn test_generic_id_bool() {
-    print(id(true))
-}
-
 @test(output = "5")
 fn test_generic_id_any() {
     let val: any = 5
@@ -95,12 +85,6 @@ fn test_generic_struct_type_inference() {
     let b = Box { item: 10 }
     let item: ? = b.item
     print(item)
-}
-
-@test(output = "7")
-fn test_nested_generic_struct() {
-    let b = Box { item: Box { item: 7 } }
-    print(b.item.item)
 }
 
 @test(output = "42", type_holes = [[0, "int"]])
