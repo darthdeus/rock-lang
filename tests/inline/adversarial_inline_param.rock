@@ -1,17 +1,14 @@
-// Adversarial tests for the L4 "@inline mutates param" hard error
-// (commit fa3c3e5a). Main goldens are in
-// `tests/errors/inline_param_mutation.rock.err`. Here we check the
-// *interaction* with V0's body restrictions:
-//
-// V0 `@inline` bodies are restricted to expression statements + a
-// trailing expression or bare `return <expr>`. That restriction already
-// rules out shadow-copy bypass (`let x = x + 1; ...`) at parse/validate
-// time. So L4's job is to catch direct mutation of a param in the
-// forms V0 DOES allow — which is effectively only `return <expr>` and
-// bare expression statements.
-//
-// Bypass attempts that we confirm ARE rejected live in the .err
-// companion. Here we confirm the benign positive cases compile.
+// Adversarial tests for @inline parameter handling: reads, writes to a
+// parameter, and closures that capture one. A spliced body must behave
+// exactly like the call it replaces, so a non-dup-safe argument still runs
+// once even when the body reassigns or captures the parameter.
+
+global CALLS: int = 0
+
+fn produce(n: int) -> int {
+    CALLS = CALLS + 1
+    return n
+}
 
 // Simple param-read + return. No mutation. Must compile.
 @inline
@@ -35,4 +32,94 @@ fn test_inline_param_used_twice() {
     // 3*3 + 3 = 12. Uses `x` twice; inline pass must ensure arg
     // dup-safety (literal `3` is trivially dup-safe).
     print(use_twice(3))
+}
+
+@inline
+fn rebind(x: int) -> int {
+    x = x + 1
+    return x
+}
+
+@inline
+fn bump(x: int) -> int {
+    x += 1
+    return x
+}
+
+@inline
+fn post_inc(x: int) -> int {
+    x++
+    return x
+}
+
+@test(output = "11 1")
+fn test_inline_assigns_whole_param() {
+    CALLS = 0
+    let r = rebind(produce(10))
+    print("{r} {CALLS}")
+}
+
+@test(output = "6 1")
+fn test_inline_compound_assigns_param() {
+    CALLS = 0
+    let r = bump(produce(5))
+    print("{r} {CALLS}")
+}
+
+@test(output = "6 1")
+fn test_inline_increments_param() {
+    CALLS = 0
+    let r = post_inc(produce(5))
+    print("{r} {CALLS}")
+}
+
+// Writing the param must not write through to the caller's local.
+@test(output = "6 5")
+fn test_inline_param_write_stays_local() {
+    let v = 5
+    let r = bump(v)
+    print("{r} {v}")
+}
+
+struct Point { x: int, y: int }
+
+fn make_point(x: int) -> Point {
+    CALLS = CALLS + 1
+    return Point { x: x, y: 2 }
+}
+
+@inline
+fn set_x(p: Point) -> int {
+    p.x = 99
+    return p.x + p.y
+}
+
+fn set_x_plain(p: Point) -> int {
+    p.x = 99
+    return p.x + p.y
+}
+
+// Structs are references, so the field write is visible to the caller,
+// exactly as it is through the non-inline twin.
+@test(output = "101 99 101 99 101 1")
+fn test_inline_assigns_param_field() {
+    let p = Point { x: 1, y: 2 }
+    let r = set_x(p)
+    let q = Point { x: 1, y: 2 }
+    let s = set_x_plain(q)
+    CALLS = 0
+    let t = set_x(make_point(1))
+    print("{r} {p.x} {s} {q.x} {t} {CALLS}")
+}
+
+@inline
+fn make_closure(x: int) -> (() -> int) {
+    return () => x
+}
+
+@test(output = "42 42 1")
+fn test_inline_body_lambda_captures_param() {
+    CALLS = 0
+    let f = make_closure(produce(42))
+    print("{f()} {f()} {CALLS}")
 }

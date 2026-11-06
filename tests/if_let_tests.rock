@@ -250,3 +250,20 @@ fn three_clause_cond_first() {
         print(item.value)
     }
 }
+
+// ==============================
+// Literal pattern in a chain
+// ==============================
+
+fn maybe_seven(b: bool) -> int? {
+    if b { return 7 }
+    return null
+}
+
+// A literal clause holds only for that exact value, never for null.
+@test(output = "7\nno\nno")
+fn chain_literal_pattern() {
+    if let 7 = maybe_seven(true) && let c = maybe_seven(true) { print(c) } else { print("no") }
+    if let 8 = maybe_seven(true) && let c = maybe_seven(true) { print(c) } else { print("no") }
+    if let 7 = maybe_seven(false) && let c = maybe_seven(true) { print(c) } else { print("no") }
+}
