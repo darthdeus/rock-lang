@@ -7,6 +7,7 @@ repository.workspace = true
 publish = false
 description = "CLI library and standalone rock compiler"
 autobins = false
+autotests = false
 
 [lib]
 path = "src/lib.rs"
@@ -79,9 +80,8 @@ name = "rock"
 path = "src/main.rs"
 
 [[test]]
-name = "main_js"
-path = "tests/main_js.rs"
-required-features = ["backend-js"]
+name = "rock_cli_tests"
+path = "tests/main.rs"
 
 [[test]]
 name = "child_lifetime"
