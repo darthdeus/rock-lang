@@ -33,3 +33,20 @@ fn test_cse_survives_safe_buffer_write() {
     let b = buf[1]; print("{b.x.floor()}"); print("{b.y.floor()}")
     let c = buf[2]; print("{c.x.floor()}"); print("{c.y.floor()}")
 }
+
+// A multi-line `//` comment between sibling pure-call statements used to
+// reset the PureCse table between the calls.
+@test(output = "1\n1\n2\n2\n1\n1")
+fn test_cse_with_comment_between() {
+    let buf = native_buffer_v2(3)
+    buf[0] = make_v2(1.0)
+    // multi-line
+    // comment
+    // here
+    buf[1] = make_v2(2.0)
+    buf[2] = make_v2(1.0)
+
+    let a = buf[0]; print("{a.x.floor()}"); print("{a.y.floor()}")
+    let b = buf[1]; print("{b.x.floor()}"); print("{b.y.floor()}")
+    let c = buf[2]; print("{c.x.floor()}"); print("{c.y.floor()}")
+}
