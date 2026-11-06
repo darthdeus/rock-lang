@@ -248,6 +248,9 @@ impl ProcessManager {
         let timed_out;
         let timeout_phase;
         let status;
+        // Most children exit within a few milliseconds, so start polling
+        // fast and back off to the long-running interval.
+        let mut poll = Duration::from_millis(1);
 
         loop {
             if let Some(rx) = &progress_rx {
@@ -361,7 +364,8 @@ impl ProcessManager {
                         timeout_phase = Some(phase);
                         break;
                     }
-                    thread::sleep(Duration::from_millis(50));
+                    thread::sleep(poll);
+                    poll = (poll * 2).min(Duration::from_millis(50));
                 }
             }
         }
@@ -760,6 +764,34 @@ mod tests {
         );
         let error = result.expect_err("a panicked reader must fail the wait");
         assert!(error.to_string().contains("stderr"), "got: {error}");
+    }
+
+    #[test]
+    fn short_lived_child_is_reaped_without_a_full_poll_interval() {
+        // The child outlives the first try_wait, so the wait must sleep at
+        // least once. Take the fastest of several runs so a loaded machine
+        // cannot fail the test; a fixed 50ms poll can never get under 40ms.
+        let fastest = (0..5)
+            .map(|_| {
+                let mut child = std::process::Command::new("sleep")
+                    .arg("0.01")
+                    .spawn()
+                    .expect("spawn sleep");
+                let start = std::time::Instant::now();
+                let result = super::ProcessManager::wait_with_timeout(
+                    &mut child,
+                    std::time::Duration::from_secs(30),
+                )
+                .expect("wait");
+                assert!(result.output.status.success() && !result.timed_out);
+                start.elapsed()
+            })
+            .min()
+            .unwrap();
+        assert!(
+            fastest < std::time::Duration::from_millis(40),
+            "fastest wait took {fastest:?}"
+        );
     }
 
     #[test]
