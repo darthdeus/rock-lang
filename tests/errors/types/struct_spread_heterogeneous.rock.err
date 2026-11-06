@@ -18,3 +18,11 @@ fn main() {
     let floats = (1.0, 2.0, 3.0)
     let data: [int] = [...floats, 4]
 }
+
+//=== TEST CASE: heterogeneous_tuple_spread_untyped_TypeMismatch ===
+// Every spread element must share the array element type.
+//! expect: type mismatch: expected `string`, found `int`
+fn main() {
+    let mixed = (1, "hello", 3.14)
+    let data = [...mixed]
+}
