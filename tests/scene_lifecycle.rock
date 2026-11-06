@@ -155,6 +155,8 @@ fn a_copied_builder_cannot_create_an_arena_after_publish() {
     let s: Scene<RoomState>? = scene_create(capture_build)
     print(is_null(s))
     print(raises(() => { let _x: Arena<Actor> = PUBLISHED_BUILDER.unwrap().arena() }))
+    assert(raises(() => PUBLISHED_BUILDER.unwrap().on_retire(() => {})),
+        "published builders cannot add retirement actions")
     print(scene_live_count() - scenes0)
     print(arena_live_count() - arenas0)
 }
@@ -288,4 +290,39 @@ fn closers_run_once_per_incarnation() {
     print(__scene_drain_closed())
     print(__scene_drain_closed())
     print(scene_closer_count(s.unwrap()))
+}
+
+@test
+fn resource_retirement_runs_after_close_and_on_discard_or_abort() {
+    for mode in 0..3 {
+        let events: [int] = []
+        let scene: Scene<RoomState>? = scene_create((builder) => {
+            let actors: Arena<Actor> = builder.arena()
+            let actor = actors.insert(Actor { hp: 1 })
+            builder.on_retire(() => {
+                assert(actor.get() != null, "resources retire before arena destruction")
+                events.push(2)
+            })
+            builder.on_close(() => {
+                assert_eq(events.len(), 0, "close callbacks precede retirement regardless of registration order")
+                events.push(1)
+            })
+            if mode == 2 { return null }
+            return RoomState { actors, name: "retirement" }
+        })
+        if let live = scene {
+            if mode == 0 { assert(scene_close(live)) }
+            else { assert(scene_discard(live)) }
+            assert_eq(events.len(), 0, "requests defer retirement until the safe point")
+            assert_eq(__scene_drain_closed(), 1)
+        }
+        if mode == 1 {
+            assert_eq(events.len(), 1, "discard still retires resources")
+        } else {
+            assert_eq(events.len(), 2, "close and failed construction run both lifecycle phases")
+            assert_eq(events[0], 1)
+        }
+        assert_eq(events[events.len() - 1], 2)
+        assert_eq(__scene_drain_closed(), 0, "retirement runs once")
+    }
 }

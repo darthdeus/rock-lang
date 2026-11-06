@@ -37,6 +37,7 @@ struct SceneRegistry {
     arena_ids: [[int]],
     next_id: int,
     closers: [[() -> ()]],
+    retirers: [[() -> ()]],
     pending_close: [int],
     root_type_key: [string],
     root_type_bucket: [int],
@@ -48,7 +49,7 @@ struct SceneRegistry {
 }
 
 global __SCENE_REGISTRY: SceneRegistry = SceneRegistry {
-    roots: [], states: [], arena_ids: [], next_id: 0, closers: [],
+    roots: [], states: [], arena_ids: [], next_id: 0, closers: [], retirers: [],
     pending_close: [], root_type_key: [], root_type_bucket: [],
     type_keys: [], type_buckets: [], type_bucket_pos: [],
     type_bucket_lookup: map_new(), phase_bucket_lengths: [],
@@ -101,10 +102,12 @@ fn __scene_reserve() -> int {
     if __SCENE_REGISTRY.next_id == 0 {
         let root_arenas: [int] = []
         let root_closers: [() -> ()] = []
+        let root_retirers: [() -> ()] = []
         vec_push(__SCENE_REGISTRY.roots, null)
         vec_push(__SCENE_REGISTRY.states, __SCENE_RESERVED)
         vec_push(__SCENE_REGISTRY.arena_ids, root_arenas)
         vec_push(__SCENE_REGISTRY.closers, root_closers)
+        vec_push(__SCENE_REGISTRY.retirers, root_retirers)
         vec_push(__SCENE_REGISTRY.root_type_key, "")
         vec_push(__SCENE_REGISTRY.root_type_bucket, -1)
         vec_push(__SCENE_REGISTRY.type_bucket_pos, -1)
@@ -115,10 +118,12 @@ fn __scene_reserve() -> int {
     __SCENE_REGISTRY.next_id = id + 1
     let owned: [int] = []
     let closers: [() -> ()] = []
+    let retirers: [() -> ()] = []
     vec_push(__SCENE_REGISTRY.roots, null)
     vec_push(__SCENE_REGISTRY.states, __SCENE_BUILDING)
     vec_push(__SCENE_REGISTRY.arena_ids, owned)
     vec_push(__SCENE_REGISTRY.closers, closers)
+    vec_push(__SCENE_REGISTRY.retirers, retirers)
     vec_push(__SCENE_REGISTRY.root_type_key, "")
     vec_push(__SCENE_REGISTRY.root_type_bucket, -1)
     vec_push(__SCENE_REGISTRY.type_bucket_pos, -1)
@@ -214,6 +219,10 @@ fn __scene_retire(scene_id: int, graceful: bool) {
             closers[i]()
         }
     }
+    let retirers = __SCENE_REGISTRY.retirers[scene_id]
+    for retire in retirers { retire() }
+    let no_retirers: [() -> ()] = []
+    __SCENE_REGISTRY.retirers.set(scene_id, no_retirers)
     let no_closers: [() -> ()] = []
     __SCENE_REGISTRY.closers.set(scene_id, no_closers)
     let owned = __SCENE_REGISTRY.arena_ids[scene_id]
@@ -276,6 +285,15 @@ fn SceneBuilder.on_close(builder, action: () -> ()) {
     vec_push(__SCENE_REGISTRY.closers[scene_id], action)
 }
 
+// Resource invalidation runs on close, discard and construction abort, after
+// semantic close callbacks but before owned arena rows disappear.
+fn SceneBuilder.on_retire(builder, action: () -> ()) {
+    let scene_id = builder._scene_id
+    assert(__scene_state(scene_id) == __SCENE_BUILDING,
+        "SceneBuilder can register retirement only during construction")
+    vec_push(__SCENE_REGISTRY.retirers[scene_id], action)
+}
+
 // Requests closure. True on the first call for a live Scene, false for a repeat
 // or a dead handle, so a caller can tell which close was theirs. Lookup stops
 // resolving immediately; the rows die at the next safe-point drain.
@@ -288,7 +306,7 @@ fn scene_close<T>(scene: Scene<T>) -> bool {
 }
 
 // Discards the Scene: same request, same safe point, same invalidation -- and
-// none of its teardown actions run. This is the abrupt half of the pair, for a
+// none of its semantic close actions run; resource retirement still runs. This is the abrupt half of the pair, for a
 // world being thrown away rather than shut down: a level reload where the
 // outgoing room's on-death effects must not fire, a failed load, an editor
 // document abandoned without committing.
