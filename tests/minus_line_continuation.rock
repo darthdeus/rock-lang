@@ -1,0 +1,39 @@
+// A line that starts with `-` continues the previous expression, except
+// after a comma, where it starts a unary operand.
+
+@test
+fn leading_minus_continues_a_let_initializer() {
+    let value = 10.0
+        - 1.0
+    assert_eq(value, 9.0)
+}
+
+@test
+fn leading_minus_continues_a_single_call_argument() {
+    let a = 10.0
+    let b = 1.0
+    assert_eq(abs(a
+        - b), 9.0)
+}
+
+fn continued_return() -> float {
+    return 10.0
+        - 1.0
+}
+
+@test
+fn leading_minus_continues_a_return_value() {
+    assert_eq(continued_return(), 9.0)
+}
+
+fn add_pair(a: float, b: float) -> float {
+    return a + b
+}
+
+@test
+fn leading_minus_after_a_comma_remains_unary() {
+    assert_eq(add_pair(
+        10.0,
+        - 1.0,
+    ), 9.0)
+}
