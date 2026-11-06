@@ -53,7 +53,6 @@ impl CommandContext {
                 self.args.command.cli_name(),
             );
         }
-        let _renderer_override = rock_host::stick::install_renderer_override(self.args.renderer);
         self.run_command()
     }
 

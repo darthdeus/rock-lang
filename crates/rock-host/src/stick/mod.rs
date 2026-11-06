@@ -167,9 +167,6 @@ pub struct StickConfig {
     pub package: Package,
     /// Optional runtime requirements, interpreted by the installed host.
     pub engine: Option<EngineConfig>,
-    /// The renderer is a build-time choice, independent of optional engine
-    /// capabilities.
-    pub renderer: Option<RendererConfig>,
     /// Declared compile-time inputs (`build_var(..)`) and release channels.
     /// Commands are run by the CLI once per session build, before compilation;
     /// the compiler only ever sees resolved values.
@@ -292,53 +289,6 @@ pub const KNOWN_BUILD_BUILTINS: [&str; 3] = ["channel", "platform", "source_revi
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
     pub needs: Vec<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct RendererConfig {
-    pub backend: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RendererBackend {
-    Gl,
-}
-
-static RENDERER_OVERRIDE: OnceLock<Mutex<Option<RendererBackend>>> = OnceLock::new();
-
-fn renderer_override_slot() -> &'static Mutex<Option<RendererBackend>> {
-    RENDERER_OVERRIDE.get_or_init(|| Mutex::new(None))
-}
-
-/// Process-local selection installed by a CLI invocation. It is read by the
-/// same manifest resolver used by compiler, engine build, and generated game
-/// preamble, so an override cannot affect only the runtime half.
-pub struct RendererOverrideGuard {
-    previous: Option<RendererBackend>,
-}
-
-impl Drop for RendererOverrideGuard {
-    fn drop(&mut self) {
-        *renderer_override_slot()
-            .lock()
-            .expect("renderer override lock") = self.previous;
-    }
-}
-
-pub fn install_renderer_override(backend: Option<RendererBackend>) -> RendererOverrideGuard {
-    let mut slot = renderer_override_slot()
-        .lock()
-        .expect("renderer override lock");
-    let previous = *slot;
-    *slot = backend;
-    RendererOverrideGuard { previous }
-}
-
-/// The renderer the current invocation selected with `--renderer`, if any.
-pub fn renderer_override() -> Option<RendererBackend> {
-    *renderer_override_slot()
-        .lock()
-        .expect("renderer override lock")
 }
 
 /// The invocation's channel selection, recorded once by the CLI before
@@ -824,38 +774,6 @@ impl<'de> serde::Deserialize<'de> for SoundConfig {
     }
 }
 
-impl<'de> serde::Deserialize<'de> for RendererConfig {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct Vis;
-        impl<'de> serde::de::Visitor<'de> for Vis {
-            type Value = RendererConfig;
-            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                write!(f, "RendererConfig struct")
-            }
-            fn visit_map<A: serde::de::MapAccess<'de>>(
-                self,
-                mut map: A,
-            ) -> Result<RendererConfig, A::Error> {
-                let mut backend: Option<String> = None;
-                while let Some(key) = map.next_key::<String>()? {
-                    match key.as_str() {
-                        "backend" => {
-                            backend = Some(map.next_value()?);
-                        }
-                        other => {
-                            return Err(serde::de::Error::custom(format!(
-                                "unknown key `{other}` in [renderer]; known keys: backend"
-                            )));
-                        }
-                    }
-                }
-                Ok(RendererConfig { backend })
-            }
-        }
-        d.deserialize_map(Vis)
-    }
-}
-
 impl<'de> serde::Deserialize<'de> for Package {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         struct Vis;
@@ -915,7 +833,6 @@ impl<'de> serde::Deserialize<'de> for StickConfig {
             ) -> Result<StickConfig, A::Error> {
                 let mut package: Option<Package> = None;
                 let mut engine: Option<EngineConfig> = None;
-                let mut renderer: Option<RendererConfig> = None;
                 let mut build: Option<BuildConfig> = None;
                 let mut release: Option<ReleaseConfig> = None;
                 let mut assets: Option<AssetsConfig> = None;
@@ -943,9 +860,6 @@ impl<'de> serde::Deserialize<'de> for StickConfig {
                         "engine" => {
                             engine = map.next_value()?;
                         }
-                        "renderer" => {
-                            renderer = map.next_value()?;
-                        }
                         "language" => {
                             language = map.next_value()?;
                         }
@@ -958,7 +872,7 @@ impl<'de> serde::Deserialize<'de> for StickConfig {
                         other => {
                             return Err(serde::de::Error::custom(format!(
                                 "unknown key `{other}` at top level; known keys: package, build, release, \
-                                 assets, sound, engine, renderer, language, dependencies, source_groups"
+                                 assets, sound, engine, language, dependencies, source_groups"
                             )));
                         }
                     }
@@ -967,7 +881,6 @@ impl<'de> serde::Deserialize<'de> for StickConfig {
                 Ok(StickConfig {
                     package,
                     engine,
-                    renderer,
                     build,
                     release,
                     assets,
@@ -1105,31 +1018,6 @@ impl StickConfig {
     pub fn new_from_str(content: &str) -> Result<Self> {
         basic_toml::from_str(content)
             .map_err(|e| anyhow::anyhow!("Failed to parse stick.toml: {}", e))
-    }
-
-    pub fn renderer_backend(&self) -> Result<RendererBackend> {
-        if let Some(backend) = *renderer_override_slot()
-            .lock()
-            .expect("renderer override lock")
-        {
-            return Ok(backend);
-        }
-        match self
-            .renderer
-            .as_ref()
-            .and_then(|r| r.backend.as_deref())
-            .unwrap_or("gl")
-        {
-            "gl" => Ok(RendererBackend::Gl),
-            backend => anyhow::bail!(
-                "stick.toml: unknown [renderer] backend {:?}. Known: \"gl\"",
-                backend
-            ),
-        }
-    }
-
-    pub fn validate_renderer(&self) -> Result<()> {
-        self.renderer_backend().map(|_| ())
     }
 
     /// Reject a malformed `[build]` section at load time: a var with zero or
@@ -1860,29 +1748,6 @@ mod tests {
             msg.contains("unknown key `ios`"),
             "error names the bad key: {msg}"
         );
-    }
-
-    #[test]
-    fn renderer_defaults_to_gl_and_rejects_retired_wgpu() {
-        let gl = StickConfig::new_from_str("[package]\nname = \"x\"\n").unwrap();
-        assert_eq!(gl.renderer_backend().unwrap(), RendererBackend::Gl);
-
-        let wgpu =
-            StickConfig::new_from_str("[package]\nname = \"x\"\n[renderer]\nbackend = \"wgpu\"\n")
-                .unwrap();
-        assert!(wgpu.validate_renderer().is_err());
-    }
-
-    #[test]
-    fn renderer_rejects_unknown_backend() {
-        let cfg = StickConfig::new_from_str(
-            "[package]\nname = \"x\"\n[renderer]\nbackend = \"vulkan\"\n",
-        )
-        .unwrap();
-        let err = cfg
-            .validate_renderer()
-            .expect_err("unknown renderer must reject");
-        assert!(format!("{err}").contains("vulkan"));
     }
 
     // RED-then-GREEN: from_path_optional must distinguish "no manifest"

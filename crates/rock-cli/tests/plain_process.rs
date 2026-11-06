@@ -319,7 +319,7 @@ fn plain_parser_rejects_options_whose_private_rules_are_absent() {
         );
         assert!(
             !help.contains(option),
-            "private option remained in public help: {option}"
+            "removed option remained in public help: {option}"
         );
     }
 }
@@ -555,6 +555,7 @@ fn plain_parser_rejects_private_runtime_options() {
         ("--jobs-force", None),
         ("--multi-order", None),
         ("--headless", None),
+        ("--renderer", Some("gl")),
         ("--list", None),
         ("--dump-state", None),
         ("--update-snapshots", None),
@@ -578,7 +579,7 @@ fn plain_parser_rejects_private_runtime_options() {
         );
         assert!(
             !help.contains(option),
-            "private option remained in public help: {option}"
+            "removed option remained in public help: {option}"
         );
     }
     let matches = rock_cli::Args::command()
@@ -595,8 +596,6 @@ fn plain_parser_rejects_private_runtime_options() {
             "release",
             "--target-os",
             "web",
-            "--renderer",
-            "gl",
             "--format",
             "json",
         ])
@@ -606,7 +605,6 @@ fn plain_parser_rejects_private_runtime_options() {
     assert_eq!(args.iters, 2);
     assert_eq!(args.warmup, 0);
     assert_eq!(args.target_os.as_deref(), Some("web"));
-    assert_eq!(args.renderer, Some(rock_cli::RendererBackend::Gl));
     assert_eq!(args.perf_format, "json");
     assert!(!root.path().join("tmp").exists());
 }

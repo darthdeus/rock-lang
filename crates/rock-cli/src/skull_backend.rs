@@ -2443,13 +2443,6 @@ fn skull_emit_project_with_inputs(
     let stats = crate::compile_measurements::Scope::begin(dir);
     let slot = crate::compile_slots::acquire(dir)?;
     crate::compile_measurements::slot(slot.acquisition());
-    let renderer_target = match skull_renderer_target(dir) {
-        Ok(target) => target,
-        Err(e) => {
-            log::error!(target: "SKULL", "invalid renderer selection for {}: {}", dir, e);
-            crate::invocation_log::exit(1);
-        }
-    };
     let spec = crate::unified_compile::SourceSpec::Directory(PathBuf::from(dir));
     let sources = match crate::unified_compile::discover_sources(&spec) {
         Ok(s) => s,
@@ -2490,7 +2483,7 @@ fn skull_emit_project_with_inputs(
     };
     let target = skull::pipeline::EmitTarget {
         project_root: Some(dir),
-        renderer: renderer_target,
+        renderer: skull::mir_emit::RendererTarget::Gl,
     };
     let compiled = skull::pipeline::compile_modules(modules, entry_file, target, &mut host);
     let skull::pipeline::Compiled {
@@ -2888,7 +2881,6 @@ pub fn skull_compile_project_with_recorded_inputs(
 
 fn skull_run_project(dir: &str) -> Result<()> {
     let stats = crate::compile_measurements::Scope::begin(dir);
-    ensure_renderer_feature(dir)?;
     let runtime = RuntimeServices::registered();
     (runtime.prepare_run)(dir)?;
     let (lua, emits_main) = skull_emit_project(dir)?;
@@ -3318,7 +3310,7 @@ pub fn body_digit_flip(text: &str, name: &str) -> Option<String> {
 pub fn skull_incremental_profile(path: &str) -> Result<()> {
     use std::path::PathBuf;
 
-    let renderer_target = skull_renderer_target(path)?;
+    let renderer_target = skull::mir_emit::RendererTarget::Gl;
     let spec = crate::unified_compile::SourceSpec::Directory(PathBuf::from(path));
     let sources = crate::unified_compile::discover_sources(&spec)?;
     let files = crate::bone_backend::session_files(&sources);
@@ -3507,7 +3499,7 @@ fn iter_incremental_sources(path: &str) -> Result<rock_core::SourceFiles> {
 }
 
 pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result<()> {
-    let renderer_target = skull_renderer_target(path)?;
+    let renderer_target = skull::mir_emit::RendererTarget::Gl;
     let sources = iter_incremental_sources(path)?;
     let files = crate::bone_backend::session_files(&sources);
 
@@ -3949,27 +3941,6 @@ root-hole names={} rows={} decls={} reason-buckets={} erased-catalogue={}",
 // Incremental compiler: two-file output (main.lua + incremental.lua)
 // ---------------------------------------------------------------------------
 
-pub fn ensure_renderer_feature(dir: &str) -> Result<()> {
-    skull_renderer_target(dir).map(|_| ())
-}
-
-pub fn skull_renderer_target(dir: &str) -> Result<skull::mir_emit::RendererTarget> {
-    let backend = skull_renderer_backend(dir)?;
-    Ok(match backend {
-        rock_host::stick::RendererBackend::Gl => skull::mir_emit::RendererTarget::Gl,
-    })
-}
-
-pub fn skull_renderer_backend(dir: &str) -> Result<rock_host::stick::RendererBackend> {
-    let abs = std::path::Path::new(dir)
-        .canonicalize()
-        .unwrap_or_else(|_| std::path::PathBuf::from(dir));
-    Ok(match rock_host::stick::StickConfig::find_from_dir(&abs)? {
-        Some((_, cfg)) => cfg.renderer_backend()?,
-        None => rock_host::stick::RendererBackend::Gl,
-    })
-}
-
 /// Game-shaped `main.lua`: preamble + emit + `__rock_main_wrapper(main)` entry.
 ///
 /// `emits_main` comes from the emitter, not from searching `emit_lua`: the
@@ -4261,7 +4232,7 @@ impl IncrementalProject {
         let stats = crate::compile_measurements::Scope::begin(dir);
         let slot = crate::compile_slots::acquire(dir)?;
         crate::compile_measurements::slot(slot.acquisition());
-        let renderer_target = skull_renderer_target(dir)?;
+        let renderer_target = skull::mir_emit::RendererTarget::Gl;
         let project = crate::live_project::LiveProject::init(dir, include_tests)?;
         let (lua, cache, artifact_fingerprint, emits_main) = {
             let ws = project.workspace();

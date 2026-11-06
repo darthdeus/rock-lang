@@ -20,7 +20,7 @@ pub use rock_host::source_files::{
     SourceFilesExt, source_file_from_code, source_file_new_preprocessed,
 };
 pub use rock_host::stick::{
-    RendererBackend, StickConfig,
+    StickConfig,
     graph::{PackageGraph, PackageId, PackageNode},
 };
 pub use rock_tokenizer::*;
@@ -162,8 +162,6 @@ pub struct Args {
     pub sim_entry: Option<String>,
     pub type_validation: bool,
     pub headless: bool,
-    /// Compiler renderer target override; the manifest remains unchanged.
-    pub renderer: Option<RendererBackend>,
     pub test_threads: Option<usize>,
     pub lib: Option<String>,
     pub clean: bool,
@@ -317,8 +315,6 @@ impl Args {
                 .help("Output format for reports and module tools: \"pretty\" (default) or \"json\"."))
             .arg(Arg::new("type-validation").long("type-validation").action(ArgAction::SetTrue)
                 .help("Enable type validation warnings for unresolved types after inference"))
-            .arg(Arg::new("renderer").long("renderer").value_parser(["gl"])
-                .help("Select the renderer target for this invocation (`gl`); manifest default remains unchanged"))
             .arg(Arg::new("test-threads").long("test-threads").value_name("NUM")
                 .value_parser(clap::value_parser!(usize))
                 .help("Number of threads to use for running tests (default: number of CPU cores, use 1 for sequential)"))
@@ -430,12 +426,6 @@ impl Args {
             sim_entry: Default::default(),
             type_validation: m.get_flag("type-validation"),
             headless: Default::default(),
-            renderer: m
-                .get_one::<String>("renderer")
-                .map(|value| match value.as_str() {
-                    "gl" => RendererBackend::Gl,
-                    _ => unreachable!("renderer value parser admitted an unknown value"),
-                }),
             test_threads: m.get_one::<usize>("test-threads").copied(),
             lib: m.get_one::<String>("lib").cloned(),
             clean: m.get_flag("clean"),

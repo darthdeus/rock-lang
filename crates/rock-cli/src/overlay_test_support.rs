@@ -157,7 +157,7 @@ pub fn direct_overlay(root: &str, target_suffix: &str, edited: &str) -> String {
     let mut session =
         crate::bone_backend::bone_session_for_emission(files, std::path::Path::new(root))
             .expect("session");
-    let renderer = crate::skull_backend::skull_renderer_target(root).expect("renderer");
+    let renderer = skull::mir_emit::RendererTarget::Gl;
     let mid = skull::user_module_id(session.workspace()).expect("user module");
     let (_, mut cache) =
         skull::mir_emit::emit_full_in_for_renderer(session.workspace(), mid, Some(root), renderer)
