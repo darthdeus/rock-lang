@@ -442,9 +442,7 @@ pub fn compiler_identity() -> Result<String> {
             let mut file = std::fs::File::open(image).map_err(|e| e.to_string())?;
             let before = file.metadata().map_err(|e| e.to_string())?;
             #[cfg(target_os = "macos")]
-            if before.modified().map_err(|e| e.to_string())? > compiler_process_started()? {
-                return Err("compiler image changed after process start".into());
-            }
+            verify_macos_compiler_image(&before)?;
             let identity = hash_compiler_image(&mut file).map_err(|e| e.to_string())?;
             let after = file.metadata().map_err(|e| e.to_string())?;
             if before.len() != after.len() || before.modified().ok() != after.modified().ok() {
@@ -670,6 +668,59 @@ mod compiler_image_tests {
         hash_compiler_image(&mut Cursor::new(bytes.to_vec())).unwrap()
     }
 
+    #[cfg(target_os = "macos")]
+    fn run_macos_identity_child(mode: &str) {
+        let temp = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new("/bin/sh")
+            .args(["-c", "cp \"$1\" \"$2\" && exec \"$2\" --exact comptime::compiler_image_tests::macos_identity_child --nocapture", "identity-probe"])
+            .arg(std::env::current_exe().unwrap())
+            .arg(temp.path().join("compiler"))
+            .env("ROCK_TEST_MACOS_IDENTITY", mode)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_exec_accepts_image_created_after_process_start() {
+        run_macos_identity_child("fresh");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_rejects_replaced_running_image() {
+        run_macos_identity_child("replace");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_identity_child() {
+        let Ok(mode) = std::env::var("ROCK_TEST_MACOS_IDENTITY") else {
+            return;
+        };
+        if mode == "replace" {
+            let image = std::env::current_exe().unwrap();
+            let replacement = image.with_extension("replacement");
+            std::fs::copy(&image, &replacement).unwrap();
+            std::fs::rename(&replacement, &image).unwrap();
+            assert!(
+                super::compiler_identity()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("compiler image replaced after exec")
+            );
+        } else {
+            assert!(!super::compiler_identity().unwrap().is_empty());
+        }
+    }
+
     /// Minimal ELF64-LE image: one PT_LOAD over "CODECODE" at offset 128,
     /// then trailing bytes outside every load segment (the debug stand-in).
     fn elf_image() -> Vec<u8> {
@@ -731,25 +782,71 @@ mod compiler_image_tests {
 }
 
 #[cfg(target_os = "macos")]
-fn compiler_process_started() -> std::result::Result<std::time::SystemTime, String> {
-    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
-    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
-    // SAFETY: info is a writable proc_bsdinfo of exactly size bytes.
+fn verify_macos_compiler_image(file: &std::fs::Metadata) -> std::result::Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+
+    // sys/proc_info.h: libc exposes vnode_info_path but not these wrappers.
+    #[repr(C)]
+    struct RegionInfo {
+        protection: u32,
+        max_protection: u32,
+        inheritance: u32,
+        flags: u32,
+        offset: u64,
+        behavior: u32,
+        user_wired_count: u32,
+        user_tag: u32,
+        pages_resident: u32,
+        pages_shared_now_private: u32,
+        pages_swapped_out: u32,
+        pages_dirtied: u32,
+        ref_count: u32,
+        shadow_depth: u32,
+        share_mode: u32,
+        private_pages_resident: u32,
+        shared_pages_resident: u32,
+        obj_id: u32,
+        depth: u32,
+        address: u64,
+        size: u64,
+    }
+    #[repr(C)]
+    struct RegionWithPath {
+        region: RegionInfo,
+        vnode: libc::vnode_info_path,
+    }
+    const PROC_PIDREGIONPATHINFO: libc::c_int = 8;
+    // SAFETY: dyld's image zero is the executable and lives for this process.
+    let header = unsafe { libc::_dyld_get_image_header(0) };
+    if header.is_null() {
+        return Err("running compiler image has no Mach-O header".into());
+    }
+    // SAFETY: both fields are C data structures whose zero values are valid.
+    let mut info: RegionWithPath = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<RegionWithPath>() as libc::c_int;
+    // SAFETY: info is writable for size bytes; header selects its mapped region.
     let written = unsafe {
         libc::proc_pidinfo(
             std::process::id() as libc::c_int,
-            libc::PROC_PIDTBSDINFO,
-            0,
-            (&mut info as *mut libc::proc_bsdinfo).cast(),
+            PROC_PIDREGIONPATHINFO,
+            header as u64,
+            (&mut info as *mut RegionWithPath).cast(),
             size,
         )
     };
     if written != size {
-        return Err(std::io::Error::last_os_error().to_string());
+        return Err(format!(
+            "cannot inspect running compiler image: {}",
+            std::io::Error::last_os_error()
+        ));
     }
-    Ok(std::time::UNIX_EPOCH
-        + std::time::Duration::from_secs(info.pbi_start_tvsec)
-        + std::time::Duration::from_micros(info.pbi_start_tvusec))
+    let mapped = info.vnode.vip_vi.vi_stat;
+    // exec preserves process birth time. Compare the opened file with the
+    // executable's mapped vnode instead, including after an atomic replacement.
+    if u64::from(mapped.vst_dev) != file.dev() || mapped.vst_ino != file.ino() {
+        return Err("compiler image replaced after exec".into());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
