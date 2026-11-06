@@ -1,0 +1,114 @@
+// Value-position control flow (`if`, block, `??`, `if let`, `if let`
+// chains, `match`) whose result type is a non-flat value struct
+// (nested value `Seg { a: V2, b: V2 }`). The result is a single cdata at
+// runtime, not scalarized fields, so each form exercises the cdata-ABI
+// path.
+
+value V2 {
+    x: float,
+    y: float,
+}
+
+value Seg {
+    a: V2,
+    b: V2,
+}
+
+@test(output = "1\n2\n3\n4")
+fn test_value_if_nested() {
+    let cond = true
+    let s: Seg = if cond {
+        Seg { a: V2 { x: 1, y: 2 }, b: V2 { x: 3, y: 4 } }
+    } else {
+        Seg { a: V2 { x: 0, y: 0 }, b: V2 { x: 0, y: 0 } }
+    }
+    print("{s.a.x.floor()}")
+    print("{s.a.y.floor()}")
+    print("{s.b.x.floor()}")
+    print("{s.b.y.floor()}")
+}
+
+@test(output = "10\n20\n30\n40")
+fn test_value_block_nested() {
+    let s: Seg = {
+        let ax = 10.0
+        let ay = 20.0
+        Seg { a: V2 { x: ax, y: ay }, b: V2 { x: 30, y: 40 } }
+    }
+    print("{s.a.x.floor()}")
+    print("{s.a.y.floor()}")
+    print("{s.b.x.floor()}")
+    print("{s.b.y.floor()}")
+}
+
+fn maybe_seg(want: bool) -> Seg? {
+    if want {
+        Seg { a: V2 { x: 1, y: 2 }, b: V2 { x: 3, y: 4 } }
+    } else {
+        null
+    }
+}
+
+@test(output = "9\n9\n9\n9")
+fn test_value_coalesce_nested() {
+    let fallback = Seg { a: V2 { x: 9, y: 9 }, b: V2 { x: 9, y: 9 } }
+    let s: Seg = maybe_seg(false) ?? fallback
+    print("{s.a.x.floor()}")
+    print("{s.a.y.floor()}")
+    print("{s.b.x.floor()}")
+    print("{s.b.y.floor()}")
+}
+
+fn maybe_seven(have: bool) -> int? {
+    if have { 7 } else { null }
+}
+
+@test(output = "1\n2\n7\n4")
+fn test_value_iflet_nested() {
+    let s: Seg = if let n = maybe_seven(true) {
+        Seg { a: V2 { x: 1, y: 2 }, b: V2 { x: n as float, y: 4 } }
+    } else {
+        Seg { a: V2 { x: 0, y: 0 }, b: V2 { x: 0, y: 0 } }
+    }
+    print("{s.a.x.floor()}")
+    print("{s.a.y.floor()}")
+    print("{s.b.x.floor()}")
+    print("{s.b.y.floor()}")
+}
+
+fn maybe_three(have: bool) -> int? {
+    if have { 3 } else { null }
+}
+
+@test(output = "1\n2\n3\n4")
+fn test_value_iflet_chain_nested() {
+    let s: Seg = if let n = maybe_three(true) && let m = maybe_three(true) {
+        Seg { a: V2 { x: 1, y: 2 }, b: V2 { x: n as float, y: 4 } }
+    } else {
+        Seg { a: V2 { x: 0, y: 0 }, b: V2 { x: 0, y: 0 } }
+    }
+    print("{s.a.x.floor()}")
+    print("{s.a.y.floor()}")
+    print("{s.b.x.floor()}")
+    print("{s.b.y.floor()}")
+}
+
+enum Tag {
+    A,
+    B,
+    C,
+}
+
+@test(output = "5\n6\n7\n8")
+fn test_value_match_nested() {
+    let k = Tag::B
+    let s: Seg = match k {
+        Tag::A => { Seg { a: V2 { x: 0, y: 0 }, b: V2 { x: 0, y: 0 } } }
+        Tag::B => { Seg { a: V2 { x: 5, y: 6 }, b: V2 { x: 7, y: 8 } } }
+        Tag::C => { Seg { a: V2 { x: 0, y: 0 }, b: V2 { x: 0, y: 0 } } }
+    }
+    print("{s.a.x.floor()}")
+    print("{s.a.y.floor()}")
+    print("{s.b.x.floor()}")
+    print("{s.b.y.floor()}")
+}
