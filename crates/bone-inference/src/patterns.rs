@@ -25,6 +25,88 @@ pub(crate) fn collect_covered_enum_variants(
     }
 }
 
+/// Inclusive `int` intervals an unguarded arm pattern covers. A bound that is
+/// not an integer literal makes its range cover nothing, so coverage is only
+/// ever under-approximated and a non-exhaustive match is never accepted.
+pub(crate) fn collect_covered_int_ranges(
+    c: BodyCtx,
+    pat: Idx<Pattern>,
+    out: &mut Vec<(i128, i128)>,
+) {
+    let lit = |e: Idx<Expr>| -> Option<i128> {
+        match c.body.expr_arena[e] {
+            Expr::Int(n) => Some(n as i128),
+            Expr::UnaryMinus(inner, _) => match c.body.expr_arena[inner] {
+                Expr::Int(n) => Some(-(n as i128)),
+                _ => None,
+            },
+            _ => None,
+        }
+    };
+    let (min, max) = (i64::MIN as i128, i64::MAX as i128);
+
+    match c.body.pattern_arena[pat] {
+        Pattern::Wildcard | Pattern::Bind(_) => out.push((min, max)),
+        Pattern::Literal(e) => {
+            if let Some(n) = lit(e) {
+                out.push((n, n));
+            }
+        }
+        Pattern::Range {
+            start,
+            end,
+            inclusive,
+        } => {
+            let lo = match start {
+                None => Some(min),
+                Some(e) => lit(e),
+            };
+            let hi = match end {
+                None => Some(max),
+                Some(e) => lit(e).map(|n| if inclusive { n } else { n - 1 }),
+            };
+            if let (Some(lo), Some(hi)) = (lo, hi) {
+                let (lo, hi) = (lo.max(min), hi.min(max));
+                if lo <= hi {
+                    out.push((lo, hi));
+                }
+            }
+        }
+        Pattern::Or { alternatives } => {
+            for alt in alternatives {
+                collect_covered_int_ranges(c, alt, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The `int` values no interval covers, rendered as range patterns.
+pub(crate) fn missing_int_ranges(mut covered: Vec<(i128, i128)>) -> Vec<String> {
+    let (min, max) = (i64::MIN as i128, i64::MAX as i128);
+    let render = |lo: i128, hi: i128| match (lo == min, hi == max) {
+        (true, true) => "`_`".to_string(),
+        (true, false) => format!("`..={hi}`"),
+        (false, true) => format!("`{lo}..`"),
+        (false, false) if lo == hi => format!("`{lo}`"),
+        (false, false) => format!("`{lo}..={hi}`"),
+    };
+
+    covered.sort_unstable();
+    let mut missing = Vec::new();
+    let mut next = min;
+    for (lo, hi) in covered {
+        if lo > next {
+            missing.push(render(next, lo - 1));
+        }
+        next = next.max(hi + 1);
+    }
+    if next <= max {
+        missing.push(render(next, max));
+    }
+    missing
+}
+
 /// A match arm whose whole pattern is a bare `Name` is ambiguous: skull reads it
 /// as a nullary-variant tag test when the name is a variant of the scrutinee
 /// enum, and as an irrefutable binding otherwise -- so a typo'd variant silently

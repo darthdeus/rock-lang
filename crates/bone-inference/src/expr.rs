@@ -1466,6 +1466,7 @@ pub fn infer_expr_used(
             // guarded arm may not fire. An unguarded `_`/binding arm catches the rest.
             let mut exhaustive_via_catch_all = false;
             let mut covered: FxHashSet<Ustr> = FxHashSet::default();
+            let mut covered_ints: Vec<(i128, i128)> = Vec::new();
 
             for arm_idx in arms {
                 let arm = c.body.match_arm_arena[arm_idx];
@@ -1499,6 +1500,7 @@ pub fn infer_expr_used(
                         exhaustive_via_catch_all = true;
                     }
                     collect_covered_enum_variants(c, arm.pattern, &mut covered);
+                    collect_covered_int_ranges(c, arm.pattern, &mut covered_ints);
                 }
 
                 let body_ty = infer_expr_used(c, gamma, arm.body, used)?;
@@ -1511,13 +1513,25 @@ pub fn infer_expr_used(
                 }
             }
 
-            // A `match` over an enum must cover every variant unless an unguarded
-            // `_`/binding arm catches the rest. Recovered (body_errors, not a hard
-            // `?`) so partial inference survives for the LSP, like the return-type
-            // mismatch. Message keeps the "Non-exhaustive match" prefix the LSP
-            // fill-arms code action links against.
+            // A `match` over an enum must cover every variant, and one over an
+            // `int` every value, unless an unguarded `_`/binding arm catches the
+            // rest; skull lowers an uncovered value to an unreachable block.
+            // Recovered (body_errors, not a hard `?`) so partial inference
+            // survives for the LSP, like the return-type mismatch. Message keeps
+            // the "Non-exhaustive match" prefix the LSP fill-arms code action
+            // links against.
             if !exhaustive_via_catch_all {
-                if let TypeExpr::App {
+                let scrut_ty = resolve(gamma, scrut_ty, expr_span);
+                if matches!(gamma.get(scrut_ty), TypeExpr::Builtin(BuiltinTy::Int)) {
+                    let missing = missing_int_ranges(covered_ints);
+                    if !missing.is_empty() {
+                        let names = missing.join(", ");
+                        gamma.body_errors.push(CompilerError::new_with_label(
+                            expr_span,
+                            format!("Non-exhaustive match expression. Missing patterns: {names}"),
+                        ));
+                    }
+                } else if let TypeExpr::App {
                     ctor: TypeCtor::Nominal(ename),
                     ..
                 } = *gamma.get(scrut_ty)
