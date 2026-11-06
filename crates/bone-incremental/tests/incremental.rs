@@ -2591,24 +2591,62 @@ fn run_fuzz_session(seed: u64, steps: usize) {
     }
 }
 
+// Sweep many seeds for op-sequence breadth (add/remove/edit interleavings
+// exercise module-id reassignment, the soundness surface the module-arena
+// migration touches). One test per seed so the harness runs them in parallel.
+macro_rules! fuzz_session_synthetic_seeds {
+    ($($name:ident = $seed:literal),* $(,)?) => {$(
+        #[test]
+        fn $name() {
+            run_fuzz_session($seed, 120);
+        }
+    )*};
+}
+
+fuzz_session_synthetic_seeds! {
+    fuzz_session_synthetic_seed1 = 1,
+    fuzz_session_synthetic_seed2 = 2,
+    fuzz_session_synthetic_seed3 = 3,
+    fuzz_session_synthetic_seed4 = 4,
+    fuzz_session_synthetic_seed5 = 5,
+    fuzz_session_synthetic_seed6 = 6,
+    fuzz_session_synthetic_seed7 = 7,
+    fuzz_session_synthetic_seed8 = 8,
+    fuzz_session_synthetic_seed9 = 9,
+    fuzz_session_synthetic_seed10 = 10,
+    fuzz_session_synthetic_seed11 = 11,
+    fuzz_session_synthetic_seed12 = 12,
+    fuzz_session_synthetic_seed13 = 13,
+    fuzz_session_synthetic_seed14 = 14,
+    fuzz_session_synthetic_seed15 = 15,
+    fuzz_session_synthetic_seed16 = 16,
+    fuzz_session_synthetic_seed17 = 17,
+    fuzz_session_synthetic_seed18 = 18,
+    fuzz_session_synthetic_seed19 = 19,
+    fuzz_session_synthetic_seed20 = 20,
+    fuzz_session_synthetic_seed21 = 21,
+    fuzz_session_synthetic_seed22 = 22,
+    fuzz_session_synthetic_seed23 = 23,
+    fuzz_session_synthetic_seed24 = 24,
+    fuzz_session_synthetic_seed25 = 25,
+    fuzz_session_synthetic_seed26 = 26,
+    fuzz_session_synthetic_seed27 = 27,
+    fuzz_session_synthetic_seed28 = 28,
+    fuzz_session_synthetic_seed29 = 29,
+    fuzz_session_synthetic_seed30 = 30,
+    fuzz_session_synthetic_seed31 = 31,
+    fuzz_session_synthetic_seed32 = 32,
+}
+
+/// Reproduce one seed outside the default sweep: `ROCK_TEST_SEED=<n>`.
 #[test]
-fn fuzz_session_synthetic() {
-    // Sweep many seeds for op-sequence breadth (add/remove/edit interleavings
-    // exercise module-id reassignment, the soundness surface the module-arena
-    // migration touches). A single run is ~2ms, so the sweep stays well under
-    // the suite's time budget. `ROCK_TEST_SEED=<n>` pins one seed to reproduce
-    // a failure.
-    let steps = 120;
-    let seeds: Vec<u64> = match std::env::var("ROCK_TEST_SEED")
+#[ignore = "set ROCK_TEST_SEED=<n> and run with --ignored"]
+fn fuzz_session_synthetic_env_seed() {
+    let seed = std::env::var("ROCK_TEST_SEED")
         .ok()
         .and_then(|s| s.parse().ok())
-    {
-        Some(s) => vec![s],
-        None => (1..=32).collect(),
-    };
-    for seed in seeds {
-        run_fuzz_session(seed, steps);
-    }
+        .expect("ROCK_TEST_SEED=<n> selects the seed");
+    run_fuzz_session(seed, 120);
 }
 
 /// Package-graph fuzz with the full warm stdlib, gated like the rock-side real

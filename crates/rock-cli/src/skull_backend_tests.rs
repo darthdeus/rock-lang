@@ -610,11 +610,41 @@ mod incremental_watch_tests {
         }
     }
 
+    fn fuzz_incremental_matches_fresh(seed: u64, steps: usize) {
+        run_fuzz(
+            seed.wrapping_mul(2654435761),
+            16,
+            steps,
+            skull::CalleeBindingMode::Global,
+        );
+    }
+
+    // A handful of deterministic seeds; each drives many valid body edits on a
+    // call/inline graph and checks incremental==fresh every step. One test per
+    // seed so the harness runs them in parallel.
+    macro_rules! fuzz_incremental_seeds {
+        ($($name:ident = $seed:literal),* $(,)?) => {$(
+            #[test]
+            fn $name() {
+                fuzz_incremental_matches_fresh($seed, 120);
+            }
+        )*};
+    }
+
+    fuzz_incremental_seeds! {
+        fuzz_incremental_matches_fresh_seed1 = 1,
+        fuzz_incremental_matches_fresh_seed2 = 2,
+        fuzz_incremental_matches_fresh_seed3 = 3,
+        fuzz_incremental_matches_fresh_seed4 = 4,
+        fuzz_incremental_matches_fresh_seed5 = 5,
+        fuzz_incremental_matches_fresh_seed6 = 6,
+        fuzz_incremental_matches_fresh_seed7 = 7,
+        fuzz_incremental_matches_fresh_seed8 = 8,
+    }
+
     #[test]
-    fn fuzz_incremental_matches_fresh() {
-        // A handful of deterministic seeds; each drives many valid body edits on a
-        // call/inline graph and checks incremental==fresh every step. Override with
-        // SKULL_FUZZ_SEEDS / SKULL_FUZZ_STEPS for a longer soak.
+    #[ignore = "soak; set SKULL_FUZZ_SEEDS / SKULL_FUZZ_STEPS and run with --ignored"]
+    fn fuzz_incremental_matches_fresh_soak() {
         let steps: usize = std::env::var("SKULL_FUZZ_STEPS")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -624,12 +654,7 @@ mod incremental_watch_tests {
             .and_then(|s| s.parse().ok())
             .unwrap_or(8);
         for seed in 1..=seeds {
-            run_fuzz(
-                seed.wrapping_mul(2654435761),
-                16,
-                steps,
-                skull::CalleeBindingMode::Global,
-            );
+            fuzz_incremental_matches_fresh(seed, steps);
         }
     }
 
@@ -1624,11 +1649,31 @@ mod overlay_runtime_tests {
         }
     }
 
+    fn runtime_accumulation_fuzz(seed: u64, steps: usize) {
+        run_overlay_fuzz(seed.wrapping_mul(2654435761), 8, steps);
+    }
+
+    // Each luajit spawn costs ~10-30ms, so this runs fewer/shorter than the
+    // byte fuzz. One test per seed so the harness runs them in parallel.
+    macro_rules! runtime_accumulation_seeds {
+        ($($name:ident = $seed:literal),* $(,)?) => {$(
+            #[test]
+            fn $name() {
+                runtime_accumulation_fuzz($seed, 20);
+            }
+        )*};
+    }
+
+    runtime_accumulation_seeds! {
+        runtime_accumulation_fuzz_seed1 = 1,
+        runtime_accumulation_fuzz_seed2 = 2,
+        runtime_accumulation_fuzz_seed3 = 3,
+        runtime_accumulation_fuzz_seed4 = 4,
+    }
+
     #[test]
-    fn runtime_accumulation_fuzz() {
-        // Each luajit spawn costs ~10-30ms, so this runs fewer/shorter than the
-        // byte fuzz. Override with SKULL_RT_FUZZ_SEEDS / SKULL_RT_FUZZ_STEPS for a
-        // longer soak.
+    #[ignore = "soak; set SKULL_RT_FUZZ_SEEDS / SKULL_RT_FUZZ_STEPS and run with --ignored"]
+    fn runtime_accumulation_fuzz_soak() {
         let steps: usize = std::env::var("SKULL_RT_FUZZ_STEPS")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -1638,7 +1683,7 @@ mod overlay_runtime_tests {
             .and_then(|s| s.parse().ok())
             .unwrap_or(4);
         for seed in 1..=seeds {
-            run_overlay_fuzz(seed.wrapping_mul(2654435761), 8, steps);
+            runtime_accumulation_fuzz(seed, steps);
         }
     }
 
