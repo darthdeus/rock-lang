@@ -556,6 +556,15 @@ pub fn throttle_count() -> usize {
 mod tests {
     use super::*;
 
+    // The level is process-wide and the harness runs tests in parallel.
+    static LEVEL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn hold_level() -> std::sync::MutexGuard<'static, ()> {
+        LEVEL
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     // Regression: set_level must keep the `log` facade's static
     // max-level in sync, else `log::info!` etc. short-circuit against
     // the level set once at init() and runtime level changes never open
@@ -567,6 +576,7 @@ mod tests {
     // under the test NopLogger so it can't distinguish levels).
     #[test]
     fn set_level_syncs_facade_max_level() {
+        let _level = hold_level();
         set_level(0);
         assert_eq!(log::max_level(), log::LevelFilter::Error);
 
@@ -590,6 +600,7 @@ mod tests {
     // category targets are not.
     #[test]
     fn noisy_third_party_targets_capped_at_warn() {
+        let _level = hold_level();
         set_level(3); // debug — generous global level
         // symphonia info/debug suppressed; warn/error still emit.
         assert!(!is_noisy("AUDIO"));
