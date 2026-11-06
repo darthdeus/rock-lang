@@ -6,6 +6,7 @@ publish = false
 description = "Formatter (rock fmt) and its tests/fmt corpus"
 license.workspace = true
 repository.workspace = true
+autotests = false
 
 [lints]
 workspace = true
@@ -17,3 +18,7 @@ skull-parser = { path = "../skull-parser" }
 comfy-la-arena = { path = "../la-arena" }
 ustr = { workspace = true }
 ordered-float = { workspace = true }
+
+[[test]]
+name = "skull_fmt_tests"
+path = "tests/main.rs"

@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 license.workspace = true
 repository.workspace = true
+autotests = false
 publish = false
 description = "Control-flow transforms, inlining and coroutine lowering"
 
@@ -28,3 +29,7 @@ skull-graph = { workspace = true }
 
 [lints]
 workspace = true
+
+[[test]]
+name = "skull_transform_tests"
+path = "tests/main.rs"

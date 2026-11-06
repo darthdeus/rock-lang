@@ -6,6 +6,7 @@ publish = false
 description = "Semantic passes, identity-storage validation and typechecker fixtures"
 license.workspace = true
 repository.workspace = true
+autotests = false
 
 [features]
 sequential = ["bone-core/sequential"]
@@ -34,7 +35,13 @@ datatest-stable = "0.3"
 rock-stdlib = { path = "../rock-stdlib" }
 
 [[test]]
+name = "bone_semantic_tests"
+path = "tests/main.rs"
+
+# datatest-stable supplies its own main, so the fixture suite stays separate.
+[[test]]
 name = "fixtures"
+path = "tests/fixtures.rs"
 harness = false
 
 [lints]

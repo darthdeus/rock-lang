@@ -13,8 +13,7 @@
 //   Pattern::Record       { .., enum_name_span: Option<Span> }   // name_span already exists
 // and populates them at the five bone-lower construction sites (see the plan
 // doc). Once it compiles, the assertions pin that each span covers exactly its
-// own name token. It is in its own test binary so the missing fields don't block
-// the rest of the structural suite from building.
+// own name token.
 
 use bone_semantic::prelude::*;
 
