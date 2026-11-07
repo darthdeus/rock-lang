@@ -777,7 +777,7 @@ mod tests {
                     .arg("0.01")
                     .spawn()
                     .expect("spawn sleep");
-                let start = std::time::Instant::now();
+                let start = bone_core::prelude::Instant::now();
                 let result = super::ProcessManager::wait_with_timeout(
                     &mut child,
                     std::time::Duration::from_secs(30),
