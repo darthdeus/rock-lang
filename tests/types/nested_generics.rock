@@ -1,4 +1,5 @@
-// Exploration tests for nested generic type application.
+// Nested generic type application: generic structs inside vectors, maps,
+// enums and other generic structs.
 
 struct Bucket<K, V> {
     key: K,
@@ -123,17 +124,17 @@ fn test_hashmap_shape_put_get() {
 
 // --- Enum with nested generic variant ---
 
-enum Tree<T> {
+enum TreeEnum<T> {
     Leaf,
-    Node(T, [Tree<T>]),
+    Node(T, [TreeEnum<T>]),
 }
 
 @test(output = "leaf")
 fn test_recursive_generic_enum() {
-    let t: Tree<int> = Tree::Leaf
+    let t: TreeEnum<int> = TreeEnum::Leaf
     match t {
-        Tree::Leaf => print("leaf"),
-        Tree::Node(_, _) => print("node"),
+        TreeEnum::Leaf => print("leaf"),
+        TreeEnum::Node(_, _) => print("node"),
     }
 }
 
@@ -149,4 +150,206 @@ fn test_generic_fn_infers_nested() {
     c.entries.push(Bucket { key: 1, value: "a" })
     c.entries.push(Bucket { key: 2, value: "b" })
     print(container_size(c))
+}
+
+// === Adversarial cases: self-referential and mutually recursive generic
+// structs, generic functions inferring through nesting. ===
+
+// --- 1. Self-referential generic (tree) ---
+
+struct Tree<T> {
+    value: T,
+    children: [Tree<T>],
+}
+
+@test(output = "root")
+fn test_self_referential_tree() {
+    let leaf: Tree<string> = Tree { value: "leaf", children: vec_new() }
+    let root: Tree<string> = Tree { value: "root", children: vec_new() }
+    root.children.push(leaf)
+    print(root.value)
+}
+
+// --- 2. Mutual reference between two generic structs ---
+
+struct NodeA<T> {
+    val: T,
+    bs: [NodeB<T>],
+}
+
+struct NodeB<T> {
+    val: T,
+    as_: [NodeA<T>],
+}
+
+@test(output = "a")
+fn test_mutual_generic() {
+    let a: NodeA<string> = NodeA { val: "a", bs: vec_new() }
+    print(a.val)
+}
+
+// --- 3. Deeply nullable: Vec<Vec<T>?>? ---
+
+struct Matrix<T> {
+    data: [[T]?]?,
+}
+
+@test(output = "ok")
+fn test_deep_nullable_generic() {
+    let m: Matrix<int> = Matrix { data: null }
+    print("ok")
+}
+
+// --- 4. Tuple element is nested generic ---
+
+struct TupleHolder<K, V> {
+    pair: (K, [V]),
+}
+
+@test(output = "42")
+fn test_tuple_nested_generic() {
+    let t: TupleHolder<int, string> = TupleHolder { pair: (42, vec_new()) }
+    print(t.pair.0)
+}
+
+// --- 5. Generic function argument forces inference through nesting ---
+
+struct Wrapped<T> {
+    inner: [T],
+}
+
+fn unwrap_one<T>(w: Wrapped<T>) -> T? {
+    if w.inner.len() == 0 { return null }
+    return w.inner[0]
+}
+
+@test(output = "hi")
+fn test_generic_fn_infers_through_nested() {
+    let w: Wrapped<string> = Wrapped { inner: vec_new() }
+    w.inner.push("hi")
+    let v = unwrap_one(w)
+    if v != null { print(v) } else { print("null") }
+}
+
+// --- 6. Generic function returns another generic that uses its params ---
+
+struct Pair<K, V> {
+    k: K,
+    v: V,
+}
+
+fn make_pairs<K, V>() -> [Pair<K, V>] {
+    return vec_new()
+}
+
+@test(output = "0")
+fn test_generic_fn_returns_vec_of_nested() {
+    let ps: [Pair<int, string>] = make_pairs()
+    print(ps.len())
+}
+
+// --- 7. Generic function whose return type embeds a param inside a Vec inside a struct ---
+
+fn build_tree<T>(v: T) -> Tree<T> {
+    return Tree { value: v, children: vec_new() }
+}
+
+@test(output = "hello")
+fn test_generic_fn_builds_self_referential() {
+    let t: Tree<string> = build_tree("hello")
+    print(t.value)
+}
+
+// --- 8. Method-style via UFCS on nested-generic field ---
+
+fn add_child<T>(parent: Tree<T>, child: Tree<T>) {
+    parent.children.push(child)
+}
+
+@test(output = "2")
+fn test_ufcs_on_nested_generic() {
+    let root: Tree<int> = build_tree(0)
+    root.add_child(build_tree(1))
+    root.add_child(build_tree(2))
+    print(root.children.len())
+}
+
+// --- 9. Nullable generic parameter passed into a nested position ---
+
+struct Maybe<T> {
+    values: [T?],
+}
+
+@test(output = "2")
+fn test_nullable_param_in_nested() {
+    let m: Maybe<int> = Maybe { values: vec_new() }
+    m.values.push(1)
+    m.values.push(null)
+    print(m.values.len())
+}
+
+// --- 10. Enum variant holding nested generic ---
+
+enum Result2<T, E> {
+    Ok(T),
+    Err(E),
+    Multi([T]),
+}
+
+@test(output = "multi:2")
+fn test_enum_with_nested_generic_variant() {
+    let v: [int] = vec_new()
+    v.push(10)
+    v.push(20)
+    let r: Result2<int, string> = Result2::Multi(v)
+    match r {
+        Result2::Ok(_) => print("ok"),
+        Result2::Err(_) => print("err"),
+        Result2::Multi(xs) => print("multi:{xs.len()}"),
+    }
+}
+
+// --- 11. Same generic param used in two nested positions ---
+
+struct TwoSlots<T> {
+    a: [T],
+    b: [[T]],
+}
+
+@test(output = "1 1")
+fn test_same_param_two_nested_positions() {
+    let s: TwoSlots<int> = TwoSlots { a: vec_new(), b: vec_new() }
+    s.a.push(7)
+    let inner: [int] = vec_new()
+    inner.push(8)
+    s.b.push(inner)
+    print("{s.a.len()} {s.b.len()}")
+}
+
+// --- Invariant container around an under-determined nested generic ---
+//
+// An invariant container wrapping an under-determined nested generic must drive
+// inference INTO the nested type: Holder<Duo<?, ?>> has to unify with the expected
+// Holder<Duo<int, string>> and solve the inner K=int, V=string. The invariant
+// variance arm only special-cases a BARE type variable; a nested App that
+// *contains* unsolved vars (Duo<?, ?>) falls to the "concrete types must be exactly
+// equal" branch and errors instead of recursing. Not array-specific (arrays here
+// stay covariant) -- struct generics and Map keys are invariant too.
+//
+// `mk` returns Holder<Duo<K, V>> with K, V undetermined by its (zero) args, so the
+// only way to solve them is to push the expected binding type back through the
+// invariant Holder into Duo. The empty-array field lets `mk` build the value
+// without needing K/V values.
+
+struct Duo<K, V> { k: K, v: V }
+struct Holder<T> { items: [T] }
+
+fn mk<K, V>() -> Holder<Duo<K, V>> {
+    return Holder { items: vec_new() }
+}
+
+@test(output = "ok")
+fn test_invariant_nested_generic_infers() {
+    let _h: Holder<Duo<int, string>> = mk()
+    print("ok")
 }

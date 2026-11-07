@@ -1,6 +1,174 @@
-// Core type inference tests migrated from rock/tests/type_system_tests.rs simple_inference_tests module
-// Tests fundamental type inference patterns, error cases, and basic language constructs
-// Covers literals, let bindings, function types, if expressions, loops, and semicolon handling
+// Local type inference: literals, operators, structs, generics, arrays, calls,
+// if and while bodies, unit-valued blocks and functions. Type hole ids are
+// numbered across the whole file in source order.
+
+// ============================================
+// Basic Literal Type Inference
+// ============================================
+
+@test(type_holes = [[0, "int"]])
+fn test_int_literal() {
+    let x: ? = 5  // hole 0 -> int
+    assert_eq(x, 5)
+}
+
+@test(type_holes = [[1, "string"]])
+fn test_string_literal() {
+    let x: ? = "rock"  // hole 1 -> string
+    assert_eq(x, "rock")
+}
+
+@test(type_holes = [[2, "bool"]])
+fn test_bool_literal() {
+    let x: ? = true  // hole 2 -> bool
+    assert_eq(x, true)
+}
+
+// ============================================
+// Variable Assignment Type Inference
+// ============================================
+
+@test(type_holes = [[3, "int"], [4, "int"]])
+fn test_variable_assignment() {
+    let x = 5
+    let y: ? = x      // hole 3 -> int (inferred from x)
+    let z: ? = y      // hole 4 -> int (inferred from y)
+    assert_eq(y, 5)
+    assert_eq(z, 5)
+}
+
+// ============================================
+// Binary Expression Type Inference
+// ============================================
+
+@test(type_holes = [[5, "int"]])
+fn test_addition() {
+    let result: ? = 5 + 3  // hole 5 -> int
+    assert_eq(result, 8)
+}
+
+@test(type_holes = [[6, "int"]])
+fn test_complex_arithmetic() {
+    let result: ? = 1 + (2 * 3)  // hole 6 -> int
+    assert_eq(result, 7)
+}
+
+@test(type_holes = [[7, "bool"]])
+fn test_comparison() {
+    let result: ? = (5 == 5)  // hole 7 -> bool
+    assert_eq(result, true)
+}
+
+@test(type_holes = [[8, "bool"]])
+fn test_logical_and() {
+    let result: ? = true && false  // hole 8 -> bool
+    assert_eq(result, false)
+}
+
+// ============================================
+// If Expression Type Inference
+// ============================================
+
+@test(type_holes = [[9, "int"]])
+fn test_if_expression() {
+    let result: ? = if true { 5 } else { 10 }  // hole 9 -> int
+    assert_eq(result, 5)
+}
+
+// ============================================
+// Struct Type Inference
+// ============================================
+
+struct FixVec2 { x: int, y: int }
+
+@test(type_holes = [[10, "FixVec2"]])
+fn test_struct_creation() {
+    let v: ? = FixVec2 { x: 5, y: 10 }  // hole 10 -> FixVec2
+    assert_eq(v.x, 5)
+    assert_eq(v.y, 10)
+}
+
+@test(type_holes = [[11, "int"]])
+fn test_struct_field_access() {
+    let v = FixVec2 { x: 5, y: 10 }
+    let x_val: ? = v.x  // hole 11 -> int
+    assert_eq(x_val, 5)
+}
+
+// ============================================
+// Generic Struct Type Inference
+// ============================================
+
+struct Container<T> { value: T }
+
+@test(type_holes = [[12, "Container<int>"]])
+fn test_generic_struct_int() {
+    let c: ? = Container { value: 42 }  // hole 12 -> Container<int>
+    assert_eq(c.value, 42)
+}
+
+@test(type_holes = [[13, "Container<string>"]])
+fn test_generic_struct_string() {
+    let c: ? = Container { value: "hello" }  // hole 13 -> Container<string>
+    assert_eq(c.value, "hello")
+}
+
+// ============================================
+// Array Type Inference
+// ============================================
+
+@test(type_holes = [[14, "[int]"]])
+fn test_int_array() {
+    let arr: ? = [1, 2, 3]  // hole 14 -> [int]
+    assert_eq(arr[0], 1)
+}
+
+@test(type_holes = [[15, "[string]"]])
+fn test_string_array() {
+    let arr: ? = ["a", "b", "c"]  // hole 15 -> [string]
+    assert_eq(arr[0], "a")
+}
+
+@test(type_holes = [[16, "int"]])
+fn test_array_element_access() {
+    let arr = [10, 20, 30]
+    let first: ? = arr[0]  // hole 16 -> int
+    assert_eq(first, 10)
+}
+
+// ============================================
+// Function Type Inference
+// ============================================
+
+fn identity_int(x: int) -> int { return x }
+
+@test(type_holes = [[17, "int"]])
+fn test_function_call() {
+    let result: ? = identity_int(42)  // hole 17 -> int
+    assert_eq(result, 42)
+}
+
+fn void_func(x: int) {
+    print(x)
+}
+
+@test(type_holes = [[18, "()"]])
+fn test_void_function_call() {
+    let result: ? = void_func(5)  // hole 18 -> ()
+    assert_eq(result, ())
+}
+
+// ============================================
+// Parenthesized Expression Type Inference
+// ============================================
+
+@test(type_holes = [[19, "int"]])
+fn test_parenthesized_expression() {
+    let x = 5
+    let y = 6
+    let result: ? = (x + y)  // hole 19 -> int
+    assert_eq(result, 11)
+}
 
 // ============================================
 // Helper Function Definitions
@@ -68,7 +236,7 @@ fn test_bool_literal_inference() {
     print(true == false)
 }
 
-@test(type_holes = [[0, "int"], [1, "int"]])
+@test(type_holes = [[20, "int"], [21, "int"]])
 fn test_typed_let_inference() {
     let x: int = 5
     let y: ? = x
@@ -107,7 +275,7 @@ fn test_if_no_else_is_unit() {
 // While Loop Type Inference Tests
 // ============================================
 
-@test(type_holes = [[0, "int"], [1, "int"]])
+@test(type_holes = [[22, "int"], [23, "int"]])
 fn test_while_loop_inference() {
     let x = 0
     let a: ? = x

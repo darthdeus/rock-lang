@@ -1,6 +1,5 @@
-// Advanced generic inference tests migrated from rock/tests/generic_tests.rs
-// Tests complex generic inference, nullable generics, type inference validation, and edge cases
-// This covers the advanced tests not included in types/generics_comprehensive.rock
+// Generic functions and structs: explicit and inferred type arguments,
+// nullable generics, nested generic structs and generic call chains.
 
 // ============================================
 // Core Generic Function Definitions
@@ -142,10 +141,6 @@ fn test_first_with_typed_empty_array() {
 // }
 
 // ============================================
-// Syntax Definition Tests (Valid Parsing)
-// ============================================
-
-// ============================================
 // Complex Generic Type Scenarios
 // ============================================
 
@@ -165,4 +160,66 @@ fn test_complex_generic_inference_scenario() {
     let maybe_value = maybe_id(id("hello"))
     
     print(0)
+}
+
+// ============================================
+// Basic Generic Functions and Structs
+// ============================================
+
+struct Pair<T, U> { 
+    first: T, 
+    second: U 
+}
+
+struct Holder<T> { 
+    value: int 
+}
+
+// Generic wrapper function
+fn wrap<T>(x: T) -> T { 
+    return x 
+}
+
+// Helper function for testing
+fn foo<T>(x: int) -> int { 
+    return x + 1 
+}
+
+@test(output = "0")
+fn generic_struct_multiple_params() {
+    print(0)
+}
+
+@test(output = "5")
+fn generic_identity_infer_int() {
+    print(id(5))
+}
+
+@test(output = "2.5")
+fn generic_identity_infer_float() {
+    print(id(2.5))
+}
+
+@test(output = "10")
+fn generic_struct_basic() {
+    let b = Box { item: 10 }
+    print(b.item)
+}
+
+@test(output = "7")
+fn generic_struct_nested() {
+    let b = Box { item: Box { item: 7 } }
+    print(b.item.item)
+}
+
+@test(output = "42")
+fn generic_function_struct_return() {
+    let b = Box { item: 42 }
+    print(unbox(b))
+}
+
+@test(output = "6")
+fn generic_infer_from_variable() {
+    let x = id(5)
+    print(x + 1)
 }
