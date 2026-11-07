@@ -321,7 +321,6 @@ pub struct ConcreteBodies {
 
 impl Default for ConcreteBodies {
     fn default() -> Self {
-        #[cfg(feature = "test-hooks")]
         CONCRETE_DEFAULT_INVOCATIONS.with(|count| count.set(count.get() + 1));
         Self {
             bodies: BTreeMap::new(),
@@ -2636,25 +2635,33 @@ fn produce_always(
     }
 }
 
-#[derive(Default)]
+/// Which threads ran a fanout. Off unless a traced test entry point asks, so
+/// the production fanout takes no shared lock per item.
 struct WorkerCensus {
-    #[cfg(feature = "test-hooks")]
-    workers: std::sync::Mutex<std::collections::HashSet<std::thread::ThreadId>>,
+    workers: Option<std::sync::Mutex<std::collections::HashSet<std::thread::ThreadId>>>,
 }
 
 impl WorkerCensus {
-    #[inline]
-    fn record(&self) {
-        #[cfg(feature = "test-hooks")]
-        self.workers
-            .lock()
-            .expect("worker census poisoned")
-            .insert(std::thread::current().id());
+    fn new(tracking: bool) -> Self {
+        Self {
+            workers: tracking.then(Default::default),
+        }
     }
 
-    #[cfg(feature = "test-hooks")]
+    #[inline]
+    fn record(&self) {
+        if let Some(workers) = &self.workers {
+            workers
+                .lock()
+                .expect("worker census poisoned")
+                .insert(std::thread::current().id());
+        }
+    }
+
     fn worker_count(&self) -> usize {
-        self.workers.lock().expect("worker census poisoned").len()
+        self.workers.as_ref().map_or(0, |workers| {
+            workers.lock().expect("worker census poisoned").len()
+        })
     }
 }
 
@@ -2688,14 +2695,14 @@ where
     }
 }
 
-#[cfg(all(feature = "test-hooks", not(feature = "sequential")))]
+#[cfg(not(feature = "sequential"))]
 struct CompletionScheduler {
     ranks: BTreeMap<Instance, usize>,
     state: std::sync::Mutex<CompletionState>,
     ready: std::sync::Condvar,
 }
 
-#[cfg(all(feature = "test-hooks", not(feature = "sequential")))]
+#[cfg(not(feature = "sequential"))]
 struct CompletionState {
     arrived: Vec<Instance>,
     selected: Vec<Instance>,
@@ -2705,7 +2712,7 @@ struct CompletionState {
     scheduler_entries: usize,
 }
 
-#[cfg(all(feature = "test-hooks", not(feature = "sequential")))]
+#[cfg(not(feature = "sequential"))]
 impl CompletionScheduler {
     fn new(ready: &[PreparedInstance]) -> Self {
         let ranks = ready
@@ -2794,7 +2801,6 @@ impl CompletionScheduler {
     }
 }
 
-#[cfg(feature = "test-hooks")]
 fn produce_instances(
     ws: &Workspace,
     g: &InstanceGraph,
@@ -2856,29 +2862,6 @@ fn produce_instances(
     }
 }
 
-#[cfg(not(feature = "test-hooks"))]
-fn produce_instances(
-    ws: &Workspace,
-    g: &InstanceGraph,
-    ready: Vec<PreparedInstance>,
-    signatures: &PublishedSignatures,
-    domains: &PublishedDomains,
-    timing_enabled: bool,
-    census: &WorkerCensus,
-    _schedule: BuildSchedule,
-) -> Vec<InstanceResult> {
-    concrete_map(ready, census, |instance| {
-        InstanceResult::Built(produce_instance(
-            ws,
-            g,
-            instance,
-            signatures,
-            domains,
-            timing_enabled,
-        ))
-    })
-}
-
 /// Build a [`ConcreteBody`] for every instance the walk expanded.
 ///
 /// The tables intern into the graph's arena: a second arena would hand out ids
@@ -2893,33 +2876,30 @@ pub fn build_invocations() -> u64 {
 
 thread_local! {
     static BUILD_INVOCATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-    #[cfg(feature = "test-hooks")]
     static CONCRETE_DEFAULT_INVOCATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
-    build_impl(ws, g, BuildResultOrder::Canonical, BuildSchedule::Default).bodies
+    build_impl(
+        ws,
+        g,
+        BuildResultOrder::Canonical,
+        BuildSchedule::Default,
+        false,
+    )
+    .bodies
 }
 
 pub fn concrete_default_invocations() -> u64 {
-    #[cfg(feature = "test-hooks")]
-    {
-        CONCRETE_DEFAULT_INVOCATIONS.with(std::cell::Cell::get)
-    }
-    #[cfg(not(feature = "test-hooks"))]
-    {
-        0
-    }
+    CONCRETE_DEFAULT_INVOCATIONS.with(std::cell::Cell::get)
 }
 
-#[cfg(feature = "test-hooks")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BuildResultOrder {
     Canonical,
     Reverse,
 }
 
-#[cfg(feature = "test-hooks")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BuildSchedule {
     Default,
@@ -2927,19 +2907,6 @@ enum BuildSchedule {
     ReverseCompletion,
 }
 
-#[cfg(not(feature = "test-hooks"))]
-#[derive(Clone, Copy)]
-enum BuildResultOrder {
-    Canonical,
-}
-
-#[cfg(not(feature = "test-hooks"))]
-#[derive(Clone, Copy)]
-enum BuildSchedule {
-    Default,
-}
-
-#[cfg(feature = "test-hooks")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BuildTrace {
     pub completion_order: Vec<Instance>,
@@ -2950,25 +2917,27 @@ pub struct BuildTrace {
 
 struct BuildRun {
     bodies: ConcreteBodies,
-    #[cfg(feature = "test-hooks")]
     merge_order: Vec<Instance>,
-    #[cfg(feature = "test-hooks")]
     trace: Option<BuildTrace>,
 }
 
-#[cfg(feature = "test-hooks")]
 pub fn build_with_result_order(
     ws: &Workspace,
     g: &InstanceGraph,
     order: BuildResultOrder,
 ) -> (ConcreteBodies, Vec<Instance>) {
-    let run = build_impl(ws, g, order, BuildSchedule::Default);
+    let run = build_impl(ws, g, order, BuildSchedule::Default, true);
     (run.bodies, run.merge_order)
 }
 
-#[cfg(feature = "test-hooks")]
 pub fn build_with_default_trace(ws: &Workspace, g: &InstanceGraph) -> (ConcreteBodies, BuildTrace) {
-    let run = build_impl(ws, g, BuildResultOrder::Canonical, BuildSchedule::Default);
+    let run = build_impl(
+        ws,
+        g,
+        BuildResultOrder::Canonical,
+        BuildSchedule::Default,
+        true,
+    );
     (
         run.bodies,
         run.trace
@@ -2976,7 +2945,7 @@ pub fn build_with_default_trace(ws: &Workspace, g: &InstanceGraph) -> (ConcreteB
     )
 }
 
-#[cfg(all(feature = "test-hooks", not(feature = "sequential")))]
+#[cfg(not(feature = "sequential"))]
 pub fn build_with_reverse_completion(
     ws: &Workspace,
     g: &InstanceGraph,
@@ -2986,6 +2955,7 @@ pub fn build_with_reverse_completion(
         g,
         BuildResultOrder::Canonical,
         BuildSchedule::ReverseCompletion,
+        true,
     );
     (
         run.bodies,
@@ -3000,8 +2970,9 @@ fn build_impl(
     g: &InstanceGraph,
     order: BuildResultOrder,
     schedule: BuildSchedule,
+    traced: bool,
 ) -> BuildRun {
-    build_published_impl(ws, g, order, schedule)
+    build_published_impl(ws, g, order, schedule, traced)
 }
 
 fn build_published_impl(
@@ -3009,9 +2980,8 @@ fn build_published_impl(
     g: &InstanceGraph,
     order: BuildResultOrder,
     schedule: BuildSchedule,
+    traced: bool,
 ) -> BuildRun {
-    #[cfg(not(feature = "test-hooks"))]
-    let _ = order;
     BUILD_INVOCATIONS.with(|count| count.set(count.get() + 1));
     let t_build = bone_core::prelude::Instant::now();
     let intern_before = g.interner().stats();
@@ -3025,7 +2995,6 @@ fn build_published_impl(
     let expansion_time = t_expansion.elapsed();
 
     let t_preparation = bone_core::prelude::Instant::now();
-    #[allow(unused_mut)]
     let mut prepared = expanded
         .iter()
         .cloned()
@@ -3067,15 +3036,17 @@ fn build_published_impl(
     let foreign_publication_time = t_foreign_publication.elapsed();
 
     let t_partition = bone_core::prelude::Instant::now();
-    #[cfg(feature = "test-hooks")]
     if matches!(order, BuildResultOrder::Reverse) {
         prepared.reverse();
     }
-    #[cfg(feature = "test-hooks")]
-    let merge_order = prepared
-        .iter()
-        .map(|result| result.instance().clone())
-        .collect::<Vec<_>>();
+    let merge_order = if traced {
+        prepared
+            .iter()
+            .map(|result| result.instance().clone())
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     let signatures = std::sync::Arc::new(signatures);
     let published_domains = std::sync::Arc::new(published_domains);
     let mut gaps = Vec::new();
@@ -3087,21 +3058,9 @@ fn build_published_impl(
         }
     }
     let partition_time = t_partition.elapsed();
-    let ordinary_census = WorkerCensus::default();
+    let ordinary_census = WorkerCensus::new(traced);
     let t_ordinary_parallel = bone_core::prelude::Instant::now();
-    #[cfg(feature = "test-hooks")]
     let (mut results, completion_trace) = produce_instances(
-        ws,
-        g,
-        ready,
-        signatures.as_ref(),
-        published_domains.as_ref(),
-        timing_enabled,
-        &ordinary_census,
-        schedule,
-    );
-    #[cfg(not(feature = "test-hooks"))]
-    let mut results = produce_instances(
         ws,
         g,
         ready,
@@ -3184,7 +3143,7 @@ fn build_published_impl(
     let ordinary_merge_time = t_ordinary_merge.elapsed();
 
     let t_always_parallel = bone_core::prelude::Instant::now();
-    let always_census = WorkerCensus::default();
+    let always_census = WorkerCensus::new(traced);
     let mut always_results = concrete_map(always_inputs, &always_census, |prepared| {
         produce_always(
             ws,
@@ -3220,7 +3179,6 @@ fn build_published_impl(
         }
     }
     let always_merge_time = t_always_merge.elapsed();
-    #[cfg(feature = "test-hooks")]
     let completion_trace = completion_trace.map(|mut trace| {
         trace.always_worker_count = always_census.worker_count();
         trace
@@ -3327,9 +3285,7 @@ fn build_published_impl(
     }
     BuildRun {
         bodies: out,
-        #[cfg(feature = "test-hooks")]
         merge_order,
-        #[cfg(feature = "test-hooks")]
         trace: completion_trace,
     }
 }

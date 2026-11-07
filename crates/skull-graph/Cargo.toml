@@ -9,7 +9,6 @@ description = "Backend-neutral instance graph and concrete artifact plans"
 
 [features]
 sequential = []
-test-hooks = []
 
 # The TARGET-NEUTRAL instance graph and the per-artifact views over it. It sits BELOW every backend so
 # each one realizes the same graph: `skull` (luajit driver),

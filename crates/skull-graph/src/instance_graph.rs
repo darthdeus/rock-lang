@@ -983,23 +983,14 @@ pub const INDEX_TRIGGERED: &[(&str, StorageCond, &[&str])] = &[
     ("NativeBuffer", StorageCond::Always, &["__nb_checked_index"]),
 ];
 
-#[cfg(feature = "test-hooks")]
 thread_local! {
     static BUILD_INVOCATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 pub fn build_invocations() -> u64 {
-    #[cfg(feature = "test-hooks")]
-    {
-        BUILD_INVOCATIONS.with(std::cell::Cell::get)
-    }
-    #[cfg(not(feature = "test-hooks"))]
-    {
-        0
-    }
+    BUILD_INVOCATIONS.with(std::cell::Cell::get)
 }
 
-#[cfg(feature = "test-hooks")]
 impl InstanceGraph {
     pub fn incremental_state_population(&self) -> (usize, usize, usize) {
         (
@@ -1594,7 +1585,6 @@ pub fn build_in(
     perturb: bool,
     interner: std::sync::Arc<MonoInterner>,
 ) -> InstanceGraph {
-    #[cfg(feature = "test-hooks")]
     BUILD_INVOCATIONS.with(|count| count.set(count.get() + 1));
     let t_build = bone_core::prelude::Instant::now();
     let intern_before = interner.stats();

@@ -47,32 +47,17 @@ use crate::instance_graph::{
 use crate::target_projection::{supports, CpuTargetSpec, TargetSpec};
 use rustc_hash::{FxHashMap, FxHashSet};
 
-#[cfg(feature = "test-hooks")]
 thread_local! {
     static REALIZE_INVOCATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static FRESH_INDEX_SITE_ROWS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 pub fn realize_invocations() -> u64 {
-    #[cfg(feature = "test-hooks")]
-    {
-        REALIZE_INVOCATIONS.with(std::cell::Cell::get)
-    }
-    #[cfg(not(feature = "test-hooks"))]
-    {
-        0
-    }
+    REALIZE_INVOCATIONS.with(std::cell::Cell::get)
 }
 
 pub fn fresh_index_site_rows() -> u64 {
-    #[cfg(feature = "test-hooks")]
-    {
-        FRESH_INDEX_SITE_ROWS.with(std::cell::Cell::get)
-    }
-    #[cfg(not(feature = "test-hooks"))]
-    {
-        0
-    }
+    FRESH_INDEX_SITE_ROWS.with(std::cell::Cell::get)
 }
 
 /// Where an artifact's realization of a callee comes from, when the
@@ -740,7 +725,6 @@ fn publication_candidates(ws: &Workspace, req: &ArtifactRequest<'_>) -> BTreeMap
 }
 
 impl ArtifactView {
-    #[cfg(feature = "test-hooks")]
     fn forced_broad_scan_count(&self) -> usize {
         if std::env::var_os("SKULL_FORCE_ARTIFACT_BROAD_SCAN").is_none() {
             return 0;
@@ -752,11 +736,6 @@ impl ArtifactView {
                 .values()
                 .map(BTreeSet::len)
                 .sum::<usize>()
-    }
-
-    #[cfg(not(feature = "test-hooks"))]
-    fn forced_broad_scan_count(&self) -> usize {
-        0
     }
 
     /// Apply graph deltas to this target without re-realizing the workspace.
@@ -2030,7 +2009,6 @@ fn has_rock_body(ws: &Workspace, decl: FuncRef) -> bool {
 /// therefore no mismatch to detect -- backend-sibling selection lives in
 /// [`realize_decl`], which is reached from here and from nowhere else.
 pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> ArtifactView {
-    #[cfg(feature = "test-hooks")]
     REALIZE_INVOCATIONS.with(|count| count.set(count.get() + 1));
     // Shader packaging is absent from this value by construction. Platform
     // capabilities remain available for host boundary admission.
@@ -2063,7 +2041,6 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
         ..Default::default()
     };
     for (owner, sites) in g.call_sites() {
-        #[cfg(feature = "test-hooks")]
         FRESH_INDEX_SITE_ROWS.with(|count| count.set(count.get() + sites.len() as u64));
         index.site_counts.insert(owner.clone(), sites.len());
         for (site, record) in sites {

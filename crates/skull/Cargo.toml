@@ -42,7 +42,6 @@ rayon = { workspace = true }
 [dev-dependencies]
 rock-host = { workspace = true }
 rock-stdlib = { workspace = true }
-skull-graph = { workspace = true, features = ["test-hooks"] }
 tempfile = "3.0"
 test-utils = { workspace = true }
 # The updater's tests drive real incremental inference rather than inventing a
