@@ -25,14 +25,13 @@ rock-core = { path = "../rock-core" }
 test-utils = { path = "../test-utils" }
 
 [dev-dependencies]
-datatest-stable = "0.3"
 rock-stdlib = { path = "../rock-stdlib" }
 
 [[test]]
 name = "bone_semantic_tests"
 path = "tests/main.rs"
 
-# datatest-stable supplies its own main, so the fixture suite stays separate.
+# One test per fixture file, from its own small harness in tests/fixture_harness.rs.
 [[test]]
 name = "fixtures"
 path = "tests/fixtures.rs"

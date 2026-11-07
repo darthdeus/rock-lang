@@ -213,8 +213,9 @@ Run the Rust suites for every crate changed, for example:
 cargo test --locked -p bone-semantic -p bone-inference -p skull-mir
 ```
 
-The semantic fixture suite keeps its own `datatest-stable` binary and can be
-narrowed to an existing file:
+The semantic fixture suite runs each `tests/fixtures/*.rock` file as its own
+test through a small libtest-style harness (`tests/fixture_harness.rs`), and can
+be narrowed to an existing file:
 
 ```sh
 cargo test --locked -p bone-semantic --test fixtures or_patterns

@@ -1,21 +1,20 @@
-use datatest_stable::Utf8Path;
+mod fixture_harness;
 
-fn check_rock(_path: &Utf8Path, contents: String) -> datatest_stable::Result<()> {
+type Result = std::result::Result<(), String>;
+
+fn check_rock(file_name: &str, contents: &str) -> Result {
     // Modules-v1 multi-file fixtures: sections hold embedded `//--` files.
-    if _path
-        .file_name()
-        .map_or(false, |n| n.starts_with("modules_"))
-    {
-        if _path.file_name() == Some("modules_std.rock") {
-            return check_std_fixture(&contents);
+    if file_name.starts_with("modules_") {
+        if file_name == "modules_std.rock" {
+            return check_std_fixture(contents);
         }
-        return check_modules_fixture(&contents);
+        return check_modules_fixture(contents);
     }
-    let sections = test_utils::parse_sections(&contents);
+    let sections = test_utils::parse_sections(contents);
 
     if sections.is_empty() {
         // Bare fixture (no `//- name` markers) — whole file is one case.
-        if let Err(e) = bone_semantic::test_support::check_types(&contents) {
+        if let Err(e) = bone_semantic::test_support::check_types(contents) {
             panic!("{}", e);
         }
     } else {
@@ -75,7 +74,7 @@ fn stdlib_sources() -> &'static [(&'static str, &'static str)] {
     })
 }
 
-fn check_std_fixture(contents: &str) -> datatest_stable::Result<()> {
+fn check_std_fixture(contents: &str) -> Result {
     let sections = test_utils::parse_sections(contents);
     let inventory = sections
         .iter()
@@ -167,13 +166,13 @@ fn check_std_fixture(contents: &str) -> datatest_stable::Result<()> {
             .chain(module.interface_errors.iter())
             .next();
         if let Some(error) = body_error {
-            return Err(format!("v1 default prelude failed: {error}").into());
+            return Err(format!("v1 default prelude failed: {error}"));
         }
     }
     Ok(())
 }
 
-fn check_modules_fixture(contents: &str) -> datatest_stable::Result<()> {
+fn check_modules_fixture(contents: &str) -> Result {
     let sections = test_utils::parse_sections(contents);
     if sections.is_empty() {
         if let Err(e) = bone_semantic::test_support::check_types_embedded_with_stdlib(
@@ -237,6 +236,6 @@ fn check_modules_fixture(contents: &str) -> datatest_stable::Result<()> {
     Ok(())
 }
 
-datatest_stable::harness! {
-    { test = check_rock, root = "tests/fixtures", pattern = r"^.*\.rock$" },
+fn main() -> std::process::ExitCode {
+    fixture_harness::run("check_rock", "tests/fixtures", check_rock)
 }
