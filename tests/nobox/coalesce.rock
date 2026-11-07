@@ -1,0 +1,215 @@
+// `??` at nullable `nobox` values and nullable tuples carrying them.
+//
+// -- Diverging right-hand side --
+//
+// `??` whose RHS DIVERGES: the absent arm has no value to store, so neither
+// coalesce arm may splat leaves into its result cells. The value form used to
+// emit `(nil).x` before the `return` and fault at run time; the tuple form
+// stored nil slots, which did not fault only because slot conversion projects
+// no fields. Both arms are guarded on the same rule.
+
+fn maybe_v2() -> Vec2? { return null }
+
+fn coalesce_return(flag: bool) -> float {
+    let p = maybe_v2() ?? return -1.0
+    return p.x
+}
+
+@test fn value_coalesce_with_diverging_rhs() {
+    assert(coalesce_return(true) == -1.0)
+}
+
+fn maybe_pair() -> (Vec2, float)? { return null }
+
+fn coalesce_tuple_return() -> float {
+    let (p, f) = maybe_pair() ?? return -1.0
+    return p.x + f
+}
+
+@test fn tuple_coalesce_with_diverging_rhs() {
+    assert(coalesce_tuple_return() == -1.0)
+}
+
+// The PRESENT arm still has to reach its leaves -- a guard that skipped the
+// stores unconditionally would pass the tests above and break this one.
+fn some_v2() -> Vec2? { return v(3.0, 4.0) }
+
+fn coalesce_present() -> float {
+    let p = some_v2() ?? return -1.0
+    return p.x + p.y
+}
+
+@test fn present_arm_still_reads_its_leaves() {
+    assert(coalesce_present() == 7.0)
+}
+
+// -- An if-let or if expression as the right-hand side, with and without a
+// type annotation on the binding --
+
+nobox value Place { x: int, y: int }
+
+fn maybe_place(present: bool) -> Place? {
+    if present { return Place { x: 3, y: 9 } }
+    return null
+}
+
+@test(output = "3 9")
+fn coalesce_iflet_rhs_keeps_present_value() {
+    let place: Place? = maybe_place(false) ?? if let value = maybe_place(true) { value } else { null }
+    if place == null { print("null"); return }
+    print("{place.x} {place.y}")
+}
+
+@test(output = "5 8")
+fn coalesce_if_rhs_keeps_present_value() {
+    let place: Place? = maybe_place(false) ?? if true { Place { x: 5, y: 8 } } else { null }
+    if place == null { print("null"); return }
+    print("{place.x} {place.y}")
+}
+
+@test(output = "3 9")
+fn coalesce_iflet_rhs_keeps_present_value_unannotated() {
+    let place = maybe_place(false) ?? if let value = maybe_place(true) { value } else { null }
+    if place != null {
+        print("{place.x} {place.y}")
+    } else {
+        print("null")
+    }
+}
+
+@test(output = "5 8")
+fn coalesce_if_rhs_keeps_present_value_unannotated() {
+    let place = maybe_place(false) ?? if true { Place { x: 5, y: 8 } } else { null }
+    if place != null {
+        print("{place.x} {place.y}")
+    } else {
+        print("null")
+    }
+}
+
+// -- Regression witnesses for a nullable tuple destructure feeding a nobox value
+// join, both as a coalesce RHS and as a plain let value. --
+
+fn tuple_maybe_pair(present: bool) -> (int, int)? {
+    if present { return (4, 6) }
+    return null
+}
+
+fn tuple_maybe_place(present: bool) -> Place? {
+    if present { return Place { x: 1, y: 2 } }
+    return null
+}
+
+@test(output = "4 6")
+fn tuple_iflet_rhs_of_coalesce() {
+    let place: Place? = tuple_maybe_place(false) ?? if let (a, b) = tuple_maybe_pair(true) {
+        Place { x: a, y: b }
+    } else {
+        null
+    }
+    if place == null { print("missing") } else { print("{place.x} {place.y}") }
+}
+
+@test(output = "null")
+fn tuple_iflet_plain_let_keeps_else() {
+    let place = if let (a, b) = tuple_maybe_pair(false) {
+        Place { x: a, y: b }
+    } else {
+        null
+    }
+    if place == null { print("null") } else { print("{place.x} {place.y}") }
+}
+
+// -- The bound and the result are different nobox values, and the taken arm
+// calls a constructor --
+
+nobox value IVec2 { x: int, y: int }
+fn call_maybe_grid(present: bool) -> IVec2? {
+    if present { return IVec2 { x: 4, y: 6 } }
+    return null
+}
+
+fn call_maybe_place(present: bool) -> Place? {
+    if present { return Place { x: 1, y: 2 } }
+    return null
+}
+
+fn make_place(grid: IVec2) -> Place {
+    return Place { x: grid.x, y: grid.y }
+}
+
+@test(output = "4 6")
+fn coalesce_iflet_call_changes_nobox_type() {
+    let place = call_maybe_place(false) ?? if let grid = call_maybe_grid(true) {
+        make_place(grid)
+    } else {
+        null
+    }
+    if place == null { print("missing") } else { print("{place.x} {place.y}") }
+}
+
+// -- A nested if-let join whose else arm may itself be null --
+
+nobox value SpaceId { value: int }
+nobox value JoinPlace { space: SpaceId, grid: IVec2 }
+
+fn join_maybe_place(present: bool) -> JoinPlace? {
+    if present { return boot_spawn_place(IVec2 { x: 3, y: 9 }) }
+    return null
+}
+
+fn join_maybe_grid(present: bool) -> IVec2? {
+    if present { return IVec2 { x: 3, y: 9 } }
+    return null
+}
+
+fn boot_spawn_place(grid: IVec2) -> JoinPlace {
+    return JoinPlace { space: SpaceId { value: 7 }, grid }
+}
+
+fn check_placement(prepared_present: bool, grid_present: bool, editor: bool) {
+    let prepared = join_maybe_place(prepared_present) ?? if let grid = join_maybe_grid(grid_present) {
+        boot_spawn_place(grid)
+    } else {
+        if editor { boot_spawn_place(IVec2 { x: 4, y: 8 }) } else { null }
+    }
+    if let place = prepared {
+        print("{place.space.value} {place.grid.x} {place.grid.y}")
+    } else { print("null") }
+}
+
+@test(output = "7 3 9\n7 3 9\n7 4 8\nnull")
+fn coalesce_nested_iflet_preserves_presence_and_payload() {
+    check_placement(true, false, false)
+    check_placement(false, true, false)
+    check_placement(false, false, true)
+    check_placement(false, false, false)
+}
+
+// -- Chained `a ?? b ?? c`, with and without a diverging tail --
+
+fn maybe_space(present: bool) -> SpaceId? {
+    if present { return SpaceId { value: 7 } }
+    return null
+}
+
+fn choose_space(present: bool) -> SpaceId? {
+    let space = maybe_space(present) ?? maybe_space(false) ?? {
+        return null
+    }
+    return space
+}
+
+@test(output = "7\nnull")
+fn nested_coalesce_diverges_after_null() {
+    let present = choose_space(true)
+    if present == null { print("missing") } else { print("{present.value}") }
+    let absent = choose_space(false)
+    if absent == null { print("null") } else { print("{absent.value}") }
+}
+
+@test(output = "7")
+fn nested_coalesce_without_diverging_tail() {
+    let space = maybe_space(false) ?? maybe_space(true) ?? maybe_space(false)
+    if space == null { print("null") } else { print("{space.value}") }
+}

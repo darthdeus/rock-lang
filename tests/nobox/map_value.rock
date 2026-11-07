@@ -155,8 +155,7 @@
     assert_eq(m.len(), 0)
 }
 
-// A nobox Map as a struct field, built in a global initializer -- bitgun's
-// FlowField shape.
+// A nobox Map as a struct field, built in a global initializer.
 struct MapHolder {
     grid: Map<string, Vec2>,
 }
@@ -252,4 +251,137 @@ value MapCellP { a: int, b: int }
     m[7] = Vec2 { x: 5.0, y: 6.0 }
     assert_eq(m.len(), 1)
     assert_eq(m[7].x, 5.0)
+}
+
+// -- Hand-built spine+column map --
+//
+// Proof that the spine+column storage works at a `nobox` V with NO compiler
+// change: the spine is a scalar-valued Map (a plain table, works today) and
+// `data: [V]` is an ordinary column Vec (works today). Same field vocabulary as
+// Arena's bookkeeping SoA, which this is meant to collapse into.
+
+struct ProofMap<K, V> {
+    spine: Map<K, int>,
+    data: [V],
+    free_indices: [int],
+    occupied_count: int,
+}
+
+fn proof_new<K, V>() -> ProofMap<K, V> {
+    return ProofMap { spine: map_new(), data: [], free_indices: [], occupied_count: 0 }
+}
+
+fn ProofMap<K, V>.pset(m, key: K, value: V) {
+    let existing = m.spine.get(key)
+    if existing != null {
+        m.data.set(existing.unwrap(), value)
+        return
+    }
+    let slot = 0
+    if m.free_indices.len > 0 {
+        slot = m.free_indices.pop().unwrap()
+        m.data.set(slot, value)
+    } else {
+        slot = m.data.len
+        m.data.push(value)
+    }
+    m.spine[key] = slot
+    m.occupied_count = m.occupied_count + 1
+}
+
+fn ProofMap<K, V>.pget(m, key: K) -> V? {
+    let slot = m.spine.get(key)
+    if slot == null { return null }
+    return m.data[slot.unwrap()]
+}
+
+fn ProofMap<K, V>.premove(m, key: K) -> V? {
+    let slot = m.spine.get(key)
+    if slot == null { return null }
+    let i = slot.unwrap()
+    let old = m.data[i]
+    m.free_indices.push(i)
+    m.spine.remove(key)
+    m.occupied_count = m.occupied_count - 1
+    return old
+}
+
+fn ProofMap<K, V>.plen(m) -> int { return m.occupied_count }
+
+@test fn proof_store_and_read() {
+    let m: ProofMap<string, Vec2> = proof_new()
+    m.pset("a", Vec2 { x: 1.0, y: 2.0 })
+    m.pset("b", Vec2 { x: 3.0, y: 4.0 })
+    assert_eq(m.pget("a").unwrap().x, 1.0)
+    assert_eq(m.pget("a").unwrap().y, 2.0)
+    assert_eq(m.pget("b").unwrap().x, 3.0)
+    assert_eq(m.plen(), 2)
+}
+
+@test fn proof_update_reuses_the_slot() {
+    let m: ProofMap<string, Vec2> = proof_new()
+    m.pset("a", Vec2 { x: 1.0, y: 2.0 })
+    m.pset("a", Vec2 { x: 9.0, y: 8.0 })
+    assert_eq(m.pget("a").unwrap().x, 9.0)
+    assert_eq(m.plen(), 1)
+    assert_eq(m.data.len, 1)
+}
+
+@test fn proof_miss_is_null() {
+    let m: ProofMap<string, Vec2> = proof_new()
+    m.pset("a", Vec2 { x: 1.0, y: 2.0 })
+    assert(m.pget("nope") == null)
+}
+
+@test fn proof_slot_reuse_after_remove() {
+    let m: ProofMap<string, Vec2> = proof_new()
+    m.pset("a", Vec2 { x: 1.0, y: 1.0 })
+    m.pset("b", Vec2 { x: 2.0, y: 2.0 })
+    let old = m.premove("a")
+    assert(old != null)
+    assert_eq(old.unwrap().x, 1.0)
+    m.pset("c", Vec2 { x: 3.0, y: 3.0 })
+    assert_eq(m.pget("b").unwrap().x, 2.0)
+    assert_eq(m.pget("c").unwrap().x, 3.0)
+    assert(m.pget("a") == null)
+    assert_eq(m.plen(), 2)
+    // the freed slot was reused, so the column did not grow
+    assert_eq(m.data.len, 2)
+}
+
+@test fn proof_iteration_over_the_spine() {
+    let m: ProofMap<string, Vec2> = proof_new()
+    m.pset("a", Vec2 { x: 1.0, y: 2.0 })
+    m.pset("b", Vec2 { x: 3.0, y: 4.0 })
+    let sx = 0.0
+    let n = 0
+    for (k, slot) in m.spine {
+        sx = sx + m.data[slot].x
+        n = n + 1
+    }
+    assert_eq(n, 2)
+    assert_eq(sx, 4.0)
+}
+
+// -- Unmarked outer value with a nullable nobox field --
+//
+// The OTHER Map shape that rejects with the same diagnostic sentence: an
+// UNMARKED (GC-tier `_vt`) value outer carrying a NULLABLE nobox field, stored
+// in a Map. It is not the Map mechanism -- the `_vt` ctor has no
+// presence-carrying leaf form -- so this pins which of the two it is.
+
+nobox value NV2 { x: float, y: float }
+value Opt { pos: NV2? }
+
+@test fn map_unmarked_outer_with_nullable_nobox_field() {
+    let m: Map<string, Opt> = map_new()
+    m["a"] = Opt { pos: NV2 { x: 1.0, y: 2.0 } }
+    assert_eq(m["a"].pos?.x ?? -1.0, 1.0)
+    assert_eq(m["a"].pos?.y ?? -1.0, 2.0)
+}
+
+@test fn map_unmarked_outer_absent_field() {
+    let m: Map<string, Opt> = map_new()
+    m["b"] = Opt { pos: null }
+    assert_eq(m["b"].pos?.x ?? -1.0, -1.0)
 }

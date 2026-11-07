@@ -229,8 +229,8 @@ fn primitive_tuple_answers_the_same() -> int {
 }
 
 // `materialize` of a nullable tuple is an escape, so an absent value boxes to
-// `nil`, never to a statically non-nil tuple (bitgun's
-// `materialize(line_intersects_circle(..))` null checks).
+// `nil`, never to a statically non-nil tuple (the
+// `materialize(line_intersects_circle(..))` null-check shape).
 @test(returns = 1)
 fn materialize_keeps_an_absent_nullable_tuple_absent() -> int {
     if materialize(maybe(false)) == null { return 1 }
@@ -241,4 +241,267 @@ fn materialize_keeps_an_absent_nullable_tuple_absent() -> int {
 fn materialize_boxes_a_present_nullable_tuple() -> int {
     let t = materialize(maybe(true)) ?? return 0
     return t.0.x + t.1
+}
+
+// ======== As a RETURN ========
+//
+// A NULLABLE tuple return whose element is a `nobox` value: `-> (NV2, float)?`.
+// The plain tuple form is covered by `tests/nobox/tuple.rock`; the `?` is
+// a separate wire, because a multi-value boundary must carry the null
+// discriminant alongside the splatted slots rather than boxing the whole tuple.
+// It leads: `present, <slots...>`, absent as `false, nil, ...` -- the same
+// convention `ValueShape::nullable` uses one level down.
+//
+// Live shape: `stone/engine/systems/shapes.rock`'s `line_intersects_circle` /
+// `line_intersects_rect`, both `-> (Vec2, float)?` consumed as
+// `if let hit_info = ...`.
+
+nobox value NV2 { x: float, y: float }
+
+value BV2 { x: float, y: float }
+
+fn hit(a: float) -> (NV2, float)? {
+    if a < 0.0 { return null }
+    return (NV2 { x: a, y: a * 2.0 }, a * 10.0)
+}
+
+// Nobox element SECOND, so presence and the leaves are not adjacent in the
+// trivial way.
+fn hit_tail(a: float) -> (float, NV2)? {
+    if a < 0.0 { return null }
+    return (a * 10.0, NV2 { x: a, y: a * 2.0 })
+}
+
+fn hit_boxed(a: float) -> (BV2, float)? {
+    if a < 0.0 { return null }
+    return (BV2 { x: a, y: a * 2.0 }, a * 10.0)
+}
+
+@test(returns = 13)
+fn present_binds_leaves() -> int {
+    if let t = hit(1.0) {
+        return (t.0.x + t.0.y + t.1) as int
+    }
+    return -1
+}
+
+@test(returns = 1)
+fn absent_is_null() -> int {
+    if hit(-1.0) == null { return 1 }
+    return -2
+}
+
+@test(returns = 1)
+fn present_is_not_null() -> int {
+    if hit(1.0) != null { return 1 }
+    return -2
+}
+
+@test(returns = 13)
+fn present_binds_leaves_in_tail_position() -> int {
+    if let t = hit_tail(1.0) {
+        return (t.0 + t.1.x + t.1.y) as int
+    }
+    return -1
+}
+
+@test(returns = 1)
+fn absent_is_null_in_tail_position() -> int {
+    if hit_tail(-1.0) == null { return 1 }
+    return -2
+}
+
+// The asymmetry guard: an UNMARKED value keeps the single boxed tuple, so the
+// same source still round-trips both ways and the wire above stays off.
+@test(returns = 13)
+fn unmarked_element_still_round_trips() -> int {
+    if let t = hit_boxed(1.0) {
+        return (t.0.x + t.0.y + t.1) as int
+    }
+    return -1
+}
+
+@test(returns = 1)
+fn unmarked_absent_is_null() -> int {
+    if hit_boxed(-1.0) == null { return 1 }
+    return -2
+}
+
+// ======== At a fn PARAM ========
+//
+// A NULLABLE tuple carrying a `nobox` value at a fn PARAM.
+//
+// Was `nullable_tuple_of_a_nobox_at_a_PARAM_Generic` in
+// `nobox_container_gaps.rock.err`. The RETURN side already put a presence bool
+// ahead of the slots (the let and return sections above); the param side spelled
+// the same wire but `tuple_param_slot` only admitted a bare `TypeExpr::Tuple`,
+// so a `(PNV, int)?` param fell to `Opaque` and the argument packed to fill it.
+//
+// The presence rides the param list exactly as it rides the return: one leading
+// slot, then the element slots, absent being `false` plus nils.
+
+nobox value PNV { x: float, y: float }
+
+value UNV { x: float, y: float }
+
+fn param_maybe(b: bool) -> (PNV, float)? {
+    if b { return (PNV { x: 1.0, y: 3.0 }, 10.0) }
+    return null
+}
+
+fn describe(t: (PNV, float)?) -> float {
+    if t == null { return -1.0 }
+    return t.0.y + t.1
+}
+
+@test(returns = 13.0)
+fn a_present_nullable_tuple_crosses_a_direct_call() -> float {
+    return describe(param_maybe(true))
+}
+
+@test(returns = -1.0)
+fn an_absent_one_arrives_absent() -> float {
+    return describe(param_maybe(false))
+}
+
+@test(returns = -1.0)
+fn a_bare_null_literal_fills_the_wire() -> float {
+    return describe(null)
+}
+
+@test(returns = 13.0)
+fn a_tuple_literal_is_present_without_a_callee() -> float {
+    return describe((PNV { x: 1.0, y: 3.0 }, 10.0))
+}
+
+@test(returns = 13.0)
+fn the_argument_bound_to_a_local_first() -> float {
+    let t = param_maybe(true)
+    return describe(t)
+}
+
+// `if let` inside the callee reads the presence the param carried, rather than
+// re-deriving it from a box that is not there.
+fn via_if_let(t: (PNV, float)?) -> float {
+    if let (v, n) = t { return v.x + n }
+    return -1.0
+}
+
+@test(returns = 11.0)
+fn the_callee_can_if_let_its_own_param() -> float {
+    return via_if_let(param_maybe(true))
+}
+
+@test(returns = -1.0)
+fn the_same_if_let_on_an_absent_param() -> float {
+    return via_if_let(param_maybe(false))
+}
+
+// Forwarding: the param's own cells feed the next call's slots, with no box in
+// between.
+fn forward(t: (PNV, float)?) -> float { return describe(t) }
+
+@test(returns = 13.0)
+fn a_param_forwards_to_another_param() -> float {
+    return forward(param_maybe(true))
+}
+
+@test(returns = -1.0)
+fn an_absent_param_forwards_absent() -> float {
+    return forward(param_maybe(false))
+}
+
+// A `??` in the callee consumes the presence dynamically.
+fn coalesced(t: (PNV, float)?) -> float {
+    let s = t ?? (PNV { x: 7.0, y: 8.0 }, 100.0)
+    return s.0.x + s.1
+}
+
+@test(returns = 107.0)
+fn the_callee_coalesces_an_absent_param() -> float {
+    return coalesced(param_maybe(false))
+}
+
+@test(returns = 11.0)
+fn the_callee_coalesces_a_present_param() -> float {
+    return coalesced(param_maybe(true))
+}
+
+// NAMED args place a splatting param by slot, so the nil-fill width has to be
+// the slot's -- presence included.
+fn keyed(k: float, t: (PNV, float)?) -> float { return describe(t) + k }
+
+@test(returns = 113.0)
+fn a_nullable_tuple_param_places_by_name() -> float {
+    return keyed(t: param_maybe(true), k: 100.0)
+}
+
+@test(returns = 99.0)
+fn an_absent_one_places_by_name_too() -> float {
+    return keyed(t: param_maybe(false), k: 100.0)
+}
+
+// The three definition forms share `bind_param_slot`, so all three bind the
+// presence cell.
+@test(returns = 13.0)
+fn a_nested_fn_binds_the_presence_cell() -> float {
+    fn inner(t: (PNV, float)?) -> float {
+        if t == null { return -1.0 }
+        return t.0.y + t.1
+    }
+    return inner(param_maybe(true))
+}
+
+@test(returns = -1.0)
+fn the_nested_fn_on_an_absent_argument() -> float {
+    fn inner(t: (PNV, float)?) -> float {
+        if t == null { return -1.0 }
+        return t.0.y + t.1
+    }
+    return inner(param_maybe(false))
+}
+
+fn apply(g: ((PNV, float)?) -> float, t: (PNV, float)?) -> float { return g(t) }
+
+@test(returns = 13.0)
+fn the_wire_survives_a_fn_VALUE_param() -> float {
+    return apply(describe, param_maybe(true))
+}
+
+@test(returns = -1.0)
+fn the_absent_wire_survives_a_fn_VALUE_param() -> float {
+    return apply(describe, param_maybe(false))
+}
+
+@test(returns = 13.0)
+fn the_same_through_a_lambda() -> float {
+    return apply(t => if t == null { -1.0 } else { t.0.y + t.1 }, param_maybe(true))
+}
+
+@test(returns = -1.0)
+fn the_absent_wire_through_a_lambda() -> float {
+    return apply(t => if t == null { -1.0 } else { t.0.y + t.1 }, param_maybe(false))
+}
+
+// The control that scopes the mechanism: the UNMARKED twin always compiled and
+// must keep its single boxed slot -- only a `nobox` element splats, so this
+// asserts the ABI did NOT move underneath it.
+fn u_maybe(b: bool) -> (UNV, float)? {
+    if b { return (UNV { x: 1.0, y: 3.0 }, 10.0) }
+    return null
+}
+
+fn u_describe(t: (UNV, float)?) -> float {
+    if t == null { return -1.0 }
+    return t.0.y + t.1
+}
+
+@test(returns = 13.0)
+fn an_unmarked_nullable_tuple_param_still_works() -> float {
+    return u_describe(u_maybe(true))
+}
+
+@test(returns = -1.0)
+fn the_unmarked_absent_one_still_works() -> float {
+    return u_describe(u_maybe(false))
 }

@@ -1,0 +1,220 @@
+// Reading `nobox` values stored in fields: plain value children of a nobox
+// field, nested nullable nobox fields with a `= null` default, and widening a
+// non-nullable field read into a nullable slot.
+
+// -- Plain value children of a nobox field --
+
+nobox value FieldSid { value: int }
+value FieldPoint { x: float, y: float }
+value FieldPair { point: FieldPoint }
+nobox value FieldPlace { space: FieldSid, pos: FieldPoint }
+nobox value DeepFieldPlace { space: FieldSid, pos: FieldPair }
+struct FieldHolder { place: FieldPlace }
+struct DeepFieldHolder { place: DeepFieldPlace }
+struct NullableFieldHolder { place: FieldPlace? }
+
+fn field_holder(x: float) -> FieldHolder {
+    return FieldHolder { place: FieldPlace { space: FieldSid { value: 3 }, pos: FieldPoint { x: x, y: 2.0 } } }
+}
+
+fn field_x(h: FieldHolder) -> float { return h.place.pos.x }
+fn field_y(h: FieldHolder) -> float { return h.place.pos.y }
+fn deep_field_x(h: DeepFieldHolder) -> float { return h.place.pos.point.x }
+fn deep_field_y(h: DeepFieldHolder) -> float { return h.place.pos.point.y }
+
+@test fn nobox_plain_field_reads_stored_leaves() {
+    let h = field_holder(9.5)
+    assert_eq(field_x(h), 9.5)
+    assert_eq(field_y(h), 2.0)
+}
+
+@test fn nobox_plain_field_reads_deep_plain_leaves() {
+    let h = DeepFieldHolder { place: DeepFieldPlace { space: FieldSid { value: 4 }, pos: FieldPair { point: FieldPoint { x: 7.5, y: 3.0 } } } }
+    assert_eq(deep_field_x(h), 7.5)
+    assert_eq(deep_field_y(h), 3.0)
+}
+
+@test fn nobox_plain_nullable_field_reads_presence_and_leaves() {
+    let present = NullableFieldHolder { place: FieldPlace { space: FieldSid { value: 3 }, pos: FieldPoint { x: 6.5, y: 4.0 } } }
+    let absent = NullableFieldHolder { place: null }
+    assert_eq(present.place?.pos?.x ?? -1.0, 6.5)
+    assert_eq(absent.place?.pos?.x ?? -1.0, -1.0)
+}
+
+@test fn nobox_plain_field_reads_a_vec_element() {
+    let hs = [field_holder(5.5), field_holder(8.5)]
+    assert_eq(field_x(hs[0]), 5.5)
+    assert_eq(field_x(hs[1]), 8.5)
+}
+
+@test fn nobox_plain_field_reads_after_whole_child_write() {
+    let h = field_holder(1.5)
+    h.place.pos = FieldPoint { x: 12.5, y: 13.0 }
+    assert_eq(field_x(h), 12.5)
+    assert_eq(field_y(h), 13.0)
+}
+
+// -- A nullable nested nobox field with a `= null` default keeps its presence
+// through vec, direct and map storage --
+
+nobox value PresencePoint { x: int }
+nobox value PresenceLocation { region: string, point: PresencePoint }
+nobox value PresenceDef { id: string, location: PresenceLocation? = null }
+
+fn presence_description(location: PresenceLocation?) -> string {
+    if location != null {
+        return "{location.region}:{location.point.x}"
+    }
+    return "null"
+}
+
+@test(output = "omitted null\nexplicit null\npresent crypt:3")
+fn vec_loop_keeps_nested_nobox_presence() {
+    let defs: [PresenceDef] = [
+        PresenceDef { id: "omitted" },
+        PresenceDef { id: "explicit", location: null },
+        PresenceDef { id: "present", location: PresenceLocation {
+            region: "crypt", point: PresencePoint { x: 3 },
+        } },
+    ]
+    let count = 0
+    for def in defs {
+        print("{def.id} {presence_description(def.location)}")
+        count += 1
+    }
+    assert_eq(count, 3)
+}
+
+@test(output = "null\ncrypt:5")
+fn direct_field_keeps_nested_nobox_presence() {
+    let absent = PresenceDef { id: "absent" }
+    let present = PresenceDef { id: "present", location: PresenceLocation {
+        region: "crypt", point: PresencePoint { x: 5 },
+    } }
+    print(presence_description(absent.location))
+    print(presence_description(present.location))
+}
+
+@test(output = "null\ncrypt:7\n1 1")
+fn map_value_keeps_nested_nobox_presence() {
+    let defs: Map<string, PresenceDef> = map_new()
+    defs["absent"] = PresenceDef { id: "absent" }
+    defs["present"] = PresenceDef { id: "present", location: PresenceLocation {
+        region: "crypt", point: PresencePoint { x: 7 },
+    } }
+    print(presence_description(defs["absent"].location))
+    print(presence_description(defs["present"].location))
+    let absent = 0
+    let present = 0
+    for (key, def) in defs {
+        if def.location == null { absent += 1 } else { present += 1 }
+    }
+    print("{absent} {present}")
+}
+
+// -- Widening a `nobox` value read out of a FIELD into a nullable slot.
+//
+// `prev = p.pos`, where `pos: Vec2` is declared non-nullable and `prev` is
+// `Vec2?`, lowered the presence as a runtime `p.pos ~= nil` test. That test is
+// an opaque use of the box, so SROA could no longer peel the cell feeding it,
+// and the `Vec2` ctor survived to emit as an implicit materialization -- the
+// `nobox` guarantee's own rejection, on a program that never mentions null.
+//
+// The declared field type already answers the presence question. A `nobox`
+// field read now takes the leaf-splitting Group form regardless of whether its
+// base is a mutable place, so presence is the static `true` a Group carries,
+// exactly as the `embed` path beside it already did for a marked child.
+//
+// Controls, because both conjuncts are needed to reproduce: `plain_target_*`
+// keeps the field read and drops the nullability, `ctor_source_*` keeps the
+// nullability and sources the value from a ctor instead of a field. Each
+// compiled and answered correctly while the subject rejected, so a fix that
+// only satisfies them has not touched the defect.
+
+nobox value V2 { x: float, y: float }
+value Pt { pos: V2, born: float }
+
+// SUBJECT: nullable target, value sourced from a field read off a vec element.
+fn max_step(line: [Pt]) -> float {
+    let worst = 0.0
+    let prev: V2? = null
+    for p in line {
+        if let pp = prev {
+            let dx = p.pos.x - pp.x
+            let dy = p.pos.y - pp.y
+            worst = max(worst, dx * dx + dy * dy)
+        }
+        prev = p.pos
+    }
+    return worst
+}
+
+// CONTROL: same field read, NON-nullable target.
+fn max_step_plain(line: [Pt]) -> float {
+    let worst = 0.0
+    let prev = V2 { x: 0.0, y: 0.0 }
+    for p in line {
+        let dx = p.pos.x - prev.x
+        let dy = p.pos.y - prev.y
+        worst = max(worst, dx * dx + dy * dy)
+        prev = p.pos
+    }
+    return worst
+}
+
+// CONTROL: same nullable target, value sourced from a ctor.
+fn max_step_ctor(n: int) -> float {
+    let worst = 0.0
+    let prev: V2? = null
+    for i in 0..n {
+        // Uneven steps on purpose: a uniform stride makes every gap 1, so the
+        // max is 1 no matter which pair the loop actually compared.
+        let cur = V2 { x: (i * i) as float, y: 0.0 }
+        if let pp = prev {
+            let dx = cur.x - pp.x
+            worst = max(worst, dx * dx)
+        }
+        prev = cur
+    }
+    return worst
+}
+
+fn sample() -> [Pt] {
+    return [
+        Pt { pos: V2 { x: 0.0, y: 0.0 }, born: 0.0 },
+        Pt { pos: V2 { x: 3.0, y: 4.0 }, born: 1.0 },
+        Pt { pos: V2 { x: 3.0, y: 5.0 }, born: 2.0 },
+    ]
+}
+
+// 0->(3,4) is 25; (3,4)->(3,5) is 1. The first step is the max.
+@test(returns = 25)
+fn subject_field_read_into_nullable() -> int {
+    return max_step(sample()) as int
+}
+
+// The null seed must not read as a present (0,0): with `prev` seeded absent the
+// first point contributes nothing, so a wrongly-constant presence would report
+// 9 + 16 twice over and still land on 25 -- it is the SECOND step that separates
+// them. Asserted directly so presence is pinned, not inferred from the max.
+@test(returns = 2)
+fn subject_counts_only_seeded_steps() -> int {
+    let n = 0
+    let prev: V2? = null
+    for p in sample() {
+        if prev != null { n = n + 1 }
+        prev = p.pos
+    }
+    return n
+}
+
+@test(returns = 25)
+fn plain_target_control() -> int {
+    return max_step_plain(sample()) as int
+}
+
+// x goes 0, 1, 4: the gaps are 1 and 3, so the max squared step is 9.
+@test(returns = 9)
+fn ctor_source_control() -> int {
+    return max_step_ctor(3) as int
+}

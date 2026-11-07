@@ -20,14 +20,14 @@
 //!        fifteen shapes asserted as values in
 //!        `tests/nobox/nullable_column_combinators.rock`, including `zip`'s
 //!        tuple element. A TUPLE of nobox at a fn param works
-//!        (`tests/nobox/tuple_param.rock`), and so does a chained `?.` through
+//!        (`tests/nobox/tuple.rock`), and so does a chained `?.` through
 //!        two presence levels (`tests/nobox/safe_nav.rock`). A NULLABLE tuple
 //!        carrying one -- `(Vec2, int)?`, from a declared return or from a `?.`
 //!        -- binds its wire and supports `== null` / slot projection / `if let`
 //!        (binding AND destructuring) / `??` / rebinding / forwarding, in
 //!        `tests/nobox/nullable_tuple.rock`; it crosses a fn PARAM in every
 //!        definition form and calling convention, in
-//!        `tests/nobox/nullable_tuple_param.rock`. `a.enumerate()` on
+//!        the same file. `a.enumerate()` on
 //!        a column vec works now that the eager `Vec<T>.enumerate` is deleted --
 //!        it coerces to the lazy one (`tests/nobox/column_combinators.rock`).
 //!        `Arena<Vec2>` supports insert / get / contains /

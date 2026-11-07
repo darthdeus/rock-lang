@@ -1,0 +1,274 @@
+// Tuples whose elements are `nobox` values: as a return, at a fn param, and
+// stored inside a container. The nullable forms are in nullable_tuple.rock.
+
+// ======== As a RETURN ========
+//
+// Cross-backend execution of the nobox tuple-return ABI: a tuple return whose
+// element is a `nobox` value carries that element's LEAVES, not one box.
+// Emission-shape assertions (no `NV2_ct(`) live in
+// `crates/skull/tests/nobox_values.rs`; these pin that the wire still computes
+// the right answer on every backend that can run them.
+
+nobox value NV2 { x: float, y: float }
+
+value BV2 { x: float, y: float }
+
+fn split(v: NV2) -> (bool, NV2) {
+    return (true, v)
+}
+
+fn maybe(present: bool, v: NV2) -> (bool, NV2?) {
+    if present { return (true, v) }
+    return (false, null)
+}
+
+fn split_boxed(v: BV2) -> (bool, BV2) {
+    return (true, v)
+}
+
+@test(returns = 4)
+fn tuple_return_binds_leaves() -> int {
+    let (ok, w) = split(NV2 { x: 1.0, y: 3.0 })
+    if !ok { return -1 }
+    return (w.x + w.y) as int
+}
+
+@test(returns = 7)
+fn nullable_element_threads_presence() -> int {
+    let (ok, w) = maybe(true, NV2 { x: 3.0, y: 4.0 })
+    if !ok { return -1 }
+    if let q = w { return (q.x + q.y) as int }
+    return -2
+}
+
+@test(returns = 1)
+fn absent_nullable_element_stays_null() -> int {
+    let (ok, w) = maybe(false, NV2 { x: 3.0, y: 4.0 })
+    if ok { return -1 }
+    if w == null { return 1 }
+    return -2
+}
+
+// The asymmetry guard: an UNMARKED value keeps its single boxed slot, so the
+// same source still round-trips.
+@test(returns = 9)
+fn unmarked_value_element_still_round_trips() -> int {
+    let (ok, w) = split_boxed(BV2 { x: 4.0, y: 5.0 })
+    if !ok { return -1 }
+    return (w.x + w.y) as int
+}
+
+@test(returns = 10)
+fn loop_element_binds_leaves() -> int {
+    let ps: [NV2] = [NV2 { x: 1.0, y: 2.0 }, NV2 { x: 3.0, y: 4.0 }]
+    let total = 0.0
+    for p in ps { total = total + p.x + p.y }
+    return total as int
+}
+
+// `enumerate` makes `next` return `(bool, (int, NV2))` -- the nested-tuple slot.
+@test(returns = 14)
+fn enumerated_element_binds_leaves() -> int {
+    let ps: [NV2] = [NV2 { x: 1.0, y: 2.0 }, NV2 { x: 3.0, y: 4.0 }]
+    let total = 0.0
+    for (i, p) in enumerate(ps) { total = total + i as float * 10.0 + p.x }
+    return total as int
+}
+
+// ======== At a fn PARAM ========
+//
+// A TUPLE of `nobox` values at a fn PARAM.
+//
+// Was `tuple_of_nobox_at_a_fn_param` in `nobox_container_gaps.rock.err`, filed
+// there as a fn-VALUE gap. It was not: a direct call to an ordinary top-level fn
+// rejected on its own, and one nobox in the tuple was enough. The mechanism was
+// a missing vocabulary -- the RETURN side could describe a tuple of leaves
+// (`RetSlot::Nested`) and the PARAM side carried `Option<ValueShape>`, and a
+// `ValueShape` is a NAMED struct shape, which a tuple is not. Params now carry
+// the same `RetSlot` returns do.
+
+nobox value TV { x: float, y: float }
+
+value UTV { x: float, y: float }
+
+fn pair_sum(pq: (TV, TV)) -> float { return pq.0.y + pq.1.x }
+
+// ONE nobox in the tuple is enough to need the slot.
+fn mixed(pq: (TV, float)) -> float { return pq.0.y + pq.1 }
+
+fn nested(t: ((TV, TV), float)) -> float { return t.0.0.y + t.0.1.x + t.1 }
+
+fn with_nullable(pq: (TV?, TV)) -> float { return (pq.0?.y ?? -1.0) + pq.1.x }
+
+@test(returns = 5.0)
+fn a_tuple_of_nobox_crosses_a_direct_call() -> float {
+    return pair_sum((TV { x: 1.0, y: 3.0 }, TV { x: 2.0, y: 4.0 }))
+}
+
+@test(returns = 5.0)
+fn the_same_tuple_bound_to_a_local_first() -> float {
+    let t = (TV { x: 1.0, y: 3.0 }, TV { x: 2.0, y: 4.0 })
+    return pair_sum(t)
+}
+
+@test(returns = 12.0)
+fn one_nobox_element_is_enough() -> float {
+    return mixed((TV { x: 1.0, y: 3.0 }, 9.0))
+}
+
+@test(returns = 14.0)
+fn the_slot_nests() -> float {
+    return nested(((TV { x: 1.0, y: 3.0 }, TV { x: 2.0, y: 4.0 }), 9.0))
+}
+
+// A nullable element carries its presence leaf inside the tuple slot, so the
+// absent arm has somewhere to say so.
+@test(returns = 1.0)
+fn a_nullable_element_keeps_its_presence_leaf() -> float {
+    return with_nullable((null, TV { x: 2.0, y: 4.0 }))
+}
+
+@test(returns = 7.0)
+fn the_same_nullable_element_when_present() -> float {
+    return with_nullable((TV { x: 0.0, y: 5.0 }, TV { x: 2.0, y: 4.0 }))
+}
+
+// NAMED args place a splatting param by slot, so the nil-fill width has to be
+// the slot's, not one.
+fn keyed(k: int, pq: (TV, TV)) -> float { return pq.0.y + pq.1.x + (k as float) }
+
+@test(returns = 105.0)
+fn a_tuple_param_places_by_name() -> float {
+    let t = (TV { x: 1.0, y: 3.0 }, TV { x: 2.0, y: 4.0 })
+    return keyed(pq: t, k: 100)
+}
+
+// --- the fn-VALUE boundary, which is what the gap was originally filed as ---
+
+fn apply_pair(g: ((TV, TV)) -> float, pq: (TV, TV)) -> float { return g(pq) }
+
+@test(returns = 5.0)
+fn a_tuple_of_nobox_crosses_a_fn_VALUE_param() -> float {
+    let t = (TV { x: 1.0, y: 3.0 }, TV { x: 2.0, y: 4.0 })
+    return apply_pair(pair_sum, t)
+}
+
+@test(returns = 5.0)
+fn the_same_through_a_lambda() -> float {
+    let t = (TV { x: 1.0, y: 3.0 }, TV { x: 2.0, y: 4.0 })
+    return apply_pair(pq => pq.0.y + pq.1.x, t)
+}
+
+// The headline shape: `zip(..).reduce(..)`, which is what real combinator code
+// hits and what the sentinel used as its repro.
+@test(returns = 10.0)
+fn zip_reduce_over_a_column_carries_the_pair() -> float {
+    let a: [TV] = [TV { x: 1.0, y: 3.0 }, TV { x: 2.0, y: 4.0 }]
+    return a.zip(a).reduce(0.0, (acc, pq) => acc + pq.0.y + pq.1.x)
+}
+
+// A nested `fn` is the third definition form, and shares `bind_param_slot` with
+// the other two.
+@test(returns = 5.0)
+fn a_nested_fn_binds_a_tuple_param() -> float {
+    fn inner(pq: (TV, TV)) -> float { return pq.0.y + pq.1.x }
+    return inner((TV { x: 1.0, y: 3.0 }, TV { x: 2.0, y: 4.0 }))
+}
+
+// The control that scoped the gap: the UNMARKED twin always compiled, and must
+// keep its single boxed slot -- only a `nobox` element splats.
+@test(returns = 5.0)
+fn an_unmarked_value_tuple_param_still_works() -> float {
+    fn u(pq: (UTV, UTV)) -> float { return pq.0.y + pq.1.x }
+    return u((UTV { x: 1.0, y: 3.0 }, UTV { x: 2.0, y: 4.0 }))
+}
+
+// ======== Inside a container ========
+//
+// A `nobox` value inside a TUPLE inside a container -- matrix row 13, the
+// `[(Vec2, IRect)]` push shape.
+//
+// The tuple box stores the nobox part's LEAVES splat, so no `Vec2` is ever
+// materialized. Layout comes from the declared tuple type via the same
+// `TupleRetShape` slot list the multi-return wire uses, so producer and reader
+// derive it independently and cannot disagree.
+//
+// The containers are globals so the vec escapes: a local one is scalarized away
+// and the push never reaches the element repr at all.
+
+value IR4 { x: int, y: int, w: int, h: int }
+
+global PAIRS: [(Vec2, int)] = []
+global TILES: [(Vec2, IR4)] = []
+global NESTED: [((Vec2, int), int)] = []
+
+fn add_pair(v: Vec2, n: int) {
+    PAIRS.push((v, n))
+}
+
+fn add_tile(p: Vec2, s: IR4) {
+    TILES.push((p, s))
+}
+
+@test
+fn a_nobox_part_rides_the_tuple_box_as_leaves() {
+    add_pair(Vec2 { x: 1.0, y: 2.0 }, 7)
+    let (p, n) = PAIRS[0]
+    assert_eq(p.x, 1.0)
+    assert_eq(p.y, 2.0)
+    assert_eq(n, 7)
+}
+
+// Both parts value-shaped, and 6 leaves total -- over MAX_COLUMN_LEAVES, so this
+// is genuinely the boxed path and not columns in disguise.
+@test
+fn two_value_parts_round_trip() {
+    add_tile(Vec2 { x: 3.0, y: 4.0 }, IR4 { x: 5, y: 6, w: 7, h: 8 })
+    let (p, s) = TILES[0]
+    assert_eq(p.x, 3.0)
+    assert_eq(s.w, 7)
+    assert_eq(s.h, 8)
+}
+
+// Slot PROJECTION, not just destructure -- the other read site.
+@test
+fn slot_projection_reads_the_widened_box() {
+    add_tile(Vec2 { x: 9.0, y: 10.0 }, IR4 { x: 1, y: 2, w: 3, h: 4 })
+    let t = TILES[TILES.len - 1]
+    assert_eq(t.0.y, 10.0)
+    assert_eq(t.1.x, 1)
+}
+
+// A nested tuple: the inner slot list has to compose into the outer one.
+@test
+fn a_nested_tuple_composes_its_slots() {
+    NESTED.push(((Vec2 { x: 11.0, y: 12.0 }, 13), 14))
+    let (inner, outer) = NESTED[0]
+    let (v, n) = inner
+    assert_eq(v.x, 11.0)
+    assert_eq(n, 13)
+    assert_eq(outer, 14)
+}
+
+// The element survives a rewrite in place, so the widened layout is not
+// write-once.
+@test
+fn a_stored_element_can_be_overwritten() {
+    PAIRS.push((Vec2 { x: 20.0, y: 21.0 }, 22))
+    let last = PAIRS.len - 1
+    PAIRS.set(last, (Vec2 { x: 30.0, y: 31.0 }, 32))
+    let (p, n) = PAIRS[last]
+    assert_eq(p.x, 30.0)
+    assert_eq(n, 32)
+}
+
+// Iteration reads the same boxes the pushes wrote.
+@test
+fn iteration_agrees_with_indexing() {
+    add_tile(Vec2 { x: 3.0, y: 4.0 }, IR4 { x: 5, y: 6, w: 7, h: 8 })
+    let seen = 0.0
+    for (p, s) in TILES {
+        seen = seen + p.x + s.w
+    }
+    assert_eq(seen > 0.0, true)
+}

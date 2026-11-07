@@ -74,3 +74,15 @@ fn a_returned_lambda_agrees_with_its_call_site_on_the_presence_slot() {
     assert_eq(g(true)?.x ?? -1, 5)
     assert_eq(g(false)?.x ?? -1, -1)
 }
+
+// A lambda literal returning a plain value, passed where the fn type returns a
+// nullable nobox value, takes the nullable return ABI.
+fn accepts_nullable_position(callback: () -> Vec2?) -> Vec2 {
+    return callback().unwrap()
+}
+
+@test fn literal_value_callback_gets_nullable_return_abi() {
+    let position = accepts_nullable_position(() => v(7.0, 9.0))
+    assert_eq(position.x, 7.0)
+    assert_eq(position.y, 9.0)
+}
