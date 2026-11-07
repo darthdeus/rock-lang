@@ -1,0 +1,28 @@
+// A terminal defer that raises while a coroutine is killed is reported and the
+// remaining defers still run, on every backend. The report itself goes to the
+// log on Lua and to the host's error stream on JS, so it is not compared.
+
+global LOG: [string] = []
+
+@nomangle inline(lua) fn raise_in_cleanup(msg: string) = """error(msg, 0)"""
+
+@nomangle inline(js) fn raise_in_cleanup(msg: string) = """throw new Error(msg);"""
+
+co fn three_defers() -> Coroutine<int> {
+    defer { LOG.push("first") }
+    defer { raise_in_cleanup("defer-boom") }
+    defer { LOG.push("third") }
+    yield 1
+    yield 2
+}
+
+@test
+fn raising_terminal_defer_does_not_stop_the_rest() {
+    LOG = []
+    let c = three_defers()
+    resume(c)
+    kill(c)
+    assert(LOG.len == 2, "both remaining defers ran")
+    assert(LOG[0] == "third", "LIFO order")
+    assert(LOG[1] == "first", "LIFO order")
+}
