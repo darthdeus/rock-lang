@@ -1,5 +1,6 @@
-// Comprehensive loop tests ported from rock/tests/loop_tests.rs
-// Tests basic loops, continue, break, nested loops, and for/while loops
+// loop, while and for-in loops: break, continue, nesting, iteration over
+// vectors, maps, arrays and arenas, and the element types they bind. Type
+// hole ids are numbered across the whole file.
 
 @test(output = "3")
 fn loop_basic_break() {
@@ -98,8 +99,6 @@ fn continue_in_for_loop() {
     let sum = 0
     let arr = [1, 2, 3, 4, 5]
 
-    // TODO: Tuple destructuring in for loops needs work
-    // For now, use simple iteration
     for x in arr {
         if x % 2 == 0 {
             continue
@@ -232,22 +231,6 @@ fn vec_iteration_basic() {
     print(sum)
 }
 
-@test(output = "60")
-fn arena_tuple_iteration() {
-    let arena = arena_new()
-    insert(arena, 10)
-    insert(arena, 20)
-    insert(arena, 30)
-
-    let sum = 0
-
-    for (entity, value) in arena {
-        sum += value  // Back to original working code
-    }
-
-    print(sum)
-}
-
 @test(output = "6")
 fn map_tuple_iteration() {
     let map = map_new()
@@ -285,10 +268,7 @@ fn vec_iteration_type_check() {
     print(sum)
 }
 
-// TODO: Arena iteration type checking needs investigation
-// The basic functionality works, but the type semantics are unclear
-
-@test(output = "6", type_holes = [[0, "int"]])
+@test(output = "6", type_holes = [[1, "int"]])
 fn map_iteration_type_check() {
     let map = map_new()
     insert(map, "a", 1)
@@ -298,21 +278,21 @@ fn map_iteration_type_check() {
     let sum = 0
 
     for (key, value) in map {
-        let value_typed: ? = value  // [0] - Should be int
+        let value_typed: ? = value  // [1] - Should be int
         sum += value
     }
 
     print(sum)
 }
 
-@test(output = "6", type_holes = [[0, "int"]])
+@test(output = "6", type_holes = [[2, "int"]])
 fn array_iteration_type_check() {
     let arr = [1, 2, 3]
 
     let sum = 0
 
     for x in arr {
-        let x_typed: ? = x  // [0] - Should be int
+        let x_typed: ? = x  // [2] - Should be int
         sum += x
     }
 
@@ -375,4 +355,94 @@ fn continue_with_complex_expression() {
     }
 
     print(result)
+}
+
+// ============================================
+// More iteration cases
+// ============================================
+
+@test(output = "1\nadd\n2\nadd\n3\nskip 3\n4\nadd\n5\nskip 5\n6\nskip 3\n7\nadd\n8\nadd\n9\nskip 3\n10\n22")
+fn debug_continue_multiple() {
+    let sum = 0
+    let i = 0
+
+    loop {
+        i = i + 1
+        print(i)
+
+        if i >= 10 {
+            break
+        }
+
+        if i % 3 == 0 {
+            print("skip 3")
+            continue
+        }
+
+        if i % 5 == 0 {
+            print("skip 5")
+            continue
+        }
+
+        print("add")
+        sum = sum + i
+    }
+
+    print(sum)
+}
+
+@test(output = "18")
+fn continue_preserves_loop_variables() {
+    let sum = 0
+    let arr = [1, 2, 3, 4, 5, 6]
+
+    // Manual indexing with a counter (1-based to match expected output)
+    let index = 1
+    for value in arr {
+        if value % 2 == 0 {
+            index = index + 1
+            continue
+        }
+        sum = sum + index + value
+        index = index + 1
+    }
+
+    print(sum)
+}
+
+@test(output = "6\n3")
+fn test_vec_tuple_iteration_with_indices() {
+    let vec = vec_new()
+    vec_push(vec, 1)
+    vec_push(vec, 2)
+    vec_push(vec, 3)
+
+    let sum = 0
+    let index_sum = 0
+
+    // Tuple iteration over [T] with enumerate yields (int, T) with 0-based indices
+    for (i, x) in enumerate(vec) {
+        sum += x
+        index_sum += i
+    }
+
+    print(sum)
+    print(index_sum)
+}
+
+@test(output = "60", type_holes = [[3, "int"]])
+fn test_arena_tuple_iteration_type_check() {
+    let arena = arena_new()
+    insert(arena, 10)
+    insert(arena, 20)
+    insert(arena, 30)
+
+    let sum = 0
+
+    for (entity, value) in arena {
+        let value_typed: ? = value    // [3] - Should be int
+        sum += value
+    }
+
+    print(sum)
 }

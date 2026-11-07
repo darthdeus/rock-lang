@@ -267,3 +267,182 @@ fn chain_literal_pattern() {
     if let 8 = maybe_seven(true) && let c = maybe_seven(true) { print(c) } else { print("no") }
     if let 7 = maybe_seven(false) && let c = maybe_seven(true) { print(c) } else { print("no") }
 }
+
+// ==============================
+// Value position with a call as the value
+// ==============================
+
+fn maybe(have: bool, v: int) -> int? {
+    if have { v } else { null }
+}
+
+@test(output = "42")
+fn test_iflet_some_binds() {
+    let r = if let v = maybe(true, 42) { v } else { 0 }
+    print(r)
+}
+
+@test(output = "0")
+fn test_iflet_none_else() {
+    let r = if let v = maybe(false, 42) { v } else { 0 }
+    print(r)
+}
+
+@test(output = "100")
+fn test_iflet_wildcard() {
+    let r = if let _ = maybe(true, 5) { 100 } else { 0 }
+    print(r)
+}
+
+// ==============================
+// Value-position chains: each clause short-circuits to the else branch
+// ==============================
+
+@test(output = "7")
+fn test_iflet_chain_all_some() {
+    let r = if let x = maybe(true, 3) && let y = maybe(true, 4) {
+        x + y
+    } else {
+        -1
+    }
+    print(r)
+}
+
+@test(output = "-1")
+fn test_iflet_chain_first_none() {
+    let r = if let x = maybe(false, 3) && let y = maybe(true, 4) {
+        x + y
+    } else {
+        -1
+    }
+    print(r)
+}
+
+@test(output = "-1")
+fn test_iflet_chain_second_none() {
+    let r = if let x = maybe(true, 3) && let y = maybe(false, 4) {
+        x + y
+    } else {
+        -1
+    }
+    print(r)
+}
+
+@test(output = "9")
+fn test_iflet_chain_with_cond_pass() {
+    let r = if let x = maybe(true, 4) && x > 2 {
+        x + 5
+    } else {
+        -1
+    }
+    print(r)
+}
+
+@test(output = "-1")
+fn test_iflet_chain_with_cond_fail() {
+    let r = if let x = maybe(true, 1) && x > 2 {
+        x + 5
+    } else {
+        -1
+    }
+    print(r)
+}
+
+// ==============================
+// if let as a function's result. Regressions: an implicit-return if let
+// compiled to a bare expression statement, and explicit returns in its
+// branches were rejected as a type mismatch.
+// ==============================
+
+fn lookup_in_map(m: Map<int, string>, key: int) -> string? {
+    let val = m.get(key)
+    if let v = val {
+        v
+    } else {
+        null
+    }
+}
+
+fn lookup_in_map_explicit(m: Map<int, string>, key: int) -> string? {
+    let val = m.get(key)
+    if let v = val {
+        return v
+    } else {
+        return null
+    }
+}
+
+@test
+fn test_if_let_implicit_return() {
+    let m: Map<int, string> = map_new()
+    insert(m, 42, "hello")
+
+    let result = lookup_in_map(m, 42)
+    assert(result != null, "Expected non-null result")
+    assert_eq(result.unwrap(), "hello")
+
+    let missing = lookup_in_map(m, 99)
+    assert(missing == null, "Expected null for missing key")
+
+    print("if-let implicit return works")
+}
+
+@test
+fn test_if_let_explicit_return() {
+    let m: Map<int, string> = map_new()
+    insert(m, 42, "hello")
+
+    let result = lookup_in_map_explicit(m, 42)
+    assert(result != null, "Expected non-null result")
+    assert_eq(result.unwrap(), "hello")
+
+    let missing = lookup_in_map_explicit(m, 99)
+    assert(missing == null, "Expected null for missing key")
+
+    print("if-let explicit return works")
+}
+
+// `if let x = <control-flow expr>`: the bound value is itself an if, match
+// or block expression. Regression: it was spliced into an invalid Lua
+// rvalue and failed at load.
+fn rb_pick(i: int) -> int? {
+    if i >= 0 { return 7 }
+    return null
+}
+
+@test
+fn test_if_let_value_is_if_expr() {
+    let idx = 1
+    if let e = if idx >= 0 { rb_pick(idx) } else { null } {
+        assert_eq(e.unwrap(), 7)
+    } else {
+        assert(false, "if-expr value should have bound")
+    }
+    // and the null path
+    let neg = -1
+    let hit = if let e = if neg >= 0 { rb_pick(neg) } else { null } {
+        e.unwrap()
+    } else {
+        -99
+    }
+    assert_eq(hit, -99)
+}
+
+@test
+fn test_if_let_value_is_match_expr() {
+    let k = 1
+    if let v = match k { 1 => rb_pick(0), _ => null } {
+        assert_eq(v.unwrap(), 7)
+    } else {
+        assert(false, "match-expr value should have bound")
+    }
+}
+
+@test
+fn test_if_let_value_is_block_expr() {
+    if let v = { let t = rb_pick(5); t } {
+        assert_eq(v.unwrap(), 7)
+    } else {
+        assert(false, "block-expr value should have bound")
+    }
+}

@@ -1,0 +1,1304 @@
+// break and continue in while and for loops: nesting, complex conditions,
+// top-level placement in the loop body, and every combination with return.
+// The return combinations have had codegen bugs (invalid Lua when a
+// `return` or `break` was followed by the continue label).
+
+// === continue in while loops ===
+
+@test
+fn test_simple_continue() {
+    let results = vec_new()
+    let i = 0
+    while i < 10 {
+        i = i + 1
+        if i == 3 || i == 7 {
+            continue
+        }
+        vec_push(results, i)
+    }
+
+    // Should have [1, 2, 4, 5, 6, 8, 9, 10]
+    assert(vec_len(results) == 8, "Expected 8 elements after continue")
+    assert(vec_get(results, 0) == 1, "First element should be 1")
+    assert(vec_get(results, 1) == 2, "Second element should be 2")
+    assert(vec_get(results, 2) == 4, "Third element should be 4 (skipped 3)")
+    assert(vec_get(results, 3) == 5, "Fourth element should be 5")
+    assert(vec_get(results, 4) == 6, "Fifth element should be 6")
+    assert(vec_get(results, 5) == 8, "Sixth element should be 8 (skipped 7)")
+    assert(vec_get(results, 6) == 9, "Seventh element should be 9")
+    assert(vec_get(results, 7) == 10, "Eighth element should be 10")
+}
+
+@test
+fn test_nested_loops_continue() {
+    let results = vec_new()
+    let i = 0
+    while i < 3 {
+        i = i + 1
+        let j = 0
+        while j < 3 {
+            j = j + 1
+            if j == 2 {
+                continue  // Should only skip inner loop iteration
+            }
+            vec_push(results, i * 10 + j)
+        }
+    }
+
+    // Should have [11, 13, 21, 23, 31, 33] (skipping j=2 cases)
+    assert(vec_len(results) == 6, "Expected 6 elements")
+    assert(vec_get(results, 0) == 11, "First element should be 11")
+    assert(vec_get(results, 1) == 13, "Second element should be 13 (skipped 12)")
+    assert(vec_get(results, 2) == 21, "Third element should be 21")
+    assert(vec_get(results, 3) == 23, "Fourth element should be 23 (skipped 22)")
+    assert(vec_get(results, 4) == 31, "Fifth element should be 31")
+    assert(vec_get(results, 5) == 33, "Sixth element should be 33 (skipped 32)")
+}
+
+@test
+fn test_continue_with_complex_conditions() {
+    let results = vec_new()
+    let i = 0
+    while i < 20 {
+        i = i + 1
+
+        // Multiple conditions with continue
+        if i % 2 == 0 {
+            if i % 4 == 0 {
+                continue  // Skip multiples of 4
+            }
+            vec_push(results, i)  // Keep multiples of 2 but not 4
+        } else {
+            if i % 3 == 0 {
+                continue  // Skip multiples of 3 (odd)
+            }
+            vec_push(results, i)  // Keep odd numbers not divisible by 3
+        }
+    }
+
+    // Expected: 1, 2, 5, 6, 7, 10, 11, 13, 14, 17, 18, 19
+    assert(vec_len(results) == 12, "Expected 12 elements")
+    assert(vec_get(results, 0) == 1, "Should include 1")
+    assert(vec_get(results, 1) == 2, "Should include 2")
+    assert(vec_get(results, 2) == 5, "Should include 5")
+    assert(vec_get(results, 3) == 6, "Should include 6")
+    assert(vec_get(results, 4) == 7, "Should include 7")
+    assert(vec_get(results, 5) == 10, "Should include 10")
+    assert(vec_get(results, 6) == 11, "Should include 11")
+    assert(vec_get(results, 7) == 13, "Should include 13")
+    assert(vec_get(results, 8) == 14, "Should include 14")
+    assert(vec_get(results, 9) == 17, "Should include 17")
+    assert(vec_get(results, 10) == 18, "Should include 18")
+    assert(vec_get(results, 11) == 19, "Should include 19")
+}
+
+@test
+fn test_continue_in_if_else() {
+    let results = vec_new()
+    let i = 0
+    while i < 10 {
+        i = i + 1
+
+        if i <= 5 {
+            if i % 2 == 0 {
+                continue
+            }
+            vec_push(results, i)
+        } else {
+            if i % 2 == 1 {
+                continue
+            }
+            vec_push(results, i)
+        }
+    }
+
+    // Should have [1, 3, 5, 6, 8, 10] - odds <=5, evens >5
+    assert(vec_len(results) == 6, "Expected 6 elements")
+    assert(vec_get(results, 0) == 1, "Should include 1")
+    assert(vec_get(results, 1) == 3, "Should include 3")
+    assert(vec_get(results, 2) == 5, "Should include 5")
+    assert(vec_get(results, 3) == 6, "Should include 6")
+    assert(vec_get(results, 4) == 8, "Should include 8")
+    assert(vec_get(results, 5) == 10, "Should include 10")
+}
+
+@test
+fn test_continue_with_early_return() {
+    let results = vec_new()
+    let i = 0
+    let limit = 20
+    while i < limit {
+        i = i + 1
+        if i > 15 {
+            break  // Instead of early return, use break
+        }
+        if i % 5 == 0 {
+            continue  // Skip multiples of 5
+        }
+        vec_push(results, i)
+    }
+    // Should have [1, 2, 3, 4, 6, 7, 8, 9, 11, 12, 13, 14] (stops at 15)
+    assert(vec_len(results) == 12, "Expected 12 elements")
+    assert(vec_get(results, 0) == 1, "Should include 1")
+    assert(vec_get(results, 3) == 4, "Should include 4")
+    assert(vec_get(results, 4) == 6, "Should include 6 (skipped 5)")
+    assert(vec_get(results, 8) == 11, "Should include 11 (skipped 10)")
+    assert(vec_get(results, 11) == 14, "Should include 14")
+}
+
+@test
+fn test_continue_with_break() {
+    let results = vec_new()
+    let i = 0
+    while i < 20 {
+        i = i + 1
+        if i > 15 {
+            break  // Exit loop completely
+        }
+        if i % 3 == 0 {
+            continue  // Skip multiples of 3
+        }
+        vec_push(results, i)
+        if vec_len(results) >= 8 {
+            break  // Exit after collecting 8 items
+        }
+    }
+
+    // Should have [1, 2, 4, 5, 7, 8, 10, 11] (first 8 non-multiples of 3)
+    assert(vec_len(results) == 8, "Expected exactly 8 elements")
+    assert(vec_get(results, 0) == 1, "Should include 1")
+    assert(vec_get(results, 1) == 2, "Should include 2")
+    assert(vec_get(results, 2) == 4, "Should include 4 (skipped 3)")
+    assert(vec_get(results, 3) == 5, "Should include 5")
+    assert(vec_get(results, 4) == 7, "Should include 7 (skipped 6)")
+    assert(vec_get(results, 5) == 8, "Should include 8")
+    assert(vec_get(results, 6) == 10, "Should include 10 (skipped 9)")
+    assert(vec_get(results, 7) == 11, "Should include 11")
+}
+
+@test
+fn test_deeply_nested_continue() {
+    let results = vec_new()
+    let i = 0
+    while i < 3 {
+        i = i + 1
+        let j = 0
+        while j < 3 {
+            j = j + 1
+            let k = 0
+            while k < 3 {
+                k = k + 1
+                if k == 2 {
+                    continue  // Only affects innermost loop
+                }
+                if j == 2 && k == 1 {
+                    continue  // Skip specific case
+                }
+                vec_push(results, i * 100 + j * 10 + k)
+            }
+        }
+    }
+
+    // Should skip all k=2 cases and the j=2,k=1 cases
+    assert(vec_len(results) == 15, "Expected 15 elements (18 total - 3 skipped for k=2,k=1)")
+    assert(vec_get(results, 0) == 111, "Should include 111")
+    assert(vec_get(results, 1) == 113, "Should include 113 (skipped 112)")
+    // Verify a few key values to ensure correct skipping pattern
+    let found_121 = false
+    let found_221 = false
+    let found_321 = false
+    let i_check = 0
+    while i_check < vec_len(results) {
+        let val = vec_get(results, i_check)
+        if val == 121 { found_121 = true }
+        if val == 221 { found_221 = true }
+        if val == 321 { found_321 = true }
+        i_check = i_check + 1
+    }
+    assert(!found_121, "Should skip 121 (j=2, k=1)")
+    assert(!found_221, "Should skip 221 (j=2, k=1)")
+    assert(!found_321, "Should skip 321 (j=2, k=1)")
+}
+
+fn should_skip(n: int) -> bool {
+    return n % 4 == 0 || n % 7 == 0
+}
+
+@test
+fn test_continue_with_function_calls() {
+    let results = vec_new()
+    let i = 0
+    while i < 20 {
+        i = i + 1
+        if should_skip(i) {
+            continue
+        }
+        vec_push(results, i)
+    }
+
+    // Should skip 4, 7, 8, 12, 14, 16, 20
+    assert(vec_len(results) == 13, "Expected 13 elements")
+
+    // Verify some skipped values are not present
+    let found_4 = false
+    let found_7 = false
+    let found_8 = false
+    let found_14 = false
+    let i_check = 0
+    while i_check < vec_len(results) {
+        let val = vec_get(results, i_check)
+        if val == 4 { found_4 = true }
+        if val == 7 { found_7 = true }
+        if val == 8 { found_8 = true }
+        if val == 14 { found_14 = true }
+        i_check = i_check + 1
+    }
+    assert(!found_4, "Should skip 4")
+    assert(!found_7, "Should skip 7")
+    assert(!found_8, "Should skip 8")
+    assert(!found_14, "Should skip 14")
+}
+
+// === continue and break in for loops ===
+
+@test
+fn test_for_loop_basic_continue() {
+    let results = vec_new()
+    let arr = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+    for x in arr {
+        if x % 2 == 0 {
+            continue  // Skip even numbers
+        }
+        vec_push(results, x)
+    }
+
+    // Should have [1, 3, 5, 7, 9]
+    assert(vec_len(results) == 5, "Expected 5 odd numbers")
+    assert(vec_get(results, 0) == 1, "Should include 1")
+    assert(vec_get(results, 1) == 3, "Should include 3")
+    assert(vec_get(results, 2) == 5, "Should include 5")
+    assert(vec_get(results, 3) == 7, "Should include 7")
+    assert(vec_get(results, 4) == 9, "Should include 9")
+}
+
+@test
+fn test_for_loop_basic_break() {
+    let results = vec_new()
+    let arr = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+    for x in arr {
+        if x > 5 {
+            break  // Stop when we reach numbers > 5
+        }
+        vec_push(results, x)
+    }
+
+    // Should have [1, 2, 3, 4, 5]
+    assert(vec_len(results) == 5, "Expected 5 elements before break")
+    assert(vec_get(results, 0) == 1, "Should include 1")
+    assert(vec_get(results, 1) == 2, "Should include 2")
+    assert(vec_get(results, 2) == 3, "Should include 3")
+    assert(vec_get(results, 3) == 4, "Should include 4")
+    assert(vec_get(results, 4) == 5, "Should include 5")
+}
+
+@test
+fn test_for_loop_continue_and_break() {
+    let results = vec_new()
+    let arr = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+
+    for x in arr {
+        if x > 10 {
+            break  // Stop when we reach numbers > 10
+        }
+        if x % 3 == 0 {
+            continue  // Skip multiples of 3
+        }
+        vec_push(results, x)
+    }
+
+    // Should have [1, 2, 4, 5, 7, 8, 10] (1-10, skipping 3, 6, 9)
+    assert(vec_len(results) == 7, "Expected 7 elements")
+    assert(vec_get(results, 0) == 1, "Should include 1")
+    assert(vec_get(results, 1) == 2, "Should include 2")
+    assert(vec_get(results, 2) == 4, "Should include 4 (skipped 3)")
+    assert(vec_get(results, 3) == 5, "Should include 5")
+    assert(vec_get(results, 4) == 7, "Should include 7 (skipped 6)")
+    assert(vec_get(results, 5) == 8, "Should include 8")
+    assert(vec_get(results, 6) == 10, "Should include 10 (skipped 9)")
+}
+
+@test
+fn test_for_loop_multiple_continues() {
+    let results = vec_new()
+    let arr = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+
+    for x in arr {
+        if x % 2 == 0 {
+            if x % 4 == 0 {
+                continue  // Skip multiples of 4
+            }
+            // Keep multiples of 2 but not 4 (2, 6, 10, 14)
+        } else {
+            if x % 3 == 0 {
+                continue  // Skip odd multiples of 3 (3, 9, 15)
+            }
+            // Keep odd numbers not divisible by 3 (1, 5, 7, 11, 13)
+        }
+        vec_push(results, x)
+    }
+
+    // Should have [1, 2, 5, 6, 7, 10, 11, 13, 14] (skip 3, 4, 8, 9, 12, 15)
+    assert(vec_len(results) == 9, "Expected 9 elements")
+    assert(vec_get(results, 0) == 1, "Should include 1")
+    assert(vec_get(results, 1) == 2, "Should include 2")
+    assert(vec_get(results, 2) == 5, "Should include 5")
+    assert(vec_get(results, 3) == 6, "Should include 6")
+    assert(vec_get(results, 4) == 7, "Should include 7")
+    assert(vec_get(results, 5) == 10, "Should include 10")
+    assert(vec_get(results, 6) == 11, "Should include 11")
+    assert(vec_get(results, 7) == 13, "Should include 13")
+    assert(vec_get(results, 8) == 14, "Should include 14")
+}
+
+@test
+fn test_for_loop_continue_with_break_condition() {
+    let results = vec_new()
+    let count = 0
+    let arr = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+
+    for x in arr {
+        count = count + 1
+        if x % 5 == 0 {
+            continue  // Skip multiples of 5
+        }
+        vec_push(results, x)
+        if vec_len(results) >= 8 {
+            break  // Stop after collecting 8 non-multiples of 5
+        }
+    }
+
+    // Should have [1, 2, 3, 4, 6, 7, 8, 9] (first 8 non-multiples of 5)
+    assert(vec_len(results) == 8, "Expected exactly 8 elements")
+    assert(vec_get(results, 0) == 1, "Should include 1")
+    assert(vec_get(results, 1) == 2, "Should include 2")
+    assert(vec_get(results, 2) == 3, "Should include 3")
+    assert(vec_get(results, 3) == 4, "Should include 4")
+    assert(vec_get(results, 4) == 6, "Should include 6 (skipped 5)")
+    assert(vec_get(results, 5) == 7, "Should include 7")
+    assert(vec_get(results, 6) == 8, "Should include 8")
+    assert(vec_get(results, 7) == 9, "Should include 9")
+    assert(count > 8, "Should have processed more than 8 elements due to continues")
+}
+
+@test
+fn test_nested_for_loops_with_continue() {
+    let results = vec_new()
+    let outer_arr = [1, 2, 3]
+    let inner_arr = [10, 20, 30, 40]
+
+    for i in outer_arr {
+        for j in inner_arr {
+            if j == 20 {
+                continue  // Skip inner value 20
+            }
+            if i == 2 && j == 30 {
+                continue  // Skip specific combination
+            }
+            vec_push(results, i * 100 + j)
+        }
+    }
+
+    // Should have [110, 130, 140, 210, 240, 310, 330, 340] (skip j=20 and i=2,j=30)
+    assert(vec_len(results) == 8, "Expected 8 elements")
+    assert(vec_get(results, 0) == 110, "Should include 110")
+    assert(vec_get(results, 1) == 130, "Should include 130 (skipped 120)")
+    assert(vec_get(results, 2) == 140, "Should include 140")
+    assert(vec_get(results, 3) == 210, "Should include 210")
+    assert(vec_get(results, 4) == 240, "Should include 240 (skipped 220, 230)")
+    assert(vec_get(results, 5) == 310, "Should include 310")
+    assert(vec_get(results, 6) == 330, "Should include 330 (skipped 320)")
+    assert(vec_get(results, 7) == 340, "Should include 340")
+}
+
+@test
+fn test_nested_for_loops_with_break() {
+    let results = vec_new()
+    let outer_arr = [1, 2, 3, 4]
+    let inner_arr = [10, 20, 30, 40, 50]
+
+    for i in outer_arr {
+        for j in inner_arr {
+            if j > 30 {
+                break  // Break inner loop when j > 30
+            }
+            vec_push(results, i * 100 + j)
+        }
+        if i >= 3 {
+            break  // Break outer loop when i >= 3
+        }
+    }
+
+    // Should have [110, 120, 130, 210, 220, 230, 310, 320, 330] (i=1,2,3 with j=10,20,30)
+    assert(vec_len(results) == 9, "Expected 9 elements")
+    assert(vec_get(results, 0) == 110, "Should include 110")
+    assert(vec_get(results, 1) == 120, "Should include 120")
+    assert(vec_get(results, 2) == 130, "Should include 130")
+    assert(vec_get(results, 3) == 210, "Should include 210")
+    assert(vec_get(results, 4) == 220, "Should include 220")
+    assert(vec_get(results, 5) == 230, "Should include 230")
+    assert(vec_get(results, 6) == 310, "Should include 310")
+    assert(vec_get(results, 7) == 320, "Should include 320")
+    assert(vec_get(results, 8) == 330, "Should include 330")
+}
+
+@test
+fn test_nested_for_loops_continue_and_break() {
+    let results = vec_new()
+    let outer_arr = [1, 2, 3, 4, 5]
+    let inner_arr = [1, 2, 3, 4, 5, 6, 7, 8]
+
+    for i in outer_arr {
+        if i == 4 {
+            continue  // Skip entire i=4 iteration
+        }
+        for j in inner_arr {
+            if j % 2 == 0 {
+                continue  // Skip even j values
+            }
+            if j > 5 {
+                break  // Break inner loop when j > 5
+            }
+            vec_push(results, i * 10 + j)
+        }
+        if vec_len(results) >= 12 {
+            break  // Break outer loop after collecting enough results
+        }
+    }
+
+    // i=1: j=1,3,5 → [11, 13, 15]
+    // i=2: j=1,3,5 → [21, 23, 25]
+    // i=3: j=1,3,5 → [31, 33, 35]
+    // i=4: skipped (continue)
+    // i=5: j=1,3,5 → [51, 53, 55] but break after 12 total
+    assert(vec_len(results) == 12, "Expected 12 elements")
+    assert(vec_get(results, 0) == 11, "Should include 11")
+    assert(vec_get(results, 1) == 13, "Should include 13")
+    assert(vec_get(results, 2) == 15, "Should include 15")
+    assert(vec_get(results, 3) == 21, "Should include 21")
+    assert(vec_get(results, 4) == 23, "Should include 23")
+    assert(vec_get(results, 5) == 25, "Should include 25")
+    assert(vec_get(results, 6) == 31, "Should include 31")
+    assert(vec_get(results, 7) == 33, "Should include 33")
+    assert(vec_get(results, 8) == 35, "Should include 35")
+    assert(vec_get(results, 9) == 51, "Should include 51")
+    assert(vec_get(results, 10) == 53, "Should include 53")
+    assert(vec_get(results, 11) == 55, "Should include 55")
+}
+
+@test
+fn test_for_loop_complex_continue_conditions() {
+    let results = vec_new()
+    let arr = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+
+    for x in arr {
+        // Complex nested conditions with multiple continues
+        if x <= 10 {
+            if x % 2 == 0 {
+                if x % 4 == 0 {
+                    continue  // Skip 4, 8
+                }
+                // Keep 2, 6, 10
+            } else {
+                if x % 3 == 0 {
+                    continue  // Skip 3, 9
+                }
+                // Keep 1, 5, 7
+            }
+        } else {
+            if x % 5 == 0 {
+                continue  // Skip 15, 20
+            }
+            if x > 17 {
+                break  // Break at 18, 19
+            }
+            // Keep 11, 12, 13, 14, 16, 17
+        }
+        vec_push(results, x)
+    }
+
+    // Should have [1, 2, 5, 6, 7, 10, 11, 12, 13, 14, 16, 17] (12 elements)
+    assert(vec_len(results) == 12, "Expected 12 elements")
+    assert(vec_get(results, 0) == 1, "Should include 1")
+    assert(vec_get(results, 1) == 2, "Should include 2")
+    assert(vec_get(results, 2) == 5, "Should include 5")
+    assert(vec_get(results, 3) == 6, "Should include 6")
+    assert(vec_get(results, 4) == 7, "Should include 7")
+    assert(vec_get(results, 5) == 10, "Should include 10")
+    assert(vec_get(results, 6) == 11, "Should include 11")
+    assert(vec_get(results, 7) == 12, "Should include 12")
+    assert(vec_get(results, 8) == 13, "Should include 13")
+    assert(vec_get(results, 9) == 14, "Should include 14")
+    assert(vec_get(results, 10) == 16, "Should include 16")
+    assert(vec_get(results, 11) == 17, "Should include 17")
+}
+
+@test
+fn test_for_loop_with_early_collection_limit() {
+    let results = vec_new()
+    let collected = 0
+    let arr = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+
+    for x in arr {
+        if x % 7 == 0 {
+            continue  // Skip multiples of 7 (7, 14)
+        }
+        if collected >= 5 {
+            // Stop collecting after 5 items, but continue processing to test continue still works
+            if x % 3 == 0 {
+                continue  // Test continue still works after collection stops
+            }
+            // Don't add to results, but don't break either
+        } else {
+            vec_push(results, x)
+            collected = collected + 1
+        }
+    }
+
+    // Should have [1, 2, 3, 4, 5] (first 5 non-multiples of 7)
+    assert(vec_len(results) == 5, "Expected exactly 5 elements")
+    assert(vec_get(results, 0) == 1, "Should include 1")
+    assert(vec_get(results, 1) == 2, "Should include 2")
+    assert(vec_get(results, 2) == 3, "Should include 3")
+    assert(vec_get(results, 3) == 4, "Should include 4")
+    assert(vec_get(results, 4) == 5, "Should include 5")
+}
+
+// === Edge cases ===
+
+@test
+fn test_triple_nested_for_loops() {
+    let results = vec_new()
+    let arr1 = [1, 2, 3]
+    let arr2 = [1, 2, 3]
+    let arr3 = [1, 2, 3]
+
+    for i in arr1 {
+        for j in arr2 {
+            if i == 2 && j == 2 {
+                continue  // Skip middle iteration of middle loop
+            }
+            for k in arr3 {
+                if k == 2 {
+                    continue  // Skip k=2 in all cases
+                }
+                if i == 3 && j == 1 && k == 3 {
+                    continue  // Skip specific triple combination
+                }
+                vec_push(results, i * 100 + j * 10 + k)
+            }
+        }
+    }
+
+    // i=1: j=1,2,3 k=1,3 → [111, 113, 121, 123, 131, 133]
+    // i=2: j=1,3 k=1,3 → [211, 213, 231, 233] (skip j=2 entirely)
+    // i=3: j=1,2,3 k=1,3 → [311, 313, 321, 323, 331, 333] but skip (3,1,3)
+    // Final: [111, 113, 121, 123, 131, 133, 211, 213, 231, 233, 311, 321, 323, 331, 333]
+    assert(vec_len(results) == 15, "Expected 15 elements")
+    assert(vec_get(results, 0) == 111, "Should include 111")
+    assert(vec_get(results, 1) == 113, "Should include 113")
+    assert(vec_get(results, 6) == 211, "Should include 211")
+    assert(vec_get(results, 10) == 311, "Should include 311")
+
+    // Verify 313 is NOT present (should be skipped by specific condition)
+    let found_313 = false
+    let idx = 0
+    while idx < vec_len(results) {
+        if vec_get(results, idx) == 313 {
+            found_313 = true
+        }
+        idx = idx + 1
+    }
+    assert(!found_313, "Should skip 313 (i=3, j=1, k=3)")
+}
+
+@test
+fn test_mixed_loop_types_with_continue() {
+    let results = vec_new()
+    let arr = [1, 2, 3, 4, 5]
+    let i = 0
+
+    // Outer while loop
+    while i < 3 {
+        i = i + 1
+        if i == 2 {
+            continue  // Skip i=2 iteration
+        }
+
+        // Inner for loop
+        for x in arr {
+            if x % 2 == 0 {
+                continue  // Skip even numbers
+            }
+            vec_push(results, i * 10 + x)
+        }
+    }
+
+    // Should have i=1,3 with x=1,3,5 → [11, 13, 15, 31, 33, 35]
+    assert(vec_len(results) == 6, "Expected 6 elements")
+    assert(vec_get(results, 0) == 11, "Should include 11")
+    assert(vec_get(results, 1) == 13, "Should include 13")
+    assert(vec_get(results, 2) == 15, "Should include 15")
+    assert(vec_get(results, 3) == 31, "Should include 31")
+    assert(vec_get(results, 4) == 33, "Should include 33")
+    assert(vec_get(results, 5) == 35, "Should include 35")
+}
+
+@test
+fn test_continue_with_function_calls_in_for_loop() {
+    let results = vec_new()
+    let arr = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+
+    for x in arr {
+        if should_skip_value(x) {
+            continue
+        }
+        vec_push(results, x)
+    }
+
+    // should_skip_value skips multiples of 4 and 7: 4, 7, 8, 12
+    // Should have [1, 2, 3, 5, 6, 9, 10, 11]
+    assert(vec_len(results) == 8, "Expected 8 elements")
+    assert(vec_get(results, 0) == 1, "Should include 1")
+    assert(vec_get(results, 1) == 2, "Should include 2")
+    assert(vec_get(results, 2) == 3, "Should include 3")
+    assert(vec_get(results, 3) == 5, "Should include 5 (skipped 4)")
+    assert(vec_get(results, 4) == 6, "Should include 6")
+    assert(vec_get(results, 5) == 9, "Should include 9 (skipped 7, 8)")
+    assert(vec_get(results, 6) == 10, "Should include 10")
+    assert(vec_get(results, 7) == 11, "Should include 11 (skipped 12)")
+}
+
+@test
+fn test_deeply_nested_mixed_continue_break() {
+    let results = vec_new()
+    let outer_arr = [1, 2, 3, 4]
+    let middle_arr = [10, 20, 30]
+    let inner_arr = [100, 200, 300, 400]
+
+    for i in outer_arr {
+        if i == 4 {
+            break  // Break outer loop at i=4
+        }
+
+        for j in middle_arr {
+            if i == 1 && j == 20 {
+                continue  // Skip specific middle combination
+            }
+
+            for k in inner_arr {
+                if k == 200 {
+                    continue  // Skip k=200 in all cases
+                }
+                if k > 300 {
+                    break  // Break inner loop when k > 300
+                }
+                if i == 2 && j == 30 && k == 300 {
+                    continue  // Skip specific triple combination
+                }
+                vec_push(results, i * 10000 + j * 100 + k)
+            }
+        }
+    }
+
+    // Expected combinations:
+    // i=1: j=10,30 k=100,300 → [11100, 11300, 13100, 13300] (skip j=20)
+    // i=2: j=10,20,30 k=100,300 → [21100, 21300, 22100, 22300, 23100] (skip i=2,j=30,k=300)
+    // i=3: j=10,20,30 k=100,300 → [31100, 31300, 32100, 32300, 33100, 33300]
+    assert(vec_len(results) == 15, "Expected 15 elements")
+    assert(vec_get(results, 0) == 11100, "Should include 11100")
+    assert(vec_get(results, 1) == 11300, "Should include 11300")
+    assert(vec_get(results, 2) == 13100, "Should include 13100")
+    assert(vec_get(results, 3) == 13300, "Should include 13300")
+
+    // Verify 23300 is NOT present (should be skipped by specific condition)
+    let found_23300 = false
+    let idx = 0
+    while idx < vec_len(results) {
+        if vec_get(results, idx) == 23300 {
+            found_23300 = true
+        }
+        idx = idx + 1
+    }
+    assert(!found_23300, "Should skip 23300 (i=2, j=30, k=300)")
+}
+
+@test
+fn test_continue_with_state_modification() {
+    let results = vec_new()
+    let counter = 0
+    let skip_count = 0
+    let arr = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+    for x in arr {
+        counter = counter + 1
+
+        if x % 3 == 0 {
+            skip_count = skip_count + 1
+            continue  // Skip multiples of 3, but still count them
+        }
+
+        // Add counter value instead of x to show state is preserved
+        vec_push(results, counter * 10 + x)
+    }
+
+    // Should process all 10 elements, skip 3,6,9 (3 skips), add others with counter
+    assert(vec_len(results) == 7, "Expected 7 elements")
+    assert(skip_count == 3, "Should have skipped 3 elements")
+    assert(counter == 10, "Should have processed all 10 elements")
+
+    // Verify the counter is preserved correctly: counter*10 + x
+    assert(vec_get(results, 0) == 11, "Should be 1*10 + 1 = 11")
+    assert(vec_get(results, 1) == 22, "Should be 2*10 + 2 = 22")
+    assert(vec_get(results, 2) == 44, "Should be 4*10 + 4 = 44 (skipped 3)")
+    assert(vec_get(results, 3) == 55, "Should be 5*10 + 5 = 55")
+    assert(vec_get(results, 4) == 77, "Should be 7*10 + 7 = 77 (skipped 6)")
+    assert(vec_get(results, 5) == 88, "Should be 8*10 + 8 = 88")
+    assert(vec_get(results, 6) == 110, "Should be 10*10 + 10 = 110 (skipped 9)")
+}
+
+@test
+fn test_for_loop_continue_with_complex_data_structures() {
+    let results = vec_new()
+    let outer_vec = vec_new()
+
+    // Create nested data structure
+    let inner1 = vec_new()
+    vec_push(inner1, 1)
+    vec_push(inner1, 2)
+    vec_push(inner1, 3)
+    vec_push(outer_vec, inner1)
+
+    let inner2 = vec_new()
+    vec_push(inner2, 4)
+    vec_push(inner2, 5)
+    vec_push(inner2, 6)
+    vec_push(outer_vec, inner2)
+
+    let inner3 = vec_new()
+    vec_push(inner3, 7)
+    vec_push(inner3, 8)
+    vec_push(inner3, 9)
+    vec_push(outer_vec, inner3)
+
+    // Process nested structure with continue
+    for outer_item in outer_vec {
+        let first_elem = vec_get(outer_item, 0).unwrap()
+        if first_elem % 4 == 1 {
+            continue  // Skip vectors starting with 1 (1%4=1), but not 4 or 7
+        }
+
+        for inner_item in outer_item {
+            if inner_item % 2 == 0 {
+                continue  // Skip even numbers
+            }
+            vec_push(results, inner_item)
+        }
+    }
+
+    // Should skip first vector (starts with 1, 1%4=1)
+    // From second vector [4,5,6], skip even numbers 4,6, keep 5
+    // From third vector [7,8,9], skip even number 8, keep 7,9
+    assert(vec_len(results) == 3, "Expected 3 elements")
+    assert(vec_get(results, 0) == 5, "Should include 5")
+    assert(vec_get(results, 1) == 7, "Should include 7")
+    assert(vec_get(results, 2) == 9, "Should include 9")
+}
+
+// Helper function for testing function calls with continue
+fn should_skip_value(n: int) -> bool {
+    return n % 4 == 0 || n % 7 == 0
+}
+
+@test
+fn test_continue_break_with_side_effects() {
+    let results = vec_new()
+    let side_effect_count = 0
+    let break_triggered = false
+    let arr = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+
+    for x in arr {
+        side_effect_count = side_effect_count + 1
+
+        if x > 10 {
+            break_triggered = true
+            break  // Break when x > 10
+        }
+
+        if x % 4 == 0 {
+            // Side effect happens even when we continue
+            continue  // Skip multiples of 4
+        }
+
+        vec_push(results, x)
+    }
+
+    // Should process 1-10, skip 4,8, add [1,2,3,5,6,7,9,10]
+    assert(vec_len(results) == 8, "Expected 8 elements")
+    assert(side_effect_count == 11, "Should have processed 11 elements (stopped at 11)")
+    assert(break_triggered, "Break should have been triggered")
+    assert(vec_get(results, 0) == 1, "Should include 1")
+    assert(vec_get(results, 1) == 2, "Should include 2")
+    assert(vec_get(results, 2) == 3, "Should include 3")
+    assert(vec_get(results, 3) == 5, "Should include 5 (skipped 4)")
+    assert(vec_get(results, 4) == 6, "Should include 6")
+    assert(vec_get(results, 5) == 7, "Should include 7")
+    assert(vec_get(results, 6) == 9, "Should include 9 (skipped 8)")
+    assert(vec_get(results, 7) == 10, "Should include 10")
+}
+
+@test
+fn test_maximum_nesting_continue_break() {
+    let results = vec_new()
+    let level1 = [1, 2]
+    let level2 = [1, 2]
+    let level3 = [1, 2]
+    let level4 = [1, 2]
+
+    for a in level1 {
+        if a == 2 {
+            continue  // Skip a=2, only process a=1
+        }
+
+        for b in level2 {
+            for c in level3 {
+                if b == 2 && c == 1 {
+                    continue  // Skip specific b,c combination
+                }
+
+                for d in level4 {
+                    if d == 2 {
+                        break  // Break innermost loop when d=2
+                    }
+
+                    vec_push(results, a * 1000 + b * 100 + c * 10 + d)
+                }
+            }
+        }
+    }
+
+    // a=1 only:
+    // b=1: c=1,2 d=1 → [1111, 1121]
+    // b=2: c=2 d=1 → [1221] (skip b=2,c=1)
+    assert(vec_len(results) == 3, "Expected 3 elements")
+    assert(vec_get(results, 0) == 1111, "Should include 1111")
+    assert(vec_get(results, 1) == 1121, "Should include 1121")
+    assert(vec_get(results, 2) == 1221, "Should include 1221")
+}
+
+// === break/continue/return at the top level of a loop body ===
+// Not nested in an if: Lua requires break/return to end a block, so the
+// continue label must not follow them directly.
+
+@test
+fn test_break_toplevel_in_range_loop() {
+    let sum = 0
+    for i in 0..10 {
+        sum = sum + i
+        break
+    }
+    assert(sum == 0, "break at toplevel should exit after first iteration, got {sum}")
+}
+
+@test
+fn test_break_after_code_in_range_loop() {
+    let results: [int] = []
+    for i in 0..5 {
+        results.push(i)
+        if results.len == 3 { break }
+    }
+    assert(results.len == 3, "expected 3 elements, got {results.len}")
+}
+
+@test
+fn test_continue_toplevel_in_range_loop() {
+    let sum = 0
+    for i in 0..5 {
+        sum = sum + 1
+        continue
+    }
+    assert(sum == 5, "continue at toplevel should not skip, got {sum}")
+}
+
+@test
+fn test_return_inside_loop() {
+    let result = helper_return_from_loop()
+    assert(result == 42, "expected 42 from early return, got {result}")
+}
+
+fn helper_return_from_loop() -> int {
+    for i in 0..10 {
+        let x = 42
+        return x
+    }
+    return -1
+}
+
+@test
+fn test_break_in_array_loop() {
+    let arr = [10, 20, 30, 40, 50]
+    let first = -1
+    for x in arr {
+        first = x
+        break
+    }
+    assert(first == 10, "expected first element 10, got {first}")
+}
+
+// === continue and return in the same for loop ===
+// Regression: an if/else before the return caused a parse error.
+
+@test(output = "found 3")
+fn simple_continue_then_return() {
+    print(find_first_over_2())
+}
+
+fn find_first_over_2() -> string {
+    for i in 0..5 {
+        if i <= 2 { continue }
+        return "found {i}"
+    }
+    return "not found"
+}
+
+@test(output = "yes 3")
+fn continue_then_ifelse_then_return() {
+    print(find_with_ifelse(true))
+}
+
+fn find_with_ifelse(flag: bool) -> string {
+    for i in 0..5 {
+        if i <= 2 { continue }
+
+        let result = ""
+        if flag {
+            result = "yes"
+        } else {
+            result = "no"
+        }
+
+        return "{result} {i}"
+    }
+    return "not found"
+}
+
+@test(output = "updated 3")
+fn continue_then_ifelse_then_mutate_then_return() {
+    print(find_and_mutate())
+}
+
+fn find_and_mutate() -> string {
+    let state = ""
+    for i in 0..5 {
+        if i <= 2 { continue }
+
+        if i > 2 {
+            state = "updated"
+        } else {
+            state = "other"
+        }
+
+        state = "{state} {i}"
+        return state
+    }
+    return "not found"
+}
+
+global SIDE_EFFECT: int = 0
+
+@test(output = "42")
+fn continue_then_bare_return_in_void_fn() {
+    do_stuff()
+    print(SIDE_EFFECT)
+}
+
+fn do_stuff() {
+    for i in 0..5 {
+        if i <= 2 { continue }
+
+        if i == 3 {
+            SIDE_EFFECT = 42
+        } else {
+            SIDE_EFFECT = 0
+        }
+
+        return
+    }
+}
+
+// === continue with return/break in while loops ===
+// Regression: return was not wrapped in `do return end` when continue was
+// also present.
+
+@test(output = "3")
+fn while_continue_then_return() {
+    print(while_cr())
+}
+
+fn while_cr() -> int {
+    let i = 0
+    while i < 10 {
+        i = i + 1
+        if i < 3 { continue }
+        return i
+    }
+    return -1
+}
+
+@test(output = "5")
+fn while_continue_then_break() {
+    let i = 0
+    let result = -1
+    while i < 10 {
+        i = i + 1
+        if i < 3 { continue }
+        if i > 5 { break }
+        result = i
+    }
+    print(result)
+}
+
+global W1: int = 0
+
+@test(output = "42")
+fn while_continue_ifelse_return_void() {
+    while_void_test()
+    print(W1)
+}
+
+fn while_void_test() {
+    let i = 0
+    while i < 10 {
+        i = i + 1
+        if i < 3 { continue }
+
+        if i == 3 {
+            W1 = 42
+        } else {
+            W1 = 99
+        }
+
+        return
+    }
+}
+
+// === All combinations of break/continue/return ===
+
+// === continue + return ===
+
+global G1: int = 0
+
+@test(output = "42")
+fn continue_then_return_void() {
+    continue_return_void()
+    print(G1)
+}
+
+fn continue_return_void() {
+    for i in 0..5 {
+        if i < 3 { continue }
+        G1 = 42
+        return
+    }
+}
+
+@test(output = "3")
+fn continue_then_return_value() {
+    print(continue_return_value())
+}
+
+fn continue_return_value() -> int {
+    for i in 0..5 {
+        if i < 3 { continue }
+        return i
+    }
+    return -1
+}
+
+// === continue + break ===
+
+@test(output = "3")
+fn continue_then_break() {
+    let result = -1
+    for i in 0..5 {
+        if i < 3 { continue }
+        result = i
+        break
+    }
+    print(result)
+}
+
+// === break + continue (break first in source, continue later) ===
+
+@test(output = "5")
+fn break_and_continue_in_branches() {
+    let sum = 0
+    for i in 0..10 {
+        if i >= 4 { break }
+        if i == 1 { continue }
+        sum = sum + i
+    }
+    // 0 + skip 1 + 2 + 3 = 5
+    print(sum)
+}
+
+// === continue + return inside if/else ===
+
+global G2: int = 0
+
+@test(output = "30")
+fn continue_then_ifelse_then_return_void() {
+    ifelse_return_void()
+    print(G2)
+}
+
+fn ifelse_return_void() {
+    for i in 0..5 {
+        if i < 3 { continue }
+
+        if i == 3 {
+            G2 = 30
+        } else {
+            G2 = 99
+        }
+
+        return
+    }
+}
+
+@test(output = "yes 3")
+fn continue_then_ifelse_then_return_value() {
+    print(ifelse_return_value(true))
+}
+
+fn ifelse_return_value(flag: bool) -> string {
+    for i in 0..5 {
+        if i < 3 { continue }
+
+        let r = ""
+        if flag {
+            r = "yes"
+        } else {
+            r = "no"
+        }
+
+        return "{r} {i}"
+    }
+    return "none"
+}
+
+// === nested loops with mixed control flow ===
+
+@test(output = "2-1")
+fn nested_continue_break_return() {
+    print(nested_loop_test())
+}
+
+fn nested_loop_test() -> string {
+    for i in 0..5 {
+        if i < 2 { continue }
+
+        for j in 0..5 {
+            if j < 1 { continue }
+            return "{i}-{j}"
+        }
+    }
+    return "none"
+}
+
+@test(output = "18")
+fn nested_continue_outer_break() {
+    let sum = 0
+    for i in 0..10 {
+        if i >= 4 { break }
+
+        for j in 0..5 {
+            if j < 2 { continue }
+            sum = sum + i
+        }
+        // inner loop adds i three times (j=2,3,4)
+    }
+    // i=0: +0, i=1: +3, i=2: +6, i=3: +9 = 18
+    print(sum)
+}
+
+// === continue + return + mutation between them ===
+
+global G3: string = ""
+
+@test(output = "processed 3")
+fn continue_mutate_return_void() {
+    mutate_then_return()
+    print(G3)
+}
+
+fn mutate_then_return() {
+    for i in 0..5 {
+        if i < 3 { continue }
+
+        G3 = "processed"
+        G3 = "{G3} {i}"
+        return
+    }
+}
+
+// === multiple continues before return/break ===
+
+@test(output = "3")
+fn multiple_continues_then_return() {
+    print(multi_continue())
+}
+
+fn multi_continue() -> int {
+    for i in 0..10 {
+        if i < 3 { continue }
+        if i == 4 { continue }
+        if i == 5 { continue }
+        return i
+    }
+    return -1
+}
+
+@test(output = "3")
+fn multiple_continues_then_break() {
+    let result = -1
+    for i in 0..10 {
+        if i < 3 { continue }
+        if i == 4 { continue }
+        if i == 5 { continue }
+        result = i
+        break
+    }
+    print(result)
+}
+
+// === return inside nested if inside loop with continue ===
+
+@test(output = "found 4")
+fn continue_nested_if_return() {
+    print(nested_if_return())
+}
+
+fn nested_if_return() -> string {
+    for i in 0..10 {
+        if i < 2 { continue }
+
+        if i > 3 {
+            if i < 6 {
+                return "found {i}"
+            }
+        }
+    }
+    return "none"
+}

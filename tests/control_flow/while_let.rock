@@ -1,3 +1,6 @@
+// `while let`: nullable bindings and enum-variant patterns (multi-arg,
+// wildcard, nested) as loop conditions.
+
 enum SimpleOption {
     None,
     Some(int),
@@ -33,4 +36,105 @@ fn test_while_let_enum_countdown() {
     }
 
     assert_eq(sum, 6)
+}
+
+// --- Multi-arg enum-variant patterns ---
+
+enum E { A(int, int), B }
+
+@test(output = "5 6")
+fn test_while_let_multi_arg() {
+    let e: E = E::A(5, 6);
+    while let A(x, y) = e {
+        print("{x} {y}");
+        e = E::B;
+    }
+}
+
+@test(output = "10")
+fn test_while_let_wildcard_arg() {
+    let e: E = E::A(10, 20);
+    while let A(x, _) = e {
+        print("{x}");
+        e = E::B;
+    }
+}
+
+// --- Nested enum-variant patterns ---
+
+enum Inner { J(int), K }
+enum Outer { L(Inner), M(int) }
+
+@test
+fn test_nested_enum_match_extracts_inner() {
+    let e: Outer = Outer::L(Inner::J(42))
+    let captured = 0
+    while let L(J(x)) = e {
+        captured = x
+        e = Outer::M(0)  // make next iter not match
+    }
+    assert_eq(captured, 42)
+}
+
+@test
+fn test_nested_enum_no_match_skips_body() {
+    let e: Outer = Outer::L(Inner::K)
+    let entered = 0
+    while let L(J(x)) = e {
+        entered = entered + 1
+        e = Outer::M(0)
+    }
+    assert_eq(entered, 0)  // outer matches L but inner is K, not J
+}
+
+@test
+fn test_nested_enum_outer_mismatch_skips() {
+    let e: Outer = Outer::M(7)
+    let entered = 0
+    while let L(J(x)) = e {
+        entered = entered + 1
+        e = Outer::M(0)
+    }
+    assert_eq(entered, 0)  // outer is M, not L — short-circuits before
+                          // touching the slot that J would need
+}
+
+// --- Nullable binding from a call evaluated each iteration ---
+
+global counter: int = 0
+
+fn next_or_null() -> int? {
+    counter = counter + 1
+    if counter <= 3 { counter } else { null }
+}
+
+@test(output = "1 2 3")
+fn test_while_let_iter() {
+    counter = 0
+    let out = ""
+    let first = true
+    while let v = next_or_null() {
+        if !first { out = out + " " }
+        first = false
+        out = out + "{v}"
+    }
+    print(out)
+}
+
+global counter2: int = 0
+
+fn next2() -> int? {
+    counter2 = counter2 + 1
+    if counter2 <= 5 { counter2 } else { null }
+}
+
+@test(output = "stopped at 2")
+fn test_while_let_break_inside() {
+    counter2 = 0
+    let last = 0
+    while let v = next2() {
+        last = v
+        if v == 2 { break }
+    }
+    print("stopped at {last}")
 }

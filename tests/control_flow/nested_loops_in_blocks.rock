@@ -1,5 +1,5 @@
-// Regression test for nested for loops in block expressions
-// This tests the specific case that was failing in blood_canvas.rock
+// Regression test for nested for loops in a lambda's block body passed as a
+// callback.
 
 fn with_callback(callback: () -> ()) {
     callback()
@@ -9,7 +9,6 @@ fn with_callback(callback: () -> ()) {
 fn test_nested_for_loops_in_block_expr() {
     let count = 0
 
-    // This pattern matches what blood_canvas.rock does
     with_callback(() => {
         for y in 0..3 {
             for x in 0..3 {

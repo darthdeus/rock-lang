@@ -1,14 +1,12 @@
-// Bug: implicit return not working in certain contexts.
-// Simple cases (literals, if/else) work, but UFCS method calls
-// as the last expression may not return their value.
+// A function's trailing expression is its return value, whether it is a
+// free call, a UFCS call, follows an early-return guard, or is followed by
+// comments. Regression: UFCS calls in tail position lost their value.
 
 fn lookup_free(m: Map<int, string>, key: int) -> string? {
-    // Free function call - does this work?
     get(m, key)
 }
 
 fn lookup_ufcs(m: Map<int, string>, key: int) -> string? {
-    // UFCS method call - does this work?
     m.get(key)
 }
 
@@ -71,4 +69,27 @@ fn test_implicit_return_arena_style() {
     assert(result != null, "Expected non-null from arena lookup")
     assert_eq(result.unwrap().value, 42)
     print("arena-style implicit return works")
+}
+
+// Trailing comments after the tail expression
+
+fn lookup_with_trailing_comments(m: Map<int, string>, key: int) -> string? {
+    if key < 0 { return null }
+
+    m.get(key)
+
+    // some old code
+    // that was commented out
+    // return null
+}
+
+@test
+fn test_implicit_return_with_trailing_comments() {
+    let m: Map<int, string> = map_new()
+    insert(m, 1, "hello")
+
+    let result = lookup_with_trailing_comments(m, 1)
+    assert(result != null, "Implicit return failed when followed by comments")
+    assert_eq(result.unwrap(), "hello")
+    print("implicit return with trailing comments works")
 }

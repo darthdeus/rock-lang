@@ -1,0 +1,656 @@
+// if/else as statements and expressions: value position (let, arguments,
+// operands, literals, indexes, tail returns), else-if chains, nesting,
+// scoping and shadowing in branches, and side effects.
+
+// Helper functions for conditional tests
+fn max_of_two(a: int, b: int) -> int {
+    if a > b { return a } else { return b }
+}
+
+fn foo() -> bool {
+    if true {
+        return true
+    }
+    return false
+}
+
+@test(output = "true")
+fn if_without_else_in_function() {
+    print(foo())
+}
+
+@test(output = "5")
+fn test_basic_if_expressions_1() {
+    let a = true
+    print(if a { 5 } else { 6 })
+}
+
+@test(output = "1")
+fn test_basic_if_expressions_2() {
+    let x = 10
+    print(if x > 0 { 1 } else { -1 })
+}
+
+@test(output = "42")
+fn test_basic_if_expressions_3() {
+    print(if true { 42 } else { 0 })
+}
+
+@test(output = "42")
+fn test_basic_if_expressions_4() {
+    print(if false { 0 } else { 42 })
+}
+
+@test(output = "5")
+fn test_if_expr_in_assignments_1() {
+    let a = true
+    let x = if a { 5 } else { 6 }
+    print(x)
+}
+
+@test(output = "100")
+fn test_if_expr_in_assignments_2() {
+    let condition = true
+    let x: int = if condition { 100 } else { 200 }
+    print(x)
+}
+
+@test(output = "5")
+fn test_if_expr_in_assignments_3() {
+    let a = true
+    let b = false
+    let x = if a { 1 } else { 2 }
+    let y = if b { 3 } else { 4 }
+    print(x + y)
+}
+
+@test(output = "2")
+fn test_nested_if_expressions_1() {
+    let a = true
+    let b = false
+    print(if a { if b { 1 } else { 2 } } else { 3 })
+}
+
+@test(output = "1")
+fn test_nested_if_expressions_2() {
+    let x = true
+    print(if (if x { true } else { false }) { 1 } else { 0 })
+}
+
+@test(output = "10")
+fn test_if_expr_with_complex_blocks() {
+    let condition = true
+    print(if condition { let temp = 5; temp * 2 } else { 0 })
+}
+
+@test(output = "debug mode")
+fn test_if_expr_in_function_calls_1() {
+    let debug = true
+    print(if debug { "debug mode" } else { "release mode" })
+}
+
+@test(output = "3")
+fn test_if_expr_in_function_calls_2() {
+    let a = false
+    let b = true
+    print(max_of_two(if a { 1 } else { 2 }, if b { 3 } else { 4 }))
+}
+
+@test(output = "8")
+fn test_if_expr_in_binary_operations_1() {
+    let a = true
+    let b = false
+    print((if a { 5 } else { 10 }) + (if b { 2 } else { 3 }))
+}
+
+@test(output = "true")
+fn test_if_expr_in_binary_operations_2() {
+    let x = true
+    print((if x { 1 } else { 2 }) == 1)
+}
+
+@test(output = "two")
+fn test_if_else_if_expressions_1() {
+    let x = 2
+    print(if x == 1 { "one" } else if x == 2 { "two" } else { "other" })
+}
+
+@test(output = "B")
+fn test_if_else_if_expressions_2() {
+    let score = 85
+    print(if score >= 90 { "A" } else if score >= 80 { "B" } else if score >= 70 { "C" } else { "F" })
+}
+
+@test(output = "success")
+fn test_if_expr_return_types_2() {
+    let has_error = false
+    let message = if has_error { "failed" } else { "success" }
+    print(message)
+}
+
+// ============================================
+// Basic Conditional Expression Tests
+// ============================================
+
+@test(output = "5")
+fn test_simple_if_else() {
+    let result = if true { 5 } else { 6 }
+    print(result)
+}
+
+@test(output = "2")
+fn test_else_if_chain() {
+    if false { 
+        print(1) 
+    } else if true { 
+        print(2) 
+    } else { 
+        print(3) 
+    }
+}
+
+// ============================================
+// Unwrap and Nullable Operations in Conditionals
+// ============================================
+
+@test(output = "5")
+fn test_simple_unwrap_in_function() {
+    let x: int? = 5
+    let result = x.unwrap()
+    print(result)
+}
+
+// ============================================
+// Variable Shadowing in Conditionals
+// ============================================
+
+@test(output = "5\\n5")
+fn test_shadow_variable_in_if() {
+    let x: int = 5
+    let result = if true {
+        let x = x  // Shadow outer x with same value
+        print(x)   // Print shadowed x
+        x
+    } else {
+        print(x)   // Print outer x
+        x
+    }
+    print(result)
+}
+
+// ============================================
+// Nested Conditionals with Complex Logic
+// ============================================
+
+@test(output = "5\\n5")
+fn test_nested_if_with_unwrap() {
+    let x: int? = 5
+    let result = if true {
+        let y = x.unwrap()
+        print(y)
+        5
+    } else {
+        6
+    }
+    print(result)
+}
+
+@test(output = "5\\n5")
+fn test_nested_if_with_shadowing() {
+    let x: int? = 5
+    let result = if true {
+        let x = x.unwrap()  // Shadow with unwrapped value
+        print(x)
+        5
+    } else {
+        6
+    }
+    print(result)
+}
+
+// ============================================
+// Assignment Within Conditional Blocks
+// ============================================
+
+@test(output = "50")
+fn test_assignment_inside_conditional_blocks() {
+    let y = 0
+    
+    if false {
+        y = 20
+    } else {
+        y = 50
+    }
+    
+    print(y)
+}
+
+@test(output = "10")
+fn test_let_inside_if_blocks() {
+    let outer = 0
+    
+    if false {
+        let x = 5
+        outer = x
+    } else {
+        let x = 10
+        outer = x
+    }
+    
+    print(outer)
+}
+
+// ============================================
+// Complex Conditional Patterns
+// ============================================
+
+@test(output = "assignment complete")
+fn test_conditional_with_null_value() {
+    let x = 5
+    let y = 0
+    
+    // Test conditional that returns null with type annotation
+    let result: any? = if x > 5 {
+        y = 20
+        null
+    } else {
+        y = 50
+        null
+    }
+    
+    // Check that assignments happened
+    if y == 50 {
+        print("assignment complete")
+    }
+}
+
+// ============================================
+// Edge Cases and Complex Scenarios
+// ============================================
+
+@test(output = "nested scoping works")
+fn test_complex_nested_scoping() {
+    let value = 10
+    
+    if true {
+        let inner = value * 2
+        if inner > 15 {
+            let deeper = inner + 5
+            if deeper == 25 {
+                print("nested scoping works")
+            }
+        }
+    }
+}
+
+@test(output = "conditional unwrap success")
+fn test_conditional_unwrap_patterns() {
+    let maybe_val: int? = 42
+    
+    if maybe_val != null {
+        let unwrapped = maybe_val.unwrap()
+        if unwrapped > 40 {
+            print("conditional unwrap success")
+        }
+    }
+}
+
+// ============================================
+// Multiple Conditional Branches
+// ============================================
+
+@test(output = "middle")
+fn test_multiple_conditional_branches() {
+    let value = 15
+    
+    let category = if value < 10 {
+        "small"
+    } else if value < 20 {
+        "middle"
+    } else if value < 30 {
+        "large"
+    } else {
+        "huge"
+    }
+    
+    print(category)
+}
+
+// ============================================
+// Documentation of Error Cases
+// ============================================
+
+// The following demonstrate compile-time error cases for conditional expressions.
+// Since Rock's @test system focuses on runtime validation,
+// these are documented as examples that should NOT compile.
+
+// EXAMPLE 1: Type mismatch in conditional branches
+// let x = if true { 5 } else { "string" }  // ERROR: Inconsistent return types
+
+// EXAMPLE 2: Using uninitialized variable in conditional
+// let x: int
+// if true { x = 5 }
+// print(x)  // ERROR: x might not be initialized
+
+// EXAMPLE 3: Accessing out-of-scope variable
+// if true {
+//     let inner = 5
+// }
+// print(inner)  // ERROR: inner is out of scope
+
+// EXAMPLE 4: Type error in conditional condition
+// if 5 { print("bad") }  // ERROR: Condition must be bool, not int
+
+// EXAMPLE 5: Unwrapping null value
+// let x: int? = null
+// let y = x.unwrap()  // ERROR: Runtime panic when unwrapping null
+
+// ============================================
+// If-expressions in every value position. These once lowered to IIFEs;
+// they now lower inline, and the cases below pin that the inline forms
+// keep their behavior.
+// ============================================
+
+// Test 1: If-expression in value position (assignment)
+@test
+fn test_if_expr_in_assignment() {
+    let x = if true { 42 } else { 0 }
+    assert(x == 42, "Should assign 42")
+
+    let y = if false { 100 } else { 200 }
+    assert(y == 200, "Should assign 200")
+
+    // With more complex conditions
+    let z = if 5 > 3 { "yes" } else { "no" }
+    assert(z == "yes", "Should assign 'yes'")
+}
+
+// Test 2: If-expression in tail return position (preserves TCO)
+fn returns_if_expr(cond: bool) -> int {
+    return if cond { helper_a() } else { helper_b() }
+}
+
+fn helper_a() -> int {
+    42
+}
+
+fn helper_b() -> int {
+    100
+}
+
+@test
+fn test_if_expr_in_tail_return() {
+    assert(returns_if_expr(true) == 42, "Should return 42")
+    assert(returns_if_expr(false) == 100, "Should return 100")
+}
+
+// Test 3: If-expression as standalone statement (result unused)
+@test
+fn test_if_expr_as_statement() {
+    let counter = 0
+
+    // If-expression used as statement - result discarded
+    if true { counter = counter + 1 } else { counter = counter + 2 }
+    assert(counter == 1, "Counter should be 1")
+
+    if false { counter = counter + 10 } else { counter = counter + 20 }
+    assert(counter == 21, "Counter should be 21")
+}
+
+// Test 4: If-expression with side effects
+@test
+fn test_if_expr_with_side_effects() {
+    let x = 0
+    let y = 0
+
+    let result = if true {
+        x = 10
+        y = 20
+        x + y
+    } else {
+        x = 5
+        y = 5
+        x * y
+    }
+
+    assert(result == 30, "Result should be 30")
+    assert(x == 10, "x should be 10")
+    assert(y == 20, "y should be 20")
+}
+
+// Test 5: Nested if-expressions
+@test
+fn test_nested_if_expressions() {
+    let x = if true {
+        if false { 1 } else { 2 }
+    } else {
+        if true { 3 } else { 4 }
+    }
+    assert(x == 2, "Nested if should return 2")
+
+    // More complex nesting
+    let y = if 5 > 3 {
+        let temp = if 10 < 20 { 100 } else { 200 }
+        temp + 1
+    } else {
+        500
+    }
+    assert(y == 101, "Complex nested if should return 101")
+}
+
+// Test 6: If-expression in let binding with multiple statements
+@test
+fn test_if_expr_in_let_with_multiple_statements() {
+    let result = if true {
+        let a = 10
+        let b = 20
+        a + b
+    } else {
+        let c = 100
+        c * 2
+    }
+    assert(result == 30, "Result should be 30")
+}
+
+// Test 7: If-expression with early returns (allowed at statement level)
+fn helper_with_if_return(x: int) -> int {
+    // This is allowed - if at statement level
+    if x < 0 {
+        return -1
+    } else if x == 0 {
+        return 0
+    } else {
+        return 1
+    }
+}
+
+@test
+fn test_if_with_returns_at_statement_level() {
+    assert(helper_with_if_return(-5) == -1, "Should return -1")
+    assert(helper_with_if_return(0) == 0, "Should return 0")
+    assert(helper_with_if_return(5) == 1, "Should return 1")
+}
+
+// Test 8: If-expression with continue/break at statement level (allowed)
+@test
+fn test_if_with_continue_break_at_statement_level() {
+    let sum = 0
+
+    for i in 0..10 {
+        // This is allowed - if at statement level
+        if i == 3 {
+            continue
+        }
+        if i == 7 {
+            break
+        }
+        sum = sum + i
+    }
+
+    // 0 + 1 + 2 + 4 + 5 + 6 = 18
+    assert(sum == 18, "Sum should be 18 (skipped 3, stopped at 7)")
+}
+
+// Test 9: If-expression chaining (elseif)
+@test
+fn test_if_expr_chaining() {
+    let classify = (x: int) => {
+        if x < 0 { "negative" }
+        else if x == 0 { "zero" }
+        else if x < 10 { "small" }
+        else if x < 100 { "medium" }
+        else { "large" }
+    }
+
+    assert(classify(-5) == "negative", "Should be negative")
+    assert(classify(0) == "zero", "Should be zero")
+    assert(classify(5) == "small", "Should be small")
+    assert(classify(50) == "medium", "Should be medium")
+    assert(classify(500) == "large", "Should be large")
+}
+
+// Test 10: If-expression with unit type (assignments return nil)
+@test
+fn test_if_expr_with_unit_type() {
+    let x = 0
+
+    // Assignments in if-expression return unit (nil)
+    let result = if true { x = 5 } else { x = 10 }
+
+    // result should be nil/unit
+    assert(x == 5, "x should be 5")
+    // Can't directly test for nil in Rock, but we know it's unit type
+}
+
+// Test 11: If-expression in function argument (allowed without control flow)
+fn takes_int(x: int) -> int {
+    x * 2
+}
+
+@test
+fn test_if_expr_in_function_arg() {
+    let result = takes_int(if true { 21 } else { 10 })
+    assert(result == 42, "Should pass 21 and get 42")
+
+    let result2 = takes_int(if false { 100 } else { 50 })
+    assert(result2 == 100, "Should pass 50 and get 100")
+}
+
+// Test 12: If-expression in array/tuple literals (allowed without control flow)
+@test
+fn test_if_expr_in_literals() {
+    let arr = [1, if true { 2 } else { 3 }, 4]
+    assert(arr[1] == 2, "Array should contain 2")
+
+    let tuple = (10, if false { 20 } else { 30 }, 40)
+    assert(tuple.1 == 30, "Tuple should contain 30")
+}
+
+// Test 13: If-expression in index expression (allowed without control flow)
+@test
+fn test_if_expr_in_index() {
+    let arr = [10, 20, 30]
+    let value = arr[if true { 1 } else { 2 }]
+    assert(value == 20, "Should index arr[1] = 20")
+
+    let value2 = arr[if false { 0 } else { 2 }]
+    assert(value2 == 30, "Should index arr[2] = 30")
+}
+
+// Test 14: Multiple if-expressions in same statement
+@test
+fn test_multiple_if_expressions() {
+    let x = if true { 10 } else { 20 }
+    let y = if false { 30 } else { 40 }
+    let z = x + y
+    assert(z == 50, "Should be 10 + 40 = 50")
+
+    // In a single expression
+    let result = (if true { 5 } else { 10 }) + (if false { 100 } else { 200 })
+    assert(result == 205, "Should be 5 + 200 = 205")
+}
+
+// Test 15: If-expression with blocks returning different types (both branches must match)
+@test
+fn test_if_expr_with_matching_block_types() {
+    let result = if true {
+        let x = 10
+        let y = 20
+        x + y  // returns int
+    } else {
+        let z = 100
+        z - 50  // also returns int
+    }
+    assert(result == 30, "Should return 30")
+}
+
+// Test 16: If-expression evaluated in a hot loop
+@test
+fn test_iife_performance_overhead() {
+    let results: [int] = []
+
+    for i in 0..1000 {
+        let value = if i % 2 == 0 { i * 2 } else { i * 3 }
+        results.push(value)
+    }
+
+    assert(results.len() == 1000, "Should process all 1000 values")
+    assert(results[0] == 0, "First value should be 0")    // i=0, even: 0*2=0
+    assert(results[1] == 3, "Second value should be 3")   // i=1, odd: 1*3=3
+    assert(results[2] == 4, "Third value should be 4")    // i=2, even: 2*2=4
+}
+
+// Test 19: Truthiness edge case - and/or optimization bug
+@test
+fn test_truthiness_edge_case() {
+    let flag = false
+
+    // This tests the and/or optimization bug mentioned in the design doc
+    // If using (cond and then_value or else_value), this fails when then_value is false
+    let x = if true { flag } else { true }
+
+    // Should be false, but and/or optimization would give true
+    assert(x == false, "Should preserve false value, got: " + x.to_string())
+
+    // Another edge case - consistent boolean type
+    let another_flag = if false { false } else { true }
+    assert(another_flag == true, "Should be true")
+}
+
+// Test 18: Deeply nested if-expressions
+@test
+fn test_complex_nested_iife_generation() {
+    let result = if true {
+        if false {
+            if true { 1 } else { 2 }
+        } else {
+            if true {
+                if false { 3 } else { 4 }
+            } else { 5 }
+        }
+    } else {
+        6
+    }
+
+    assert(result == 4, "Complex nesting should resolve to 4")
+}
+
+// Test 19: Control flow at statement level (should work correctly)
+@test
+fn test_control_flow_at_statement_level() {
+    let sum = 0
+
+    for i in 0..10 {
+        // This is at statement level, so control flow should work correctly
+        if i == 3 {
+            continue
+        }
+        if i == 7 {
+            break
+        }
+        sum = sum + i
+    }
+
+    // Should be: 0+1+2+4+5+6 = 18 (skip 3, break at 7)
+    assert(sum == 18, "Control flow at statement level should work correctly")
+}
