@@ -78,6 +78,8 @@ workspace = true
 [[bin]]
 name = "rock"
 path = "src/main.rs"
+# The unit tests live in the library; integration tests still get the binary.
+test = false
 
 [[test]]
 name = "rock_cli_tests"

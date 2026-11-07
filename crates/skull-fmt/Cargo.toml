@@ -17,6 +17,12 @@ rock-tokenizer = { path = "../rock-tokenizer" }
 skull-parser = { path = "../skull-parser" }
 ustr = { workspace = true }
 
+# No unit tests; skip the empty test harness.
+[[bin]]
+name = "skullfmt"
+path = "src/bin/skullfmt.rs"
+test = false
+
 [[test]]
 name = "skull_fmt_tests"
 path = "tests/main.rs"

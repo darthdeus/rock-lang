@@ -7,6 +7,11 @@ description = "Type inference: unification, calls, fields, purity"
 license.workspace = true
 repository.workspace = true
 
+# No unit tests or doctests in src/; skip the empty test harness.
+[lib]
+test = false
+doctest = false
+
 [dependencies]
 bone-core = { path = "../bone-core" }
 skull-parser = { path = "../skull-parser" }

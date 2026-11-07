@@ -8,6 +8,11 @@ repository.workspace = true
 publish = false
 description = "Incremental sessions, dependency invalidation and differential fixtures"
 
+# No unit tests or doctests in src/; skip the empty test harness.
+[lib]
+test = false
+doctest = false
+
 [dependencies]
 bone-core = { workspace = true }
 rock-core = { workspace = true }

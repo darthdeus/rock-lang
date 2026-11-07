@@ -10,6 +10,8 @@ repository.workspace = true
 [[bin]]
 name = "lsp-serde-test"
 path = "src/main.rs"
+# No unit tests; skip the empty test harness.
+test = false
 
 [dependencies]
 lsp-types = "0.97.0"

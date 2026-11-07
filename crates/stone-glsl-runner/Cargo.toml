@@ -5,9 +5,15 @@ edition = "2021"
 license.workspace = true
 repository.workspace = true
 
+# No unit tests or doctests in src/; skip the empty test harnesses.
+[lib]
+test = false
+doctest = false
+
 [[bin]]
 name = "stone-glsl-runner"
 path = "src/main.rs"
+test = false
 
 [dependencies]
 sdl2 = { version = "0.38", features = ["use-pkgconfig"] }
