@@ -35,8 +35,9 @@ members = [
     "crates/test-utils",
 ]
 
-# Keep plain cargo build/test usable without the optional SDL2 runner.
-# --workspace still includes every member, including the runner.
+# Keep plain cargo build/test usable without the optional SDL2 runner, and
+# skip the manual lsp-serde-test conformance tool, which pulls in upstream
+# lsp-types and lsp-server. --workspace still includes every member.
 default-members = [
     "crates/rock-cli",
     "crates/skull",
@@ -56,7 +57,6 @@ default-members = [
     "crates/bone-lower",
     "crates/bone-semantic",
     "crates/la-arena",
-    "crates/lsp-serde-test",
     "crates/lsp-server-manual",
     "crates/lsp-types-manual",
     "crates/rock-core",
