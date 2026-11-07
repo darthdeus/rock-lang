@@ -19,5 +19,22 @@ ustr = { workspace = true }
 itertools = { workspace = true }
 colored = { workspace = true }
 
+# Unused: pins features other members toggle, so all cargo commands share one build.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+getrandom = { version = "0.3.4", features = ["std"] }
+log = { workspace = true, features = ["std"] }
+once_cell = { workspace = true }
+
+# Same, for crates that only unix builds pull in.
+[target.'cfg(unix)'.dependencies]
+errno = "0.3.14"
+libc = { version = "0.2.191", features = ["extra_traits"] }
+
+# No build script, so never compiled here; same feature pinning for proc macros.
+[build-dependencies]
+proc-macro2 = "1.0.107"
+quote = "1.0.47"
+syn = "3.0.9"
+
 [dev-dependencies]
 test-utils = { workspace = true }
