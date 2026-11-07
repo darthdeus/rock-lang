@@ -99,3 +99,28 @@ fn iterate_empty_buffer() {
     }
     assert(count == 0)
 }
+
+// -- Indexed reads as a let initializer and a print argument --
+
+@test(output = "42")
+fn test_buffer_int_indexed_read() {
+    let buf = native_buffer_int(4)
+    buf[0] = 42
+    let v = buf[0]
+    print(v)
+}
+
+@test(output = "3")
+fn test_buffer_float_indexed_read_print() {
+    let buf = native_buffer_float(4)
+    buf[2] = 3.0
+    print(buf[2] as int)
+}
+
+@test(output = "9")
+fn test_buffer_u8_indexed_read() {
+    let buf = native_buffer_u8(8)
+    buf[3] = 9
+    let v = buf[3]
+    print(v)
+}

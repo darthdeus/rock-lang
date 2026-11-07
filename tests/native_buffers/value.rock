@@ -523,3 +523,100 @@ fn test_nested_default_side_effect() {
     put("{TICK}")
     put("\n")
 }
+
+// -- Storing a value-struct local copies the cdata once, without re-packing it
+// field by field --
+
+@test(output = "3\n7\n3\n7")
+fn test_native_buffer_cdata_local_write() {
+    let buf = nb_v2(2)
+    let v = make_v2(3.0, 7.0)
+
+    // Both writes should emit the bare cdata local without re-packing.
+    buf[0] = v
+    buf[1] = v
+
+    let a = buf[0]
+    print("{a.x.floor()}")
+    print("{a.y.floor()}")
+
+    let b = buf[1]
+    print("{b.x.floor()}")
+    print("{b.y.floor()}")
+}
+
+// -- Nested value element --
+
+// NativeBuffer<T> where T is a NESTED value struct (fields are themselves
+// value structs, like the engine's `Vertex`). skull scalarizes the element
+// store field-wise through the buffer reference (`buf.ptr[i].tl.x = ...`),
+// never materializing a `Rect_ct`/`V2_ct` — the text-vertex JIT-abort fix.
+// Exercises both a literal RHS and a scalar-ABI fn-returning-Rect RHS, then
+// reads nested fields back. Sibling flat cases: test_native_buffer_value_scalar_rhs
+// and test_source_order in this file.
+
+value Rect {
+    tl: V2,
+    br: V2,
+}
+
+@nomangle inline(lua) fn __nb_alloc_Rect(n: int) -> Ptr<Rect> = 'return ffi.new("Rect[?]", n)'
+
+fn native_buffer_rect(n: int) -> NativeBuffer<Rect> {
+    return NativeBuffer { ptr: __nb_alloc_Rect(n), len: n }
+}
+
+fn make_rect(a: float, b: float, c: float, d: float) -> Rect {
+    return Rect { tl: V2 { x: a, y: b }, br: V2 { x: c, y: d } }
+}
+
+@test(output = "1\n2\n3\n4\n5\n6\n7\n8")
+fn test_native_buffer_nested_value() {
+    let buf = native_buffer_rect(2)
+    // Literal RHS (nested value literal).
+    buf[0] = Rect { tl: V2 { x: 1.0, y: 2.0 }, br: V2 { x: 3.0, y: 4.0 } }
+    // Scalar-ABI fn RHS (Rect comes back as flattened leaves).
+    buf[1] = make_rect(5.0, 6.0, 7.0, 8.0)
+
+    let a = buf[0]
+    print("{a.tl.x.floor()}")
+    print("{a.tl.y.floor()}")
+    print("{a.br.x.floor()}")
+    print("{a.br.y.floor()}")
+
+    let b = buf[1]
+    print("{b.tl.x.floor()}")
+    print("{b.tl.y.floor()}")
+    print("{b.br.x.floor()}")
+    print("{b.br.y.floor()}")
+}
+
+// -- A function-returned value written into a nested element field --
+
+value BPair { x: int, y: int }
+value BOuter { p: BPair, z: int }
+
+fn make_bpair(n: int) -> BPair { return BPair { x: n + 5, y: n * 3 } }
+
+fn replace_nested(b: NativeBuffer<BOuter>, f: (int) -> BPair, n: int) {
+    b[0].p = f(n)
+}
+
+fn replace_whole(b: NativeBuffer<BPair>, f: (int) -> BPair, n: int) {
+    b[0] = f(n)
+}
+
+@test fn boxed_result_nested_native_buffer_write() {
+    let b: NativeBuffer<BOuter> = native_buffer_alloc(1)
+    b[0] = BOuter { p: BPair { x: 1, y: 2 }, z: 77 }
+    replace_nested(b, make_bpair, 7)
+    assert_eq(b[0].p.x, 12)
+    assert_eq(b[0].p.y, 21)
+}
+
+@test fn boxed_result_whole_native_buffer_write_control() {
+    let b: NativeBuffer<BPair> = native_buffer_alloc(1)
+    replace_whole(b, make_bpair, 7)
+    assert_eq(b[0].x, 12)
+    assert_eq(b[0].y, 21)
+}
