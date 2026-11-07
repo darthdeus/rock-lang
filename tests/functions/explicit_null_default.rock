@@ -1,7 +1,6 @@
-// EXPLICIT_NULL_DEFAULT (author, 2026-10-16, option A): an explicit `null`
-// argument overrides a parameter's non-null default. Omitting the argument
-// gives the default; passing `null`, literally or through a variable, gives
-// null. Holds on every backend.
+// An explicit `null` argument overrides a parameter's non-null default.
+// Omitting the argument gives the default; passing `null`, literally or
+// through a variable, gives null.
 
 fn seeded(seed: int? = 42) -> int? {
     return seed
@@ -136,4 +135,37 @@ fn other_defaults_unchanged() {
     assert_eq(plain(), 3)
     assert_eq(plain(m: 4), 7)
     assert_eq(plain(1, null), 1)
+}
+
+// The same rule across an `inline(lua)` wrapper and a decorator argument.
+
+inline(lua) fn lua_seeded(n: int? = 7) -> int = "return n == nil and -1 or n"
+
+@test
+fn inline_lua_default() {
+    assert_eq(lua_seeded(), 7)
+    assert_eq(lua_seeded(3), 3)
+    assert_eq(lua_seeded(null), -1)
+}
+
+global REG: [string] = []
+
+deco init register(priority: int? = 100) {
+    vec_push(REG, "{target.name}:{priority ?? -1}")
+}
+
+@register
+fn sys_default() {}
+
+@register(priority = 10)
+fn sys_ten() {}
+
+@test
+fn decorator_default() {
+    let joined = ""
+    for e in REG {
+        joined = joined + e + ";"
+    }
+    assert_eq(joined.contains("sys_default:100;"), true)
+    assert_eq(joined.contains("sys_ten:10;"), true)
 }

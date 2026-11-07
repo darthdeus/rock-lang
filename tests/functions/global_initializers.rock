@@ -1,6 +1,23 @@
-// Lambdas in const/global initializers: stored in a struct field, directly in
-// a global, in array literals, capturing an initializer local, and with a
-// nested lambda in the body.
+// Global and const initializers: typed scalar globals, a global computed from
+// another global, and lambdas stored in a struct field, directly in a global,
+// in array literals, capturing an initializer local, and with a nested lambda
+// in the body. Rejected initializers are in
+// tests/errors/global_initializers.rock.err.
+
+global good_global: int = 42
+
+// Typed global with a string initializer
+global inferred_global: string = "hello"
+
+// Global referencing another global should work
+global dependent_global: int = good_global + 10
+
+@test
+fn test_globals() {
+    assert_eq(good_global, 42)
+    assert_eq(inferred_global, "hello")
+    assert_eq(dependent_global, 52)
+}
 
 struct Counter { value: int = 4 }
 struct Queries { read: fn(Counter) -> int, double: fn(int) -> int }
