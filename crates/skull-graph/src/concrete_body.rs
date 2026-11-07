@@ -504,10 +504,6 @@ impl ConcreteBodies {
         &self.candidate_keys_by_func
     }
 
-    pub fn authoritative_build_stats(&self) -> ConcreteBuildStats {
-        self.build_stats
-    }
-
     /// Fold the authoritative owner records for an explicit census request.
     /// The repair path does not call this method.
     pub fn snapshot_build_stats(&mut self) -> ConcreteBuildStats {
@@ -996,10 +992,6 @@ pub struct BodyCensus {
 }
 
 impl BodyCensus {
-    pub fn free_total(&self) -> usize {
-        self.free_by_reason.values().sum()
-    }
-
     /// Entries across all four callee tables.
     pub fn callee_entries(&self) -> usize {
         self.direct_calls

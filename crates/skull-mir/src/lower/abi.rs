@@ -1619,16 +1619,6 @@ impl RepArena {
         self.leaf_layout(ws, id)
     }
 
-    pub fn nominal_leaf_size(
-        &self,
-        ws: &Workspace,
-        target: FnBackend,
-        name: Ustr,
-    ) -> Result<usize, RepError> {
-        self.nominal_leaf_layout(ws, target, name)
-            .map(|(_, size, _)| size)
-    }
-
     pub fn nominal_leaf_view_ctys(
         &self,
         ws: &Workspace,

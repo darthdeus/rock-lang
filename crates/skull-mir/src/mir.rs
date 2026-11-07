@@ -1505,17 +1505,6 @@ impl MirFunc {
         id
     }
 
-    pub fn new_cell_native_flat_slot(
-        &mut self,
-        name: Option<Ustr>,
-        owner: crate::monoty::MonoTyId,
-        field: Ustr,
-    ) -> Idx<Cell> {
-        let id = self.new_cell(name);
-        self.cells[id].native_flat_slot = Some(NativeFlatSlot { owner, field });
-        id
-    }
-
     /// Tag a cell as a `for`-desugaring loop binding (DESUGAR PROVENANCE; see
     /// [`Cell::loop_binding`]).
     pub fn mark_loop_binding(&mut self, cell: Idx<Cell>) {

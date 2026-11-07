@@ -743,11 +743,6 @@ impl ScalarCtx {
         self
     }
 
-    pub fn with_row_value_containers(mut self) -> Self {
-        self.row_value_containers = true;
-        self
-    }
-
     /// Like [`new`](Self::new) but with the scalarized value ABI disabled: value
     /// structs stay first-class single values everywhere (the GLSL backend's
     /// requirement -- a `vecN` is not scalar leaves). See [`values_first_class`].
@@ -758,20 +753,6 @@ impl ScalarCtx {
         scx.values_first_class = true;
         scx.target = bone_semantic::hir::FnBackend::Any;
         scx
-    }
-
-    /// Share this context's representation arena while selecting the
-    /// first-class value ABI for a caller that emits into the same target.
-    /// Global initializers use this for calls, while retaining their separate
-    /// scalar storage policy.
-    pub fn with_values_first_class(mut self) -> Self {
-        self.values_first_class = true;
-        self
-    }
-
-    pub fn with_native_flat_enums(mut self) -> Self {
-        self.native_flat_enums = true;
-        self
     }
 
     /// Incrementally fold one re-inferred body's value-reference contribution into
@@ -3696,18 +3677,6 @@ pub fn param_null_overrides_default(ws: &Workspace, body: &Body, index: usize, t
         // Declared parameter types are lowered into the module's static arena.
         TyId::Local(_) => false,
     }
-}
-
-/// [`param_null_overrides_default`] for a declared function's parameter.
-pub fn function_param_null_overrides_default(ws: &Workspace, func: FuncRef, index: usize) -> bool {
-    let module = ws.module(func.module);
-    let Some(body) = module.bodies.get(&BodyOwner::Function(func.func)) else {
-        return false;
-    };
-    module.functions[func.func]
-        .param_decls
-        .get(index)
-        .is_some_and(|pd| param_null_overrides_default(ws, body, index, pd.ty))
 }
 
 // -- Map value-struct key rejection (a fatal emit-time pass; see

@@ -2761,30 +2761,6 @@ impl YieldChannel {
     }
 }
 
-/// The [`YieldChannel`] of a co fn's declared return type `Coroutine<Y, ...>`.
-pub fn coroutine_yield_channel(ws: &Workspace, return_ty: TyId) -> Option<YieldChannel> {
-    let TyId::Static(m, idx) = return_ty else {
-        return None;
-    };
-    let TypeExpr::App { params, .. } = ws.module(m).ty_arena[idx] else {
-        return None;
-    };
-    let y_idx = params.into_iter().next()?;
-    let TypeExpr::App {
-        ctor: TypeCtor::Nominal(n),
-        ..
-    } = ws.module(m).ty_arena[y_idx]
-    else {
-        return None;
-    };
-    let shape = EnumPlan::for_name(ws, n).and_then(|plan| plan.flat().cloned())?;
-    Some(YieldChannel {
-        enum_name: shape.name,
-        tuple_width: shape.tuple_width(),
-        record_fields: shape.record_fields,
-    })
-}
-
 /// The same channel oracle for a fully concrete logical coroutine type. The
 /// declaration-shaped variant is retained for source-only analysis; emitted
 /// coroutine bodies use this concrete form.

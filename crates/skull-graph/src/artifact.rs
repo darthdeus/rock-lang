@@ -1810,24 +1810,6 @@ impl ArtifactView {
         groups
     }
 
-    pub fn render_severed_groups(&self, ws: &Workspace) -> Vec<String> {
-        self.severed_groups()
-            .iter()
-            .map(|grp| {
-                let f = &ws.module(grp.callee.module).functions[grp.callee.func];
-                format!(
-                    "`{}` [{:?}] {} -- {} sites, {} instances, {} callers",
-                    f.name,
-                    f.backend,
-                    grp.cause.label(),
-                    grp.sites,
-                    grp.instances.len(),
-                    grp.callers.len()
-                )
-            })
-            .collect()
-    }
-
     pub fn render_symbol_collisions(&self, ws: &Workspace) -> Vec<String> {
         self.symbol_collisions
             .iter()
@@ -1867,13 +1849,6 @@ impl ArtifactView {
                     s.cause.label()
                 )
             })
-            .collect()
-    }
-
-    pub fn render_excluded(&self, ws: &Workspace, g: &InstanceGraph) -> Vec<String> {
-        self.excluded
-            .iter()
-            .map(|e| format!("{} -- {}", g.identity(ws, &e.instance), e.cause.label()))
             .collect()
     }
 }

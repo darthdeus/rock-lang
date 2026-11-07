@@ -329,20 +329,6 @@ impl MonoTy {
         }
     }
 
-    /// The spelling of a PRIMITIVE leaf, and `None` for everything else --
-    /// including `any`, unit and `never`, which are leaves of the type tree but
-    /// name no primitive a ctype or a storage decision can be read off.
-    pub fn prim_name(&self) -> Option<&'static str> {
-        match self {
-            Self::Int => Some("int"),
-            Self::Uint => Some("uint"),
-            Self::Float => Some("float"),
-            Self::Bool => Some("bool"),
-            Self::String => Some("string"),
-            _ => None,
-        }
-    }
-
     /// `(payload, nullable)` -- the type with its `?` stripped.
     pub fn peel_nullable(&self) -> (&MonoTy, bool) {
         match self {
@@ -970,10 +956,6 @@ impl MonoInterner {
             intern_new,
             types,
         }
-    }
-
-    pub fn into_arena(self) -> MonoArena {
-        self.arena.into_inner().expect("mono arena poisoned")
     }
 }
 

@@ -964,14 +964,6 @@ impl Ast {
         &self.exprs[idx].kind
     }
 
-    pub fn statement_kind(&self, idx: Idx<StatementData>) -> &StatementKind {
-        &self.stmts[idx].kind
-    }
-
-    pub fn type_expr_kind(&self, idx: Idx<TypeExprData>) -> &TypeExprKind {
-        &self.types[idx].kind
-    }
-
     pub fn expr(&mut self, span: Span, kind: ExprKind) -> Idx<ExprData> {
         self.exprs.alloc(ExprData { span, kind })
     }

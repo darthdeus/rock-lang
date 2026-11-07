@@ -162,13 +162,6 @@ impl AnalysisContext {
             return_destination: Some(Place::Destination),
         }
     }
-
-    pub fn session_initializer() -> Self {
-        Self {
-            default_allocation: Place::Session,
-            return_destination: Some(Place::Session),
-        }
-    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

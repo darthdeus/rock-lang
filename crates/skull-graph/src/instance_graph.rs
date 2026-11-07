@@ -1172,29 +1172,6 @@ impl InstanceGraph {
         format!("{base}@{}.{}<{}>", decl.0, decl.1, args.join(","))
     }
 
-    /// Instances that share an [`Self::identity`], and -- for contrast -- the
-    /// ones that would share the NAME-KEYED identity it replaced.
-    ///
-    /// The first is 0 by construction now, which is exactly why the second is
-    /// reported beside it: a zero whose only content is "the key includes the
-    /// declaration" says nothing about how much the old key was merging.
-    pub fn colliding_identities(&self, ws: &Workspace) -> (usize, usize) {
-        let mut by_id: BTreeMap<String, usize> = BTreeMap::new();
-        let mut by_name: BTreeMap<String, usize> = BTreeMap::new();
-        for i in &self.instances {
-            *by_id.entry(self.identity(ws, i)).or_insert(0) += 1;
-            let f = &ws.module(i.func.module).functions[i.func.func];
-            let args: Vec<String> = i.args.iter().map(|a| self.interner.canonical(*a)).collect();
-            *by_name
-                .entry(format!("{}<{}>", mangle_fn(ws, f), args.join(",")))
-                .or_insert(0) += 1;
-        }
-        let merged = |m: BTreeMap<String, usize>| -> usize {
-            m.values().filter(|n| **n > 1).map(|n| n - 1).sum()
-        };
-        (merged(by_id), merged(by_name))
-    }
-
     /// The instance's LOGICAL symbol.
     ///
     /// DELEGATES to [`Instance::symbol`] -- it does not restate it. The two
@@ -1327,14 +1304,6 @@ impl InstanceGraph {
             }
         }
         c
-    }
-
-    pub fn edge_histogram(&self) -> BTreeMap<&'static str, usize> {
-        let mut h = BTreeMap::new();
-        for e in self.edges() {
-            *h.entry(e.kind.name()).or_insert(0) += 1;
-        }
-        h
     }
 
     /// Recursive strongly-connected components over the instance graph, split
@@ -1565,14 +1534,7 @@ pub struct SpanCensus {
     pub always_emitted: BTreeMap<&'static str, SpanCoverage>,
 }
 
-impl SpanCensus {
-    pub fn total_spanless(&self) -> usize {
-        let sum = |m: &BTreeMap<&'static str, SpanCoverage>| {
-            m.values().map(|c| c.spanless).sum::<usize>()
-        };
-        sum(&self.edges) + sum(&self.rejections) + sum(&self.unresolved) + sum(&self.always_emitted)
-    }
-}
+impl SpanCensus {}
 
 /// A span the walk could not fill in. `Span::unknown` is the only way one is
 /// produced here, and its file sentinel is what distinguishes it -- a real span
