@@ -1,0 +1,80 @@
+// Mutating an Arena while a value or pair iterator over it is live.
+//
+// `clear()`: the decided contract is that clear reseats the storage, so an
+// existing traversal keeps seeing the pre-clear rows and yields all three,
+// while the arena itself is empty afterwards.
+//
+// Growth and removal: which answer is right is an open aliasing decision.
+// These pin the current answer so identity-storage work cannot change it
+// silently: the loop yields the rows live when it started, minus the removed
+// one, and none of the rows inserted during it.
+
+struct Unit { hp: int }
+
+fn three_units() -> Arena<Unit> {
+    let units: Arena<Unit> = arena_new()
+    units.insert(Unit { hp: 1 })
+    units.insert(Unit { hp: 2 })
+    units.insert(Unit { hp: 3 })
+    return units
+}
+
+@test(output = "3 6 0")
+fn clear_during_values() {
+    let units = three_units()
+    let seen = 0
+    let sum = 0
+    for unit in values(units) {
+        if seen == 0 { units.clear() }
+        seen += 1
+        sum += unit.hp
+    }
+    print("{seen} {sum} {units.len()}")
+}
+
+@test(output = "3 9 0")
+fn clear_during_pairs() {
+    let units = three_units()
+    let seen = 0
+    let sum = 0
+    for (entity, unit) in pairs(units) {
+        if seen == 0 { units.clear() }
+        seen += 1
+        sum += unit.hp + entity._slot
+    }
+    print("{seen} {sum} {units.len()}")
+}
+
+@test(output = "3 6 23")
+fn grow_then_remove_during_values() {
+    let units = three_units()
+    let last = units.insert(Unit { hp: 4 })
+    let seen = 0
+    let sum = 0
+    for unit in values(units) {
+        if seen == 0 {
+            for i in 0..20 { units.insert(Unit { hp: 100 }) }
+            units.remove(last)
+        }
+        seen += 1
+        sum += unit.hp
+    }
+    print("{seen} {sum} {units.len()}")
+}
+
+@test(output = "3 9 23")
+fn grow_then_remove_during_pairs() {
+    let units = three_units()
+    let last = units.insert(Unit { hp: 4 })
+    let seen = 0
+    let sum = 0
+    for (entity, unit) in pairs(units) {
+        if seen == 0 {
+            for i in 0..20 { units.insert(Unit { hp: 100 }) }
+            units.remove(last)
+        }
+        seen += 1
+        sum += unit.hp + entity._generation
+    }
+    print("{seen} {sum} {units.len()}")
+}

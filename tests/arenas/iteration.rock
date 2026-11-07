@@ -1,8 +1,105 @@
-// Map/Arena iteration sub-arc, slice 2: Arena iteration.
-// `for (e, t) in a` and `for item in a` -> live's closure-free
-// numeric loop over `.entries` with goto-skip of nil/unoccupied
-// slots. Byte-identical to live IterationStrategy::Arena. Pins
-// runtime behavior; must pass with and without ROCK_ANF_FUNCTIONS=1.
+// `for` over an Arena: pair destructuring `for (e, v) in a`, single binding
+// `for item in a` read through `.0`/`.1` or tuple_first/tuple_second, skipping
+// removed slots, reused slots and a cleared arena, `continue` and `break` in the
+// body, and struct payloads with nested fields.
+
+@test(output = "count: 0")
+fn arena_iteration_empty() {
+    let a: Arena<int> = arena_new()
+    let count = 0
+    for (entity, item) in a {
+        count = count + 1
+    }
+    print("count: {count}")
+}
+
+@test(output = "values: 10,20,30\ncount: 3")
+fn arena_iteration_simple_insert() {
+    let a: Arena<int> = arena_new()
+    a.insert(10)
+    a.insert(20)
+    a.insert(30)
+
+    let values = vec_new()
+    for (_, item) in a {
+        vec_push(values, item)
+    }
+
+    print("values: {values[0]},{values[1]},{values[2]}")
+    print("count: {vec_len(values)}")
+}
+
+@test(output = "after remove bar: 2\nafter remove foo: 1\nafter remove baz: 0")
+fn arena_iteration_with_removals() {
+    let a: Arena<string> = arena_new()
+    let e1 = a.insert("foo")
+    let e2 = a.insert("bar")
+    let e3 = a.insert("baz")
+
+    a.remove(e2)
+    let count1 = 0
+    for (_, item) in a {
+        count1 = count1 + 1
+    }
+    print("after remove bar: {count1}")
+
+    a.remove(e1)
+    let count2 = 0
+    for (_, item) in a {
+        count2 = count2 + 1
+    }
+    print("after remove foo: {count2}")
+
+    a.remove(e3)
+    let count3 = 0
+    for (_, item) in a {
+        count3 = count3 + 1
+    }
+    print("after remove baz: {count3}")
+}
+
+@test(output = "initial count: 2\nafter reinsertion count: 2")
+fn arena_iteration_after_reinsertion() {
+    let a: Arena<int> = arena_new()
+    let e1 = a.insert(1)
+    let e2 = a.insert(2)
+
+    let count1 = 0
+    for (_, item) in a {
+        count1 = count1 + 1
+    }
+    print("initial count: {count1}")
+
+    a.remove(e1)                     // free slot 0
+    let e3 = a.insert(3)             // should re-use slot 0
+
+    let count2 = 0
+    for (_, item) in a {
+        count2 = count2 + 1
+    }
+    print("after reinsertion count: {count2}")
+}
+
+@test(output = "before clear: 2\nafter clear: 0")
+fn arena_iteration_after_clear() {
+    let a: Arena<int> = arena_new()
+    a.insert(100)
+    a.insert(200)
+
+    let count1 = 0
+    for (_, item) in a {
+        count1 = count1 + 1
+    }
+    print("before clear: {count1}")
+
+    a.clear()
+
+    let count2 = 0
+    for (_, item) in a {
+        count2 = count2 + 1
+    }
+    print("after clear: {count2}")
+}
 
 @test(output = "60")
 fn test_arena_pair_sum() {
@@ -57,4 +154,176 @@ fn test_arena_single_binding_tuple() {
         s = s + item.1
     }
     print("{s}")
+}
+
+global arena1: Arena<int> = arena_new()
+global arena2: Arena<string> = arena_new()
+global arena3: Arena<float> = arena_new()
+global arena4: Arena<int> = arena_new()
+global arena5: Arena<int> = arena_new()
+
+@test(output = "42\\ntrue")
+fn test_arena_single_binding() {
+    insert(arena1, 42)
+
+    for item in arena1 {
+        // item should be (Entity<int>, int)
+        let entity = tuple_first(item)
+        let value = tuple_second(item)
+        print(value)
+        print(!is_null(entity))
+        break // Only test first item
+    }
+}
+
+@test(output = "hello\\ntrue")
+fn test_arena_tuple_destructuring() {
+    insert(arena2, "hello")
+
+    for (entity, value) in arena2 {
+        // Direct access to entity and value
+        print(value)
+        print(!is_null(entity))
+        break
+    }
+}
+
+@test(output = "3.14\\ntrue")
+fn test_arena_field_access() {
+    insert(arena3, 3.14)
+
+    for item in arena3 {
+        // Using .0 and .1 syntax
+        let entity = item.0
+        let value = item.1
+        print(value)
+        print(!is_null(entity))
+        break
+    }
+}
+
+@test(output = "123\\ntrue")
+fn test_arena_tuple_destructuring_normal() {
+    // Tests normal 2-element tuple destructuring
+    insert(arena4, 123)
+
+    for (entity, value) in arena4 {
+        print(value)
+        print(!is_null(entity))
+        break
+    }
+}
+
+@test(output = "Collected lengths:\\nentities1: 3\\nentities2: 3\\nentities3: 3\\nvalues1: 3\\nvalues2: 3\\nvalues3: 3\\nAll iteration methods are equivalent")
+fn test_arena_iteration_equivalence() {
+    // Insert multiple values into the test arena
+    insert(arena5, 100)
+    insert(arena5, 200)
+    insert(arena5, 300)
+
+    // Method 1: tuple_first/tuple_second extraction
+    let entities1: [Entity<int>] = vec_new()
+    let values1: [int] = vec_new()
+    for item in arena5 {
+        let entity = tuple_first(item)
+        let value = tuple_second(item)
+        vec_push(entities1, entity)
+        vec_push(values1, value)
+    }
+
+    // Method 2: .0/.1 field access
+    let entities2: [Entity<int>] = vec_new()
+    let values2: [int] = vec_new()
+    for item in arena5 {
+        let entity = item.0
+        let value = item.1
+        vec_push(entities2, entity)
+        vec_push(values2, value)
+    }
+
+    // Method 3: tuple destructuring
+    let entities3: [Entity<int>] = vec_new()
+    let values3: [int] = vec_new()
+    for (entity, value) in arena5 {
+        vec_push(entities3, entity)
+        vec_push(values3, value)
+    }
+
+    // Debug output
+    print("Collected lengths:")
+    print("entities1: " + to_string(vec_len(entities1)))
+    print("entities2: " + to_string(vec_len(entities2)))
+    print("entities3: " + to_string(vec_len(entities3)))
+    print("values1: " + to_string(vec_len(values1)))
+    print("values2: " + to_string(vec_len(values2)))
+    print("values3: " + to_string(vec_len(values3)))
+
+    // Assert all methods collected the same number of items
+    assert(vec_len(entities1) == vec_len(entities2))
+    assert(vec_len(entities2) == vec_len(entities3))
+    assert(vec_len(values1) == vec_len(values2))
+    assert(vec_len(values2) == vec_len(values3))
+
+    // Assert all entities and values are identical across methods
+    for i in __rock_range(0, vec_len(entities1)) {
+        let v1 = vec_get(values1, i)
+        let v2 = vec_get(values2, i)
+        let v3 = vec_get(values3, i)
+
+        if v1 != v2 {
+            print("Values differ at index " + to_string(i))
+            break
+        }
+        if v2 != v3 {
+            print("Values differ at index " + to_string(i))
+            break
+        }
+
+        let e1 = vec_get(entities1, i)
+        let e2 = vec_get(entities2, i)
+        let e3 = vec_get(entities3, i)
+
+        // Compare entity fields instead of direct equality
+        if e1?._slot != e2?._slot || e1?._generation != e2?._generation {
+            print("Entity fields differ between methods")
+            break
+        }
+        if e2?._slot != e3?._slot || e2?._generation != e3?._generation {
+            print("Entity fields differ between methods")
+            break
+        }
+    }
+
+    print("All iteration methods are equivalent")
+}
+
+struct Prefab {
+    name: string,
+    sprite: SpriteInfo,
+}
+
+struct SpriteInfo {
+    source: string,
+}
+
+@test
+fn test_arena_iteration_like_game() {
+    let arena: Arena<Prefab> = arena_new()
+
+    let prefab = Prefab {
+        name: "test_prefab",
+        sprite: SpriteInfo { source: "test.png" }
+    }
+    let entity = arena.insert(prefab)
+
+    let count = 0
+    for (e, p) in arena {
+        // Test field access on both e and p
+        assert(e._slot >= 0, "Entity should have valid index")
+        assert_eq(p.name, "test_prefab", "Prefab name should match")
+        assert_eq(p.sprite.source, "test.png", "Sprite source should match")
+        count += 1
+    }
+
+    assert_eq(count, 1, "Should have iterated over 1 item")
 }

@@ -1,6 +1,5 @@
 struct FixVec2 { x: int, y: int }
 
-
 @test(output = "15")
 fn arena_insert_and_lookup() {
     let m: Arena<FixVec2> = arena_new()
@@ -71,106 +70,6 @@ fn nullable_get_when_missing() {
 
     let v = a.get(e)
     print(v == null)
-}
-
-// Skip cross_arena_entity_is_type_error - type error test
-
-@test(output = "count: 0")
-fn arena_iteration_empty() {
-    let a: Arena<int> = arena_new()
-    let count = 0
-    for (entity, item) in a {
-        count = count + 1
-    }
-    print("count: {count}")
-}
-
-@test(output = "values: 10,20,30\ncount: 3")
-fn arena_iteration_simple_insert() {
-    let a: Arena<int> = arena_new()
-    a.insert(10)
-    a.insert(20)
-    a.insert(30)
-
-    let values = vec_new()
-    for (_, item) in a {
-        vec_push(values, item)
-    }
-
-    print("values: {values[0]},{values[1]},{values[2]}")
-    print("count: {vec_len(values)}")
-}
-
-@test(output = "after remove bar: 2\nafter remove foo: 1\nafter remove baz: 0")
-fn arena_iteration_with_removals() {
-    let a: Arena<string> = arena_new()
-    let e1 = a.insert("foo")
-    let e2 = a.insert("bar")
-    let e3 = a.insert("baz")
-
-    a.remove(e2)
-    let count1 = 0
-    for (_, item) in a {
-        count1 = count1 + 1
-    }
-    print("after remove bar: {count1}")
-
-    a.remove(e1)
-    let count2 = 0
-    for (_, item) in a {
-        count2 = count2 + 1
-    }
-    print("after remove foo: {count2}")
-
-    a.remove(e3)
-    let count3 = 0
-    for (_, item) in a {
-        count3 = count3 + 1
-    }
-    print("after remove baz: {count3}")
-}
-
-@test(output = "initial count: 2\nafter reinsertion count: 2")
-fn arena_iteration_after_reinsertion() {
-    let a: Arena<int> = arena_new()
-    let e1 = a.insert(1)
-    let e2 = a.insert(2)
-
-    let count1 = 0
-    for (_, item) in a {
-        count1 = count1 + 1
-    }
-    print("initial count: {count1}")
-
-    a.remove(e1)                     // free slot 0
-    let e3 = a.insert(3)             // should re-use slot 0
-
-    let count2 = 0
-    for (_, item) in a {
-        count2 = count2 + 1
-    }
-    print("after reinsertion count: {count2}")
-}
-
-@test(output = "before clear: 2\nafter clear: 0")
-fn arena_iteration_after_clear() {
-    let a: Arena<int> = arena_new()
-    a.insert(100)
-    a.insert(200)
-
-    let count1 = 0
-    for (_, item) in a {
-        count1 = count1 + 1
-    }
-    print("before clear: {count1}")
-
-    a.clear()
-
-    let count2 = 0
-    for (_, item) in a {
-        count2 = count2 + 1
-    }
-    print("after clear: {count2}")
 }
 
 @test(output = "true")

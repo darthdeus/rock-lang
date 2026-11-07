@@ -1,0 +1,117 @@
+// `same_ref` answers identity; `==` answers structure. They disagree, and the
+// disagreement is the point: every reference type in Rock compares STRUCTURALLY
+// under `==` (`__op_eq` walks fields), so a caller that means "is this the same
+// object" cannot spell it with `==`.
+//
+// Cross-backend on purpose -- luajit maps it to `rawequal`, JS to `===`, and a
+// backend with no mapping must reject rather than fall back to a structural
+// walk that silently answers the other question (`@native_required`).
+
+struct Node { v: int }
+
+@test
+fn eq_is_structural_on_reference_structs() {
+    let a = Node { v: 1 }
+    let b = Node { v: 1 }
+    assert(a == b, "two distinct structs with equal fields compare EQUAL under ==")
+}
+
+@test
+fn same_ref_is_identity_on_reference_structs() {
+    let a = Node { v: 1 }
+    let b = Node { v: 1 }
+    let alias = a
+    assert(same_ref(a, alias), "an alias is the same instance")
+    assert(!same_ref(a, b), "distinct-but-equal-looking structs are NOT the same instance")
+}
+
+// The shape that motivated the primitive: a struct holding a coroutine. Two
+// freshly-created coroutines walk equal field-for-field, so `==` reports two
+// unrelated holders as equal -- which is why the engine's task/pool identity
+// checks cannot use it.
+co fn ticker() -> Coroutine<int, ()> {
+    yield 1
+}
+
+struct Holder { co: Coroutine<int, ()> }
+
+@test
+fn coroutines_defeat_structural_equality() {
+    let ha = Holder { co: ticker() }
+    let hb = Holder { co: ticker() }
+    assert(ha == hb, "two independent coroutines compare EQUAL under ==")
+    assert(!same_ref(ha, hb), "but they are not the same instance")
+}
+
+@test
+fn column_entity_arrays_compare_backing_identity() {
+    let first: [Entity<int>] = []
+    let alias = first
+    let other: [Entity<int>] = []
+    assert(same_ref(first, alias))
+    assert(!same_ref(first, other))
+    first.push(Entity { _scene_id: 1, _arena_id: 2, _slot: 3, _generation: 4 })
+    assert_eq(alias.len(), 1)
+    assert(same_ref(first, alias))
+    assert(!same_ref(first, other))
+}
+
+// Reference structs alias: writes through a local, an indexed element or a
+// safe-navigation chain reach the owning struct or vector.
+
+struct AliasLifecycle { kill_count: int = 0 }
+struct AliasSpawner { lifecycle: AliasLifecycle = AliasLifecycle {} }
+
+fn alias_advance(spawner: AliasSpawner, died: int) {
+    let state = spawner.lifecycle
+    state.kill_count += died
+}
+
+@test
+fn local_nested_identity_field_mutation_updates_parent() {
+    let spawner = AliasSpawner {}
+    alias_advance(spawner, 2)
+    assert_eq(spawner.lifecycle.kill_count, 2,
+        "local nested identity field mutation aliases the parent")
+}
+
+struct AliasRow { complete: bool = false }
+
+@test
+fn indexed_identity_row_field_store_updates_vector() {
+    let rows: [AliasRow] = [AliasRow {}]
+    let row = rows[0]
+    row.complete = true
+    assert(rows[0].complete, "indexed identity row mutation aliases its vector element")
+}
+
+struct SafeNavOwnerInner { value: int = 0 }
+
+struct SafeNavOwnerMiddle { inner: SafeNavOwnerInner? = null }
+
+struct SafeNavOwnerOuter { middle: SafeNavOwnerMiddle? = null }
+
+fn safe_nav_owner_bump(outer: SafeNavOwnerOuter) {
+    outer.middle?.inner?.value += 5
+}
+
+@test
+fn safe_navigation_write_through_nullable_identity_chain_reaches_the_owner() {
+    let outer = SafeNavOwnerOuter {
+        middle: SafeNavOwnerMiddle { inner: SafeNavOwnerInner { value: 10 } },
+    }
+    let held = outer.middle?.inner ?? return
+    safe_nav_owner_bump(outer)
+    outer.middle?.inner?.value += 1
+    assert(held.value == 16, "safe-navigation writes reach the held inner row")
+    held.value = 3
+    assert((outer.middle?.inner?.value ?? -1) == 3, "writes through the held row reach the owner")
+}
+
+@test
+fn safe_navigation_write_through_absent_nullable_identity_link_is_skipped() {
+    let outer = SafeNavOwnerOuter { middle: SafeNavOwnerMiddle {} }
+    safe_nav_owner_bump(outer)
+    outer.middle?.inner?.value = 7
+    assert(outer.middle?.inner == null, "an absent link stays absent")
+}

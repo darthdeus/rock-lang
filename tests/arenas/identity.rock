@@ -1,3 +1,200 @@
+// Arena identity, slot reuse and handle equality.
+//
+// An `Entity<T>` is `{_scene_id, _arena_id, _slot, _generation}` and an
+// `Arena<T>` is `{_scene_id, _arena_id}`. Both are weak: they name an
+// incarnation in the Session Arena registry rather than holding the backing
+// columns. Every observer -- equality, `entity_key`, `get`, `contains` --
+// therefore distinguishes two Arenas whose slot and generation agree.
+//
+// `Arena.clear()` keeps the Arena incarnation and its monotonic generation
+// counter, so a pre-clear handle can never be reissued.
+
+struct Tag { v: int }
+
+// --- controls: same-Arena identity, which must keep working throughout ---
+
+@test(output = "true")
+fn same_arena_entity_copy_is_equal() {
+    let a: Arena<Tag> = arena_new()
+    let e = a.insert(Tag { v: 1 })
+    let copy = e
+    print(e.equals(copy))
+}
+
+@test(output = "1")
+fn matching_arena_get_succeeds() {
+    let a: Arena<Tag> = arena_new()
+    let e = a.insert(Tag { v: 1 })
+    print(a.get(e).unwrap().v)
+}
+
+@test(output = "2")
+fn entity_inserted_after_clear_resolves() {
+    let a: Arena<Tag> = arena_new()
+    a.insert(Tag { v: 1 })
+    a.clear()
+    let fresh = a.insert(Tag { v: 2 })
+    print(a.get(fresh).unwrap().v)
+}
+
+@test(output = "7")
+fn entity_remove_returns_removed_value() {
+    let a: Arena<Tag> = arena_new()
+    let e = a.insert(Tag { v: 7 })
+    let removed = e.remove()
+    print(removed.unwrap().v)
+}
+
+// --- cross-Arena identity ---
+
+@test(output = "false")
+fn cross_arena_entities_are_not_equal() {
+    let a1: Arena<Tag> = arena_new()
+    let a2: Arena<Tag> = arena_new()
+    let e1 = a1.insert(Tag { v: 1 })
+    let e2 = a2.insert(Tag { v: 2 })
+    print(e1.equals(e2))
+}
+
+@test(output = "false")
+fn cross_arena_entity_keys_differ() {
+    let a1: Arena<Tag> = arena_new()
+    let a2: Arena<Tag> = arena_new()
+    let e1 = a1.insert(Tag { v: 1 })
+    let e2 = a2.insert(Tag { v: 2 })
+    print(entity_key(e1) == entity_key(e2))
+}
+
+@test(output = "true")
+fn cross_arena_get_rejects_foreign_entity() {
+    let a1: Arena<Tag> = arena_new()
+    let a2: Arena<Tag> = arena_new()
+    let e1 = a1.insert(Tag { v: 1 })
+    a2.insert(Tag { v: 99 })
+    print(is_null(a2.get(e1)))
+}
+
+@test(output = "false")
+fn cross_arena_contains_rejects_foreign_entity() {
+    let a1: Arena<Tag> = arena_new()
+    let a2: Arena<Tag> = arena_new()
+    let e1 = a1.insert(Tag { v: 1 })
+    a2.insert(Tag { v: 99 })
+    print(a2.contains(e1))
+}
+
+// --- clear cannot revive ---
+
+@test(output = "true\nfalse")
+fn clear_retires_old_entities() {
+    let a: Arena<Tag> = arena_new()
+    let old = a.insert(Tag { v: 1 })
+    a.clear()
+    a.insert(Tag { v: 2 })
+    print(is_null(a.get(old)))
+    print(a.contains(old))
+}
+
+// The stale handle must not read the NEW occupant of its slot -- the failure
+// this pins is a silent alias onto an unrelated entity, not merely a live
+// lookup.
+@test(output = "true")
+fn clear_stale_entity_does_not_read_new_occupant() {
+    let a: Arena<Tag> = arena_new()
+    let old = a.insert(Tag { v: 1 })
+    a.clear()
+    a.insert(Tag { v: 2 })
+    print(is_null(a.get(old)))
+}
+
+// Arena and Entity are scalar logical handles, so they travel through ordinary
+// containers without special casing. These pin that an identity that survives
+// a struct field, a Vec element, an enum payload, a Map value, and another
+// Arena's row is the SAME identity -- a copy through storage must not become a
+// second incarnation, and must not lose the Arena it names.
+
+struct Holder {
+    arena: Arena<Tag>,
+    who: Entity<Tag>,
+}
+
+// A nested Arena: the outer rows own inner Arenas. Under weak handles this is
+// two flat registry entries, not a reference cycle.
+struct Room {
+    actors: Arena<Tag>,
+}
+
+enum Slot {
+    Empty,
+    Filled(Entity<Tag>),
+}
+
+@test(output = "3\n3\ntrue")
+fn arena_and_entity_survive_a_struct_field() {
+    let a: Arena<Tag> = arena_new()
+    let e = a.insert(Tag { v: 3 })
+    let h = Holder { arena: a, who: e }
+    print(h.arena.get(h.who).unwrap().v)
+    print(h.who.get().unwrap().v)
+    print(h.who.equals(e))
+}
+
+@test(output = "true\ntrue\n2")
+fn entities_survive_a_vec() {
+    let a: Arena<Tag> = arena_new()
+    let stored: [Entity<Tag>] = vec_new()
+    vec_push(stored, a.insert(Tag { v: 1 }))
+    vec_push(stored, a.insert(Tag { v: 2 }))
+    print(a.get(stored[0]).unwrap().v == 1)
+    print(a.get(stored[1]).unwrap().v == 2)
+    print(vec_len(stored))
+}
+
+@test(output = "true\n5")
+fn entity_survives_an_enum_payload() {
+    let a: Arena<Tag> = arena_new()
+    let e = a.insert(Tag { v: 5 })
+    let s = Slot::Filled(e)
+    match s {
+        Slot::Empty => { print("false") }
+        Slot::Filled(inner) => {
+            print(inner.equals(e))
+            print(inner.get().unwrap().v)
+        }
+    }
+}
+
+@test(output = "8\ntrue")
+fn entity_survives_a_map_value() {
+    let a: Arena<Tag> = arena_new()
+    let e = a.insert(Tag { v: 8 })
+    let m: Map<string, Entity<Tag>> = map_new()
+    m["hero"] = e
+    print(m["hero"].get().unwrap().v)
+    print(m["hero"].equals(e))
+}
+
+// Two Arenas nested inside a third, each holding a slot-0 generation-0 entity.
+// The rows are indistinguishable; only the Arena identity separates them.
+@test(output = "10\n20\ntrue\ntrue")
+fn nested_arenas_stay_distinct() {
+    let rooms: Arena<Room> = arena_new()
+    let a: Arena<Tag> = arena_new()
+    let b: Arena<Tag> = arena_new()
+    let ea = a.insert(Tag { v: 10 })
+    let eb = b.insert(Tag { v: 20 })
+    let ra = rooms.insert(Room { actors: a })
+    let rb = rooms.insert(Room { actors: b })
+
+    print(rooms.get(ra).unwrap().actors.get(ea).unwrap().v)
+    print(rooms.get(rb).unwrap().actors.get(eb).unwrap().v)
+    print(is_null(rooms.get(ra).unwrap().actors.get(eb)))
+    print(is_null(rooms.get(rb).unwrap().actors.get(ea)))
+}
+
+// Entity equality compares every identity lane, including nullable handles and
+// structural enum fields, without allocating carriers.
+
 struct EqTag { n: int }
 value EqWeak<T> { owner: int, slot: int, generation: int }
 enum EqSignal { Mark(string) }

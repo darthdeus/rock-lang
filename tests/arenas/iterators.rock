@@ -2,10 +2,298 @@
 // `pairs()` yields (Entity<T>, T) as a tuple ELEMENT, so both satisfy
 // `Iterator<..>` and compose with every combinator + terminal. Bare
 // `for (e, v) in arena` desugars through `iter(arena)` = pairs mode.
+//
+// The first half drives filter/find/any/all/map, `.map(_.N)` projections and
+// nullable finds over pairs() and values(); the second half covers the
+// protocol itself: holes, keys(), enumerate and bare-for pair mode.
 
-struct Mob {
-    name: string,
-    health: int,
+struct Mob { name: string, health: int }
+struct Pos { x: float, y: float }
+
+// -- filter --
+
+@test(output = "Orc: 100\nDragon: 200")
+fn filter_by_health() {
+    let mobs: Arena<Mob> = arena_new()
+    mobs.insert(Mob { name: "Goblin", health: 30 })
+    mobs.insert(Mob { name: "Orc", health: 100 })
+    mobs.insert(Mob { name: "Rat", health: 10 })
+    mobs.insert(Mob { name: "Dragon", health: 200 })
+
+    let strong = mobs.pairs().filter(p => p.1.health >= 100).collect()
+    for (_, mob) in strong {
+        print("{mob.name}: {mob.health}")
+    }
+}
+
+@test(output = "0")
+fn filter_empty_arena() {
+    let mobs: Arena<Mob> = arena_new()
+    let result = mobs.values().filter(m => m.health > 0).collect()
+    print(vec_len(result))
+}
+
+@test(output = "0")
+fn filter_no_matches() {
+    let mobs: Arena<Mob> = arena_new()
+    mobs.insert(Mob { name: "Goblin", health: 30 })
+    let result = mobs.values().filter(m => m.health > 1000).collect()
+    print(vec_len(result))
+}
+
+@test(output = "removed Orc\n3")
+fn filter_then_remove() {
+    let mobs: Arena<Mob> = arena_new()
+    mobs.insert(Mob { name: "Goblin", health: 30 })
+    mobs.insert(Mob { name: "Orc", health: 100 })
+    mobs.insert(Mob { name: "Rat", health: 10 })
+    mobs.insert(Mob { name: "Dragon", health: 200 })
+
+    let targets = mobs.pairs().filter(p => p.1.health == 100).collect()
+    for (e, mob) in targets {
+        print("removed {mob.name}")
+        e.remove()
+    }
+
+    print(mobs.len())
+}
+
+// -- find --
+
+@test(output = "Boss: 500")
+fn find_by_name() {
+    let mobs: Arena<Mob> = arena_new()
+    mobs.insert(Mob { name: "Goblin", health: 30 })
+    mobs.insert(Mob { name: "Boss", health: 500 })
+
+    let (_, mob) = mobs.pairs().find(p => p.1.name == "Boss").unwrap()
+    print("{mob.name}: {mob.health}")
+}
+
+@test(output = "true")
+fn find_returns_null_when_missing() {
+    let mobs: Arena<Mob> = arena_new()
+    mobs.insert(Mob { name: "Goblin", health: 30 })
+
+    let result = mobs.pairs().find(p => p.1.name == "Dragon")
+    print(result == null)
+}
+
+@test(output = "true\nfalse")
+fn find_and_remove() {
+    let mobs: Arena<Mob> = arena_new()
+    mobs.insert(Mob { name: "Goblin", health: 30 })
+    mobs.insert(Mob { name: "Boss", health: 500 })
+
+    let (e, _) = mobs.pairs().find(p => p.1.name == "Boss").unwrap()
+    e.remove()
+
+    print(mobs.pairs().find(p => p.1.name == "Boss") == null)
+    print(mobs.pairs().find(p => p.1.name == "Goblin") == null)
+}
+
+@test(output = "true")
+fn find_empty_arena() {
+    let mobs: Arena<Mob> = arena_new()
+    print(mobs.pairs().find(p => p.1.health > 0) == null)
+}
+
+// -- any / all --
+
+@test(output = "true\nfalse")
+fn any_basic() {
+    let mobs: Arena<Mob> = arena_new()
+    mobs.insert(Mob { name: "Goblin", health: 30 })
+    mobs.insert(Mob { name: "Orc", health: 100 })
+
+    print(mobs.values().any(m => m.health > 50))
+    print(mobs.values().any(m => m.health > 500))
+}
+
+@test(output = "false")
+fn any_empty_arena() {
+    let mobs: Arena<Mob> = arena_new()
+    print(mobs.values().any(m => m.health > 0))
+}
+
+@test(output = "true\nfalse")
+fn all_basic() {
+    let mobs: Arena<Mob> = arena_new()
+    mobs.insert(Mob { name: "Goblin", health: 30 })
+    mobs.insert(Mob { name: "Orc", health: 100 })
+
+    print(mobs.values().all(m => m.health > 0))
+    print(mobs.values().all(m => m.health > 50))
+}
+
+@test(output = "true")
+fn all_empty_arena() {
+    let mobs: Arena<Mob> = arena_new()
+    print(mobs.values().all(m => m.health > 1000))
+}
+
+// -- map --
+
+@test(output = "Goblin\nOrc")
+fn map_to_names() {
+    let mobs: Arena<Mob> = arena_new()
+    mobs.insert(Mob { name: "Goblin", health: 30 })
+    mobs.insert(Mob { name: "Orc", health: 100 })
+
+    let names = mobs.pairs().map(p => (p.0, p.1.name)).collect()
+    for (_, name) in names {
+        print(name)
+    }
+}
+
+@test(output = "60\n200")
+fn map_transform_values() {
+    let mobs: Arena<Mob> = arena_new()
+    mobs.insert(Mob { name: "Goblin", health: 30 })
+    mobs.insert(Mob { name: "Orc", health: 100 })
+
+    let doubled = mobs.pairs().map(p => (p.0, p.1.health * 2)).collect()
+    for (_, hp) in doubled {
+        print(hp)
+    }
+}
+
+@test(output = "0")
+fn map_empty_arena() {
+    let mobs: Arena<Mob> = arena_new()
+    let result = mobs.values().map(m => m.name).collect()
+    print(vec_len(result))
+}
+
+// -- projecting tuple fields out of the pair iterator via .map(_.N) --
+
+@test(output = "2")
+fn dot0_extracts_entities() {
+    let mobs: Arena<Mob> = arena_new()
+    mobs.insert(Mob { name: "Goblin", health: 30 })
+    mobs.insert(Mob { name: "Orc", health: 100 })
+
+    let entities = mobs.pairs().filter(p => p.1.health > 0).map(_.0).collect()
+    print(vec_len(entities))
+}
+
+@test(output = "Orc\nDragon")
+fn filter_then_dot1() {
+    let mobs: Arena<Mob> = arena_new()
+    mobs.insert(Mob { name: "Goblin", health: 30 })
+    mobs.insert(Mob { name: "Orc", health: 100 })
+    mobs.insert(Mob { name: "Rat", health: 10 })
+    mobs.insert(Mob { name: "Dragon", health: 200 })
+
+    let strong_mobs = mobs.pairs().filter(p => p.1.health >= 100).map(_.1).collect()
+    for mob in strong_mobs {
+        print(mob.name)
+    }
+}
+
+// -- Game-realistic patterns --
+
+@test(output = "killed: Goblin\nkilled: Rat\nsurvivors: 2")
+fn kill_weak_mobs_pattern() {
+    let mobs: Arena<Mob> = arena_new()
+    mobs.insert(Mob { name: "Goblin", health: 30 })
+    mobs.insert(Mob { name: "Orc", health: 100 })
+    mobs.insert(Mob { name: "Rat", health: 10 })
+    mobs.insert(Mob { name: "Dragon", health: 200 })
+
+    let weak = mobs.pairs().filter(p => p.1.health < 50).collect()
+    for (e, mob) in weak {
+        print("killed: {mob.name}")
+        e.remove()
+    }
+
+    print("survivors: {mobs.len()}")
+}
+
+@test(output = "nearest: Orc")
+fn find_nearest_mob_pattern() {
+    let mobs: Arena<Mob> = arena_new()
+    mobs.insert(Mob { name: "Goblin", health: 30 })
+    mobs.insert(Mob { name: "Orc", health: 100 })
+    mobs.insert(Mob { name: "Dragon", health: 200 })
+
+    // Simulating "find first mob with health 100" as proxy for nearest
+    let (_, target) = mobs.pairs().find(p => p.1.health == 100).unwrap()
+    print("nearest: {target.name}")
+}
+
+@test(output = "any boss: true\nany boss: false")
+fn check_any_after_remove_pattern() {
+    let mobs: Arena<Mob> = arena_new()
+    mobs.insert(Mob { name: "Goblin", health: 30 })
+    let boss = mobs.insert(Mob { name: "Boss", health: 500 })
+
+    print("any boss: {mobs.values().any(m => m.health >= 500)}")
+
+    boss.remove()
+    print("any boss: {mobs.values().any(m => m.health >= 500)}")
+}
+
+// -- Placeholder lambda syntax (Scala-style _.field) --
+
+@test(output = "Orc\nDragon")
+fn placeholder_filter() {
+    let mobs: Arena<Mob> = arena_new()
+    mobs.insert(Mob { name: "Goblin", health: 30 })
+    mobs.insert(Mob { name: "Orc", health: 100 })
+    mobs.insert(Mob { name: "Dragon", health: 200 })
+
+    for mob in mobs.values().filter(_.health >= 100).collect() {
+        print(mob.name)
+    }
+}
+
+@test(output = "Goblin\nOrc\nDragon")
+fn placeholder_map_ys() {
+    let mobs: Arena<Mob> = arena_new()
+    mobs.insert(Mob { name: "Goblin", health: 30 })
+    mobs.insert(Mob { name: "Orc", health: 100 })
+    mobs.insert(Mob { name: "Dragon", health: 200 })
+
+    for name in mobs.pairs().map(_.1).map(_.name).collect() {
+        print(name)
+    }
+}
+
+// -- Nullable tuple ?.0/?.1 projection (safe-nav required on nullable base) --
+
+@test(output = "Boss\ntrue")
+fn find_dot1_nullable() {
+    let mobs: Arena<Mob> = arena_new()
+    mobs.insert(Mob { name: "Goblin", health: 30 })
+    mobs.insert(Mob { name: "Boss", health: 500 })
+
+    let mob = mobs.pairs().find(_.1.name == "Boss")?.1
+    print(mob.unwrap().name)
+
+    let missing = mobs.pairs().find(_.1.name == "Dragon")?.1
+    print(missing == null)
+}
+
+@test(output = "true\ntrue")
+fn find_dot0_nullable() {
+    let mobs: Arena<Mob> = arena_new()
+    mobs.insert(Mob { name: "Boss", health: 500 })
+
+    let entity = mobs.pairs().find(_.1.name == "Boss")?.0
+    print(entity != null)
+
+    let missing = mobs.pairs().find(_.1.name == "Dragon")?.0
+    print(missing == null)
+}
+
+@test(output = "Boss")
+fn find_dot1_chain() {
+    let mobs: Arena<Mob> = arena_new()
+    mobs.insert(Mob { name: "Boss", health: 500 })
+
+    let name = mobs.pairs().find(_.1.health > 100)?.1.unwrap().name
+    print(name)
 }
 
 fn mk_arena() -> Arena<Mob> {

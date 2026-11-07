@@ -63,3 +63,47 @@ fn the_weak_cache_drops_a_removed_owner() {
     let stale: int? = weak_cache_get("arena_liveness", owner)
     print("{cached.unwrap()} {stale == null}")
 }
+
+// Every Arena read answers "not there" for a handle whose slot lies outside
+// the occupancy column. The Lua getter has no explicit range check (ledger
+// B2a): an out-of-range slot must read as absent, never as some other row.
+
+struct Tag { v: int }
+
+fn report(arena: Arena<Tag>, entity: Entity<Tag>) {
+    print("{entity.get() == null} {arena.get(entity) == null} {!arena.contains(entity)} {arena.borrow(entity) == null} {arena.remove(entity) == null}")
+}
+
+@test(output = "true true true true true\ntrue true true true true\n1")
+fn a_slot_past_the_columns_is_absent() {
+    let a: Arena<Tag> = arena_new()
+    let only = a.insert(Tag { v: 1 })
+    // One past the end, and far past it, with the live generation.
+    report(a, entity_new(a, 1, only._generation))
+    report(a, entity_new(a, 1000, only._generation))
+    print(only.get().unwrap().v)
+}
+
+@test(output = "true true true true true\n7")
+fn a_handle_from_before_clear_is_absent_beyond_the_new_columns() {
+    let a: Arena<Tag> = arena_new()
+    let last = a.insert(Tag { v: 0 })
+    for i in 1..8 { last = a.insert(Tag { v: i }) }
+    a.clear()
+    let fresh = a.insert(Tag { v: 7 })
+    report(a, last)
+    print(fresh.get().unwrap().v)
+}
+
+@test(output = "true true true true true")
+fn a_negative_slot_is_absent() {
+    let a: Arena<Tag> = arena_new()
+    let only = a.insert(Tag { v: 1 })
+    let forged: Entity<Tag> = Entity {
+        _scene_id: only._scene_id,
+        _arena_id: only._arena_id,
+        _slot: -1,
+        _generation: only._generation,
+    }
+    report(a, forged)
+}

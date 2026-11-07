@@ -1,3 +1,85 @@
+// Handles and rows across ownership boundaries. Entity and Scene handles held
+// in globals and statics stay weak (they never revive a removed row or extend a
+// closed scene), rows passed through contexts, joins and generic callbacks keep
+// their identity, and a row returned from a helper's local arena keeps the
+// allocations stored into it.
+
+struct GlobalHandleRow { n: int, label: string = "" }
+struct GlobalHandleScene { n: int }
+
+global HANDLE_ROWS: Arena<GlobalHandleRow> = arena_new()
+global HANDLE: Entity<GlobalHandleRow>
+global MAYBE_HANDLE: Entity<GlobalHandleRow>? = null
+global INITIAL_HANDLE: Entity<GlobalHandleRow> = HANDLE_ROWS.insert(GlobalHandleRow { n: 7, label: "initial-{HANDLE_ROWS.len()}" })
+global SCENE_HANDLE: Scene<GlobalHandleScene>
+
+fn read_global_handle() -> int { return HANDLE.get().unwrap().n }
+fn read_nullable_global_handle() -> int { return MAYBE_HANDLE.unwrap().get().unwrap().n }
+
+@test
+fn c_entity_globals_preserve_weak_identity() {
+    assert(MAYBE_HANDLE == null, "nullable handle starts absent")
+    assert(INITIAL_HANDLE.get().unwrap().n == 7, "global initializer inserts a real row")
+    assert(INITIAL_HANDLE.get().unwrap().label == "initial-0", "initializer payload keeps its entity owner")
+    let first = HANDLE_ROWS.insert(GlobalHandleRow { n: 11 })
+    HANDLE = first
+    MAYBE_HANDLE = first
+    assert(read_global_handle() == 11 && read_nullable_global_handle() == 11,
+        "global reads resolve the inserted row")
+    first.get().unwrap().n = 13
+    assert(read_global_handle() == 13 && read_nullable_global_handle() == 13,
+        "globals retain handles rather than copying rows")
+    let other: Arena<GlobalHandleRow> = arena_new()
+    let second = other.insert(GlobalHandleRow { n: 23 })
+    HANDLE = second
+    MAYBE_HANDLE = second
+    assert(read_global_handle() == 23 && read_nullable_global_handle() == 23,
+        "reassignment preserves arena provenance")
+    let _ = other.remove(second)
+    assert(HANDLE.get() == null && MAYBE_HANDLE.unwrap().get() == null,
+        "removed rows leave stale global handles")
+    let replacement = other.insert(GlobalHandleRow { n: 31 })
+    assert(HANDLE.get() == null && MAYBE_HANDLE.unwrap().get() == null,
+        "slot reuse cannot revive the global handle")
+    MAYBE_HANDLE = null
+    assert(MAYBE_HANDLE == null, "nullable global can be cleared")
+    assert(replacement.get().unwrap().n == 31 && first.get().unwrap().n == 13,
+        "other live rows remain independent")
+}
+
+fn build_global_handle_scene(b: SceneBuilder) -> GlobalHandleScene? {
+    return GlobalHandleScene { n: 41 }
+}
+
+@test
+fn c_scene_global_preserves_weak_identity() {
+    let scene = scene_create(build_global_handle_scene).unwrap()
+    SCENE_HANDLE = scene
+    assert(SCENE_HANDLE.get().unwrap().n == 41, "scene global resolves its root")
+    scene_close(scene)
+    assert(SCENE_HANDLE.get() == null, "closed scene global is stale")
+    let _ = __scene_drain_closed()
+}
+
+struct StaticEntityPayload { n: int }
+global STATIC_ENTITY_ROWS: Arena<StaticEntityPayload> = arena_new()
+
+fn static_owned_entity() -> Entity<StaticEntityPayload> {
+    static handle = STATIC_ENTITY_ROWS.insert(StaticEntityPayload { n: 7 })
+    return handle
+}
+
+@test
+fn c_static_entity_handle_preserves_owned_identity() {
+    let earlier = static_owned_entity()
+    let later = static_owned_entity()
+    assert(earlier == later)
+    earlier.get().unwrap().n = 23
+    assert_eq(later.get().unwrap().n, 23)
+    let _ = earlier.remove()
+    assert(static_owned_entity().get() == null)
+}
+
 struct BoundaryRow { count: int }
 nobox value BoundaryContext { row: BoundaryRow }
 
@@ -137,4 +219,40 @@ fn same_ref_compares_scene_root_addresses() {
     let _ = scene_close(first)
     assert(!same_ref(row, first.get()))
     let _ = scene_close(second)
+}
+
+value OwnerRecord { values: [int] }
+struct OwnerRoot { records: [OwnerRecord] = [] }
+
+fn owner_root_new(arena: Arena<OwnerRoot>) -> OwnerRoot {
+    let entity = arena.insert(OwnerRoot {})
+    return entity.get().unwrap()
+}
+
+@test(output = "7")
+fn local_arena_row_result_can_retain_allocations() {
+    let arena: Arena<OwnerRoot> = arena_new()
+    let root = owner_root_new(arena)
+    root.records.push(OwnerRecord { values: [7] })
+    print(root.records[0].values[0])
+    let _ = arena_destroy(arena)
+}
+
+value FactoryRecord { values: [int] }
+struct FactoryRoot { records: [FactoryRecord] = [] }
+
+fn factory_root_new() -> FactoryRoot {
+    let arena: Arena<FactoryRoot> = arena_new()
+    return arena.insert(FactoryRoot {}).get().unwrap()
+}
+
+fn factory_root_forward() -> FactoryRoot {
+    return factory_root_new()
+}
+
+@test(output = "7")
+fn helper_local_arena_row_keeps_its_allocations() {
+    let root = factory_root_forward()
+    root.records.push(FactoryRecord { values: [7] })
+    print(root.records[0].values[0])
 }
