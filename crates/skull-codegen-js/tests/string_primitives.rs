@@ -97,6 +97,15 @@ fn split_co_emits() {
     eval_str(&js, "root", "a|b|c");
 }
 
+// pad_left/pad_right fill to `width` with spaces and never truncate.
+#[test]
+fn pad_left_and_right() {
+    let src = "fn root() -> string { join([\"ab\".pad_left(4), \"ab\".pad_right(4), \"abcde\".pad_left(3)], \"|\") }";
+    let ws = ws_with(src);
+    let js = emit_closure(&ws, "root").expect("pad emits");
+    eval_str(&js, "root", "  ab|ab  |abcde");
+}
+
 // unit_at returns the ASCII code, 0 out of bounds.
 #[test]
 fn unit_at_ascii_and_oob() {

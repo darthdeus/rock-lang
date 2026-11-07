@@ -4078,6 +4078,9 @@ inline(lua) fn string.pad_right(s, width: int) -> string = """
     if len >= width then return s end
     return s .. string.rep(" ", width - len)
 """
+inline(js) fn string.pad_right(s, width: int) -> string = """
+    return s.length >= width ? s : s + " ".repeat(width - s.length);
+"""
 
 // Right-align `s` in a field of `width` chars by prepending spaces. Returns
 // `s` unchanged when `#s >= width` (never truncates).
@@ -4085,6 +4088,9 @@ inline(lua) fn string.pad_left(s, width: int) -> string = """
     local len = #s
     if len >= width then return s end
     return string.rep(" ", width - len) .. s
+"""
+inline(js) fn string.pad_left(s, width: int) -> string = """
+    return s.length >= width ? s : " ".repeat(width - s.length) + s;
 """
 
 // Format a float as a string with exactly `decimals` fractional digits,
