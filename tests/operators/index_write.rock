@@ -1,0 +1,48 @@
+// Index writes. `arr[idx] = expr` where `expr` mutates `idx` must capture the
+// index VALUE before evaluating the right-hand side. Compound index writes
+// `m[k] += v` on a Map read the cell through the checked-read helper and
+// write it back.
+
+@test
+fn test_eval_order_basic() {
+    let arr = [0, 0, 0, 0, 0]
+    let idx = 0
+    let tricky = (val: int) => {
+        arr[idx] = val + { idx += 1; idx }
+    }
+    tricky(100)
+    // LHS captured idx=0, RHS mutates idx to 1, sum 100+1 = 101.
+    assert_eq(arr[0], 101)
+    assert_eq(idx, 1)
+}
+
+@test
+fn test_eval_order_nested_writes() {
+    let arr = [10, 20, 30]
+    let i = 0
+    let bump = (v: int) => {
+        arr[i] = v + { i += 1; i }
+    }
+    bump(5)
+    // arr[0] = 5 + 1 = 6
+    assert_eq(arr[0], 6)
+    bump(50)
+    // arr[1] = 50 + 2 = 52
+    assert_eq(arr[1], 52)
+}
+
+@test(output = "4")
+fn test_map_compound_add() {
+    let m: Map<string, int> = map_new()
+    insert(m, "k", 3)
+    m["k"] += 1
+    print(unwrap(get(m, "k")))
+}
+
+@test(output = "6")
+fn test_map_compound_mul() {
+    let m: Map<string, int> = map_new()
+    insert(m, "k", 2)
+    m["k"] *= 3
+    print(unwrap(get(m, "k")))
+}

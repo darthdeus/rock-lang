@@ -1,5 +1,6 @@
-// Test for v function with for loop variables and multiplication
-// This matches the exact pattern in map.rock that's failing
+// Calls whose arguments are arithmetic expressions or for-loop variables,
+// combined with a user `*` overload: int arguments promote into float
+// params, and `fixv(x, y) * n` picks the int-scaled overload.
 
 struct FixVec2 {
     x: float,
@@ -10,9 +11,38 @@ fn fixv(x: float, y: float) -> FixVec2 {
     return FixVec2 { x: x, y: y }
 }
 
+operator *(v: FixVec2, scale: float) -> FixVec2 {
+    return FixVec2 { x: v.x * scale, y: v.y * scale }
+}
+
 operator *(v: FixVec2, scale: int) -> FixVec2 {
     let s = float(scale)
     return FixVec2 { x: v.x * s, y: v.y * s }
+}
+
+@test
+fn test_v_with_arithmetic_exprs() {
+    let PAD = 10.0
+    let BAR_HEIGHT = 20.0
+
+    // This should call v with two arguments
+    let vec = fixv(2.0 * PAD, 3.0 * (BAR_HEIGHT + PAD))
+
+    assert_eq(vec.x, 20.0)  // 2 * 10
+    assert_eq(vec.y, 90.0)  // 3 * (20 + 10)
+}
+
+@test
+fn test_v_with_complex_exprs() {
+    let x = 5
+    let y = 7
+    let bg_size = 16
+
+    // int args promote into the float params, then int-scaled
+    let vec = fixv(x, y) * bg_size
+
+    assert_eq(vec.x, 5.0 * 16.0)
+    assert_eq(vec.y, 7.0 * 16.0)
 }
 
 @test
@@ -20,10 +50,9 @@ fn test_v_in_nested_for_loops_with_multiplication() {
     let bg_size = 28  // 448 / 16
     let span = 3
 
-    // Match the exact pattern from map.rock
     for x in (-span)..(span + 1) {
         for y in (-span)..(span + 1) {
-            // This is the failing pattern: fixv(x, y) * bg_size
+            // Pattern under test: fixv(x, y) * bg_size
             let result = fixv(x, y) * bg_size
 
             assert_eq(result.x, float(x * bg_size))

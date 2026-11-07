@@ -1,0 +1,87 @@
+// Division: `/` is always float division (int operands promote), `./` is
+// integer floor division at the `*` precedence tier, and int arithmetic
+// assigned to a float-annotated binding promotes.
+
+@test
+fn test_div_infers_float() {
+    // unannotated let infers float, no truncation
+    let x = 3 / 4
+    assert_eq(x, 0.75)
+}
+
+@test
+fn test_div_annotated_float() {
+    let x: float = 3 / 4
+    assert_eq(x, 0.75)
+}
+
+@test
+fn test_div_mixed_operands() {
+    assert_eq(3 / 2, 1.5)
+}
+
+@test
+fn test_div_int_promotes_into_float_arg() {
+    // int literal promotes into the float `/`
+    assert_eq(10 / 4, 2.5)
+}
+
+@test(output = "0.75")
+fn test_div_print() {
+    print(3 / 4)
+}
+
+@test
+fn test_idiv_basic() {
+    assert_eq(3 ./ 4, 0)
+}
+
+@test
+fn test_idiv_floor_negative() {
+    // floor, NOT truncation: rounds toward -inf
+    assert_eq(-7 ./ 2, -4)
+}
+
+@test
+fn test_idiv_truncation_positive() {
+    assert_eq(7 ./ 2, 3)
+}
+
+@test
+fn test_idiv_precedence_add() {
+    // `./` binds tighter than `+`: 6 ./ 4 == 1, then 1 + 1 == 2
+    assert_eq(1 + 6 ./ 4, 2)
+}
+
+@test
+fn test_idiv_left_assoc_same_tier_as_mul() {
+    // same tier as `*`, left assoc: (2 * 3) ./ 2 == 6 ./ 2 == 3
+    assert_eq(2 * 3 ./ 2, 3)
+}
+
+@test
+fn test_int_division_direct_assignment_works() {
+    let result: int = 5 ./ 2
+    assert_eq(result, 2)
+}
+
+@test
+fn test_mixed_division_works() {
+    let result1: float = 5 / 2.0
+    assert_eq(result1, 2.5)
+
+    let result2: float = 5.0 / 2
+    assert_eq(result2, 2.5)
+}
+
+@test
+fn test_other_int_operations_still_promote() {
+    let result1: float = 5 + 2
+    assert_eq(result1, 7.0)
+
+    let result2: float = 5 - 2
+    assert_eq(result2, 3.0)
+
+    let result3: float = 5 * 2
+    assert_eq(result3, 10.0)
+}

@@ -1,8 +1,6 @@
-// Small-tail: `x++` / `x--` in statement position desugars to the
-// compound-assign `x = x + 1` / `x = x - 1` (value discarded), the
-// same ANF shape `x += 1` already lowers. Value-position / non-
-// simple-lvalue increments stay reject-to-live. Pins runtime
-// behavior; must pass with and without ROCK_ANF_FUNCTIONS=1.
+// `x++` / `x--` in statement position desugars to the compound assignment
+// `x = x + 1` / `x = x - 1` with the value discarded; value-position pre and
+// post increments yield the new and old values respectively.
 
 @test(output = "5")
 fn test_postincrement_in_while() {
