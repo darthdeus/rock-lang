@@ -1,6 +1,139 @@
-// Adversarial coverage for the same-concrete-enum == / != specialization.
-// Exercises cases beyond the happy path to make sure we didn't regress
-// anything when we skip the generic __op_eq dispatch.
+// Same-concrete-enum == / != specialization: payloadless enums compare
+// natively and payloaded enums call a per-enum equality instead of the
+// generic __op_eq dispatch. The second half covers adversarial shapes: enum
+// fields, nullable refinement, containers, map keys and tuples.
+
+enum TileType { Floor, Wall, Water }
+enum AiState { Idle, Wander, Chase }
+
+enum Msg {
+    Ping,
+    Val(int),
+    Str(string),
+}
+
+@test
+fn test_payloadless_same_variant() {
+    let a = TileType::Wall
+    let b = TileType::Wall
+    assert_eq(a == b, true)
+    assert_eq(a != b, false)
+}
+
+@test
+fn test_payloadless_different_variants() {
+    let a = TileType::Floor
+    let b = TileType::Water
+    assert_eq(a == b, false)
+    assert_eq(a != b, true)
+}
+
+@test
+fn test_payloadless_variable_vs_literal() {
+    let t = TileType::Wall
+    assert_eq(t == TileType::Wall, true)
+    assert_eq(TileType::Wall == t, true)
+    assert_eq(t == TileType::Floor, false)
+    assert_eq(TileType::Floor != t, true)
+}
+
+@test
+fn test_payloadless_in_if() {
+    let state = AiState::Wander
+    let result = 0
+    if state == AiState::Wander {
+        result = 1
+    }
+    assert_eq(result, 1)
+    if state != AiState::Idle {
+        result = 2
+    }
+    assert_eq(result, 2)
+}
+
+@test
+fn test_payloaded_same_payload() {
+    let a = Msg::Val(5)
+    let b = Msg::Val(5)
+    assert_eq(a == b, true)
+}
+
+@test
+fn test_payloaded_different_payload() {
+    let a = Msg::Val(5)
+    let b = Msg::Val(6)
+    assert_eq(a == b, false)
+    assert_eq(a != b, true)
+}
+
+@test
+fn test_payloaded_different_variants() {
+    let a = Msg::Val(5)
+    let b = Msg::Str("hi")
+    assert_eq(a == b, false)
+}
+
+@test
+fn test_payloaded_vs_unit_variant() {
+    let a = Msg::Ping
+    let b = Msg::Val(0)
+    assert_eq(a == b, false)
+    assert_eq(a != b, true)
+}
+
+@test
+fn test_mixed_enum_with_units_and_payloads() {
+    let a = Msg::Ping
+    let b = Msg::Ping
+    assert_eq(a == b, true)
+}
+
+// Moved from enum_tuple_variants.rock: loop + match over heterogeneous vec
+enum Shape {
+    Point,
+    Line(float, float, float, float),
+    Circle(float, float, float),
+}
+
+@test
+fn test_tuple_variant_nested_match() {
+    let shapes = [
+        Shape::Point,
+        Shape::Line(0.0, 0.0, 5.0, 5.0),
+        Shape::Circle(10.0, 10.0, 2.5),
+    ]
+
+    for shape in shapes {
+        match shape {
+            Shape::Point => print("Got a point"),
+            Shape::Line(_, _, x2, y2) => print("Line ends at ({x2}, {y2})"),
+            Shape::Circle(_, _, radius) => print("Circle with radius {radius}"),
+        }
+    }
+}
+
+enum Message {
+    Quit,
+    Move(int, int),
+    Write(string),
+    ChangeColor(int, int, int),
+}
+
+@test
+fn test_mixed_variant_types() {
+    let msg = Message::Move(10, 20)
+
+    match msg {
+        Message::Quit => print("Quit"),
+        Message::Move(x, y) => {
+            assert_eq(x, 10)
+            assert_eq(y, 20)
+            print("Move to ({x}, {y})")
+        }
+        Message::Write(text) => print("Write: {text}"),
+        Message::ChangeColor(r, g, b) => print("Color: ({r}, {g}, {b})"),
+    }
+}
 
 enum Color { Red, Green, Blue }
 enum Tag { A, B, C }
@@ -10,14 +143,14 @@ struct Item {
     tag: Tag,
 }
 
-enum Shape {
+enum HeldShape {
     Point,
     Circle(int),
     Rect(int, int),
 }
 
 struct Holder {
-    shape: Shape,
+    shape: HeldShape,
 }
 
 // Case 1: enum stored in a struct field, compared to a literal.
@@ -92,9 +225,9 @@ fn test_enum_in_vec() {
 // Case 6: payloaded enum stored in a struct, compared via fast path (==).
 @test
 fn test_payloaded_struct_field() {
-    let h1 = Holder { shape: Shape::Circle(5) }
-    let h2 = Holder { shape: Shape::Circle(5) }
-    let h3 = Holder { shape: Shape::Rect(2, 3) }
+    let h1 = Holder { shape: HeldShape::Circle(5) }
+    let h2 = Holder { shape: HeldShape::Circle(5) }
+    let h3 = Holder { shape: HeldShape::Rect(2, 3) }
     assert_eq(h1.shape == h2.shape, true)
     assert_eq(h1.shape == h3.shape, false)
     assert_eq(h1.shape != h3.shape, true)

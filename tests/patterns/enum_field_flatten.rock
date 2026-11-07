@@ -1,8 +1,8 @@
-// Behavioral oracle for universal enum scalarization / struct-field flattening.
-// A non-cdata enum (closure variant) stored in
-// a regular struct field must construct, reassign, match, and compare structurally
-// the same whether the field is boxed (status quo) or flattened into the parent
-// table. These assertions must hold BEFORE and AFTER the codegen change.
+// Enum struct-field flattening. A non-cdata enum (closure variant) stored in a
+// struct field must construct, reassign, match, copy and compare structurally
+// the same whether the field is boxed or flattened into the parent table. The
+// second enum mixes record, tuple and unit variants to cover record-payload
+// flattening.
 
 enum Sig {
     Idle,
@@ -73,4 +73,64 @@ fn test_if_let_on_field() {
     assert_eq(got, 42)
     let miss = if let Sig::Pair(a, b) = h.sig { a + b } else { -1 }
     assert_eq(miss, -1)
+}
+
+enum Shape {
+    Empty,
+    Circle { r: int },
+    Rect { w: int, h: int },
+    Line(int, int),              // a tuple variant alongside records (mixed)
+    Draw(() -> ()),              // closure payload -> Shape is non-cdata
+}
+
+struct Canvas {
+    shape: Shape,
+}
+
+fn area(c: Canvas) -> int {
+    return match c.shape {
+        Shape::Empty => 0
+        Shape::Circle { r } => r * r * 3
+        Shape::Rect { w, h } => w * h
+        Shape::Line(a, b) => a + b
+        Shape::Draw(_) => -1
+    }
+}
+
+@test
+fn test_construct_record_variants() {
+    assert_eq(area(Canvas { shape: Shape::Empty }), 0)
+    assert_eq(area(Canvas { shape: Shape::Circle { r: 4 } }), 48)
+    assert_eq(area(Canvas { shape: Shape::Rect { w: 3, h: 5 } }), 15)
+    assert_eq(area(Canvas { shape: Shape::Line(7, 8) }), 15)
+    assert_eq(area(Canvas { shape: Shape::Draw(() => {}) }), -1)
+}
+
+@test
+fn test_reassign_record_variants() {
+    let c = Canvas { shape: Shape::Empty }
+    assert_eq(area(c), 0)
+    c.shape = Shape::Rect { w: 6, h: 7 }
+    assert_eq(area(c), 42)
+    c.shape = Shape::Circle { r: 2 }
+    assert_eq(area(c), 12)
+    c.shape = Shape::Line(10, 20)
+    assert_eq(area(c), 30)
+}
+
+@test
+fn test_structural_eq_record() {
+    let c = Canvas { shape: Shape::Rect { w: 3, h: 5 } }
+    assert_eq(c.shape == Shape::Rect { w: 3, h: 5 }, true)
+    assert_eq(c.shape == Shape::Rect { w: 5, h: 3 }, false)
+    assert_eq(c.shape == Shape::Circle { r: 3 }, false)
+    c.shape = Shape::Circle { r: 9 }
+    assert_eq(c.shape == Shape::Circle { r: 9 }, true)
+}
+
+@test
+fn test_if_let_record() {
+    let c = Canvas { shape: Shape::Rect { w: 4, h: 6 } }
+    let got = if let Shape::Rect { w, h } = c.shape { w * h } else { -1 }
+    assert_eq(got, 24)
 }

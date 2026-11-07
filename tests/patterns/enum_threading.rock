@@ -1,0 +1,239 @@
+// Flat-enum threading. A flat-eligible boxed (non-cdata) enum threads as its
+// tag and payload scalars instead of a box: across fn params and returns, as
+// the leaf cells of a `let` local, and as a nullable `E?` whose null sentinel is
+// a nil tag (a present variant always has a non-nil tag). A box materializes
+// only where a whole value is needed (==, capture, containers). Behavior must
+// match the boxed representation.
+
+enum Cmd {
+    Stop,
+    Go(int),
+    Move { dx: int, dy: int },
+    Run(() -> ()),       // closure payload -> Cmd is non-cdata (boxed today)
+}
+
+// Returns a flat enum.
+fn make_cmd(n: int) -> Cmd {
+    if n == 0 { return Cmd::Stop }
+    if n < 0 { return Cmd::Move { dx: n, dy: -n } }
+    return Cmd::Go(n)
+}
+
+// Takes a flat enum by value and matches it (param threading).
+fn eval(c: Cmd) -> int {
+    return match c {
+        Cmd::Stop => 0
+        Cmd::Go(n) => n
+        Cmd::Move { dx, dy } => dx + dy
+        Cmd::Run(_) => -1
+    }
+}
+
+// Round-trips through both boundaries.
+fn roundtrip(n: int) -> int {
+    return eval(make_cmd(n))
+}
+
+@test
+fn test_return_then_match() {
+    assert_eq(eval(make_cmd(0)), 0)
+    assert_eq(eval(make_cmd(5)), 5)
+    assert_eq(eval(make_cmd(-3)), 0)   // Move { dx: -3, dy: 3 } -> 0
+}
+
+@test
+fn test_roundtrip() {
+    assert_eq(roundtrip(0), 0)
+    assert_eq(roundtrip(7), 7)
+    assert_eq(roundtrip(-4), 0)
+}
+
+@test
+fn test_param_by_value() {
+    assert_eq(eval(Cmd::Go(9)), 9)
+    assert_eq(eval(Cmd::Move { dx: 2, dy: 3 }), 5)
+    assert_eq(eval(Cmd::Stop), 0)
+    assert_eq(eval(Cmd::Run(() => {})), -1)
+}
+
+@test
+fn test_returned_value_used_whole() {
+    // The returned enum is bound and compared as a WHOLE value (forces a box
+    // materialization at this boundary) -- must still be structural-eq correct.
+    let c = make_cmd(5)
+    assert_eq(c == Cmd::Go(5), true)
+    assert_eq(c == Cmd::Go(6), false)
+    assert_eq(eval(c), 5)
+}
+
+enum Ev {
+    Idle,
+    Tick(int),
+    At { x: int, y: int },
+    Cb(() -> int),
+}
+
+fn make_ev(n: int) -> Ev {
+    if n == 0 { return Ev::Idle }
+    if n < 0 { return Ev::At { x: n, y: -n } }
+    return Ev::Tick(n)
+}
+
+fn read_ev(e: Ev) -> int {
+    return match e {
+        Ev::Idle => 0
+        Ev::Tick(n) => n
+        Ev::At { x, y } => x + y
+        Ev::Cb(f) => f()
+    }
+}
+
+@test
+fn test_let_then_match() {
+    let a = make_ev(5)
+    assert_eq(read_ev(a), 5)
+    let b = Ev::At { x: 3, y: 4 }
+    assert_eq(read_ev(b), 7)
+    let c = Ev::Idle
+    assert_eq(read_ev(c), 0)
+}
+
+@test
+fn test_reassign_local() {
+    let e = Ev::Idle
+    assert_eq(read_ev(e), 0)
+    e = Ev::Tick(9)
+    assert_eq(read_ev(e), 9)
+    e = Ev::At { x: 1, y: 2 }
+    assert_eq(read_ev(e), 3)
+    e = make_ev(7)
+    assert_eq(read_ev(e), 7)
+}
+
+@test
+fn test_local_whole_value_use() {
+    let e = make_ev(4)
+    // `==` forces a box materialization at this site; still structural-correct.
+    assert_eq(e == Ev::Tick(4), true)
+    assert_eq(e == Ev::Tick(5), false)
+    // pass the whole value to another fn (materialize at the call)
+    assert_eq(read_ev(e), 4)
+}
+
+@test
+fn test_local_captured_by_closure() {
+    let e = Ev::Tick(11)
+    let get = () => read_ev(e)      // closure captures the threaded local (the cells)
+    assert_eq(get(), 11)
+    e = Ev::At { x: 5, y: 20 }   // reassign after capture; closure sees the update
+    assert_eq(get(), 25)         // captures the VARIABLE, so reads the new value
+    assert_eq(read_ev(e), 25)
+}
+
+@test
+fn test_local_cb_variant() {
+    let e = Ev::Cb(() => 42)
+    assert_eq(read_ev(e), 42)
+}
+
+enum Sig {
+    Idle,
+    Num(int),
+    Pair(int, int),
+    Act(() -> ()),      // closure payload -> Sig is non-cdata (boxed/flat, not cdata)
+}
+
+// nullable RETURN (nil on the not-found path)
+fn find(n: int) -> Sig? {
+    if n < -100 { return null }
+    if n == 0 { return Sig::Idle }
+    if n < 0 { return Sig::Pair(n, -n) }
+    return Sig::Num(n)
+}
+
+// nullable PARAM + refinement + match
+fn describe(s: Sig?) -> int {
+    if s == null { return -1000 }
+    return match s {
+        Sig::Idle => 0
+        Sig::Num(x) => x
+        Sig::Pair(a, b) => a + b
+        Sig::Act(_) => -1
+    }
+}
+
+@test
+fn test_return_null() {
+    assert_eq(find(-999) == null, true)
+    assert_eq(find(-999) != null, false)
+}
+
+@test
+fn test_return_value() {
+    assert_eq(find(5) != null, true)
+    assert_eq(describe(find(5)), 5)
+    assert_eq(describe(find(0)), 0)
+    assert_eq(describe(find(-3)), 0)   // Pair(-3, 3) -> 0
+}
+
+@test
+fn test_param_null() {
+    assert_eq(describe(null), -1000)
+}
+
+@test
+fn test_param_value() {
+    assert_eq(describe(Sig::Num(7)), 7)
+    assert_eq(describe(Sig::Idle), 0)
+    assert_eq(describe(Sig::Pair(2, 3)), 5)
+    assert_eq(describe(Sig::Act(() => {})), -1)
+}
+
+@test
+fn test_nullable_local() {
+    let x: Sig? = Sig::Num(3)
+    assert_eq(x != null, true)
+    assert_eq(describe(x), 3)
+    let y: Sig? = null
+    assert_eq(y == null, true)
+    assert_eq(describe(y), -1000)
+}
+
+@test
+fn test_nullable_local_reassign() {
+    let x: Sig? = null
+    assert_eq(describe(x), -1000)
+    x = Sig::Num(11)
+    assert_eq(describe(x), 11)
+    x = null
+    assert_eq(describe(x), -1000)
+}
+
+@test
+fn test_coalesce() {
+    let x: Sig? = null
+    assert_eq(describe(x ?? Sig::Idle), 0)
+    let y: Sig? = Sig::Num(9)
+    assert_eq(describe(y ?? Sig::Idle), 9)
+}
+
+@test
+fn test_roundtrip_return_to_param() {
+    // return (nullable) -> param (nullable): threaded end to end.
+    assert_eq(describe(find(8)), 8)
+    assert_eq(describe(find(0)), 0)
+    assert_eq(describe(find(-999)), -1000)
+}
+
+// A THREADED nullable param materialized into a container must produce `nil` for
+// the null case (a `{__variant = nil}` box would fail `== null`).
+fn boxit(s: Sig?) -> [Sig?] { return [s] }
+
+@test
+fn test_threaded_null_materialized() {
+    let arr = boxit(null)
+    assert_eq(arr[0] == null, true)
+    let arr2 = boxit(Sig::Num(7))
+    assert_eq(arr2[0] != null, true)
+    assert_eq(describe(arr2[0]), 7)
+}
