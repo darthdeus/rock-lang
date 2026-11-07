@@ -1,4 +1,6 @@
-// Test the type hole testing feature
+// Type hole assertions: @test(type_holes = [[id, "type"], ...]) checks the
+// type inferred for each `?` annotation. Hole ids are assigned in source
+// order across the whole file, so new tests go at the end.
 
 // Basic type inference tests
 @test(type_holes = [[0, "int"], [1, "string"], [2, "float"]])
@@ -98,4 +100,99 @@ fn test_function_return_inference() {
     
     assert_eq(greeting, "Hello, World!")
     assert_eq(length, 13)
+}
+
+// Several holes in one function, with typed returns
+@test(type_holes = [[18, "int"], [19, "string"], [20, "int"]])
+fn test_basic_type_hole_inference() -> int {
+    let x: ? = 42
+    let y: ? = "hello"
+    let z: ? = x + 1
+    return z
+}
+
+@test(type_holes = [[21, "int"]])
+fn test_generic_type_hole() -> int {
+    let result: ? = identity(42)
+    return result
+}
+
+@test(type_holes = [[22, "Point"]])
+fn test_struct_type_hole() -> Point {
+    let p: ? = Point { x: 10, y: 20 }
+    return p
+}
+
+@test(type_holes = [[23, "[string]"]])
+fn test_array_type_hole() -> [string] {
+    let arr: ? = ["hello", "world"]
+    return arr
+}
+
+fn get_number() -> int {
+    return 42
+}
+
+@test(type_holes = [[24, "int"]])
+fn test_function_return_type_hole() -> int {
+    let x: ? = get_number()
+    return x
+}
+
+@test(type_holes = [[25, "int"], [26, "float"], [27, "bool"], [28, "[int]"]])
+fn test_multiple_type_holes() -> bool {
+    let a: ? = 10
+    let b: ? = 20.5
+    let c: ? = true
+    let d: ? = [1, 2, 3]
+    return c
+}
+
+@test(type_holes = [[29, "string"]])
+fn test_string_inference() {
+    let msg: ? = "Hello, Rock!"
+    assert_eq(msg, "Hello, Rock!")
+}
+
+@test(type_holes = [[30, "[int]"], [31, "int"]])
+fn test_array_inference() {
+    let nums: ? = [1, 2, 3, 4, 5]
+    let first: ? = nums[0]
+    assert_eq(first, 1)
+}
+
+struct Person {
+    name: string,
+    age: int
+}
+
+@test(type_holes = [[32, "Person"], [33, "string"], [34, "int"]])
+fn test_struct_inference() {
+    let p: ? = Person { name: "Alice", age: 30 }
+    let n: ? = p.name
+    let a: ? = p.age
+    assert_eq(n, "Alice")
+    assert_eq(a, 30)
+}
+
+@test(output = "int: 100\nfloat: 3.14", type_holes = [[35, "int"], [36, "float"]])
+fn test_combined_output_int_float() {
+    let i: ? = 100
+    let f: ? = 3.14
+    print("int: {i}")
+    print("float: {f}")
+}
+
+@test(type_holes = [[37, "int"]])
+fn test_nullable_null_coalesce_inference() {
+    let maybe_val: int? = null
+    let default_val: ? = maybe_val ?? 42
+    assert_eq(default_val, 42)
+}
+
+@test(output = "Type: int\nValue: 42", type_holes = [[38, "int"]])
+fn test_combined_output_type_line() {
+    let x: ? = 42
+    print("Type: int")
+    print("Value: {x}")
 }

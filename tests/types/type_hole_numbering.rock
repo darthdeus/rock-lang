@@ -1,4 +1,4 @@
-// Simple test to verify type hole numbering
+// Hole ids are numbered across the whole file, not per test
 
 @test(type_holes = [[0, "int"]])
 fn test_single_hole() {
