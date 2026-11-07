@@ -1,0 +1,69 @@
+// A scalarized value local (held as leaf locals, no single object) crossing a
+// nullable boundary: widened to `V?` at a call argument, and returned from a
+// function whose nullable join must splat into the scalar return ABI.
+
+value V2 { x: int, y: int }
+
+fn make_v2(x: int, y: int) -> V2 {
+    return V2 { x: x, y: y }
+}
+
+// `dest: V2? = null`: the cdata-ABI nullable slot that triggered the
+// widening at the call site. Sum the components to distinguish from
+// the default-arg path (which would receive nil -> 0).
+fn consume_or_default(dest: V2? = null) -> int {
+    if dest == null {
+        return -1
+    }
+    let d = dest.unwrap()
+    return d.x + d.y
+}
+
+@test(output = "30")
+fn scalarized_value_at_nullable_arg() {
+    let v = make_v2(10, 20)
+    // Receiving nil here would return -1.
+    let got = consume_or_default(v)
+    print(got)
+}
+
+// The same local consumed at a V2 slot and at a V2? slot; both must observe
+// the same value.
+fn consume_nonnull(d: V2) -> int { return d.x * 100 + d.y }
+
+@test(output = "1020\n30")
+fn scalarized_value_at_both_arg_shapes() {
+    let v = make_v2(10, 20)
+    print(consume_nonnull(v))     // scalar-ABI splat path
+    print(consume_or_default(v))  // nullable cdata-ABI pack path
+}
+
+value FV2 { x: float, y: float }
+
+fn make_fv2(x: float, y: float) -> FV2 { return FV2 { x: x, y: y } }
+
+// A fn returning a value whose body joins over a nullable scrutinee by
+// refinement (bare `v` after the null check). The join is typed nullable, but
+// the return slot is the multi-value scalar ABI, so the result must splat at
+// the return boundary.
+fn opt_or_fn(v: FV2?, fb: FV2) -> FV2 {
+    if v != null { v } else { fb }
+}
+
+fn takes_v(v: FV2) -> float { return v.x + v.y }
+
+@test(output = "30")
+fn return_slot_some() {
+    let m: FV2? = FV2 { x: 10.0, y: 20.0 }
+    let fb = FV2 { x: 1.0, y: 1.0 }
+    let r = opt_or_fn(m, fb)
+    print(takes_v(r))
+}
+
+@test(output = "2")
+fn return_slot_none() {
+    let m: FV2? = null
+    let fb = FV2 { x: 1.0, y: 1.0 }
+    let r = opt_or_fn(m, fb)
+    print(takes_v(r))
+}

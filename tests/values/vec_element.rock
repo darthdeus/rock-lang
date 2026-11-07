@@ -1,0 +1,45 @@
+// Indexing a `[V2]` of value structs: `vs[i].field`, binding `vs[i]` to a
+// local, passing it to a scalar-ABI callee, and iterating with `for v in vs`.
+
+value V2 { x: int, y: int }
+
+fn make_v2(x: int, y: int) -> V2 {
+    return V2 { x: x, y: y }
+}
+
+fn sum2(v: V2) -> int {
+    return v.x + v.y
+}
+
+@test(output = "3")
+fn test_index_field_read() {
+    let xs: [V2] = [make_v2(1, 2), make_v2(3, 4)]
+    print(xs[0].x + xs[0].y)
+}
+
+@test(output = "7")
+fn test_index_second_element() {
+    let xs: [V2] = [make_v2(1, 2), make_v2(3, 4)]
+    print(xs[1].x + xs[1].y)
+}
+
+@test(output = "3")
+fn test_index_into_scalar_abi_arg() {
+    let xs: [V2] = [make_v2(1, 2), make_v2(3, 4)]
+    print(sum2(xs[0]))
+}
+
+@test(output = "3, 4")
+fn test_value_vec_index() {
+    let vs: [V2] = [V2 { x: 1, y: 2 }, V2 { x: 3, y: 4 }]
+    let v = vs[1]
+    print("{v.x}, {v.y}")
+}
+
+@test(output = "1, 2\n3, 4")
+fn test_value_vec_for_loop() {
+    let vs: [V2] = [V2 { x: 1, y: 2 }, V2 { x: 3, y: 4 }]
+    for v in vs {
+        print("{v.x}, {v.y}")
+    }
+}

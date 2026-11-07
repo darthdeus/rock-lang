@@ -4,7 +4,7 @@
 //! `<T>_ct(..)` box and NO boxed `__nb_checked_set` whole-value store. The
 //! bounds-checked slot accessor `__nb_checked_get` stays (it fetches the flat slot
 //! that a scalarized store then writes in place). Runtime correctness is
-//! `tests/values/flat_vec_value.rock`; this pins the emitted shape.
+//! `tests/values/flat_vec.rock`; this pins the emitted shape.
 use crate::common::{emit_module, function_body};
 
 const FLAT_VEC_LOOP: &str = r#"

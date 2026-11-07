@@ -1,0 +1,222 @@
+// Value structs at awkward expression and call shapes, where a multi-value
+// return could be truncated to its first leaf or a pack could be skipped:
+// - a value-returning call as a NON-LAST argument (cdata and scalar callees);
+// - a parenthesized value-returning call or value local (Lua's parentheses
+//   keep only the first return value);
+// - a value passed as a variadic surplus argument;
+// - a value returned by an `@inline inline(lua)` splice;
+// - compound assignment (`+=`, `-=`) to a bare value local through a user
+//   operator;
+// - a value literal that relies on declaration defaults.
+
+value V2 {
+    x: float,
+    y: float,
+}
+
+// Rock fn returning a value type -> caller emits scalar multi-return.
+fn make_v2() -> V2 {
+    return V2 { x: 10.0, y: 20.0 }
+}
+
+// Callee takes V2 as a packed cdata (NOT scalarized). Achieve that by
+// declaring the body as inline(lua): inline(lua) bodies keep the cdata
+// ABI per the scalarize pass's body_is_rock gate.
+inline(lua) fn scale_v2_inline(v: V2, factor: float) -> V2 = """
+return __rock_create_struct("V2", { x = v.x * factor, y = v.y * factor })
+"""
+
+@test(output = "40\n80")
+fn test_nested_value_call_non_last_arg() {
+    // `make_v2()` in NON-LAST arg position. Callee `scale_v2_inline`
+    // expects a single cdata V2; without a pack, Lua truncates the
+    // multi-return from make_v2 to a single scalar (10.0) and the
+    // second arg (4.0) collides / the body crashes on v.x.
+    let r = scale_v2_inline(make_v2(), 4.0)
+    print("{r.x.floor()}")
+    print("{r.y.floor()}")
+}
+
+// Extra: Rock-to-Rock with a non-last arg of same shape. The callee
+// IS scalarized here so the "right" thing is to forward multi-return
+// of make_v2 into make_v2's slot followed by factor as another scalar
+// — no truncation, both scalars should flow through. Included to pin
+// down the scalarized-callee branch.
+fn scale_v2_rock(v: V2, factor: float) -> V2 {
+    return V2 { x: v.x * factor, y: v.y * factor }
+}
+
+@test(output = "40\n80")
+fn test_nested_value_call_non_last_arg_rock() {
+    let r = scale_v2_rock(make_v2(), 4.0)
+    print("{r.x.floor()}")
+    print("{r.y.floor()}")
+}
+
+value PV2 {
+    x: int,
+    y: int,
+}
+
+fn make_pv2(a: int, b: int) -> PV2 {
+    return PV2 { x: a, y: b }
+}
+
+fn take_v2(v: PV2) -> int {
+    return v.x * 100 + v.y
+}
+
+@test(output = "3\n4")
+fn test_paren_let_rhs() {
+    let r = (make_pv2(3, 4))
+    print(r.x)
+    print(r.y)
+}
+
+@test(output = "5")
+fn test_paren_field_access() {
+    let x = (make_pv2(5, 9)).x
+    print(x)
+}
+
+@test(output = "708")
+fn test_paren_arg_position() {
+    let n = take_v2((make_pv2(7, 8)))
+    print(n)
+}
+
+// Double-parens: `((make_pv2()))`. Paren nodes are preserved (not flattened)
+// by the parser, so the unwrap must peek through all layers, not just one.
+@test(output = "11\n22")
+fn test_double_paren_let_rhs() {
+    let r = ((make_pv2(11, 22)))
+    print(r.x)
+    print(r.y)
+}
+
+// Paren around a value-typed Ident in a let-RHS: the Ident arm must
+// also see the inner.
+@test(output = "99\n5")
+fn test_paren_ident_passthrough() {
+    let src = make_pv2(99, 5)
+    let copy = (src)
+    print(copy.x)
+    print(copy.y)
+}
+
+value VV2 { x: int, y: int }
+
+fn collect_2(a: any, b: any) -> int {
+    // Cheap structural check: both args should have been packed as
+    // VV2 cdata at the boundary. We can't easily introspect cdata
+    // shape from `any`, so use a sentinel return.
+    7
+}
+
+fn vfn(args: ...any) -> int {
+    // Variadic body: `args` is a table; just count its length.
+    7
+}
+
+@test
+fn test_variadic_two_value_args() {
+    let v = VV2 { x: 1, y: 2 }
+    let n = vfn(v, v)
+    assert_eq(n, 7)
+}
+
+@test
+fn test_variadic_one_value_surplus() {
+    let v = VV2 { x: 3, y: 4 }
+    // Mixed: a non-variadic int + a value-typed surplus.
+    let n = mixed_with_surplus(7, v, v)
+    assert_eq(n, 14)
+}
+
+fn mixed_with_surplus(a: int, args: ...any) -> int {
+    a * 2
+}
+
+nobox value UfcsV2 { x: int, y: int }
+
+@scalar_abi fn ufcs_variadic(receiver: UfcsV2, first: int, args: ...any) -> int {
+    return receiver.x
+}
+
+@test
+fn test_variadic_ufcs_tail_slot_reuse() {
+    let v = UfcsV2 { x: 11, y: 12 }
+    assert_eq(v.ufcs_variadic(1, 2, 3), 11)
+}
+
+value IV2 { x: int, y: int }
+
+@inline
+inline(lua) fn make_v(x: int, y: int) -> IV2 = "return IV2_ct(x, y)"
+
+@test
+fn test_let_inline_lua_value_call() {
+    let v = make_v(7, 9)
+    assert_eq(v.x, 7)
+    assert_eq(v.y, 9)
+}
+
+@test
+fn test_let_inline_lua_value_call_field_use() {
+    let v = make_v(3, 4)
+    assert_eq(v.x + v.y, 7)
+}
+
+value CV2 { x: int, y: int }
+
+@pure operator +(a: CV2, b: CV2) -> CV2 {
+    CV2 { x: a.x + b.x, y: a.y + b.y }
+}
+
+@pure operator -(a: CV2, b: CV2) -> CV2 {
+    CV2 { x: a.x - b.x, y: a.y - b.y }
+}
+
+@test(output = "4, 6")
+fn anf_value_local_compound_add() {
+    let v = CV2 { x: 1, y: 2 }
+    let w = CV2 { x: 3, y: 4 }
+    v += w
+    print("{v.x}, {v.y}")
+}
+
+@test(output = "-2, -2")
+fn anf_value_local_compound_sub() {
+    let v = CV2 { x: 1, y: 2 }
+    let w = CV2 { x: 3, y: 4 }
+    v -= w
+    print("{v.x}, {v.y}")
+}
+
+@test(output = "7, 10")
+fn anf_value_local_compound_chain() {
+    let v = CV2 { x: 1, y: 2 }
+    v += CV2 { x: 3, y: 4 }
+    v += CV2 { x: 3, y: 4 }
+    print("{v.x}, {v.y}")
+}
+
+value V3 { x: int = 5, y: int = 6 }
+
+@test(output = "5, 6")
+fn value_struct_lit_all_defaults() {
+    let v = V3 { }
+    print("{v.x}, {v.y}")
+}
+
+@test(output = "7, 6")
+fn value_struct_lit_partial_default() {
+    let v = V3 { x: 7 }
+    print("{v.x}, {v.y}")
+}
+
+@test(output = "5, 8")
+fn value_struct_lit_partial_default_other() {
+    let v = V3 { y: 8 }
+    print("{v.x}, {v.y}")
+}

@@ -59,3 +59,34 @@ fn ro_sum() -> int {
 fn test_read_only_constant_still_works() {
     print("{ro_sum()} {ro_sum()}")
 }
+
+// -- Constant literals at a cdata-ABI (@nomangle) argument slot --
+//
+// A constant `V2 { x, y }` literal passed to an unmangled cdata-ABI callee is
+// hoisted to one module const per distinct literal; a literal with a dynamic
+// field is packed per call.
+
+value V2 { x: int, y: int }
+
+@nomangle
+fn sum_v2(v: V2) -> int { v.x + v.y }
+
+@test(output = "21")
+fn const_hoist_first_call() {
+    print(sum_v2(V2 { x: 10, y: 11 }))
+}
+
+@test(output = "42")
+fn const_hoist_distinct_literals_distinct_locals() {
+    // Distinct field values — distinct hoisted const locals.
+    print(sum_v2(V2 { x: 20, y: 22 }))
+}
+
+@test(output = "5")
+fn const_hoist_dynamic_field_no_hoist() {
+    // Dynamic field expression — no hoist, per-call pack.
+    // This still works; the test pins that dynamic shapes don't
+    // crash through the hoist path.
+    let n = 2
+    print(sum_v2(V2 { x: n, y: 3 }))
+}

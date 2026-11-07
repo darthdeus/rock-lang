@@ -1,3 +1,8 @@
+// Storing one value into two places copies it: a later write through either
+// place must not reach the other. Covers stores from params, optional fields,
+// map lookups, array elements, closures, unwraps and coalesces, for plain and
+// GC-carrying (string-holding) values.
+
 value AliasPoint { x: int, y: int }
 value AliasWrap { p: AliasPoint, n: int }
 struct AliasHolder { a: AliasPoint, b: AliasPoint, o: AliasPoint? = null, w: AliasWrap? = null }
@@ -193,4 +198,22 @@ fn gc_tier_plain_value_store_twice_copies() {
     alias_label_store_twice(AliasLabel { text: "x", n: 1 }, h)
     h.a.n = 5
     assert_eq(h.b.n, 1, "gc-tier value stores alias")
+}
+
+value GcAliasLabel { text: string, n: int }
+struct GcAliasHolder { a: GcAliasLabel, b: GcAliasLabel }
+
+fn gc_alias_store_twice(e: GcAliasLabel?, h: GcAliasHolder) {
+    if let v = e {
+        h.a = v
+        h.b = v
+    }
+}
+
+@test
+fn storing_one_gc_value_twice_copies() {
+    let h = GcAliasHolder { a: GcAliasLabel { text: "a", n: 0 }, b: GcAliasLabel { text: "b", n: 0 } }
+    gc_alias_store_twice(GcAliasLabel { text: "x", n: 1 }, h)
+    h.a.n = 5
+    assert_eq(h.b.n, 1, "GC value stores copy independently")
 }

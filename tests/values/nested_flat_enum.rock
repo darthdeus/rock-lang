@@ -1,7 +1,8 @@
 // A flat inner enum shares its tag and payload slots with its parent, so the
 // nested arm must read those slots directly. This fixture mixes scalar and
-// struct payload variants; the string-payload and wider-position shapes live in
-// values/nested_flat_enum_string_payload.rock and patterns/nested_flat_enum_pattern.rock.
+// struct payload variants, then a string payload that must be bound, not just
+// tag-tested. Wider positions, named fields and suspension live in
+// patterns/nested_flat_enum_pattern.rock.
 
 nobox value MixedPatternPlace { space: int, x: int, y: int }
 struct MixedPatternSpec { name: string }
@@ -53,4 +54,28 @@ fn nested_flat_enum_mixed_payload_after_yield() {
     assert_eq(c.resume() ?? -9, 0)
     // Same nested shape after suspension: the resumed frame rebuilds the same slots.
     assert_eq(c.resume() ?? -9, 1)
+}
+
+// String payload: the nested arm must read and bind it, not just inspect the tag.
+
+enum SentInner {
+    Named(string),
+    Empty,
+}
+
+enum SentOuter {
+    Msg(SentInner),
+    Other,
+}
+
+@test
+fn nested_flat_enum_binds_string_payload() {
+    let v = SentOuter::Msg(SentInner::Named("Harm"))
+    let got = ""
+    match v {
+        SentOuter::Msg(SentInner::Named(spell)) => { got = spell }
+        SentOuter::Msg(_) => { got = "fallback" }
+        SentOuter::Other => { got = "other" }
+    }
+    assert_eq(got, "Harm", "a nested flat-enum arm binds its payload from the parent's slots")
 }

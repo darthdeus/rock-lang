@@ -1,0 +1,200 @@
+// FlatVec<T>: growable flat storage for FFI-clean value structs. Exercises
+// push (with growth past the initial capacity), indexed get/set, len/clear, and
+// non-capturing sort. The emit test pins the zero-`_ct` lowering shape; this is
+// the runtime oracle.
+
+value RayTarget { angle: float, x: float, y: float }
+
+@test(output = "0\n3\n7\n2\n42")
+fn test_flat_vec_push_get_len() {
+    let rays: FlatVec<RayTarget> = flat_vec_new(2)   // small cap -> push forces a grow
+    print("{rays.len}")                     // 0
+
+    rays.push(RayTarget { angle: 0.5, x: 1.0, y: 2.0 })
+    rays.push(RayTarget { angle: 0.1, x: 3.0, y: 4.0 })
+    rays.push(RayTarget { angle: 0.9, x: 5.0, y: 6.0 })   // triggers 2 -> 4 grow
+    print("{rays.len}")                     // 3
+
+    // The grown buffer preserved every element field-wise.
+    let sum = rays.get(0).x + rays.get(1).x + rays.get(2).x   // 1 + 3 + 5 = 9
+    print("{(sum - 2.0).floor()}")          // 7
+
+    rays.set(1, RayTarget { angle: 0.1, x: 30.0, y: 40.0 })
+    print("{(rays.get(1).x - 28.0).floor()}")   // 2
+
+    rays.clear()
+    rays.push(RayTarget { angle: 0.0, x: 42.0, y: 0.0 })
+    print("{rays.get(0).x.floor()}")        // 42
+}
+
+@test(output = "0.1\n0.5\n0.9")
+fn test_flat_vec_sort_non_capturing() {
+    let rays: FlatVec<RayTarget> = flat_vec_new(4)
+    rays.push(RayTarget { angle: 0.9, x: 0.0, y: 0.0 })
+    rays.push(RayTarget { angle: 0.1, x: 0.0, y: 0.0 })
+    rays.push(RayTarget { angle: 0.5, x: 0.0, y: 0.0 })
+
+    rays.sort((t) => t.angle)   // capture-free key -> shared fn, no per-call closure
+
+    for i in 0..rays.len {
+        print("{rays.get(i).angle}")
+    }
+}
+
+// Descending input -- the insertion-sort worst case, where every element shifts
+// the whole prefix. The pivot is held across those shifts, so this is what goes
+// wrong if a whole-value element read binds interior storage instead of copying:
+// the shift overwrites the slot the pivot came from and the sort loses elements.
+@test(output = "1\n2\n3\n4\n5\n15")
+fn test_flat_vec_sort_pivot_survives_shifts() {
+    let rays: FlatVec<RayTarget> = flat_vec_new(8)
+    for i in 0..5 {
+        let k = (5 - i) as float
+        rays.push(RayTarget { angle: k, x: k, y: k })
+    }
+
+    rays.sort((t) => t.angle)
+
+    let sum = 0.0
+    for i in 0..rays.len {
+        print("{rays.get(i).angle.floor()}")
+        sum = sum + rays.get(i).x
+    }
+    print("{sum.floor()}")   // every element still present exactly once
+}
+
+// fv[i] unified-indexing + `for v in fv` sugar over FlatVec<T: value>.
+// fv[i] indexes the buf storage (debug capacity-checked; fv.get is the
+// len-checked accessor); `for` is a numeric loop over 0..fv.len.
+
+value SV2 { x: float, y: float }
+
+@test
+fn flat_vec_index_read_write() {
+    let fv: FlatVec<SV2> = flat_vec_new(4)
+    fv.push(SV2 { x: 1.0, y: 2.0 })
+    fv.push(SV2 { x: 3.0, y: 4.0 })
+    fv[0] = SV2 { x: 9.0, y: 8.0 }
+    let a = fv[0]
+    let b = fv[1]
+    assert_eq(a.x, 9.0)
+    assert_eq(a.y, 8.0)
+    assert_eq(b.x, 3.0)
+    assert_eq(fv.len, 2)
+}
+
+@test
+fn flat_vec_for_iterates_len_not_capacity() {
+    let fv: FlatVec<SV2> = flat_vec_new(8)
+    fv.push(SV2 { x: 1.0, y: 10.0 })
+    fv.push(SV2 { x: 2.0, y: 20.0 })
+    fv.push(SV2 { x: 3.0, y: 30.0 })
+    let sx = 0.0
+    let n = 0
+    for v in fv {
+        sx = sx + v.x
+        n = n + 1
+    }
+    assert_eq(sx, 6.0)
+    assert_eq(n, 3)
+}
+
+// `==` over FlatVec<T> compares the first `len` elements by value. Without a
+// FlatVec case, __op_eq's generic walk reached the NativeBuffer's cdata
+// pointer and compared ADDRESSES: two FlatVecs with equal contents were
+// never equal, so a cache keyed on one never hit.
+
+value P2 { x: float, y: float }
+
+fn pair(a: float, b: float, c: float, d: float, cap: int = 4) -> FlatVec<P2> {
+    let fv: FlatVec<P2> = flat_vec_new(cap)
+    fv.push(P2 { x: a, y: b })
+    fv.push(P2 { x: c, y: d })
+    return fv
+}
+
+@test
+fn flat_vec_equal_contents_compare_equal() {
+    assert_eq(pair(1.0, 2.0, 3.0, 4.0) == pair(1.0, 2.0, 3.0, 4.0), true)
+}
+
+@test
+fn flat_vec_same_instance_is_equal() {
+    let fv = pair(1.0, 2.0, 3.0, 4.0)
+    assert_eq(fv == fv, true)
+}
+
+@test
+fn flat_vec_different_element_is_unequal() {
+    assert_eq(pair(1.0, 2.0, 3.0, 4.0) == pair(1.0, 2.0, 3.0, 5.0), false)
+}
+
+@test
+fn flat_vec_different_len_is_unequal() {
+    let longer = pair(1.0, 2.0, 3.0, 4.0)
+    longer.push(P2 { x: 0.0, y: 0.0 })
+    assert_eq(pair(1.0, 2.0, 3.0, 4.0) == longer, false)
+}
+
+@test
+fn flat_vec_equality_ignores_capacity() {
+    assert_eq(pair(1.0, 2.0, 3.0, 4.0, cap: 4) == pair(1.0, 2.0, 3.0, 4.0, cap: 32), true)
+}
+
+@test
+fn flat_vec_equality_reads_only_live_elements() {
+    let reused: FlatVec<P2> = flat_vec_new(4)
+    reused.push(P2 { x: 9.0, y: 9.0 })
+    reused.push(P2 { x: 9.0, y: 9.0 })
+    reused.push(P2 { x: 9.0, y: 9.0 })
+    reused.clear()
+    reused.push(P2 { x: 1.0, y: 2.0 })
+    reused.push(P2 { x: 3.0, y: 4.0 })
+    assert_eq(reused == pair(1.0, 2.0, 3.0, 4.0), true)
+}
+
+@test
+fn flat_vec_empty_vectors_are_equal() {
+    let a: FlatVec<P2> = flat_vec_new(2)
+    let b: FlatVec<P2> = flat_vec_new(8)
+    assert_eq(a == b, true)
+}
+
+// An element read raises on an out-of-range index even when nothing uses the
+// value. Column and strided storage share one VecCheckedIndex per element
+// access across their leaf reads; dead-code elimination of the leaves must
+// not take the check with them.
+
+nobox value Four { a: int, b: int, c: int, d: int }
+nobox value Six { a: int, b: int, c: int, d: int, e: int, f: int }
+enum Dense { A(int), B(int, int) }
+
+@nomangle inline(lua) fn raises(f: fn()) -> bool = """
+    local ok, err = pcall(f)
+    return not ok
+"""
+
+@test(output = "true true true true true")
+fn unused_out_of_range_reads_raise_on_every_tier() {
+    let boxed = raises(() => {
+        let xs: [int] = [1]
+        let _ = xs[5]
+    })
+    let columns = raises(() => {
+        let xs: [Four] = [Four { a: 1, b: 1, c: 1, d: 1 }]
+        let _ = xs[5]
+    })
+    let dense = raises(() => {
+        let xs: [Dense] = [Dense::A(1)]
+        let _ = xs[5]
+    })
+    let rows = raises(() => {
+        let xs: [Six] = [Six { a: 1, b: 1, c: 1, d: 1, e: 1, f: 1 }]
+        let _ = xs[5]
+    })
+    let field = raises(() => {
+        let xs: [Six] = [Six { a: 1, b: 1, c: 1, d: 1, e: 1, f: 1 }]
+        let _ = xs[5].a
+    })
+    print("{boxed} {columns} {dense} {rows} {field}")
+}

@@ -1,9 +1,6 @@
-// Value-ABI tail: reading a *cdata-backed* value back to scalars.
-// A value struct stored in a regular struct field (or returned by a
-// generic/cdata-ABI call) is ONE Lua cdata at runtime; consuming it
-// as scalars unpacks per-field `cd.f` (byte-faithful to live
-// value_types.rs Multi(["h.v.x",...])). Pins runtime behavior; must
-// pass with and without ROCK_ANF_FUNCTIONS=1.
+// Reading a value struct that lives as ONE cdata (stored in a regular struct
+// field or returned from a call) back into scalars: field reads, binding to a
+// local, and passing it to a scalar-ABI callee unpack it per field.
 
 value V2 { x: int, y: int }
 struct Holder { v: V2, tag: int }
@@ -46,4 +43,30 @@ fn test_cdata_returned_then_read() {
 fn test_cdata_field_chain_into_call() {
     let h = Holder { v: V2 { x: 5, y: 12 }, tag: 0 }
     print("{dist2(get_v(h))}")
+}
+
+struct BareHolder { v: V2 }
+
+fn sum2(v: V2) -> int {
+    return v.x + v.y
+}
+
+@test(output = "12")
+fn test_cdata_subfield_read_single_field_holder() {
+    let h = BareHolder { v: V2 { x: 5, y: 7 } }
+    print(h.v.x + h.v.y)
+}
+
+@test(output = "12")
+fn test_cdata_to_scalar_local_single_field_holder() {
+    let h = BareHolder { v: V2 { x: 5, y: 7 } }
+    let p = h.v
+    print(p.x + p.y)
+}
+
+@test(output = "12")
+fn test_cdata_into_scalar_abi_arg_single_field_holder() {
+    let h = BareHolder { v: V2 { x: 5, y: 7 } }
+    // sum2 takes V2 through the scalar ABI, so h.v unpacks into leaves.
+    print(sum2(h.v))
 }
