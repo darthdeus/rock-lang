@@ -1476,17 +1476,6 @@ pub fn lower_statement_value(
     Ok(hir_s)
 }
 
-pub fn lower_statement(
-    ctx: &mut LowerCtx,
-    a: &Ast,
-    body: &mut Body,
-    scope: Idx<Scope>,
-    s: &StatementData,
-) -> Result<Idx<hir::Statement>, CompilerError> {
-    let hir_s = lower_statement_value(ctx, a, body, scope, s)?;
-    Ok(body.alloc_statement(hir_s, s.span))
-}
-
 pub fn lower_expr_value(
     ctx: &mut LowerCtx,
     a: &Ast,

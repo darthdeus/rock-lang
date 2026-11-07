@@ -444,21 +444,6 @@ pub fn parse_embedded_files(body: &str) -> Vec<EmbeddedFile<'_>> {
     files
 }
 
-/// Check one multi-file fixture section: parse the embedded files, run the
-/// pipeline with default (self-name) alias tables, and verify `//^` markers.
-pub fn check_types_embedded(files: &[EmbeddedFile<'_>]) -> Result<(), String> {
-    let fixtures: Vec<PackageFixture<'_>> = files
-        .iter()
-        .map(|f| PackageFixture {
-            file: f.file,
-            package: f.package,
-            dialect: f.dialect,
-            src: f.src,
-        })
-        .collect();
-    check_types_packages(&fixtures)
-}
-
 /// Check embedded modules with the compiler-owned stdlib export view
 /// available as the v1 default prelude.
 pub fn check_types_embedded_with_stdlib(

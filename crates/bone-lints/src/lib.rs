@@ -269,10 +269,6 @@ impl LintOptions {
         self
     }
 
-    pub fn ignored_types(&self) -> &FxHashSet<Ustr> {
-        &self.ignore_types
-    }
-
     /// Whether `method_syntax` may report over receiver type `name`.
     pub fn covers_type(&self, name: Ustr) -> bool {
         self.only_types
@@ -3186,23 +3182,6 @@ fn inference_findings_with(
         );
     }
     out
-}
-
-/// The whole-workspace lints, grouped by the file each finding sits in. A
-/// finding anywhere can flip from an edit anywhere, so these are recomputed as
-/// a unit; a file with none is absent from the map. Unsuppressed -- the caller
-/// holds the per-file text and applies [`filter_suppressed_findings`].
-///
-/// `unused_fn` is closed-world and runs only for a `bin` package;
-/// `backend_sibling_mismatch` is opt-in because JS is an optional backend; use
-/// `LintOptions::only` or `rock lint --lints=backend_sibling_mismatch` when
-/// auditing parity explicitly.
-pub fn workspace_findings_by_file(
-    ws: &Workspace,
-    warm: &FxHashSet<ModuleId>,
-    is_bin: bool,
-) -> FxHashMap<Ustr, Vec<Finding>> {
-    workspace_findings_by_file_with(ws, warm, is_bin, &LintOptions::default())
 }
 
 pub fn workspace_findings_by_file_with(

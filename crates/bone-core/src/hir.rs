@@ -70,18 +70,6 @@ pub enum TyId {
 }
 
 impl TyId {
-    pub fn unwrap_in_mod(self, err_span: Span) -> Result<(ModuleId, Idx<TypeExpr>), CompilerError> {
-        match self {
-            TyId::Static(mid, idx) => Ok((mid, idx)),
-
-            TyId::Local(idx) => comp_error!(
-                err_span,
-                "Tried to unwrap a in-module, but got local {:?}",
-                idx
-            ),
-        }
-    }
-
     pub fn with_idx(self, idx: Idx<TypeExpr>) -> TyId {
         match self {
             TyId::Static(mid, _) => TyId::Static(mid, idx),

@@ -13,7 +13,7 @@ pub use bone_core::identity_storage::{
     IdentityNode, IdentityPosition, IdentityStorageViolation, IdentityTypes, identity_violation_in,
 };
 use bone_core::modules::is_stdlib_module_file;
-use bone_core::suspension::{SuspensionPolicy, suspension_crossings, uses_after_suspension};
+use bone_core::suspension::{SuspensionPolicy, uses_after_suspension};
 use bone_core::workspace::BodyInference;
 
 use crate::hir::{
@@ -455,75 +455,6 @@ fn contains(outer: Span, inner: Span) -> bool {
     outer.file == inner.file
         && outer.offset_range.0 <= inner.offset_range.0
         && inner.offset_range.1 <= outer.offset_range.1
-}
-
-/// [`identity_body_sites`] for every inferred function body of `module`.
-pub fn identity_module_body_sites(ws: &Workspace, module: &Module) -> Vec<IdentityStorageSite> {
-    let Some(inference) = ws.inference(module.id) else {
-        return Vec::new();
-    };
-    let mut sites = Vec::new();
-    for (f_id, function) in module.functions.iter() {
-        let owner = BodyOwner::Function(f_id);
-        let (Some(body), Some(bi)) = (module.bodies.get(&owner), inference.per_fn.get(&owner))
-        else {
-            continue;
-        };
-        sites.extend(identity_body_sites(ws, function, body, bi));
-    }
-    sites
-}
-
-/// A use of an identity borrow after a suspension, with the last suspension
-/// before it on each path: the input of `rock fix --across-yield`.
-pub struct IdentityCrossing {
-    pub function: Idx<Function>,
-    pub binding: Idx<BindingInfo>,
-    pub at: Idx<Expr>,
-    pub suspensions: Vec<Idx<Expr>>,
-}
-
-/// The across-yield uses of [`identity_body_sites`] in every coroutine of
-/// `module`, with their suspensions.
-pub fn identity_suspension_crossings(ws: &Workspace, module: &Module) -> Vec<IdentityCrossing> {
-    let Some(inference) = ws.inference(module.id) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for (f_id, function) in module.functions.iter() {
-        let owner = BodyOwner::Function(f_id);
-        let (Some(body), Some(bi)) = (module.bodies.get(&owner), inference.per_fn.get(&owner))
-        else {
-            continue;
-        };
-        if !function.is_coroutine {
-            continue;
-        }
-        let types = InferredSlotTypes { ws, bi };
-        let policy = IdentityBorrowPolicy {
-            body,
-            bi,
-            types: &types,
-        };
-        for crossing in suspension_crossings(body, &policy) {
-            let Some(binding) = used_binding(body, crossing.at) else {
-                continue;
-            };
-            let Some(ty) = bi.binding_types.get(binding).copied() else {
-                continue;
-            };
-            if types.stored(ty).is_none() {
-                continue;
-            }
-            out.push(IdentityCrossing {
-                function: f_id,
-                binding,
-                at: crossing.at,
-                suspensions: crossing.suspensions,
-            });
-        }
-    }
-    out
 }
 
 fn used_binding(body: &Body, at: Idx<Expr>) -> Option<Idx<BindingInfo>> {

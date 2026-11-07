@@ -1120,16 +1120,6 @@ pub(crate) fn bound_var(gamma: &Gamma, ty: TyId) -> Option<VarId> {
     }
 }
 
-pub fn instantiate_param(
-    gamma: &mut Gamma,
-    generics: &[TyId],
-    param: TyId,
-    span: Span,
-) -> Result<TyId, CompilerError> {
-    let (subs, _fresh) = gamma.instantiate_generics(generics, span)?;
-    substitute(gamma, param, &subs, span)
-}
-
 pub fn instantiate_params(
     gamma: &mut Gamma,
     generics: &[TyId],

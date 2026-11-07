@@ -158,14 +158,6 @@ pub fn visible_globals(ws: &Workspace, frag: &FragmentScope) -> Vec<GlobalBindin
     out
 }
 
-/// Render a nominal type at a v1 query site. Primitive and generic renderings
-/// are already source spellings; a DefKey nominal gets the shortest visible
-/// bare spelling when one exists.
-pub fn display_type(ws: &Workspace, frag: &FragmentScope, rendered: &str) -> String {
-    let spellings = spellings_by_key(ws, frag, DefKind::Type);
-    display_type_with_names(ws, rendered, &spellings)
-}
-
 pub(crate) fn display_type_with_names(
     ws: &Workspace,
     rendered: &str,
@@ -198,23 +190,6 @@ pub(crate) fn display_type_with_names(
         start = end;
     }
     out
-}
-
-/// Rewrite canonical method names in a reachability suffix into names admitted
-/// by frag. A missing spelling means the path cannot be written at this site,
-/// so the caller should omit it rather than emit a DefKey.
-pub fn display_reach_suffix(
-    ws: &Workspace,
-    frag: &FragmentScope,
-    path: &crate::reachability::ReachPath,
-) -> Option<String> {
-    let callable_names = spellings_by_key(ws, frag, DefKind::Callable);
-    display_method_suffix_with_names(
-        path.suffix.as_str(),
-        path.is_method,
-        &path.method_members,
-        &callable_names,
-    )
 }
 
 pub(crate) fn display_method_suffix_with_names(
