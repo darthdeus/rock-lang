@@ -1,0 +1,205 @@
+// `deco init` decorators with arguments: a default parameter, several
+// optional parameters selected by call shape, and decorators declared ahead of
+// their use as if from another module.
+
+global REGISTRATIONS: [string] = []
+
+// Decorator with default argument
+deco init register(priority: int = 100) {
+    vec_push(REGISTRATIONS, "priority({priority}): {target.name}")
+}
+
+// Use default priority
+@register
+fn system_default() {
+    print("default priority system")
+}
+
+// Use explicit priority
+@register(priority = 10)
+fn system_low_priority() {
+    print("low priority system")
+}
+
+@register(priority = 50)
+fn system_mid_priority() {
+    print("mid priority system")
+}
+
+@test
+fn test_default_args_work() {
+    assert(vec_len(REGISTRATIONS) == 3, "Expected 3 registrations")
+
+    let found_default = false
+    let found_low = false
+    let found_mid = false
+
+    for entry in REGISTRATIONS {
+        if entry.contains("priority(100): system_default") {
+            found_default = true
+        }
+        if entry.contains("priority(10): system_low_priority") {
+            found_low = true
+        }
+        if entry.contains("priority(50): system_mid_priority") {
+            found_mid = true
+        }
+    }
+
+    assert(found_default, "system_default should use default priority 100")
+    assert(found_low, "system_low_priority should have priority 10")
+    assert(found_mid, "system_mid_priority should have priority 50")
+}
+
+@test(output="default priority system\nlow priority system\nmid priority system")
+fn test_decorated_functions_work() {
+    system_default()
+    system_low_priority()
+    system_mid_priority()
+}
+
+// --- One decorator whose optional params cover several call shapes ---
+
+global opt_registered: [string] = []
+
+// Single decorator with optional parameters covers multiple call shapes
+deco init register_opt(priority: int = -1, tag: string = "") {
+    if priority == -1 && tag == "" {
+        vec_push(opt_registered, "default: {target.name}")
+    } else if tag == "" {
+        vec_push(opt_registered, "priority({priority}): {target.name}")
+    } else {
+        vec_push(opt_registered, "priority({priority}), tag({tag}): {target.name}")
+    }
+}
+
+// Use no args (all defaults)
+@register_opt
+fn opt_system_default() {
+    print("default system")
+}
+
+// Use one arg
+@register_opt(priority = 10)
+fn opt_system_priority() {
+    print("priority system")
+}
+
+// Use two args
+@register_opt(priority = 5, tag = "physics")
+fn opt_system_tagged() {
+    print("tagged system")
+}
+
+@test
+fn test_overload_selection() {
+    // Check that correct behavior was selected based on provided args
+    assert(vec_len(opt_registered) == 3, "Expected 3 registrations")
+
+    // Find each registration
+    let found_default = false
+    let found_priority = false
+    let found_tagged = false
+
+    for entry in opt_registered {
+        if entry.contains("default: opt_system_default") {
+            found_default = true
+        }
+        if entry.contains("priority(10): opt_system_priority") {
+            found_priority = true
+        }
+        if entry.contains("priority(5), tag(physics): opt_system_tagged") {
+            found_tagged = true
+        }
+    }
+
+    assert(found_default, "Default should be selected for @register_opt")
+    assert(found_priority, "Priority should be selected for @register_opt(priority=10)")
+    assert(found_tagged, "Tagged should be selected for @register_opt(priority=5, tag=\"physics\")")
+}
+
+@test(output="default system\npriority system\ntagged system")
+fn test_functions_still_work() {
+    // Verify the decorated functions still work
+    opt_system_default()
+    opt_system_priority()
+    opt_system_tagged()
+}
+
+// --- Decorators declared before use, as if from another module ---
+
+// Decorator registry - simulates being in a separate "systems" module
+global CROSS_MODULE_REGISTRY: [string] = []
+
+// Simple decorator - would be in systems.rock in real usage
+deco init cross_module_decorator {
+    vec_push(CROSS_MODULE_REGISTRY, "registered: {target.name}")
+}
+
+// Parameterized decorator - tests arg + deco across modules
+deco init cross_module_with_arg(tag: string) {
+    vec_push(CROSS_MODULE_REGISTRY, "registered({tag}): {target.name}")
+}
+
+// These functions simulate being in a different file (e.g., game.rock)
+// In real multi-file projects, the decorators above would be in a different .rock file
+
+@cross_module_decorator
+fn system_a() {
+    print("system_a executed")
+}
+
+@cross_module_decorator
+fn system_b() {
+    print("system_b executed")
+}
+
+@cross_module_with_arg(tag = "physics")
+fn physics_system() {
+    print("physics_system executed")
+}
+
+@cross_module_with_arg(tag = "render")
+fn render_system() {
+    print("render_system executed")
+}
+
+@test
+fn test_cross_module_registration() {
+    // Verify all 4 systems were registered
+    assert(vec_len(CROSS_MODULE_REGISTRY) == 4, "Expected 4 registrations, got {vec_len(CROSS_MODULE_REGISTRY)}")
+
+    // Check each registration
+    let found_a = false
+    let found_b = false
+    let found_physics = false
+    let found_render = false
+
+    for entry in CROSS_MODULE_REGISTRY {
+        if entry.contains("registered: system_a") {
+            found_a = true
+        }
+        if entry.contains("registered: system_b") {
+            found_b = true
+        }
+        if entry.contains("registered(physics): physics_system") {
+            found_physics = true
+        }
+        if entry.contains("registered(render): render_system") {
+            found_render = true
+        }
+    }
+
+    assert(found_a, "system_a should be registered")
+    assert(found_b, "system_b should be registered")
+    assert(found_physics, "physics_system should be registered with tag")
+    assert(found_render, "render_system should be registered with tag")
+}
+
+@test(output="system_a executed\nsystem_b executed\nphysics_system executed\nrender_system executed")
+fn test_cross_module_decorated_functions_work() {
+    system_a()
+    system_b()
+    physics_system()
+    render_system()
+}

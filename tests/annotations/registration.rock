@@ -1,0 +1,145 @@
+// `deco init` registration: decorated functions are collected at init into a
+// registry, undecorated ones are not, and `target.name` captures the decorated
+// function name whatever its parameter list.
+
+// Simple array of names for registration
+global REGISTERED_NAMES: [string] = []
+
+// Basic init decorator for registration
+deco init register {
+    vec_push(REGISTERED_NAMES, target.name)
+}
+
+@register
+fn system_a() {
+    print("system_a running")
+}
+
+@register
+fn system_b() {
+    print("system_b running")
+}
+
+fn not_registered() {
+    print("not registered")
+}
+
+@test
+fn test_init_registration() {
+    // Init decorators run at module load time, so systems should already be registered
+    assert(vec_len(REGISTERED_NAMES) == 2, "should have 2 registered systems")
+}
+
+@test
+fn test_init_captures_name() {
+    let first = vec_get(REGISTERED_NAMES, 0).unwrap()
+    let second = vec_get(REGISTERED_NAMES, 1).unwrap()
+
+    // Order might vary, but both names should be present
+    let has_a = first == "system_a" || second == "system_a"
+    let has_b = first == "system_b" || second == "system_b"
+
+    assert(has_a, "system_a should be registered")
+    assert(has_b, "system_b should be registered")
+}
+
+global UPDATE_SYSTEMS: [string] = []
+
+// Init decorator without arguments
+deco init update {
+    vec_push(UPDATE_SYSTEMS, target.name)
+}
+
+@update
+fn input_system(dt: float) {
+    print("input: {dt}")
+}
+
+@update
+fn physics_system(dt: float) {
+    print("physics: {dt}")
+}
+
+@update
+fn render_system(dt: float) {
+    print("render: {dt}")
+}
+
+@test
+fn test_init_count() {
+    assert(vec_len(UPDATE_SYSTEMS) == 3, "should have 3 registered systems")
+}
+
+@test
+fn test_init_names() {
+    let found_input = false
+    let found_physics = false
+    let found_render = false
+
+    for sys in UPDATE_SYSTEMS {
+        if sys == "input_system" {
+            found_input = true
+        }
+        if sys == "physics_system" {
+            found_physics = true
+        }
+        if sys == "render_system" {
+            found_render = true
+        }
+    }
+
+    assert(found_input, "input_system should be registered")
+    assert(found_physics, "physics_system should be registered")
+    assert(found_render, "render_system should be registered")
+}
+
+global PARAM_NAMES: [string] = []
+
+deco init capture_params {
+    vec_push(PARAM_NAMES, target.name)
+}
+
+@capture_params
+fn no_params() {
+    print("no params")
+}
+
+@capture_params
+fn one_param(x: int) {
+    print("x = {x}")
+}
+
+@capture_params
+fn two_params(name: string, age: int) {
+    print("{name} is {age}")
+}
+
+@capture_params
+fn many_params(a: int, b: int, c: int, d: int) {
+    print("{a} {b} {c} {d}")
+}
+
+@test
+fn test_all_functions_registered() {
+    assert(vec_len(PARAM_NAMES) == 4, "should have 4 registered functions")
+}
+
+@test
+fn test_function_names_captured() {
+    let has_no_params = false
+    let has_one_param = false
+    let has_two_params = false
+    let has_many_params = false
+
+    for name in PARAM_NAMES {
+        if name == "no_params" { has_no_params = true }
+        if name == "one_param" { has_one_param = true }
+        if name == "two_params" { has_two_params = true }
+        if name == "many_params" { has_many_params = true }
+    }
+
+    assert(has_no_params, "no_params should be registered")
+    assert(has_one_param, "one_param should be registered")
+    assert(has_two_params, "two_params should be registered")
+    assert(has_many_params, "many_params should be registered")
+}
