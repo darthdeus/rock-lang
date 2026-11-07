@@ -1,0 +1,200 @@
+// An error that propagates out of an ordinary fn runs every pending defer of
+// every frame it leaves, innermost first and LIFO within a scope, before the
+// error reaches the handler unchanged. Portable across backends: the handler
+// helpers have a Lua and a JS body.
+
+global LOG: string = ""
+
+@nomangle inline(lua) fn catch_message(check: fn()) -> string = """
+    local ok, err = pcall(check)
+    if ok then return "no error" end
+    return tostring(err)
+"""
+
+@nomangle inline(js) fn catch_message(check: fn()) -> string = """
+    try { __rock_call(check); return "no error"; }
+    catch (e) { return String(e !== null && e !== undefined && e.message !== undefined ? e.message : e); }
+"""
+
+@nomangle inline(lua) fn mentions(s: string, sub: string) -> bool = """
+    return string.find(s, sub, 1, true) ~= nil
+"""
+
+@nomangle inline(js) fn mentions(s: string, sub: string) -> bool = """
+    return s.indexOf(sub) >= 0;
+"""
+
+fn fail_one_frame() {
+    defer { LOG = LOG + "d1;" }
+    error("one frame")
+}
+
+@test(output = "d1; true")
+fn defer_runs_when_error_leaves_one_frame() {
+    LOG = ""
+    let m = catch_message(() => fail_one_frame())
+    print("{LOG} {mentions(m, "one frame")}")
+}
+
+fn level3() {
+    defer { LOG = LOG + "l3;" }
+    error("deep")
+}
+
+fn level2() {
+    defer { LOG = LOG + "l2;" }
+    level3()
+    LOG = LOG + "unreached2;"
+}
+
+fn level1() {
+    defer { LOG = LOG + "l1;" }
+    level2()
+    LOG = LOG + "unreached1;"
+}
+
+@test(output = "l3;l2;l1; true")
+fn defers_run_innermost_frame_first() {
+    LOG = ""
+    let m = catch_message(() => level1())
+    print("{LOG} {mentions(m, "deep")}")
+}
+
+fn three_defers() {
+    defer { LOG = LOG + "a;" }
+    defer { LOG = LOG + "b;" }
+    defer { LOG = LOG + "c;" }
+    error("lifo")
+}
+
+@test(output = "c;b;a; true")
+fn defers_in_one_scope_run_lifo() {
+    LOG = ""
+    let m = catch_message(() => three_defers())
+    print("{LOG} {mentions(m, "lifo")}")
+}
+
+fn only_registered_defers() {
+    defer { LOG = LOG + "first;" }
+    error("early")
+    defer { LOG = LOG + "never;" }
+}
+
+@test(output = "first; true")
+fn defer_after_the_raise_does_not_run() {
+    LOG = ""
+    let m = catch_message(() => only_registered_defers())
+    print("{LOG} {mentions(m, "early")}")
+}
+
+fn fail_in_loop() {
+    defer { LOG = LOG + "fn;" }
+    for i in 0..4 {
+        defer { LOG = LOG + "i{i};" }
+        if i == 2 {
+            error("loop")
+        }
+    }
+    LOG = LOG + "unreached;"
+}
+
+@test(output = "i0;i1;i2;fn; true")
+fn loop_body_defer_runs_on_error() {
+    LOG = ""
+    let m = catch_message(() => fail_in_loop())
+    print("{LOG} {mentions(m, "loop")}")
+}
+
+fn fail_in_while() {
+    let n = 0
+    while n < 5 {
+        defer { LOG = LOG + "w{n};" }
+        n = n + 1
+        if n == 3 {
+            assert(false, "while")
+        }
+    }
+}
+
+@test(output = "w1;w2;w3; true")
+fn while_body_defer_sees_current_value_on_error() {
+    LOG = ""
+    let m = catch_message(() => fail_in_while())
+    print("{LOG} {mentions(m, "while")}")
+}
+
+fn guarded(tag: string, fail: bool) -> int {
+    defer { LOG = LOG + "{tag};" }
+    if fail {
+        error("bad {tag}")
+    }
+    return 7
+}
+
+fn caller_catches() -> int {
+    defer { LOG = LOG + "outer;" }
+    let m = catch_message(() => {
+        let _r = guarded("x", true)
+    })
+    LOG = LOG + "caught({mentions(m, "bad x")});"
+    return guarded("y", false)
+}
+
+@test(output = "x;caught(true);y;outer; 7")
+fn caller_catches_and_continues() {
+    LOG = ""
+    let r = caller_catches()
+    print("{LOG} {r}")
+}
+
+fn fail_with_value(n: int) {
+    defer { LOG = LOG + "v{n};" }
+    error("code {n * 6}")
+}
+
+@test(output = "v7; code 42")
+fn error_message_reaches_the_handler() {
+    LOG = ""
+    let m = catch_message(() => fail_with_value(7))
+    let shown = if mentions(m, "code 42") { "code 42" } else { m }
+    print("{LOG} {shown}")
+}
+
+fn recurse(n: int) {
+    defer { LOG = LOG + "r{n};" }
+    if n == 0 {
+        error("bottom")
+    }
+    recurse(n - 1)
+}
+
+@test(output = "r0;r1;r2; true")
+fn recursive_frames_unwind_in_order() {
+    LOG = ""
+    let m = catch_message(() => recurse(2))
+    print("{LOG} {mentions(m, "bottom")}")
+}
+
+@test(output = "first:d1; second:d1; true")
+fn a_caught_error_does_not_leave_stale_defers() {
+    LOG = ""
+    catch_message(() => fail_one_frame())
+    let a = LOG
+    LOG = ""
+    let m = catch_message(() => fail_one_frame())
+    print("first:{a} second:{LOG} {mentions(m, "one frame")}")
+}
+
+fn completes() -> int {
+    defer { LOG = LOG + "done;" }
+    return 1
+}
+
+@test(output = "done; no error")
+fn normal_return_still_runs_defer_once() {
+    LOG = ""
+    let m = catch_message(() => {
+        let _r = completes()
+    })
+    print("{LOG} {m}")
+}
