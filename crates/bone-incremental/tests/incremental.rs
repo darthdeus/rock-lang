@@ -498,30 +498,10 @@ fn decorated_body_edit_reinfers_the_body() {
     );
 }
 
-/// PREMISE-TDD (per-body re-inference): a BODY edit's lower+infer WORK should be
-/// proportional to the EDIT, not the module size. Today `rebuild_module` ->
-/// `lower_and_infer(&[whole edited module])` re-lowers and re-infers EVERY
-/// function in the file (`check_module` loops all functions), so the work scales
-/// with the module. The `reinferred` REPORT is already narrowed to the changed
-/// body (`body_edit_reinfers_only_the_edited_body`, so skull's overlay only
-/// re-emits dependents) -- this pins narrowing the inference WORK the same way.
-/// For a PURE body edit the signature is unchanged (guaranteed by the BodyOnly
-/// tier + the `interface_snapshot` debug-assert), so NO other function's types
-/// depend on it: re-inferring only the changed body is sound.
-///
-/// RED today: a 400-fn module's lower+infer is ~20x a 20-fn one. GREEN when a
-/// body edit lowers+infers only the changed body and reuses the rest. The work
-/// isn't otherwise observable, so this pins it as a RATIO (same machine, so
-/// load-independent) of the MIN over many edits, on modules large enough that
-/// the phases are well above timer granularity. Remove `#[ignore]` when
-/// implementing the narrowing.
 /// MILESTONE 1, step 1 (deterministic): a body edit must BUMP the changed body's
 /// `Body.generation` and PRESERVE the unchanged bodies' generations. This is the
 /// primitive `check_module` keys reuse on (`body_generation == body.generation`)
-/// and that lowering keeps stable for unchanged bodies. Today generation is
-/// always 0 (unused groundwork), so editing `a` leaves all three at 0. RED now;
-/// GREEN when `rebuild_module` sets generations (bump the `classify` `changed`
-/// set, keep the rest). Remove `#[ignore]` when implementing.
+/// and that lowering keeps stable for unchanged bodies.
 #[test]
 fn body_edit_bumps_only_changed_body_generation() {
     let mut h = Harness::new(&[(
@@ -2880,13 +2860,15 @@ fn stress_100k_edits_arena_flat() {
          fn h(a: P, b: P) -> int {{ return a.x + b.x }}\n"
         )
     };
-    let mut h = Harness::new(&[("a.rock", &v("    let y: P = p"))]);
+    // Each edit changes a literal in `f`. The per-edit assertion below pins
+    // that every update really re-infers it, so flat arenas cannot come from
+    // a no-change fast path.
+    let body = |k: usize| format!("    let y: P = p\n    let z: int = p.x + {k}");
+    let mut h = Harness::new(&[("a.rock", &v(&body(0)))]);
     let mid = h.mid("a.rock");
 
     // settle one edit so lazily-grown per-body arenas reach steady state.
-    h.session
-        .update_file("a.rock", &v("    let y: P = p "))
-        .unwrap();
+    h.session.update_file("a.rock", &v(&body(9))).unwrap();
     let snap = |h: &Harness| {
         let m = h.session.workspace().module(mid);
         let body: usize = m
@@ -2906,8 +2888,17 @@ fn stress_100k_edits_arena_flat() {
     let baseline = snap(&h);
 
     for i in 0..100_000 {
-        let body = format!("    let y: P = p{}", " ".repeat(1 + i % 4));
-        h.session.update_file("a.rock", &v(&body)).unwrap();
+        h.session
+            .update_file("a.rock", &v(&body(1 + i % 4)))
+            .unwrap();
+        assert_eq!(
+            h.session
+                .ws
+                .reinferred_body_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "edit {i} must re-infer the edited body"
+        );
     }
 
     let after = snap(&h);

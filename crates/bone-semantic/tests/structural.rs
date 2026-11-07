@@ -190,26 +190,42 @@ fn probe_stdlib_first_wall() {
     }
 }
 
+// `+` is declared inline so the add tests need no stdlib.
+const INT_ADD: &str = "@pure @inline operator(lua) +(a: int, b: int) -> int = \"return a + b\"\n";
+
 #[test]
-#[ignore]
 fn lower_and_check_add() {
-    let src = "fn add(x: int, y: int) -> int { return x + y }";
-    let srcs: &[(&str, &str)] = &[("<parse_rock>", src)];
-    let module = parse_rock(src).expect_pretty("parse_rock", srcs);
+    let src = format!("{INT_ADD}fn add(x: int, y: int) -> int {{ return x + y }}");
+    let srcs: &[(&str, &str)] = &[("<parse_rock>", &src)];
+    let module = parse_rock(&src).expect_pretty("parse_rock", srcs);
     semantic_pass(&mut [module]).expect_pretty("semantic_pass", srcs);
+    let messages: Vec<String> = body_errors(&src, "add")
+        .into_iter()
+        .map(|e| e.message)
+        .collect();
+    assert!(messages.is_empty(), "{messages:?}");
 }
 
 #[test]
-#[ignore]
-fn check_add_mismatch_returns_error() {
-    let src = "fn add(x: int, y: int) -> bool { return x + y }";
-    let is_err = check(src).is_err();
-    assert!(is_err);
+fn check_add_mismatch_records_a_body_error() {
+    let src = format!("{INT_ADD}fn add(x: int, y: int) -> bool {{ return x + y }}");
+    let messages: Vec<String> = body_errors(&src, "add")
+        .into_iter()
+        .map(|e| e.message)
+        .collect();
+    assert!(
+        messages.iter().any(|m| m.contains("expected `bool`")),
+        "{messages:?}"
+    );
 }
 
 // The per-body errors recorded for `fn main` in a self-contained source
 // (semantic_pass returns Ok; type errors live per-body).
 fn main_body_errors(src: &str) -> Vec<CompilerError> {
+    body_errors(src, "main")
+}
+
+fn body_errors(src: &str, name: &str) -> Vec<CompilerError> {
     let ws = check(src).expect("semantic_pass");
     let mid = ws
         .modules
@@ -217,15 +233,15 @@ fn main_body_errors(src: &str) -> Vec<CompilerError> {
         .find(|m| m.id != ModuleId::builtin())
         .expect("one user module")
         .id;
-    let (main_idx, _) = ws
+    let (fn_idx, _) = ws
         .module(mid)
         .functions
         .iter()
-        .find(|(_, f)| f.name.as_str() == "main")
-        .expect("fn main exists");
+        .find(|(_, f)| f.name.as_str() == name)
+        .expect("fn exists");
     let inf = ws.inference(mid).expect("user module inferred");
     inf.errors
-        .get(&BodyOwner::Function(main_idx))
+        .get(&BodyOwner::Function(fn_idx))
         .cloned()
         .unwrap_or_default()
 }
