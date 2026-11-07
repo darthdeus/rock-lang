@@ -1164,7 +1164,6 @@ pub fn convert_body(
             }),
         }
     }
-    drop(convert_memo);
     c.conversions = conversions;
     c.type_memo = memo;
     c

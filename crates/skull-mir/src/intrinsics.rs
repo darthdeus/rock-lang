@@ -99,9 +99,7 @@ pub fn expand_kind(f: &Function) -> Option<ExpandKind> {
         return Some(ExpandKind::StructPairs);
     }
     if has_anno(f, "shader_expand") {
-        return match f.name.as_str() {
-            _ => Some(ExpandKind::ShaderPipeline),
-        };
+        return Some(ExpandKind::ShaderPipeline);
     }
     if has_anno(f, "vertex_expand") {
         return Some(ExpandKind::VertexLayout);

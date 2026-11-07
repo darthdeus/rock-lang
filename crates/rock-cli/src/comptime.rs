@@ -816,7 +816,9 @@ fn verify_macos_compiler_image(file: &std::fs::Metadata) -> std::result::Result<
         vnode: libc::vnode_info_path,
     }
     const PROC_PIDREGIONPATHINFO: libc::c_int = 8;
+    // libc deprecates its dyld bindings in favor of mach2, which is not a dependency.
     // SAFETY: dyld's image zero is the executable and lives for this process.
+    #[allow(deprecated)]
     let header = unsafe { libc::_dyld_get_image_header(0) };
     if header.is_null() {
         return Err("running compiler image has no Mach-O header".into());
