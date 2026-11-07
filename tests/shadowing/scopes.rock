@@ -1,13 +1,199 @@
-// Extended shadowing tests - migrated from rock/tests/shadowing_tests.rs
-// Tests parameter vs function precedence, global shadowing, lambda captures, 
-// loop variables, and advanced shadowing scenarios
+// Name resolution under shadowing: parameters and locals over functions and
+// globals, block and branch scopes, lambda captures, loop variables, default
+// and tuple parameters, and generic and type-alias names.
 
-// TODO: Add pattern matching variable shadowing tests when Rock supports match expressions
-// Example scenarios to test:
-// - match expressions where pattern variables shadow outer scope variables
-// - nested pattern matching with multiple levels of shadowing
-// - enum variant destructuring that introduces variables shadowing outer scope
-// - tuple pattern matching with variable shadowing
+// ============================================
+// Helper structures and functions
+// ============================================
+
+struct FixVec2 {
+    x: int,
+    y: int,
+}
+
+fn fixv() -> int {
+    return 42
+}
+
+fn helper_function() -> int {
+    return 99
+}
+
+global global_var: int = 999
+
+// ============================================
+// Parameter vs Function Precedence Tests
+// ============================================
+
+@test(output = "10")
+fn test_parameter_vs_function_precedence_field_access() {
+    // Parameter should shadow function name in field access
+    let pos = FixVec2 { x: 10, y: 20 }
+    let result = test_precedence(pos)
+    print(result)
+}
+
+fn test_precedence(v: FixVec2) -> int {
+    return v.x  // This should resolve to parameter v, not function v()
+}
+
+@test(output = "10") 
+fn test_parameter_vs_function_precedence_direct_use() {
+    // Parameter should shadow function name
+    let result = test_function_parameter(10)
+    print(result)
+}
+
+fn test_function_parameter(v: int) -> int {
+    return v  // This should resolve to parameter v, not function v()
+}
+
+// ============================================
+// Local Variable vs Function Precedence Tests  
+// ============================================
+
+@test(output = "20")
+fn test_local_var_vs_function_precedence() {
+    // Local variable should shadow function name
+    let result = test_local_shadowing()
+    print(result)
+}
+
+fn test_local_shadowing() -> int {
+    let v = 20  // This shadows the function v()
+    return v    // Should return 20, not call v()
+}
+
+// ============================================
+// Nested Scope Precedence Tests
+// ============================================
+
+@test(output = "30")
+fn test_nested_scope_precedence() {
+    let result = test_nested()
+    print(result)
+}
+
+fn test_nested() -> int {
+    let helper_function = 30  // shadows helper_function()
+    return test_inner(helper_function)
+}
+
+fn test_inner(helper: int) -> int {
+    return helper  // Should use parameter, not function
+}
+
+// ============================================
+// Block Scope Shadowing Tests
+// ============================================
+
+@test(output = "1\n2\n1")
+fn test_block_scope_shadowing() {
+    let x = 1
+    print(x)
+    
+    // Inner block with shadowing
+    {
+        let x = 2
+        print(x)
+    }
+    
+    print(x)  // Should be back to 1
+}
+
+@test(output = "100\n5")
+fn test_if_statement_shadowing() {
+    let x = 5
+    
+    if true {
+        let x = 100
+        print(x)
+    }
+    
+    print(x)  // Should still be 5
+}
+
+// ============================================
+// Function Parameter Shadowing Tests
+// ============================================
+
+@test(output = "42")
+fn test_parameter_shadows_global() {
+    let result = use_parameter(42)
+    print(result)
+}
+
+fn use_parameter(global_var: int) -> int {
+    return global_var  // Parameter shadows global
+}
+
+@test(output = "7")
+fn test_multiple_parameters_shadowing() {
+    let result = multi_param_test(7, 8)
+    print(result)
+}
+
+fn multi_param_test(helper_function: int, v: int) -> int {
+    // Parameters shadow functions with same names
+    return helper_function  // Should return 7, not call helper_function()
+}
+
+// ============================================
+// Let Binding Shadowing Tests
+// ============================================
+
+@test(output = "1\n2\n1")
+fn test_sequential_let_shadowing() {
+    let x = 1
+    print(x)
+    
+    let x = 2  // Shadows previous x
+    print(x)
+    
+    let x = x - 1  // Uses shadowed x (2) and creates new x (1)
+    print(x)
+}
+
+@test(output = "10\n20")
+fn test_let_expression_shadowing() {
+    let result = 10
+    let result = result + 10  // Uses previous result
+    print(result - 10)  // Prints 10
+    print(result)       // Prints 20
+}
+
+// ============================================
+// Conditional Shadowing Tests
+// ============================================
+
+@test(output = "outer\nif_branch\nouter")
+fn test_conditional_shadowing() {
+    let cond_var = "outer"
+    print(cond_var)
+    
+    if true {
+        let cond_var = "if_branch"
+        print(cond_var)
+    }
+    
+    print(cond_var)  // Back to outer
+}
+
+@test(output = "5\n10\n5")
+fn test_else_branch_shadowing() {
+    let branch_var = 5
+    print(branch_var)
+    
+    if false {
+        let branch_var = 99
+        print(branch_var)
+    } else {
+        let branch_var = 10
+        print(branch_var)
+    }
+    
+    print(branch_var)  // Back to 5
+}
 
 // Shared struct definitions
 struct Data {
@@ -23,10 +209,6 @@ struct Container<T> {
 }
 
 // Helper functions
-fn fixv() -> int {
-    return 42
-}
-
 fn helper() -> int {
     return 999
 }
@@ -40,16 +222,13 @@ fn value_func() -> int {
 }
 
 // Helper functions for specific tests
-fn test_local_shadowing() -> int {
+fn local_shadowing_ten() -> int {
     let v = 10  // Local variable shadows the function
     return v    // This should resolve to local variable v, not function v()
 }
 
-fn test_inner(helper: int) -> int {
-    return helper  // Parameter should shadow the global function
-}
 
-fn test_nested() -> int {
+fn nested_local_shadows_helper() -> int {
     let helper = 5
     return test_inner(helper)  // Should use local variable, not global function
 }
@@ -197,14 +376,14 @@ fn f_recursive(n: int) -> int {
 
 // Test cases
 @test(output = "10")
-fn test_local_var_vs_function_precedence() {
-    let result = test_local_shadowing()
+fn local_var_shadows_function_name() {
+    let result = local_shadowing_ten()
     print(result)
 }
 
 @test(output = "5")
-fn test_nested_scope_precedence() {
-    let result = test_nested()
+fn nested_local_shadows_function_name() {
+    let result = nested_local_shadows_helper()
     print(result)
 }
 

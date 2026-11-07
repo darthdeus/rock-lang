@@ -1,4 +1,4 @@
-// Comprehensive if-expression shadowing tests
+// If-expression shadowing tests
 // Tests shadow renaming in if expressions with nullable types and complex scenarios
 
 // Helper structs
@@ -362,4 +362,93 @@ fn test_shadow_with_safe_navigation() {
     let c1 = Container { value: 42 }
     print("Result: " + get_value(c1).to_string())
     print("Result with null: " + get_value(null).to_string())
+}
+
+// Shadowing inside if-expression values, plain and nested.
+
+// Simple case - this should work
+@test(output = "Inner: 20\nOuter: 10")
+fn test_simple_if_expression_shadow() {
+    let x = 10
+    let result = if true {
+        let x = 20
+        print("Inner: " + x.to_string())
+        x
+    } else {
+        x
+    }
+    print("Outer: " + x.to_string())
+}
+
+// Nested if expression
+@test(output = "Level 1: 100\nLevel 2: 200\nOriginal: 1")
+fn test_nested_if_expression_bug() {
+    let x = 1
+    
+    let result = if true {
+        let x = 100
+        print("Level 1: " + x.to_string())
+        
+        if true {
+            let x = 200
+            print("Level 2: " + x.to_string())
+            x
+        } else {
+            x
+        }
+    } else {
+        x
+    }
+    
+    print("Original: " + x.to_string())
+}
+
+// Even simpler repro
+@test(output = "A\nB\nC")
+fn test_minimal_nested_if() {
+    if true {
+        print("A")
+        if true {
+            print("B")
+        }
+        print("C")
+    }
+}
+
+// Test if expression as value with side effects
+@test(output = "Computing...\nResult: 42")
+fn test_if_expr_with_side_effects() {
+    let value = if true {
+        print("Computing...")
+        42
+    } else {
+        0
+    }
+    print("Result: " + value.to_string())
+}
+
+// Test nested if expression values
+@test(output = "Outer if\nInner if\nResult: 300")
+fn test_nested_if_values() {
+    let result = if true {
+        print("Outer if")
+        if true {
+            print("Inner if")
+            300
+        } else {
+            200
+        }
+    } else {
+        100
+    }
+    print("Result: " + result.to_string())
+}
+
+// Test typed let statement followed by shadowing with binary operator
+// This was the specific bug we fixed where typed let statements created duplicate symbols
+@test(output = "2")
+fn test_typed_let_shadow_with_binop() {
+    let x: int = 1
+    let x = x + 1  // Shadow with binary operator
+    print(x.to_string())
 }

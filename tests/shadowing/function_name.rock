@@ -1,7 +1,7 @@
-// Regression test for function shadowing bug
-// This test demonstrates the issue where declaring a variable with the same name
-// as a function and trying to call that function in the initialization causes
-// the variable to shadow itself, resulting in "attempt to call nil value" error
+// A `let` named like a function may call that function in its own
+// initializer: the new binding is not in scope until after the initializer.
+// Regression: the variable used to shadow itself, giving "attempt to call nil
+// value".
 
 fn get_value() -> int {
     return 42
@@ -11,11 +11,8 @@ fn get_string() -> string {
     return "hello"
 }
 
-// This should cause a compilation error or runtime error
-// The variable 'get_value' shadows the function before it's fully initialized
 @test
 fn test_function_shadowing_with_same_name() {
-    // This line causes the bug: variable shadows the function it's trying to call
     let get_value = get_value()
 
     assert_eq(get_value, 42)
@@ -24,7 +21,6 @@ fn test_function_shadowing_with_same_name() {
 // Another case with a different type
 @test
 fn test_function_shadowing_string() {
-    // Same issue with string return type
     let get_string = get_string()
 
     assert_eq(get_string, "hello")
@@ -47,7 +43,6 @@ fn test_nested_scope_shadowing() {
     assert_eq(outer, 42)
 
     {
-        // This should also trigger the bug in the nested scope
         let get_value = get_value()
         assert_eq(get_value, 42)
     }
@@ -60,7 +55,6 @@ fn add(a: int, b: int) -> int {
 
 @test
 fn test_function_with_params_shadowing() {
-    // This should also cause the shadowing bug
     let add = add(1, 2)
     assert_eq(add, 3)
 }
@@ -72,7 +66,6 @@ fn get_function() -> fn() -> int {
 
 @test
 fn test_function_returning_function_shadowing() {
-    // This might behave differently
     let get_function = get_function()
     let result = get_function()
     assert_eq(result, 100)
