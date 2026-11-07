@@ -17,11 +17,11 @@ Install the components for the same stable toolchain used to build the compiler:
 
 ```sh
 rustup component add clippy
-cargo clippy --locked --workspace --all-targets
+cargo clippy --locked --workspace --all-targets -- -D warnings
 ```
 
-The workspace has existing Clippy warnings, so this command is not a
-warning-free gate. Fix the cause of a diagnostic rather than adding a blanket
+The workspace is Clippy-clean and CI runs this command, so any new warning
+fails the build. Fix the cause of a diagnostic rather than adding a blanket
 allowance. Crates inherit the shared lint policy through `[lints] workspace = true`.
 
 Rust formatting uses the formatter shipped with Rust 1.99.1, independently of

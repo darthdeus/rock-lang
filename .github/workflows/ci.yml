@@ -18,6 +18,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - name: Install SDL2 development libraries
         run: |
           sudo apt-get update
@@ -65,6 +67,8 @@ jobs:
         run: command -v luajit && luajit -v
       - name: Build workspace
         run: cargo build --locked --workspace
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Test workspace
         run: cargo test --locked --workspace
       - name: Test language corpus
