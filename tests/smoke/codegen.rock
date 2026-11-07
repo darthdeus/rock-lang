@@ -1,0 +1,785 @@
+// Broad code-generation smoke tests: arithmetic, string interpolation,
+// methods, let bindings, loops, tuples, enums, structs, closures, safe
+// navigation, casts, arrays, maps, nullables and coroutines, then compound
+// assignment, operator overloading, array and vector index writes, nested
+// if/return shapes and enum pattern matching.
+
+// ============================================
+// Helper structures and functions
+// ============================================
+
+struct FixVec2 {
+    x: float,
+    y: float,
+}
+
+fn length(v: FixVec2) -> float {
+    return (v.x * v.x + v.y * v.y).sqrt()
+}
+
+fn double_string(x: string, suffix: string) -> string {
+    return "{x}{x}{suffix}"
+}
+
+fn string_double(x: string, suffix: string) -> string {
+    return "{x}{x}{suffix}"
+}
+
+fn string_rev_concat(a: string, b: string) -> string {
+    return "{b}{a}"
+}
+
+fn string_concat(a: string, b: string) -> string {
+    return "{a}{b}"
+}
+
+struct Point { x: int, y: int }
+
+struct Rectangle { width: int, height: int }
+
+fn area(r: Rectangle) -> int {
+    return r.width * r.height
+}
+
+struct Foo { value: int }
+
+struct Inner { value: int }
+struct Outer { inner: Inner? }
+
+enum Color { Red, Green, Blue }
+
+enum Option<T> { Some(T), None }
+
+// ============================================
+// Basic codegen tests
+// ============================================
+
+@test(output = "4")
+fn simple_codegen_arithmetic() {
+    print(1 + 3)
+}
+
+@test(output = "5\n7")
+fn simple_codegen_increment() {
+    let x = 5
+    print(x++)
+    print(++x)
+}
+
+// ============================================
+// String interpolation tests
+// ============================================
+
+@test(output = "3")
+fn string_interpolation_basic() {
+    print("{1 + 2}")
+}
+
+@test(output = "a1b2c7")
+fn string_interpolation_multiple() {
+    print("a{1}b{2}c{3+4}")
+}
+
+@test(output = "x=42\nx = 42")
+fn string_interpolation_variable() {
+    let x = 42
+    print("x={x}")
+    print("x = {x}")
+}
+
+@test(output = "calc=9")
+fn string_interpolation_arithmetic() {
+    print("calc={(1+2)*3}")
+}
+
+@test(output = "truth: true, lie: false")
+fn string_interpolation_booleans() {
+    print("truth: {true}, lie: {false}")
+}
+
+@test(output = "nothing: nil")
+fn string_interpolation_null() {
+    print("nothing: {null}")
+}
+
+@test(output = "say hi!")
+fn string_interpolation_nested_string() {
+    print("say {\"hi\"}!")
+}
+
+@test(output = "hello 1 5 world")
+fn string_interpolation_complex() {
+    print("hello {1} {2 + 3} world")
+}
+
+// ============================================
+// Operator tests
+// ============================================
+
+// ============================================
+// Method tests
+// ============================================
+
+@test(output = "hihiho\nhihiho")
+fn simple_method_codegen() {
+    print("hi".double_string("ho"))
+    print("hi".string_double("ho"))
+}
+
+@test(output = "5")
+fn more_method_codegen() {
+    let v = FixVec2 { x: 3, y: 4 }
+    print(v.length())
+}
+
+@test(output = "hohi\nhiho")
+fn complex_strip_type_method_codegen() {
+    print("hi".string_rev_concat("ho"))
+    print("hi".string_concat("ho"))
+}
+
+// ============================================
+// Let and var tests
+// ============================================
+
+@test(output = "5\n42")
+fn let_assignment() {
+    let values = [5, 42]
+    for value in values {
+        let inferred = value
+        print(inferred)
+    }
+}
+
+@test(output = "37")
+fn let_reassignment() {
+    let x = 5
+    x = 37
+    print(x)
+}
+
+// ============================================
+// Loop tests
+// ============================================
+
+@test(output = "0\n1\n2\n3\n4")
+fn loop_with_index() {
+    let i = 0
+    while i < 5 {
+        print(i)
+        i += 1
+    }
+}
+
+@test(output = "0 \n1 \n2 \n3 \n4")
+fn for_range_space() {
+    for i in 0..5 {
+        print("{i} ")
+    }
+}
+
+@test(output = "0\n \n1\n \n2\n \n3\n \n4")
+fn for_range_no_trailing_space() {
+    for i in 0..5 {
+        if i > 0 { print(" ") }
+        print(i)
+    }
+}
+
+// ============================================
+// Tuple tests
+// ============================================
+
+@test(output = "4\n2")
+fn tuple_access() {
+    let t = (4, 2)
+    print(t.0)
+    print(t.1)
+}
+
+@test(output = "15")
+fn tuple_sum() {
+    let t = (5, 10)
+    print(t.0 + t.1)
+}
+
+// ============================================
+// Enum tests
+// ============================================
+
+@test
+fn enum_basic() {
+    let c1 = Color::Red
+    let c2 = Color::Green
+    let c3 = Color::Blue
+
+    assert_eq(c1 == Color::Red, true)
+    assert_eq(c2 == Color::Green, true)
+    assert_eq(c3 == Color::Blue, true)
+    assert_eq(c1 == c2, false)
+}
+
+@test(output = "42")
+fn enum_with_data() {
+    let a = Option::Some(42)
+    let _b: Option<int> = Option::None
+    
+    // Test pattern matching instead
+    match a {
+        Option::Some(val) => print(val),
+        Option::None => print(0)
+    }
+}
+
+// ============================================
+// Struct tests
+// ============================================
+
+@test(output = "15")
+fn struct_field_sum() {
+    let p = Point { x: 5, y: 10 }
+    print(p.x + p.y)
+}
+
+@test(output = "15")
+fn struct_method() {
+    let rect = Rectangle { width: 3, height: 5 }
+    print(rect.area())
+}
+
+// ============================================
+// Closure tests
+// ============================================
+
+@test(output = "8")
+fn closure_capture() {
+    let x = 3
+    let add = y => x + y
+    print(add(5))
+}
+
+@test(output = "15")
+fn closure_multiple_captures() {
+    let a = 5
+    let b = 10
+    let sum = () => a + b
+    print(sum())
+}
+
+// ============================================
+// Safe navigation tests
+// ============================================
+
+@test(output = "5\nnil")
+fn safe_navigation_basic() {
+    let f_val = Foo { value: 5 }
+    let f: Foo? = f_val
+    print(f?.value)
+    
+    let g: Foo? = null
+    print(g?.value)
+}
+
+@test(output = "10\nnil")
+fn safe_navigation_chain() {
+    let o1 = Outer { inner: Inner { value: 10 } }
+    print(o1.inner?.value)
+    
+    let o2 = Outer { inner: null }
+    print(o2.inner?.value)
+}
+
+// ============================================
+// Type casting tests
+// ============================================
+
+@test(output = "42\n42")
+fn type_casting() {
+    let x = 42
+    let y = 42.0
+    
+    print(x)
+    print(float_to_int(y))
+}
+
+@test
+fn float_int_casting() {
+    let f: float = 3.14
+    let i: int = f as int
+    let round_trip: float = i as float
+
+    assert_eq(i, 3)
+    assert_eq(round_trip, 3.0)
+}
+
+// ============================================
+// Array/Vec tests
+// ============================================
+
+@test(output = "2")
+fn array_access() {
+    let arr = [1, 2, 3]
+    print(arr[1])
+}
+
+@test(output = "1 \n2 \n3")
+fn array_iteration() {
+    let arr = [1, 2, 3]
+    for x in arr {
+        print("{x} ")
+    }
+}
+
+// ============================================
+// Map tests
+// ============================================
+
+@test(output = "100")
+fn map_basic() {
+    let m: Map<string, int> = map_new()
+    insert(m, "hp", 100)
+    print(get(m, "hp"))
+}
+
+@test(output = "nil")
+fn map_missing_key() {
+    let m: Map<string, int> = map_new()
+    print(get(m, "missing"))
+}
+
+// ============================================
+// Error handling tests
+// ============================================
+
+@test(output = "Value: 42")
+fn nullable_unwrap() {
+    let x: int? = 42
+    print("Value: {unwrap(x)}")
+}
+
+@test(output = "Default: 0")
+fn nullable_unwrap_or() {
+    let x: int? = null
+    print("Default: {unwrap_or(x, 0)}")
+}
+
+// ============================================
+// Coroutine tests
+// ============================================
+
+co fn simple() -> Coroutine<int> {
+    yield 1
+    yield 2
+    yield 3
+}
+
+@test(output = "1\n2\n3")
+fn coroutine_basic() {
+    let coro = simple()
+    print(coro.resume())
+    print(coro.resume())
+    print(coro.resume())
+}
+
+co fn evens(max: int) -> Coroutine<int> {
+    let i = 0
+    while i < max {
+        yield i
+        i += 2
+    }
+}
+
+@test(output = "0\n2\n4\n6\n8")
+fn coroutine_with_loop() {
+    let coro = evens(10)
+    print(coro.resume())
+    print(coro.resume())
+    print(coro.resume())
+    print(coro.resume())
+    print(coro.resume())
+}
+
+// ============================================
+// Helper structures for operator overloading
+// ============================================
+
+struct AdvVec2 {
+    x: float,
+    y: float,
+}
+
+operator +(a: AdvVec2, b: AdvVec2) -> AdvVec2 {
+    return AdvVec2 { x: a.x + b.x, y: a.y + b.y }
+}
+
+operator -(a: AdvVec2, b: AdvVec2) -> AdvVec2 {
+    return AdvVec2 { x: a.x - b.x, y: a.y - b.y }
+}
+
+operator *(v: AdvVec2, s: float) -> AdvVec2 {
+    return AdvVec2 { x: v.x * s, y: v.y * s }
+}
+
+operator /(v: AdvVec2, s: float) -> AdvVec2 {
+    return AdvVec2 { x: v.x / s, y: v.y / s }
+}
+
+struct AdvPoint {
+    x: int,
+    y: int,
+}
+
+struct Player {
+    position: AdvPoint,
+    health: int,
+}
+
+global global_counter: int = 100
+
+// ============================================
+// Compound Assignment Tests - Basic
+// ============================================
+
+@test(output = "15\n10\n30\n3")
+fn compound_assign_basic() {
+    let a = 5
+    let b = 20
+    let c = 6
+    let d = 12
+
+    a += 10
+    print(a)
+
+    b -= 10
+    print(b)
+
+    c *= 5
+    print(c)
+
+    d = d ./ 4
+    print(d)
+}
+
+@test(output = "17")
+fn compound_assign_precedence() {
+    let x = 5
+    x += 3 * 4  // Should be 5 + (3 * 4) = 17
+    print(x)
+}
+
+// ============================================
+// Compound Assignment with Struct Fields
+// ============================================
+
+@test(output = "15\n25")
+fn compound_assign_with_fields() {
+    let p = AdvPoint { x: 10, y: 20 }
+    p.x += 5
+    p.y += 5
+    print(p.x)
+    print(p.y)
+}
+
+@test(output = "15\n90")
+fn compound_assign_with_nested_fields() {
+    let player = Player {
+        position: AdvPoint { x: 10, y: 20 },
+        health: 100
+    }
+
+    player.position.x += 5
+    player.health -= 10
+
+    print(player.position.x)
+    print(player.health)
+}
+
+@test(output = "42")
+fn compound_operator_precedence() {
+    let x = 10
+    let y = get_value()
+    x += y * 2  // Should be 10 + (16 * 2) = 42
+    print(x)
+}
+
+fn get_value() -> int {
+    return 16
+}
+
+// ============================================
+// Compound Assignment in Control Flow
+// ============================================
+
+@test(output = "15")
+fn compound_assign_in_if() {
+    let x = 10
+    if x > 5 {
+        x += 5
+    }
+    print(x)
+}
+
+@test(output = "16")
+fn compound_assign_in_while() {
+    let x = 1
+    while x < 10 {
+        x *= 2
+    }
+    print(x)
+}
+
+@test(output = "10")
+fn compound_assign_in_for() {
+    let sum = 0
+    for i in [1, 2, 3, 4] {
+        sum += i
+    }
+    print(sum)
+}
+
+// ============================================
+// Compound Assignment with Globals
+// ============================================
+
+@test(output = "150")
+fn compound_assign_with_globals() {
+    global_counter += 50
+    print(global_counter)
+    global_counter = 100  // Reset for other tests
+}
+
+// ============================================
+// Basic Operator Overloading
+// ============================================
+
+@test(output = "AdvVec2(8, 10)")
+fn operator_overloading() {
+    let v1 = AdvVec2 { x: 3.0, y: 4.0 }
+    let v2 = AdvVec2 { x: 5.0, y: 6.0 }
+    let result = v1 + v2
+    print("AdvVec2({result.x}, {result.y})")
+}
+
+@test(output = "AdvVec2(8, 10)\nAdvVec2(-2, -2)\nAdvVec2(6, 8)\nAdvVec2(1.5, 2)")
+fn complex_operator_overloading() {
+    let v1 = AdvVec2 { x: 3.0, y: 4.0 }
+    let v2 = AdvVec2 { x: 5.0, y: 6.0 }
+
+    let sum = v1 + v2
+    print("AdvVec2({sum.x}, {sum.y})")
+
+    let diff = v1 - v2
+    print("AdvVec2({diff.x}, {diff.y})")
+
+    let scaled = v1 * 2.0
+    print("AdvVec2({scaled.x}, {scaled.y})")
+
+    let divided = v1 / 2.0
+    print("AdvVec2({divided.x}, {divided.y})")
+}
+
+// ============================================
+// Array/Vec Creation and Access
+// ============================================
+
+@test(output = "1\n2\n3")
+fn array_literal_creation_and_access() {
+    let arr = [1, 2, 3]
+    print(arr[0])
+    print(arr[1])
+    print(arr[2])
+}
+
+@test(output = "20\n30")
+fn array_indexing_with_variables_and_expressions() {
+    let arr = [10, 20, 30, 40]
+    let i = 1
+    print(arr[i])
+
+    let j = i + 1
+    print(arr[j])
+}
+
+// ============================================
+// Array/Vec Assignment (Mutation)
+// ============================================
+
+@test(output = "1\n99\n3")
+fn array_assignment_via_index() {
+    let arr = [1, 2, 3]
+    arr[1] = 99
+    print(arr[0])
+    print(arr[1])
+    print(arr[2])
+}
+
+@test(output = "0\n1\n2\n10\n11\n12")
+fn zero_based_indexing_comprehensive() {
+    let arr = [0, 1, 2]
+
+    // Basic indexing
+    print(arr[0])
+    print(arr[1])
+    print(arr[2])
+
+    // Modify via indexing
+    arr[0] = 10
+    arr[1] = 11
+    arr[2] = 12
+
+    print(arr[0])
+    print(arr[1])
+    print(arr[2])
+}
+
+@test(output = "4")
+fn vec_indexing_read_write() {
+    let v = [1, 2, 3]
+    vec_push(v, 4)
+    let last_index = vec_len(v) - 1
+    print(v[last_index])
+}
+
+@test(output = "30")
+fn vec_indexing_with_expressions() {
+    let v = [10, 20, 30]
+    let index = 1 + 1  // 2
+    print(v[index])
+}
+
+// ============================================
+// Array Operations
+// ============================================
+
+@test(output = "4\n40\n30")
+fn array_literal_desugaring() {
+    let v = [10, 20, 30]
+    vec_push(v, 40)
+    print(vec_len(v))
+    print(vec_get(v, 3))
+    print(vec_get(v, 2))
+}
+
+@test(output = "3\n20")
+fn arrays_in_functions() {
+    let arr = [10, 20, 30]
+    print(get_array_length(arr))
+    print(get_second_element(arr))
+}
+
+fn get_array_length(arr: [int]) -> int {
+    return vec_len(arr)
+}
+
+fn get_second_element(arr: [int]) -> int {
+    return arr[1]
+}
+
+@test(output = "3\n1\n2\n3")
+fn arrays_in_functions_complex() {
+    let result = create_and_process_array()
+    print(vec_len(result))
+    print(result[0])
+    print(result[1])
+    print(result[2])
+}
+
+fn create_and_process_array() -> [int] {
+    let arr = [1, 2]
+    vec_push(arr, 3)
+    return arr
+}
+
+// ============================================
+// Block Return Semantics
+// ============================================
+
+@test(output = "early")
+fn nested_if_with_return_branches() {
+    let result = test_nested_returns(true)
+    print(result)
+}
+
+fn test_nested_returns(flag: bool) -> string {
+    if flag {
+        if true {
+            return "early"
+        }
+        return "middle"
+    }
+    return "late"
+}
+
+@test(output = "then")
+fn nested_if_with_return_in_both_branches() {
+    let result = test_both_branches(true)
+    print(result)
+}
+
+fn test_both_branches(condition: bool) -> string {
+    if condition {
+        return "then"
+    } else {
+        return "else"
+    }
+}
+
+@test(output = "42\n5")
+fn bare_expression_last() {
+    let result = get_value_implicit()
+    print(result)
+
+    let computed = compute_something()
+    print(computed)
+}
+
+fn get_value_implicit() -> int {
+    let x = 40
+    x + 2  // Implicit return
+}
+
+fn compute_something() -> int {
+    let base = 3
+    base + 2  // This should be implicitly returned
+}
+
+// ============================================
+// Advanced Let Binding
+// ============================================
+
+@test(output = "42")
+fn let_binding_with_if_else() {
+    let condition = true
+    let value = if condition { 42 } else { 0 }
+    print(value)
+}
+
+// ============================================
+// Comprehensive Enum Pattern Matching
+// ============================================
+
+enum Shape {
+    Square { width: int },
+    Rect { width: int, height: int },
+    Circle(int),
+}
+
+@test(output = "100\n200\n314")
+fn comprehensive_enum_pattern_matching() {
+    let square = Shape::Square { width: 10 }
+    let rect = Shape::Rect { width: 10, height: 20 }
+    let circle = Shape::Circle(10)
+
+    print(calculate_area(square))
+    print(calculate_area(rect))
+    print(calculate_area(circle))
+}
+
+fn calculate_area(shape: Shape) -> int {
+    let area = match shape {
+        Shape::Square { width } => width * width,
+        Shape::Rect { width, height } => width * height,
+        Shape::Circle(radius) => 314,
+    }
+    return area
+}
