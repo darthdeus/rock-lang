@@ -1769,6 +1769,18 @@ inline(js) fn float_to_int(value: float) -> int = "return Math.floor(value);"
 // so the wrapper doesn't allocate a fresh closure per copy; @nomangle because
 // it recurses by name and is called from deepcopy's body.
 @intrinsic @nomangle inline(lua) fn __rock_deepcopy_value(obj: any, seen: any) -> any = """
+    -- Opaque resource hooks clone ownership; the shared memo preserves aliases.
+    if type(obj) == "userdata" then
+        if seen[obj] then return seen[obj] end
+        local mt = getmetatable(obj)
+        local clone = type(mt) == "table" and rawget(mt, "__deepcopy")
+        if clone then
+            local copy = clone(obj)
+            seen[obj] = copy
+            return copy
+        end
+        return obj
+    end
     if type(obj) == "cdata" then
         local info = __rock_c_struct_of(obj)
         if info then return info.copy(obj) end
