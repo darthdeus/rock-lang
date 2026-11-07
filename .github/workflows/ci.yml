@@ -74,7 +74,7 @@ jobs:
         # skip count so new skips need an explicit bump; lower it as the
         # emitter catches up.
         env:
-          JS_MAX_SKIPS: "210"
+          JS_MAX_SKIPS: "177"
         run: |
           set -o pipefail
           cargo run --locked -p rock-cli --bin rock -- test --backend js tests/ | tee "$RUNNER_TEMP/js-corpus.txt"
