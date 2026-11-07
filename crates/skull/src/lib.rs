@@ -1755,58 +1755,21 @@ fn c_struct_inspect_defs(ws: &Workspace, emitted: &rustc_hash::FxHashSet<ustr::U
     out
 }
 
-/// A RECURSIVE, structural rendering of a declared type as a Lua table literal.
-///
-/// [`reflect_field_type`] is flat and lossy on purpose -- it collapses a
-/// nullable to `any`, an array to `[]` and drops every generic argument -- so a
-/// consumer holding one of its strings cannot tell a `Vec<Image>`'s element
-/// from an ordinary int. That is why a direct global, a `Vec` element, a map
-/// value and a tuple member all serialize their raw process-local ids today.
-/// This preserves the shape all the way down, so the walk that reaches a leaf
-/// also knows what the leaf was DECLARED to be.
-///
-/// Purely STRUCTURAL: it names nominal types and says nothing about which of
-/// them the host owns. The native-class list stays in exactly one place
-/// (the host projection); a copy here would be a second thing
-/// to forget a type in, and the two drifting would make every handle of the
-/// forgotten type serialize as a missing one.
-///
-/// `None` when the type contains no nominal type anywhere, so a descriptor is
-/// emitted only where one could possibly matter -- `Vec<int>` gets none. Every
-/// value with no descriptor keeps exactly the walk, and the bytes, it has today.
+/// Declared shape for runtime record walkers. Unsupported types remain `any`;
+/// consumers that reconstruct typed values must reject those descriptors.
 pub fn type_desc_lua(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> Option<String> {
     let mut out = String::new();
     desc_into(ws, ty, &mut out, 0).then_some(out)
 }
 
-/// [`type_desc_lua`] for a position that ALREADY has the flat reflection `type`
-/// string beside it -- a struct field.
-///
-/// A bare nominal is fully expressible there, and the struct-field consumer has
-/// classified off it since B3a. Emitting a descriptor that repeats what the
-/// neighbouring key already says would be a second mechanism for the one case
-/// that was never broken, and would move bytes for every struct field in every
-/// game while adding no coverage. A global has no such neighbour, which is why
-/// it uses [`type_desc_lua`] directly.
-fn field_desc_lua(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> Option<String> {
-    let d = type_desc_lua(ws, ty)?;
-    (!d.starts_with("{k=\"nom\"")).then_some(d)
-}
-
-/// Append `ty`'s descriptor to `out`; the bool is whether any nominal type was
-/// reached, which is what decides that the descriptor is worth emitting.
-///
-/// `depth` bounds the walk. A recursive type (`struct Node { next: Node? }`)
-/// is a finite TypeExpr graph but an unbounded TREE, so an unguarded walk would
-/// not terminate. The cutoff renders `{k="any"}`, which every consumer already
-/// has to handle -- it is the descriptor of an untyped value, not a wrong one.
+/// Nominal leaves stop recursion; structural nesting has a finite depth bound.
 fn desc_into(
     ws: &Workspace,
     ty: bone_semantic::prelude::TyId,
     out: &mut String,
     depth: u32,
 ) -> bool {
-    use bone_semantic::hir::{TypeCtor, TypeExpr};
+    use bone_semantic::hir::{BuiltinTy, TypeCtor, TypeExpr};
     use bone_semantic::prelude::TyId;
 
     const MAX_DEPTH: u32 = 12;
@@ -1829,10 +1792,19 @@ fn desc_into(
         }
     };
     match te {
-        TypeExpr::Builtin(_)
-        | TypeExpr::Generic(..)
-        | TypeExpr::Infer(..)
-        | TypeExpr::Function { .. } => {
+        TypeExpr::Builtin(kind) => {
+            let name = match kind {
+                BuiltinTy::Int => "int",
+                BuiltinTy::Uint => "uint",
+                BuiltinTy::Float => "float",
+                BuiltinTy::Bool => "bool",
+                BuiltinTy::String => "string",
+                _ => "any",
+            };
+            out.push_str(&format!("{{k=\"{name}\"}}"));
+            name != "any"
+        }
+        TypeExpr::Generic(..) | TypeExpr::Infer(..) | TypeExpr::Function { .. } => {
             out.push_str("{k=\"any\"}");
             false
         }
@@ -1867,17 +1839,17 @@ fn desc_into(
                 found
             }
             TypeCtor::Map => {
-                // Only the VALUE side is rendered. A map's keys are serialized
-                // as JSON object keys, so a key position has no leaf slot a
-                // projection marker could be written into.
-                let Some(val) = params.into_iter().nth(1) else {
+                let mut params = params.into_iter();
+                let (Some(key), Some(val)) = (params.next(), params.next()) else {
                     out.push_str("{k=\"any\"}");
                     return false;
                 };
-                out.push_str("{k=\"map\",val=");
-                let found = desc_into(ws, ty.with_idx(val), out, depth + 1);
+                out.push_str("{k=\"map\",key=");
+                let key_found = desc_into(ws, ty.with_idx(key), out, depth + 1);
+                out.push_str(",val=");
+                let val_found = desc_into(ws, ty.with_idx(val), out, depth + 1);
                 out.push('}');
-                found
+                key_found || val_found
             }
             TypeCtor::Ref => {
                 unreachable!("frame references are rejected from reflected storage")
@@ -1896,33 +1868,44 @@ fn desc_into(
     }
 }
 
-/// Per-variant payload descriptors for a BOXED enum, or `None` when no variant
-/// payload anywhere in the enum contains a nominal type -- in which case the
-/// enum needs no reflection entry and does not get one, so an enum of plain
-/// payloads keeps exactly the bytes it has today.
-///
-/// A boxed enum's two payload forms are distinct runtime shapes and are keyed
-/// the way the serializer reaches them, not the way they were declared: a TUPLE
-/// payload lands under positional keys `1..n`, a RECORD payload under its field
-/// names. Keying them alike would make one of the two unreachable.
-///
-/// Uses [`type_desc_lua`] rather than [`field_desc_lua`] for the same reason a
-/// global does: there is no flat `type` string beside a payload slot, so a bare
-/// nominal has to be carried here or it is carried nowhere.
+/// Complete boxed-enum alternatives, including units and primitive payloads.
 fn boxed_variant_descs(ws: &Workspace, e: &bone_semantic::hir::EnumDef) -> Option<String> {
     use bone_semantic::hir::VariantPayload;
+    let flat =
+        skull_mir::lower::EnumPlan::for_name(ws, e.name).and_then(|plan| plan.flat().cloned());
     let mut any = false;
     let mut variants: Vec<String> = Vec::new();
     for variant in e.variants.iter() {
         let body = match &variant.payload {
-            VariantPayload::Unit => continue,
+            VariantPayload::Unit => "pos={}".to_string(),
             VariantPayload::Tuple(types) => {
                 let entries: Vec<String> = types
                     .iter()
                     .enumerate()
-                    .filter_map(|(i, ty)| {
-                        let d = type_desc_lua(ws, *ty)?;
-                        Some(format!("[{}]={d}", i + 1))
+                    .map(|(i, ty)| {
+                        let mut d = type_desc_lua(ws, *ty).unwrap_or_else(|| "{k=\"any\"}".into());
+                        if let Some(flat) = &flat {
+                            d.pop();
+                            d.push_str(&format!(",slot={}", flat.slot_offset(i) + 1));
+                            if let bone_semantic::prelude::TyId::Static(mid, idx) = *ty {
+                                if let bone_semantic::hir::TypeExpr::App {
+                                    ctor: bone_semantic::hir::TypeCtor::Nominal(name),
+                                    ..
+                                } = ws.modules[mid.index()].ty_arena[idx]
+                                {
+                                    if let Some(paths) = flat.position_leaf_paths(i, name) {
+                                        let paths = paths
+                                            .iter()
+                                            .map(|path| format!("{:?}", path.as_str()))
+                                            .collect::<Vec<_>>()
+                                            .join(",");
+                                        d.push_str(&format!(",leaves={{{paths}}}"));
+                                    }
+                                }
+                            }
+                            d.push('}');
+                        }
+                        format!("[{}]={d}", i + 1)
                     })
                     .collect();
                 if entries.is_empty() {
@@ -2041,22 +2024,33 @@ fn type_table_defs(
                 )
                 .map_err(|e| CompilerError::new_no_location(e.message))?;
                 let nullable = plan.nullable();
-                let (tystr, embed) = match plan.inline_child() {
-                    Some(child) => (
-                        skull_mir::mangle::type_symbol(ws, child)
+                let (tystr, embed) = match &plan {
+                    skull_mir::lower::StructFieldPlan::Inline { child, flat, .. } => (
+                        skull_mir::mangle::type_symbol(ws, *child)
                             .as_str()
                             .to_string(),
-                        ", embed = true",
+                        if flat.is_none() { ", embed = true" } else { "" },
                     ),
-                    None => (tystr, ""),
+                    _ => (tystr, ""),
                 };
-                let desc = match field_desc_lua(ws, f.ty) {
+                let flat = plan
+                    .flat_storage_keys(f.name)
+                    .map(|keys| {
+                        let keys = keys
+                            .iter()
+                            .map(|key| format!("{:?}", key.as_str()))
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        format!(", flat = {{{keys}}}")
+                    })
+                    .unwrap_or_default();
+                let desc = match type_desc_lua(ws, f.ty) {
                     Some(d) => format!(", desc = {d}"),
                     None => String::new(),
                 };
                 fields.push(format!(
-                    "{{ name = \"{}\", type = \"{}\", nullable = {}{}{} }}",
-                    f.name, tystr, nullable, embed, desc
+                    "{{ name = \"{}\", type = \"{}\", nullable = {}{}{}{} }}",
+                    f.name, tystr, nullable, embed, flat, desc
                 ));
             }
             out.push_str(&format!(
@@ -2090,13 +2084,24 @@ fn type_table_defs(
                     skull_mir::mangle::type_symbol(ws, e.name), flat.tuple_width(), names,
                 ));
             }
+            if plan.as_ref().is_none_or(|p| p.cdata().is_none())
+                && !e.variants.is_empty()
+                && e.variants
+                    .iter()
+                    .all(|v| matches!(v.payload, VariantPayload::Unit))
+            {
+                let variants = e
+                    .variants
+                    .iter()
+                    .enumerate()
+                    .map(|(i, v)| format!("[{i}]={:?}", v.name.as_str()))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                out.push_str(&format!("_G.__ROCK_TYPE_TABLE[\"{}\"] = {{ name = \"{}\", kind = \"enum_tag\", variants = {{ {variants} }} }}\n",
+                    skull_mir::mangle::type_symbol(ws, e.name), skull_mir::mangle::type_symbol(ws, e.name)));
+                continue;
+            }
             let Some(shape) = plan.and_then(|plan| plan.cdata().cloned()) else {
-                // A BOXED enum has no value shape, and until now no reflection
-                // entry at all -- so a serializer reaching one had nothing to
-                // ask about its payload and rendered every handle in it as a
-                // raw id. The entry exists only to carry the payload's declared
-                // shapes; a boxed enum's own storage is its `__variant` tag plus
-                // the payload slots, which reflection reads directly.
                 if let Some(vd) = boxed_variant_descs(ws, e) {
                     out.push_str(&format!(
                         "_G.__ROCK_TYPE_TABLE[\"{n}\"] = {{ name = \"{n}\", kind = \"enum\", fields = {{ }}, variant_desc = {{ {vd} }} }}\n",

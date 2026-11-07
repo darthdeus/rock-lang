@@ -1394,3 +1394,335 @@ fn json_reader_is_object(reader: JsonReader) -> bool {
     if let value = reader.value { return json_as_object(value) != null }
     return reader.at >= 0 && reader.src.unwrap().unit_at(reader.at) == 123
 }
+
+struct JsonRecordAdapter {
+    name: string,
+    encode: fn(any) -> JsonValue,
+    decode: fn(JsonValue) -> any?,
+}
+
+struct JsonRecordCodec {
+    adapters: [JsonRecordAdapter] = [],
+    encode_float: fn(float) -> JsonValue = json_float,
+    decode_float: fn(JsonValue) -> float? = json_record_finite_float,
+}
+
+fn json_record_finite_float(value: JsonValue) -> float? {
+    let number = json_as_float(value) ?? return null
+    if is_nan(number) || number == 1.0 / 0.0 || number == -1.0 / 0.0 { return null }
+    return number
+}
+
+inline(lua) fn __json_record_type<T>(sample: T) -> string = "error('json record type intrinsic reached runtime')"
+
+inline(lua) fn __json_record_adapter<T>(name: string, encode: fn(T) -> JsonValue,
+    decode: fn(JsonValue) -> T?) -> JsonRecordAdapter = """
+    return { __ty = 'JsonRecordAdapter', name = name, encode = encode, decode = decode }
+"""
+
+fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
+    decode: fn(JsonValue) -> T?) -> JsonRecordAdapter {
+    return __json_record_adapter(__json_record_type(sample), encode, decode)
+}
+
+@nomangle inline(lua) fn __json_record_node(tag: string, item: any) -> JsonValue = """
+    if tag == 'Null' then return __rock_enum_unit('JsonValue', 'Null') end
+    return { __ty = 'JsonValue', __variant = tag, item }
+"""
+
+@nomangle inline(lua) fn __json_record_vec(items: any, count: int) -> any = "return { __ty = 'Vec', _data = items, len = count }"
+@nomangle inline(lua) fn __json_record_tag(value: any, tag: string) -> bool = "return type(value) == 'table' and value.__variant == tag"
+@nomangle inline(lua) fn __json_record_finite(n: float) -> bool = "return n == n and n ~= math.huge and n ~= -math.huge"
+
+@nomangle inline(lua) fn __json_record_field_get(source: any, field: any) -> any = """
+    local key = field.name
+    if field.flat then
+        if source[field.flat[1]] == nil then return nil end
+        local value = { __ty = field.type, __variant = source[field.flat[1]] }
+        for i = 2, #field.flat do value[i - 1] = source[field.flat[i]] end
+        return value
+    end
+    if not field.embed then return source[key] end
+    if field.nullable and source[key] == nil then return nil end
+    local value, prefix = { __ty = field.type }, key .. '.'
+    for name, item in pairs(source) do
+        if type(name) == 'string' and name:sub(1, #prefix) == prefix then value[name:sub(#prefix + 1)] = item end
+    end
+    return value
+"""
+
+@nomangle inline(lua) fn __json_record_field_put(target: any, field: any, value: any) = """
+    local key = field.name
+    if field.flat then
+        if value == nil then return end
+        target[field.flat[1]] = value.__variant
+        for i = 2, #field.flat do target[field.flat[i]] = value[i - 1] end
+    elseif field.embed then
+        if field.nullable then target[key] = value ~= nil and true or nil end
+        if type(value) == 'cdata' then
+            for _, child in ipairs(_G.__ROCK_TYPE_TABLE[field.type].fields) do target[key .. '.' .. child.name] = value[child.name] end
+        elseif value ~= nil then
+            for name, item in pairs(value) do
+                if name ~= '__ty' then target[key .. '.' .. name] = item end
+            end
+        end
+    else target[key] = value end
+"""
+
+@nomangle inline(lua) fn __json_record_payload_get(value: any, shape: any, index: int) -> any = """
+    local slot = shape.slot or index
+    if not shape.leaves then return value[slot] end
+    local flat = _G.__ROCK_ENUM_FLAT_LAYOUT[shape.name]
+    if flat then
+        local result = { __ty = shape.name, __variant = value[slot] }
+        for i = 1, flat.tuple_width do result[i] = value[slot + i] end
+        return result
+    end
+    local decl = _G.__ROCK_TYPE_TABLE[shape.name]
+    local result = decl.kind == 'c_struct' and _G[shape.name .. '_ct']() or { __ty = shape.name }
+    for i, path in ipairs(shape.leaves) do
+        if path:find('.', 1, true) then error('json record unsupported nested value payload', 0) end
+        result[path] = value[slot + i - 1]
+    end
+    return result
+"""
+
+@nomangle inline(lua) fn __json_record_payload_put(target: any, shape: any, index: int, value: any) = """
+    local slot = shape.slot or index
+    if not shape.leaves then target[slot] = value; return end
+    local flat = _G.__ROCK_ENUM_FLAT_LAYOUT[shape.name]
+    if flat then
+        target[slot] = value.__variant
+        for i = 1, flat.tuple_width do target[slot + i] = value[i] end
+        return
+    end
+    for i, path in ipairs(shape.leaves) do
+        if path:find('.', 1, true) then error('json record unsupported nested value payload', 0) end
+        target[slot + i - 1] = value[path]
+    end
+"""
+
+@nomangle inline(lua) fn __json_record_visit(codec: any, shape: any,
+    value: any, reading: bool, seen: any, depth: int) -> any = """
+    if depth > 128 then
+        if reading then return false end
+        error('json record nesting exceeds 128', 0)
+    end
+    local kind = shape.k
+    if kind == 'opt' then
+        if reading and __json_record_tag(value, 'Null') then return true, nil end
+        if not reading and value == nil then return true, __json_record_node('Null', nil) end
+        return __json_record_visit(codec, shape.inner, value, reading, seen, depth + 1)
+    end
+    if kind == 'int' or kind == 'uint' then
+        local n = reading and ((__json_record_tag(value, 'Int') or __json_record_tag(value, 'Float')) and value[1]) or value
+        if type(n) ~= 'number' or not __json_record_finite(n) or n ~= math.floor(n)
+            or (kind == 'uint' and n < 0) then return false end
+        return true, reading and n or __json_record_node('Int', n)
+    end
+    if kind == 'float' then
+        if reading then
+            local n = codec.decode_float(value)
+            return n ~= nil and __json_record_finite(n), n
+        end
+        if not __json_record_finite(value) then error('json record cannot encode a nonfinite float', 0) end
+        return true, codec.encode_float(value)
+    end
+    if kind == 'string' or kind == 'bool' then
+        local tag = kind == 'string' and 'Str' or 'Bool'
+        if reading then
+            if not __json_record_tag(value, tag) then return false end
+            return true, value[1]
+        end
+        return true, __json_record_node(tag, value)
+    end
+    if kind == 'vec' then
+        local element = shape.elem.k == 'nom' and _G.__ROCK_TYPE_TABLE[shape.elem.name]
+        if element and (element.kind == 'c_struct' or element.kind == 'c_enum') then
+            error('json record does not support native value arrays', 0)
+        end
+        if reading and not __json_record_tag(value, 'Array') then return false end
+        local items = reading and value[1] or value
+        if __rock_is_column_vec(items) or __rock_is_strided_vec(items) then
+            error('json record does not support column or strided arrays', 0)
+        end
+        local result = {}
+        for i = 1, items.len do
+            local ok, decoded = __json_record_visit(codec, shape.elem, items._data[i], reading, seen, depth + 1)
+            if not ok then return false end
+            result[i] = decoded
+        end
+        if reading then return true, __json_record_vec(result, items.len) end
+        return true, __json_record_node('Array', __json_record_vec(result, items.len))
+    end
+    if kind == 'map' then
+        if shape.key.k ~= 'string' then error('json record maps require string keys', 0) end
+        local element = shape.val.k == 'nom' and _G.__ROCK_TYPE_TABLE[shape.val.name]
+        if element and (element.kind == 'c_struct' or element.kind == 'c_enum') then
+            error('json record does not support native value maps', 0)
+        end
+        if reading and not __json_record_tag(value, 'Object') then return false end
+        local items = reading and value[1] or value
+        local result = {}
+        for key, item in pairs(items) do
+            local ok, decoded = __json_record_visit(codec, shape.val, item, reading, seen, depth + 1)
+            if not ok then return false end
+            result[key] = decoded
+        end
+        if reading then return true, result end
+        return true, __json_record_node('Object', result)
+    end
+    if kind ~= 'nom' then error('json record unsupported shape: ' .. tostring(kind), 0) end
+    local name = shape.name
+    local adapter = codec.adapters[name]
+    if adapter then
+        if not reading then return true, adapter.encode(value) end
+        local result = adapter.decode(value)
+        return result ~= nil, result
+    end
+    local decl = _G.__ROCK_TYPE_TABLE[name]
+    if not decl then error('json record missing declaration: ' .. name, 0) end
+    if decl.kind == 'enum_tag' then
+        if reading then
+            if not __json_record_tag(value, 'Array') or value[1].len ~= 1 then return false end
+            local label = value[1]._data[1]
+            if not __json_record_tag(label, 'Str') then return false end
+            for tag, name in pairs(decl.variants) do if name == label[1] then return true, tag end end
+            return false
+        end
+        local label = decl.variants[value]
+        if not label then return false end
+        return true, __json_record_node('Array', __json_record_vec({__json_record_node('Str', label)}, 1))
+    end
+    if not reading then
+        if value == nil then error('json record missing value for ' .. name .. ' at depth ' .. depth, 0) end
+        if seen[value] then error('json record cannot encode cycles', 0) end
+        seen[value] = true
+    end
+    local result
+    if decl.kind == 'enum' or decl.kind == 'c_enum' then
+        local tag, fields, payload, selected
+        if decl.kind == 'c_enum' then
+            if reading then
+                if not __json_record_tag(value, 'Array') or value[1].len < 1 then return false end
+                local label = value[1]._data[1]
+                if label.__variant ~= 'Str' then return false end
+                for index, candidate in pairs(decl.variants) do
+                    if candidate.name == label[1] then tag, selected = index, candidate; break end
+                end
+            else
+                tag = tonumber(value.__tag)
+                selected = decl.variants[tag]
+            end
+            if not selected then return false end
+            fields, payload = selected.fields, {}
+            for i, field in ipairs(fields) do
+                if field.name ~= tostring(i) then error('json record does not support record enum payloads', 0) end
+                payload[i] = field.desc or (_G.__ROCK_TYPE_TABLE[field.type]
+                    and { k = 'nom', name = field.type } or { k = field.type })
+            end
+        else
+            if reading then
+                if not __json_record_tag(value, 'Array') or value[1].len < 1 then return false end
+                local label = value[1]._data[1]
+                if label.__variant ~= 'Str' then return false end
+                tag = label[1]
+            else tag = value.__variant end
+            selected = decl.variant_desc[tag]
+            if not selected then
+                if not reading then error('json record invalid variant ' .. name .. ':' .. tostring(tag), 0) end
+                return false
+            end
+            if not selected.pos then error('json record does not support record enum payloads', 0) end
+            payload = selected.pos
+        end
+        local count = #payload
+        if reading and value[1].len ~= count + 1 then return false end
+        local data
+        if reading then
+            if fields then
+                result = _G[name .. '_ct']()
+                result.__tag = tag
+            else result = (count == 0 and __rock_enum_unit(name, tag)) or { __ty = name, __variant = tag } end
+        else data = {} end
+        for i = 1, count do
+            local item
+            if reading then item = value[1]._data[i + 1]
+            elseif fields then item = value[fields[i].slot]
+            else item = __json_record_payload_get(value, payload[i], i) end
+            local ok, decoded = __json_record_visit(codec, payload[i], item, reading, seen, depth + 1)
+            if not ok then
+                if not reading then error('json record invalid payload ' .. name .. '.' .. tostring(tag) .. '[' .. i .. ']', 0) end
+                return false
+            end
+            if not reading then data[i] = decoded
+            elseif fields then result[fields[i].slot] = decoded
+            else __json_record_payload_put(result, payload[i], i, decoded) end
+        end
+        if not reading then
+            table.insert(data, 1, __json_record_node('Str', fields and selected.name or tag))
+            result = __json_record_node('Array', __json_record_vec(data, count + 1))
+        end
+    elseif decl.kind == 'struct' or decl.kind == 'value_table' or decl.kind == 'c_struct' then
+        if reading and not __json_record_tag(value, 'Object') then return false end
+        local data = reading and decl.kind == 'c_struct' and _G[name .. '_ct']() or {}
+        for i, field in ipairs(decl.fields) do
+            if decl.kind == 'c_struct' and field.nullable then
+                error('json record does not support nullable native fields', 0)
+            end
+            local child = field.desc
+            if not child then
+                child = _G.__ROCK_TYPE_TABLE[field.type] and { k = 'nom', name = field.type } or { k = field.type }
+            end
+            if field.nullable and child.k ~= 'opt' then child = { k = 'opt', inner = child } end
+            local item
+            if reading then item = value[1][field.name]
+            elseif type(value) == 'table' then item = __json_record_field_get(value, field)
+            else item = value[field.name] end
+            if reading and item == nil then return false end
+            local ok, decoded = __json_record_visit(codec, child, item, reading, seen, depth + 1)
+            if not ok then
+                if not reading then error('json record invalid field ' .. name .. '.' .. field.name, 0) end
+                return false
+            end
+            if reading then __json_record_field_put(data, field, decoded)
+            else data[field.name] = decoded end
+        end
+        if reading then
+            if decl.kind ~= 'c_struct' then data.__ty = name end
+            result = data
+        else result = __json_record_node('Object', data) end
+    else error('json record unsupported declaration: ' .. name, 0) end
+    if not reading then seen[value] = nil end
+    return true, result
+"""
+
+@nomangle inline(lua) fn __json_record_context(codec: JsonRecordCodec) -> any = """
+    local adapters = {}
+    for i = 1, codec.adapters.len do
+        local adapter = codec.adapters._data[i]
+        if adapters[adapter.name] then error('json record duplicate adapter: ' .. adapter.name, 0) end
+        adapters[adapter.name] = adapter
+    end
+    return { adapters = adapters, encode_float = codec.encode_float, decode_float = codec.decode_float }
+"""
+
+inline(lua) fn __json_record_encode<T>(name: string, codec: JsonRecordCodec, value: T) -> JsonValue = """
+    local ok, result = __json_record_visit(__json_record_context(codec), { k = 'nom', name = name }, value, false, {}, 0)
+    if not ok then error('invalid value for json record encoding', 0) end
+    return result
+"""
+
+inline(lua) fn __json_record_decode<T>(name: string, codec: JsonRecordCodec, value: JsonValue, prototype: T) -> T? = """
+    local ok, result = __json_record_visit(__json_record_context(codec), { k = 'nom', name = name }, value, true, {}, 0)
+    if ok then return result end
+    return nil
+"""
+
+fn json_record_encode<T>(codec: JsonRecordCodec, value: T) -> JsonValue {
+    return __json_record_encode(__json_record_type(value), codec, value)
+}
+
+fn json_record_decode<T>(codec: JsonRecordCodec, value: JsonValue, prototype: T) -> T? {
+    return __json_record_decode(__json_record_type(prototype), codec, value, prototype)
+}

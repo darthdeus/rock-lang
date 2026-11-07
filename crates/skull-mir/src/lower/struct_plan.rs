@@ -69,6 +69,15 @@ impl StructFieldPlan {
         }
     }
 
+    pub fn flat_storage_keys(&self, field: Ustr) -> Option<Vec<Ustr>> {
+        match self {
+            Self::Inline {
+                flat: Some(shape), ..
+            } => Some(super::flat_slot_names(field, shape)),
+            _ => None,
+        }
+    }
+
     pub fn nullable(&self) -> bool {
         match self {
             Self::Direct { nullable, .. } | Self::Inline { nullable, .. } => *nullable,

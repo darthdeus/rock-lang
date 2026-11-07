@@ -261,3 +261,171 @@ fn a_generic_specialized_at_a_v1_nominal_emits_runnable_lua() {
     let out = run_luajit(&format!("{}\nmain()\n", emitted.lua), "modules_v1_spec");
     assert_eq!(out, "total=9");
 }
+
+#[test]
+fn record_codec_metadata_keeps_primitive_payloads_and_collection_elements() {
+    let lua = crate::common::emit_module(
+        r#"
+enum Entry { Empty, Text(string), Pair(int, float), Names([string]) }
+struct Record { entries: [Entry], title: string?, weights: Map<string, float> }
+inline(lua) fn verify(value: any) = """
+    local fields = _G.__ROCK_TYPE_TABLE[value.__ty].fields
+    assert(fields[2].desc.k == 'opt' and fields[2].desc.inner.k == 'string')
+    assert(fields[3].desc.key.k == 'string' and fields[3].desc.val.k == 'float')
+    local variants = _G.__ROCK_TYPE_TABLE[fields[1].desc.elem.name].variant_desc
+    assert(variants.Empty.pos and #variants.Empty.pos == 0)
+    assert(variants.Text.pos[1].k == 'string')
+    assert(variants.Pair.pos[1].k == 'int' and variants.Pair.pos[2].k == 'float')
+    assert(variants.Names.pos[1].k == 'vec' and variants.Names.pos[1].elem.k == 'string')
+"""
+fn main() {
+    verify(Record { entries: [Entry::Text("hello")], title: null, weights: map_new() })
+    print("ok")
+}
+"#,
+    );
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "record_codec_metadata"),
+        "ok"
+    );
+}
+
+#[test]
+fn typed_json_records_roundtrip_and_reject_malformed_fields() {
+    let lua = crate::common::emit_module(
+        r#"
+enum Event { Empty, Text(string), Pair(int, float), Names([string]) }
+value Tint { red: float, visible: bool }
+value Change { event: Event, count: int }
+struct Record {
+    rows: [Change],
+    title: string?,
+    weights: Map<string, float>,
+    tint: Tint,
+}
+fn main() {
+    let codec = JsonRecordCodec {}
+    let weights: Map<string, float> = map_new()
+    weights["alpha"] = 1.25
+    let source = Record { rows: [Change { event: Event::Empty, count: 1 },
+        Change { event: Event::Pair(5, 2.5), count: 2 },
+        Change { event: Event::Names(["a", "b"]), count: 3 }],
+        title: null, weights, tint: Tint { red: 0.75, visible: false } }
+    let wire = json_record_encode(codec, source)
+    let copy = json_record_decode(codec, json_decode(json_encode(wire)).unwrap(), source).unwrap()
+    assert(copy == source)
+    assert(!same_ref(copy, source))
+    copy.rows[0] = Change { event: Event::Text("changed"), count: 8 }
+    assert(source.rows[0].count == 1)
+    let fields = json_as_object(wire).unwrap()
+    fields["rows"] = json_str("wrong")
+    assert(json_record_decode(codec, wire, source) == null)
+    fields["rows"] = json_array([json_object(map_new())])
+    assert(json_record_decode(codec, wire, source) == null)
+    fields["rows"] = json_array([])
+    fields["weights"] = json_str("wrong")
+    assert(json_record_decode(codec, wire, source) == null)
+    fields["weights"] = json_object(map_new())
+    fields["title"] = json_int(4)
+    assert(json_record_decode(codec, wire, source) == null)
+    print("ok")
+}
+"#,
+    );
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "typed_json_records"),
+        "ok"
+    );
+}
+
+#[test]
+fn typed_json_uses_declared_scalar_enum_adapters_and_embedded_values() {
+    let lua = crate::common::emit_module(
+        r#"
+enum Kind { First, Second }
+nobox value Tint { red: float, visible: bool }
+struct Packet { kind: Kind, tint: Tint, spare: Tint? }
+fn kind_encode(value: Kind) -> JsonValue { return json_str(if value == Kind::First { "a" } else { "b" }) }
+fn kind_decode(value: JsonValue) -> Kind? {
+    let key = json_as_str(value) ?? return null
+    if key == "a" { return Kind::First }
+    if key == "b" { return Kind::Second }
+    return null
+}
+fn main() {
+    let codec = JsonRecordCodec { adapters: [json_record_adapter(Kind::First, kind_encode, kind_decode)] }
+    let source = Packet { kind: Kind::Second, tint: Tint { red: 0.5, visible: false }, spare: null }
+    let wire = json_record_encode(codec, source)
+    assert(json_as_str(json_field(wire, "kind").unwrap()).unwrap() == "b")
+    let copy = json_record_decode(codec, wire, source).unwrap()
+    assert(copy == source)
+    json_as_object(wire).unwrap()["kind"] = json_str("unknown")
+    assert(json_record_decode(codec, wire, source) == null)
+    print("ok")
+}
+"#,
+    );
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "typed_json_adapters"),
+        "ok"
+    );
+}
+
+#[test]
+fn typed_json_flat_enum_fields_and_widened_payloads() {
+    let lua = crate::common::emit_module(
+        r#"
+nobox value Tint { red: float, visible: bool }
+enum Event { Empty, Text(string), Colored(string, Tint), Pair(string, int) }
+enum Envelope { Wrapped(Event), Other(string) }
+struct Record { event: Event, envelope: Envelope, optional: Event? }
+fn main() {
+    let codec = JsonRecordCodec {}
+    for event in [Event::Empty, Event::Text("hello"), Event::Colored("red", Tint { red: 0.5, visible: false }), Event::Pair("count", 7)] {
+        let source = Record { event, envelope: Envelope::Wrapped(event), optional: if event == Event::Empty { null } else { event } }
+        let wire = json_record_encode(codec, source)
+        let copy = json_record_decode(codec, json_decode(json_encode(wire)).unwrap(), source).unwrap()
+        assert(copy == source)
+        assert(json_encode(json_record_encode(codec, copy)) == json_encode(wire))
+        if let Event::Colored(label, tint) = copy.event {
+            assert(label == "red" && tint.red == 0.5 && !tint.visible)
+        }
+    }
+    print("ok")
+}
+"#,
+    );
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "typed_json_flat"),
+        "ok"
+    );
+}
+
+#[test]
+fn typed_json_rejects_cycles_and_unsupported_storage() {
+    let lua = crate::common::emit_module(
+        r#"
+struct Node { next: Node? = null }
+value Point { x: float }
+struct NativeRows { rows: [Point] }
+struct NumericKeys { entries: Map<int, string> }
+inline(lua) fn fails(run: fn() -> JsonValue, message: string) = """
+    local ok, err = pcall(run)
+    assert(not ok and tostring(err):find(message, 1, true), tostring(err))
+"""
+fn main() {
+    let codec = JsonRecordCodec {}
+    let node = Node {}
+    node.next = node
+    fails(() => json_record_encode(codec, node), "cannot encode cycles")
+    fails(() => json_record_encode(codec, NativeRows { rows: [Point { x: 1.0 }] }), "native value arrays")
+    fails(() => json_record_encode(codec, NumericKeys { entries: map_new() }), "require string keys")
+    print("ok")
+}
+"#,
+    );
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "typed_json_rejections"),
+        "ok"
+    );
+}

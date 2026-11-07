@@ -585,6 +585,22 @@ impl Builder<'_> {
                 }
             }
         }
+        if let Callee::Unresolved { name, .. } = callee
+            && name.as_str() == "__json_record_type"
+            && self.resolves_to_inline_builtin(e, name)
+        {
+            let [arg] = arg_idxs[..] else {
+                return Err(self.gap_here("json record type requires one value"));
+            };
+            let ty = self
+                .concrete_expr_ty(arg)
+                .and_then(|ty| ty.nominal())
+                .ok_or_else(|| self.gap_here("json record requires a concrete nominal type"))?;
+            self.lower_expr_repr(arg)?;
+            return Ok(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Str(
+                crate::mangle::type_symbol(self.ws, ty),
+            )))));
+        }
         // Scalar arithmetic: rock desugars `+ - * / %` to `__op_*` calls; turn
         // them back into native typed ops when both operands are scalars.
         // (Non-scalar `__op_*` falls through to a real overload Call below.)

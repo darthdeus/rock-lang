@@ -106,11 +106,9 @@ fn value_struct_with_enum_field_has_cdef_int_not_table() {
         !lua.contains("__rock_enum_BlendMode_Additive ="),
         "payload-free enum must NOT emit singleton tables:\n{lua}"
     );
-    // (`__tag` as a bare substring survives in the stdlib `inspect` key-filter;
-    // the dual-rep was the `__tag = <ord>` singleton FIELD + the `by_tag` array.)
     assert!(
-        !lua.contains("__tag = "),
-        "the dead `__tag =` singleton field must be gone:\n{lua}"
+        !lua.contains("__ty = \"BlendMode\""),
+        "payload-free enum must not construct tagged tables:\n{lua}"
     );
     assert!(
         !lua.contains("_by_tag"),
