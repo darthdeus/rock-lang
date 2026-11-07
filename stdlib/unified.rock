@@ -687,6 +687,49 @@ value SceneBuilder {
     return obj.__ty
 """
 
+// Values must not retain this owner: LuaJIT weak tables are not ephemerons.
+struct CacheOwner { retired: bool = false }
+
+inline(lua) fn weak_cache_get<V>(name: string, owner: CacheOwner) -> V? = """
+    if owner.retired then return nil end
+    local owners = _G.__rock_record_caches
+    local entries = owners and owners[owner]
+    if entries then return entries[name] end
+    return nil
+"""
+
+inline(lua) fn weak_cache_put<V>(name: string, owner: CacheOwner, value: V) = """
+    if owner.retired then error("weak_cache_put requires a live owner") end
+    local owners = _G.__rock_record_caches
+    if not owners then
+        owners = setmetatable({}, {__mode = "k"})
+        _G.__rock_record_caches = owners
+    end
+    local entries = owners[owner]
+    if not entries then entries = {}; owners[owner] = entries end
+    entries[name] = value
+    local counts = _G.__rock_weak_cache_builds
+    if not counts then counts = {}; _G.__rock_weak_cache_builds = counts end
+    counts[name] = (counts[name] or 0) + 1
+"""
+
+inline(lua) fn weak_cache_drop(name: string, owner: CacheOwner) = """
+    local owners = _G.__rock_record_caches
+    local entries = owners and owners[owner]
+    if entries then
+        entries[name] = nil
+        if next(entries) == nil then owners[owner] = nil end
+    end
+"""
+
+inline(lua) fn cache_owner_retire(owner: CacheOwner) -> bool = """
+    if owner.retired then return false end
+    owner.retired = true
+    local owners = _G.__rock_record_caches
+    if owners then owners[owner] = nil end
+    return true
+"""
+
 // Rebuildable caches live outside global storage. Keys are owner handles;
 // retirement evicts values. A read also checks the entry's backing store, so a
 // handle whose owner was replaced reads cold rather than another store's value.
@@ -830,9 +873,11 @@ inline(lua) fn weak_cache_builds(name: string) -> int = """
 
 inline(lua) fn weak_cache_live(name: string) -> int = """
     local owners = _G.__rock_weak_cache_owners
-    if not owners then return 0 end
     local n = 0
-    for _, scenes in pairs(owners) do
+    for _, entries in pairs(_G.__rock_record_caches or {}) do
+        if entries[name] ~= nil then n = n + 1 end
+    end
+    for _, scenes in pairs(owners or {}) do
         if scenes[name] then n = n + 1 end
         for arena, slots in pairs(scenes) do
             if type(arena) == "number" then

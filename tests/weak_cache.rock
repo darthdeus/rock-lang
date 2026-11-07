@@ -93,3 +93,50 @@ fn weak_cache_releases_a_retired_owner() {
     assert_eq(weak_cache_builds(WC_GC), 2, "retirement preserves the build count")
     let _ = arena_destroy(rows)
 }
+
+struct CacheOwnerPair { left: CacheOwner, right: CacheOwner }
+
+inline(lua) fn weak_cache_collect() = """
+    collectgarbage("collect")
+    collectgarbage("collect")
+"""
+
+fn weak_cache_unretained_record(name: string) {
+    weak_cache_put(name, CacheOwner {}, WeakCacheValue { tag: 5 })
+}
+
+@test
+fn weak_cache_record_copies_start_cold_and_retire_independently() {
+    let name = "test.weak_cache.record"
+    let owner = CacheOwner {}
+    weak_cache_put(name, owner, WeakCacheValue { tag: 7 })
+    let pair = deepcopy(CacheOwnerPair { left: owner, right: owner })
+    assert(same_ref(pair.left, pair.right), "copies preserve owner aliases")
+    let cold: WeakCacheValue? = weak_cache_get(name, pair.left)
+    assert(cold == null, "a copied owner starts cold")
+    weak_cache_put(name, pair.left, WeakCacheValue { tag: 9 })
+    let original: WeakCacheValue = weak_cache_get(name, owner).unwrap()
+    assert_eq(original.tag, 7)
+    assert_eq(weak_cache_live(name), 2)
+    assert(cache_owner_retire(pair.left))
+    assert(!cache_owner_retire(pair.right))
+    assert_eq(weak_cache_live(name), 1, "retirement evicts while aliases remain reachable")
+    assert(cache_owner_retire(owner))
+    let retired: WeakCacheValue? = weak_cache_get(name, owner)
+    assert(retired == null)
+    assert(weak_cache_raises(() => { weak_cache_put(name, owner, WeakCacheValue { tag: 0 }) }))
+    let boolean_owner = CacheOwner {}
+    weak_cache_put(name, boolean_owner, false)
+    let boolean_value: bool? = weak_cache_get(name, boolean_owner)
+    assert(boolean_value != null && !boolean_value.unwrap())
+    weak_cache_drop(name, boolean_owner)
+    assert_eq(weak_cache_live(name), 0)
+    weak_cache_unretained_record(name)
+    weak_cache_collect()
+    assert_eq(weak_cache_live(name), 0, "an unretained owner is collected")
+}
+
+inline(lua) fn weak_cache_raises(f: fn()) -> bool = """
+    local ok = pcall(function() __rock_call(f) end)
+    return not ok
+"""
