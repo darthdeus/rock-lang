@@ -705,6 +705,7 @@ fn build_run_program(emitted: &skull_codegen_js::emit::JsProgram) -> String {
     append_call_runtime(&mut p, &emitted.program, &emitted.code_artifact);
     p.push_str(skull_codegen_js::JS_GLOBALS_RUNTIME);
     p.push_str(skull_codegen_js::JS_CORO_RUNTIME);
+    p.push_str(skull_codegen_js::JS_DEFER_RUNTIME);
     p.push_str(skull_codegen_js::JS_STRING_RUNTIME);
     p.push_str(skull_codegen_js::JS_INSPECT_RUNTIME);
     p.push_str(skull_codegen_js::JS_DEEPCOPY_RUNTIME);
@@ -781,6 +782,7 @@ fn build_node_program(
     append_call_runtime_with_flag(&mut p, shared_defs, has_code_refs);
     p.push_str(skull_codegen_js::JS_GLOBALS_RUNTIME);
     p.push_str(skull_codegen_js::JS_CORO_RUNTIME);
+    p.push_str(skull_codegen_js::JS_DEFER_RUNTIME);
     p.push_str(skull_codegen_js::JS_STRING_RUNTIME);
     p.push_str(skull_codegen_js::JS_INSPECT_RUNTIME);
     p.push_str(skull_codegen_js::JS_DEEPCOPY_RUNTIME);

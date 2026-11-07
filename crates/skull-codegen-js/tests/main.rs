@@ -19,6 +19,8 @@ mod closure;
 mod deepcopy;
 #[path = "default_lambda_fields.rs"]
 mod default_lambda_fields;
+#[path = "defer_unwind.rs"]
+mod defer_unwind;
 #[path = "differential.rs"]
 mod differential;
 #[path = "emit.rs"]

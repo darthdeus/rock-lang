@@ -610,6 +610,7 @@ pub fn emit_fn_with_callees(
             }
         }
     }
+    let unwind = mf.registers_defer_cleanup(&reachable_blocks(mf));
     let mut em = Emitter {
         ws,
         mf,
@@ -630,7 +631,7 @@ pub fn emit_fn_with_callees(
         pack_multi_return: false,
         hoisted_temps: HashSet::new(),
         out: String::new(),
-        indent: 1,
+        indent: if unwind { 2 } else { 1 },
     };
 
     let params: Vec<String> = mf.params.iter().map(|&c| cell_name(mf, c)).collect();
@@ -671,7 +672,7 @@ pub fn emit_fn_with_callees(
 
     match em.emit_seq(mf.entry, None, LoopCtx::default()) {
         Ok(()) => {
-            let body = format!("{header}{}}}\n", em.out);
+            let body = format!("{header}{}}}\n", defer_unwind_wrap(unwind, &em.out));
             Ok(finalize_labels(body, mf, &em.loop_markers, &em.labels_used))
         }
         // The structured relooper cannot express this CFG (a shared branch tail
@@ -709,6 +710,7 @@ pub fn emit_fn_trampoline(
     let region = reachable_from(mf, entry);
     let (use_count, inlinable) = compute_inlinable_over(mf, &region);
     let hoisted_temps = cross_block_temps(mf, &region, &use_count, &inlinable);
+    let unwind = mf.registers_defer_cleanup(&region);
     let mut em = Emitter {
         ws,
         mf,
@@ -729,7 +731,7 @@ pub fn emit_fn_trampoline(
         pack_multi_return,
         hoisted_temps,
         out: String::new(),
-        indent: 1,
+        indent: if unwind { 2 } else { 1 },
     };
     let pnames: Vec<String> = params.iter().map(|&c| cell_name(mf, c)).collect();
     let mut header = format!("function {js_name}({}) {{\n", pnames.join(", "));
@@ -779,7 +781,31 @@ pub fn emit_fn_trampoline(
     em.push("}");
     em.indent -= 1;
     em.push("}");
-    Ok(format!("{header}{}}}\n", em.out))
+    Ok(format!(
+        "{header}{}}}\n",
+        defer_unwind_wrap(unwind, &em.out)
+    ))
+}
+
+/// A body that registers an ordinary-fn `defer` (`skull_mir::mir::DEFER_PUSH`)
+/// catches whatever escapes it: `__rock_defer_unwind` runs the cleanups still
+/// registered above the depth the body was entered at, LIFO, and rethrows. The
+/// Lua backend gets the same protection by re-entering the body under
+/// `__rock_defer_call`.
+fn defer_unwind_wrap(unwind: bool, body: &str) -> String {
+    if !unwind {
+        return body.to_string();
+    }
+    format!(
+        "  var __rock_defer_base = __rock_defer_top;\n  try {{\n{body}  \
+         }} catch (__rock_e) {{ __rock_defer_unwind(__rock_defer_base, __rock_e); }}\n"
+    )
+}
+
+/// The cleanup-stack entry points the shared lowering calls as globals; the
+/// JS runtime defines them (`JS_DEFER_RUNTIME`).
+fn is_defer_runtime_global(name: &str) -> bool {
+    name == skull_mir::mir::DEFER_PUSH || name == skull_mir::mir::DEFER_POP
 }
 
 /// A unique, JS-invalid sentinel a loop emits in place of its label; resolved by
@@ -1029,6 +1055,10 @@ impl Emitter<'_> {
             }
         }
         None
+    }
+
+    fn is_defer_runtime_value(&self, v: Idx<Inst>) -> bool {
+        matches!(&self.mf.insts[v], Inst::Global(n) if is_defer_runtime_global(n))
     }
 
     /// Whether inst `iid` produces a statement in [`Self::emit_block_effects`]:
@@ -2229,7 +2259,11 @@ impl Emitter<'_> {
                     .ok_or_else(|| err("JS: Rock function value has no CodeRef slot"))?;
                 format!("__rock_code_slot_ref({})", js_string_lit(key)?)
             }
-            Inst::Global(name) if self.hoisted.contains(name) || name.as_str() == "error" => {
+            Inst::Global(name)
+                if self.hoisted.contains(name)
+                    || name.as_str() == "error"
+                    || is_defer_runtime_global(name) =>
+            {
                 name.to_string()
             }
             // A boundary function referenced as a value: its co-emitted JS name.
@@ -2278,6 +2312,14 @@ impl Emitter<'_> {
                     parts.push(format!("{f}: {}", self.render_val(*v)?));
                 }
                 format!("({{{}}})", parts.join(", "))
+            }
+            // The defer runtime is plain JS: no CodeRef dispatch.
+            Inst::CallValue { callee, args } if self.is_defer_runtime_value(*callee) => {
+                let rendered = args
+                    .iter()
+                    .map(|a| self.render_val(*a))
+                    .collect::<Result<Vec<_>, _>>()?;
+                format!("{}({})", self.render_val(*callee)?, rendered.join(", "))
             }
             // An indirect call: foreign raw functions call directly; Rock values
             // resolve their slot through `__rock_call`.
@@ -6800,7 +6842,7 @@ fn schedule_global_reads(
         if fn_value_names.contains(&name) {
             continue;
         }
-        if name.as_str() == "error" {
+        if name.as_str() == "error" || is_defer_runtime_global(&name) {
             continue;
         } else if st.enum_defs.contains_key(&name) {
             st.gctx.enum_globals.insert(name);

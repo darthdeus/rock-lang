@@ -23,7 +23,7 @@ pub(crate) enum DeferMode {
     /// Scope exit only: a global initializer or decorator, or a backend
     /// without unwind support.
     Inline,
-    /// An ordinary fn, nested fn or lambda body on the Lua target.
+    /// An ordinary fn, nested fn or lambda body on the Lua or JS target.
     Unwind,
     /// A `co fn` body (not a lambda inside it).
     CoFlag,
@@ -33,7 +33,10 @@ impl DeferMode {
     pub(crate) fn for_body(is_coroutine: bool, target: bone_semantic::hir::FnBackend) -> Self {
         if is_coroutine {
             DeferMode::CoFlag
-        } else if target == bone_semantic::hir::FnBackend::Lua {
+        } else if matches!(
+            target,
+            bone_semantic::hir::FnBackend::Lua | bone_semantic::hir::FnBackend::Js
+        ) {
             DeferMode::Unwind
         } else {
             DeferMode::Inline

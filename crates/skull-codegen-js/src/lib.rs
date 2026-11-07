@@ -1481,6 +1481,55 @@ function __rock_coroutine_kill(c) {
 }
 "#;
 
+/// Ordinary-fn `defer` unwinding (`skull_mir::mir::DEFER_PUSH`), the JS port of
+/// the Lua prelude's cleanup stack (`skull::PRELUDE_TEMPLATE`). Registering a
+/// defer pushes its cleanup closure and every scope-exit splice pops it, so the
+/// stack holds exactly the cleanups of scopes still open. A body that pushes
+/// catches what escapes it and calls `__rock_defer_unwind` with the depth it was
+/// entered at. The original error wins: an `Error` (what `error` throws, the
+/// Lua string error) or a string carries the cleanup's message; any other value
+/// is rethrown unchanged and the message goes to the log.
+pub const JS_DEFER_RUNTIME: &str = r#"
+var __rock_defer_stack = [];
+var __rock_defer_top = 0;
+function __rock_defer_push(d) {
+  __rock_defer_stack[__rock_defer_top] = d;
+  __rock_defer_top = __rock_defer_top + 1;
+}
+function __rock_defer_pop() {
+  __rock_defer_top = __rock_defer_top - 1;
+  __rock_defer_stack[__rock_defer_top] = undefined;
+}
+// Never throws: a cleanup error's message or toString may itself throw.
+function __rock_defer_describe(e) {
+  try {
+    var s = (e instanceof Error) ? e.message : lua_tostring(e);
+    if (typeof s === "string") return s;
+  } catch (_) {}
+  return "<unprintable " + (e === null ? "nil" : typeof e) + " error>";
+}
+function __rock_defer_unwind(base, err) {
+  while (__rock_defer_top > base) {
+    var d = __rock_defer_stack[__rock_defer_top - 1];
+    __rock_defer_pop();
+    try { __rock_call(d); } catch (derr) {
+      var note = "\n  (defer raised while unwinding: " + __rock_defer_describe(derr) + ")";
+      if (err instanceof Error) {
+        err.message = err.message + note;
+      } else if (typeof err === "string") {
+        err = err + note;
+      } else {
+        try {
+          __rock_log_emit(1, "DEFER", "defer raised while unwinding a "
+            + (err === null ? "nil" : typeof err) + " error: " + __rock_defer_describe(derr), false);
+        } catch (_) {}
+      }
+    }
+  }
+  throw err;
+}
+"#;
+
 /// JS runtime preamble for the string subset (T2): `lua_tostring` reproduces
 /// Lua's `tostring`/`..` number formatting (`%.14g`), and `__rock_format_float`
 /// ports the stdlib `@nomangle inline(lua)` helper (`stdlib/unified.rock`,
@@ -1807,6 +1856,7 @@ pub fn assemble_prelude(
     }
     p.push_str(JS_GLOBALS_RUNTIME);
     p.push_str(JS_CORO_RUNTIME);
+    p.push_str(JS_DEFER_RUNTIME);
     p.push_str(JS_STRING_RUNTIME);
     p.push_str(JS_INSPECT_RUNTIME);
     p.push_str(JS_DEEPCOPY_RUNTIME);
