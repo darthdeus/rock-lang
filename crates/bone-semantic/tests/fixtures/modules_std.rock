@@ -10,6 +10,7 @@
 // prelude: ArenaValIter
 // prelude: ArtifactDefinition
 // prelude: Bvec3
+// prelude: CacheOwner
 // prelude: CanonicalUniformLeaf
 // prelude: ChainIter
 // prelude: CharsIter
@@ -274,6 +275,7 @@
 // prelude: borrow
 // prelude: build_var
 // prelude: bvec3
+// prelude: cache_owner_retire
 // prelude: capacity
 // prelude: cast
 // prelude: ceil
@@ -538,6 +540,7 @@
 // prelude: on_killed
 // prelude: on_reload
 // prelude: on_resume
+// prelude: on_retire
 // prelude: pack_uniform_block
 // prelude: pad_left
 // prelude: pad_right

@@ -606,7 +606,20 @@ pub(crate) fn resolve_unary_by_recv(
     recv_ty: TyId,
     span: Span,
 ) -> Result<((ModuleId, Idx<Function>), TyId, FxHashMap<VarId, TyId>), CompilerError> {
-    let family = CallFamily::from_name(name);
+    let scoped = c
+        .module
+        .iterator_families
+        .as_ref()
+        .and_then(|families| match name.as_str() {
+            "iter" => Some(&families[0]),
+            "next" => Some(&families[1]),
+            _ => None,
+        });
+    let family = match scoped {
+        Some(Ok(family)) => *family,
+        Some(Err(message)) => return Err(CompilerError::new_with_label(span, message.clone())),
+        None => CallFamily::from_name(name),
+    };
     let candidates = resolve_callee(gamma, &family);
     if candidates.is_empty() {
         comp_error!(span, "no `{}` function in scope", name);

@@ -122,6 +122,20 @@ fn snapshot(ws: &Workspace, files: &[SessionFile]) -> Snapshot {
     let mut signature_keys = BTreeMap::new();
     for module in ws.modules.iter().filter(|m| user.contains(m.file.as_str())) {
         let file = module.file.to_string();
+        for (idx, te) in module.ty_arena.iter() {
+            if let TypeExpr::App {
+                ctor: TypeCtor::Nominal(key),
+                ..
+            } = te
+            {
+                let (s, e) = module
+                    .ty_spans
+                    .get(idx)
+                    .map(|sp| sp.offset_range)
+                    .unwrap_or((0, 0));
+                references.insert((file.clone(), s, e, "type", key.to_string(), None));
+            }
+        }
         for body in module.bodies.values() {
             for (idx, expr) in body.expr_arena.iter() {
                 let Some((kind, key, members)) = expr_reference(module, expr) else {
@@ -1840,4 +1854,29 @@ fn a_legacy_providers_family_grows_and_shrinks_under_a_v1_glob_user() {
         "{:?}",
         h.diagnostics()
     );
+}
+
+#[test]
+fn imported_iterator_protocol_tracks_visibility_and_body_edits() {
+    let provider = "mod sequence;\npub value Sequence { item: int }\n\
+        pub struct Cursor { item: int, done: bool = false }\n\
+        pub fn iter(sequence: Sequence) -> Cursor { return Cursor { item: sequence.item } }\n\
+        pub fn next(cursor: Cursor) -> (bool, int) {\n\
+            let live = !cursor.done\n cursor.done = true\n return (live, cursor.item)\n }\n";
+    let visible = "use self::sequence::{Sequence, iter, next};\n\
+        fn consume(sequence: Sequence) -> int {\n\
+            for item in sequence { return item }\n return 0\n }\n";
+    let hidden = visible.replace("iter, next", "iter");
+    let mut h = V1Harness::new(vec![
+        v1("sequence.rock", provider),
+        v1("caller.rock", visible),
+    ]);
+    assert!(h.diagnostics().is_empty(), "{:?}", h.diagnostics());
+    h.edit("caller.rock", &hidden).expect("scope edit");
+    assert!(!h.diagnostics().is_empty(), "unimported next is rejected");
+    h.edit("caller.rock", visible).expect("restore import");
+    assert!(h.diagnostics().is_empty(), "{:?}", h.diagnostics());
+    h.edit("caller.rock", &visible.replace("return item", "return 1"))
+        .expect("body edit");
+    assert!(h.diagnostics().is_empty(), "{:?}", h.diagnostics());
 }

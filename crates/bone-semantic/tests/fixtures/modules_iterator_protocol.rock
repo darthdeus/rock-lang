@@ -1,0 +1,69 @@
+//- imported_generic_tuple_iterator
+//-- sequence.rock @pkg=sample,1 @v1
+pub mod sequence;
+pub value Sequence<T> { item: T }
+pub struct Cursor<T> { item: T, done: bool = false }
+pub fn iter<T>(sequence: Sequence<T>) -> Cursor<T> { return Cursor { item: sequence.item } }
+pub fn next<T>(cursor: Cursor<T>) -> (bool, int, T) {
+    let live = !cursor.done
+    cursor.done = true
+    return (live, 0, cursor.item)
+}
+//-- caller.rock @pkg=sample,1 @v1
+use self::sequence::{Sequence, iter, next};
+fn consume(sequence: Sequence<int>) -> int {
+    for (index, item) in sequence {
+        let result = index + item
+          //^ int
+        return result
+    }
+    return 0
+}
+
+//- unimported_next_is_not_visible @fail=no `next(
+//-- sequence.rock @pkg=sample,1 @v1
+pub mod sequence;
+pub value Sequence<T> { item: T }
+pub struct Cursor<T> { item: T, done: bool = false }
+pub fn iter<T>(sequence: Sequence<T>) -> Cursor<T> { return Cursor { item: sequence.item } }
+pub fn next<T>(cursor: Cursor<T>) -> (bool, int, T) {
+    let live = !cursor.done
+    cursor.done = true
+    return (live, 0, cursor.item)
+}
+//-- caller.rock @pkg=sample,1 @v1
+use self::sequence::{Sequence, iter};
+fn consume(sequence: Sequence<int>) -> int {
+    for (index, item) in sequence {
+        let result = index + item
+          //^ int
+        return result
+    }
+    return 0
+}
+
+//- imported_iterator_coerces_a_bounded_argument_without_a_loop_in_the_caller
+//-- sequence.rock @pkg=sample,1 @v1
+pub mod sequence;
+pub value Sequence<T> { item: T }
+pub struct Cursor<T> { item: T, done: bool = false }
+pub fn iter<T>(sequence: Sequence<T>) -> Cursor<T> { return Cursor { item: sequence.item } }
+pub fn next<T>(cursor: Cursor<T>) -> (bool, T) {
+    let live = !cursor.done
+    cursor.done = true
+    return (live, cursor.item)
+}
+//-- consumer.rock @pkg=sample,1 @v1
+pub mod consumer;
+pub fn first<I: Iterator<int>>(cursor: I) -> int {
+    for item in cursor { return item }
+    return 0
+}
+//-- caller.rock @pkg=sample,1 @v1
+use self::sequence::{Sequence, iter, next};
+use self::consumer::first;
+fn consume() -> int {
+    let result = first(Sequence { item: 7 })
+      //^ int
+    return result
+}

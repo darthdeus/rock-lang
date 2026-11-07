@@ -224,3 +224,40 @@ fn main() {}
         "builtin @test must still discover `doubles`"
     );
 }
+
+#[test]
+fn v1_imported_generic_iterator_executes_tuple_yields() {
+    let emitted = emit_v1_package(
+        "sequence_test",
+        &[
+            V1Fragment {
+                file: "main.rock",
+                src: r#"
+use sequence::{Sequence, iter, next};
+fn main() {
+    let values = Sequence { item: 7 }
+    for (index, item) in values { print(index + item) }
+}
+"#,
+            },
+            V1Fragment {
+                file: "sequence.rock",
+                src: r#"
+mod sequence;
+pub value Sequence<T> { item: T }
+pub struct Cursor<T> { item: T, done: bool = false }
+pub fn iter<T>(sequence: Sequence<T>) -> Cursor<T> { return Cursor { item: sequence.item } }
+pub fn next<T>(cursor: Cursor<T>) -> (bool, int, T) {
+    let live = !cursor.done
+    cursor.done = true
+    return (live, 3, cursor.item)
+}
+"#,
+            },
+        ],
+    );
+    assert_eq!(
+        run_luajit(&format!("{}\nmain()\n", emitted.lua), "modules_iterator"),
+        "10"
+    );
+}

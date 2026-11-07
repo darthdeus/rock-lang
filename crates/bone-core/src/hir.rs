@@ -442,6 +442,8 @@ pub struct Module {
     /// and the namespace tree), so every body that calls it records the same
     /// members, and a body-only re-lower overwrites them in place.
     pub call_families: FxHashMap<Ustr, Vec<FamilyMember>>,
+    /// Implicit protocol calls use this file's visibility, including import tiers.
+    pub iterator_families: Option<[Result<CallFamily, String>; 2]>,
 
     /// Path segments spelled outside any body: `use` items and the
     /// interface positions (signatures, fields, globals) of a v1 fragment
@@ -491,6 +493,7 @@ impl Default for Module {
             scope_probes: Default::default(),
 
             call_families: Default::default(),
+            iterator_families: None,
 
             path_segments: Default::default(),
         }

@@ -493,6 +493,35 @@ impl<'a> LowerCtx<'a> {
         Ok(self.record_family(name, resolved))
     }
 
+    fn capture_iterator_families(&mut self) {
+        if self.module.iterator_families.is_some() {
+            return;
+        }
+        let families = ["iter", "next"].map(|name| {
+            let name = Ustr::from(name);
+            let file = self.module.file;
+            let resolved = match self.v1_scope() {
+                Some(frag) => self.probed_cached(&self.resolutions.optional, name, || {
+                    resolve::resolve_v1_unary(self.workspace, frag, name)
+                }),
+                None => {
+                    self.probe_legacy(name);
+                    resolve::resolve_legacy_callee(self.workspace, file, name).map(Some)
+                }
+            };
+            resolved.map(|family| {
+                self.record_family(
+                    name,
+                    family.unwrap_or(resolve::CalleeFamily::Merged {
+                        members: Vec::new(),
+                    }),
+                )
+                .1
+            })
+        });
+        self.module.iterator_families = Some(families);
+    }
+
     /// The spelling and `CallFamily` of a resolved callee; a merged family's
     /// member keys go on the module for inference.
     fn record_family(
@@ -2394,6 +2423,7 @@ pub fn lower_expr(
     scope: Idx<Scope>,
     e: &skull_parser::ExprData,
 ) -> Result<Idx<hir::Expr>, CompilerError> {
+    ctx.capture_iterator_families();
     if let ExprKind::Block(b) = &e.kind {
         let saved = ctx.placeholder_forbidden;
         ctx.placeholder_forbidden = true;
