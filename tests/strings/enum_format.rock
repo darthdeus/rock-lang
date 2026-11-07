@@ -1,3 +1,5 @@
+// Enum values in interpolation and inspect.
+//
 // Structural, type-qualified, one-line text that does not depend on the
 // layout the compiler picks for the enum or on where the value is stored.
 
@@ -150,4 +152,53 @@ fn nullable_flat_enum_formats_null() {
     assert(absent_source_text(present) == "DamageSource::Mob(MobId {{ scene_id: 1, arena_id: 2, slot: 3, generation: 4 }})")
     let w = Witness { suspect: null }
     assert(absent_source_text(w.suspect) == "nil", "an absent stored flat enum")
+}
+
+// --- Payload-free enums ---
+// All-unit enums are represented by an int ordinal, yet a `{x}` hole still
+// renders `<Enum>::<Variant>` from the static type, the same text inspect
+// gives.
+
+enum BlendMode {
+    Normal,
+    Additive,
+    Multiply,
+}
+
+@test(output = "BlendMode::Normal\nBlendMode::Additive\nBlendMode::Multiply")
+fn test_interp_each_variant() {
+    // A bare `{Enum::Variant}` parses `::Variant` as a format spec, so bind first.
+    let n = BlendMode::Normal
+    let a = BlendMode::Additive
+    let m = BlendMode::Multiply
+    print("{n}")
+    print("{a}")
+    print("{m}")
+}
+
+@test(output = "mode=BlendMode::Additive")
+fn test_interp_through_local() {
+    let m = BlendMode::Additive
+    print("mode={m}")
+}
+
+@test(output = "add")
+fn test_match_int_compare() {
+    let m = BlendMode::Additive
+    let s = match m {
+        BlendMode::Normal => "norm",
+        BlendMode::Additive => "add",
+        BlendMode::Multiply => "mul",
+    }
+    print(s)
+}
+
+@test(output = "eq ne")
+fn test_eq_is_int_compare() {
+    let a = BlendMode::Multiply
+    let b = BlendMode::Multiply
+    let c = BlendMode::Normal
+    let eq = if a == b { "eq" } else { "ne" }
+    let ne = if a == c { "eq" } else { "ne" }
+    print("{eq} {ne}")
 }

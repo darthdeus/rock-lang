@@ -1,5 +1,5 @@
-// Inspect tests - migrated from rock/tests/inspect_tests.rs
-// Tests the inspect() function for debugging and pretty-printing values
+// inspect() and interpolation of composite values: scalars, structs, enums,
+// collections, null fields and function values.
 
 struct Person {
     name: string,
@@ -152,4 +152,166 @@ fn test_inspect_flat_enum_nobox_record_payload() {
 @test(output = "InspU::F {{ [1] = 7 }}")
 fn test_inspect_flat_enum_scalar_payload_stays_positional() {
     print(inspect(InspU::F(7.0)))
+}
+
+// --- Null fields ---
+//
+// A nil field is an ABSENT KEY in the emitted Lua table, so a key-driven
+// inspect cannot see it. Field rendering is driven off `__ROCK_TYPE_TABLE`
+// so declared-but-null fields still render.
+//
+// Expected strings are composed through `{ob}`/`{cb}` holes because a Rock
+// string literal cannot contain a literal brace (no `{{`, no `\{`).
+
+struct AllNull { a: int?, b: string? }
+struct SomeNull { a: int, b: string?, c: int? }
+struct NoNull { a: int, b: string }
+
+@nomangle inline(lua) fn __brace_open() -> string = """
+    return "{"
+"""
+
+@nomangle inline(lua) fn __brace_close() -> string = """
+    return "}"
+"""
+
+@test
+fn test_all_fields_null() {
+    let ob = __brace_open()
+    let cb = __brace_close()
+    let x = AllNull { a: null, b: null }
+    assert_eq(inspect(x), "AllNull {ob} a = nil, b = nil {cb}")
+}
+
+@test
+fn test_some_fields_null() {
+    let ob = __brace_open()
+    let cb = __brace_close()
+    let x = SomeNull { a: 1, b: null, c: null }
+    assert_eq(inspect(x), "SomeNull {ob}\n  a = 1,\n  b = nil,\n  c = nil\n{cb}")
+}
+
+@test
+fn test_null_field_in_interpolation() {
+    let ob = __brace_open()
+    let cb = __brace_close()
+    let x = AllNull { a: null, b: null }
+    assert_eq("{x}", "AllNull {ob} a = nil, b = nil {cb}")
+}
+
+// Controls: a fully-populated struct is unchanged, and a populated field
+// alongside a null one still renders its value.
+
+@test
+fn test_no_null_fields_unchanged() {
+    let ob = __brace_open()
+    let cb = __brace_close()
+    let x = NoNull { a: 1, b: "hi" }
+    assert_eq(inspect(x), "NoNull {ob} a = 1, b = \"hi\" {cb}")
+}
+
+@test
+fn test_populated_field_survives() {
+    let ob = __brace_open()
+    let cb = __brace_close()
+    let x = SomeNull { a: 42, b: "set", c: null }
+    assert_eq(inspect(x), "SomeNull {ob}\n  a = 42,\n  b = \"set\",\n  c = nil\n{cb}")
+}
+
+// --- Function values ---
+//
+// A capturing lambda compiles to an env record `setmetatable({ __slot = .., c<N>
+// = .. }, __rock_fn_mt)` -- a plain Lua table. Every generic table-walker
+// (inspect, and interpolation of a composite, which routes through inspect) must
+// render it as a FUNCTION value, matching a capture-free lambda (a raw Lua
+// function), not leak its `{ __slot = .., c<N> = .. }` capture internals.
+
+struct Holder { cb: fn() -> int, tag: int }
+
+fn make_capfree() -> fn() -> int { return () => 42 }
+fn make_capturing(x: int) -> fn() -> int { return () => x + 1 }
+
+// Both a capture-free (raw function) and a capturing (record) lambda inspect to
+// the `function: ...` form -- the record is rendered via its CodeRef, not walked.
+@test(output = "true\ntrue")
+fn test_inspect_record_renders_as_function() {
+    print(inspect(make_capfree()).starts_with("function: "))
+    print(inspect(make_capturing(10)).starts_with("function: "))
+}
+
+// No capture internals leak from a record's inspect output.
+@test(output = "false")
+fn test_inspect_record_no_leak() {
+    print(inspect(make_capturing(10)).contains("__slot"))
+}
+
+// A struct holding a capturing lambda renders the field as a function, same as
+// one holding a capture-free lambda -- the record does not leak through the walk.
+@test(output = "true\ntrue\nfalse")
+fn test_inspect_composite_with_record() {
+    let hf = Holder { cb: make_capfree(), tag: 1 }
+    let hc = Holder { cb: make_capturing(10), tag: 2 }
+    print(inspect(hf).contains("cb = function: "))
+    print(inspect(hc).contains("cb = function: "))
+    print(inspect(hc).contains("__slot"))
+}
+
+// Interpolation of a composite holding a capturing lambda routes through inspect
+// -- same no-leak guarantee.
+@test(output = "false")
+fn test_interp_composite_with_record() {
+    let hc = Holder { cb: make_capturing(10), tag: 2 }
+    let s = "{hc}"
+    print(s.contains("__slot"))
+}
+
+// --- Interpolation routes composite values through inspect() ---
+
+enum Status {
+    Ok,
+    Error(string)
+}
+
+@test fn test_composite_types_use_inspect() {
+    // Test structs - should NOT show memory addresses
+    let p = Point { x: 10, y: 20 }
+    let result = "{p}"
+    assert(!result.contains("0x"), "Struct should not show memory address")
+    // Type name display for user-defined structs is now implemented
+    assert(result.contains("Point"), "Struct should show type name")
+    assert(result.contains("x") && result.contains("10"), "Struct should show fields")
+    
+    // Test arrays - should NOT show memory addresses
+    let arr = [1, 2, 3]
+    let arr_str = "{arr}"
+    assert(!arr_str.contains("0x"), "Array should not show memory address")
+    assert(arr_str.contains("Vec"), "Array should show Vec type")
+    assert(arr_str.contains("1") && arr_str.contains("2") && arr_str.contains("3"), "Array should show contents")
+    
+    // Test tuples - should show contents
+    let tup = (42, "hello")
+    let tup_str = "{tup}"
+    assert(tup_str.contains("42"), "Tuple should show first element")
+    assert(tup_str.contains("hello"), "Tuple should show second element")
+    
+    // Test enums - should show variant information
+    let status1 = Status::Ok
+    let status1_str = "{status1}"
+    assert(!status1_str.contains("0x"), "Enum should not show memory address")
+    assert(status1_str.contains("Status"), "Enum should show type name")
+    assert(status1_str.contains("Ok"), "Enum should show variant")
+    
+    let status2 = Status::Error("oops")
+    let status2_str = "{status2}"
+    assert(status2_str.contains("Status"), "Enum should show type name")
+    assert(status2_str.contains("Error"), "Enum should show variant")
+    assert(status2_str.contains("oops"), "Enum should show variant data")
+}
+
+@test fn test_primitive_types_use_tostring() {
+    // Test that primitive types still use tostring (no change)
+    assert("{42}" == "42", "Integer interpolation")
+    assert("{true}" == "true", "Boolean interpolation")
+    assert("{\"hello\"}" == "hello", "String interpolation")
+    assert("{3.14159}" == "3.1416", "Float interpolation with default precision")
 }

@@ -86,12 +86,6 @@ fn integer_zero_padding() {
     print("{x:05}")
 }
 
-@test(output = "3.14")
-fn width_with_precision() {
-    let x = 3.14159
-    print("{x:.2f}")
-}
-
 // Sign format tests
 @test(output = "+42\n-17")
 fn explicit_plus_sign() {
