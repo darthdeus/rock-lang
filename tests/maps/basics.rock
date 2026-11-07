@@ -1,4 +1,186 @@
-// Tests for advanced Map operations: get_or_insert, update, upsert
+// Map basics: insert/get/remove/contains/len, overwrite, missing keys, int,
+// nullable and struct values, UFCS calls, indexed reads, and the
+// get_or_insert/update/upsert helpers.
+
+@test
+fn test_basic_map() {
+    let m: Map<string, int> = map_new()
+    insert(m, "hello", 42)
+    assert_eq(get(m, "hello").unwrap(), 42)
+    assert_eq(m.len(), 1)
+}
+
+@test
+fn test_map_with_int_keys() {
+    let m = map_new()
+    insert(m, 1, "one")
+    insert(m, 2, "two")
+    assert_eq(get(m, 1).unwrap(), "one")
+    assert_eq(get(m, 2).unwrap(), "two")
+}
+
+@test
+fn test_map_len() {
+    let test_map: Map<string, int> = map_new()
+    assert $ test_map.len() == 0
+
+    insert(test_map, "one", 1)
+    assert $ test_map.len() == 1
+
+    insert(test_map, "two", 2)
+    assert $ test_map.len() == 2
+
+    insert(test_map, "three", 3)
+    assert $ test_map.len() == 3
+}
+
+// --- Basic map operations ---
+
+@test(output = "42")
+fn test_map_insert_get() {
+    let m: Map<string, int> = map_new()
+    insert(m, "key", 42)
+    let val = get(m, "key")
+    if val != null {
+        print(val)
+    }
+}
+
+@test(output = "missing")
+fn test_map_get_missing() {
+    let m: Map<string, int> = map_new()
+    let val = get(m, "nonexistent")
+    if val == null {
+        print("missing")
+    }
+}
+
+// --- Map size ---
+
+@test(output = "3")
+fn test_map_size() {
+    let m: Map<string, int> = map_new()
+    insert(m, "a", 1)
+    insert(m, "b", 2)
+    insert(m, "c", 3)
+    print(m.len())
+}
+
+@test(output = "0")
+fn test_empty_map_size() {
+    let m: Map<string, int> = map_new()
+    print(m.len())
+}
+
+// --- Map overwrite ---
+
+@test(output = "20")
+fn test_map_overwrite() {
+    let m: Map<string, int> = map_new()
+    insert(m, "key", 10)
+    insert(m, "key", 20)
+    let val = get(m, "key") ?? -1
+    print(val)
+}
+
+// --- Map remove ---
+
+@test(output = "missing")
+fn test_map_remove() {
+    let m: Map<string, int> = map_new()
+    insert(m, "key", 42)
+    remove(m, "key")
+    let val = get(m, "key")
+    if val == null {
+        print("missing")
+    }
+}
+
+// --- Map contains ---
+
+@test(output = "true false")
+fn test_map_contains() {
+    let m: Map<string, int> = map_new()
+    insert(m, "a", 1)
+    print("{m.contains("a")} {m.contains("b")}")
+}
+
+// --- Map with int keys ---
+
+@test(output = "hello")
+fn test_map_int_keys() {
+    let m: Map<int, string> = map_new()
+    insert(m, 42, "hello")
+    let val = get(m, 42) ?? "missing"
+    print(val)
+}
+
+// --- Map with nullable values ---
+
+@test(output = "present")
+fn test_map_nullable_values() {
+    let m: Map<string, int?> = map_new()
+    insert(m, "a", 42)
+    insert(m, "b", null)
+    let a = get(m, "a")
+    if a != null {
+        print("present")
+    }
+}
+
+// --- Map with struct values ---
+
+struct Point {
+    x: int,
+    y: int,
+}
+
+@test(output = "3 4")
+fn test_map_struct_values() {
+    let m: Map<string, Point> = map_new()
+    insert(m, "origin", Point { x: 3, y: 4 })
+    let p = get(m, "origin")
+    if p != null {
+        print("{p.x} {p.y}")
+    }
+}
+
+// --- UFCS style map operations ---
+
+@test(output = "42")
+fn test_map_ufcs_style() {
+    let m: Map<string, int> = map_new()
+    m.insert("key", 42)
+    let val = m.get("key") ?? -1
+    print(val)
+}
+
+// --- Indexed reads `m[k]` as a let initializer and a call argument ---
+
+@test(output = "42")
+fn test_map_indexed_read_let_rhs() {
+    let m: Map<string, int> = map_new()
+    m["k"] = 42
+    let v = m["k"]
+    print(v)
+}
+
+@test(output = "7")
+fn test_map_indexed_read_print_arg() {
+    let m: Map<string, int> = map_new()
+    m["k"] = 7
+    print(m["k"])
+}
+
+@test(output = "100")
+fn test_map_int_key_indexed_read() {
+    let m: Map<int, int> = map_new()
+    m[1] = 100
+    let x = m[1]
+    print(x)
+}
+
+// --- get_or_insert, update, upsert ---
 
 newtype UserId(int)
 

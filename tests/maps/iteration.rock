@@ -1,7 +1,7 @@
-// Map/Arena iteration sub-arc, slice 1: `for (k, v) in m` over a
-// Map -> `for k, v in pairs(m) do`, byte-identical to live
-// (loops.rs IterationStrategy::Map). Pins runtime behavior; must
-// pass with and without ROCK_ANF_FUNCTIONS=1.
+// `for` over a Map: `for (k, v) in m` lowers to a `pairs` walk (not `ipairs`).
+// Covers pair destructuring with `_` on either side, single-binding loops,
+// `continue`, string, int and struct keys and values, empty maps and an
+// inferred map type. Map order is unspecified, so assertions are order-free.
 
 @test(output = "6\n3")
 fn test_map_sum_values() {
@@ -46,4 +46,185 @@ fn test_map_iter_key_used() {
         ksum = ksum + k
     }
     print("{ksum}")
+}
+
+@test
+fn test_map_tuple_destructuring() {
+    let m: Map<string, int> = map_new()
+    insert(m, "a", 1)
+    insert(m, "b", 2)
+
+    let item_count = 0
+    for item in m {
+        item_count = item_count + 1
+    }
+    assert_eq(item_count, 2)
+
+    let pair_count = 0
+    let found_a = false
+    let found_b = false
+    for (k, v) in m {
+        pair_count = pair_count + 1
+        if k == "a" {
+            assert_eq(v, 1)
+            found_a = true
+        } else if k == "b" {
+            assert_eq(v, 2)
+            found_b = true
+        }
+    }
+    assert_eq(pair_count, 2)
+    assert(found_a)
+    assert(found_b)
+}
+
+@test
+fn test_map_for_in_basic() {
+    let test_map: Map<string, string> = map_new()
+    insert(test_map, "key1", "value1")
+    insert(test_map, "key2", "value2")
+    insert(test_map, "key3", "value3")
+
+    let found_keys = 0
+    let found_values = 0
+
+    for (key, value) in test_map {
+        found_keys = found_keys + 1
+        found_values = found_values + 1
+
+        // Make sure we get the right key-value pairs
+        if key == "key1" {
+            assert value == "value1"
+        } else if key == "key2" {
+            assert value == "value2"
+        } else if key == "key3" {
+            assert value == "value3"
+        } else {
+            error("Unexpected key: " + key)
+        }
+    }
+
+    // Should iterate over all 3 entries
+    assert found_keys == 3
+    assert found_values == 3
+}
+
+@test
+fn test_map_for_in_empty() {
+    let empty_map: Map<string, int> = map_new()
+    let iterations = 0
+
+    for (key, value) in empty_map {
+        iterations = iterations + 1
+        error("Should not iterate over empty map")
+    }
+
+    assert iterations == 0
+}
+
+struct TestStruct {
+    name: string,
+    value: int,
+}
+
+@test
+fn test_map_for_in_complex_values() {
+    let struct_map: Map<string, TestStruct> = map_new()
+
+    insert(struct_map, "struct1", TestStruct { name: "first", value: 10 })
+    insert(struct_map, "struct2", TestStruct { name: "second", value: 20 })
+
+    let total_value = 0
+    let total_entries = 0
+
+    for (key, item) in struct_map {
+        total_entries = total_entries + 1
+        total_value = total_value + item.value
+
+        if key == "struct1" {
+            assert item.name == "first"
+            assert item.value == 10
+        } else if key == "struct2" {
+            assert item.name == "second"
+            assert item.value == 20
+        }
+    }
+
+    assert total_entries == 2
+    assert total_value == 30
+}
+
+@test
+fn test_map_iteration_destructuring() {
+    let m: Map<string, int> = map_new()
+    insert(m, "a", 10)
+    insert(m, "b", 20)
+    insert(m, "c", 30)
+
+    print("Destructuring:")
+
+    // Collect all keys to verify they're present (order doesn't matter)
+    let found_a = false
+    let found_b = false
+    let found_c = false
+
+    for (key, _) in m {
+        print(key)
+        if key == "a" {
+            found_a = true
+        }
+        if key == "b" {
+            found_b = true
+        }
+        if key == "c" {
+            found_c = true
+        }
+    }
+
+    assert(found_a, "Key 'a' not found")
+    assert(found_b, "Key 'b' not found")
+    assert(found_c, "Key 'c' not found")
+}
+
+@test(output = "Sum of values: 150")
+fn test_map_iteration_computation() {
+    let m: Map<string, int> = map_new()
+    insert(m, "first", 30)
+    insert(m, "second", 50)
+    insert(m, "third", 70)
+
+    let sum = 0
+    for (_, value) in m {
+        sum = sum + value
+    }
+
+    print("Sum of values: {sum}")
+}
+
+@test(output = "Empty map iteration count: 0")
+fn test_empty_map_iteration() {
+    let m: Map<int, int> = map_new()
+
+    let count = 0
+    for _ in m {
+        count = count + 1
+    }
+
+    print("Empty map iteration count: {count}")
+}
+
+@test(output = "Type inference works: 3")
+fn test_map_iteration_type_inference() {
+    // Test that type inference works correctly for map iteration
+    let m = map_new()
+    insert(m, "x", 1)
+    insert(m, "y", 2)
+
+    // The type of k and v should be inferred
+    let total = 0
+    for (k, v) in m {
+        total = total + v  // v should be inferred as int
+    }
+
+    print("Type inference works: {total}")
 }
