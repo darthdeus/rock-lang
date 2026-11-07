@@ -1898,9 +1898,18 @@ impl Emitter<'_> {
                         self.push(&format!("let v{} = {};", self.mf.emit_inst_id(iid), expr));
                     }
                 }
+                Inst::ArrayPush {
+                    arr,
+                    value,
+                    kind: ContainerKind::Vec,
+                } => {
+                    let a = self.render_val(*arr)?;
+                    let v = self.render_val(*value)?;
+                    self.push(&format!("{a}._data[{a}.len] = {v}; {a}.len = {a}.len + 1;"));
+                }
                 // An inlinable value inst renders at its use; an unused pure inst
                 // (dead `Load`/`Index`/`Field`/`Len`) is dropped. Remaining
-                // EFFECT insts (StoreField, StoreGlobal, ArrayPush, MapNext,
+                // EFFECT insts (StoreField, StoreGlobal, column ArrayPush, MapNext,
                 // CallMulti, coroutine ops, ...) are outside the subset.
                 other if other.produces_value() => {}
                 other => return Err(err(format!("JS subset: unsupported effect {other:?}"))),

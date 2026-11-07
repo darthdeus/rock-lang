@@ -90,6 +90,20 @@ fn range_materializes_vec() {
     eval_int(&js, "root", 93); // 2+3+4 = 9, len 3
 }
 
+// A tuple spread into an array literal appends each element to the 0-based
+// `_data` in order and bumps `len` once per element.
+#[test]
+fn tuple_spread_appends_to_array_literal() {
+    let src = "fn root() -> int {\n\
+                   let nums = (1, 2, 3)\n\
+                   let xs: [int] = [...nums, 4]\n\
+                   xs[0] * 1000 + xs[1] * 100 + xs[3] * 10 + xs.len\n\
+               }";
+    let ws = ws_with(src);
+    let js = emit_closure(&ws, "root").expect("spread literal emits");
+    eval_int(&js, "root", 1244);
+}
+
 // `tuple_first`/`tuple_second` templates project ONE element of the array, but
 // the generic `A`/`B` may itself be a tuple: the call then returns as many lanes
 // as that tuple has, and the caller rebuilds the value from them. A lane read
