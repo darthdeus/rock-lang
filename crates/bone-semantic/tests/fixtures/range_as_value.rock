@@ -1,7 +1,7 @@
 //! A range expression used as a VALUE materializes to `[int]` (rock evaluates
 //! `0..N` to an int array; verified: `rev2<T>(c:[T])` accepts `0..10`). This is
 //! distinct from `for i in 0..N`, which stays a dedicated loop form. Verified vs
-//! rock (tests/iterators/basics.rock `rev`).
+//! rock (tests/iterators/for_in.rock `rev`).
 
 //- range_value_is_int_array
 fn f() -> [int] {
