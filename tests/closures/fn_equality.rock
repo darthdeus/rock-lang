@@ -1,3 +1,33 @@
+// Equality and fn values.
+//
+// --- Null checks on optional fn values ---
+//
+// `==`/`!=` between fn values is a compile error (fn identity is not
+// meaningful -- tests/errors/fn_identity_compare.rock.err), but comparing an
+// OPTIONAL fn against the null literal is refinement and must keep working,
+// including calling through the refined value.
+
+fn add_one(x: int) -> int { return x + 1 }
+
+@test(output = "yes\n6")
+fn test_optional_fn_null_check_refines() {
+    let f: (fn(int) -> int)? = add_one
+    if f != null {
+        print("yes")
+        print("{f(5)}")
+    }
+}
+
+@test(output = "none")
+fn test_optional_fn_eq_null() {
+    let f: (fn(int) -> int)? = null
+    if f == null {
+        print("none")
+    }
+}
+
+// --- Structs with fn-typed fields ---
+//
 // `==` on a struct with a fn-typed field stays legal, but a closure env record
 // compares as an opaque LEAF by IDENTITY (rawequal) -- never by walking its
 // capture fields. A record is a callable value, not a data table, so it is the
@@ -64,4 +94,40 @@ fn make_capfree() -> CfHolder { return CfHolder { cb: () => 42, tag: 1 } }
 @test(output = "true")
 fn test_capfree_same_site_equal() {
     print(make_capfree() == make_capfree())
+}
+
+// --- Generic `==` wrappers ---
+// Comparing fn values through a generic wrapper is a compile error
+// (tests/errors/fn_identity_generic.rock.err). The same wrapper over non-fn
+// types still compiles and runs: the call-site check fires only when a
+// `==`-compared type param resolves to a fn type.
+
+fn same<T>(a: T, b: T) -> bool { return a == b }
+
+struct P { x: int }
+value V { n: int }
+
+@test(output = "true")
+fn test_same_int_through_generic() {
+    print("{same(1, 1)}")
+}
+
+@test(output = "false")
+fn test_same_string_through_generic() {
+    print("{same(\"a\", \"b\")}")
+}
+
+@test(output = "true")
+fn test_same_struct_through_generic() {
+    // the point is only that the generic compiles for a struct type param;
+    // structs compare by identity, so the same binding compared to itself is true.
+    let p = P { x: 1 }
+    print("{same(p, p)}")
+}
+
+@test(output = "true")
+fn test_same_value_through_generic() {
+    let a = V { n: 3 }
+    let b = V { n: 3 }
+    print("{same(a, b)}")
 }

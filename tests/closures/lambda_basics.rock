@@ -1,7 +1,5 @@
-// Lambdas/closures sub-arc: `ExprKind::Lambda` -> `AnfComp::Lambda`
-// (a real Lua `function(params) … end` expression; body via the
-// fn-body taxonomy; Lua lexical capture-by-reference). Pins runtime
-// behavior; must pass with and without ROCK_ANF_FUNCTIONS=1.
+// Lambda basics: calling a lambda, capturing enclosing locals, passing and
+// returning closures, multi-statement bodies and loops inside a lambda.
 
 fn apply(f: fn(int) -> int, x: int) -> int {
     return f(x)

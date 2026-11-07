@@ -1,7 +1,8 @@
-// Runtime guard for skull's closure capture-snapshot (codegen opt: snapshot a
-// loop-stored single-assignment captured cell by value, capture everything else
-// by reference with no IIFE). skull-diff only compares rock-vs-skull; an absolute
-// miscompile in BOTH needs an expected-output test, which this is.
+// Closures capturing loop variables. A `for` binding is captured per
+// iteration by value unless a lambda writes it; a reassigned `let` (including
+// a while-loop counter) is one shared binding, so every closure sees its final
+// value. A captured single-assignment cell stored in a loop is snapshotted by
+// value; everything else is captured by reference.
 
 // Closures created in a loop must each capture THEIR iteration's value. If the
 // by-value snapshot were wrongly dropped, all closures would share the cell's
@@ -26,4 +27,113 @@ fn test_nonloop_capture() {
     let y = 4
     let f = () => x + y
     print(f())
+}
+
+// -- Reassigned lets are shared, not per-iteration --
+// Regression: loop counters were detected structurally, so `while` counters
+// and even non-loop if-join shapes were captured per iteration. Loop bindings
+// are now tagged by the `for` desugaring, and a lambda-written cell is boxed.
+
+// A while-loop counter captured under an `if`: with the old structural detector
+// the increment matched a latch and `x` wrongly snapshotted per-iteration
+// ("0\n1\n2"). Correct (shared box): every closure sees the final counter.
+@test(output = "3\n3\n3")
+fn test_while_counter_capture_under_if() {
+    let fns: [fn() -> int] = []
+    let x = 0
+    while x < 3 {
+        if x >= 0 {
+            fns.push(() => x)
+        }
+        x = x + 1
+    }
+    for f in fns { print(f()) }
+}
+
+// NON-LOOP shape: an if-join `x = x + 1` followed by an `if x < 10` matched the
+// old latch/header pattern, so the capture wrongly snapshotted by value and the
+// post-capture `x = 100` was invisible ("1"). Correct (shared box): "100".
+@test(output = "100")
+fn test_nonloop_ifjoin_capture() {
+    for g in make_fns(true) { print(g()) }
+}
+
+fn make_fns(cond: bool) -> [fn() -> int] {
+    let fns: [fn() -> int] = []
+    let x = 0
+    if cond { x = x + 1 }
+    if x < 10 { fns.push(() => x) }
+    x = 100
+    return fns
+}
+
+// WRITE path: a lambda that MUTATES the misclassified counter used to write into
+// its record's private by-value field -- the mutation was silently dropped and
+// the loop ran on the un-bumped counter ("3"). Correct (shared box): the bump is
+// visible, first iteration jumps x to 10, increment to 11, loop exits -> "11".
+@test(output = "11")
+fn test_while_counter_lambda_write_visible() {
+    print(run_bump(true))
+}
+
+fn run_bump(cond: bool) -> int {
+    let x = 0
+    while x < 3 {
+        if cond {
+            let bump = () => { x = x + 10 }
+            bump()
+        }
+        x = x + 1
+    }
+    return x
+}
+
+// -- Lambda writes to `for` bindings --
+// A lambda-written `for` counter/index is boxed and shared, so the write
+// steers the live counter (same as a plain in-loop write).
+
+// Range counter written by a lambda: iteration 0 has i=0, the lambda steers it to
+// 10, the body sums i (10); the latch then bumps 10 -> 11, the header 11 < 3 is
+// false, so the loop exits after one iteration. Pre-arc: 10.
+@test(output = "10")
+fn test_range_counter_lambda_write_steers_loop() {
+    let mut_sum = 0
+    for i in 0..3 {
+        let f = () => { i = i + 10 }
+        f()
+        mut_sum = mut_sum + i
+    }
+    print(mut_sum)
+}
+
+// Map `for (k, v)` where the lambda writes the user key binding `k` (a fresh
+// per-iteration cell, distinct from the anonymous MapNext cursor -- so the
+// iteration is not corrupted). Single entry {1: 100}: k steered 1 -> 11, sum =
+// 11 + 100. Pre-arc: 111.
+@test(output = "111")
+fn test_map_key_lambda_write_boxes() {
+    let m = map_new()
+    m[1] = 100
+    let sum = 0
+    for (k, v) in m {
+        let f = () => { k = k + 10 }
+        f()
+        sum = sum + k + v
+    }
+    print(sum)
+}
+
+// Enumerate index written by a lambda: idx IS the loop counter, so steering it
+// exits the loop like the range case. idx 0 -> 100, x = xs[0] = 10, sum = 110;
+// the latch bumps 100 -> 101, 101 < 3 is false -> exit. Pre-arc: 110.
+@test(output = "110")
+fn test_enumerate_index_lambda_write_steers_loop() {
+    let xs = [10, 20, 30]
+    let sum = 0
+    for (idx, x) in enumerate(xs) {
+        let f = () => { idx = idx + 100 }
+        f()
+        sum = sum + idx + x
+    }
+    print(sum)
 }

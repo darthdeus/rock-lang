@@ -1185,7 +1185,7 @@ impl Builder<'_> {
             //
             // A call returning a REFERENCE struct IS storage -- it hands back the
             // shared table, so the write is real. `o.next.unwrap().value = v` is
-            // the live shape (`tests/closures/lambda_stress.rock`).
+            // the live shape (`tests/closures/assignment_in_lambda.rock`).
             Expr::Call { .. } | Expr::SafeNavCall { .. } if self.expr_is_value_struct(e) => {
                 Err(CompilerError::new_with_label(
                     self.body.expr_spans[e],

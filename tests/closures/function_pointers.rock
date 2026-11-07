@@ -1,5 +1,6 @@
-// Function pointer tests - migrated from rock/tests/function_pointer_tests.rs
-// Tests function references, higher-order functions, and function pointer behavior
+// Functions as values: references to named functions, fn-typed locals and
+// parameters called through `f(args)`, higher-order functions, composition,
+// and lambdas taking or returning fn types.
 
 // Shared struct definition
 struct Point {
@@ -221,3 +222,98 @@ fn function_with_struct_parameters() {
 // 4. Struct fields with function pointers not fully supported
 // 5. Overloaded function reference errors can't be tested with @test
 // 6. Type mismatch and parameter count errors are compile-time errors
+
+// --- Calling fn-typed locals and parameters (`(int) -> int` syntax) ---
+
+fn apply_int(f: (int) -> int, x: int) -> int {
+    return f(x)
+}
+
+@test(output = "6")
+fn test_hof_apply() {
+    print(apply_int(add_one, 5))
+}
+
+@test(output = "100")
+fn test_let_bound_fn_call() {
+    let inc = (x: int) => x + 1
+    let total = 0
+    let i = 0
+    while i < 100 {
+        // Lambda call through let-bound fn-typed local.
+        let _ = inc(i)
+        i = i + 1
+    }
+    print(100)
+}
+
+fn apply_twice_arrow(f: (int) -> int, x: int) -> int {
+    return f(f(x))
+}
+
+@test(output = "12")
+fn test_hof_apply_twice() {
+    print(apply_twice_arrow(add_one, 10))
+}
+
+@test(output = "15")
+fn test_lambda_arg() {
+    let r = apply_int((x: int) => x * 3, 5)
+    print(r)
+}
+
+// --- Lambdas with fn-typed parameters and results ---
+
+fn is_even(n: int) -> bool {
+    return n % 2 == 0
+}
+
+@test(output = "42 is even")
+fn test_lambda_with_function_type_param() {
+    // Lambda with function type parameter
+    let handler = (callback: fn(int) -> bool) => {
+        return callback(42)
+    }
+
+    // Use the handler
+    let result = handler(is_even)
+    print(if result { "42 is even" } else { "42 is odd" })
+}
+
+@test(output = "12")
+fn test_lambda_with_multiple_function_type_params() {
+    // Lambda with multiple function type parameters
+    let combiner = (f: fn(int) -> int, g: fn(int) -> int, x: int) => {
+        return f(g(x))
+    }
+
+    // (5 + 1) * 2 = 12
+    print(combiner(double, add_one, 5))
+}
+
+@test(output = "15\n30")
+fn test_lambda_returning_function() {
+    // Lambda that returns a function
+    let make_adder = (n: int) => {
+        return (x: int) => x + n
+    }
+
+    let cases = [(5, 10), (10, 20)]
+    for pair in cases {
+        let add = make_adder(pair.0)
+        print(add(pair.1))
+    }
+}
+
+@test(output = "18")
+fn test_nested_lambda_with_function_types() {
+    // Nested lambdas with function types
+    let outer = (transform: fn(int) -> int) => {
+        return (value: int) => {
+            return transform(value) * 2
+        }
+    }
+
+    let inner = outer(square)
+    print(inner(3))  // (3 * 3) * 2 = 18
+}

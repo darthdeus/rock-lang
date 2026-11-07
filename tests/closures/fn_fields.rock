@@ -1,0 +1,283 @@
+// Calling through fn-typed struct fields: plain and generic structs, and how
+// a field call is told apart from a free function of the same name.
+
+struct FunctionHolder {
+    func: fn() -> int,
+    func_with_args: fn(int, int) -> int,
+}
+
+fn adder() -> int { 
+    return 42 
+}
+
+fn multiplier(a: int, b: int) -> int { 
+    return a * b 
+}
+
+@test fn test_function_field_call() {
+    let holder = FunctionHolder {
+        func: adder,
+        func_with_args: multiplier,
+    }
+    
+    // Direct field access and call
+    assert_eq(holder.func(), 42)
+    assert_eq(holder.func_with_args(3, 4), 12)
+    
+    // With intermediate variable
+    let f = holder.func
+    assert_eq(f(), 42)
+    
+    let f2 = holder.func_with_args
+    assert_eq(f2(5, 6), 30)
+}
+
+// Test with nested field access
+struct Outer {
+    inner: Inner,
+}
+
+struct Inner {
+    callback: fn() -> string,
+}
+
+fn nested_callback() -> string { 
+    return "nested" 
+}
+
+@test fn test_nested_function_field_call() {
+    let obj = Outer {
+        inner: Inner {
+            callback: nested_callback
+        }
+    }
+    
+    // Nested field access and call
+    assert_eq(obj.inner.callback(), "nested")
+}
+
+// Test with nullable function fields
+struct NullableHolder {
+    maybe_func: (fn() -> int)?,
+}
+
+fn nullable_func() -> int { 
+    return 99 
+}
+
+@test fn test_nullable_function_field_call() {
+    let holder = NullableHolder {
+        maybe_func: nullable_func
+    }
+    
+    if holder.maybe_func != null {
+        assert_eq(holder.maybe_func.unwrap()(), 99)
+    }
+}
+
+// --- Edge cases ---
+
+// Generic struct with function field
+struct Container<T> {
+    data: T,
+    processor: fn(T) -> T,
+}
+
+fn double_int(x: int) -> int {
+    return x * 2
+}
+
+@test fn test_generic_struct_function_field() {
+    let container = Container {
+        data: 5,
+        processor: double_int,
+    }
+    
+    // This should work with generic structs
+    assert_eq(container.processor(10), 20)
+}
+
+// Nullable struct with function field
+struct CallbackHolder {
+    callback: fn() -> string,
+}
+
+fn get_message() -> string {
+    return "hello"
+}
+
+@test fn test_nullable_struct_function_field() {
+    let holder_value = CallbackHolder {
+        callback: get_message
+    }
+    let holder: CallbackHolder? = holder_value
+    
+    // This should work with nullable types
+    if holder != null {
+        assert_eq(holder.unwrap().callback(), "hello")
+    }
+}
+
+// Nested generic structs
+struct Wrapper<T> {
+    inner: Container<T>,
+}
+
+@test fn test_nested_generic_function_field() {
+    let wrapper = Wrapper {
+        inner: Container {
+            data: 3,
+            processor: double_int,
+        }
+    }
+    
+    // This should work with nested generic structs
+    assert_eq(wrapper.inner.processor(7), 14)
+}
+
+// Multiple function fields
+struct MultiFunc {
+    f1: fn() -> int,
+    f2: fn(int) -> int,
+    f3: fn(int, int) -> int,
+}
+
+fn ret_one() -> int { return 1 }
+fn add_one(x: int) -> int { return x + 1 }
+fn add_two(x: int, y: int) -> int { return x + y }
+
+@test fn test_multiple_function_fields() {
+    let multi = MultiFunc {
+        f1: ret_one,
+        f2: add_one,
+        f3: add_two,
+    }
+    
+    assert_eq(multi.f1(), 1)
+    assert_eq(multi.f2(5), 6)
+    assert_eq(multi.f3(3, 4), 7)
+}
+
+// Function field accessing another field (to ensure we don't break normal field access)
+struct DataHolder {
+    value: int,
+    transformer: fn(int) -> int,
+}
+
+fn triple(x: int) -> int {
+    return x * 3
+}
+
+@test fn test_function_field_with_data_field() {
+    let holder = DataHolder {
+        value: 7,
+        transformer: triple,
+    }
+    
+    // Both field accesses should work
+    assert_eq(holder.value, 7)
+    assert_eq(holder.transformer(4), 12)
+}
+
+// --- Field call next to a free function ---
+//
+// `recv.f()` through a fn-typed field when exactly one free function `f` is
+// also visible. The call is an indirect call through the field; the free
+// function's resolvable name must not make lowering look for a direct callee.
+
+global FIELD_CALL_HITS: int = 0
+
+fn field_call_bump() {
+    FIELD_CALL_HITS += 1
+}
+
+struct FieldCallButton {
+    press: () -> (),
+}
+
+fn press(x: int, delay: float = 0) -> int {
+    return x
+}
+
+fn field_call_buttons() -> [FieldCallButton] {
+    return [FieldCallButton { press: field_call_bump }, FieldCallButton { press: field_call_bump }]
+}
+
+@test
+fn an_indexed_unit_fn_field_call_runs_the_field() {
+    FIELD_CALL_HITS = 0
+    let buttons = field_call_buttons()
+    for i in 0..buttons.len {
+        buttons[i].press()
+    }
+    assert(FIELD_CALL_HITS == 2, "each button's field ran once")
+    assert(press(7) == 7, "the free function is still callable")
+}
+
+@test
+fn a_unit_fn_field_statement_call_runs_the_field() {
+    FIELD_CALL_HITS = 0
+    let button = FieldCallButton { press: field_call_bump }
+    button.press()
+    assert(FIELD_CALL_HITS == 1, "the field ran")
+}
+
+// --- Call syntax picks the field or the function ---
+//
+// A call through a fn-typed field is chosen by call syntax: method syntax
+// (`t.sprite()`, `t?.sprite()`) calls the field, a call written by name
+// (`sprite(t)`) calls the function, even when the first argument's struct has
+// a fn-typed field of that name.
+
+struct FieldCallTile {
+    sprite: fn() -> int,
+    pair: fn() -> (int, int)?,
+}
+
+fn sprite(t: FieldCallTile) -> int {
+    100
+}
+
+fn pair(t: FieldCallTile) -> (int, int)? {
+    (100, 200)
+}
+
+fn field_call_tile() -> FieldCallTile {
+    FieldCallTile { sprite: () => 7, pair: () => null }
+}
+
+fn field_call_nav(t: FieldCallTile?) -> int {
+    t?.sprite() ?? -1
+}
+
+@test
+fn a_call_by_name_calls_the_function_not_the_field() {
+    let t = field_call_tile()
+    assert_eq(sprite(t), 100)
+}
+
+@test
+fn method_syntax_calls_the_field_over_the_function() {
+    let t = field_call_tile()
+    assert_eq(t.sprite(), 7)
+    assert_eq(field_call_nav(t), 7)
+    assert_eq(field_call_nav(null), -1)
+}
+
+@test
+fn a_nullable_tuple_call_by_name_calls_the_function() {
+    let t = field_call_tile()
+    let got = pair(t)
+    assert(got != null, "pair(t) must call the function, which returns a pair")
+    if let (a, b) = pair(t) {
+        assert_eq(a + b, 300)
+    } else {
+        assert(false, "pair(t) must call the function, not the null field")
+    }
+}
+
+@test
+fn a_nullable_tuple_method_call_calls_the_field() {
+    let t = field_call_tile()
+    assert(t.pair() == null, "t.pair() must call the field, which returns null")
+}
