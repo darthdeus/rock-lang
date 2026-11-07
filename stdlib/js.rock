@@ -401,3 +401,91 @@ inline(js) fn ffi_string(ptr: any, len: int?) -> string = """
         if (Object.keys(scenes).length === 0) delete owners[scene];
     }
 """
+
+// Twins of the unified.rock weak-cache directories. JS object keys are strings,
+// so Scene-level names take an "n:" prefix to stay apart from numeric Arena ids.
+@nomangle inline(js) fn __weak_cache_write(name: string, scene: int, arena: int, slot: int, generation: int, backing: any, value: any) = """
+    var owners = globalThis.__rock_weak_cache_owners || (globalThis.__rock_weak_cache_owners = {});
+    var scenes = owners[scene] || (owners[scene] = {});
+    var entries = scenes, key = "n:" + name;
+    if (arena !== -1) {
+        var slots = scenes[arena] || (scenes[arena] = {});
+        entries = slots[slot] || (slots[slot] = {});
+        key = name;
+    }
+    entries[key] = { generation: generation, backing: backing, value: value };
+    var counts = globalThis.__rock_weak_cache_builds || (globalThis.__rock_weak_cache_builds = {});
+    counts[name] = (counts[name] || 0) + 1;
+"""
+
+@nomangle inline(js) fn __weak_cache_delete(name: string, scene: int, arena: int, slot: int, generation: int) = """
+    var owners = globalThis.__rock_weak_cache_owners;
+    var scenes = owners && owners[scene];
+    if (!scenes) return;
+    var slots = scenes[arena];
+    var entries = arena === -1 ? scenes : (slots && slots[slot]);
+    var key = arena === -1 ? "n:" + name : name;
+    var entry = entries && entries[key];
+    if (entry && entry.generation === generation) {
+        delete entries[key];
+        if (arena !== -1 && Object.keys(entries).length === 0) {
+            delete slots[slot];
+            if (Object.keys(slots).length === 0) delete scenes[arena];
+        }
+        if (Object.keys(scenes).length === 0) delete owners[scene];
+    }
+"""
+
+inline(js) fn __weak_cache_entity_get<V>(name: string, scene: int, arena: int, slot: int, generation: int) -> V? = """
+    var backing = __arena_store_any(scene, arena);
+    if (backing == null || backing.generations._data[slot] !== generation) return null;
+    var owners = globalThis.__rock_weak_cache_owners;
+    var scenes = owners && owners[scene];
+    var slots = scenes && scenes[arena];
+    var entries = slots && slots[slot];
+    var entry = entries && entries[name];
+    if (entry && entry.generation === generation && entry.backing === backing) return entry.value;
+    return null;
+"""
+
+inline(js) fn __weak_cache_entity_put<V>(name: string, scene: int, arena: int, slot: int, generation: int, value: V) = """
+    var backing = __arena_store_any(scene, arena);
+    if (backing == null || backing.generations._data[slot] !== generation) {
+        throw new Error("weak_cache_put requires a live owner");
+    }
+    __weak_cache_write(name, scene, arena, slot, generation, backing, value);
+"""
+
+inline(js) fn __weak_cache_scene_get<T, V>(name: string, scene: int, backing: T) -> V? = """
+    var owners = globalThis.__rock_weak_cache_owners;
+    var scenes = owners && owners[scene];
+    var entry = scenes && scenes["n:" + name];
+    if (entry && entry.backing === backing) return entry.value;
+    return null;
+"""
+
+inline(js) fn __weak_cache_scene_put<V>(name: string, scene: int, value: V) = """
+    var backing = __scene_root_any(scene);
+    if (backing == null) throw new Error("weak_cache_put requires a live owner");
+    __weak_cache_write(name, scene, -1, -1, 0, backing, value);
+"""
+
+inline(js) fn weak_cache_builds(name: string) -> int = """
+    var counts = globalThis.__rock_weak_cache_builds;
+    return (counts && counts[name]) || 0;
+"""
+
+inline(js) fn weak_cache_live(name: string) -> int = """
+    var owners = globalThis.__rock_weak_cache_owners || {};
+    var n = 0;
+    for (var s in owners) {
+        var scenes = owners[s];
+        if (scenes["n:" + name]) n++;
+        for (var a in scenes) {
+            if (a.startsWith("n:")) continue;
+            var slots = scenes[a];
+            for (var k in slots) if (slots[k][name]) n++;
+        }
+    }
+    return n;
+"""
