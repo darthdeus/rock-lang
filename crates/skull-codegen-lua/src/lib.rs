@@ -2924,7 +2924,7 @@ fn record_representation_violations(ctx: &CodegenCtx, func: &MirFunc) {
 /// storage, so a constant that reaches a mutable
 /// place must be materialized FRESH per construction -- otherwise `a.p.x = 5`
 /// through one holder rewrites every other holder of that literal, including an
-/// unrelated global (`tests/value_const_hoist_aliasing.rock`). Candidates whose
+/// unrelated global (`tests/values/const_hoist_aliasing.rock`). Candidates whose
 /// uses are not provably read-only emit their ctor inline, exactly as before the
 /// hoist existed.
 fn collect_const_hoists(

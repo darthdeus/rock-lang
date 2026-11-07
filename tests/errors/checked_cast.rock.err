@@ -43,7 +43,7 @@ fn main() {
 }
 
 // An empty array literal has no element type of its own. `[1, 2, 3] as [int]`
-// (tests/checked_ascription.rock) is the accepted control -- there the operand
+// (tests/types/checked_ascription.rock) is the accepted control -- there the operand
 // types itself.
 //=== TEST CASE: cast_empty_array_unresolved_element_MismatchedType ===
 fn main() {

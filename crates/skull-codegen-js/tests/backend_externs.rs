@@ -197,7 +197,7 @@ fn main() {
 // and lowered the declaration as if it were portable Rock. The emitted program
 // then referenced a body that was never emitted, so the call answered
 // `undefined` -- a wrong ANSWER rather than an unsupported program, which is
-// what made `tests/extern_fn_value.rock` report 7 failures instead of 7 skips.
+// what made `tests/closures/extern_fn_value.rock` report 7 failures instead of 7 skips.
 //
 // Both sides are asserted here: the shapes that must reject, and a portable Rock
 // fn through the SAME path that must still be admitted. Rejecting everything

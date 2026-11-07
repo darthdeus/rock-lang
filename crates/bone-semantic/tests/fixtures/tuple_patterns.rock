@@ -1,7 +1,7 @@
 //! Tuple patterns `(a, b)` in match arms. The scrutinee must be a tuple type;
 //! each element pattern is checked against the corresponding element type.
 //! Unlike or-patterns, tuple patterns DO bind variables. Verified vs rock
-//! (tests/pattern_tuple_range_inc.rock).
+//! (tests/patterns/tuple_and_range.rock).
 
 // Literal + binding + wildcard element patterns; result is the arm-body type.
 //- tuple_two_elem

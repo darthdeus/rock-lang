@@ -3,7 +3,7 @@
 // macro forwarding to a renamed `_impl` co fn.
 //
 // Coroutine signature here: `Coroutine<Y, R, A>` = yield Y, return R,
-// resume arg A. Following tests/coroutine_resume_with_value_yield_star.rock.
+// resume arg A. Following tests/coroutines/resume_with_value_yield_star.rock.
 
 global SITES_SEEN: [string] = []
 

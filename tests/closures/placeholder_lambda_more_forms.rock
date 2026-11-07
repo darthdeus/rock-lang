@@ -6,7 +6,7 @@
 // and `~` (bitwise not) fell through to ordinary ident resolution and
 // produced "Undefined variable '_'".
 //
-// See also `tests/placeholder_lambda_tuple_field.rock` for the
+// See also `tests/closures/placeholder_lambda_tuple_field.rock` for the
 // TupleIndex case (fix `0bbfbbba6`).
 
 struct Bag { v: int }

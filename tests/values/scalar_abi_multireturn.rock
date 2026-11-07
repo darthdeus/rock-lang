@@ -200,7 +200,7 @@ fn adv_map_value_insert() {
 }
 
 // (12 dropped — value-typed binop already covered by bug #1's regression
-// test in value_adversarial_calls.rock; stdlib Vec2 isn't reachable from
+// test in values/scalar_abi_call_args.rock; stdlib Vec2 isn't reachable from
 // this bare test file.)
 
 // ----- 13-15. Regression guards for "direct return" (NOT IIFE) paths.

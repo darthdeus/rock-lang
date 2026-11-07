@@ -1,6 +1,6 @@
 //! `f64` is `float`; `f32` is narrow field storage whose reads and writes
 //! are `float`, so calls and assignments need no casts. (Arithmetic needs the
-//! stdlib operators; `tests/value_float_width.rock` covers it.)
+//! stdlib operators; `tests/values/float_width.rock` covers it.)
 
 //- f64_is_float
 fn widen(x: f64) -> float {

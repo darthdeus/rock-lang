@@ -1,6 +1,6 @@
 // Comprehensive generic tests ported from rock/tests/generic_tests.rs
 // Tests basic generic functions, structs, type inference, and constraints
-// For advanced tests see generics_advanced.rock
+// For advanced tests see types/generics_advanced.rock
 
 // Generic function definitions
 fn id<T>(x: T) -> T { 

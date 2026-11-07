@@ -2,7 +2,7 @@
 //! ops map to a JS array: `sb_new` -> `[]`, `sb_push` -> `.push`, `sb_build` ->
 //! `.join("")`. `join` (stdlib/strings.rock) is pure Rock over them and
 //! co-emits. The node-executed check is the correctness oracle; the corpus
-//! `tests/js_string_builder.rock` cross-checks against luajit.
+//! `tests/strings/js_string_builder.rock` cross-checks against luajit.
 
 use crate::common::ws_with;
 use skull_mir::mir::FuncRef;

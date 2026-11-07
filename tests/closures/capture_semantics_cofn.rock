@@ -1,7 +1,7 @@
 // P0: runtime semantic contract for
 // lambdas inside `co fn` bodies, written BEFORE the frame-lambda hoist (P1)
 // so the swap from inline-closure-over-frame-fields to env records is held
-// to these outputs. Non-co siblings: closure_capture_semantics.rock.
+// to these outputs. Non-co siblings: closures/capture_semantics.rock.
 
 enum CEv { Tick(int) }
 
@@ -269,7 +269,7 @@ fn test_cofn_hook_local_and_defer_frame_state() {
 // own defers, never the enclosing co fn's still-pending ones. Pre-fix the
 // shared `defers` stack in lower.rs spliced the co-fn defer into the lambda
 // (miscompile) and, when the defer body created the lambda, recursed forever
-// during lowering (compiler stack overflow). Plain-fn siblings: defer_lambda.rock.
+// during lowering (compiler stack overflow). Plain-fn siblings: control_flow/defer_lambda.rock.
 
 global CR_MIS: int = 0
 global CR_SUM: int = 0

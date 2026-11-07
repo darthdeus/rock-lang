@@ -13,7 +13,7 @@
 //! `ROCK_SKULL_VALUE_CTOR` is read once per PROCESS and these tests share a
 //! binary with every other skull test. The runtime half -- a value type in a
 //! record, equality across shapes, field evaluation order -- is
-//! `tests/value_ctor_splice.rock`, which the `rock test tests/` gate runs under
+//! `tests/values/ctor_splice.rock`, which the `rock test tests/` gate runs under
 //! both shapes.
 
 use skull::mir_emit::emit_full_with_value_ctor;

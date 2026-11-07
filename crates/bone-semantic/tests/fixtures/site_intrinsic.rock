@@ -2,7 +2,7 @@
 //! literal of type `string` ("file:line"). bone's lower drops it into the
 //! unsupported catch-all ("unsupported expr: Intrinsic"). For type-checking it
 //! is just a string -- the actual "file:line" value is filled at a later
-//! codegen/macro stage bone doesn't run. Verified vs rock (site_literal.rock
+//! codegen/macro stage bone doesn't run. Verified vs rock (library/site_literal.rock
 //! binds `let s: string = __SITE__`).
 
 //- site_is_string

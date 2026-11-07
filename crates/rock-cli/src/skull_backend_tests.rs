@@ -1962,7 +1962,7 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         // The `Act(() -> ())` closure payload makes Ev NON-cdata-eligible, so it is a
         // genuinely FLAT (boxed) enum that rides the frame-slot channel -- an
         // all-scalar-payload enum would scalarize as a `_ct` cdata instead (mirrors
-        // `tests/enum_thread_yield.rock`).
+        // `tests/coroutines/enum_thread_yield.rock`).
         let prog = |a: i32, b: i32| {
             format!(
                 "enum Ev {{ Tick(int), Pair(int, int), Done, Act(() -> ()) }}\n\

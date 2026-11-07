@@ -1510,7 +1510,7 @@ pub fn is_nobox_nominal(ws: &Workspace, name: Ustr) -> bool {
 /// leaves defeats both -- it contributes exactly one leaf under its own name
 /// with nothing below it, so the sequence is flat and undotted while a presence
 /// tag is right there and the type is leaf-table. That is the same shape
-/// `tests/nobox_zero_leaf_child.rock` pins for the Lua ctor site.
+/// `tests/nobox/zero_leaf_child.rock` pins for the Lua ctor site.
 pub struct NoboxGlobalAccessorShape {
     pub ty_name: Ustr,
     pub paths: Vec<Ustr>,

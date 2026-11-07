@@ -4,7 +4,7 @@
 // so a process that calls setlocale would otherwise decode `1.5` as `1`,
 // silently, for every float in every document.
 //
-// Sibling coverage: tests/json_number_exact.rock asserts decoded == the host
+// Sibling coverage: tests/json/number_exact.rock asserts decoded == the host
 // parser on the same literal; this file asserts that equality survives a
 // hostile locale.
 

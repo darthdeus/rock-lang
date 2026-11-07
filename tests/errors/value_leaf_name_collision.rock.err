@@ -12,7 +12,7 @@
 //!        sibling-param case entirely (the struct is clean there) and rejects
 //!        programs whose ambiguous shape never reaches a named param list, which
 //!        is legal and computes correctly. That accepted shape is pinned as a
-//!        positive test in tests/scalar_abi_leaf_name_ambiguity.rock; the
+//!        positive test in tests/values/scalar_abi_leaf_name_ambiguity.rock; the
 //!        non-colliding emit control is in rock-lang/crates/skull/tests/value_scalarize.rs.
 //! Tags: skull, codegen, scalar-abi, value-struct, emit-time
 

@@ -1487,7 +1487,7 @@ fn emits_interpolation_as_flat_concat() {
 // Enum match execution is covered end-to-end where the program-level enum
 // scaffolding (`<Enum>_ct` ctors, `ffi.cdef` typedefs) is emitted: the `skull`
 // umbrella crate (`enum_cdata`/`enum_scalarize`/`enum_payload_sroa`) and the
-// Rock suite (`tests/enum_tests.rock`). The per-function `run` harness here
+// Rock suite (`tests/patterns/enums.rock`). The per-function `run` harness here
 // can't emit that scaffolding (it would need a dep on `skull`), so it can't
 // execute a scalarized-enum match; per-function match shape is pinned by
 // skull-mir's `match_enum_*` lowering tests.

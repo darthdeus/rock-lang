@@ -582,7 +582,7 @@ impl Builder<'_> {
             // route the cdata-eligible enum takes inside `lower_enum_variant`.
             // Lowering the payload args directly instead packs each one on its
             // own, which boxes a `nobox` payload the enum would have stored
-            // splat (`tests/nobox_enum_payload_container.rock`).
+            // splat (`tests/nobox/enum_payload_container.rock`).
             Expr::EnumVariant { enum_name, .. }
                 if EnumPlan::for_name(self.ws, enum_name)
                     .is_some_and(|plan| plan.flat().is_some()) =>
@@ -1185,7 +1185,7 @@ impl Builder<'_> {
             //
             // A call returning a REFERENCE struct IS storage -- it hands back the
             // shared table, so the write is real. `o.next.unwrap().value = v` is
-            // the live shape (`tests/lambda_stress_tests.rock`).
+            // the live shape (`tests/closures/lambda_stress.rock`).
             Expr::Call { .. } | Expr::SafeNavCall { .. } if self.expr_is_value_struct(e) => {
                 Err(CompilerError::new_with_label(
                     self.body.expr_spans[e],

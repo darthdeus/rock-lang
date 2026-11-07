@@ -3,7 +3,7 @@
 //! side-effect rule: an UNUSED Vec/NativeBuffer index read is emitted as a
 //! statement (its bounds check throws), never dropped as a pure value -- so
 //! `try_call(|| { let _ = xs[oob] })` reports the OOB error luajit raises.
-//! `tests/js_try_call.rock` cross-checks against luajit.
+//! `tests/library/js_try_call.rock` cross-checks against luajit.
 
 use crate::common::ws_with;
 use skull_mir::mir::FuncRef;

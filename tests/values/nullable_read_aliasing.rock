@@ -4,9 +4,9 @@
 // observable: a `V?` read out of a mutable place copies its leaves when the
 // value is present and stays null when it is absent.
 //
-// Sibling coverage: tests/value_semantics_decision_points.rock pins the place
+// Sibling coverage: tests/values/semantics_decision_points.rock pins the place
 // model itself; this file pins the copy invariant that model depends on, and
-// tests/value_nullable_place_read_copies.rock pins the other place roots
+// tests/values/nullable_place_read_copies.rock pins the other place roots
 // (param, global, element, map value, safe-nav) plus the absent case.
 
 value Pt { x: int, y: int }

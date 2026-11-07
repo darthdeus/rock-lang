@@ -2,7 +2,7 @@
 //! key(a) < key(b))` maps to the `__vec_sort` runtime: sort the logical
 //! `0..len` slice in place (0-based hole-free `_data`), key_fn through
 //! `__rock_call`. The node-executed checks are the correctness oracle;
-//! `tests/js_sort.rock` cross-checks against luajit (tie order is unspecified,
+//! `tests/vectors/js_sort.rock` cross-checks against luajit (tie order is unspecified,
 //! so only order-invariant properties are asserted).
 
 use crate::common::ws_with;

@@ -8,7 +8,7 @@
 //!
 //! The behavioural halves live elsewhere, one per side of the admission:
 //! `tests/errors/non_overloadable_operator_def.rock.err` asserts each
-//! non-overloadable symbol REJECTS, and `tests/overloadable_operators.rock`
+//! non-overloadable symbol REJECTS, and `tests/operators/overloadable.rock`
 //! asserts each overloadable one actually DISPATCHES to the user fn.
 
 use bone_core::hir::{OPERATOR_FNS, UNARY_OPERATOR_FNS, operator_entry, unary_operator_entry};

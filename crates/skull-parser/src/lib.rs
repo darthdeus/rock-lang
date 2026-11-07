@@ -770,7 +770,7 @@ mod tests {
         // A string literal inside the hole is opaque: its brackets must not move
         // the bracket-depth counter and its `:` must not trigger the spec split.
         // Regression guard -- a naive char-level depth counter miscounts `(`/`[`
-        // inside inner strings (broke tests/strings_characterization split cases).
+        // inside inner strings (broke tests/strings/characterization split cases).
         assert_eq!(
             body_sexp(r#"fn f() { let x = "{join("a[b]c".split("["), "|")}" }"#),
             r#"(block (let x () "(call join (call (. "a[b]c" split) "[") "|")"))"#,

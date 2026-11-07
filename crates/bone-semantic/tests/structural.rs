@@ -2252,7 +2252,7 @@ fn multiply(x: Number?, y: int) -> int { x * y }
 /// bone-inference): `two(T, int)` and `two(int, T)` each pay one bare-hole
 /// slot against `(int, int)`, so neither wins -- the bare-`T`-catch-all-vs-
 /// concrete case (`pick(int)` + `pick<T>(T)`) now resolves to the concrete
-/// overload (pinned as a positive test in `tests/overload_genericity_cost`).
+/// overload (pinned as a positive test in `tests/functions/overload_genericity_cost`).
 #[test]
 fn ambiguous_overload_error_lists_tied_candidates() {
     let src = r#"

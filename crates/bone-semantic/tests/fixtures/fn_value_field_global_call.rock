@@ -9,7 +9,7 @@
 //!   - `global_func()` resolves the ident to `Expr::Global` (not
 //!     `Expr::Var`), so the `Callee::Local` value-call path is skipped and
 //!     it falls to name resolution. Fix: a global of fn type is callable.
-//! Verified vs rock (tests/function_field_call.rock, function_shadowing_bug.rock).
+//! Verified vs rock (tests/closures/function_field_call.rock, shadowing/function_name.rock).
 
 //- fn_typed_field_call
 struct Holder { func: fn() -> int, with_args: fn(int, int) -> int }

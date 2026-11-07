@@ -8,7 +8,7 @@
 //! `item` is stored and never indexed, so a pushed COLUMN vec is not a layout
 //! violation. There is no TYPE that says this: retyping `item` to `any`/`any?`
 //! drops the inference edge that gives `vec_new()` its element -- measured,
-//! `tests/coroutines.rock` loses `Coroutine<..>` and fails at `resume()`. Hence
+//! `tests/coroutines/basics.rock` loses `Coroutine<..>` and fails at `resume()`. Hence
 //! a contract carried beside the type rather than in it.
 //!
 //! Scope: it waives ONE parameter of ONE rule. It is not a nobox escape, it does

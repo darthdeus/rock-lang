@@ -7,7 +7,7 @@
 //! control key, and it is injective over paths (`a__b` is not -- `embed a: X`
 //! with field `b` and a plain field `a_b` both encode to it).
 //!
-//! Behavioral coverage is `tests/embed_projection.rock`; this file pins the
+//! Behavioral coverage is `tests/values/embed_projection.rock`; this file pins the
 //! LAYOUT that makes the feature real, mirroring `tuple_scalarize.rs`.
 
 use crate::common::{emit_module, function_body};

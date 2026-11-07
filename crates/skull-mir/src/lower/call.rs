@@ -524,7 +524,7 @@ impl Builder<'_> {
         // Keyed on the RESOLVED callee, never the spelling: a user fn named
         // `cast` returning a nobox value is a different function, and threading
         // its argument through would delete the call and emit a leaf read of
-        // whatever was passed in (pinned by tests/nobox_cast_identity.rock).
+        // whatever was passed in (pinned by tests/nobox/cast_identity.rock).
         if let Callee::Unresolved { name, .. } = callee {
             if name.as_str() == "cast" && self.nobox_value_name(e).is_some() {
                 if let [inner] = arg_idxs[..] {

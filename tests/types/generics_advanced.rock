@@ -1,6 +1,6 @@
 // Advanced generic inference tests migrated from rock/tests/generic_tests.rs
 // Tests complex generic inference, nullable generics, type inference validation, and edge cases
-// This covers the advanced tests not included in generics_comprehensive.rock
+// This covers the advanced tests not included in types/generics_comprehensive.rock
 
 // ============================================
 // Core Generic Function Definitions

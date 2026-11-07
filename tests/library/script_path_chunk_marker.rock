@@ -9,7 +9,7 @@
 // "watched script ire/src/main.rs:283:9 not found".
 //
 // This redeclares the pure strip logic (tests/ can't reach stone engine)
-// the same way fkey_keycode_string_test.rock guards sdl_keycode_to_string.
+// the same way strings/fkey_keycode_string.rock guards sdl_keycode_to_string.
 
 fn strip_lua_chunk_marker(source: string) -> string {
     // Lua chunk names: "@file" => file load, "=text" => verbatim source.

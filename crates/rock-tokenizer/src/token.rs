@@ -259,7 +259,7 @@ impl TokenKind {
             // shifts and the comparisons, and under `+`/`-` -- so `a + b % c`
             // was `(a + b) % c`, `a % b * c` was `a % (b * c)`, and `a % b < c`
             // was `a % (b < c)`, which the typechecker rejected outright.
-            // Pinned by `tests/mod_precedence.rock`.
+            // Pinned by `tests/operators/mod_precedence.rock`.
             Mul | Div | IntDiv | Mod => left(35),
 
             Dot | Colon => left(51),

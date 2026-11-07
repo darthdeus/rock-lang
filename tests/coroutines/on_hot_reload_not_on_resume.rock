@@ -4,7 +4,7 @@
 // so the hook ran on every resume -- in mag this cleared a mob's attack
 // flag each frame and respawned the swing coroutine endlessly. rock was
 // the oracle (correct). Sibling: on_killed coverage in
-// phase9_yield_star_kill.rock.
+// yield_star_kill.rock.
 
 global HR_LOG: [string] = []
 

@@ -1,7 +1,7 @@
 //! Or-patterns `A | B | C` at the top of a match arm. Each alternative is
 //! checked against the scrutinee type; the arm body type is the match result.
 //! v1: alternatives may NOT bind variables (rock rejects with an explicit
-//! error). Verified vs rock (tests/or_patterns.rock).
+//! error). Verified vs rock (tests/patterns/or_patterns.rock).
 
 // Unit-variant alternation. The multi-line `match` must type-check; `r` is bool.
 //- or_unit_variants

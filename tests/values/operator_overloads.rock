@@ -7,7 +7,7 @@
 //
 // NOTE: the *triple* direct chain `a + b + c` is a separate
 // pre-existing live operator-inliner bug — see
-// tests/operator_chain_sentinel.rock. The let-broken form
+// tests/operators/overload_chaining.rock. The let-broken form
 // (`let t = a + b; t + c`) is correct and exercised here.
 
 value V2 { x: int, y: int }

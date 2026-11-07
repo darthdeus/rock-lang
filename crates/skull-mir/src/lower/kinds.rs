@@ -284,7 +284,7 @@ impl Builder<'_> {
     ///   `let v = vec_new()` whose element is never used), which the instance
     ///   graph already records as `RejectionKind::UnconstrainedTypeVar` with a
     ///   span. Emission still runs the pre-mono path, so making it fatal HERE
-    ///   would reject `tests/vec_sort_test.rock` and `tests/enumerate_tests.rock`
+    ///   would reject `tests/vectors/sort.rock` and `tests/iterators/enumerate.rock`
     ///   ahead of the cutover -- measured, both fail to emit. The rejection lands
     ///   with Stage 3, in one place, not twice on two schedules.
     /// - A missing `BodyInference`, or an expression bone typed nothing for ->

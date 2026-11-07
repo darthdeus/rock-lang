@@ -6,7 +6,7 @@
 // it carries `@repr(opaque)`. Without that contract a pushed COLUMN vec read as
 // a layout violation (`[[Vec2]]` -- mag's `hand_l` and `path`). It keeps the
 // type `T` because that is the inference edge giving `vec_new()` its element;
-// `any`/`any?` compiles here and breaks `tests/coroutines.rock`.
+// `any`/`any?` compiles here and breaks `tests/coroutines/basics.rock`.
 //
 // Both backends: the payload case is where Lua and JS diverged, because Lua
 // intercepts `push` and JS did not specialize it.

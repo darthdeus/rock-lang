@@ -267,7 +267,7 @@ fn main() { let x = scalar_bank(1.0) }
 ///
 /// Both properties are one shape: every argument is evaluated, in order, into
 /// reserved temps BEFORE any lane is written. The effects half is executed in
-/// `tests/js_nobox_return_abi.rock`; the throw half is a shape assertion,
+/// `tests/nobox/js_return_abi.rock`; the throw half is a shape assertion,
 /// because a caller cannot observe an unwritten lane without reading the bank,
 /// which hand-written JS may not do.
 #[test]

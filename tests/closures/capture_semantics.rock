@@ -2,7 +2,7 @@
 //
 // Most cases PASS today (semantics preserved across the mechanism swap). The one
 // SENTINEL encodes today's goto-shaped-loop final-value bug and must be flipped
-// when P2.6 lands per-iteration loop-binding capture. See closure_loop_capture.rock
+// when P2.6 lands per-iteration loop-binding capture. See closures/loop_capture.rock
 // for the fresh-binding (`let a = i`) per-iteration case; here we capture the loop
 // var DIRECTLY, which is what distinguishes the loop shapes.
 

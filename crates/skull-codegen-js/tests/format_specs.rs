@@ -2,7 +2,7 @@
 //! (__rock_fmt_pad/_grouping/_binary/_percent) plus the `Format`/`FormatDyn` MIR
 //! nodes (`string.format(spec, value)`) lowered through the single-value C printf
 //! port `__rock_sprintf`. The node-executed checks are the correctness oracle
-//! (byte-match incl. round-half-to-even); `tests/js_format_specs.rock`
+//! (byte-match incl. round-half-to-even); `tests/strings/js_format_specs.rock`
 //! cross-checks against luajit.
 
 use crate::common::ws_with;

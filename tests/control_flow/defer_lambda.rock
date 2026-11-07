@@ -4,7 +4,7 @@
 // lambda's own defers. Pre-fix the shared `defers` stack leaked the enclosing
 // defer into every lambda call (miscompile) and, when the defer body created
 // the lambda, recursed forever during lowering (compiler stack overflow).
-// Co-fn variants live in closure_capture_semantics_cofn.rock.
+// Co-fn variants live in closures/capture_semantics_cofn.rock.
 
 global R1: int = 0
 

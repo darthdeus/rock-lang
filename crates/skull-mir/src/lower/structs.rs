@@ -355,7 +355,7 @@ impl Builder<'_> {
     /// (wider than the ABI cut, or an opaque fn-value call), or a `let` of a
     /// ctor that SROA did not scalarize. That box may be shared with the caller,
     /// callee or closure it came from, so a whole-value use must copy it
-    /// (tests/value_boxed_whole_use_copies.rock, tests/value_alias_escape_paths.rock).
+    /// (tests/values/boxed_whole_use_copies.rock, tests/values/alias_escape_paths.rock).
     pub(crate) fn boxed_value_local(&self, b: Idx<BindingInfo>, e: Idx<Expr>) -> Option<Ustr> {
         if self.scx.values_first_class
             || !self.binds.contains_key(&raw(b))

@@ -2,7 +2,7 @@
 //! (empty collection) used to bind an infer var to itself in `unify`'s
 //! substitution map (no same-var guard), so `resolve` looped -> stack overflow.
 //! `unify` now no-ops when both sides resolve to the same infer var.
-//! (Minimal stdlib-free analogue of `tests/vec_sort_test.rock`'s empty-vec sort.)
+//! (Minimal stdlib-free analogue of `tests/vectors/sort.rock`'s empty-vec sort.)
 
 //- identity_lambda_unconstrained_elem
 fn mk<T>() -> [T] { [] }

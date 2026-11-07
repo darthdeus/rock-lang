@@ -2,7 +2,7 @@
 //! bone rejects `VariableBindingKind::Newtype` in let lowering. The value must
 //! be the named newtype; each inner binding takes the corresponding wrapped
 //! type (with generic subst from the value's type args). Verified vs rock
-//! (newtypes.rock).
+//! (newtypes/basics.rock).
 
 //- newtype_let_destructure
 newtype UserId(int)

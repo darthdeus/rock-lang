@@ -2,7 +2,7 @@
 //! backs Map.remove; the Vec drain ops now route through `__vec_data_unset`
 //! (`_data[i] = undefined` on the 0-based hole-free array). `__table_unset`
 //! dispatches on `instanceof Map` for the Map path. The node-executed checks are
-//! the correctness oracle; the corpus `tests/js_table_unset.rock` cross-checks
+//! the correctness oracle; the corpus `tests/maps/js_table_unset.rock` cross-checks
 //! against luajit.
 
 use crate::common::ws_with;

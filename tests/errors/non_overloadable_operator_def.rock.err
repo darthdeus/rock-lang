@@ -108,5 +108,5 @@ fn main() {}
 
 // The admitted side is NOT here: a rejection suite cannot express "accepted
 // and then actually dispatched", and acceptance alone would pass even if `+`
-// were silently ignored too. `tests/overloadable_operators.rock` covers all
+// were silently ignored too. `tests/operators/overloadable.rock` covers all
 // six overloadable symbols by asserting each returns its marker.

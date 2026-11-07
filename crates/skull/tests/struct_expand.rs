@@ -4,7 +4,7 @@
 //! `(field_name, E::V(u.field))` per struct field, declaration order, the variant
 //! chosen structurally by payload type. The positive control lives here (successful
 //! emit + emitted-Lua substrings); the runtime-value + ordering contract is
-//! `tests/pass_uniforms_expand.rock`; the spanned rejections are also pinned in
+//! `tests/annotations/pass_uniforms_expand.rock`; the spanned rejections are also pinned in
 //! `tests/errors/struct_expand.rock.err`.
 use crate::common::{emit_module, function_body, try_emit_module};
 

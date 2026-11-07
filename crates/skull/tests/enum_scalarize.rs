@@ -192,7 +192,7 @@ fn run_skull_test(src: &str, fn_name: &str) -> String {
 /// -- here passed directly to the generic `inspect(any)` -- loses its static type
 /// and renders as the bare ordinal int, NOT `<Enum>::<Variant>`. A `{x}` interp
 /// hole renders correctly (the static type is known at the hole; see
-/// `enum_payload_free_stringify.rock`); this `inspect`/`any`-escape path is the
+/// `strings/enum_payload_free_stringify.rock`); this `inspect`/`any`-escape path is the
 /// deferred box-on-escape-into-`any` work.
 ///
 /// This pins the CURRENT (wrong) behavior. When increment 4 lands, the output

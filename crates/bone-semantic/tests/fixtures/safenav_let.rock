@@ -3,7 +3,7 @@
 //! here) in the block scope, the block body is typed, and the result is wrapped
 //! back into a nullable. Mirrors the `?.field` peel/rewrap but with a block.
 //! bone drops it into the unsupported-expr catch-all. Bodies avoid operators
-//! (no stdlib in the fixture harness). Verified vs rock (safenav_tests.rock).
+//! (no stdlib in the fixture harness). Verified vs rock (nullable/safe_nav_cases.rock).
 
 // the block returns the unwrapped value directly: T? -> T -> T?
 //- safenav_let_identity

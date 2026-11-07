@@ -12,7 +12,7 @@
 //! disagree: it contributes exactly ONE leaf, keyed on the field's own name with
 //! nothing below it (`leaf_names_rec`), so no path is dotted and no path is a
 //! prefix of another. The same shape is pinned for the Lua ctor site by
-//! `tests/nobox_zero_leaf_child.rock`, where picking by punctuation was a live
+//! `tests/nobox/zero_leaf_child.rock`, where picking by punctuation was a live
 //! `attempt to call global 'Tagged_vt' (a nil value)`.
 //!
 //! Measuring it turned up two further shapes the punctuation rules got wrong,
@@ -35,7 +35,7 @@ use bone_semantic::inference::Workspace;
 use skull_mir::lower::{NoboxGlobalAccessorShape, ScalarCtx, nobox_global_accessor_shape};
 
 /// The parent must carry more than four leaves so it exceeds the column budget,
-/// exactly as `tests/nobox_zero_leaf_child.rock` explains: at four or fewer,
+/// exactly as `tests/nobox/zero_leaf_child.rock` explains: at four or fewer,
 /// column storage means no ctor is emitted and the choice is never made.
 const ZERO_LEAF_CHILD: &str = r#"
 nobox value Marker {}

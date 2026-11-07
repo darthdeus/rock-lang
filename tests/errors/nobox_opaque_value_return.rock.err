@@ -10,7 +10,7 @@
 //! `-> NV2` was the one uncovered position.
 //!
 //! The escape is `@scalar_abi` + returning the leaves, which the message names.
-//! Positive control (accepted, leaves returned): `tests/nobox_opaque_return.rock`.
+//! Positive control (accepted, leaves returned): `tests/nobox/opaque_return.rock`.
 
 //=== TEST CASE: nobox_bare_return_from_inline_lua ===
 nobox value NV2 { x: float, y: float }

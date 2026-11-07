@@ -1,6 +1,6 @@
 // A flat inner enum shares its tag and string payload slots with its parent.
 // The nested arm must read and bind the payload, not just inspect the tag.
-// Wider positions, named fields and suspension live in nested_flat_enum_pattern.rock.
+// Wider positions, named fields and suspension live in patterns/nested_flat_enum_pattern.rock.
 
 enum SentInner {
     Named(string),

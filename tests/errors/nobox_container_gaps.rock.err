@@ -13,27 +13,27 @@
 //!        enumerate / find / any / all / min_by / count, plus the whole lazy
 //!        combinator pipeline (map / filter / collect / reduce / zip / skip /
 //!        take / chains) -- positive coverage in
-//!        `tests/nobox_column_combinators.rock`. `[Vec2?]` stores a PRESENCE
+//!        `tests/nobox/column_combinators.rock`. `[Vec2?]` stores a PRESENCE
 //!        column beside the leaf columns and supports that same Vec surface
-//!        EXCEPT the five iterator terminals (`tests/nobox_nullable_column.rock`).
+//!        EXCEPT the five iterator terminals (`tests/nobox/nullable_column.rock`).
 //!        The whole lazy-combinator surface over a NULLABLE column works too --
 //!        fifteen shapes asserted as values in
-//!        `tests/nobox_nullable_column_combinators.rock`, including `zip`'s
+//!        `tests/nobox/nullable_column_combinators.rock`, including `zip`'s
 //!        tuple element. A TUPLE of nobox at a fn param works
-//!        (`tests/nobox_tuple_param.rock`), and so does a chained `?.` through
-//!        two presence levels (`tests/nobox_safe_nav.rock`). A NULLABLE tuple
+//!        (`tests/nobox/tuple_param.rock`), and so does a chained `?.` through
+//!        two presence levels (`tests/nobox/safe_nav.rock`). A NULLABLE tuple
 //!        carrying one -- `(Vec2, int)?`, from a declared return or from a `?.`
 //!        -- binds its wire and supports `== null` / slot projection / `if let`
 //!        (binding AND destructuring) / `??` / rebinding / forwarding, in
-//!        `tests/nobox_nullable_tuple.rock`; it crosses a fn PARAM in every
+//!        `tests/nobox/nullable_tuple.rock`; it crosses a fn PARAM in every
 //!        definition form and calling convention, in
-//!        `tests/nobox_nullable_tuple_param.rock`. `a.enumerate()` on
+//!        `tests/nobox/nullable_tuple_param.rock`. `a.enumerate()` on
 //!        a column vec works now that the eager `Vec<T>.enumerate` is deleted --
-//!        it coerces to the lazy one (`tests/nobox_column_combinators.rock`).
+//!        it coerces to the lazy one (`tests/nobox/column_combinators.rock`).
 //!        `Arena<Vec2>` supports insert / get / contains /
 //!        remove / len / clear / pairs / values / keys / enumerate. A REFERENCE
 //!        struct field holding a nobox whose own field is nobox splices its
-//!        nested leaves both ways (`tests/nobox_nested_ctor.rock`), which is
+//!        nested leaves both ways (`tests/nobox/nested_ctor.rock`), which is
 //!        what closed `?.` yielding one -- safe-nav was never the variable.
 //!
 //!        `inspect` and `to_lua_array` over a column `[Vec2]` also reject and
@@ -44,7 +44,7 @@
 //=== TEST CASE: whole_tuple_escape_of_a_nobox_Generic ===
 // NOT an unbuilt mechanism -- the guarantee firing, pinned so the boundary
 // cannot move unnoticed. A nullable tuple carrying a nobox element is bound and
-// used slot-wise (seventeen shapes in `tests/nobox_nullable_tuple.rock`), but
+// used slot-wise (seventeen shapes in `tests/nobox/nullable_tuple.rock`), but
 // interpolating the WHOLE tuple asks for one value with a runtime type, which is
 // a box by definition -- the same justified-box class as `inspect` over a column
 // vec. Project the slots instead (`t.0.x`), or `materialize` deliberately.

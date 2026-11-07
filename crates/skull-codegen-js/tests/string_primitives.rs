@@ -4,7 +4,7 @@
 //! algorithms (split / replace / trim ...) are pure Rock over them and co-emit.
 //! `find`'s omitted `from` param uses the declared default 0 at the call site.
 //! Node-executed checks are the correctness oracle;
-//! `tests/js_string_primitives.rock` cross-checks against luajit.
+//! `tests/strings/js_string_primitives.rock` cross-checks against luajit.
 
 use crate::common::ws_with;
 use skull_mir::mir::FuncRef;

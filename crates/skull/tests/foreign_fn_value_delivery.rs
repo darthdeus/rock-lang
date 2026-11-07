@@ -7,7 +7,7 @@
 //! call. There is nothing to splice into: the program stores the definition
 //! itself, under its own symbol.
 //!
-//! The end-to-end control is `tests/function_ref_cross_module.rock`, whose two
+//! The end-to-end control is `tests/closures/function_ref_cross_module.rock`, whose two
 //! `@test`s die on `attempt to call local 'r0' (a nil value)` when the
 //! definition is missing.
 

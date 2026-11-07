@@ -92,7 +92,7 @@ fn log_get_level() -> int { __rock_log_init(); return __rock_log_level }
 // log_once fires once per call site; subsequent calls from the same site
 // are silently dropped. log_throttled fires at most once per interval per
 // call site. The plain names are ERROR and ignore the level gate (tests/
-// log_once.rock: log_set_level(0) must still fire); log_warn_once and
+// library/log_once.rock: log_set_level(0) must still fire); log_warn_once and
 // log_warn_throttled are WARN and obey it. Pick by what the record means, not
 // by the dedup it needs.
 // Both use `__SITE__` (via macro shim) to derive a stable per-site key —

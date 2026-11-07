@@ -5,7 +5,7 @@
 //! (`Name { f: v }`, declaration field order) via an emit-time recursive renderer
 //! (its fields are bounded to primitives + nested value structs). An ENUM argument
 //! still REJECTS (the scalarized box cannot reproduce the named variant). Node
-//! execution is the correctness oracle; `tests/js_inspect.rock` cross-checks
+//! execution is the correctness oracle; `tests/strings/js_inspect.rock` cross-checks
 //! against luajit.
 
 use crate::common::ws_with;

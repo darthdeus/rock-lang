@@ -1,6 +1,6 @@
 //! A typed global with no initializer is allowed (rock: `global image: Image`).
 //! Its type comes from the annotation; there is no value expression to check.
-//! Verified vs rock (tests/type_system_tests.rock).
+//! Verified vs rock (tests/types/type_system.rock).
 
 //- uninit_typed_global
 struct Image { w: int, h: int }

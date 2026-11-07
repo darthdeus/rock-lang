@@ -1,5 +1,5 @@
 // A NULLABLE tuple return whose element is a `nobox` value: `-> (NV2, float)?`.
-// The plain tuple form is covered by `tests/nobox_tuple_return.rock`; the `?` is
+// The plain tuple form is covered by `tests/nobox/tuple_return.rock`; the `?` is
 // a separate wire, because a multi-value boundary must carry the null
 // discriminant alongside the splatted slots rather than boxing the whole tuple.
 // It leads: `present, <slots...>`, absent as `false, nil, ...` -- the same

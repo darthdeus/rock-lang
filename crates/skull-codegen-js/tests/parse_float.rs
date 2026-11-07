@@ -1,7 +1,7 @@
 //! parse_float emission (T8d). `string.parse_float` -> `__parse_float`, a strict
 //! whole-string numeric parse reproducing Lua `tonumber` (empty/whitespace ->
 //! null, non-numeric tail -> null, else the parsed double). The node-executed
-//! checks are the correctness oracle; `tests/js_parse_float.rock` cross-checks
+//! checks are the correctness oracle; `tests/strings/js_parse_float.rock` cross-checks
 //! against luajit.
 
 use crate::common::ws_with;

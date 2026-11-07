@@ -2,7 +2,7 @@
 // STAY killed: the yield stamp is guarded on `state >= 0` (same guard as the
 // completion stamp), so status() stays "dead", the post-yield body never runs,
 // and a resume after the kill is a no-op. The defer fires exactly once, at the
-// kill. Sibling coverage: tests/coroutine_defer_terminal.rock (external kill).
+// kill. Sibling coverage: tests/coroutines/defer_terminal.rock (external kill).
 
 global K_SELF: Coroutine<int>? = null
 global K_LOG: int = 0

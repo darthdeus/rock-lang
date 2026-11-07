@@ -5,8 +5,8 @@
 // write is silently lost (const case) or emits a ctor call in statement
 // position (non-const case, which does not even parse).
 //
-// Sibling coverage: tests/value_place_leaf_write.rock (container elements),
-// tests/value_whole_read_copies.rock (copy-on-read out of a place).
+// Sibling coverage: tests/values/place_leaf_write.rock (container elements),
+// tests/values/whole_read_copies.rock (copy-on-read out of a place).
 
 value Pt { x: int, y: int }
 value Inner { a: int }

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Regenerate tests/fixtures/json_conformance/manifest.txt from cases/.
 
-The manifest is the asserted denominator for tests/json_conformance.rock: the
+The manifest is the asserted denominator for tests/json/conformance.rock: the
 harness reads it rather than listing a directory, so a case file that vanishes
 is a failure instead of a silently smaller run.
 

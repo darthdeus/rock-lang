@@ -1,7 +1,7 @@
 //! deepcopy emission (T8d): `deepcopy` maps to the `__rock_deepcopy_value`
 //! runtime (`JS_DEEPCOPY_RUNTIME`) -- a `seen`-Map clone that preserves the
 //! object graph (shared refs copy once, cycles terminate). Node execution is the
-//! correctness oracle; `tests/js_deepcopy.rock` cross-checks against luajit.
+//! correctness oracle; `tests/library/js_deepcopy.rock` cross-checks against luajit.
 
 use crate::common::ws_with;
 use skull_mir::mir::FuncRef;

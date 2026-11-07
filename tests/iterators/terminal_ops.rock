@@ -1,5 +1,5 @@
 // Iterator terminal ops: collect/reduce/find/any/all over `I: Iterator<T>`.
-// Complements tests/iterator_combinators.rock (the intermediate ops); together
+// Complements tests/iterators/combinators.rock (the intermediate ops); together
 // they cover the full lazy-iterator replacement for the deleted eager
 // vec/Arena functional methods.
 

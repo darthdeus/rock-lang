@@ -20,8 +20,8 @@
 //! while this was a sentinel: a nullable marked local with NO merge, a
 //! statement-position `return null`, and `materialize` on a non-nullable marked
 //! value. The concrete-shape premises this belongs to are in
-//! `tests/nobox_concrete_nullable_ops.rock`; the positive value coverage is
-//! `tests/nobox_nullable_merge.rock`.
+//! `tests/nobox/concrete_nullable_ops.rock`; the positive value coverage is
+//! `tests/nobox/nullable_merge.rock`.
 
 /// The reported repro, `materialize` and all.
 const PHI_WITH_MATERIALIZE: &str = r#"

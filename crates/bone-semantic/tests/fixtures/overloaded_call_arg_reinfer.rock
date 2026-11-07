@@ -9,7 +9,7 @@
 //! Real rock accepts all of these (no such guard; an arg may be visited in
 //! synth then check). Fix is bone's call: infer args once, OR relax the guard
 //! to accept a unify-compatible re-assign. See the canonical real-suite files
-//! (implicit_return_bug.rock etc.) which hit this through `assert(x != null, ..)`.
+//! (control_flow/implicit_return.rock etc.) which hit this through `assert(x != null, ..)`.
 
 // canonical: overloaded callee + a `null` comparison in argument position.
 //- overloaded_arg_null_compare

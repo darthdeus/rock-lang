@@ -1,7 +1,7 @@
 //! `put` emission (T8d): the test-local `@intrinsic @inline inline(lua) fn put(s: string) =
 //! "io.write(s)"` idiom maps to a `put($1)` call the harness routes into the same
 //! per-test output buffer as `print` -- raw, no trailing newline. Node execution
-//! is the correctness oracle; `tests/js_put.rock` cross-checks against luajit.
+//! is the correctness oracle; `tests/library/js_put.rock` cross-checks against luajit.
 
 use crate::common::ws_with;
 use skull_mir::mir::FuncRef;

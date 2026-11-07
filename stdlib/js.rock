@@ -311,7 +311,7 @@ inline(js) fn ffi_string(ptr: any, len: int?) -> string = """
 // slots and "__proto__" re-points the prototype instead of storing.) A native
 // Map has none of these problems, and it is what `__map_next` already walks --
 // which is what makes a column Map ITERABLE here rather than a rejection.
-// Pinned by tests/map_prototype_keys.rock and tests/nobox_map_value.rock.
+// Pinned by tests/maps/prototype_keys.rock and tests/nobox/map_value.rock.
 //
 // The luajit sibling keeps a plain table, whose keys are already typed. Only the
 // spelling differs; the structure (`spine` of key -> slot, column `data`, a

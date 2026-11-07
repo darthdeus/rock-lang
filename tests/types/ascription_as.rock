@@ -1,5 +1,5 @@
 // `as` conversions and `::` ascriptions that are ordinary identity/compatible
-// pairs. The checked semantics of each form live in tests/checked_ascription.rock
+// pairs. The checked semantics of each form live in tests/types/checked_ascription.rock
 // and tests/errors/checked_{ascription,cast}.rock.err.
 
 @test(output = "42\n3.14\nhello")

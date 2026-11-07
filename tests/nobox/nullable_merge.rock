@@ -9,12 +9,12 @@
 // `present_*`.
 //
 // The three conjuncts the defect needs are controlled in
-// `tests/nobox_concrete_nullable_ops.rock` (statement-position returns, a merge
+// `tests/nobox/concrete_nullable_ops.rock` (statement-position returns, a merge
 // of two present arms, and the same merge unmarked). This file is the positive
 // form of the shape those controls bound, so it does not repeat them.
 //
 // Values on BOTH sides of the null, per the convention in
-// `tests/nobox_nullable_column.rock`: a presence answer that is right for the
+// `tests/nobox/nullable_column.rock`: a presence answer that is right for the
 // wrong reason is exactly what a constant presence looks like.
 
 nobox value P { x: int, y: int }

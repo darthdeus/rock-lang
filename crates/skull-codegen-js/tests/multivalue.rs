@@ -49,7 +49,7 @@ fn tuple_return_uses_scratch_slots() {
 // A closure capturing an iteration-local `let` copy snapshots THAT iteration's
 // value into a fresh env record built inside the loop body (`convert_closures`
 // classifies the copy as a by-value capture). Per-iteration correctness is pinned
-// behaviorally in tests/js_multivalue.rock on both backends.
+// behaviorally in tests/functions/js_multivalue.rock on both backends.
 #[test]
 fn loop_capture_snapshots_per_iteration() {
     let ws = ws_with(
@@ -70,7 +70,7 @@ fn loop_capture_snapshots_per_iteration() {
 // closure-conversion pass classifies the counter as a per-iteration by-value
 // capture (the fresh record each iteration snapshots the counter's value),
 // where the deleted T7 path rejected it as out of subset. Per-iteration
-// correctness is pinned in tests/closure_capture_semantics.rock on both backends.
+// correctness is pinned in tests/closures/capture_semantics.rock on both backends.
 #[test]
 fn loop_counter_capture_now_emits() {
     let ws = ws_with(

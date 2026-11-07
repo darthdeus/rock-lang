@@ -8,7 +8,7 @@
 //! discriminate the via-`s` collapse (body reads THROUGH the s-field) from a
 //! by-value loop-binding snapshot (body reads its own env field, never via `s`).
 //! The exact per-iteration/param VALUES are pinned on luajit by
-//! tests/closure_capture_semantics_cofn.rock; here we pin the emit SHAPE.
+//! tests/closures/capture_semantics_cofn.rock; here we pin the emit SHAPE.
 use crate::common::{emit_module, function_body, mangled_name};
 
 /// Scan for `needle` followed by one-or-more ASCII digits followed by `tail`

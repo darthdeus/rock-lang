@@ -3,7 +3,7 @@
 //! neighbours alone. Each program's oracle is the value read back through the
 //! `ref` after the write, compared with the container and with values read
 //! before it. The behavior matrix that also runs on C is
-//! `tests/flat_element_ref.rock`.
+//! `tests/values/flat_element_ref.rock`.
 
 use crate::common::{require_luajit, run_luajit, try_emit_module};
 

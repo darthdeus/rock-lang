@@ -1,4 +1,4 @@
-// Comprehensive shadowing tests - covers advanced scenarios not in shadowing_basic.rock
+// Comprehensive shadowing tests - covers advanced scenarios not in shadowing/basic.rock
 // Migrated from rock/tests/type_system_tests.rs shadowing_tests module
 // Tests loop shadowing, type shadowing, closure captures, arrays, and deep nesting
 

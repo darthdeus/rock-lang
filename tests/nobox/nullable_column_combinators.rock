@@ -1,5 +1,5 @@
 // The combinator + terminal surface over a NULLABLE column `[Vec2?]`, the twin
-// of `nobox_column_combinators.rock`,
+// of `nobox/column_combinators.rock`,
 // step 5: the element destination is split into {presence cell, leaf cells} at
 // the point the shape is known, so a presence-carrying element crosses the
 // placeholder splice without ever being repacked into a box.

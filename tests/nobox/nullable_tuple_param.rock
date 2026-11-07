@@ -2,7 +2,7 @@
 //
 // Was `nullable_tuple_of_a_nobox_at_a_PARAM_Generic` in
 // `nobox_container_gaps.rock.err`. The RETURN side already put a presence bool
-// ahead of the slots (`tests/nobox_nullable_tuple.rock`); the param side spelled
+// ahead of the slots (`tests/nobox/nullable_tuple.rock`); the param side spelled
 // the same wire but `tuple_param_slot` only admitted a bare `TypeExpr::Tuple`,
 // so a `(NV, int)?` param fell to `Opaque` and the argument packed to fill it.
 //

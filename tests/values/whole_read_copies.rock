@@ -8,7 +8,7 @@
 //
 // Every owner is built through a ctor call on purpose, which keeps this file
 // on the whole-value-read path; the leaf-write-through-a-scalarized-local path
-// is tests/value_field_write_scalarized_local.rock.
+// is tests/values/field_write_scalarized_local.rock.
 
 value Pt { x: int, y: int }            // C-mappable -> FFI-clean (cdata) tier
 value GcH { xs: [int], n: int }        // `xs` is not C-mappable -> GC (table) tier

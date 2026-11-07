@@ -5,7 +5,7 @@
 // returns a `V?` whose presence is the SPINE, so the absent arm has nil leaves;
 // any consumer that packs that Group into a `<V>_ct` cdata before asking the
 // null question converts a nil leaf and faults. The `nobox` twins in
-// `tests/nobox_map_value.rock` cannot see this: the mark routes `== null`
+// `tests/nobox/map_value.rock` cannot see this: the mark routes `== null`
 // through the presence-aware arm, so they never reach the packing consumer.
 
 value GetCell { a: int, b: int }

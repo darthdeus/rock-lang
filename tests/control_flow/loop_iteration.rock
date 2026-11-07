@@ -1,5 +1,5 @@
 // Loop iteration tests - migrated from rock/tests/loop_tests.rs
-// Tests for-in loop iteration, type assertions, and edge cases not covered in loops_comprehensive.rock
+// Tests for-in loop iteration, type assertions, and edge cases not covered in control_flow/loops_comprehensive.rock
 
 // NOTE: Rock's loop expression doesn't support assignment from loop
 // This behavior differs from Rust where loops can return values
@@ -55,7 +55,7 @@ fn continue_preserves_loop_variables() {
 }
 
 // Type assertion tests for iteration
-// Note: Basic vec, map, and array iteration type checks are in loops_comprehensive.rock
+// Note: Basic vec, map, and array iteration type checks are in control_flow/loops_comprehensive.rock
 
 @test(output = "6\n3")
 fn test_vec_tuple_iteration_with_indices() {
@@ -77,7 +77,7 @@ fn test_vec_tuple_iteration_with_indices() {
     print(index_sum)
 }
 
-// Arena iteration type checking - addresses TODO in loops_comprehensive.rock
+// Arena iteration type checking - addresses TODO in control_flow/loops_comprehensive.rock
 @test(output = "60", type_holes = [[0, "int"]])
 fn test_arena_tuple_iteration_type_check() {
     let arena = arena_new()
@@ -95,7 +95,7 @@ fn test_arena_tuple_iteration_type_check() {
     print(sum)
 }
 
-// Map and array iteration type checks are in loops_comprehensive.rock
+// Map and array iteration type checks are in control_flow/loops_comprehensive.rock
 
 // NOTE: These tests verify compile-time behavior and can't be directly migrated
 // They would need to be kept as Rust tests:

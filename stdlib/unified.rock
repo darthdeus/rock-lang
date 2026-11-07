@@ -383,8 +383,8 @@ fn metric_recent(m: Metric, i: int) -> float {
 // stored contiguously as `T` cdata (AoS); a whole-value `buf[i]` read copies the
 // element out, `buf[i].x` reads the slot live, `buf[i].x = v` writes through it,
 // and `buf[i] = v` copies the struct field-wise. See
-// tests/native_buffer_value.rock, tests/value_element_read_copy.rock,
-// tests/value_place_leaf_write.rock and FlatVec<T> below.
+// tests/native_buffers/value.rock, tests/values/element_read_copy.rock,
+// tests/values/place_leaf_write.rock and FlatVec<T> below.
 
 // ============================================================================
 // FlatVec<T> — growable flat storage for FFI-clean value structs
@@ -1754,7 +1754,7 @@ fn expect<T>(value: T?, message: string) -> T {
 @intrinsic @pure @inline inline(lua) fn int_to_float(value: int) -> float = "return value"
 @intrinsic @pure @inline inline(lua) fn to_float(value: int) -> float = "return value"
 
-// `float_to_int` is taken as a fn VALUE (tests/function_ref_cross_module), so
+// `float_to_int` is taken as a fn VALUE (tests/closures/function_ref_cross_module), so
 // it needs a real bound JS fn, not a call-site template: an inline(js) sibling
 // of the inline(lua) body. bone collapses the same-name backend pair to one
 // logical fn in the value path, so the reference / call binds the right variant.
@@ -3103,7 +3103,7 @@ fn Map<K, V>.insert(map, key: K, value: V) {
 // The spine is a key -> slot dictionary, and a map key is DATA: it must never
 // collide with a name the host object model already defines. A Lua table
 // inherits nothing, so this is a bare table; the JS sibling needs a
-// null-prototype object (stdlib/js.rock). Pinned by tests/map_prototype_keys.rock.
+// null-prototype object (stdlib/js.rock). Pinned by tests/maps/prototype_keys.rock.
 @nomangle inline(lua) fn __map_col_new_spine() -> any = """
     return {}
 """
@@ -3977,7 +3977,7 @@ fn Envelope.step_by(e, goal: float, step_dt: float) -> float {
 // The C parser reads LC_NUMERIC and JSON's decimal separator is always `.`, so
 // a `de_DE` process would otherwise decode `1.5` as `1` -- silently, for every
 // float in every document. `strtod_l` against a locale pinned to "C" is immune.
-// Gate: tests/json_number_locale.rock.
+// Gate: tests/json/number_locale.rock.
 // The setup lives in its own function on purpose. Building the closures inline
 // here puts an UCLO bytecode in the hot path, which luajit cannot record: with
 // the setup in this body the decode ran 70% INTERPRETED and canada went to

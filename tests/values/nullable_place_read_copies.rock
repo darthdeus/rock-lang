@@ -1,6 +1,6 @@
 // A `V?` whole-value read out of a mutable place copies its leaves when the
 // value is present and stays null when it is absent -- at every place root, not
-// just the struct field pinned by tests/value_nullable_read_aliasing.rock.
+// just the struct field pinned by tests/values/nullable_read_aliasing.rock.
 // The absent cases are load-bearing: an absent value has no leaves, so an
 // unconditional split would index nil.
 

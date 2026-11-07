@@ -175,7 +175,7 @@ fn the_chain_works_through_a_let() -> int {
 // `?.` yielding a nobox whose own field is nobox. Safe-nav was never the
 // variable here: the same shape rejected with no `?.` anywhere, because a
 // reference struct field splices its nobox child's leaves and the nested value
-// was falling to one boxed leaf. Storage coverage: `tests/nobox_nested_ctor.rock`.
+// was falling to one boxed leaf. Storage coverage: `tests/nobox/nested_ctor.rock`.
 nobox value SNN { x: int, y: int }
 nobox value SNMid { v: SNN }
 struct SNOuter { m: SNMid }

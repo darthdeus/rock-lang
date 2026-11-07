@@ -1,7 +1,7 @@
 // A flat inner enum shares its tag and payload slots with its parent, so the
 // nested arm must read those slots directly. This fixture mixes scalar and
 // struct payload variants; the string-payload and wider-position shapes live in
-// nested_flat_enum_string_payload.rock and nested_flat_enum_pattern.rock.
+// values/nested_flat_enum_string_payload.rock and patterns/nested_flat_enum_pattern.rock.
 
 nobox value MixedPatternPlace { space: int, x: int, y: int }
 struct MixedPatternSpec { name: string }

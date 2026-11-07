@@ -2,7 +2,7 @@
 //! `tuple[1]`/`[2]` -> the 0-based JS array `[0]`/`[1]`), __range (materialized
 //! `a..b` -> a Vec-shaped runtime object). Node-executed checks are the
 //! correctness
-//! oracle; `tests/js_misc_intrinsics.rock` cross-checks against luajit.
+//! oracle; `tests/intrinsics/js_misc_intrinsics.rock` cross-checks against luajit.
 
 use crate::common::ws_with;
 use skull_mir::mir::FuncRef;

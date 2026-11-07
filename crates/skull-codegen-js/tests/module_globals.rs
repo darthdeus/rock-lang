@@ -3,7 +3,7 @@
 //! write -> `__G.<name> = ...`), with each global's initializer emitted once at
 //! load in transitive-dependency order; a top-level fn referenced as a VALUE
 //! (`Inst::Global` naming a function) co-emits and renders as its JS name. Node
-//! execution is the correctness oracle; `tests/js_module_globals.rock`
+//! execution is the correctness oracle; `tests/functions/js_module_globals.rock`
 //! cross-checks against luajit.
 
 use crate::common::ws_with;

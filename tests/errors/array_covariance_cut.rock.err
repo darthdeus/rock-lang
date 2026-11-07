@@ -3,7 +3,7 @@
 //!        through the covariant array arm, which is gone. The only production
 //!        reliance was struct-spread numeric promotion, deliberately dropped.
 //!        Array literals still check element-wise and type-var inference still
-//!        flows through arrays (see tests/invariant_nested_generic_inference.rock).
+//!        flows through arrays (see tests/types/invariant_nested_generic_inference.rock).
 //! Tags: arrays, covariance
 
 //=== TEST CASE: array_int_to_float_rejected_MismatchedType ===

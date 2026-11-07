@@ -8,8 +8,8 @@
 // Each test stores a whole value into a place, writes a leaf through that place,
 // and reads the value back through every other name for it.
 //
-// Sibling coverage: tests/value_whole_read_copies.rock (copy-on-read out of a
-// place), tests/value_semantics_decision_points.rock (capture by cell).
+// Sibling coverage: tests/values/whole_read_copies.rock (copy-on-read out of a
+// place), tests/values/semantics_decision_points.rock (capture by cell).
 
 value Wide {
     f0: int,

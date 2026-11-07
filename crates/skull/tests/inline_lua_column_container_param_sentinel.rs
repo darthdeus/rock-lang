@@ -25,7 +25,7 @@
 //! param spelled `[T]` states that the body expects the vec representation; a
 //! param spelled `any` claims no representation at all, and the
 //! column-introspection probes that read `v["@vec"]` deliberately take `any`
-//! (`tests/vec_column_stdlib_surface.rock`, `tests/nobox_nullable_column.rock`).
+//! (`tests/vectors/column_stdlib_surface.rock`, `tests/nobox/nullable_column.rock`).
 //! Keying on the argument instead rejects the bodies that handle columns
 //! CORRECTLY -- measured: it turned three passing files red.
 //!

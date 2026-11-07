@@ -2,7 +2,7 @@
 //!        rendering, so a composite carrying one is rejected rather than
 //!        silently formatted without it. Width / alignment / fill DO apply
 //!        to a composite (they pad the rendering) -- see
-//!        tests/format_specifier_adversarial.rock.
+//!        tests/strings/format_specifier_adversarial.rock.
 //! Tags: interpolation, format-specifier, composite
 
 //=== TEST CASE: composite_explicit_sign_Rejected ===

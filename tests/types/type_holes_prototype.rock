@@ -6,7 +6,7 @@
 // @test(type_holes = [[hole_id, "expected_type"], ...])
 
 // The basic, generic-function, struct-field and nested-type examples are
-// checked with type_holes assertions in type_hole_tests.rock.
+// checked with type_holes assertions in types/type_holes.rock.
 
 fn greet(name: string) -> string {
     return "Hello, {name}!"

@@ -6,7 +6,7 @@
 
 // ---------------------------------------------------------------------
 // Baseline: no spec (must preserve smart-float behavior from
-// tests/float_interpolation.rock)
+// tests/strings/float_interpolation.rock)
 // ---------------------------------------------------------------------
 
 @test

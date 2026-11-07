@@ -7,7 +7,7 @@
 // poller-level guarantee so coroutine bodies can assume their entity
 // is alive whenever they run.
 //
-// Standalone mini-poller (follows the engine_systems_test.rock pattern)
+// Standalone mini-poller (follows the smoke/engine_systems.rock pattern)
 // — the real integration lands in stone/engine/systems/coroutines.rock
 // once these tests go green.
 

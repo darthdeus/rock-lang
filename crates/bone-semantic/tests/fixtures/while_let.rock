@@ -3,7 +3,7 @@
 //! pattern `while let E::V(n) = e`, binds the variant payload. The whole
 //! `while let` is a statement (unit); the body is checked. Mirrors if-let
 //! minus the else / value-expr form (verified vs rock:
-//! tests/while_let_tests.rock).
+//! tests/control_flow/while_let.rock).
 
 //- while_let_nullable_binding
 fn f(o: int?) -> int {

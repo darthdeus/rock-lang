@@ -4,7 +4,7 @@
 // caller reading one value off a two-value return would bind a number and then
 // index it. A `nobox` value is the opposite case and opts in explicitly --
 // `@scalar_abi` overrides this gate and returns the leaves
-// (`tests/nobox_opaque_return.rock`). Must pass with and without
+// (`tests/nobox/opaque_return.rock`). Must pass with and without
 // ROCK_ANF_FUNCTIONS=1.
 
 value V2 { x: int, y: int }

@@ -5,7 +5,7 @@
 // moves the write onto a temporary while reads fold to the ctor's original
 // operands. The lowering marks the root cell `borrowed`.
 //
-// Sibling coverage: tests/value_field_write_scalarized_local.rock (direct
+// Sibling coverage: tests/values/field_write_scalarized_local.rock (direct
 // `h.p.x = v` writes on the owner).
 
 value RaQuery {
