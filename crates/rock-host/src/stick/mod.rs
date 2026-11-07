@@ -167,6 +167,7 @@ pub struct StickConfig {
     pub package: Package,
     /// Optional runtime requirements, interpreted by the installed host.
     pub engine: Option<EngineConfig>,
+    pub native: Option<NativeConfig>,
     /// Declared compile-time inputs (`build_var(..)`) and release channels.
     /// Commands are run by the CLI once per session build, before compilation;
     /// the compiler only ever sees resolved values.
@@ -285,6 +286,19 @@ pub struct SoundConfig {
 }
 
 pub const KNOWN_BUILD_BUILTINS: [&str; 3] = ["channel", "platform", "source_revision"];
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeConfig {
+    pub manifest: String,
+    pub library: String,
+    #[serde(default = "native_shipped_default")]
+    pub shipped: bool,
+}
+
+fn native_shipped_default() -> bool {
+    true
+}
 
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
@@ -833,6 +847,7 @@ impl<'de> serde::Deserialize<'de> for StickConfig {
             ) -> Result<StickConfig, A::Error> {
                 let mut package: Option<Package> = None;
                 let mut engine: Option<EngineConfig> = None;
+                let mut native: Option<NativeConfig> = None;
                 let mut build: Option<BuildConfig> = None;
                 let mut release: Option<ReleaseConfig> = None;
                 let mut assets: Option<AssetsConfig> = None;
@@ -857,6 +872,9 @@ impl<'de> serde::Deserialize<'de> for StickConfig {
                         "sound" => {
                             sound = Some(map.next_value()?);
                         }
+                        "native" => {
+                            native = map.next_value()?;
+                        }
                         "engine" => {
                             engine = map.next_value()?;
                         }
@@ -872,7 +890,7 @@ impl<'de> serde::Deserialize<'de> for StickConfig {
                         other => {
                             return Err(serde::de::Error::custom(format!(
                                 "unknown key `{other}` at top level; known keys: package, build, release, \
-                                 assets, sound, engine, language, dependencies, source_groups"
+                                 assets, sound, engine, native, language, dependencies, source_groups"
                             )));
                         }
                     }
@@ -881,6 +899,7 @@ impl<'de> serde::Deserialize<'de> for StickConfig {
                 Ok(StickConfig {
                     package,
                     engine,
+                    native,
                     build,
                     release,
                     assets,
@@ -1708,6 +1727,30 @@ mod tests {
         let cfg =
             StickConfig::new_from_str("[package]\nname = \"x\"\nversion = \"1.2.3\"\n").unwrap();
         assert_eq!(cfg.package.version(), "1.2.3");
+    }
+
+    #[test]
+    fn native_declarations_are_strict_and_available_to_library_packages() {
+        let manifest = "[package]\nname = \"bindings\"\ntype = \"lib\"\n[native]\nmanifest = \"../native/Cargo.toml\"\nlibrary = \"example_native\"\n";
+        let config = StickConfig::new_from_str(manifest).unwrap();
+        let native = config.native.unwrap();
+        assert_eq!(native.manifest, "../native/Cargo.toml");
+        assert_eq!(native.library, "example_native");
+        assert!(native.shipped);
+        assert!(
+            !StickConfig::new_from_str(&format!("{manifest}shipped = false\n"))
+                .unwrap()
+                .native
+                .unwrap()
+                .shipped
+        );
+        for invalid in [
+            manifest.replace("library =", "libary ="),
+            manifest.replace("manifest = \"../native/Cargo.toml\"\n", ""),
+            manifest.replace("library = \"example_native\"\n", ""),
+        ] {
+            assert!(StickConfig::new_from_str(&invalid).is_err(), "{invalid}");
+        }
     }
 
     #[test]
