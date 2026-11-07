@@ -1,35 +1,35 @@
-nobox value HealingSpace { value: int }
-nobox value HealingPlace { space: HealingSpace }
-struct HealingSimulation { place: HealingPlace }
-struct HealingMovable { simulation: HealingSimulation }
-struct HealingMob { movable: HealingMovable, diorama: bool }
-enum HealingSubject { None, Mob(Entity<HealingMob>), DioramaMob(Entity<HealingMob>) }
+nobox value ThingLeaf { value: int }
+nobox value ThingSlot { leaf: ThingLeaf }
+struct ThingInner { slot: ThingSlot }
+struct ThingOuter { inner: ThingInner }
+struct Thing { outer: ThingOuter, flagged: bool }
+enum ThingRef { None, Plain(Entity<Thing>), Flagged(Entity<Thing>) }
 
-fn healing_subject(entity: Entity<HealingMob>, mob: HealingMob) -> HealingSubject {
-    return if mob.diorama { HealingSubject::DioramaMob(entity) } else { HealingSubject::Mob(entity) }
+fn thing_ref(entity: Entity<Thing>, thing: Thing) -> ThingRef {
+    return if thing.flagged { ThingRef::Flagged(entity) } else { ThingRef::Plain(entity) }
 }
 
 // A native enum return must replace the leaves initialized by a variant.
-@test fn c_healing_feedback_assignment_projects_subject_and_space() {
-    let rows: Arena<HealingMob> = arena_new()
-    let mob = rows.insert(HealingMob {
-        diorama: true,
-        movable: HealingMovable {
-            simulation: HealingSimulation { place: HealingPlace { space: HealingSpace { value: 29 } } },
+@test fn enum_return_copy_assignment_projects_variant_and_leaf() {
+    let rows: Arena<Thing> = arena_new()
+    let thing = rows.insert(Thing {
+        flagged: true,
+        outer: ThingOuter {
+            inner: ThingInner { slot: ThingSlot { leaf: ThingLeaf { value: 29 } } },
         },
     })
-    let target_space: HealingSpace? = null
-    let subject = HealingSubject::Mob(mob)
-    if let target = mob.get() {
-        subject = healing_subject(mob, target)
-        target_space = target.movable.simulation.place.space
+    let target_leaf: ThingLeaf? = null
+    let kind = ThingRef::Plain(thing)
+    if let target = thing.get() {
+        kind = thing_ref(thing, target)
+        target_leaf = target.outer.inner.slot.leaf
     }
-    match subject {
-        HealingSubject::DioramaMob(entity) => assert(entity == mob),
+    match kind {
+        ThingRef::Flagged(entity) => assert(entity == thing),
         _ => assert(false),
     }
-    if let space = target_space {
-        assert_eq(space.value, 29)
+    if let leaf = target_leaf {
+        assert_eq(leaf.value, 29)
     } else { assert(false) }
     let _ = arena_destroy(rows)
     let _ = __arena_drain_retired()

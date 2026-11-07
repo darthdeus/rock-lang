@@ -1,28 +1,28 @@
-struct LeafgapPresentation { id: int }
-struct LeafgapAnchor { id: int }
-enum LeafgapSubject { Lectern(LeafgapPresentation), Gallery(LeafgapAnchor) }
-struct LeafgapPlayer { gallery: bool }
+struct RecordLeft { id: int }
+struct RecordRight { id: int }
+enum RecordKind { Left(RecordLeft), Right(RecordRight) }
+struct Record { right: bool }
 
-fn LeafgapPlayer.subject(player) -> LeafgapSubject? {
-    if player.gallery { return LeafgapSubject::Gallery(LeafgapAnchor { id: 43 }) }
+fn Record.kind(record) -> RecordKind? {
+    if record.right { return RecordKind::Right(RecordRight { id: 43 }) }
     return null
 }
 
 // A nullable native return replaces both presence and payload leaves.
-@test fn c_lectern_subject_assignment_projects_presence_and_payload() {
-    let players: Arena<LeafgapPlayer> = arena_new()
-    let player = players.insert(LeafgapPlayer { gallery: true })
-    let subject: LeafgapSubject? = null
-    if let value = player.get() { subject = value.subject() }
-    if let value = subject {
+@test fn nullable_enum_return_assignment_projects_presence_and_payload() {
+    let records: Arena<Record> = arena_new()
+    let record = records.insert(Record { right: true })
+    let kind: RecordKind? = null
+    if let value = record.get() { kind = value.kind() }
+    if let value = kind {
         match value {
-            LeafgapSubject::Gallery(anchor) => assert_eq(anchor.id, 43),
-            LeafgapSubject::Lectern(_) => assert(false),
+            RecordKind::Right(right) => assert_eq(right.id, 43),
+            RecordKind::Left(_) => assert(false),
         }
     } else { assert(false) }
-    if let value = player.get() { value.gallery = false }
-    subject = player.get().unwrap().subject()
-    assert(subject == null)
-    let _ = arena_destroy(players)
+    if let value = record.get() { value.right = false }
+    kind = record.get().unwrap().kind()
+    assert(kind == null)
+    let _ = arena_destroy(records)
     let _ = __arena_drain_retired()
 }

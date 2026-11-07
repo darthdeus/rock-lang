@@ -1,35 +1,35 @@
-nobox value DamageSpace { value: int }
-nobox value DamagePlace { space: DamageSpace }
-struct DamageSimulation { place: DamagePlace }
-struct DamageMovable { simulation: DamageSimulation }
-struct DamageMob { movable: DamageMovable, diorama: bool }
-enum DamageSubject { None, Mob(Entity<DamageMob>), DioramaMob(Entity<DamageMob>) }
+nobox value ItemLeaf { value: int }
+nobox value ItemSlot { leaf: ItemLeaf }
+struct ItemInner { slot: ItemSlot }
+struct ItemOuter { inner: ItemInner }
+struct Item { outer: ItemOuter, flagged: bool }
+enum ItemRef { None, Plain(Entity<Item>), Flagged(Entity<Item>) }
 
-fn damage_subject(entity: Entity<DamageMob>, mob: DamageMob) -> DamageSubject {
-    return if mob.diorama { DamageSubject::DioramaMob(entity) } else { DamageSubject::Mob(entity) }
+fn item_ref(entity: Entity<Item>, item: Item) -> ItemRef {
+    return if item.flagged { ItemRef::Flagged(entity) } else { ItemRef::Plain(entity) }
 }
 
 // A native enum return must replace the leaves initialized by a variant.
-@test fn c_damage_feedback_assignment_projects_subject_and_space() {
-    let rows: Arena<DamageMob> = arena_new()
-    let mob = rows.insert(DamageMob {
-        diorama: true,
-        movable: DamageMovable {
-            simulation: DamageSimulation { place: DamagePlace { space: DamageSpace { value: 17 } } },
+@test fn enum_return_assignment_projects_variant_and_leaf() {
+    let rows: Arena<Item> = arena_new()
+    let item = rows.insert(Item {
+        flagged: true,
+        outer: ItemOuter {
+            inner: ItemInner { slot: ItemSlot { leaf: ItemLeaf { value: 17 } } },
         },
     })
-    let target_space: DamageSpace? = null
-    let subject = DamageSubject::Mob(mob)
-    if let target = mob.get() {
-        subject = damage_subject(mob, target)
-        target_space = target.movable.simulation.place.space
+    let target_leaf: ItemLeaf? = null
+    let kind = ItemRef::Plain(item)
+    if let target = item.get() {
+        kind = item_ref(item, target)
+        target_leaf = target.outer.inner.slot.leaf
     }
-    match subject {
-        DamageSubject::DioramaMob(entity) => assert(entity == mob),
+    match kind {
+        ItemRef::Flagged(entity) => assert(entity == item),
         _ => assert(false),
     }
-    if let space = target_space {
-        assert_eq(space.value, 17)
+    if let leaf = target_leaf {
+        assert_eq(leaf.value, 17)
     } else { assert(false) }
     let _ = arena_destroy(rows)
     let _ = __arena_drain_retired()
