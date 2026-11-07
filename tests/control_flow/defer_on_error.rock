@@ -11,8 +11,17 @@ inline(lua) fn raised(check: fn() -> ()) -> string? = """
     return tostring(err)
 """
 
+inline(js) fn raised(check: fn() -> ()) -> string? = """
+    try { __rock_call(check); return null; }
+    catch (e) { return (e instanceof Error) ? e.message : String(e); }
+"""
+
 inline(lua) fn has(s: string?, sub: string) -> bool = """
     return s ~= nil and string.find(s, sub, 1, true) ~= nil
+"""
+
+inline(js) fn has(s: string?, sub: string) -> bool = """
+    return s !== null && s !== undefined && s.indexOf(sub) >= 0;
 """
 
 inline(lua) fn before(s: string?, a: string, b: string) -> bool = """
@@ -22,14 +31,29 @@ inline(lua) fn before(s: string?, a: string, b: string) -> bool = """
     return i ~= nil and j ~= nil and i < j
 """
 
+inline(js) fn before(s: string?, a: string, b: string) -> bool = """
+    if (s === null || s === undefined) return false;
+    var i = s.indexOf(a), j = s.indexOf(b);
+    return i >= 0 && j >= 0 && i < j;
+"""
+
 // Runtime cleanup-stack depth; 0 when every registration was unwound.
 inline(lua) fn defer_depth() -> int = """
     return rawget(_G, "__rock_defer_top") or -1
 """
 
+inline(js) fn defer_depth() -> int = """
+    return typeof __rock_defer_top === "number" ? __rock_defer_top : -1;
+"""
+
 inline(lua) fn throw_value() = """
     _G.__defer_probe_err = _G.__defer_probe_err or { probe = true }
     error(_G.__defer_probe_err)
+"""
+
+inline(js) fn throw_value() = """
+    globalThis.__defer_probe_err = globalThis.__defer_probe_err || { probe: true };
+    throw globalThis.__defer_probe_err;
 """
 
 inline(lua) fn raised_same_value(check: fn() -> ()) -> bool = """
@@ -38,10 +62,20 @@ inline(lua) fn raised_same_value(check: fn() -> ()) -> bool = """
     return (not ok) and rawequal(err, _G.__defer_probe_err)
 """
 
+inline(js) fn raised_same_value(check: fn() -> ()) -> bool = """
+    globalThis.__defer_probe_err = globalThis.__defer_probe_err || { probe: true };
+    try { __rock_call(check); return false; }
+    catch (e) { return e === globalThis.__defer_probe_err; }
+"""
+
 inline(lua) fn traceback_of(check: fn() -> ()) -> string = """
     local ok, tb = xpcall(check, __rock_traceback)
     if ok then return "no error" end
     return tostring(tb)
+"""
+
+inline(js) fn traceback_of(check: fn() -> ()) -> string = """
+    try { __rock_call(check); return "no error"; } catch (e) { return String(e && e.stack); }
 """
 
 fn fails_after_defer() {
@@ -304,6 +338,10 @@ inline(lua) fn throw_msg(m: string) = """
     error(m, 0)
 """
 
+inline(js) fn throw_msg(m: string) = """
+    throw new Error(m);
+"""
+
 fn same_first_origin(n: int) {
     if n == 0 {
         throw_msg("same msg")
@@ -376,6 +414,10 @@ inline(lua) fn throw_unprintable() = """
     error(setmetatable({}, { __tostring = function() error("formatting failure") end }))
 """
 
+inline(js) fn throw_unprintable() = """
+    throw { toString: function() { throw new Error("formatting failure"); } };
+"""
+
 fn unprintable_cleanup_error() {
     defer { LOG = LOG + "remaining;" }
     defer { throw_unprintable() }
@@ -400,6 +442,16 @@ inline(lua) fn capture_log(check: fn() -> ()) -> string = """
     pcall(check)
     _G.__rock_log_sink = saved
     return table.concat(seen, "|")
+"""
+
+// The log emitter is swapped through `globalThis`: naming it directly would
+// make the compiler look for it as a Rock function.
+inline(js) fn capture_log(check: fn() -> ()) -> string = """
+    var k = "__rock_log_" + "emit", saved = globalThis[k], seen = [];
+    globalThis[k] = function(level, category, msg) { seen.push(category + ":" + msg); };
+    try { __rock_call(check); } catch (e) {}
+    globalThis[k] = saved;
+    return seen.join("|");
 """
 
 fn value_error_with_raising_cleanup() {
