@@ -1,5 +1,7 @@
-// Struct default initialization tests - migrated from rock/tests/struct_tests.rs
-// Tests struct default field values, partial override, and nested structs
+// Struct field defaults: a literal that omits defaulted fields gets the
+// declared values (including call expressions and nested struct defaults),
+// provided fields override them, and a literal that provides every field
+// injects nothing.
 
 // Helper functions for default value testing
 fn fixv(x: float, y: float) -> int {
@@ -71,4 +73,41 @@ fn test_function_calls_in_struct_defaults() {
     let s = TestStruct {}
     print(s.field1)
     print(s.field2)
+}
+
+struct Cfg {
+    width: int,
+    height: int = 100,
+    label: string = "untitled",
+    scale: float = 1.5,
+}
+
+@test(output = "10\n100\nuntitled")
+fn test_omit_all_defaults() {
+    let c = Cfg { width: 10 }
+    print("{c.width}")
+    print("{c.height}")
+    print("{c.label}")
+}
+
+@test(output = "10\n42\nuntitled")
+fn test_override_one_default() {
+    let c = Cfg { width: 10, height: 42 }
+    print("{c.width}")
+    print("{c.height}")
+    print("{c.label}")
+}
+
+@test(output = "3")
+fn test_default_float_used() {
+    let c = Cfg { width: 1 }
+    print("{(c.scale * 2.0).floor()}")
+}
+
+@test(output = "2\n9\nhi")
+fn test_provide_all_no_injection() {
+    let c = Cfg { width: 2, height: 9, label: "hi", scale: 2.0 }
+    print("{c.width}")
+    print("{c.height}")
+    print("{c.label}")
 }

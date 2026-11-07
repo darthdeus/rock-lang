@@ -1,7 +1,7 @@
 //! Multi-field init `Foo { a + b: expr }` -- shorthand for `a: expr, b: expr`
 //! with `expr` evaluated once and shared across the named fields. bone already
 //! handles the struct-literal arm; these slices also cover the enum
-//! record-variant arm. Verified vs rock (tests/structs/init_multi_field.rock).
+//! record-variant arm. Verified vs rock (tests/structs/init_shorthand.rock).
 
 // Two fields share one value.
 //- struct_two_fields

@@ -1,7 +1,7 @@
 // Every Vec carries a direct `__ty = "Vec"` field -- the same shape skull emits
 // for `[...]` literals -- so a Vec is identifiable with no metatable, and
 // `__rock_get_type` (used by `inspect` and `d()`) reads that tag. Structural
-// Vec `==` is pinned separately in tests/structs/structural_equality.rock.
+// Vec `==` is pinned separately in tests/structs/equality.rock.
 
 // Strip the metatable: a Vec must still report its type via `__ty`. The Vec is
 // constructed on the Rock side: `vec_new` is not `@nomangle`, so calling it from

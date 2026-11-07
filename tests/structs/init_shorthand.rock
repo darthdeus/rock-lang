@@ -1,19 +1,306 @@
+// Struct literal field-init shorthand: `Point { x, y }` takes each field from
+// the same-named binding (also in nested structs and enum record variants),
+// and `Foo { a + b: expr }` gives several fields one value.
+
 struct Point {
     x: int
     y: int
 }
 
-@test(output = "3 7")
-fn test_shorthand_field() {
-    let x = 3
-    let y = 7
-    let p = Point { x, y }
-    print("{p.x} {p.y}")
+struct Person {
+    name: string
+    age: int
+    location: Point
 }
 
-@test(output = "5 5")
+@test
+fn test_basic_shorthand() {
+    let x = 10
+    let y = 20
+
+    // Shorthand syntax
+    let p1 = Point { x, y }
+
+    // Should be equivalent to explicit syntax
+    let p2 = Point { x: x, y: y }
+
+    assert_eq(p1.x, p2.x)
+    assert_eq(p1.y, p2.y)
+    assert_eq(p1.x, 10)
+    assert_eq(p1.y, 20)
+}
+
+@test
 fn test_mixed_shorthand_and_explicit() {
     let x = 5
-    let p = Point { x, y: 5 }
-    print("{p.x} {p.y}")
+
+    // Mix shorthand and explicit
+    let p = Point { x, y: 15 }
+
+    assert_eq(p.x, 5)
+    assert_eq(p.y, 15)
+}
+
+@test
+fn test_nested_struct_shorthand() {
+    let name = "Alice"
+    let age = 30
+    let x = 100
+    let y = 200
+    let location = Point { x, y }
+
+    // Use shorthand for nested struct
+    let person = Person { name, age, location }
+
+    assert_eq(person.name, "Alice")
+    assert_eq(person.age, 30)
+    assert_eq(person.location.x, 100)
+    assert_eq(person.location.y, 200)
+}
+
+enum Color {
+    RGB { r: int, g: int, b: int }
+    HSL { h: int, s: int, l: int }
+}
+
+@test
+fn test_enum_variant_shorthand() {
+    let r = 255
+    let g = 128
+    let b = 0
+
+    // Shorthand for enum variant with record fields
+    let color1 = Color::RGB { r, g, b }
+
+    // Should be equivalent to explicit
+    let color2 = Color::RGB { r: r, g: g, b: b }
+
+    // Pattern matching with enum variants has a separate issue
+    // so we'll just test construction here
+    // For now, we can only verify that construction works
+    assert(true)  // Construction succeeded if we got here
+}
+
+@test
+fn test_shorthand_with_expressions() {
+    let base = 10
+
+    // Shorthand only works with simple identifiers
+    // These should use explicit syntax
+    let p = Point {
+        x: base * 2,  // expression, not shorthand
+        y: base + 5   // expression, not shorthand
+    }
+
+    assert_eq(p.x, 20)
+    assert_eq(p.y, 15)
+}
+
+// --- Multi-field init: `Foo { a + b: expr }` ------------------------------------
+//
+// `a + b: expr` is shorthand for `a: expr, b: expr`, but the value expression
+// is evaluated *once*. Both fields receive the same result (shared reference
+// for heap values).
+
+struct FixVec2 { x: int, y: int }
+struct Rect { pos: FixVec2, size: FixVec2 }
+
+fn iv(x: int, y: int) -> FixVec2 {
+    return FixVec2 { x: x, y: y }
+}
+
+// --- Core semantics ----------------------------------------------------------
+
+@test(output = "10 5 10 5")
+fn basic_two_fields() {
+    let r = Rect { pos + size: iv(10, 5) }
+    print("{r.pos.x} {r.pos.y} {r.size.x} {r.size.y}")
+}
+
+struct Triple { a: int, b: int, c: int }
+
+@test(output = "7 7 7")
+fn three_fields_in_one_group() {
+    let t = Triple { a + b + c: 7 }
+    print("{t.a} {t.b} {t.c}")
+}
+
+struct Named { a: int, b: int, name: string }
+
+@test(output = "1 1 hi")
+fn mixed_with_explicit_field() {
+    let n = Named { a + b: 1, name: "hi" }
+    print("{n.a} {n.b} {n.name}")
+}
+
+// --- Eval-once guarantee -----------------------------------------------------
+
+global EVAL_COUNT: int = 0
+
+fn tick() -> int {
+    EVAL_COUNT = EVAL_COUNT + 1
+    return EVAL_COUNT
+}
+
+@test(output = "1 1 1")
+fn value_expression_evaluated_once() {
+    EVAL_COUNT = 0
+    let v = Triple { a + b + c: tick() }
+    // All three fields get the same value; tick() called exactly once
+    print("{v.a} {v.b} {v.c}")
+}
+
+struct FourInts { a: int, b: int, c: int, d: int }
+
+@test(output = "10 10 20 20 2")
+fn each_group_evaluated_once() {
+    EVAL_COUNT = 0
+    let q = FourInts { a + b: { EVAL_COUNT = EVAL_COUNT + 1; 10 }, c + d: { EVAL_COUNT = EVAL_COUNT + 1; 20 } }
+    print("{q.a} {q.b} {q.c} {q.d} {EVAL_COUNT}")
+}
+
+struct VecPair { a: [int], b: [int] }
+
+@test(output = "true 4")
+fn fields_share_reference() {
+    // For heap values, both fields point to the same instance.
+    let vp = VecPair { a + b: [1, 2, 3] }
+    vp.a.push(999)
+    // Mutation through `a` is visible through `b` — same table.
+    print("{vp.a.len() == vp.b.len()} {vp.b.len()}")
+}
+
+// --- Combined with shorthand and explicit ------------------------------------
+
+struct Six { a: int, b: int, c: int, d: int, e: int, f: int }
+
+@test(output = "1 2 2 3 3 4")
+fn all_three_init_forms_in_one_literal() {
+    // a: shorthand, b+c: multi-field, d+e: multi-field, f: shorthand
+    let a = 1
+    let f = 4
+    let six = Six { a, b + c: 2, d + e: 3, f }
+    print("{six.a} {six.b} {six.c} {six.d} {six.e} {six.f}")
+}
+
+// --- Value expressions -------------------------------------------------------
+
+@test(output = "6 6 6 6")
+fn value_is_method_chain() {
+    let r = Rect { pos + size: iv(1, 1).scale(2).scale(3) }
+    print("{r.pos.x} {r.pos.y} {r.size.x} {r.size.y}")
+}
+
+fn scale(v: FixVec2, factor: int) -> FixVec2 {
+    return FixVec2 { x: v.x * factor, y: v.y * factor }
+}
+
+struct Callbacks { on_click: () -> int, on_hover: () -> int }
+
+@test(output = "42 42")
+fn value_is_capturing_lambda() {
+    let captured = 42
+    let c = Callbacks { on_click + on_hover: () => captured }
+    print("{c.on_click()} {c.on_hover()}")
+}
+
+@test(output = "10 10")
+fn value_is_if_expression() {
+    let flag = true
+    let v = FixVec2 { x + y: if flag { 10 } else { 0 } }
+    print("{v.x} {v.y}")
+}
+
+enum Sign { Neg, Pos }
+
+@test(output = "-1 -1")
+fn value_is_match_expression() {
+    let s = Sign::Neg
+    let v = FixVec2 { x + y: match s { Neg => -1, Pos => 1 } }
+    print("{v.x} {v.y}")
+}
+
+// --- Type system integration -------------------------------------------------
+
+struct OptPair { a: int?, b: int? }
+
+@test(output = "nil nil")
+fn nullable_fields_with_null() {
+    let n = OptPair { a + b: null }
+    print("{n.a} {n.b}")
+}
+
+@test(output = "42 42")
+fn nullable_fields_with_value() {
+    let n = OptPair { a + b: 42 }
+    print("{n.a} {n.b}")
+}
+
+struct GPair<T> { first: T, second: T }
+
+@test(output = "1 2 1 2")
+fn generic_struct() {
+    let p: GPair<FixVec2> = GPair { first + second: iv(1, 2) }
+    print("{p.first.x} {p.first.y} {p.second.x} {p.second.y}")
+}
+
+// --- Enum record variants ----------------------------------------------------
+
+enum Shape {
+    Circle { cx: int, cy: int, radius: int }
+    Box { x: int, y: int, w: int, h: int }
+}
+
+@test(output = "5 5 10")
+fn enum_variant_multi_field() {
+    let s = Shape::Circle { cx + cy: 5, radius: 10 }
+    match s {
+        Circle { cx, cy, radius } => print("{cx} {cy} {radius}")
+        _ => print("wrong")
+    }
+}
+
+@test(output = "0 0 100 100")
+fn enum_variant_two_multi_field_groups() {
+    let s = Shape::Box { x + y: 0, w + h: 100 }
+    match s {
+        Box { x, y, w, h } => print("{x} {y} {w} {h}")
+        _ => print("wrong")
+    }
+}
+
+// --- Nesting -----------------------------------------------------------------
+
+struct Inner { a: int, b: int }
+struct Middle { left: Inner, right: Inner }
+struct Outer { top: Middle, bottom: Middle }
+
+@test(output = "1 1 1 1 1 1 1 1")
+fn nested_multi_field_at_every_level() {
+    // Each `+` in the nested chain produces its own IIFE in the compiled Lua.
+    let o = Outer {
+        top + bottom: Middle {
+            left + right: Inner { a + b: 1 }
+        }
+    }
+    print("{o.top.left.a} {o.top.left.b} {o.top.right.a} {o.top.right.b} {o.bottom.left.a} {o.bottom.left.b} {o.bottom.right.a} {o.bottom.right.b}")
+}
+
+// --- Contexts ----------------------------------------------------------------
+
+global ORIGIN: FixVec2 = FixVec2 { x + y: 0 }
+
+@test(output = "0 0")
+fn in_global_initializer() {
+    print("{ORIGIN.x} {ORIGIN.y}")
+}
+
+fn make_square(side: int) -> Rect {
+    return Rect { pos + size: iv(side, side) }
+}
+
+@test(output = "7 7 7 7")
+fn in_return_position() {
+    let r = make_square(7)
+    print("{r.pos.x} {r.pos.y} {r.size.x} {r.size.y}")
 }
