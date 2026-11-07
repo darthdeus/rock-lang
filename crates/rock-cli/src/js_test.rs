@@ -712,6 +712,7 @@ fn build_run_program(emitted: &skull_codegen_js::emit::JsProgram) -> String {
     p.push_str(skull_codegen_js::JS_LOG_RUNTIME);
     p.push_str(skull_codegen_js::JS_RNG_RUNTIME);
     p.push_str(NODE_RNG_ENV_GLUE);
+    p.push_str(skull_codegen_js::JS_NODE_HOST);
     p.push_str(
         r#"
 var __G = {};
@@ -800,6 +801,12 @@ function print() {
 }
 // `put` = the test-local `io.write` idiom: append raw, no separators/newline.
 function put(s) { __buf.push(s); }
+// Runtime diagnostics (`write_err`) stay out of the compared output.
+var __rock_host = {
+  write: put,
+  write_err: function(s) { process.stderr.write(s); },
+  env_var: function(n) { var v = process.env[n]; return v === undefined ? null : v; }
+};
 "#,
     );
     p.push_str(shared_defs);
