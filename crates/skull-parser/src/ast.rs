@@ -929,7 +929,7 @@ impl Ast {
     /// Pre-size the arenas from the module's token count so a parse does a
     /// single up-front allocation per arena instead of the ~log2(N) doubling
     /// reallocations (each a memmove of the live elements) a from-empty grow
-    /// incurs. Ratios are measured over the games corpus (`SKULL_ARENA_STATS`):
+    /// incurs. Ratios measured over a corpus of real modules:
     /// exprs ~0.40, stmts ~0.09, types ~0.043, blocks ~0.028 of tokens; the
     /// divisors round up a margin so a typical module never re-grows. `items`
     /// is a plain `Vec` reserved by the same model.

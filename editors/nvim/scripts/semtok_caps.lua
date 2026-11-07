@@ -15,7 +15,6 @@ vim.opt.runtimepath:append(plugin)
 vim.filetype.add({ extension = { rock = 'rock' } })
 vim.notify = function() end
 vim.notify_once = function() end
-vim.env.ROCK_LSP_BACKEND = nil
 vim.env.ROCK_BACKEND = nil
 vim.env.ROCK_LSP_DEBUG = '/tmp/rock_semtok_caps.log'
 os.remove('/tmp/rock_semtok_caps.log')

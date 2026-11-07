@@ -9606,26 +9606,20 @@ fn main() {
     }
 
     #[allow(dead_code)]
-    struct InlineOn(std::sync::MutexGuard<'static, ()>, Option<String>);
+    struct InlineOn(std::sync::MutexGuard<'static, ()>);
 
     impl InlineOn {
         fn on() -> Self {
             let guard = INLINE_OFF.lock().unwrap_or_else(|e| e.into_inner());
-            let previous = std::env::var("SKULL_INLINE_OFF").ok();
-            unsafe { std::env::remove_var("SKULL_INLINE_OFF") };
             skull_mir::ablation::clear();
             skull_mir::ablation::set_enabled(false);
-            Self(guard, previous)
+            Self(guard)
         }
     }
 
     impl Drop for InlineOn {
         fn drop(&mut self) {
             skull_mir::ablation::clear();
-            match &self.1 {
-                Some(value) => unsafe { std::env::set_var("SKULL_INLINE_OFF", value) },
-                None => unsafe { std::env::remove_var("SKULL_INLINE_OFF") },
-            }
         }
     }
 

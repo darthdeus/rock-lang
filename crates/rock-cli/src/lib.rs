@@ -262,11 +262,8 @@ pub struct Args {
     /// (`libs/example-core`) needs the repo root passed explicitly.
     pub consumers: Option<String>,
 
-    /// For `rock test`: force package-aware compilation (the surrounding
-    /// stick.toml is compiled as one unit, so @test files see sibling
-    /// definitions). Without the flag, `rock test` still auto-detects a
-    /// surrounding package; set `ROCK_TEST_NO_PACKAGE=1` to fall back to
-    /// the legacy single-file path.
+    /// Accepted for compatibility and not read: `rock test` always
+    /// auto-detects a surrounding stick.toml package.
     pub package: bool,
 }
 
@@ -347,7 +344,7 @@ impl Args {
             .arg(Arg::new("watch").long("watch").action(ArgAction::SetTrue)
                 .help("For `rock test`: re-run tests on source changes."))
             .arg(Arg::new("package").long("package").action(ArgAction::SetTrue)
-                .help("For `rock test`: compile the surrounding stick.toml package (and its deps) so @test files can call sibling-file symbols. Auto-detected when the path lives inside a package; pass --package=false (or env ROCK_TEST_NO_PACKAGE=1) to force single-file mode."))
+                .help("For `rock test`: compile the surrounding stick.toml package (and its deps) so @test files can call sibling-file symbols. Package detection is automatic, so the flag has no effect."))
             .arg(Arg::new("no-lints").long("no-lints").action(ArgAction::SetTrue)
                 .help("Drop lint warnings/advice from build output. Error-severity lints still run and still fail the build."))
             .arg(Arg::new("lint-summary").long("lint-summary").action(ArgAction::SetTrue)

@@ -174,7 +174,7 @@ pub struct StickConfig {
     pub build: Option<BuildConfig>,
     /// Release asset selection consumed by both `rock package` and `rock web`.
     pub release: Option<ReleaseConfig>,
-    /// External asset roots used when ROCK_ASSET_OVERLAYS is unset.
+    /// External asset roots.
     pub assets: Option<AssetsConfig>,
     /// Optional compiler-owned sound project declaration.
     pub sound: Option<SoundConfig>,

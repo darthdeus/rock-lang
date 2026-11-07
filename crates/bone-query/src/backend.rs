@@ -1,5 +1,5 @@
 //! The bone-backed LSP path: one consolidated facade over the `bone`
-//! typechecker, selected by `ROCK_LSP_BACKEND=bone` / `--backend bone`.
+//! typechecker, selected by `ROCK_BACKEND=bone` / `--backend bone`.
 //!
 //! The rock-semantic path is untouched. Each `*_workspace` handler gets a
 //! single early branch into the matching method here; the persistent server
