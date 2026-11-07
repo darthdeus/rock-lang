@@ -115,6 +115,11 @@ cargo run --quiet --bin rock -- check cases.rock
 `check` is useful for inspecting type errors, but does not establish runtime
 correctness. Exercise both backends when changing shared lowering behavior.
 
+CI runs the `tests/` corpus on both backends. On JS, a test the backend
+cannot compile is reported as skipped, and CI fails if the skip count rises
+above `JS_MAX_SKIPS` in `.github/workflows/ci.yml`. When a change removes
+skips, lower that number to the new count.
+
 ## Expected compiler errors
 
 Keep intentionally invalid programs separate from runtime cases. Save this as

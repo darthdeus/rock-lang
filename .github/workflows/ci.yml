@@ -69,6 +69,27 @@ jobs:
         run: cargo test --locked --workspace
       - name: Test language corpus
         run: cargo run --locked -p rock-cli --bin rock -- test tests/
+      - name: Test language corpus on the JS backend
+        # A test the JS backend cannot compile is skipped, not failed. Cap the
+        # skip count so new skips need an explicit bump; lower it as the
+        # emitter catches up.
+        env:
+          JS_MAX_SKIPS: "210"
+        run: |
+          set -o pipefail
+          cargo run --locked -p rock-cli --bin rock -- test --backend js tests/ | tee "$RUNNER_TEMP/js-corpus.txt"
+          skipped=$(sed -n 's/^js backend: .*, \([0-9][0-9]*\) skipped).*/\1/p' "$RUNNER_TEMP/js-corpus.txt")
+          if [ -z "$skipped" ]; then
+            echo "could not read the JS skip count"
+            exit 1
+          fi
+          if [ "$skipped" -gt "$JS_MAX_SKIPS" ]; then
+            echo "JS corpus skips rose to $skipped (cap $JS_MAX_SKIPS)"
+            exit 1
+          fi
+          if [ "$skipped" -lt "$JS_MAX_SKIPS" ]; then
+            echo "JS corpus skips fell to $skipped; lower JS_MAX_SKIPS to $skipped"
+          fi
       - name: Test diagnostic and CLI output with forced colors
         env:
           ROCK_FORCE_COLOR: "1"
