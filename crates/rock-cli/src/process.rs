@@ -163,7 +163,7 @@ fn run_process(registrations: &'static crate::registry::Registrations) {
     // cap at 6.
     //
     // Under `--features sequential` we skip building the pool entirely:
-    // with rock-semantic's loading also serial under that feature, no
+    // with bone-semantic's work also serial under that feature, no
     // rayon worker threads spawn at all, so a sampling profile of the
     // front end carries no rayon pool/teardown frames.
     #[cfg(not(feature = "sequential"))]

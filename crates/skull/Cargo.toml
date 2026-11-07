@@ -10,7 +10,7 @@ autotests = false
 
 # skull is the Claude-managed code-generation backend for `bone`'s HIR. It
 # consumes bone as a library (parse -> semantic_pass -> Workspace) and emits
-# Lua, independent of rock's `rock-codegen`.
+# Lua.
 
 [features]
 # Swap skull's and skull-graph's Rayon fanouts for sequential iteration, so a

@@ -870,7 +870,7 @@ impl Builder<'_> {
             }
 
             // `x?.field` -> `if x == nil then nil else x.field`, joined through a
-            // result cell (mirrors rock-codegen). A numeric field is a tuple read
+            // result cell. A numeric field is a tuple read
             // (`x?.0`), a name is a struct/enum-record field.
             Expr::SafeNav { base, field } => {
                 // Keep the evaluated receiver across representation selection.

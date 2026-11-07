@@ -1407,7 +1407,7 @@ impl Builder<'_> {
     /// `await sub` — drive the inner coroutine `sub` through its `.resume()`,
     /// re-yielding each value; the expression's value is `sub`'s return value.
     /// Built as a normal pump loop with a `yield` inside, so the coroutine
-    /// transform splits it like any other yield. Mirrors rock-codegen / old skull.
+    /// transform splits it like any other yield.
     pub(crate) fn lower_yield_delegate(
         &mut self,
         sub_expr: Idx<Expr>,

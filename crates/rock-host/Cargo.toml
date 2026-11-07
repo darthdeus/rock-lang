@@ -1,7 +1,6 @@
 # rock-host: neutral CLI/runtime substrate shared by every backend
-# (rock=legacy, bone=typechecker, skull=codegen). A leaf crate by design —
-# it must NOT depend on rock-semantic / rock-codegen / rock, so the "new"
-# bone/skull path can use it without dragging in the legacy compiler.
+# (bone=typechecker, skull=codegen). A leaf crate by design: it must NOT
+# depend on the compiler crates, so bone and skull can use it.
 [package]
 name = "rock-host"
 version = "0.1.0"
@@ -17,7 +16,7 @@ workspace = true
 [features]
 # Load project source files serially instead of via rayon, so a sampling
 # profile of the front end carries no rayon pool init/teardown frames.
-# Mirrors rock-semantic's `sequential` feature.
+# Mirrors bone-semantic's `sequential` feature.
 sequential = []
 
 [dev-dependencies]

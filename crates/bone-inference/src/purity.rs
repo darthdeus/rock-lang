@@ -1,9 +1,8 @@
 use super::*;
 
 /// True if `e` reaches a `return`/`break`/`continue` (statement or expr form)
-/// through block / if / match / loop bodies. Port of rock's
-/// `block_contains_control_flow`
-/// (rock-semantic/src/semantic/control_flow_subexpr_validation.rs).
+/// through block / if / match / loop bodies. Port of the retired checker's
+/// `block_contains_control_flow`.
 pub(crate) fn expr_contains_cf(c: BodyCtx, e: Idx<Expr>) -> bool {
     match c.body.expr_arena[e] {
         Expr::Return(_) | Expr::Break | Expr::Continue => true,

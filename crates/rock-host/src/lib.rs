@@ -1,10 +1,9 @@
 //! rock-host — neutral CLI/runtime substrate shared by all backends.
 //!
-//! Houses the infra the command surface and every backend need but that has
-//! no business living in the legacy `rock` compiler crate: project discovery,
-//! source loading, configuration, LuaJIT execution and process management.
-//! Leaf crate (no `rock-semantic`/`rock-codegen`/`rock` dep) so bone/skull can
-//! depend on it without the legacy pipeline.
+//! Houses the infra the command surface and every backend need: project
+//! discovery, source loading, configuration, LuaJIT execution and process
+//! management. Leaf crate (no compiler crate dependency) so bone and skull can
+//! depend on it.
 
 pub mod cargo;
 pub mod compilation_units;

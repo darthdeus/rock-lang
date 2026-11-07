@@ -1,9 +1,8 @@
 //! The bone-backed LSP path: one consolidated facade over the `bone`
 //! typechecker, selected by `ROCK_BACKEND=bone` / `--backend bone`.
 //!
-//! The rock-semantic path is untouched. Each `*_workspace` handler gets a
-//! single early branch into the matching method here; the persistent server
-//! holds one [`BoneWorkspace`] alongside its rock-semantic state. Everything
+//! Each `*_workspace` handler calls the matching method here; the persistent
+//! server holds one [`BoneWorkspace`]. Everything
 //! bone can't answer yet lives in [`gaps`] -- that is the "fill in what's
 //! missing on bone" surface. See query facade contract.
 //!
@@ -453,7 +452,7 @@ fn stick_is_bin(root: &Path) -> bool {
 
 /// All bone-backed LSP state for the running server. Holds one [`Session`] per
 /// stick-project root, created lazily on first edit. Multi-root publish-authority
-/// routing (the rock-semantic path's diamond handling) is intentionally not
+/// routing (diamond handling) is intentionally not
 /// modeled here yet -- documented gap, closes as bone grows.
 #[derive(Default)]
 pub struct BoneWorkspace {

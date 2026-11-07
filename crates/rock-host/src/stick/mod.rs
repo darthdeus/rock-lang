@@ -433,7 +433,7 @@ pub enum DependencySource {
 
 // ---------------------------------------------------------------------------
 // serde::Deserialize impls — hand-rolled to avoid pulling serde_derive
-// (and thus syn) into rock-semantic's compile-time critical path.
+// (and thus syn) into the front end's compile-time critical path.
 // ---------------------------------------------------------------------------
 
 impl<'de> serde::Deserialize<'de> for PackageType {

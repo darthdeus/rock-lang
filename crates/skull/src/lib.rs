@@ -2,9 +2,9 @@
 //!
 //! skull consumes `bone` as a library (`parse_rock` -> `semantic_pass` ->
 //! `Workspace`), lowers the typed HIR to a **basic-block CFG** ([`mir`]), and
-//! emits **luajit** from it ([`emit_lua`]) — independent of rock's
-//! `rock-codegen`. It is a separate verification layer driving the user's manual
-//! `bone` work; bone will eventually pull from skull.
+//! emits **luajit** from it ([`emit_lua`]). It is a separate verification
+//! layer driving the user's manual `bone` work; bone will eventually pull from
+//! skull.
 //!
 //! Pipeline: bone HIR --[`lower`]--> MIR (CFG, light SSA) --[`emit_lua`]--> Lua.
 //! The CFG substrate is the foundation for real codegen passes (const-fold,
@@ -438,7 +438,7 @@ pub fn decorator_call_args(
 /// nil-guard per-key, so they self-heal off a present-but-empty registry.
 fn runtime_prelude() -> &'static str {
     // Runtime setup has two parts:
-    //   1. LuaJIT mcode/trace tuning. skull (like rock-codegen) emits more Lua
+    //   1. LuaJIT mcode/trace tuning. skull emits more Lua
     //      than LuaJIT's small-script defaults assume (32 KB mcode blocks /
     //      512 KB total / 1000 traces). Exhausting the mcode arena triggers a
     //      global trace flush, dropping hot loops back to the interpreter.
@@ -994,11 +994,10 @@ fn cdata_alias_fields(
 ///   skip-then-`Name_ct`-nil-crash, unfuck backlog #51).
 ///
 /// C requires a nested struct's typedef to precede its use, so FFI-clean
-/// emission is dependency-ordered (mirrors rock-codegen/src/backend/lua/
-/// structs.rs): each round emits the structs whose value-struct fields are all
-/// emitted. A round with no progress is a definition cycle: rejected, not
-/// emitted broken. A GC-carrying struct never enters the cdef ordering (a table
-/// has no C layout to sequence).
+/// emission is dependency-ordered: each round emits the structs whose
+/// value-struct fields are all emitted. A round with no progress is a
+/// definition cycle: rejected, not emitted broken. A GC-carrying struct never
+/// enters the cdef ordering (a table has no C layout to sequence).
 fn value_struct_defs(
     ws: &Workspace,
     rep_arena: &skull_mir::lower::RepArena,
@@ -1529,8 +1528,8 @@ fn enum_cdata_metatypes(ws: &Workspace) -> String {
 /// Attach an `ffi.metatype` to each value-struct ctype giving it value
 /// `__eq` (field-wise) and `__tostring`, so `c == c2` on two distinct cdata
 /// compares by value instead of by pointer identity (the LuaJIT default).
-/// Mirrors rock-codegen/structs.rs: a thin metatype trampoline delegates to a
-/// mutable `_G.__ROCK_C_METATYPE[name]` impl table (metatypes seal once, so the
+/// A thin metatype trampoline delegates to a mutable
+/// `_G.__ROCK_C_METATYPE[name]` impl table (metatypes seal once, so the
 /// trampoline indirection is what lets a reload update the impl). Gated by
 /// `emitted` — exactly the structs `value_struct_defs` declared a ctype for.
 fn value_struct_metatypes(ws: &Workspace, emitted: &rustc_hash::FxHashSet<ustr::Ustr>) -> String {
@@ -1605,9 +1604,9 @@ fn value_struct_metatypes(ws: &Workspace, emitted: &rustc_hash::FxHashSet<ustr::
 ///   stable Lua map keys and reference-equal across uses
 ///   (see `lower::enum_singleton_name`).
 ///
-/// The `<global> = <global> or { ... }` preserve-if-exists form (matching
-/// rock-codegen) is load-bearing for HOT RELOAD: a reload re-dofiles the whole
-/// chunk, and a bare re-creation would mint a NEW table, breaking reference-
+/// The `<global> = <global> or { ... }` preserve-if-exists form is
+/// load-bearing for HOT RELOAD: a reload re-dofiles the whole chunk, and a
+/// bare re-creation would mint a NEW table, breaking reference-
 /// equality with enum values stored in preserved globals (e.g. a `GRID:
 /// []<TileType>` whose `TileType::Wall` entries would no longer `==` the
 /// freshly-created singleton -> walls silently stop rendering). A payload-free
@@ -1682,7 +1681,7 @@ fn enum_runtime_defs(ws: &Workspace) -> String {
 /// structurally (`ffi.istype(info.name, obj)` -> `info.inspect(obj)`) instead of
 /// printing an address, `deepcopy` copies it instead of SHARING it, and the sim
 /// checkpoint census classifies it as `value_cdata` instead of refusing it as
-/// unmodelled. Mirrors rock-codegen/src/backend/lua/structs.rs.
+/// unmodelled.
 ///
 /// Every consumer asks through the stdlib's `__rock_c_struct_of`, which
 /// memoizes the `ffi.istype` scan per CTypeID in `__ROCK_C_STRUCT_BY_CTYPE`.
@@ -3227,7 +3226,7 @@ mod tests {
     /// Function inlining: a tiny single-block value-struct constructor called in
     /// a hot loop is spliced into the caller. The scalar-ABI ctor arrives as a
     /// `CallMulti` (`r1, r2 = iv(...)`); after inlining the caller no longer
-    /// calls it, yet computes the same sum. This is the rock-codegen-parity lever
+    /// calls it, yet computes the same sum. This is the lever
     /// that lets the loop trace (no per-tile call frame).
     #[test]
     fn inlines_value_struct_ctor_call() {

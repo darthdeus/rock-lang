@@ -159,7 +159,7 @@ impl Builder<'_> {
     }
 
     /// Default `{x}` stringify for value `v` of expression `expr`, dispatched on
-    /// `expr`'s static type (mirrors rock-codegen's interp dispatch).
+    /// `expr`'s static type.
     pub(crate) fn stringify(
         &mut self,
         expr: Idx<Expr>,
@@ -296,9 +296,8 @@ impl Builder<'_> {
     /// emits one `string.format("<fmt>", v)`; dynamic width/precision assemble
     /// the conversion at runtime (`FormatDyn`); grouping/center/fill wrap with
     /// the stdlib `__rock_fmt_grouping`/`__rock_fmt_pad`; a composite with `.N`
-    /// precision routes through `inspect_formatted`. Mirrors the old skull /
-    /// rock-codegen dispatch. The `%`/`b` conversions (raw prelude globals, not
-    /// FuncRef-resolvable) gap for now.
+    /// precision routes through `inspect_formatted`. The `%`/`b` conversions
+    /// (raw prelude globals, not FuncRef-resolvable) gap for now.
     pub(crate) fn lower_format(
         &mut self,
         expr: Idx<Expr>,

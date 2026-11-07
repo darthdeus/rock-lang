@@ -1,7 +1,6 @@
 //! Function inlining: a MIR->MIR pass that splices an eligible callee's body
-//! into the caller so a hot loop traces with no per-call frame (rock-codegen
-//! runtime parity). Re-fit of the deleted hybrid-SSA `skull/src/inline.rs`
-//! onto the cell-model CFG.
+//! into the caller so a hot loop traces with no per-call frame. Re-fit of the
+//! deleted hybrid-SSA `skull/src/inline.rs` onto the cell-model CFG.
 //!
 //! The cell model makes the splice simpler than the old SSA one: there are NO
 //! block params, so arg-binding is a `Store` into the callee's (cloned) param

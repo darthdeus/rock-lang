@@ -1992,8 +1992,7 @@ fn emit_global_unit(
             out.attribution.times = out.times;
             // Hot-reload init line. A `const` is a compile-time constant: tweaking
             // the source literal should show the new value next reload, so its init
-            // runs UNCONDITIONALLY (no preserve guard), mirroring rock-codegen's
-            // `if is_const` branch (`incremental.rs::generate_global_code`).
+            // runs UNCONDITIONALLY (no preserve guard).
             //
             // A mutable `global` holds live runtime state we WANT to survive the
             // re-dofile, so it keeps the preservation guard: on a reload
@@ -4653,7 +4652,7 @@ pub fn collect_sim_fns(ws: &Workspace) -> Vec<(Ustr, &bone_semantic::hir::Functi
 }
 
 /// `register_sim("<wire>", <mangled_fn>)` for every `@sim`-annotated fn,
-/// workspace-wide -- the skull analog of rock-codegen's `sim_registrations.rs`.
+/// workspace-wide.
 /// Emitted at module-init time (after fn + global defs) so a skull-compiled game
 /// registers its sims and the runtime's `ROCK_RUN_SIM=<wire>` dispatch resolves.
 ///

@@ -839,7 +839,7 @@ impl LspServer {
         );
 
         // Custom introspection requests for the rock.nvim panel. Bone
-        // ports of the old rock-semantic endpoints (rock/consistency was
+        // ports of the old checker's endpoints (rock/consistency was
         // dropped in the port -- it had no bone equivalent worth the
         // surface).
         if req.method == "rock/stats" {
