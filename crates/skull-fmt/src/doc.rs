@@ -30,11 +30,6 @@ pub enum Doc {
     Indent(Box<Doc>),
     /// A unit that the renderer lays out flat if it fits, otherwise broken.
     Group(Box<Doc>),
-    /// `(broken, flat)` — renders the first doc when the enclosing group breaks,
-    /// the second when it stays flat. Used for trailing commas (`,` only when
-    /// multi-line).
-    #[allow(dead_code)]
-    IfBreak(Box<Doc>, Box<Doc>),
 }
 
 impl Doc {
@@ -52,14 +47,6 @@ impl Doc {
 
     pub fn group(d: Doc) -> Doc {
         Doc::Group(Box::new(d))
-    }
-
-    // Wadler `if_break` primitive. Currently unused -- the formatter preserves
-    // the author's source line layout for collections/calls rather than emitting
-    // width-conditional trailing commas -- but kept as a renderer building block.
-    #[allow(dead_code)]
-    pub fn if_break(broken: Doc, flat: Doc) -> Doc {
-        Doc::IfBreak(Box::new(broken), Box::new(flat))
     }
 
     /// Join `docs` with `sep` between each pair.
@@ -82,9 +69,6 @@ impl Doc {
             Doc::Text(_) | Doc::Nil | Doc::Line(_) => false,
             Doc::Concat(ds) => ds.iter().any(Doc::has_hard_line),
             Doc::Indent(d) | Doc::Group(d) => d.has_hard_line(),
-            // The flat branch is what matters when probing whether a group can
-            // stay flat; the broken branch never appears in flat mode.
-            Doc::IfBreak(_, flat) => flat.has_hard_line(),
         }
     }
 }
@@ -147,10 +131,6 @@ fn fits(mut width: isize, mut stack: Vec<(usize, Mode, &Doc)>) -> bool {
                     Mode::Flat
                 };
                 stack.push((indent, m, d));
-            }
-            Doc::IfBreak(broken, flat) => {
-                let chosen = if mode == Mode::Break { broken } else { flat };
-                stack.push((indent, mode, chosen));
             }
         }
     }
@@ -221,10 +201,6 @@ pub fn render(doc: &Doc, width: usize, indent_unit: usize) -> String {
                 let flat_fits = !sub.has_hard_line() && fits(width as isize - col as isize, probe);
                 let m = if flat_fits { Mode::Flat } else { Mode::Break };
                 stack.push((indent, m, sub));
-            }
-            Doc::IfBreak(broken, flat) => {
-                let chosen = if mode == Mode::Break { broken } else { flat };
-                stack.push((indent, mode, chosen.as_ref()));
             }
         }
     }

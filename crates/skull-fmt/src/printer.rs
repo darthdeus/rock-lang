@@ -26,7 +26,6 @@ fn kw(name: Ustr) -> String {
 pub struct Printer<'a> {
     ast: &'a Ast,
     src: &'a str,
-    #[allow(dead_code)]
     cfg: &'a FormatConfig,
     trivia: &'a Trivia,
 }

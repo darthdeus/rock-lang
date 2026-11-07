@@ -12,7 +12,6 @@ pub use std::os::windows::io::AsRawHandle;
 // rock_host, and the rest from std / common deps.
 pub use anyhow::{Result, bail};
 pub use atomic_refcell::AtomicRefCell;
-#[allow(unused_imports)]
 pub use log::{debug, error, info, trace, warn};
 pub use rock_core::*;
 pub use rock_host::process_management::*;

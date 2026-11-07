@@ -3,8 +3,6 @@
 //! single-module workspace (`ws_of`). Each integration harness declares this
 //! module once; its test modules import helpers through `crate::common`.
 
-#![allow(dead_code)] // The main and GPU harnesses use different helper subsets.
-
 use bone_semantic::inference::Workspace;
 use std::sync::LazyLock;
 use ustr::Ustr;
@@ -90,22 +88,6 @@ pub fn emit_mir(src: &str) -> skull::mir_emit::MirEmit {
     assert_no_bone_errors(&ws);
     let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
     skull::mir_emit::emit_workspace_mir(&ws, mid).expect("emit")
-}
-
-/// [`emit_mir`] as a package's `rock test` program rooted at `src`'s `@test`s.
-pub fn emit_mir_package_test(src: &str) -> skull::mir_emit::MirEmit {
-    let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
-    assert_no_bone_errors(&ws);
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
-    let tests = skull::module_tests_with_ids(&ws, mid)
-        .expect("collect tests")
-        .into_iter()
-        .map(|(func, _)| skull_mir::mir::FuncRef { module: mid, func })
-        .collect::<Vec<_>>();
-    assert!(!tests.is_empty(), "package-test source has no @test roots");
-    skull::mir_emit::emit_workspace_mir_for_package_test(&ws, mid, &tests).expect("emit")
 }
 
 pub fn emit_mir_with_inputs(

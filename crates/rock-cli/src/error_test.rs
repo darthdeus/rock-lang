@@ -7,10 +7,6 @@ use walkdir::WalkDir;
 
 #[derive(Debug)]
 struct ErrorTest {
-    #[allow(dead_code)]
-    name: String,
-    #[allow(dead_code)]
-    path: PathBuf,
     test_cases: Vec<ErrorTestCase>,
     is_todo: bool,
 }
@@ -23,8 +19,6 @@ struct ErrorTestCase {
     /// to split across modules (for cross-module error scenarios).
     files: Vec<(String, String)>,
     expected_error_kind: String,
-    #[allow(dead_code)]
-    expected_params: Option<String>,
     /// `//! expect: <text>` lines: substrings the rejecting diagnostic must
     /// contain. Empty means "any stage may reject, for any reason" -- the
     /// original contract, kept for the cases that predate this.
@@ -41,29 +35,16 @@ enum ErrorTestResult {
 impl ErrorTest {
     fn from_file(path: &Path) -> Result<Self> {
         let content = fs::read_to_string(path)?;
-        let name = extract_test_name(&content);
         let is_todo = content.lines().any(|l| l.contains("//! TODO:"));
 
         // Parse test cases from the .err file
         let test_cases = parse_error_test_cases(&content)?;
 
         Ok(ErrorTest {
-            name,
-            path: path.to_owned(),
             test_cases,
             is_todo,
         })
     }
-}
-
-fn extract_test_name(content: &str) -> String {
-    // Look for "//! Error: " line
-    for line in content.lines() {
-        if let Some(stripped) = line.strip_prefix("//! Error: ") {
-            return stripped.trim().to_string();
-        }
-    }
-    "Unknown error test".to_string()
 }
 
 fn parse_error_test_cases(content: &str) -> Result<Vec<ErrorTestCase>> {
@@ -83,9 +64,9 @@ fn parse_error_test_cases(content: &str) -> Result<Vec<ErrorTestCase>> {
                 .unwrap()
                 .trim();
 
-            // Parse the expected error from the test case name
-            let (case_name, expected_error_kind, expected_params) =
-                parse_test_case_name(case_header)?;
+            // Parse the expected error from the test case name. The `{params}`
+            // suffix is validated but not checked against the diagnostic.
+            let (case_name, expected_error_kind, _params) = parse_test_case_name(case_header)?;
 
             // Collect the input code until we find the next test case or end of file
             i += 1;
@@ -128,7 +109,6 @@ fn parse_error_test_cases(content: &str) -> Result<Vec<ErrorTestCase>> {
                 name: case_name,
                 files,
                 expected_error_kind,
-                expected_params,
                 expected_reasons,
             });
         } else {

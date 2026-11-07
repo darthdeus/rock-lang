@@ -15,17 +15,10 @@ pub struct Failure {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
+#[allow(dead_code)] // The Err message is only read through Debug.
 pub enum Outcome {
     Ok(Value),
     Err(String),
-}
-
-impl Outcome {
-    #[allow(dead_code)]
-    pub fn is_ok(&self) -> bool {
-        matches!(self, Outcome::Ok(_))
-    }
 }
 
 pub trait TypeTest: Send + Sync {

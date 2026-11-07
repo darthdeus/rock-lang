@@ -2,8 +2,6 @@
 //! params, and edit application. Pulled in via `mod common;` in main.rs; used by
 //! the code-action and server-capability test modules.
 
-#![allow(dead_code)] // not every module uses every helper.
-
 use lsp_types::*;
 use rock_lsp::{LspWorkspace, compute_code_actions_workspace};
 use std::str::FromStr;

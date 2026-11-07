@@ -1,8 +1,6 @@
 //! Shared test helpers: build the stdlib workspace and emit an intrinsic's
 //! scalar Rock-fallback body to JS.
 
-#![allow(dead_code)]
-
 use std::sync::Arc;
 
 use skull_graph::instance_graph;

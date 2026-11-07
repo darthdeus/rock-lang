@@ -23,15 +23,6 @@ pub fn gen_range(rng: &mut StdRng) -> Value {
     })
 }
 
-#[allow(dead_code)]
-pub fn gen_string(rng: &mut StdRng) -> Value {
-    let len = rng.random_range(0..20usize);
-    let s: String = (0..len)
-        .map(|_| (b'a' + rng.random_range(0..26u8)) as char)
-        .collect();
-    json!(s)
-}
-
 pub fn gen_uri(_rng: &mut StdRng) -> Value {
     json!("file:///tmp/test.rock")
 }

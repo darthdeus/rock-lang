@@ -516,7 +516,6 @@ pub enum AccessDenied {
     Privilege {
         struct_name: Ustr,
         field: Ustr,
-        #[allow(dead_code)]
         vis: NsVisibility,
         need: FieldAccessNeed,
     },

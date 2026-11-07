@@ -10,7 +10,6 @@ use skull_mir::monoty::MonoInterner;
 /// instead of skipping when the binary is absent: a host without luajit must
 /// report red for tests that never ran, never green.
 // The `emit` target's execution oracles call this; `coverage` shares this file but never executes.
-#[allow(dead_code)]
 pub fn require_luajit() {
     if std::process::Command::new("luajit")
         .arg("-v")
@@ -32,7 +31,6 @@ pub fn lower_test_ref(
 /// [`lower_test_ref`] plus the instance graph it lowered through, for a test
 /// that needs the call edges as well as the body (the tail-call shape reads
 /// them through `skull_codegen_lua::callees_on_cycles`).
-#[allow(dead_code)]
 pub fn lower_test_ref_with_graph(
     ws: &bone_semantic::inference::Workspace,
     mid: bone_semantic::prelude::ModuleId,
@@ -62,7 +60,6 @@ pub fn lower_test_ref_with_graph(
 
 /// The functions on a call cycle in `graph`, spelled the way production spells
 /// it (`skull::mir_emit::recursive_callees`).
-#[allow(dead_code)]
 pub fn cycle_callees(
     graph: &instance_graph::InstanceGraph,
 ) -> bone_semantic::prelude::FxHashSet<FuncRef> {
@@ -77,7 +74,6 @@ pub fn cycle_callees(
 
 /// Every function's call-graph component number in `graph`, spelled the way
 /// production spells it (`skull::mir_emit::call_sccs`).
-#[allow(dead_code)]
 pub fn call_sccs(
     graph: &instance_graph::InstanceGraph,
 ) -> bone_semantic::prelude::FxHashMap<FuncRef, u32> {

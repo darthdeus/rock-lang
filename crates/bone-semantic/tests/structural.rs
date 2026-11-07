@@ -11,7 +11,6 @@ use bone_semantic::test_support::ExpectPretty;
 fn parse_rock(src: &str) -> Result<skull_parser::Ast, CompilerError> {
     skull_parser::parse_module_clean(src, Ustr::from("<parse_rock>"))
 }
-#[allow(dead_code)]
 fn parse_rock_with_file(src: &str, file: &str) -> Result<skull_parser::Ast, CompilerError> {
     skull_parser::parse_module_clean(src, Ustr::from(file))
 }
