@@ -77,25 +77,6 @@ pub fn shuffled<I: IntoIterator>(iter: I) -> Vec<I::Item> {
     v
 }
 
-/// Collect an iterator into a Vec, sort by `key` (deterministic across
-/// runs / cwds / processes), then shuffle if `ROCK_SHUFFLE_SEED` is set.
-///
-/// This is the recommended pattern for any code that walks a HashMap
-/// and picks a winner. The sort makes production behavior deterministic
-/// regardless of hash-bucketing; the shuffle exposes new ordering bugs
-/// when tests are run with the env var.
-pub fn sorted_then_shuffled<I, K, F>(iter: I, mut key: F) -> Vec<I::Item>
-where
-    I: IntoIterator,
-    K: Ord,
-    F: FnMut(&I::Item) -> K,
-{
-    let mut v: Vec<I::Item> = iter.into_iter().collect();
-    v.sort_by_key(|x| key(x));
-    shuffle_in_place(&mut v);
-    v
-}
-
 fn next_u64(state: &mut u64) -> u64 {
     // SplitMix64 — single-state PRNG, no additional deps. Fine for
     // shuffle-fairness; not for cryptography.

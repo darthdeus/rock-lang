@@ -56,18 +56,6 @@ impl CompileStats {
             format!("{:.0} loc/sec", lps)
         }
     }
-
-    /// One-line summary suitable for log output:
-    /// `47.3k loc/sec (12345 lines, 87 files, 1.84s)`.
-    pub fn format_summary(&self, elapsed: std::time::Duration) -> String {
-        format!(
-            "{} ({} lines, {} files, {:.2}s)",
-            self.format_throughput(elapsed),
-            self.total_lines,
-            self.files,
-            elapsed.as_secs_f64(),
-        )
-    }
 }
 
 #[cfg(test)]

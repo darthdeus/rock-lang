@@ -1,8 +1,6 @@
 use std::str::FromStr;
 use ustr::Ustr;
 
-use crate::ScopeId;
-
 /// Represents a unique module identifier based on the file path
 /// We use an Option internally to allow for const construction
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -37,10 +35,6 @@ impl ModuleId {
 
     pub fn is_stdlib(&self) -> bool {
         self.as_str().contains("stdlib")
-    }
-
-    pub fn scope(&self) -> ScopeId {
-        ScopeId::Root(*self)
     }
 }
 

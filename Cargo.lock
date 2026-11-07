@@ -1290,7 +1290,6 @@ dependencies = [
  "colored",
  "fs-err",
  "itertools 0.13.0",
- "rustc-hash",
  "test-utils",
  "ustr",
 ]

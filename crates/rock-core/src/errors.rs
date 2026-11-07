@@ -66,37 +66,14 @@ pub enum CompilerErrorKind {
         first_location: Option<LineCol>,
     },
 
-    MismatchedType {
-        expected: TypeId,
-        actual: TypeId,
-    },
-
     WrongNumberOfArgs {
         expected: usize,
         actual: usize,
     },
 
-    IndexingNonArrayType {
-        actual: TypeId,
-    },
-
     InvalidChainedCompoundAssign,
 
     IncompatibleNewtypeOperation,
-
-    UnificationError {
-        expected: TypeRef,
-        actual: TypeRef,
-    },
-
-    SubtypeError {
-        sup: TypeRef,
-        sub: TypeRef,
-    },
-
-    InferenceError {
-        unresolved_nodes: Vec<(AstNodeId, TypeRef)>,
-    },
 
     DestructuringError,
 
@@ -204,11 +181,6 @@ impl CompilerError {
 
     pub fn new_with_label(span: Span, message: String) -> Self {
         Self::at(span.start(), message.clone()).with_label(span, message)
-    }
-
-    pub fn with_kind(mut self, kind: CompilerErrorKind) -> Self {
-        self.kind = kind;
-        self
     }
 
     pub fn with_level(mut self, level: CompilerErrorLevel) -> Self {

@@ -17,7 +17,6 @@ fs-err = { workspace = true }
 atomic_refcell = { workspace = true }
 ustr = { workspace = true }
 itertools = { workspace = true }
-rustc-hash = { workspace = true }
 colored = { workspace = true }
 
 [dev-dependencies]
