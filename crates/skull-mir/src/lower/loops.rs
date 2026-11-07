@@ -84,8 +84,12 @@ impl Builder<'_> {
             .inf
             .and_then(|i| i.for_iter_protocol.get(&iter).cloned())
         {
-            // Lua keeps its counted arena walk; native rows use the recorded iterator.
+            // Lua keeps its counted arena walk; native rows and JS use the
+            // recorded iterator. The walk's synthesized `__arena_store_or_empty`
+            // call has no instance-graph site, which only JS checks strictly.
+            // Adding that site would let JS take the walk too.
             if !self.scx.row_value_containers
+                && self.scx.target() == bone_semantic::hir::FnBackend::Lua
                 && let Some(collection) = enumerated_collection.filter(|&c| self.iter_is_arena(c))
             {
                 return self.lower_for_arena(&vars, collection, body, true);

@@ -274,3 +274,36 @@ fn range_match_folds_to_and_diamond() {
         "no longer rejects:\n{js}"
     );
 }
+
+// `enumerate(arena)` on JS lowers through the recorded iterator protocol. The
+// counted arena walk synthesizes a call the instance graph does not reach, so
+// the closure would reject it.
+#[test]
+fn enumerate_arena_emits_through_the_iterator() {
+    let ws = ws_with(
+        "struct Mob { name: string }
+        fn root() -> int {
+            let mobs: Arena<Mob> = arena_new()
+            mobs.insert(Mob { name: \"A\" })
+            let n = 0
+            for (i, pair) in enumerate(mobs) {
+                n = n + i
+            }
+            n
+        }",
+    );
+    let mid = ws.module_ids[&ustr::Ustr::from("<test>")];
+    let (fid, _) = ws
+        .module(mid)
+        .functions
+        .iter()
+        .find(|(_, f)| f.name.as_str() == "root")
+        .expect("root");
+    let root = skull_mir::mir::FuncRef {
+        module: mid,
+        func: fid,
+    };
+    if let Err(e) = skull_codegen_js::emit::emit_with_closure(&ws, &[(root, "root".to_string())]) {
+        panic!("enumerate(arena) rejects on JS: {}", e.message);
+    }
+}
