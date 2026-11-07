@@ -1,6 +1,45 @@
-// PR-γ: edge cases for `.result()` semantics. These tests pin
-// today's behavior so it doesn't drift if/when the ResumeResult<Y, R>
-// enum surface lands.
+// Coroutine return values: a co fn with R != () can `return expr`, and the
+// caller reads it with `.result()` once the coroutine has finished.
+// `.resume()` still returns Y? whatever R is.
+
+co fn produce() -> Coroutine<int, string> {
+    yield 1
+    yield 2
+    return "done"
+}
+
+@test(output = "1 2 done")
+fn test_return_value_observable() {
+    let c = produce()
+    let a = c.resume()
+    let b = c.resume()
+    let _drain = c.resume() // drives terminal; returns null
+    let r = c.result()
+    let pa = if a != null { "{a}" } else { "null" }
+    let pb = if b != null { "{b}" } else { "null" }
+    let pr = if r != null { "{r}" } else { "null" }
+    print("{pa} {pb} {pr}")
+}
+
+// Sanity: a coroutine that bare-returns without a value sees null
+// from `.result()`. This guards the unit-elision path.
+co fn bare_return() -> Coroutine<int> {
+    yield 1
+    return
+}
+
+@test(output = "1 null")
+fn test_bare_return_result_is_null() {
+    let c = bare_return()
+    let v = c.resume()
+    let _drain = c.resume()
+    let r = c.result()
+    let pv = if v != null { "{v}" } else { "null" }
+    let pr = if r != null { "stashed" } else { "null" }
+    print("{pv} {pr}")
+}
+
+// ---- Edge cases for `.result()` ----
 
 // ----- Case 1: result() before terminal (still suspended) -----
 //
@@ -89,4 +128,47 @@ fn test_explicit_unit_bare_return() {
     let _drain = c.resume()
     let r = c.result()
     if r != null { print("stashed") } else { print("null") }
+}
+
+// ---- Multi-field return values ----
+// Tuple and value-struct returns box as a single value in the return slot,
+// so both fields read back through `.result()` on every backend.
+
+co fn two_out() -> Coroutine<int, (int, int)> {
+    yield 1
+    return (42, 99)
+}
+
+@test(output = "42 99")
+fn test_multivalue_tuple_co_return() {
+    let c = two_out()
+    let _y = c.resume()
+    let _drain = c.resume()
+    let r = c.result()
+    if r != null {
+        let (a, b) = r
+        print("{a} {b}")
+    } else {
+        print("null")
+    }
+}
+
+value Pair { a: int, b: int }
+
+co fn make_pair() -> Coroutine<int, Pair> {
+    yield 1
+    return Pair { a: 42, b: 99 }
+}
+
+@test(output = "42 99")
+fn test_value_struct_co_return() {
+    let c = make_pair()
+    let _y = c.resume()
+    let _drain = c.resume()
+    let r = c.result()
+    if r != null {
+        print("{r.a} {r.b}")
+    } else {
+        print("null")
+    }
 }

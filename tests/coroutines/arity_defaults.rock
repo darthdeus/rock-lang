@@ -1,0 +1,124 @@
+// One unit type: the coroutine default R/N is the builtin `()`, spellable
+// in any type position. `Coroutine<Y>` == `Coroutine<Y, ()>` ==
+// `Coroutine<Y, (), ()>`, and a struct default `= ()` threads into a
+// coroutine-typed field -- the generic `Task<R = ()>` shape in miniature
+
+co fn falls_off() -> Coroutine<int> {
+    yield 1
+    yield 2
+}
+
+co fn explicit_all() -> Coroutine<int, (), ()> {
+    yield 7
+}
+
+co fn count_to(n: int) -> Coroutine<int, string> {
+    let i = 0
+    while i < n {
+        yield i
+        i = i + 1
+    }
+    return "done"
+}
+
+@test
+fn bare_and_explicit_unit_slots_unify() {
+    let a: Coroutine<int, ()> = falls_off()
+    let b: Coroutine<int> = explicit_all()
+    assert(a.resume() == 1)
+    assert(b.resume() == 7)
+}
+
+struct Box<R = ()> {
+    c: Coroutine<int, R>
+}
+
+@test
+fn default_param_threads_into_coroutine_field() {
+    let b: Box<string> = Box { c: count_to(2) }
+    while status(b.c) == "suspended" {
+        b.c.resume()
+    }
+    assert(b.c.result() == "done")
+
+    let u: Box = Box { c: falls_off() }
+    assert(u.c.resume() == 1)
+}
+
+@test
+fn fall_off_generator_iterates() {
+    let sum = 0
+    for v in falls_off() {
+        sum = sum + v
+    }
+    assert(sum == 3)
+}
+
+// ---- `Coroutine<int>` is sugar for `Coroutine<int, ()>` ----
+
+co fn count_to_implicit(n: int) -> Coroutine<int> {
+    yield n
+}
+
+co fn count_to_explicit(n: int) -> Coroutine<int, ()> {
+    yield n
+}
+
+@test(output = "1")
+fn test_arity_1_yields_value() {
+    let c = count_to_implicit(1)
+    let v = c.resume()
+    if v != null { print("{v}") } else { print("null") }
+}
+
+@test(output = "2")
+fn test_arity_2_explicit_yields_value() {
+    let c = count_to_explicit(2)
+    let v = c.resume()
+    if v != null { print("{v}") } else { print("null") }
+}
+
+// ---- Arity 1, 2 and 3 forms unify ----
+
+co fn arity_one_explicit_unit() -> Coroutine<int, (), ()> {
+    yield 1
+}
+
+co fn arity_two_explicit_unit_n() -> Coroutine<int, string, ()> {
+    yield 1
+    return "done"
+}
+
+co fn arity_one_implicit() -> Coroutine<int> {
+    yield 1
+}
+
+co fn arity_two_implicit() -> Coroutine<int, string> {
+    yield 1
+    return "done"
+}
+
+@test(output = "1\nnull\n1\nresult=done\n1\nnull\n1\nresult=done")
+fn test_coroutine_arity_three_forms_unify() {
+    let a = arity_one_explicit_unit()
+    print(a.resume() ?? -1)         // 1
+    let r1 = a.resume()
+    if r1 == null { print("null") } else { print(r1.unwrap()) }  // null
+
+    let b = arity_two_explicit_unit_n()
+    print(b.resume() ?? -1)         // 1
+    let _r2 = b.resume()
+    let rb = b.result()
+    if rb == null { print("null") } else { print("result={rb.unwrap()}") }  // result=done
+
+    let c = arity_one_implicit()
+    print(c.resume() ?? -1)         // 1
+    let r3 = c.resume()
+    if r3 == null { print("null") } else { print(r3.unwrap()) }  // null
+
+    let d = arity_two_implicit()
+    print(d.resume() ?? -1)         // 1
+    let _r4 = d.resume()
+    let rd = d.result()
+    if rd == null { print("null") } else { print("result={rd.unwrap()}") }  // result=done
+}

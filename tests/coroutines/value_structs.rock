@@ -1,11 +1,6 @@
-// RED test for value-typed locals + params in stackless coroutines.
-//
-// A `co fn` that uses a value-typed local or parameter must still work.
-// Today the stackless_coroutine pass hoists each local as one state-slot
-// (`s.v`) and emits writebacks of the single name `v`. For a value type
-// like Vec2 the caller passes scalarized args (`v__x, v__y`) and Rock
-// field-access lowers through scalarized locals (`v__x`), so the
-// hoisting must expand to per-field state slots.
+// Value-typed locals and parameters in co fn bodies. A value such as Vec2
+// is passed and accessed as per-field scalars, so it is hoisted into the
+// coroutine frame as one slot per field.
 
 value V2 {
     x: int,
@@ -94,4 +89,42 @@ fn test_value_param_in_branch() {
     let c2 = co_branch(V2 { x: 1, y: 2 }, false)
     print(c2.resume() ?? -1)
     print(c2.resume() ?? -1)
+}
+
+// ---- Bare references to a value-typed parameter ----
+// `let q = p` / `yield p` / `foo(p)` for
+// a value-typed `p` must resolve per-field scalars through `s.p__x`,
+// `s.p__y` -- not bare `p__x`, `p__y` (which are nil globals because the
+// coroutine frame only has `s` as a local).
+
+fn v2_sum(v: V2) -> int {
+    return v.x + v.y
+}
+
+// Bare param forwarded through a let binding, then field-accessed.
+co fn co_alias(p: V2) -> Coroutine<int> {
+    let q = p
+    yield q.x
+    yield q.y
+}
+
+@test(output = "10\n20")
+fn test_value_param_let_alias() {
+    let c = co_alias(V2 { x: 10, y: 20 })
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+}
+
+// Bare param passed as arg across yield.
+co fn co_arg(p: V2) -> Coroutine<int> {
+    let a = v2_sum(p)
+    yield a
+    yield v2_sum(p) * 2
+}
+
+@test(output = "7\n14")
+fn test_value_param_as_arg() {
+    let c = co_arg(V2 { x: 3, y: 4 })
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
 }

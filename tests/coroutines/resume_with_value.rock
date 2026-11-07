@@ -1,0 +1,52 @@
+// Resume values: `let x = yield V` binds the value passed to the next
+// `c.resume(val)`, typed by the coroutine's N parameter. The first resume's
+// argument is discarded since the body has not yielded yet.
+
+co fn echo_back() -> Coroutine<int, (), int> {
+    //                          ^Y    ^R    ^N -- non-unit N enables
+    //                                             let-bound yield form
+    let x = yield 1
+    print(x)
+    let y = yield 2
+    print(y)
+    let z = yield 3
+    print(z)
+}
+
+@test(output = "1\n42\n2\n7\n3\n0\n-1\n-1\nnull")
+fn test_resume_with_value_basic() {
+    let c = echo_back()
+    print(c.resume(0) ?? -1)   // 1 -- pre-first-yield resume; arg=0 discarded
+    print(c.resume(42) ?? -1)  // 42 (body prints), yields 2
+    print(c.resume(7) ?? -1)   // 7  (body prints), yields 3
+    print(c.resume(0) ?? -1)   // 0  (body prints), body falls off
+    print(c.resume(0) ?? -1)   // -1 -- body already terminated; resume returns null
+    let last = c.resume(0)     // null -- body still terminated
+    if last == null { print("null") } else { print(last.unwrap()) }
+}
+
+// ---- Per-yield feedback in a loop: every resume binds its value ----
+
+co fn accumulator() -> Coroutine<int, int, int> {
+    //                          ^Y   ^R   ^N
+    let total: int = 0
+    let i: int = 0
+    while i < 3 {
+        let v = yield i      // yields the iteration index, gets answer back
+        total = total + v
+        i = i + 1
+    }
+    return total
+}
+
+@test(output = "0\n1\n2\nfinal=60")
+fn test_resume_with_value_loop() {
+    let c = accumulator()
+    print(c.resume(0) ?? -1)   // yields 0 (i=0); arg=0 discarded (pre-first-yield)
+    print(c.resume(10) ?? -1)  // total += 10, yields 1
+    print(c.resume(20) ?? -1)  // total += 20, yields 2
+    let last = c.resume(30)    // total += 30 = 60, body returns
+    if last != null { print("unexpected={last.unwrap()}") }
+    let r = c.result()
+    if r != null { print("final={r.unwrap()}") } else { print("final=null") }
+}
