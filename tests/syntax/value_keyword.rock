@@ -1,4 +1,4 @@
-// Contextual `value` keyword — introduces an immutable struct,
+// Contextual `value` keyword -- introduces an immutable struct,
 // equivalent to the transitional `@value struct ...`. Also confirms
 // that `value` remains a plain identifier in every other position.
 
@@ -14,7 +14,7 @@ value R {
     h: int,
 }
 
-// `value` as a param name, local binding, and field name — all stay
+// `value` as a param name, local binding, and field name -- all stay
 // as plain identifiers.
 struct Box {
     value: int,

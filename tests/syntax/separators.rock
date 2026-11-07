@@ -1,15 +1,7 @@
-// Regression coverage for enum/struct separator strictness.
-//
-// History: the parser used to accept bare spaces as separators between enum
-// variants and struct fields, so `enum Foo { A B C D }` and
-// `struct Foo { x: int y: int }` parsed silently. That has been fixed —
-// commas or newlines are required, end-of-block (`}`) is allowed without a
-// trailing separator. Sentinel pinning that the buggy inputs are rejected
-// lives in rock/tests/enum_variant_separator_sentinel_test.rs.
-//
-// This file pins the *accepted* shapes from real code so we don't accidentally
-// re-tighten too far (e.g. breaking trailing-newline-only enums or
-// optional-comma match arms).
+// Enum and struct separators: commas or newlines separate enum variants and
+// struct fields, and the closing `}` needs no trailing separator. Bare spaces
+// (`enum Foo { A B }`) are rejected. These are the accepted shapes from real
+// code, pinned so the parser is not tightened too far.
 
 // --- Enum: newline-separated variants ---
 
@@ -64,4 +56,27 @@ fn swap(pair: (int, string)) -> (string, int) {
 fn test_tuple_type_commas_required() {
     let result = swap((42, "hello"))
     print("{result.0} {result.1}")
+}
+
+// --- Enum: comments between variants ---
+
+enum BlendMode {
+    Alpha,    // Normal alpha blending
+    // This is a comment between variants
+    Additive, // Additive blending for effects
+    /* Block comment */
+    Multiply, // Multiply blending
+}
+
+enum TestEnum {
+    First,
+    // Comment at the end
+    Second
+}
+
+@test
+fn test_enum_with_comments() {
+    let mode = BlendMode::Alpha
+    let test = TestEnum::First
+    // Basic test that enums with comments parse correctly
 }

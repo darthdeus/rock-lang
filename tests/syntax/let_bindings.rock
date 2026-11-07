@@ -1,5 +1,5 @@
-// Let binding tests - migrated from rock/tests/let_tests.rs
-// Tests tuple destructuring, let bindings, and keyword variable names
+// Let bindings: tuple destructuring, type annotations, and keywords from
+// other languages used as variable names.
 
 @test(output = "5\nhello")
 fn test_tuple_let_binding_basic() {

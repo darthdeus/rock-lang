@@ -1,5 +1,5 @@
 // Leading-dot floats: `.5` lexes as `0.5` in expression-start position, while
-// `.0` after a value stays a tuple/field index (`w.0`). See Phase 4 of
+// `.0` after a value stays a tuple/field index (`w.0`).
 
 @test
 fn test_leading_dot_literal() {
