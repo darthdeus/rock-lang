@@ -120,6 +120,41 @@ cannot compile is reported as skipped, and CI fails if the skip count rises
 above `JS_MAX_SKIPS` in `.github/workflows/ci.yml`. When a change removes
 skips, lower that number to the new count.
 
+## Corpus layout
+
+The `tests/` corpus is grouped into one directory per language topic:
+`values/`, `nullable/`, `nobox/`, `control_flow/`, `strings/`, `closures/`,
+`types/`, `iterators/`, `functions/`, `operators/`, `arenas/`, `patterns/`,
+`structs/`, `vectors/`, `maps/`, `shadowing/`, `newtypes/`,
+`native_buffers/`, `json/`, `coroutines/`, `library/` (standard library
+helpers), `annotations/`, `syntax/` and `smoke/` (whole-program checks), plus
+the optimizer and feature directories `inline/`, `scalarize/`, `macros/`,
+`intrinsics/` and `comment_placement/`. `tests/errors/` and `tests/lsp/` hold
+the expected-error and LSP suites, `tests/fixtures/` holds data files, and
+directories with a `stick.toml` are package tests.
+
+Put a new file in the directory for the feature it exercises. Follow these
+rules when adding or renaming files:
+
+- Use one level of nesting under `tests/`. Test labels show only the parent
+  directory and the file name, so deeper paths become ambiguous.
+- File names must be unique within a directory. Do not repeat the directory
+  name as a prefix (`closures/capture_semantics.rock`, not
+  `closures/closure_capture_semantics.rock`).
+- Never name a topic directory `errors` or `lsp`: those names select the
+  expected-error and LSP suites. Avoid `stdlib` as well, since a `stdlib` path
+  component changes completion ranking.
+- Do not prefix names with a backend (`c_`, `lua_`) or a pipeline stage or
+  increment (`anf_`, `phaseN_`, `_incN`), and drop `test_`/`_test`. The corpus
+  runs on every backend. Keep a `js_` prefix only on files that pin a
+  JS-backend mechanism, such as a runtime helper or the emitted ABI.
+
+`--filter <dir>/` selects one topic:
+
+```sh
+cargo run --quiet --bin rock -- test tests/ --filter closures/
+```
+
 ## Expected compiler errors
 
 Keep intentionally invalid programs separate from runtime cases. Save this as
