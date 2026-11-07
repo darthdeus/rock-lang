@@ -1,4 +1,4 @@
-// Tests for random_seed, parse_int, parse_float, and env_var stdlib functions.
+// random_seed and the random streams, parse_int, parse_float and env_var.
 
 @test(output = "true")
 fn test_random_seed_deterministic() {
@@ -194,4 +194,30 @@ fn test_env_var_rock_test_seed() {
     // The `||` RHS narrows `result` to non-null (it runs only when the left is
     // false), so `result.len()` type-checks without a separate guard.
     print(result == null || result.len() >= 0)
+}
+
+// ---- Exact random stream values ----
+// Both streams use the same generator with a signed 32-bit state, and wide
+// integer spans take two draws.
+
+@test
+fn native_rng_matches_gameplay_and_presentation_contract() {
+    random_seed(0)
+    assert_eq(random(), 0.31659073126502335, "first gameplay draw")
+    assert_eq(random_get_state(), 1359758873, "gameplay state is signed 32-bit")
+    assert_eq(random(), 0.5607803913298994, "second gameplay draw")
+    assert_eq(random_get_state(), -1886404018, "gameplay state wraps signed 32-bit")
+
+    random_seed(0)
+    assert_eq(random_int(0, 4294967296), 1359746837, "single draw integer span")
+    random_seed(0)
+    assert_eq(random_int(-4, 9000000000), 8798616889, "two draw integer span")
+
+    presentation_random_seed(0)
+    assert_eq(presentation_random(), 0.31659073126502335, "presentation uses same algorithm")
+    assert_eq(presentation_random_get_state(), 1359758873,
+        "presentation state is signed 32-bit")
+    presentation_random_seed(0)
+    assert_eq(presentation_random_int(-4, 9000000000), 8798616889,
+        "presentation two draw integer span")
 }

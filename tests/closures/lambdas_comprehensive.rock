@@ -1,5 +1,4 @@
-// Lambda tests - migrated from rock/tests/lambda_tests.rs
-// Tests lambda expressions, closures, and higher-order functions
+// Lambda expressions, closures and higher-order functions.
 
 // Helper struct definitions
 struct S { field: int }

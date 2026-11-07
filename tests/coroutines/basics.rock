@@ -1,5 +1,4 @@
-// Coroutine tests - migrated from rock/tests/coroutine_tests.rs
-// Tests coroutine yield/resume functionality and multiple instances
+// Coroutine basics: yield/resume and several independent instances.
 
 // Coroutine definitions at top level
 co fn echo() -> Coroutine<string> {

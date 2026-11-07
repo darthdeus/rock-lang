@@ -1,5 +1,4 @@
-// Comprehensive lambda functional tests migrated from rock/tests/lambda_functional_tests.rs
-// Tests lambda expressions, functional programming patterns, vector operations, and advanced patterns
+// Lambdas in functional patterns over vectors.
 // Covers basic operations (map, filter), custom implementations (reduce, zip), and performance patterns
 
 // ============================================

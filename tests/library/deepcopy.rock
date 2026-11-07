@@ -113,3 +113,83 @@ fn native_buffer_deepcopy_preserves_shared_storage_aliases() {
     assert_eq(nb_get(copied.b, 0), 8)
     assert_eq(nb_get(original, 0), 4)
 }
+
+// ---- Userdata resources ----
+// A userdata with a `__deepcopy` metamethod copies once per graph and the
+// copy is independent of the original; unmanaged userdata stays shared.
+
+inline(lua) fn copy_resource_new(value: int) -> any = """
+    local function create(n)
+        local resource = newproxy(true)
+        local mt = getmetatable(resource)
+        mt.value = n
+        mt.__deepcopy = function(source)
+            return create(getmetatable(source).value)
+        end
+        return resource
+    end
+    return create(value)
+"""
+inline(lua) fn copy_resource_value(resource: any) -> int = "return getmetatable(resource).value"
+inline(lua) fn copy_resource_set(resource: any, value: int) = "getmetatable(resource).value = value"
+inline(lua) fn copy_resource_same(a: any, b: any) -> bool = "return rawequal(a, b)"
+
+inline(lua) fn copy_resource_shared() -> any = "return newproxy(false)"
+
+struct ResourceCopyPair { first: any, second: any }
+
+@test
+fn deepcopy_preserves_resource_aliases_with_independent_ownership() {
+    let shared = copy_resource_shared()
+    assert(copy_resource_same(shared, deepcopy(shared)), "unmanaged userdata retains its shared semantics")
+    let resource = copy_resource_new(17)
+    let original = ResourceCopyPair { first: resource, second: resource }
+    let branch = deepcopy(original)
+    let sibling = deepcopy(original)
+    assert(copy_resource_same(branch.first, branch.second), "one resource copy per graph")
+    assert(!copy_resource_same(original.first, branch.first), "resource ownership is independent")
+    copy_resource_set(branch.first, 29)
+    assert_eq(copy_resource_value(branch.second), 29)
+    assert_eq(copy_resource_value(original.first), 17)
+    assert_eq(copy_resource_value(sibling.first), 17)
+}
+
+// ---- table_copy ----
+//
+// `table_copy` preserves the metatable (mirrors `deepcopy`): copying a
+// metatabled table yields the same entries under the same metatable.
+
+inline(lua) fn __test_make_metatabled() -> any = """
+    return setmetatable({ a = 1, b = 2 }, { __rock_test_marker = true })
+"""
+
+inline(lua) fn __test_copy_keeps_mt(orig: any, copy: any) -> bool = """
+    return copy ~= orig
+        and copy.a == 1 and copy.b == 2
+        and getmetatable(copy) ~= nil
+        and getmetatable(copy) == getmetatable(orig)
+"""
+
+inline(lua) fn __test_copy_plain_ok(orig: any, copy: any) -> bool = """
+    return copy ~= orig
+        and copy.a == 1 and copy.b == 2
+        and getmetatable(copy) == nil
+"""
+
+@test(output = "true")
+fn table_copy_keeps_metatable() {
+    let t = __test_make_metatabled()
+    let c = table_copy(t)
+    print(__test_copy_keeps_mt(t, c))
+}
+
+@test(output = "true")
+fn table_copy_plain_table_has_no_metatable() {
+    let t: any = __test_make_plain()
+    let c = table_copy(t)
+    print(__test_copy_plain_ok(t, c))
+}
+
+inline(lua) fn __test_make_plain() -> any = """
+    return { a = 1, b = 2 }
+"""
