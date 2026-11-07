@@ -11,7 +11,6 @@ license.workspace = true
 
 [features]
 default = []
-perfetto = ["dep:tracing-perfetto", "dep:tracing-flame", "dep:tracing-subscriber"]
 # Mirror rock-cli: build rock-lsp's bone hover/diagnostics path with bone's
 # sequential shim (single-threaded, no rayon frames) for clean profiling.
 sequential = ["bone-query/sequential"]
@@ -40,10 +39,6 @@ rock-log = { workspace = true }
 lsp-server = { workspace = true }
 lsp-types = { workspace = true }
 tracing = { workspace = true }
-tracing-flame = { workspace = true, optional = true }
-tracing-subscriber = { workspace = true, optional = true }
-
-tracing-perfetto = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3.0"

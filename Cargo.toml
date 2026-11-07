@@ -91,9 +91,6 @@ skull-transform = { path = "crates/skull-transform" }
 rock-lsp = { path = "crates/rock-lsp" }
 lsp-server = { package = "lsp-server-manual", path = "crates/lsp-server-manual" }
 env_filter = { version = "2.0.0", default-features = false, features = ["std"] }
-tracing-flame = "0.2"
-tracing-subscriber = { version = "0.3.20", default-features = false, features = ["std", "registry"] }
-tracing-perfetto = "0.1"
 skull-mir = { path = "crates/skull-mir" }
 skull-graph = { path = "crates/skull-graph" }
 bone-incremental = { path = "crates/bone-incremental" }

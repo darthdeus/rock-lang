@@ -14,8 +14,8 @@ impl CompilerPolicy {
     }
 }
 
-/// Open a tracing info-span scoped to the rest of the enclosing block, output
-/// to tracing-flame / tracing-perfetto. rock-lsp is its only user.
+/// Open a tracing info-span scoped to the rest of the enclosing block, for
+/// whatever tracing subscriber the process installs. rock-lsp is its only user.
 #[macro_export]
 macro_rules! scope {
     ($name:expr) => {
