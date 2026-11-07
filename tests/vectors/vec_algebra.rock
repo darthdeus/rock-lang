@@ -1,5 +1,28 @@
-// Vec3/Vec4 algebra parity with Vec2 (stdlib/vec.rock). Vec3 fills to Vec2
-// where sensible; Vec4 was fields-only and gains the shader-facing algebra.
+// Vec2/Vec3/Vec4 algebra from the stdlib (stdlib/vec.rock): construction and
+// pure algebra resolve in a bare program with no engine. Vec3 matches Vec2
+// where sensible and Vec4 carries the shader-facing algebra.
+
+@test
+fn vec2_stdlib_arithmetic() {
+    let a = Vec2 { x: 3.0, y: 4.0 }
+    let b = Vec2 { x: 1.0, y: 2.0 }
+
+    let sum = a + b
+    assert(sum.x == 4.0)
+    assert(sum.y == 6.0)
+
+    assert(a.dot(b) == 11.0)
+    assert(a.length() == 5.0)
+}
+
+@test
+fn vec3_vec4_construct_in_stdlib() {
+    let c = Vec3 { x: 1.0, y: 2.0, z: 3.0 }
+    let d = Vec4 { x: 1.0, y: 2.0, z: 3.0, w: 4.0 }
+
+    assert(c.z == 3.0)
+    assert(d.w == 4.0)
+}
 
 @test
 fn vec3_componentwise_mul() {

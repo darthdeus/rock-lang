@@ -1,0 +1,25 @@
+// Every Vec carries a direct `__ty = "Vec"` field -- the same shape skull emits
+// for `[...]` literals -- so a Vec is identifiable with no metatable, and
+// `__rock_get_type` (used by `inspect` and `d()`) reads that tag. Structural
+// Vec `==` is pinned separately in tests/structs/structural_equality.rock.
+
+// Strip the metatable: a Vec must still report its type via `__ty`. The Vec is
+// constructed on the Rock side: `vec_new` is not `@nomangle`, so calling it from
+// opaque text would name a mangled symbol. `any` is the param type because the
+// body reads the raw layout, which is what the container boundary rule asks for.
+@nomangle inline(lua) fn __test_ty_no_mt(v: any) -> string = """
+    setmetatable(v, nil)
+    return __rock_get_type(v) or "<nil>"
+"""
+
+@test(output = "Vec")
+fn vec_identifiable_without_metatable() {
+    let v: [int] = vec_new()
+    print(__test_ty_no_mt(v))
+}
+
+@test(output = "Vec {{ 1, 2, 3 }}")
+fn vec_inspect_repr() {
+    let xs = [1, 2, 3]
+    print(inspect(xs, true, 6))
+}
