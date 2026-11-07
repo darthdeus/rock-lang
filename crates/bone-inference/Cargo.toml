@@ -11,12 +11,8 @@ repository.workspace = true
 bone-core = { path = "../bone-core" }
 skull-parser = { path = "../skull-parser" }
 
-rustc-hash = { workspace = true }
 ustr = { workspace = true }
-comfy-la-arena = { path = "../la-arena" }
-rust-lapper = { workspace = true }
 smallvec = { workspace = true }
-itertools = { workspace = true }
 tracing = { workspace = true }
 
 [lints]

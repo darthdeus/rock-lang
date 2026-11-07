@@ -12,15 +12,9 @@ autotests = false
 sequential = ["bone-core/sequential"]
 
 [dependencies]
-rustc-hash = { workspace = true }
 ustr = { workspace = true }
-comfy-la-arena = { path = "../la-arena" }
 rust-lapper = { workspace = true }
-rayon = { workspace = true }
 tracing = { workspace = true }
-smallvec = { workspace = true }
-itertools = { workspace = true }
-nonmax = { workspace = true }
 
 bone-core = { path = "../bone-core" }
 bone-lower = { path = "../bone-lower" }

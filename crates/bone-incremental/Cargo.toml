@@ -16,10 +16,6 @@ skull-parser = { workspace = true }
 
 rustc-hash = { workspace = true }
 ustr = { workspace = true }
-rust-lapper = { workspace = true }
-comfy-la-arena = { workspace = true }
-smallvec = { workspace = true }
-itertools = { workspace = true }
 
 [dev-dependencies]
 # Real-project tests only: graph discovery (rock-host) and the alias tables

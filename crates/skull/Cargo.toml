@@ -29,7 +29,6 @@ skull-codegen-lua = { workspace = true }
 #. skull (the driver) may depend on the GLSL
 # backend; skull-mir must not -- the layering constraint.
 skull-codegen-glsl = { workspace = true }
-skull-codegen-shader = { workspace = true }
 skull-transform = { workspace = true }
 skull-parser = { workspace = true }
 bone-lints = { workspace = true }
@@ -39,7 +38,6 @@ comfy-la-arena = { workspace = true }
 ustr = { workspace = true }
 rustc-hash = { workspace = true }
 rayon = { workspace = true }
-smallvec = { workspace = true }
 
 [dev-dependencies]
 rock-host = { workspace = true }

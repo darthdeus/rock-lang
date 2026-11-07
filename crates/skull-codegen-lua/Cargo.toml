@@ -21,7 +21,6 @@ rustc-hash = { workspace = true }
 skull-mir = { workspace = true }
 bone-semantic = { workspace = true }
 ustr = { workspace = true }
-log = { workspace = true }
 
 [dev-dependencies]
 ustr = { workspace = true }

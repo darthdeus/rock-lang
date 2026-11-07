@@ -27,11 +27,9 @@ rock-stdlib = { workspace = true }
 rock-core = { workspace = true }
 lsp-types = { workspace = true }
 
-rust-lapper = { workspace = true }
 ustr = { workspace = true }
 log = { workspace = true }
 fs-err = { workspace = true }
-walkdir = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3.0"

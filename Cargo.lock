@@ -167,7 +167,6 @@ dependencies = [
  "rustc-hash",
  "skull-parser",
  "smallvec",
- "tracing",
  "ustr",
 ]
 
@@ -178,15 +177,11 @@ dependencies = [
  "bone-core",
  "bone-query",
  "bone-semantic",
- "comfy-la-arena",
- "itertools 0.13.0",
  "rock-core",
  "rock-host",
  "rock-stdlib",
- "rust-lapper",
  "rustc-hash",
  "skull-parser",
- "smallvec",
  "ustr",
 ]
 
@@ -195,10 +190,6 @@ name = "bone-inference"
 version = "0.1.0"
 dependencies = [
  "bone-core",
- "comfy-la-arena",
- "itertools 0.13.0",
- "rust-lapper",
- "rustc-hash",
  "skull-parser",
  "smallvec",
  "tracing",
@@ -221,13 +212,7 @@ name = "bone-lower"
 version = "0.1.0"
 dependencies = [
  "bone-core",
- "comfy-la-arena",
- "itertools 0.13.0",
- "rust-lapper",
- "rustc-hash",
  "skull-parser",
- "smallvec",
- "tracing",
  "ustr",
 ]
 
@@ -246,11 +231,9 @@ dependencies = [
  "rock-host",
  "rock-stdlib",
  "rock-tokenizer",
- "rust-lapper",
  "skull-parser",
  "tempfile",
  "ustr",
- "walkdir",
 ]
 
 [[package]]
@@ -260,17 +243,11 @@ dependencies = [
  "bone-core",
  "bone-inference",
  "bone-lower",
- "comfy-la-arena",
  "datatest-stable",
- "itertools 0.13.0",
- "nonmax",
- "rayon",
  "rock-core",
  "rock-stdlib",
  "rust-lapper",
- "rustc-hash",
  "skull-parser",
- "smallvec",
  "test-utils",
  "tracing",
  "ustr",
@@ -1315,7 +1292,6 @@ dependencies = [
  "itertools 0.13.0",
  "rustc-hash",
  "test-utils",
- "tracing",
  "ustr",
 ]
 
@@ -1642,12 +1618,10 @@ dependencies = [
  "rustc-hash",
  "skull-codegen-glsl",
  "skull-codegen-lua",
- "skull-codegen-shader",
  "skull-graph",
  "skull-mir",
  "skull-parser",
  "skull-transform",
- "smallvec",
  "tempfile",
  "test-utils",
  "ustr",
@@ -1692,7 +1666,6 @@ dependencies = [
  "bone-core",
  "bone-semantic",
  "comfy-la-arena",
- "log",
  "rock-host",
  "rock-stdlib",
  "rustc-hash",
@@ -1722,8 +1695,6 @@ dependencies = [
 name = "skull-fmt"
 version = "0.1.0"
 dependencies = [
- "comfy-la-arena",
- "ordered-float",
  "rock-core",
  "rock-tokenizer",
  "skull-parser",
