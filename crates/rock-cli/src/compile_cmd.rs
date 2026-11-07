@@ -22,9 +22,9 @@ use crate::skull_backend::GameProgram;
 use anyhow::Result;
 
 /// Run an ordinary emitted program through the captured stdin evaluator.
-pub fn run_lua_program(lua: &GameProgram, emits_main: bool) -> Result<()> {
+pub fn run_lua_program(preamble: &str, lua: &GameProgram, emits_main: bool) -> Result<()> {
     // The captured stdin evaluator requires contiguous input.
-    let program = crate::skull_backend::skull_game_main("", lua, emits_main).concat();
+    let program = crate::skull_backend::skull_game_main(preamble, lua, emits_main).concat();
     match run_lua_code(&program) {
         Ok(run) => {
             print!("{}", run.stdout);
