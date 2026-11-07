@@ -459,7 +459,7 @@ pub const RUNTIME_SERVICES: registry::RuntimeServices = registry::RuntimeService
     prepare_sound_bank: |_| Ok(None),
     sound_project_path: |_| Ok(None),
     prepare_run: |_| Ok(()),
-    launch: |_, program, emits_main| crate::compile_cmd::run_lua_program(program, emits_main),
+    launch: |_, program, emits_main| crate::compile_cmd::run_lua_program("", program, emits_main),
     // Compiler-only artifacts have no host globals, including incremental output.
     program_preamble: |_, _| Ok(String::new()),
     program_host: |_| {
