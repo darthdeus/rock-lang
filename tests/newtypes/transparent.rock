@@ -1,6 +1,8 @@
 // Transparency premise: a newtype compiles to its inner value -- no
 // `{__ty, [1]=...}` box, no tag, no allocation. The value IS the inner value
 // at runtime; nominal distinctness is purely compile-time.
+// The constructor is a function call and `.0` is a no-op read; the value is
+// never scalarized or boxed across calls.
 
 newtype Uid(int)
 newtype Lbl(string)
@@ -59,4 +61,60 @@ fn test_newtype_pattern_unwrap() {
     let id = Uid(42)
     let Uid(v) = id
     print(v)
+}
+
+// --- Newtype ABI: one plain value through calls, returns and `.0` unwraps ---
+
+newtype UserId(int)
+newtype Meters(float)
+
+fn mk(n: int) -> UserId {
+    return UserId(n)
+}
+
+fn raw(u: UserId) -> int {
+    return u.0
+}
+
+fn passthrough(u: UserId) -> UserId {
+    return u
+}
+
+fn add_ids(a: UserId, b: UserId) -> UserId {
+    return UserId(a.0 + b.0)
+}
+
+@test(output = "42\n7")
+fn test_construct_and_unwrap() {
+    let u = mk(42)
+    print("{raw(u)}")
+    let v = UserId(7)
+    print("{v.0}")
+}
+
+@test(output = "99")
+fn test_passthrough() {
+    let u = passthrough(UserId(99))
+    print("{u.0}")
+}
+
+@test(output = "5")
+fn test_newtype_arith_via_unwrap() {
+    let s = add_ids(UserId(2), UserId(3))
+    print("{s.0}")
+}
+
+@test(output = "true\nfalse")
+fn test_newtype_eq() {
+    let a = UserId(1)
+    let b = UserId(1)
+    let c = UserId(2)
+    print("{a == b}")
+    print("{a == c}")
+}
+
+@test(output = "3")
+fn test_float_newtype() {
+    let m = Meters(3.5)
+    print("{m.0.floor()}")
 }
