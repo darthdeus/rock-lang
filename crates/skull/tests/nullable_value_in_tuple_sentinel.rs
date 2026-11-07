@@ -4,7 +4,7 @@
 //! `false` -- the whole body folded to `do return (not (true)) end`, because a
 //! boxed tuple slot got the ctor `pack` builds regardless of presence.
 //!
-//! Same root as the safe-nav receiver defect (`tests/nullable/safe_nav_absent_value_receiver.rock`)
+//! Same root as the safe-nav receiver defect (`tests/nullable/safe_nav_value_receiver.rock`)
 //! -- a presence tag dropped on the way to a box -- and the same shape of fix,
 //! at the CONSUMER rather than in `pack`. It is NOT fixable in `pack`'s Group
 //! arm, the obvious-looking move: branching there puts the ctor behind a cell,

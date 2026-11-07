@@ -1,0 +1,362 @@
+// Null coalescing `??`.
+//
+// Typing: T? ?? T -> T and T? ?? T? -> T? (inner types must match;
+// mismatches are compile errors).
+
+// ============================================
+// Valid uses
+// ============================================
+
+@test(output = "5")
+fn coalesce_int_with_int_default() {
+    let x: int? = 5
+    print(x ?? 0)
+}
+
+@test(output = "0")
+fn coalesce_null_with_int_default() {
+    let x: int? = null
+    print(x ?? 0)
+}
+
+@test(output = "hello")
+fn coalesce_string_with_string_default() {
+    let s: string? = null
+    print(s ?? "hello")
+}
+
+@test(output = "3")
+fn coalesce_chain_all_matching() {
+    let a: int? = null
+    let b: int? = null
+    let c: int? = 3
+    print(a ?? b ?? c ?? 99)
+}
+
+@test(output = "10")
+fn coalesce_nullable_nullable() {
+    let a: int? = null
+    let b: int? = 10
+    let result: int? = a ?? b
+    print(result ?? -1)
+}
+
+@test(output = "3.14")
+fn coalesce_float_float() {
+    // float? ?? float works fine
+    let x: float? = null
+    let result = x ?? 3.14
+    print(result)
+}
+
+// ============================================
+// Falsy values, chaining, side effects, edge cases
+// ============================================
+
+// --- 1.1: ?? with falsy non-nil values ---
+
+@test(output = "false")
+fn test_bool_coalesce_false_value() {
+    let x: bool? = false
+    let result = x ?? true
+    print(result)
+}
+
+@test(output = "true")
+fn test_bool_coalesce_null_value() {
+    let x: bool? = null
+    let result = x ?? true
+    print(result)
+}
+
+@test(output = "true")
+fn test_bool_coalesce_true_value() {
+    let x: bool? = true
+    let result = x ?? false
+    print(result)
+}
+
+@test(output = "0")
+fn test_int_coalesce_zero() {
+    let x: int? = 0
+    let result = x ?? 42
+    print(result)
+}
+
+@test(output = "42")
+fn test_int_coalesce_null() {
+    let x: int? = null
+    let result = x ?? 42
+    print(result)
+}
+
+@test(output = "")
+fn test_string_coalesce_empty() {
+    let x: string? = ""
+    let result = x ?? "default"
+    print(result)
+}
+
+// --- Chained coalescing with falsy values ---
+
+@test(output = "false")
+fn test_chained_bool_coalesce() {
+    let a: bool? = null
+    let b: bool? = false
+    let result = a ?? b ?? true
+    print(result)
+}
+
+@test(output = "true")
+fn test_chained_bool_coalesce_all_null() {
+    let a: bool? = null
+    let b: bool? = null
+    let result = a ?? b ?? true
+    print(result)
+}
+
+@test(output = "0")
+fn test_chained_int_coalesce_zero() {
+    let a: int? = null
+    let b: int? = 0
+    let result = a ?? b ?? 99
+    print(result)
+}
+
+// --- Side effects ---
+
+global side_effect_count: int = 0
+
+fn side_effect_int() -> int {
+    side_effect_count = side_effect_count + 1
+    return 999
+}
+
+@test(output = "false 0")
+fn test_bool_coalesce_no_side_effect_when_present() {
+    side_effect_count = 0
+    let x: bool? = false
+    let result = x ?? true
+    print("{result} {side_effect_count}")
+}
+
+@test(output = "42 0")
+fn test_int_coalesce_no_rhs_eval_when_present() {
+    side_effect_count = 0
+    let x: int? = 42
+    let result = x ?? side_effect_int()
+    print("{result} {side_effect_count}")
+}
+
+@test(output = "999 1")
+fn test_int_coalesce_rhs_eval_when_null() {
+    side_effect_count = 0
+    let x: int? = null
+    let result = x ?? side_effect_int()
+    print("{result} {side_effect_count}")
+}
+
+// --- ?? in various expression positions ---
+
+@test(output = "3")
+fn test_coalesce_in_arithmetic() {
+    let x: int? = null
+    let result = (x ?? 1) + 2
+    print(result)
+}
+
+@test(output = "hello world")
+fn test_coalesce_in_interpolation() {
+    let name: string? = null
+    print("{name ?? "hello"} world")
+}
+
+@test(output = "5")
+fn test_coalesce_as_function_arg() {
+    let x: int? = null
+    let arr: [int] = []
+    arr.push(x ?? 5)
+    print(arr[0])
+}
+
+// --- Deep chaining (5+ levels) ---
+
+@test(output = "99")
+fn test_deep_chain_coalesce() {
+    let a: int? = null
+    let b: int? = null
+    let c: int? = null
+    let d: int? = null
+    let e: int? = null
+    let result = a ?? b ?? c ?? d ?? e ?? 99
+    print(result)
+}
+
+@test(output = "3")
+fn test_deep_chain_coalesce_middle_value() {
+    let a: int? = null
+    let b: int? = null
+    let c: int? = 3
+    let d: int? = null
+    let e: int? = null
+    let result = a ?? b ?? c ?? d ?? e ?? 99
+    print(result)
+}
+
+// --- ?? combined with ?.  ---
+
+struct Inner {
+    value: int,
+}
+
+struct Outer {
+    inner: Inner?,
+}
+
+@test(output = "42")
+fn test_safenav_then_coalesce() {
+    let o: Outer? = Outer { inner: Inner { value: 42 } }
+    let result = o?.inner?.value ?? 0
+    print(result)
+}
+
+@test(output = "0")
+fn test_safenav_null_then_coalesce() {
+    let o: Outer? = null
+    let result = o?.inner?.value ?? 0
+    print(result)
+}
+
+@test(output = "0")
+fn test_safenav_inner_null_then_coalesce() {
+    let o: Outer? = Outer { inner: null }
+    let result = o?.inner?.value ?? 0
+    print(result)
+}
+
+// ============================================
+// Controls for the nullable coalesce join: scalar and boxed value payloads
+// ============================================
+
+value BoxedPair { x: int, y: int }
+
+fn maybe_int(present: bool) -> int? {
+    if present { return 11 }
+    return null
+}
+
+fn maybe_boxed_pair(present: bool) -> BoxedPair? {
+    if present { return BoxedPair { x: 2, y: 4 } }
+    return null
+}
+
+@test(output = "11")
+fn scalar_payload_control() {
+    let value = maybe_int(false) ?? if let inner = maybe_int(true) { inner } else { null }
+    if value != null { print(value) } else { print("null") }
+}
+
+@test(output = "2 4")
+fn boxed_value_payload_control() {
+    let value = maybe_boxed_pair(false) ?? if let inner = maybe_boxed_pair(true) { inner } else { null }
+    if value != null {
+        print("{value.x} {value.y}")
+    } else {
+        print("null")
+    }
+}
+
+// ============================================
+// Precedence: `??` must bind TIGHTER than assignment.
+// ============================================
+//
+// It did not: `rock-tokenizer`'s infix_bp put DoubleQuestionMark at 3 and
+// Assign at 5, so `x = a ?? b` parsed as `(x = a) ?? b` -- the assignment
+// became the left operand of the coalesce. Every assignment form was hit
+// (global, local, field, index, compound), and `??` was the only operator
+// affected: `x = a + b` and `x = a || b` were always fine.
+//
+// The guards at the bottom pin the other side, so raising the level cannot
+// silently drag `??` above the operators it must stay below.
+
+global CO_G: int = 0
+
+fn co_some() -> int? { return 5 }
+fn co_none() -> int? { return null }
+
+struct CoS { v: int }
+
+@test
+fn coalesce_over_global_assign() {
+    CO_G = co_some() ?? 0
+    assert_eq(CO_G, 5)
+
+    CO_G = co_none() ?? 7
+    assert_eq(CO_G, 7)
+}
+
+@test
+fn coalesce_over_local_assign() {
+    let x = 0
+    x = co_some() ?? 0
+    assert_eq(x, 5)
+
+    x = co_none() ?? 7
+    assert_eq(x, 7)
+}
+
+@test
+fn coalesce_over_field_assign() {
+    let s = CoS { v: 0 }
+    s.v = co_some() ?? 0
+    assert_eq(s.v, 5)
+}
+
+@test
+fn coalesce_over_index_assign() {
+    let a = [1, 2]
+    a[0] = co_some() ?? 0
+    assert_eq(a[0], 5)
+}
+
+@test
+fn coalesce_over_compound_assign() {
+    CO_G = 1
+    CO_G += co_some() ?? 0
+    assert_eq(CO_G, 6)
+}
+
+@test
+fn coalesce_chain_over_assign() {
+    CO_G = co_none() ?? co_some() ?? 0
+    assert_eq(CO_G, 5)
+
+    CO_G = co_none() ?? co_none() ?? 9
+    assert_eq(CO_G, 9)
+}
+
+// --- Guards: the level must not go too far the other way. ---
+
+@test
+fn coalesce_stays_below_arithmetic() {
+    // `a ?? 1 + 2` is `a ?? (1 + 2)`, not `(a ?? 1) + 2`. Both would read 3
+    // when a is null, so the discriminating case is a NON-null left: if the
+    // grouping were wrong this would be 7.
+    CO_G = co_some() ?? 1 + 2
+    assert_eq(CO_G, 5)
+}
+
+fn co_none_b() -> bool? { return null }
+
+@test
+fn coalesce_stays_below_comparison() {
+    // `a ?? 1 == 2` groups as `a ?? (1 == 2)` -- C# semantics, `??` sits
+    // below `==`. This only typechecks under that grouping: the tighter
+    // reading would be `(bool? ?? 1) == 2`, a bool-vs-int mismatch, so the
+    // test cannot pass for the wrong reason.
+    let miss = co_none_b() ?? 1 == 2
+    assert_eq(miss, false)
+
+    let hit = co_none_b() ?? 2 == 2
+    assert_eq(hit, true)
+}

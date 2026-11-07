@@ -1,0 +1,207 @@
+// Nullable struct fields holding values, structs, enums and newtypes:
+// narrowing, clearing, aliasing and reflection.
+
+// --- Clearing a nullable field through an alias invalidates the narrowed field. ---
+
+value RoutePlace { x: int }
+struct RouteRow { goal: RoutePlace? = null }
+fn clear_route_goal(row: RouteRow) { row.goal = null }
+
+@test
+fn nullable_field_assignment_is_invalidated_through_an_alias() {
+    let row = RouteRow {}
+    let alias = row
+    row.goal = RoutePlace { x: 7 }
+    clear_route_goal(alias)
+    assert(row.goal == null)
+}
+
+// --- A narrowed nullable value field compares equal to a value. ---
+
+nobox value NarrowedPlace { x: int }
+struct NarrowedRow { goal: NarrowedPlace? = null }
+
+@test
+fn narrowed_nullable_value_field_compares_with_a_value() {
+    let row = NarrowedRow {}
+    let goal = NarrowedPlace { x: 7 }
+    row.goal = goal
+    assert(row.goal == goal)
+}
+
+// --- Narrowing survives read-only collection calls on the field. ---
+
+struct ReadonlyRoute { path: [int]? }
+@test
+fn nullable_field_survives_verified_collection_reads() {
+    let row = ReadonlyRoute { path: [7] }
+    if row.path != null && row.path.len() > 0 {
+        let size = row.path.len()
+        let empty = row.path.is_empty()
+        let first = row.path[0]
+        assert(size == 1 && !empty && first == 7)
+    } else { assert(false) }
+}
+
+// --- Unwrapping a nullable struct field yields the owner's object, not a copy. ---
+
+struct NullablePlaceCounter { n: int = 0 }
+
+struct NullablePlaceHolder { inner: NullablePlaceCounter? = null }
+
+fn nullable_place_bump(holder: NullablePlaceHolder) {
+    let counter = holder.inner ?? return
+    counter.n += 1
+}
+
+@test
+fn nullable_identity_field_unwrap_mutates_the_owner() {
+    let holder = NullablePlaceHolder { inner: NullablePlaceCounter {} }
+    nullable_place_bump(holder)
+    nullable_place_bump(holder)
+    let counter = holder.inner ?? return
+    assert(counter.n == 2, "both bumps reach the held counter")
+}
+
+// --- Present and absent stores into a nullable value field of an arena row. ---
+
+nobox value NullableStoreTile { x: int, y: int }
+
+struct NullableStoreMob { approach: NullableStoreTile? = null }
+
+@test
+fn nullable_value_field_accepts_present_and_absent_stores_through_an_arena_row() {
+    let mobs: Arena<NullableStoreMob> = arena_new()
+    let entity = mobs.insert(NullableStoreMob {
+        approach: NullableStoreTile { x: 3, y: 4 },
+    })
+    let mob = entity.get() ?? return
+    mob.approach = null
+    let cleared = entity.get() ?? return
+    assert(cleared.approach == null)
+    mob.approach = NullableStoreTile { x: 8, y: 9 }
+    let restored = entity.get() ?? return
+    let tile = restored.approach ?? return
+    assert(tile.x == 8 && tile.y == 9)
+}
+
+// --- Clearing a nullable enum field whose payload is a wide value. ---
+
+value FlatClearId { scene_id: int, arena_id: int, slot: int, generation: int }
+enum FlatClearTarget { Player(FlatClearId), Mob(FlatClearId) }
+struct FlatClearState { target: FlatClearTarget? = null }
+
+fn flat_clear(state: FlatClearState) {
+    state.target = null
+}
+
+@test
+fn nullable_wide_payload_enum_field_clears() {
+    let id = FlatClearId { scene_id: 1, arena_id: 2, slot: 3, generation: 4 }
+    let state = FlatClearState { target: FlatClearTarget::Mob(id) }
+    flat_clear(state)
+    assert(state.target == null, "nullable wide payload enum field clears")
+}
+
+// --- field_get on nullable value fields: one owner evaluation, copied payloads. ---
+
+nobox value ReflectedPlace { area: int, x: int, y: int }
+struct ReflectedOwner { place: ReflectedPlace?, other: ReflectedPlace? }
+nobox value ReflectedFlag { enabled: bool, place: ReflectedPlace? }
+struct ReflectedFlags { flag: ReflectedFlag? }
+global REFLECTED_READS: int = 0
+
+fn reflected_read<T, V>(owner: T, field: ReadFieldRef<T, V>) -> V {
+    return field_get(owner, field)
+}
+
+fn reflected_owner_once(owner: ReflectedOwner) -> ReflectedOwner {
+    REFLECTED_READS += 1
+    return owner
+}
+
+@test
+fn field_get_nullable_value_evaluates_owner_once_and_copies() {
+    let owner = ReflectedOwner {
+        place: ReflectedPlace { area: 3, x: 5, y: 7 }, other: null,
+    }
+    REFLECTED_READS = 0
+    let snapshot = field_get(f: .place, o: reflected_owner_once(owner)).unwrap()
+    owner.place = ReflectedPlace { area: 11, x: 13, y: 17 }
+    assert(REFLECTED_READS == 1)
+    assert(snapshot.area == 3 && snapshot.x == 5 && snapshot.y == 7)
+}
+
+@test
+fn field_get_nullable_value_preserves_false_and_nested_presence() {
+    let owner = ReflectedFlags { flag: ReflectedFlag { enabled: false, place: null } }
+    let read = reflected_read(owner, .flag).unwrap()
+    assert(!read.enabled && read.place == null)
+    owner.flag = ReflectedFlag {
+        enabled: true, place: ReflectedPlace { area: 19, x: 23, y: 29 },
+    }
+    let present = reflected_read(owner, .flag).unwrap()
+    assert(present.enabled)
+    assert(present.place.unwrap().x == 23)
+    owner.flag = null
+    assert(reflected_read(owner, .flag) == null)
+}
+
+@test
+fn field_get_nullable_value_reads_payload() {
+    let owner = ReflectedOwner {
+        place: ReflectedPlace { area: 7, x: 11, y: 13 }, other: null,
+    }
+    let read = reflected_read(owner, .place).unwrap()
+    assert(read.area == 7 && read.x == 11 && read.y == 13)
+    assert(reflected_read(owner, .other) == null)
+    owner.place = null
+    assert(reflected_read(owner, .place) == null)
+    owner.place = ReflectedPlace { area: 17, x: 19, y: 23 }
+    let reread = reflected_read(owner, .place).unwrap()
+    assert(reread.area == 17 && reread.x == 19 && reread.y == 23)
+}
+
+// --- Nullable newtype fields project their integer lane. ---
+
+newtype LaneImage(int)
+newtype LaneCanvasId(int)
+value LaneCanvas { handle: LaneCanvasId }
+struct LaneCache { image: LaneImage? = null }
+struct LaneCanvasCache { image: LaneImage? = null, canvas: LaneCanvas? = null, key: [int] = [] }
+
+fn nullable_image_key(cache: LaneCache) -> [int] {
+    let image = cache.image ?? return []
+    let key: [int] = []
+    for value in [17, image.0, 29] { key.push(value) }
+    return key
+}
+
+@test
+fn nullable_newtype_projects_integer_lane() {
+    let cache = LaneCache { image: LaneImage(23) }
+    let key = nullable_image_key(cache)
+    assert(key.len() == 3 && key[0] == 17 && key[1] == 23 && key[2] == 29)
+    cache.image = null
+    assert(nullable_image_key(cache).len() == 0)
+}
+
+fn refresh_canvas_key(cache: LaneCanvasCache) {
+    let image = cache.image ?? return
+    let canvas = cache.canvas ?? return
+    let key = cache.key
+    if key.len() != 3 || key[0] != canvas.handle.0 || key[1] != image.0 {
+        key.clear()
+        for value in [canvas.handle.0, image.0, 29] { key.push(value) }
+    }
+}
+
+@test
+fn nullable_host_handles_project_array_lanes() {
+    let cache = LaneCanvasCache { image: LaneImage(23), canvas: LaneCanvas { handle: LaneCanvasId(17) } }
+    refresh_canvas_key(cache)
+    assert(cache.key.len() == 3 && cache.key[0] == 17 && cache.key[1] == 23)
+    cache.image = LaneImage(31)
+    refresh_canvas_key(cache)
+    assert(cache.key[1] == 31)
+}

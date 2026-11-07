@@ -149,20 +149,6 @@ fn test_assign_null_to_optional_t() {
 // ============================================
 
 @test(output = "5")
-fn test_optional_inference() {
-    let opt_x: int? = null
-    opt_x = 5
-    print(opt_x)
-}
-
-@test(output = "true")
-fn test_optional_null_reassignment() {
-    let opt_x: int? = 5
-    opt_x = null
-    print(opt_x == null)
-}
-
-@test(output = "5")
 fn test_nullable_variable_inference() {
     let opt_val: int? = 5
     let inferred = opt_val
