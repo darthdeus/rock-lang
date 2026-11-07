@@ -38,7 +38,7 @@ fn test_value_local_reassign_from_call() {
 // three above do not reach: they check the value ARRIVES, not that it is
 // independent of where it came from. Copy-on-whole-value-read is the invariant
 // the place model rests on, and it is broken for
-// one other shape -- see tests/values/nullable_read_aliasing.rock.
+// one other shape -- see tests/values/nullable_place_read_copies.rock.
 
 struct Box { p: V2 }
 struct NBox { p: V2? }

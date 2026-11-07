@@ -383,7 +383,7 @@ fn metric_recent(m: Metric, i: int) -> float {
 // stored contiguously as `T` cdata (AoS); a whole-value `buf[i]` read copies the
 // element out, `buf[i].x` reads the slot live, `buf[i].x = v` writes through it,
 // and `buf[i] = v` copies the struct field-wise. See
-// tests/native_buffers/value.rock, tests/values/element_read_copy.rock,
+// tests/native_buffers/value.rock, tests/values/whole_read_copies.rock,
 // tests/values/place_leaf_write.rock and FlatVec<T> below.
 
 // ============================================================================

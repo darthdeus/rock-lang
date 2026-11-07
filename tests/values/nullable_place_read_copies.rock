@@ -1,11 +1,48 @@
-// A `V?` whole-value read out of a mutable place copies its leaves when the
-// value is present and stays null when it is absent -- at every place root, not
-// just the struct field pinned by tests/values/nullable_read_aliasing.rock.
-// The absent cases are load-bearing: an absent value has no leaves, so an
-// unconditional split would index nil.
+// Whole-value reads of a `value` struct must COPY -- the invariant the
+// mutable-place model rests on. Binding, argument, return and boxed-storage
+// uses copy the value. Nullability is not
+// observable: a `V?` read out of a mutable place copies its leaves when the
+// value is present and stays null when it is absent.
+//
+// Sibling coverage: tests/values/semantics_decision_points.rock pins the place
+// model itself; this file pins the copy invariant that model depends on, and
+// the second half of this file pins the other place roots
+// (param, global, element, map value, safe-nav) plus the absent case.
 
 value Pt { x: int, y: int }
 
+struct NonNull1 { p: Pt }
+struct NonNull2 { p: Pt }
+struct Nullable1 { p: Pt? }
+struct Nullable2 { p: Pt? }
+
+// CONTROL -- correct behavior, not a sentinel. A whole-value read of a
+// non-nullable value field copies, so the write through `b` leaves `a` alone.
+@test(output = "b=99 a=1")
+fn non_nullable_value_field_read_copies() {
+    let a = NonNull1 { p: Pt { x: 1, y: 2 } }
+    let b = NonNull2 { p: a.p }
+    b.p.x = 99
+    print("b={b.p.x} a={a.p.x}")
+}
+
+// Nullability is the only difference from the control above, and the output is
+// the same.
+@test(output = "b=99 a=1")
+fn nullable_value_field_read_copies() {
+    let a = Nullable1 { p: Pt { x: 1, y: 2 } }
+    let b = Nullable2 { p: a.p }
+    if b.p != null && a.p != null {
+        b.p.x = 99
+        print("b={b.p.x} a={a.p.x}")
+    }
+}
+
+// A `V?` whole-value read out of a mutable place copies its leaves when the
+// value is present and stays null when it is absent -- at every place root, not
+// just the struct field pinned above.
+// The absent cases are load-bearing: an absent value has no leaves, so an
+// unconditional split would index nil.
 struct NB1 { p: Pt? }
 struct NB2 { p: Pt? }
 

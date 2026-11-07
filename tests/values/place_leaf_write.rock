@@ -1,7 +1,7 @@
 // A LEAF write through a container element (`buf[i].x = 5`, `v[i].x = 5`) is a
 // place write: the store must land on the element slot, not on a copy of it.
 // The place model legalized this shape; the
-// element-read COPY rule (tests/values/element_read_copy.rock) applies to whole-
+// element-read COPY rule (tests/values/whole_read_copies.rock) applies to whole-
 // value RVALUE reads only, so an assignment target's base must never pack.
 
 value Pt { x: int, y: int }

@@ -1,4 +1,4 @@
-// GC-carrying value structs: materialization shapes (item 0b premise).
+// GC-carrying value structs: materialization shapes, then equality.
 //
 // A `value` struct with a non-C-mappable field (`[int]`, `Arena<T>`, ...) or a
 // generic `value` struct is GC-CARRYING: it scalarizes through calls exactly
@@ -6,7 +6,7 @@
 // (`<Name>_vt(...)`), not cdata. Before the two-tier work these files CRASHED
 // at every materialization site -- `value_struct_defs` skipped the cdef, so a
 // nullable return / container store / capture emitted `<Name>_ct(...)` against
-// an undefined ctor ("attempt to call global 'Bag_ct'", unfuck backlog #51).
+// an undefined ctor ("attempt to call global 'Bag_ct'").
 //
 // Every test asserts a RUNTIME VALUE, not just compilation. The eq cases pin
 // the locked contract: scalar fields structural, GC-ref fields BY REFERENCE.
@@ -173,4 +173,165 @@ fn gc_deepcopy_deep_copies_and_preserves_fields() {
     let b = make_bag(1, 2, 3, 1)       // xs=[1,2,3], n=1 -> sum 7
     let c = deepcopy(b)
     print("{bag_sum(c)} {b == c} {bag_sum(b) == bag_sum(c)}")
+}
+
+// GC-carrying value-struct equality: the per-field ref/contents split.
+//
+// A `value` struct with a non-C-mappable field (Vec, string, generic T, a
+// reference struct, a nested value struct) is GC-CARRYING: it materializes as
+// a table (`<Name>_vt`) with a per-type `__eq` that compares SCALAR and nested
+// VALUE-struct fields structurally (`==`) but GC-REF fields BY REFERENCE
+// (`rawequal`). This corpus is the cross-backend oracle for that split -- it
+// is GREEN on luajit and must stay byte-identical on JS once the type-aware
+// registry (`__rock_vt_eq`) lands. The load-bearing case is
+// `diff_ref_equal_contents_ne`: two Vecs with EQUAL CONTENTS but different
+// identity compare != -- exactly where value-struct eq diverges from the
+// contents-walk a reference struct gets.
+
+value VecBox {
+    xs: [int],
+    n: int,
+}
+
+// ----- 1. Same GC-ref identity -> equal.
+
+@test(output = "true")
+fn same_ref_vec_field_eq() {
+    let shared = [1, 2, 3]
+    let a = VecBox { xs: shared, n: 5 }
+    let b = VecBox { xs: shared, n: 5 }
+    print(a == b)
+}
+
+// ----- 2. Equal CONTENTS, different GC-ref identity -> NOT equal (the divergence).
+
+@test(output = "false")
+fn diff_ref_equal_contents_ne() {
+    let a = VecBox { xs: [1, 2, 3], n: 5 }
+    let b = VecBox { xs: [1, 2, 3], n: 5 }
+    print(a == b)
+}
+
+// ----- 3. Same ref, differing scalar -> NOT equal (scalar field structural).
+
+@test(output = "false")
+fn same_ref_diff_scalar_ne() {
+    let shared = [1, 2, 3]
+    let a = VecBox { xs: shared, n: 5 }
+    let b = VecBox { xs: shared, n: 6 }
+    print(a == b)
+}
+
+// ----- 4. String field compares BY VALUE (Lua interns; JS `===` is by-value).
+
+value SBox {
+    s: string,
+    n: int,
+}
+
+@test(output = "true")
+fn string_field_by_value_eq() {
+    let w = "wor"
+    let a = SBox { s: "{w}ld", n: 1 }
+    let b = SBox { s: "world", n: 1 }
+    print(a == b)
+}
+
+// ----- 5. Nested SCALAR value-struct field: structural (a cdata `Point` on
+// luajit compares byte-value; equal contents -> equal, differing -> not).
+
+value Point {
+    x: int,
+    y: int,
+}
+
+value Tagged {
+    p: Point,
+    xs: [int],
+}
+
+@test(output = "true false")
+fn nested_scalar_valuestruct_field_structural() {
+    let xs = [1, 2]
+    let a = Tagged { p: Point { x: 1, y: 2 }, xs: xs }
+    let b = Tagged { p: Point { x: 1, y: 2 }, xs: xs }
+    let c = Tagged { p: Point { x: 9, y: 2 }, xs: xs }
+    print("{a == b} {a == c}")
+}
+
+// ----- 6. Nested GC-carrying value-struct field: structural (recurses into
+// that struct's own per-field split -- its inner Vec is still BY REFERENCE).
+
+value Wrap {
+    inner: VecBox,
+    k: int,
+}
+
+@test(output = "true false")
+fn nested_gc_valuestruct_field_structural() {
+    let shared = [7, 8]
+    let a = Wrap { inner: VecBox { xs: shared, n: 3 }, k: 9 }
+    let b = Wrap { inner: VecBox { xs: shared, n: 3 }, k: 9 }
+    // Same inner Vec ref + equal scalars -> equal.
+    let c = Wrap { inner: VecBox { xs: [7, 8], n: 3 }, k: 9 }
+    // Inner Vec has equal contents but different identity -> not equal.
+    print("{a == b} {a == c}")
+}
+
+// ----- 7. Reference-struct field compares BY REFERENCE (the `rawequal` arm).
+
+struct Ref {
+    v: int,
+}
+
+value HasRef {
+    r: Ref,
+    n: int,
+}
+
+@test(output = "true false")
+fn ref_struct_field_by_reference() {
+    let shared = Ref { v: 7 }
+    let a = HasRef { r: shared, n: 1 }
+    let b = HasRef { r: shared, n: 1 }
+    let c = HasRef { r: Ref { v: 7 }, n: 1 }
+    // b shares the Ref identity (equal); c has an equal-contents but distinct
+    // Ref (NOT equal -- a reference struct field is compared by identity).
+    print("{a == b} {a == c}")
+}
+
+// ----- 8. Generic value struct (generic => GC-tier). Fields are the generic
+// `T`, compared by reference; for `int` payloads that is value-eq.
+@test(output = "true false")
+fn generic_pair_eq() {
+    let a = make_pair(3, 4)
+    let b = make_pair(3, 4)
+    let c = make_pair(3, 5)
+    print("{a == b} {a == c}")
+}
+
+// ----- 9. inspect: a GC-carrying value struct is a `_vt` TABLE on luajit,
+// walked by the generic equals-format walker (NOT the colon `_vt.__tostring`,
+// which inspect never calls) -- byte-agreeing with the JS `{__ty,..}`-object
+// render. `assert_eq(inspect(..), "..")` byte-checks on BOTH backends. (A
+// GC-FREE value struct stays gated: it is cdata, rendered colon via __tostring.)
+
+@test
+fn inspect_vec_field() {
+    assert_eq(inspect(VecBox { xs: [1, 2, 3], n: 5 }), "VecBox {{ n = 5, xs = Vec {{ 1, 2, 3 }} }}")
+}
+
+@test
+fn inspect_string_field() {
+    assert_eq(inspect(SBox { s: "hi", n: 2 }), "SBox {{ n = 2, s = \"hi\" }}")
+}
+
+@test
+fn inspect_ref_struct_field() {
+    assert_eq(inspect(HasRef { r: Ref { v: 7 }, n: 1 }), "HasRef {{ n = 1, r = Ref {{ v = 7 }} }}")
+}
+
+@test
+fn inspect_generic_pair() {
+    assert_eq(inspect(Pair { a: 3, b: 4 }), "Pair {{ a = 3, b = 4 }}")
 }

@@ -1,0 +1,512 @@
+// `embed` fields: legal projections, reflection over the logical form,
+// nullable embeds nested inside embedded children, and embedded children
+// holding non-ffi-clean enum fields.
+//
+// -- Projection --
+//
+// `embed`: the LEGAL half of projection-only -- everything that stays
+// leaf-wise. The rejection matrix is tests/errors/embed_projection_only.rock.err
+// and tests/errors/embed_site_legality.rock.err.
+//
+// Storage is NOT flattened yet (that is skull's half): an embed field is
+// physically an ordinary field today, so these pin SEMANTICS, not layout.
+
+struct Pt { x: int, y: int }
+struct Holder { embed p: Pt, tag: int }
+
+@test(output = "1 2 3")
+fn test_leaf_read() {
+    let h = Holder { p: Pt { x: 1, y: 2 }, tag: 3 }
+    print("{h.p.x} {h.p.y} {h.tag}")
+}
+
+@test(output = "9 2")
+fn test_leaf_place_write() {
+    let h = Holder { p: Pt { x: 1, y: 2 }, tag: 3 }
+    h.p.x = 9
+    print("{h.p.x} {h.p.y}")
+}
+
+@test(output = "4 2")
+fn test_leaf_compound_assign() {
+    let h = Holder { p: Pt { x: 1, y: 2 }, tag: 3 }
+    h.p.x += 3
+    print("{h.p.x} {h.p.y}")
+}
+
+@test(output = "7 8")
+fn test_whole_field_ctor_write() {
+    let h = Holder { p: Pt { x: 1, y: 2 }, tag: 3 }
+    h.p = Pt { x: 7, y: 8 }
+    print("{h.p.x} {h.p.y}")
+}
+
+// The scalar-ABI round trip: leaves in, leaves out, no box. This is the shape
+// projection-only exists to keep legal.
+fn advance(p: Pt, dt: int) -> Pt {
+    return Pt { x: p.x + dt, y: p.y + dt }
+}
+
+@test(output = "11 12")
+fn test_scalar_abi_round_trip() {
+    let h = Holder { p: Pt { x: 1, y: 2 }, tag: 3 }
+    h.p = advance(h.p, 10)
+    print("{h.p.x} {h.p.y}")
+}
+
+@test(output = "same different")
+fn test_equality_is_leaf_wise() {
+    let a = Holder { p: Pt { x: 1, y: 2 }, tag: 3 }
+    let b = Holder { p: Pt { x: 1, y: 2 }, tag: 3 }
+    let c = Holder { p: Pt { x: 9, y: 2 }, tag: 3 }
+    let first = if a.p == b.p { "same" } else { "differs" }
+    let second = if a.p == c.p { "same" } else { "different" }
+    print("{first} {second}")
+}
+
+// Nullable embed: presence is a leaf, so presence operations are projections.
+struct Slot { embed p: Pt?, tag: int }
+
+@test(output = "absent")
+fn test_nullable_presence_absent() {
+    let s = Slot { p: null, tag: 1 }
+    if s.p == null {
+        print("absent")
+    } else {
+        print("present")
+    }
+}
+
+@test(output = "present 5")
+fn test_nullable_presence_and_leaf_read() {
+    let s = Slot { p: Pt { x: 5, y: 6 }, tag: 1 }
+    if s.p != null {
+        print("present {s.p.x}")
+    } else {
+        print("absent")
+    }
+}
+
+@test(output = "5 0")
+fn test_nullable_safe_nav_leaf() {
+    let present = Slot { p: Pt { x: 5, y: 6 }, tag: 1 }
+    let absent = Slot { p: null, tag: 1 }
+    print("{present.p?.x ?? 0} {absent.p?.x ?? 0}")
+}
+
+@test(output = "cleared")
+fn test_nullable_clear() {
+    let s = Slot { p: Pt { x: 5, y: 6 }, tag: 1 }
+    s.p = null
+    if s.p == null {
+        print("cleared")
+    } else {
+        print("still present")
+    }
+}
+
+// A write-only selector IS admissible for an embedded field -- that is the
+// admission rule's point.
+fn clear_tag<T>(o: T, f: WriteFieldRef<T, int>) {
+    field_set(o, f, 0)
+}
+
+@test(output = "0")
+fn test_write_field_ref_admits_non_embed_field() {
+    let h = Holder { p: Pt { x: 1, y: 2 }, tag: 3 }
+    clear_tag(h, .tag)
+    print("{h.tag}")
+}
+
+// A `value` field embeds into either parent kind. On a value-struct PARENT
+// (already contiguous) `embed` is a no-op guarantee -- it asserts the layout.
+value V2 { x: float, y: float }
+struct ValueHolder { embed v: V2, tag: int }
+value ValueParent { embed v: V2, w: float }
+
+@test(output = "1 2")
+fn test_embed_value_field_in_reference_parent() {
+    let h = ValueHolder { v: V2 { x: 1.0, y: 2.0 }, tag: 3 }
+    print("{h.v.x:.0f} {h.v.y:.0f}")
+}
+
+@test(output = "1 3")
+fn test_embed_value_field_in_value_parent() {
+    let o = ValueParent { v: V2 { x: 1.0, y: 2.0 }, w: 3.0 }
+    print("{o.v.x:.0f} {o.w:.0f}")
+}
+
+// CONTROL: `embed` is a CONTEXTUAL keyword -- it stays legal as a field name.
+struct Legacy { embed: int, other: int }
+
+@test(output = "1 2")
+fn test_embed_is_still_a_legal_field_name() {
+    let l = Legacy { embed: 1, other: 2 }
+    print("{l.embed} {l.other}")
+}
+
+// -- Reflection --
+//
+// Reflection follows the LOGICAL form. An embedded field is DECLARED as `f`
+// while its physical keys are `f.x`/`f.y`, so anything driven off the raw table
+// would render `f = nil` next to leaked `f.x` keys. `inspect` reconstructs the
+// child from its leaves instead, and physical keys never surface.
+@test(output = "Holder {{ p = Pt {{ x = 1, y = 2 }}, tag = 3 }}")
+fn test_inspect_renders_the_logical_child() {
+    let h = Holder { p: Pt { x: 1, y: 2 }, tag: 3 }
+    print("{inspect(h)}")
+}
+
+// Interpolating a struct renders structurally through the same path.
+@test(output = "Holder {{ p = Pt {{ x = 4, y = 5 }}, tag = 6 }}")
+fn test_interpolation_renders_the_logical_child() {
+    let h = Holder { p: Pt { x: 4, y: 5 }, tag: 6 }
+    print("{h}")
+}
+
+// A leaf write is visible logically -- reflection reads the leaves, not a
+// stale child box.
+@test(output = "Holder {{ p = Pt {{ x = 9, y = 2 }}, tag = 3 }}")
+fn test_inspect_after_a_leaf_write() {
+    let h = Holder { p: Pt { x: 1, y: 2 }, tag: 3 }
+    h.p.x = 9
+    print("{inspect(h)}")
+}
+
+struct Inner { c: int }
+struct RMid { embed b: Inner, m: int }
+struct Outer { embed a: RMid, o: int }
+
+@test(output = "Outer {{ a = RMid {{ b = Inner {{ c = 1 }}, m = 2 }}, o = 3 }}")
+fn test_inspect_nested_embed() {
+    let t = Outer { a: RMid { b: Inner { c: 1 }, m: 2 }, o: 3 }
+    print("{inspect(t)}")
+}
+
+// Nullable embed is presence-gated: absent reads as null, present renders the
+// child. The presence slot itself is never shown.
+struct RSlot { embed q: Pt?, tag: int }
+
+@test(output = "RSlot {{ q = Pt {{ x = 5, y = 6 }}, tag = 1 }}")
+fn test_inspect_nullable_present() {
+    let s = RSlot { q: Pt { x: 5, y: 6 }, tag: 1 }
+    print("{inspect(s)}")
+}
+
+@test(output = "RSlot {{ q = nil, tag = 1 }}")
+fn test_inspect_nullable_absent() {
+    let s = RSlot { q: null, tag: 1 }
+    print("{inspect(s)}")
+}
+
+// CONTROL: a plain (non-embed) struct field still renders as the boxed child it
+// is, so the tests above pin the embed path and not inspect at large.
+struct PlainHolder { p: Pt, tag: int }
+
+@test(output = "PlainHolder {{ p = Pt {{ x = 1, y = 2 }}, tag = 3 }}")
+fn test_inspect_plain_struct_field_control() {
+    let h = PlainHolder { p: Pt { x: 1, y: 2 }, tag: 3 }
+    print("{inspect(h)}")
+}
+
+// SENTINEL -- a flattened enum FIELD still does not reconstruct logically.
+//
+// The bug: an enum field is stored flattened, as the physical keys `sig.#`
+// (discriminant) and `sig.0` (payload), so the declared name `sig` indexes
+// nothing and reflection renders it as nil. The embed path above rebuilds its
+// child from the leaves; the flattened-enum path has no equivalent, because
+// this mixed, non-cdata enum is absent from `__ROCK_TYPE_TABLE`, so there is no
+// variant/payload metadata to rebuild from. Cdata-eligible enums are registered
+// separately for column materialization and logical serialization.
+//
+// This assertion is INVERTED: it passes today BECAUSE the bug exists. The raw
+// `sig.#`/`sig.0` keys no longer leak into the output -- that half is fixed by
+// the physical-key filter -- but the value itself is still lost.
+//
+// When this fails, the reconstruction landed: flip the expected output to
+// `FlatHolder {{ other = 1, sig = Sig::B("x") }}` and delete this comment.
+enum Sig { A, B(string) }
+struct FlatHolder { sig: Sig, other: int }
+
+fn show_flat(h: FlatHolder) { print("{inspect(h)}") }
+
+@test(output = "FlatHolder {{ other = 1, sig = nil }}")
+fn test_flat_enum_field_reflection_sentinel() {
+    show_flat(FlatHolder { sig: Sig::B("x"), other: 1 })
+}
+
+// -- Nested nullable embed --
+//
+// A NULLABLE embed nested inside an embedded child. The inner field owns a
+// presence slot at its own declared name under the composed path
+// (`child.inner`), exactly as a top-level nullable embed does.
+//
+// The parent-literal path used to route a nullable inner embed through the
+// non-nullable leaf builder, so it wrote no presence slot and lowered
+// `inner: null` as a leaf-wise read off nil -- `(nil).v` -- which crashed the
+// chunk at runtime. Both halves now go through the same nullable-aware pair the
+// whole-field store uses.
+
+struct Leaf {
+    v: int,
+}
+
+struct Mid {
+    embed inner: Leaf?,
+    m: int,
+}
+
+struct Top {
+    embed child: Mid?,
+    t: int,
+}
+
+global T: Top = Top { child: null, t: 0 }
+
+fn fill_present() { T.child = Mid { inner: Leaf { v: 7 }, m: 1 } }
+fn fill_absent() { T.child = Mid { inner: null, m: 2 } }
+fn clear_child() { T.child = null }
+
+fn probe_inner() -> int { return T.child?.inner?.v ?? -1 }
+fn probe_m() -> int { return T.child?.m ?? -1 }
+fn inner_is_null() -> bool { return T.child?.inner == null }
+
+inline(lua) fn inner_presence_absent(o: Top) -> bool = """
+    return o["child.inner"] == nil
+"""
+
+@test
+fn nested_nullable_absent_inner_does_not_crash() {
+    // The `(nil).v` lowering killed the chunk at load; reaching this at all is
+    // the assertion.
+    fill_absent()
+    assert_eq(probe_m(), 2)
+    assert_eq(probe_inner(), -1)
+}
+
+@test
+fn nested_nullable_present_inner_roundtrips() {
+    fill_present()
+    assert_eq(probe_inner(), 7)
+    assert_eq(probe_m(), 1)
+}
+
+@test
+fn nested_nullable_presence_slot_tracks_the_inner_field() {
+    fill_present()
+    assert_eq(inner_presence_absent(T), false)
+    fill_absent()
+    assert_eq(inner_presence_absent(T), true)
+}
+
+@test
+fn clearing_the_outer_child_clears_the_inner_leaves() {
+    fill_present()
+    clear_child()
+    assert_eq(probe_inner(), -1)
+    assert_eq(probe_m(), -1)
+}
+
+@test
+fn nested_nullable_inner_null_compare() {
+    // `T.child?.inner == null` reads TRUE when the inner field is absent. The
+    // safe-nav arm composes through `physical_field` rather than reading off the
+    // re-materialized base, so the compare consults the real presence slot
+    // (`T["child.inner"]`) and never builds a child at all.
+    //
+    // The reconstruction is correct on its own now too (mechanism K), which
+    // `nested_nullable_survives_a_materialized_child` covers -- this one stays as
+    // the guard for the no-rebuild path.
+    fill_absent()
+    assert_eq(inner_is_null(), true)
+}
+
+@test
+fn outer_null_compare_control() {
+    // Scopes the sentinel to the NESTED case: `== null` on a TOP-LEVEL nullable
+    // embed is correct in both directions. This also keeps the sentinel honest
+    // -- an `inner_is_null` stuck at false would satisfy it, but not this.
+    clear_child()
+    assert_eq(T.child == null, true)
+    fill_absent()
+    assert_eq(T.child == null, false)
+}
+
+fn inner_is_null_of(m: Mid?) -> bool { return m?.inner == null }
+fn inner_v_of(m: Mid?) -> int { return m?.inner?.v ?? -1 }
+
+@test
+fn nested_nullable_survives_a_materialized_child() {
+    // The whole child crossing a call boundary is the consumer that reads the
+    // REBUILT box, where the safe-nav path composes through `physical_field` and
+    // never builds one. It miscompiled in BOTH directions: the rebuild boxed
+    // `inner` under its own name, so an absent inner came back non-nil, and a
+    // present inner's leaf came back nil because the callee reads `["inner.v"]`.
+    fill_absent()
+    assert_eq(inner_is_null_of(T.child), true)
+    assert_eq(inner_v_of(T.child), -1)
+    fill_present()
+    assert_eq(inner_is_null_of(T.child), false)
+    assert_eq(inner_v_of(T.child), 7)
+}
+
+inline(lua) fn slot_keys(m: Mid) -> string = """
+    local ks = {}
+    for k, _ in pairs(m) do if k ~= "__ty" then ks[#ks + 1] = tostring(k) end end
+    table.sort(ks)
+    return table.concat(ks, ",")
+"""
+
+// The embed field itself cannot reach an `inline(lua)` callee (that takes a whole
+// struct); by the time it is a param it is an ordinary materialized value.
+fn slot_keys_of(m: Mid?) -> string {
+    if m == null { return "null" }
+    return slot_keys(m)
+}
+
+@test
+fn a_rebuilt_child_carries_the_canonical_flat_slots() {
+    // Names the SHAPE, not just the values it happens to read back: a rebuilt
+    // `Mid` must key its embedded inner exactly as `Mid { .. }` does -- a dotted
+    // leaf plus a presence tag at the field's own name -- or the two
+    // representations diverge again for whatever consumer reads a different slot.
+    fill_present()
+    assert_eq(slot_keys_of(T.child), "inner,inner.v,m")
+}
+
+// -- Embedded child with a flat enum field --
+//
+// An `embed` child holding a NON-ffi-clean enum field (a payload the C layout
+// can't take -- here a closure) keeps that field FLAT under the composed key:
+// `f.active.#`, `f.active.0`. One encoding across ctor, store and read.
+//
+// The three paths used to disagree -- the ctor boxed the enum under `f.active`,
+// the store wrote sub-slots beside it, and a read rebuilt the child carrying
+// the stale box, so every match on the field fell through to nil with no error.
+// An ffi-clean enum never reproduced it (one cdata under one key, so read and
+// store agreed by accident), which is why the controls below carry the scope:
+// boxed-child and top-level placements of the same enum, and a scalar leaf of
+// the same embedded child.
+//
+// `Task.active: Wait` is this shape (`Wait::Until(() -> bool, int)`), so it is
+// also the stage-3 layout gate.
+
+enum Waitish {
+    Frame,
+    Secs(float),
+    Until(() -> bool, int),
+}
+
+struct Framed {
+    handle: int,
+    active: Waitish,
+    last: int = -1,
+}
+
+struct EmbedOwner {
+    embed f: Framed,
+    tag: int,
+}
+
+struct BoxedOwner {
+    f: Framed,
+    tag: int,
+}
+
+struct DirectOwner {
+    active: Waitish,
+}
+
+global EMB: EmbedOwner = EmbedOwner { f: Framed { handle: 1, active: Waitish::Frame }, tag: 0 }
+global BOX: BoxedOwner = BoxedOwner { f: Framed { handle: 1, active: Waitish::Frame }, tag: 0 }
+global DIR: DirectOwner = DirectOwner { active: Waitish::Frame }
+
+fn arm_embedded() { EMB.f.active = Waitish::Secs(1.5) }
+fn arm_boxed() { BOX.f.active = Waitish::Secs(1.5) }
+fn arm_direct() { DIR.active = Waitish::Secs(1.5) }
+
+fn arm_embedded_closure(n: int) { EMB.f.active = Waitish::Until(() => n > 3, n) }
+
+fn read_embedded() -> int {
+    return match EMB.f.active {
+        Waitish::Secs(s) => int(s * 10.0),
+        Waitish::Until(p, k) => if p() { k } else { -k },
+        Waitish::Frame => -1,
+    }
+}
+
+fn read_boxed() -> int {
+    return match BOX.f.active {
+        Waitish::Secs(s) => int(s * 10.0),
+        Waitish::Until(p, k) => if p() { k } else { -k },
+        Waitish::Frame => -1,
+    }
+}
+
+fn read_direct() -> int {
+    return match DIR.active {
+        Waitish::Secs(s) => int(s * 10.0),
+        Waitish::Until(p, k) => if p() { k } else { -k },
+        Waitish::Frame => -1,
+    }
+}
+
+inline(lua) fn raw_subslot_tag(o: EmbedOwner) -> string = """
+    return tostring(o["f.active.#"])
+"""
+
+// The encoding the bug split in two: nothing may sit under the composed key.
+inline(lua) fn raw_composed_key_absent(o: EmbedOwner) -> bool = """
+    return o["f.active"] == nil
+"""
+
+@test
+fn embedded_child_flat_enum_roundtrips() {
+    arm_embedded()
+    assert_eq(read_embedded(), 15)
+}
+
+@test
+fn embedded_child_flat_enum_closure_payload_roundtrips() {
+    arm_embedded_closure(7)
+    assert_eq(read_embedded(), 7)
+    arm_embedded_closure(2)
+    assert_eq(read_embedded(), -2)
+}
+
+@test
+fn embedded_child_flat_enum_uses_one_encoding() {
+    arm_embedded()
+    assert_eq(raw_subslot_tag(EMB), "Secs")
+    assert_eq(raw_composed_key_absent(EMB), true)
+}
+
+@test
+fn ctor_writes_the_flat_encoding_too() {
+    // The ctor was the other half of the split: it boxed the enum under the
+    // composed key, so a never-stored field read stale from construction.
+    let fresh = EmbedOwner { f: Framed { handle: 2, active: Waitish::Secs(0.9) }, tag: 5 }
+    assert_eq(raw_subslot_tag(fresh), "Secs")
+    assert_eq(raw_composed_key_absent(fresh), true)
+}
+
+@test
+fn boxed_child_flat_enum_roundtrips_control() {
+    arm_boxed()
+    assert_eq(read_boxed(), 15)
+}
+
+@test
+fn direct_flat_enum_roundtrips_control() {
+    arm_direct()
+    assert_eq(read_direct(), 15)
+}
+
+@test
+fn embedded_scalar_leaf_roundtrips_control() {
+    // Scopes the fix: the non-enum leaves of the same embedded child were
+    // always fine, so this is flat-enum sub-slot composition, not embed
+    // storage at large.
+    EMB.f.handle = 21
+    assert_eq(EMB.f.handle, 21)
+}
