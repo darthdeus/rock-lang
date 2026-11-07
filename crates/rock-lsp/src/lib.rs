@@ -63,10 +63,6 @@ pub use workspace_adapters::*;
 
 pub mod completion_record;
 
-pub fn debug_write(msg: String) {
-    log::trace!("{}", msg);
-}
-
 #[macro_export]
 macro_rules! debug_log {
     ($($arg:tt)*) => {
@@ -978,9 +974,7 @@ impl LspServer {
         let edited = changed_doc(body)?;
         self.workspace
             .update_document_version(&at.to_string(), edited.version);
-        // Clear cached hints so the next request recomputes; the refresh
-        // below makes the client actually re-request them.
-        self.workspace.force_invalidate_inlay_hints(&at.to_string());
+        // The refresh makes the client re-request hints for the edited text.
         out.push(lsp_server::Message::Notification(
             lsp_server::Notification {
                 method: "workspace/inlayHint/refresh".to_string(),

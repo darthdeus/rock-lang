@@ -31,14 +31,6 @@ pub struct SemanticTokenCache {
     pub document_version: Option<i32>,
 }
 
-/// Inlay hints cache entry with version tracking
-#[derive(Clone, Debug)]
-pub struct InlayHintCache {
-    pub hints: Vec<lsp_types::InlayHint>,
-    pub document_version: Option<i32>,
-    pub range: lsp_types::Range,
-}
-
 /// Document version tracker
 #[derive(Default)]
 pub struct DocumentVersionTracker {
@@ -52,9 +44,6 @@ pub struct LspWorkspace {
 
     /// Semantic token cache with document version tracking
     semantic_token_cache: HashMap<String, SemanticTokenCache>,
-
-    /// Inlay hints cache with document version tracking
-    inlay_hint_cache: HashMap<String, InlayHintCache>,
 
     /// Document version tracker
     document_versions: DocumentVersionTracker,
@@ -76,7 +65,6 @@ impl LspWorkspace {
         Self {
             bone: policy.workspace(),
             semantic_token_cache: HashMap::new(),
-            inlay_hint_cache: HashMap::new(),
             document_versions: DocumentVersionTracker::default(),
             published_diagnostics: HashMap::new(),
         }
@@ -121,9 +109,6 @@ impl LspWorkspace {
             // SMART CACHE INVALIDATION: Don't remove semantic tokens immediately
             // They will be replaced when new tokens are successfully computed
             // This prevents semantic tokens from disappearing during recompilation
-
-            // Still invalidate inlay hints as they're less critical
-            self.inlay_hint_cache.remove(uri);
         }
     }
 
@@ -203,83 +188,12 @@ impl LspWorkspace {
         self.document_versions.versions.get(uri).copied()
     }
 
-    /// Get cached inlay hints if valid for the current document version and range
-    pub fn get_cached_inlay_hints(
-        &self,
-        uri: &str,
-        current_version: Option<i32>,
-        range: &lsp_types::Range,
-    ) -> Option<&InlayHintCache> {
-        let cache_entry = self.inlay_hint_cache.get(uri)?;
-        // Check if the cached hints are for the current document version and range
-        if cache_entry.document_version == current_version && cache_entry.range == *range {
-            Some(cache_entry)
-        } else {
-            None
-        }
-    }
-
-    /// Cache inlay hints for a document version and range
-    pub fn cache_inlay_hints(
-        &mut self,
-        uri: &str,
-        hints: Vec<lsp_types::InlayHint>,
-        document_version: Option<i32>,
-        range: lsp_types::Range,
-    ) {
-        let cache_entry = InlayHintCache {
-            hints,
-            document_version,
-            range,
-        };
-        self.inlay_hint_cache.insert(uri.to_string(), cache_entry);
-    }
-
-    /// Clear inlay hints cache for a specific URI
-    /// This ensures stale hints are not displayed after document changes
-    pub fn clear_inlay_hints_cache(&mut self, uri: &str) {
-        self.inlay_hint_cache.remove(uri);
-    }
-
     /// Drop all per-document caches for a URI the editor has closed.
     /// Called from the `textDocument/didClose` handler. The bone session entry
     /// for the file is dropped separately (`workspace.bone.remove`).
     pub fn close_document(&mut self, uri: &str) {
         self.document_versions.versions.remove(uri);
-        self.inlay_hint_cache.remove(uri);
         self.semantic_token_cache.remove(uri);
-    }
-
-    /// Test accessors for the cache layer. Count methods let tests assert
-    /// that eviction reclaimed the right amount of state without exposing
-    /// the underlying maps.
-    #[doc(hidden)]
-    pub fn document_versions_count(&self) -> usize {
-        self.document_versions.versions.len()
-    }
-    #[doc(hidden)]
-    pub fn semantic_token_cache_count(&self) -> usize {
-        self.semantic_token_cache.len()
-    }
-    #[doc(hidden)]
-    pub fn inlay_hint_cache_count(&self) -> usize {
-        self.inlay_hint_cache.len()
-    }
-
-    /// Force invalidate inlay hints cache by setting a special marker
-    /// This will cause the next request to return empty hints, forcing editor refresh
-    pub fn force_invalidate_inlay_hints(&mut self, uri: &str) {
-        // Insert a special cache entry that will force empty hints on next request
-        let invalidation_marker = InlayHintCache {
-            hints: Vec::new(),
-            document_version: Some(-1), // Special marker version
-            range: lsp_types::Range::new(
-                lsp_types::Position::new(0, 0),
-                lsp_types::Position::new(0, 0),
-            ),
-        };
-        self.inlay_hint_cache
-            .insert(uri.to_string(), invalidation_marker);
     }
 }
 
