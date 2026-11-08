@@ -3397,8 +3397,11 @@ fn filter_suppressed_findings_census(
 ) -> Vec<Finding> {
     let raw = findings.len();
     let started = bone_core::prelude::Instant::now();
-    let allow = suppression_entries(source);
-    let filtered = filter_suppressed_findings_with_entries(findings, &allow);
+    let filtered = if findings.is_empty() {
+        findings
+    } else {
+        filter_suppressed_findings_with_entries(findings, &suppression_entries(source))
+    };
     if let Some(census) = census {
         let family = &mut census.suppression;
         family.requests += 1;
@@ -3506,12 +3509,18 @@ fn filter_suppressed_census<F: LintFinding>(
 ) -> Vec<F> {
     let raw = findings.len();
     let started = bone_core::prelude::Instant::now();
-    let allow: FxHashSet<usize> = source
-        .lines()
-        .enumerate()
-        .filter(|(_, line)| parse_allow_comment(line, F::LINT))
-        .map(|(n, _)| n)
-        .collect();
+    // Most families find nothing in most files; the scan would only build an
+    // allow set nothing reads.
+    let allow: FxHashSet<usize> = if findings.is_empty() {
+        FxHashSet::default()
+    } else {
+        source
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| parse_allow_comment(line, F::LINT))
+            .map(|(n, _)| n)
+            .collect()
+    };
     let filtered = if allow.is_empty() {
         findings
     } else {
