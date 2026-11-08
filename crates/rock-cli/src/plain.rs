@@ -5,6 +5,28 @@ use crate::*;
 
 pub static COMMANDS: &[&CliCommand] = &[
     &CliCommand {
+        name: "sim",
+        route: Route::Backend(Operation::Sim),
+    },
+    &CliCommand {
+        name: "sim-report",
+        route: Route::Direct(|cx| {
+            if cx.args.files.len() > 1 {
+                anyhow::bail!(
+                    "usage: rock sim-report [<run-id>] [--sim-log-dir <root>] \
+                 [--sim-entry <name>] [--top N] [--format pretty|json]"
+                );
+            }
+            crate::sim_report::run(
+                cx.args.sim_log_dir.as_deref(),
+                cx.args.files.first().map(String::as_str),
+                cx.args.sim_entry.as_deref(),
+                cx.args.top,
+                &cx.args.perf_format,
+            )
+        }),
+    },
+    &CliCommand {
         name: "frame",
         route: Route::Backend(Operation::Frame),
     },
@@ -260,6 +282,7 @@ pub static SKULL: BackendSpec = BackendSpec {
     operations: &[
         (Operation::Frame, crate::frame_commands::handle_frame),
         (Operation::Perf, crate::frame_commands::handle_perf),
+        (Operation::Sim, crate::sim_command::handle_sim),
         (Operation::Stone, |cx| {
             let path = cx.get_project_dir_or_current()?;
             crate::stone_watch::do_stone_watch(
@@ -386,14 +409,7 @@ pub const RUNTIME_SERVICES: registry::RuntimeServices = registry::RuntimeService
     launch: crate::stone_runtime::launch,
     program_preamble: crate::stone_runtime::program_preamble,
     program_host: crate::stone_runtime::program_host,
-    // An unfiltered compiler build needs no private selection policy.
-    resolve_sim_specs: |names, selection| {
-        if selection.is_empty() {
-            Ok(names.to_vec())
-        } else {
-            unavailable("simulation selection")
-        }
-    },
+    resolve_sim_specs: crate::run_sim::resolve_sim_specs,
 };
 
 /// Portable scratch belongs to the OS/user-selected temporary directory,
@@ -402,10 +418,6 @@ fn prepare_test(command: &mut std::process::Command) -> Result<tempfile::TempDir
     let scratch = tempfile::Builder::new().prefix("rock-test-").tempdir()?;
     command.env("ROCK_TEST_TMP", scratch.path());
     Ok(scratch)
-}
-
-fn unavailable<T>(operation: &str) -> Result<T> {
-    anyhow::bail!("{operation} is unavailable in the plain compiler build")
 }
 
 pub fn command_metadata(command: &CliCommand) -> registry::CommandMetadata {
@@ -421,6 +433,7 @@ pub fn command_metadata(command: &CliCommand) -> registry::CommandMetadata {
                 | "lint"
                 | "fmt"
                 | "frame"
+                | "sim"
         ),
         compiler_process: if command.cli_name() == "check"
             || matches!(
@@ -433,6 +446,8 @@ pub fn command_metadata(command: &CliCommand) -> registry::CommandMetadata {
                 )
             ) {
             registry::CompilerProcess::Always
+        } else if command.operation() == Some(Operation::Sim) {
+            registry::CompilerProcess::WhenListed
         } else {
             registry::CompilerProcess::Never
         },
@@ -476,15 +491,14 @@ pub static REGISTRATIONS: registry::Registrations = registry::Registrations {
     commands: COMMANDS,
     backends: BACKENDS,
     option_rules: OPTION_RULES,
-    arguments: crate::frame_commands::arguments,
-    decode_arguments: crate::frame_commands::decode,
+    arguments: crate::sim_arguments::arguments,
+    decode_arguments: crate::sim_arguments::decode,
     command_metadata,
     invocation_context_keys: &[],
     compile_slot_policy: || Ok(None),
     scan_excluded: |_| false,
     early_entries: EARLY_ENTRIES,
     fixes: &[],
-    sim_environment: None,
     runtime_services: &RUNTIME_SERVICES,
     // A public tool does not record working directories and branches unless asked.
     initialize_process: |args| {

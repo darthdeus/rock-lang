@@ -34,10 +34,6 @@ pub struct Registrations {
     pub early_entries: &'static [EarlyEntry],
     /// Process-only environment policy, called after parsing and before worker threads.
     pub initialize_process: fn(&Args),
-    /// Optional batch environment enrichment for checked sim declarations.
-    pub sim_environment: Option<
-        fn(&bone_semantic::inference::Workspace, &mut [crate::skull_backend::SimDescriptor]),
-    >,
     pub runtime_services: &'static RuntimeServices,
 }
 

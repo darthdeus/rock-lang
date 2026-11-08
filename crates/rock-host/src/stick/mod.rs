@@ -178,11 +178,38 @@ pub struct StickConfig {
     pub assets: Option<AssetsConfig>,
     /// Optional compiler-owned sound project declaration.
     pub sound: Option<SoundConfig>,
+    /// Project-owned ambient inputs included in sim timing identities.
+    pub sim: Option<SimConfig>,
     /// Source-language selection for this package. `None` = legacy.
     pub language: Option<LanguageConfig>,
     pub dependencies: HashMap<String, Dependency>,
     /// Optional implementation directories that retain this package's owner.
     pub source_groups: HashMap<String, SourceGroupConfig>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SimConfig {
+    #[serde(default, deserialize_with = "sim_environment_prefixes")]
+    pub environment_prefixes: Vec<String>,
+}
+
+fn sim_environment_prefixes<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Vec<String>, D::Error> {
+    let prefixes = <Vec<String> as serde::Deserialize>::deserialize(d)?;
+    if prefixes.iter().any(|p| {
+        p.len() < 2
+            || !p.ends_with('_')
+            || !p
+                .bytes()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == b'_')
+    }) {
+        return Err(serde::de::Error::custom(
+            "sim environment prefixes must be uppercase names ending in _",
+        ));
+    }
+    Ok(prefixes)
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -852,6 +879,7 @@ impl<'de> serde::Deserialize<'de> for StickConfig {
                 let mut release: Option<ReleaseConfig> = None;
                 let mut assets: Option<AssetsConfig> = None;
                 let mut sound: Option<SoundConfig> = None;
+                let mut sim: Option<SimConfig> = None;
                 let mut language: Option<LanguageConfig> = None;
                 let mut dependencies: HashMap<String, Dependency> = HashMap::new();
                 let mut source_groups: HashMap<String, SourceGroupConfig> = HashMap::new();
@@ -868,6 +896,9 @@ impl<'de> serde::Deserialize<'de> for StickConfig {
                         }
                         "assets" => {
                             assets = Some(map.next_value()?);
+                        }
+                        "sim" => {
+                            sim = map.next_value()?;
                         }
                         "sound" => {
                             sound = Some(map.next_value()?);
@@ -890,7 +921,7 @@ impl<'de> serde::Deserialize<'de> for StickConfig {
                         other => {
                             return Err(serde::de::Error::custom(format!(
                                 "unknown key `{other}` at top level; known keys: package, build, release, \
-                                 assets, sound, engine, native, language, dependencies, source_groups"
+                                 assets, sound, sim, engine, native, language, dependencies, source_groups"
                             )));
                         }
                     }
@@ -904,6 +935,7 @@ impl<'de> serde::Deserialize<'de> for StickConfig {
                     release,
                     assets,
                     sound,
+                    sim,
                     language,
                     dependencies,
                     source_groups,
@@ -1893,5 +1925,30 @@ mod tests {
             msg.contains("parse stick.toml") || msg.contains("stick.toml"),
             "error mentions stick.toml: {msg}"
         );
+    }
+}
+
+#[cfg(test)]
+mod sim_config_tests {
+    use super::StickConfig;
+
+    #[test]
+    fn sim_timing_environment_requires_explicit_nonempty_namespaces() {
+        let manifest = "[package]\nname = \"sample\"\n";
+        assert!(StickConfig::new_from_str(manifest).unwrap().sim.is_none());
+        let config = StickConfig::new_from_str(&format!(
+            "{manifest}[sim]\nenvironment_prefixes = [\"APP_\"]\n"
+        ))
+        .unwrap();
+        assert_eq!(config.sim.unwrap().environment_prefixes, ["APP_"]);
+        for prefix in ["", "_", "APP", "app_", "APP-_"] {
+            assert!(
+                StickConfig::new_from_str(&format!(
+                    "{manifest}[sim]\nenvironment_prefixes = [\"{prefix}\"]\n"
+                ))
+                .is_err(),
+                "{prefix:?}"
+            );
+        }
     }
 }

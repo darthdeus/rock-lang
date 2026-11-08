@@ -851,7 +851,7 @@ fn prune_stone_sessions(root: &std::path::Path) {
         else {
             continue;
         };
-        if game.is_empty() || pid_alive(pid) {
+        if game.is_empty() || crate::child_lifetime::pid_alive(pid) {
             continue;
         }
         let path = entry.path();
@@ -2039,22 +2039,4 @@ mod session_cache_tests {
             "the restart loads the edited program"
         );
     }
-}
-#[cfg(unix)]
-fn pid_alive(pid: u32) -> bool {
-    let Ok(pid) = i32::try_from(pid) else {
-        return false;
-    };
-    // `kill(pid, 0)` performs no signal; EPERM still means the process
-    // exists (another user's), so only a clean error means dead.
-    unsafe {
-        libc::kill(pid, 0) == 0
-            || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
-    }
-}
-
-#[cfg(not(unix))]
-fn pid_alive(_pid: u32) -> bool {
-    // Without a liveness probe, keep PID-keyed artifacts.
-    true
 }
