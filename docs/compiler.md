@@ -82,6 +82,19 @@ The [wide-value ABI tests](../crates/skull/tests/wide_value_abi.rs) cover call
 kinds and boxed value semantics. Representation changes must preserve value
 copies and field layout, including uniform packing and nested no-box fields.
 
+## Opaque body boundaries
+
+An `inline(lua)` or `inline(js)` body is target code the compiler cannot
+rewrite, and an `extern` has no Rock body to inspect. At a concrete call,
+[boundary checks](../crates/skull-mir/src/lower/nobox.rs) reject declared
+parameter and return representations that the opaque body cannot safely assume.
+The container check uses the concrete declared slots, including an implicit
+receiver, rather than the types of caller expressions. A slot declared `any`
+does not assert a container layout. A parameter marked `@repr(opaque)` waives
+only the container-layout check for that parameter: the body must treat its
+value without assuming that layout. This does not waive the no-box checks.
+Compiler-routed container operations are replaced before the opaque call check.
+
 ## JavaScript multi-value returns
 
 The JS emitter returns the first leaf directly and publishes remaining leaves
@@ -92,3 +105,9 @@ the result. See [`multi_assign`](../crates/skull-codegen-js/src/emit.rs) and the
 Reference leaves can remain reachable until overwritten, bounded by the bank's
 width. Clearing every slot on each call adds stores; retain the bounded bank
 unless a measured retention problem warrants a different policy.
+
+An `inline(js)` body with a multi-lane result must end with one top-level
+`return __rock_publish(...)`, with one argument per ABI result lane. It must
+not contain another return or access the scratch bank directly. A zero- or
+single-lane result uses an ordinary return. The emitter validates this shape;
+the body remains responsible for the meaning and order of its values.
