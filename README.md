@@ -85,7 +85,7 @@ and [coroutines](docs/coroutines.md).
 
 ## Stone games
 
-Build the native dependencies and run the rendering testbed from a source checkout:
+Install the native dependencies and run the rendering testbed from a source checkout:
 
 ```sh
 python3 scripts/gamelibs.py sync
@@ -94,8 +94,8 @@ cargo run -p rock-cli --bin rock -- stone demos/testbed
 
 `bash scripts/release.sh` builds a host archive containing Rock, Stone, LuaJIT,
 native libraries and named packages. Extract it and run `bin/rock stone demos/testbed`.
-Native window tests use `cargo nextest run -p stone-rs`; Linux needs Xvfb, i3,
-clang and the system development libraries required by SDL2/audio.
+Linux source builds need SDL2, ALSA and XTest development packages. Native window
+tests use `cargo nextest run -p stone-rs`; on Linux they also need Xvfb, i3 and clang.
 
 ## Testing compiler changes
 

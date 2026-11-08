@@ -21,8 +21,4 @@ channels = ["dev", "direct"]
 default_channel = "dev"
 
 [build.vars]
-GIT_SHA = { builtin = "source_revision" }
-BUILD_UNIX = { cmd = "date +%s", volatile = true }
-BUILD_DATE = { cmd = "date -u '+%Y-%m-%d %H:%M'", volatile = true }
-CHANNEL = { builtin = "channel" }
-PLATFORM = { builtin = "platform" }
+GIT_SHA = { value = "stone-tests" }
