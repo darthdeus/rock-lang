@@ -324,12 +324,11 @@ fn ty_is_value_struct(gamma: &Gamma, ty: TyId) -> Option<Ustr> {
         .then_some(name)
 }
 
-/// Whether a value-struct field write whose base is `base` targets real MUTABLE
-/// STORAGE (legal place write) rather than a value LOCAL / rvalue copy (rejected).
-/// A value struct reached through a mutable struct field, a container element
-/// (`Index`), or a global lives in mutable storage and its leaves are writable in
-/// place; one held directly as a value-typed local (`Var`) -- or a chain of value
-/// projections off one -- or produced by a call/literal is an immutable copy.
+/// Whether a value-struct field write whose base is `base` targets a place
+/// (legal) rather than an rvalue temporary (rejected). A value struct reached
+/// through a mutable struct field, a container element (`Index`), a global, or
+/// a local or parameter (a chain of value projections off a `Var`) is a place;
+/// one produced by a call or literal is a temporary.
 fn value_field_write_is_place(
     c: BodyCtx,
     gamma: &mut Gamma,
@@ -356,7 +355,10 @@ fn value_field_write_is_place(
                 }
                 cur = parent;
             }
-            // A bare value local, a call result, a literal: an immutable copy.
+            // A local or parameter owns its copy, so a write replaces that
+            // binding's whole value (#107) and no other copy observes it.
+            Expr::Var(_) => return Ok(true),
+            // A call result or a literal is a temporary: the write is lost.
             _ => return Ok(false),
         }
     }
@@ -383,11 +385,11 @@ fn expr_is_reachable_storage(c: BodyCtx, e: Idx<Expr>) -> bool {
 }
 
 /// Reject a write to a `value` struct's field UNLESS it targets a mutable place.
-/// Value structs are immutable *as values*: a write
-/// into a value LOCAL / rvalue (`let p = Pt{}; p.x = 5`) is a lost write on a copy
-/// and rejects. But a value that LIVES in mutable storage -- a field of a mutable
-/// struct (`mob.pos.x`), a container element (`buf[i].pos.x`), a global place
-/// (`CAST_ENV.value = x`) -- is writable in place.
+/// A write into an rvalue (`mk().x = 5`) would be lost on a temporary and
+/// rejects. A value local or parameter (`p.x = 5`) owns its copy, so the write
+/// replaces that binding's whole value; a value that LIVES in mutable storage --
+/// a field of a mutable struct (`mob.pos.x`), a container element
+/// (`buf[i].pos.x`), a global place (`CAST_ENV.value = x`) -- is writable in place.
 /// Fires from the assignment / compound-assign / inc-dec target when its BASE is a
 /// value-struct projection.
 pub(crate) fn reject_value_struct_field_write(
@@ -406,8 +408,7 @@ pub(crate) fn reject_value_struct_field_write(
     }
     comp_error!(
         span,
-        "cannot assign to a field of `value` struct `{}`: it is an immutable local/temporary. Replace it wholesale (`p = {} {{ .. }}`), or mutate in place only through a mutable field / element / global.",
-        name,
+        "cannot assign to a field of `value` struct `{}`: it is a temporary, so the write would be lost. Bind it to a local first, or write through a local, parameter, field, element or global.",
         name
     );
 }

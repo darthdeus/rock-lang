@@ -1,5 +1,5 @@
 // `value` types look like structs but copy on assignment and on calls,
-// and their fields cannot be mutated in place: replace them wholesale.
+// so a field write changes only that one copy.
 struct Box {
     n: int,
 }
@@ -13,7 +13,8 @@ fn bump_box(b: Box) {
 }
 
 fn bump_dot(d: Dot) -> Dot {
-    return Dot { n: d.n + 1 }
+    d.n = d.n + 1 // writes this call's own copy
+    return d
 }
 
 fn main() {
@@ -25,7 +26,7 @@ fn main() {
     print(d.n) // 0: the value was copied, the caller's copy is untouched
     print(d2.n) // 1
     let e = d
-    e = Dot { n: 99 } // `let` bindings are reassignable
+    e.n = 99 // replaces `e`'s whole value; `d` is another copy
     print(d.n) // 0
     print(e.n) // 99
 }

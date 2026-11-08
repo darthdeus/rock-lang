@@ -2177,9 +2177,9 @@ pub(crate) fn check_expr(
                 let t_r = resolve(gamma, t, span);
                 // `FieldRef` and `WriteFieldRef` carry the WRITE capability
                 // (`field_set`, `poll_co_field`), so neither can resolve against a
-                // `value` struct, whose fields are immutable. `ReadFieldRef`
-                // (read-only, `field_get`) allows it -- reading a value-struct
-                // field is fine.
+                // `value` struct: the callee receives a copy, never the caller's
+                // place, so the write would be lost. `ReadFieldRef` (read-only,
+                // `field_get`) allows it -- reading a value-struct field is fine.
                 if is_field_ref || is_write_field_ref {
                     if let TypeExpr::App {
                         ctor: TypeCtor::Nominal(tn),
@@ -2192,7 +2192,7 @@ pub(crate) fn check_expr(
                         if is_value {
                             comp_error!(
                                 span,
-                                "cannot form a writable field reference `.{}` into `value` struct `{}`; value structs are immutable",
+                                "cannot form a writable field reference `.{}` into `value` struct `{}`: a value argument is a copy, so a write through the reference (`field_set`) would be lost; assign the field directly",
                                 field,
                                 tn
                             );

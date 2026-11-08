@@ -141,9 +141,11 @@ it comes before any overriding fields.
 ## Value types
 
 A `value` looks like a struct but copies on assignment and on calls,
-so a function cannot mutate its caller's copy. Fields of a value held
-in a local cannot be assigned in place; replace the whole value. The
-math types (`Vec2`, `Vec3`, `Vec4`, `Mat4`) are value types.
+so a function cannot mutate its caller's copy. Assigning a field of a
+value local or parameter replaces that binding's whole value, nested
+fields included; no other copy sees the change. A call result is a
+temporary, so its fields cannot be assigned. The math types (`Vec2`,
+`Vec3`, `Vec4`, `Mat4`) are value types.
 
 A value is stored inline, so it cannot contain itself by value, even
 as `T?` or through other values: `value Node { next: Node? }` is a
@@ -152,7 +154,7 @@ Map, an enum or an `Entity<T>` handle.
 
 ```rock
 // `value` types look like structs but copy on assignment and on calls,
-// and their fields cannot be mutated in place: replace them wholesale.
+// so a field write changes only that one copy.
 struct Box {
     n: int,
 }
@@ -166,7 +168,8 @@ fn bump_box(b: Box) {
 }
 
 fn bump_dot(d: Dot) -> Dot {
-    return Dot { n: d.n + 1 }
+    d.n = d.n + 1 // writes this call's own copy
+    return d
 }
 
 fn main() {
@@ -178,7 +181,7 @@ fn main() {
     print(d.n) // 0: the value was copied, the caller's copy is untouched
     print(d2.n) // 1
     let e = d
-    e = Dot { n: 99 } // `let` bindings are reassignable
+    e.n = 99 // replaces `e`'s whole value; `d` is another copy
     print(d.n) // 0
     print(e.n) // 99
 }

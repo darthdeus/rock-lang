@@ -254,8 +254,10 @@ impl Builder<'_> {
 
     /// Whether `e` denotes a mutable PLACE -- storage a later write can reach
     /// through, so a whole-value read out of it must copy. A value local/param is
-    /// NOT one (bone rejects leaf writes there), nor is a call result; without
-    /// that exclusion every uniform-struct field read would rebuild its value.
+    /// NOT one, nor is a call result; without that exclusion every
+    /// uniform-struct field read would rebuild its value. A field write on a
+    /// value binding is a borrow of it ([`Self::binding_ref_borrowed`]), which
+    /// keeps its box from being lent.
     ///
     /// Sibling, NOT a duplicate: bone's `value_field_write_is_place`
     /// (`bone-inference/src/fields.rs`) decides whether a write TARGET is legal
@@ -389,7 +391,8 @@ impl Builder<'_> {
     }
 
     /// Whether some `ref` borrow in this body (a `ref` argument or a `ref`
-    /// local, lambdas included) is rooted at binding `b`. A write through it
+    /// local, lambdas included) is rooted at binding `b`, or a field write
+    /// reaches `b` through value projections only (`b.p.x = v`). Either write
     /// lands in `b`'s box, so that box is never lent to an argument slot, and
     /// a parameter's lent box is copied before the body can borrow it.
     pub(crate) fn binding_ref_borrowed(&self, b: Idx<BindingInfo>) -> bool {
@@ -417,7 +420,34 @@ impl Builder<'_> {
                         }
                         _ => None,
                     });
-                args.chain(ref_lets).filter_map(root).collect()
+                // A value-projection chain only: a reference struct or a
+                // container in it is shared storage, not `b`'s box.
+                let field_write_root = |target: Idx<Expr>| {
+                    let (Expr::FieldAccess { mut base, .. } | Expr::SafeNav { mut base, .. }) =
+                        self.body.expr_arena[target]
+                    else {
+                        return None;
+                    };
+                    loop {
+                        self.value_struct_name_of(base)?;
+                        match &self.body.expr_arena[base] {
+                            Expr::Var(b) => return Some(raw(*b)),
+                            Expr::FieldAccess { base: next, .. }
+                            | Expr::SafeNav { base: next, .. } => base = *next,
+                            _ => return None,
+                        }
+                    }
+                };
+                let field_writes = self.body.expr_arena.iter().filter_map(|(_, e)| match e {
+                    Expr::Assign { target, .. }
+                    | Expr::CompoundAssign { target, .. }
+                    | Expr::IncDec { target, .. } => field_write_root(*target),
+                    _ => None,
+                });
+                args.chain(ref_lets)
+                    .filter_map(root)
+                    .chain(field_writes)
+                    .collect()
             })
             .contains(&raw(b))
     }

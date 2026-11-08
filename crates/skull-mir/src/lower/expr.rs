@@ -1086,6 +1086,223 @@ impl Builder<'_> {
         Ok(place)
     }
 
+    /// A field place held wholly in a scalarized binding's leaf cells
+    /// ([`Builder::group_binds`]): the cells it spans and its shape. A write
+    /// replaces those leaves, which is the whole-value replacement a value
+    /// local or parameter field write means, and the only form a `nobox`
+    /// binding has. `None` once the path leaves the cells, through a reference
+    /// or an opaque value child.
+    fn group_leaf_place(&self, e: Idx<Expr>) -> Option<(Vec<Idx<Cell>>, FieldShape)> {
+        match self.group_leaf_walk(e)? {
+            (guards, cells, selected) if guards.is_empty() => Some((cells, selected)),
+            _ => None,
+        }
+    }
+
+    /// [`Self::group_leaf_place`] through `?.` links too: also the presence
+    /// cells of the nullable levels those links test, outermost first.
+    fn group_leaf_walk(
+        &self,
+        e: Idx<Expr>,
+    ) -> Option<(Vec<Idx<Cell>>, Vec<Idx<Cell>>, FieldShape)> {
+        let mut links = Vec::new();
+        let mut at = e;
+        let b = loop {
+            match self.body.expr_arena[at] {
+                Expr::FieldAccess { base, field } if self.swizzle_of(base, field).is_none() => {
+                    links.push((field, false));
+                    at = base;
+                }
+                Expr::SafeNav { base, field } => {
+                    links.push((field, true));
+                    at = base;
+                }
+                Expr::Var(b) if self.group_binds.contains_key(&raw(b)) => break b,
+                _ => return None,
+            }
+        };
+        if links.is_empty() {
+            return None;
+        }
+        links.reverse();
+        let (cells, shape) = &self.group_binds[&raw(b)];
+        let path: Vec<Ustr> = links.iter().map(|(field, _)| *field).collect();
+        let mut guards = Vec::new();
+        for (depth, &(_, safe)) in links.iter().enumerate() {
+            if !safe {
+                continue;
+            }
+            let nullable = if depth == 0 {
+                shape.nullable
+            } else {
+                match self.value_projection_range(shape, &path[..depth])? {
+                    (range, FieldShape::Nested(level)) => {
+                        level.nullable && {
+                            guards.push(cells[range.start]);
+                            false
+                        }
+                    }
+                    // A `?.` off an opaque child tests a box, not a leaf.
+                    (_, FieldShape::Prim) => return None,
+                }
+            };
+            if nullable {
+                guards.push(cells[0]);
+            }
+        }
+        let (range, selected) = self.value_projection_range(shape, &path)?;
+        Some((guards, cells[range].to_vec(), selected))
+    }
+
+    /// One leaf of a scalarized binding used as a place base: a reference is
+    /// written through, while an opaque value child may share its box with the
+    /// source the binding was read from, so the write lands on a copy stored
+    /// back into the leaf.
+    fn group_leaf_place_base(
+        &mut self,
+        e: Idx<Expr>,
+        cell: Idx<Cell>,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let leaf = self.emit_cur(Inst::Load(cell));
+        match self.concrete_expr_ty(e) {
+            Some(ty)
+                if ty
+                    .peel_nullable()
+                    .0
+                    .nominal()
+                    .is_some_and(|name| self.is_value_struct(name)) =>
+            {
+                let copy = self.copied_value_box(&ty, leaf)?;
+                self.emit_cur(Inst::Store { cell, value: copy });
+                // Through a reload, so copy propagation sees the cell written
+                // in place and does not fold reads to the copy's operands.
+                Ok(self.emit_cur(Inst::Load(cell)))
+            }
+            _ => Ok(leaf),
+        }
+    }
+
+    /// Branch to `absent` unless every presence cell in `guards` is set.
+    fn group_presence_guard(&mut self, guards: &[Idx<Cell>], absent: Idx<Block>) {
+        for &cell in guards {
+            let flag = self.emit_cur(Inst::Load(cell));
+            let present = self.f.new_block();
+            self.f.set_term(
+                self.cur,
+                Term::Branch {
+                    cond: flag,
+                    then_bb: present,
+                    else_bb: absent,
+                },
+            );
+            self.cur = present;
+        }
+    }
+
+    /// Under first-class values (GLSL) a field write rooted at a value local
+    /// or parameter, through value projections only: the root's cell and the
+    /// path with each level's struct name.
+    fn first_class_field_place(&self, e: Idx<Expr>) -> Option<(Idx<Cell>, Vec<(Ustr, Ustr)>)> {
+        if !self.scx.values_first_class {
+            return None;
+        }
+        let mut path = Vec::new();
+        let mut at = e;
+        let b = loop {
+            match self.body.expr_arena[at] {
+                Expr::FieldAccess { base, field } if self.swizzle_of(base, field).is_none() => {
+                    path.push((self.value_struct_of(base)?, field));
+                    at = base;
+                }
+                Expr::Var(b) if !self.static_cells.contains_key(&raw(b)) => break b,
+                _ => return None,
+            }
+        };
+        if path.is_empty() {
+            return None;
+        }
+        path.reverse();
+        Some((*self.binds.get(&raw(b))?, path))
+    }
+
+    /// Replace the whole value in `cell` with a copy whose field at `path`
+    /// is `update(old)`. A first-class value has no storage a field store
+    /// could name, so the write is the whole-value replacement it means.
+    /// With `result` set, returns the old (`Some(true)`) or new field value,
+    /// readable after the write.
+    fn first_class_field_update(
+        &mut self,
+        cell: Idx<Cell>,
+        path: &[(Ustr, Ustr)],
+        result: Option<bool>,
+        update: impl FnOnce(&mut Self, Idx<Inst>) -> Result<Idx<Inst>, CompilerError>,
+    ) -> Result<Option<Idx<Inst>>, CompilerError> {
+        let mut levels = vec![self.emit_cur(Inst::Load(cell))];
+        for &(_, field) in &path[..path.len() - 1] {
+            let base = *levels.last().expect("root level");
+            levels.push(self.emit_cur(Inst::Field { base, field }));
+        }
+        let (_, last) = path[path.len() - 1];
+        let base = *levels.last().expect("root level");
+        let old = self.emit_cur(Inst::Field { base, field: last });
+        let new = update(self, old)?;
+        let mut value = new;
+        for (&(name, field), &base) in path.iter().zip(&levels).rev() {
+            let parts = self
+                .struct_field_names_required(name)?
+                .into_iter()
+                .map(|f| {
+                    ValueRepr::Scalar(if f == field {
+                        value
+                    } else {
+                        self.emit_cur(Inst::Field { base, field: f })
+                    })
+                })
+                .collect();
+            value = self.pack(ValueRepr::Group {
+                name,
+                parts,
+                present: None,
+            })?;
+        }
+        // GLSL renders a value at its use, so a result read before the store
+        // but used after it would see the new field. Snapshot it in a cell.
+        let snapshot = result.map(|old_wanted| {
+            let snap = self.f.new_cell(None);
+            self.emit_cur(Inst::Store {
+                cell: snap,
+                value: if old_wanted { old } else { new },
+            });
+            snap
+        });
+        self.emit_cur(Inst::Store { cell, value });
+        Ok(snapshot.map(|snap| self.emit_cur(Inst::Load(snap))))
+    }
+
+    /// `place.f = v` where `place` lies in a scalarized binding's leaves.
+    fn group_leaf_store(
+        &mut self,
+        target: Idx<Expr>,
+        cells: &[Idx<Cell>],
+        selected: &FieldShape,
+        value: Idx<Expr>,
+    ) -> Result<(), CompilerError> {
+        let leaves = match selected {
+            FieldShape::Prim => {
+                let expected = self.concrete_expr_ty(target);
+                vec![self.lower_expr_with_expected(value, expected.as_deref())?]
+            }
+            FieldShape::Nested(shape) => {
+                let r = self.lower_expr_repr(value)?;
+                self.repr_to_storage_leaves(&r, shape, "scalarized field assignment")?
+            }
+        };
+        for (cell, value) in cells.iter().zip(leaves) {
+            self.emit_cur(Inst::Store { cell: *cell, value });
+        }
+        Ok(())
+    }
+
     /// `target = value` -> a `Store`/`StoreField`/`StoreIndex`/`StoreGlobal`
     /// (the effect; no value). The expression form wraps this with a unit value.
     /// The BASE of an assignment target, lowered as a PLACE: the slot itself,
@@ -1153,6 +1370,11 @@ impl Builder<'_> {
             {
                 Ok(self.emit_cur(Inst::Load(self.binds[&raw(b)])))
             }
+            Expr::FieldAccess { .. }
+                if let Some((cells, FieldShape::Prim)) = self.group_leaf_place(e) =>
+            {
+                self.group_leaf_place_base(e, cells[0])
+            }
             // A leaf of a column-stored or strided element has no slot to name;
             // read it. A leaf that can be a place base holds a reference
             // (`xs[i].o` in `xs[i].o.hp = v`), so the read is that object.
@@ -1216,6 +1438,12 @@ impl Builder<'_> {
             _ => None,
         };
         match self.body.expr_arena[e] {
+            Expr::SafeNav { .. }
+                if let Some((guards, cells, FieldShape::Prim)) = self.group_leaf_walk(e) =>
+            {
+                self.group_presence_guard(&guards, absent_join);
+                self.group_leaf_place_base(e, cells[0])
+            }
             Expr::SafeNav { base, field } => {
                 let recv = self.lower_guarded_place_base(base, absent_join)?;
                 let nil = self.emit_cur(Inst::Const(Lit::Nil));
@@ -1418,6 +1646,19 @@ impl Builder<'_> {
                     _ => v,
                 };
                 self.emit_cur(Inst::Store { cell, value: v });
+            }
+            Expr::FieldAccess { .. }
+                if let Some((cell, path)) = self.first_class_field_place(target) =>
+            {
+                let expected = self.concrete_expr_ty(target);
+                self.first_class_field_update(cell, &path, None, |s, _| {
+                    s.lower_expr_with_expected(value, expected.as_deref())
+                })?;
+            }
+            Expr::FieldAccess { .. }
+                if let Some((cells, selected)) = self.group_leaf_place(target) =>
+            {
+                self.group_leaf_store(target, &cells, &selected, value)?;
             }
             // A leaf of a `nobox` global (`SPOT.x = v`, `SPOT.a.b = v`): the
             // group has no slot to take a place base of, so the write lands in
@@ -1640,6 +1881,17 @@ impl Builder<'_> {
             // receiver `base` lowers to nil then). `value` evaluates ONLY on the
             // non-null path. Deep `a?.b?.c = v` works: `base` (`a?.b`) is itself
             // a SafeNav that lowers to nil if any inner link is null.
+            // The same through a scalarized binding's leaves: test the
+            // presence leaves, then write the field's leaves.
+            Expr::SafeNav { .. }
+                if let Some((guards, cells, selected)) = self.group_leaf_walk(target) =>
+            {
+                let join = self.f.new_block();
+                self.group_presence_guard(&guards, join);
+                self.group_leaf_store(target, &cells, &selected, value)?;
+                self.f.set_term(self.cur, Term::Goto(join));
+                self.cur = join;
+            }
             Expr::SafeNav { base, field } => {
                 let join = self.f.new_block();
                 let recv = self.lower_guarded_place_base(base, join)?;
@@ -1765,6 +2017,24 @@ impl Builder<'_> {
                     self.compound_combine_f32(e, f32_target, scalar, op_fn, overload, cur, value)?;
                 self.emit_cur(Inst::StoreGlobal { name, value: new_v });
             }
+            Expr::FieldAccess { .. }
+                if let Some((cell, path)) = self.first_class_field_place(target) =>
+            {
+                self.first_class_field_update(cell, &path, None, |s, cur| {
+                    s.compound_combine_f32(e, f32_target, scalar, op_fn, overload, cur, value)
+                })?;
+            }
+            Expr::FieldAccess { .. }
+                if let Some((cells, FieldShape::Prim)) = self.group_leaf_place(target) =>
+            {
+                let cur = self.emit_cur(Inst::Load(cells[0]));
+                let new_v =
+                    self.compound_combine_f32(e, f32_target, scalar, op_fn, overload, cur, value)?;
+                self.emit_cur(Inst::Store {
+                    cell: cells[0],
+                    value: new_v,
+                });
+            }
             Expr::FieldAccess { base, field } => {
                 if let Some((buf, checked, _, place)) = self.nb_leaf_rmw_place(target)? {
                     let cur = self.nb_leaf_load(buf, checked, &place);
@@ -1814,6 +2084,21 @@ impl Builder<'_> {
             }
             // `base?.field <op>= value` — skip silently if any `?.` link is null.
             // The read-modify-write and `value` run only on the non-null path.
+            Expr::SafeNav { .. }
+                if let Some((guards, cells, FieldShape::Prim)) = self.group_leaf_walk(target) =>
+            {
+                let join = self.f.new_block();
+                self.group_presence_guard(&guards, join);
+                let cur = self.emit_cur(Inst::Load(cells[0]));
+                let new_v =
+                    self.compound_combine_f32(e, f32_target, scalar, op_fn, overload, cur, value)?;
+                self.emit_cur(Inst::Store {
+                    cell: cells[0],
+                    value: new_v,
+                });
+                self.f.set_term(self.cur, Term::Goto(join));
+                self.cur = join;
+            }
             Expr::SafeNav { base, field } => {
                 let join = self.f.new_block();
                 let recv = self.lower_guarded_place_base(base, join)?;
@@ -1955,6 +2240,26 @@ impl Builder<'_> {
                 let old = self.emit_cur(Inst::Global(name));
                 let new = bump(self, old);
                 self.emit_cur(Inst::StoreGlobal { name, value: new });
+                Ok(if postfix { old } else { new })
+            }
+            Expr::FieldAccess { .. }
+                if let Some((cell, path)) = self.first_class_field_place(target) =>
+            {
+                let result =
+                    self.first_class_field_update(cell, &path, Some(postfix), |s, old| {
+                        Ok(bump(s, old))
+                    })?;
+                Ok(result.expect("a requested result"))
+            }
+            Expr::FieldAccess { .. }
+                if let Some((cells, FieldShape::Prim)) = self.group_leaf_place(target) =>
+            {
+                let old = self.emit_cur(Inst::Load(cells[0]));
+                let new = bump(self, old);
+                self.emit_cur(Inst::Store {
+                    cell: cells[0],
+                    value: new,
+                });
                 Ok(if postfix { old } else { new })
             }
             Expr::FieldAccess { base, field } => {

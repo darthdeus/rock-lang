@@ -64,7 +64,7 @@ value Pt { x: int, y: int }
 fn take_write(f: WriteFieldRef<Pt, int>) {}
 
 fn main() {
-    take_write(.x)   // ERROR: value struct fields are immutable
+    take_write(.x)   // ERROR: a write through a value copy would be lost
 }
 
 //=== TEST CASE: write_field_ref_arity_Generic ===

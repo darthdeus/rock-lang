@@ -1474,3 +1474,27 @@ fn conditionally_reassigned_sample() {
         "got:\n{glsl}"
     );
 }
+
+/// A field write on a value local or parameter replaces the whole value
+/// (#107). GLSL renders a value at its use, so a postfix result read before
+/// the write is held in its own variable.
+#[test]
+fn value_local_and_param_field_writes_replace_the_whole_value() {
+    let src = r#"
+        fn nudge(p: Vec2, d: float) -> float {
+            let q = p
+            q.y += d
+            p.x *= 2.0
+            let old = q.x++
+            return old + q.x + q.y + p.x + p.y
+        }
+    "#;
+    let glsl = emit(src, &["nudge"]).expect("emit");
+    assert_eq!(
+        glsl.trim(),
+        "float nudge_Vec2_float(vec2 p, float d) {\n  vec2 q;\n  float t3;\n  float old;\n  \
+         q = p;\n  q = vec2(q.x, (q.y + d));\n  p = vec2((p.x * 2.0), p.y);\n  t3 = q.x;\n  \
+         q = vec2((q.x + 1.0), q.y);\n  old = t3;\n  \
+         return ((((old + q.x) + q.y) + p.x) + p.y);\n}"
+    );
+}

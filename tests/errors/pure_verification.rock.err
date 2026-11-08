@@ -149,9 +149,9 @@ fn pure_mutates_own_local() -> int {
 
 //=== TEST CASE: pure_local_value_field_write_Generic ===
 // The user-reported shape (a shader helper): a `@pure` fn building a Vec2-like
-// value in a local and adjusting one component. TWO rules fire on the same
-// line -- the value-local place rejection (tests/errors/value_struct_field_write
-// .rock.err) and this syntactic purity rejection. Both checks are independent.
+// value in a local and adjusting one component. The write itself is legal
+// (tests/values/value_local_field_write.rock); only this syntactic purity
+// rejection fires. Effect-aware purity would accept it (#107).
 value V2 { x: float, y: float }
 
 @pure
