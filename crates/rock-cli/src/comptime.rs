@@ -5,9 +5,9 @@
 //! at the compile chokepoints -- never from the LSP, which performs no
 //! emission and so never reaches this module.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use bone_semantic::inference::{ComptimeInputs, ComptimeVarValue};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 /// The invocation's `--channel`/`--var` selection. Set once by `run_cli`
@@ -375,6 +375,37 @@ fn resolve_source_fingerprints(
     Ok(())
 }
 
+/// Resolve a filesystem support file from the selected package or project.
+pub(crate) fn resolve_source_fingerprint_support_path(
+    file: &str,
+    embed_root: Option<&Path>,
+) -> Result<PathBuf> {
+    let declared_path = Path::new(file);
+    let support_path = if let Some(package_path) = file.strip_prefix("packages/") {
+        let (package, relative) = package_path
+            .split_once('/')
+            .context("package support files must name a package and relative path")?;
+        rock_stdlib::package_dir(package)
+            .map_err(anyhow::Error::msg)
+            .with_context(|| format!("resolve source fingerprint package {package:?}"))?
+            .join(relative)
+    } else if declared_path.is_absolute() {
+        declared_path.to_path_buf()
+    } else {
+        embed_root
+            .with_context(|| {
+                format!("source fingerprint support file {file:?} requires an embed root")
+            })?
+            .join(declared_path)
+    };
+    support_path.canonicalize().with_context(|| {
+        format!(
+            "resolve source fingerprint support file {}",
+            support_path.display()
+        )
+    })
+}
+
 /// Resolve declared fingerprints using the checked program's source snapshot.
 /// The reader must return exactly the bytes used to check each file; support
 /// files fall back to the project's filesystem. Stdlib always uses the same
@@ -402,23 +433,11 @@ pub(crate) fn resolve_checked_inputs(
                     .find(|f| f.name == name)
                     .map(|f| f.contents.to_string());
             }
-            // `packages/` is an explicit toolchain-package selector. Resolve it
-            // before project-relative inputs so a same-spelled local file
-            // cannot shadow the selected package or satisfy a missing file.
-            let package_path = file.strip_prefix("packages/");
-            let path = if let Some(package_path) = package_path {
-                let (package, relative) = package_path.split_once('/')?;
-                Some(rock_stdlib::package_dir(package).ok()?.join(relative))
-            } else {
-                let path = Path::new(file);
-                if path.is_absolute() {
-                    Some(path.to_path_buf())
-                } else {
-                    root.as_ref().map(|root| root.join(path))
-                }
-            };
-            let path = path.and_then(|path| path.canonicalize().ok());
-            let text = if package_path.is_some() {
+            // `packages/` selects the toolchain package before project paths,
+            // so a same-spelled local file cannot shadow it or satisfy a miss.
+            let package_path = file.starts_with("packages/");
+            let path = resolve_source_fingerprint_support_path(file, root.as_deref()).ok();
+            let text = if package_path {
                 let path = path.as_ref()?;
                 source_text(path.to_str()?).or_else(|| std::fs::read_to_string(path).ok())?
             } else {
@@ -993,7 +1012,7 @@ mod source_fingerprint_tests {
             let package_root = std::path::PathBuf::from(std::env::var_os(PACKAGE_ROOT).unwrap());
             let project_root = std::path::PathBuf::from(std::env::var_os(PROJECT_ROOT).unwrap());
             let (ws, mut inputs) = fixture();
-            inputs.embed_root = Some(project_root);
+            inputs.embed_root = Some(project_root.clone());
             inputs
                 .source_fingerprints
                 .get_mut(&Ustr::from("REV"))
@@ -1014,30 +1033,67 @@ mod source_fingerprint_tests {
                 .unwrap();
             let package_file_key = Ustr::from(package_file.to_str().unwrap());
             let revision = resolved.vars[&Ustr::from("REV")].value.clone();
+            let rock_exe = std::env::current_exe().unwrap();
+            let cache_digest = || {
+                crate::compile_cache::compile_cache_identity(
+                    &project_root,
+                    crate::Backend::Skull,
+                    &inputs,
+                    &rock_exe,
+                )
+                .unwrap()["source_fingerprint_support_sha256"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            };
+            let initial_cache_digest = cache_digest();
             assert_eq!(
                 resolved.source_fingerprint_files.get(&package_file_key),
                 Some(&skull_mir::mir::comptime_value_hash(decode)),
                 "fingerprint tracking must watch the resolved package file"
             );
 
+            std::fs::write(
+                project_root.join("packages/package-probe/decoder.rock"),
+                "fn decode() -> int { 100 }",
+            )
+            .unwrap();
+            assert_eq!(
+                initial_cache_digest,
+                cache_digest(),
+                "project-local decoys must not participate in a package support digest"
+            );
+
             let changed_decode = "fn decode() -> int { 8 }";
             std::fs::write(&package_file, changed_decode).unwrap();
             let changed = resolve_checked_inputs(&ws, inputs.clone(), read_checked_source).unwrap();
             assert_ne!(revision, changed.vars[&Ustr::from("REV")].value);
+            assert_ne!(initial_cache_digest, cache_digest());
             assert_eq!(
                 changed.source_fingerprint_files.get(&package_file_key),
                 Some(&skull_mir::mir::comptime_value_hash(changed_decode)),
                 "watch hash must follow package-source changes"
             );
 
-            std::fs::remove_file(package_file).unwrap();
-            let missing = resolve_checked_inputs(&ws, inputs, read_checked_source)
+            std::fs::remove_file(&package_file).unwrap();
+            let missing = resolve_checked_inputs(&ws, inputs.clone(), read_checked_source)
                 .expect_err("a project-root file must not satisfy a missing package file");
             assert!(
                 missing
                     .to_string()
                     .contains("packages/package-probe/decoder.rock"),
                 "{missing:#}"
+            );
+            let missing_cache = crate::compile_cache::compile_cache_identity(
+                &project_root,
+                crate::Backend::Skull,
+                &inputs,
+                &rock_exe,
+            )
+            .expect_err("a project decoy must not satisfy a missing package support file");
+            assert!(
+                format!("{missing_cache:#}").contains("decoder.rock"),
+                "{missing_cache:#}"
             );
             return;
         }
