@@ -62,13 +62,14 @@ jobs:
       - name: Test language corpus on the JS backend
         # A test the JS backend cannot compile is skipped, not failed. Cap the
         # skip count so new skips need an explicit bump; lower it as the
-        # emitter catches up.
+        # emitter catches up. Tests marked `@test(backends = "lua")` report as
+        # "not for js" and are outside the cap.
         env:
           JS_MAX_SKIPS: "157"
         run: |
           set -o pipefail
           cargo run --locked -p rock-cli --bin rock -- test --backend js tests/ | tee "$RUNNER_TEMP/js-corpus.txt"
-          skipped=$(sed -n 's/^js backend: .*, \([0-9][0-9]*\) skipped).*/\1/p' "$RUNNER_TEMP/js-corpus.txt")
+          skipped=$(sed -n 's/^js backend: .* failed, \([0-9][0-9]*\) skipped[,)].*/\1/p' "$RUNNER_TEMP/js-corpus.txt")
           if [ -z "$skipped" ]; then
             echo "could not read the JS skip count"
             exit 1

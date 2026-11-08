@@ -348,6 +348,63 @@ fn no_args(anno: &Annotation) -> Result<(), CompilerError> {
     Ok(())
 }
 
+/// A backend the `@test` runners execute on. `@test(backends = "lua")` limits
+/// a test to the listed backends; the others neither compile nor run it and
+/// count it apart from their skips.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum TestBackend {
+    Lua,
+    Js,
+    Glsl,
+}
+
+impl TestBackend {
+    pub const ALL: [TestBackend; 3] = [TestBackend::Lua, TestBackend::Js, TestBackend::Glsl];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            TestBackend::Lua => "lua",
+            TestBackend::Js => "js",
+            TestBackend::Glsl => "glsl",
+        }
+    }
+}
+
+/// Parse the value of `@test(backends = "...")`: a comma-separated list of
+/// backend names. `Err` carries the complete diagnostic text.
+pub fn parse_test_backends(list: &str) -> std::result::Result<Vec<TestBackend>, String> {
+    let known = || {
+        TestBackend::ALL
+            .iter()
+            .map(|b| b.name())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut out = Vec::new();
+    for raw in list.split(',') {
+        let name = raw.trim();
+        if name.is_empty() {
+            return Err(format!(
+                "`@test(backends = ...)` needs a comma-separated list of backend names (known: {})",
+                known()
+            ));
+        }
+        let Some(backend) = TestBackend::ALL.into_iter().find(|b| b.name() == name) else {
+            return Err(format!(
+                "`@test(backends = ...)`: unknown backend `{name}` (known: {})",
+                known()
+            ));
+        };
+        if out.contains(&backend) {
+            return Err(format!(
+                "`@test(backends = ...)` lists backend `{name}` twice"
+            ));
+        }
+        out.push(backend);
+    }
+    Ok(out)
+}
+
 fn test_args(anno: &Annotation) -> Result<(), CompilerError> {
     const TEST_KEYS: &[&str] = &[
         "output",
@@ -355,24 +412,71 @@ fn test_args(anno: &Annotation) -> Result<(), CompilerError> {
         "expect_failure",
         "compile_error",
         "type_holes",
+        "backends",
     ];
     for arg in &anno.args {
         match &arg.name {
+            Some(key) if key.name.as_str() == "backends" => match &arg.value {
+                AnnoValue::String(list) => {
+                    if let Err(message) = parse_test_backends(list.as_str()) {
+                        comp_error!(anno.span, "{}", message);
+                    }
+                }
+                _ => comp_error!(
+                    anno.span,
+                    "`@test(backends = ...)` takes a string such as \"lua\" or \"lua, js\""
+                ),
+            },
             Some(key) if TEST_KEYS.contains(&key.name.as_str()) => {}
             Some(key) => {
                 comp_error!(
                     anno.span,
-                    "`@test` has no `{}` argument (known: output, returns, expect_failure, compile_error, type_holes)",
+                    "`@test` has no `{}` argument (known: output, returns, expect_failure, compile_error, type_holes, backends)",
                     key.name
                 );
             }
             None => {
                 comp_error!(
                     anno.span,
-                    "`@test` arguments must be named: output=, returns=, expect_failure=, compile_error=, type_holes="
+                    "`@test` arguments must be named: output=, returns=, expect_failure=, compile_error=, type_holes=, backends="
                 );
             }
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TestBackend, parse_test_backends};
+
+    #[test]
+    fn backends_list_parses_single_and_comma_separated_names() {
+        assert_eq!(parse_test_backends("lua"), Ok(vec![TestBackend::Lua]));
+        assert_eq!(
+            parse_test_backends(" lua ,js,glsl"),
+            Ok(vec![TestBackend::Lua, TestBackend::Js, TestBackend::Glsl])
+        );
+    }
+
+    #[test]
+    fn backends_list_rejects_unknown_empty_and_repeated_names() {
+        let unknown = parse_test_backends("lua, luajit").unwrap_err();
+        assert!(
+            unknown.contains("unknown backend `luajit`")
+                && unknown.contains("known: lua, js, glsl"),
+            "{unknown}"
+        );
+        assert!(
+            parse_test_backends("")
+                .unwrap_err()
+                .contains("comma-separated")
+        );
+        assert!(
+            parse_test_backends("lua,")
+                .unwrap_err()
+                .contains("comma-separated")
+        );
+        assert!(parse_test_backends("js, js").unwrap_err().contains("twice"));
+    }
 }

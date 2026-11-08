@@ -36,5 +36,8 @@ mod js_value_tests;
 #[path = "js_support/param_default_explicit_null.rs"]
 mod param_default_explicit_null;
 #[cfg(feature = "backend-js")]
+#[path = "js_support/test_backends.rs"]
+mod test_backends;
+#[cfg(feature = "backend-js")]
 #[path = "js_support/test_exit_status_gate_js.rs"]
 mod test_exit_status_gate_js;

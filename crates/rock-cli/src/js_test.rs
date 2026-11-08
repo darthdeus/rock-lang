@@ -40,6 +40,8 @@ enum JsUnitOutcome {
         /// subset's work list, and one reason per skipped test makes it a floor
         /// (the emitter computes the rest of the list in the same pass).
         skips: Vec<(String, Vec<String>)>,
+        /// Tests `@test(backends = ...)` limits to other backends.
+        other_backend: usize,
     },
     /// bone rejected the unit and every `@test` expected the failure -- each
     /// counts as a passing test (luajit-path parity).
@@ -55,6 +57,9 @@ pub struct JsSuiteSummary {
     pub tests_passed: usize,
     pub tests_failed: usize,
     pub tests_skipped: usize,
+    /// Tests `@test(backends = ...)` limits to other backends: never emitted,
+    /// never run, and not skips (the CI skip cap measures only JS gaps).
+    pub tests_other_backend: usize,
     pub unit_failures: usize,
     /// Skip reasons bucketed by exact message, count desc.
     pub skip_reasons: Vec<(String, usize)>,
@@ -66,7 +71,7 @@ pub fn js_test(paths: &[String]) -> Result<()> {
     let start = Instant::now();
     let summary = js_test_run(paths, true)?;
     println!(
-        "\njs backend: {}/{} @tests passed ({} failed, {} skipped) across {} files ({:.2}s)",
+        "\njs backend: {}/{} @tests passed ({} failed, {} skipped, {} not for js) across {} files ({:.2}s)",
         summary.tests_passed.to_string().green(),
         summary.tests_passed + summary.tests_failed + summary.tests_skipped,
         if summary.tests_failed == 0 {
@@ -75,6 +80,7 @@ pub fn js_test(paths: &[String]) -> Result<()> {
             summary.tests_failed.to_string().red()
         },
         summary.tests_skipped.to_string().yellow(),
+        summary.tests_other_backend,
         summary.files,
         start.elapsed().as_secs_f64(),
     );
@@ -122,6 +128,7 @@ pub fn js_test_run(paths: &[String], print: bool) -> Result<JsSuiteSummary> {
         tests_passed: 0,
         tests_failed: 0,
         tests_skipped: 0,
+        tests_other_backend: 0,
         unit_failures: 0,
         skip_reasons: Vec::new(),
     };
@@ -153,29 +160,42 @@ pub fn js_test_run(paths: &[String], print: bool) -> Result<JsSuiteSummary> {
                 passed,
                 fails,
                 skips,
+                other_backend,
             }) => {
                 summary.tests_passed += passed;
                 summary.tests_failed += fails.len();
                 summary.tests_skipped += skips.len();
+                summary.tests_other_backend += other_backend;
                 for (_, reasons) in &skips {
                     all_skip_reasons.extend(reasons.iter().cloned());
                 }
-                if print && (passed + fails.len() + skips.len() > 0) {
+                if print && (passed + fails.len() + skips.len() + other_backend > 0) {
                     let status = if fails.is_empty() {
                         "ok".green()
                     } else {
                         "FAILED".red()
                     };
+                    let elsewhere = if other_backend > 0 {
+                        format!(", {other_backend} not for js")
+                    } else {
+                        String::new()
+                    };
                     println!(
-                        "{:.<60} {}  ({} pass, {} fail, {} skip)",
+                        "{:.<60} {}  ({} pass, {} fail, {} skip{})",
                         label,
                         status,
                         passed,
                         fails.len(),
-                        skips.len()
+                        skips.len(),
+                        elsewhere
                     );
                     for detail in &fails {
                         println!("  {} {}", "FAIL".red(), detail);
+                    }
+                    if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
+                        for (name, reasons) in &skips {
+                            println!("  {} {}: {}", "SKIP".yellow(), name, reasons.join(" | "));
+                        }
                     }
                 }
             }
@@ -347,9 +367,36 @@ fn js_compile_failure(file: &str, src: &str, errs: &[rock_core::CompilerError]) 
     }
 }
 
+/// Run the unit's tests that apply to JS. A test limited by
+/// `@test(backends = ...)` to other backends is neither emitted nor run; it is
+/// counted apart so it never reads as a JS gap.
+fn js_run_tests(
+    ws: &bone_semantic::inference::Workspace,
+    tests: &[(FuncRef, skull::SkullTest)],
+) -> JsUnitOutcome {
+    let (on_js, elsewhere): (Vec<_>, Vec<_>) = tests
+        .iter()
+        .cloned()
+        .partition(|(_, t)| t.runs_on(bone_core::annotations::TestBackend::Js));
+    match js_run_applicable_tests(ws, &on_js) {
+        JsUnitOutcome::Ran {
+            passed,
+            fails,
+            skips,
+            ..
+        } => JsUnitOutcome::Ran {
+            passed,
+            fails,
+            skips,
+            other_backend: elsewhere.len(),
+        },
+        other => other,
+    }
+}
+
 /// Per-test closure emission + one node invocation for the unit's runnable
 /// tests, speaking the `__SKULL__` protocol.
-fn js_run_tests(
+fn js_run_applicable_tests(
     ws: &bone_semantic::inference::Workspace,
     tests: &[(FuncRef, skull::SkullTest)],
 ) -> JsUnitOutcome {
@@ -437,6 +484,7 @@ fn js_run_tests(
             passed: 0,
             fails,
             skips,
+            other_backend: 0,
         };
     }
 
@@ -510,6 +558,7 @@ fn js_run_tests(
         passed,
         fails,
         skips,
+        other_backend: 0,
     }
 }
 

@@ -198,6 +198,17 @@ pub struct SkullTest {
     /// `@test(returns = <literal>)`: the fn's return value is captured by the
     /// backend harness and compared HOST-side against this pinned literal.
     pub returns: Option<ValueExpect>,
+    /// `@test(backends = "...")`: the only backends that compile and run the
+    /// test. `None` = every backend.
+    pub backends: Option<Vec<bone_core::annotations::TestBackend>>,
+}
+
+impl SkullTest {
+    pub fn runs_on(&self, backend: bone_core::annotations::TestBackend) -> bool {
+        self.backends
+            .as_ref()
+            .map_or(true, |list| list.contains(&backend))
+    }
 }
 
 /// The pinned literal of a `@test(returns = ...)` value test. Comparison policy
@@ -342,6 +353,30 @@ pub fn module_tests_with_ids(
             },
             None => None,
         };
+        let backends = match test_ann.args.iter().find(|arg| {
+            arg.name
+                .as_ref()
+                .map_or(false, |n| n.name.as_str() == "backends")
+        }) {
+            Some(arg) => {
+                let parsed = match &arg.value {
+                    bone_semantic::hir::AnnoValue::String(s) => {
+                        bone_core::annotations::parse_test_backends(s.as_str())
+                    }
+                    _ => Err("backends expects a string such as \"lua\" or \"lua, js\"".into()),
+                };
+                match parsed {
+                    Ok(list) => Some(list),
+                    Err(message) => {
+                        return Err(CompilerError::new_with_label(
+                            test_ann.span,
+                            format!("@test on `{}`: {message}", f.name.as_str()),
+                        ));
+                    }
+                }
+            }
+            None => None,
+        };
         out.push((
             fid,
             SkullTest {
@@ -351,6 +386,7 @@ pub fn module_tests_with_ids(
                 symbol: skull_mir::mangle::mangle_fn(ws, f),
                 output,
                 returns,
+                backends,
             },
         ));
     }

@@ -111,3 +111,34 @@ fn output_empty_string_is_a_constant() {
         .expect("empty string literal is a constant, not an interpolation");
     assert_eq!(tests[0].output.as_deref(), Some(""));
 }
+
+#[test]
+fn backends_limits_the_test_to_the_listed_backends() {
+    use bone_core::annotations::TestBackend;
+    let tests = tests_of(
+        "@test(backends = \"lua\")\nfn a() { }\n\
+         @test(output = \"x\", backends = \"lua, js\")\nfn b() { print(\"x\") }\n\
+         @test\nfn c() { }\n",
+    )
+    .expect("discovery ok");
+    let runs = |t: &skull::SkullTest| {
+        TestBackend::ALL
+            .into_iter()
+            .filter(|b| t.runs_on(*b))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(runs(&tests[0]), vec![TestBackend::Lua]);
+    assert_eq!(runs(&tests[1]), vec![TestBackend::Lua, TestBackend::Js]);
+    assert_eq!(runs(&tests[2]), TestBackend::ALL.to_vec());
+}
+
+#[test]
+fn backends_unknown_name_rejects() {
+    let err = tests_of("@test(backends = \"lua, luajit\")\nfn a() { }\n")
+        .expect_err("an unknown backend name must reject");
+    assert!(
+        err.message.contains("unknown backend `luajit`"),
+        "unexpected message: {}",
+        err.message
+    );
+}

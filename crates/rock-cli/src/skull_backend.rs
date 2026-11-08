@@ -763,6 +763,14 @@ fn run_emitted_tests(
 ) -> std::result::Result<SkullOutcome, SkullFailure> {
     let lua = lua.into();
     assert_eq!(tests.len(), files.len());
+    // `@test(backends = ...)` without lua: not a test of this backend.
+    let (lua_tests, lua_files): (Vec<skull::SkullTest>, Vec<String>) = tests
+        .iter()
+        .zip(files)
+        .filter(|(test, _)| test.runs_on(bone_core::annotations::TestBackend::Lua))
+        .map(|(test, file)| (test.clone(), file.clone()))
+        .unzip();
+    let (tests, files) = (lua_tests.as_slice(), lua_files.as_slice());
 
     let mut selected_tests = Vec::with_capacity(tests.len());
     let mut selected_files = Vec::with_capacity(files.len());

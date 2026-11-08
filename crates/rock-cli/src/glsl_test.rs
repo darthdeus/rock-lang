@@ -417,12 +417,15 @@ fn run_tests(
 ) -> UnitOutcome {
     let mut outside_value_class = 0usize;
     // Value tests only (returns=). Non-value @tests are permanently outside the
-    // class -- one collapsed count, never a histogram.
+    // class -- one collapsed count, never a histogram. So are tests that
+    // `@test(backends = ...)` limits to other backends.
     let value_tests: Vec<(FuncRef, &skull::SkullTest, &ValueExpect)> = tests
         .iter()
         .filter_map(|(fr, t)| match &t.returns {
-            Some(expect) => Some((*fr, t, expect)),
-            None => {
+            Some(expect) if t.runs_on(bone_core::annotations::TestBackend::Glsl) => {
+                Some((*fr, t, expect))
+            }
+            _ => {
                 outside_value_class += 1;
                 None
             }
