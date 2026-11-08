@@ -61,6 +61,22 @@ fn narrowed_nullable_nobox_field_uses_the_nonnull_read_shape() {
 }
 
 #[test]
+fn scalar_abi_call_widens_an_int_argument_for_a_float_parameter() {
+    let src = "value V2 { x: float, y: float }\n\
+               fn mk(x: float, y: float) -> V2 { return V2 { x: x, y: y } }\n\
+               fn shift(w: float) -> V2 { return mk(w, 0) }\n\
+               fn shift_named(w: float) -> V2 { return mk(y: 0, x: w) }";
+    for name in ["shift", "shift_named"] {
+        let ast = skull_parser::parse_module_clean(src, ustr::Ustr::from("<test>")).expect("parse");
+        let dump = lower_dump(vec![ast], name);
+        assert!(
+            dump.contains("int_to_float"),
+            "an int literal bound to a float parameter must be widened in `{name}`: {dump}"
+        );
+    }
+}
+
+#[test]
 fn value_constructors_carry_the_owned_representation() {
     let ast = skull_parser::parse_module(
         "value V2 { x: float, y: float }\n\

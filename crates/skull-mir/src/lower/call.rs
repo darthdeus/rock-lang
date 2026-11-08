@@ -898,8 +898,14 @@ impl Builder<'_> {
                         self.f.code_value_identities.insert(g, identity);
                     }
                     let param_shapes = abi.param_slots(&self.scx.rep_arena());
-                    let arg_vals =
-                        self.slotted_call_args(e, &abi.param_names, &param_shapes, &arg_idxs, &[])?;
+                    let arg_vals = self.slotted_call_args(
+                        e,
+                        &abi.param_names,
+                        &param_shapes,
+                        &arg_idxs,
+                        &[],
+                        &[],
+                    )?;
                     let Some(shape) = abi.result_shape(&self.scx.rep_arena()) else {
                         let v = self.emit_call_value(e, g, arg_vals)?;
                         self.f.call_rep_plans.insert(v, abi.representation.clone());
@@ -1225,7 +1231,18 @@ impl Builder<'_> {
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         if dc.plan.uses_scalar_abi() {
             let param_shapes = dc.plan.argument_shapes();
-            let args = self.scalar_call_args(e, func, arg_idxs, any_named, &param_shapes)?;
+            let param_count = self.ws.module(func.module).functions[func.func]
+                .param_decls
+                .len();
+            let param_tys: Vec<_> = (0..param_count)
+                .map(|i| {
+                    self.concrete_callee_param_ty(e, &dc.callee_inst, i)
+                        .ok()
+                        .flatten()
+                })
+                .collect();
+            let args =
+                self.scalar_call_args(e, func, arg_idxs, any_named, &param_shapes, &param_tys)?;
             return dc.plan.transport_arguments(args);
         }
         let callee = &self.ws.module(func.module).functions[func.func];
@@ -1239,7 +1256,7 @@ impl Builder<'_> {
             .any(|&id| matches!(dc.plan.rep_plan(id).layout(), RepLayout::Tuple { .. }));
         Ok(if has_tuple_storage {
             let opaque = vec![RetSlot::Opaque; callee.param_decls.len()];
-            self.scalar_call_args(e, func, arg_idxs, any_named, &opaque)?
+            self.scalar_call_args(e, func, arg_idxs, any_named, &opaque, &[])?
         } else if any_named {
             self.reorder_named_args(e, arg_idxs, func, Some(&dc.callee_inst))?
         } else {
@@ -1558,6 +1575,7 @@ impl Builder<'_> {
         arg_idxs: &[Idx<Expr>],
         any_named: bool,
         param_shapes: &[RetSlot],
+        param_tys: &[Option<std::rc::Rc<crate::monoty::MonoTy>>],
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         if !any_named {
             let mut out = Vec::new();
@@ -1572,7 +1590,8 @@ impl Builder<'_> {
                 )?;
                 let callee = &self.ws.module(func.module).functions[func.func];
                 let lend = callee.inline_body.is_none() && !callee.is_extern;
-                out.extend(self.arg_values_for_call_slot(e, &slot, a, lend)?);
+                let values = self.arg_values_for_call_slot(e, &slot, a, lend)?;
+                out.extend(self.coerced_scalar_arg(values, a, &slot, param_tys.get(i)));
             }
             out.extend(self.trailing_default_args(func, arg_idxs.len(), Some(param_shapes))?);
             return Ok(out);
@@ -1583,7 +1602,32 @@ impl Builder<'_> {
             .map(|pd| pd.name)
             .collect();
         let defaults = self.call_param_defaults(func);
-        self.slotted_call_args(e, &param_names, param_shapes, arg_idxs, &defaults)
+        self.slotted_call_args(
+            e,
+            &param_names,
+            param_shapes,
+            arg_idxs,
+            &defaults,
+            param_tys,
+        )
+    }
+
+    /// An unsplatted scalar argument through the int->float funnel, as the
+    /// boxed ABI's argument loop does: a scalar-ABI call must not hand a float
+    /// parameter an int.
+    fn coerced_scalar_arg(
+        &mut self,
+        values: Vec<Idx<Inst>>,
+        arg: Idx<Expr>,
+        slot: &RetSlot,
+        param_ty: Option<&Option<std::rc::Rc<crate::monoty::MonoTy>>>,
+    ) -> Vec<Idx<Inst>> {
+        match (values.as_slice(), param_ty) {
+            (&[value], Some(Some(ty))) if !slot.splats() => {
+                vec![self.coerced_mono(value, arg, ty.as_ref())]
+            }
+            _ => values,
+        }
     }
 
     /// Build a call's argument list by placing each argument into its PARAM SLOT
@@ -1602,6 +1646,7 @@ impl Builder<'_> {
         param_shapes: &[RetSlot],
         arg_idxs: &[Idx<Expr>],
         defaults: &[Option<CallParamDefault>],
+        param_tys: &[Option<std::rc::Rc<crate::monoty::MonoTy>>],
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         let mut slots: Vec<Option<Vec<Idx<Inst>>>> = vec![None; param_names.len()];
         let mut next_pos = 0usize;
@@ -1657,7 +1702,8 @@ impl Builder<'_> {
             slots[pidx] = Some(if is_ref {
                 self.repr_to_slot_values_bundle(&r, &slot)?
             } else {
-                self.snapshot_argument_slot(r, &slot)?
+                let values = self.snapshot_argument_slot(r, &slot)?;
+                self.coerced_scalar_arg(values, a, &slot, param_tys.get(pidx))
             });
         }
         let hi = slots.iter().rposition(|s| s.is_some()).map_or(0, |i| i + 1);
