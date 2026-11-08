@@ -1068,6 +1068,15 @@ impl<'a> Printer<'a> {
             // the whole source line (one or more elements) is sliced verbatim.
             if group.len() == 1 && group[0].0.line_range.0 != group[0].0.line_range.1 {
                 body.push(group[0].1.clone());
+            } else if group
+                .iter()
+                .any(|(sp, _)| sp.line_range.0 != sp.line_range.1)
+            {
+                // A verbatim slice would keep a multi-line element's old indent.
+                body.push(Doc::join(
+                    Doc::text(", "),
+                    group.iter().map(|(_, d)| d.clone()),
+                ));
             } else {
                 let lo = group.first().unwrap().0.offset_range.0;
                 let hi = group.last().unwrap().0.offset_range.1;
@@ -1894,7 +1903,7 @@ impl<'a> Printer<'a> {
         if args.is_empty() {
             return Doc::text("()");
         }
-        let arg_doc = |a: &FunctionCallArg| {
+        let render_arg = |a: &FunctionCallArg| {
             let v = self.expr(a.value);
             if a.is_spread {
                 return Doc::concat([Doc::text(".."), v]);
@@ -1928,7 +1937,12 @@ impl<'a> Printer<'a> {
         // even past the width limit, so a hand-compacted call (e.g. inside a
         // data-table row) is kept, not exploded. Comments force the multi-line
         // form (so they survive).
-        let source_multiline = span.line_range.0 != span.line_range.1;
+        // An argument that renders across lines (a one-line multi-statement
+        // block, a block lambda) makes the output multi-line; lay it out as the
+        // next pass will read it, or the formatter never reaches a fixed point.
+        let docs: Vec<Doc> = args.iter().map(render_arg).collect();
+        let renders_multiline = docs.iter().any(Doc::has_hard_line);
+        let source_multiline = span.line_range.0 != span.line_range.1 || renders_multiline;
         // Trailing-argument hug: when the author wrote the call with a sole or
         // last collection/struct-literal argument opening on the call line
         // (`push(Foo {`, `arena_insert(prefabs, Prefab {`), keep it hugging --
@@ -1941,16 +1955,17 @@ impl<'a> Printer<'a> {
         if source_multiline && self.hugs_trailing_arg(args, span) {
             let n = args.len();
             let mut parts = vec![Doc::text("(")];
-            for a in &args[..n - 1] {
-                parts.push(arg_doc(a));
+            for d in &docs[..n - 1] {
+                parts.push(d.clone());
                 parts.push(Doc::text(", "));
             }
-            parts.push(arg_doc(&args[n - 1]));
+            parts.push(docs[n - 1].clone());
             parts.push(Doc::text(")"));
             return Doc::concat(parts);
         }
         // Preserve the author's per-line argument grouping (hanging or exploded).
-        if !has_comments && source_multiline {
+        // Verbatim rows would copy a multi-line-rendering arg's one-line source.
+        if !has_comments && source_multiline && !renders_multiline {
             if let Some(d) = self.call_arg_rows(args, span) {
                 return d;
             }
@@ -1958,9 +1973,10 @@ impl<'a> Printer<'a> {
         if has_comments || source_multiline {
             let entries = args
                 .iter()
-                .map(|a| {
+                .zip(docs)
+                .map(|(a, d)| {
                     let s = arg_span(a);
-                    (arg_doc(a), s.line_range.0, s)
+                    (d, s.line_range.0, s)
                 })
                 .collect();
             let body = if has_comments {
@@ -1980,10 +1996,7 @@ impl<'a> Printer<'a> {
                 Doc::text("("),
                 Doc::indent(Doc::concat([
                     softline(),
-                    Doc::join(
-                        Doc::concat([Doc::text(","), line()]),
-                        args.iter().map(arg_doc),
-                    ),
+                    Doc::join(Doc::concat([Doc::text(","), line()]), docs),
                 ])),
                 softline(),
                 Doc::text(")"),
@@ -1992,7 +2005,7 @@ impl<'a> Printer<'a> {
         // Single-line source: stay inline.
         Doc::concat([
             Doc::text("("),
-            Doc::join(Doc::text(", "), args.iter().map(arg_doc)),
+            Doc::join(Doc::text(", "), docs),
             Doc::text(")"),
         ])
     }
@@ -2074,13 +2087,19 @@ impl<'a> Printer<'a> {
         };
         // Preserve the author's layout: a chain written across multiple source
         // lines breaks one call per line; one on a single line stays inline.
-        let source_multiline = span.line_range.0 != span.line_range.1;
+        // A segment that renders across lines makes the chain multi-line on the
+        // next pass, so break it the same way now.
+        let segs_docs: Vec<Doc> = tail.iter().map(seg_doc).collect();
+        let source_multiline = span.line_range.0 != span.line_range.1
+            || head.has_hard_line()
+            || segs_docs.iter().any(Doc::has_hard_line);
         let tail_docs: Vec<Doc> = if source_multiline {
-            tail.iter()
-                .map(|seg| Doc::concat([hardline(), seg_doc(seg)]))
+            segs_docs
+                .into_iter()
+                .map(|d| Doc::concat([hardline(), d]))
                 .collect()
         } else {
-            tail.iter().map(seg_doc).collect()
+            segs_docs
         };
         Some(Doc::concat([head, Doc::indent(Doc::concat(tail_docs))]))
     }
@@ -2095,7 +2114,8 @@ impl<'a> Printer<'a> {
         }
         matches!(
             &self.ast.e(&e).kind,
-            ExprKind::ArrayLiteral(_)
+            ExprKind::Block(_)
+                | ExprKind::ArrayLiteral(_)
                 | ExprKind::StructLiteral { .. }
                 | ExprKind::EnumVariantRecord { .. }
         )
@@ -2341,15 +2361,23 @@ impl<'a> Printer<'a> {
         // stays inline -- even past the width limit (a hand-compacted data-table
         // row is kept, not exploded). Comments force the multi-line form.
         let source_multiline = span.line_range.0 != span.line_range.1;
-        if source_multiline || has_comments {
+        // A one-line literal whose field renders across lines (a block lambda)
+        // expands one field per line, the layout the next pass preserves.
+        let docs: Vec<Doc> = fields
+            .iter()
+            .map(|(names, value)| field_doc(names, value))
+            .collect();
+        let renders_multiline = !source_multiline && docs.iter().any(Doc::has_hard_line);
+        if source_multiline || has_comments || renders_multiline {
             // Comment-bearing literals route through comma_block (it preserves
             // the comments). Otherwise preserve the author's row layout verbatim
             // -- fields packed onto one source line stay packed, with their
             // column alignment intact.
-            if !has_comments {
+            if !has_comments && !renders_multiline {
                 let rows = fields
                     .iter()
-                    .map(|(names, value)| {
+                    .zip(docs)
+                    .map(|((names, value), doc)| {
                         let v = self.ast.e(value).span;
                         // The field's full source span: first key name -> value end.
                         let full = Span {
@@ -2358,7 +2386,7 @@ impl<'a> Printer<'a> {
                             offset_range: (names[0].span.offset_range.0, v.offset_range.1),
                             ..v
                         };
-                        (full, field_doc(names, value))
+                        (full, doc)
                     })
                     .collect();
                 return Doc::concat([
@@ -2368,7 +2396,8 @@ impl<'a> Printer<'a> {
             }
             let entries = fields
                 .iter()
-                .map(|(names, value)| {
+                .zip(docs)
+                .map(|((names, value), doc)| {
                     let v = self.ast.e(value).span;
                     // Full field span (name start -> value end) so a leading
                     // inline block comment (`/* y field */ y: 2`) is in the
@@ -2378,7 +2407,7 @@ impl<'a> Printer<'a> {
                         offset_range: (names[0].span.offset_range.0, v.offset_range.1),
                         ..v
                     };
-                    (field_doc(names, value), field_line(names), full)
+                    (doc, field_line(names), full)
                 })
                 .collect();
             return Doc::concat([
@@ -2391,10 +2420,9 @@ impl<'a> Printer<'a> {
                 ),
             ]);
         }
-        let entries = fields.iter().map(|(names, value)| field_doc(names, value));
         Doc::concat([
             Doc::text(format!("{name} {{ ")),
-            Doc::join(Doc::text(", "), entries),
+            Doc::join(Doc::text(", "), docs),
             Doc::text(" }"),
         ])
     }

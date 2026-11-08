@@ -63,7 +63,7 @@ impl Doc {
 
     /// True if this doc contains a hard line, which forces breaking regardless
     /// of width.
-    fn has_hard_line(&self) -> bool {
+    pub fn has_hard_line(&self) -> bool {
         match self {
             Doc::Line(LineKind::Hard) => true,
             Doc::Text(_) | Doc::Nil | Doc::Line(_) => false,

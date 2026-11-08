@@ -67,20 +67,7 @@ fn test() {
     }
 }
 
-//=== EXPECTED ===
-fn test() {
-    let nested_result = {
-        process_data(
-            {
-                transform_input(
-                    {
-                        validate_and_clean(raw_input_data)
-                    }
-                )
-            }
-        )
-    }
-}
+//=== NO CHANGE ===
 
 //=== TEST CASE: long_conditional_expressions_in_lets ===
 fn test() {

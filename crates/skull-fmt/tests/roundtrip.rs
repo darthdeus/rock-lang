@@ -126,6 +126,32 @@ fn closure_followed_by_another_argument_reaches_a_fixed_point() {
     }
 }
 
+/// A construct written on one source line whose children render across lines
+/// (a multi-statement block, a block lambda) must lay out the way the next
+/// pass reads the now multi-line source.
+#[test]
+fn single_line_containers_with_multiline_children_reach_a_fixed_point() {
+    for source in [
+        "fn f() {\n    print({ let x = 5; x * 2 })\n}\n",
+        "fn f() {\n    print({ let x = 5; x * 2 } + { let y = 3; y + 1 })\n}\n",
+        "fn f() {\n    print(if { let r = true; r } { 1 } else { 2 })\n}\n",
+        "fn f() {\n    print({})\n}\n",
+        "fn f() -> C {\n    return C { bump: () => { n = n + 1; return n }, tag: 1 }\n}\n",
+        "fn f() -> P {\n    return P { get: () => n, bump: () => { n = n + 1; return n } }\n}\n",
+        "fn f() {\n    let q = F { a + b: { c = c + 1; 10 }, d: 2 }\n}\n",
+        "fn f() {\n    for x in v.iter().map(x => { t.push(x); x }).filter(x => { u(); true }) {\n        print(x)\n    }\n}\n",
+        "fn f() -> P {\n    return P { get: () => n, bump: () => {\n        n = n + 1\n        return n\n    } }\n}\n",
+    ] {
+        let original = skull_parser::parse_module_clean(source, "<source>".into()).unwrap();
+        let config = skull_fmt::FormatConfig::default();
+        let once = skull_fmt::try_format(source, &config).expect("format source");
+        let twice = skull_fmt::try_format(&once, &config).expect("reparse formatted source");
+        assert_eq!(once, twice, "source: {source}");
+        let formatted = skull_parser::parse_module_clean(&once, "<formatted>".into()).unwrap();
+        assert_eq!(original.module_sexp(), formatted.module_sexp(), "{once}");
+    }
+}
+
 /// Call splats print in the prefix form the parser accepts (`f(...rest)`).
 #[test]
 fn call_splat_roundtrips() {
