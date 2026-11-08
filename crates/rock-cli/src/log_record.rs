@@ -37,9 +37,7 @@ fn parse_log_record(line: &str) -> Option<(&'static str, &str)> {
     if int_digits == 0 {
         return None;
     }
-    let Some(frac) = padded[int_digits..].strip_prefix('.') else {
-        return None;
-    };
+    let frac = padded[int_digits..].strip_prefix('.')?;
     if frac.len() < LOG_TIME_PRECISION
         || !frac.as_bytes()[..LOG_TIME_PRECISION]
             .iter()
@@ -189,7 +187,7 @@ mod tests {
             levels.len() * 2,
             "incomplete logger output: {emitted:?}"
         );
-        for (record, level) in lines.chunks_exact(2).zip(levels) {
+        for (record, level) in lines.as_chunks::<2>().0.iter().zip(levels) {
             let header = record[0];
             let parsed = parse_log_record(header)
                 .unwrap_or_else(|| panic!("production header rejected: {header:?}"));

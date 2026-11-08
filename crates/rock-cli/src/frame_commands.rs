@@ -116,7 +116,7 @@ pub fn do_perf(
     };
 
     rock_host::process_management::report_spawn_phase("execution");
-    let launch_start = std::time::Instant::now();
+    let launch_start = bone_core::prelude::Instant::now();
     let launched = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs_f64();
@@ -466,123 +466,6 @@ fn perf_stderr_lines(stderr: &str, child_failed: bool) -> Vec<&str> {
         })
         .collect()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn a_failed_perf_run_forwards_the_whole_runtime_error() {
-        let stderr = "[   0.1s INFO ] [FRAME] frame compile cache miss\n\
-            luajit: PERF_GC_STEPS requires tools/luajit-gc-probe.py runtime\n\
-            stack traceback:\n\
-            \t[C]: in function 'error'\n";
-        let failed = perf_stderr_lines(stderr, true);
-        assert!(
-            failed.contains(&"luajit: PERF_GC_STEPS requires tools/luajit-gc-probe.py runtime"),
-            "{failed:?}"
-        );
-        assert!(failed.contains(&"stack traceback:"), "{failed:?}");
-        let passed = perf_stderr_lines(stderr, false);
-        assert_eq!(
-            passed,
-            ["\t[C]: in function 'error'"],
-            "a successful run keeps the noise filter"
-        );
-    }
-    #[test]
-    fn perf_process_is_headless_without_screenshot_mode() {
-        let mut cmd = std::process::Command::new("true");
-        apply_perf_env(&mut cmd);
-        let env: std::collections::HashMap<_, _> = cmd
-            .get_envs()
-            .filter_map(|(key, value)| Some((key.to_str()?, value?.to_str()?)))
-            .collect();
-
-        assert_eq!(env.get("PERF_MODE"), Some(&"1"));
-        assert_eq!(env.get("STONE_HEADLESS"), Some(&"1"));
-        assert_eq!(env.get("PERF_NO_SECTIONS"), Some(&"1"));
-        assert!(!env.contains_key("TAKE_SCREENSHOT"));
-    }
-    #[cfg(unix)]
-    #[test]
-    fn timed_out_frame_run_is_an_error() {
-        use std::os::unix::process::ExitStatusExt;
-        let ok = std::process::ExitStatus::from_raw(0);
-        let failed = std::process::ExitStatus::from_raw(3 << 8); // exit code 3
-        assert!(
-            frame_exit_result(false, &ok, 3).is_ok(),
-            "clean zero-exit is Ok"
-        );
-        assert!(
-            frame_exit_result(true, &ok, 3).is_err(),
-            "a timeout must be an error even if the killed status looks like success"
-        );
-        assert!(
-            frame_exit_result(false, &failed, 3).is_err(),
-            "a nonzero child exit must propagate"
-        );
-    }
-    #[cfg(unix)]
-    #[test]
-    fn timeout_diagnostics_name_startup_and_frame_inactivity() {
-        use std::os::unix::process::ExitStatusExt;
-        let status = std::process::ExitStatus::from_raw(0);
-        let startup = super::frame_exit_result_with_progress(
-            true,
-            &status,
-            120,
-            Some(240),
-            None,
-            false,
-            Some(crate::common::TimeoutPhase::Startup),
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(startup.contains("phase=startup"), "{startup}");
-        assert!(startup.contains("completed/requested=0/240"), "{startup}");
-
-        let progress = crate::frame_runtime::FrameProgress {
-            renderer: "gl".into(),
-            completed: 1,
-            requested: Some(240),
-        };
-        let inactivity = super::frame_exit_result_with_progress(
-            true,
-            &status,
-            30,
-            Some(240),
-            Some(&progress),
-            true,
-            Some(crate::common::TimeoutPhase::ProgressInactivity),
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(
-            inactivity.contains("phase=frame inactivity"),
-            "{inactivity}"
-        );
-        assert!(
-            inactivity.contains("renderer=gl, completed/requested=1/240"),
-            "{inactivity}"
-        );
-    }
-
-    /// The frame watchdog bounds startup and inactivity independently of the
-    /// requested frame count. A legitimate slow run can therefore outlive its
-    /// old total budget, while a child that stops reporting still fails.
-    #[test]
-    fn frame_watchdog_preserves_progress_and_override_contracts() {
-        let default = frame_watchdog_config(None);
-        assert_eq!(default.startup, Duration::from_secs(5));
-        assert_eq!(default.inactivity, Duration::from_secs(5));
-        assert_eq!(default.override_secs, None);
-
-        let override_config = frame_watchdog_config(Some(60));
-        assert_eq!(override_config.startup, Duration::from_secs(60));
-        assert_eq!(override_config.inactivity, Duration::from_secs(60));
-        assert_eq!(override_config.override_secs, Some(60));
-    }
-}
 /// `rock frame` on the skull backend (do_one_frame is backend-parameterized).
 pub fn handle_frame(cx: &CommandContext) -> Result<()> {
     let file = get_game_file(cx)?;
@@ -765,5 +648,122 @@ pub fn initialize_process(args: &Args) {
     // The dispatcher calls this before starting worker threads.
     if args.jv {
         unsafe { std::env::set_var("STONE_JV", "1") };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn a_failed_perf_run_forwards_the_whole_runtime_error() {
+        let stderr = "[   0.1s INFO ] [FRAME] frame compile cache miss\n\
+            luajit: PERF_GC_STEPS requires tools/luajit-gc-probe.py runtime\n\
+            stack traceback:\n\
+            \t[C]: in function 'error'\n";
+        let failed = perf_stderr_lines(stderr, true);
+        assert!(
+            failed.contains(&"luajit: PERF_GC_STEPS requires tools/luajit-gc-probe.py runtime"),
+            "{failed:?}"
+        );
+        assert!(failed.contains(&"stack traceback:"), "{failed:?}");
+        let passed = perf_stderr_lines(stderr, false);
+        assert_eq!(
+            passed,
+            ["\t[C]: in function 'error'"],
+            "a successful run keeps the noise filter"
+        );
+    }
+    #[test]
+    fn perf_process_is_headless_without_screenshot_mode() {
+        let mut cmd = std::process::Command::new("true");
+        apply_perf_env(&mut cmd);
+        let env: std::collections::HashMap<_, _> = cmd
+            .get_envs()
+            .filter_map(|(key, value)| Some((key.to_str()?, value?.to_str()?)))
+            .collect();
+
+        assert_eq!(env.get("PERF_MODE"), Some(&"1"));
+        assert_eq!(env.get("STONE_HEADLESS"), Some(&"1"));
+        assert_eq!(env.get("PERF_NO_SECTIONS"), Some(&"1"));
+        assert!(!env.contains_key("TAKE_SCREENSHOT"));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn timed_out_frame_run_is_an_error() {
+        use std::os::unix::process::ExitStatusExt;
+        let ok = std::process::ExitStatus::from_raw(0);
+        let failed = std::process::ExitStatus::from_raw(3 << 8); // exit code 3
+        assert!(
+            frame_exit_result(false, &ok, 3).is_ok(),
+            "clean zero-exit is Ok"
+        );
+        assert!(
+            frame_exit_result(true, &ok, 3).is_err(),
+            "a timeout must be an error even if the killed status looks like success"
+        );
+        assert!(
+            frame_exit_result(false, &failed, 3).is_err(),
+            "a nonzero child exit must propagate"
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn timeout_diagnostics_name_startup_and_frame_inactivity() {
+        use std::os::unix::process::ExitStatusExt;
+        let status = std::process::ExitStatus::from_raw(0);
+        let startup = super::frame_exit_result_with_progress(
+            true,
+            &status,
+            120,
+            Some(240),
+            None,
+            false,
+            Some(crate::common::TimeoutPhase::Startup),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(startup.contains("phase=startup"), "{startup}");
+        assert!(startup.contains("completed/requested=0/240"), "{startup}");
+
+        let progress = crate::frame_runtime::FrameProgress {
+            renderer: "gl".into(),
+            completed: 1,
+            requested: Some(240),
+        };
+        let inactivity = super::frame_exit_result_with_progress(
+            true,
+            &status,
+            30,
+            Some(240),
+            Some(&progress),
+            true,
+            Some(crate::common::TimeoutPhase::ProgressInactivity),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            inactivity.contains("phase=frame inactivity"),
+            "{inactivity}"
+        );
+        assert!(
+            inactivity.contains("renderer=gl, completed/requested=1/240"),
+            "{inactivity}"
+        );
+    }
+
+    /// The frame watchdog bounds startup and inactivity independently of the
+    /// requested frame count. A legitimate slow run can therefore outlive its
+    /// old total budget, while a child that stops reporting still fails.
+    #[test]
+    fn frame_watchdog_preserves_progress_and_override_contracts() {
+        let default = frame_watchdog_config(None);
+        assert_eq!(default.startup, Duration::from_secs(5));
+        assert_eq!(default.inactivity, Duration::from_secs(5));
+        assert_eq!(default.override_secs, None);
+
+        let override_config = frame_watchdog_config(Some(60));
+        assert_eq!(override_config.startup, Duration::from_secs(60));
+        assert_eq!(override_config.inactivity, Duration::from_secs(60));
+        assert_eq!(override_config.override_secs, Some(60));
     }
 }

@@ -151,8 +151,8 @@ fn spawn_scoped(
     scratch: &std::path::Path,
     budget: std::time::Duration,
 ) -> std::io::Result<BoundChild> {
+    use bone_core::prelude::{Duration, Instant};
     use std::io::Read;
-    use std::time::{Duration, Instant};
     let directory = tempfile::Builder::new()
         .prefix("scope-launch-")
         .tempdir_in(scratch)?;
