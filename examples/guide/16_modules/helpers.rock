@@ -1,4 +1,3 @@
-// Items default to visibility in their module and its descendants.
 mod helpers;
 
 pub fn shout(s: string) -> string {
