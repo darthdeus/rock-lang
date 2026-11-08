@@ -1990,7 +1990,13 @@ impl<'a> Printer<'a> {
         let render_arg = |a: &FunctionCallArg| {
             let v = self.expr(a.value);
             if a.is_spread {
-                return Doc::concat([Doc::text(".."), v]);
+                // `.. .p` must not fuse into the splat `...p`.
+                let dots = if self.slice(self.ast.e(&a.value).span).starts_with('.') {
+                    ".. "
+                } else {
+                    ".."
+                };
+                return Doc::concat([Doc::text(dots), v]);
             }
             let v = if a.is_splat {
                 Doc::concat([Doc::text("..."), v])

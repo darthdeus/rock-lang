@@ -235,6 +235,7 @@ fn range_operator_next_to_a_dot_keeps_its_spaces() {
     for source in [
         "fn f() {\n    print(src .. .w.f0)\n}\n",
         "fn f() {\n    let r = a..b\n}\n",
+        "fn f() {\n    sum2(.. .p)\n}\n",
         "fn f() {\n    (s? ?.x)\n}\n",
         "fn f() {\n    s? .x\n}\n",
         "fn f() {\n    s? .a().b()\n}\n",
