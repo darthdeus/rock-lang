@@ -335,79 +335,104 @@ mod tests {
             processes: processes.iter().copied().collect(),
         }))
     }
+    // A child spawned by any concurrent test holds copies of this process's
+    // descriptors until its exec closes them (O_CLOEXEC does not shorten that),
+    // and a flock lives until its last copy closes. A lock dropped here,
+    // including the free slots each scan locks and releases, can therefore read
+    // as held for a moment. Production polls past this; these helpers do too.
+    // Only denials are retried, so a wrong grant still fails at once.
+    const LOCK_SETTLE: Duration = Duration::from_secs(10);
+    fn acquired(mut attempt: impl FnMut() -> Result<Admission>) -> File {
+        let started = Instant::now();
+        loop {
+            match granted(attempt()) {
+                Ok(file) => return file,
+                Err(reason) if started.elapsed() > LOCK_SETTLE => {
+                    panic!("still denied after settling: {reason}")
+                }
+                Err(_) => std::thread::sleep(Duration::from_millis(5)),
+            }
+        }
+    }
+    fn denied(expected: &str, mut attempt: impl FnMut() -> Result<Admission>) {
+        let started = Instant::now();
+        loop {
+            match granted(attempt()) {
+                Ok(_) => panic!("expected denial {expected}, but the slot was granted"),
+                Err(reason) if reason == expected => return,
+                Err(reason) if started.elapsed() > LOCK_SETTLE => {
+                    panic!("expected denial {expected}, still denied with {reason}")
+                }
+                Err(_) => std::thread::sleep(Duration::from_millis(5)),
+            }
+        }
+    }
     #[test]
     fn waiting_admission_recovers_and_does_not_double_spend_or_double_count() {
         let root = tempfile::tempdir().unwrap();
-        let acquire = |free, processes: &[(u32, u64)]| {
-            granted(try_acquire(root.path(), 4, false, || gpu(free, processes)))
+        let attempt = |free, processes: &[(u32, u64)]| {
+            try_acquire(root.path(), 4, false, || gpu(free, processes))
         };
-        let mut first = acquire(6144, &[]).unwrap();
-        assert_eq!(acquire(6144, &[]).unwrap_err(), "gpu_headroom");
+        let mut first = acquired(|| attempt(6144, &[]));
+        denied("gpu_headroom", || attempt(6144, &[]));
         // Space freed by an unrelated workload lets a second worker start.
-        let second = acquire(10240, &[]).unwrap();
+        let second = acquired(|| attempt(10240, &[]));
         assert!(
-            acquire(10240, &[]).is_err(),
+            granted(attempt(10240, &[])).is_err(),
             "pending boots must reserve capacity"
         );
         publish_pid(root.path(), &mut first, 42).unwrap();
         // First worker's 2 GiB is already absent from free: do not count it twice.
         drop(second);
-        let second = acquire(8192, &[(42, 2048)]).unwrap();
-        assert!(acquire(8192, &[(42, 2048)]).is_err());
+        let second = acquired(|| attempt(8192, &[(42, 2048)]));
+        assert!(granted(attempt(8192, &[(42, 2048)])).is_err());
         assert!(
-            acquire(0, &[(42, 2048)]).is_err(),
+            granted(attempt(0, &[(42, 2048)])).is_err(),
             "falling capacity must stop new starts"
         );
         drop(first);
         drop(second);
-        assert!(
-            acquire(6144, &[]).is_ok(),
-            "completed leases must release capacity"
-        );
+        // Completed leases must release capacity.
+        acquired(|| attempt(6144, &[]));
     }
     #[test]
     fn telemetry_does_not_lock_out_reservations_or_pid_publication() {
         let root = tempfile::tempdir().unwrap();
         let mut concurrent = None;
-        let result = try_acquire(root.path(), 2, false, || {
-            let lock = open(&root.path().join("admission.lock")).unwrap();
-            lock.try_lock()
-                .expect("GPU telemetry must not hold the host admission lock");
-            drop(lock);
-            let mut slot =
-                granted(try_acquire(root.path(), 2, true, || panic!("forced probe"))).unwrap();
-            publish_pid(root.path(), &mut slot, 42).unwrap();
-            concurrent = Some(slot);
-            // This snapshot predates the concurrently admitted worker.
-            gpu(8192, &[])
+        denied("gpu_headroom", || {
+            try_acquire(root.path(), 2, false, || {
+                if concurrent.is_none() {
+                    let lock = open(&root.path().join("admission.lock")).unwrap();
+                    lock.try_lock()
+                        .expect("GPU telemetry must not hold the host admission lock");
+                    drop(lock);
+                    let mut slot =
+                        granted(try_acquire(root.path(), 2, true, || panic!("forced probe")))
+                            .unwrap();
+                    publish_pid(root.path(), &mut slot, 42).unwrap();
+                    concurrent = Some(slot);
+                }
+                // This snapshot predates the concurrently admitted worker.
+                gpu(8192, &[])
+            })
         });
-        assert_eq!(granted(result).unwrap_err(), "gpu_headroom");
         drop(concurrent);
-        assert!(granted(try_acquire(root.path(), 2, false, || gpu(8192, &[]))).is_ok());
+        acquired(|| try_acquire(root.path(), 2, false, || gpu(8192, &[])));
     }
     #[test]
     fn failures_and_missing_tooling_preserve_admission_contracts() {
         let root = tempfile::tempdir().unwrap();
-        let first = granted(try_acquire(root.path(), 2, false, || {
-            Err("probe failed".into())
-        }))
-        .unwrap();
-        assert_eq!(
-            granted(try_acquire(root.path(), 2, false, || Err(
-                "probe failed".into()
-            )))
-            .unwrap_err(),
-            "gpu_probe_failed"
-        );
-        let second = granted(try_acquire(root.path(), 2, true, || panic!("forced probe"))).unwrap();
-        assert_eq!(
-            granted(try_acquire(root.path(), 2, true, || panic!("full probe"))).unwrap_err(),
-            "worker_slots"
-        );
+        let failed = || try_acquire(root.path(), 2, false, || Err("probe failed".into()));
+        let forced = || try_acquire(root.path(), 2, true, || panic!("forced probe"));
+        let missing = || try_acquire(root.path(), 2, false, || Ok(None));
+        let first = acquired(failed);
+        denied("gpu_probe_failed", failed);
+        let second = acquired(forced);
+        denied("worker_slots", forced);
         drop(first);
         drop(second);
-        let _first = granted(try_acquire(root.path(), 2, false, || Ok(None))).unwrap();
-        assert!(granted(try_acquire(root.path(), 2, false, || Ok(None))).is_ok());
+        let _first = acquired(missing);
+        acquired(missing);
     }
     #[cfg(unix)]
     #[test]
