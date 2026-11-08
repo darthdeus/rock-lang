@@ -45,8 +45,6 @@ fn host_api_items_stay_public() {
 
     // Packaging.
     let _ = rock_cli::package::run_package;
-    let _ = rock_cli::package::prepare_sound_inspection_target;
-    let _ = std::any::type_name::<rock_cli::package::SoundInspectionTarget>();
 
     // Incremental skull projects and sims.
     let _ = rock_cli::skull_backend::collect_sim_descriptors;
