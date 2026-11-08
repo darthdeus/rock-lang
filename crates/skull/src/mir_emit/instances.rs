@@ -193,6 +193,26 @@ pub(super) fn build_inline_candidate_table_with_census(
 /// (`cache.graph.has_bound_tree_disagreement`) rejects
 /// that one instance rather than picking an arbitrary tree -- the
 /// graph-driven equivalent of `DemandMap`'s clash check.
+/// Test-only observer of the specialization waves: it sees each wave's jobs,
+/// may hold a finished job back to force a completion order, and records what
+/// is installed in which order.
+#[cfg(test)]
+pub(super) trait SpecWaveHook: Send + Sync {
+    /// Called on the scheduling thread before a wave runs, with its job symbols.
+    fn wave(&self, jobs: &[String]);
+    /// Called on the worker once a job's chunk is built; blocking here holds
+    /// that job's completion back.
+    fn finished(&self, name: &str);
+    /// Called as each demanded instance's outcome is installed.
+    fn installed(&self, name: &str, ok: bool);
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static SPEC_WAVE_HOOK: std::cell::RefCell<Option<std::sync::Arc<dyn SpecWaveHook>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 pub(super) fn view_driven_specialized_chunks(
     ws: &Workspace,
     cg: &CodegenCtx,
@@ -223,6 +243,14 @@ pub(super) fn view_driven_specialized_chunks(
         }
     }
     let mut done: FxHashSet<Instance> = FxHashSet::default();
+    #[cfg(test)]
+    let hook = SPEC_WAVE_HOOK.with(|hook| hook.borrow().clone());
+    #[cfg(test)]
+    let installed = |name: &str, ok: bool| {
+        if let Some(hook) = &hook {
+            hook.installed(name, ok);
+        }
+    };
     while !pending.is_empty() {
         let mut jobs = Vec::new();
         for inst in std::mem::take(&mut pending).into_iter().rev() {
@@ -234,19 +262,34 @@ pub(super) fn view_driven_specialized_chunks(
             // it is a target-neutral fact-recorder, not a diagnostic surface), so
             // emission is where the spanned rejection has to live, same as before.
             if let Some((name, err)) = too_deep_to_instantiate(ws, scx, &inst) {
+                #[cfg(test)]
+                installed(&name, false);
                 errs.push((name, err));
                 continue;
             }
             if cache.graph.has_bound_tree_disagreement(&inst) {
-                errs.push(demand_clash(ws, scx, &inst));
+                let (name, err) = demand_clash(ws, scx, &inst);
+                #[cfg(test)]
+                installed(&name, false);
+                errs.push((name, err));
                 continue;
             }
             if let Some(Ok(c)) = cache.chunks.get(&inst) {
                 pending.extend(c.specs.iter().map(|d| d.inst.clone()));
+                #[cfg(test)]
+                installed(&inst.symbol(ws, scx.interner()), true);
                 built.insert(inst, c.clone());
                 continue;
             }
             jobs.push(inst);
+        }
+        #[cfg(test)]
+        if let Some(hook) = &hook {
+            let names: Vec<String> = jobs
+                .iter()
+                .map(|inst| inst.symbol(ws, scx.interner()))
+                .collect();
+            hook.wave(&names);
         }
         let results = par_map_with(
             jobs,
@@ -267,10 +310,16 @@ pub(super) fn view_driven_specialized_chunks(
                     inline_cache,
                     &mut specs,
                 );
+                #[cfg(test)]
+                if let Some(hook) = &hook {
+                    hook.finished(&name);
+                }
                 (inst, name, result)
             },
         );
         for (inst, name, result) in results {
+            #[cfg(test)]
+            installed(&name, result.is_ok());
             match result {
                 Ok(chunk) => {
                     pending.extend(chunk.specs.iter().map(|d| d.inst.clone()));

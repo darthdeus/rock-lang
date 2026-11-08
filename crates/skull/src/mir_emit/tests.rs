@@ -1603,3 +1603,377 @@ fn main() { let result = outer(1) }
         );
     }
 }
+
+/// Adversarial schedules for the specialization waves
+/// (`view_driven_specialized_chunks`): forced completion orders, duplicate
+/// demand within and across waves, and conflicting or failing demand. The
+/// waves run on the real scheduler; `SpecWaveHook` only holds finished jobs
+/// back and records what each wave installed.
+#[cfg(all(test, not(feature = "sequential")))]
+mod spec_wave_tests {
+    use super::instances::{SPEC_WAVE_HOOK, SpecWaveHook};
+    use super::*;
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::time::Duration;
+    use ustr::Ustr;
+
+    // `mid<int>` is demanded by `a` and `c` in the first wave, `leaf<int>` by
+    // `a` there and again by `mid<int>` in the second, and `outer<bool>`
+    // reaches `leaf<bool>` only in the third. Each `pick{i}` adds its own
+    // `count` specialization to the first wave, as in
+    // `instance_owned_emission::specializations_emit_in_a_stable_order`.
+    const SRC: &str = r#"
+inline(lua) fn tag<V>(value: V) -> int = "return 1"
+fn count<V>(items: [V]) -> int {
+    let n = 0
+    for x in items { n += tag(x) }
+    return n
+}
+struct Item0 { v: int }
+struct Item1 { v: int }
+struct Item2 { v: int }
+struct Item3 { v: int }
+struct Item4 { v: int }
+struct Item5 { v: int }
+fn pick0() -> int { return count([Item0 { v: 0 }]) }
+fn pick1() -> int { return count([Item1 { v: 1 }]) }
+fn pick2() -> int { return count([Item2 { v: 2 }]) }
+fn pick3() -> int { return count([Item3 { v: 3 }]) }
+fn pick4() -> int { return count([Item4 { v: 4 }]) }
+fn pick5() -> int { return count([Item5 { v: 5 }]) }
+struct Cell1 { v: int }
+fn leaf<T>(x: T) -> T { return x }
+fn mid<T>(x: T) -> T { return leaf(x) }
+fn outer<T>(x: T) -> T { return mid(x) }
+fn a() -> int { return mid(1) + leaf(2) }
+fn b() -> bool { return outer(true) }
+fn c() -> int { return mid(3) }
+fn d() -> Cell1 { return leaf(Cell1 { v: 4 }) }
+fn e() -> Cell1 { return mid(Cell1 { v: 5 }) }
+fn main() { let r = a() + c() }
+"#;
+
+    const MODULE: &str = "<spec-wave-test>";
+    const TURN_TIMEOUT: Duration = Duration::from_secs(10);
+
+    type Order = fn(&[String]) -> Vec<String>;
+
+    fn input_order(jobs: &[String]) -> Vec<String> {
+        jobs.to_vec()
+    }
+
+    fn reverse_order(jobs: &[String]) -> Vec<String> {
+        jobs.iter().rev().cloned().collect()
+    }
+
+    /// Odd input positions first, then even ones, each half reversed.
+    fn interleaved_order(jobs: &[String]) -> Vec<String> {
+        let (odd, even): (Vec<_>, Vec<_>) = jobs.iter().enumerate().partition(|(i, _)| i % 2 == 1);
+        odd.into_iter()
+            .rev()
+            .chain(even.into_iter().rev())
+            .map(|(_, name)| name.clone())
+            .collect()
+    }
+
+    #[derive(Default)]
+    struct Log {
+        turn: VecDeque<String>,
+        waves: Vec<Vec<String>>,
+        completed: Vec<Vec<String>>,
+        installed: Vec<(String, bool)>,
+        timed_out: Vec<String>,
+    }
+
+    /// Lets each wave's jobs complete only in `order`.
+    struct Forced {
+        order: Order,
+        log: Mutex<Log>,
+        turn: Condvar,
+    }
+
+    impl Forced {
+        fn new(order: Order) -> Arc<Self> {
+            Arc::new(Self {
+                order,
+                log: Mutex::default(),
+                turn: Condvar::new(),
+            })
+        }
+    }
+
+    impl SpecWaveHook for Forced {
+        fn wave(&self, jobs: &[String]) {
+            let mut log = self.log.lock().unwrap();
+            assert!(
+                log.turn.is_empty(),
+                "a wave started before the last drained"
+            );
+            log.turn = (self.order)(jobs).into();
+            log.waves.push(jobs.to_vec());
+            log.completed.push(Vec::new());
+        }
+
+        fn finished(&self, name: &str) {
+            let mut log = self.log.lock().unwrap();
+            while log.turn.front().map(String::as_str) != Some(name) {
+                let (next, wait) = self.turn.wait_timeout(log, TURN_TIMEOUT).unwrap();
+                log = next;
+                if wait.timed_out() {
+                    log.timed_out.push(name.to_string());
+                    break;
+                }
+            }
+            if log.turn.front().map(String::as_str) == Some(name) {
+                log.turn.pop_front();
+            }
+            log.completed.last_mut().unwrap().push(name.to_string());
+            self.turn.notify_all();
+        }
+
+        fn installed(&self, name: &str, ok: bool) {
+            self.log
+                .lock()
+                .unwrap()
+                .installed
+                .push((name.to_string(), ok));
+        }
+    }
+
+    fn workspace() -> Workspace {
+        let mut modules: Vec<_> = rock_stdlib::stdlib_files()
+            .iter()
+            .map(|file| {
+                let id = Ustr::from(rock_stdlib::stdlib_file_id(file.name).as_str());
+                skull_parser::parse_module_clean(file.contents, id).expect("stdlib parse")
+            })
+            .collect();
+        modules.push(skull_parser::parse_module_clean(SRC, Ustr::from(MODULE)).expect("parse"));
+        bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic")
+    }
+
+    /// Enough workers that every held-back job keeps a thread while the job
+    /// whose turn it is runs.
+    fn pool() -> rayon::ThreadPool {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(32)
+            .build()
+            .expect("wave test pool")
+    }
+
+    fn with_hook<R: Send>(hook: Option<Arc<Forced>>, f: impl FnOnce() -> R + Send) -> R {
+        pool().install(|| {
+            SPEC_WAVE_HOOK
+                .with(|slot| *slot.borrow_mut() = hook.map(|hook| hook as Arc<dyn SpecWaveHook>));
+            let result = f();
+            SPEC_WAVE_HOOK.with(|slot| *slot.borrow_mut() = None);
+            result
+        })
+    }
+
+    fn emit(ws: &Workspace, hook: Option<Arc<Forced>>) -> (MirEmit, SkullEmitCache) {
+        let mid = *ws.module_ids.get(&Ustr::from(MODULE)).expect("module");
+        with_hook(hook, || FullEmit::program().run(ws, mid)).expect("wave fixture emits")
+    }
+
+    fn assert_forced(hook: &Forced, label: &str) {
+        let log = hook.log.lock().unwrap();
+        assert!(
+            log.timed_out.is_empty(),
+            "{label}: jobs never got their turn: {:?}",
+            log.timed_out
+        );
+        for (jobs, completed) in log.waves.iter().zip(&log.completed) {
+            assert_eq!(
+                completed,
+                &(hook.order)(jobs),
+                "{label}: the wave did not complete in the forced order"
+            );
+        }
+    }
+
+    #[test]
+    fn forced_completion_orders_install_and_emit_identically() {
+        let ws = workspace();
+        let (natural, _) = emit(&ws, None);
+        let mut reference: Option<(Vec<Vec<String>>, Vec<(String, bool)>)> = None;
+        for (label, order) in [
+            ("input", input_order as Order),
+            ("reverse", reverse_order),
+            ("interleaved", interleaved_order),
+        ] {
+            let hook = Forced::new(order);
+            let (emit, _) = emit(&ws, Some(Arc::clone(&hook)));
+            assert_forced(&hook, label);
+            assert_eq!(
+                emit.lua, natural.lua,
+                "{label}: forced completion order changed the emitted program"
+            );
+            let log = hook.log.lock().unwrap();
+            let observed = (log.waves.clone(), log.installed.clone());
+            match &reference {
+                None => reference = Some(observed),
+                Some(reference) => assert_eq!(
+                    &observed, reference,
+                    "{label}: waves or installation order depend on completion order"
+                ),
+            }
+        }
+
+        let (waves, installed) = reference.expect("schedules ran");
+        assert!(
+            waves.len() >= 3 && waves.iter().any(|wave| wave.len() >= 8),
+            "the fixture must run several waves, one of them wide: {waves:?}"
+        );
+        // Duplicate demand: two first-wave chunks demand `mid<int>` and a
+        // second-wave chunk demands `leaf<int>` again, yet each instance is
+        // scheduled and installed once.
+        let scheduled: Vec<&String> = waves.iter().flatten().collect();
+        let unique: BTreeSet<&String> = scheduled.iter().copied().collect();
+        assert_eq!(
+            scheduled.len(),
+            unique.len(),
+            "an instance was built twice: {waves:?}"
+        );
+        let installed_names: BTreeSet<&String> = installed.iter().map(|(name, _)| name).collect();
+        assert_eq!(installed.len(), installed_names.len(), "{installed:?}");
+        assert!(installed.iter().all(|(_, ok)| *ok), "{installed:?}");
+    }
+
+    fn spec_named(cache: &SkullEmitCache, ws: &Workspace, name: &str, arg: &str) -> Instance {
+        cache
+            .graph
+            .instances
+            .iter()
+            .find(|inst| {
+                let f = &ws.module(inst.func.module).functions[inst.func.func];
+                f.name.as_str() == name
+                    && !inst.args.is_empty()
+                    && inst.symbol(ws, cache.scx.interner()).contains(arg)
+            })
+            .cloned()
+            .unwrap_or_else(|| panic!("no `{name}` instance at `{arg}`"))
+    }
+
+    /// A conflicting demand (two bound-tree answers for one instance) and a
+    /// job whose build fails share waves with successful jobs. The rejections,
+    /// the surviving chunks and the installation order must not depend on
+    /// which job finishes first.
+    #[test]
+    fn conflicting_and_failing_demand_report_identically_under_forced_orders() {
+        let ws = workspace();
+        let (_, mut cache) = emit(&ws, None);
+        let clashing = spec_named(&cache, &ws, "mid", "bool");
+        let failing = spec_named(&cache, &ws, "leaf", "Cell1");
+        let owner = cache
+            .graph
+            .instances
+            .iter()
+            .find(|inst| inst.args.is_empty())
+            .cloned()
+            .expect("a base instance");
+        let mut dissent = BTreeMap::new();
+        dissent.insert(
+            crate::instance_graph::Owner::Instance(clashing.clone()),
+            crate::instance_graph::InstanceBoundTree::default(),
+        );
+        cache.graph.index.trees.insert(
+            clashing.clone(),
+            crate::instance_graph::Agreed {
+                owners: BTreeSet::from([crate::instance_graph::Owner::Instance(owner)]),
+                value: crate::instance_graph::InstanceBoundTree::default(),
+                dissent,
+                total: 2,
+            },
+        );
+        std::sync::Arc::make_mut(&mut cache.concrete.plans).remove(&failing);
+        // A retained cache already holds every specialized chunk; drop them so
+        // the waves have to build each one again.
+        cache.chunks.retain(|inst, _| inst.args.is_empty());
+
+        let run = |order: Order| {
+            let hook = Forced::new(order);
+            let (built, errs) = with_hook(Some(Arc::clone(&hook)), || {
+                view_driven_specialized_chunks(&ws, &cache.cg, &cache.scx, &cache, &[])
+            });
+            let mut chunks: Vec<(String, String)> = built
+                .iter()
+                .map(|(inst, chunk)| (inst.symbol(&ws, cache.scx.interner()), chunk.lua.clone()))
+                .collect();
+            chunks.sort();
+            let errs: Vec<(String, String)> = errs
+                .into_iter()
+                .map(|(name, err)| (name, err.message))
+                .collect();
+            let installed = hook.log.lock().unwrap().installed.clone();
+            (hook, chunks, errs, installed)
+        };
+
+        let (first, chunks, errs, installed) = run(input_order);
+        assert_forced(&first, "input");
+        let clash_name = clashing.symbol(&ws, cache.scx.interner());
+        let failing_name = failing.symbol(&ws, cache.scx.interner());
+        // `mid<Cell1>` lowers a call to the plan-less `leaf<Cell1>`, so it
+        // fails alongside it in the same wave.
+        let caller_name = spec_named(&cache, &ws, "mid", "Cell1").symbol(&ws, cache.scx.interner());
+        let mut rejected: Vec<&String> = errs.iter().map(|(name, _)| name).collect();
+        rejected.sort();
+        let mut expected = vec![&clash_name, &failing_name, &caller_name];
+        expected.sort();
+        assert_eq!(rejected, expected, "{errs:?}");
+        assert!(
+            errs.iter().any(|(name, message)| *name == clash_name
+                && message.contains("different `Iterator` bound resolutions")),
+            "the conflicting demand was not rejected: {errs:?}"
+        );
+        assert!(
+            errs.iter().any(
+                |(name, message)| *name == failing_name && message.contains("no concrete plan")
+            ),
+            "the failing job was not reported: {errs:?}"
+        );
+        assert!(
+            first
+                .log
+                .lock()
+                .unwrap()
+                .waves
+                .iter()
+                .any(|wave| wave.contains(&failing_name) && wave.len() >= 3),
+            "the failing job must share a wide wave with successful ones"
+        );
+        assert!(
+            chunks.iter().all(|(name, _)| !expected.contains(&name)),
+            "a rejected instance still produced a chunk"
+        );
+        // Only the clashing instance demands `leaf<bool>`, so its rejection
+        // must also keep that instance out.
+        assert!(
+            !chunks
+                .iter()
+                .any(|(name, _)| name.starts_with("leaf") && name.contains("bool")),
+            "a rejected demand's callees were still built: {chunks:?}"
+        );
+
+        for (label, order) in [
+            ("reverse", reverse_order as Order),
+            ("interleaved", interleaved_order),
+        ] {
+            let (hook, other_chunks, other_errs, other_installed) = run(order);
+            assert_forced(&hook, label);
+            assert_eq!(
+                other_errs, errs,
+                "{label}: diagnostics depend on completion order"
+            );
+            assert_eq!(
+                other_chunks, chunks,
+                "{label}: chunks depend on completion order"
+            );
+            assert_eq!(
+                other_installed, installed,
+                "{label}: installation order depends on completion order"
+            );
+        }
+    }
+}
