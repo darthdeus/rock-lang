@@ -12,6 +12,7 @@ use std::fmt::Write as _;
 
 use bone_core::workspace::Workspace;
 use comfy_la_arena::{Idx, RawIdx};
+use skull_mir::cfg::relooper::{LoopCtx, LoopFrame, LoopTest, StructuredEmit};
 use skull_mir::cfg::structure::{
     self, CountedBound, CountedLoop, LoopRegion, LoopShapes, Structure,
 };
@@ -1013,48 +1014,209 @@ struct Emitter<'a> {
     indent: usize,
 }
 
-/// The enclosing loop's jump targets, mirroring skull-mir's `loop_targets`:
-/// `Goto(cont)` -> `continue`, `Goto(brk)` -> `break`.
-#[derive(Clone, Copy, Default)]
-struct LoopCtx {
-    cont: Option<Idx<Block>>,
-    brk: Option<Idx<Block>>,
-}
+impl StructuredEmit for Emitter<'_> {
+    const BREAK_ON_EXIT_ENTRY: bool = true;
+    // The empty-arm shortcut resumes the live arm at the empty arm's target,
+    // which is wrong when that target is an intermediate block the live arm
+    // skips past to reach the real merge (the inlined bounds-check
+    // `if oob { r = nil } else { r = data[i] }` tail: both arms would reach
+    // the merge and double-visit it), or a loop header whose `Goto` must lower
+    // to `continue;`.
+    const STRICT_EMPTY_FORWARD: bool = true;
 
-/// One entry in the enclosing-loop stack (`Emitter::loop_stack`), for MULTI-LEVEL
-/// jumps: a `Goto` to a non-innermost loop's `cont`/`brk` emits `continue L<h>;`/
-/// `break L<h>;`. Arises from an inlined iterator `next()` whose skip-loop nests
-/// inside the for-loop and `continue`s the OUTER loop. `header` names the JS label
-/// (`L<header>`); the loop is labeled only if [`Emitter::needs_label`] holds.
-#[derive(Clone, Copy)]
-struct LoopFrame {
-    cont: Idx<Block>,
-    brk: Idx<Block>,
-    header: Idx<Block>,
+    fn mir(&self) -> &MirFunc {
+        self.mf
+    }
+
+    fn structure(&self) -> &Structure {
+        &self.structure
+    }
+
+    fn counted_at(&self, b: Idx<Block>) -> Option<CountedLoop> {
+        self.counted.get(&b).copied()
+    }
+
+    fn general_at(&self, b: Idx<Block>) -> Option<LoopRegion> {
+        self.general.get(&b).cloned()
+    }
+
+    fn is_active(&self, b: Idx<Block>) -> bool {
+        self.active.contains(&b)
+    }
+
+    fn set_active(&mut self, b: Idx<Block>, active: bool) {
+        if active {
+            self.active.insert(b);
+        } else {
+            self.active.remove(&b);
+        }
+    }
+
+    fn mark_visited(&mut self, b: Idx<Block>) -> bool {
+        self.visited.insert(b)
+    }
+
+    fn out(&mut self) -> &mut String {
+        &mut self.out
+    }
+
+    fn indent(&mut self) -> &mut usize {
+        &mut self.indent
+    }
+
+    fn render_cond(&mut self, cond: Idx<Inst>) -> Result<String, CompilerError> {
+        self.render_val(cond)
+    }
+
+    fn block_effects(&mut self, b: Idx<Block>) -> Result<(), CompilerError> {
+        self.emit_block_effects(b)
+    }
+
+    fn return_values(&mut self, vs: &[Idx<Inst>]) -> Result<(), CompilerError> {
+        self.emit_return(vs)
+    }
+
+    fn unreachable(&mut self) {
+        self.emit_unreachable();
+    }
+
+    fn block_has_statement(&self, b: Idx<Block>) -> bool {
+        self.mf.blocks[b].insts.iter().any(|&i| self.inst_emits(i))
+    }
+
+    /// Natural loops are dispatched before the visited guard, so a revisit is
+    /// a reducible-but-unstructured shape. A FORWARD shared tail -- a block
+    /// reached from 2+ branch arms that is not the branch's ipdom (an
+    /// or-pattern success arm, a multiple-`continue` latch tail) -- has no
+    /// back-edge through it, so re-emitting it inline (tail DUPLICATION)
+    /// terminates and is semantically identical: each dynamic execution
+    /// follows exactly one copy. Bounded by `stop`, small, and lambda-/loop-free
+    /// (`dup_region`). An enclosing active loop header (a multi-level jump) is
+    /// NOT a forward tail -- that is the labeled-`continue` path, and if it
+    /// reaches here it is genuinely unstructured. Anything else rejects.
+    fn on_revisit(
+        &mut self,
+        b: Idx<Block>,
+        stop: Option<Idx<Block>>,
+        ctx: LoopCtx,
+    ) -> Result<(), CompilerError> {
+        if !self.active.contains(&b) {
+            if let Some(region) = self.dup_region(b, stop, ctx) {
+                return self.emit_dup(b, stop, ctx, &region);
+            }
+        }
+        self.shared_tail_reject = true;
+        Err(err(
+            "JS subset: unstructured control flow (shared branch tail)",
+        ))
+    }
+
+    fn unsupported_term(&self, term: &Term) -> CompilerError {
+        if matches!(term, Term::Yield { .. }) {
+            err("JS subset: `yield` not supported")
+        } else {
+            err("JS subset: `match`/switch not supported")
+        }
+    }
+
+    /// A `Goto` to an ENCLOSING (non-innermost) loop's header/exit: a labeled
+    /// `continue L<h>;`/`break L<h>;` (the inlined iterator next() skip-loop
+    /// that continues the outer for-loop).
+    fn outer_jump(&mut self, t: Idx<Block>) -> Option<String> {
+        self.labeled_jump(t)
+    }
+
+    /// Short-circuit fold: a `match` range/tuple pattern lowers to nested
+    /// branches whose failure arms share one tail block (`if A { if B { X }
+    /// else { S } } else { S }`) -- reducible but not a natural loop, so the
+    /// relooper cannot structure the doubly-reached `S`. Recognizing the chain
+    /// (`A && B`; the `||` dual for a shared success arm) collapses it to a
+    /// clean diamond that rejoins at the ipost-dominator. A folded inner
+    /// block's pure reads hoist before the `if`.
+    fn fold_branch(
+        &mut self,
+        mut cond_s: String,
+        mut then_bb: Idx<Block>,
+        mut else_bb: Idx<Block>,
+    ) -> Result<(String, Idx<Block>, Idx<Block>), CompilerError> {
+        loop {
+            if let Some((c2, t2, e2)) = self.foldable_branch(then_bb) {
+                if e2 == else_bb {
+                    self.emit_block_effects(then_bb)?;
+                    self.visited.insert(then_bb);
+                    cond_s = format!("({cond_s} && {})", self.render_val(c2)?);
+                    then_bb = t2;
+                    continue;
+                }
+            }
+            if let Some((c2, t2, e2)) = self.foldable_branch(else_bb) {
+                if t2 == then_bb {
+                    self.emit_block_effects(else_bb)?;
+                    self.visited.insert(else_bb);
+                    cond_s = format!("({cond_s} || {})", self.render_val(c2)?);
+                    else_bb = e2;
+                    continue;
+                }
+            }
+            return Ok((cond_s, then_bb, else_bb));
+        }
+    }
+
+    /// A `while cond`/`for` loop's header test (a `Branch` with one arm
+    /// directly to the exit); none for a `loop {}`, whose `break`s and
+    /// `continue`s fall out of the body's own branch structure (a branch arm
+    /// ENTERING the exit block breaks via [`Self::BREAK_ON_EXIT_ENTRY`]).
+    fn loop_test(&mut self, region: &LoopRegion) -> Result<Option<LoopTest>, CompilerError> {
+        let Some(test) = region.test else {
+            return Ok(None);
+        };
+        if let Term::Branch {
+            cond,
+            then_bb,
+            else_bb,
+        } = self.mf.blocks[test].term
+        {
+            if then_bb == region.exit || else_bb == region.exit {
+                let break_when_true = then_bb == region.exit;
+                return Ok(Some(LoopTest {
+                    block: test,
+                    cond,
+                    body: if break_when_true { else_bb } else { then_bb },
+                    break_when_true,
+                }));
+            }
+        }
+        Err(err(
+            "JS subset: unstructured loop (condition test has no direct exit arm)",
+        ))
+    }
+
+    /// The bound is a `Load` of a hoisted preheader cell (or a const), rendered
+    /// inline so it never depends on a header-block temp the loop skips.
+    fn counted_slot_bound(&mut self, li: &CountedLoop) -> Result<(String, String), CompilerError> {
+        Ok((
+            cell_name(self.mf, li.slot),
+            self.render_inst_expr(li.bound)?,
+        ))
+    }
+
+    fn loop_label(&mut self, header: Idx<Block>) -> String {
+        self.loop_markers.push(header);
+        loop_marker(self.mf, header)
+    }
+
+    fn enter_loop(&mut self, frame: LoopFrame) {
+        self.loop_stack.push(frame);
+    }
+
+    fn exit_loop(&mut self) {
+        self.loop_stack.pop();
+    }
 }
 
 impl Emitter<'_> {
-    fn push(&mut self, line: &str) {
-        for _ in 0..self.indent {
-            self.out.push_str("  ");
-        }
-        self.out.push_str(line);
-        self.out.push('\n');
-    }
-
     fn emit_unreachable(&mut self) {
         self.push("throw new Error(\"rock: reached an unreachable block\");");
-    }
-
-    /// A block that emits no statement and just forwards (`Some(target)`): an
-    /// empty `if`/`else` arm.
-    fn empty_forward(&self, b: Idx<Block>) -> Option<Idx<Block>> {
-        if let Term::Goto(t) = self.mf.blocks[b].term {
-            if !self.mf.blocks[b].insts.iter().any(|&i| self.inst_emits(i)) {
-                return Some(t);
-            }
-        }
-        None
     }
 
     fn is_runtime_value(&self, v: Idx<Inst>) -> bool {
@@ -1081,108 +1243,6 @@ impl Emitter<'_> {
 
     fn is_nil(&self, iid: Idx<Inst>) -> bool {
         matches!(self.mf.insts[iid], Inst::Const(Lit::Nil))
-    }
-
-    fn emit_seq(
-        &mut self,
-        start: Idx<Block>,
-        stop: Option<Idx<Block>>,
-        ctx: LoopCtx,
-    ) -> Result<(), CompilerError> {
-        let mut cur = start;
-        loop {
-            if Some(cur) == stop {
-                return Ok(());
-            }
-            // Entering the enclosing loop's exit block IS a break: a `loop {}`
-            // whose `break` is a branch arm directly into the exit (no `Goto(exit)`
-            // edge to catch below) relies on this. Checked before the visited mark
-            // so the exit stays available for the post-loop emission the header's
-            // dispatcher resumes at.
-            if Some(cur) == ctx.brk {
-                self.push("break;");
-                return Ok(());
-            }
-            // A natural-loop header is dispatched structurally (before the
-            // visited guard): `emit_general` re-enters `emit_seq` on the header
-            // for its condition region, so the header must not be pre-marked.
-            if !self.active.contains(&cur) {
-                if let Some(li) = self.counted.get(&cur).copied() {
-                    self.emit_counted(cur, li)?;
-                    cur = li.exit;
-                    continue;
-                }
-                if let Some(region) = self.general.get(&cur).cloned() {
-                    self.emit_general(&region, ctx)?;
-                    cur = region.exit;
-                    continue;
-                }
-            }
-            if !self.visited.insert(cur) {
-                // Natural loops are dispatched above, so a revisit here is a
-                // reducible-but-unstructured shape. A FORWARD shared tail -- a
-                // block reached from 2+ branch arms that is not the branch's ipdom
-                // (an or-pattern success arm, a multiple-`continue` latch tail) --
-                // has no back-edge through it, so re-emitting it inline (tail
-                // DUPLICATION) terminates and is semantically identical: each
-                // dynamic execution follows exactly one copy. Bounded by `stop`,
-                // small, and lambda-/loop-free (`dup_region`). An enclosing active
-                // loop header (a multi-level jump) is NOT a forward tail -- that is
-                // the labeled-`continue` path in the `Goto` arm below, and if it
-                // reaches here it is genuinely unstructured. Anything else rejects.
-                if !self.active.contains(&cur) {
-                    if let Some(region) = self.dup_region(cur, stop, ctx) {
-                        return self.emit_dup(cur, stop, ctx, &region);
-                    }
-                }
-                self.shared_tail_reject = true;
-                return Err(err(
-                    "JS subset: unstructured control flow (shared branch tail)",
-                ));
-            }
-            self.emit_block_effects(cur)?;
-            match self.mf.blocks[cur].term.clone() {
-                Term::Return(vs) => {
-                    self.emit_return(&vs)?;
-                    return Ok(());
-                }
-                Term::Unreachable => {
-                    self.emit_unreachable();
-                    return Ok(());
-                }
-                Term::Goto(t) => {
-                    if Some(t) == ctx.cont {
-                        self.push("continue;");
-                        return Ok(());
-                    }
-                    if Some(t) == ctx.brk {
-                        self.push("break;");
-                        return Ok(());
-                    }
-                    if Some(t) == stop {
-                        return Ok(());
-                    }
-                    // A `Goto` to an ENCLOSING (non-innermost) loop's header/exit:
-                    // a labeled `continue L<h>;`/`break L<h>;` (the inlined iterator
-                    // next() skip-loop that continues the outer for-loop).
-                    if let Some(stmt) = self.labeled_jump(t) {
-                        self.push(&stmt);
-                        return Ok(());
-                    }
-                    cur = t;
-                }
-                Term::Branch {
-                    cond,
-                    then_bb,
-                    else_bb,
-                } => match self.emit_branch(cur, cond, then_bb, else_bb, stop, ctx)? {
-                    Some(m) => cur = m,
-                    None => return Ok(()),
-                },
-                Term::Switch { .. } => return Err(err("JS subset: `match`/switch not supported")),
-                Term::Yield { .. } => return Err(err("JS subset: `yield` not supported")),
-            }
-        }
     }
 
     /// The set of blocks a forward shared tail `start` spans up to `stop` (the
@@ -1373,150 +1433,6 @@ impl Emitter<'_> {
         pure.then_some((cond, then_bb, else_bb))
     }
 
-    /// Emit an `if`-diamond. Returns the join to continue at, or `None` when the
-    /// arms diverge (the join is the virtual exit) and there is no fall-through.
-    fn emit_branch(
-        &mut self,
-        blk: Idx<Block>,
-        cond: Idx<Inst>,
-        then_bb: Idx<Block>,
-        else_bb: Idx<Block>,
-        stop: Option<Idx<Block>>,
-        ctx: LoopCtx,
-    ) -> Result<Option<Idx<Block>>, CompilerError> {
-        // Short-circuit fold: a `match` range/tuple pattern lowers to nested
-        // branches whose failure arms share one tail block (`if A { if B { X }
-        // else { S } } else { S }`) -- reducible but not a natural loop, so the
-        // relooper cannot structure the doubly-reached `S`. Recognizing the chain
-        // (`A && B`; the `||` dual for a shared success arm) collapses it to a
-        // clean diamond that rejoins at the ipost-dominator. A folded inner
-        // block's pure reads hoist before the `if`.
-        let (cond_s, then_bb, else_bb) = {
-            let mut cond_s = self.render_val(cond)?;
-            let (mut then_bb, mut else_bb) = (then_bb, else_bb);
-            loop {
-                if let Some((c2, t2, e2)) = self.foldable_branch(then_bb) {
-                    if e2 == else_bb {
-                        self.emit_block_effects(then_bb)?;
-                        self.visited.insert(then_bb);
-                        cond_s = format!("({cond_s} && {})", self.render_val(c2)?);
-                        then_bb = t2;
-                        continue;
-                    }
-                }
-                if let Some((c2, t2, e2)) = self.foldable_branch(else_bb) {
-                    if t2 == then_bb {
-                        self.emit_block_effects(else_bb)?;
-                        self.visited.insert(else_bb);
-                        cond_s = format!("({cond_s} || {})", self.render_val(c2)?);
-                        else_bb = e2;
-                        continue;
-                    }
-                }
-                break (cond_s, then_bb, else_bb);
-            }
-        };
-        // Empty else -> then-only `if`; continue at the else target. Valid ONLY
-        // when the empty arm forwards to the branch's actual merge (the FILTERED
-        // ipdom `merge` below): the shortcut stops the live arm at `j` and resumes
-        // there, correct only if that arm also reconverges at `j`. Two ways `j`
-        // (the empty arm's forward target) can differ from the real merge:
-        //   - the live arm merges LATER, past an empty arm that forwards to an
-        //     intermediate block (the inlined bounds-check
-        //     `if oob { r = nil } else { r = data[i] }` shape) -- `j` is not the
-        //     join, so both arms would independently reach the merge and
-        //     double-visit it;
-        //   - `j` is a loop back/exit edge (`ctx.cont`/`ctx.brk`) -- a `Goto`
-        //     there must lower to `continue;`/`break;` (which the full-diamond
-        //     path does via `emit_seq`'s terminator handling), not fall through to
-        //     the header and re-enter it.
-        // The empty-arm shortcut (`if (cond) { live_arm }`, resume at the empty
-        // arm's forward target `j`) is sound when either:
-        //   - the branch has a real forward merge and `j` IS it (`merge ==
-        //     Some(j)`) -- both arms rejoin at `j`; or
-        //   - the branch has NO forward merge (`merge` is None): both arms diverge
-        //     (a `break`/`continue`/`return`), so the empty arm's forward is a
-        //     genuine divergence (e.g. `if (i == 3) { break }` in a `for`, whose
-        //     empty else falls through to `continue`) and the live arm diverges
-        //     too -- there is no shared tail to double-visit.
-        // It is UNSOUND when the branch HAS a forward merge but `j` is a plain
-        // intermediate block the live arm skips PAST to reach it (the inlined
-        // bounds-check `if oob { r = nil } else { r = data[i] }` tail: `j` is not
-        // the join). And in all cases `j` must not be the ACTIVE header -- resuming
-        // at a `loop {}`'s own header (its `continue` target) re-enters it.
-        let merge = self
-            .structure
-            .ipdom(blk)
-            .filter(|&m| Some(m) != ctx.cont && Some(m) != ctx.brk);
-        let forward_ok =
-            |j: Idx<Block>| (merge == Some(j) || merge.is_none()) && !self.active.contains(&j);
-        if let Some(j) = self.empty_forward(else_bb).filter(|&j| forward_ok(j)) {
-            self.push(&format!("if ({cond_s}) {{"));
-            self.indent += 1;
-            self.emit_seq(then_bb, Some(j), ctx)?;
-            self.indent -= 1;
-            self.push("}");
-            return Ok(Some(j));
-        }
-        // Empty then -> invert and emit the else arm only (same forward guard).
-        if let Some(j) = self.empty_forward(then_bb).filter(|&j| forward_ok(j)) {
-            self.push(&format!("if (!({cond_s})) {{"));
-            self.indent += 1;
-            self.emit_seq(else_bb, Some(j), ctx)?;
-            self.indent -= 1;
-            self.push("}");
-            return Ok(Some(j));
-        }
-        // Full diamond. The merge is ipdom, unless an arm diverges (ipdom
-        // collapses to the virtual exit or a loop target) -- then the arms absorb
-        // the continuation up to the enclosing stop and there is no fall-through.
-        let arm_stop = merge.map(Some).unwrap_or(stop);
-        self.push(&format!("if ({cond_s}) {{"));
-        self.indent += 1;
-        self.emit_seq(then_bb, arm_stop, ctx)?;
-        self.indent -= 1;
-        self.push("} else {");
-        self.indent += 1;
-        self.emit_seq(else_bb, arm_stop, ctx)?;
-        self.indent -= 1;
-        self.push("}");
-        Ok(merge)
-    }
-
-    /// A range-`for`: `for (; slot < bound; slot = slot + 1) { body }`. The slot
-    /// and bound were initialized in the preheader (hoisted cells), so the `for`
-    /// init clause is empty. `continue` targets the latch (the `for` increment
-    /// runs it); `break` targets the exit.
-    fn emit_counted(&mut self, header: Idx<Block>, li: CountedLoop) -> Result<(), CompilerError> {
-        let slot = cell_name(self.mf, li.slot);
-        // The bound is a `Load` of a hoisted preheader cell (or a const),
-        // rendered inline so it never depends on a header-block temp we skip.
-        let bound = self.render_inst_expr(li.bound)?;
-        let cmp = if li.inclusive { "<=" } else { "<" };
-        self.loop_markers.push(header);
-        let mark = loop_marker(self.mf, header);
-        self.push(&format!(
-            "{mark}for (; {slot} {cmp} {bound}; {slot} = {slot} + 1) {{"
-        ));
-        self.indent += 1;
-        let ctx = LoopCtx {
-            cont: Some(li.latch),
-            brk: Some(li.exit),
-        };
-        self.loop_stack.push(LoopFrame {
-            cont: li.latch,
-            brk: li.exit,
-            header,
-        });
-        let body_len = self.out.len();
-        self.emit_seq(li.body_entry, None, ctx)?;
-        self.trim_trailing_continue(body_len);
-        self.loop_stack.pop();
-        self.indent -= 1;
-        self.push("}");
-        Ok(())
-    }
-
     /// The JS statement for a `Goto(t)` that is a `continue`/`break` of an
     /// enclosing loop: bare for the innermost, labeled (`continue L<h>;`) for an
     /// outer one (a multi-level jump), recording that header so `finalize_labels`
@@ -1543,99 +1459,6 @@ impl Emitter<'_> {
         } else {
             format!("break L{};", self.mf.emit_block_id(header))
         })
-    }
-
-    /// A general loop. Two shapes:
-    /// - `while cond`/`for` (`region.test` set): `while (true) { <cond region>;
-    ///   if (!(cond)) break; <body> }`. The condition region may be a multi-block
-    ///   diamond (`while a && b`), so it goes through the structurizer recursively.
-    /// - `loop {}` (`region.test` None): a headerless `while (true) { <body> }`;
-    ///   the loop's `break`s and `continue`s fall out of the body's own branch
-    ///   structure (a `Goto(exit)` -> `break`, a `Goto(header)` -> `continue`, and
-    ///   a branch arm ENTERING the exit block breaks via the `cur == brk` guard in
-    ///   [`Self::emit_seq`]). Reached when a `continue` precedes the `break`, so no
-    ///   single test dominates the back-edges.
-    fn emit_general(&mut self, region: &LoopRegion, outer: LoopCtx) -> Result<(), CompilerError> {
-        let h = region.header;
-        let exit = region.exit;
-        let ctx = LoopCtx {
-            cont: Some(h),
-            brk: Some(exit),
-        };
-
-        self.active.insert(h);
-        self.loop_markers.push(h);
-        let mark = loop_marker(self.mf, h);
-        self.push(&format!("{mark}while (true) {{"));
-        self.indent += 1;
-        self.loop_stack.push(LoopFrame {
-            cont: h,
-            brk: exit,
-            header: h,
-        });
-
-        if let Some(test) = region.test {
-            let (cond, body_start, break_when_true) = self.test_arms(test, exit)?;
-            self.emit_seq(h, Some(test), outer)?;
-            self.emit_block_effects(test)?;
-            self.visited.insert(test);
-            let cond_s = self.render_val(cond)?;
-            if break_when_true {
-                self.push(&format!("if ({cond_s}) {{ break; }}"));
-            } else {
-                self.push(&format!("if (!({cond_s})) {{ break; }}"));
-            }
-            let body_len = self.out.len();
-            self.emit_seq(body_start, None, ctx)?;
-            self.trim_trailing_continue(body_len);
-        } else {
-            let body_len = self.out.len();
-            self.emit_seq(h, None, ctx)?;
-            self.trim_trailing_continue(body_len);
-        }
-
-        self.loop_stack.pop();
-        self.indent -= 1;
-        self.push("}");
-        self.active.remove(&h);
-        Ok(())
-    }
-
-    /// Decompose the `while cond`/`for` header test `test` (a `Branch` with one
-    /// arm directly to `exit`): returns `(cond, body entry, break-when-cond-true)`.
-    fn test_arms(
-        &self,
-        test: Idx<Block>,
-        exit: Idx<Block>,
-    ) -> Result<(Idx<Inst>, Idx<Block>, bool), CompilerError> {
-        if let Term::Branch {
-            cond,
-            then_bb,
-            else_bb,
-        } = self.mf.blocks[test].term
-        {
-            if then_bb == exit {
-                return Ok((cond, else_bb, true));
-            }
-            if else_bb == exit {
-                return Ok((cond, then_bb, false));
-            }
-        }
-        Err(err(
-            "JS subset: unstructured loop (condition test has no direct exit arm)",
-        ))
-    }
-
-    /// Drop a redundant trailing `continue;` that is the loop body's natural
-    /// back-edge fall-through (indented exactly at the body level).
-    fn trim_trailing_continue(&mut self, start: usize) {
-        let line = format!("{}continue;\n", "  ".repeat(self.indent));
-        if self.out.len() >= start + line.len() && self.out.ends_with(&line) {
-            let cut = self.out.len() - line.len();
-            if cut >= start && (cut == 0 || self.out.as_bytes()[cut - 1] == b'\n') {
-                self.out.truncate(cut);
-            }
-        }
     }
 
     /// JS access paths of an intrinsic call's result lanes. `None` means the

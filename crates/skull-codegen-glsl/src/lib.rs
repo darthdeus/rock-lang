@@ -28,6 +28,7 @@ use skull_codegen_shader::const_lit;
 use skull_graph::instance_graph::{InstanceGraph, SiteOutcome};
 pub use skull_graph::shader::ShaderLibraryView;
 use skull_graph::shader::{ShaderProgram, ShaderProgramView, ShaderStageView};
+use skull_mir::cfg::relooper::{LoopCtx, LoopTest, StructuredEmit};
 use skull_mir::cfg::reverse_postorder;
 use skull_mir::cfg::structure::{
     self, CountedBound, CountedLoop, LoopRegion, LoopShapes, Structure,
@@ -1008,14 +1009,6 @@ struct MainOut {
 /// The fragment output field that is written to `gl_FragDepth`.
 const FRAG_DEPTH_FIELD: &str = "FragDepth";
 
-/// The enclosing loop's jump targets, mirroring skull-mir's `loop_targets`:
-/// `Goto(cont)` -> `continue`, `Goto(brk)` -> `break`.
-#[derive(Clone, Copy, Default)]
-struct LoopCtx {
-    cont: Option<Idx<Block>>,
-    brk: Option<Idx<Block>>,
-}
-
 /// Emit `<ret> <name>(<params>) { <body> }` for one lowered INSTANCE.
 #[cfg(test)]
 fn emit_fn_def(
@@ -1257,14 +1250,6 @@ fn cell_base_name(cell: &Cell, cid: Idx<Cell>) -> String {
 }
 
 impl FnEmit<'_> {
-    fn push(&mut self, line: &str) {
-        for _ in 0..self.indent {
-            self.out.push_str("  ");
-        }
-        self.out.push_str(line);
-        self.out.push('\n');
-    }
-
     /// Assign unique GLSL identifiers to cells and retained vector calls.
     ///
     /// In entry mode the hoisted locals share the function scope with the
@@ -2177,174 +2162,6 @@ impl FnEmit<'_> {
         self.fn_span
     }
 
-    /// Emit a structured sequence of blocks starting at `start`, stopping before
-    /// `stop` (its continuation). Handles straight-line code, if-diamonds,
-    /// counted `for` loops, and general `while` loops; `ctx` carries the
-    /// enclosing loop's break/continue targets.
-    fn emit_seq(
-        &mut self,
-        start: Idx<Block>,
-        stop: Option<Idx<Block>>,
-        ctx: LoopCtx,
-    ) -> Result<(), CompilerError> {
-        let mut cur = start;
-        loop {
-            if Some(cur) == stop {
-                return Ok(());
-            }
-            // Loop headers are dispatched structurally (before the visited guard):
-            // `emit_general` re-enters `emit_seq` on the header for its condition
-            // region, so the header must not already be marked visited.
-            if !self.active.contains(&cur) {
-                if let Some(li) = self.counted.get(&cur).copied() {
-                    self.emit_counted(li)?;
-                    cur = li.exit;
-                    continue;
-                }
-                if let Some(region) = self.general.get(&cur).cloned() {
-                    self.emit_general(&region, ctx)?;
-                    cur = region.exit;
-                    continue;
-                }
-            }
-            if !self.visited.insert(cur) {
-                return Err(err(
-                    self.span(),
-                    "shader profile: unstructured control flow (unsupported loop/branch shape)",
-                ));
-            }
-            self.emit_block_effects(cur)?;
-            match self.f.blocks[cur].term.clone() {
-                Term::Return(vs) => {
-                    self.emit_return(&vs)?;
-                    return Ok(());
-                }
-                Term::Unreachable => return Ok(()),
-                Term::Goto(t) => {
-                    if Some(t) == ctx.cont {
-                        self.push("continue;");
-                        return Ok(());
-                    }
-                    if Some(t) == ctx.brk {
-                        self.push("break;");
-                        return Ok(());
-                    }
-                    if Some(t) == stop {
-                        return Ok(());
-                    }
-                    cur = t;
-                }
-                Term::Branch {
-                    cond,
-                    then_bb,
-                    else_bb,
-                } => {
-                    // Direct shader calls materialize scalar literal defaults
-                    // at the call site. Other MIR defaults still need their
-                    // nil path, which GLSL cannot represent and must reject.
-                    let materialized_default = self
-                        .f
-                        .param_default_guards
-                        .get(&cond)
-                        .is_some_and(|index| self.f.param_default_materialized.contains(index));
-                    if materialized_default {
-                        cur = else_bb;
-                        continue;
-                    }
-                    // A folded short-circuit / ternary diamond emits nothing here --
-                    // its expression renders at the result cell's one use. Skip to
-                    // the join (ipdom); both arms are absorbed.
-                    if self.folded_block.contains_key(&cur) {
-                        match self.structure.ipdom(cur) {
-                            Some(join) => cur = join,
-                            None => return Ok(()),
-                        }
-                    } else {
-                        match self.emit_branch(cur, cond, then_bb, else_bb, stop, ctx)? {
-                            Some(m) => cur = m,
-                            None => return Ok(()),
-                        }
-                    }
-                }
-                Term::Switch { .. } => {
-                    return Err(err(self.span(), "shader profile: `match` is not tier 0"));
-                }
-                Term::Yield { .. } => {
-                    return Err(err(
-                        self.span(),
-                        "shader profile: `yield` (coroutine) is not tier 0",
-                    ));
-                }
-            }
-        }
-    }
-
-    /// Whether `b` produces no statement and just forwards to another block
-    /// (`Some(target)`): the empty else/then arm of a statement `if`, or a bare
-    /// `break`/`continue` block.
-    fn empty_forward(&self, b: Idx<Block>) -> Option<Idx<Block>> {
-        if let Term::Goto(t) = self.f.blocks[b].term {
-            let has_statement = self.f.blocks[b].insts.iter().any(|&i| {
-                matches!(self.f.insts[i], Inst::Store { .. }) || self.value_name.contains_key(&i)
-            });
-            if !has_statement {
-                return Some(t);
-            }
-        }
-        None
-    }
-
-    /// Emit an `if`-diamond for a `Branch`. Returns the block to continue at
-    /// (the merge / join), or `None` when both arms diverge and the arms have
-    /// absorbed the continuation.
-    fn emit_branch(
-        &mut self,
-        blk: Idx<Block>,
-        cond: Idx<Inst>,
-        then_bb: Idx<Block>,
-        else_bb: Idx<Block>,
-        stop: Option<Idx<Block>>,
-        ctx: LoopCtx,
-    ) -> Result<Option<Idx<Block>>, CompilerError> {
-        let cond_s = self.render_val(cond)?;
-        // Empty else -> then-only `if`; continue at the else target.
-        if let Some(j) = self.empty_forward(else_bb) {
-            self.push(&format!("if ({cond_s}) {{"));
-            self.indent += 1;
-            self.emit_seq(then_bb, Some(j), ctx)?;
-            self.indent -= 1;
-            self.push("}");
-            return Ok(Some(j));
-        }
-        // Empty then -> invert and emit the else arm only.
-        if let Some(j) = self.empty_forward(then_bb) {
-            self.push(&format!("if (!({cond_s})) {{"));
-            self.indent += 1;
-            self.emit_seq(else_bb, Some(j), ctx)?;
-            self.indent -= 1;
-            self.push("}");
-            return Ok(Some(j));
-        }
-        // Full diamond. The merge is ipdom, unless an arm diverges (ipdom
-        // collapses to the virtual exit or a loop target) -- then the arms absorb
-        // the continuation up to the enclosing stop and there is no fall-through.
-        let merge = self
-            .structure
-            .ipdom(blk)
-            .filter(|&m| Some(m) != ctx.cont && Some(m) != ctx.brk);
-        let arm_stop = merge.or(stop);
-        self.push(&format!("if ({cond_s}) {{"));
-        self.indent += 1;
-        self.emit_seq(then_bb, arm_stop, ctx)?;
-        self.indent -= 1;
-        self.push("} else {");
-        self.indent += 1;
-        self.emit_seq(else_bb, arm_stop, ctx)?;
-        self.indent -= 1;
-        self.push("}");
-        Ok(merge)
-    }
-
     /// Emit the straight-line effect statements of a block: Stores (assignments)
     /// and void (effect-only) calls like `discard()`, plus shared vector calls.
     fn emit_block_effects(&mut self, b: Idx<Block>) -> Result<(), CompilerError> {
@@ -2455,70 +2272,121 @@ impl FnEmit<'_> {
         }
         Ok(())
     }
+}
 
-    fn emit_counted(&mut self, li: CountedLoop) -> Result<(), CompilerError> {
-        let slot = self.cell_name[&li.slot].clone();
-        let bound = self.render_val(li.bound)?;
-        let cmp = if li.inclusive { "<=" } else { "<" };
-        self.push(&format!(
-            "for (; {slot} {cmp} {bound}; {slot} = {slot} + 1) {{"
-        ));
-        self.indent += 1;
-        let body_len = self.out.len();
-        let ctx = LoopCtx {
-            cont: Some(li.latch),
-            brk: Some(li.exit),
-        };
-        self.emit_seq(li.body_entry, None, ctx)?;
-        self.trim_trailing_continue(body_len);
-        self.indent -= 1;
-        self.push("}");
-        Ok(())
+impl StructuredEmit for FnEmit<'_> {
+    const BREAK_ON_EXIT_ENTRY: bool = false;
+    const STRICT_EMPTY_FORWARD: bool = false;
+
+    fn mir(&self) -> &MirFunc {
+        self.f
     }
 
-    /// A general `while`: `while (true) { <cond region>; if (!(cond)) break; <body> }`.
-    /// The condition region may be a multi-block diamond (`while a && b`), so it
-    /// goes through the structurizer recursively.
-    fn emit_general(&mut self, region: &LoopRegion, outer: LoopCtx) -> Result<(), CompilerError> {
-        let h = region.header;
-        let exit = region.exit;
-        let (test, cond, body_start, break_when_true) = self.find_test(region)?;
+    fn structure(&self) -> &Structure {
+        &self.structure
+    }
 
-        self.active.insert(h);
-        self.push("while (true) {");
-        self.indent += 1;
+    fn counted_at(&self, b: Idx<Block>) -> Option<CountedLoop> {
+        self.counted.get(&b).copied()
+    }
 
-        self.emit_seq(h, Some(test), outer)?;
-        self.emit_block_effects(test)?;
-        self.visited.insert(test);
+    fn general_at(&self, b: Idx<Block>) -> Option<LoopRegion> {
+        self.general.get(&b).cloned()
+    }
 
-        let cond_s = self.render_val(cond)?;
-        if break_when_true {
-            self.push(&format!("if ({cond_s}) {{ break; }}"));
+    fn is_active(&self, b: Idx<Block>) -> bool {
+        self.active.contains(&b)
+    }
+
+    fn set_active(&mut self, b: Idx<Block>, active: bool) {
+        if active {
+            self.active.insert(b);
         } else {
-            self.push(&format!("if (!({cond_s})) {{ break; }}"));
+            self.active.remove(&b);
         }
-
-        let ctx = LoopCtx {
-            cont: Some(h),
-            brk: Some(exit),
-        };
-        let body_len = self.out.len();
-        self.emit_seq(body_start, None, ctx)?;
-        self.trim_trailing_continue(body_len);
-
-        self.indent -= 1;
-        self.push("}");
-        self.active.remove(&h);
-        Ok(())
     }
 
-    /// The loop's condition test: the unique `Branch` in the body with a direct
-    /// successor to the exit. Returns `(test block, cond, body entry, break-when-cond-true)`.
-    fn find_test(
-        &self,
-        region: &LoopRegion,
-    ) -> Result<(Idx<Block>, Idx<Inst>, Idx<Block>, bool), CompilerError> {
+    fn mark_visited(&mut self, b: Idx<Block>) -> bool {
+        self.visited.insert(b)
+    }
+
+    fn out(&mut self) -> &mut String {
+        &mut self.out
+    }
+
+    fn indent(&mut self) -> &mut usize {
+        &mut self.indent
+    }
+
+    fn render_cond(&mut self, cond: Idx<Inst>) -> Result<String, CompilerError> {
+        self.render_val(cond)
+    }
+
+    fn block_effects(&mut self, b: Idx<Block>) -> Result<(), CompilerError> {
+        self.emit_block_effects(b)
+    }
+
+    fn return_values(&mut self, vs: &[Idx<Inst>]) -> Result<(), CompilerError> {
+        self.emit_return(vs)
+    }
+
+    fn block_has_statement(&self, b: Idx<Block>) -> bool {
+        self.f.blocks[b].insts.iter().any(|&i| {
+            matches!(self.f.insts[i], Inst::Store { .. }) || self.value_name.contains_key(&i)
+        })
+    }
+
+    fn on_revisit(
+        &mut self,
+        _b: Idx<Block>,
+        _stop: Option<Idx<Block>>,
+        _ctx: LoopCtx,
+    ) -> Result<(), CompilerError> {
+        Err(err(
+            self.span(),
+            "shader profile: unstructured control flow (unsupported loop/branch shape)",
+        ))
+    }
+
+    fn unsupported_term(&self, term: &Term) -> CompilerError {
+        if matches!(term, Term::Yield { .. }) {
+            err(
+                self.span(),
+                "shader profile: `yield` (coroutine) is not tier 0",
+            )
+        } else {
+            err(self.span(), "shader profile: `match` is not tier 0")
+        }
+    }
+
+    fn branch_shortcut(
+        &mut self,
+        b: Idx<Block>,
+        cond: Idx<Inst>,
+        else_bb: Idx<Block>,
+    ) -> Option<Option<Idx<Block>>> {
+        // Direct shader calls materialize scalar literal defaults at the call
+        // site. Other MIR defaults still need their nil path, which GLSL
+        // cannot represent and must reject.
+        let materialized_default = self
+            .f
+            .param_default_guards
+            .get(&cond)
+            .is_some_and(|index| self.f.param_default_materialized.contains(index));
+        if materialized_default {
+            return Some(Some(else_bb));
+        }
+        // A folded short-circuit / ternary diamond emits nothing here -- its
+        // expression renders at the result cell's one use. Skip to the join
+        // (ipdom); both arms are absorbed.
+        self.folded_block
+            .contains_key(&b)
+            .then(|| self.structure.ipdom(b))
+    }
+
+    /// The loop's condition test: the `Branch` in the body with a direct
+    /// successor to the exit.
+    fn loop_test(&mut self, region: &LoopRegion) -> Result<Option<LoopTest>, CompilerError> {
         for &b in &region.body {
             if let Term::Branch {
                 cond,
@@ -2526,11 +2394,14 @@ impl FnEmit<'_> {
                 else_bb,
             } = self.f.blocks[b].term
             {
-                if then_bb == region.exit {
-                    return Ok((b, cond, else_bb, true));
-                }
-                if else_bb == region.exit {
-                    return Ok((b, cond, then_bb, false));
+                if then_bb == region.exit || else_bb == region.exit {
+                    let break_when_true = then_bb == region.exit;
+                    return Ok(Some(LoopTest {
+                        block: b,
+                        cond,
+                        body: if break_when_true { else_bb } else { then_bb },
+                        break_when_true,
+                    }));
                 }
             }
         }
@@ -2540,16 +2411,8 @@ impl FnEmit<'_> {
         ))
     }
 
-    /// Drop a redundant trailing `continue;` that is the loop body's natural
-    /// back-edge fall-through (indented exactly at the body level).
-    fn trim_trailing_continue(&mut self, start: usize) {
-        let line = format!("{}continue;\n", "  ".repeat(self.indent));
-        if self.out.len() >= start + line.len() && self.out.ends_with(&line) {
-            let cut = self.out.len() - line.len();
-            if cut >= start && (cut == 0 || self.out.as_bytes()[cut - 1] == b'\n') {
-                self.out.truncate(cut);
-            }
-        }
+    fn counted_slot_bound(&mut self, li: &CountedLoop) -> Result<(String, String), CompilerError> {
+        Ok((self.cell_name[&li.slot].clone(), self.render_val(li.bound)?))
     }
 }
 

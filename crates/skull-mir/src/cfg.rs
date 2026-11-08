@@ -185,6 +185,7 @@ pub fn dominates(idom: &HashMap<Idx<Block>, Idx<Block>>, a: Idx<Block>, b: Idx<B
     }
 }
 
+pub mod relooper;
 pub mod structure;
 
 /// Dense-index CFG primitives for the relooper backends (JS, GLSL), which need

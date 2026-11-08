@@ -3,7 +3,8 @@
 //! need structured goto-free output and see the same reducible CFGs skull-mir
 //! lowers for a tier-0 fn, so the simple iterative algorithms suffice (tens of
 //! blocks). What differs per target is passed in as [`LoopShapes`] and
-//! [`CountedBound`]; the structured walk itself stays in each backend.
+//! [`CountedBound`]; the structured walk over this analysis is
+//! [`relooper`](super::relooper).
 
 use super::dense::{bi, bx, collect_loop_body, dominates, idoms, pred_list, rpo, succ_list};
 use crate::mir::{Block, Cell, Inst, Lit, MirFunc, Term};
