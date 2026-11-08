@@ -247,11 +247,13 @@ pub fn unify(gamma: &mut Gamma, a: TyId, b: TyId, span: Span) -> Result<(), Comp
         (TypeExpr::Infer(va, _), TypeExpr::Infer(vb, _)) if va == vb => {}
 
         (TypeExpr::Infer(va, _), _) => {
-            gamma.out.bind_var(*va, b);
+            let va = *va;
+            bind_var_checked(gamma, va, b, span)?;
         }
 
         (_, TypeExpr::Infer(vb, _)) => {
-            gamma.out.bind_var(*vb, a);
+            let vb = *vb;
+            bind_var_checked(gamma, vb, a, span)?;
         }
 
         (
@@ -621,6 +623,55 @@ pub(crate) fn types_equal(gamma: &Gamma, a: TyId, b: TyId) -> bool {
 
         _ => false,
     }
+}
+
+/// Whether inference variable `var` appears anywhere in `ty`'s tree, following
+/// bound variables. Binding `var` to such a type would make it infinite
+/// (`a := a?`), and every later walk of it would recurse forever.
+fn occurs_in(gamma: &Gamma, var: VarId, ty: TyId) -> bool {
+    match *gamma.get(ty) {
+        TypeExpr::Infer(v, _) => {
+            v == var
+                || gamma
+                    .out
+                    .substitutions
+                    .get(v)
+                    .is_some_and(|next| occurs_in(gamma, var, next))
+        }
+        TypeExpr::Builtin(_) | TypeExpr::Generic(..) => false,
+        TypeExpr::Nullable(inner) => occurs_in(gamma, var, ty.with_idx(inner)),
+        TypeExpr::App { params, .. } => params
+            .into_iter()
+            .any(|p| occurs_in(gamma, var, ty.with_idx(p))),
+        TypeExpr::Tuple { elements } => elements
+            .into_iter()
+            .any(|e| occurs_in(gamma, var, ty.with_idx(e))),
+        TypeExpr::Function { params, ret } => {
+            occurs_in(gamma, var, ty.with_idx(ret))
+                || params
+                    .into_iter()
+                    .any(|p| occurs_in(gamma, var, ty.with_idx(p)))
+        }
+    }
+}
+
+/// Bind `var := ty`, rejecting a binding that would make the type infinite.
+fn bind_var_checked(
+    gamma: &mut Gamma,
+    var: VarId,
+    ty: TyId,
+    span: Span,
+) -> Result<(), CompilerError> {
+    if occurs_in(gamma, var, ty) {
+        unify_fail!(
+            gamma,
+            span,
+            "cannot infer a type: it would contain itself (`{}`)",
+            gamma.workspace.render(Some(&gamma.out), ty)
+        );
+    }
+    gamma.out.bind_var(var, ty);
+    Ok(())
 }
 
 /// Whether `ty` still holds an unbound inference variable anywhere in its tree.
