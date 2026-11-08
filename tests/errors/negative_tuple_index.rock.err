@@ -1,0 +1,17 @@
+//! Error: a tuple index is a plain digit run. The tokenizer folds a sign
+//!        into the literal, so `t.-1` used to parse as index 2^64 - 1.
+//! Tags: tuples, parser
+
+//=== TEST CASE: negative_tuple_index ===
+//! expect: must be followed by an identifier or integer
+fn main() {
+    let t = (1, 2)
+    print(t.-1)   // ERROR: field access `.` must be followed by an identifier or integer
+}
+
+//=== TEST CASE: negative_safe_navigation_index ===
+//! expect: expected CloseParen
+fn main() {
+    let t: (int, int)? = (1, 2)
+    print(t?.-1)   // ERROR: expected CloseParen, got Int(-1)
+}

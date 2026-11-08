@@ -3008,7 +3008,7 @@ impl<'a> Parser<'a> {
                                 self.advance();
                                 Ident { span: s, name }
                             }
-                            TokenKind::Int(num, _) => {
+                            TokenKind::Int(num, text) if is_tuple_index(&text) => {
                                 let s = self.span();
                                 self.advance();
                                 Ident {
@@ -3259,7 +3259,7 @@ impl<'a> Parser<'a> {
                 self.advance();
                 Ident { span, name }
             }
-            TokenKind::Int(num, _) => {
+            TokenKind::Int(num, text) if is_tuple_index(&text) => {
                 let span = self.span();
                 self.advance();
                 Ident {
@@ -4786,6 +4786,13 @@ fn take_balanced_brace_body(
             full_spec
         ),
     ))
+}
+
+/// A tuple index after `.`/`?.` is a plain decimal digit run. The tokenizer
+/// lexes a sign into the literal, so `t.-1` would otherwise wrap to a huge
+/// index.
+fn is_tuple_index(text: &str) -> bool {
+    !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit())
 }
 
 fn op_starts_expr(op: TokenKind) -> bool {
