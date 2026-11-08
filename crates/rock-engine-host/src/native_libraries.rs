@@ -428,8 +428,9 @@ mod tests {
         let lib = &libs[0];
         build_optional_engine_lib(lib).unwrap();
         let inputs = native_watch_inputs(&libs).unwrap();
-        assert!(inputs.contains(&root.path().join("support/src/lib.rs")));
-        assert!(inputs.contains(&root.path().join("native/Cargo.toml")));
+        let canonical_root = root.path().canonicalize().unwrap();
+        assert!(inputs.contains(&canonical_root.join("support/src/lib.rs")));
+        assert!(inputs.contains(&canonical_root.join("native/Cargo.toml")));
         assert!(!inputs.contains(&target.join("debug/example.rs")));
         assert!(!inputs.contains(&lib.stage_dir.join("example.rs")));
         let staged = lib

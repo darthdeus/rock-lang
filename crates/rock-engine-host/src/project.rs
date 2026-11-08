@@ -118,7 +118,9 @@ mod tests {
     use tempfile::TempDir;
     #[test]
     fn game_recognition_uses_resolved_stone_identity() {
-        let root = TempDir::new().unwrap();
+        let tmp = TempDir::new().unwrap();
+        // Discovery returns canonical paths; macOS temp dirs sit behind a /var symlink.
+        let root = tmp.path().canonicalize().unwrap();
         for (directory, manifest) in [
             ("engine", "[package]\nname = \"stone\"\ntype = \"lib\"\n"),
             (
@@ -131,22 +133,22 @@ mod tests {
             ),
             ("plain", "[package]\nname = \"plain\"\n"),
         ] {
-            let path = root.path().join(directory);
+            let path = root.join(directory);
             fs::create_dir_all(&path).unwrap();
             fs::write(path.join("stick.toml"), manifest).unwrap();
         }
         for directory in ["wrapper", "game"] {
-            let project = root.path().join(directory);
+            let project = root.join(directory);
             assert_eq!(
                 configured_stone_dir(&project).unwrap(),
-                Some(root.path().join("engine"))
+                Some(root.join("engine"))
             );
             assert!(
                 is_game_project(&project).unwrap(),
                 "{directory} lost its resolved Stone runtime"
             );
         }
-        assert!(!is_game_project(&root.path().join("plain")).unwrap());
+        assert!(!is_game_project(&root.join("plain")).unwrap());
     }
 
     #[test]
