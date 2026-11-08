@@ -103,6 +103,25 @@ pub static COMMANDS: &[&CliCommand] = &[
         }),
     },
     &CliCommand {
+        name: "package",
+        route: Route::Direct(|cx| {
+            let output = cx
+                .args
+                .output
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("package requires --output <directory>"))?;
+            let project = cx.get_project_dir_or_current()?;
+            crate::package::run_package(&project, std::path::Path::new(output))
+        }),
+    },
+    &CliCommand {
+        name: "asset-check",
+        route: Route::Direct(|cx| {
+            let project = cx.get_project_dir_or_current()?;
+            crate::package::check_project_assets(std::path::Path::new(&project))
+        }),
+    },
+    &CliCommand {
         name: "check",
         route: Route::Direct(bone_compile),
     },
