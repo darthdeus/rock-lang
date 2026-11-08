@@ -13,6 +13,7 @@ use skull_mir::code_identity::{
 };
 use skull_mir::lower::CoroutinePlan;
 use skull_mir::mir::*;
+use skull_mir::verify::Stage;
 use ustr::Ustr;
 
 use crate::CoroLowered;
@@ -59,6 +60,7 @@ pub fn prepare_coroutine(
 ) -> Result<PreparedCoroutine, CompilerError> {
     let channel = plan.channel.as_ref();
     let mut lowered = crate::transform_coroutine(func, channel, plan.has_return_value());
+    crate::body_chain::debug_verify(&lowered.step, Stage::LOWERED, &"the coroutine transform");
     // `__resume`/`__advance` are rendered by the constructor from the plan;
     // whether an `__advance` exists is the plan's answer.
     reserve(&plan.resume());
@@ -162,6 +164,10 @@ pub fn prepare_coroutine(
         for nf in &mut aux.nested_fns {
             crate::cleanup_with_nobox(ws, nf)?;
         }
+    }
+    crate::body_chain::debug_verify(&lowered.step, Stage::EMIT_READY, &"coroutine preparation");
+    for aux in defers.iter().chain(hooks.iter().map(|(_, aux)| aux)) {
+        crate::body_chain::debug_verify(aux, Stage::CONVERTED, &"coroutine preparation");
     }
     let volatile_vars = &ws.comptime_inputs.volatile_vars;
     let mut code_artifact =

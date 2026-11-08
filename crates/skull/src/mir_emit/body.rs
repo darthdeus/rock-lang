@@ -390,6 +390,11 @@ pub(super) fn emit_body_chunk_with_mutation(
         })?;
     let tv = Instant::now();
     skull_transform::validate_no_residual_bound_calls(ws, f, &mf)?;
+    skull_transform::body_chain::debug_verify(
+        &mf,
+        skull_mir::verify::Stage::EMIT_READY,
+        &"the residual-bound-call gate",
+    );
     let mut specs = Vec::new();
     let owner = BodyOwner::Function(self_ref.func);
     let ctx = skull_mir::bound::concrete_body_ctx(

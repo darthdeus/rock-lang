@@ -10,6 +10,7 @@ use bone_core::workspace::Workspace;
 use skull_mir::concrete::ConcretePlans;
 use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::{FuncRef, MirFunc};
+use skull_mir::verify::Stage;
 
 use crate::{InlineCache, InlineScanStats, LoadStoreCensus, SpliceRecord};
 
@@ -70,6 +71,20 @@ pub struct Inliner<'a> {
     pub plans: &'a ConcretePlans,
 }
 
+/// Run the MIR verifier on `mf` in debug builds, panicking on a violation.
+/// `what` names the pass that just ran. Compiles to nothing in release.
+#[inline(always)]
+pub fn debug_verify(mf: &MirFunc, stage: Stage, what: &dyn std::fmt::Display) {
+    #[cfg(debug_assertions)]
+    skull_mir::verify::assert_verified(mf, stage, what);
+    #[cfg(not(debug_assertions))]
+    let _ = (mf, stage, what);
+}
+
+fn verify_after(mf: &MirFunc, stage: Stage, pass: BodyPass) {
+    debug_verify(mf, stage, &format_args!("{pass:?}"));
+}
+
 /// A chain failure and the pass it came from.
 pub struct ChainError {
     pub pass: BodyPass,
@@ -87,6 +102,7 @@ pub fn prepare_body(
     opts: &ChainOptions<'_>,
     obs: &mut dyn PassObserver,
 ) -> Result<HashSet<FuncRef>, ChainError> {
+    debug_verify(mf, Stage::LOWERED, &"lowering");
     let floor = inliner.cache.census_enabled().then_some(mf.insts.len());
     obs.begin(BodyPass::Inline, mf);
     let (mut spliced, records, scan) = crate::inline_functions_with_plans(
@@ -103,6 +119,7 @@ pub fn prepare_body(
     })?;
     obs.inlined(BodyPass::Inline, &records, scan);
     obs.end(BodyPass::Inline, mf);
+    verify_after(mf, Stage::LOWERED, BodyPass::Inline);
     convert(ws, mf, name, opts, obs, floor)?;
     if opts.inline_hoisted {
         inline_hoisted(ws, inliner, &mut mf.nested_fns, &mut spliced, obs)?;
@@ -120,6 +137,7 @@ pub fn convert_body(
     opts: &ChainOptions<'_>,
     obs: &mut dyn PassObserver,
 ) -> Result<(), ChainError> {
+    debug_verify(mf, Stage::LOWERED, &"lowering");
     convert(ws, mf, name, opts, obs, None)
 }
 
@@ -140,6 +158,7 @@ fn convert(
     }
     crate::convert_named_nested_closures(&mut mf.nested_fns[..named], opts.reserve);
     obs.end(BodyPass::Closure, mf);
+    verify_after(mf, Stage::CONVERTED, BodyPass::Closure);
     if opts.counted_loops != CountedLoops::Skip {
         obs.begin(BodyPass::CountedLoop, mf);
         crate::recover_counted_loops(ws, mf);
@@ -149,6 +168,7 @@ fn convert(
             }
         }
         obs.end(BodyPass::CountedLoop, mf);
+        verify_after(mf, Stage::CONVERTED, BodyPass::CountedLoop);
     }
     Ok(())
 }
@@ -167,6 +187,12 @@ fn cleanup(
     };
     result.map_err(|error| ChainError { pass, error })?;
     obs.end(BodyPass::Cleanup, mf);
+    // A hoisted body's cleanup runs after closure conversion.
+    let stage = match pass {
+        BodyPass::HoistedInline => Stage::CONVERTED,
+        _ => Stage::LOWERED,
+    };
+    verify_after(mf, stage, pass);
     Ok(())
 }
 
@@ -203,6 +229,7 @@ fn inline_hoisted(
         })?;
         obs.inlined(BodyPass::HoistedInline, &records, scan);
         obs.end(BodyPass::HoistedInline, nf);
+        verify_after(nf, Stage::CONVERTED, BodyPass::HoistedInline);
         spliced.extend(callees);
         cleanup(ws, nf, BodyPass::HoistedInline, obs, floor)?;
         let mut children = std::mem::take(&mut nf.nested_fns);

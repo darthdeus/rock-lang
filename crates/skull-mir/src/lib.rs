@@ -30,4 +30,5 @@ pub mod site;
 pub mod spec_census;
 pub mod struct_defaults;
 pub mod verdict;
+pub mod verify;
 pub mod vertex_plan;
