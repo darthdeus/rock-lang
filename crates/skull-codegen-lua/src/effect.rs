@@ -255,14 +255,16 @@ impl Emitter<'_> {
                 self.write_csv(out, args);
                 out.push_str(")\n");
             }
-            // Rewritten to `s.__inner = ..` by the coroutine transform; if it
-            // reaches codegen the transform didn't run (a bug).
+            // Rewritten to `s.__inner = ..` by the coroutine transform.
             Inst::CoroSetInner(_) => {
-                unreachable!("CoroSetInner must be removed by the coroutine transform")
+                self.reject_pass_residue("await bookkeeping", "coroutine transform")
             }
             // Relocated to the constructor by the coroutine transform.
             Inst::CoroHook { .. } => {
-                unreachable!("CoroHook must be relocated by the coroutine transform")
+                self.reject_pass_residue("a coroutine hook", "coroutine transform")
+            }
+            Inst::CallBoundMulti { .. } => {
+                self.reject_pass_residue("a placeholder bound call", "residual-bound-call gate")
             }
             _ => unreachable!("not an effect"),
         }

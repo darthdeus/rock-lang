@@ -382,9 +382,7 @@ impl Emitter<'_> {
                     out.push_str(" end\n");
                 }
             }
-            Term::Yield { .. } => {
-                unreachable!("Yield must be removed by the coroutine transform before codegen")
-            }
+            Term::Yield { .. } => self.reject_pass_residue("a `yield`", "coroutine transform"),
         }
     }
 

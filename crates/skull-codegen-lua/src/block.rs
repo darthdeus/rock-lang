@@ -143,6 +143,19 @@ impl Emitter<'_> {
         push_uint(out, self.func.emit_block_id(t));
     }
 
+    /// Report what an earlier pass should have removed. The MIR verifier
+    /// catches this in debug builds; release builds reach here instead.
+    pub(crate) fn reject_pass_residue(&self, residue: &str, pass: &str) {
+        self.ctx.reject(
+            self.func.name.to_string(),
+            CompilerError::new_no_location(format!(
+                "internal compiler error: {residue} survived the {pass} and reached Lua \
+                 emission in `{}`",
+                self.func.name
+            )),
+        );
+    }
+
     pub(crate) fn write_goto(&self, out: &mut String, t: Idx<Block>) {
         out.push_str("  goto ");
         self.write_label_ref(out, t);

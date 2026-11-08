@@ -2604,3 +2604,92 @@ fn line_directives_off_writes_no_directive() {
     });
     assert!(lexer_lines(&lua).iter().all(Option::is_some), "{lua}");
 }
+
+/// A body that still carries what an earlier pass should have removed is a
+/// compiler bug. The MIR verifier catches it in debug builds; in release the
+/// emitter must report it as a diagnostic, not abort the process.
+#[test]
+fn pass_residue_reaching_emission_is_reported_not_a_panic() {
+    use skull_mir::mir::{CoroHookKind, Inst, Lit, MirFunc, Term};
+
+    type Inject = fn(&mut MirFunc);
+    let cases: [(&str, Inject); 5] = [
+        ("closure conversion", |mf| {
+            let entry = mf.entry();
+            let body = mf.new_block();
+            let one = mf.emit(body, Inst::Const(Lit::Int(1)));
+            mf.set_term(body, Term::Return(vec![one]));
+            let lambda = mf.emit(
+                entry,
+                Inst::Lambda {
+                    params: vec![],
+                    entry: body,
+                },
+            );
+            mf.set_term(entry, Term::Return(vec![lambda]));
+        }),
+        ("coroutine transform", |mf| {
+            let entry = mf.entry();
+            let resume = mf.new_block();
+            mf.set_term(resume, Term::Return(vec![]));
+            mf.set_term(
+                entry,
+                Term::Yield {
+                    values: vec![],
+                    resume,
+                },
+            );
+        }),
+        ("coroutine transform", |mf| {
+            let entry = mf.entry();
+            // Any placed value serves: the emitter rejects before reading it.
+            let lambda = mf.emit(entry, Inst::Const(Lit::Int(0)));
+            mf.emit(entry, Inst::CoroSetInner(lambda));
+            mf.set_term(entry, Term::Return(vec![]));
+        }),
+        ("coroutine transform", |mf| {
+            let entry = mf.entry();
+            // Any placed value serves: the emitter rejects before reading it.
+            let lambda = mf.emit(entry, Inst::Const(Lit::Int(0)));
+            mf.emit(
+                entry,
+                Inst::CoroHook {
+                    kind: CoroHookKind::OnKilled,
+                    lambda,
+                },
+            );
+            mf.set_term(entry, Term::Return(vec![]));
+        }),
+        ("residual-bound-call gate", |mf| {
+            let entry = mf.entry();
+            mf.emit(
+                entry,
+                Inst::CallBoundMulti {
+                    dests: vec![],
+                    generic_idx: 0,
+                    args: vec![],
+                },
+            );
+            mf.set_term(entry, Term::Return(vec![]));
+        }),
+    ];
+    let mut modules = vec![
+        skull_parser::parse_module_clean("fn f() {}", ustr::Ustr::from("<test>")).expect("parse"),
+    ];
+    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    let interner = skull_mir::monoty::MonoInterner::new();
+    for (pass, inject) in cases {
+        let mut mf = MirFunc::new(ustr::Ustr::from("residue"));
+        inject(&mut mf);
+        let ctx = CodegenCtx::new(&ws);
+        skull_codegen_lua::emit_named(&ws, &ctx, &interner, "residue", &mf, None);
+        let err = ctx
+            .take_rejection()
+            .unwrap_or_else(|| panic!("residue from the {pass} must be rejected"));
+        assert!(
+            err.message.contains("internal compiler error") && err.message.contains(pass),
+            "{}",
+            err.message
+        );
+    }
+}

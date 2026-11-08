@@ -190,9 +190,7 @@ impl Emitter<'_> {
                 self.write_csv(out, args);
                 out.push(')');
             }
-            Inst::Lambda { .. } => {
-                unreachable!("residual Inst::Lambda reached Lua emission")
-            }
+            Inst::Lambda { .. } => self.reject_pass_residue("a closure", "closure conversion"),
 
             Inst::MakeTuple(vs) => {
                 out.push('{');
