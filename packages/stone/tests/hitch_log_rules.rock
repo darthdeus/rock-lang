@@ -1,0 +1,31 @@
+// Which slow frames get their own [HITCH] line, and when the window line
+// fires. Every frame over the threshold is still counted; only the logging
+// is tiered, so a present-bound miss under HITCH_LOUD_MS reaches the log
+// through the window tally alone.
+
+@test
+fn hitch_present_misses_log_only_when_loud() {
+    let saved = HITCH
+    HITCH = hitch_ledger_new()
+    HITCH.loud_ms = 50.0
+    assert(!hitch_logs_frame("present", 30.0), "a short present wait is counted, not printed")
+    assert(hitch_logs_frame("present", 50.0), "a loud present wait prints")
+    assert(hitch_logs_frame("render", 25.1), "a game-explained hitch prints at the threshold")
+    assert(hitch_logs_frame("gc", 26.0), "every non-present cause prints")
+    HITCH = saved
+}
+
+@test
+fn hitch_window_tally_resets_once_per_window() {
+    let saved = HITCH
+    HITCH = hitch_ledger_new()
+    HITCH.window_secs = 60.0
+    hitch_window_tick(100.0)
+    hitch_tally("present")
+    hitch_window_tick(159.9)
+    assert_eq(HITCH.win_hitches, 1, "the tally survives until the window elapses")
+    hitch_window_tick(160.0)
+    assert_eq(HITCH.win_hitches, 0, "an elapsed window reads and resets the tally")
+    assert_eq(hitch_count_for("present"), 1, "lifetime counts are untouched")
+    HITCH = saved
+}
